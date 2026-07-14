@@ -1,5 +1,4 @@
 #include <yams/core/assert.hpp>
-#include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/WriteCoordinator.h>
@@ -54,6 +53,8 @@ void WriteCoordinator::enqueue(std::unique_ptr<WriteBatch> batch) {
     if (!batch)
         return;
     batch->enqueueTime = std::chrono::steady_clock::now();
+    bool forcedOverCapacity = false;
+    std::size_t queueDepth = 0;
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
         if (stop_.load(std::memory_order_acquire)) {
@@ -62,15 +63,23 @@ void WriteCoordinator::enqueue(std::unique_ptr<WriteBatch> batch) {
             return;
         }
         if (pendingBatches_.size() >= config_.channelCapacity) {
-            spdlog::warn("[WriteCoordinator] Queue full ({} batches), applying backpressure",
-                         pendingBatches_.size());
+            forcedOverCapacity = true;
+            spdlog::warn(
+                "[WriteCoordinator] Queue full ({} batches); forcing guaranteed enqueue past "
+                "capacity={}",
+                pendingBatches_.size(), config_.channelCapacity);
         }
         pendingBatches_.push_back(std::move(batch));
-        YAMS_PLOT("wc.queue.depth", static_cast<int64_t>(pendingBatches_.size()));
+        queueDepth = pendingBatches_.size();
+        YAMS_PLOT("wc.queue.depth", static_cast<int64_t>(queueDepth));
     }
     {
         std::lock_guard<std::mutex> lock(statsMutex_);
         stats_.batchesEnqueued++;
+        stats_.maxQueueDepth = std::max<std::uint64_t>(stats_.maxQueueDepth, queueDepth);
+        if (forcedOverCapacity) {
+            stats_.forcedEnqueuesOverCapacity++;
+        }
     }
     wakeWriter();
 }
@@ -79,19 +88,30 @@ bool WriteCoordinator::tryEnqueue(std::unique_ptr<WriteBatch>& batch) {
     YAMS_ZONE_SCOPED_N("WriteCoordinator::tryEnqueue");
     if (!batch)
         return false;
+    bool rejectedAtCapacity = false;
+    std::size_t queueDepth = 0;
     {
         std::lock_guard<std::mutex> lock(queueMutex_);
-        if (stop_.load(std::memory_order_acquire) ||
-            pendingBatches_.size() >= config_.channelCapacity) {
+        if (stop_.load(std::memory_order_acquire)) {
             return false;
         }
-        batch->enqueueTime = std::chrono::steady_clock::now();
-        pendingBatches_.push_back(std::move(batch));
-        YAMS_PLOT("wc.queue.depth", static_cast<int64_t>(pendingBatches_.size()));
+        if (pendingBatches_.size() >= config_.channelCapacity) {
+            rejectedAtCapacity = true;
+        } else {
+            batch->enqueueTime = std::chrono::steady_clock::now();
+            pendingBatches_.push_back(std::move(batch));
+            queueDepth = pendingBatches_.size();
+            YAMS_PLOT("wc.queue.depth", static_cast<int64_t>(queueDepth));
+        }
     }
     {
         std::lock_guard<std::mutex> lock(statsMutex_);
+        if (rejectedAtCapacity) {
+            stats_.capacityRejections++;
+            return false;
+        }
         stats_.batchesEnqueued++;
+        stats_.maxQueueDepth = std::max<std::uint64_t>(stats_.maxQueueDepth, queueDepth);
     }
     wakeWriter();
     return true;
@@ -238,9 +258,6 @@ boost::asio::awaitable<void> WriteCoordinator::writerLoop() {
             }
 
             std::size_t effectiveMax = std::min(config_.maxBatchSize, kMaxBatchesPerIteration);
-            if (ResourceGovernor::instance().getPressureLevel() == ResourcePressureLevel::Warning) {
-                effectiveMax = std::max<std::size_t>(1, effectiveMax / 2);
-            }
             std::size_t count = std::min(pendingBatches_.size(), effectiveMax);
             if (count > 0) {
                 YAMS_ZONE_SCOPED_N("WriteCoordinator::dequeue");
@@ -914,11 +931,10 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
     return r;
 }
 
-Result<void>
-WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
-                          AddDeferredEdgesOp& op,
-                          std::unordered_map<std::string, std::int64_t>& nodeKeyToId,
-                          metadata::KGWriteBuffer* edgeBuffer) {
+Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
+                                       AddDeferredEdgesOp& op,
+                                       std::unordered_map<std::string, std::int64_t>& nodeKeyToId,
+                                       metadata::KGWriteBuffer* edgeBuffer) {
     if (op.edges.empty())
         return Result<void>();
     std::vector<metadata::KGEdge> resolved;
@@ -962,9 +978,9 @@ WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
     return r;
 }
 
-Result<void>
-WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch, AddAliasesOp& op,
-                          std::unordered_map<std::string, std::int64_t>& nodeKeyToId) {
+Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
+                                       AddAliasesOp& op,
+                                       std::unordered_map<std::string, std::int64_t>& nodeKeyToId) {
     if (op.aliases.empty())
         return Result<void>();
     std::vector<metadata::KGAlias> resolved;
@@ -1017,10 +1033,9 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
     return r;
 }
 
-Result<void>
-WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
-                          AddDeferredDocEntitiesOp& op,
-                          std::unordered_map<std::string, std::int64_t>& nodeKeyToId) {
+Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch& kgBatch,
+                                       AddDeferredDocEntitiesOp& op,
+                                       std::unordered_map<std::string, std::int64_t>& nodeKeyToId) {
     if (op.entities.empty())
         return Result<void>();
     std::vector<metadata::DocEntity> resolved;

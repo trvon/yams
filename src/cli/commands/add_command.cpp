@@ -5,14 +5,11 @@
 #include <cctype>
 #include <chrono>
 #include <climits>
-#include <fstream>
-#include <iomanip>
 #include <iostream>
 #include <map>
 #include <memory>
 #include <mutex>
-#include <random>
-#include <regex>
+#include <optional>
 #include <sstream>
 #include <thread>
 #include <utility>
@@ -276,7 +273,8 @@ std::string getActiveSessionId(YamsCLI* cli, bool bypass, bool initContext = tru
     if (bypass)
         return {};
     // Check environment variable first (fast path, no storage init needed)
-    if (const char* envSession = std::getenv("YAMS_SESSION_CURRENT")) {
+    if (const char* envSession =
+            std::getenv("YAMS_SESSION_CURRENT")) { // NOLINT(concurrency-mt-unsafe)
         if (*envSession) {
             return std::string(envSession);
         }
@@ -475,11 +473,13 @@ public:
                     }
                 }
 
-                // In sandboxed/embedded environments (Codex, CI, restricted IPC), the daemon
-                // plan may intentionally resolve to InProcess. Keep the daemon request path in
-                // that case instead of falling back to local services: the service path performs
-                // full CLI storage initialization (including KG integrity checks) and can take
-                // tens of seconds on large stores before a single-file add even reaches ingestion.
+                // Socket-only CLI builds cannot service an InProcess daemon plan. If the
+                // socket probe selected in-process fallback, preserve add usability by using
+                // repo-local services instead of retrying an unreachable socket path.
+                if (daemonPlan.resolvedMode == yams::daemon::ClientTransportMode::InProcess) {
+                    daemonSpinner.pause();
+                    co_return executeWithServices();
+                }
 
                 auto sanitizedTagsRes = sanitizeStringList(tags_, "Tag", kMaxTagLength);
                 if (!sanitizedTagsRes)
@@ -748,6 +748,50 @@ public:
                             totalSkipped += result.value().documentsSkipped;
                             render(result.value(), std::filesystem::path("-"));
                             successfulRequests++;
+                        } else if (auto appContext = cli_->getAppContext()) {
+                            // Socket-only client builds cannot fall back to embedded daemon mode.
+                            // Stdin is already buffered here, so preserve `yams add -` usability by
+                            // storing through local services when daemon IPC is unavailable.
+                            app::services::StoreDocumentRequest req;
+                            req.content = aopts.content;
+                            req.name = aopts.name.empty() ? "stdin" : aopts.name;
+                            req.tags = tags_;
+                            req.noEmbeddings = noEmbeddings_;
+                            req.collection = collection_;
+                            req.snapshotId = snapshotId_;
+                            req.snapshotLabel = snapshotLabel_;
+                            req.sessionId = getActiveSessionId(cli_, bypassSession_);
+                            req.mimeType = mimeType_;
+                            req.disableAutoMime = disableAutoMime_;
+                            for (const auto& [key, value] : aopts.metadata) {
+                                req.metadata[key] = value;
+                            }
+
+                            auto documentService = app::services::makeDocumentService(*appContext);
+                            auto local = documentService
+                                             ? documentService->store(req)
+                                             : Result<app::services::StoreDocumentResponse>(
+                                                   Error{ErrorCode::NotInitialized,
+                                                         "Failed to create document service"});
+                            if (local) {
+                                totalAdded++;
+                                if (cli_->getJsonOutput()) {
+                                    jsonResults.push_back(json{{"path", "-"},
+                                                               {"hash", local.value().hash},
+                                                               {"success", true}});
+                                } else {
+                                    std::cout
+                                        << "Added document: " << local.value().hash.substr(0, 16)
+                                        << "..." << std::endl;
+                                }
+                                successfulRequests++;
+                            } else {
+                                const auto err = local.error();
+                                daemonFailures.emplace_back(std::filesystem::path("-"), err);
+                                if (cli_->getJsonOutput()) {
+                                    recordJsonFailure(std::filesystem::path("-"), err);
+                                }
+                            }
                         } else {
                             const auto err = result.error();
                             const auto msg = scrubDaemonLoadMessage(err.message);
@@ -885,6 +929,16 @@ private:
                 if (p.string() == "-") {
                     auto r = storeFromStdinWithServicesRaw(*appContext);
                     if (r) {
+                        auto indexResult = lightIndexForLocalSearch(*appContext, r.value().hash);
+                        if (!indexResult) {
+                            ++failed;
+                            jsonResults.push_back(
+                                json{{"path", "-"},
+                                     {"success", false},
+                                     {"error", indexResult.error().message},
+                                     {"code", static_cast<int>(indexResult.error().code)}});
+                            continue;
+                        }
                         ++added;
                         jsonResults.push_back(json{{"path", "-"},
                                                    {"success", true},
@@ -914,16 +968,28 @@ private:
                 if (std::filesystem::is_directory(p)) {
                     auto r = storeDirectoryWithServicesRaw(*appContext, p);
                     if (r) {
+                        std::size_t indexFailures = 0;
+                        for (const auto& file : r.value().results) {
+                            if (file.success && !file.hash.empty()) {
+                                auto indexResult = lightIndexForLocalSearch(*appContext, file.hash);
+                                if (!indexResult) {
+                                    ++indexFailures;
+                                    spdlog::warn("local light index failed for {}: {}", file.path,
+                                                 indexResult.error().message);
+                                }
+                            }
+                        }
                         added += r.value().filesIndexed;
                         skipped += r.value().filesSkipped;
-                        failed += r.value().filesFailed;
-                        jsonResults.push_back(json{{"path", p.string()},
-                                                   {"success", r.value().filesFailed == 0},
-                                                   {"documentsAdded", r.value().filesIndexed},
-                                                   {"documentsUpdated", 0},
-                                                   {"documentsSkipped", r.value().filesSkipped},
-                                                   {"filesProcessed", r.value().filesProcessed},
-                                                   {"filesFailed", r.value().filesFailed}});
+                        failed += r.value().filesFailed + indexFailures;
+                        jsonResults.push_back(
+                            json{{"path", p.string()},
+                                 {"success", r.value().filesFailed == 0 && indexFailures == 0},
+                                 {"documentsAdded", r.value().filesIndexed},
+                                 {"documentsUpdated", 0},
+                                 {"documentsSkipped", r.value().filesSkipped},
+                                 {"filesProcessed", r.value().filesProcessed},
+                                 {"filesFailed", r.value().filesFailed + indexFailures}});
                     } else {
                         ++failed;
                         jsonResults.push_back(json{{"path", p.string()},
@@ -936,6 +1002,16 @@ private:
 
                 auto r = storeFileWithServicesRaw(*appContext, p);
                 if (r) {
+                    auto indexResult = lightIndexForLocalSearch(*appContext, r.value().hash);
+                    if (!indexResult) {
+                        ++failed;
+                        jsonResults.push_back(
+                            json{{"path", p.string()},
+                                 {"success", false},
+                                 {"error", indexResult.error().message},
+                                 {"code", static_cast<int>(indexResult.error().code)}});
+                        continue;
+                    }
                     ++added;
                     jsonResults.push_back(json{{"path", p.string()},
                                                {"success", true},
@@ -1001,6 +1077,97 @@ private:
         return Result<void>();
     }
 
+    bool isLightIndexCandidate(const metadata::DocumentInfo& info,
+                               std::size_t maxBytes = 2ULL * 1024ULL * 1024ULL) const {
+        if (info.fileSize > 0 && static_cast<std::size_t>(info.fileSize) > maxBytes) {
+            return false;
+        }
+
+        auto& detector = yams::detection::FileTypeDetector::instance();
+        if (!info.mimeType.empty() && detector.isTextMimeType(info.mimeType)) {
+            return true;
+        }
+        if (!info.fileExtension.empty()) {
+            auto detectedMime =
+                yams::detection::FileTypeDetector::getMimeTypeFromExtension(info.fileExtension);
+            return !detectedMime.empty() && detector.isTextMimeType(detectedMime);
+        }
+        return false;
+    }
+
+    Result<void> waitForLocalLightIndex(const app::services::AppContext& appContext,
+                                        const std::string& hash) const {
+        if (!waitForProcessing_ || hash.empty()) {
+            return Result<void>();
+        }
+        if (!appContext.metadataRepo) {
+            return Error{ErrorCode::NotInitialized, "metadata repository not available"};
+        }
+
+        auto initial = appContext.metadataRepo->getDocumentByHash(hash);
+        if (!initial) {
+            return initial.error();
+        }
+        if (!initial.value().has_value()) {
+            return Error{ErrorCode::NotFound, "document not found by hash"};
+        }
+        if (!isLightIndexCandidate(*initial.value())) {
+            return Result<void>();
+        }
+
+        const auto deadline =
+            waitTimeoutSeconds_ <= 0
+                ? std::chrono::steady_clock::time_point::max()
+                : std::chrono::steady_clock::now() + std::chrono::seconds(waitTimeoutSeconds_);
+        while (std::chrono::steady_clock::now() < deadline) {
+            auto doc = appContext.metadataRepo->getDocumentByHash(hash);
+            if (!doc) {
+                return doc.error();
+            }
+            if (doc.value().has_value()) {
+                const auto& info = *doc.value();
+                if (info.contentExtracted &&
+                    info.extractionStatus == metadata::ExtractionStatus::Success) {
+                    return Result<void>();
+                }
+                if (info.extractionStatus == metadata::ExtractionStatus::Failed ||
+                    info.extractionStatus == metadata::ExtractionStatus::Skipped) {
+                    return Error{
+                        ErrorCode::InvalidData,
+                        "Local text indexing ended with status: " +
+                            metadata::ExtractionStatusUtils::toString(info.extractionStatus)};
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        return Error{ErrorCode::Timeout, "Timed out waiting for local text indexing"};
+    }
+
+    Result<void> lightIndexForLocalSearch(const app::services::AppContext& appContext,
+                                          const std::string& hash) const {
+        if (hash.empty()) {
+            return Result<void>();
+        }
+        auto searchService = app::services::makeSearchService(appContext);
+        if (!searchService) {
+            if (waitForProcessing_) {
+                return Error{ErrorCode::NotInitialized, "Failed to create search service"};
+            }
+            spdlog::warn("local light index skipped: Failed to create search service");
+            return Result<void>();
+        }
+        auto indexResult = searchService->lightIndexForHash(hash);
+        if (!indexResult) {
+            if (waitForProcessing_) {
+                return indexResult.error();
+            }
+            spdlog::warn("local light index failed: {}", indexResult.error().message);
+            return Result<void>();
+        }
+        return waitForLocalLightIndex(appContext, hash);
+    }
+
     Result<void> storeFromStdinWithServices(const app::services::AppContext& appContext) {
         auto result = storeFromStdinWithServicesRaw(appContext);
         if (!result) {
@@ -1008,11 +1175,9 @@ private:
         }
 
         outputServiceResult(result.value());
-        if (auto appContext2 = cli_->getAppContext()) {
-            auto searchService = app::services::makeSearchService(*appContext2);
-            if (searchService) {
-                (void)searchService->lightIndexForHash(result.value().hash);
-            }
+        auto indexResult = lightIndexForLocalSearch(appContext, result.value().hash);
+        if (!indexResult) {
+            return indexResult.error();
         }
         return Result<void>();
     }
@@ -1069,11 +1234,9 @@ private:
         }
 
         outputServiceResult(result.value());
-        if (auto appContext2 = cli_->getAppContext()) {
-            auto searchService = app::services::makeSearchService(*appContext2);
-            if (searchService) {
-                (void)searchService->lightIndexForHash(result.value().hash);
-            }
+        auto indexResult = lightIndexForLocalSearch(appContext, result.value().hash);
+        if (!indexResult) {
+            return indexResult.error();
         }
         return Result<void>();
     }
@@ -1154,13 +1317,11 @@ private:
                       << " skipped, " << resp.filesFailed << " failed)" << std::endl;
         }
 
-        if (auto appContext2 = cli_->getAppContext()) {
-            auto searchService = app::services::makeSearchService(*appContext2);
-            if (searchService) {
-                for (const auto& f : resp.results) {
-                    if (f.success && !f.hash.empty()) {
-                        (void)searchService->lightIndexForHash(f.hash);
-                    }
+        for (const auto& f : resp.results) {
+            if (f.success && !f.hash.empty()) {
+                auto indexResult = lightIndexForLocalSearch(appContext, f.hash);
+                if (!indexResult) {
+                    return indexResult.error();
                 }
             }
         }

@@ -2,18 +2,17 @@
 """Live-daemon relevance A/B over the user's own corpus.
 
 Runs a judged query set through the real `yams search` path (the running,
-configured release daemon) and reports nDCG@K / Recall@K / MRR. Fusion strategy
-is whatever the daemon was started with (YAMS_FUSION_STRATEGY); pass --label to
-tag the run, restart the daemon under a different strategy, rerun, and diff.
+configured release daemon) and reports nDCG@K / Recall@K / MRR. Pass --label to
+tag a run, restart the daemon under a different configuration, rerun, and diff.
 
 Usage:
   uv run tests/benchmarks/relevance/live_relevance_ab.py \
       --queries tests/benchmarks/relevance/yams_corpus_queries.json \
-      --label rrf --k 10 --type hybrid --out /tmp/relevance_rrf.json
+      --label baseline --k 10 --type hybrid --out /tmp/relevance_baseline.json
 
-  # then restart daemon: YAMS_FUSION_STRATEGY=CONVEX yams daemon restart
-  uv run .../live_relevance_ab.py --label convex --out /tmp/relevance_convex.json
-  uv run .../live_relevance_ab.py --diff /tmp/relevance_rrf.json /tmp/relevance_convex.json
+  # Restart the daemon with the candidate typed configuration, then compare.
+  uv run .../live_relevance_ab.py --label candidate --out /tmp/relevance_candidate.json
+  uv run .../live_relevance_ab.py --diff /tmp/relevance_baseline.json /tmp/relevance_candidate.json
 """
 import argparse
 import json

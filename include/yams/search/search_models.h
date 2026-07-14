@@ -147,6 +147,44 @@ inline double componentSourceScoreInResult(const SearchResult& r,
     return 0.0;
 }
 
+inline void accumulateComponentScore(SearchResult& result, ComponentResult::Source source,
+                                     double contribution) noexcept {
+    switch (source) {
+        case ComponentResult::Source::Vector:
+        case ComponentResult::Source::EntityVector:
+            result.vectorScore = result.vectorScore.value_or(0.0) + contribution;
+            break;
+        case ComponentResult::Source::GraphVector:
+            result.graphVectorScore = result.graphVectorScore.value_or(0.0) + contribution;
+            break;
+        case ComponentResult::Source::Text:
+            result.keywordScore = result.keywordScore.value_or(0.0) + contribution;
+            break;
+        case ComponentResult::Source::SimeonText:
+        case ComponentResult::Source::GraphText:
+            result.graphTextScore = result.graphTextScore.value_or(0.0) + contribution;
+            break;
+        case ComponentResult::Source::KnowledgeGraph:
+            result.kgScore = result.kgScore.value_or(0.0) + contribution;
+            break;
+        case ComponentResult::Source::PathTree:
+            result.pathScore = result.pathScore.value_or(0.0) + contribution;
+            break;
+        case ComponentResult::Source::Tag:
+        case ComponentResult::Source::Metadata:
+            result.tagScore = result.tagScore.value_or(0.0) + contribution;
+            break;
+        case ComponentResult::Source::Symbol:
+            result.symbolScore = result.symbolScore.value_or(0.0) + contribution;
+            break;
+        case ComponentResult::Source::Anchor:
+            result.anchorScore = result.anchorScore.value_or(0.0) + contribution;
+            break;
+        case ComponentResult::Source::Unknown:
+            break;
+    }
+}
+
 inline std::string documentIdFromComponent(const ComponentResult& comp) noexcept {
     if (!comp.filePath.empty()) {
         return comp.filePath;
@@ -177,36 +215,5 @@ struct SearchResponse {
         return timedOutComponents.empty() && failedComponents.empty();
     }
 };
-
-namespace detail {
-
-template <typename T> std::string makeFusionDedupKey(const T& item, bool enablePathDedup) {
-    const auto& filePath = [&]() -> const std::string& {
-        if constexpr (requires { item.filePath; }) {
-            return item.filePath;
-        } else {
-            return item.document.filePath;
-        }
-    }();
-    const auto& hash = [&]() -> const std::string& {
-        if constexpr (requires { item.documentHash; }) {
-            return item.documentHash;
-        } else {
-            return item.document.sha256Hash;
-        }
-    }();
-    if (enablePathDedup && !filePath.empty()) {
-        return "path:" + filePath;
-    }
-    if (!hash.empty()) {
-        return "hash:" + hash;
-    }
-    if (!filePath.empty()) {
-        return "path:" + filePath;
-    }
-    return "unknown:";
-}
-
-} // namespace detail
 
 } // namespace yams::search

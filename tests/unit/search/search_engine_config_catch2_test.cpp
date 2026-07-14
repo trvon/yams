@@ -1,18 +1,17 @@
 /**
  * @file search_engine_config_catch2_test.cpp
  * @brief Tests for SearchEngineConfig, CorpusProfile, ComponentResult helpers,
- *        and accumulateComponentScore (search_result_fusion.h)
+ *        and score attribution helpers (search_models.h)
  *
  * These are header-only or inline functions at 0% coverage. Tests here
- * exercise forProfile(), detectProfile(), fusionStrategyToString(),
- * componentSourceToString(), isVectorComponent(), isTextAnchoringComponent(),
- * and accumulateComponentScore().
+ * exercise forProfile(), detectProfile(), componentSourceToString(),
+ * isVectorComponent(), isTextAnchoringComponent(), and accumulateComponentScore().
  */
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
-#include <yams/search/search_result_fusion.h>
+#include <yams/search/search_models.h>
 
 #include <string>
 #include <unordered_map>
@@ -20,22 +19,6 @@
 using namespace yams::search;
 using Catch::Approx;
 using yams::metadata::SearchResult;
-
-// ────────────────────────────────────────────────────────────────────────────────
-// fusionStrategyToString
-// ────────────────────────────────────────────────────────────────────────────────
-
-TEST_CASE("fusionStrategyToString covers all strategies", "[search][config][catch2]") {
-    using FS = SearchEngineConfig::FusionStrategy;
-
-    CHECK(std::string(SearchEngineConfig::fusionStrategyToString(FS::WEIGHTED_SUM)) ==
-          "WEIGHTED_SUM");
-    CHECK(std::string(SearchEngineConfig::fusionStrategyToString(FS::RECIPROCAL_RANK)) ==
-          "RECIPROCAL_RANK");
-    CHECK(std::string(SearchEngineConfig::fusionStrategyToString(FS::WEIGHTED_RECIPROCAL)) ==
-          "WEIGHTED_RECIPROCAL");
-    CHECK(std::string(SearchEngineConfig::fusionStrategyToString(FS::COMB_MNZ)) == "COMB_MNZ");
-}
 
 TEST_CASE("navigationZoomLevelToString covers all zoom levels", "[search][config][catch2]") {
     using Z = SearchEngineConfig::NavigationZoomLevel;
@@ -331,17 +314,71 @@ TEST_CASE("SearchEngineConfig default values", "[search][config][catch2]") {
     CHECK(cfg.maxResults == 100);
     CHECK(cfg.similarityThreshold == Approx(0.0f));
     CHECK(cfg.enableParallelExecution == true);
-    CHECK(cfg.enableTieredExecution == true);
-    CHECK(cfg.fusionStrategy == SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL);
-    CHECK(cfg.enableTopologyWeakQueryRouting == false);
+    CHECK(cfg.topologyRoutingMode == SearchEngineConfig::TopologyRoutingMode::HybridAssist);
+    CHECK(cfg.topologyVectorPolicy == SearchEngineConfig::TopologyVectorPolicy::Shadow);
     CHECK(cfg.topologyMaxClusters == 2U);
+    CHECK(cfg.topologyMinClusters == 1U);
+    CHECK(cfg.topologyMaxSeedDocuments == 32U);
+    CHECK(cfg.topologyAdaptiveProbeScoreGap == Approx(0.0F));
+    CHECK(cfg.topologyNarrowMinBoundaryMargin == Approx(0.2F));
+    CHECK(std::string_view(SearchEngineConfig::topologyVectorPolicyToString(
+              SearchEngineConfig::TopologyVectorPolicy::Shadow)) == "shadow");
     CHECK(cfg.topologyMaxDocs == 64U);
+    CHECK(cfg.topologyEvidenceWeight == Approx(0.02F));
     CHECK(cfg.rrfK == Approx(12.0f));
     CHECK(cfg.bm25NormDivisor == Approx(25.0f));
-    CHECK(cfg.symbolRank == true);
     CHECK(cfg.enableReranking == true);
     CHECK(cfg.rerankTopK == 5);
-    CHECK(cfg.rerankReplaceScores == true);
+    CHECK(cfg.rerankReplaceScores == false);
+    CHECK(cfg.rerankBlendWeight == Approx(0.30f));
+}
+
+TEST_CASE("SearchEngineConfig preserves typed execution policy across tuning",
+          "[search][config][topology][catch2]") {
+    SearchEngineConfig tuned;
+    tuned.textWeight = 0.25F;
+
+    SearchEngineConfig configured;
+    configured.topologyRoutingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    configured.topologyMaxClusters = 3;
+    configured.topologyMinClusters = 2;
+    configured.topologyMaxSeedDocuments = 24;
+    configured.topologyAdaptiveProbeScoreGap = 0.08F;
+    configured.topologyNarrowMinBoundaryMargin = 0.12F;
+    configured.topologyMaxDocs = 48;
+    configured.topologyMedoidBoost = 0.17F;
+    configured.topologyRouteScoringMode =
+        SearchEngineConfig::TopologyRouteScoringMode::SeedCoverage;
+    configured.topologySparseDenseAlpha = 0.7F;
+    configured.topologyMinRouteScore = 0.2F;
+    configured.topologyExpansionSource =
+        SearchEngineConfig::TopologyExpansionSource::GraphNeighbors;
+    configured.topologyGraphNeighborMinScore = 0.4F;
+    configured.topologyGraphNeighborReciprocalOnly = false;
+    configured.topologyGraphVectorSeedProbe = 16;
+    configured.topologyVectorPolicy = SearchEngineConfig::TopologyVectorPolicy::Narrow;
+
+    tuned.applyExecutionPolicyFrom(configured);
+
+    CHECK(tuned.textWeight == Approx(0.25F));
+    CHECK(tuned.topologyRoutingMode == SearchEngineConfig::TopologyRoutingMode::HybridAssist);
+    CHECK(tuned.topologyMaxClusters == 3);
+    CHECK(tuned.topologyMinClusters == 2);
+    CHECK(tuned.topologyMaxSeedDocuments == 24);
+    CHECK(tuned.topologyAdaptiveProbeScoreGap == Approx(0.08F));
+    CHECK(tuned.topologyNarrowMinBoundaryMargin == Approx(0.12F));
+    CHECK(tuned.topologyMaxDocs == 48);
+    CHECK(tuned.topologyMedoidBoost == Approx(0.17F));
+    CHECK(tuned.topologyRouteScoringMode ==
+          SearchEngineConfig::TopologyRouteScoringMode::SeedCoverage);
+    CHECK(tuned.topologySparseDenseAlpha == Approx(0.7F));
+    CHECK(tuned.topologyMinRouteScore == Approx(0.2F));
+    CHECK(tuned.topologyExpansionSource ==
+          SearchEngineConfig::TopologyExpansionSource::GraphNeighbors);
+    CHECK(tuned.topologyGraphNeighborMinScore == Approx(0.4F));
+    CHECK_FALSE(tuned.topologyGraphNeighborReciprocalOnly);
+    CHECK(tuned.topologyGraphVectorSeedProbe == 16);
+    CHECK(tuned.topologyVectorPolicy == SearchEngineConfig::TopologyVectorPolicy::Narrow);
 }
 
 // ────────────────────────────────────────────────────────────────────────────────

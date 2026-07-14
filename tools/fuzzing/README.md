@@ -13,7 +13,6 @@ AFL++ fuzzing harnesses for CLI/daemon IPC protocol testing per issue #8.
 - `fuzz_proto_serializer` - Protobuf encoding/decoding of IPC message payloads
 - `fuzz_request_handler` - Request processing, message framing, and handler configuration
 - `fuzz_streaming_processor` - Chunked streaming response handling and processor delegation
-- `fuzz_query_parser` - User-facing search query parsing + FTS5 translation
 - `fuzz_plugin_trust` - Plugin trust list parsing + safe path containment checks
 - `fuzz_plugin_abi_mount` - ABI plugin mount/load/unload path via `AbiPluginLoader`
 - `fuzz_plugin_abi_negotiation` - ABI manifest/interface negotiation across controlled plugins
@@ -43,7 +42,6 @@ Run a fuzzer (interactive / live AFL++ UI):
 ./tools/fuzzing/fuzz.sh fuzz proto_serializer
 ./tools/fuzzing/fuzz.sh fuzz request_handler
 ./tools/fuzzing/fuzz.sh fuzz streaming_processor
-./tools/fuzzing/fuzz.sh fuzz query_parser
 ./tools/fuzzing/fuzz.sh fuzz plugin_trust
 ./tools/fuzzing/fuzz.sh fuzz plugin_abi_mount
 ./tools/fuzzing/fuzz.sh fuzz plugin_abi_negotiation

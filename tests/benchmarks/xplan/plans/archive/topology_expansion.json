@@ -1,0 +1,115 @@
+{
+  "name": "topology_expansion",
+  "description": "Expansion/fusion/rerank ablation (full64, medoid64, cap8, cap2, rerank_only) on BEIR scifact via retrieval_quality worker \u2014 no shell matrix.",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 3600,
+  "continue_on_arm_failure": true,
+  "mode": "live-ish",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SEARCH_STAGE_TRACE": "1",
+      "YAMS_BENCH_TOPOLOGY_ENGINE": "connected",
+      "YAMS_BENCH_TOPOLOGY_ROUTE_SCORING": "current",
+      "YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA": "0.5",
+      "YAMS_BENCH_TOPOLOGY_MIN_ROUTE_SCORE": "0",
+      "YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS": "2",
+      "YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS": "0",
+      "YAMS_BENCH_TOPOLOGY_SOURCE": "vector"
+    },
+    "params": {
+      "dataset": "scifact",
+      "corpus_size": 2000,
+      "num_queries": 50,
+      "topk": 10,
+      "topology_engine": "connected",
+      "topology_source": "vector"
+    }
+  },
+  "arms": [
+    {
+      "name": "full64",
+      "factors": {
+        "expansion_arm": "full64"
+      },
+      "params": {
+        "expansion_arm": "full64"
+      }
+    },
+    {
+      "name": "medoid64",
+      "factors": {
+        "expansion_arm": "medoid64"
+      },
+      "params": {
+        "expansion_arm": "medoid64"
+      }
+    },
+    {
+      "name": "cap8",
+      "factors": {
+        "expansion_arm": "cap8"
+      },
+      "params": {
+        "expansion_arm": "cap8"
+      }
+    },
+    {
+      "name": "cap2",
+      "factors": {
+        "expansion_arm": "cap2"
+      },
+      "params": {
+        "expansion_arm": "cap2"
+      }
+    },
+    {
+      "name": "rerank_only",
+      "factors": {
+        "expansion_arm": "rerank_only"
+      },
+      "params": {
+        "expansion_arm": "rerank_only"
+      }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_quality",
+      "metrics": [
+        "mrr",
+        "ndcg_at_k",
+        "topology_applied"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": [
+      "metrics.json",
+      "stdout.log",
+      "debug.jsonl"
+    ],
+    "require_metrics": [
+      "mrr"
+    ],
+    "require_metric_status": [
+      "ok"
+    ]
+  },
+  "summarize": {
+    "primary": [
+      "mrr",
+      "ndcg_at_k",
+      "map",
+      "topology_applied",
+      "topology_added_avg",
+      "topology_sidecar_avg",
+      "topology_admitted",
+      "hybrid_queries"
+    ],
+    "group_by": [
+      "expansion_arm"
+    ]
+  }
+}

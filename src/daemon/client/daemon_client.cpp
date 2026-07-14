@@ -11,13 +11,11 @@
 #include <yams/daemon/client/client_transport.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
-#include <yams/daemon/client/in_process_transport.h>
 #include <yams/daemon/client/ipc_failure.h>
 #include <yams/daemon/client/process_discovery.h>
 #include <yams/daemon/client/sandbox_detection.h>
 #include <yams/daemon/client/sandbox_probe.h>
 #include <yams/daemon/client/streaming_handlers.h>
-#include <yams/daemon/embedded_service_host.h>
 #include <yams/daemon/ipc/connection_fsm.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
@@ -238,15 +236,10 @@ public:
     std::chrono::milliseconds bodyTimeout_{60000};   // 60s default
     TransportOptions transportOptions_;
     std::shared_ptr<AsioConnectionPool> pool_;
-    std::shared_ptr<EmbeddedServiceHost> embeddedHost_;
     bool explicitly_disconnected_{false};    // Track explicit disconnect() calls
     std::atomic<bool> shutting_down_{false}; // Set when DaemonClient is being destroyed
 
     void refresh_transport() {
-        if (resolvedTransportMode_ == ClientTransportMode::InProcess) {
-            pool_.reset();
-            return;
-        }
         transportOptions_.socketPath = config_.socketPath;
         transportOptions_.headerTimeout = headerTimeout_;
         transportOptions_.bodyTimeout = bodyTimeout_;
@@ -455,29 +448,6 @@ std::filesystem::path resolveDataDirCached() {
 }
 } // namespace
 
-namespace {
-
-bool running_under_codex_client() {
-    return !unix_socket_io_permitted();
-}
-
-Result<std::shared_ptr<EmbeddedServiceHost>> ensure_embedded_host(daemon::ClientConfig& config) {
-    if (config.dataDir.empty()) {
-        config.dataDir = resolveDataDirCached();
-    }
-
-    EmbeddedServiceHost::Options options;
-    options.dataDir = config.dataDir;
-    options.enableAutoRepair = false;
-    options.autoLoadPlugins = false;
-    options.enableModelProvider = false;
-    options.oneShot = running_under_codex_client();
-
-    return EmbeddedServiceHost::getOrCreate(options);
-}
-
-} // namespace
-
 // Forward declaration: used during DaemonClient construction for proxy health checks.
 static bool pingDaemonSync(const std::filesystem::path& socketPath);
 static bool isProxySocketPath(const std::filesystem::path& socketPath);
@@ -489,29 +459,11 @@ DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_shared<
     pImpl->config_.transportMode = pImpl->resolvedTransportMode_;
 
     if (pImpl->resolvedTransportMode_ == ClientTransportMode::InProcess) {
-        auto host = ensure_embedded_host(pImpl->config_);
-        if (host) {
-            pImpl->embeddedHost_ = host.value();
-        } else {
-            bool forceEmbedded = false;
-            if (const char* env = std::getenv("YAMS_EMBEDDED"); env && *env) {
-                std::string value(env);
-                std::transform(value.begin(), value.end(), value.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                forceEmbedded = (value == "1" || value == "true" || value == "on" ||
-                                 value == "yes" || value == "embedded" || value == "in_process");
-            }
-
-            if (forceEmbedded) {
-                spdlog::error("Embedded mode initialization failed: {}", host.error().message);
-            } else {
-                spdlog::warn(
-                    "Embedded mode initialization failed (falling back to socket transport): {}",
-                    host.error().message);
-                pImpl->resolvedTransportMode_ = ClientTransportMode::Socket;
-                pImpl->config_.transportMode = ClientTransportMode::Socket;
-            }
-        }
+        spdlog::warn(
+            "In-process daemon transport is not available in the socket-only daemon client; "
+            "falling back to socket transport");
+        pImpl->resolvedTransportMode_ = ClientTransportMode::Socket;
+        pImpl->config_.transportMode = ClientTransportMode::Socket;
     }
 
     if (pImpl->resolvedTransportMode_ == ClientTransportMode::Socket) {
@@ -784,17 +736,6 @@ static bool shouldRetryViaMainSocket(const Error& err) {
 boost::asio::awaitable<Result<void>> DaemonClient::connect() {
     // Capture shared_ptr to extend Impl lifetime across co_await suspension points
     auto impl = pImpl;
-    if (impl && impl->resolvedTransportMode_ == ClientTransportMode::InProcess) {
-        if (!impl->embeddedHost_) {
-            auto host = ensure_embedded_host(impl->config_);
-            if (!host) {
-                co_return host.error();
-            }
-            impl->embeddedHost_ = std::move(host.value());
-        }
-        impl->explicitly_disconnected_ = false;
-        co_return Result<void>();
-    }
     // Async variant using adapter's connect helper and timers; avoids blocking sleeps
     // If daemon is not reachable and autoStart is disabled, surface a failure.
     const auto socketPath = impl->config_.socketPath.empty()
@@ -949,10 +890,6 @@ boost::asio::awaitable<Result<void>> DaemonClient::connect() {
 }
 
 void DaemonClient::disconnect() {
-    if (pImpl->resolvedTransportMode_ == ClientTransportMode::InProcess) {
-        pImpl->explicitly_disconnected_ = true;
-        return;
-    }
     // Only shut down non-shared pools. Shared pools may be in use by other clients.
     if (pImpl->pool_ && !pImpl->pool_->is_shared()) {
         pImpl->pool_->shutdown();
@@ -964,9 +901,6 @@ bool DaemonClient::isConnected() const {
     // If explicitly disconnected, return false until reconnect
     if (pImpl->explicitly_disconnected_) {
         return false;
-    }
-    if (pImpl->resolvedTransportMode_ == ClientTransportMode::InProcess) {
-        return pImpl->embeddedHost_ && pImpl->embeddedHost_->getDispatcher() != nullptr;
     }
     // Treat connectivity as liveness of the daemon (socket + ping), not a persistent socket
     constexpr auto kHealthyTtl = std::chrono::seconds(2);
@@ -1157,23 +1091,6 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(const Request
     const auto selectedSocket = selectSocketPathForRequest(impl->config_, ownedReq);
     spdlog::debug("DaemonClient::sendRequest: [{}] streaming={} sock='{}'",
                   getRequestName(ownedReq), false, selectedSocket.string());
-    if (impl->resolvedTransportMode_ == ClientTransportMode::InProcess) {
-        if (!impl->embeddedHost_) {
-            auto host = ensure_embedded_host(impl->config_);
-            if (!host) {
-                co_return host.error();
-            }
-            impl->embeddedHost_ = std::move(host.value());
-        }
-        InProcessTransport transport(impl->embeddedHost_);
-        auto r = co_await transport.send_request(std::move(ownedReq));
-        if (impl->isShuttingDown()) {
-            co_return Error{ErrorCode::InvalidState, "DaemonClient destroyed during request"};
-        }
-        if (!r)
-            co_return r.error();
-        co_return r.value();
-    }
     // Use request-type-aware timeout without shortening configured limits
     auto opts = impl->transportOptions_;
     opts.socketPath = selectedSocket;
@@ -1224,23 +1141,6 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(Request&& req
     const auto selectedSocket = selectSocketPathForRequest(impl->config_, req);
     spdlog::debug("DaemonClient::sendRequest(move): [{}] streaming={} sock='{}'", type, false,
                   selectedSocket.string());
-    if (impl->resolvedTransportMode_ == ClientTransportMode::InProcess) {
-        if (!impl->embeddedHost_) {
-            auto host = ensure_embedded_host(impl->config_);
-            if (!host) {
-                co_return host.error();
-            }
-            impl->embeddedHost_ = std::move(host.value());
-        }
-        InProcessTransport transport(impl->embeddedHost_);
-        auto r = co_await transport.send_request(std::move(req));
-        if (impl->isShuttingDown()) {
-            co_return Error{ErrorCode::InvalidState, "DaemonClient destroyed during request"};
-        }
-        if (!r)
-            co_return r.error();
-        co_return r.value();
-    }
     // Use request-type-aware timeout without shortening configured limits
     auto opts = impl->transportOptions_;
     opts.socketPath = selectedSocket;
@@ -1753,25 +1653,6 @@ DaemonClient::sendRequestStreaming(const Request& req,
     };
     auto onError = [handler](const Error& e) { handler->onError(e); };
     auto onComplete = [handler]() { handler->onComplete(); };
-
-    if (impl->resolvedTransportMode_ == ClientTransportMode::InProcess) {
-        if (!impl->embeddedHost_) {
-            auto host = ensure_embedded_host(impl->config_);
-            if (!host) {
-                co_return host.error();
-            }
-            impl->embeddedHost_ = std::move(host.value());
-        }
-        InProcessTransport transport(impl->embeddedHost_);
-        auto res = co_await transport.send_request_streaming(std::move(ownedReq), onHeader, onChunk,
-                                                             onError, onComplete);
-        if (impl->isShuttingDown()) {
-            co_return Error{ErrorCode::InvalidState, "DaemonClient destroyed during request"};
-        }
-        if (!res)
-            co_return res.error();
-        co_return Result<void>();
-    }
 
     // Use request-type-aware timeout without shortening configured limits
     auto opts = impl->transportOptions_;

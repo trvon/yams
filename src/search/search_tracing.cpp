@@ -1,6 +1,7 @@
 // Copyright (c) 2025 YAMS Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <yams/search/search_metric_keys.h>
 #include <yams/search/search_tracing.h>
 
 #include <algorithm>
@@ -35,6 +36,16 @@ std::string documentIdForTrace(const std::string& filePath, const std::string& d
         return docId;
     }
     return documentHash;
+}
+
+void setDebug(std::unordered_map<std::string, std::string>& debug, std::string_view key,
+              std::string value) {
+    debug[std::string(key)] = std::move(value);
+}
+
+void setDebugBool(std::unordered_map<std::string, std::string>& debug, std::string_view key,
+                  bool value) {
+    debug[std::string(key)] = value ? "1" : "0";
 }
 
 std::vector<std::string>
@@ -112,6 +123,142 @@ std::string joinWithTab(const std::vector<std::string>& values) {
     return out;
 }
 
+void recordIndexReadinessDebug(std::unordered_map<std::string, std::string>& debug,
+                               const IndexFreshnessSnapshot& freshness) {
+    setDebugBool(debug, metrics::kSearchEngineReady, freshness.lexicalReady);
+    setDebugBool(debug, metrics::kVectorReady, freshness.vectorReady);
+    setDebugBool(debug, metrics::kKgReady, freshness.kgReady);
+    setDebugBool(debug, metrics::kTopologyReady, freshness.topologyReady);
+    setDebugBool(debug, metrics::kTopologyArtifactsFresh, freshness.topologyArtifactsFresh);
+    setDebug(debug, metrics::kTopologyEpoch, std::to_string(freshness.topologyEpoch));
+}
+
+void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConfig& config,
+                                SearchEngineConfig::TopologyRoutingMode mode,
+                                const TopologyRoutingSessionResult& session,
+                                const std::string& skipReason, std::size_t totalCandidates,
+                                bool shadowEvaluation, bool includeDocumentIds) {
+    auto& debug = response.debugStats;
+    setDebug(debug, metrics::kTopologyRoutingMode,
+             SearchEngineConfig::topologyRoutingModeToString(mode));
+    setDebug(debug, metrics::kTopologyRouteScoringMode,
+             SearchEngineConfig::topologyRouteScoringModeToString(config.topologyRouteScoringMode));
+    setDebug(debug, metrics::kTopologySparseDenseAlpha,
+             std::to_string(config.topologySparseDenseAlpha));
+    setDebug(debug, metrics::kTopologyMinRouteScore, std::to_string(config.topologyMinRouteScore));
+    setDebugBool(debug, metrics::kTopologyWeakQueryEnabled,
+                 mode != SearchEngineConfig::TopologyRoutingMode::Disabled);
+    setDebugBool(debug, metrics::kTopologyWeakQueryLoadAttempted, session.loadAttempted);
+    setDebugBool(debug, metrics::kTopologyWeakQueryLoadSucceeded, session.loadSucceeded);
+    setDebugBool(debug, metrics::kTopologyArtifactAdmitted, session.artifactAdmitted);
+    setDebugBool(debug, metrics::kTopologyWeakQueryApplied, session.applied && !shadowEvaluation);
+    setDebugBool(debug, metrics::kTopologyWeakQueryNarrowApplied,
+                 session.narrowApplied && !shadowEvaluation);
+    setDebug(debug, metrics::kTopologyWeakQuerySkipReason, skipReason);
+    setDebug(debug, metrics::kTopologyWeakQueryRoutesRejected,
+             std::to_string(session.routesRejected));
+    setDebug(debug, metrics::kTopologyWeakQueryRoutedClusters,
+             std::to_string(session.routedClusters));
+    setDebug(debug, metrics::kTopologyRouteAvailableCount, std::to_string(session.availableRoutes));
+    setDebug(debug, metrics::kTopologyRouteBoundaryScoreMargin,
+             std::to_string(session.routeBoundaryScoreMargin));
+    setDebugBool(debug, metrics::kTopologyRouteConfidenceAbstained, session.confidenceAbstained);
+    setDebug(debug, metrics::kTopologyRouteRepresentativeDistanceEvaluations,
+             std::to_string(session.routeRepresentativeDistanceEvaluations));
+    setDebug(debug, metrics::kTopologyRouteRepresentativeCountMax,
+             std::to_string(session.routeRepresentativeCountMax));
+    setDebug(debug, metrics::kTopologyWeakQueryRoutedDocs, std::to_string(session.routedDocs));
+    setDebug(debug, metrics::kTopologyWeakQueryAddedCandidates,
+             std::to_string(shadowEvaluation ? 0 : session.addedCandidates));
+    setDebug(debug, metrics::kTopologyWeakQueryDuplicateCandidates,
+             std::to_string(shadowEvaluation ? 0 : session.duplicateCandidates));
+    setDebug(debug, metrics::kTopologyWeakQueryStaleCandidates,
+             std::to_string(session.staleCandidates));
+    if (includeDocumentIds) {
+        setDebug(debug, metrics::kTopologyWeakQueryAddedCandidateHashes,
+                 shadowEvaluation ? std::string{} : joinWithTab(session.addedCandidateHashes));
+    }
+    setDebug(debug, metrics::kTopologyWeakQueryTotalCandidates, std::to_string(totalCandidates));
+    const auto& allowedCandidateHashes = session.routeAllowedDocumentHashes.empty()
+                                             ? session.routedCandidateHashes
+                                             : session.routeAllowedDocumentHashes;
+    const bool shadowEvaluated = shadowEvaluation && session.loadAttempted;
+    const char* shadowAction = "global";
+    if (shadowEvaluated && session.narrowApplied && !allowedCandidateHashes.empty()) {
+        shadowAction = "narrow";
+    }
+    setDebugBool(debug, metrics::kTopologyShadowEvaluated, shadowEvaluated);
+    setDebug(debug, metrics::kTopologyShadowProposedAction, shadowAction);
+    setDebug(debug, metrics::kTopologyWeakQueryAllowedCandidates,
+             std::to_string(allowedCandidateHashes.size()));
+    if (includeDocumentIds) {
+        std::vector<std::string> routedCandidateHashes(allowedCandidateHashes.begin(),
+                                                       allowedCandidateHashes.end());
+        std::sort(routedCandidateHashes.begin(), routedCandidateHashes.end());
+        setDebug(debug, metrics::kTopologyWeakQueryAllowedCandidateHashes,
+                 joinWithTab(routedCandidateHashes));
+    }
+    setDebugBool(debug, metrics::kTopologySnapshotCacheHit, session.snapshotCacheHit);
+    float scaleAgreementSum = 0.0F;
+    float overlapSupportSum = 0.0F;
+    float persistenceSupportSum = 0.0F;
+    float cohesionSupportSum = 0.0F;
+    float bridgeSupportSum = 0.0F;
+    float densitySupportSum = 0.0F;
+    for (const auto& [_, evidence] : session.candidateStructureEvidence) {
+        scaleAgreementSum += evidence.scaleAgreement;
+        overlapSupportSum += evidence.overlapSupport;
+        persistenceSupportSum += evidence.persistenceSupport;
+        cohesionSupportSum += evidence.cohesionSupport;
+        bridgeSupportSum += evidence.bridgeSupport;
+        densitySupportSum += evidence.densitySupport;
+    }
+    const auto structureCandidateCount = session.candidateStructureEvidence.size();
+    const float structureDenominator =
+        structureCandidateCount == 0 ? 1.0F : static_cast<float>(structureCandidateCount);
+    setDebug(debug, metrics::kTopologyStructureCandidateCount,
+             std::to_string(structureCandidateCount));
+    setDebug(debug, metrics::kTopologyStructureScaleAgreementMean,
+             std::to_string(scaleAgreementSum / structureDenominator));
+    setDebug(debug, metrics::kTopologyStructureOverlapSupportMean,
+             std::to_string(overlapSupportSum / structureDenominator));
+    setDebug(debug, metrics::kTopologyStructurePersistenceSupportMean,
+             std::to_string(persistenceSupportSum / structureDenominator));
+    setDebug(debug, metrics::kTopologyStructureCohesionSupportMean,
+             std::to_string(cohesionSupportSum / structureDenominator));
+    setDebug(debug, metrics::kTopologyStructureBridgeSupportMean,
+             std::to_string(bridgeSupportSum / structureDenominator));
+    setDebug(debug, metrics::kTopologyStructureDensitySupportMean,
+             std::to_string(densitySupportSum / structureDenominator));
+    setDebug(debug, metrics::kTopologyRouteBestScore, std::to_string(session.bestRouteScore));
+    setDebug(debug, metrics::kTopologyRouteMeanAcceptedScore,
+             std::to_string(session.meanAcceptedRouteScore));
+    setDebug(debug, metrics::kTopologyRouteAcceptedCount, std::to_string(session.acceptedRoutes));
+    setDebug(debug, metrics::kTopologySeedCount, std::to_string(session.seedCount));
+    setDebug(debug, metrics::kTopologySeedCoverageCount,
+             std::to_string(session.seedsInRoutedClusters));
+    if (session.loadSucceeded) {
+        setDebugBool(debug, metrics::kTopologyReady, true);
+        setDebugBool(debug, metrics::kTopologyArtifactsFresh, session.artifactsFresh);
+        setDebug(debug, metrics::kTopologyEpoch, std::to_string(session.topologyEpoch));
+        setDebug(debug, metrics::kTopologyConstructionFingerprint, session.constructionFingerprint);
+    }
+    if (session.loadAttempted) {
+        auto& timing = response.componentTimingMicros;
+        timing[std::string(metrics::kTimingTopologyWeakQuery)] = session.timings.totalMicros;
+        timing[std::string(metrics::kTimingTopologyLoad)] = session.timings.loadMicros;
+        timing[std::string(metrics::kTimingTopologyValidate)] = session.timings.validateMicros;
+        timing[std::string(metrics::kTimingTopologyRequestPrep)] =
+            session.timings.requestPrepMicros;
+        timing[std::string(metrics::kTimingTopologyRoute)] = session.timings.routeMicros;
+        timing[std::string(metrics::kTimingTopologyClusterLookup)] =
+            session.timings.clusterLookupMicros;
+        timing[std::string(metrics::kTimingTopologyDocLookup)] = session.timings.docLookupMicros;
+        timing[std::string(metrics::kTimingTopologyCandidateInsert)] =
+            session.timings.candidateInsertMicros;
+    }
+}
+
 nlohmann::json buildComponentHitSummaryJson(const std::vector<ComponentResult>& componentResults,
                                             size_t topPerComponent) {
     struct RankedHit {
@@ -174,7 +321,9 @@ nlohmann::json buildComponentHitSummaryJson(const std::vector<ComponentResult>& 
     return out;
 }
 
-SearchTraceCollector::SearchTraceCollector(const SearchEngineConfig& config) : config_(config) {}
+SearchTraceCollector::SearchTraceCollector(const SearchEngineConfig& config,
+                                           bool captureDocumentIds)
+    : config_(config), captureDocumentIds_(captureDocumentIds) {}
 
 void SearchTraceCollector::markStageConfigured(const std::string& name, bool enabled) {
     stages_[name].enabled = enabled;
@@ -209,8 +358,12 @@ void SearchTraceCollector::markStageResult(const std::string& name,
         }
     }
     stage.uniqueDocCount = uniqueDocs.size();
-    stage.uniqueDocIds.assign(uniqueDocs.begin(), uniqueDocs.end());
-    std::sort(stage.uniqueDocIds.begin(), stage.uniqueDocIds.end());
+    if (captureDocumentIds_) {
+        stage.uniqueDocIds.assign(uniqueDocs.begin(), uniqueDocs.end());
+        std::sort(stage.uniqueDocIds.begin(), stage.uniqueDocIds.end());
+    } else {
+        stage.uniqueDocIds.clear();
+    }
 
     if (!results.empty()) {
         double minScore = std::numeric_limits<double>::infinity();
@@ -230,6 +383,24 @@ void SearchTraceCollector::markStageResult(const std::string& name,
         stage.minScore = 0.0;
         stage.maxScore = 0.0;
     }
+}
+
+void SearchTraceCollector::markValueStageResult(const std::string& name, bool producedValue,
+                                                std::int64_t durationMicros) {
+    auto& stage = stages_[name];
+    stage.attempted = true;
+    stage.failed = false;
+    stage.timedOut = false;
+    stage.skipped = false;
+    stage.skipReason.clear();
+    stage.contributed = producedValue;
+    stage.durationMicros = durationMicros;
+    stage.rawHitCount = producedValue ? 1 : 0;
+    stage.uniqueDocCount = 0;
+    stage.uniqueDocIds.clear();
+    stage.scoreStatsValid = producedValue;
+    stage.minScore = producedValue ? 1.0 : 0.0;
+    stage.maxScore = producedValue ? 1.0 : 0.0;
 }
 
 void SearchTraceCollector::markStageTimeout(const std::string& name, std::int64_t durationMicros) {

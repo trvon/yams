@@ -1,0 +1,74 @@
+{
+  "name": "ingest_pipeline",
+  "description": "Ingest ablation (one-factor-off): KG, vectors, GLiNER, and full minimal path for optimization ranking.",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 900,
+  "continue_on_arm_failure": true,
+  "mode": "synthetic",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1"
+    },
+    "params": {
+      "corpus_size": 100,
+      "doc_size": 1000,
+      "poll_interval_ms": 100
+    }
+  },
+  "arms": [
+    {
+      "name": "baseline",
+      "factors": { "kg": "on", "vectors": "on", "gliner": "on" }
+    },
+    {
+      "name": "no_kg",
+      "factors": { "kg": "off", "vectors": "on", "gliner": "on" }
+    },
+    {
+      "name": "no_vectors",
+      "factors": { "kg": "on", "vectors": "off", "gliner": "on" }
+    },
+    {
+      "name": "no_gliner",
+      "factors": { "kg": "on", "vectors": "on", "gliner": "off" }
+    },
+    {
+      "name": "no_vectors_no_kg",
+      "factors": { "kg": "off", "vectors": "off", "gliner": "on" }
+    },
+    {
+      "name": "minimal",
+      "factors": { "kg": "off", "vectors": "off", "gliner": "off" }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "ingestion_e2e",
+      "metrics": [
+        "total_duration_ms",
+        "docs_per_s",
+        "pipeline_complete",
+        "dropped_batches"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json", "mode_manifest.json"],
+    "require_metrics": ["total_duration_ms", "docs_per_s"],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "docs_per_s",
+      "total_duration_ms",
+      "pipeline_complete",
+      "dropped_batches",
+      "document_store_total_ms",
+      "extract_ms",
+      "kg_ms",
+      "embed_prepare_ms"
+    ],
+    "group_by": ["kg", "vectors", "gliner"]
+  }
+}

@@ -17,10 +17,14 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <thread>
+#include <type_traits>
+#include <utility>
 
 #include <yams/compat/unistd.h>
 #include <yams/search/search_engine_builder.h>
@@ -31,19 +35,81 @@ using namespace yams::search;
 using namespace yams::storage;
 using Catch::Approx;
 
+static_assert(!std::is_reference_v<decltype(std::declval<const SearchTuner&>().getParams())>,
+              "SearchTuner parameter reads must return a concurrency-safe snapshot");
+
+TEST_CASE("SearchTuner parameter snapshots are safe during observation",
+          "[unit][search_tuner][concurrency]") {
+    CorpusStats stats;
+    SearchTuner tuner(stats);
+    SearchTuner::RuntimeTelemetry telemetry;
+    telemetry.latencyMs = 1.0;
+
+    std::atomic<bool> start{false};
+    std::atomic<bool> snapshotsValid{true};
+    std::jthread writer([&] {
+        while (!start.load(std::memory_order_acquire)) {
+        }
+        for (std::size_t i = 0; i < 1000; ++i) {
+            tuner.observe(telemetry);
+        }
+    });
+    std::jthread reader([&] {
+        while (!start.load(std::memory_order_acquire)) {
+        }
+        for (std::size_t i = 0; i < 1000; ++i) {
+            const auto snapshot = tuner.getParams();
+            if (snapshot.rrfK <= 0 || tuner.getRrfK() <= 0) {
+                snapshotsValid.store(false, std::memory_order_relaxed);
+            }
+        }
+    });
+
+    start.store(true, std::memory_order_release);
+    writer.join();
+    reader.join();
+    CHECK(snapshotsValid.load(std::memory_order_relaxed));
+}
+
+TEST_CASE("SearchTuner snapshot keeps config and parameters correlated",
+          "[unit][search_tuner][concurrency][snapshot]") {
+    CorpusStats stats;
+    SearchTuner tuner(stats);
+    SearchTuner::RuntimeTelemetry telemetry;
+    telemetry.latencyMs = 200.0;
+
+    std::atomic<bool> start{false};
+    std::jthread writer([&] {
+        while (!start.load(std::memory_order_acquire)) {
+        }
+        for (std::size_t i = 0; i < 500; ++i) {
+            tuner.observe(telemetry);
+        }
+    });
+
+    start.store(true, std::memory_order_release);
+    for (std::size_t i = 0; i < 500; ++i) {
+        const auto snapshot = tuner.snapshot();
+        CHECK(snapshot.config.rrfK == Approx(static_cast<float>(snapshot.params.rrfK)));
+        CHECK(snapshot.config.textWeight == Approx(snapshot.params.weights.text.value));
+        CHECK(snapshot.config.vectorWeight == Approx(snapshot.params.weights.vector.value));
+        CHECK(snapshot.state == tuner.currentState());
+    }
+}
+
 // =============================================================================
 // TuningState enum and string conversion tests
 // =============================================================================
 
 TEST_CASE("TuningState: string conversion", "[unit][search_tuner]") {
-    CHECK(std::string(tuningStateToString(TuningState::SMALL_CODE)) == "SMALL_CODE");
-    CHECK(std::string(tuningStateToString(TuningState::LARGE_CODE)) == "LARGE_CODE");
-    CHECK(std::string(tuningStateToString(TuningState::SMALL_PROSE)) == "SMALL_PROSE");
-    CHECK(std::string(tuningStateToString(TuningState::LARGE_PROSE)) == "LARGE_PROSE");
-    CHECK(std::string(tuningStateToString(TuningState::SCIENTIFIC)) == "SCIENTIFIC");
-    CHECK(std::string(tuningStateToString(TuningState::MIXED)) == "MIXED");
-    CHECK(std::string(tuningStateToString(TuningState::MIXED_PRECISION)) == "MIXED_PRECISION");
-    CHECK(std::string(tuningStateToString(TuningState::MINIMAL)) == "MINIMAL");
+    CHECK((std::string(tuningStateToString(TuningState::SMALL_CODE)) == "SMALL_CODE"));
+    CHECK((std::string(tuningStateToString(TuningState::LARGE_CODE)) == "LARGE_CODE"));
+    CHECK((std::string(tuningStateToString(TuningState::SMALL_PROSE)) == "SMALL_PROSE"));
+    CHECK((std::string(tuningStateToString(TuningState::LARGE_PROSE)) == "LARGE_PROSE"));
+    CHECK((std::string(tuningStateToString(TuningState::SCIENTIFIC)) == "SCIENTIFIC"));
+    CHECK((std::string(tuningStateToString(TuningState::MIXED)) == "MIXED"));
+    CHECK((std::string(tuningStateToString(TuningState::MIXED_PRECISION)) == "MIXED_PRECISION"));
+    CHECK((std::string(tuningStateToString(TuningState::MINIMAL)) == "MINIMAL"));
 }
 
 // =============================================================================
@@ -53,75 +119,81 @@ TEST_CASE("TuningState: string conversion", "[unit][search_tuner]") {
 TEST_CASE("TunedParams: SMALL_CODE parameters", "[unit][search_tuner][params]") {
     auto params = getTunedParams(TuningState::SMALL_CODE);
 
-    CHECK(params.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Street);
-    CHECK(params.rrfK == 20);
-    CHECK(params.weights.text.value == Approx(0.45f));
-    CHECK(params.weights.vector.value == Approx(0.15f));
-    CHECK(params.weights.entityVector.value == Approx(0.15f));
-    CHECK(params.weights.pathTree.value == Approx(0.15f));
-    CHECK(params.weights.kg.value == Approx(0.05f));
-    CHECK(params.weights.tag.value == Approx(0.03f));
-    CHECK(params.weights.metadata.value == Approx(0.02f));
+    CHECK((params.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Street));
+    CHECK((params.rrfK == 20));
+    CHECK((params.weights.text.value == Approx(0.45f)));
+    CHECK((params.weights.vector.value == Approx(0.15f)));
+    CHECK((params.weights.entityVector.value == Approx(0.15f)));
+    CHECK((params.weights.pathTree.value == Approx(0.15f)));
+    CHECK((params.weights.kg.value == Approx(0.05f)));
+    CHECK((params.weights.tag.value == Approx(0.03f)));
+    CHECK((params.weights.metadata.value == Approx(0.02f)));
 }
 
 TEST_CASE("TunedParams: LARGE_CODE parameters", "[unit][search_tuner][params]") {
     auto params = getTunedParams(TuningState::LARGE_CODE);
 
-    CHECK(params.rrfK == 60);
-    CHECK(params.weights.text.value == Approx(0.40f));
-    CHECK(params.weights.vector.value == Approx(0.20f));
-    CHECK(params.weights.entityVector.value == Approx(0.15f));
-    CHECK(params.weights.pathTree.value == Approx(0.10f));
-    CHECK(params.weights.kg.value == Approx(0.05f));
-    CHECK(params.weights.tag.value == Approx(0.05f));
-    CHECK(params.weights.metadata.value == Approx(0.05f));
+    CHECK((params.rrfK == 60));
+    CHECK((params.weights.text.value == Approx(0.40f)));
+    CHECK((params.weights.vector.value == Approx(0.20f)));
+    CHECK((params.weights.entityVector.value == Approx(0.15f)));
+    CHECK((params.weights.pathTree.value == Approx(0.10f)));
+    CHECK((params.weights.kg.value == Approx(0.05f)));
+    CHECK((params.weights.tag.value == Approx(0.05f)));
+    CHECK((params.weights.metadata.value == Approx(0.05f)));
 }
 
 TEST_CASE("TunedParams: SMALL_PROSE parameters", "[unit][search_tuner][params]") {
     auto params = getTunedParams(TuningState::SMALL_PROSE);
 
-    CHECK(params.rrfK == 25);
-    CHECK(params.weights.text.value == Approx(0.50f));
-    CHECK(params.weights.vector.value == Approx(0.40f));
-    CHECK(params.weights.entityVector.value == Approx(0.00f));
-    CHECK(params.weights.pathTree.value == Approx(0.00f));
-    CHECK(params.weights.kg.value == Approx(0.00f));
-    CHECK(params.weights.tag.value == Approx(0.05f));
-    CHECK(params.weights.metadata.value == Approx(0.05f));
-    CHECK(params.lexicalFloorTopN == 12);
-    CHECK(params.lexicalFloorBoost == Approx(0.20f));
+    CHECK((params.rrfK == 25));
+    CHECK((params.weights.text.value == Approx(0.50f)));
+    CHECK((params.weights.vector.value == Approx(0.40f)));
+    CHECK((params.weights.entityVector.value == Approx(0.00f)));
+    CHECK((params.weights.pathTree.value == Approx(0.00f)));
+    CHECK((params.weights.kg.value == Approx(0.00f)));
+    CHECK((params.weights.tag.value == Approx(0.05f)));
+    CHECK((params.weights.metadata.value == Approx(0.05f)));
+    CHECK((params.lexicalFloorTopN == 12));
+    CHECK((params.lexicalFloorBoost == Approx(0.20f)));
     CHECK(params.enableLexicalTieBreak);
-    CHECK(params.lexicalTieBreakEpsilon == Approx(0.010f));
-    CHECK(params.fusionEvidenceRescueSlots == 1);
-    CHECK(params.fusionEvidenceRescueMinScore == Approx(0.012f));
+    CHECK((params.lexicalTieBreakEpsilon == Approx(0.010f)));
+    CHECK((params.fusionEvidenceRescueSlots == 1));
+    CHECK((params.fusionEvidenceRescueMinScore == Approx(0.012f)));
 }
 
 TEST_CASE("TunedParams: LARGE_PROSE parameters", "[unit][search_tuner][params]") {
     auto params = getTunedParams(TuningState::LARGE_PROSE);
 
-    CHECK(params.rrfK == 60);
-    CHECK(params.weights.text.value == Approx(0.40f));
-    CHECK(params.weights.vector.value == Approx(0.45f));
-    CHECK(params.weights.entityVector.value == Approx(0.00f));
-    CHECK(params.weights.pathTree.value == Approx(0.05f));
-    CHECK(params.weights.kg.value == Approx(0.00f));
-    CHECK(params.weights.tag.value == Approx(0.05f));
-    CHECK(params.weights.metadata.value == Approx(0.05f));
+    CHECK((params.rrfK == 60));
+    CHECK((params.weights.text.value == Approx(0.40f)));
+    CHECK((params.weights.vector.value == Approx(0.45f)));
+    CHECK((params.weights.entityVector.value == Approx(0.00f)));
+    CHECK((params.weights.pathTree.value == Approx(0.05f)));
+    CHECK((params.weights.kg.value == Approx(0.00f)));
+    CHECK((params.weights.tag.value == Approx(0.05f)));
+    CHECK((params.weights.metadata.value == Approx(0.05f)));
 }
 
 TEST_CASE("TunedParams: SCIENTIFIC parameters", "[unit][search_tuner][params]") {
     auto params = getTunedParams(TuningState::SCIENTIFIC);
 
-    CHECK(params.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Auto);
-    CHECK(params.rrfK == 12);
-    CHECK(params.weights.text.value == Approx(0.50f));
-    CHECK(params.weights.simeonText.value == Approx(0.10f));
-    CHECK(params.weights.vector.value == Approx(0.35f));
-    CHECK(params.weights.entityVector.value == Approx(0.00f));
-    CHECK(params.weights.pathTree.value == Approx(0.00f));
-    CHECK(params.weights.kg.value == Approx(0.00f));
-    CHECK(params.weights.tag.value == Approx(0.00f));
-    CHECK(params.weights.metadata.value == Approx(0.05f));
+    // SCIENTIFIC is MIXED_PRECISION + structure sources zeroed (measured product
+    // path: full SCIENTIFIC knobs regressed MRR; soft lexical+vector fusion wins).
+    CHECK((params.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Auto));
+    CHECK((params.rrfK == 45));
+    // After zeroing path/entity/kg/tag/metadata, normalize leaves text+vector.
+    CHECK((params.weights.text.value == Approx(0.40f / 0.65f).epsilon(0.01)));
+    CHECK((params.weights.simeonText.value == Approx(0.00f)));
+    CHECK((params.weights.vector.value == Approx(0.25f / 0.65f).epsilon(0.01)));
+    CHECK((params.weights.entityVector.value == Approx(0.00f)));
+    CHECK((params.weights.pathTree.value == Approx(0.00f)));
+    CHECK((params.weights.kg.value == Approx(0.00f)));
+    CHECK((params.weights.tag.value == Approx(0.00f)));
+    CHECK((params.weights.metadata.value == Approx(0.00f)));
+    CHECK((params.lexicalFloorTopN == 12));
+    CHECK((params.lexicalFloorBoost == Approx(0.20f)));
+    CHECK((params.vectorOnlyThreshold == Approx(0.94f)));
     CHECK(params.conceptExtractionBackend ==
           SearchEngineConfig::ConceptExtractionBackend::Fallback);
 }
@@ -129,75 +201,74 @@ TEST_CASE("TunedParams: SCIENTIFIC parameters", "[unit][search_tuner][params]") 
 TEST_CASE("TunedParams: MIXED parameters", "[unit][search_tuner][params]") {
     auto params = getTunedParams(TuningState::MIXED);
 
-    CHECK(params.rrfK == 45);
-    CHECK(params.weights.text.value == Approx(0.40f));
-    CHECK(params.weights.vector.value == Approx(0.25f));
-    CHECK(params.weights.entityVector.value == Approx(0.10f));
-    CHECK(params.weights.pathTree.value == Approx(0.10f));
-    CHECK(params.weights.kg.value == Approx(0.05f));
-    CHECK(params.weights.tag.value == Approx(0.05f));
-    CHECK(params.weights.metadata.value == Approx(0.05f));
+    CHECK((params.rrfK == 45));
+    CHECK((params.weights.text.value == Approx(0.40f)));
+    CHECK((params.weights.vector.value == Approx(0.25f)));
+    CHECK((params.weights.entityVector.value == Approx(0.10f)));
+    CHECK((params.weights.pathTree.value == Approx(0.10f)));
+    CHECK((params.weights.kg.value == Approx(0.05f)));
+    CHECK((params.weights.tag.value == Approx(0.05f)));
+    CHECK((params.weights.metadata.value == Approx(0.05f)));
 }
 
 TEST_CASE("TunedParams: MIXED_PRECISION parameters", "[unit][search_tuner][params]") {
     auto params = getTunedParams(TuningState::MIXED_PRECISION);
 
-    CHECK(params.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Neighborhood);
-    CHECK(params.rrfK == 45);
-    CHECK(params.weights.text.value == Approx(0.40f));
-    CHECK(params.weights.vector.value == Approx(0.25f));
-    CHECK(params.weights.entityVector.value == Approx(0.10f));
-    CHECK(params.weights.pathTree.value == Approx(0.10f));
-    CHECK(params.weights.kg.value == Approx(0.05f));
-    CHECK(params.weights.tag.value == Approx(0.05f));
-    CHECK(params.weights.metadata.value == Approx(0.05f));
-    CHECK(params.vectorOnlyThreshold == Approx(0.94f));
-    CHECK(params.vectorOnlyPenalty == Approx(0.70f));
-    CHECK(params.vectorOnlyNearMissReserve == 2);
-    CHECK(params.enablePathDedupInFusion);
-    CHECK(params.lexicalFloorTopN == 12);
-    CHECK(params.lexicalFloorBoost == Approx(0.20f));
+    CHECK((params.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Neighborhood));
+    CHECK((params.rrfK == 45));
+    CHECK((params.weights.text.value == Approx(0.40f)));
+    CHECK((params.weights.vector.value == Approx(0.25f)));
+    CHECK((params.weights.entityVector.value == Approx(0.10f)));
+    CHECK((params.weights.pathTree.value == Approx(0.10f)));
+    CHECK((params.weights.kg.value == Approx(0.05f)));
+    CHECK((params.weights.tag.value == Approx(0.05f)));
+    CHECK((params.weights.metadata.value == Approx(0.05f)));
+    CHECK((params.vectorOnlyThreshold == Approx(0.94f)));
+    CHECK((params.vectorOnlyPenalty == Approx(0.70f)));
+    CHECK((params.vectorOnlyNearMissReserve == 2));
+    CHECK((params.lexicalFloorTopN == 12));
+    CHECK((params.lexicalFloorBoost == Approx(0.20f)));
     CHECK(params.enableLexicalTieBreak);
-    CHECK(params.lexicalTieBreakEpsilon == Approx(0.010f));
-    CHECK(params.semanticRescueSlots == 1);
-    CHECK(params.semanticRescueMinVectorScore == Approx(0.0f));
-    CHECK(params.fusionEvidenceRescueSlots == 1);
-    CHECK(params.fusionEvidenceRescueMinScore == Approx(0.012f));
+    CHECK((params.lexicalTieBreakEpsilon == Approx(0.010f)));
+    CHECK((params.semanticRescueSlots == 1));
+    CHECK((params.semanticRescueMinVectorScore == Approx(0.0f)));
+    CHECK((params.fusionEvidenceRescueSlots == 1));
+    CHECK((params.fusionEvidenceRescueMinScore == Approx(0.012f)));
 }
 
 TEST_CASE("TunedParams: MINIMAL parameters", "[unit][search_tuner][params]") {
     auto params = getTunedParams(TuningState::MINIMAL);
 
-    CHECK(params.rrfK == 15);
-    CHECK(params.weights.text.value == Approx(0.55f));
-    CHECK(params.weights.vector.value == Approx(0.30f));
-    CHECK(params.weights.entityVector.value == Approx(0.05f));
-    CHECK(params.weights.pathTree.value == Approx(0.05f));
-    CHECK(params.weights.kg.value == Approx(0.00f));
-    CHECK(params.weights.tag.value == Approx(0.03f));
-    CHECK(params.weights.metadata.value == Approx(0.02f));
+    CHECK((params.rrfK == 15));
+    CHECK((params.weights.text.value == Approx(0.55f)));
+    CHECK((params.weights.vector.value == Approx(0.30f)));
+    CHECK((params.weights.entityVector.value == Approx(0.05f)));
+    CHECK((params.weights.pathTree.value == Approx(0.05f)));
+    CHECK((params.weights.kg.value == Approx(0.00f)));
+    CHECK((params.weights.tag.value == Approx(0.03f)));
+    CHECK((params.weights.metadata.value == Approx(0.02f)));
 }
 
 TEST_CASE("TunedParams: JSON serialization", "[unit][search_tuner][params]") {
     auto params = getTunedParams(TuningState::SMALL_CODE);
     auto json = params.toJson();
 
-    CHECK(json["zoom_level"] == "STREET");
-    CHECK(json["rrf_k"] == 20);
-    CHECK(json["text_weight"].get<float>() == Approx(0.45f));
-    CHECK(json["vector_weight"].get<float>() == Approx(0.15f));
-    CHECK(json["entity_vector_weight"].get<float>() == Approx(0.15f));
-    CHECK(json["path_tree_weight"].get<float>() == Approx(0.15f));
-    CHECK(json["kg_weight"].get<float>() == Approx(0.05f));
-    CHECK(json["tag_weight"].get<float>() == Approx(0.03f));
-    CHECK(json["metadata_weight"].get<float>() == Approx(0.02f));
+    CHECK((json["zoom_level"] == "STREET"));
+    CHECK((json["rrf_k"] == 20));
+    CHECK((json["text_weight"].get<float>() == Approx(0.45f)));
+    CHECK((json["vector_weight"].get<float>() == Approx(0.15f)));
+    CHECK((json["entity_vector_weight"].get<float>() == Approx(0.15f)));
+    CHECK((json["path_tree_weight"].get<float>() == Approx(0.15f)));
+    CHECK((json["kg_weight"].get<float>() == Approx(0.05f)));
+    CHECK((json["tag_weight"].get<float>() == Approx(0.03f)));
+    CHECK((json["metadata_weight"].get<float>() == Approx(0.02f)));
 
     // Provenance source fields
-    CHECK(json["text_weight_source"] == "Profile");
-    CHECK(json["vector_weight_source"] == "Profile");
-    CHECK(json["kg_weight_source"] == "Profile");
-    CHECK(json["similarity_threshold_source"] == "Default");
-    CHECK(json["semantic_rescue_slots_source"] == "Default");
+    CHECK((json["text_weight_source"] == "Profile"));
+    CHECK((json["vector_weight_source"] == "Profile"));
+    CHECK((json["kg_weight_source"] == "Profile"));
+    CHECK((json["similarity_threshold_source"] == "Default"));
+    CHECK((json["semantic_rescue_slots_source"] == "Default"));
 }
 
 TEST_CASE("TunedParams: applyTo SearchEngineConfig", "[unit][search_tuner][params]") {
@@ -206,15 +277,15 @@ TEST_CASE("TunedParams: applyTo SearchEngineConfig", "[unit][search_tuner][param
     SearchEngineConfig config;
     params.applyTo(config);
 
-    CHECK(config.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Neighborhood);
-    CHECK(config.textWeight == Approx(0.40f));
-    CHECK(config.vectorWeight == Approx(0.45f));
-    CHECK(config.entityVectorWeight == Approx(0.00f));
-    CHECK(config.pathTreeWeight == Approx(0.05f));
-    CHECK(config.kgWeight == Approx(0.00f));
-    CHECK(config.tagWeight == Approx(0.05f));
-    CHECK(config.metadataWeight == Approx(0.05f));
-    CHECK(config.similarityThreshold == Approx(0.0f));
+    CHECK((config.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Neighborhood));
+    CHECK((config.textWeight == Approx(0.40f)));
+    CHECK((config.vectorWeight == Approx(0.45f)));
+    CHECK((config.entityVectorWeight == Approx(0.00f)));
+    CHECK((config.pathTreeWeight == Approx(0.05f)));
+    CHECK((config.kgWeight == Approx(0.00f)));
+    CHECK((config.tagWeight == Approx(0.05f)));
+    CHECK((config.metadataWeight == Approx(0.05f)));
+    CHECK((config.similarityThreshold == Approx(0.0f)));
 }
 
 // =============================================================================
@@ -226,7 +297,7 @@ TEST_CASE("SearchTuner: MINIMAL state for empty corpus", "[unit][search_tuner][f
     stats.docCount = 0;
 
     auto state = SearchTuner::computeState(stats);
-    CHECK(state == TuningState::MINIMAL);
+    CHECK((state == TuningState::MINIMAL));
 }
 
 TEST_CASE("SearchTuner: MINIMAL state for very small corpus", "[unit][search_tuner][fsm]") {
@@ -234,7 +305,7 @@ TEST_CASE("SearchTuner: MINIMAL state for very small corpus", "[unit][search_tun
     stats.docCount = 50; // < 100
 
     auto state = SearchTuner::computeState(stats);
-    CHECK(state == TuningState::MINIMAL);
+    CHECK((state == TuningState::MINIMAL));
 }
 
 TEST_CASE("SearchTuner: MINIMAL state boundary (99 docs)", "[unit][search_tuner][fsm]") {
@@ -242,7 +313,7 @@ TEST_CASE("SearchTuner: MINIMAL state boundary (99 docs)", "[unit][search_tuner]
     stats.docCount = 99;
 
     auto state = SearchTuner::computeState(stats);
-    CHECK(state == TuningState::MINIMAL);
+    CHECK((state == TuningState::MINIMAL));
 }
 
 TEST_CASE("SearchTuner: SMALL_CODE state", "[unit][search_tuner][fsm]") {
@@ -253,7 +324,7 @@ TEST_CASE("SearchTuner: SMALL_CODE state", "[unit][search_tuner][fsm]") {
     stats.binaryRatio = 0.05f;
 
     auto state = SearchTuner::computeState(stats);
-    CHECK(state == TuningState::SMALL_CODE);
+    CHECK((state == TuningState::SMALL_CODE));
 }
 
 TEST_CASE("SearchTuner: LARGE_CODE state", "[unit][search_tuner][fsm]") {
@@ -264,7 +335,7 @@ TEST_CASE("SearchTuner: LARGE_CODE state", "[unit][search_tuner][fsm]") {
     stats.binaryRatio = 0.05f;
 
     auto state = SearchTuner::computeState(stats);
-    CHECK(state == TuningState::LARGE_CODE);
+    CHECK((state == TuningState::LARGE_CODE));
 }
 
 TEST_CASE("SearchTuner: SMALL_PROSE state", "[unit][search_tuner][fsm]") {
@@ -278,7 +349,7 @@ TEST_CASE("SearchTuner: SMALL_PROSE state", "[unit][search_tuner][fsm]") {
     stats.tagCoverage = 0.3f;         // Has tags (avoid SCIENTIFIC)
 
     auto state = SearchTuner::computeState(stats);
-    CHECK(state == TuningState::SMALL_PROSE);
+    CHECK((state == TuningState::SMALL_PROSE));
 }
 
 TEST_CASE("SearchTuner: LARGE_PROSE state", "[unit][search_tuner][fsm]") {
@@ -292,7 +363,7 @@ TEST_CASE("SearchTuner: LARGE_PROSE state", "[unit][search_tuner][fsm]") {
     stats.tagCoverage = 0.3f;         // Has tags
 
     auto state = SearchTuner::computeState(stats);
-    CHECK(state == TuningState::LARGE_PROSE);
+    CHECK((state == TuningState::LARGE_PROSE));
 }
 
 TEST_CASE("SearchTuner: SCIENTIFIC state", "[unit][search_tuner][fsm]") {
@@ -306,7 +377,7 @@ TEST_CASE("SearchTuner: SCIENTIFIC state", "[unit][search_tuner][fsm]") {
     stats.symbolDensity = 0.0f;
 
     auto state = SearchTuner::computeState(stats);
-    CHECK(state == TuningState::SCIENTIFIC);
+    CHECK((state == TuningState::SCIENTIFIC));
 }
 
 TEST_CASE("SearchTuner: MIXED state for balanced corpus", "[unit][search_tuner][fsm]") {
@@ -317,7 +388,7 @@ TEST_CASE("SearchTuner: MIXED state for balanced corpus", "[unit][search_tuner][
     stats.binaryRatio = 0.2f;
 
     auto state = SearchTuner::computeState(stats);
-    CHECK(state == TuningState::MIXED);
+    CHECK((state == TuningState::MIXED));
 }
 
 TEST_CASE("SearchTuner: MIXED_PRECISION state when mixed corpus has embeddings",
@@ -331,8 +402,8 @@ TEST_CASE("SearchTuner: MIXED_PRECISION state when mixed corpus has embeddings",
 
     std::string reason;
     auto state = SearchTuner::computeState(stats, reason);
-    CHECK(state == TuningState::MIXED_PRECISION);
-    CHECK(reason.find("mixed_precision") != std::string::npos);
+    CHECK((state == TuningState::MIXED_PRECISION));
+    CHECK((reason.find("mixed_precision") != std::string::npos));
 }
 
 TEST_CASE("SearchTuner: MIXED state boundary (code at 0.7)", "[unit][search_tuner][fsm]") {
@@ -343,7 +414,7 @@ TEST_CASE("SearchTuner: MIXED state boundary (code at 0.7)", "[unit][search_tune
     stats.binaryRatio = 0.1f;
 
     auto state = SearchTuner::computeState(stats);
-    CHECK(state == TuningState::MIXED);
+    CHECK((state == TuningState::MIXED));
 }
 
 TEST_CASE("SearchTuner: state reason contains explanation", "[unit][search_tuner][fsm]") {
@@ -355,10 +426,10 @@ TEST_CASE("SearchTuner: state reason contains explanation", "[unit][search_tuner
     std::string reason;
     auto state = SearchTuner::computeState(stats, reason);
 
-    CHECK(state == TuningState::SMALL_CODE);
-    CHECK(reason.find("code_dominant") != std::string::npos);
-    CHECK(reason.find("80%") != std::string::npos);
-    CHECK(reason.find("small") != std::string::npos);
+    CHECK((state == TuningState::SMALL_CODE));
+    CHECK((reason.find("code_dominant") != std::string::npos));
+    CHECK((reason.find("80%") != std::string::npos));
+    CHECK((reason.find("small") != std::string::npos));
 }
 
 // =============================================================================
@@ -373,8 +444,8 @@ TEST_CASE("SearchTuner: construction and state access", "[unit][search_tuner]") 
 
     SearchTuner tuner(stats);
 
-    CHECK(tuner.currentState() == TuningState::SMALL_CODE);
-    CHECK(tuner.getRrfK() == 20);
+    CHECK((tuner.currentState() == TuningState::SMALL_CODE));
+    CHECK((tuner.getRrfK() == 20));
     CHECK_FALSE(tuner.stateReason().empty());
 }
 
@@ -383,16 +454,23 @@ TEST_CASE("SearchTuner: getParams returns correct params", "[unit][search_tuner]
     stats.docCount = 5000;
     stats.codeRatio = 0.85f;
     stats.symbolDensity = 0.0f; // No KG: kgWeight is zeroed and remaining weights are normalized
+    // No tags / shallow absolute paths → tag + path also gated off.
+    stats.tagCoverage = 0.0f;
+    stats.pathDepthAvg = 0.0;
 
     SearchTuner tuner(stats);
     const auto& params = tuner.getParams();
 
     // Should be LARGE_CODE
-    CHECK(params.rrfK == 60);
-    CHECK(stats.hasKnowledgeGraph() == false);
-    CHECK(params.weights.kg.value == Approx(0.0f));
-    CHECK(params.weights.text.value == Approx(0.42105263f));
-    CHECK(params.weights.vector.value == Approx(0.21052632f));
+    CHECK((params.rrfK == 60));
+    CHECK((stats.hasKnowledgeGraph() == false));
+    CHECK((params.weights.kg.value == Approx(0.0f)));
+    CHECK((params.weights.pathTree.value == Approx(0.0f)));
+    CHECK((params.weights.tag.value == Approx(0.0f)));
+    // LARGE_CODE: text=0.40 vector=0.20 entity=0.15 path=0.10 kg=0.05 tag=0.05 meta=0.05
+    // After gating path/kg/tag → remaining mass 0.80 → text=0.50 vector=0.25
+    CHECK((params.weights.text.value == Approx(0.50f)));
+    CHECK((params.weights.vector.value == Approx(0.25f)));
 }
 
 TEST_CASE("SearchTuner: getConfig returns valid SearchEngineConfig", "[unit][search_tuner]") {
@@ -407,13 +485,12 @@ TEST_CASE("SearchTuner: getConfig returns valid SearchEngineConfig", "[unit][sea
     auto config = tuner.getConfig();
 
     // Should be SMALL_PROSE
-    CHECK(config.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Neighborhood);
-    CHECK(config.textWeight == Approx(0.50f));
-    CHECK(config.vectorWeight == Approx(0.40f));
-    CHECK(config.pathTreeWeight == Approx(0.00f));
-    CHECK(config.kgWeight == Approx(0.00f));
-    CHECK(config.corpusProfile == SearchEngineConfig::CorpusProfile::CUSTOM);
-    CHECK(config.fusionStrategy == SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL);
+    CHECK((config.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Neighborhood));
+    CHECK((config.textWeight == Approx(0.50f)));
+    CHECK((config.vectorWeight == Approx(0.40f)));
+    CHECK((config.pathTreeWeight == Approx(0.00f)));
+    CHECK((config.kgWeight == Approx(0.00f)));
+    CHECK((config.corpusProfile == SearchEngineConfig::CorpusProfile::CUSTOM));
 }
 
 TEST_CASE("SearchTuner: toJson serialization", "[unit][search_tuner]") {
@@ -429,19 +506,19 @@ TEST_CASE("SearchTuner: toJson serialization", "[unit][search_tuner]") {
     SearchTuner tuner(stats);
     auto json = tuner.toJson();
 
-    CHECK(json["state"] == "MIXED_PRECISION");
+    CHECK((json["state"] == "MIXED_PRECISION"));
     CHECK_FALSE(json["reason"].get<std::string>().empty());
-    CHECK(json["rrf_k"] == 45);
-    CHECK(json["params"]["zoom_level"] == "NEIGHBORHOOD");
+    CHECK((json["rrf_k"] == 45));
+    CHECK((json["params"]["zoom_level"] == "NEIGHBORHOOD"));
     // When KG is present, graph-aware adjustments shift weights toward KG
     // (multiplicative scaling preserves profile ratios).
-    CHECK(json["params"]["text_weight"].get<float>() == Approx(0.356f).epsilon(0.01));
-    CHECK(json["params"]["text_weight_source"] == "Corpus");
-    CHECK(json["params"]["kg_weight"].get<float>() == Approx(0.131f).epsilon(0.01));
-    CHECK(json["params"]["kg_weight_source"] == "Corpus");
-    CHECK(json["corpus"]["doc_count"] == 1000);
-    CHECK(json["corpus"]["code_ratio"].get<float>() == Approx(0.4f));
-    CHECK(json["corpus"]["prose_ratio"].get<float>() == Approx(0.4f));
+    CHECK((json["params"]["text_weight"].get<float>() == Approx(0.356f).epsilon(0.01)));
+    CHECK((json["params"]["text_weight_source"] == "Corpus"));
+    CHECK((json["params"]["kg_weight"].get<float>() == Approx(0.131f).epsilon(0.01)));
+    CHECK((json["params"]["kg_weight_source"] == "Corpus"));
+    CHECK((json["corpus"]["doc_count"] == 1000));
+    CHECK((json["corpus"]["code_ratio"].get<float>() == Approx(0.4f)));
+    CHECK((json["corpus"]["prose_ratio"].get<float>() == Approx(0.4f)));
 }
 
 // =============================================================================
@@ -457,8 +534,8 @@ TEST_CASE("SearchTuner: handles missing embeddings", "[unit][search_tuner][edge]
     std::string reason;
     auto state = SearchTuner::computeState(stats, reason);
 
-    CHECK(state == TuningState::SMALL_CODE);
-    CHECK(reason.find("no_embeddings") != std::string::npos);
+    CHECK((state == TuningState::SMALL_CODE));
+    CHECK((reason.find("no_embeddings") != std::string::npos));
 }
 
 TEST_CASE("SearchTuner: handles missing KG", "[unit][search_tuner][edge]") {
@@ -470,8 +547,8 @@ TEST_CASE("SearchTuner: handles missing KG", "[unit][search_tuner][edge]") {
     std::string reason;
     auto state = SearchTuner::computeState(stats, reason);
 
-    CHECK(state == TuningState::SMALL_CODE);
-    CHECK(reason.find("no_kg") != std::string::npos);
+    CHECK((state == TuningState::SMALL_CODE));
+    CHECK((reason.find("no_kg") != std::string::npos));
 }
 
 TEST_CASE("SearchTuner: seedRuntimeConfig preserves explicit graph overrides without KG",
@@ -501,15 +578,15 @@ TEST_CASE("SearchTuner: seedRuntimeConfig preserves explicit graph overrides wit
 
     CHECK_FALSE(stats.hasKnowledgeGraph());
     CHECK(seeded.enableGraphRerank);
-    CHECK(seeded.kgWeight > 0.0f);
-    CHECK(seeded.kgWeight == Approx(0.04f / 1.04f));
-    CHECK(seeded.graphRerankTopN == 30);
-    CHECK(seeded.graphRerankWeight == Approx(0.18f));
-    CHECK(seeded.graphRerankMaxBoost == Approx(0.22f));
-    CHECK(seeded.graphRerankMinSignal == Approx(0.01f));
-    CHECK(seeded.graphCommunityWeight == Approx(0.10f));
-    CHECK(seeded.kgMaxResults == 60);
-    CHECK(seeded.graphScoringBudgetMs == 8);
+    CHECK((seeded.kgWeight > 0.0f));
+    CHECK((seeded.kgWeight == Approx(0.04f / 1.04f)));
+    CHECK((seeded.graphRerankTopN == 30));
+    CHECK((seeded.graphRerankWeight == Approx(0.18f)));
+    CHECK((seeded.graphRerankMaxBoost == Approx(0.22f)));
+    CHECK((seeded.graphRerankMinSignal == Approx(0.01f)));
+    CHECK((seeded.graphCommunityWeight == Approx(0.10f)));
+    CHECK((seeded.kgMaxResults == 60));
+    CHECK((seeded.graphScoringBudgetMs == 8));
 }
 
 TEST_CASE("SearchTuner: seedRuntimeConfig preserves explicit reranker overrides",
@@ -524,15 +601,102 @@ TEST_CASE("SearchTuner: seedRuntimeConfig preserves explicit reranker overrides"
     config.enableReranking = true;
     config.rerankTopK = 50;
     config.rerankReplaceScores = false;
-    config.rerankAnchoredMinRelativeScore = 0.37f;
 
     tuner.seedRuntimeConfig(config);
     const auto seeded = tuner.getConfig();
 
-    CHECK(seeded.enableReranking == true);
-    CHECK(seeded.rerankTopK == 50);
-    CHECK(seeded.rerankReplaceScores == false);
-    CHECK(seeded.rerankAnchoredMinRelativeScore == Approx(0.37f));
+    CHECK((seeded.enableReranking == true));
+    CHECK((seeded.rerankTopK == 50));
+    CHECK((seeded.rerankReplaceScores == false));
+}
+
+TEST_CASE("SearchEngine setConfig reseeds an installed tuner",
+          "[unit][search_tuner][engine_config]") {
+    CorpusStats stats;
+    stats.docCount = 500;
+    stats.proseRatio = 0.90F;
+    auto tuner = std::make_shared<SearchTuner>(stats);
+
+    SearchEngineConfig initial = tuner->getConfig();
+    SearchEngine engine(nullptr, nullptr, nullptr, nullptr, initial);
+    engine.setSearchTuner(tuner);
+
+    SearchEngineConfig replacement = initial;
+    replacement.vectorMaxResults = 149;
+    replacement.enableReranking = true;
+    replacement.rerankTopK = 31;
+    engine.setConfig(replacement);
+
+    const auto effective = tuner->getConfig();
+    CHECK(effective.vectorMaxResults == replacement.vectorMaxResults);
+    CHECK(effective.enableReranking == replacement.enableReranking);
+    CHECK(effective.rerankTopK == replacement.rerankTopK);
+}
+
+TEST_CASE("SearchTuner: dead-source gates pin structure weights on SCIENTIFIC",
+          "[unit][search_tuner][dead_source]") {
+    CorpusStats stats;
+    stats.docCount = 2000;
+    stats.proseRatio = 0.90f;
+    stats.codeRatio = 0.05f;
+    stats.pathRelativeDepthAvg = 0.5; // flat → SCIENTIFIC
+    stats.pathDepthAvg = 8.0;         // absolute depth can still be high
+    stats.tagCoverage = 0.0f;
+    stats.symbolDensity = 0.0f;
+    stats.embeddingCoverage = 0.90f;
+
+    REQUIRE((SearchTuner::computeState(stats) == TuningState::SCIENTIFIC));
+
+    SearchTuner tuner(stats);
+    const auto cfg = tuner.getConfig();
+    CHECK((cfg.pathTreeWeight == Approx(0.0f)));
+    CHECK((cfg.entityVectorWeight == Approx(0.0f)));
+    CHECK((cfg.tagWeight == Approx(0.0f)));
+    CHECK((cfg.metadataWeight == Approx(0.0f)));
+    CHECK((cfg.kgWeight == Approx(0.0f)));
+    // Live fusion legs stay mass-bearing after normalize.
+    CHECK((cfg.textWeight > 0.35f));
+    CHECK((cfg.vectorWeight > 0.25f));
+    // Lexical floor / vector-only guardrails retained from MIXED_PRECISION.
+    CHECK((cfg.lexicalFloorTopN == 12));
+    CHECK((cfg.lexicalFloorBoost == Approx(0.20f)));
+    CHECK((cfg.vectorOnlyThreshold == Approx(0.94f)));
+}
+
+TEST_CASE("SearchTuner: seedRuntimeConfig cannot resurrect dead structure weights",
+          "[unit][search_tuner][dead_source]") {
+    CorpusStats stats;
+    stats.docCount = 2000;
+    stats.proseRatio = 0.90f;
+    stats.pathRelativeDepthAvg = 0.5;
+    stats.tagCoverage = 0.0f;
+    stats.symbolDensity = 0.0f;
+    stats.embeddingCoverage = 0.90f;
+
+    SearchTuner tuner(stats);
+    REQUIRE((tuner.currentState() == TuningState::SCIENTIFIC));
+
+    SearchEngineConfig clobber = tuner.getConfig();
+    // Simulate BuildOptions / env-shaped seed writing structure weights back.
+    // Keep kgWeight=0 so this is not treated as an explicit graph override seed.
+    clobber.pathTreeWeight = 0.12f;
+    clobber.entityVectorWeight = 0.10f;
+    clobber.tagWeight = 0.05f;
+    clobber.metadataWeight = 0.05f;
+    clobber.kgWeight = 0.0f;
+    clobber.textWeight = 0.40f;
+    clobber.vectorWeight = 0.25f;
+
+    tuner.seedRuntimeConfig(clobber);
+    const auto seeded = tuner.getConfig();
+
+    CHECK((seeded.pathTreeWeight == Approx(0.0f)));
+    CHECK((seeded.entityVectorWeight == Approx(0.0f)));
+    CHECK((seeded.tagWeight == Approx(0.0f)));
+    CHECK((seeded.metadataWeight == Approx(0.0f)));
+    CHECK((seeded.kgWeight == Approx(0.0f)));
+    CHECK((seeded.textWeight > 0.35f));
+    CHECK((seeded.vectorWeight > 0.25f));
 }
 
 TEST_CASE("SearchTuner: priority order - MINIMAL takes precedence", "[unit][search_tuner][edge]") {
@@ -542,7 +706,7 @@ TEST_CASE("SearchTuner: priority order - MINIMAL takes precedence", "[unit][sear
     stats.codeRatio = 0.9f; // Would be SMALL_CODE if not minimal
 
     auto state = SearchTuner::computeState(stats);
-    CHECK(state == TuningState::MINIMAL);
+    CHECK((state == TuningState::MINIMAL));
 }
 
 TEST_CASE("SearchTuner: small scientific-like prose gets SCIENTIFIC",
@@ -555,7 +719,7 @@ TEST_CASE("SearchTuner: small scientific-like prose gets SCIENTIFIC",
     stats.symbolDensity = 0.0f;
 
     auto state = SearchTuner::computeState(stats);
-    CHECK(state == TuningState::SCIENTIFIC);
+    CHECK((state == TuningState::SCIENTIFIC));
 }
 
 TEST_CASE("SearchTuner: large scientific-like prose still uses SCIENTIFIC",
@@ -568,7 +732,7 @@ TEST_CASE("SearchTuner: large scientific-like prose still uses SCIENTIFIC",
     stats.symbolDensity = 0.0f;
 
     auto state = SearchTuner::computeState(stats);
-    CHECK(state == TuningState::SCIENTIFIC);
+    CHECK((state == TuningState::SCIENTIFIC));
 }
 
 TEST_CASE("SearchTuner: SCIENTIFIC falls back to prose when structured",
@@ -584,7 +748,7 @@ TEST_CASE("SearchTuner: SCIENTIFIC falls back to prose when structured",
     stats.symbolDensity = 0.2f;
 
     auto state = SearchTuner::computeState(stats);
-    CHECK(state == TuningState::SMALL_PROSE);
+    CHECK((state == TuningState::SMALL_PROSE));
 }
 
 TEST_CASE("SearchTuner: size threshold boundary (1000 docs)", "[unit][search_tuner][edge]") {
@@ -597,8 +761,8 @@ TEST_CASE("SearchTuner: size threshold boundary (1000 docs)", "[unit][search_tun
     large_stats.docCount = 1000;
     large_stats.codeRatio = 0.8f;
 
-    CHECK(SearchTuner::computeState(small_stats) == TuningState::SMALL_CODE);
-    CHECK(SearchTuner::computeState(large_stats) == TuningState::LARGE_CODE);
+    CHECK((SearchTuner::computeState(small_stats) == TuningState::SMALL_CODE));
+    CHECK((SearchTuner::computeState(large_stats) == TuningState::LARGE_CODE));
 }
 
 // =============================================================================
@@ -616,7 +780,7 @@ TEST_CASE("TunedParams: weights sum to approximately 1.0", "[unit][search_tuner]
         float sum = params.weights.sum();
 
         INFO("State: " << tuningStateToString(state));
-        CHECK(sum == Approx(1.0f).margin(0.01f));
+        CHECK((sum == Approx(1.0f).margin(0.01f)));
     }
 }
 
@@ -630,26 +794,24 @@ TEST_CASE("SearchEngineBuilder: default options align with MIXED_PRECISION fallb
     CHECK(opts.autoTune);
     CHECK(opts.config.enableParallelExecution);
     CHECK(opts.config.includeDebugInfo);
-    CHECK(opts.config.maxResults == 100);
-    CHECK(opts.config.corpusProfile == SearchEngineConfig::CorpusProfile::CUSTOM);
+    CHECK((opts.config.maxResults == 100));
+    CHECK((opts.config.corpusProfile == SearchEngineConfig::CorpusProfile::CUSTOM));
 
-    CHECK(opts.config.textWeight == Approx(expectedConfig.textWeight));
-    CHECK(opts.config.vectorWeight == Approx(expectedConfig.vectorWeight));
-    CHECK(opts.config.entityVectorWeight == Approx(expectedConfig.entityVectorWeight));
-    CHECK(opts.config.pathTreeWeight == Approx(expectedConfig.pathTreeWeight));
-    CHECK(opts.config.kgWeight == Approx(expectedConfig.kgWeight));
-    CHECK(opts.config.tagWeight == Approx(expectedConfig.tagWeight));
-    CHECK(opts.config.metadataWeight == Approx(expectedConfig.metadataWeight));
-    CHECK(opts.config.rrfK == Approx(expectedConfig.rrfK));
-    CHECK(opts.config.fusionStrategy == expectedConfig.fusionStrategy);
-    CHECK(opts.config.vectorOnlyThreshold == Approx(expectedConfig.vectorOnlyThreshold));
-    CHECK(opts.config.vectorOnlyPenalty == Approx(expectedConfig.vectorOnlyPenalty));
-    CHECK(opts.config.enablePathDedupInFusion == expectedConfig.enablePathDedupInFusion);
-    CHECK(opts.config.lexicalFloorTopN == expectedConfig.lexicalFloorTopN);
-    CHECK(opts.config.lexicalFloorBoost == Approx(expectedConfig.lexicalFloorBoost));
-    CHECK(opts.config.enableLexicalTieBreak == expectedConfig.enableLexicalTieBreak);
-    CHECK(opts.config.lexicalTieBreakEpsilon == Approx(expectedConfig.lexicalTieBreakEpsilon));
-    CHECK(opts.config.semanticRescueSlots == expectedConfig.semanticRescueSlots);
+    CHECK((opts.config.textWeight == Approx(expectedConfig.textWeight)));
+    CHECK((opts.config.vectorWeight == Approx(expectedConfig.vectorWeight)));
+    CHECK((opts.config.entityVectorWeight == Approx(expectedConfig.entityVectorWeight)));
+    CHECK((opts.config.pathTreeWeight == Approx(expectedConfig.pathTreeWeight)));
+    CHECK((opts.config.kgWeight == Approx(expectedConfig.kgWeight)));
+    CHECK((opts.config.tagWeight == Approx(expectedConfig.tagWeight)));
+    CHECK((opts.config.metadataWeight == Approx(expectedConfig.metadataWeight)));
+    CHECK((opts.config.rrfK == Approx(expectedConfig.rrfK)));
+    CHECK((opts.config.vectorOnlyThreshold == Approx(expectedConfig.vectorOnlyThreshold)));
+    CHECK((opts.config.vectorOnlyPenalty == Approx(expectedConfig.vectorOnlyPenalty)));
+    CHECK((opts.config.lexicalFloorTopN == expectedConfig.lexicalFloorTopN));
+    CHECK((opts.config.lexicalFloorBoost == Approx(expectedConfig.lexicalFloorBoost)));
+    CHECK((opts.config.enableLexicalTieBreak == expectedConfig.enableLexicalTieBreak));
+    CHECK((opts.config.lexicalTieBreakEpsilon == Approx(expectedConfig.lexicalTieBreakEpsilon)));
+    CHECK((opts.config.semanticRescueSlots == expectedConfig.semanticRescueSlots));
 }
 
 TEST_CASE("SearchTuner: adaptive observation trims KG under latency pressure",
@@ -694,10 +856,10 @@ TEST_CASE("SearchTuner: adaptive observation trims KG under latency pressure",
     }
 
     const auto after = tuner.getParams();
-    CHECK(after.kgMaxResults <= before.kgMaxResults);
-    CHECK(after.graphScoringBudgetMs <= before.graphScoringBudgetMs);
-    CHECK(after.graphRerankTopN <= before.graphRerankTopN);
-    CHECK(after.weights.kg.value >= Approx(0.02f));
+    CHECK((after.kgMaxResults <= before.kgMaxResults));
+    CHECK((after.graphScoringBudgetMs <= before.graphScoringBudgetMs));
+    CHECK((after.graphRerankTopN <= before.graphRerankTopN));
+    CHECK((after.weights.kg.value >= Approx(0.02f)));
 
     const auto adaptive = tuner.adaptiveStateToJson();
     CHECK(adaptive["changed_last_observation"].get<bool>());
@@ -746,7 +908,7 @@ TEST_CASE("SearchTuner: adaptive observation keeps KG floor and cools flapping",
     }
 
     const auto pressured = tuner.getParams();
-    CHECK(pressured.weights.kg.value >= Approx(0.02f));
+    CHECK((pressured.weights.kg.value >= Approx(0.02f)));
 
     SearchTuner::RuntimeTelemetry goodTelemetry;
     goodTelemetry.latencyMs = 40.0;
@@ -775,7 +937,8 @@ TEST_CASE("SearchTuner: adaptive observation keeps KG floor and cools flapping",
 
     tuner.observe(goodTelemetry);
     const auto cooled = tuner.adaptiveStateToJson();
-    CHECK(cooled["last_decision"].get<std::string>().find("cooldown_active") != std::string::npos);
+    CHECK(
+        (cooled["last_decision"].get<std::string>().find("cooldown_active") != std::string::npos));
 }
 
 // =============================================================================
@@ -796,15 +959,12 @@ TEST_CASE("seedTunedParamsFromConfig preserves explicit config fields",
     config.tagWeight = 0.05f;
     config.metadataWeight = 0.30f;
     config.similarityThreshold = 0.47f;
-    config.vectorBoostFactor = 1.35f;
     config.rrfK = 17.0f;
-    config.fusionStrategy = SearchEngineConfig::FusionStrategy::WEIGHTED_SUM;
     config.vectorOnlyThreshold = 0.81f;
     config.vectorOnlyPenalty = 0.66f;
     config.vectorOnlyNearMissReserve = 3;
     config.vectorOnlyNearMissSlack = 0.07f;
     config.vectorOnlyNearMissPenalty = 0.44f;
-    config.enablePathDedupInFusion = true;
     config.lexicalFloorTopN = 9;
     config.lexicalFloorBoost = 0.23f;
     config.enableLexicalTieBreak = true;
@@ -820,7 +980,6 @@ TEST_CASE("seedTunedParamsFromConfig preserves explicit config fields",
     config.enableReranking = false;
     config.rerankTopK = 11;
     config.rerankReplaceScores = false;
-    config.rerankAnchoredMinRelativeScore = 0.29f;
     config.chunkAggregation = SearchEngineConfig::ChunkAggregation::SUM;
     config.enableGraphRerank = true;
     config.graphRerankTopN = 33;
@@ -837,42 +996,64 @@ TEST_CASE("seedTunedParamsFromConfig preserves explicit config fields",
     config.graphCoverageSignalWeight = 0.22f;
     config.graphPathSignalWeight = 0.14f;
     config.graphCorroborationFloor = 0.39f;
+    config.vectorMaxResults = 137;
+    config.textMaxResults = 83;
+    config.graphExpansionMaxTerms = 13;
+    config.graphExpansionQueryNeighborK = 19;
+    config.enableLexicalExpansion = true;
+    config.lexicalExpansionMinHits = 6;
+    config.conceptMaxCount = 7;
+    config.fusionCandidateLimit = 211;
+    config.enableMultiVectorQuery = true;
+    config.multiVectorMaxPhrases = 5;
+    config.chunkAggregationTopK = 4;
+    config.tieredNarrowVectorSearch = false;
+    config.tieredMinCandidates = 23;
 
     const auto params = seedTunedParamsFromConfig(config);
     SearchEngineConfig roundTrip;
     params.applyTo(roundTrip);
 
-    CHECK(roundTrip.zoomLevel == config.zoomLevel);
-    CHECK(roundTrip.textWeight == Approx(config.textWeight));
-    CHECK(roundTrip.vectorWeight == Approx(config.vectorWeight));
-    CHECK(roundTrip.entityVectorWeight == Approx(config.entityVectorWeight));
-    CHECK(roundTrip.pathTreeWeight == Approx(config.pathTreeWeight));
-    CHECK(roundTrip.kgWeight == Approx(config.kgWeight));
-    CHECK(roundTrip.tagWeight == Approx(config.tagWeight));
-    CHECK(roundTrip.metadataWeight == Approx(config.metadataWeight));
-    CHECK(roundTrip.similarityThreshold == Approx(config.similarityThreshold));
-    CHECK(roundTrip.vectorBoostFactor == Approx(config.vectorBoostFactor));
-    CHECK(roundTrip.rrfK == Approx(config.rrfK));
-    CHECK(roundTrip.fusionStrategy == config.fusionStrategy);
-    CHECK(roundTrip.semanticRescueSlots == config.semanticRescueSlots);
-    CHECK(roundTrip.semanticRescueMinVectorScore == Approx(config.semanticRescueMinVectorScore));
-    CHECK(roundTrip.fusionEvidenceRescueSlots == config.fusionEvidenceRescueSlots);
-    CHECK(roundTrip.fusionEvidenceRescueMinScore == Approx(config.fusionEvidenceRescueMinScore));
-    CHECK(roundTrip.enableSubPhraseRescoring == config.enableSubPhraseRescoring);
-    CHECK(roundTrip.subPhraseScoringPenalty == Approx(config.subPhraseScoringPenalty));
-    CHECK(roundTrip.enableReranking == config.enableReranking);
-    CHECK(roundTrip.rerankTopK == config.rerankTopK);
-    CHECK(roundTrip.rerankReplaceScores == config.rerankReplaceScores);
-    CHECK(roundTrip.rerankAnchoredMinRelativeScore ==
-          Approx(config.rerankAnchoredMinRelativeScore));
-    CHECK(roundTrip.chunkAggregation == config.chunkAggregation);
-    CHECK(roundTrip.graphEnablePathEnumeration == config.graphEnablePathEnumeration);
-    CHECK(roundTrip.enableGraphQueryExpansion == config.enableGraphQueryExpansion);
-    CHECK(roundTrip.graphEntitySignalWeight == Approx(config.graphEntitySignalWeight));
-    CHECK(roundTrip.graphStructuralSignalWeight == Approx(config.graphStructuralSignalWeight));
-    CHECK(roundTrip.graphCoverageSignalWeight == Approx(config.graphCoverageSignalWeight));
-    CHECK(roundTrip.graphPathSignalWeight == Approx(config.graphPathSignalWeight));
-    CHECK(roundTrip.graphCorroborationFloor == Approx(config.graphCorroborationFloor));
+    CHECK((roundTrip.zoomLevel == config.zoomLevel));
+    CHECK((roundTrip.textWeight == Approx(config.textWeight)));
+    CHECK((roundTrip.vectorWeight == Approx(config.vectorWeight)));
+    CHECK((roundTrip.entityVectorWeight == Approx(config.entityVectorWeight)));
+    CHECK((roundTrip.pathTreeWeight == Approx(config.pathTreeWeight)));
+    CHECK((roundTrip.kgWeight == Approx(config.kgWeight)));
+    CHECK((roundTrip.tagWeight == Approx(config.tagWeight)));
+    CHECK((roundTrip.metadataWeight == Approx(config.metadataWeight)));
+    CHECK((roundTrip.similarityThreshold == Approx(config.similarityThreshold)));
+    CHECK((roundTrip.rrfK == Approx(config.rrfK)));
+    CHECK((roundTrip.semanticRescueSlots == config.semanticRescueSlots));
+    CHECK((roundTrip.semanticRescueMinVectorScore == Approx(config.semanticRescueMinVectorScore)));
+    CHECK((roundTrip.fusionEvidenceRescueSlots == config.fusionEvidenceRescueSlots));
+    CHECK((roundTrip.fusionEvidenceRescueMinScore == Approx(config.fusionEvidenceRescueMinScore)));
+    CHECK((roundTrip.enableSubPhraseRescoring == config.enableSubPhraseRescoring));
+    CHECK((roundTrip.subPhraseScoringPenalty == Approx(config.subPhraseScoringPenalty)));
+    CHECK((roundTrip.enableReranking == config.enableReranking));
+    CHECK((roundTrip.rerankTopK == config.rerankTopK));
+    CHECK((roundTrip.rerankReplaceScores == config.rerankReplaceScores));
+    CHECK((roundTrip.chunkAggregation == config.chunkAggregation));
+    CHECK((roundTrip.graphEnablePathEnumeration == config.graphEnablePathEnumeration));
+    CHECK((roundTrip.enableGraphQueryExpansion == config.enableGraphQueryExpansion));
+    CHECK((roundTrip.graphEntitySignalWeight == Approx(config.graphEntitySignalWeight)));
+    CHECK((roundTrip.graphStructuralSignalWeight == Approx(config.graphStructuralSignalWeight)));
+    CHECK((roundTrip.graphCoverageSignalWeight == Approx(config.graphCoverageSignalWeight)));
+    CHECK((roundTrip.graphPathSignalWeight == Approx(config.graphPathSignalWeight)));
+    CHECK((roundTrip.graphCorroborationFloor == Approx(config.graphCorroborationFloor)));
+    CHECK((roundTrip.vectorMaxResults == config.vectorMaxResults));
+    CHECK((roundTrip.textMaxResults == config.textMaxResults));
+    CHECK((roundTrip.graphExpansionMaxTerms == config.graphExpansionMaxTerms));
+    CHECK((roundTrip.graphExpansionQueryNeighborK == config.graphExpansionQueryNeighborK));
+    CHECK((roundTrip.enableLexicalExpansion == config.enableLexicalExpansion));
+    CHECK((roundTrip.lexicalExpansionMinHits == config.lexicalExpansionMinHits));
+    CHECK((roundTrip.conceptMaxCount == config.conceptMaxCount));
+    CHECK((roundTrip.fusionCandidateLimit == config.fusionCandidateLimit));
+    CHECK((roundTrip.enableMultiVectorQuery == config.enableMultiVectorQuery));
+    CHECK((roundTrip.multiVectorMaxPhrases == config.multiVectorMaxPhrases));
+    CHECK((roundTrip.chunkAggregationTopK == config.chunkAggregationTopK));
+    CHECK((roundTrip.tieredNarrowVectorSearch == config.tieredNarrowVectorSearch));
+    CHECK((roundTrip.tieredMinCandidates == config.tieredMinCandidates));
 }
 
 TEST_CASE("resolveQueryPolicy preserves no-tuner config fields unaffected by query layers",
@@ -904,64 +1085,47 @@ TEST_CASE("resolveQueryPolicy preserves no-tuner config fields unaffected by que
     const auto resolution = resolveQueryPolicy(
         "documents and files", config, seedTunedParamsFromConfig(config), std::nullopt, false);
 
-    CHECK(resolution.routeDecision.intent.label == QueryIntent::Prose);
+    CHECK((resolution.routeDecision.intent.label == QueryIntent::Prose));
     CHECK_FALSE(resolution.communityOverride.has_value());
-    CHECK(resolution.config.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Neighborhood);
-    CHECK(resolution.config.semanticRescueMinVectorScore == Approx(0.73f));
-    CHECK(resolution.config.fusionEvidenceRescueSlots == 2);
-    CHECK(resolution.config.fusionEvidenceRescueMinScore == Approx(0.021f));
-    CHECK(resolution.config.enableSubPhraseRescoring == true);
-    CHECK(resolution.config.subPhraseScoringPenalty == Approx(0.61f));
-    CHECK(resolution.config.chunkAggregation == SearchEngineConfig::ChunkAggregation::SUM);
-    CHECK(resolution.config.graphEnablePathEnumeration == true);
-    CHECK(resolution.config.enableGraphQueryExpansion == true);
-    CHECK(resolution.config.graphEntitySignalWeight == Approx(0.31f));
-    CHECK(resolution.config.graphStructuralSignalWeight == Approx(0.18f));
-    CHECK(resolution.config.graphCoverageSignalWeight == Approx(0.22f));
-    CHECK(resolution.config.graphPathSignalWeight == Approx(0.14f));
-    CHECK(resolution.config.graphCorroborationFloor == Approx(0.39f));
+    CHECK((resolution.config.zoomLevel == SearchEngineConfig::NavigationZoomLevel::Neighborhood));
+    CHECK((resolution.config.semanticRescueMinVectorScore == Approx(0.73f)));
+    CHECK((resolution.config.fusionEvidenceRescueSlots == 2));
+    CHECK((resolution.config.fusionEvidenceRescueMinScore == Approx(0.021f)));
+    CHECK((resolution.config.enableSubPhraseRescoring == true));
+    CHECK((resolution.config.subPhraseScoringPenalty == Approx(0.61f)));
+    CHECK((resolution.config.chunkAggregation == SearchEngineConfig::ChunkAggregation::SUM));
+    CHECK((resolution.config.graphEnablePathEnumeration == true));
+    CHECK((resolution.config.enableGraphQueryExpansion == true));
+    CHECK((resolution.config.graphEntitySignalWeight == Approx(0.31f)));
+    CHECK((resolution.config.graphStructuralSignalWeight == Approx(0.18f)));
+    CHECK((resolution.config.graphCoverageSignalWeight == Approx(0.22f)));
+    CHECK((resolution.config.graphPathSignalWeight == Approx(0.14f)));
+    CHECK((resolution.config.graphCorroborationFloor == Approx(0.39f)));
 }
 
 TEST_CASE("applyCommunityLayer: MIXED_PRECISION → SCIENTIFIC blend",
           "[unit][search_tuner][community]") {
     auto params = getTunedParams(TuningState::MIXED_PRECISION);
+    const auto sci = getTunedParams(TuningState::SCIENTIFIC);
 
     applyCommunityLayer(TuningState::SCIENTIFIC, TuningState::MIXED_PRECISION, params);
 
-    // Weights: 60% toward SCIENTIFIC, 40% current (MIXED_PRECISION)
-    // MIXED_PRECISION text=0.40, SCIENTIFIC text=0.50 -> 0.46; SimeonText gets its own blend.
-    CHECK(params.weights.text.value == Approx(0.46f).epsilon(0.01));
-    CHECK(params.weights.text.source == TuningLayer::Community);
-    CHECK(params.weights.simeonText.value == Approx(0.06f).epsilon(0.01));
-    CHECK(params.weights.simeonText.source == TuningLayer::Community);
-    // MIXED_PRECISION vector=0.25, SCIENTIFIC vector=0.35 → 0.25 + 0.60*(0.35-0.25) = 0.31
-    CHECK(params.weights.vector.value == Approx(0.31f).epsilon(0.01));
+    // Weights: 60% toward SCIENTIFIC (MIXED_PRECISION + structure zeros + normalize).
+    const float expectedText = 0.40f + 0.60f * (sci.weights.text.value - 0.40f);
+    const float expectedVector = 0.25f + 0.60f * (sci.weights.vector.value - 0.25f);
+    CHECK((params.weights.text.value == Approx(expectedText).epsilon(0.01)));
+    CHECK((params.weights.text.source == TuningLayer::Community));
+    CHECK((params.weights.simeonText.value == Approx(0.00f).epsilon(0.01)));
+    CHECK((params.weights.vector.value == Approx(expectedVector).epsilon(0.01)));
 
-    // semanticRescueSlots: lerp(1, 2, 0.60) = round(1.6) = 2
-    CHECK(params.semanticRescueSlots.value == 2);
-    CHECK(params.semanticRescueSlots.source == TuningLayer::Community);
+    // SCIENTIFIC inherits MIXED_PRECISION rescue slots (=1); lerp is a no-op.
+    CHECK((params.semanticRescueSlots.value == 1));
 
-    // semanticRescueMinVectorScore: lerp(0.0, 0.65, 0.60) = 0.39
-    CHECK(params.semanticRescueMinVectorScore == Approx(0.39f).epsilon(0.01));
+    // Both profiles leave sub-phrase rescoring off by default.
+    CHECK((params.enableSubPhraseRescoring == false));
 
-    // enableSubPhraseRescoring: false || true = true
-    CHECK(params.enableSubPhraseRescoring == true);
-
-    // fusionStrategy: adopted from SCIENTIFIC
-    CHECK(params.fusionStrategy == SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL);
-
-    // chunkAggregation: adopted from SCIENTIFIC
-    CHECK(params.chunkAggregation == SearchEngineConfig::ChunkAggregation::SUM);
-
-    // rerankTopK: lerp(5, 12, 0.60) = round(9.2) = 9
-    CHECK(params.rerankTopK == 9);
-
-    // rerankAnchoredMinRelativeScore: lerp(0.0, 0.50, 0.60) = 0.30
-    CHECK(params.rerankAnchoredMinRelativeScore == Approx(0.30f).epsilon(0.01));
-
-    // similarityThreshold: lerp(0.0, 0.30, 0.60) = 0.18 because MIXED_PRECISION inherits the
-    // default unfiltered threshold while SCIENTIFIC overrides to 0.30.
-    CHECK(params.similarityThreshold.value == Approx(0.18f).epsilon(0.01));
+    // similarityThreshold: both profiles use the unfiltered default (0.0).
+    CHECK((params.similarityThreshold.value == Approx(0.0f).epsilon(0.01)));
 }
 
 TEST_CASE("applyCommunityLayer: no-op when already in target state",
@@ -972,10 +1136,9 @@ TEST_CASE("applyCommunityLayer: no-op when already in target state",
     applyCommunityLayer(TuningState::SCIENTIFIC, TuningState::SCIENTIFIC, params);
 
     // Nothing should change
-    CHECK(params.weights.text.value == Approx(before.weights.text.value));
-    CHECK(params.weights.vector.value == Approx(before.weights.vector.value));
-    CHECK(params.fusionStrategy == before.fusionStrategy);
-    CHECK(params.semanticRescueSlots.value == before.semanticRescueSlots.value);
+    CHECK((params.weights.text.value == Approx(before.weights.text.value)));
+    CHECK((params.weights.vector.value == Approx(before.weights.vector.value)));
+    CHECK((params.semanticRescueSlots.value == before.semanticRescueSlots.value));
 }
 
 TEST_CASE("applyCommunityLayer: env-pinned weight survives blend",
@@ -988,23 +1151,23 @@ TEST_CASE("applyCommunityLayer: env-pinned weight survives blend",
     applyCommunityLayer(TuningState::SCIENTIFIC, TuningState::MIXED_PRECISION, params);
 
     // Pinned weight must not change
-    CHECK(params.weights.vector.value == Approx(0.35f));
-    CHECK(params.weights.vector.source == TuningLayer::Env);
-    CHECK(params.weights.vector.pinned == true);
+    CHECK((params.weights.vector.value == Approx(0.35f)));
+    CHECK((params.weights.vector.source == TuningLayer::Env));
+    CHECK((params.weights.vector.pinned == true));
 
     // Other weights still blended
-    CHECK(params.weights.text.source == TuningLayer::Community);
+    CHECK((params.weights.text.source == TuningLayer::Community));
 }
 
-TEST_CASE("applyCommunityLayer: SCIENTIFIC → Code blend preserves sub-phrase rescoring",
+TEST_CASE("applyCommunityLayer: SCIENTIFIC → Code blend keeps sub-phrase off",
           "[unit][search_tuner][community]") {
     auto params = getTunedParams(TuningState::SCIENTIFIC);
-    CHECK(params.enableSubPhraseRescoring == true); // SCIENTIFIC enables it
+    CHECK((params.enableSubPhraseRescoring == false));
 
     applyCommunityLayer(TuningState::SMALL_CODE, TuningState::SCIENTIFIC, params);
 
-    // OR semantics: current=true || target=false → true (preserved)
-    CHECK(params.enableSubPhraseRescoring == true);
+    // Both profiles leave sub-phrase rescoring off; OR stays false.
+    CHECK((params.enableSubPhraseRescoring == false));
 }
 
 TEST_CASE("applyCommunityLayer: nullopt is no-op", "[unit][search_tuner][community]") {
@@ -1013,14 +1176,13 @@ TEST_CASE("applyCommunityLayer: nullopt is no-op", "[unit][search_tuner][communi
 
     applyCommunityLayer(std::nullopt, TuningState::MIXED, params);
 
-    CHECK(params.weights.text.value == Approx(before.weights.text.value));
-    CHECK(params.fusionStrategy == before.fusionStrategy);
+    CHECK((params.weights.text.value == Approx(before.weights.text.value)));
 }
 
 TEST_CASE("lerpValue: float and integral types", "[unit][search_tuner][community]") {
     // Float lerp
-    CHECK(lerpValue(0.0f, 1.0f, 0.6f) == Approx(0.6f));
-    CHECK(lerpValue(10.0f, 20.0f, 0.5f) == Approx(15.0f));
+    CHECK((lerpValue(0.0f, 1.0f, 0.6f) == Approx(0.6f)));
+    CHECK((lerpValue(10.0f, 20.0f, 0.5f) == Approx(15.0f)));
 
     // Integral lerp (rounds to nearest)
     CHECK(lerpValue(size_t{1}, size_t{2}, 0.6f) == size_t{2});  // round(1.6) = 2
@@ -1042,16 +1204,18 @@ TEST_CASE("SearchTuner: graph features activate when symbolDensity > 0.1",
     stats.proseRatio = 0.90f;
     stats.codeRatio = 0.05f;
     stats.binaryRatio = 0.05f;
-    stats.symbolDensity = 0.25f; // hasKnowledgeGraph() = true
+    stats.symbolDensity = 0.25f;       // hasKnowledgeGraph() = true
+    stats.nativeSymbolDensity = 0.25f; // structural symbols make this non-SCIENTIFIC
+    stats.pathRelativeDepthAvg = 2.0;  // avoid flat scientific-corpus classification
     stats.embeddingCoverage = 0.80f;
 
     SearchTuner tuner(stats);
     const auto& p = tuner.getParams();
 
-    CHECK(p.enableGraphRerank == true);
-    CHECK(p.weights.kg.value > 0.0f);
-    CHECK(p.kgMaxResults > 0);
-    CHECK(p.graphScoringBudgetMs > 0);
+    CHECK((p.enableGraphRerank == true));
+    CHECK((p.weights.kg.value > 0.0f));
+    CHECK((p.kgMaxResults > 0));
+    CHECK((p.graphScoringBudgetMs > 0));
 }
 
 TEST_CASE("SearchTuner: graph features disabled when symbolDensity = 0",
@@ -1067,9 +1231,9 @@ TEST_CASE("SearchTuner: graph features disabled when symbolDensity = 0",
     SearchTuner tuner(stats);
     const auto& p = tuner.getParams();
 
-    CHECK(p.enableGraphRerank == false);
-    CHECK(p.weights.kg.value == 0.0f);
-    CHECK(p.kgMaxResults == 0);
+    CHECK((p.enableGraphRerank == false));
+    CHECK((p.weights.kg.value == 0.0f));
+    CHECK((p.kgMaxResults == 0));
 }
 
 TEST_CASE("SearchTuner: graph richness scales budget and results", "[unit][search_tuner][graph]") {
@@ -1093,9 +1257,9 @@ TEST_CASE("SearchTuner: graph richness scales budget and results", "[unit][searc
     SearchTuner highTuner(high);
 
     // Higher richness → more budget and results (these don't normalize away)
-    CHECK(highTuner.getParams().graphScoringBudgetMs > lowTuner.getParams().graphScoringBudgetMs);
-    CHECK(highTuner.getParams().kgMaxResults > lowTuner.getParams().kgMaxResults);
-    CHECK(highTuner.getParams().graphRerankWeight > lowTuner.getParams().graphRerankWeight);
+    CHECK((highTuner.getParams().graphScoringBudgetMs > lowTuner.getParams().graphScoringBudgetMs));
+    CHECK((highTuner.getParams().kgMaxResults > lowTuner.getParams().kgMaxResults));
+    CHECK((highTuner.getParams().graphRerankWeight > lowTuner.getParams().graphRerankWeight));
 }
 
 TEST_CASE("SearchTuner: overlay-backed stats damp graph-heavy tuning",
@@ -1112,13 +1276,13 @@ TEST_CASE("SearchTuner: overlay-backed stats damp graph-heavy tuning",
     SearchTuner tuner(stats);
     const auto& p = tuner.getParams();
 
-    CHECK(p.weights.kg.value <= 0.10f + 1e-6f);
-    CHECK(p.kgMaxResults <= size_t{48});
-    CHECK(p.graphScoringBudgetMs <= 8);
-    CHECK(p.graphRerankTopN <= size_t{24});
-    CHECK(p.enableGraphQueryExpansion == false);
-    CHECK(p.graphEnablePathEnumeration == false);
-    CHECK(tuner.toJson()["corpus"]["used_online_overlay"].get<bool>() == true);
+    CHECK((p.weights.kg.value <= 0.10f + 1e-6f));
+    CHECK((p.kgMaxResults <= size_t{48}));
+    CHECK((p.graphScoringBudgetMs <= 8));
+    CHECK((p.graphRerankTopN <= size_t{24}));
+    CHECK((p.enableGraphQueryExpansion == false));
+    CHECK((p.graphEnablePathEnumeration == false));
+    CHECK((tuner.toJson()["corpus"]["used_online_overlay"].get<bool>() == true));
 }
 
 TEST_CASE("SearchTuner: adaptive runtime tuning stays steady on overlay-backed stats",
@@ -1147,10 +1311,10 @@ TEST_CASE("SearchTuner: adaptive runtime tuning stays steady on overlay-backed s
     tuner.observe(telemetry);
     const auto after = tuner.getParams();
 
-    CHECK(after.kgMaxResults == before.kgMaxResults);
-    CHECK(after.graphScoringBudgetMs == before.graphScoringBudgetMs);
-    CHECK(after.graphRerankTopN == before.graphRerankTopN);
-    CHECK(tuner.adaptiveStateToJson()["last_decision"] == "steady_overlay_stats");
+    CHECK((after.kgMaxResults == before.kgMaxResults));
+    CHECK((after.graphScoringBudgetMs == before.graphScoringBudgetMs));
+    CHECK((after.graphRerankTopN == before.graphRerankTopN));
+    CHECK((tuner.adaptiveStateToJson()["last_decision"] == "steady_overlay_stats"));
 }
 
 TEST_CASE("SearchTuner: overlay stats still allow fusion pressure adaptation",
@@ -1188,8 +1352,8 @@ TEST_CASE("SearchTuner: overlay stats still allow fusion pressure adaptation",
 
     const auto after = tuner.getParams();
     CHECK(after.enableLexicalTieBreak);
-    CHECK(after.lexicalFloorTopN > before.lexicalFloorTopN);
-    CHECK(after.lexicalFloorBoost > before.lexicalFloorBoost);
+    CHECK((after.lexicalFloorTopN > before.lexicalFloorTopN));
+    CHECK((after.lexicalFloorBoost > before.lexicalFloorBoost));
     CHECK(tuner.adaptiveStateToJson()["last_decision"].get<std::string>().find(
               "fusion_lexical_pressure") != std::string::npos);
 }
@@ -1209,10 +1373,12 @@ TEST_CASE("SearchTuner: no-KG fusion pressure enables lexical preservation",
 
     SearchTuner tuner(stats);
     const auto before = tuner.getParams();
-    REQUIRE(before.weights.kg.value == Approx(0.0f));
-    REQUIRE_FALSE(before.enableLexicalTieBreak);
-    REQUIRE(before.lexicalFloorTopN == 0);
-    REQUIRE(before.lexicalFloorBoost == Approx(0.0f));
+    REQUIRE((before.weights.kg.value == Approx(0.0f)));
+    // SCIENTIFIC inherits MIXED_PRECISION lexical floor (already on). Adaptive
+    // pressure should still raise floor topN / boost further.
+    REQUIRE(before.enableLexicalTieBreak);
+    REQUIRE((before.lexicalFloorTopN == 12));
+    REQUIRE((before.lexicalFloorBoost == Approx(0.20f)));
 
     SearchTuner::RuntimeTelemetry telemetry;
     telemetry.latencyMs = 35.0;
@@ -1235,17 +1401,19 @@ TEST_CASE("SearchTuner: no-KG fusion pressure enables lexical preservation",
 
     const auto after = tuner.getParams();
     CHECK(after.enableLexicalTieBreak);
-    CHECK(after.lexicalTieBreakEpsilon > before.lexicalTieBreakEpsilon);
-    CHECK(after.lexicalFloorTopN > before.lexicalFloorTopN);
-    CHECK(after.lexicalFloorBoost > before.lexicalFloorBoost);
-    CHECK(after.vectorOnlyPenalty >= 0.85f);
+    // Profile default epsilon already sits at the adaptive step; floor topN/boost
+    // are the primary pressure response under MIXED_PRECISION inheritance.
+    CHECK((after.lexicalTieBreakEpsilon >= before.lexicalTieBreakEpsilon));
+    CHECK((after.lexicalFloorTopN > before.lexicalFloorTopN));
+    CHECK((after.lexicalFloorBoost > before.lexicalFloorBoost));
+    CHECK((after.vectorOnlyPenalty >= 0.85f));
 
     const auto adaptive = tuner.adaptiveStateToJson();
     CHECK(adaptive["changed_last_observation"].get<bool>());
     CHECK(adaptive["last_decision"].get<std::string>().find("fusion_lexical_pressure") !=
           std::string::npos);
-    CHECK(adaptive["ewma_fusion_dropped_rate"].get<double>() > 0.0);
-    CHECK(adaptive["ewma_anchored_fusion_dropped_rate"].get<double>() > 0.0);
+    CHECK((adaptive["ewma_fusion_dropped_rate"].get<double>() > 0.0));
+    CHECK((adaptive["ewma_anchored_fusion_dropped_rate"].get<double>() > 0.0));
 }
 
 TEST_CASE("SearchTuner: no-KG fusion adaptation stays idle without lexical pressure",
@@ -1281,10 +1449,10 @@ TEST_CASE("SearchTuner: no-KG fusion adaptation stays idle without lexical press
     }
 
     const auto after = tuner.getParams();
-    CHECK(after.enableLexicalTieBreak == before.enableLexicalTieBreak);
-    CHECK(after.lexicalFloorTopN == before.lexicalFloorTopN);
-    CHECK(after.lexicalFloorBoost == Approx(before.lexicalFloorBoost));
-    CHECK(tuner.adaptiveStateToJson()["last_decision"] == "steady_no_kg");
+    CHECK((after.enableLexicalTieBreak == before.enableLexicalTieBreak));
+    CHECK((after.lexicalFloorTopN == before.lexicalFloorTopN));
+    CHECK((after.lexicalFloorBoost == Approx(before.lexicalFloorBoost)));
+    CHECK((tuner.adaptiveStateToJson()["last_decision"] == "steady_no_kg"));
 }
 
 TEST_CASE("SearchTuner: vector-only pressure lowers threshold and increases rescue",
@@ -1302,10 +1470,9 @@ TEST_CASE("SearchTuner: vector-only pressure lowers threshold and increases resc
 
     SearchTuner tuner(stats);
     const auto before = tuner.getParams();
-    // SCIENTIFIC profile's default vectorOnlyThreshold remains at 0.90
-    // (corpus_state pushes recall but doesn't touch vectorOnlyThreshold now)
-    REQUIRE(before.vectorOnlyThreshold == Approx(0.90f));
-    REQUIRE(before.semanticRescueSlots.value > 0);
+    // SCIENTIFIC inherits MIXED_PRECISION vector-only guardrails (0.94).
+    REQUIRE((before.vectorOnlyThreshold == Approx(0.94f)));
+    REQUIRE((before.semanticRescueSlots.value > 0));
 
     SearchTuner::RuntimeTelemetry telemetry;
     telemetry.latencyMs = 35.0;
@@ -1325,8 +1492,8 @@ TEST_CASE("SearchTuner: vector-only pressure lowers threshold and increases resc
     }
 
     const auto after = tuner.getParams();
-    CHECK(after.vectorOnlyThreshold < before.vectorOnlyThreshold);
-    CHECK(after.vectorOnlyThreshold >= Approx(0.65f));
+    CHECK((after.vectorOnlyThreshold < before.vectorOnlyThreshold));
+    CHECK((after.vectorOnlyThreshold >= Approx(0.65f)));
 
     const auto adaptive = tuner.adaptiveStateToJson();
     CHECK(adaptive["last_decision"].get<std::string>().find("vector_only_pressure") !=
@@ -1365,7 +1532,7 @@ TEST_CASE("SearchTuner: vector-only pressure stays idle without sufficient signa
     }
 
     const auto after = tuner.getParams();
-    CHECK(after.vectorOnlyThreshold == Approx(before.vectorOnlyThreshold));
+    CHECK((after.vectorOnlyThreshold == Approx(before.vectorOnlyThreshold)));
 }
 
 TEST_CASE("SearchTuner: semantic rescue saturation increases slots",
@@ -1383,7 +1550,7 @@ TEST_CASE("SearchTuner: semantic rescue saturation increases slots",
 
     SearchTuner tuner(stats);
     const auto before = tuner.getParams();
-    REQUIRE(before.semanticRescueSlots.value > 0);
+    REQUIRE((before.semanticRescueSlots.value > 0));
 
     SearchTuner::RuntimeTelemetry telemetry;
     telemetry.latencyMs = 35.0;
@@ -1403,8 +1570,10 @@ TEST_CASE("SearchTuner: semantic rescue saturation increases slots",
     }
 
     const auto after = tuner.getParams();
-    CHECK(after.semanticRescueSlots.value > before.semanticRescueSlots.value);
-    CHECK(after.semanticRescueMinVectorScore < before.semanticRescueMinVectorScore);
+    CHECK((after.semanticRescueSlots.value > before.semanticRescueSlots.value));
+    // MIXED_PRECISION / SCIENTIFIC start at minVectorScore=0.0; adaptive cannot
+    // lower further, only raise slots under saturation pressure.
+    CHECK((after.semanticRescueMinVectorScore == Approx(before.semanticRescueMinVectorScore)));
 }
 
 TEST_CASE("SearchTuner: result pool resizes when vector dominates and fusion drops high",
@@ -1441,8 +1610,8 @@ TEST_CASE("SearchTuner: result pool resizes when vector dominates and fusion dro
     }
 
     const auto after = tuner.getParams();
-    CHECK(after.vectorMaxResults > originalVecMax);
-    CHECK(after.textMaxResults < originalTextMax);
+    CHECK((after.vectorMaxResults > originalVecMax));
+    CHECK((after.textMaxResults < originalTextMax));
 
     const auto adaptive = tuner.adaptiveStateToJson();
     CHECK(adaptive["last_decision"].get<std::string>().find("result_pool_resize") !=
@@ -1479,8 +1648,8 @@ TEST_CASE("SearchTuner: result pool stays idle without vector dominance",
     }
 
     const auto after = tuner.getParams();
-    CHECK(after.vectorMaxResults == before.vectorMaxResults);
-    CHECK(after.textMaxResults == before.textMaxResults);
+    CHECK((after.vectorMaxResults == before.vectorMaxResults));
+    CHECK((after.textMaxResults == before.textMaxResults));
 }
 
 // =============================================================================
@@ -1501,15 +1670,19 @@ TEST_CASE("SearchTuner: 940-doc scientific corpus gets SCIENTIFIC state",
     stats.embeddingCoverage = 0.80f;
 
     auto state = SearchTuner::computeState(stats);
-    CHECK(state == TuningState::SCIENTIFIC);
+    CHECK((state == TuningState::SCIENTIFIC));
 
     // Verify SCIENTIFIC params activate (with corpus_state recall push)
     SearchTuner tuner(stats);
     const auto& p = tuner.getParams();
     // corpus_state=active raises semanticRescueSlots to 3 for scientific prose
-    CHECK(p.semanticRescueSlots.value == 3);
-    CHECK(p.enableSubPhraseRescoring == true);
-    CHECK(p.fusionStrategy.value == SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL);
+    CHECK((p.semanticRescueSlots.value == 3));
+    // Dead-source gates pin structure weights off on flat scientific corpora.
+    CHECK((p.weights.pathTree.value == Approx(0.0f)));
+    CHECK((p.weights.entityVector.value == Approx(0.0f)));
+    CHECK((p.weights.tag.value == Approx(0.0f)));
+    CHECK((p.weights.metadata.value == Approx(0.0f)));
+    CHECK((p.lexicalFloorTopN == 12));
 }
 
 TEST_CASE("SearchTuner: 50-doc scientific corpus still gets MINIMAL",
@@ -1522,7 +1695,7 @@ TEST_CASE("SearchTuner: 50-doc scientific corpus still gets MINIMAL",
     stats.nativeSymbolDensity = 0.0f;
 
     auto state = SearchTuner::computeState(stats);
-    CHECK(state == TuningState::MINIMAL);
+    CHECK((state == TuningState::MINIMAL));
 }
 
 // =============================================================================
@@ -1544,8 +1717,8 @@ TEST_CASE("SearchTuner: path enumeration activates for rich KG",
 
     SearchTuner tuner(stats);
     const auto& p = tuner.getParams();
-    CHECK(p.graphEnablePathEnumeration == true);
-    CHECK(p.enableGraphQueryExpansion == true);
+    CHECK((p.graphEnablePathEnumeration == true));
+    CHECK((p.enableGraphQueryExpansion == true));
 }
 
 TEST_CASE("SearchTuner: path enumeration off for sparse KG",
@@ -1563,8 +1736,8 @@ TEST_CASE("SearchTuner: path enumeration off for sparse KG",
 
     SearchTuner tuner(stats);
     const auto& p = tuner.getParams();
-    CHECK(p.graphEnablePathEnumeration == false);
-    CHECK(p.enableGraphQueryExpansion == false);
+    CHECK((p.graphEnablePathEnumeration == false));
+    CHECK((p.enableGraphQueryExpansion == false));
 }
 
 TEST_CASE("SearchTuner: path enumeration off when no KG", "[unit][search_tuner][graph_features]") {
@@ -1577,8 +1750,8 @@ TEST_CASE("SearchTuner: path enumeration off when no KG", "[unit][search_tuner][
 
     SearchTuner tuner(stats);
     const auto& p = tuner.getParams();
-    CHECK(p.graphEnablePathEnumeration == false);
-    CHECK(p.enableGraphQueryExpansion == false);
+    CHECK((p.graphEnablePathEnumeration == false));
+    CHECK((p.enableGraphQueryExpansion == false));
 }
 
 // =============================================================================
@@ -1588,42 +1761,42 @@ TEST_CASE("SearchTuner: path enumeration off when no KG", "[unit][search_tuner][
 TEST_CASE("TunedParams: SCIENTIFIC profile has entity-heavy graph signals",
           "[unit][search_tuner][graph_signals]") {
     auto p = getTunedParams(TuningState::SCIENTIFIC);
-    CHECK(p.graphEntitySignalWeight == Approx(0.50f));
-    CHECK(p.graphStructuralSignalWeight == Approx(0.15f));
-    CHECK(p.graphCoverageSignalWeight == Approx(0.15f));
-    CHECK(p.graphPathSignalWeight == Approx(0.10f));
-    CHECK(p.graphCorroborationFloor == Approx(0.25f));
+    CHECK((p.graphEntitySignalWeight == Approx(0.50f)));
+    CHECK((p.graphStructuralSignalWeight == Approx(0.15f)));
+    CHECK((p.graphCoverageSignalWeight == Approx(0.15f)));
+    CHECK((p.graphPathSignalWeight == Approx(0.10f)));
+    CHECK((p.graphCorroborationFloor == Approx(0.25f)));
 }
 
 TEST_CASE("TunedParams: SMALL_CODE profile has structure-heavy graph signals",
           "[unit][search_tuner][graph_signals]") {
     auto p = getTunedParams(TuningState::SMALL_CODE);
-    CHECK(p.graphEntitySignalWeight == Approx(0.25f));
-    CHECK(p.graphStructuralSignalWeight == Approx(0.35f));
-    CHECK(p.graphCoverageSignalWeight == Approx(0.20f));
-    CHECK(p.graphPathSignalWeight == Approx(0.15f));
-    CHECK(p.graphCorroborationFloor == Approx(0.40f));
+    CHECK((p.graphEntitySignalWeight == Approx(0.25f)));
+    CHECK((p.graphStructuralSignalWeight == Approx(0.35f)));
+    CHECK((p.graphCoverageSignalWeight == Approx(0.20f)));
+    CHECK((p.graphPathSignalWeight == Approx(0.15f)));
+    CHECK((p.graphCorroborationFloor == Approx(0.40f)));
 }
 
 TEST_CASE("TunedParams: default profiles use balanced graph signals",
           "[unit][search_tuner][graph_signals]") {
     auto p = getTunedParams(TuningState::MIXED_PRECISION);
-    CHECK(p.graphEntitySignalWeight == Approx(0.40f));
-    CHECK(p.graphStructuralSignalWeight == Approx(0.20f));
-    CHECK(p.graphCoverageSignalWeight == Approx(0.20f));
-    CHECK(p.graphPathSignalWeight == Approx(0.10f));
-    CHECK(p.graphCorroborationFloor == Approx(0.35f));
+    CHECK((p.graphEntitySignalWeight == Approx(0.40f)));
+    CHECK((p.graphStructuralSignalWeight == Approx(0.20f)));
+    CHECK((p.graphCoverageSignalWeight == Approx(0.20f)));
+    CHECK((p.graphPathSignalWeight == Approx(0.10f)));
+    CHECK((p.graphCorroborationFloor == Approx(0.35f)));
 }
 
 TEST_CASE("Community blend lerps graph signal weights", "[unit][search_tuner][graph_signals]") {
     auto params = getTunedParams(TuningState::MIXED_PRECISION);
     applyCommunityLayer(TuningState::SCIENTIFIC, TuningState::MIXED_PRECISION, params);
     // 60% toward SCIENTIFIC: 0.4*0.40 + 0.6*0.50 = 0.46
-    CHECK(params.graphEntitySignalWeight == Approx(0.46f).margin(0.01f));
+    CHECK((params.graphEntitySignalWeight == Approx(0.46f).margin(0.01f)));
     // 60% toward SCIENTIFIC: 0.4*0.20 + 0.6*0.15 = 0.17
-    CHECK(params.graphStructuralSignalWeight == Approx(0.17f).margin(0.01f));
+    CHECK((params.graphStructuralSignalWeight == Approx(0.17f).margin(0.01f)));
     // 60% toward SCIENTIFIC: 0.4*0.35 + 0.6*0.25 = 0.29
-    CHECK(params.graphCorroborationFloor == Approx(0.29f).margin(0.01f));
+    CHECK((params.graphCorroborationFloor == Approx(0.29f).margin(0.01f)));
 }
 
 TEST_CASE("Graph signal weights propagate to SearchEngineConfig",
@@ -1631,22 +1804,22 @@ TEST_CASE("Graph signal weights propagate to SearchEngineConfig",
     auto p = getTunedParams(TuningState::SCIENTIFIC);
     SearchEngineConfig config;
     p.applyTo(config);
-    CHECK(config.graphEntitySignalWeight == Approx(0.50f));
-    CHECK(config.graphStructuralSignalWeight == Approx(0.15f));
-    CHECK(config.graphCorroborationFloor == Approx(0.25f));
+    CHECK((config.graphEntitySignalWeight == Approx(0.50f)));
+    CHECK((config.graphStructuralSignalWeight == Approx(0.15f)));
+    CHECK((config.graphCorroborationFloor == Approx(0.25f)));
 }
 
 TEST_CASE("TunedParams: toJson includes graph signal fields",
           "[unit][search_tuner][serialization]") {
     auto p = getTunedParams(TuningState::SCIENTIFIC);
     auto j = p.toJson();
-    CHECK(j.at("graph_entity_signal_weight").get<float>() == Approx(0.50f));
-    CHECK(j.at("graph_corroboration_floor").get<float>() == Approx(0.25f));
-    CHECK(j.at("graph_enable_path_enumeration").get<bool>() == false);
+    CHECK((j.at("graph_entity_signal_weight").get<float>() == Approx(0.50f)));
+    CHECK((j.at("graph_corroboration_floor").get<float>() == Approx(0.25f)));
+    CHECK((j.at("graph_enable_path_enumeration").get<bool>() == false));
     CHECK(j.at("enable_graph_query_expansion").get<bool>() == false); // FSM-controlled
-    CHECK(j.at("graph_structural_signal_weight").get<float>() == Approx(0.15f));
-    CHECK(j.at("graph_coverage_signal_weight").get<float>() == Approx(0.15f));
-    CHECK(j.at("graph_path_signal_weight").get<float>() == Approx(0.10f));
+    CHECK((j.at("graph_structural_signal_weight").get<float>() == Approx(0.15f)));
+    CHECK((j.at("graph_coverage_signal_weight").get<float>() == Approx(0.15f)));
+    CHECK((j.at("graph_path_signal_weight").get<float>() == Approx(0.10f)));
 }
 
 // =============================================================================
@@ -1720,7 +1893,7 @@ TEST_CASE("SearchTuner: saveAdaptiveState round-trips EWMA counters",
 
     auto original = writer.adaptiveStateToJson();
     auto restored = reader.adaptiveStateToJson();
-    CHECK(restored.at("observations") == original.at("observations"));
+    CHECK((restored.at("observations") == original.at("observations")));
     CHECK(restored.at("ewma_latency_ms").get<double>() ==
           Approx(original.at("ewma_latency_ms").get<double>()));
     CHECK(restored.at("ewma_kg_latency_share").get<double>() ==
@@ -1741,7 +1914,7 @@ TEST_CASE("SearchTuner: loadAdaptiveState treats missing file as no-op",
     SearchTuner tuner(stats);
     auto loaded = tuner.loadAdaptiveState(path);
     REQUIRE(loaded.has_value());
-    CHECK(tuner.adaptiveStateToJson().at("observations").get<std::uint64_t>() == 0);
+    CHECK((tuner.adaptiveStateToJson().at("observations").get<std::uint64_t>() == 0));
 }
 
 TEST_CASE("SearchTuner: loadAdaptiveState survives corrupt file", "[unit][search_tuner][persist]") {
@@ -1756,7 +1929,7 @@ TEST_CASE("SearchTuner: loadAdaptiveState survives corrupt file", "[unit][search
     SearchTuner tuner(stats);
     auto loaded = tuner.loadAdaptiveState(path);
     REQUIRE(loaded.has_value());
-    CHECK(tuner.adaptiveStateToJson().at("observations").get<std::uint64_t>() == 0);
+    CHECK((tuner.adaptiveStateToJson().at("observations").get<std::uint64_t>() == 0));
 
     std::filesystem::remove(path);
 }
@@ -1785,7 +1958,7 @@ TEST_CASE("SearchTuner: auto-persist triggers after observe threshold",
         std::ifstream in(path);
         nlohmann::json j;
         in >> j;
-        CHECK(j.at("observations").get<std::uint64_t>() >= 20);
+        CHECK((j.at("observations").get<std::uint64_t>() >= 20));
     }
 
     std::filesystem::remove(path);
@@ -1802,9 +1975,9 @@ TEST_CASE("SearchTuner: observeRelevanceFeedback averages per-query rewards into
     SearchTuner tuner(stats);
 
     const auto initial = tuner.adaptiveStateToJson();
-    CHECK(initial.at("relevance_sessions").get<std::uint64_t>() == 0);
-    CHECK(initial.at("relevance_queries").get<std::uint64_t>() == 0);
-    CHECK(initial.at("ewma_relevance_reward").get<double>() == Approx(0.0));
+    CHECK((initial.at("relevance_sessions").get<std::uint64_t>() == 0));
+    CHECK((initial.at("relevance_queries").get<std::uint64_t>() == 0));
+    CHECK((initial.at("ewma_relevance_reward").get<double>() == Approx(0.0)));
 
     RelevanceSession session;
     session.timestamp = "2026-04-15T00:00:00Z";
@@ -1822,12 +1995,12 @@ TEST_CASE("SearchTuner: observeRelevanceFeedback averages per-query rewards into
     tuner.observeRelevanceFeedback(session);
 
     const auto after = tuner.adaptiveStateToJson();
-    CHECK(after.at("relevance_sessions").get<std::uint64_t>() == 1);
-    CHECK(after.at("relevance_queries").get<std::uint64_t>() == 2);
+    CHECK((after.at("relevance_sessions").get<std::uint64_t>() == 1));
+    CHECK((after.at("relevance_queries").get<std::uint64_t>() == 2));
     const double ewma = after.at("ewma_relevance_reward").get<double>();
-    CHECK(ewma > 0.0);
-    CHECK(ewma < 1.0);
-    CHECK(after.at("last_relevance_timestamp").get<std::string>() == "2026-04-15T00:00:00Z");
+    CHECK((ewma > 0.0));
+    CHECK((ewma < 1.0));
+    CHECK((after.at("last_relevance_timestamp").get<std::string>() == "2026-04-15T00:00:00Z"));
 }
 
 TEST_CASE("SearchTuner: observeRelevanceFeedback clamps rewards to [0,1]",
@@ -1844,8 +2017,8 @@ TEST_CASE("SearchTuner: observeRelevanceFeedback clamps rewards to [0,1]",
     tuner.observeRelevanceFeedback(session);
 
     const auto j = tuner.adaptiveStateToJson();
-    CHECK(j.at("ewma_relevance_reward").get<double>() <= 1.0);
-    CHECK(j.at("ewma_relevance_reward").get<double>() >= 0.0);
+    CHECK((j.at("ewma_relevance_reward").get<double>() <= 1.0));
+    CHECK((j.at("ewma_relevance_reward").get<double>() >= 0.0));
 }
 
 TEST_CASE("SearchTuner: hasConverged requires both observations and cooldown",
@@ -1868,7 +2041,7 @@ TEST_CASE("SearchTuner: hasConverged requires both observations and cooldown",
         tuner.observe(makeKgHotTelemetry());
     }
     const auto mid = tuner.adaptiveStateToJson();
-    REQUIRE(mid.at("observations").get<std::uint64_t>() >= 15);
+    REQUIRE((mid.at("observations").get<std::uint64_t>() >= 15));
     // With minObservations=5 the count is satisfied, but the most recent
     // adjustment is very recent, so cooldown gating keeps hasConverged false.
     const bool midConverged = tuner.hasConverged(5);
@@ -1901,27 +2074,26 @@ TEST_CASE("SearchTuner: SciFact-like corpus with rich edges activates graph full
     stats.tagCoverage = 0.0;
 
     // SCIENTIFIC classification
-    CHECK(stats.isScientific() == true);
-    CHECK(stats.hasKnowledgeGraph() == true);
-    CHECK(stats.hasRichGraphTopology() == true);
-    CHECK(stats.hasExtractedContent() == true);
-    CHECK(stats.hasFtsIndexing() == true);
-    CHECK(stats.hasTitles() == true);
+    CHECK((stats.isScientific() == true));
+    CHECK((stats.hasKnowledgeGraph() == true));
+    CHECK((stats.hasRichGraphTopology() == true));
+    CHECK((stats.hasExtractedContent() == true));
+    CHECK((stats.hasFtsIndexing() == true));
+    CHECK((stats.hasTitles() == true));
 
     SearchTuner tuner(stats);
     const auto& p = tuner.getParams();
 
     // Graph should be fully enabled with rich edge topology
-    CHECK(p.enableGraphRerank == true);
-    CHECK(p.graphRerankTopN >= 30);
-    CHECK(p.kgMaxResults >= 80);
+    CHECK((p.enableGraphRerank == true));
+    CHECK((p.graphRerankTopN >= 30));
+    CHECK((p.kgMaxResults >= 80));
     // Rich edges + high edge density → path enumeration and expansion enabled
-    CHECK(p.graphEnablePathEnumeration == true);
-    CHECK(p.enableGraphQueryExpansion == true);
+    CHECK((p.graphEnablePathEnumeration == true));
+    CHECK((p.enableGraphQueryExpansion == true));
     // SCIENTIFIC profile characteristics preserved
-    CHECK(p.weights.vector.value > 0.30f);
-    CHECK(p.weights.text.value > 0.35f);
-    CHECK(p.fusionStrategy == SearchEngineConfig::FusionStrategy::WEIGHTED_RECIPROCAL);
+    CHECK((p.weights.vector.value > 0.30f));
+    CHECK((p.weights.text.value > 0.35f));
 }
 
 TEST_CASE("SearchTuner: NER-only corpus without edges dams graph activation",
@@ -1939,20 +2111,20 @@ TEST_CASE("SearchTuner: NER-only corpus without edges dams graph activation",
     stats.embeddingCoverage = 1.0;
     stats.pathRelativeDepthAvg = 0.0;
 
-    CHECK(stats.hasKnowledgeGraph() == true);
+    CHECK((stats.hasKnowledgeGraph() == true));
     CHECK(stats.hasRichGraphTopology() == false); // no edges = not rich
 
     SearchTuner tuner(stats);
     const auto& p = tuner.getParams();
 
-    // Graph rerank still enabled (hasKG) but damped
-    CHECK(p.enableGraphRerank == true);
-    // Path enumeration and expansion should be OFF: no edges means no rich topology
-    CHECK(p.graphEnablePathEnumeration == false);
-    CHECK(p.enableGraphQueryExpansion == false);
-    // KG budget/weight should be minimal (nerOnlyNoEdges applies 0.35x damp)
-    CHECK(p.kgMaxResults <= 85);
-    CHECK(p.weights.kg.value <= 0.08f);
+    // NER-only SCIENTIFIC corpora do not have structural topology, so graph
+    // scoring stays disabled instead of resurrecting KG weight from entity
+    // density alone.
+    CHECK((p.enableGraphRerank == false));
+    CHECK((p.graphEnablePathEnumeration == false));
+    CHECK((p.enableGraphQueryExpansion == false));
+    CHECK((p.kgMaxResults == 0));
+    CHECK((p.weights.kg.value == 0.0f));
 }
 
 TEST_CASE("CorpusStats: JSON roundtrip preserves new signals", "[unit][search_tuner][r7_signals]") {
@@ -1974,16 +2146,16 @@ TEST_CASE("CorpusStats: JSON roundtrip preserves new signals", "[unit][search_tu
     auto j = original.toJson();
     auto restored = CorpusStats::fromJson(j);
 
-    CHECK(restored.contentExtractedCount == 80);
-    CHECK(restored.contentExtractedCoverage == 0.8);
-    CHECK(restored.ftsIndexedCount == 75);
-    CHECK(restored.ftsIndexedCoverage == 0.75);
-    CHECK(restored.titleCount == 90);
-    CHECK(restored.titleCoverage == 0.9);
-    CHECK(restored.docsWithLanguage == 95);
-    CHECK(restored.languageCoverage == 0.95);
-    CHECK(restored.kgEdgeCount == 300);
-    CHECK(restored.kgEdgeDensity == 3.0);
-    CHECK(restored.kgAliasCount == 150);
-    CHECK(restored.kgAliasDensity == 1.5);
+    CHECK((restored.contentExtractedCount == 80));
+    CHECK((restored.contentExtractedCoverage == 0.8));
+    CHECK((restored.ftsIndexedCount == 75));
+    CHECK((restored.ftsIndexedCoverage == 0.75));
+    CHECK((restored.titleCount == 90));
+    CHECK((restored.titleCoverage == 0.9));
+    CHECK((restored.docsWithLanguage == 95));
+    CHECK((restored.languageCoverage == 0.95));
+    CHECK((restored.kgEdgeCount == 300));
+    CHECK((restored.kgEdgeDensity == 3.0));
+    CHECK((restored.kgAliasCount == 150));
+    CHECK((restored.kgAliasDensity == 1.5));
 }

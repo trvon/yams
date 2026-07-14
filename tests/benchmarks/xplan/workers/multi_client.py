@@ -1,0 +1,475 @@
+"""Adapter around multi_client_ingestion_bench (Catch2)."""
+
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+from artifacts import raw_worker_output_path, write_json
+from workers.ablation import apply_ablation
+from workers.base import WorkerContext, WorkerResult
+from workers.util import (
+    last_jsonl_matching,
+    latency_ms_from_us_block,
+    maybe_meson_compile,
+    nested_get,
+    resolve_binary,
+    run_captured,
+)
+
+
+def _binary(ctx: WorkerContext) -> Path:
+    explicit = ctx.params.get("binary") or os.environ.get("YAMS_BENCH_MULTI_CLIENT_BINARY")
+    return resolve_binary(
+        ctx.build_dir,
+        "tests",
+        "benchmarks",
+        "multi_client_ingestion_bench",
+        explicit=str(explicit) if explicit else None,
+    )
+
+
+def _clone_corpus_seed(source: Path, destination: Path) -> str:
+    """Create an isolated corpus copy, preferring filesystem copy-on-write clones."""
+    source = source.expanduser().resolve()
+    destination = destination.expanduser().resolve()
+    if not source.is_dir():
+        raise FileNotFoundError(f"corpus seed directory does not exist: {source}")
+    if destination.exists():
+        raise FileExistsError(f"isolated corpus destination already exists: {destination}")
+    if destination == source or source in destination.parents:
+        raise ValueError("isolated corpus destination must not be inside its seed")
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    clone_cmd: list[str] | None = None
+    if sys.platform == "darwin":
+        clone_cmd = ["cp", "-cR", str(source), str(destination)]
+    elif sys.platform.startswith("linux"):
+        clone_cmd = ["cp", "--reflink=auto", "-a", str(source), str(destination)]
+
+    if clone_cmd is not None:
+        try:
+            cloned = subprocess.run(
+                clone_cmd,
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if cloned.returncode == 0:
+                return "clone"
+        except OSError:
+            pass
+        if destination.exists():
+            shutil.rmtree(destination)
+
+    shutil.copytree(source, destination, symlinks=True)
+    return "copy"
+
+
+def run_multi_client(
+    ctx: WorkerContext,
+    *,
+    catch_filter: str,
+    test_name: str,
+    env_extra: dict[str, str] | None = None,
+) -> WorkerResult:
+    """Run a Catch2-filtered multi_client case and return raw JSONL record + status."""
+    binary = _binary(ctx)
+    raw_path = raw_worker_output_path(ctx.arm_dir, ctx.step_index, "multi_client")
+    jsonl_path = ctx.arm_dir / f"step{ctx.step_index:02d}_multi_client.jsonl"
+    stdout_path = ctx.arm_dir / f"step{ctx.step_index:02d}_multi_client.stdout.log"
+    stderr_path = ctx.arm_dir / f"step{ctx.step_index:02d}_multi_client.stderr.log"
+
+    if ctx.dry_run:
+        write_json(
+            raw_path,
+            {"dry_run": True, "binary": str(binary), "catch_filter": catch_filter},
+        )
+        return WorkerResult(
+            status="ok",
+            exit_code=0,
+            metrics={},
+            attributes={"dry_run": True, "binary": str(binary), "catch_filter": catch_filter},
+            message=f"dry-run multi_client filter={catch_filter}",
+            raw_path=str(raw_path),
+        )
+
+    skip_build = bool(ctx.params.get("skip_build")) or os.environ.get("YAMS_BENCH_SKIP_BUILD") == "1"
+    force_build = bool(ctx.params.get("force_build")) or os.environ.get("YAMS_BENCH_FORCE_BUILD") == "1"
+    maybe_meson_compile(
+        ctx.repo_root,
+        ctx.build_dir,
+        "bench_multi_client",
+        skip=skip_build,
+        binary=binary,
+        force=force_build,
+    )
+    if not binary.exists():
+        return WorkerResult(
+            status="failed",
+            exit_code=2,
+            metrics={},
+            attributes={"binary": str(binary)},
+            message=f"multi_client binary missing: {binary}",
+        )
+
+    env = os.environ.copy()
+    env.update(ctx.env)
+    env.setdefault("YAMS_TESTING", "1")
+    env.setdefault("YAMS_TEST_SAFE_SINGLE_INSTANCE", "1")
+    env.setdefault("YAMS_DISABLE_SESSION_WATCHER", "1")
+    env.setdefault("YAMS_SKIP_MODEL_LOADING", "1")
+    # Default vectors off for load speed unless ablation sets vectors=on.
+    env.setdefault("YAMS_DISABLE_VECTORS", "1")
+    env["YAMS_BENCH_OUTPUT"] = str(jsonl_path)
+
+    corpus_seed = ctx.params.get("corpus_seed_dir") or env.get(
+        "YAMS_BENCH_CORPUS_SEED_DIR"
+    )
+    corpus_clone_method: str | None = None
+    if corpus_seed:
+        isolated_data_dir = ctx.arm_dir / f"step{ctx.step_index:02d}_corpus"
+        try:
+            corpus_clone_method = _clone_corpus_seed(
+                Path(str(corpus_seed)), isolated_data_dir
+            )
+        except (OSError, ValueError) as exc:
+            return WorkerResult(
+                status="failed",
+                exit_code=2,
+                metrics={},
+                attributes={"corpus_seed_dir": str(corpus_seed)},
+                message=f"failed to isolate corpus seed: {exc}",
+            )
+        env["YAMS_BENCH_DATA_DIR"] = str(isolated_data_dir)
+    elif ctx.params.get("data_dir"):
+        env["YAMS_BENCH_DATA_DIR"] = str(ctx.params["data_dir"])
+
+    arm_factors = getattr(getattr(ctx.arm, "arm", None), "factors", None) or {}
+    ablation = apply_ablation(env, factors=arm_factors, params=ctx.params)
+    # If ablation wants vectors on, clear the default disable.
+    if ablation.get("axes", {}).get("vectors") == "on":
+        env.pop("YAMS_DISABLE_VECTORS", None)
+
+    # Workload knobs from plan params / factor values.
+    clients = ctx.params.get("search_clients") or ctx.params.get("num_clients") or 4
+    docs = ctx.params.get("docs_per_client") or ctx.params.get("corpus_size") or 25
+    doc_size = ctx.params.get("doc_size") or ctx.params.get("doc_size_bytes") or 1024
+    search_ratio = ctx.params.get("search_ratio", 0.5)
+    warmup = ctx.params.get("warmup_docs", 20)
+    search_type = (
+        env.get("YAMS_BENCH_SEARCH_TYPE")
+        or ctx.params.get("search_type")
+        or "hybrid"
+    )
+
+    env["YAMS_BENCH_NUM_CLIENTS"] = str(int(clients))
+    env["YAMS_BENCH_DOCS_PER_CLIENT"] = str(int(docs))
+    env["YAMS_BENCH_DOC_SIZE_BYTES"] = str(int(doc_size))
+    env["YAMS_BENCH_SEARCH_RATIO"] = str(float(search_ratio))
+    env["YAMS_BENCH_WARMUP_DOCS"] = str(int(warmup))
+    env["YAMS_BENCH_SEARCH_TYPE"] = str(search_type)
+    if ctx.params.get("search_query"):
+        env["YAMS_BENCH_SEARCH_QUERY"] = str(ctx.params["search_query"])
+    env["YAMS_BENCH_MIXED_SEARCHERS"] = str(int(clients))
+    env["YAMS_BENCH_MIXED_WRITERS"] = str(max(1, int(int(clients) // 2)))
+    env["YAMS_BENCH_MIXED_READER_OPS"] = str(int(ctx.params.get("mixed_reader_ops") or 50))
+    env["YAMS_BENCH_MIXED_OPS_PER_CLIENT"] = str(
+        int(ctx.params.get("mixed_ops_per_client") or 0)
+    )
+    env["YAMS_BENCH_IDLE_PROBE"] = str(ctx.params.get("idle_probe", "1"))
+
+    if env_extra:
+        env.update({k: str(v) for k, v in env_extra.items()})
+
+    timeout = ctx.step.timeout_sec or int(ctx.params.get("timeout_sec") or ctx.arm.plan.timeout_sec)
+    # Catch2: run only the requested tag/name; allow benchmark-tagged cases.
+    cmd = [str(binary), catch_filter, "--reporter", "compact"]
+
+    try:
+        proc = run_captured(
+            cmd,
+            cwd=ctx.repo_root,
+            env=env,
+            timeout=timeout,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return WorkerResult(
+            status="failed",
+            exit_code=124,
+            metrics={},
+            attributes={"binary": str(binary), "catch_filter": catch_filter},
+            message=f"multi_client timed out/failed: {exc}",
+        )
+
+    record = last_jsonl_matching(jsonl_path, test_name=test_name)
+    if record is None:
+        # Fall back to any record
+        record = last_jsonl_matching(jsonl_path)
+    write_json(raw_path, record or {"exit_code": proc.returncode, "stdout": stdout_path.name})
+
+    if proc.returncode != 0 and record is None:
+        return WorkerResult(
+            status="failed",
+            exit_code=proc.returncode,
+            metrics={},
+            attributes={"binary": str(binary), "catch_filter": catch_filter},
+            message=f"multi_client exited {proc.returncode} without JSONL metrics",
+            raw_path=str(raw_path),
+        )
+
+    return WorkerResult(
+        status="ok" if proc.returncode == 0 else "failed",
+        exit_code=proc.returncode,
+        metrics=_metrics_from_record(record or {}),
+        attributes={
+            "binary": str(binary),
+            "catch_filter": catch_filter,
+            "test": (record or {}).get("test"),
+            "jsonl": str(jsonl_path),
+            "ablation": ablation,
+            "search_type": search_type,
+            "search_query": env.get("YAMS_BENCH_SEARCH_QUERY"),
+            "data_dir": env.get("YAMS_BENCH_DATA_DIR"),
+            "corpus_seed_dir": str(corpus_seed) if corpus_seed else None,
+            "corpus_clone_method": corpus_clone_method,
+        },
+        message="multi_client completed" if proc.returncode == 0 else f"exit {proc.returncode}",
+        raw_path=str(raw_path),
+    )
+
+
+def _metrics_from_record(record: dict[str, Any]) -> dict[str, Any]:
+    search = record.get("search_latency") or nested_get(record, "search", "latency") or {}
+    add = record.get("add_latency") or {}
+    list_latency = record.get("list_latency") or {}
+    idle = record.get("idle_probe") or {}
+    idle_base = idle.get("idle_baseline") if isinstance(idle, dict) else {}
+    drain = record.get("drain_metrics") or {}
+    peaks = record.get("resource_peaks") or {}
+    baseline = record.get("resource_baseline") or {}
+    if not isinstance(baseline, dict):
+        baseline = {}
+
+    metrics: dict[str, Any] = {
+        "elapsed_seconds": float(record.get("elapsed_seconds") or 0),
+        "docs_per_s": float(record.get("throughput_docs_per_sec") or 0),
+        "total_searches": float(record.get("total_searches") or 0),
+        "total_adds": float(record.get("total_adds") or 0),
+        "total_lists": float(record.get("total_lists") or 0),
+        "total_failures": float(record.get("total_failures") or 0),
+        "num_clients": float(record.get("num_clients") or 0),
+        "drained": 1.0 if record.get("drained") else 0.0,
+    }
+
+    p50 = latency_ms_from_us_block(search if isinstance(search, dict) else None, "p50_us")
+    p90 = latency_ms_from_us_block(search if isinstance(search, dict) else None, "p90_us")
+    p95 = latency_ms_from_us_block(search if isinstance(search, dict) else None, "p95_us")
+    if p50 is not None:
+        metrics["search_p50_ms"] = p50
+    if p90 is not None:
+        metrics["search_p90_ms"] = p90
+    if p95 is not None:
+        metrics["search_p95_ms"] = p95
+    elif p90 is not None:
+        # multi_client emits p90; map to p95 slot when p95 absent
+        metrics["search_p95_ms"] = p90
+    search_p99 = latency_ms_from_us_block(
+        search if isinstance(search, dict) else None, "p99_us"
+    )
+    if search_p99 is not None:
+        metrics["search_p99_ms"] = search_p99
+
+    add_p50 = latency_ms_from_us_block(add if isinstance(add, dict) else None, "p50_us")
+    if add_p50 is not None:
+        metrics["add_p50_ms"] = add_p50
+    for percentile in ("p95_us", "p99_us"):
+        value = latency_ms_from_us_block(add if isinstance(add, dict) else None, percentile)
+        if value is not None:
+            metrics[f"add_{percentile.removesuffix('_us')}_ms"] = value
+
+    for percentile in ("p50_us", "p95_us", "p99_us"):
+        value = latency_ms_from_us_block(
+            list_latency if isinstance(list_latency, dict) else None, percentile
+        )
+        if value is not None:
+            metrics[f"list_{percentile.removesuffix('_us')}_ms"] = value
+
+    metrics["search_rejected"] = float(record.get("search_rejected") or 0)
+    if metrics["total_searches"] > 0 and metrics["elapsed_seconds"] > 0:
+        metrics["qps"] = metrics["total_searches"] / metrics["elapsed_seconds"]
+    else:
+        metrics["qps"] = 0.0
+    elapsed = metrics["elapsed_seconds"]
+    metrics["add_ops_per_s"] = metrics["total_adds"] / elapsed if elapsed > 0 else 0.0
+    metrics["search_ops_per_s"] = metrics["total_searches"] / elapsed if elapsed > 0 else 0.0
+    metrics["list_ops_per_s"] = metrics["total_lists"] / elapsed if elapsed > 0 else 0.0
+    metrics["total_ops_per_s"] = (
+        metrics["total_adds"] + metrics["total_searches"] + metrics["total_lists"]
+    ) / elapsed if elapsed > 0 else 0.0
+
+    # Idle / ops timeline fields
+    if isinstance(idle_base, dict):
+        metrics["idle_mean_cpu_pct"] = float(idle_base.get("meanCpuPercent") or idle_base.get("mean_cpu_percent") or 0)
+        metrics["idle_peak_cpu_pct"] = float(idle_base.get("peakCpuPercent") or idle_base.get("peak_cpu_percent") or 0)
+        samples = float(idle_base.get("samples") or 0)
+        metrics["sample_count"] = samples
+        # Proxy idle fraction: inverse of mean CPU vs a 100% busy baseline (clamped).
+        mean_cpu = metrics["idle_mean_cpu_pct"]
+        metrics["idle_fraction"] = max(0.0, min(1.0, 1.0 - (mean_cpu / 100.0)))
+    if isinstance(idle, dict):
+        metrics["idle_work_visible_us"] = float(idle.get("work_visible_us") or idle.get("workVisibleUs") or 0)
+        metrics["idle_add_latency_us"] = float(idle.get("add_latency_us") or idle.get("addLatencyUs") or 0)
+        metrics["idle_probe_attempted"] = 1.0 if idle.get("attempted") else 0.0
+    if isinstance(drain, dict):
+        metrics["backlog_peak"] = float(
+            drain.get("peakPostIngestQueued") or drain.get("peak_post_ingest_queued") or 0
+        )
+        metrics["drain_elapsed_ms"] = float(drain.get("elapsedMs") or drain.get("elapsed_ms") or 0)
+    if isinstance(peaks, dict):
+        metrics["backlog_peak"] = max(
+            metrics.get("backlog_peak", 0.0),
+            float(peaks.get("peak_post_ingest_queued") or 0),
+        )
+        metrics["post_ingest_inflight_peak"] = float(
+            peaks.get("peak_post_ingest_inflight") or 0
+        )
+        metrics["write_queue_depth_peak"] = float(
+            peaks.get("peak_write_queue_depth") or 0
+        )
+        metrics["write_in_flight_peak"] = float(peaks.get("peak_write_in_flight") or 0)
+        metrics["write_max_batch_apply_ms_peak"] = float(
+            peaks.get("peak_write_max_batch_apply_ms") or 0
+        )
+        metrics["write_max_batch_queue_wait_ms_peak"] = float(
+            peaks.get("peak_write_max_batch_queue_wait_ms") or 0
+        )
+        metrics["write_max_batch_excess_queue_wait_ms_peak"] = float(
+            peaks.get("peak_write_max_batch_excess_queue_wait_ms") or 0
+        )
+        metrics["pressure_level_peak"] = float(peaks.get("max_pressure_level") or 0)
+        metrics["db_write_pool_waiting_peak"] = float(
+            peaks.get("peak_db_write_pool_waiting") or 0
+        )
+        metrics["db_read_pool_waiting_peak"] = float(
+            peaks.get("peak_db_read_pool_waiting") or 0
+        )
+        metrics["db_write_pool_slow_holders_delta"] = max(
+            0.0,
+            float(peaks.get("peak_db_write_pool_slow_holders") or 0)
+            - float(baseline.get("db_write_pool_slow_holders") or 0),
+        )
+        metrics["db_read_pool_slow_holders_delta"] = max(
+            0.0,
+            float(peaks.get("peak_db_read_pool_slow_holders") or 0)
+            - float(baseline.get("db_read_pool_slow_holders") or 0),
+        )
+        metrics["db_write_pool_max_holder_high_water_ms"] = max(
+            0.0,
+            float(peaks.get("peak_db_write_pool_max_holder_us") or 0)
+            - float(baseline.get("db_write_pool_max_holder_us") or 0),
+        ) / 1000.0
+        metrics["db_read_pool_max_holder_high_water_ms"] = max(
+            0.0,
+            float(peaks.get("peak_db_read_pool_max_holder_us") or 0)
+            - float(baseline.get("db_read_pool_max_holder_us") or 0),
+        ) / 1000.0
+        metrics["write_queue_capacity"] = float(peaks.get("write_queue_capacity") or 0)
+        metrics["write_queue_depth_max"] = float(
+            peaks.get("peak_write_queue_depth_max") or 0
+        )
+        metrics["write_queue_capacity_rejections"] = float(
+            peaks.get("peak_write_queue_capacity_rejections") or 0
+        )
+        metrics["write_queue_forced_over_capacity"] = float(
+            peaks.get("peak_write_queue_forced_over_capacity") or 0
+        )
+        metrics["metadata_wal_bytes_peak"] = float(
+            peaks.get("peak_metadata_wal_bytes") or 0
+        )
+
+        def workload_delta(peak_key: str, baseline_key: str) -> float:
+            peak = float(peaks.get(peak_key) or 0)
+            base = float(baseline.get(baseline_key) or 0)
+            return max(0.0, peak - base)
+
+        metrics["write_queue_depth_high_water_delta"] = workload_delta(
+            "peak_write_queue_depth_max", "write_queue_depth_max"
+        )
+        metrics["write_queue_capacity_rejections_delta"] = workload_delta(
+            "peak_write_queue_capacity_rejections", "write_queue_capacity_rejections"
+        )
+        metrics["write_queue_forced_over_capacity_delta"] = workload_delta(
+            "peak_write_queue_forced_over_capacity", "write_queue_forced_over_capacity"
+        )
+        metrics["metadata_wal_growth_bytes"] = workload_delta(
+            "peak_metadata_wal_bytes", "metadata_wal_bytes"
+        )
+
+    # Work-share proxies from final snapshot if present
+    snap = record.get("daemon_snapshot_final") or record.get("daemon_snapshot") or {}
+    if isinstance(snap, dict):
+        metrics["work_share_post_ingest"] = float(
+            snap.get("postIngestQueued") or snap.get("post_ingest_queued") or 0
+        )
+        metrics["work_share_rpc"] = float(snap.get("searchActive") or snap.get("search_active") or 0)
+        metrics["work_share_repair"] = float(
+            snap.get("repairQueueDepth") or snap.get("repair_queue_depth") or 0
+        )
+        metrics["work_share_background"] = float(
+            snap.get("fts5Queued") or snap.get("fts5_queued") or 0
+        )
+
+    metrics["fanout_stage_ms"] = float(record.get("fanout_stage_ms") or 0)
+    return metrics
+
+
+def write_timeline_from_record(arm_dir: Path, record: dict[str, Any]) -> Path | None:
+    """Materialize a coarse timeline.jsonl from multi_client time series if present."""
+    series = record.get("time_series") or record.get("timeseries") or []
+    path = arm_dir / "timeline.jsonl"
+    if not isinstance(series, list) or not series:
+        # Synthesize a short timeline from idle probe + drain if available.
+        rows = []
+        idle = record.get("idle_probe") or {}
+        if isinstance(idle, dict) and idle.get("attempted"):
+            base = idle.get("idle_baseline") or {}
+            rows.append(
+                {
+                    "t_ms": 0,
+                    "phase": "idle_baseline",
+                    "mean_cpu_pct": base.get("meanCpuPercent") or base.get("mean_cpu_percent"),
+                    "peak_cpu_pct": base.get("peakCpuPercent") or base.get("peak_cpu_percent"),
+                }
+            )
+            rows.append(
+                {
+                    "t_ms": idle.get("work_visible_us", 0),
+                    "phase": "work_visible",
+                    "add_latency_us": idle.get("add_latency_us"),
+                }
+            )
+        if not rows:
+            return None
+        with path.open("w", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json_dumps(row) + "\n")
+        return path
+
+    with path.open("w", encoding="utf-8") as fh:
+        for row in series:
+            if isinstance(row, dict):
+                fh.write(json_dumps(row) + "\n")
+    return path
+
+
+def json_dumps(obj: Any) -> str:
+    import json
+
+    return json.dumps(obj, sort_keys=True)

@@ -42,3 +42,40 @@ yams_onnx_resource_dep = declare_dependency(
 )
 
 meson.override_dependency('yams_onnx_resource', yams_onnx_resource_dep)
+
+# Daemon-neutral ABI plugin runtime used by both daemon and local CLI model loading.
+# Keep this out of libyams_daemon.a so socket clients can link plugin loading without
+# pulling the whole daemon service stack.
+yams_plugin_runtime_lib = static_library('yams_plugin_runtime',
+  [
+    'abi_plugin_loader.cpp',
+    'abi_model_provider_adapter.cpp',
+    'plugin_host_services_shim.cpp',
+  ],
+  include_directories: include_directories('../../../include'),
+  dependencies: [
+    dependency('yams_core'),
+    dependency('yams_vector'),
+    dependency('yams_app_services'),
+    dependency('yams_config'),
+    yams_onnx_resource_dep,
+    dependency('nlohmann_json'),
+    spdlog_dep,
+  ],
+  install: false,
+)
+
+yams_plugin_runtime_dep = declare_dependency(
+  link_with: yams_plugin_runtime_lib,
+  include_directories: include_directories('../../../include'),
+  dependencies: [
+    dependency('yams_core'),
+    dependency('yams_vector'),
+    dependency('yams_app_services'),
+    yams_onnx_resource_dep,
+    dependency('nlohmann_json'),
+    spdlog_dep,
+  ],
+)
+
+meson.override_dependency('yams_plugin_runtime', yams_plugin_runtime_dep)

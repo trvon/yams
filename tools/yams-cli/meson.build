@@ -14,9 +14,7 @@ endif
 
 yams_cli_exe_deps = [
   yams_cli_dep,
-  # Ensure correct static link order: client first, then daemon providers
   dependency('yams_daemon_client'),
-  dependency('yams_daemon'),
   dependency('yams_app_services'),
   dependency('yams_repair'),
   dependency('yams_api'),

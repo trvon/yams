@@ -1,5 +1,4 @@
 #include <yams/daemon/components/TuneAdvisor.h>
-#include <yams/daemon/components/VectorIndexCoordinator.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/extraction/text_extractor.h>
@@ -173,14 +172,14 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
                         const std::vector<std::string>& documentHashes,
                         EmbeddingRepairProgressCallback progressCallback,
                         const yams::extraction::ContentExtractorList& extractors,
-                        daemon::VectorIndexCoordinator* coord) {
+                        BeginBulkIngestCallback beginBulkIngest) {
     EmbeddingRepairStats stats;
 
-    // If a coordinator is provided, hold a BulkScope for the whole repair so that
+    // If the daemon provides a coordinator-backed lease, hold it for the whole repair so that
     // finalizeBulkLoad + buildIndex + persistIndex happen exactly once when we return.
-    daemon::VectorIndexCoordinator::BulkScope bulkScope;
-    if (coord) {
-        bulkScope = coord->beginBulkIngest(daemon::RebuildReason::EmbeddingBatch);
+    BulkIngestLease bulkScope;
+    if (beginBulkIngest) {
+        bulkScope = beginBulkIngest();
     }
 
     auto cancelRequested = [&]() -> bool {

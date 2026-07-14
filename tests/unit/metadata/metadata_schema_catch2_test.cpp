@@ -1714,3 +1714,55 @@ TEST_CASE("Migration version 35 narrows the documents path FTS update trigger",
     CHECK((rolledBackSql.value()->find("WHEN old.file_path IS NOT new.file_path") ==
            std::string::npos));
 }
+
+TEST_CASE("Migration version 36 adds indexed trigram symbol lookup",
+          "[unit][metadata][schema][migration]") {
+    StandaloneMigrationDb db{"migration_v36_symbol_fts"};
+    REQUIRE(db.mm.migrateTo(35).has_value());
+
+    REQUIRE(db.db
+                .execute(R"(
+        INSERT INTO documents (sha256_hash, file_name, file_path, file_size, mime_type)
+        VALUES ('symbol-fts-doc', 'coordinator.cpp', '/tmp/coordinator.cpp', 10, 'text/plain');
+        INSERT INTO symbol_metadata (
+            document_hash, file_path, symbol_name, qualified_name, kind
+        ) VALUES (
+            'symbol-fts-doc', '/tmp/coordinator.cpp', 'WriteCoordinator',
+            'yams::daemon::WriteCoordinator', 'class'
+        );
+    )")
+                .has_value());
+
+    REQUIRE(db.mm.migrateTo(36).has_value());
+
+    auto ftsExists = db.db.tableExists("symbol_metadata_fts");
+    REQUIRE(ftsExists.has_value());
+    CHECK(ftsExists.value());
+
+    auto count = querySingleInt64(
+        db.db, "SELECT COUNT(*) FROM symbol_metadata_fts WHERE symbol_name LIKE '%Coordinator%'");
+    REQUIRE(count.has_value());
+    CHECK((count.value() == 1));
+
+    {
+        auto planResult = db.db.prepare("EXPLAIN QUERY PLAN SELECT rowid FROM symbol_metadata_fts "
+                                        "WHERE symbol_name LIKE '%Coordinator%'");
+        REQUIRE(planResult.has_value());
+        auto plan = std::move(planResult).value();
+        bool usesVirtualIndex = false;
+        while (true) {
+            auto step = plan.step();
+            REQUIRE(step.has_value());
+            if (!step.value())
+                break;
+            usesVirtualIndex = usesVirtualIndex ||
+                               plan.getString(3).find("VIRTUAL TABLE INDEX") != std::string::npos;
+        }
+        CHECK(usesVirtualIndex);
+    }
+
+    REQUIRE(db.mm.rollbackTo(35).has_value());
+    auto removed = db.db.tableExists("symbol_metadata_fts");
+    REQUIRE(removed.has_value());
+    CHECK_FALSE(removed.value());
+}

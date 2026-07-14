@@ -5,7 +5,9 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_engine.h>
 #include <yams/search/search_engine_builder.h>
+#include <yams/search/search_engine_config.h>
 #include <yams/search/simeon_lexical_backend.h>
+#include <yams/search/topology_routing_session.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
 
@@ -19,6 +21,9 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 
+#include <algorithm>
+#include <cctype>
+
 namespace yams::daemon {
 
 namespace {
@@ -27,9 +32,64 @@ std::uint64_t nextLexicalDeltaEpoch(std::atomic<std::uint64_t>& counter) {
 }
 
 constexpr std::size_t kMaxRecentLexicalDeltaDocs = 256;
+
+std::string normalizeTopologyToken(std::string raw) {
+    raw.erase(std::remove_if(raw.begin(), raw.end(),
+                             [](unsigned char c) { return std::isspace(c) != 0; }),
+              raw.end());
+    std::transform(raw.begin(), raw.end(), raw.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    std::replace(raw.begin(), raw.end(), '-', '_');
+    return raw;
+}
+
+std::optional<yams::search::SearchEngineConfig::TopologyRoutingMode>
+parseTopologyRoutingMode(std::string raw) {
+    raw = normalizeTopologyToken(std::move(raw));
+    using Mode = yams::search::SearchEngineConfig::TopologyRoutingMode;
+    if (raw == "disabled" || raw == "off" || raw == "none") {
+        return Mode::Disabled;
+    }
+    if (raw == "weak_query_only" || raw == "weak" || raw == "weak_only") {
+        return Mode::WeakQueryOnly;
+    }
+    if (raw == "hybrid_assist" || raw == "hybrid" || raw == "assist") {
+        return Mode::HybridAssist;
+    }
+    return std::nullopt;
+}
+
+std::optional<yams::search::SearchEngineConfig::TopologyRouteScoringMode>
+parseTopologyRouteScoringMode(std::string raw) {
+    raw = normalizeTopologyToken(std::move(raw));
+    using Mode = yams::search::SearchEngineConfig::TopologyRouteScoringMode;
+    if (raw == "current" || raw == "default") {
+        return Mode::Current;
+    }
+    if (raw == "size_weighted" || raw == "size") {
+        return Mode::SizeWeighted;
+    }
+    if (raw == "seed_coverage" || raw == "seed" || raw == "coverage") {
+        return Mode::SeedCoverage;
+    }
+    return std::nullopt;
+}
+
+std::optional<yams::search::SearchEngineConfig::TopologyVectorPolicy>
+parseTopologyVectorPolicy(std::string raw) {
+    raw = normalizeTopologyToken(std::move(raw));
+    using Policy = yams::search::SearchEngineConfig::TopologyVectorPolicy;
+    if (raw == "narrow" || raw == "filter" || raw == "replace") {
+        return Policy::Narrow;
+    }
+    if (raw == "shadow" || raw == "observe" || raw == "calibrate") {
+        return Policy::Shadow;
+    }
+    return std::nullopt;
+}
 } // namespace
 
-yams::search::SearchEngine* SearchEngineManager::getCachedEngine() const {
+std::shared_ptr<yams::search::SearchEngine> SearchEngineManager::getCachedEngine() const {
     std::shared_lock lock(snapshotMutex_);
     return cachedEngine_;
 }
@@ -155,8 +215,10 @@ void SearchEngineManager::refreshSnapshot() {
         eng = engine_;
     }
 
+    // Publish a shared_ptr snapshot so concurrent diagnostics (metrics polling)
+    // cannot observe a raw dangling engine during rebuild/replace.
     std::unique_lock snapLock(snapshotMutex_);
-    cachedEngine_ = eng.get();
+    cachedEngine_ = std::move(eng);
 }
 
 boost::asio::awaitable<Result<std::shared_ptr<yams::search::SearchEngine>>>
@@ -329,15 +391,47 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         }
     }
 
-    // Topology weak-query routing is opt-in. It routes weak lexical queries through
-    // published topology clusters before narrowing vector search.
+    // Topology routing selects query-ranked cluster members before the vector stage; the typed
+    // vector policy decides whether to observe or apply route-restricted ANN.
     {
         auto tp = ConfigResolver::resolveTopologyRoutingPolicy();
-        if (tp.enableWeakQueryRouting) {
-            opts.config.enableTopologyWeakQueryRouting = *tp.enableWeakQueryRouting;
+        if (tp.mode) {
+            if (auto mode = parseTopologyRoutingMode(*tp.mode); mode.has_value()) {
+                opts.config.topologyRoutingMode = *mode;
+            } else {
+                spdlog::warn("Ignoring unknown search.topology.mode='{}'", *tp.mode);
+            }
+        }
+        if (tp.vectorPolicy) {
+            if (auto policy = parseTopologyVectorPolicy(*tp.vectorPolicy); policy.has_value()) {
+                opts.config.topologyVectorPolicy = *policy;
+            } else {
+                spdlog::warn("Ignoring unknown search.topology.vector_policy='{}'",
+                             *tp.vectorPolicy);
+            }
+        }
+        if (tp.enableWeakQueryRouting && !tp.mode) {
+            opts.config.topologyRoutingMode =
+                yams::search::resolveTopologyRoutingMode(opts.config, tp.enableWeakQueryRouting);
+        }
+        if (tp.minClusters) {
+            opts.config.topologyMinClusters = std::max<std::size_t>(1, *tp.minClusters);
         }
         if (tp.maxClusters) {
             opts.config.topologyMaxClusters = *tp.maxClusters;
+        }
+        if (tp.maxSeedDocuments) {
+            opts.config.topologyMaxSeedDocuments = *tp.maxSeedDocuments;
+        }
+        if (tp.representativeLimit) {
+            opts.config.topologyRoutingRepresentativeLimit = *tp.representativeLimit;
+        }
+        if (tp.adaptiveProbeScoreGap) {
+            opts.config.topologyAdaptiveProbeScoreGap = std::max(0.0F, *tp.adaptiveProbeScoreGap);
+        }
+        if (tp.narrowMinBoundaryMargin) {
+            opts.config.topologyNarrowMinBoundaryMargin =
+                std::max(0.0F, *tp.narrowMinBoundaryMargin);
         }
         if (tp.maxDocs) {
             opts.config.topologyMaxDocs = *tp.maxDocs;
@@ -345,32 +439,47 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         if (tp.medoidBoost) {
             opts.config.topologyMedoidBoost = std::max(0.0f, *tp.medoidBoost);
         }
+        if (tp.evidenceWeight) {
+            opts.config.topologyEvidenceWeight = std::clamp(*tp.evidenceWeight, 0.0f, 1.0f);
+        }
+        if (tp.routeScoring) {
+            if (auto mode = parseTopologyRouteScoringMode(*tp.routeScoring); mode.has_value()) {
+                opts.config.topologyRouteScoringMode = *mode;
+            } else {
+                spdlog::warn("Ignoring unknown search.topology.route_scoring='{}'",
+                             *tp.routeScoring);
+            }
+        }
+        if (tp.sparseDenseAlpha) {
+            opts.config.topologySparseDenseAlpha = std::clamp(*tp.sparseDenseAlpha, 0.0f, 1.0f);
+        }
+        if (tp.minRouteScore) {
+            opts.config.topologyMinRouteScore = std::max(0.0f, *tp.minRouteScore);
+        }
+        if (tp.expansionSource) {
+            const auto s = *tp.expansionSource;
+            if (s == "graph_neighbors" || s == "graph" || s == "neighbors" || s == "relations") {
+                opts.config.topologyExpansionSource =
+                    yams::search::SearchEngineConfig::TopologyExpansionSource::GraphNeighbors;
+            } else if (s == "clusters" || s == "cluster") {
+                opts.config.topologyExpansionSource =
+                    yams::search::SearchEngineConfig::TopologyExpansionSource::Clusters;
+            } else {
+                spdlog::warn("Ignoring unknown search.topology.expansion_source='{}'", s);
+            }
+        }
+        if (tp.graphNeighborMinScore) {
+            opts.config.topologyGraphNeighborMinScore = std::max(0.0f, *tp.graphNeighborMinScore);
+        }
+        if (tp.graphNeighborReciprocalOnly) {
+            opts.config.topologyGraphNeighborReciprocalOnly = *tp.graphNeighborReciprocalOnly;
+        }
+        if (tp.graphVectorSeedProbe) {
+            opts.config.topologyGraphVectorSeedProbe = *tp.graphVectorSeedProbe;
+        }
         if (tp.rrfK) {
             opts.config.rrfK = std::clamp(*tp.rrfK, 1.0f, 10000.0f);
             spdlog::info("SearchEngine rrfK applied via config: {:.3f}", opts.config.rrfK);
-        }
-    }
-
-    // Meta-path routing (Phase P/Y graph-walk boost) is opt-in via [search.meta_path].
-    {
-        const auto mp = ConfigResolver::resolveMetaPathRoutingPolicy();
-        auto& cfg = opts.config;
-        cfg.enableMetaPathRouting = mp.enable.value_or(cfg.enableMetaPathRouting);
-        cfg.metaPathSeedK = mp.seedK.value_or(cfg.metaPathSeedK);
-        cfg.metaPathHopLimit = mp.hopLimit.value_or(cfg.metaPathHopLimit);
-        cfg.metaPathBoostAlpha = mp.boostAlpha.value_or(cfg.metaPathBoostAlpha);
-        cfg.metaPathWeightSem = mp.weightSem.value_or(cfg.metaPathWeightSem);
-        cfg.metaPathWeightCall = mp.weightCall.value_or(cfg.metaPathWeightCall);
-        cfg.metaPathWeightDef = mp.weightDef.value_or(cfg.metaPathWeightDef);
-        cfg.metaPathWeightEntity = mp.weightEntity.value_or(cfg.metaPathWeightEntity);
-        cfg.metaPathUseEdgeWeights = mp.useEdgeWeights.value_or(cfg.metaPathUseEdgeWeights);
-        cfg.metaPathMinSeedSimilarity =
-            mp.minSeedSimilarity.value_or(cfg.metaPathMinSeedSimilarity);
-        cfg.metaPathReciprocalOnly = mp.reciprocalOnly.value_or(cfg.metaPathReciprocalOnly);
-        cfg.metaPathSeedSimilarity = mp.seedSimilarity.value_or(cfg.metaPathSeedSimilarity);
-        if (cfg.enableMetaPathRouting) {
-            spdlog::info("SearchEngine meta-path routing enabled via config (seedK={}, alpha={})",
-                         cfg.metaPathSeedK, cfg.metaPathBoostAlpha);
         }
     }
 

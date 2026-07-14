@@ -14,7 +14,9 @@
 
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/knowledge_graph_store.h>
+#include <yams/search/search_execution_context.h>
 #include <yams/search/search_models.h>
+#include <yams/search/topology_routing_session.h>
 
 namespace yams::search {
 
@@ -30,6 +32,21 @@ collectRankedResultDocIds(const std::vector<SearchResult>& results,
 
 std::vector<std::string> setDifferenceIds(const std::vector<std::string>& lhs,
                                           const std::vector<std::string>& rhs);
+
+void setDebug(std::unordered_map<std::string, std::string>& debug, std::string_view key,
+              std::string value);
+
+void setDebugBool(std::unordered_map<std::string, std::string>& debug, std::string_view key,
+                  bool value);
+
+void recordIndexReadinessDebug(std::unordered_map<std::string, std::string>& debug,
+                               const IndexFreshnessSnapshot& freshness);
+
+void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConfig& config,
+                                SearchEngineConfig::TopologyRoutingMode mode,
+                                const TopologyRoutingSessionResult& session,
+                                const std::string& skipReason, std::size_t totalCandidates,
+                                bool shadowEvaluation = false, bool includeDocumentIds = false);
 
 std::string joinWithTab(const std::vector<std::string>& values);
 
@@ -63,12 +80,15 @@ struct TraceStageSummary {
 
 class SearchTraceCollector {
 public:
-    explicit SearchTraceCollector(const SearchEngineConfig& config);
+    explicit SearchTraceCollector(const SearchEngineConfig& config,
+                                  bool captureDocumentIds = false);
 
     void markStageConfigured(const std::string& name, bool enabled);
     void markStageAttempted(const std::string& name);
     void markStageResult(const std::string& name, const std::vector<ComponentResult>& results,
                          std::int64_t durationMicros, bool contributed);
+    void markValueStageResult(const std::string& name, bool producedValue,
+                              std::int64_t durationMicros);
     void markStageTimeout(const std::string& name, std::int64_t durationMicros = 0);
     void markStageFailure(const std::string& name, std::int64_t durationMicros = 0);
     void markStageSkipped(const std::string& name, std::string reason);
@@ -82,6 +102,7 @@ public:
 
 private:
     const SearchEngineConfig& config_;
+    bool captureDocumentIds_ = false;
     std::map<std::string, TraceStageSummary> stages_;
 };
 

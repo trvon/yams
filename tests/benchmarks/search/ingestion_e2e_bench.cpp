@@ -13,6 +13,8 @@
     YAMS_BENCH_DOC_SIZE=N             - Document size in bytes (default: 1000)
     YAMS_BENCH_POLL_INTERVAL_MS=N     - Queue polling interval (default: 100)
     YAMS_BENCH_OUTPUT=path            - JSON output file (default: stdout)
+    YAMS_BENCH_DISABLE_KG=1           - Disable KG post-ingest enrichment for ablation
+    YAMS_BENCH_SEARCH_PROBES=0        - Disable fixed post-ingest search probes
 
   Metrics collected:
     - Total pipeline duration (start → all stages complete)
@@ -20,6 +22,7 @@
     - Queue depths over time (store_document_tasks, embed_jobs, fts5_jobs, postIngest)
     - Throughput (docs/sec) and success/fail counts
     - WorkCoordinator thread pool utilization
+    - Fixed post-ingest keyword/semantic/hybrid search probe impact
 */
 
 #include <nlohmann/json.hpp>
@@ -44,6 +47,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -78,6 +82,17 @@ uint64_t saturatedAdd(uint64_t lhs, uint64_t rhs) noexcept {
         return std::numeric_limits<uint64_t>::max();
     }
     return lhs + rhs;
+}
+
+bool envFlagEnabled(const char* name) {
+    const char* raw = std::getenv(name);
+    if (!raw || !*raw) {
+        return false;
+    }
+    std::string value(raw);
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value == "1" || value == "true" || value == "yes" || value == "on";
 }
 
 } // namespace
@@ -454,6 +469,38 @@ struct StageMetrics {
     }
 };
 
+struct SearchImpactProbe {
+    std::string name;
+    std::string query;
+    std::string search_type;
+    bool required_by_contract = false;
+    bool skipped = false;
+    std::string skip_reason;
+    bool ok = false;
+    std::string error;
+    int64_t wall_ms = 0;
+    int64_t daemon_elapsed_ms = 0;
+    uint64_t total_count = 0;
+    uint64_t returned_count = 0;
+    std::vector<std::string> top_ids;
+
+    json toJson() const {
+        return json{{"name", name},
+                    {"query", query},
+                    {"search_type", search_type},
+                    {"required_by_contract", required_by_contract},
+                    {"skipped", skipped},
+                    {"skip_reason", skip_reason},
+                    {"ok", ok},
+                    {"error", error},
+                    {"wall_ms", wall_ms},
+                    {"daemon_elapsed_ms", daemon_elapsed_ms},
+                    {"total_count", total_count},
+                    {"returned_count", returned_count},
+                    {"top_ids", top_ids}};
+    }
+};
+
 // ============================================================================
 // BenchmarkResult - Complete benchmark output
 // ============================================================================
@@ -467,6 +514,7 @@ struct BenchmarkResult {
     std::string embedding_model = "simeon-default";
     std::string embedding_backend = "simeon";
     std::string simeon_recipe;
+    bool kg_enabled = true;
 
     // Overall metrics
     int64_t total_duration_ms = 0;
@@ -498,6 +546,7 @@ struct BenchmarkResult {
     std::unordered_map<std::string, yams::storage::RefCounterWriterValueMetric>
         ref_counter_writer_value_metrics;
     yams::daemon::PostIngestQueue::MetricsSnapshot post_ingest_metrics;
+    std::vector<SearchImpactProbe> search_impact;
 
     // Queue monitoring
     std::vector<QueueSnapshot> queue_samples;
@@ -532,7 +581,7 @@ struct BenchmarkResult {
             {"corpus_size", corpus_size},           {"doc_size", doc_size},
             {"poll_interval_ms", poll_interval_ms}, {"timestamp", timestamp},
             {"embedding_model", embedding_model},   {"embedding_backend", embedding_backend},
-            {"simeon_recipe", simeon_recipe}};
+            {"simeon_recipe", simeon_recipe},       {"kg_enabled", kg_enabled}};
 
         j["total_duration_ms"] = total_duration_ms;
         j["throughput_docs_per_sec"] = throughput_docs_per_sec;
@@ -655,6 +704,12 @@ struct BenchmarkResult {
                 {"span_ms", nonNegativeDeltaMs(timing.lastEndMs, timing.firstStartMs)}};
         }
         j["post_ingest_phase_timings"] = std::move(postTimings);
+        json searchImpact = json::array();
+        for (const auto& probe : search_impact) {
+            searchImpact.push_back(probe.toJson());
+        }
+        j["search_impact"] = std::move(searchImpact);
+
         j["post_ingest_batch_metrics"] = {
             {"extraction_batches", post_ingest_metrics.batches.extractionBatches},
             {"extraction_tasks", post_ingest_metrics.batches.extractionTasks},
@@ -819,6 +874,88 @@ QueueSnapshot captureQueueSnapshot() {
     return snap;
 }
 
+std::vector<SearchImpactProbe> runSearchImpactProbes(
+    const std::shared_ptr<yams::daemon::DaemonClient>& client, bool vectorsDisabled,
+    bool kgEnabled, bool pipelineComplete) {
+    if (const char* searchProbes = std::getenv("YAMS_BENCH_SEARCH_PROBES");
+        searchProbes && std::string(searchProbes) == "0") {
+        return {};
+    }
+
+    std::vector<SearchImpactProbe> probes;
+    probes.push_back({.name = "keyword",
+                      .query = "Synthetic Test Corpus",
+                      .search_type = "keyword",
+                      .required_by_contract = pipelineComplete});
+    probes.push_back({.name = "semantic",
+                      .query = "synthetic document corpus",
+                      .search_type = "semantic",
+                      .required_by_contract = pipelineComplete && !vectorsDisabled});
+    probes.push_back({.name = "graph_rerank_hybrid",
+                      .query = "synthetic document corpus",
+                      .search_type = "hybrid",
+                      .required_by_contract = pipelineComplete && !vectorsDisabled && kgEnabled});
+
+    for (auto& probe : probes) {
+        if (probe.name == "semantic" && vectorsDisabled) {
+            probe.skipped = true;
+            probe.skip_reason = "vectors_disabled";
+            continue;
+        }
+        if (probe.name == "graph_rerank_hybrid" && !kgEnabled) {
+            probe.skipped = true;
+            probe.skip_reason = "kg_disabled";
+            continue;
+        }
+        if (probe.name == "graph_rerank_hybrid" && vectorsDisabled) {
+            probe.skipped = true;
+            probe.skip_reason = "vectors_disabled";
+            continue;
+        }
+        if (!pipelineComplete) {
+            probe.skipped = true;
+            probe.skip_reason = "pipeline_incomplete";
+            continue;
+        }
+
+        yams::daemon::SearchRequest req;
+        req.query = probe.query;
+        req.searchType = probe.search_type;
+        req.limit = 10;
+        req.useSession = false;
+        req.globalSearch = true;
+        req.showHash = true;
+        req.timeout = std::chrono::milliseconds(10000);
+
+        const auto start = nowMs();
+        auto response = yams::cli::run_sync(client->search(req), 15s);
+        const auto end = nowMs();
+        probe.wall_ms = nonNegativeDeltaMs(end, start);
+
+        if (!response) {
+            probe.ok = false;
+            probe.error = response.error().message;
+            continue;
+        }
+
+        const auto& value = response.value();
+        probe.ok = true;
+        probe.daemon_elapsed_ms = value.elapsed.count();
+        probe.total_count = static_cast<uint64_t>(value.totalCount);
+        probe.returned_count = static_cast<uint64_t>(value.results.size());
+        for (const auto& item : value.results) {
+            if (!item.id.empty()) {
+                probe.top_ids.push_back(item.id);
+            }
+            if (probe.top_ids.size() >= 5) {
+                break;
+            }
+        }
+    }
+
+    return probes;
+}
+
 // ============================================================================
 // runBenchmark - Main benchmark logic
 // ============================================================================
@@ -843,11 +980,13 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
     result.embedding_backend = vectorsDisabled ? "mock" : (simeonModel ? "simeon" : "onnxruntime");
     result.simeon_recipe =
         (!vectorsDisabled && simeonModel) ? yams::vector::simeonRecipeLabel() : "";
+    result.kg_enabled = !envFlagEnabled("YAMS_BENCH_DISABLE_KG");
 
     spdlog::info("=== Ingestion E2E Benchmark ===");
     spdlog::info("Corpus size: {}", corpusSize);
     spdlog::info("Doc size: {} bytes", docSize);
     spdlog::info("Poll interval: {} ms", pollIntervalMs);
+    spdlog::info("KG enrichment: {}", result.kg_enabled ? "enabled" : "disabled");
 
     // Phase 1: Start daemon
     spdlog::info("Phase 1: Starting daemon...");
@@ -897,6 +1036,9 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
         yams::storage::resetRefCounterWriterMetrics();
         if (auto postIngest = serviceManager->getPostIngestQueue()) {
             postIngest->resetMetrics();
+            if (!result.kg_enabled) {
+                postIngest->pauseStage(yams::daemon::PostIngestQueue::Stage::KnowledgeGraph);
+            }
         }
     }
 
@@ -956,7 +1098,7 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
     // So we only track post-ingest (metadata+FTS5) and embeddings completion
     uint64_t expectedPost = successCount;
     uint64_t expectedEmbed = vectorsDisabled ? 0 : successCount;
-    uint64_t expectedKg = successCount;
+    uint64_t expectedKg = result.kg_enabled ? successCount : 0;
     result.expected_post = expectedPost;
     result.expected_embed = expectedEmbed;
     result.expected_kg = expectedKg;
@@ -999,9 +1141,10 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
         uint64_t embedDroppedDelta = counterDelta(snap.embed_dropped, baselineEmbedDropped);
         uint64_t postDroppedDelta = counterDelta(snap.post_dropped, baselinePostDropped);
         uint64_t kgDroppedDelta = counterDelta(snap.kg_dropped, baselineKgDropped);
+        const uint64_t countedKgDroppedDelta = result.kg_enabled ? kgDroppedDelta : 0;
         result.dropped_batches = saturatedAdd(
             saturatedAdd(saturatedAdd(snap.fts5_dropped, embedDroppedDelta), postDroppedDelta),
-            kgDroppedDelta);
+            countedKgDroppedDelta);
 
         // Check if all stages have processed all documents (relative to baseline)
         // FTS5 happens in post-ingest, so we only check post and embed completion
@@ -1009,8 +1152,11 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
             counterDelta(snap.embed_consumed, baselineEmbedConsumed), embedDroppedDelta);
         uint64_t postProcessedDelta =
             saturatedAdd(counterDelta(snap.post_consumed, baselinePostConsumed), postDroppedDelta);
-        uint64_t kgProcessedDelta =
-            saturatedAdd(counterDelta(snap.kg_consumed, baselineKgConsumed), kgDroppedDelta);
+        uint64_t kgProcessedDelta = result.kg_enabled
+                                        ? saturatedAdd(counterDelta(snap.kg_consumed,
+                                                                    baselineKgConsumed),
+                                                       kgDroppedDelta)
+                                        : 0;
         lastEmbedProcessedDelta = embedProcessedDelta;
         lastPostProcessedDelta = postProcessedDelta;
         lastKgProcessedDelta = kgProcessedDelta;
@@ -1108,6 +1254,11 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs) {
     result.total_duration_ms = nonNegativeDeltaMs(totalEndMs, ingestStartMs);
     result.throughput_docs_per_sec =
         result.total_duration_ms > 0 ? successCount / (result.total_duration_ms / 1000.0) : 0.0;
+
+    spdlog::info("Phase 6: Running fixed search-impact probes...");
+    result.search_impact =
+        runSearchImpactProbes(client, vectorsDisabled, result.kg_enabled, result.pipeline_complete);
+
     if (serviceManager) {
         result.embedding_phase_timings = serviceManager->getEmbeddingPhaseTimingsSnapshot();
         result.document_store_phase_timings =

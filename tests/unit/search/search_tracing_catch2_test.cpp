@@ -2,6 +2,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/search/search_engine.h>
+#include <yams/search/search_metric_keys.h>
 #include <yams/search/search_tracing.h>
 
 using yams::search::ComponentResult;
@@ -115,4 +116,221 @@ TEST_CASE("SearchTraceCollector emits empty counters object when none recorded",
     REQUIRE(summary.at("embedding").contains("counters"));
     CHECK(summary.at("embedding").at("counters").is_object());
     CHECK(summary.at("embedding").at("counters").empty());
+}
+
+TEST_CASE("SearchTraceCollector only retains document identifiers for explicit traces",
+          "[search][tracing][catch2]") {
+    SearchEngineConfig config;
+    const std::vector<ComponentResult> results{
+        makeComponent("/tmp/b.txt", 0.8F, ComponentResult::Source::Vector, 0),
+        makeComponent("/tmp/a.txt", 0.7F, ComponentResult::Source::Vector, 1),
+    };
+
+    SearchTraceCollector compactCollector(config, false);
+    compactCollector.markStageResult("vector", results, 10, true);
+    const auto compact = compactCollector.buildStageSummaryJson().at("vector");
+    CHECK(compact.at("unique_doc_count").get<std::size_t>() == 2);
+    CHECK(compact.at("unique_doc_ids").empty());
+
+    SearchTraceCollector tracedCollector(config, true);
+    tracedCollector.markStageResult("vector", results, 10, true);
+    const auto traced = tracedCollector.buildStageSummaryJson().at("vector");
+    CHECK(traced.at("unique_doc_count").get<std::size_t>() == 2);
+    CHECK(traced.at("unique_doc_ids") == nlohmann::json::array({"a", "b"}));
+}
+
+TEST_CASE("SearchTraceCollector records non-document stage outcomes without fake hits",
+          "[search][tracing][catch2]") {
+    SearchEngineConfig config;
+    SearchTraceCollector collector(config);
+
+    collector.markValueStageResult("embedding", true, 2500);
+    collector.markValueStageResult("concepts", false, 1000);
+
+    const auto summary = collector.buildStageSummaryJson();
+    const auto& embedding = summary.at("embedding");
+    CHECK(embedding.at("attempted").get<bool>());
+    CHECK(embedding.at("contributed").get<bool>());
+    CHECK(embedding.at("raw_hit_count").get<std::size_t>() == 1);
+    CHECK(embedding.at("unique_doc_count").get<std::size_t>() == 0);
+    CHECK(embedding.at("score_stats_valid").get<bool>());
+    CHECK(embedding.at("min_score").get<double>() == Catch::Approx(1.0));
+    CHECK(embedding.at("max_score").get<double>() == Catch::Approx(1.0));
+    CHECK(embedding.at("duration_ms").get<double>() == Catch::Approx(2.5));
+
+    const auto& concepts = summary.at("concepts");
+    CHECK(concepts.at("attempted").get<bool>());
+    CHECK_FALSE(concepts.at("contributed").get<bool>());
+    CHECK(concepts.at("raw_hit_count").get<std::size_t>() == 0);
+    CHECK_FALSE(concepts.at("score_stats_valid").get<bool>());
+}
+
+TEST_CASE("recordTopologyRoutingDebug emits the legacy topology key set",
+          "[search][tracing][topology][catch2]") {
+    SearchEngineConfig config;
+    config.topologyRouteScoringMode = SearchEngineConfig::TopologyRouteScoringMode::SizeWeighted;
+    config.topologySparseDenseAlpha = 0.25f;
+    config.topologyMinRouteScore = 0.5f;
+
+    yams::search::TopologyRoutingSessionResult session;
+    session.loadAttempted = true;
+    session.loadSucceeded = true;
+    session.artifactAdmitted = true;
+    session.applied = true;
+    session.narrowApplied = false;
+    session.artifactsFresh = true;
+    session.topologyEpoch = 7;
+    session.constructionFingerprint = "0123456789abcdef";
+    session.routedClusters = 2;
+    session.availableRoutes = 3;
+    session.routedDocs = 5;
+    session.routesRejected = 1;
+    session.addedCandidates = 4;
+    session.duplicateCandidates = 3;
+    session.staleCandidates = 1;
+    session.routeBoundaryScoreMargin = 0.17F;
+    session.confidenceAbstained = true;
+    session.routeRepresentativeDistanceEvaluations = 7;
+    session.routeRepresentativeCountMax = 4;
+    session.addedCandidateHashes = {"hash-a", "hash-b"};
+    session.routedCandidateHashes = {"hash-c", "hash-a"};
+    session.candidateStructureEvidence.emplace("hash-a",
+                                               yams::search::TopologyCandidateStructureEvidence{
+                                                   .scaleAgreement = 0.8F,
+                                                   .overlapSupport = 0.4F,
+                                                   .persistenceSupport = 0.6F,
+                                                   .cohesionSupport = 0.9F,
+                                                   .bridgeSupport = 0.3F,
+                                                   .densitySupport = 0.7F,
+                                               });
+    session.candidateStructureEvidence.emplace("hash-c",
+                                               yams::search::TopologyCandidateStructureEvidence{
+                                                   .scaleAgreement = 0.2F,
+                                                   .overlapSupport = 0.2F,
+                                                   .persistenceSupport = 0.8F,
+                                                   .cohesionSupport = 0.3F,
+                                                   .bridgeSupport = 0.2F,
+                                                   .densitySupport = 0.6F,
+                                               });
+    session.timings.totalMicros = 100;
+    session.timings.loadMicros = 10;
+    session.timings.validateMicros = 20;
+    session.timings.requestPrepMicros = 30;
+    session.timings.routeMicros = 40;
+    session.timings.clusterLookupMicros = 50;
+    session.timings.docLookupMicros = 60;
+    session.timings.candidateInsertMicros = 70;
+
+    yams::search::SearchResponse response;
+    yams::search::recordTopologyRoutingDebug(response, config,
+                                             SearchEngineConfig::TopologyRoutingMode::HybridAssist,
+                                             session, "skip-reason", 42, false, true);
+
+    const auto& debug = response.debugStats;
+    CHECK(debug.at("topology_routing_mode") == "hybrid_assist");
+    CHECK(debug.at("topology_route_scoring_mode") == "size_weighted");
+    CHECK(debug.at("topology_sparse_dense_alpha") == std::to_string(0.25f));
+    CHECK(debug.at("topology_min_route_score") == std::to_string(0.5f));
+    CHECK(debug.at("topology_weak_query_enabled") == "1");
+    CHECK(debug.at("topology_weak_query_load_attempted") == "1");
+    CHECK(debug.at("topology_weak_query_load_succeeded") == "1");
+    CHECK(debug.at("topology_artifact_admitted") == "1");
+    CHECK(debug.at("topology_weak_query_applied") == "1");
+    CHECK(debug.at("topology_weak_query_narrow_applied") == "0");
+    CHECK(debug.at("topology_weak_query_skip_reason") == "skip-reason");
+    CHECK(debug.at("topology_weak_query_routes_rejected") == "1");
+    CHECK(debug.at("topology_weak_query_routed_clusters") == "2");
+    CHECK(debug.at("topology_route_available_count") == "3");
+    CHECK(debug.at("topology_route_boundary_score_margin") == std::to_string(0.17F));
+    CHECK(debug.at("topology_route_confidence_abstained") == "1");
+    CHECK(debug.at("topology_route_representative_distance_evaluations") == "7");
+    CHECK(debug.at("topology_route_representative_count_max") == "4");
+    CHECK(debug.at("topology_weak_query_routed_docs") == "5");
+    CHECK(debug.at("topology_weak_query_added_candidates") == "4");
+    CHECK(debug.at("topology_weak_query_duplicate_candidates") == "3");
+    CHECK(debug.at("topology_weak_query_stale_candidates") == "1");
+    CHECK(debug.at("topology_weak_query_added_candidate_hashes") == "hash-a\thash-b");
+    CHECK(debug.at("topology_weak_query_allowed_candidate_hashes") == "hash-a\thash-c");
+    CHECK(debug.at("topology_weak_query_total_candidates") == "42");
+    CHECK(debug.at("topology_structure_candidate_count") == "2");
+    CHECK(std::stof(debug.at("topology_structure_scale_agreement_mean")) == Catch::Approx(0.5F));
+    CHECK(std::stof(debug.at("topology_structure_overlap_support_mean")) == Catch::Approx(0.3F));
+    CHECK(std::stof(debug.at("topology_structure_persistence_support_mean")) ==
+          Catch::Approx(0.7F));
+    CHECK(std::stof(debug.at("topology_structure_cohesion_support_mean")) == Catch::Approx(0.6F));
+    CHECK(std::stof(debug.at("topology_structure_bridge_support_mean")) == Catch::Approx(0.25F));
+    CHECK(std::stof(debug.at("topology_structure_density_support_mean")) == Catch::Approx(0.65F));
+    CHECK(debug.at("topology_ready") == "1");
+    CHECK(debug.at("topology_artifacts_fresh") == "1");
+    CHECK(debug.at("topology_epoch") == "7");
+    CHECK(debug.at("topology_construction_fingerprint") == "0123456789abcdef");
+
+    const auto& timing = response.componentTimingMicros;
+    CHECK(timing.at("topology_weak_query") == 100);
+    CHECK(timing.at("topology_load") == 10);
+    CHECK(timing.at("topology_validate") == 20);
+    CHECK(timing.at("topology_request_prep") == 30);
+    CHECK(timing.at("topology_route") == 40);
+    CHECK(timing.at("topology_cluster_lookup") == 50);
+    CHECK(timing.at("topology_doc_lookup") == 60);
+    CHECK(timing.at("topology_candidate_insert") == 70);
+}
+
+TEST_CASE("recordTopologyRoutingDebug omits readiness and timing when load not attempted",
+          "[search][tracing][topology][catch2]") {
+    SearchEngineConfig config;
+    yams::search::TopologyRoutingSessionResult session;
+
+    yams::search::SearchResponse response;
+    yams::search::recordTopologyRoutingDebug(response, config,
+                                             SearchEngineConfig::TopologyRoutingMode::Disabled,
+                                             session, "disabled", 0);
+
+    const auto& debug = response.debugStats;
+    CHECK(debug.at("topology_weak_query_enabled") == "0");
+    CHECK(debug.at("topology_weak_query_load_attempted") == "0");
+    CHECK(debug.at("topology_artifact_admitted") == "0");
+    CHECK(debug.at("topology_weak_query_skip_reason") == "disabled");
+    CHECK_FALSE(debug.contains("topology_ready"));
+    CHECK_FALSE(debug.contains("topology_epoch"));
+    CHECK_FALSE(debug.contains("topology_weak_query_added_candidate_hashes"));
+    CHECK_FALSE(debug.contains("topology_weak_query_allowed_candidate_hashes"));
+    CHECK(response.componentTimingMicros.empty());
+}
+
+TEST_CASE("recordIndexReadinessDebug emits readiness flags for both pipelines",
+          "[search][tracing][catch2]") {
+    yams::search::IndexFreshnessSnapshot freshness;
+    freshness.lexicalReady = true;
+    freshness.vectorReady = false;
+    freshness.kgReady = true;
+    freshness.topologyReady = false;
+    freshness.topologyArtifactsFresh = true;
+    freshness.topologyEpoch = 12;
+
+    std::unordered_map<std::string, std::string> debug;
+    yams::search::recordIndexReadinessDebug(debug, freshness);
+
+    CHECK(debug.at("search_engine_ready") == "1");
+    CHECK(debug.at("vector_ready") == "0");
+    CHECK(debug.at("kg_ready") == "1");
+    CHECK(debug.at("topology_ready") == "0");
+    CHECK(debug.at("topology_artifacts_fresh") == "1");
+    CHECK(debug.at("topology_epoch") == "12");
+    CHECK(debug.size() == 6);
+}
+
+TEST_CASE("metric key constants are stable strings", "[search][tracing][catch2]") {
+    namespace metrics = yams::search::metrics;
+    CHECK(metrics::kSearchPipelineName == "search_pipeline_name");
+    CHECK(metrics::kTopologyArtifactAdmitted == "topology_artifact_admitted");
+    CHECK(metrics::kTopologyWeakQueryApplied == "topology_weak_query_applied");
+    CHECK(metrics::kTopologyWeakQueryAddedCandidates == "topology_weak_query_added_candidates");
+    CHECK(metrics::kTopologyWeakQueryDuplicateCandidates ==
+          "topology_weak_query_duplicate_candidates");
+    CHECK(metrics::kTopologyRouteBestScore == "topology_route_best_score");
+    CHECK(metrics::kTopologyRouteMeanAcceptedScore == "topology_route_mean_accepted_score");
+    CHECK(metrics::kTopologyRouteAcceptedCount == "topology_route_accepted_count");
+    CHECK(metrics::kTopologySeedCount == "topology_seed_count");
+    CHECK(metrics::kTopologySeedCoverageCount == "topology_seed_coverage_count");
 }

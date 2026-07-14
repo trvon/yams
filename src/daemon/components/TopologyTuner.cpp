@@ -7,7 +7,6 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
-#include <sstream>
 #include <yams/profiling.h>
 
 namespace yams::daemon {
@@ -16,36 +15,6 @@ namespace {
 
 constexpr double kGiniTarget = 0.4;
 constexpr double kIntraEdgeNormalizer = 1.0;
-
-std::size_t scaleClusterSize(std::size_t corpusDocCount, double factor) {
-    if (corpusDocCount == 0) {
-        return 2;
-    }
-    auto v = static_cast<double>(corpusDocCount);
-    auto computed = static_cast<std::size_t>(std::max(2.0, std::round(factor * v)));
-    return std::min(computed, std::max<std::size_t>(2, corpusDocCount / 2));
-}
-
-std::size_t logBaseTwoCeil(std::size_t corpusDocCount) {
-    if (corpusDocCount <= 2) {
-        return 2;
-    }
-    return static_cast<std::size_t>(std::ceil(std::log2(static_cast<double>(corpusDocCount))));
-}
-
-std::size_t sqrtSize(std::size_t corpusDocCount) {
-    if (corpusDocCount == 0) {
-        return 2;
-    }
-    return std::max<std::size_t>(
-        2, static_cast<std::size_t>(std::round(std::sqrt(static_cast<double>(corpusDocCount)))));
-}
-
-std::string makeHdbscanArmId(std::size_t minc, std::size_t minp, std::size_t hops) {
-    std::ostringstream os;
-    os << "hdbscan_minc" << minc << "_minp" << minp << "_hops" << hops;
-    return os.str();
-}
 
 double clamp01(double v) noexcept {
     if (v < 0.0)
@@ -81,46 +50,16 @@ double computeIntrinsicReward(const TopologyManager::RebuildStats& stats,
     return clamp01(1.0 - singletonPenalty - giantPenalty - giniPenalty + intraEdgeBonus);
 }
 
-std::vector<TopologyArm> defaultArmGrid(std::size_t corpusDocCount) {
+std::vector<TopologyArm> defaultArmGrid(std::size_t) {
     std::vector<TopologyArm> arms;
 
     // ConnectedComponents has no per-engine knobs today; one arm only.
-    arms.push_back(TopologyArm{/*id=*/"connected", /*engine=*/"connected", 0, 0, 0});
+    arms.push_back(TopologyArm{/*id=*/"connected", /*engine=*/"connected"});
 
     // Phase H Louvain modularity-greedy clustering on reciprocal-edge graph.
     // No per-engine knobs; reads minEdgeScore + reciprocalOnly from shared config.
-    arms.push_back(TopologyArm{/*id=*/"louvain", /*engine=*/"louvain", 0, 0, 0});
-
-    const std::size_t logN = logBaseTwoCeil(corpusDocCount);
-    const std::size_t sqrtN = sqrtSize(corpusDocCount);
-
-    const std::size_t clusterSizes[] = {
-        std::max<std::size_t>(2, logN), std::max<std::size_t>(2, logN + 2),
-        std::max<std::size_t>(2, sqrtN),
-        std::max<std::size_t>(2, scaleClusterSize(corpusDocCount, 0.05))};
-
-    for (auto minc : clusterSizes) {
-        const std::size_t minPointsCandidates[] = {2u, minc, std::max<std::size_t>(2, minc * 2)};
-        for (auto minp : minPointsCandidates) {
-            for (std::size_t hops = 0; hops <= 2; ++hops) {
-                arms.push_back(TopologyArm{/*id=*/makeHdbscanArmId(minc, minp, hops),
-                                           /*engine=*/"hdbscan", minc, minp, hops});
-            }
-        }
-    }
-
-    // Deduplicate arms with identical ids (small cluster sizes can collide
-    // when log2(n) == sqrt(n) on small corpora). Keep first occurrence.
-    std::vector<TopologyArm> deduped;
-    deduped.reserve(arms.size());
-    for (const auto& arm : arms) {
-        bool exists = std::any_of(deduped.begin(), deduped.end(),
-                                  [&](const TopologyArm& a) { return a.id == arm.id; });
-        if (!exists) {
-            deduped.push_back(arm);
-        }
-    }
-    return deduped;
+    arms.push_back(TopologyArm{/*id=*/"louvain", /*engine=*/"louvain"});
+    return arms;
 }
 
 TopologyTuner::TopologyTuner(TopologyTunerConfig cfg) : cfg_(cfg) {}
@@ -132,8 +71,7 @@ void TopologyTuner::setArms(std::vector<TopologyArm> arms) {
     std::vector<yams::search::TunerMAB::Arm> mabArms;
     mabArms.reserve(arms_.size());
     for (const auto& arm : arms_) {
-        mabArms.push_back(yams::search::TunerMAB::Arm{
-            arm.id, static_cast<double>(arm.hdbscanMinClusterSize), {}});
+        mabArms.push_back(yams::search::TunerMAB::Arm{arm.id, 0.0, {}});
     }
     mab_.setArms(std::move(mabArms));
 }
@@ -327,9 +265,6 @@ nlohmann::json TopologyTuner::toJson() const {
         armsJson.push_back(nlohmann::json{
             {"id", arm.id},
             {"engine", arm.engine},
-            {"hdbscan_min_cluster_size", arm.hdbscanMinClusterSize},
-            {"hdbscan_min_points", arm.hdbscanMinPoints},
-            {"feature_smoothing_hops", arm.featureSmoothingHops},
         });
     }
     j["arms"] = std::move(armsJson);

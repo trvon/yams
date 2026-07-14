@@ -11,6 +11,7 @@
 
 #include <yams/compat/unistd.h>
 #include <yams/config/config_helpers.h>
+#include <yams/config/config_migration.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 
@@ -231,58 +232,6 @@ preserve_sentences = 0
     CHECK(policy.config.overlap_percentage == 0.0);
     CHECK_FALSE(policy.config.use_token_count);
     CHECK_FALSE(policy.config.preserve_sentences);
-}
-
-TEST_CASE("ConfigResolver::resolveMetaPathRoutingPolicy reads [search.meta_path]",
-          "[daemon][components][config][metapath][catch2]") {
-    ConfigResolverFixture fx;
-
-    SECTION("defaults when section absent") {
-        auto configPath = fx.writeToml("config.toml", "[search]\n");
-        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
-
-        auto policy = ConfigResolver::resolveMetaPathRoutingPolicy();
-        CHECK_FALSE(policy.enable.has_value());
-        CHECK_FALSE(policy.seedK.has_value());
-        CHECK_FALSE(policy.boostAlpha.has_value());
-    }
-
-    SECTION("reads all keys") {
-        auto configPath = fx.writeToml("config.toml",
-                                       R"TOML(
-[search.meta_path]
-enable = true
-seed_k = 16
-hop_limit = 32
-boost_alpha = 0.25
-weight_sem = 0.9
-weight_call = 0.6
-weight_def = 0.4
-weight_entity = 0.2
-use_edge_weights = true
-min_seed_similarity = 0.35
-reciprocal_only = true
-seed_similarity = 0.05
-)TOML");
-        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
-
-        auto policy = ConfigResolver::resolveMetaPathRoutingPolicy();
-        REQUIRE(policy.enable.has_value());
-        CHECK(*policy.enable);
-        CHECK(policy.seedK == std::size_t{16});
-        CHECK(policy.hopLimit == std::size_t{32});
-        CHECK(policy.boostAlpha == Catch::Approx(0.25f));
-        CHECK(policy.weightSem == Catch::Approx(0.9f));
-        CHECK(policy.weightCall == Catch::Approx(0.6f));
-        CHECK(policy.weightDef == Catch::Approx(0.4f));
-        CHECK(policy.weightEntity == Catch::Approx(0.2f));
-        REQUIRE(policy.useEdgeWeights.has_value());
-        CHECK(*policy.useEdgeWeights);
-        CHECK(policy.minSeedSimilarity == Catch::Approx(0.35f));
-        REQUIRE(policy.reciprocalOnly.has_value());
-        CHECK(*policy.reciprocalOnly);
-        CHECK(policy.seedSimilarity == Catch::Approx(0.05f));
-    }
 }
 
 TEST_CASE("ConfigResolver::envTruthy correctly parses truthy values",
@@ -519,12 +468,48 @@ socket_path = "/tmp/test.sock"
 }
 
 TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver::resolveTopologyEnginePolicy reads routing representatives",
+                 "[daemon][components][config][topology][catch2]") {
+    auto configPath = writeToml("config.toml", R"TOML(
+[topology]
+engine = "connected"
+routing_representatives = 4
+boundary_spill = true
+boundary_spill_limit = 1
+boundary_spill_distance_ratio = 1.2
+boundary_spill_residual_penalty = 1.5
+)TOML");
+
+    EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+    auto policy = ConfigResolver::resolveTopologyEnginePolicy();
+
+    REQUIRE(policy.engine.has_value());
+    CHECK(*policy.engine == "connected");
+    REQUIRE(policy.routingRepresentativeCount.has_value());
+    CHECK(*policy.routingRepresentativeCount == 4);
+    REQUIRE(policy.boundarySpillEnabled.has_value());
+    CHECK(*policy.boundarySpillEnabled);
+    REQUIRE(policy.boundarySpillLimit.has_value());
+    CHECK(*policy.boundarySpillLimit == 1);
+    REQUIRE(policy.boundarySpillDistanceRatio.has_value());
+    CHECK(*policy.boundarySpillDistanceRatio == Catch::Approx(1.2));
+    REQUIRE(policy.boundarySpillResidualPenalty.has_value());
+    CHECK(*policy.boundarySpillResidualPenalty == Catch::Approx(1.5));
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
                  "ConfigResolver::resolveTopologyRoutingPolicy reads populated TOML block",
                  "[daemon][components][config][topology_routing][catch2]") {
     auto configPath = writeToml("config.toml", R"TOML(
 [search.topology]
 enable_weak_query_routing = true
+vector_policy = shadow
+min_clusters = 1
 max_clusters = 3
+max_seed_documents = 24
+representative_limit = 2
+adaptive_probe_score_gap = 0.07
+narrow_min_boundary_margin = 0.03
 max_docs = 42
 medoid_boost = 0.2
 rrf_k = 33
@@ -535,8 +520,20 @@ rrf_k = 33
 
     REQUIRE(policy.enableWeakQueryRouting.has_value());
     CHECK(*policy.enableWeakQueryRouting == true);
+    REQUIRE(policy.vectorPolicy.has_value());
+    CHECK(*policy.vectorPolicy == "shadow");
     REQUIRE(policy.maxClusters.has_value());
     CHECK(*policy.maxClusters == 3U);
+    REQUIRE(policy.minClusters.has_value());
+    CHECK(*policy.minClusters == 1U);
+    REQUIRE(policy.maxSeedDocuments.has_value());
+    CHECK(*policy.maxSeedDocuments == 24U);
+    REQUIRE(policy.representativeLimit.has_value());
+    CHECK(*policy.representativeLimit == 2U);
+    REQUIRE(policy.adaptiveProbeScoreGap.has_value());
+    CHECK(*policy.adaptiveProbeScoreGap == Catch::Approx(0.07F));
+    REQUIRE(policy.narrowMinBoundaryMargin.has_value());
+    CHECK(*policy.narrowMinBoundaryMargin == Catch::Approx(0.03F));
     REQUIRE(policy.maxDocs.has_value());
     CHECK(*policy.maxDocs == 42U);
     REQUIRE(policy.medoidBoost.has_value());
@@ -544,6 +541,32 @@ rrf_k = 33
     CHECK(*policy.medoidBoost < 0.21f);
     REQUIRE(policy.rrfK.has_value());
     CHECK(*policy.rrfK == 33.0f);
+}
+
+TEST_CASE("Generated config keeps topology-assisted hybrid search as the product default",
+          "[config][search][topology][catch2]") {
+    const auto defaults = yams::config::ConfigMigrator::getLatestConfigDefaults();
+    const auto topologyIt = defaults.find("search.topology");
+    REQUIRE(topologyIt != defaults.end());
+
+    const auto& topology = topologyIt->second;
+    CHECK(topology.at("mode") == "hybrid_assist");
+    CHECK(topology.at("vector_policy") == "shadow");
+    CHECK_FALSE(topology.contains("enable_weak_query_routing"));
+    CHECK_FALSE(topology.contains("routing_variant"));
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture, "ConfigResolver reads topology evidence weight",
+                 "[daemon][components][config][topology_routing][catch2]") {
+    auto configPath = writeToml("config.toml", R"TOML(
+[search.topology]
+evidence_weight = 0.03
+)TOML");
+
+    EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+    auto topology = ConfigResolver::resolveTopologyRoutingPolicy();
+    REQUIRE(topology.evidenceWeight.has_value());
+    CHECK(*topology.evidenceWeight == Catch::Approx(0.03F));
 }
 
 TEST_CASE_METHOD(ConfigResolverFixture,

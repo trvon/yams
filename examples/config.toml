@@ -504,33 +504,36 @@ include_debug_scores = false
 parallel_search = true
 
 [search.topology]
-# Topology-aware weak-query routing (medoid/bridge cluster boosts).
-# Each key can be overridden at runtime via YAMS_SEARCH_TOPOLOGY_* env vars.
-# Route weak queries through cluster medoids/bridges
-enable_weak_query_routing = false
+# Product-default topology context around hybrid retrieval. Use "disabled" only as a scientific
+# control or explicit operator override.
+mode = "hybrid_assist"
+# Observe the routed projection while preserving the global ANN result set.
+vector_policy = "shadow"
+# Minimum selected-cluster prefix when adaptive routing is enabled
+min_clusters = 1
 # Max number of clusters considered when routing a weak query
 max_clusters = 2
+# Cap ranked lexical documents used as sparse routing evidence
+max_seed_documents = 32
+# Maximum dense representatives evaluated per cluster (0 = all stored representatives)
+representative_limit = 0
+# Grow the selected prefix while route scores remain this close to the best (0 = fixed max_clusters)
+adaptive_probe_score_gap = 0.0
+# Abstain from narrowing when the selected/excluded score boundary is smaller (0 = disabled)
+narrow_min_boundary_margin = 0.20
 # Max number of candidate docs pulled from routed clusters
 max_docs = 64
 # Score boost applied to medoid documents in routed clusters
 medoid_boost = 0.05
-# Score boost applied to bridge documents linking routed clusters
-bridge_boost = 0.03
-# Score multiplier applied to baseline (non-routed) candidates when routing fires
-routed_base_multiplier = 0.85
-# Routing variant: "baseline" | "vector_seed" | "kg_walk" | "score_replace" | "medoid_promote"
-routing_variant = "baseline"
-# Topology integration pattern for consuming routed clusters during hybrid search:
-#   "boost"         — apply medoid/bridge boost (default, matches baseline)
-#   "recall_expand" — disable boost; expand vector recall via routed-cluster members
-#   "rrf"           — keep boost but force RECIPROCAL_RANK fusion with rrf_k below
-#   "both"          — recall_expand + rrf combined
-integration = "boost"
-# Per-cluster member cap applied when integration = recall_expand / both (0 = unlimited)
-recall_expand_per_cluster = 0
-# RRF k applied when integration = rrf / both (falls back to [search].rrf_k otherwise)
-rrf_k = 60.0
-# Cluster-route scoring rule for StableClusterTopologyRouter.
+# Maximum additive topology evidence applied during fusion
+evidence_weight = 0.02
+# Sparse/dense route score blend (0 = sparse only, 1 = dense only)
+sparse_dense_alpha = 0.5
+# Reject routes below this score
+min_route_score = 0.0
+# RRF k used by hybrid fusion
+rrf_k = 12.0
+# Cluster-route scoring rule for SparseGuidedClusterRouter.
 #   "current"        — persistence + 0.5*cohesion + matchedSeed + memberCount/40 (default)
 #   "size_weighted"  — current * 1/(1+log(size)); de-emphasizes giant clusters
 #   "seed_coverage"  — rank by fraction of query seeds covered by each cluster
@@ -539,27 +542,20 @@ route_scoring = "current"
 [topology]
 # Cluster-formation engine used by the background topology rebuild.
 #   "connected" — reciprocal-edge connected components (default, baseline)
-#   "hdbscan"   — density-based clustering (McInnes/Healy 2017) via hdbscan-cpp
+#   "louvain"   — modularity-greedy communities on the reciprocal-edge graph
+#   "kmeans"    — embedding-space coarse quantizer
 engine = "connected"
-# HDBSCAN minimum points for core-distance (0 = auto from corpus size).
-hdbscan_min_points = 0
-# HDBSCAN minimum cluster size (0 = auto from corpus size).
-hdbscan_min_cluster_size = 0
-# SGC feature propagation hops applied to embeddings before HDBSCAN runs
-# (Wu 2019, X' = S_hat^K * X). 0 disables smoothing; 2-3 is typical.
-# Ignored by the "connected" engine (which uses graph topology only).
-feature_smoothing_hops = 0
 
 [topology.tuner]
 # Phase G: per-corpus adaptive topology tuner (UCB1 multi-armed bandit over
-# {engine, HDBSCAN params, SGC hops}). Each successful rebuild produces an
+# supported engines). Each successful rebuild produces an
 # intrinsic-quality reward (singletonRatio, giantClusterRatio, gini, intraEdge);
 # the bandit learns which arm fits the corpus shape best. No relevance labels
 # required. Off by default.
 #
 # Tuning recipes — uncomment one block to activate, leaving the others as
-# documentation. Enabling the tuner overrides the static [topology] knobs above
-# whenever an arm is pulled.
+# documentation. Enabling the tuner overrides the static engine above whenever
+# an arm is pulled.
 #
 # off (default): static [topology] knobs win; bandit dormant.
 enabled = false

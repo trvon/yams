@@ -58,6 +58,18 @@ TEST_CASE("topology::resolveFactoryKey normalizes unknown inputs",
     CHECK(resolveFactoryKey("not_registered") == std::string_view{"connected"});
 }
 
+TEST_CASE("topology::makeEngine resolves the kmeans key to the k-means engine",
+          "[topology][factory][kmeans][catch2]") {
+    CHECK(resolveFactoryKey("kmeans") == std::string_view{"kmeans"});
+    auto engine = makeEngine("kmeans");
+    REQUIRE(engine != nullptr);
+    yams::topology::TopologyBuildConfig cfg;
+    std::vector<yams::topology::TopologyDocumentInput> empty;
+    auto result = engine->buildArtifacts(empty, cfg);
+    REQUIRE(result);
+    CHECK(result.value().algorithm == "kmeans_v1");
+}
+
 TEST_CASE("topology::listAlgorithms includes the default key",
           "[topology][factory][p3_1][catch2]") {
     const auto algos = listAlgorithms();
@@ -112,10 +124,8 @@ TEST_CASE("topology::makeEngine builds artifacts for the Axis-8 engines",
     yams::topology::TopologyBuildConfig cfg;
     cfg.reciprocalOnly = true;
     cfg.inputKind = yams::topology::TopologyInputKind::Hybrid;
-    cfg.hdbscanMinPoints = 2;
-    cfg.hdbscanMinClusterSize = 2;
 
-    for (const char* key : {"connected", "hdbscan"}) {
+    for (const char* key : {"connected", "kmeans"}) {
         auto engine = makeEngine(key);
         REQUIRE(engine != nullptr);
         auto result = engine->buildArtifacts(docs, cfg);
@@ -140,6 +150,70 @@ TEST_CASE("topology::applySGCSmoothing hops=0 is a no-op", "[topology][sgc][catc
         for (std::size_t d = 0; d < docs[i].embedding.size(); ++d) {
             CHECK(docs[i].embedding[d] == before[i].embedding[d]);
         }
+    }
+}
+
+TEST_CASE("topology::applySGCSmoothing preserves topology document identity",
+          "[topology][sgc][catch2]") {
+    auto docs = buildTwoClusterFixture();
+    for (std::size_t i = 0; i < docs.size(); ++i) {
+        docs[i].filePath = "fixture/" + docs[i].documentHash + ".txt";
+        docs[i].metadata.emplace("ordinal", std::to_string(i));
+    }
+    const auto before = docs;
+    yams::topology::TopologyBuildConfig cfg;
+    cfg.reciprocalOnly = true;
+
+    yams::topology::applySGCSmoothing(docs, cfg, 1);
+
+    REQUIRE(docs.size() == before.size());
+    for (std::size_t i = 0; i < docs.size(); ++i) {
+        CAPTURE(i);
+        CHECK(docs[i].documentHash == before[i].documentHash);
+        CHECK(docs[i].filePath == before[i].filePath);
+        CHECK(docs[i].metadata == before[i].metadata);
+        REQUIRE(docs[i].neighbors.size() == before[i].neighbors.size());
+        for (std::size_t j = 0; j < docs[i].neighbors.size(); ++j) {
+            CHECK(docs[i].neighbors[j].documentHash == before[i].neighbors[j].documentHash);
+            CHECK(docs[i].neighbors[j].score == before[i].neighbors[j].score);
+            CHECK(docs[i].neighbors[j].reciprocal == before[i].neighbors[j].reciprocal);
+        }
+        CHECK(docs[i].embedding.size() == before[i].embedding.size());
+    }
+}
+
+TEST_CASE("topology::applySGCSmoothing preserves identity for ragged inputs",
+          "[topology][sgc][catch2]") {
+    auto docs = buildTwoClusterFixture();
+    docs[0].metadata.emplace("kind", "reference");
+    docs[1].embedding.clear();
+    docs[2].embedding = {0.9F, 0.1F};
+    docs[3].neighbors.push_back({.documentHash = "missing", .score = 0.95F, .reciprocal = true});
+    docs.push_back(yams::topology::TopologyDocumentInput{.documentHash = "",
+                                                         .filePath = "/repo/unhashed.txt",
+                                                         .embedding = {42.0F},
+                                                         .neighbors = {},
+                                                         .metadata = {{"kind", "unhashed"}}});
+
+    const auto before = docs;
+    yams::topology::TopologyBuildConfig cfg;
+    cfg.reciprocalOnly = true;
+
+    yams::topology::applySGCSmoothing(docs, cfg, 3);
+
+    REQUIRE((docs.size() == before.size()));
+    for (std::size_t i = 0; i < docs.size(); ++i) {
+        CAPTURE(i);
+        CHECK((docs[i].documentHash == before[i].documentHash));
+        CHECK((docs[i].filePath == before[i].filePath));
+        CHECK((docs[i].metadata == before[i].metadata));
+        REQUIRE((docs[i].neighbors.size() == before[i].neighbors.size()));
+        for (std::size_t j = 0; j < docs[i].neighbors.size(); ++j) {
+            CHECK((docs[i].neighbors[j].documentHash == before[i].neighbors[j].documentHash));
+            CHECK((docs[i].neighbors[j].score == before[i].neighbors[j].score));
+            CHECK((docs[i].neighbors[j].reciprocal == before[i].neighbors[j].reciprocal));
+        }
+        CHECK((docs[i].embedding.size() == before[i].embedding.size()));
     }
 }
 
@@ -182,38 +256,4 @@ TEST_CASE("topology::applySGCSmoothing shrinks intra-cluster variance", "[topolo
 
     CHECK(afterClusterA < beforeClusterA);
     CHECK(afterClusterB < beforeClusterB);
-}
-
-TEST_CASE("topology::hdbscan recovers two dense embedding clusters",
-          "[topology][factory][axis8][hdbscan][catch2]") {
-    const auto docs = buildTwoClusterFixture();
-    yams::topology::TopologyBuildConfig cfg;
-    cfg.reciprocalOnly = true;
-    cfg.inputKind = yams::topology::TopologyInputKind::Hybrid;
-    cfg.hdbscanMinPoints = 2;
-    cfg.hdbscanMinClusterSize = 2;
-
-    auto engine = makeEngine("hdbscan");
-    REQUIRE(engine != nullptr);
-    auto result = engine->buildArtifacts(docs, cfg);
-    REQUIRE(result);
-    const auto& batch = result.value();
-    CAPTURE(batch.algorithm);
-    CHECK(batch.algorithm == "hdbscan_v1");
-    CHECK(batch.memberships.size() == docs.size());
-
-    std::unordered_map<std::string, std::string> clusterOf;
-    for (const auto& m : batch.memberships) {
-        clusterOf.emplace(m.documentHash, m.clusterId);
-    }
-    REQUIRE(clusterOf.size() == docs.size());
-    for (const char* h : {"b", "c"}) {
-        CAPTURE(h);
-        CHECK(clusterOf.at(h) == clusterOf.at("a"));
-    }
-    for (const char* h : {"e", "f"}) {
-        CAPTURE(h);
-        CHECK(clusterOf.at(h) == clusterOf.at("d"));
-    }
-    CHECK(clusterOf.at("a") != clusterOf.at("d"));
 }

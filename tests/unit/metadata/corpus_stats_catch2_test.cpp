@@ -794,11 +794,16 @@ TEST_CASE("SearchTuner: biomedical prose corpus selects SCIENTIFIC profile",
     SearchTuner tuner(stats);
     CHECK(tuner.currentState() == TuningState::SCIENTIFIC);
 
-    // SCIENTIFIC profile should apply lower similarity threshold and sub-phrase rescoring
+    // SCIENTIFIC intentionally reuses the product MIXED_PRECISION package with
+    // structure-only sources zeroed for flat BEIR-style corpora. Keep the default
+    // unfiltered vector threshold and do not resurrect the historical aggressive
+    // scientific knobs that regressed quality.
     auto config = tuner.getConfig();
-    CHECK(config.similarityThreshold == Approx(0.30f).margin(0.01f));
-    CHECK(config.enableSubPhraseRescoring == true);
-    CHECK(config.rerankAnchoredMinRelativeScore == Approx(0.50f).margin(0.01f));
+    CHECK(config.similarityThreshold == Approx(0.05f).margin(0.01f));
+    CHECK(config.enableSubPhraseRescoring == false);
+    CHECK(config.pathTreeWeight == Approx(0.0f).margin(0.001f));
+    CHECK(config.kgWeight == Approx(0.0f).margin(0.001f));
+    CHECK(config.tagWeight == Approx(0.0f).margin(0.001f));
 }
 
 TEST_CASE("SearchTuner: code corpus still selects code profile after CorpusStats fix",

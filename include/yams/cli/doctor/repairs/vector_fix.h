@@ -1,8 +1,8 @@
 #pragma once
 
 #include <cstddef>
-#include <ostream>
 #include <optional>
+#include <ostream>
 #include <string>
 
 namespace yams::cli {
@@ -27,7 +27,7 @@ public:
         std::string error;
     };
 
-    explicit VectorFixRepair(YamsCLI* cli, bool jsonOutput = false);
+    explicit VectorFixRepair(YamsCLI* cli);
 
     /// Run the detection + fix (mutates config when mismatch is found).
     Result execute(const DoctorContext& ctx);
@@ -37,7 +37,6 @@ public:
 
 private:
     YamsCLI* cli_{nullptr};
-    bool jsonOutput_{false};
 };
 
 } // namespace yams::cli::doctor

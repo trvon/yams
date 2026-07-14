@@ -707,7 +707,7 @@ private:
             checkInstalledModels(cli_);
             checkVec0Module(); // Check vec0 module even when daemon is down
             checkEmbeddingDimMismatch(cachedStatus);
-            checkDbIntegrity(cachedStatus);
+            checkDbIntegrity();
             checkOrphanSummary(cachedStatus);
             checkStorageBlob(cachedStatus);
             checkRefCount();
@@ -716,7 +716,7 @@ private:
         checkInstalledModels(cli_);
         checkVec0Module(); // Check vec0 module availability and schema
         checkEmbeddingDimMismatch(cachedStatus);
-        checkDbIntegrity(cachedStatus);
+        checkDbIntegrity();
         checkOrphanSummary(cachedStatus);
         checkEmbeddingHealth(cachedStatus);
         checkStorageBlob(cachedStatus);
@@ -758,7 +758,7 @@ private:
         doctor::DimConsistencyCheck::render(std::cout, result);
     }
 
-    void checkDbIntegrity(std::optional<yams::daemon::StatusResponse>& cachedStatus) {
+    void checkDbIntegrity() {
         doctor::DoctorContext ctx(cli_);
         doctor::DbIntegrityCheck check;
         auto result = check.execute(ctx);

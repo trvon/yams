@@ -293,6 +293,8 @@ struct MetricsSnapshot {
     std::uint64_t dbWritePoolTotalWaitMicros{0};
     std::size_t dbWritePoolTimeoutCount{0};
     std::size_t dbWritePoolFailedAcquisitions{0};
+    std::uint64_t dbWritePoolSlowHolders{0};
+    std::uint64_t dbWritePoolMaxHolderMicros{0};
 
     bool dbReadPoolAvailable{false};
     std::size_t dbReadPoolTotalConnections{0};
@@ -303,6 +305,8 @@ struct MetricsSnapshot {
     std::uint64_t dbReadPoolTotalWaitMicros{0};
     std::size_t dbReadPoolTimeoutCount{0};
     std::size_t dbReadPoolFailedAcquisitions{0};
+    std::uint64_t dbReadPoolSlowHolders{0};
+    std::uint64_t dbReadPoolMaxHolderMicros{0};
 
     // WorkCoordinator metrics
     std::size_t workCoordinatorActiveWorkers{0};

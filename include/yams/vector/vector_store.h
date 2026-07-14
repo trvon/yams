@@ -76,4 +76,30 @@ public:
     virtual Result<void> rollbackTransaction() = 0;
 };
 
+/// Optional per-call diagnostics seam. Backends implement this when they can
+/// report work without global counters or cross-request races.
+class IDiagnosticVectorStore {
+public:
+    virtual ~IDiagnosticVectorStore() = default;
+    virtual Result<std::vector<VectorRecord>>
+    searchSimilarWithDiagnostics(const std::vector<float>& query_embedding, size_t k,
+                                 float similarity_threshold,
+                                 const std::optional<std::string>& document_hash,
+                                 const std::unordered_set<std::string>& candidate_hashes,
+                                 const std::map<std::string, std::string>& metadata_filters,
+                                 VectorSearchDiagnostics& diagnostics) = 0;
+};
+
+/// Optional explicit exhaustive candidate-scoring seam. Keeping this separate from searchSimilar
+/// prevents filtered ANN backends from silently changing exact rerank/control semantics.
+class IExactCandidateVectorStore {
+public:
+    virtual ~IExactCandidateVectorStore() = default;
+    virtual Result<std::vector<VectorRecord>>
+    searchExactCandidatesWithDiagnostics(const std::vector<float>& query_embedding, size_t k,
+                                         float similarity_threshold,
+                                         const std::unordered_set<std::string>& candidate_hashes,
+                                         VectorSearchDiagnostics& diagnostics) = 0;
+};
+
 } // namespace yams::vector

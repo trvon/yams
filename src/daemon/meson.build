@@ -5,6 +5,8 @@ protobuf_dep = dependency('protobuf')
 # Build yams_onnx_resource shared library first (contains OnnxConcurrencyRegistry)
 subdir('resource')
 yams_onnx_resource_dep = dependency('yams_onnx_resource')
+yams_plugin_runtime_dep = dependency('yams_plugin_runtime')
+yams_write_coordinator_dep = dependency('yams_write_coordinator')
 
 # Tracy profiling support (optional, controlled by -Denable-profiling=true)
 enable_profiling = get_option('enable-profiling')
@@ -169,11 +171,11 @@ yams_daemon_lib = static_library('yams_daemon',
     'components/SearchEngineManager.cpp',
     'components/SearchComponent.cpp',
     'components/GraphComponent.cpp',
+    'components/metadata_graph_bridge.cpp',
     'components/PostIngestQueue.cpp',
     'components/embed_preparer.cpp',
     'components/IOCoordinator.cpp',
     'components/EmbeddingService.cpp',
-    'components/WriteCoordinator.cpp',
     'components/TuningManager.cpp',
     'components/TuneAdvisor.cpp',
     'components/GradientLimiter.cpp',
@@ -190,12 +192,9 @@ yams_daemon_lib = static_library('yams_daemon',
     'resource/mock_model_provider.cpp',
     'resource/simeon_model_provider.cpp',
     'components/dispatch_utils.cpp',
-    'resource/abi_model_provider_adapter.cpp',
     'resource/abi_entity_extractor_adapter.cpp',
     'resource/abi_symbol_extractor_adapter.cpp',
-    'resource/abi_plugin_loader.cpp',
     'resource/plugin_host.cpp',
-    'resource/plugin_host_services_shim.cpp',
     'resource/external_plugin_host.cpp',
     'resource/plugin_content_extractor_adapter.cpp',
     'resource/external_entity_provider_adapter.cpp',
@@ -237,6 +236,8 @@ yams_daemon_lib = static_library('yams_daemon',
     dependency('yams_topology'),
     yams_daemon_client_dep,
     yams_onnx_resource_dep,
+    yams_plugin_runtime_dep,
+    yams_write_coordinator_dep,
     # Direct Boost dependency required because daemon sources
     # various IPC components) include boost/asio headers directly. Relying on the
     # daemon_client's transitive usage isn't sufficient for include paths at compile time.
@@ -267,6 +268,30 @@ yams_daemon_dep = declare_dependency(
 )
 
 meson.override_dependency('yams_daemon', yams_daemon_dep)
+
+# Optional embedded/in-process daemon client transport. Keep this out of
+# yams_daemon_client so CLI/MCP socket clients do not pull the full daemon.
+yams_daemon_client_embedded_lib = static_library('yams_daemon_client_embedded',
+  [
+    'client/in_process_transport.cpp',
+  ],
+  dependencies: [
+    yams_daemon_client_dep,
+    yams_daemon_dep,
+    boost_dep,
+    dependency('spdlog'),
+  ],
+  include_directories: [include_directories('../../include'), include_directories('.')],
+  install: false,
+)
+
+yams_daemon_client_embedded_dep = declare_dependency(
+  link_with: yams_daemon_client_embedded_lib,
+  include_directories: [include_directories('../../include'), include_directories('.')],
+  dependencies: [yams_daemon_client_dep, yams_daemon_dep],
+)
+
+meson.override_dependency('yams_daemon_client_embedded', yams_daemon_client_embedded_dep)
 
 # Set platform-specific rpath for daemon
 # macOS uses @executable_path, Linux uses $ORIGIN

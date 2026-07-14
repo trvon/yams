@@ -21,7 +21,7 @@ namespace yams::search {
 //
 // Design constraints (from the tuning plan):
 //   * Never authoritative until the rule-based EWMA tuner reports
-//     `SearchTuner::hasConverged()`.
+//     `SearchTuner::hasConverged(minObservations)`.
 //   * Reward source is selectable: user-labeled (primary) or proxy (fallback).
 //   * Persistent state survives restarts via JSON; schema mismatch is
 //     non-fatal (state is discarded, MAB resets, EWMA continues unaffected).

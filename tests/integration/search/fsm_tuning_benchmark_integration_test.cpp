@@ -314,13 +314,17 @@ TEST_CASE("FSM Tuning Integration: SearchTuner state transitions",
 
         SearchTuner tuner(stats);
 
-        // Scientific corpus: prose-dominant, flat structure, no tags
+        // Scientific corpus: prose-dominant, flat structure, no tags. The profile
+        // intentionally reuses the product MIXED_PRECISION text/vector package and
+        // zeros structure-only sources instead of applying the old aggressive
+        // scientific overrides.
         CHECK(tuner.currentState() == TuningState::SCIENTIFIC);
-        CHECK(tuner.getRrfK() == 12);
-        CHECK(tuner.getParams().weights.text.value == Approx(0.50f));
-        CHECK(tuner.getParams().weights.simeonText.value == Approx(0.10f));
-        CHECK(tuner.getParams().weights.vector.value == Approx(0.35f));
-        CHECK(tuner.getParams().weights.tag.value == Approx(0.00f));
+        CHECK((tuner.getRrfK() == 45));
+        CHECK((tuner.getParams().weights.text.value == Approx(0.61538f).margin(0.0001f)));
+        CHECK((tuner.getParams().weights.simeonText.value == Approx(0.00f).margin(0.0001f)));
+        CHECK((tuner.getParams().weights.vector.value == Approx(0.38462f).margin(0.0001f)));
+        CHECK((tuner.getParams().weights.kg.value == Approx(0.00f).margin(0.0001f)));
+        CHECK((tuner.getParams().weights.tag.value == Approx(0.00f).margin(0.0001f)));
     }
 
     SECTION("Large mixed corpus") {
@@ -335,8 +339,8 @@ TEST_CASE("FSM Tuning Integration: SearchTuner state transitions",
         SearchTuner tuner(stats);
 
         // Mixed content, neither code nor prose dominant
-        CHECK(tuner.currentState() == TuningState::MIXED);
-        CHECK(tuner.getRrfK() == 45);
+        CHECK((tuner.currentState() == TuningState::MIXED));
+        CHECK((tuner.getRrfK() == 45));
     }
 
     SECTION("Minimal corpus") {
@@ -350,10 +354,11 @@ TEST_CASE("FSM Tuning Integration: SearchTuner state transitions",
 
         SearchTuner tuner(stats);
 
-        // Very small corpus should use MINIMAL state
-        CHECK(tuner.currentState() == TuningState::MINIMAL);
-        CHECK(tuner.getRrfK() == 15);
-        CHECK(tuner.getParams().weights.text.value == Approx(0.55f));
+        // Very small corpus should use MINIMAL state. Dead-source gates renormalize
+        // the default MINIMAL weights after disabling unavailable structure signals.
+        CHECK((tuner.currentState() == TuningState::MINIMAL));
+        CHECK((tuner.getRrfK() == 15));
+        CHECK((tuner.getParams().weights.text.value == Approx(0.56701f).margin(0.0001f)));
     }
 }
 
@@ -375,19 +380,19 @@ TEST_CASE("FSM Tuning Integration: TunedParams apply to config",
     auto config = tuner.getConfig();
 
     // Verify config has tuned weights applied
-    CHECK(config.textWeight == tuner.getParams().weights.text.value);
-    CHECK(config.vectorWeight == tuner.getParams().weights.vector.value);
-    CHECK(config.pathTreeWeight == tuner.getParams().weights.pathTree.value);
-    CHECK(config.kgWeight == tuner.getParams().weights.kg.value);
-    CHECK(config.tagWeight == tuner.getParams().weights.tag.value);
-    CHECK(config.metadataWeight == tuner.getParams().weights.metadata.value);
+    CHECK((config.textWeight == tuner.getParams().weights.text.value));
+    CHECK((config.vectorWeight == tuner.getParams().weights.vector.value));
+    CHECK((config.pathTreeWeight == tuner.getParams().weights.pathTree.value));
+    CHECK((config.kgWeight == tuner.getParams().weights.kg.value));
+    CHECK((config.tagWeight == tuner.getParams().weights.tag.value));
+    CHECK((config.metadataWeight == tuner.getParams().weights.metadata.value));
 
     // Verify JSON serialization for observability
     auto json = tuner.toJson();
     CHECK(json.contains("state"));
     CHECK(json.contains("params"));
     CHECK(json.contains("reason"));
-    CHECK(json["state"].get<std::string>() == tuningStateToString(tuner.currentState()));
+    CHECK((json["state"].get<std::string>() == tuningStateToString(tuner.currentState())));
 }
 
 // =============================================================================
@@ -409,10 +414,10 @@ TEST_CASE("FSM Tuning Integration: BenchmarkComparison detection",
 
         auto comparison = InternalBenchmark::compare(baseline, current, 0.05f);
 
-        CHECK(comparison.isImprovement == true);
-        CHECK(comparison.isRegression == false);
-        CHECK(comparison.mrrDelta == Approx(0.15f));
-        CHECK(comparison.recallDelta == Approx(0.15f));
+        CHECK((comparison.isImprovement == true));
+        CHECK((comparison.isRegression == false));
+        CHECK((comparison.mrrDelta == Approx(0.15f)));
+        CHECK((comparison.recallDelta == Approx(0.15f)));
         CHECK_THAT(comparison.summary, ContainsSubstring("IMPROVEMENT"));
     }
 
@@ -429,9 +434,9 @@ TEST_CASE("FSM Tuning Integration: BenchmarkComparison detection",
 
         auto comparison = InternalBenchmark::compare(baseline, current, 0.05f);
 
-        CHECK(comparison.isRegression == true);
-        CHECK(comparison.isImprovement == false);
-        CHECK(comparison.mrrDelta == Approx(-0.15f));
+        CHECK((comparison.isRegression == true));
+        CHECK((comparison.isImprovement == false));
+        CHECK((comparison.mrrDelta == Approx(-0.15f)));
         CHECK_THAT(comparison.summary, ContainsSubstring("REGRESSION"));
     }
 
@@ -448,9 +453,9 @@ TEST_CASE("FSM Tuning Integration: BenchmarkComparison detection",
 
         auto comparison = InternalBenchmark::compare(baseline, current, 0.05f);
 
-        CHECK(comparison.isRegression == false);
-        CHECK(comparison.isImprovement == false);
-        CHECK(comparison.mrrDelta == Approx(0.02f));
+        CHECK((comparison.isRegression == false));
+        CHECK((comparison.isImprovement == false));
+        CHECK((comparison.mrrDelta == Approx(0.02f)));
     }
 
     SECTION("Handles first run (no baseline)") {
@@ -466,9 +471,9 @@ TEST_CASE("FSM Tuning Integration: BenchmarkComparison detection",
         auto comparison = InternalBenchmark::compare(baseline, current, 0.05f);
 
         // First run should not be flagged as regression
-        CHECK(comparison.isRegression == false);
+        CHECK((comparison.isRegression == false));
         // Could be flagged as improvement from 0
-        CHECK(comparison.mrrDelta == Approx(0.75f));
+        CHECK((comparison.mrrDelta == Approx(0.75f)));
     }
 }
 

@@ -448,6 +448,14 @@ public:
                         "list: socket transport unavailable; using in-process transport: {}",
                         prepared.plan.fallbackReason);
                 }
+                if (prepared.plan.resolvedMode == yams::daemon::ClientTransportMode::InProcess) {
+                    spdlog::info("list: socket-only client cannot service in-process plan; using "
+                                 "local services");
+                    if (spinner) {
+                        spinner->stop();
+                    }
+                    return executeWithServices(&spinner);
+                }
 
                 yams::app::services::RetrievalService rsvc;
                 auto res = rsvc.list(dreq, prepared.options);

@@ -171,7 +171,14 @@ public:
         if (options_.configPath) {
             previousYamsConfig_ = std::getenv("YAMS_CONFIG") ? std::getenv("YAMS_CONFIG") : "";
             hadYamsConfig_ = std::getenv("YAMS_CONFIG") != nullptr;
+            previousYamsConfigPath_ =
+                std::getenv("YAMS_CONFIG_PATH") ? std::getenv("YAMS_CONFIG_PATH") : "";
+            hadYamsConfigPath_ = std::getenv("YAMS_CONFIG_PATH") != nullptr;
             setenv("YAMS_CONFIG", options_.configPath->string().c_str(), 1);
+            // ConfigResolver policies use YAMS_CONFIG_PATH as their highest-priority
+            // source. Keep it aligned with the explicit harness config so an ambient
+            // developer config cannot silently change a benchmark/test arm.
+            setenv("YAMS_CONFIG_PATH", options_.configPath->string().c_str(), 1);
             configEnvOwned_ = true;
             cfg.configFilePath = *options_.configPath;
         }
@@ -393,9 +400,16 @@ public:
                 } else {
                     unsetenv("YAMS_CONFIG");
                 }
+                if (hadYamsConfigPath_) {
+                    setenv("YAMS_CONFIG_PATH", previousYamsConfigPath_.c_str(), 1);
+                } else {
+                    unsetenv("YAMS_CONFIG_PATH");
+                }
                 configEnvOwned_ = false;
                 hadYamsConfig_ = false;
+                hadYamsConfigPath_ = false;
                 previousYamsConfig_.clear();
+                previousYamsConfigPath_.clear();
             }
 
             // Reset daemon so it can be recreated on next start()
@@ -528,10 +542,12 @@ private:
     std::filesystem::path originalCwd_;
     std::string originalXdgState_;
     std::string previousYamsConfig_;
+    std::string previousYamsConfigPath_;
     bool isolateStateActive_ = false;
     bool externalDataDir_ = false;
     bool configEnvOwned_ = false;
     bool hadYamsConfig_ = false;
+    bool hadYamsConfigPath_ = false;
     Options options_;
 };
 

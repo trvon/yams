@@ -5,7 +5,7 @@
 **Epic**: yams-eg1l
 **Task**: yams-7nib
 
-> **Implementation note (2026-06-26):** This document reflects the anchor-strategy era of the fusion stack. Current code no longer exposes `TEXT_ANCHOR`, `DENSE_FIRST`, or `CONCEPT_ANCHOR`; the active `FusionStrategy` enum is smaller (`WEIGHTED_SUM`, `RECIPROCAL_RANK`, `WEIGHTED_RECIPROCAL`, `COMB_MNZ`, `CONVEX`, `WEIGHTED_LINEAR_ZSCORE`). Treat this ADR as historical analysis that motivated simplification, not as a verbatim description of the current runtime.
+> **Implementation note (2026-07-12):** This document reflects the retired strategy-dispatch era. The product pipeline now has one weighted-reciprocal evidence formulation and no `FusionStrategy` selector. Treat this ADR as historical analysis that motivated simplification, not as a verbatim description of the current runtime.
 
 ## Context
 

@@ -191,63 +191,6 @@ std::optional<yams::vector::ChunkingStrategy> parseChunkingStrategy(const std::s
 
 } // namespace
 
-bool ConfigResolver::envTruthy(const char* value) {
-    if (!value || !*value) {
-        return false;
-    }
-    std::string v(value);
-    std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return std::tolower(c); });
-    return !(v == "0" || v == "false" || v == "off" || v == "no");
-}
-
-std::filesystem::path ConfigResolver::resolveDefaultConfigPath() {
-    if (const char* explicitPath = std::getenv("YAMS_CONFIG_PATH")) {
-        std::filesystem::path p{explicitPath};
-        if (std::filesystem::exists(p))
-            return p;
-    }
-    // YAMS_CONFIG is the canonical env var used by test fixtures and
-    // config_helpers.cpp; accept it here so resolver-based policies (topology
-    // engine, routing, integration, ...) respect the harness-supplied TOML.
-    if (const char* fixtureConfig = std::getenv("YAMS_CONFIG")) {
-        std::filesystem::path p{fixtureConfig};
-        if (std::filesystem::exists(p))
-            return p;
-    }
-#ifdef _WIN32
-    // Windows: prefer roaming APPDATA for config (matches get_config_dir())
-    if (const char* appdata = std::getenv("APPDATA")) {
-        std::filesystem::path p = std::filesystem::path(appdata) / "yams" / "config.toml";
-        if (std::filesystem::exists(p))
-            return p;
-    }
-#endif
-    if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
-        std::filesystem::path p = std::filesystem::path(xdg) / "yams" / "config.toml";
-        if (std::filesystem::exists(p))
-            return p;
-    }
-    if (const char* home = std::getenv("HOME")) {
-        std::filesystem::path p = std::filesystem::path(home) / ".config" / "yams" / "config.toml";
-        if (std::filesystem::exists(p))
-            return p;
-    }
-#ifdef _WIN32
-    // Windows: check LOCALAPPDATA
-    if (const char* localAppData = std::getenv("LOCALAPPDATA")) {
-        std::filesystem::path p = std::filesystem::path(localAppData) / "yams" / "config.toml";
-        if (std::filesystem::exists(p))
-            return p;
-    }
-#endif
-    return {};
-}
-
-std::map<std::string, std::string>
-ConfigResolver::parseSimpleTomlFlat(const std::filesystem::path& path) {
-    return yams::config::parse_simple_toml(path);
-}
-
 std::optional<size_t> ConfigResolver::readDbEmbeddingDim(const std::filesystem::path& dbPath) {
     try {
         namespace fs = std::filesystem;
@@ -847,44 +790,6 @@ ConfigResolver::resolveEmbeddingConfig(const DaemonConfig& config,
     return result;
 }
 
-std::string ConfigResolver::resolveEmbeddingBackend(const std::string& defaultValue) {
-    auto normalize = [](std::string s) {
-        for (auto& c : s)
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        if (s == "onnx" || s == "onnxruntime" || s == "onnx-runtime" || s == "ort" ||
-            s == "local_onnx") {
-            return std::string("onnxruntime");
-        }
-        if (s == "hybrid" || s == "local") {
-            return std::string("daemon");
-        }
-        return s;
-    };
-
-    if (const char* envp = std::getenv("YAMS_EMBED_BACKEND")) {
-        std::string v(envp);
-        if (!v.empty()) {
-            return normalize(std::move(v));
-        }
-    }
-
-    try {
-        namespace fs = std::filesystem;
-        fs::path cfgPath = resolveDefaultConfigPath();
-        if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            auto kv = parseSimpleTomlFlat(cfgPath);
-            auto it = kv.find("embeddings.backend");
-            if (it != kv.end() && !it->second.empty()) {
-                return normalize(it->second);
-            }
-        }
-    } catch (const std::exception& e) {
-        spdlog::debug("Error reading config for embedding backend: {}", e.what());
-    }
-
-    return normalize(defaultValue);
-}
-
 ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPolicy() {
     TopologyRoutingPolicy policy;
 
@@ -900,17 +805,63 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
                     return std::nullopt;
                 }
             };
+            if (auto it = kv.find("search.topology.mode"); it != kv.end()) {
+                policy.mode = std::string(trimView(it->second));
+            }
+            if (auto it = kv.find("search.topology.vector_policy"); it != kv.end()) {
+                policy.vectorPolicy = std::string(trimView(it->second));
+            }
             if (auto it = kv.find("search.topology.enable_weak_query_routing"); it != kv.end()) {
                 policy.enableWeakQueryRouting = parseBoolValue(it->second);
             }
+            if (auto it = kv.find("search.topology.min_clusters"); it != kv.end()) {
+                policy.minClusters = parseSize(it->second);
+            }
             if (auto it = kv.find("search.topology.max_clusters"); it != kv.end()) {
                 policy.maxClusters = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.max_seed_documents"); it != kv.end()) {
+                policy.maxSeedDocuments = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.representative_limit"); it != kv.end()) {
+                policy.representativeLimit = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.adaptive_probe_score_gap"); it != kv.end()) {
+                policy.adaptiveProbeScoreGap = parseFloat(it->second);
+            }
+            if (auto it = kv.find("search.topology.narrow_min_boundary_margin"); it != kv.end()) {
+                policy.narrowMinBoundaryMargin = parseFloat(it->second);
             }
             if (auto it = kv.find("search.topology.max_docs"); it != kv.end()) {
                 policy.maxDocs = parseSize(it->second);
             }
             if (auto it = kv.find("search.topology.medoid_boost"); it != kv.end()) {
                 policy.medoidBoost = parseFloat(it->second);
+            }
+            if (auto it = kv.find("search.topology.evidence_weight"); it != kv.end()) {
+                policy.evidenceWeight = parseFloat(it->second);
+            }
+            if (auto it = kv.find("search.topology.route_scoring"); it != kv.end()) {
+                policy.routeScoring = std::string(trimView(it->second));
+            }
+            if (auto it = kv.find("search.topology.sparse_dense_alpha"); it != kv.end()) {
+                policy.sparseDenseAlpha = parseFloat(it->second);
+            }
+            if (auto it = kv.find("search.topology.min_route_score"); it != kv.end()) {
+                policy.minRouteScore = parseFloat(it->second);
+            }
+            if (auto it = kv.find("search.topology.expansion_source"); it != kv.end()) {
+                policy.expansionSource = std::string(trimView(it->second));
+            }
+            if (auto it = kv.find("search.topology.graph_neighbor_min_score"); it != kv.end()) {
+                policy.graphNeighborMinScore = parseFloat(it->second);
+            }
+            if (auto it = kv.find("search.topology.graph_neighbor_reciprocal_only");
+                it != kv.end()) {
+                policy.graphNeighborReciprocalOnly = parseBoolValue(it->second);
+            }
+            if (auto it = kv.find("search.topology.graph_vector_seed_probe"); it != kv.end()) {
+                policy.graphVectorSeedProbe = parseSize(it->second);
             }
             if (auto it = kv.find("search.topology.rrf_k"); it != kv.end()) {
                 policy.rrfK = parseFloat(it->second);
@@ -943,64 +894,47 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             spdlog::debug("config: failed to parse YAMS_SEARCH_TOPOLOGY_MEDOID_BOOST float");
         }
     }
-
-    return policy;
-}
-
-ConfigResolver::MetaPathRoutingPolicy ConfigResolver::resolveMetaPathRoutingPolicy() {
-    MetaPathRoutingPolicy policy;
-
-    try {
-        namespace fs = std::filesystem;
-        fs::path cfgPath = resolveDefaultConfigPath();
-        if (cfgPath.empty() || !fs::exists(cfgPath)) {
-            return policy;
+    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_ROUTE_SCORING")) {
+        if (*env) {
+            policy.routeScoring = std::string(trimView(env));
         }
-        const auto kv = parseSimpleTomlFlat(cfgPath);
-        const auto lookup = [&kv](std::string_view key) -> const std::string* {
-            auto it = kv.find(std::string(key));
-            return it != kv.end() ? &it->second : nullptr;
-        };
-
-        if (const auto* raw = lookup("search.meta_path.enable")) {
-            policy.enable = parseBoolValue(*raw);
+    }
+    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_SPARSE_DENSE_ALPHA")) {
+        try {
+            policy.sparseDenseAlpha = std::stof(env);
+        } catch (const std::exception&) {
+            spdlog::debug("config: failed to parse YAMS_SEARCH_TOPOLOGY_SPARSE_DENSE_ALPHA float");
         }
-        if (const auto* raw = lookup("search.meta_path.use_edge_weights")) {
-            policy.useEdgeWeights = parseBoolValue(*raw);
+    }
+    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_MIN_ROUTE_SCORE")) {
+        try {
+            policy.minRouteScore = std::stof(env);
+        } catch (const std::exception&) {
+            spdlog::debug("config: failed to parse YAMS_SEARCH_TOPOLOGY_MIN_ROUTE_SCORE float");
         }
-        if (const auto* raw = lookup("search.meta_path.reciprocal_only")) {
-            policy.reciprocalOnly = parseBoolValue(*raw);
+    }
+    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE")) {
+        if (*env) {
+            policy.expansionSource = std::string(trimView(env));
         }
-
-        const std::pair<std::string_view, std::optional<std::size_t>*> sizeKeys[] = {
-            {"search.meta_path.seed_k", &policy.seedK},
-            {"search.meta_path.hop_limit", &policy.hopLimit},
-        };
-        for (const auto& [key, slot] : sizeKeys) {
-            if (const auto* raw = lookup(key)) {
-                *slot = parseSize(*raw);
-            }
+    }
+    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE")) {
+        try {
+            policy.graphNeighborMinScore = std::stof(env);
+        } catch (const std::exception&) {
+            spdlog::debug(
+                "config: failed to parse YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE float");
         }
-
-        const std::pair<std::string_view, std::optional<float>*> floatKeys[] = {
-            {"search.meta_path.boost_alpha", &policy.boostAlpha},
-            {"search.meta_path.weight_sem", &policy.weightSem},
-            {"search.meta_path.weight_call", &policy.weightCall},
-            {"search.meta_path.weight_def", &policy.weightDef},
-            {"search.meta_path.weight_entity", &policy.weightEntity},
-            {"search.meta_path.min_seed_similarity", &policy.minSeedSimilarity},
-            {"search.meta_path.seed_similarity", &policy.seedSimilarity},
-        };
-        for (const auto& [key, slot] : floatKeys) {
-            if (const auto* raw = lookup(key)) {
-                try {
-                    *slot = std::stof(*raw);
-                } catch (const std::exception&) {
-                }
-            }
+    }
+    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_RECIPROCAL_ONLY")) {
+        if (auto parsed = parseBoolValue(env); parsed.has_value()) {
+            policy.graphNeighborReciprocalOnly = *parsed;
         }
-    } catch (const std::exception& e) {
-        spdlog::debug("Error reading config for meta-path routing policy: {}", e.what());
+    }
+    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_GRAPH_VECTOR_SEED_PROBE")) {
+        if (auto parsed = parseSize(env); parsed.has_value()) {
+            policy.graphVectorSeedProbe = *parsed;
+        }
     }
 
     return policy;
@@ -1023,12 +957,21 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
                 policy.engine = it->second;
             }
         }
-        if (auto it = kv.find("topology.hdbscan_min_points"); it != kv.end())
-            policy.hdbscanMinPoints = parseSize(it->second);
-        if (auto it = kv.find("topology.hdbscan_min_cluster_size"); it != kv.end())
-            policy.hdbscanMinClusterSize = parseSize(it->second);
-        if (auto it = kv.find("topology.feature_smoothing_hops"); it != kv.end())
-            policy.featureSmoothingHops = parseSize(it->second);
+        if (auto it = kv.find("topology.routing_representatives"); it != kv.end()) {
+            policy.routingRepresentativeCount = parseSize(it->second);
+        }
+        if (auto it = kv.find("topology.boundary_spill"); it != kv.end()) {
+            policy.boundarySpillEnabled = parseBoolValue(it->second);
+        }
+        if (auto it = kv.find("topology.boundary_spill_limit"); it != kv.end()) {
+            policy.boundarySpillLimit = parseSize(it->second);
+        }
+        if (auto it = kv.find("topology.boundary_spill_distance_ratio"); it != kv.end()) {
+            policy.boundarySpillDistanceRatio = parseDouble(it->second);
+        }
+        if (auto it = kv.find("topology.boundary_spill_residual_penalty"); it != kv.end()) {
+            policy.boundarySpillResidualPenalty = parseDouble(it->second);
+        }
     } catch (const std::exception& e) {
         spdlog::debug("Error reading config for topology engine policy: {}", e.what());
     }
@@ -1137,55 +1080,6 @@ std::optional<bool> parseTomlBool(std::string_view s) {
 
 } // namespace
 
-ConfigResolver::SimeonEncoderPolicy ConfigResolver::resolveSimeonEncoderPolicy() {
-    SimeonEncoderPolicy policy;
-
-    try {
-        namespace fs = std::filesystem;
-        fs::path cfgPath = resolveDefaultConfigPath();
-        if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            auto kv = parseSimpleTomlFlat(cfgPath);
-            if (auto it = kv.find("embeddings.simeon.ngram_mode");
-                it != kv.end() && !it->second.empty())
-                policy.ngramMode = it->second;
-            if (auto it = kv.find("embeddings.simeon.ngram_min"); it != kv.end())
-                policy.ngramMin = parseTomlU32(it->second);
-            if (auto it = kv.find("embeddings.simeon.ngram_max"); it != kv.end())
-                policy.ngramMax = parseTomlU32(it->second);
-            if (auto it = kv.find("embeddings.simeon.sketch_dim"); it != kv.end())
-                policy.sketchDim = parseTomlU32(it->second);
-            if (auto it = kv.find("embeddings.simeon.output_dim"); it != kv.end())
-                policy.outputDim = parseTomlU32(it->second);
-            if (auto it = kv.find("embeddings.simeon.projection");
-                it != kv.end() && !it->second.empty())
-                policy.projection = it->second;
-            if (auto it = kv.find("embeddings.simeon.l2_normalize"); it != kv.end())
-                policy.l2Normalize = parseTomlBool(it->second);
-            if (auto it = kv.find("embeddings.simeon.pq_bytes"); it != kv.end())
-                policy.pqBytes = parseTomlU32(it->second);
-        }
-    } catch (const std::exception& e) {
-        spdlog::debug("Error reading config for simeon encoder policy: {}", e.what());
-    }
-
-    if (auto v = readEnvString("YAMS_SIMEON_NGRAM_MODE"))
-        policy.ngramMode = std::move(v);
-    if (auto v = readEnvU32("YAMS_SIMEON_NGRAM_MIN"))
-        policy.ngramMin = v;
-    if (auto v = readEnvU32("YAMS_SIMEON_NGRAM_MAX"))
-        policy.ngramMax = v;
-    if (auto v = readEnvU32("YAMS_SIMEON_SKETCH_DIM"))
-        policy.sketchDim = v;
-    if (auto v = readEnvU32("YAMS_SIMEON_OUTPUT_DIM"))
-        policy.outputDim = v;
-    if (auto v = readEnvString("YAMS_SIMEON_PROJECTION"))
-        policy.projection = std::move(v);
-    if (auto v = readEnvU32("YAMS_SIMEON_PQ_BYTES"))
-        policy.pqBytes = v;
-
-    return policy;
-}
-
 ConfigResolver::VectorBackendPolicy ConfigResolver::resolveVectorBackendPolicy() {
     VectorBackendPolicy policy;
 
@@ -1203,156 +1097,6 @@ ConfigResolver::VectorBackendPolicy ConfigResolver::resolveVectorBackendPolicy()
 
     if (auto v = readEnvString("YAMS_VECTOR_BACKEND"))
         policy.backend = std::move(v);
-
-    return policy;
-}
-
-ConfigResolver::EmbeddingRuntimePolicy ConfigResolver::resolveEmbeddingRuntimePolicy() {
-    EmbeddingRuntimePolicy policy;
-
-    try {
-        namespace fs = std::filesystem;
-        fs::path cfgPath = resolveDefaultConfigPath();
-        if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            auto kv = parseSimpleTomlFlat(cfgPath);
-            if (auto it = kv.find("embeddings.runtime.backend");
-                it != kv.end() && !it->second.empty())
-                policy.backend = it->second;
-            if (auto it = kv.find("embeddings.runtime.preferred_model");
-                it != kv.end() && !it->second.empty())
-                policy.preferredModel = it->second;
-            if (auto it = kv.find("embeddings.runtime.batch_size"); it != kv.end())
-                if (auto v = parseTomlU32(it->second))
-                    policy.batchSize = static_cast<std::size_t>(*v);
-            if (auto it = kv.find("embeddings.runtime.batch_target"); it != kv.end())
-                if (auto v = parseTomlU32(it->second))
-                    policy.batchTarget = static_cast<std::size_t>(*v);
-            if (auto it = kv.find("embeddings.runtime.repair_lock_timeout_ms"); it != kv.end())
-                if (auto val = parseTomlU32(it->second)) {
-                    policy.repairLockTimeoutMs = static_cast<std::uint64_t>(*val);
-                }
-        }
-    } catch (const std::exception& e) {
-        spdlog::debug("Error reading config for embedding runtime: {}", e.what());
-    }
-
-    // Env overrides (preserve existing test/CI overlays)
-    if (auto v = readEnvString("YAMS_EMBED_BACKEND"))
-        policy.backend = std::move(v);
-    if (auto v = readEnvString("YAMS_PREFERRED_MODEL"))
-        policy.preferredModel = std::move(v);
-    if (auto v = readEnvString("YAMS_EMBED_BATCH")) {
-        try {
-            policy.batchSize = static_cast<std::size_t>(std::stoull(*v));
-        } catch (...) {
-            spdlog::debug("config: failed to parse YAMS_EMBED_BATCH size_t");
-        }
-    }
-    if (auto v = readEnvString("YAMS_EMBED_BATCH_TARGET")) {
-        try {
-            policy.batchTarget = static_cast<std::size_t>(std::stoull(*v));
-        } catch (...) {
-            spdlog::debug("config: failed to parse YAMS_EMBED_BATCH_TARGET size_t");
-        }
-    }
-    if (auto v = readEnvString("YAMS_REPAIR_LOCK_TIMEOUT_MS")) {
-        try {
-            policy.repairLockTimeoutMs = static_cast<std::uint64_t>(std::stoull(*v));
-        } catch (...) {
-            spdlog::debug("config: failed to parse YAMS_REPAIR_LOCK_TIMEOUT_MS uint64");
-        }
-    }
-
-    return policy;
-}
-
-ConfigResolver::SimeonBm25Policy ConfigResolver::resolveSimeonBm25Policy() {
-    SimeonBm25Policy policy;
-
-    try {
-        namespace fs = std::filesystem;
-        fs::path cfgPath = resolveDefaultConfigPath();
-        if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            auto kv = parseSimpleTomlFlat(cfgPath);
-            if (auto it = kv.find("embeddings.simeon.bm25.enabled"); it != kv.end())
-                policy.enabled = parseTomlBool(it->second);
-            if (auto it = kv.find("embeddings.simeon.bm25.variant");
-                it != kv.end() && !it->second.empty())
-                policy.variant = it->second;
-            if (auto it = kv.find("embeddings.simeon.bm25.subword_gamma"); it != kv.end())
-                policy.subwordGamma = parseTomlFloat(it->second);
-            if (auto it = kv.find("embeddings.simeon.bm25.max_corpus_docs"); it != kv.end())
-                policy.maxCorpusDocs = parseTomlSize(it->second);
-            if (auto it = kv.find("embeddings.simeon.bm25.max_corpus_bytes"); it != kv.end())
-                policy.maxCorpusBytes = parseTomlSize(it->second);
-            if (auto it = kv.find("embeddings.simeon.bm25.build_doc_chunk_bytes"); it != kv.end())
-                policy.buildDocChunkBytes = parseTomlSize(it->second);
-            if (auto it = kv.find("embeddings.simeon.bm25.build_doc_max_chunks"); it != kv.end())
-                policy.buildDocMaxChunks = parseTomlSize(it->second);
-            if (auto it = kv.find("embeddings.simeon.bm25.fragment_geometry.enabled");
-                it != kv.end())
-                policy.fragmentGeometryEnabled = parseTomlBool(it->second);
-            if (auto it = kv.find("embeddings.simeon.bm25.fragment_geometry.max_docs");
-                it != kv.end())
-                policy.fragmentGeometryMaxDocs = parseTomlSize(it->second);
-            if (auto it = kv.find("embeddings.simeon.bm25.fragment_geometry.max_corpus_bytes");
-                it != kv.end())
-                policy.fragmentGeometryMaxCorpusBytes = parseTomlSize(it->second);
-            if (auto it = kv.find("embeddings.simeon.bm25.fragment_geometry.pmi_sample_docs");
-                it != kv.end())
-                policy.fragmentGeometryPmiSampleDocs = parseTomlSize(it->second);
-            if (auto it = kv.find("embeddings.simeon.bm25.fragment_geometry.pmi_sample_bytes");
-                it != kv.end())
-                policy.fragmentGeometryPmiSampleBytes = parseTomlSize(it->second);
-            if (auto it = kv.find("embeddings.simeon.bm25.router.enabled"); it != kv.end())
-                policy.routerEnabled = parseTomlBool(it->second);
-            if (auto it = kv.find("embeddings.simeon.bm25.router.preset");
-                it != kv.end() && !it->second.empty())
-                policy.routerPreset = it->second;
-        }
-    } catch (const std::exception& e) {
-        spdlog::debug("Error reading config for simeon bm25 policy: {}", e.what());
-    }
-
-    if (const char* raw = std::getenv("YAMS_SIMEON_BM25_ENABLED")) {
-        if (auto b = parseTomlBool(raw))
-            policy.enabled = b;
-    }
-    if (auto v = readEnvString("YAMS_SIMEON_BM25_VARIANT"))
-        policy.variant = std::move(v);
-    if (auto v = readEnvFloat("YAMS_SIMEON_BM25_SUBWORD_GAMMA"))
-        policy.subwordGamma = v;
-    if (auto v = readEnvString("YAMS_SIMEON_BM25_MAX_CORPUS_DOCS"))
-        policy.maxCorpusDocs = parseSize(*v);
-    if (auto v = readEnvString("YAMS_SIMEON_BM25_MAX_CORPUS_BYTES"))
-        policy.maxCorpusBytes = parseSize(*v);
-    if (auto v = readEnvString("YAMS_SIMEON_BM25_BUILD_DOC_CHUNK_BYTES"))
-        policy.buildDocChunkBytes = parseSize(*v);
-    if (auto v = readEnvString("YAMS_SIMEON_BM25_BUILD_DOC_MAX_CHUNKS"))
-        policy.buildDocMaxChunks = parseSize(*v);
-    if (const char* raw = std::getenv("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_ENABLED")) {
-        if (auto b = parseTomlBool(raw))
-            policy.fragmentGeometryEnabled = b;
-    }
-    if (auto v = readEnvString("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_MAX_DOCS"))
-        policy.fragmentGeometryMaxDocs = parseSize(*v);
-    if (auto v = readEnvString("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_MAX_CORPUS_BYTES"))
-        policy.fragmentGeometryMaxCorpusBytes = parseSize(*v);
-    if (auto v = readEnvString("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_PMI_SAMPLE_DOCS"))
-        policy.fragmentGeometryPmiSampleDocs = parseSize(*v);
-    if (auto v = readEnvString("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_PMI_SAMPLE_BYTES"))
-        policy.fragmentGeometryPmiSampleBytes = parseSize(*v);
-    if (const char* raw = std::getenv("YAMS_SIMEON_BM25_ROUTER_ENABLED")) {
-        if (auto b = parseTomlBool(raw))
-            policy.routerEnabled = b;
-    }
-    if (auto v = readEnvString("YAMS_SIMEON_BM25_ROUTER_PRESET"))
-        policy.routerPreset = std::move(v);
-
-    if (const char* raw = std::getenv("YAMS_SIMEON_STRATEGY_ROUTER_ENABLED")) {
-        if (auto b = parseTomlBool(raw))
-            policy.strategyRouterEnabled = b;
-    }
 
     return policy;
 }

@@ -254,10 +254,20 @@ RequestDispatcher::handleEmbedDocumentsRequest(const EmbedDocumentsRequest& req)
                 } catch (...) {
                     // Optional repair path hint; repair utility can proceed without it.
                 }
+                yams::repair::BeginBulkIngestCallback beginBulkIngest;
+                if (auto coord = serviceManager_->getVectorIndexCoordinator()) {
+                    beginBulkIngest = [coord]() -> yams::repair::BulkIngestLease {
+                        auto scope =
+                            std::make_shared<yams::daemon::VectorIndexCoordinator::BulkScope>(
+                                coord->beginBulkIngest(
+                                    yams::daemon::RebuildReason::EmbeddingBatch));
+                        return yams::repair::BulkIngestLease{
+                            [scope = std::move(scope)]() mutable { scope.reset(); }};
+                    };
+                }
                 auto stats = yams::repair::repairMissingEmbeddings(
                     contentStore, metadataRepo, modelProvider, modelName, repairConfig,
-                    req.documentHashes, nullptr, contentExtractors,
-                    serviceManager_->getVectorIndexCoordinator().get());
+                    req.documentHashes, nullptr, contentExtractors, std::move(beginBulkIngest));
                 result = std::move(stats);
             }
         }

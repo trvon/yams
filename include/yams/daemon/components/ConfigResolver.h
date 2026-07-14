@@ -71,33 +71,38 @@ public:
     };
 
     struct TopologyRoutingPolicy {
+        std::optional<std::string> mode;
+        // shadow | narrow
+        std::optional<std::string> vectorPolicy;
         std::optional<bool> enableWeakQueryRouting;
+        std::optional<std::size_t> minClusters;
         std::optional<std::size_t> maxClusters;
+        std::optional<std::size_t> maxSeedDocuments;
+        std::optional<std::size_t> representativeLimit;
+        std::optional<float> adaptiveProbeScoreGap;
+        std::optional<float> narrowMinBoundaryMargin;
         std::optional<std::size_t> maxDocs;
         std::optional<float> medoidBoost;
+        std::optional<float> evidenceWeight;
+        std::optional<std::string> routeScoring;
+        std::optional<float> sparseDenseAlpha;
+        std::optional<float> minRouteScore;
+        // clusters | graph_neighbors
+        std::optional<std::string> expansionSource;
+        std::optional<float> graphNeighborMinScore;
+        std::optional<bool> graphNeighborReciprocalOnly;
+        /// GraphNeighbors seed ANN k; 0 disables (Tier-1 seeds only).
+        std::optional<std::size_t> graphVectorSeedProbe;
         std::optional<float> rrfK;
     };
 
     struct TopologyEnginePolicy {
         std::optional<std::string> engine;
-        std::optional<std::size_t> hdbscanMinPoints;
-        std::optional<std::size_t> hdbscanMinClusterSize;
-        std::optional<std::size_t> featureSmoothingHops;
-    };
-
-    struct MetaPathRoutingPolicy {
-        std::optional<bool> enable;
-        std::optional<std::size_t> seedK;
-        std::optional<std::size_t> hopLimit;
-        std::optional<float> boostAlpha;
-        std::optional<float> weightSem;
-        std::optional<float> weightCall;
-        std::optional<float> weightDef;
-        std::optional<float> weightEntity;
-        std::optional<bool> useEdgeWeights;
-        std::optional<float> minSeedSimilarity;
-        std::optional<bool> reciprocalOnly;
-        std::optional<float> seedSimilarity;
+        std::optional<std::size_t> routingRepresentativeCount;
+        std::optional<bool> boundarySpillEnabled;
+        std::optional<std::size_t> boundarySpillLimit;
+        std::optional<double> boundarySpillDistanceRatio;
+        std::optional<double> boundarySpillResidualPenalty;
     };
 
     // Per-corpus adaptive tuner for the topology layer (Phase G). Disabled
@@ -418,39 +423,43 @@ public:
      * All fields are optional; unset keys are left nullopt.
      *
      * Config keys:
+     * - search.topology.mode = disabled|weak_query_only|hybrid_assist
      * - search.topology.enable_weak_query_routing = true|false
+     * - search.topology.vector_policy = narrow|shadow
+     * - search.topology.min_clusters = int
      * - search.topology.max_clusters = int
+     * - search.topology.max_seed_documents = int
+     * - search.topology.representative_limit = int
+     * - search.topology.adaptive_probe_score_gap = float
+     * - search.topology.narrow_min_boundary_margin = float
      * - search.topology.max_docs = int
      * - search.topology.medoid_boost = float
+     * - search.topology.evidence_weight = float in [0,1]
+     * - search.topology.route_scoring = current|size_weighted|seed_coverage
+     * - search.topology.sparse_dense_alpha = float in [0,1]
+     * - search.topology.min_route_score = float
+     * - search.topology.expansion_source = clusters|graph_neighbors
+     * - search.topology.graph_neighbor_min_score = float
+     * - search.topology.graph_neighbor_reciprocal_only = true|false
+     * - search.topology.graph_vector_seed_probe = int
      * - search.topology.rrf_k = float
      */
     static TopologyRoutingPolicy resolveTopologyRoutingPolicy();
-
-    /**
-     * @brief Resolve meta-path routing (Phase P/Y graph-walk boost) from config file.
-     *
-     * Reads from config.toml:
-     * - search.meta_path.enable = true|false
-     * - search.meta_path.seed_k = N
-     * - search.meta_path.hop_limit = N
-     * - search.meta_path.boost_alpha = float
-     * - search.meta_path.weight_sem / weight_call / weight_def / weight_entity = float
-     */
-    static MetaPathRoutingPolicy resolveMetaPathRoutingPolicy();
 
     /**
      * @brief Resolve topology cluster-engine selection from config file.
      *
      * Reads [topology] keys. Callers apply `engine` to
      * TuningConfig::topologyAlgorithm (which seeds topology::makeEngine
-     * dispatch) and the hdbscan_* knobs to TopologyBuildConfig.
+     * dispatch).
      *
      * Config keys:
-     * - topology.engine = connected|hdbscan
-     * - topology.hdbscan_min_points = int (0 = auto from corpus size)
-     * - topology.hdbscan_min_cluster_size = int (0 = auto from corpus size)
-     * - topology.feature_smoothing_hops = int (0 = off; SGC K for embedding
-     *   propagation over the semantic-neighbor graph before clustering)
+     * - topology.engine = connected|louvain|kmeans
+     * - topology.routing_representatives = int
+     * - topology.boundary_spill = bool
+     * - topology.boundary_spill_limit = int
+     * - topology.boundary_spill_distance_ratio = float
+     * - topology.boundary_spill_residual_penalty = float
      */
     static TopologyEnginePolicy resolveTopologyEnginePolicy();
 

@@ -6,7 +6,7 @@
 /// throughput with varying batch sizes.
 ///
 /// Registered as a Google Benchmark executable in tests/benchmarks/meson.build.
-/// Output feeds into docs/benchmarks/performance_report.md via benchmark_results.json.
+/// Micro-bench output: local JSON/results; daemon KPI ledger is docs/benchmarks/kpi_progress.md.
 
 #include <benchmark/benchmark.h>
 

@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # yams/scripts/local-ci/native-macos-lane.sh
 #
-# Native macOS build+test lane for pre-push CI parity. This complements the
-# Linux smolvm lane because smolvm does not run macOS guests.
+# Native macOS build+test lane for pre-push CI and sanitizer gates.
 
 set -euo pipefail
 
@@ -22,6 +21,8 @@ Usage: native-macos-lane.sh [options]
 Profiles:
   self-test  Verify the lane can run on this host without building.
   ci         Native macOS Debug build + unit/integration tests (default).
+  asan       Native macOS ASan+UBSan Debug build + unit/integration tests.
+  tsan       Native macOS TSan Debug build + unit/integration tests.
 
 Options:
   --profile NAME  self-test|ci (default: ci)
@@ -30,7 +31,7 @@ Options:
   -h, --help      Show this help
 
 Environment:
-  YAMS_MACOS_BUILD_DIR        Build dir (default: build/prepush-macos)
+  YAMS_MACOS_BUILD_DIR        Build dir override (default depends on profile)
   YAMS_MACOS_COMPILE_TARGETS  Optional space-separated Meson compile targets
   YAMS_MACOS_TEST_ARGS        Meson test args (default: --suite unit --suite integration ...)
 USAGE
@@ -67,10 +68,10 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "${PROFILE}" in
-self-test | ci) ;;
+self-test | ci | asan | tsan) ;;
 *)
 	fail "invalid profile: ${PROFILE}"
-	echo "valid profiles: self-test, ci" >&2
+	echo "valid profiles: self-test, ci, asan, tsan" >&2
 	exit 2
 	;;
 esac
@@ -111,16 +112,38 @@ run_ci() {
 	export CI=true
 	export RUNNER_OS=macOS
 	export YAMS_DISABLE_FAISS=1
-	export ENABLE_TSAN=false
 	export YAMS_ENABLE_MOBILE_BINDINGS=false
-	export YAMS_BUILD_DIR="${YAMS_MACOS_BUILD_DIR:-build/prepush-macos}"
 	export YAMS_CONAN_HOST_PROFILE="${YAMS_CONAN_HOST_PROFILE:-./conan/profiles/host-macos-apple-clang}"
 	export YAMS_CONAN_ARCH="${YAMS_CONAN_ARCH:-${conan_arch}}"
-	export YAMS_EXTRA_MESON_FLAGS="${YAMS_EXTRA_MESON_FLAGS:---buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Dtest-timeout-scale=2 -Denable-dcheck=true}"
+
+	setup_args=(Debug)
+	case "${PROFILE}" in
+	ci)
+		export ENABLE_TSAN=false
+		export ENABLE_ASAN=false
+		export YAMS_BUILD_DIR="${YAMS_MACOS_BUILD_DIR:-build/prepush-macos}"
+		export YAMS_EXTRA_MESON_FLAGS="${YAMS_EXTRA_MESON_FLAGS:---buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Dtest-timeout-scale=2 -Denable-dcheck=true}"
+		setup_args+=(--no-tsan --no-asan)
+		;;
+	asan)
+		export ENABLE_TSAN=false
+		export ENABLE_ASAN=true
+		export YAMS_BUILD_DIR="${YAMS_MACOS_BUILD_DIR:-build/prepush-asan}"
+		export YAMS_EXTRA_MESON_FLAGS="${YAMS_EXTRA_MESON_FLAGS:---buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Dtest-timeout-scale=3 -Denable-dcheck=true}"
+		setup_args+=(--asan --no-tsan)
+		;;
+	tsan)
+		export ENABLE_TSAN=true
+		export ENABLE_ASAN=false
+		export YAMS_BUILD_DIR="${YAMS_MACOS_BUILD_DIR:-build/prepush-tsan}"
+		export YAMS_EXTRA_MESON_FLAGS="${YAMS_EXTRA_MESON_FLAGS:---buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Dtest-timeout-scale=10 -Denable-dcheck=true}"
+		setup_args+=(--tsan --no-asan)
+		;;
+	esac
 
 	conan profile detect --force
 
-	./setup.sh Debug
+	./setup.sh "${setup_args[@]}"
 
 	CONAN_BUILD_ENV=""
 	for candidate in \
@@ -149,13 +172,22 @@ run_ci() {
 	export YAMS_SQLITE_MINIMAL_PRAGMAS=1
 	export YAMS_SQLITE_VEC_INIT_TIMEOUT_MS=1500
 	export YAMS_SQLITE_BUSY_TIMEOUT_MS=1000
-	export YAMS_VDB_IN_MEMORY=1
-	export YAMS_SQLITE_VEC_SKIP_INIT=1
-	export YAMS_DISABLE_VECTORS=1
 	export YAMS_TESTING=1
 
+	case "${PROFILE}" in
+	asan)
+		default_test_args="--suite unit --suite integration --print-errorlogs --timeout-multiplier 3"
+		;;
+	tsan)
+		default_test_args="--suite unit --suite integration --print-errorlogs --timeout-multiplier 10"
+		;;
+	*)
+		default_test_args="--suite unit --suite integration --print-errorlogs --timeout-multiplier 2"
+		;;
+	esac
+
 	# shellcheck disable=SC2086
-	meson test -C "${YAMS_BUILD_DIR}" ${YAMS_MACOS_TEST_ARGS:---suite unit --suite integration --print-errorlogs --timeout-multiplier 2}
+	meson test -C "${YAMS_BUILD_DIR}" ${YAMS_MACOS_TEST_ARGS:-${default_test_args}}
 }
 
 {

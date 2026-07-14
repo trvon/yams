@@ -9,6 +9,33 @@ if re2_dep.found()
   _optional_deps += [re2_dep]
 endif
 
+yams_write_coordinator_lib = static_library('yams_write_coordinator',
+  [
+    '../../daemon/components/WriteCoordinator.cpp',
+  ],
+  dependencies: [
+    dependency('yams_core'),
+    dependency('yams_metadata'),
+    boost_dep,
+    dependency('spdlog'),
+  ],
+  include_directories: include_directories('../../../include'),
+  install: false,
+)
+
+yams_write_coordinator_dep = declare_dependency(
+  link_with: yams_write_coordinator_lib,
+  include_directories: include_directories('../../../include'),
+  dependencies: [
+    dependency('yams_core'),
+    dependency('yams_metadata'),
+    boost_dep,
+    dependency('spdlog'),
+  ],
+)
+
+meson.override_dependency('yams_write_coordinator', yams_write_coordinator_dep)
+
 yams_app_services_lib = static_library('yams_app_services',
   [
     'document_service.cpp',
@@ -38,6 +65,9 @@ yams_app_services_lib = static_library('yams_app_services',
     dependency('yams_vector'),
     dependency('yams_detection'),
     dependency('yams_downloader'),
+    dependency('yams_extraction'),
+    dependency('yams_ingest'),
+    yams_write_coordinator_dep,
     boost_dep,
     dependency('nlohmann_json'),
     dependency('spdlog'),
@@ -58,6 +88,9 @@ yams_app_services_dep = declare_dependency(
     dependency('yams_vector'),
     dependency('yams_detection'),
     dependency('yams_downloader'),
+    dependency('yams_extraction'),
+    dependency('yams_ingest'),
+    yams_write_coordinator_dep,
     boost_dep,
     dependency('nlohmann_json'),
     dependency('spdlog'),

@@ -52,6 +52,8 @@ Environment for linux-ci:
   YAMS_SMOLVM_COMPILE_TARGETS Optional space-separated Meson compile targets
   YAMS_SMOLVM_TEST_JOBS       Meson test jobs when YAMS_SMOLVM_TEST_ARGS unset (default: 1)
   YAMS_SMOLVM_TEST_ARGS       Meson test args (default: --suite unit --suite integration ...)
+  YAMS_SMOLVM_SWAP_SIZE       Guest swap file size for link-heavy Debug builds (default: 2G, 0 disables)
+  YAMS_SMOLVM_USE_LLD         Add clang lld link args for lower link memory (default: 1)
 USAGE
 }
 
@@ -200,10 +202,49 @@ apt-get -o Acquire::Retries=5 -o Acquire::ForceIPv4=true install -y --no-install
 	ninja-build pkg-config python3 python3-pip python3-venv xz-utils \
 	libbenchmark-dev libboost-all-dev libomp-dev
 
+export YAMS_SMOLVM_SWAP_SIZE="${YAMS_SMOLVM_SWAP_SIZE:-2G}"
+if [ "${YAMS_SMOLVM_SWAP_SIZE}" != "0" ] && command -v swapon >/dev/null 2>&1; then
+	SWAP_FILE=/tmp/yams-smolvm.swap
+	echo "[guest] provisioning ${YAMS_SMOLVM_SWAP_SIZE} swap for link-heavy debug targets"
+	rm -f -- "${SWAP_FILE}"
+	if command -v fallocate >/dev/null 2>&1; then
+		fallocate -l "${YAMS_SMOLVM_SWAP_SIZE}" "${SWAP_FILE}"
+	else
+		swap_size_to_mib() {
+			size="$1"
+			case "${size}" in
+			*[Gg]) value="${size%?}"; multiplier=1024 ;;
+			*[Mm]) value="${size%?}"; multiplier=1 ;;
+			*[Kk])
+				value="${size%?}"
+				case "${value}" in '' | *[!0-9]*) return 1 ;; esac
+				echo $(((value + 1023) / 1024))
+				return 0
+				;;
+			*[0-9]) value="${size}"; multiplier=1 ;;
+			*) return 1 ;;
+			esac
+			case "${value}" in '' | *[!0-9]*) return 1 ;; esac
+			echo $((value * multiplier))
+		}
+		SWAP_MIB="$(swap_size_to_mib "${YAMS_SMOLVM_SWAP_SIZE}")" || {
+			echo "unsupported YAMS_SMOLVM_SWAP_SIZE='${YAMS_SMOLVM_SWAP_SIZE}' without fallocate; use integer M/G/K units" >&2
+			exit 2
+		}
+		dd if=/dev/zero of="${SWAP_FILE}" bs=1M count="${SWAP_MIB}" status=none
+	fi
+	chmod 600 "${SWAP_FILE}"
+	mkswap "${SWAP_FILE}" >/dev/null
+	swapon "${SWAP_FILE}" || echo "[guest] warning: swapon failed; continuing without extra swap" >&2
+fi
+
 PYTOOLS_DIR=/tmp/yams-python-tools
 python3 -m venv "${PYTOOLS_DIR}"
-"${PYTOOLS_DIR}/bin/python" -m pip install --upgrade pip
-"${PYTOOLS_DIR}/bin/python" -m pip install --upgrade 'conan==2.21.*' 'meson==1.4.*' 'ninja==1.11.*'
+export PIP_NO_INPUT=1
+export PIP_DISABLE_PIP_VERSION_CHECK=1
+export PIP_DEFAULT_TIMEOUT="${PIP_DEFAULT_TIMEOUT:-60}"
+"${PYTOOLS_DIR}/bin/python" -m pip install --retries 5 --timeout "${PIP_DEFAULT_TIMEOUT}" --upgrade pip
+"${PYTOOLS_DIR}/bin/python" -m pip install --retries 5 --timeout "${PIP_DEFAULT_TIMEOUT}" --upgrade 'conan==2.21.*' 'meson==1.4.*' 'ninja==1.11.*'
 export PATH="${PYTOOLS_DIR}/bin:${PATH}"
 conan profile detect --force
 
@@ -233,6 +274,13 @@ export YAMS_BUILD_DIR="${YAMS_SMOLVM_BUILD_DIR:-build/smolvm-linux}"
 export YAMS_CONAN_HOST_PROFILE="${YAMS_CONAN_HOST_PROFILE:-./conan/profiles/host-linux-clang}"
 export YAMS_CONAN_ARCH="${YAMS_CONAN_ARCH:-${conan_arch}}"
 export YAMS_EXTRA_MESON_FLAGS="${YAMS_EXTRA_MESON_FLAGS:---buildtype=debug -Dbuild-tests=true -Denable-onnx=disabled -Dtest-timeout-scale=2 -Denable-bench-tests=false -Dbuild-benchmarks=false -Denable-dcheck=true}"
+export YAMS_SMOLVM_USE_LLD="${YAMS_SMOLVM_USE_LLD:-1}"
+if [ "${YAMS_SMOLVM_USE_LLD}" != "0" ] && command -v ld.lld >/dev/null 2>&1; then
+	case " ${YAMS_EXTRA_MESON_FLAGS} " in
+	*"-Dcpp_link_args="*) ;;
+	*) YAMS_EXTRA_MESON_FLAGS="${YAMS_EXTRA_MESON_FLAGS} -Dcpp_link_args=-fuse-ld=lld -Dc_link_args=-fuse-ld=lld" ;;
+	esac
+fi
 export YAMS_SMOLVM_CLEAN_BUILD="${YAMS_SMOLVM_CLEAN_BUILD:-1}"
 export YAMS_SMOLVM_CONAN_JOBS="${YAMS_SMOLVM_CONAN_JOBS:-1}"
 export YAMS_CONAN_EXTRA_OPTIONS="-c tools.build:jobs=${YAMS_SMOLVM_CONAN_JOBS} ${YAMS_CONAN_EXTRA_OPTIONS:-}"
@@ -310,6 +358,20 @@ case "${PROFILE}" in
 linux-ci)
 	GUEST_SCRIPT_CONTENT="$(linux_ci_guest_script)"
 	VOLUME_SPEC="${REPO_ROOT}:/workspace"
+	if [ "${YAMS_SMOLVM_CLEAN_BUILD:-1}" != "0" ]; then
+		HOST_BUILD_DIR="${YAMS_SMOLVM_BUILD_DIR:-build/smolvm-linux}"
+		case "${HOST_BUILD_DIR}" in
+		build/* | ./build/*)
+			HOST_CLEAN_PATH="${REPO_ROOT}/${HOST_BUILD_DIR#./}"
+			log "host cleaning smolvm build dir: ${HOST_BUILD_DIR}"
+			rm -rf -- "${HOST_CLEAN_PATH:?}"
+			;;
+		*)
+			fail "refusing to host-clean non-build YAMS_SMOLVM_BUILD_DIR=${HOST_BUILD_DIR}"
+			exit 2
+			;;
+		esac
+	fi
 	;;
 *)
 	GUEST_SCRIPT_CONTENT="$(static_guest_script)"

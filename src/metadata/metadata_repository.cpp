@@ -21,7 +21,6 @@
 #include <yams/common/utf8_utils.h>
 #include <yams/core/assert.hpp>
 #include <yams/core/atomic_utils.h>
-#include <yams/daemon/components/GraphComponent.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
@@ -681,7 +680,7 @@ void MetadataRepository::shutdown() {
     symspellIndex_.reset();
     symspellDb_.reset();
     symspellInitialized_.store(false, std::memory_order_release);
-    graphComponent_.reset();
+    treeDiffAppliedCallback_ = {};
     kgStore_.reset();
 }
 
@@ -4011,8 +4010,8 @@ Result<void> MetadataRepository::appendTreeChanges(int64_t diffId,
         return sqlResult;
     }
 
-    if (graphComponent_) {
-        auto kgResult = graphComponent_->onTreeDiffApplied(diffId, changes);
+    if (treeDiffAppliedCallback_) {
+        auto kgResult = treeDiffAppliedCallback_(diffId, changes);
         if (!kgResult) {
             spdlog::warn("GraphComponent tree diff processing failed: {}",
                          kgResult.error().message);

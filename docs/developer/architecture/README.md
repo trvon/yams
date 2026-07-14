@@ -24,7 +24,8 @@ This index points to architecture references that mirror the live implementation
 ## Operations and Performance Guides
 
 - [Admin: Operations](../../admin/operations.md)
-- [Performance Report](../../benchmarks/performance_report.md)
+- [Benchmarks (numbers + refs)](../../benchmarks/README.md)
+- [xplan harness](../../../tests/benchmarks/xplan/README.md)
 
 ## Contribution Workflow
 

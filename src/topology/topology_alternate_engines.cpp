@@ -1,11 +1,5 @@
 #include <yams/topology/topology_alternate_engines.h>
-#include <yams/topology/topology_sgc.h>
-
-#include <spdlog/spdlog.h>
-#include <Hdbscan/hdbscan.hpp>
-#include <Runner/hdbscanParameters.hpp>
-#include <Runner/hdbscanResult.hpp>
-#include <Runner/hdbscanRunner.hpp>
+#include <yams/topology/topology_representatives.h>
 
 #include <algorithm>
 #include <chrono>
@@ -145,7 +139,8 @@ makeAdjacency(std::size_t n, const PairWeightMap& pairWeights) {
 TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentInput> documents,
                                                const std::vector<std::int64_t>& assignment,
                                                const PairWeightMap& pairWeights,
-                                               std::string algorithm, const TimeStamps& ts) {
+                                               std::string algorithm, const TimeStamps& ts,
+                                               const TopologyBuildConfig& config) {
     TopologyArtifactBatch batch;
     batch.snapshotId = makeSnapshotId(ts.unixMillis);
     batch.algorithm = std::move(algorithm);
@@ -235,6 +230,12 @@ TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentI
         cluster.memberCount = members.size();
         cluster.persistenceScore = persistence;
         cluster.cohesionScore = cohesion;
+        const double possibleEdges = members.size() > 1
+                                         ? static_cast<double>(members.size()) *
+                                               static_cast<double>(members.size() - 1) / 2.0
+                                         : 0.0;
+        cluster.densityScore =
+            possibleEdges > 0.0 ? static_cast<double>(internalEdgeCount) / possibleEdges : 0.0;
         cluster.bridgeMass =
             members.empty() ? 0.0 : static_cast<double>(bridgeCount) / members.size();
         cluster.medoid = ClusterRepresentative{.clusterId = clusterId,
@@ -242,6 +243,8 @@ TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentI
                                                .filePath = documents[medoidIdx].filePath,
                                                .representativeScore = std::max(0.0, medoidScore)};
         cluster.centroidEmbedding = meanEmbedding(documents, members);
+        cluster.routingRepresentatives = selectDiverseRoutingRepresentatives(
+            documents, members, cluster.centroidEmbedding, config.routingRepresentativeCount);
         cluster.memberDocumentHashes.reserve(members.size());
         for (std::size_t idx : members) {
             cluster.memberDocumentHashes.push_back(documents[idx].documentHash);
@@ -284,6 +287,8 @@ TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentI
                   return lhs.documentHash < rhs.documentHash;
               });
 
+    (void)applyOrthogonalBoundarySpill(documents, config, batch);
+
     return batch;
 }
 
@@ -305,7 +310,7 @@ TopologyDirtyRegion defaultDirtyRegion(std::span<const TopologyDocumentInput> ch
     return region;
 }
 
-// -------------------- HDBSCAN --------------------
+// -------------------- K-means helpers --------------------
 
 double cosineDistance(std::span<const float> a, std::span<const float> b) {
     if (a.size() != b.size() || a.empty()) {
@@ -326,9 +331,42 @@ double cosineDistance(std::span<const float> a, std::span<const float> b) {
     return 1.0 - std::clamp(cos, -1.0, 1.0);
 }
 
-std::vector<std::int64_t> runHDBSCAN(std::span<const TopologyDocumentInput> documents,
-                                     std::size_t requestedMinPoints,
-                                     std::size_t requestedMinClusterSize) {
+std::vector<float> normalized(std::vector<float> v) {
+    double norm = 0.0;
+    for (float x : v) {
+        norm += static_cast<double>(x) * static_cast<double>(x);
+    }
+    if (norm > 0.0) {
+        const float inv = static_cast<float>(1.0 / std::sqrt(norm));
+        for (auto& x : v) {
+            x *= inv;
+        }
+    }
+    return v;
+}
+
+std::size_t nearestCentroid(const std::vector<float>& emb,
+                            const std::vector<std::vector<float>>& centroids) {
+    std::size_t best = 0;
+    double bestDist = std::numeric_limits<double>::max();
+    for (std::size_t c = 0; c < centroids.size(); ++c) {
+        if (centroids[c].empty()) {
+            continue;
+        }
+        const double d = cosineDistance(emb, centroids[c]);
+        if (d < bestDist) {
+            bestDist = d;
+            best = c;
+        }
+    }
+    return best;
+}
+
+// Spherical k-means over document embeddings. Deterministic (farthest-first / Gonzalez init, no
+// RNG) so topology snapshots reproduce across rebuilds. Returns a per-document cluster assignment;
+// documents without a usable embedding become their own singleton clusters.
+std::vector<std::int64_t> runKMeans(std::span<const TopologyDocumentInput> documents,
+                                    std::size_t requestedK, std::size_t maxIterations) {
     const std::size_t n = documents.size();
     std::vector<std::int64_t> assignment(n, -1);
     if (n == 0) {
@@ -353,144 +391,120 @@ std::vector<std::int64_t> runHDBSCAN(std::span<const TopologyDocumentInput> docu
         return assignment;
     }
 
-    std::size_t minClusterSize = requestedMinClusterSize;
-    if (minClusterSize == 0) {
-        minClusterSize = std::max<std::size_t>(2, static_cast<std::size_t>(std::round(std::log2(
-                                                      static_cast<double>(usable.size()) + 1.0))));
+    std::size_t k = requestedK;
+    if (k == 0) {
+        k = static_cast<std::size_t>(std::round(std::sqrt(static_cast<double>(usable.size()))));
     }
-    minClusterSize = std::min(minClusterSize, std::max<std::size_t>(2, usable.size() / 2));
+    k = std::clamp<std::size_t>(k, 2, usable.size());
 
-    std::size_t minPoints = requestedMinPoints == 0 ? minClusterSize : requestedMinPoints;
-    minPoints = std::min(minPoints, std::max<std::size_t>(2, usable.size() - 1));
+    std::vector<std::vector<float>> centroids;
+    centroids.reserve(k);
+    std::vector<bool> selected(usable.size(), false);
+    centroids.push_back(normalized(documents[usable.front()].embedding));
+    selected[0] = true;
+    std::vector<double> minDist(usable.size(), std::numeric_limits<double>::max());
+    while (centroids.size() < k) {
+        std::size_t farthest = usable.size();
+        double farthestDist = -1.0;
+        for (std::size_t u = 0; u < usable.size(); ++u) {
+            if (selected[u]) {
+                continue;
+            }
+            const double d = cosineDistance(documents[usable[u]].embedding, centroids.back());
+            if (d < minDist[u]) {
+                minDist[u] = d;
+            }
+            if (minDist[u] > farthestDist) {
+                farthestDist = minDist[u];
+                farthest = u;
+            }
+        }
+        if (farthest == usable.size()) {
+            break;
+        }
+        selected[farthest] = true;
+        centroids.push_back(normalized(documents[usable[farthest]].embedding));
+    }
+    k = centroids.size();
 
-    std::vector<std::vector<double>> distances(usable.size(),
-                                               std::vector<double>(usable.size(), 0.0));
-    for (std::size_t i = 0; i < usable.size(); ++i) {
-        for (std::size_t j = i + 1; j < usable.size(); ++j) {
-            const double d =
-                cosineDistance(documents[usable[i]].embedding, documents[usable[j]].embedding);
-            distances[i][j] = d;
-            distances[j][i] = d;
+    const auto centroidOf = [&](const std::vector<std::size_t>& memberUsable) {
+        std::vector<std::size_t> docIdx;
+        docIdx.reserve(memberUsable.size());
+        for (std::size_t u : memberUsable) {
+            docIdx.push_back(usable[u]);
+        }
+        return normalized(meanEmbedding(documents, docIdx));
+    };
+
+    std::vector<std::size_t> membership(usable.size(), 0);
+    const std::size_t iterations = maxIterations == 0 ? 10 : maxIterations;
+    for (std::size_t iter = 0; iter < iterations; ++iter) {
+        bool changed = false;
+        for (std::size_t u = 0; u < usable.size(); ++u) {
+            const std::size_t c = nearestCentroid(documents[usable[u]].embedding, centroids);
+            if (c != membership[u]) {
+                membership[u] = c;
+                changed = true;
+            }
+        }
+
+        std::vector<std::vector<std::size_t>> members(k);
+        for (std::size_t u = 0; u < usable.size(); ++u) {
+            members[membership[u]].push_back(u);
+        }
+        for (std::size_t c = 0; c < k; ++c) {
+            if (!members[c].empty()) {
+                centroids[c] = centroidOf(members[c]);
+            }
+        }
+        for (std::size_t c = 0; c < k; ++c) {
+            if (!members[c].empty()) {
+                continue;
+            }
+            std::size_t worstU = usable.size();
+            std::size_t donor = k;
+            double worstDist = -1.0;
+            for (std::size_t u = 0; u < usable.size(); ++u) {
+                const std::size_t mc = membership[u];
+                if (members[mc].size() <= 1) {
+                    continue;
+                }
+                const double d = cosineDistance(documents[usable[u]].embedding, centroids[mc]);
+                if (d > worstDist) {
+                    worstDist = d;
+                    worstU = u;
+                    donor = mc;
+                }
+            }
+            if (worstU == usable.size()) {
+                continue;
+            }
+            auto& donorMembers = members[donor];
+            donorMembers.erase(std::find(donorMembers.begin(), donorMembers.end(), worstU));
+            membership[worstU] = c;
+            members[c].push_back(worstU);
+            centroids[c] = normalized(documents[usable[worstU]].embedding);
+            centroids[donor] = centroidOf(donorMembers);
+            changed = true;
+        }
+        if (!changed) {
+            break;
         }
     }
 
-    hdbscanParameters params;
-    params.distances = std::move(distances);
-    params.distanceFunction = "";
-    params.minPoints = static_cast<std::uint32_t>(minPoints);
-    params.minClusterSize = static_cast<std::uint32_t>(minClusterSize);
-
-    hdbscanRunner runner;
-    hdbscanResult result;
-    try {
-        result = runner.run(params);
-    } catch (const std::exception& e) {
-        spdlog::warn("[hdbscan] runner threw: {}; falling back to singletons", e.what());
-        std::iota(assignment.begin(), assignment.end(), 0);
-        return assignment;
-    }
-
-    if (result.labels.size() != usable.size()) {
-        spdlog::warn("[hdbscan] label count mismatch ({} vs {}); falling back to singletons",
-                     result.labels.size(), usable.size());
-        std::iota(assignment.begin(), assignment.end(), 0);
-        return assignment;
-    }
-
-    std::unordered_map<int, std::int64_t> canon;
     for (std::size_t u = 0; u < usable.size(); ++u) {
-        const int lbl = result.labels[u];
-        const auto docIdx = static_cast<std::int64_t>(usable[u]);
-        if (lbl == 0) {
-            continue;
-        }
-        auto it = canon.find(lbl);
-        if (it == canon.end()) {
-            canon.emplace(lbl, docIdx);
-        } else if (docIdx < it->second) {
-            it->second = docIdx;
-        }
+        assignment[usable[u]] = static_cast<std::int64_t>(membership[u]);
     }
-
-    std::int64_t orphanId = static_cast<std::int64_t>(n);
-    for (std::size_t u = 0; u < usable.size(); ++u) {
-        const int lbl = result.labels[u];
-        if (lbl == 0) {
-            assignment[usable[u]] = orphanId++;
-        } else {
-            assignment[usable[u]] = canon[lbl];
-        }
-    }
+    std::int64_t singleton = static_cast<std::int64_t>(k);
     for (std::size_t i = 0; i < n; ++i) {
         if (assignment[i] < 0) {
-            assignment[i] = orphanId++;
+            assignment[i] = singleton++;
         }
     }
     return assignment;
 }
 
 } // namespace
-
-// ============================================================================
-// HDBSCANTopologyEngine
-// ============================================================================
-
-Result<TopologyArtifactBatch>
-HDBSCANTopologyEngine::buildArtifacts(std::span<const TopologyDocumentInput> documents,
-                                      const TopologyBuildConfig& config) {
-    const auto ts = nowStamps();
-    if (documents.empty()) {
-        TopologyArtifactBatch batch;
-        batch.snapshotId = makeSnapshotId(ts.unixMillis);
-        batch.algorithm = "hdbscan_v1";
-        batch.inputKind = config.inputKind;
-        batch.generatedAtUnixSeconds = ts.unixSeconds;
-        return batch;
-    }
-
-    std::unordered_map<std::string, std::size_t> indexByHash;
-    indexByHash.reserve(documents.size());
-    for (std::size_t i = 0; i < documents.size(); ++i) {
-        if (!documents[i].documentHash.empty()) {
-            indexByHash[documents[i].documentHash] = i;
-        }
-    }
-    auto pairWeights = buildPairWeights(documents, indexByHash, config);
-
-    std::vector<TopologyDocumentInput> smoothedOwned;
-    std::span<const TopologyDocumentInput> clusteringInput = documents;
-    if (config.featureSmoothingHops > 0) {
-        smoothedOwned.assign(documents.begin(), documents.end());
-        applySGCSmoothing(smoothedOwned, config, config.featureSmoothingHops);
-        clusteringInput = smoothedOwned;
-    }
-
-    const std::size_t minClusterSize =
-        config.hdbscanMinClusterSize == 0
-            ? std::max<std::size_t>(
-                  5, static_cast<std::size_t>(std::sqrt(static_cast<double>(documents.size()))))
-            : config.hdbscanMinClusterSize;
-    auto assignment = runHDBSCAN(clusteringInput, config.hdbscanMinPoints, minClusterSize);
-    auto batch = buildBatchFromAssignment(documents, assignment, pairWeights, "hdbscan_v1", ts);
-    batch.inputKind = config.inputKind;
-    return batch;
-}
-
-Result<TopologyDirtyRegion>
-HDBSCANTopologyEngine::defineDirtyRegion(const TopologyArtifactBatch&,
-                                         std::span<const TopologyDocumentInput> changedDocuments,
-                                         const TopologyBuildConfig&) const {
-    return defaultDirtyRegion(changedDocuments);
-}
-
-Result<TopologyArtifactBatch> HDBSCANTopologyEngine::updateArtifacts(
-    const TopologyArtifactBatch&, std::span<const TopologyDocumentInput> changedDocuments,
-    const TopologyBuildConfig& config, TopologyUpdateStats* stats) {
-    if (stats != nullptr) {
-        stats->fallbackFullRebuilds = 1;
-    }
-    return buildArtifacts(changedDocuments, config);
-}
 
 // ============================================================================
 // LouvainTopologyEngine — Phase H alternative cluster engine
@@ -630,7 +644,8 @@ LouvainTopologyEngine::buildArtifacts(std::span<const TopologyDocumentInput> doc
     auto pairWeights = buildPairWeights(documents, indexByHash, config);
     auto adjacency = makeAdjacency(documents.size(), pairWeights);
     auto assignment = runLouvain(documents, adjacency);
-    auto batch = buildBatchFromAssignment(documents, assignment, pairWeights, "louvain_v1", ts);
+    auto batch =
+        buildBatchFromAssignment(documents, assignment, pairWeights, "louvain_v1", ts, config);
     batch.inputKind = config.inputKind;
     return batch;
 }
@@ -643,6 +658,54 @@ LouvainTopologyEngine::defineDirtyRegion(const TopologyArtifactBatch&,
 }
 
 Result<TopologyArtifactBatch> LouvainTopologyEngine::updateArtifacts(
+    const TopologyArtifactBatch&, std::span<const TopologyDocumentInput> changedDocuments,
+    const TopologyBuildConfig& config, TopologyUpdateStats* stats) {
+    if (stats != nullptr) {
+        stats->fallbackFullRebuilds = 1;
+    }
+    return buildArtifacts(changedDocuments, config);
+}
+
+// ============================================================================
+// KMeansTopologyEngine — IVF-style balanced coarse quantizer
+// ============================================================================
+
+Result<TopologyArtifactBatch>
+KMeansTopologyEngine::buildArtifacts(std::span<const TopologyDocumentInput> documents,
+                                     const TopologyBuildConfig& config) {
+    const auto ts = nowStamps();
+    if (documents.empty()) {
+        TopologyArtifactBatch batch;
+        batch.snapshotId = makeSnapshotId(ts.unixMillis);
+        batch.algorithm = "kmeans_v1";
+        batch.inputKind = config.inputKind;
+        batch.generatedAtUnixSeconds = ts.unixSeconds;
+        return batch;
+    }
+
+    std::unordered_map<std::string, std::size_t> indexByHash;
+    indexByHash.reserve(documents.size());
+    for (std::size_t i = 0; i < documents.size(); ++i) {
+        if (!documents[i].documentHash.empty()) {
+            indexByHash[documents[i].documentHash] = i;
+        }
+    }
+    auto pairWeights = buildPairWeights(documents, indexByHash, config);
+    auto assignment = runKMeans(documents, config.kmeansK, config.kmeansMaxIterations);
+    auto batch =
+        buildBatchFromAssignment(documents, assignment, pairWeights, "kmeans_v1", ts, config);
+    batch.inputKind = config.inputKind;
+    return batch;
+}
+
+Result<TopologyDirtyRegion>
+KMeansTopologyEngine::defineDirtyRegion(const TopologyArtifactBatch&,
+                                        std::span<const TopologyDocumentInput> changedDocuments,
+                                        const TopologyBuildConfig&) const {
+    return defaultDirtyRegion(changedDocuments);
+}
+
+Result<TopologyArtifactBatch> KMeansTopologyEngine::updateArtifacts(
     const TopologyArtifactBatch&, std::span<const TopologyDocumentInput> changedDocuments,
     const TopologyBuildConfig& config, TopologyUpdateStats* stats) {
     if (stats != nullptr) {

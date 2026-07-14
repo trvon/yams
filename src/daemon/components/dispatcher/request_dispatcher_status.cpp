@@ -473,6 +473,9 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
                static_cast<size_t>(snap.dbWritePoolTotalWaitMicros));
         setVal(metrics::kDbWritePoolTimeoutCount, snap.dbWritePoolTimeoutCount);
         setVal(metrics::kDbWritePoolFailedAcquisitions, snap.dbWritePoolFailedAcquisitions);
+        setVal(metrics::kDbWritePoolSlowHolders, snap.dbWritePoolSlowHolders);
+        setVal(metrics::kDbWritePoolMaxHolderMicros,
+               static_cast<size_t>(snap.dbWritePoolMaxHolderMicros));
         setVal(metrics::kDbReadPoolAvailable, snap.dbReadPoolAvailable ? 1 : 0);
         setVal(metrics::kDbReadPoolTotalConnections, snap.dbReadPoolTotalConnections);
         setVal(metrics::kDbReadPoolAvailableConnections, snap.dbReadPoolAvailableConnections);
@@ -482,6 +485,9 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
                static_cast<size_t>(snap.dbReadPoolTotalWaitMicros));
         setVal(metrics::kDbReadPoolTimeoutCount, snap.dbReadPoolTimeoutCount);
         setVal(metrics::kDbReadPoolFailedAcquisitions, snap.dbReadPoolFailedAcquisitions);
+        setVal(metrics::kDbReadPoolSlowHolders, snap.dbReadPoolSlowHolders);
+        setVal(metrics::kDbReadPoolMaxHolderMicros,
+               static_cast<size_t>(snap.dbReadPoolMaxHolderMicros));
     }
 
     setVal(metrics::kDocumentsTotal, static_cast<size_t>(snap.documentsTotal));
@@ -1155,6 +1161,17 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                 }
                 if (auto wc = serviceManager_->getWriteCoordinator()) {
                     auto stats = wc->getStats();
+                    response.additionalStats["write_queue_depth"] =
+                        std::to_string(wc->queuedBatches());
+                    response.additionalStats["write_in_flight"] = std::to_string(wc->inFlight());
+                    response.additionalStats["write_queue_capacity"] =
+                        std::to_string(wc->channelCapacity());
+                    response.additionalStats["write_queue_depth_max"] =
+                        std::to_string(stats.maxQueueDepth);
+                    response.additionalStats["write_queue_capacity_rejections"] =
+                        std::to_string(stats.capacityRejections);
+                    response.additionalStats["write_queue_forced_over_capacity"] =
+                        std::to_string(stats.forcedEnqueuesOverCapacity);
                     response.additionalStats["kg_write_batches_enqueued"] =
                         std::to_string(stats.batchesEnqueued);
                     response.additionalStats["kg_write_batches_committed"] =
@@ -1266,6 +1283,10 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                     std::to_string(snap->dbWritePoolTimeoutCount);
                 response.additionalStats[std::string(metrics::kDbWritePoolFailedAcquisitions)] =
                     std::to_string(snap->dbWritePoolFailedAcquisitions);
+                response.additionalStats[std::string(metrics::kDbWritePoolSlowHolders)] =
+                    std::to_string(snap->dbWritePoolSlowHolders);
+                response.additionalStats[std::string(metrics::kDbWritePoolMaxHolderMicros)] =
+                    std::to_string(snap->dbWritePoolMaxHolderMicros);
 
                 response.additionalStats[std::string(metrics::kDbReadPoolAvailable)] =
                     std::to_string(static_cast<size_t>(snap->dbReadPoolAvailable ? 1 : 0));
@@ -1285,6 +1306,10 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                     std::to_string(snap->dbReadPoolTimeoutCount);
                 response.additionalStats[std::string(metrics::kDbReadPoolFailedAcquisitions)] =
                     std::to_string(snap->dbReadPoolFailedAcquisitions);
+                response.additionalStats[std::string(metrics::kDbReadPoolSlowHolders)] =
+                    std::to_string(snap->dbReadPoolSlowHolders);
+                response.additionalStats[std::string(metrics::kDbReadPoolMaxHolderMicros)] =
+                    std::to_string(snap->dbReadPoolMaxHolderMicros);
 
                 const auto vectorDbBytes = snap->vectorDbSizeBytes > 0
                                                ? static_cast<std::uint64_t>(snap->vectorDbSizeBytes)

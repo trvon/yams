@@ -1,0 +1,123 @@
+{
+  "name": "subsystem_overhead",
+  "description": "Cross-lane ablation index plan: search one-factor-off quality arms on BEIR scifact for KPI-1 overhead ranking (ingest/load/repair/ops use their own named plans).",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 3600,
+  "continue_on_arm_failure": true,
+  "mode": "live-ish",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SEARCH_STAGE_TRACE": "1",
+      "YAMS_ENABLE_ENV_OVERRIDES": "1",
+      "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+      "YAMS_BENCH_TOPOLOGY_ENGINE": "connected"
+    },
+    "params": {
+      "dataset": "scifact",
+      "corpus_size": 2000,
+      "num_queries": 50,
+      "topk": 10,
+      "expansion_arm": "cap2"
+    }
+  },
+  "arms": [
+    {
+      "name": "baseline",
+      "factors": {}
+    },
+    {
+      "name": "ablate_text",
+      "factors": {
+        "text": "off"
+      },
+      "params": {
+        "text": "off"
+      }
+    },
+    {
+      "name": "ablate_vector",
+      "factors": {
+        "vector": "off"
+      },
+      "params": {
+        "vector": "off"
+      }
+    },
+    {
+      "name": "ablate_kg",
+      "factors": {
+        "kg_weight": "off"
+      },
+      "params": {
+        "kg_weight": "off"
+      }
+    },
+    {
+      "name": "ablate_topology",
+      "factors": {
+        "topology": "off"
+      },
+      "params": {
+        "topology": "off"
+      }
+    },
+    {
+      "name": "ablate_rerank",
+      "factors": {
+        "rerank": "off"
+      },
+      "params": {
+        "rerank": "off"
+      }
+    },
+    {
+      "name": "ablate_graph_rerank",
+      "factors": {
+        "graph_rerank": "off"
+      },
+      "params": {
+        "graph_rerank": "off"
+      }
+    },
+    {
+      "name": "ablate_vectors_product",
+      "factors": {
+        "vectors": "off"
+      },
+      "params": {
+        "vectors": "off"
+      }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_quality",
+      "metrics": [
+        "mrr",
+        "ndcg_at_k"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": [
+      "metrics.json"
+    ],
+    "require_metrics": [
+      "mrr"
+    ],
+    "require_metric_status": [
+      "ok"
+    ]
+  },
+  "summarize": {
+    "primary": [
+      "mrr",
+      "ndcg_at_k",
+      "map",
+      "hybrid_queries",
+      "topology_applied"
+    ]
+  }
+}

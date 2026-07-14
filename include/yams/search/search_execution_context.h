@@ -20,10 +20,14 @@ struct IndexFreshnessSnapshot {
     std::uint64_t lexicalDeltaPublishedDocs{0};
     std::uint32_t lexicalDeltaRecentDocs{0};
     std::uint64_t topologyEpoch{0};
+    std::uint32_t topologyDirtyDocuments{0};
     bool lexicalReady{false};
     bool vectorReady{false};
     bool kgReady{false};
+    bool topologyStatusKnown{false};
     bool topologyReady{false};
+    bool topologyArtifactsFresh{false};
+    bool topologyRebuildRunning{false};
     bool awaitingDrain{false};
     bool simeonLexicalConfigured{false};
     bool simeonLexicalReady{false};
@@ -37,6 +41,14 @@ struct IndexFreshnessSnapshot {
         return ingestQueued > 0 || ingestInFlight > 0 || postIngestQueued > 0 ||
                postIngestInFlight > 0 || lexicalDeltaPendingDocs > 0 || awaitingDrain ||
                !lexicalReady;
+    }
+
+    /// Standalone engines do not publish topology readiness, so they may validate artifacts in
+    /// their loader. Daemon-backed engines explicitly publish status and require the complete
+    /// operational freshness contract rather than epoch equality alone.
+    [[nodiscard]] bool topologyRoutingUsable() const noexcept {
+        return !topologyStatusKnown || (topologyReady && topologyArtifactsFresh &&
+                                        !topologyRebuildRunning && topologyDirtyDocuments == 0);
     }
 };
 

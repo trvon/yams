@@ -33,29 +33,15 @@ RebuildStats makeStats(double singleton, double giant, double gini, double intra
 }
 } // namespace
 
-TEST_CASE("TopologyTuner: defaultArmGrid covers engine + HDBSCAN params",
+TEST_CASE("TopologyTuner: defaultArmGrid covers supported topology engines",
           "[unit][daemon][topology_tuner][catch2]") {
     auto arms = defaultArmGrid(5183);
 
-    REQUIRE(!arms.empty());
-
-    bool seenConnected = false;
-    bool seenHdbscanWithSmoothing = false;
-    bool seenHdbscanNoSmoothing = false;
-    for (const auto& arm : arms) {
-        if (arm.engine == "connected") {
-            seenConnected = true;
-        }
-        if (arm.engine == "hdbscan" && arm.featureSmoothingHops > 0) {
-            seenHdbscanWithSmoothing = true;
-        }
-        if (arm.engine == "hdbscan" && arm.featureSmoothingHops == 0) {
-            seenHdbscanNoSmoothing = true;
-        }
-    }
-    CHECK(seenConnected);
-    CHECK(seenHdbscanWithSmoothing);
-    CHECK(seenHdbscanNoSmoothing);
+    REQUIRE(arms.size() == 2);
+    CHECK(arms[0].id == "connected");
+    CHECK(arms[0].engine == "connected");
+    CHECK(arms[1].id == "louvain");
+    CHECK(arms[1].engine == "louvain");
 
     // No two arms should share the same id (deduplication invariant).
     for (std::size_t i = 0; i < arms.size(); ++i) {
@@ -240,8 +226,8 @@ TEST_CASE("TopologyTuner: rewardMode routes reward computation correctly",
         TopologyTuner tuner(cfg);
         // Two-arm grid for clear ranking.
         tuner.setArms(std::vector<TopologyArm>{
-            TopologyArm{"arm_a", "hdbscan", 4, 4, 0},
-            TopologyArm{"arm_b", "hdbscan", 8, 8, 0},
+            TopologyArm{"arm_a", "connected"},
+            TopologyArm{"arm_b", "louvain"},
         });
         // Pull arm_a with high persistence, arm_b with low.
         auto armA = tuner.selectArm();
@@ -268,8 +254,8 @@ TEST_CASE("TopologyTuner: rewardMode routes reward computation correctly",
         cfg.rewardMode = yams::daemon::TunerRewardMode::Hybrid;
         TopologyTuner tuner(cfg);
         tuner.setArms(std::vector<TopologyArm>{
-            TopologyArm{"arm_a", "hdbscan", 4, 4, 0},
-            TopologyArm{"arm_b", "hdbscan", 8, 8, 0},
+            TopologyArm{"arm_a", "connected"},
+            TopologyArm{"arm_b", "louvain"},
         });
         // arm_a: low geometric, high persistence
         // arm_b: high geometric, low persistence
@@ -360,6 +346,35 @@ TEST_CASE("TopologyTuner: loadState on missing path returns FileNotFound",
     CHECK_FALSE(result.has_value());
 }
 
+TEST_CASE("TopologyTuner: restored state drops retired engine arms",
+          "[unit][daemon][topology_tuner][catch2]") {
+    TopologyTunerConfig cfg;
+    cfg.enabled = true;
+    TopologyTuner tuner(cfg);
+    tuner.setArms(defaultArmGrid(1000));
+
+    auto state = tuner.toJson();
+    auto& mabArms = state["mab"]["arms"];
+    REQUIRE(mabArms.is_array());
+    REQUIRE(mabArms.size() == 2);
+    mabArms[0]["pulls"] = 1;
+    mabArms[0]["reward_sum"] = 0.5;
+    mabArms.push_back({
+        {"id", "retired_engine_arm"},
+        {"value", 8.0},
+        {"pulls", 100},
+        {"reward_sum", 100.0},
+    });
+
+    REQUIRE(tuner.fromJson(state));
+    const auto best = tuner.bestArmId();
+    REQUIRE(best.has_value());
+    CHECK(*best == "connected");
+    REQUIRE(tuner.arms().size() == 2);
+    CHECK(tuner.arms()[0].engine == "connected");
+    CHECK(tuner.arms()[1].engine == "louvain");
+}
+
 TEST_CASE("TopologyTuner: rebuildArmGridForCorpusSize is no-op when ids match",
           "[unit][daemon][topology_tuner][catch2]") {
     TopologyTunerConfig cfg;
@@ -372,24 +387,9 @@ TEST_CASE("TopologyTuner: rebuildArmGridForCorpusSize is no-op when ids match",
     CHECK_FALSE(tuner.rebuildArmGridForCorpusSize(5000));
     CHECK(tuner.arms().size() == initialCount);
 
-    // Substantially different corpus size → grid changes (cluster sizes scale)
-    const bool changed = tuner.rebuildArmGridForCorpusSize(50000);
-    if (changed) {
-        // Grid was rebuilt — at least one arm id should differ
-        bool anyDiff = false;
-        auto post = tuner.arms();
-        if (post.size() == initialCount) {
-            for (std::size_t i = 0; i < post.size(); ++i) {
-                if (post[i].id != defaultArmGrid(5000)[i].id) {
-                    anyDiff = true;
-                    break;
-                }
-            }
-        } else {
-            anyDiff = true;
-        }
-        CHECK(anyDiff);
-    }
+    // Supported engine arms are corpus-size independent.
+    CHECK_FALSE(tuner.rebuildArmGridForCorpusSize(50000));
+    CHECK(tuner.arms().size() == initialCount);
 }
 
 TEST_CASE("TopologyTuner: UCB1 explores arms then converges to highest reward",
@@ -403,9 +403,9 @@ TEST_CASE("TopologyTuner: UCB1 explores arms then converges to highest reward",
     TopologyTuner tuner(cfg);
 
     std::vector<TopologyArm> arms = {
-        TopologyArm{"arm_low", "hdbscan", 4, 4, 0},
-        TopologyArm{"arm_mid", "hdbscan", 8, 8, 0},
-        TopologyArm{"arm_high", "hdbscan", 16, 16, 0},
+        TopologyArm{"arm_low", "connected"},
+        TopologyArm{"arm_mid", "louvain"},
+        TopologyArm{"arm_high", "kmeans"},
     };
     tuner.setArms(arms);
 
@@ -499,9 +499,9 @@ TEST_CASE("TopologyTuner: cross-restart persistence preserves UCB1 convergence",
     const auto statePath = tmpDir / "tuner_state.json";
 
     std::vector<TopologyArm> arms = {
-        TopologyArm{"arm_low", "hdbscan", 4, 4, 0},
-        TopologyArm{"arm_mid", "hdbscan", 8, 8, 0},
-        TopologyArm{"arm_high", "hdbscan", 16, 16, 0},
+        TopologyArm{"arm_low", "connected"},
+        TopologyArm{"arm_mid", "louvain"},
+        TopologyArm{"arm_high", "kmeans"},
     };
     auto statsForArm = [](const std::string& id) {
         if (id == "arm_high") {

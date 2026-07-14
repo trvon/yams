@@ -79,64 +79,7 @@ effectiveZoomLevelForIntent(SearchEngineConfig::NavigationZoomLevel configured,
 
 TunedParams seedTunedParamsFromConfig(const SearchEngineConfig& config) {
     TunedParams params;
-    params.zoomLevel = config.zoomLevel;
-    params.rrfK = static_cast<int>(std::lround(config.rrfK));
-    params.weights.setAll(config.textWeight, config.simeonTextWeight, config.vectorWeight,
-                          config.entityVectorWeight, config.pathTreeWeight, config.kgWeight,
-                          config.tagWeight, config.metadataWeight, TuningLayer::Default);
-    params.similarityThreshold =
-        TuningSlot<float>(config.similarityThreshold, TuningLayer::Default);
-    params.vectorBoostFactor = config.vectorBoostFactor;
-    params.fusionStrategy.value = config.fusionStrategy;
-    params.vectorOnlyThreshold = config.vectorOnlyThreshold;
-    params.vectorOnlyPenalty = config.vectorOnlyPenalty;
-    params.vectorOnlyNearMissReserve = config.vectorOnlyNearMissReserve;
-    params.vectorOnlyNearMissSlack = config.vectorOnlyNearMissSlack;
-    params.vectorOnlyNearMissPenalty = config.vectorOnlyNearMissPenalty;
-    params.enablePathDedupInFusion = config.enablePathDedupInFusion;
-    params.lexicalFloorTopN = config.lexicalFloorTopN;
-    params.lexicalFloorBoost = config.lexicalFloorBoost;
-    params.enableLexicalTieBreak = config.enableLexicalTieBreak;
-    params.lexicalTieBreakEpsilon = config.lexicalTieBreakEpsilon;
-    params.semanticRescueSlots =
-        TuningSlot<size_t>(config.semanticRescueSlots, TuningLayer::Default);
-    params.semanticRescueMinVectorScore = config.semanticRescueMinVectorScore;
-    params.fusionEvidenceRescueSlots = config.fusionEvidenceRescueSlots;
-    params.fusionEvidenceRescueMinScore = config.fusionEvidenceRescueMinScore;
-    params.weakQueryMinTextHits = config.weakQueryMinTextHits;
-    params.weakQueryMinTopTextScore = config.weakQueryMinTopTextScore;
-    params.enableSubPhraseRescoring = config.enableSubPhraseRescoring;
-    params.subPhraseScoringPenalty = config.subPhraseScoringPenalty;
-    params.rerankTopK = config.rerankTopK;
-    params.rerankAnchoredMinRelativeScore = config.rerankAnchoredMinRelativeScore;
-    params.enableReranking = config.enableReranking;
-    params.rerankReplaceScores = config.rerankReplaceScores;
-    params.chunkAggregation = config.chunkAggregation;
-    params.enableGraphRerank = config.enableGraphRerank;
-    params.graphRerankTopN = config.graphRerankTopN;
-    params.graphRerankWeight = config.graphRerankWeight;
-    params.graphRerankMaxBoost = config.graphRerankMaxBoost;
-    params.graphRerankMinSignal = config.graphRerankMinSignal;
-    params.graphCommunityWeight = config.graphCommunityWeight;
-    params.kgMaxResults = config.kgMaxResults;
-    params.graphScoringBudgetMs = config.graphScoringBudgetMs;
-    params.graphEnablePathEnumeration = config.graphEnablePathEnumeration;
-    params.enableGraphQueryExpansion = config.enableGraphQueryExpansion;
-    params.graphEntitySignalWeight = config.graphEntitySignalWeight;
-    params.graphStructuralSignalWeight = config.graphStructuralSignalWeight;
-    params.graphCoverageSignalWeight = config.graphCoverageSignalWeight;
-    params.graphPathSignalWeight = config.graphPathSignalWeight;
-    params.graphCorroborationFloor = config.graphCorroborationFloor;
-    params.enableMetaPathRouting = config.enableMetaPathRouting;
-    params.metaPathSeedK = config.metaPathSeedK;
-    params.metaPathHopLimit = config.metaPathHopLimit;
-    params.metaPathBoostAlpha = config.metaPathBoostAlpha;
-    params.metaPathWeightSem = config.metaPathWeightSem;
-    params.metaPathWeightCall = config.metaPathWeightCall;
-    params.metaPathWeightDef = config.metaPathWeightDef;
-    params.metaPathWeightEntity = config.metaPathWeightEntity;
-    params.metaPathWeightBlob = config.metaPathWeightBlob;
-    params.conceptExtractionBackend = config.conceptExtractionBackend;
+    params.overlayValuesFrom(config);
     return params;
 }
 
@@ -411,8 +354,6 @@ void applyCommunityLayer(std::optional<TuningState> communityState, TuningState 
     params.semanticRescueMinVectorScore =
         lerpValue(params.semanticRescueMinVectorScore, target.semanticRescueMinVectorScore, kBlend);
     params.rerankTopK = lerpValue(params.rerankTopK, target.rerankTopK, kBlend);
-    params.rerankAnchoredMinRelativeScore = lerpValue(
-        params.rerankAnchoredMinRelativeScore, target.rerankAnchoredMinRelativeScore, kBlend);
     params.lexicalFloorTopN = lerpValue(params.lexicalFloorTopN, target.lexicalFloorTopN, kBlend);
     params.lexicalFloorBoost =
         lerpValue(params.lexicalFloorBoost, target.lexicalFloorBoost, kBlend);
@@ -442,11 +383,9 @@ void applyCommunityLayer(std::optional<TuningState> communityState, TuningState 
         params.enableSubPhraseRescoring || target.enableSubPhraseRescoring;
     params.enableLexicalTieBreak = params.enableLexicalTieBreak || target.enableLexicalTieBreak;
 
-    // Enums/strategy: adopt target profile's strategy
+    // Profile-level ranking controls.
     params.rrfK = target.rrfK;
-    params.fusionStrategy = target.fusionStrategy;
     params.chunkAggregation = target.chunkAggregation;
-    params.vectorBoostFactor = target.vectorBoostFactor;
 }
 
 // ---------------------------------------------------------------------------
@@ -454,8 +393,6 @@ void applyCommunityLayer(std::optional<TuningState> communityState, TuningState 
 // ---------------------------------------------------------------------------
 
 void applySemanticOnlyLayer(TunedParams& params) {
-    params.fusionStrategy.forceSet(SearchEngineConfig::FusionStrategy::WEIGHTED_SUM,
-                                   TuningLayer::Mode);
     params.similarityThreshold.forceSet(std::min(params.similarityThreshold.value, 0.0f),
                                         TuningLayer::Mode);
     params.weights.text.forceSet(std::min(params.weights.text.value, 0.20f), TuningLayer::Mode);

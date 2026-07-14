@@ -36,6 +36,53 @@ std::string envOr(const char* name, std::string_view fallback) {
     return std::string{fallback};
 }
 
+double envDoubleOr(const char* name, double fallback) {
+    const char* raw = std::getenv(name);
+    if (raw == nullptr || *raw == '\0') {
+        return fallback;
+    }
+    try {
+        return std::stod(raw);
+    } catch (...) {
+        return fallback;
+    }
+}
+
+std::size_t envSizeOr(const char* name, std::size_t fallback) {
+    const char* raw = std::getenv(name);
+    if (raw == nullptr || *raw == '\0') {
+        return fallback;
+    }
+    try {
+        return static_cast<std::size_t>(std::stoull(raw));
+    } catch (...) {
+        return fallback;
+    }
+}
+
+bool envBoolOr(const char* name, bool fallback) {
+    const char* raw = std::getenv(name);
+    if (raw == nullptr || *raw == '\0') {
+        return fallback;
+    }
+    const std::string_view v{raw};
+    if (v == "0" || v == "false" || v == "False" || v == "no" || v == "off") {
+        return false;
+    }
+    if (v == "1" || v == "true" || v == "True" || v == "yes" || v == "on") {
+        return true;
+    }
+    return fallback;
+}
+
+void applyConstructionPurityDefaults(topology::TopologyBuildConfig& buildConfig) {
+    // Default above 0 — zero admits every reciprocal edge and collapses CC.
+    buildConfig.minEdgeScore = envDoubleOr("YAMS_TOPOLOGY_MIN_EDGE_SCORE", 0.25);
+    // Lean ConstructionGates default.
+    buildConfig.maxComponentDocs = envSizeOr("YAMS_TOPOLOGY_MAX_COMPONENT_DOCS", 64);
+    buildConfig.reciprocalOnly = envBoolOr("YAMS_TOPOLOGY_RECIPROCAL_ONLY", true);
+}
+
 std::string computeCellIdentity() {
     std::string identity;
     identity.reserve(128);
@@ -136,8 +183,8 @@ bool TopologyManager::tryScheduleRebuild() {
     }
     // Audit-fix #1: throttle between rebuild completions. During bulk ingest,
     // every embedding batch fires a tryScheduleRebuild via post_ingest_drain.
-    // Without throttling, the daemon spends most of its wall time running
-    // HDBSCAN on the growing corpus instead of ingesting docs (O(N²) total).
+    // Without throttling, the daemon spends most of its wall time rebuilding
+    // topology on the growing corpus instead of ingesting docs (O(N²) total).
     // The throttle delays scheduling a NEW rebuild until rebuildMinIntervalMs
     // has elapsed since the last rebuild ENDED. Dirty hashes accumulate in
     // dirtyHashes_; the next successful schedule picks them all up at once.
@@ -254,10 +301,8 @@ TopologyManager::rebuildArtifacts(const std::string& reason, bool dryRun,
         if (tuner_ && tuner_->config().enabled) {
             const auto now = std::chrono::steady_clock::now();
             const std::size_t curDocCount = documentHashes.size();
-            // Rebuild arm grid against current corpus size so cluster-size
-            // candidates (log2(n), sqrt(n), 0.05·n) stay meaningful as the
-            // corpus grows. No-op when the new grid's arm ids match the
-            // current set — preserves MAB state across non-trivial rebuilds.
+            // Rebuild the engine arm grid when its identity changes. No-op
+            // grids preserve MAB state across rebuilds.
             if (curDocCount > 0 && tuner_->rebuildArmGridForCorpusSize(curDocCount)) {
                 spdlog::info("[TopologyManager] tuner arm grid resized for "
                              "corpus={} → {} arms",
@@ -270,16 +315,11 @@ TopologyManager::rebuildArtifacts(const std::string& reason, bool dryRun,
                     tunerCurrentArmId_ = arm->id;
                     tunerLastPullTime_ = now;
                     tunerLastPullDocCount_ = curDocCount;
-                    setHdbscanMinClusterSize(arm->hdbscanMinClusterSize);
-                    setHdbscanMinPoints(arm->hdbscanMinPoints);
-                    setFeatureSmoothingHops(arm->featureSmoothingHops);
                     if (!arm->engine.empty()) {
                         effectiveAlgorithm = arm->engine;
                     }
-                    spdlog::info("[TopologyManager] tuner pulled arm '{}' (engine={} minc={} "
-                                 "minp={} hops={})",
-                                 arm->id, arm->engine, arm->hdbscanMinClusterSize,
-                                 arm->hdbscanMinPoints, arm->featureSmoothingHops);
+                    spdlog::info("[TopologyManager] tuner pulled arm '{}' (engine={})", arm->id,
+                                 arm->engine);
                 }
             }
         }
@@ -342,10 +382,15 @@ TopologyManager::rebuildArtifacts(const std::string& reason, bool dryRun,
             reason, stats.documentsProcessed, stats.documentsMissingEmbeddings,
             stats.documentsMissingGraphNodes, stats.issues.empty() ? 0 : stats.issues.size());
     } else {
-        spdlog::info("[TopologyManager] rebuild complete (reason={}, docs={}, clusters={}, "
-                     "memberships={}, stored={}, snapshot={})",
-                     reason, stats.documentsProcessed, stats.clustersBuilt, stats.membershipsBuilt,
-                     stats.stored ? 1 : 0, stats.snapshotId);
+        spdlog::info("[TopologyManager] rebuild complete (reason={}, algorithm={}, docs={}, "
+                     "clusters={}, memberships={}, stored={}, snapshot={}, size_max={}, "
+                     "size_p50={}, size_p90={}, singletons={}, giant_ratio={:.4f}, "
+                     "gini={:.4f}, avg_intra_edge={:.4f})",
+                     reason, stats.algorithm, stats.documentsProcessed, stats.clustersBuilt,
+                     stats.membershipsBuilt, stats.stored ? 1 : 0, stats.snapshotId,
+                     stats.clusterSizeMax, stats.clusterSizeP50, stats.clusterSizeP90,
+                     stats.singletonCount, stats.giantClusterRatio, stats.clusterSizeGini,
+                     stats.avgIntraEdgeWeight);
     }
 
     {
@@ -524,9 +569,14 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     buildConfig.inputKind = topology::TopologyInputKind::Hybrid;
     buildConfig.reciprocalOnly = true;
     buildConfig.maxNeighborsPerDocument = extractionConfig.maxNeighborsPerDocument;
-    buildConfig.hdbscanMinPoints = hdbscanMinPoints_.load(std::memory_order_acquire);
-    buildConfig.hdbscanMinClusterSize = hdbscanMinClusterSize_.load(std::memory_order_acquire);
-    buildConfig.featureSmoothingHops = featureSmoothingHops_.load(std::memory_order_acquire);
+    buildConfig.routingRepresentativeCount = routingRepresentativeCount();
+    buildConfig.allowOverlap = boundarySpillEnabled_.load(std::memory_order_acquire);
+    buildConfig.overlapLimit = boundarySpillLimit_.load(std::memory_order_acquire);
+    buildConfig.overlapBoundaryDistanceRatio =
+        boundarySpillDistanceRatio_.load(std::memory_order_acquire);
+    buildConfig.overlapResidualPenalty =
+        boundarySpillResidualPenalty_.load(std::memory_order_acquire);
+    applyConstructionPurityDefaults(buildConfig);
 
     topology::TopologyExtractionStats extractionStats;
     auto extracted = extractor->extract(extractionConfig, &extractionStats);

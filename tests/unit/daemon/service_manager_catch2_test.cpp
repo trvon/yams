@@ -16,6 +16,7 @@
 
 #include "../../common/test_helpers_catch2.h"
 
+#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/repair/repair_health_probe.h>
@@ -223,6 +224,41 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager getConfig returns config
     REQUIRE((cfg.socketPath == config_.socketPath));
 }
 
+TEST_CASE("ServiceManager topology readiness follows artifact freshness",
+          "[daemon][service_manager][topology]") {
+    yams::search::IndexFreshnessSnapshot snapshot;
+    snapshot.topologyStatusKnown = true;
+    snapshot.topologyEpoch = 42;
+    snapshot.topologyArtifactsFresh = true;
+
+    CHECK(ServiceManager::isTopologyRoutingReady(snapshot));
+
+    snapshot.topologyEpoch = 0;
+    CHECK_FALSE(ServiceManager::isTopologyRoutingReady(snapshot));
+
+    snapshot.topologyEpoch = 42;
+    snapshot.topologyArtifactsFresh = false;
+    CHECK_FALSE(ServiceManager::isTopologyRoutingReady(snapshot));
+
+    snapshot.topologyArtifactsFresh = true;
+    snapshot.topologyRebuildRunning = true;
+    CHECK_FALSE(ServiceManager::isTopologyRoutingReady(snapshot));
+
+    snapshot.topologyRebuildRunning = false;
+    snapshot.postIngestQueued = 1;
+    CHECK_FALSE(ServiceManager::isTopologyRoutingReady(snapshot));
+
+    snapshot.postIngestQueued = 0;
+    snapshot.topologyDirtyDocuments = 1;
+    CHECK_FALSE(ServiceManager::isTopologyRoutingReady(snapshot));
+
+    snapshot.topologyDirtyDocuments = 0;
+    snapshot.awaitingDrain = true;
+    snapshot.lexicalReady = false;
+    snapshot.kgReady = false;
+    CHECK(ServiceManager::isTopologyRoutingReady(snapshot));
+}
+
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager PostIngestQueue accessor before init",
                  "[daemon][service_manager]") {
     ServiceManager sm(config_, state_, lifecycleFsm_);
@@ -279,7 +315,7 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager search engine snapshot d
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager cached search engine access doesn't crash",
                  "[daemon][service_manager]") {
     ServiceManager sm(config_, state_, lifecycleFsm_);
-    auto* engine = sm.getCachedSearchEngine();
+    auto engine = sm.getCachedSearchEngine();
     (void)engine; // May be null, that's OK
     SUCCEED();
 }
@@ -735,6 +771,20 @@ TEST_CASE_METHOD(ServiceManagerFixture,
         sm->shutdown();
         CHECK(walSidecarCleared(dbPath));
     }
+}
+
+TEST_CASE("ServiceManager auto-vacuum requires material reclaimable pages or file tail",
+          "[daemon][service_manager][vacuum]") {
+    constexpr std::uint64_t kPageSize = 4096;
+    constexpr std::uint64_t kLargeDatabaseBytes = 13ULL * 1024 * 1024 * 1024;
+
+    CHECK_FALSE(
+        ServiceManager::__test_shouldAutoVacuum(kLargeDatabaseBytes, 3'405'384, 182, kPageSize));
+    CHECK_FALSE(
+        ServiceManager::__test_shouldAutoVacuum(256ULL * 1024 * 1024, 65'536, 20'000, kPageSize));
+    CHECK(ServiceManager::__test_shouldAutoVacuum(2ULL * 1024 * 1024 * 1024, 524'288, 131'072,
+                                                  kPageSize));
+    CHECK(ServiceManager::__test_shouldAutoVacuum(600ULL * 1024 * 1024, 8, 0, kPageSize));
 }
 
 } // namespace yams::daemon::test

@@ -55,7 +55,7 @@ inline yams::Result<T> run_sync(boost::asio::awaitable<yams::Result<T>> aw,
         constexpr auto cancel_grace = std::chrono::milliseconds(1000);
         if (result_future.wait_for(cancel_grace) == std::future_status::ready) {
             try {
-                result_future.get(); // Consume to clean up
+                static_cast<void>(result_future.get()); // Consume to clean up
             } catch (...) {
                 // Intentional best-effort path; keep the primary operation unaffected.
             }

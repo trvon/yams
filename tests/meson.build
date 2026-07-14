@@ -543,16 +543,6 @@ if catch2_dep.found()
     install: false,
   )
 
-#ParallelPostProcessor daemon - aware budgeting tests
-  catch2_parallel_post_processor_exe = executable('catch2_parallel_post_processor',
-    files('unit/search/parallel_post_processor_catch2_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
-
 #FTS5 performance / stress tests(migrated from GTest, opt - in via YAMS_RUN_STRESS_TESTS = 1)
   catch2_fts5_stress_exe = executable('catch2_fts5_stress',
     files('unit/metadata/fts5_performance_stress_catch2_test.cpp'),
@@ -780,7 +770,8 @@ if catch2_dep.found()
   catch2_in_process_transport_exe = executable('catch2_in_process_transport',
     files('unit/daemon/in_process_transport_catch2_test.cpp'),
     include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    dependencies: [catch2_dep, catch2_main_dep, dependency('yams_daemon_client_embedded')]
+      + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
     build_rpath: ':'.join(_test_rpaths),
     install: false,
@@ -1178,7 +1169,7 @@ if catch2_dep.found()
     install: false,
   )
 
-#Search submodule tests(QueryParser, SearchExecutor, etc.)
+#Search submodule tests
 #Migrated from GTest as part of yams - 3s4 / yams - 1yq
   catch2_search_submodule_exe = executable('catch2_search_submodule',
     files(
@@ -1187,7 +1178,6 @@ if catch2_dep.found()
       'unit/search/hotzone_manager_catch2_test.cpp',
       'unit/search/kg_scorer_simple_catch2_test.cpp',
       'unit/search/lexical_scoring_catch2_test.cpp',
-      'unit/search/meta_path_router_catch2_test.cpp',
       'unit/search/simeon_lexical_backend_catch2_test.cpp',
       'unit/search/search_engine_simeon_lexical_catch2_test.cpp',
       'unit/search/search_engine_topology_catch2_test.cpp',
@@ -1195,19 +1185,26 @@ if catch2_dep.found()
       'unit/search/simeon_bandit_backend_catch2_test.cpp',
       'unit/search/query_helpers_catch2_test.cpp',
       'unit/search/query_router_catch2_test.cpp',
-      'unit/search/query_parser_catch2_test.cpp',
       'unit/search/query_concept_extractor_catch2_test.cpp',
       'unit/search/query_qualifiers_catch2_test.cpp',
-      'unit/search/result_fusion_catch2_test.cpp',
-      'unit/search/result_ranker_catch2_test.cpp',
       'unit/search/search_engine_config_catch2_test.cpp',
+      'unit/search/search_config_environment_catch2_test.cpp',
       'unit/search/search_tracing_catch2_test.cpp',
-      'unit/search/search_smoke_catch2_test.cpp',
-      'unit/search/query_literal_extractor_catch2_test.cpp',
+      'unit/search/component_fanout_catch2_test.cpp',
+      'unit/search/concept_boost_catch2_test.cpp',
+      'unit/search/cross_rerank_catch2_test.cpp',
       'unit/search/search_vector_pipeline_catch2_test.cpp',
-      'unit/search/search_filters_catch2_test.cpp',
-      'unit/search/search_results_catch2_test.cpp',
+      'unit/search/search_facets_catch2_test.cpp',
     ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_evidence_search_pipeline_exe = executable('catch2_evidence_search_pipeline',
+    files('unit/search/evidence_search_pipeline_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -1517,7 +1514,6 @@ if catch2_dep.found()
         'unit/vector/turboquant_asymmetric_score_catch2_test.cpp',
         'unit/vector/turboquant_integration_catch2_test.cpp',
         'unit/vector/turboquant_storage_catch2_test.cpp',
-        'unit/vector/turboquant_packed_reranker_catch2_test.cpp',
         'unit/vector/simeon_backend_catch2_test.cpp',
       ),
       include_directories: incs,
@@ -1548,6 +1544,7 @@ if catch2_dep.found()
   catch2_api_submodule_exe = executable('catch2_api_submodule',
     files(
       'unit/api/content_store_catch2_test.cpp',
+      'unit/api/content_store_builder_compression_catch2_test.cpp',
       'unit/api/metadata_api_catch2_test.cpp',
       'unit/api/semantic_search_api_catch2_test.cpp',
     ),
@@ -1839,6 +1836,15 @@ if catch2_dep.found()
 
   catch2_topology_factory_exe = executable('catch2_topology_factory',
     files('unit/topology/topology_factory_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_topology_kmeans_exe = executable('catch2_topology_kmeans',
+    files('unit/topology/kmeans_engine_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -2447,6 +2453,12 @@ if catch2_dep.found()
   )
 
   test('topology_factory', catch2_topology_factory_exe,
+    suite: ['catch2', 'unit', 'topology'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
+  )
+
+  test('topology_kmeans', catch2_topology_kmeans_exe,
     suite: ['catch2', 'unit', 'topology'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 30
@@ -3280,6 +3292,12 @@ if catch2_dep.found()
     timeout: 180
   )
 
+  test('evidence_search_pipeline', catch2_evidence_search_pipeline_exe,
+    suite: ['catch2', 'unit', 'search', 'evidence_pipeline'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
+  )
+
 #TuningSlot provenance tests
   test('tuning_slot', catch2_tuning_slot_exe,
     suite: ['catch2', 'unit', 'search', 'tuner'],
@@ -3307,6 +3325,21 @@ if catch2_dep.found()
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
+
+  test('retrieval_benchmark_support', catch2_retrieval_benchmark_support_exe,
+    suite: ['catch2', 'unit', 'search', 'benchmark'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
+  )
+
+  xplan_python = import('python').find_installation('python3', required: false)
+  if xplan_python.found()
+    test('xplan_contracts', xplan_python,
+      args: [meson.current_source_dir() / 'benchmarks/xplan/test_xplan_contracts.py'],
+      suite: ['unit', 'search', 'benchmark', 'xplan'],
+      timeout: 30
+    )
+  endif
 
   test('relevance_label_store', catch2_relevance_label_store_exe,
     suite: ['catch2', 'unit', 'search', 'relevance'],

@@ -1,0 +1,75 @@
+{
+  "name": "search_product_clean_baseline",
+  "description": "Product topology+ANN baseline after dead-source gates: scifact + nfcorpus, n=3. Topology contributes non-destructive evidence while global ANN and lexical fallback preserve recall.",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 10800,
+  "continue_on_arm_failure": true,
+  "mode": "live-ish",
+  "repeats": 3,
+  "baseline": "scifact",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SEARCH_STAGE_TRACE": "1",
+      "YAMS_ENABLE_ENV_OVERRIDES": "1",
+      "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+      "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY": "shadow",
+      "YAMS_BENCH_SKIP_BUILD": "1"
+    },
+    "params": {
+      "topk": 10,
+      "num_queries": 50,
+      "skip_build": true,
+      "topology_mode": "hybrid_assist",
+      "topology_vector_policy": "shadow"
+    }
+  },
+  "arms": [
+    {
+      "name": "scifact",
+      "factors": { "dataset": "scifact" },
+      "params": { "dataset": "scifact", "corpus_size": 2000 },
+      "env": {
+        "YAMS_BENCH_DATASET": "scifact",
+        "YAMS_BENCH_CORPUS_SIZE": "2000"
+      }
+    },
+    {
+      "name": "nfcorpus",
+      "factors": { "dataset": "nfcorpus" },
+      "params": { "dataset": "nfcorpus", "corpus_size": 0 },
+      "env": {
+        "YAMS_BENCH_DATASET": "nfcorpus"
+      }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_quality",
+      "metrics": [
+        "mrr",
+        "ndcg_at_k",
+        "map",
+        "recall_at_k",
+        "search_latency_ms_p50",
+        "search_latency_ms_p95"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json", "stdout.log"],
+    "require_metrics": ["mrr"],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "mrr",
+      "ndcg_at_k",
+      "map",
+      "search_latency_ms_p50",
+      "search_latency_ms_p95"
+    ],
+    "group_by": ["dataset"]
+  }
+}

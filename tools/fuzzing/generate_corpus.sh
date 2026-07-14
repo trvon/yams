@@ -17,7 +17,6 @@ mkdir -p \
 	"${CORPUS_DIR}/proto_serializer" \
 	"${CORPUS_DIR}/request_handler" \
 	"${CORPUS_DIR}/streaming_processor" \
-	"${CORPUS_DIR}/query_parser" \
 	"${CORPUS_DIR}/plugin_trust" \
 	"${CORPUS_DIR}/plugin_abi_mount" \
 	"${CORPUS_DIR}/plugin_abi_negotiation" \
@@ -47,26 +46,6 @@ head -c 64 /dev/urandom > "${CORPUS_DIR}/request_handler/01_random.bin"
 
 printf '\x00' > "${CORPUS_DIR}/streaming_processor/00_zero.bin"
 head -c 64 /dev/urandom > "${CORPUS_DIR}/streaming_processor/01_random.bin"
-
-# User-facing query parser seeds (plain text)
-cat > "${CORPUS_DIR}/query_parser/01_simple.txt" <<'EOF'
-hello world
-EOF
-cat > "${CORPUS_DIR}/query_parser/02_boolean.txt" <<'EOF'
-(title:hello OR title:world) AND content:test
-EOF
-cat > "${CORPUS_DIR}/query_parser/03_phrase.txt" <<'EOF'
-"quoted phrase" author:bob
-EOF
-cat > "${CORPUS_DIR}/query_parser/04_wildcards.txt" <<'EOF'
-tag:dev* file:readme?
-EOF
-cat > "${CORPUS_DIR}/query_parser/05_fuzzy.txt" <<'EOF'
-helo~2 world~1
-EOF
-cat > "${CORPUS_DIR}/query_parser/06_ranges.txt" <<'EOF'
-date:[2020 TO 2026] size:{10 TO 100}
-EOF
 
 # Plugin trust/path seeds.
 # Format: base\0candidate\0trustfile-body

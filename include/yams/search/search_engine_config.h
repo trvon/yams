@@ -88,7 +88,6 @@ struct SearchEngineConfig {
     size_t vectorOnlyNearMissReserve = 0;
     float vectorOnlyNearMissSlack = 0.05f;
     float vectorOnlyNearMissPenalty = 0.60f;
-    float vectorBoostFactor = 0.10f;
     float entityVectorWeight = 0.05f;
     float tagWeight = 0.05f;
     float metadataWeight = 0.05f;
@@ -124,7 +123,6 @@ struct SearchEngineConfig {
     bool enableParallelExecution = true;
     std::chrono::milliseconds componentTimeout = std::chrono::milliseconds(0);
 
-    bool enableTieredExecution = true;
     bool tieredNarrowVectorSearch = false;
     size_t tieredMinCandidates = 10;
     size_t weakQueryMinTextHits = 3;
@@ -132,47 +130,115 @@ struct SearchEngineConfig {
     bool enableWeakQueryFanoutBoost = true;
     float weakQueryVectorFanoutMultiplier = 2.0f;
     float weakQueryEntityVectorFanoutMultiplier = 1.5f;
-    bool enableTopologyWeakQueryRouting = false;
+
+    enum class TopologyRoutingMode {
+        Disabled,
+        WeakQueryOnly,
+        HybridAssist,
+    } topologyRoutingMode = TopologyRoutingMode::HybridAssist;
+
+    [[nodiscard]] static constexpr const char*
+    topologyRoutingModeToString(TopologyRoutingMode mode) noexcept {
+        switch (mode) {
+            case TopologyRoutingMode::Disabled:
+                return "disabled";
+            case TopologyRoutingMode::WeakQueryOnly:
+                return "weak_query_only";
+            case TopologyRoutingMode::HybridAssist:
+                return "hybrid_assist";
+        }
+        return "disabled";
+    }
+
+    /// How routed topology members interact with the global vector retriever.
+    /// Narrow filters Vec0 ANN traversal by routed cluster membership. Other vector engines
+    /// post-filter their bounded global results. Shadow records the proposed narrowing projection
+    /// while returning the unchanged global vector leg.
+    enum class TopologyVectorPolicy {
+        Narrow,
+        Shadow,
+    } topologyVectorPolicy = TopologyVectorPolicy::Shadow;
+
+    [[nodiscard]] static constexpr const char*
+    topologyVectorPolicyToString(TopologyVectorPolicy policy) noexcept {
+        switch (policy) {
+            case TopologyVectorPolicy::Narrow:
+                return "narrow";
+            case TopologyVectorPolicy::Shadow:
+                return "shadow";
+        }
+        return "shadow";
+    }
+
+    enum class TopologyRouteScoringMode {
+        Current,
+        SizeWeighted,
+        SeedCoverage,
+    } topologyRouteScoringMode = TopologyRouteScoringMode::Current;
+
+    [[nodiscard]] static constexpr const char*
+    topologyRouteScoringModeToString(TopologyRouteScoringMode mode) noexcept {
+        switch (mode) {
+            case TopologyRouteScoringMode::Current:
+                return "current";
+            case TopologyRouteScoringMode::SizeWeighted:
+                return "size_weighted";
+            case TopologyRouteScoringMode::SeedCoverage:
+                return "seed_coverage";
+        }
+        return "current";
+    }
+
+    /// Minimum and maximum cluster probes. Adaptive probing is disabled when
+    /// topologyAdaptiveProbeScoreGap is zero, preserving fixed maxClusters behavior.
+    size_t topologyMinClusters = 1;
     size_t topologyMaxClusters = 2;
+    /// Highest-ranked lexical documents allowed to influence cluster routing.
+    size_t topologyMaxSeedDocuments = 32;
+    /// Maximum total dense representatives evaluated per cluster, including the centroid.
+    /// Zero evaluates the complete representative cover stored in the topology snapshot.
+    size_t topologyRoutingRepresentativeLimit = 0;
+    /// Include another cluster while its score remains this close to the best route.
+    float topologyAdaptiveProbeScoreGap = 0.0f;
+    /// Abstain from hard narrowing when the selected/excluded boundary is closer
+    /// than this margin. Mixed-corpus calibration favors 0.20; zero disables abstention.
+    float topologyNarrowMinBoundaryMargin = 0.20f;
     size_t topologyMaxDocs = 64;
     float topologyMedoidBoost = 0.05f;
-    // Phase Y: multi-meta-path scoring (PathSim-style fixed weights, post-fusion boost).
-    // Each enabled meta-path independently scores candidate docs reachable from query
-    // seeds; total boost = Σ_m (w_m × pathScore_m). Phase P is the special case
-    // {only M_sem, w_sem=1, binary boost}. Default off → V0 matches existing Phase P.
-    bool enableMetaPathRouting{false};
-    std::size_t metaPathSeedK{8};     // seeds drawn via vectorDb.search(q, k)
-    std::size_t metaPathHopLimit{16}; // per-edge-type hop budget per seed
-    float metaPathBoostAlpha{0.3f};   // multiplier on the combined boost
-    float metaPathWeightSem{1.0f};    // doc — semantic_neighbor — doc
-    float metaPathWeightCall{
-        0.5f}; // doc — contains — function — calls — function — defined_in — doc
-    float metaPathWeightDef{0.5f};         // doc — contains — symbol — defined_in — doc
-    float metaPathWeightEntity{0.3f};      // doc — kg_doc_entities — node — kg_doc_entities — doc
-    float metaPathWeightBlob{0.2f};        // doc — blob — doc (dedup)
-    bool metaPathUseEdgeWeights{false};    // weight hits by edge.weight * seed similarity
-    float metaPathMinSeedSimilarity{0.0f}; // skip boost when best seed sim is below this
-    bool metaPathReciprocalOnly{false};    // keep only dst docs with a reverse edge to a seed
-    float metaPathSeedSimilarity{0.7f};    // seed-search cosine floor; must match the embedding
-                                           // backend's cosine scale or no seeds survive
+    /// Maximum additive score evidence from an admitted topology membership.
+    float topologyEvidenceWeight = 0.02f;
+    float topologySparseDenseAlpha = 0.5f;
+    float topologyMinRouteScore = 0.0f;
+
+    /// Where topology candidates come from at search time.
+    /// Clusters: seed → cluster router → member expansion (legacy).
+    /// GraphNeighbors: seed → semantic_neighbor edges (no partition required).
+    enum class TopologyExpansionSource {
+        Clusters,
+        GraphNeighbors,
+    } topologyExpansionSource = TopologyExpansionSource::Clusters;
+
+    [[nodiscard]] static constexpr const char*
+    topologyExpansionSourceToString(TopologyExpansionSource source) noexcept {
+        switch (source) {
+            case TopologyExpansionSource::Clusters:
+                return "clusters";
+            case TopologyExpansionSource::GraphNeighbors:
+                return "graph_neighbors";
+        }
+        return "clusters";
+    }
+
+    /// Min edge weight for graph_neighbors expansion (search path).
+    float topologyGraphNeighborMinScore = 0.25f;
+    /// Prefer reciprocal semantic_neighbor edges when expanding graph neighbors.
+    bool topologyGraphNeighborReciprocalOnly = true;
+    /// GraphNeighbors seed ANN k. 0 = off (product default); opt-in for experiments.
+    size_t topologyGraphVectorSeedProbe = 0;
 
     bool bypassCorpusWarmingGate = false;
     float rrfK = 12.0f;
     float bm25NormDivisor = 25.0f;
-    bool enableProfiling = false;
-
-    enum class FusionStrategy {
-        WEIGHTED_SUM,
-        RECIPROCAL_RANK,
-        WEIGHTED_RECIPROCAL,
-        COMB_MNZ,
-        CONVEX,
-        WEIGHTED_LINEAR_ZSCORE
-    } fusionStrategy = FusionStrategy::WEIGHTED_RECIPROCAL;
-
-    size_t weightedLinearZScorePoolSize = 500;
-    float weightedLinearZScoreAlpha = 0.75f;
-    bool weightedLinearZScoreUseZScore = true;
     bool enableAdaptiveFusion = false;
 
     enum class ChunkAggregation {
@@ -185,11 +251,9 @@ struct SearchEngineConfig {
     float chunkAggregationWeightDecay = 0.6f;
 
     bool enableIntentAdaptiveWeighting = true;
-    bool enableFieldAwareWeightedRrf = true;
     bool enableLexicalExpansion = false;
     size_t lexicalExpansionMinHits = 3;
     float lexicalExpansionScorePenalty = 0.65f;
-    bool enablePathDedupInFusion = false;
     size_t lexicalFloorTopN = 0;
     float lexicalFloorBoost = 0.0f;
     bool enableLexicalTieBreak = false;
@@ -226,25 +290,6 @@ struct SearchEngineConfig {
     float graphExpansionFtsPenalty = 0.78f;
     float graphExpansionVectorPenalty = 0.82f;
 
-    [[nodiscard]] static constexpr const char*
-    fusionStrategyToString(FusionStrategy strategy) noexcept {
-        switch (strategy) {
-            case FusionStrategy::WEIGHTED_SUM:
-                return "WEIGHTED_SUM";
-            case FusionStrategy::RECIPROCAL_RANK:
-                return "RECIPROCAL_RANK";
-            case FusionStrategy::WEIGHTED_RECIPROCAL:
-                return "WEIGHTED_RECIPROCAL";
-            case FusionStrategy::COMB_MNZ:
-                return "COMB_MNZ";
-            case FusionStrategy::CONVEX:
-                return "CONVEX";
-            case FusionStrategy::WEIGHTED_LINEAR_ZSCORE:
-                return "WEIGHTED_LINEAR_ZSCORE";
-        }
-        return "UNKNOWN";
-    }
-
     size_t textMaxResults = 300;
     size_t pathTreeMaxResults = 150;
     size_t kgMaxResults = 100;
@@ -255,17 +300,14 @@ struct SearchEngineConfig {
     size_t semanticBudgetVectorMaxResults = 32;
     size_t semanticBudgetEntityVectorMaxResults = 16;
 
-    bool useConnectionPriority = true;
     size_t minChunkSizeForParallel = 50;
-    bool symbolRank = true;
     bool includeDebugInfo = false;
     bool includeComponentTiming = false;
 
     bool enableReranking = true;
     size_t rerankTopK = 5;
-    float rerankAnchoredMinRelativeScore = 0.0f;
-    bool rerankReplaceScores = true;
-    float rerankBlendWeight = 0.60f;
+    bool rerankReplaceScores = false;
+    float rerankBlendWeight = 0.30f;
     float rerankScoreGapThreshold = 0.0f;
     size_t rerankSnippetMaxChars = 256;
     size_t fusionCandidateLimit = 0;
@@ -397,7 +439,6 @@ struct SearchEngineConfig {
     /// vectorMaxResults, etc.) per query based on signal strength.
     /// Narrow queries (1-2 terms) get reduced vector/graph budget;
     /// complex queries (4+ terms) get expanded fusion budget.
-    /// Requires enableAdaptiveFusion to be true as well for budget-aware fusion.
     bool enableAdaptiveBudgeting = false;
 
     /// Scaling factors for adaptive per-query budgets.
@@ -406,14 +447,36 @@ struct SearchEngineConfig {
     std::size_t narrowQueryTokenThreshold = 2;  // ≤ this = narrow
     std::size_t complexQueryTokenThreshold = 4; // ≥ this = complex
 
-    // Per-query multi-armed bandit arm selections. When non-empty, the
-    // tuning pipeline overrides the corresponding static config value with
-    // the MAB-selected arm. These extend the existing simeonBanditArm pattern
-    // to fusion strategy, vector-only threshold, and rerank top-K.
-    // Empty = use the static config value (no MAB override active).
-    std::string mabFusionStrategyArm;
-    std::string mabVectorOnlyThresholdArm;
-    std::string mabRerankTopKArm;
+    /// Reapply the operator-selected topology policy after corpus tuning.
+    /// Topology routing is an execution policy, not a corpus-derived relevance
+    /// weight, so tuning must not silently change the product default or an
+    /// explicit override.
+    void applyTopologyPolicyFrom(const SearchEngineConfig& source) noexcept {
+        topologyRoutingMode = source.topologyRoutingMode;
+        topologyVectorPolicy = source.topologyVectorPolicy;
+        topologyRouteScoringMode = source.topologyRouteScoringMode;
+        topologyMinClusters = source.topologyMinClusters;
+        topologyMaxClusters = source.topologyMaxClusters;
+        topologyMaxSeedDocuments = source.topologyMaxSeedDocuments;
+        topologyRoutingRepresentativeLimit = source.topologyRoutingRepresentativeLimit;
+        topologyAdaptiveProbeScoreGap = source.topologyAdaptiveProbeScoreGap;
+        topologyNarrowMinBoundaryMargin = source.topologyNarrowMinBoundaryMargin;
+        topologyMaxDocs = source.topologyMaxDocs;
+        topologyMedoidBoost = source.topologyMedoidBoost;
+        topologyEvidenceWeight = source.topologyEvidenceWeight;
+        topologySparseDenseAlpha = source.topologySparseDenseAlpha;
+        topologyMinRouteScore = source.topologyMinRouteScore;
+        topologyExpansionSource = source.topologyExpansionSource;
+        topologyGraphNeighborMinScore = source.topologyGraphNeighborMinScore;
+        topologyGraphNeighborReciprocalOnly = source.topologyGraphNeighborReciprocalOnly;
+        topologyGraphVectorSeedProbe = source.topologyGraphVectorSeedProbe;
+    }
+
+    /// Reapply operator-selected execution policies after a corpus tuner replaces relevance
+    /// weights. These switches define which implementation runs and are not tuning outputs.
+    void applyExecutionPolicyFrom(const SearchEngineConfig& source) noexcept {
+        applyTopologyPolicyFrom(source);
+    }
 };
 
 } // namespace yams::search

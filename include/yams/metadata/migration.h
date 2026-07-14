@@ -264,6 +264,9 @@ private:
 
     // Version 35: Avoid path-FTS churn on document updates that do not change file_path.
     static Migration optimizeDocumentsPathFtsUpdateTrigger();
+
+    // Version 36: Add trigram FTS for substring symbol/path lookup.
+    static Migration createSymbolMetadataTrigramFts();
 };
 
 /**

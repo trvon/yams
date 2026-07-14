@@ -34,6 +34,7 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 #include <yams/search/search_engine.h>
+#include <yams/search/search_execution_context.h>
 
 #include "common/fixture_manager.h"
 #include "common/test_data_generator.h"
@@ -708,6 +709,28 @@ TEST_CASE("SearchService: context integration", "[unit][services][search]") {
     REQUIRE(f.searchService != nullptr);
     auto result = runAwait(f.searchService->search(f.createBasicSearchRequest("test")));
     REQUIRE(result);
+}
+
+TEST_CASE("SearchService: host execution context supplies steady-state readiness",
+          "[unit][services][search][readiness]") {
+    SearchServiceFixture f;
+    f.appContext.searchExecutionContextProvider = [] {
+        auto context = search::defaultSearchExecutionContext();
+        context.freshness.lexicalReady = true;
+        context.freshness.vectorReady = true;
+        return context;
+    };
+    f.searchService = makeSearchService(f.appContext);
+
+    auto request = f.createBasicSearchRequest("programming");
+    request.type = "keyword";
+    auto result = runAwait(f.searchService->search(request));
+
+    REQUIRE(result);
+    REQUIRE(result.value().searchStats.contains("search_engine_ready"));
+    CHECK(result.value().searchStats.at("search_engine_ready") == "true");
+    CHECK(result.value().searchStats.at("vector_ready") == "true");
+    CHECK(result.value().searchStats.at("corpus_warming") == "false");
 }
 
 // ============ Edge Cases ============

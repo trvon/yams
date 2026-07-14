@@ -135,6 +135,20 @@ ClusterRepresentative representativeFromJson(const json& j) {
     return representative;
 }
 
+json routingRepresentativeToJson(const ClusterRoutingRepresentative& representative) {
+    return json{{"document_hash", representative.documentHash},
+                {"embedding", representative.embedding}};
+}
+
+ClusterRoutingRepresentative routingRepresentativeFromJson(const json& j) {
+    ClusterRoutingRepresentative representative;
+    representative.documentHash = j.value("document_hash", "");
+    if (j.contains("embedding") && j["embedding"].is_array()) {
+        representative.embedding = j["embedding"].get<std::vector<float>>();
+    }
+    return representative;
+}
+
 json clusterToJson(const ClusterArtifact& cluster) {
     json j = json::object();
     j["cluster_id"] = cluster.clusterId;
@@ -147,6 +161,7 @@ json clusterToJson(const ClusterArtifact& cluster) {
     j["member_count"] = cluster.memberCount;
     j["persistence_score"] = cluster.persistenceScore;
     j["cohesion_score"] = cluster.cohesionScore;
+    j["density_score"] = cluster.densityScore;
     j["bridge_mass"] = cluster.bridgeMass;
     j["member_document_hashes"] = cluster.memberDocumentHashes;
     j["overlap_cluster_ids"] = cluster.overlapClusterIds;
@@ -155,6 +170,12 @@ json clusterToJson(const ClusterArtifact& cluster) {
     }
     if (!cluster.centroidEmbedding.empty()) {
         j["centroid_embedding"] = cluster.centroidEmbedding;
+    }
+    if (!cluster.routingRepresentatives.empty()) {
+        j["routing_representatives"] = json::array();
+        for (const auto& representative : cluster.routingRepresentatives) {
+            j["routing_representatives"].push_back(routingRepresentativeToJson(representative));
+        }
     }
     return j;
 }
@@ -169,6 +190,7 @@ ClusterArtifact clusterFromJson(const json& j) {
     cluster.memberCount = j.value("member_count", std::size_t{0});
     cluster.persistenceScore = j.value("persistence_score", 0.0);
     cluster.cohesionScore = j.value("cohesion_score", 0.0);
+    cluster.densityScore = j.value("density_score", 0.0);
     cluster.bridgeMass = j.value("bridge_mass", 0.0);
     if (j.contains("medoid") && j["medoid"].is_object()) {
         cluster.medoid = representativeFromJson(j["medoid"]);
@@ -181,6 +203,14 @@ ClusterArtifact clusterFromJson(const json& j) {
     }
     if (j.contains("centroid_embedding") && j["centroid_embedding"].is_array()) {
         cluster.centroidEmbedding = j["centroid_embedding"].get<std::vector<float>>();
+    }
+    if (j.contains("routing_representatives") && j["routing_representatives"].is_array()) {
+        for (const auto& representative : j["routing_representatives"]) {
+            if (representative.is_object()) {
+                cluster.routingRepresentatives.push_back(
+                    routingRepresentativeFromJson(representative));
+            }
+        }
     }
     return cluster;
 }

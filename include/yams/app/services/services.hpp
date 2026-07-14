@@ -14,6 +14,7 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/query_concept_extractor.h>
 #include <yams/search/search_engine.h>
+#include <yams/search/search_execution_context.h>
 // Required for yams::extraction::IContentExtractor
 #include <yams/extraction/content_extractor.h>
 
@@ -100,6 +101,10 @@ class IGraphQueryService;
 
 struct AppContext {
     yams::daemon::ServiceManager* service_manager = nullptr;
+    std::function<void(const std::string& hash, const std::string& mime)> enqueuePostIngest;
+    // Host-owned daemon state without a yams_app_services -> yams_daemon link dependency.
+    // When absent, standalone/in-process callers receive the conservative default context.
+    std::function<search::SearchExecutionContext()> searchExecutionContextProvider;
     boost::asio::any_io_executor workerExecutor;
     std::shared_ptr<api::IContentStore> store;
     std::shared_ptr<metadata::MetadataRepository> metadataRepo;

@@ -1,0 +1,156 @@
+{
+  "name": "topology_routing_budget_ablation",
+  "description": "Compact recall-work gate for the adaptive connected-component router versus global Vec0 PHSS. The routed arm is the measured topology winner; disproven fixed-width, KMeans, and global-hedge arms are intentionally excluded.",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 7200,
+  "continue_on_arm_failure": true,
+  "mode": "live-ish",
+  "repeats": 3,
+  "baseline": "global_ann_c16",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SEARCH_STAGE_TRACE": "1",
+      "YAMS_ENABLE_ENV_OVERRIDES": "1",
+      "YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS": "1",
+      "YAMS_BENCH_TOPOLOGY_ENGINE": "connected",
+      "YAMS_TOPOLOGY_MIN_EDGE_SCORE": "0.25",
+      "YAMS_TOPOLOGY_MAX_COMPONENT_DOCS": "64",
+      "YAMS_VECTOR_MAX_RESULTS": "32",
+      "YAMS_VECTOR_SEARCH_ENGINE": "vec0",
+      "YAMS_VECTOR_VEC0_PHSS_ENABLED": "1",
+      "YAMS_VECTOR_VEC0_PHSS_CANDIDATES": "64"
+    },
+    "params": {
+      "dataset": "scifact",
+      "corpus_size": 2000,
+      "num_queries": 50,
+      "topk": 10,
+      "topology_source": "vector",
+      "topology_engine": "connected",
+      "seed_semantic_neighbors": "1",
+      "max_component_docs": 64,
+      "min_edge_score": 0.25
+    }
+  },
+  "arms": [
+    {
+      "name": "global_ann_c16",
+      "factors": {
+        "topology_mode": "disabled",
+        "ann_candidate_budget": 16,
+        "vector_result_budget": 32
+      },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_MODE": "disabled",
+        "YAMS_VECTOR_VEC0_PHSS_CANDIDATES": "16"
+      }
+    },
+    {
+      "name": "global_ann_c64",
+      "factors": {
+        "topology_mode": "disabled",
+        "ann_candidate_budget": 64,
+        "vector_result_budget": 32
+      },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_MODE": "disabled",
+        "YAMS_VECTOR_VEC0_PHSS_CANDIDATES": "64"
+      }
+    },
+    {
+      "name": "global_ann_c139",
+      "factors": {
+        "topology_mode": "disabled",
+        "ann_candidate_budget": 139,
+        "vector_result_budget": 32
+      },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_MODE": "disabled",
+        "YAMS_VECTOR_VEC0_PHSS_CANDIDATES": "139"
+      }
+    },
+    {
+      "name": "routed_cc_adaptive_docs16",
+      "factors": {
+        "topology_mode": "hybrid_assist",
+        "topology_vector_policy": "narrow",
+        "route_candidate_budget": 16,
+        "adaptive_routing": true
+      },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+        "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY": "narrow"
+      },
+      "params": {
+        "topology_vector_policy": "narrow",
+        "min_clusters": 1,
+        "max_clusters": 4,
+        "max_docs": 16,
+        "max_seed_documents": 16,
+        "adaptive_probe_score_gap": 0.05,
+        "narrow_min_boundary_margin": 0.02,
+        "min_route_score": 0.15
+      }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_quality",
+      "metrics": [
+        "mrr",
+        "ndcg_at_k",
+        "map",
+        "recall_at_k",
+        "search_latency_ms_p50",
+        "search_latency_ms_p95",
+        "topology_narrow_rate",
+        "topology_confidence_abstain_rate",
+        "topology_route_available_avg",
+        "topology_route_boundary_score_margin_avg",
+        "topology_snapshot_cache_hit_rate",
+        "topology_allowed_candidates_avg",
+        "topology_vector_filter_allowed_candidates_avg",
+        "topology_vector_filter_latency_ms_avg",
+        "topology_vector_abstain_latency_ms_avg",
+        "vector_candidate_budget_avg",
+        "vector_result_budget_avg",
+        "vector_candidate_work_budget_avg",
+        "vector_distance_evaluation_budget_avg",
+        "vector_rows_visited_actual_avg",
+        "vector_exact_distance_evaluations_actual_avg",
+        "vector_ann_candidate_budget_actual_avg",
+        "vector_total_rows_visited_actual_avg",
+        "vector_total_exact_distance_evaluations_actual_avg"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json", "stdout.log"],
+    "require_metrics": ["mrr", "search_latency_ms_p50"],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "mrr",
+      "ndcg_at_k",
+      "recall_at_k",
+      "search_latency_ms_p50",
+      "topology_narrow_rate",
+      "topology_confidence_abstain_rate",
+      "topology_route_available_avg",
+      "topology_route_boundary_score_margin_avg",
+      "topology_snapshot_cache_hit_rate",
+      "topology_allowed_candidates_avg",
+      "topology_vector_filter_allowed_candidates_avg",
+      "topology_vector_filter_latency_ms_avg",
+      "topology_vector_abstain_latency_ms_avg",
+      "vector_candidate_work_budget_avg",
+      "vector_distance_evaluation_budget_avg",
+      "vector_ann_candidate_budget_actual_avg",
+      "vector_total_rows_visited_actual_avg",
+      "vector_total_exact_distance_evaluations_actual_avg"
+    ]
+  }
+}

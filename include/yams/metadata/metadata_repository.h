@@ -924,9 +924,14 @@ public:
         kgStore_ = std::move(kgStore);
     }
 
-    void setGraphComponent(std::shared_ptr<yams::daemon::GraphComponent> graphComponent) {
-        graphComponent_ = std::move(graphComponent);
+    using TreeDiffAppliedCallback =
+        std::function<Result<void>(int64_t, const std::vector<TreeChangeRecord>&)>;
+
+    void setTreeDiffAppliedCallback(TreeDiffAppliedCallback callback) {
+        treeDiffAppliedCallback_ = std::move(callback);
     }
+
+    void setGraphComponent(std::shared_ptr<yams::daemon::GraphComponent> graphComponent);
 
     std::shared_ptr<KnowledgeGraphStore> getKnowledgeGraphStore() const { return kgStore_; }
 
@@ -935,8 +940,8 @@ private:
     ConnectionPool* readPool_{nullptr};
     bool hasPathIndexing_{false};
     bool pathFtsAvailable_{false};
-    std::shared_ptr<KnowledgeGraphStore> kgStore_; // PBI-043: tree diff KG integration
-    std::shared_ptr<yams::daemon::GraphComponent> graphComponent_; // PBI-009: centralized graph ops
+    std::shared_ptr<KnowledgeGraphStore> kgStore_;    // PBI-043: tree diff KG integration
+    TreeDiffAppliedCallback treeDiffAppliedCallback_; // PBI-009: centralized graph ops hook
 
     // Component-owned metrics (updated on insert/delete, read by DaemonMetrics)
     mutable std::atomic<uint64_t> cachedDocumentCount_{0};

@@ -216,10 +216,8 @@ public:
     // against the selected BM25 variant. When router_enabled is false this
     // behaves exactly like score() + fixed recipe_name = config variant.
     //
-    // CascadeLinearAlpha maps to the SabSmooth index at this layer — yams's
-    // ResultFusion already implements the α=0.75 linear-z hybrid that
-    // CascadeLinearAlpha describes, so the routing decision just picks which
-    // BM25 variant feeds into that fusion.
+    // CascadeLinearAlpha maps to the SabSmooth index at this layer; the search
+    // pipeline owns the final cross-source fusion.
     Result<RescoreDecision> scoreRouted(std::string_view query,
                                         std::span<const std::int64_t> candidate_doc_ids) const;
 

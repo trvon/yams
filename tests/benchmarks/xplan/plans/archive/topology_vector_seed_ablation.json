@@ -1,0 +1,135 @@
+{
+  "name": "topology_vector_seed_ablation",
+  "description": "ARCHIVED: GraphNeighbors seed mechanism screen retained for historical comparison. Superseded by topology_routing_budget_ablation after cluster routing won.",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 7200,
+  "continue_on_arm_failure": true,
+  "mode": "live-ish",
+  "repeats": 3,
+  "baseline": "topo_off",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SEARCH_STAGE_TRACE": "1",
+      "YAMS_ENABLE_ENV_OVERRIDES": "1",
+      "YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS": "1",
+      "YAMS_BENCH_TOPOLOGY_ENGINE": "connected",
+      "YAMS_TOPOLOGY_MIN_EDGE_SCORE": "0.25",
+      "YAMS_TOPOLOGY_MAX_COMPONENT_DOCS": "64"
+    },
+    "params": {
+      "dataset": "scifact",
+      "corpus_size": 2000,
+      "num_queries": 50,
+      "topk": 10,
+      "topology_source": "vector",
+      "topology_engine": "connected",
+      "seed_semantic_neighbors": "1",
+      "max_component_docs": 64,
+      "min_edge_score": 0.25
+    }
+  },
+  "arms": [
+    {
+      "name": "topo_off",
+      "factors": { "topology_mode": "disabled" },
+      "env": { "YAMS_BENCH_TOPOLOGY_MODE": "disabled" }
+    },
+    {
+      "name": "graph_neighbors_vseed16",
+      "factors": {
+        "topology_mode": "hybrid_assist",
+        "expansion_source": "graph_neighbors",
+        "vector_seed_probe": 16
+      },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+        "YAMS_BENCH_TOPOLOGY_EXPANSION": "graph_neighbors",
+        "YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE": "graph_neighbors",
+        "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE": "0.20",
+        "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_RECIPROCAL_ONLY": "0",
+        "YAMS_SEARCH_TOPOLOGY_GRAPH_VECTOR_SEED_PROBE": "16",
+        "YAMS_BENCH_SEED_SEMANTIC_TOPK": "16",
+        "YAMS_BENCH_SEED_SEMANTIC_THRESHOLD": "0.20",
+        "YAMS_SEARCH_TOPOLOGY_MAX_DOCS": "12"
+      },
+      "params": {
+        "expansion_source": "graph_neighbors",
+        "seed_semantic_topk": 16,
+        "vector_seed_probe": 16,
+        "max_docs": 12
+      }
+    },
+    {
+      "name": "graph_neighbors_no_vseed",
+      "factors": {
+        "topology_mode": "hybrid_assist",
+        "expansion_source": "graph_neighbors",
+        "vector_seed_probe": 0
+      },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+        "YAMS_BENCH_TOPOLOGY_EXPANSION": "graph_neighbors",
+        "YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE": "graph_neighbors",
+        "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE": "0.20",
+        "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_RECIPROCAL_ONLY": "0",
+        "YAMS_SEARCH_TOPOLOGY_GRAPH_VECTOR_SEED_PROBE": "0",
+        "YAMS_BENCH_SEED_SEMANTIC_TOPK": "16",
+        "YAMS_BENCH_SEED_SEMANTIC_THRESHOLD": "0.20",
+        "YAMS_SEARCH_TOPOLOGY_MAX_DOCS": "12"
+      },
+      "params": {
+        "expansion_source": "graph_neighbors",
+        "seed_semantic_topk": 16,
+        "vector_seed_probe": 0,
+        "max_docs": 12
+      }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_quality",
+      "metrics": [
+        "mrr",
+        "ndcg_at_k",
+        "map",
+        "recall_at_k",
+        "search_latency_ms_p50",
+        "search_latency_ms_p95",
+        "topology_applied",
+        "topology_added_avg",
+        "topology_routed_docs_avg",
+        "topology_path_medoid_rate",
+        "topology_path_seed_neighbors_rate",
+        "topology_vector_seeds_added_avg",
+        "topology_vector_seeds_nonzero_rate",
+        "topology_vector_seed_probe_avg",
+        "topology_narrow_rate",
+        "topology_snapshot_cache_hit_rate",
+        "topology_allowed_candidates_avg",
+        "topology_member_rerank_candidates_avg",
+        "vector_candidate_work_budget_avg"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json", "stdout.log"],
+    "require_metrics": ["mrr"],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "mrr",
+      "ndcg_at_k",
+      "search_latency_ms_p50",
+      "topology_added_avg",
+      "topology_path_medoid_rate",
+      "topology_path_seed_neighbors_rate",
+      "topology_vector_seeds_added_avg",
+      "topology_narrow_rate",
+      "topology_allowed_candidates_avg",
+      "vector_candidate_work_budget_avg"
+    ]
+  }
+}

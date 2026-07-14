@@ -542,4 +542,10 @@ makeSqliteKnowledgeGraphStore(const std::string& dbPath, const KnowledgeGraphSto
 Result<std::unique_ptr<KnowledgeGraphStore>>
 makeSqliteKnowledgeGraphStore(ConnectionPool& pool, const KnowledgeGraphStoreConfig& cfg = {});
 
+// Create a SQLite-backed store with distinct write and read pools. The store does not own either
+// pool and routes read-only KG/symbol/readiness operations through readPool.
+Result<std::unique_ptr<KnowledgeGraphStore>>
+makeSqliteKnowledgeGraphStore(ConnectionPool& writePool, ConnectionPool& readPool,
+                              const KnowledgeGraphStoreConfig& cfg = {});
+
 } // namespace yams::metadata

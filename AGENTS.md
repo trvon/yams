@@ -103,6 +103,104 @@ contract in the prompt; the graph here is rich: function-level nodes with
 - DynamicCap sentinel: `UINT32_MAX` = unset (use it when resetting, not `0`).
 - See `docs/developer/testing.md` for the full suite-shaping policy.
 
+## Benchmarks & Experiments (xplan)
+
+Daemon KPI and **search-engine** quality/latency ablations use **xplan**. Use the
+harness; do not invent parallel multi-arm shell matrices. Organized default-system
+numbers: `docs/benchmarks/README.md`. Per-run detail (gitignored):
+`build/benchmarks/<plan>/<stamp>/` (`REPORT.md`, `ablation.md`, `metrics.csv`).
+
+### Entry points
+
+```bash
+python3 tests/benchmarks/xplan/runner.py self-test
+python3 tests/benchmarks/xplan/runner.py list-plans
+python3 tests/benchmarks/xplan/runner.py download-beir   # scifact + nfcorpus
+python3 tests/benchmarks/xplan/runner.py run <plan> --build-dir build/release
+python3 tests/benchmarks/xplan/runner.py report build/benchmarks/<plan>/<stamp>
+python3 tests/benchmarks/xplan/runner.py compare <dirA> <dirB>
+```
+
+| Surface | Path |
+|---------|------|
+| Default-system numbers | `docs/benchmarks/README.md` |
+| Harness (how it works) | `tests/benchmarks/xplan/README.md` |
+| Plans / workers | `tests/benchmarks/xplan/plans/`, `…/workers/` |
+| Artifacts | `build/benchmarks/**` (gitignored) |
+
+Quality plans default to **BEIR scifact**. Do not rank search levers on
+`dataset=synthetic` (ingest/load throughput only). Prefer
+`build/release/tests/benchmarks/retrieval_quality_bench` for quality runs.
+
+### Search engine measurement loop
+
+The primary optimization surface is **`src/search/`** (`SearchEngine`, fanout,
+fusion, rerank, topology assist). Topology is one optional assist path — not the
+whole loop. Engine expansion (new stages, seams, fusion/rerank knobs) must be
+driven by this loop, not intuition alone.
+
+1. **Name the lever** — one typed `SearchEngineConfig` / topology field (or a
+   tested seam extract). No new product `YAMS_*` env tunables.
+2. **Pick a plan by question:**
+
+   | Question | Plan |
+   |----------|------|
+   | Which hybrid component carries quality? | `search_component_ablation` |
+   | Product-default path (topology off) | `search_product_component_ablation` (`repeats=3`) |
+   | Vector fusion weight | `search_vector_weight_ablation` (`repeats=3`) |
+   | Vector weight multi-corpus gate | `search_vector_weight_0_20_multicorp` (`repeats=3`) |
+   | Graph-vector fusion weight | `search_graph_vector_weight_ablation` (`repeats=3`) — **parked for product defaults**: only meaningful with topology assist; SCIENTIFIC/no-KG gates force `graphVectorWeight=0` |
+   | Tiered execution on/off | `search_tiered_ablation` (`repeats=3`) |
+   | Multi-corpus transfer gate | `search_product_nfcorpus_gate` (`repeats=3`) |
+   | Compact engine overhead set | `subsystem_overhead` |
+   | Pipeline / leg stages | `leg_stage_ablation` (`repeats=3`) |
+   | Rerank off vs replace vs blend | `simeon_rerank` / `simeon_rerank_beir` |
+   | Rerank blend weight multi-corpus | `search_rerank_blend_multicorp` (`repeats=3`) |
+   | Per-query RR class analysis | `analyze_query_class.py` on arm `debug.jsonl` |
+   | Routed vs global ANN at equal budgets | `topology_routing_budget_ablation` (`repeats=3`) |
+   | Topology construction purity | `topology_purity_validate` (`repeats=3`) |
+   | Ingest / load / repair / ops KPIs | `ingest_pipeline`, `retrieval_load`, … |
+
+3. **Decision-grade runs use `repeats>=3`.** Bare Δ with `repeats=1` is exploratory.
+   Summary marks: `*` clears pooled stdev, `~` within noise, unmarked = n=1.
+4. **Read quality × cost** — primary columns include MRR (and friends) **and**
+   `search_latency_ms_p50` (plus expansion/path rates when topology is on).
+   Mechanism rates from `debug.jsonl` (e.g. medoid vs seed-neighbor path,
+   `topology_vector_seeds_added_*`) land in metrics via `retrieval_quality`.
+5. **Compare stamps** with `runner.py compare` before claiming a win. Do not
+   rebuild `build/release` mid-run (poisons arms). xplan skips meson compile when
+   the bench binary already exists; force with `YAMS_BENCH_FORCE_BUILD=1`.
+6. **Product default** for topology routing stays **disabled**. Experimental
+   engine paths must beat that default hybrid on quality without a large
+   latency regression, or stay opt-in / parked.
+7. **Catch2 first** for seams and unit behavior (`tests/unit/search/`); xplan
+   is for multi-arm KPI and default-system ranking — not a substitute for TDD.
+
+### Workers (short)
+
+`retrieval_quality` → BEIR quality + engine/topology counters (`retrieval_quality_bench`).\
+`ingestion_e2e` / `retrieval_load` / `repair_ability` / `ops_timeline` → daemon KPIs 2–5.
+Ablation mapping: `workers/ablation.py` (search weight gates, ingest flags, topology
+mode/expansion). Harness-only: `YAMS_BENCH_*`. Do not grow product `YAMS_*` for axes.
+
+### Plan hygiene
+
+- Active topology decision plans: `topology_purity_validate`,
+  `topology_routing_budget_ablation`.
+- Product-path engine plans: `search_product_component_ablation`,
+  `search_vector_weight_ablation`, `search_vector_weight_0_20_multicorp`,
+  `search_tiered_ablation`, `search_product_nfcorpus_gate`,
+  `search_rerank_blend_multicorp`, `search_product_clean_baseline`.
+- Parked product levers (do not use for promote/kill of defaults):
+  `search_graph_vector_weight_ablation` (topology-only), path/tag/metadata/entity
+  weight knobs on SCIENTIFIC (capability-gated to 0).
+- Superseded multi-arm topology plans: `tests/benchmarks/xplan/plans/archive/`
+  (historical only; not for promote/kill).
+- No new multi-arm shell scripts; wrappers under `scripts/` or
+  `tests/benchmarks/scripts/` only.
+- Prefer sanitizer builds for intermittent bench crashes:
+  `build/asan-api|tsan-api|ubsan-api` + `YAMS_BENCH_SKIP_BUILD=1`.
+
 ## Patterns To Reuse (High Signal)
 
 - `TuneAdvisor`: static inline atomics, relaxed reads for advisory knobs.

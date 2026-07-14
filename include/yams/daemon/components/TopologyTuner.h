@@ -20,15 +20,11 @@
 
 namespace yams::daemon {
 
-// One arm in the topology bandit's grid: an (engine, params) tuple to be
-// evaluated against intrinsic cluster-quality reward. Caller-supplied id
-// is the canonical key the bandit uses to attribute reward back to this arm.
+// One engine arm in the topology bandit's grid. Caller-supplied id is the
+// canonical key the bandit uses to attribute reward back to this arm.
 struct TopologyArm {
     std::string id;
     std::string engine;
-    std::size_t hdbscanMinClusterSize{0};
-    std::size_t hdbscanMinPoints{0};
-    std::size_t featureSmoothingHops{0};
 };
 
 // Weights for the intrinsic-reward formula. The reward is clamped to [0, 1].
@@ -72,9 +68,8 @@ struct TopologyTunerConfig {
 [[nodiscard]] double computeIntrinsicReward(const TopologyManager::RebuildStats& stats,
                                             const IntrinsicRewardWeights& weights) noexcept;
 
-// Build the default arm grid for a corpus of `corpusDocCount` documents.
-// The HDBSCAN parameter values scale with corpus size (log2(n), sqrt(n))
-// so the same grid is meaningful at 1k and 50k docs.
+// Build the default engine grid. `corpusDocCount` is retained in the API so
+// future engines can add corpus-size-aware arms without changing callers.
 [[nodiscard]] std::vector<TopologyArm> defaultArmGrid(std::size_t corpusDocCount);
 
 class TopologyTuner {

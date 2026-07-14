@@ -26,6 +26,28 @@ namespace {
 constexpr std::uintmax_t kOversizedDbBytes = 600ULL * 1024 * 1024;
 constexpr std::uintmax_t kCompactedDbMaxBytes = 1024ULL * 1024;
 
+int sanitizerTimeoutScale() {
+#if defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+    return 4;
+#elif __has_feature(address_sanitizer)
+    return 2;
+#endif
+#endif
+#if defined(__SANITIZE_THREAD__)
+    return 4;
+#elif defined(__SANITIZE_ADDRESS__)
+    return 2;
+#else
+    return 1;
+#endif
+}
+
+template <typename Rep, typename Period>
+std::chrono::milliseconds scaledTimeout(std::chrono::duration<Rep, Period> base) {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(base) * sanitizerTimeoutScale();
+}
+
 void writeCorruptDb(const fs::path& path) {
     std::ofstream out(path, std::ios::binary);
     std::string header = "SQLite format 3";
@@ -215,7 +237,7 @@ TEST_CASE("Daemon startup checkpoints stale WAL and auto-vacuums oversized metad
     CHECK((startupProbeRowCount(dbPath) == 1U));
 
     if (expectAutoVacuum) {
-        CHECK(waitForDbBelowSize(dbPath, kCompactedDbMaxBytes, 30s));
+        CHECK(waitForDbBelowSize(dbPath, kCompactedDbMaxBytes, scaledTimeout(30s)));
     } else {
         WARN("Skipping DB shrink assertion because this runner has insufficient free space for "
              "startup auto-VACUUM");

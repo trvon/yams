@@ -44,10 +44,13 @@ constexpr double kFusionDroppedPressureThreshold = 0.35;
 constexpr double kAnchoredDroppedPressureThreshold = 0.18;
 constexpr double kTopTextDroppedPressureThreshold = 0.12;
 constexpr std::uint64_t kFusionPressureWarmupObservations = 5;
-constexpr size_t kMaxAdaptiveLexicalFloorTopN = 12;
-constexpr float kMaxAdaptiveLexicalFloorBoost = 0.18f;
+// Caps sit above MIXED_PRECISION / SCIENTIFIC profile defaults (topN=12,
+// boost=0.20) so fusion-drop pressure can still push the lexical floor harder.
+// Simeon soft-fusion work: pure dense is weak; lexical floor is the hedge.
+constexpr size_t kMaxAdaptiveLexicalFloorTopN = 24;
+constexpr float kMaxAdaptiveLexicalFloorBoost = 0.35f;
 constexpr float kAdaptiveLexicalFloorBoostStep = 0.04f;
-constexpr float kMaxAdaptiveLexicalTieBreakEpsilon = 0.010f;
+constexpr float kMaxAdaptiveLexicalTieBreakEpsilon = 0.015f;
 constexpr float kAdaptiveLexicalTieBreakEpsilonStep = 0.0025f;
 constexpr float kMinAdaptiveVectorOnlyPenalty = 0.85f;
 // Vector-only pressure thresholds — activate when too many vector-only
@@ -434,8 +437,6 @@ bool applyResultPoolAdjustments(TunedParams& candidate, const RuntimeTelemetry& 
 
 constexpr size_t kMaxRerankTopK = 30;
 constexpr size_t kRerankTopKStep = 2;
-constexpr float kRerankAnchoredMinStep = 0.05f;
-constexpr float kMinRerankAnchoredScore = 0.30f;
 
 bool applyRerankerAdjustments(TunedParams& candidate, const RuntimeTelemetry& telemetry,
                               std::vector<std::string>& reasons) {
@@ -454,13 +455,6 @@ bool applyRerankerAdjustments(TunedParams& candidate, const RuntimeTelemetry& te
     const size_t nextRerankTopK = std::min(kMaxRerankTopK, candidate.rerankTopK + kRerankTopKStep);
     if (nextRerankTopK > candidate.rerankTopK) {
         candidate.rerankTopK = nextRerankTopK;
-        changed = true;
-    }
-
-    const float nextAnchoredScore = std::max(
-        kMinRerankAnchoredScore, candidate.rerankAnchoredMinRelativeScore - kRerankAnchoredMinStep);
-    if (nextAnchoredScore + 1e-6f < candidate.rerankAnchoredMinRelativeScore) {
-        candidate.rerankAnchoredMinRelativeScore = nextAnchoredScore;
         changed = true;
     }
 
@@ -529,6 +523,54 @@ bool applyFusionGuardrailAdjustments(TunedParams& candidate, const RuntimeTeleme
     return changed;
 }
 
+/// Pin a fusion weight at zero so normalize/zoom cannot resurrect it while
+/// the capability remains absent.
+void pinWeightZero(TuningSlot<float>& slot) {
+    slot.forceSet(0.0f, TuningLayer::Corpus);
+    slot.pinned = true;
+}
+
+/// Capability-gated dead-source zeros for flat scientific / structure-less corpora.
+/// Product hybrid only contributes text+vector (measured stage traces); path/tag/
+/// entity/kg/metadata were attempted with 0 contribute under default weights.
+void applyDeadSourceGates(const storage::CorpusStats& stats, TuningState state, TunedParams& params,
+                          bool preserveExplicitGraph = false) {
+    const bool scientific = state == TuningState::SCIENTIFIC;
+
+    // SCIENTIFIC is selected for flat-relative corpora even when absolute pathDepthAvg
+    // is high (hasPaths() true). Always zero path on SCIENTIFIC.
+    if (scientific || !stats.hasPaths()) {
+        pinWeightZero(params.weights.pathTree);
+    }
+    if (!stats.hasTags()) {
+        pinWeightZero(params.weights.tag);
+    }
+    if (scientific) {
+        pinWeightZero(params.weights.metadata);
+        pinWeightZero(params.weights.entityVector);
+        params.graphTextWeight = 0.0f;
+        params.graphVectorWeight = 0.0f;
+    }
+    // Absent KG, and SCIENTIFIC corpora without rich topology, zero the KG
+    // fusion leg unless the caller explicitly seeded a graph override package
+    // (seedRuntimeConfig preserveExplicitGraph). SCIENTIFIC is the flat
+    // BEIR-style text/vector profile; NER-only entity density must not
+    // implicitly resurrect graph scoring, but measured rich KG edge topology
+    // should still activate graph reranking.
+    if ((!stats.hasKnowledgeGraph() || (scientific && !stats.hasRichGraphTopology())) &&
+        !preserveExplicitGraph) {
+        pinWeightZero(params.weights.kg);
+        params.graphTextWeight = 0.0f;
+        params.graphVectorWeight = 0.0f;
+        params.kgMaxResults = 0;
+        params.graphScoringBudgetMs = 0;
+        params.enableGraphRerank = false;
+        params.enableGraphQueryExpansion = false;
+        params.graphEnablePathEnumeration = false;
+    }
+    params.weights.normalize();
+}
+
 } // namespace
 
 SearchTuner::SearchTuner(const storage::CorpusStats& stats) : SearchTuner(stats, std::nullopt) {}
@@ -546,6 +588,7 @@ SearchTuner::SearchTuner(const storage::CorpusStats& stats, std::optional<Tuning
     applyGraphAwareAdjustments(stats_, params_, stateReason_);
     applyCorpusStateAdjustments(stats_, state_, params_, stateReason_);
     applyAdaptiveClamp(stats_, params_);
+    applyDeadSourceGates(stats_, state_, params_);
     baseParams_ = params_;
     baseConfig_ = buildConfigFromParamsLocked();
 
@@ -556,72 +599,23 @@ SearchTuner::SearchTuner(const storage::CorpusStats& stats, std::optional<Tuning
 void SearchTuner::seedRuntimeConfig(const SearchEngineConfig& config) {
     std::lock_guard<std::mutex> lock(mutex_);
     baseConfig_ = config;
-    params_.zoomLevel = config.zoomLevel;
-    params_.weights.text.value = config.textWeight;
-    params_.weights.simeonText.value = config.simeonTextWeight;
-    params_.weights.vector.value = config.vectorWeight;
-    params_.weights.entityVector.value = config.entityVectorWeight;
-    params_.weights.pathTree.value = config.pathTreeWeight;
-    params_.weights.kg.value = config.kgWeight;
-    params_.weights.tag.value = config.tagWeight;
-    params_.weights.metadata.value = config.metadataWeight;
-    params_.similarityThreshold.value = config.similarityThreshold;
-    params_.vectorBoostFactor = config.vectorBoostFactor;
-    params_.rrfK = static_cast<int>(std::lround(config.rrfK));
-    params_.fusionStrategy.value = config.fusionStrategy;
-    params_.vectorMaxResults = config.vectorMaxResults;
-    params_.bm25NormDivisor = config.bm25NormDivisor;
-    params_.vectorOnlyThreshold = config.vectorOnlyThreshold;
-    params_.vectorOnlyPenalty = config.vectorOnlyPenalty;
-    params_.vectorOnlyNearMissReserve = config.vectorOnlyNearMissReserve;
-    params_.vectorOnlyNearMissSlack = config.vectorOnlyNearMissSlack;
-    params_.vectorOnlyNearMissPenalty = config.vectorOnlyNearMissPenalty;
-    params_.enableStrongVectorOnlyRelief = config.enableStrongVectorOnlyRelief;
-    params_.strongVectorOnlyMinScore = config.strongVectorOnlyMinScore;
-    params_.strongVectorOnlyTopRank = config.strongVectorOnlyTopRank;
-    params_.strongVectorOnlyPenalty = config.strongVectorOnlyPenalty;
-    params_.enablePathDedupInFusion = config.enablePathDedupInFusion;
-    params_.lexicalFloorTopN = config.lexicalFloorTopN;
-    params_.lexicalFloorBoost = config.lexicalFloorBoost;
-    params_.enableLexicalTieBreak = config.enableLexicalTieBreak;
-    params_.lexicalTieBreakEpsilon = config.lexicalTieBreakEpsilon;
-    params_.semanticRescueSlots.value = config.semanticRescueSlots;
-    params_.semanticRescueMinVectorScore = config.semanticRescueMinVectorScore;
-    params_.fusionEvidenceRescueSlots = config.fusionEvidenceRescueSlots;
-    params_.fusionEvidenceRescueMinScore = config.fusionEvidenceRescueMinScore;
-    params_.enableAdaptiveFusion = config.enableAdaptiveFusion;
-    params_.weakQueryMinTextHits = config.weakQueryMinTextHits;
-    params_.weakQueryMinTopTextScore = config.weakQueryMinTopTextScore;
-    params_.enableWeakQueryFanoutBoost = config.enableWeakQueryFanoutBoost;
-    params_.weakQueryVectorFanoutMultiplier = config.weakQueryVectorFanoutMultiplier;
-    params_.weakQueryEntityVectorFanoutMultiplier = config.weakQueryEntityVectorFanoutMultiplier;
-    params_.rerankTopK = config.rerankTopK;
-    params_.rerankAnchoredMinRelativeScore = config.rerankAnchoredMinRelativeScore;
-    params_.enableReranking = config.enableReranking;
-    params_.rerankReplaceScores = config.rerankReplaceScores;
-    params_.enableGraphRerank = config.enableGraphRerank;
-    params_.graphRerankTopN = config.graphRerankTopN;
-    params_.graphRerankWeight = config.graphRerankWeight;
-    params_.graphRerankMaxBoost = config.graphRerankMaxBoost;
-    params_.graphRerankMinSignal = config.graphRerankMinSignal;
-    params_.graphCommunityWeight = config.graphCommunityWeight;
-    params_.kgMaxResults = config.kgMaxResults;
-    params_.graphScoringBudgetMs = config.graphScoringBudgetMs;
-    params_.enableMetaPathRouting = config.enableMetaPathRouting;
-    params_.metaPathSeedK = config.metaPathSeedK;
-    params_.metaPathHopLimit = config.metaPathHopLimit;
-    params_.metaPathBoostAlpha = config.metaPathBoostAlpha;
-    params_.metaPathWeightSem = config.metaPathWeightSem;
-    params_.metaPathWeightCall = config.metaPathWeightCall;
-    params_.metaPathWeightDef = config.metaPathWeightDef;
-    params_.metaPathWeightEntity = config.metaPathWeightEntity;
-    params_.metaPathWeightBlob = config.metaPathWeightBlob;
+    params_.overlayValuesFrom(config);
+    // Capability pins are recomputed from the new runtime baseline.
+    params_.weights.pathTree.unpin();
+    params_.weights.tag.unpin();
+    params_.weights.kg.unpin();
+    params_.weights.entityVector.unpin();
+    params_.weights.metadata.unpin();
     const bool preserveExplicitGraphConfig =
         !stats_.hasKnowledgeGraph() &&
         (config.enableGraphRerank || config.kgWeight > 0.0f || config.graphRerankWeight > 0.0f ||
          config.graphRerankMaxBoost > 0.0f || config.graphCommunityWeight > 0.0f ||
          config.kgMaxResults > 0 || config.graphScoringBudgetMs > 0);
     applyAdaptiveClamp(stats_, params_, preserveExplicitGraphConfig);
+    // seedRuntimeConfig writes raw .value fields from the live SearchEngineConfig
+    // (BuildOptions defaults, env overlays). Re-apply capability gates so path/
+    // tag/entity/kg cannot resurrect after a seed clobber.
+    applyDeadSourceGates(stats_, state_, params_, preserveExplicitGraphConfig);
     baseParams_ = params_;
 }
 
@@ -650,13 +644,17 @@ SearchEngineConfig SearchTuner::buildConfigFromParamsLocked() const {
     SearchEngineConfig config = baseConfig_;
     params_.applyTo(config);
     config.corpusProfile = SearchEngineConfig::CorpusProfile::CUSTOM;
-    config.enableProfiling = false;
     return config;
 }
 
 SearchEngineConfig SearchTuner::getConfig() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return buildConfigFromParamsLocked();
+}
+
+SearchTuner::Snapshot SearchTuner::snapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return Snapshot{.config = buildConfigFromParamsLocked(), .params = params_, .state = state_};
 }
 
 void SearchTuner::observeRelevanceFeedback(const RelevanceSession& session) {

@@ -124,6 +124,8 @@ constexpr std::string_view kDbWritePoolMaxObservedWaiting = "db_write_pool_max_o
 constexpr std::string_view kDbWritePoolTotalWaitMicros = "db_write_pool_total_wait_micros";
 constexpr std::string_view kDbWritePoolTimeoutCount = "db_write_pool_timeout_count";
 constexpr std::string_view kDbWritePoolFailedAcquisitions = "db_write_pool_failed_acquisitions";
+constexpr std::string_view kDbWritePoolSlowHolders = "db_write_pool_slow_holders";
+constexpr std::string_view kDbWritePoolMaxHolderMicros = "db_write_pool_max_holder_us";
 
 constexpr std::string_view kDbReadPoolAvailable = "db_read_pool_available";
 constexpr std::string_view kDbReadPoolTotalConnections = "db_read_pool_total_connections";
@@ -134,6 +136,8 @@ constexpr std::string_view kDbReadPoolMaxObservedWaiting = "db_read_pool_max_obs
 constexpr std::string_view kDbReadPoolTotalWaitMicros = "db_read_pool_total_wait_micros";
 constexpr std::string_view kDbReadPoolTimeoutCount = "db_read_pool_timeout_count";
 constexpr std::string_view kDbReadPoolFailedAcquisitions = "db_read_pool_failed_acquisitions";
+constexpr std::string_view kDbReadPoolSlowHolders = "db_read_pool_slow_holders";
+constexpr std::string_view kDbReadPoolMaxHolderMicros = "db_read_pool_max_holder_us";
 
 // Ingestion metrics
 constexpr std::string_view kDeferredQueueDepth = "deferred_queue_depth";

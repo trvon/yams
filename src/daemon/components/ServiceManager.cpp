@@ -14,11 +14,8 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <queue>
-#include <sstream>
 #include <string>
 #include <system_error>
-#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <yams/common/fs_utils.h>
@@ -97,6 +94,7 @@
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
+#include <yams/daemon/resource/simeon_model_provider.h>
 #include <yams/extraction/builtin_text_content_extractor.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/integrity/repair_manager.h>
@@ -237,32 +235,6 @@ namespace yams::daemon {
 namespace {
 constexpr auto kTopologyOverlayRebuildMinAge = std::chrono::minutes(5);
 constexpr std::size_t kTopologyOverlayDirtyThreshold = 64;
-
-std::optional<std::uintmax_t> sqliteLogicalFileSize(sqlite3* db) {
-    auto readPragma = [db](const char* sql) -> std::optional<std::uintmax_t> {
-        sqlite3_stmt* rawStmt = nullptr;
-        if (sqlite3_prepare_v2(db, sql, -1, &rawStmt, nullptr) != SQLITE_OK) {
-            return std::nullopt;
-        }
-        std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> stmt(rawStmt,
-                                                                        sqlite3_finalize);
-        if (sqlite3_step(stmt.get()) != SQLITE_ROW) {
-            return std::nullopt;
-        }
-        const auto value = sqlite3_column_int64(stmt.get(), 0);
-        if (value <= 0) {
-            return std::nullopt;
-        }
-        return static_cast<std::uintmax_t>(value);
-    };
-
-    auto pageCount = readPragma("PRAGMA page_count");
-    auto pageSize = readPragma("PRAGMA page_size");
-    if (!pageCount || !pageSize) {
-        return std::nullopt;
-    }
-    return (*pageCount) * (*pageSize);
-}
 } // namespace
 
 using yams::Error;
@@ -373,29 +345,28 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             spdlog::info("Topology engine applied via config: {} (resolved={})",
                          *enginePolicy.engine, resolved);
         }
-        if (enginePolicy.hdbscanMinPoints) {
-            topologyManager_.setHdbscanMinPoints(*enginePolicy.hdbscanMinPoints);
-            spdlog::info("Topology hdbscan_min_points applied via config: {}",
-                         *enginePolicy.hdbscanMinPoints);
+        if (enginePolicy.routingRepresentativeCount) {
+            topologyManager_.setRoutingRepresentativeCount(
+                *enginePolicy.routingRepresentativeCount);
+            spdlog::info("Topology routing representatives applied via config: {}",
+                         topologyManager_.routingRepresentativeCount());
         }
-        if (enginePolicy.hdbscanMinClusterSize) {
-            topologyManager_.setHdbscanMinClusterSize(*enginePolicy.hdbscanMinClusterSize);
-            spdlog::info("Topology hdbscan_min_cluster_size applied via config: {}",
-                         *enginePolicy.hdbscanMinClusterSize);
-        }
-        if (enginePolicy.featureSmoothingHops) {
-            topologyManager_.setFeatureSmoothingHops(*enginePolicy.featureSmoothingHops);
-            spdlog::info("Topology feature_smoothing_hops applied via config: {}",
-                         *enginePolicy.featureSmoothingHops);
+        if (enginePolicy.boundarySpillEnabled) {
+            topologyManager_.setBoundarySpillPolicy(
+                *enginePolicy.boundarySpillEnabled, enginePolicy.boundarySpillLimit.value_or(1),
+                enginePolicy.boundarySpillDistanceRatio.value_or(1.05),
+                enginePolicy.boundarySpillResidualPenalty.value_or(1.0));
+            spdlog::info("Topology SOAR boundary spill applied via config: enabled={}",
+                         topologyManager_.boundarySpillEnabled());
         }
     }
 
     // Audit-fix #1: throttle topology rebuild scheduling. During bulk ingest
     // every embedding batch fires a `requestTopologyRebuild("post_ingest_drain")`
     // and without throttling each rebuild starts immediately after the previous
-    // one finishes — turning O(N) ingest into O(N²) wall time because every
-    // rebuild runs HDBSCAN over the full corpus. Default 60s; set to 0 to
-    // disable. Env knob `YAMS_TOPOLOGY_REBUILD_MIN_INTERVAL_MS` overrides.
+    // one finishes — turning O(N) ingest into repeated full-corpus work.
+    // Default 60s; set to 0 to disable. Env knob
+    // `YAMS_TOPOLOGY_REBUILD_MIN_INTERVAL_MS` overrides.
     {
         std::int64_t throttleMs = 60'000; // 60s default
         if (const std::string raw = getenvCopy("YAMS_TOPOLOGY_REBUILD_MIN_INTERVAL_MS");
@@ -2204,13 +2175,13 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             metadata::KnowledgeGraphStoreConfig kgCfg;
             kgCfg.enable_alias_fts = true;
             kgCfg.enable_wal = true;
-            auto kgRes = metadata::makeSqliteKnowledgeGraphStore(*writePool, kgCfg);
+            auto readPool = getReadConnectionPool();
+            auto kgRes = readPool
+                             ? metadata::makeSqliteKnowledgeGraphStore(*writePool, *readPool, kgCfg)
+                             : metadata::makeSqliteKnowledgeGraphStore(*writePool, kgCfg);
             if (kgRes) {
                 auto kgStore =
                     std::shared_ptr<metadata::KnowledgeGraphStore>(std::move(kgRes).value());
-                if (auto readPool = getReadConnectionPool()) {
-                    kgStore->setReadPool(readPool.get());
-                }
                 if (databaseManager_) {
                     databaseManager_->setKgStore(kgStore);
                 }
@@ -3156,10 +3127,27 @@ void ServiceManager::recoverStaleWalIfPresent(const std::filesystem::path& dbPat
                      "successfully",
                      walSize);
     } else {
-        spdlog::warn("[ServiceManager] WAL recovery checkpoint failed: {}; leaving WAL/SHM in "
-                     "place for a later retry",
-                     cpR.error().message);
+        const auto message = cpR.error().message;
+        spdlog::warn("[ServiceManager] WAL recovery checkpoint failed: {}", message);
         tempDb->close();
+        if (message.find("malformed") != std::string::npos ||
+            message.find("corrupt") != std::string::npos) {
+            spdlog::warn("[ServiceManager] Removing malformed stale WAL/SHM sidecars; "
+                         "metadata DB will continue from its last checkpoint");
+            for (const auto& suffix : {"-wal", "-shm"}) {
+                std::error_code sidecarEc;
+                const auto sidecarPath = std::filesystem::path(dbPath.string() + suffix);
+                if (std::filesystem::exists(sidecarPath, sidecarEc)) {
+                    std::filesystem::remove(sidecarPath, sidecarEc);
+                    if (sidecarEc) {
+                        spdlog::debug("[ServiceManager] stale SQLite sidecar cleanup failed: {}",
+                                      sidecarEc.message());
+                    }
+                }
+            }
+        } else {
+            spdlog::warn("[ServiceManager] Leaving WAL/SHM in place for a later retry");
+        }
         return;
     }
     tempDb->close();
@@ -3235,11 +3223,36 @@ bool ServiceManager::ensureDatabaseIntegrityOrRecover(const std::filesystem::pat
     return openDatabaseOnce(dbPath);
 }
 
+bool ServiceManager::shouldAutoVacuum(std::uint64_t databaseBytes, std::uint64_t pageCount,
+                                      std::uint64_t freePageCount, std::uint64_t pageSize) {
+    constexpr std::uintmax_t kAutoVacuumThreshold = 512ULL * 1024 * 1024;
+    constexpr std::uint64_t kMinReclaimableBytes = 128ULL * 1024 * 1024;
+    constexpr double kMinReclaimableRatio = 0.10;
+    if (databaseBytes <= kAutoVacuumThreshold || pageCount == 0 || pageSize == 0 ||
+        freePageCount > pageCount) {
+        return false;
+    }
+    if (freePageCount > std::numeric_limits<std::uint64_t>::max() / pageSize ||
+        pageCount > std::numeric_limits<std::uint64_t>::max() / pageSize) {
+        return false;
+    }
+    const auto reclaimablePageBytes = freePageCount * pageSize;
+    const auto logicalBytes = pageCount * pageSize;
+    const auto reclaimableTailBytes =
+        databaseBytes > logicalBytes ? databaseBytes - logicalBytes : 0;
+    const auto reclaimablePageRatio = static_cast<double>(freePageCount) / pageCount;
+    const auto reclaimableTailRatio =
+        static_cast<double>(reclaimableTailBytes) / static_cast<double>(databaseBytes);
+    return (reclaimablePageBytes >= kMinReclaimableBytes &&
+            reclaimablePageRatio >= kMinReclaimableRatio) ||
+           (reclaimableTailBytes >= kMinReclaimableBytes &&
+            reclaimableTailRatio >= kMinReclaimableRatio);
+}
+
 void ServiceManager::maybeAutoVacuumDatabase(const std::filesystem::path& dbPath) {
     std::error_code ec;
     const auto dbSize = std::filesystem::file_size(dbPath, ec);
-    constexpr std::uintmax_t kAutoVacuumThreshold = 512ULL * 1024 * 1024;
-    if (ec || dbSize <= kAutoVacuumThreshold) {
+    if (ec) {
         return;
     }
 
@@ -3252,10 +3265,6 @@ void ServiceManager::maybeAutoVacuumDatabase(const std::filesystem::path& dbPath
         return;
     }
 
-    spdlog::info("[ServiceManager] DB file is {} MB, background auto-VACUUM to reclaim space "
-                 "({} MB free)",
-                 dbSize / kMiB, spaceInfo.available / kMiB);
-
     metadata::Database vacuumDb;
     auto openR = vacuumDb.open(dbPath.string(), metadata::ConnectionMode::ReadWrite);
     if (!openR) {
@@ -3263,6 +3272,37 @@ void ServiceManager::maybeAutoVacuumDatabase(const std::filesystem::path& dbPath
                      openR.error().message);
         return;
     }
+
+    const auto readPragma = [&](std::string_view sql) -> std::optional<std::uint64_t> {
+        auto stmtR = vacuumDb.prepare(std::string(sql));
+        if (!stmtR) {
+            return std::nullopt;
+        }
+        auto stmt = std::move(stmtR).value();
+        auto stepR = stmt.step();
+        if (!stepR || !stepR.value()) {
+            return std::nullopt;
+        }
+        const auto value = stmt.getInt64(0);
+        return value >= 0 ? std::optional<std::uint64_t>(static_cast<std::uint64_t>(value))
+                          : std::nullopt;
+    };
+    const auto pageCount = readPragma("PRAGMA page_count");
+    const auto freePageCount = readPragma("PRAGMA freelist_count");
+    const auto pageSize = readPragma("PRAGMA page_size");
+
+    if (!pageCount || !freePageCount || !pageSize ||
+        !shouldAutoVacuum(dbSize, *pageCount, *freePageCount, *pageSize)) {
+        const auto reclaimableBytes = freePageCount && pageSize ? (*freePageCount * *pageSize) : 0;
+        spdlog::debug("[ServiceManager] auto-VACUUM not useful: db={} MB reclaimable={} MB",
+                      dbSize / kMiB, reclaimableBytes / kMiB);
+        vacuumDb.close();
+        return;
+    }
+
+    spdlog::info("[ServiceManager] DB file is {} MB, background auto-VACUUM to reclaim {} MB "
+                 "({} MB free)",
+                 dbSize / kMiB, (*freePageCount * *pageSize) / kMiB, spaceInfo.available / kMiB);
 
     sqlite3_progress_handler(
         vacuumDb.rawHandle(), 1000,
@@ -3274,7 +3314,13 @@ void ServiceManager::maybeAutoVacuumDatabase(const std::filesystem::path& dbPath
         this);
     auto vacuumR = vacuumDb.execute("VACUUM");
     sqlite3_progress_handler(vacuumDb.rawHandle(), 0, nullptr, nullptr);
-    const auto logicalSize = vacuumR ? sqliteLogicalFileSize(vacuumDb.rawHandle()) : std::nullopt;
+    if (vacuumR) {
+        auto checkpointR = vacuumDb.execute("PRAGMA wal_checkpoint(TRUNCATE)");
+        if (!checkpointR) {
+            spdlog::debug("[ServiceManager] post-VACUUM WAL checkpoint skipped: {}",
+                          checkpointR.error().message);
+        }
+    }
     vacuumDb.close();
     if (!vacuumR) {
         if (shutdownInvoked_.load(std::memory_order_acquire)) {
@@ -3286,20 +3332,7 @@ void ServiceManager::maybeAutoVacuumDatabase(const std::filesystem::path& dbPath
         return;
     }
 
-    auto newSize = std::filesystem::file_size(dbPath, ec);
-    if (!ec && logicalSize && *logicalSize > 0 && *logicalSize < newSize) {
-        std::error_code resizeEc;
-        std::filesystem::resize_file(dbPath, *logicalSize, resizeEc);
-        if (!resizeEc) {
-            spdlog::info("[ServiceManager] auto-VACUUM truncated trailing unused bytes: {} MB -> "
-                         "{} MB",
-                         newSize / kMiB, *logicalSize / kMiB);
-            newSize = *logicalSize;
-        } else {
-            spdlog::debug("[ServiceManager] auto-VACUUM tail truncate skipped: {}",
-                          resizeEc.message());
-        }
-    }
+    const auto newSize = std::filesystem::file_size(dbPath, ec);
     if (!ec) {
         spdlog::info("[ServiceManager] auto-VACUUM complete: {} MB -> {} MB", dbSize / kMiB,
                      newSize / kMiB);
@@ -3577,9 +3610,48 @@ void ServiceManager::wireSearchEngineRuntimeAdapters(
         spdlog::debug("[{}] GLiNER concept extractor unavailable", contextLabel);
     }
 
+    std::string rerankerBackend = "auto";
+    if (auto policy = ConfigResolver::resolveRerankerBackendPolicy(config_); policy.backend) {
+        rerankerBackend = *policy.backend;
+    }
+    if (const std::string env = getenvCopy("YAMS_SEARCH_RERANKER_BACKEND"); !env.empty()) {
+        rerankerBackend = env;
+        std::transform(rerankerBackend.begin(), rerankerBackend.end(), rerankerBackend.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    }
+
     auto modelProvider = loadModelProvider();
-    if (modelProvider && modelProvider->isAvailable()) {
-        std::weak_ptr<IModelProvider> weakProvider = modelProvider;
+    const bool storedAvailable = modelProvider && modelProvider->isAvailable();
+
+    std::shared_ptr<IModelProvider> reranker;
+    if (rerankerBackend == "none" || rerankerBackend == "off") {
+        reranker = nullptr;
+    } else if (rerankerBackend == "onnx") {
+        if (storedAvailable) {
+            reranker = modelProvider;
+        }
+    } else if (rerankerBackend == "simeon") {
+        if (!simeonRerankerProvider_) {
+            simeonRerankerProvider_ = makeSimeonModelProvider();
+        }
+        if (simeonRerankerProvider_ && simeonRerankerProvider_->isAvailable()) {
+            reranker = simeonRerankerProvider_;
+        }
+    } else {
+        if (storedAvailable) {
+            reranker = modelProvider;
+        } else {
+            if (!simeonRerankerProvider_) {
+                simeonRerankerProvider_ = makeSimeonModelProvider();
+            }
+            if (simeonRerankerProvider_ && simeonRerankerProvider_->isAvailable()) {
+                reranker = simeonRerankerProvider_;
+            }
+        }
+    }
+
+    if (reranker) {
+        std::weak_ptr<IModelProvider> weakProvider = reranker;
         engine->setCrossReranker(
             [weakProvider](const std::string& query, const std::vector<std::string>& documents)
                 -> Result<std::vector<float>> {
@@ -3589,10 +3661,11 @@ void ServiceManager::wireSearchEngineRuntimeAdapters(
                 }
                 return provider->scoreDocuments(query, documents);
             });
-        spdlog::debug("[{}] model-provider reranker wired to search engine", contextLabel);
+        spdlog::debug("[{}] reranker wired to search engine (backend={})", contextLabel,
+                      rerankerBackend);
     } else {
         engine->setCrossReranker({});
-        spdlog::debug("[{}] model-provider reranker unavailable", contextLabel);
+        spdlog::debug("[{}] reranker unavailable (backend={})", contextLabel, rerankerBackend);
     }
 }
 
@@ -3813,7 +3886,7 @@ boost::asio::awaitable<void> ServiceManager::preloadPreferredModelIfConfigured()
                     if (countRes) {
                         const uint64_t totalDocs = static_cast<uint64_t>(countRes.value());
                         uint64_t recordedDocs = totalDocs;
-                        if (auto* engine = searchEngineManager_.getCachedEngine()) {
+                        if (auto engine = searchEngineManager_.getCachedEngine()) {
                             const auto lexical = engine->getSimeonLexicalStatus();
                             if (lexical.configured && lexical.docCount == 0 && totalDocs > 0) {
                                 spdlog::info(
@@ -3867,6 +3940,25 @@ std::shared_ptr<search::SearchEngine> ServiceManager::getSearchEngineSnapshot() 
 yams::app::services::AppContext ServiceManager::getAppContext() const {
     app::services::AppContext ctx;
     ctx.service_manager = const_cast<ServiceManager*>(this);
+    ctx.searchExecutionContextProvider = [self = const_cast<ServiceManager*>(this)] {
+        auto context = search::defaultSearchExecutionContext();
+        const auto metrics = self->getSearchLoadMetrics();
+        context.activeRequests = std::max<std::uint32_t>(1, metrics.active);
+        context.queuedRequests = metrics.queued;
+        context.concurrencyLimit = std::max<std::uint32_t>(
+            1, metrics.concurrencyLimit == 0
+                   ? static_cast<std::uint32_t>(TuneAdvisor::searchConcurrencyLimit())
+                   : metrics.concurrencyLimit);
+        context.recommendedWorkers = std::max<std::uint32_t>(
+            1, static_cast<std::uint32_t>(TuneAdvisor::recommendedThreads(0.5, 0)));
+        context.freshness = self->getIndexFreshnessSnapshot();
+        context.topologyOverlayHashes = self->getTopologyOverlayHashes();
+        return context;
+    };
+    ctx.enqueuePostIngest = [self = const_cast<ServiceManager*>(this)](const std::string& hash,
+                                                                       const std::string& mime) {
+        self->enqueuePostIngest(hash, mime);
+    };
     ctx.store = getContentStore(); // Thread-safe via atomic_load
     auto metadataRepo = getMetadataRepo();
     ctx.metadataRepo = metadataRepo;

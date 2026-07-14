@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -153,6 +154,24 @@ public:
     [[nodiscard]] std::int64_t getRebuildMinIntervalMs() const noexcept {
         return rebuildMinIntervalMs_.load(std::memory_order_acquire);
     }
+    void setRoutingRepresentativeCount(std::size_t count) noexcept {
+        routingRepresentativeCount_.store(std::max<std::size_t>(1, count),
+                                          std::memory_order_release);
+    }
+    [[nodiscard]] std::size_t routingRepresentativeCount() const noexcept {
+        return routingRepresentativeCount_.load(std::memory_order_acquire);
+    }
+    void setBoundarySpillPolicy(bool enabled, std::size_t limit, double distanceRatio,
+                                double residualPenalty) noexcept {
+        boundarySpillLimit_.store(limit, std::memory_order_release);
+        boundarySpillDistanceRatio_.store(std::max(1.0, distanceRatio), std::memory_order_release);
+        boundarySpillResidualPenalty_.store(std::max(0.0, residualPenalty),
+                                            std::memory_order_release);
+        boundarySpillEnabled_.store(enabled, std::memory_order_release);
+    }
+    [[nodiscard]] bool boundarySpillEnabled() const noexcept {
+        return boundarySpillEnabled_.load(std::memory_order_acquire);
+    }
     void clearScheduled();
 
     void setAutoRebuildEnabled(bool enabled) {
@@ -163,33 +182,9 @@ public:
         return autoRebuildEnabled_.load(std::memory_order_acquire);
     }
 
-    void setHdbscanMinPoints(std::size_t n) {
-        hdbscanMinPoints_.store(n, std::memory_order_release);
-    }
-
-    [[nodiscard]] std::size_t hdbscanMinPoints() const {
-        return hdbscanMinPoints_.load(std::memory_order_acquire);
-    }
-
-    void setHdbscanMinClusterSize(std::size_t n) {
-        hdbscanMinClusterSize_.store(n, std::memory_order_release);
-    }
-
-    [[nodiscard]] std::size_t hdbscanMinClusterSize() const {
-        return hdbscanMinClusterSize_.load(std::memory_order_acquire);
-    }
-
-    void setFeatureSmoothingHops(std::size_t n) {
-        featureSmoothingHops_.store(n, std::memory_order_release);
-    }
-
-    [[nodiscard]] std::size_t featureSmoothingHops() const {
-        return featureSmoothingHops_.load(std::memory_order_acquire);
-    }
-
     // Phase G: optional adaptive tuner. When set and enabled, each
-    // rebuildArtifacts() call may pull a new arm (within cooldown) and
-    // overwrite the HDBSCAN parameters + algorithm before clustering runs.
+    // rebuildArtifacts() call may pull a new engine arm (within cooldown)
+    // before clustering runs.
     void setTopologyTuner(std::shared_ptr<TopologyTuner> tuner);
 
     [[nodiscard]] TelemetrySnapshot getTelemetrySnapshot() const;
@@ -219,12 +214,13 @@ private:
     // Audit-fix #1 state:
     std::atomic<std::int64_t> lastRebuildEndSteadyMillis_{0};
     std::atomic<std::int64_t> rebuildMinIntervalMs_{0};
+    std::atomic<std::size_t> routingRepresentativeCount_{1};
+    std::atomic<bool> boundarySpillEnabled_{false};
+    std::atomic<std::size_t> boundarySpillLimit_{1};
+    std::atomic<double> boundarySpillDistanceRatio_{1.05};
+    std::atomic<double> boundarySpillResidualPenalty_{1.0};
     std::atomic<bool> autoRebuildEnabled_{true};
     std::atomic<std::uint64_t> publishedEpoch_{0};
-    std::atomic<std::size_t> hdbscanMinPoints_{0};
-    std::atomic<std::size_t> hdbscanMinClusterSize_{0};
-    std::atomic<std::size_t> featureSmoothingHops_{0};
-
     // Tuner state (Phase G). Protected by tunerMutex_ since multiple
     // fields move together on each pull / observation.
     mutable std::mutex tunerMutex_;

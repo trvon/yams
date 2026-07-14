@@ -1,5 +1,5 @@
 // Topology ablation bench — isolated parameter sweep over the topology
-// subsystem. Exercises StableClusterTopologyRouter::route and the
+// subsystem. Exercises the prepared SparseGuidedClusterRouter path and the
 // role-score boost application independent of the full search engine,
 // daemon, or corpus.
 //
@@ -53,7 +53,7 @@ using yams::topology::ClusterArtifact;
 using yams::topology::ClusterRepresentative;
 using yams::topology::DocumentClusterMembership;
 using yams::topology::DocumentTopologyRole;
-using yams::topology::StableClusterTopologyRouter;
+using yams::topology::SparseGuidedClusterRouter;
 using yams::topology::TopologyArtifactBatch;
 using yams::topology::TopologyRouteRequest;
 
@@ -228,7 +228,8 @@ TEST_CASE("[!benchmark][topology-ablation] axis-1 routing depth sweep", "[topolo
         {1, 32}, {1, 64}, {1, 128}, {2, 32}, {2, 64}, {2, 128}, {4, 32}, {4, 64}, {4, 128},
     };
 
-    StableClusterTopologyRouter router;
+    SparseGuidedClusterRouter router;
+    const auto routeIndex = SparseGuidedClusterRouter::buildRouteIndex(batch);
     constexpr std::size_t kIterations = 200;
 
     for (const auto& point : grid) {
@@ -242,10 +243,9 @@ TEST_CASE("[!benchmark][topology-ablation] axis-1 routing depth sweep", "[topolo
             request.queryText = "synthetic";
             request.seedDocumentHashes = seeds;
             request.limit = point.limit;
-            request.weakQueryOnly = true;
 
             const auto start = std::chrono::steady_clock::now();
-            auto result = router.route(request, batch);
+            auto result = router.route(request, batch, routeIndex);
             const auto end = std::chrono::steady_clock::now();
             REQUIRE(result.has_value());
             latencyUs.push_back(std::chrono::duration<double, std::micro>(end - start).count());

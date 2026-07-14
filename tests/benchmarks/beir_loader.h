@@ -1,13 +1,13 @@
 #pragma once
 
+#include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
 #include <filesystem>
 #include <fstream>
 #include <map>
 #include <sstream>
 #include <string>
-#include <utility>
-#include <nlohmann/json.hpp>
-#include <spdlog/spdlog.h>
+#include <vector>
 #include <yams/core/types.h>
 
 namespace yams::bench {
@@ -23,11 +23,27 @@ struct BEIRQuery {
     std::string text;
 };
 
+struct BEIRQrel {
+    std::string docId;
+    int score = 0;
+};
+
+struct BenchmarkKgEntity {
+    std::string docId;
+    std::string entityKey;
+    std::string label;
+    std::string type = "benchmark_entity";
+    std::string relation = "mentioned_in";
+    std::string extractor = "benchmark_manifest";
+    float weight = 1.0F;
+};
+
 struct BEIRDataset {
     std::string name;
     std::map<std::string, BEIRDocument> documents;
     std::map<std::string, BEIRQuery> queries;
-    std::multimap<std::string, std::pair<std::string, int>> qrels;
+    std::multimap<std::string, BEIRQrel> qrels;
+    std::vector<BenchmarkKgEntity> kgEntities;
     std::filesystem::path basePath;
 };
 
@@ -143,7 +159,7 @@ inline yams::Result<BEIRDataset> loadBEIRDataset(const std::string& datasetName,
             std::getline(iss, scoreStr, '\t')) {
             try {
                 int score = std::stoi(scoreStr);
-                dataset.qrels.emplace(queryId, std::make_pair(docId, score));
+                dataset.qrels.emplace(queryId, BEIRQrel{.docId = docId, .score = score});
             } catch (const std::exception& e) {
                 spdlog::warn("BEIR loader: bad qrel score '{}': {}", scoreStr, e.what());
             }

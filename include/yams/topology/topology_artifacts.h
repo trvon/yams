@@ -59,27 +59,31 @@ struct TopologyBuildConfig {
     std::size_t maxDirtyRegionDepth{2};
     std::size_t maxDirtySeedCount{64};
     std::size_t maxLevels{3};
-    std::size_t overlapLimit{2};
+    /// Maximum secondary cluster assignments per boundary document.
+    std::size_t overlapLimit{1};
+    /// Admit a secondary assignment only when its residual distance is within this multiple of
+    /// the primary residual distance.
+    double overlapBoundaryDistanceRatio{1.05};
+    /// SOAR lambda: penalty for the candidate residual component parallel to the primary residual.
+    /// Zero reduces to nearest-centroid spilling.
+    double overlapResidualPenalty{1.0};
     std::size_t rollingWindowDocuments{0};
     std::size_t fullRebuildDocThreshold{4096};
     Duration coalesceWindow{Duration{250}};
+    // Floor for undirected edge admission when building pairWeights / CC / SGC.
+    // 0.0 keeps every reciprocal edge (legacy; often creates giant components).
     double minEdgeScore{0.0};
     double minClusterPersistence{0.0};
+    // Lean ConstructionGates anti-giant cap. 0 = unlimited (legacy). Production
+    // TopologyManager defaults this to 64 so oversized CC components are split.
+    std::size_t maxComponentDocs{0};
     bool reciprocalOnly{true};
-    bool allowOverlap{true};
+    bool allowOverlap{false};
     bool emitBridgeAnnotations{true};
     bool emitOutliers{true};
     DirtyRegionExpansionMode dirtyRegionExpansion{
         DirtyRegionExpansionMode::PriorClusterAndNeighbors};
     Duration budget{Duration{250}};
-    // HDBSCAN engine: minimum points for core-distance / minimum cluster size
-    // (0 = auto from corpus size). Ignored by other engines.
-    std::size_t hdbscanMinPoints{0};
-    std::size_t hdbscanMinClusterSize{0};
-    // SGC (Wu 2019) feature propagation hops applied to document embeddings
-    // before clustering runs: X' = S_hat^K * X. K = 0 disables smoothing.
-    // Only embedding-consuming engines (HDBSCAN) observe the smoothed features.
-    std::size_t featureSmoothingHops{0};
     // Phase S: KMeans engine knobs.
     // kmeansK: target cluster count for KMeans engines (0 = auto: max(64, min(300, sqrt(n)))).
     // kmeansMaxIterations: Lloyd iteration cap during buildArtifacts.
@@ -88,6 +92,9 @@ struct TopologyBuildConfig {
     std::size_t kmeansK{0};
     std::size_t kmeansMaxIterations{10};
     float minSimilarityToJoin{0.45F};
+    // Total dense route representatives per cluster, including the centroid. Values above one
+    // add deterministic diverse member embeddings. The default preserves centroid-only routing.
+    std::size_t routingRepresentativeCount{1};
 };
 
 struct TopologyDirtyRegion {
@@ -120,6 +127,11 @@ struct ClusterRepresentative {
     double representativeScore{0.0};
 };
 
+struct ClusterRoutingRepresentative {
+    std::string documentHash;
+    std::vector<float> embedding;
+};
+
 struct ClusterArtifact {
     std::string clusterId;
     std::optional<std::string> parentClusterId;
@@ -127,13 +139,18 @@ struct ClusterArtifact {
     std::size_t memberCount{0};
     double persistenceScore{0.0};
     double cohesionScore{0.0};
+    /// Undirected density of the primary construction core in [0,1]. Boundary-spill replicas are
+    /// retrieval postings and do not alter this structural statistic.
+    double densityScore{0.0};
     double bridgeMass{0.0};
     std::optional<ClusterRepresentative> medoid;
     std::vector<std::string> memberDocumentHashes;
     std::vector<std::string> overlapClusterIds;
     // Phase S: optional running-mean centroid for online KMeans engine.
-    // Empty for engines that don't compute it (HDBSCAN/Connected/Louvain).
+    // Empty for engines that don't compute it (Connected/Louvain).
     std::vector<float> centroidEmbedding;
+    // Additional bounded representatives; centroidEmbedding is always the implicit first one.
+    std::vector<ClusterRoutingRepresentative> routingRepresentatives;
 };
 
 struct TopologyArtifactBatch {
@@ -169,12 +186,19 @@ enum class RouteScoringMode : uint8_t {
     SeedCoverage,
 };
 
+/// Query-time evidence for routing a document into a cluster. The weight is
+/// already normalized/rank-discounted by the caller; routers aggregate it
+/// without needing to know which lexical backend produced it.
+struct WeightedDocumentSeed {
+    std::string documentHash;
+    float weight{0.0F};
+};
+
 struct TopologyRouteRequest {
     std::string queryText;
     std::vector<std::string> seedDocumentHashes;
+    std::vector<WeightedDocumentSeed> weightedSeedDocuments;
     std::size_t limit{8};
-    bool preferStableClusters{true};
-    bool weakQueryOnly{true};
     RouteScoringMode scoringMode{RouteScoringMode::Current};
     // Phase S: optional dense signal for sparse-guided routing.
     // Empty queryEmbedding falls back to seed-only scoring (current behaviour).
@@ -182,6 +206,9 @@ struct TopologyRouteRequest {
     // Blend factor for SparseGuidedClusterRouter: score = alpha · bm25_mass +
     // (1-alpha) · centroid_cosine. 0.0 = pure dense; 1.0 = pure sparse.
     float sparseDenseAlpha{0.5F};
+    /// Maximum total dense representatives evaluated per cluster, including the centroid.
+    /// Zero evaluates the complete prebuilt cover.
+    std::size_t maxRoutingRepresentatives{0};
 };
 
 struct ClusterRoute {
