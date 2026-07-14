@@ -624,6 +624,7 @@ private:
             storeReq.collection = req.collection;
             storeReq.tags = req.tags;
             storeReq.noEmbeddings = req.noEmbeddings;
+            storeReq.skipInlineContentIndexing = static_cast<bool>(ctx_.enqueuePostIngest);
             // Set automatic snapshot ID for versioning
             storeReq.snapshotId = snapshotId;
             // Session-isolated memory (PBI-082)

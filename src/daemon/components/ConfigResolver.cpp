@@ -1384,6 +1384,15 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
     updateUint32("hold_ms", tuningConfig.holdMs);
 
     const auto* postIngest = findSection("tuning.post_ingest");
+    if (auto value = parseUnsigned(postIngest, "tuning.post_ingest", "coalesce_ms")) {
+        constexpr std::uint64_t kMaxCoalesceMs = 20;
+        if (*value <= kMaxCoalesceMs) {
+            tuningConfig.postIngestCoalesceMs = static_cast<std::uint32_t>(*value);
+        } else {
+            spdlog::warn("Config: tuning.post_ingest.coalesce_ms outside range 0..{}",
+                         kMaxCoalesceMs);
+        }
+    }
     const auto applyPostIngestCap = [&](std::string_view key, const char* envName,
                                         std::uint32_t minimum, std::uint32_t maximum, auto setter) {
         auto value = parseUnsigned(postIngest, "tuning.post_ingest", key);

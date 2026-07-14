@@ -2234,10 +2234,12 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         try {
             if (config_.tuning.postIngestCapacity > 0)
                 newPostIngest->setCapacity(config_.tuning.postIngestCapacity);
+            newPostIngest->setBatchCoalesceWindow(
+                std::chrono::milliseconds(config_.tuning.postIngestCoalesceMs));
         } catch (const std::exception& e) {
-            spdlog::debug("[ServiceManager] post-ingest capacity override failed: {}", e.what());
+            spdlog::debug("[ServiceManager] post-ingest tuning apply failed: {}", e.what());
         } catch (...) {
-            spdlog::debug("[ServiceManager] post-ingest capacity override failed");
+            spdlog::debug("[ServiceManager] post-ingest tuning apply failed");
         }
 
         std::atomic_store_explicit(&postIngest_, newPostIngest, std::memory_order_release);

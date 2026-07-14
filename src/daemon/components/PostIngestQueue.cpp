@@ -1035,6 +1035,9 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
     cfg.batchProcessFn = [this](std::vector<InternalEventBus::PostIngestTask>&& tasks) {
         processBatch(std::move(tasks));
     };
+    cfg.batchCoalesceWindowFn = [this]() {
+        return std::chrono::milliseconds(batchCoalesceMs_.load(std::memory_order_relaxed));
+    };
     // Disable CPU throttling for the extraction poller. Extraction concurrency is
     // already bounded by the poller's batch fan-out and maxExtractionConcurrent(). The
     // CPU throttle adds 2-25ms delays after every productive batch, compounding

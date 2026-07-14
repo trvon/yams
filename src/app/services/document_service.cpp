@@ -749,7 +749,7 @@ buildDocumentInfo(const StoreDocumentRequest& req, const std::string& usePath,
     info.createdTime = now_s;
     info.modifiedTime = now_s;
     info.indexedTime = now_s;
-    info.contentExtracted = isTextMime(info.mimeType);
+    info.contentExtracted = isTextMime(info.mimeType) && !req.skipInlineContentIndexing;
     info.extractionStatus = info.contentExtracted ? metadata::ExtractionStatus::Success
                                                   : metadata::ExtractionStatus::Pending;
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <exception>
 #include <functional>
@@ -329,11 +330,12 @@ public:
     const TuningConfig& getTuningConfig() const { return tuningConfig_; }
     void setTuningConfig(const TuningConfig& cfg) {
         tuningConfig_ = cfg;
-        if (cfg.postIngestCapacity > 0) {
-            auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
-            if (piq) {
+        auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
+        if (piq) {
+            if (cfg.postIngestCapacity > 0) {
                 piq->setCapacity(cfg.postIngestCapacity);
             }
+            piq->setBatchCoalesceWindow(std::chrono::milliseconds(cfg.postIngestCoalesceMs));
         }
     }
     const std::vector<std::shared_ptr<yams::extraction::IContentExtractor>>&

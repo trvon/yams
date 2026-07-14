@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -344,6 +345,12 @@ public:
             capacity_.store(cap, std::memory_order_relaxed);
         }
     }
+    void setBatchCoalesceWindow(std::chrono::milliseconds window) {
+        constexpr auto kMaxWindow = std::chrono::milliseconds{20};
+        const auto bounded = std::clamp(window, std::chrono::milliseconds{0}, kMaxWindow);
+        batchCoalesceMs_.store(static_cast<std::uint32_t>(bounded.count()),
+                               std::memory_order_relaxed);
+    }
 
     // ========================================================================
     // Pause/Resume Support (for ResourceGovernor pressure response)
@@ -558,6 +565,7 @@ private:
     std::atomic<double> latencyMsEma_{0.0};
     std::atomic<double> ratePerSecEma_{0.0};
     std::atomic<std::size_t> capacity_{1000};
+    std::atomic<std::uint32_t> batchCoalesceMs_{0};
     // Concurrency limits now dynamic via TuneAdvisor (PBI-05a)
 
     // Drain detection: signals corpus stats stale once per drain cycle

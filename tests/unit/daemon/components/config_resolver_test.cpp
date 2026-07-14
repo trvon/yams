@@ -155,6 +155,7 @@ TEST_CASE("ConfigResolver applies one typed tuning snapshot for startup and relo
                           {"post_ingest_capacity", "4096"},
                           {"post_ingest_threads_min", "3"},
                           {"control_interval_ms", "250"}};
+    sections["tuning.post_ingest"] = {{"coalesce_ms", "3"}};
 
     TuningConfig base;
     base.postIngestThreadsMax = 12;
@@ -164,6 +165,7 @@ TEST_CASE("ConfigResolver applies one typed tuning snapshot for startup and relo
     CHECK(resolved.targetCpuPercent == 175);
     CHECK(resolved.postIngestCapacity == 4096);
     CHECK(resolved.postIngestThreadsMin == 3);
+    CHECK(resolved.postIngestCoalesceMs == 3);
     CHECK(resolved.controlIntervalMs == 250);
     CHECK(resolved.postIngestThreadsMax == 12);
     CHECK(resolved.topologyAlgorithm == "multiscale");
@@ -171,13 +173,16 @@ TEST_CASE("ConfigResolver applies one typed tuning snapshot for startup and relo
     sections["tuning"] = {{"target_cpu_percent", "-1"},
                           {"post_ingest_capacity", "-2"},
                           {"control_interval_ms", "4294967296"}};
+    sections["tuning.post_ingest"] = {{"coalesce_ms", "21"}};
     base.targetCpuPercent = 80;
     base.postIngestCapacity = 2048;
     base.controlIntervalMs = 500;
+    base.postIngestCoalesceMs = 4;
     const auto rejected = ConfigResolver::applyRuntimeTuning(sections, base);
     CHECK(rejected.targetCpuPercent == 80);
     CHECK(rejected.postIngestCapacity == 2048);
     CHECK(rejected.controlIntervalMs == 500);
+    CHECK(rejected.postIngestCoalesceMs == 4);
 }
 
 TEST_CASE("ConfigResolver::resolveEmbeddingChunkingPolicy defaults are embedding-safe",

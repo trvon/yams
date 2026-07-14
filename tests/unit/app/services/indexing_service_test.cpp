@@ -189,6 +189,11 @@ TEST_CASE("IndexingService - Basic Operations", "[indexing][service][basic]") {
         CHECK(result.value().filesSkipped == 0);
         CHECK(result.value().filesFailed == 0);
         CHECK(result.value().filesProcessed == 1);
+        REQUIRE(result.value().results.size() == 1);
+        auto document = fixture.metadataRepo_->getDocumentByHash(result.value().results[0].hash);
+        REQUIRE(document);
+        REQUIRE(document.value().has_value());
+        CHECK(document.value()->contentExtracted);
     }
 
     SECTION("Indexing populates canonical doc and blob KG nodes") {
@@ -275,6 +280,29 @@ TEST_CASE("IndexingService - Basic Operations", "[indexing][service][basic]") {
         CHECK(result.value().filesIndexed == 0);
         CHECK(result.value().filesProcessed == 0);
     }
+}
+
+TEST_CASE("IndexingService defers content indexing when post-ingest is available",
+          "[indexing][service][post-ingest]") {
+    IndexingFixture fixture;
+    std::vector<std::string> dispatchedHashes;
+    fixture.appContext_.enqueuePostIngest = [&](const std::string& hash, const std::string&) {
+        dispatchedHashes.push_back(hash);
+    };
+    fixture.indexingService_ = makeIndexingService(fixture.appContext_);
+
+    auto filePath = fixture.createFile("deferred/content.txt", "deferred indexing content");
+    auto request = fixture.createRequest(filePath.parent_path());
+    auto result = fixture.indexingService_->addDirectory(request);
+
+    REQUIRE(result);
+    REQUIRE(result.value().filesIndexed == 1);
+    REQUIRE(dispatchedHashes.size() == 1);
+
+    auto document = fixture.metadataRepo_->getDocumentByHash(dispatchedHashes.front());
+    REQUIRE(document);
+    REQUIRE(document.value().has_value());
+    CHECK_FALSE(document.value()->contentExtracted);
 }
 
 TEST_CASE("IndexingService - File Handling", "[indexing][service][files]") {

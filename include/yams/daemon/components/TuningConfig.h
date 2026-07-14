@@ -17,6 +17,7 @@ struct TuningConfig {
     std::size_t postIngestCapacity{2000};
     std::size_t postIngestThreadsMin{2};
     std::size_t postIngestThreadsMax{8};
+    std::uint32_t postIngestCoalesceMs{2};
 
     // Admission thresholds
     std::size_t admitWarnThreshold{1500};

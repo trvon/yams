@@ -131,6 +131,7 @@ template <typename Task> struct PressureLimitedPollerConfig {
     bool batchLimiterPerTask = true;
     std::function<std::size_t()> batchSizeFn;
     std::function<void(std::vector<Task>&&)> batchProcessFn;
+    std::function<std::chrono::milliseconds()> batchCoalesceWindowFn;
 
     // Optional high-priority channel (for RPC / latency-sensitive work)
     std::shared_ptr<SpscQueue<Task>> highPriorityChannel;
@@ -302,22 +303,22 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                 // maxConcurrent is temporarily clamped low (e.g., pressure=Critical/Emergency).
                 // inFlightCounter tracks admitted tasks (not batches), so use a task budget.
                 const std::size_t taskBudget = std::max(maxConcurrent, batchSize);
-                while (cfg.inFlightCounter->load() < taskBudget && batch.size() < batchSize) {
-                    bool fromHighPriority = false;
-                    if (cfg.highPriorityChannel && hpTaken >= hpMax) {
-                        // Quota consumed; only pull from the normal channel for fairness.
-                        if (!channel->try_pop(task)) {
+                bool highPriorityTaken = false;
+                bool admissionBlocked = false;
+                const auto drainAvailable = [&]() {
+                    while (cfg.inFlightCounter->load() < taskBudget && batch.size() < batchSize) {
+                        bool fromHighPriority = false;
+                        if (cfg.highPriorityChannel && hpTaken >= hpMax) {
+                            // Quota consumed; only pull from the normal channel for fairness.
+                            if (!channel->try_pop(task)) {
+                                break;
+                            }
+                        } else if (!tryPopFromAny(task, fromHighPriority)) {
                             break;
                         }
-                        fromHighPriority = false;
-                    } else {
-                        if (!tryPopFromAny(task, fromHighPriority)) {
-                            break;
-                        }
-                    }
 
-                    if (cfg.batchLimiterPerTask) {
-                        if (!cfg.tryAcquireFn(lim, cfg.getHashFn(task), cfg.stageName)) {
+                        if (cfg.batchLimiterPerTask &&
+                            !cfg.tryAcquireFn(lim, cfg.getHashFn(task), cfg.stageName)) {
                             // Push back to the originating channel to preserve priority.
                             bool requeued = false;
                             if (fromHighPriority && cfg.highPriorityChannel) {
@@ -332,14 +333,41 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                                     "task; breaking to avoid hot-spin",
                                     cfg.stageName);
                             }
+                            admissionBlocked = true;
                             break;
                         }
+                        didWork = true;
+                        cfg.inFlightCounter->fetch_add(1);
+                        batch.push_back(std::move(task));
+                        if (fromHighPriority) {
+                            ++hpTaken;
+                            highPriorityTaken = true;
+                        }
                     }
-                    didWork = true;
-                    cfg.inFlightCounter->fetch_add(1);
-                    batch.push_back(std::move(task));
-                    if (fromHighPriority) {
-                        ++hpTaken;
+                };
+
+                drainAvailable();
+
+                // Normal-priority producers can arrive as a short trickle (notably directory
+                // ingestion). Keep the first partial batch open for a bounded interval so those
+                // tasks share one commit. High-priority work always bypasses this window.
+                const auto coalesceWindow = cfg.batchCoalesceWindowFn
+                                                ? cfg.batchCoalesceWindowFn()
+                                                : std::chrono::milliseconds{0};
+                if (didWork && !highPriorityTaken && !admissionBlocked &&
+                    batch.size() < batchSize && coalesceWindow.count() > 0) {
+                    const auto deadline = std::chrono::steady_clock::now() + coalesceWindow;
+                    while (!cfg.stopFlag->load() && !highPriorityTaken && !admissionBlocked &&
+                           batch.size() < batchSize) {
+                        const auto now = std::chrono::steady_clock::now();
+                        if (now >= deadline) {
+                            break;
+                        }
+                        const auto remaining =
+                            std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
+                        co_await detail::awaitPressureLimitedPollerWake(cfg, remaining,
+                                                                        "batch coalesce");
+                        drainAvailable();
                     }
                 }
 
