@@ -608,7 +608,8 @@ private:
                 storeRequest.collection = req.collection;
                 storeRequest.tags = req.tags;
                 storeRequest.noEmbeddings = req.noEmbeddings;
-                storeRequest.skipInlineContentIndexing = static_cast<bool>(ctx_.enqueuePostIngest);
+                storeRequest.skipInlineContentIndexing =
+                    static_cast<bool>(ctx_.enqueuePostIngestBatch);
                 storeRequest.snapshotId = snapshotId;
                 storeRequest.sessionId = req.sessionId;
                 storeRequest.bypassSession = req.bypassSession;
@@ -657,6 +658,8 @@ private:
             return;
         }
 
+        std::vector<std::string> postIngestHashes;
+        postIngestHashes.reserve(storeResults.size());
         for (std::size_t i = 0; i < resultIndices.size(); ++i) {
             auto& fileResult = response.results[resultIndices[i]];
             if (i >= storeResults.size()) {
@@ -675,16 +678,8 @@ private:
             fileResult.success = true;
             ++response.filesIndexed;
 
-            if (!fileResult.hash.empty() && ctx_.enqueuePostIngest) {
-                try {
-                    ctx_.enqueuePostIngest(fileResult.hash, "");
-                } catch (const std::exception& error) {
-                    spdlog::debug("[IndexingService] Post-ingest dispatch failed: {}",
-                                  error.what());
-                } catch (...) {
-                    spdlog::warn(
-                        "[IndexingService] Post-ingest dispatch failed with unknown exception");
-                }
+            if (!fileResult.hash.empty() && ctx_.enqueuePostIngestBatch) {
+                postIngestHashes.push_back(fileResult.hash);
             }
 
             if (!req.verify) {
@@ -720,6 +715,18 @@ private:
                 fileResult.error = std::move(verificationError);
                 --response.filesIndexed;
                 ++response.filesFailed;
+            }
+        }
+
+        if (!postIngestHashes.empty()) {
+            try {
+                ctx_.enqueuePostIngestBatch(postIngestHashes, "");
+            } catch (const std::exception& error) {
+                spdlog::debug("[IndexingService] Post-ingest batch dispatch failed: {}",
+                              error.what());
+            } catch (...) {
+                spdlog::warn(
+                    "[IndexingService] Post-ingest batch dispatch failed with unknown exception");
             }
         }
     }

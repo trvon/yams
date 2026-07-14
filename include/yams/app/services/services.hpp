@@ -101,7 +101,8 @@ class IGraphQueryService;
 
 struct AppContext {
     yams::daemon::ServiceManager* service_manager = nullptr;
-    std::function<void(const std::string& hash, const std::string& mime)> enqueuePostIngest;
+    std::function<void(const std::vector<std::string>& hashes, const std::string& mime)>
+        enqueuePostIngestBatch;
     // Host-owned daemon state without a yams_app_services -> yams_daemon link dependency.
     // When absent, standalone/in-process callers receive the conservative default context.
     std::function<search::SearchExecutionContext()> searchExecutionContextProvider;

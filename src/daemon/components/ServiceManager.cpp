@@ -3960,10 +3960,11 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
         context.topologyOverlayHashes = self->getTopologyOverlayHashes();
         return context;
     };
-    ctx.enqueuePostIngest = [self = const_cast<ServiceManager*>(this)](const std::string& hash,
-                                                                       const std::string& mime) {
-        self->enqueuePostIngest(hash, mime);
-    };
+    ctx.enqueuePostIngestBatch =
+        [self = const_cast<ServiceManager*>(this)](const std::vector<std::string>& hashes,
+                                                   const std::string& mime) {
+            self->enqueuePostIngestBatch(hashes, mime);
+        };
     ctx.store = getContentStore(); // Thread-safe via atomic_load
     auto metadataRepo = getMetadataRepo();
     ctx.metadataRepo = metadataRepo;

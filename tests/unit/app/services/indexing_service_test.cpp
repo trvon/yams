@@ -285,24 +285,32 @@ TEST_CASE("IndexingService - Basic Operations", "[indexing][service][basic]") {
 TEST_CASE("IndexingService defers content indexing when post-ingest is available",
           "[indexing][service][post-ingest]") {
     IndexingFixture fixture;
-    std::vector<std::string> dispatchedHashes;
-    fixture.appContext_.enqueuePostIngest = [&](const std::string& hash, const std::string&) {
-        dispatchedHashes.push_back(hash);
+    std::vector<std::vector<std::string>> dispatchedBatches;
+    fixture.appContext_.enqueuePostIngestBatch = [&](const std::vector<std::string>& hashes,
+                                                     const std::string&) {
+        dispatchedBatches.push_back(hashes);
     };
     fixture.indexingService_ = makeIndexingService(fixture.appContext_);
 
-    auto filePath = fixture.createFile("deferred/content.txt", "deferred indexing content");
-    auto request = fixture.createRequest(filePath.parent_path());
+    constexpr std::size_t kDocumentCount = 5;
+    for (std::size_t i = 0; i < kDocumentCount; ++i) {
+        fixture.createFile("deferred/content-" + std::to_string(i) + ".txt",
+                           "deferred indexing content " + std::to_string(i));
+    }
+
+    auto request = fixture.createRequest(fixture.testDir_ / "deferred");
     auto result = fixture.indexingService_->addDirectory(request);
 
     REQUIRE(result);
-    REQUIRE(result.value().filesIndexed == 1);
-    REQUIRE(dispatchedHashes.size() == 1);
-
-    auto document = fixture.metadataRepo_->getDocumentByHash(dispatchedHashes.front());
-    REQUIRE(document);
-    REQUIRE(document.value().has_value());
-    CHECK_FALSE(document.value()->contentExtracted);
+    REQUIRE(result.value().filesIndexed == kDocumentCount);
+    REQUIRE(dispatchedBatches.size() == 1);
+    REQUIRE(dispatchedBatches.front().size() == kDocumentCount);
+    for (const auto& hash : dispatchedBatches.front()) {
+        auto document = fixture.metadataRepo_->getDocumentByHash(hash);
+        REQUIRE(document);
+        REQUIRE(document.value().has_value());
+        CHECK_FALSE(document.value()->contentExtracted);
+    }
 }
 
 TEST_CASE("IndexingService submits directory content through the batch boundary",
