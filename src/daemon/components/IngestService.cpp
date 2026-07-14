@@ -28,15 +28,19 @@ namespace yams::daemon {
 using PendingPostIngestByMime = std::unordered_map<std::string, std::vector<PostIngestQueue::Task>>;
 static PendingPostIngestByMime processTask(ServiceManager* sm,
                                            const InternalEventBus::StoreDocumentTask& task);
+static PendingPostIngestByMime
+processTaskBatch(ServiceManager* sm, std::vector<InternalEventBus::StoreDocumentTask> tasks);
 static std::future<PendingPostIngestByMime>
-dispatchTaskToCoordinator(ServiceManager* sm, WorkCoordinator* coordinator,
-                          InternalEventBus::StoreDocumentTask task) {
+dispatchBatchToCoordinator(ServiceManager* sm, WorkCoordinator* coordinator,
+                           std::vector<InternalEventBus::StoreDocumentTask> tasks) {
     std::promise<PendingPostIngestByMime> promise;
     auto future = promise.get_future();
 
-    if (!coordinator || !coordinator->isRunning()) {
+    // channelPoller runs on this coordinator and waits on the returned future. With only one
+    // worker, posting back to the same executor would deadlock that sole worker.
+    if (!coordinator || !coordinator->isRunning() || coordinator->getWorkerCount() < 2) {
         try {
-            promise.set_value(processTask(sm, task));
+            promise.set_value(processTaskBatch(sm, std::move(tasks)));
         } catch (...) {
             promise.set_exception(std::current_exception());
         }
@@ -46,9 +50,9 @@ dispatchTaskToCoordinator(ServiceManager* sm, WorkCoordinator* coordinator,
     auto sharedPromise =
         std::make_shared<std::promise<PendingPostIngestByMime>>(std::move(promise));
     auto executor = coordinator->getExecutor();
-    boost::asio::post(executor, [sm, task = std::move(task), sharedPromise]() mutable {
+    boost::asio::post(executor, [sm, tasks = std::move(tasks), sharedPromise]() mutable {
         try {
-            sharedPromise->set_value(processTask(sm, task));
+            sharedPromise->set_value(processTaskBatch(sm, std::move(tasks)));
         } catch (...) {
             sharedPromise->set_exception(std::current_exception());
         }
@@ -266,29 +270,22 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
         if (!batch.empty()) {
             const std::size_t parallelism = resolveIngestParallelism(coordinator_, underPressure);
 
-            // Reuse futures vector across waves to avoid per-wave allocation
-            std::vector<std::future<PendingPostIngestByMime>> futures;
-            futures.reserve(parallelism);
-
             for (std::size_t offset = 0; offset < batch.size();) {
                 const std::size_t waveSize =
                     std::min<std::size_t>(parallelism, batch.size() - offset);
-                futures.clear();
-
+                std::vector<InternalEventBus::StoreDocumentTask> wave;
+                wave.reserve(waveSize);
                 for (std::size_t i = 0; i < waveSize; ++i) {
-                    auto taskCopy = std::move(batch[offset + i]);
-                    futures.push_back(
-                        dispatchTaskToCoordinator(sm_, coordinator_, std::move(taskCopy)));
+                    wave.push_back(std::move(batch[offset + i]));
                 }
 
-                for (auto& fut : futures) {
-                    try {
-                        mergePendingPostIngest(pendingPostIngest, fut.get());
-                    } catch (const std::exception& e) {
-                        spdlog::error("[IngestService] parallel task failed: {}", e.what());
-                    } catch (...) {
-                        spdlog::error("[IngestService] parallel task failed: unknown exception");
-                    }
+                auto future = dispatchBatchToCoordinator(sm_, coordinator_, std::move(wave));
+                try {
+                    mergePendingPostIngest(pendingPostIngest, future.get());
+                } catch (const std::exception& e) {
+                    spdlog::error("[IngestService] task wave failed: {}", e.what());
+                } catch (...) {
+                    spdlog::error("[IngestService] task wave failed: unknown exception");
                 }
 
                 offset += waveSize;
@@ -318,6 +315,50 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
     }
 
     spdlog::info("[IngestService] Channel poller exited");
+}
+
+static void appendPostIngestTask(ServiceManager* sm, const AddDocumentRequest& request,
+                                 const app::services::StoreDocumentResponse& response,
+                                 PendingPostIngestByMime& pendingPostIngest) {
+    auto postIngestQueue = sm ? sm->getPostIngestQueue() : nullptr;
+    if (!postIngestQueue || response.hash.empty()) {
+        spdlog::warn("[IngestService] Post-ingest skipped: sm={} piq={} hash_empty={}",
+                     sm != nullptr, postIngestQueue != nullptr, response.hash.empty());
+        return;
+    }
+
+    PostIngestQueue::Task postIngest;
+    postIngest.hash = response.hash;
+    postIngest.mime = request.mimeType;
+    postIngest.documentId = response.documentId;
+    postIngest.noEmbeddings = request.noEmbeddings;
+    pendingPostIngest[request.mimeType].push_back(std::move(postIngest));
+}
+
+static app::services::StoreDocumentRequest
+mapStoreTask(const InternalEventBus::StoreDocumentTask& task) {
+    auto request = yams::daemon::dispatch::mapStoreDocumentRequest(task.request);
+    request.precomputedHash = task.precomputedHash;
+    request.precomputedFileSize = task.precomputedFileSize;
+    request.precomputedLastWriteTimeNs = task.precomputedLastWriteTimeNs;
+    request.skipInlineContentIndexing = true;
+    request.combineMetadataPathTree = true;
+    return request;
+}
+
+static void collectStoreResult(ServiceManager* sm, const AddDocumentRequest& request,
+                               const Result<app::services::StoreDocumentResponse>& result,
+                               PendingPostIngestByMime& pendingPostIngest) {
+    if (!result) {
+        spdlog::error("Failed to store document from ingest queue: {}", result.error().message);
+        return;
+    }
+
+    const auto& response = result.value();
+    spdlog::debug("Successfully stored document from ingest queue: {} "
+                  "(bytesStored={}, bytesDeduped={})",
+                  response.hash, response.bytesStored, response.bytesDeduped);
+    appendPostIngestTask(sm, request, response, pendingPostIngest);
 }
 
 static PendingPostIngestByMime processTask(ServiceManager* sm,
@@ -381,37 +422,71 @@ static PendingPostIngestByMime processTask(ServiceManager* sm,
         }
     } else {
         auto docService = yams::app::services::makeDocumentService(appContext);
-        auto serviceReq = yams::daemon::dispatch::mapStoreDocumentRequest(req);
-        serviceReq.precomputedHash = task.precomputedHash;
-        serviceReq.precomputedFileSize = task.precomputedFileSize;
-        serviceReq.precomputedLastWriteTimeNs = task.precomputedLastWriteTimeNs;
-        serviceReq.skipInlineContentIndexing = true;
-        serviceReq.combineMetadataPathTree = true;
+        auto result = docService->store(mapStoreTask(task));
+        collectStoreResult(sm, req, result, pendingPostIngest);
+    }
 
-        auto result = docService->store(serviceReq);
-        if (!result) {
-            spdlog::error("Failed to store document from ingest queue: {}", result.error().message);
+    return pendingPostIngest;
+}
+
+static PendingPostIngestByMime
+processTaskBatch(ServiceManager* sm, std::vector<InternalEventBus::StoreDocumentTask> tasks) {
+    PendingPostIngestByMime pendingPostIngest;
+    if (tasks.size() < 2) {
+        if (!tasks.empty()) {
+            mergePendingPostIngest(pendingPostIngest, processTask(sm, tasks.front()));
+        }
+        return pendingPostIngest;
+    }
+
+    std::vector<const InternalEventBus::StoreDocumentTask*> documentTasks;
+    documentTasks.reserve(tasks.size());
+    for (const auto& task : tasks) {
+        const auto& request = task.request;
+        std::error_code pathError;
+        const bool isDirectory = !request.path.empty() &&
+                                 std::filesystem::is_directory(request.path, pathError) &&
+                                 !pathError;
+        const bool validDocument =
+            !isDirectory &&
+            (!request.path.empty() || (!request.content.empty() && !request.name.empty()));
+        if (!pathError && validDocument && !request.recursive) {
+            documentTasks.push_back(&task);
         } else {
-            const auto& serviceResp = result.value();
-            spdlog::debug("Successfully stored document from ingest queue: {} "
-                          "(bytesStored={}, bytesDeduped={})",
-                          serviceResp.hash, serviceResp.bytesStored, serviceResp.bytesDeduped);
-
-            if (sm && sm->getPostIngestQueue() && !serviceResp.hash.empty()) {
-                spdlog::debug("[IngestService] Enqueuing post-ingest for hash={}",
-                              serviceResp.hash);
-                PostIngestQueue::Task t;
-                t.hash = serviceResp.hash;
-                t.mime = req.mimeType;
-                t.documentId = serviceResp.documentId;
-                t.noEmbeddings = req.noEmbeddings;
-                pendingPostIngest[req.mimeType].push_back(std::move(t));
-            } else {
-                spdlog::warn("[IngestService] Post-ingest skipped: sm={} piq={} hash_empty={}",
-                             sm != nullptr, sm ? (sm->getPostIngestQueue() != nullptr) : false,
-                             serviceResp.hash.empty());
+            try {
+                mergePendingPostIngest(pendingPostIngest, processTask(sm, task));
+            } catch (const std::exception& error) {
+                spdlog::error("[IngestService] task failed: {}", error.what());
+            } catch (...) {
+                spdlog::error("[IngestService] task failed: unknown exception");
             }
         }
+    }
+
+    if (documentTasks.empty()) {
+        return pendingPostIngest;
+    }
+    if (documentTasks.size() == 1) {
+        mergePendingPostIngest(pendingPostIngest, processTask(sm, *documentTasks.front()));
+        return pendingPostIngest;
+    }
+
+    auto appContext = sm->getAppContext();
+    auto documentService = yams::app::services::makeDocumentService(appContext);
+    std::vector<app::services::StoreDocumentRequest> requests;
+    requests.reserve(documentTasks.size());
+    for (const auto* task : documentTasks) {
+        requests.push_back(mapStoreTask(*task));
+    }
+
+    auto results = documentService->storeBatch(requests);
+    for (std::size_t i = 0; i < documentTasks.size(); ++i) {
+        const auto& request = documentTasks[i]->request;
+        if (i >= results.size()) {
+            spdlog::error("Failed to store document wave item {}: missing batch result", i);
+            continue;
+        }
+        collectStoreResult(sm, request, results[i], pendingPostIngest);
     }
 
     return pendingPostIngest;

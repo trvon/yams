@@ -10,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <climits>
+#include <condition_variable>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
@@ -24,10 +25,15 @@
 #include "../../common/test_helpers_catch2.h"
 #include <catch2/catch_test_macros.hpp>
 #include <yams/api/content_store.h>
+#include <yams/daemon/components/DaemonLifecycleFsm.h>
+#include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PostIngestQueue.h>
+#include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/WorkCoordinator.h>
+#include <yams/daemon/daemon.h>
 #include <yams/extraction/content_extractor.h>
 #include <yams/metadata/metadata_repository.h>
 
@@ -66,6 +72,21 @@ void drainEmbedJobsChannel() {
     while (channel->try_pop(drain)) {
     }
 }
+
+void drainStoreDocumentChannel() {
+    auto channel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::StoreDocumentTask>(
+            "store_document_tasks", 64);
+    InternalEventBus::StoreDocumentTask drain;
+    while (channel->try_pop(drain)) {
+    }
+}
+
+class StoreDocumentChannelGuard {
+public:
+    StoreDocumentChannelGuard() { drainStoreDocumentChannel(); }
+    ~StoreDocumentChannelGuard() { drainStoreDocumentChannel(); }
+};
 
 using yams::test::ScopedEnvVar;
 
@@ -149,6 +170,18 @@ private:
     uint32_t prevExtraction_{0};
 };
 
+class WorkCoordinatorThreadsGuard {
+public:
+    explicit WorkCoordinatorThreadsGuard(uint32_t threads)
+        : previous_(TuneAdvisor::workCoordinatorThreads()) {
+        TuneAdvisor::setWorkCoordinatorThreads(threads);
+    }
+    ~WorkCoordinatorThreadsGuard() { TuneAdvisor::setWorkCoordinatorThreads(previous_); }
+
+private:
+    uint32_t previous_{0};
+};
+
 // Unified StubContentStore (thread-safe, supports all required operations)
 class StubContentStore : public api::IContentStore {
 public:
@@ -213,10 +246,19 @@ public:
         return r;
     }
 
-    // Unused methods (required by interface)
-    Result<api::StoreResult> store(const std::filesystem::path&, const api::ContentMetadata&,
+    Result<api::StoreResult> store(const std::filesystem::path& path, const api::ContentMetadata&,
                                    api::ProgressCallback) override {
-        return ErrorCode::NotImplemented;
+        singleCalls_.fetch_add(1, std::memory_order_relaxed);
+        storeCv_.notify_all();
+
+        api::StoreResult result;
+        result.contentHash = "single-hash";
+        std::error_code error;
+        result.bytesStored = std::filesystem::file_size(path, error);
+        if (error) {
+            return Error{ErrorCode::IOError, error.message()};
+        }
+        return result;
     }
     Result<api::RetrieveResult> retrieve(const std::string&, const std::filesystem::path&,
                                          api::ProgressCallback) override {
@@ -239,9 +281,26 @@ public:
         return ErrorCode::NotImplemented;
     }
     std::vector<Result<api::StoreResult>>
-    storeBatch(const std::vector<std::filesystem::path>&,
+    storeBatch(const std::vector<std::filesystem::path>& paths,
                const std::vector<api::ContentMetadata>&) override {
-        return {};
+        batchCalls_.fetch_add(1, std::memory_order_relaxed);
+        lastBatchSize_.store(paths.size(), std::memory_order_relaxed);
+        storeCv_.notify_all();
+
+        std::vector<Result<api::StoreResult>> results;
+        results.reserve(paths.size());
+        for (std::size_t i = 0; i < paths.size(); ++i) {
+            api::StoreResult result;
+            result.contentHash = "batch-hash-" + std::to_string(i);
+            std::error_code error;
+            result.bytesStored = std::filesystem::file_size(paths[i], error);
+            if (error) {
+                results.emplace_back(Error{ErrorCode::IOError, error.message()});
+            } else {
+                results.emplace_back(std::move(result));
+            }
+        }
+        return results;
     }
     std::vector<Result<bool>> removeBatch(const std::vector<std::string>&) override { return {}; }
     api::ContentStoreStats getStats() const override { return {}; }
@@ -252,9 +311,34 @@ public:
         return ErrorCode::NotImplemented;
     }
 
+    [[nodiscard]] std::size_t batchCalls() const {
+        return batchCalls_.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] std::size_t singleCalls() const {
+        return singleCalls_.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] std::size_t lastBatchSize() const {
+        return lastBatchSize_.load(std::memory_order_relaxed);
+    }
+
+    bool waitForStore(std::chrono::steady_clock::time_point deadline) {
+        std::unique_lock lock(storeMutex_);
+        return storeCv_.wait_until(lock, deadline, [this] {
+            return singleCalls_.load(std::memory_order_relaxed) != 0 ||
+                   batchCalls_.load(std::memory_order_relaxed) != 0;
+        });
+    }
+
 private:
     mutable std::mutex mu_;
     std::unordered_map<std::string, ByteVector> blobs_;
+    std::atomic<std::size_t> singleCalls_{0};
+    std::atomic<std::size_t> batchCalls_{0};
+    std::atomic<std::size_t> lastBatchSize_{0};
+    std::mutex storeMutex_;
+    std::condition_variable storeCv_;
 };
 
 // Minimal MetadataRepository stub for testing
@@ -498,12 +582,76 @@ public:
     }
 };
 
+struct StoreCallSnapshot {
+    std::size_t singleCalls{0};
+    std::size_t batchCalls{0};
+    std::size_t lastBatchSize{0};
+};
+
+StoreCallSnapshot runQueuedDocuments(std::size_t count) {
+    StoreDocumentChannelGuard channelGuard;
+    WorkCoordinatorThreadsGuard threadsGuard(1);
+    yams::test::TempDirGuard testDir("yams_ingest_service_batch_");
+
+    auto contentStore = std::make_shared<StubContentStore>();
+    {
+        DaemonConfig config;
+        config.dataDir = testDir.path();
+        StateComponent state;
+        DaemonLifecycleFsm lifecycleFsm;
+        ServiceManager serviceManager(config, state, lifecycleFsm);
+        serviceManager.__test_setContentStore(contentStore);
+
+        auto channel =
+            InternalEventBus::instance().get_or_create_channel<InternalEventBus::StoreDocumentTask>(
+                "store_document_tasks", 64);
+        for (std::size_t i = 0; i < count; ++i) {
+            InternalEventBus::StoreDocumentTask task;
+            task.request.name = "queued-" + std::to_string(i) + ".txt";
+            task.request.content = "queued content " + std::to_string(i);
+            REQUIRE(channel->try_push(std::move(task)));
+        }
+
+        IngestService ingestService(&serviceManager, serviceManager.getWorkCoordinator());
+        ingestService.start();
+        CHECK(
+            contentStore->waitForStore(std::chrono::steady_clock::now() + std::chrono::seconds(2)));
+        ingestService.stop();
+    }
+
+    return {.singleCalls = contentStore->singleCalls(),
+            .batchCalls = contentStore->batchCalls(),
+            .lastBatchSize = contentStore->lastBatchSize()};
+}
+
 bool isMpmcEnabled() {
     const char* m = std::getenv("YAMS_INTERNAL_BUS_MPMC");
     return m && std::string(m) == "1";
 }
 
 } // namespace
+
+// =============================================================================
+// IngestService Tests
+// =============================================================================
+
+TEST_CASE("IngestService preserves single and batched queued storage paths",
+          "[daemon][background][ingest][batch]") {
+    SpdlogCaptureGuard logGuard(spdlog::level::err);
+
+    SECTION("one task keeps the exact single-store path") {
+        const auto calls = runQueuedDocuments(1);
+        CHECK(calls.singleCalls == 1);
+        CHECK(calls.batchCalls == 0);
+    }
+
+    SECTION("two tasks cross one batch boundary") {
+        const auto calls = runQueuedDocuments(2);
+        CHECK(calls.singleCalls == 0);
+        CHECK(calls.batchCalls == 1);
+        CHECK(calls.lastBatchSize == 2);
+    }
+}
 
 // =============================================================================
 // PostIngestQueue Tests
