@@ -163,6 +163,38 @@ def parse_quality_from_text(text: str) -> dict[str, float]:
     return out
 
 
+def parse_benchmark_setup_metrics(path: Path) -> dict[str, float]:
+    """Read the structured cold-ingest/setup observation emitted by the benchmark."""
+    if not path.is_file():
+        return {}
+    metrics: dict[str, float] = {}
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict) or obj.get("event") != "benchmark_setup_metrics":
+            continue
+        ingestion = obj.get("ingestion") or {}
+        if not isinstance(ingestion, dict):
+            continue
+        metrics = {
+            "ingest_cold_performed": 1.0 if ingestion.get("cold_performed") else 0.0,
+            "ingest_admission_ms": float(ingestion.get("admission_ms") or 0),
+            "ingest_storage_ready_ms": float(ingestion.get("storage_ready_ms") or 0),
+            "ingest_pipeline_drain_ms": float(ingestion.get("pipeline_drain_ms") or 0),
+            "ingest_searchability_ready_ms": float(
+                ingestion.get("searchability_ready_ms") or 0
+            ),
+            "ingest_enrichment_ready_ms": float(
+                ingestion.get("enrichment_ready_ms") or 0
+            ),
+            "ingest_measurement_n": float(ingestion.get("measurement_n") or 0),
+            "benchmark_setup_total_ms": float(obj.get("setup_total_ms") or 0),
+        }
+    return metrics
+
+
 def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
     if not path.is_file():
         return {}
@@ -1075,6 +1107,8 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         for left_index, left in enumerate(dry_sources):
             for right in dry_sources[left_index + 1 :]:
                 dry_run_metrics[f"mixed_cluster_overlap_jaccard_{left}_{right}"] = 0.0
+        # Plans can grow instrumentation without requiring a parallel dry-run registry.
+        dry_run_metrics.update({name: 0.0 for name in ctx.step.metrics})
         return WorkerResult(
             status="ok",
             exit_code=0,
@@ -1443,6 +1477,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
     # Let the bench's own ingest-stall logic (PROGRESS_TIMEOUT) fire before we kill the process.
     progress_timeout = int(env.get("YAMS_BENCH_PROGRESS_TIMEOUT", "0") or "0")
     timeout = max(timeout, progress_timeout + 120)
+    seed_setup_metrics: dict[str, float] = {}
     if shared_state_root is not None:
         seed_dir = shared_state_root / "seed"
         ready_marker = shared_state_root / "seed_ready"
@@ -1481,6 +1516,13 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
                     ),
                 )
             ready_marker.write_text("ready\n", encoding="utf-8")
+        prime_debug_path = shared_state_root / "prime_debug.jsonl"
+        seed_setup_metrics = parse_benchmark_setup_metrics(prime_debug_path)
+        if seed_setup_metrics:
+            write_json(
+                shared_state_root / "seed_ingestion_metrics.json",
+                {"metrics": seed_setup_metrics},
+            )
         isolated_data_dir = ctx.arm_dir / "isolated_data"
         try:
             clone_benchmark_state(seed_dir, isolated_data_dir)
@@ -1549,6 +1591,8 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
     }
     metrics.update(quality)
     metrics.update(dbg.get("metrics") or {})
+    metrics.update(parse_benchmark_setup_metrics(debug_path))
+    metrics.update({f"seed_{key}": value for key, value in seed_setup_metrics.items()})
     if mixed_corpus is not None:
         metrics.update(
             analyze_mixed_corpus_debug(

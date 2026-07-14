@@ -193,7 +193,15 @@
         "ranking_loss_query_rate",
         "vector_unique_rescue_rate",
         "recall_at_k_ceiling",
-        "ceiling_normalized_returned_recall"
+        "ceiling_normalized_returned_recall",
+        "seed_ingest_cold_performed",
+        "seed_ingest_admission_ms",
+        "seed_ingest_storage_ready_ms",
+        "seed_ingest_pipeline_drain_ms",
+        "seed_ingest_searchability_ready_ms",
+        "seed_ingest_enrichment_ready_ms",
+        "seed_ingest_measurement_n",
+        "seed_benchmark_setup_total_ms"
       ]
     }
   ],
@@ -207,7 +215,10 @@
       "mixed_topology_route_source_purity",
       "mixed_topology_relevant_fragment_coverage",
       "mixed_cluster_weighted_source_purity",
-      "search_latency_ms_p50"
+      "search_latency_ms_p50",
+      "seed_ingest_admission_ms",
+      "seed_ingest_searchability_ready_ms",
+      "seed_ingest_measurement_n"
     ],
     "require_metric_status": ["ok"]
   },
@@ -252,6 +263,13 @@
       "mixed_cluster_cross_source_exposure_scifact",
       "mixed_cluster_cross_source_exposure_nfcorpus",
       "mixed_cluster_overlap_jaccard_nfcorpus_scifact",
+      "seed_ingest_admission_ms",
+      "seed_ingest_storage_ready_ms",
+      "seed_ingest_pipeline_drain_ms",
+      "seed_ingest_searchability_ready_ms",
+      "seed_ingest_enrichment_ready_ms",
+      "seed_ingest_measurement_n",
+      "seed_benchmark_setup_total_ms",
       "search_latency_ms_p50",
       "search_latency_ms_p95",
       "topology_narrow_rate",

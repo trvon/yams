@@ -44,6 +44,7 @@ from workers.retrieval_quality import (  # noqa: E402
     _merge_benchmark_env,
     _reset_measured_outputs,
     clone_benchmark_state,
+    parse_benchmark_setup_metrics,
     parse_debug_jsonl,
     require_shared_topology_construction_identity,
     require_steady_state,
@@ -937,6 +938,35 @@ class IngestionContractTests(unittest.TestCase):
             self.assertIsNotNone(error)
             self.assertIn("identity mismatch", error or "")
 
+    def test_mixed_quality_seed_exports_one_honest_ingestion_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            debug_path = Path(tmp) / "prime_debug.jsonl"
+            debug_path.write_text(
+                json.dumps(
+                    {
+                        "event": "benchmark_setup_metrics",
+                        "ingestion": {
+                            "cold_performed": True,
+                            "admission_ms": 11,
+                            "storage_ready_ms": 25,
+                            "pipeline_drain_ms": 14,
+                            "searchability_ready_ms": 31,
+                            "enrichment_ready_ms": 37,
+                            "measurement_n": 1,
+                        },
+                        "setup_total_ms": 41,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            metrics = parse_benchmark_setup_metrics(debug_path)
+            self.assertEqual(metrics["ingest_admission_ms"], 11.0)
+            self.assertEqual(metrics["ingest_pipeline_drain_ms"], 14.0)
+            self.assertEqual(metrics["ingest_enrichment_ready_ms"], 37.0)
+            self.assertEqual(metrics["ingest_measurement_n"], 1.0)
+
     def test_ingestion_plans_are_decision_grade_and_keep_submission_paths_separate(self) -> None:
         plans_dir = XPLAN_ROOT / "plans"
         feature_plan = json.loads(
@@ -954,6 +984,17 @@ class IngestionContractTests(unittest.TestCase):
         self.assertEqual(path_plan["repeats"], 3)
         modes = {arm["params"]["ingest_mode"] for arm in path_plan["arms"]}
         self.assertEqual(modes, {"directory", "pipelined_single_file"})
+
+        quality_plan = json.loads(
+            (plans_dir / "search_generalized_memory_topology_gate.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        required = set(quality_plan["validate"]["require_metrics"])
+        self.assertIn("seed_ingest_admission_ms", required)
+        self.assertIn("seed_ingest_searchability_ready_ms", required)
+        self.assertIn("seed_ingest_measurement_n", required)
+
 
 class MultiClientMetricTests(unittest.TestCase):
     def test_read_write_latency_and_pool_pressure_are_preserved(self) -> None:

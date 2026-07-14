@@ -4832,6 +4832,16 @@ RetrievalMetrics evaluateGrepQueries(yams::daemon::DaemonClient& client,
 }
 
 struct BenchFixture {
+    struct SetupTimingMetrics {
+        bool coldIngestPerformed = false;
+        int64_t admissionMs = 0;
+        int64_t storageReadyMs = 0;
+        int64_t pipelineDrainMs = 0;
+        int64_t searchabilityReadyMs = 0;
+        int64_t enrichmentReadyMs = 0;
+        int64_t setupTotalMs = 0;
+    };
+
     std::unique_ptr<DaemonHarness> harness;
     std::unique_ptr<ScopedEnvOverrides> scopedEnv;
     std::unique_ptr<ScopedEnvOverrides> pluginScopedEnv;
@@ -4846,6 +4856,7 @@ struct BenchFixture {
     bool useBEIR = false;
     SyntheticCorpusMode syntheticCorpusMode = SyntheticCorpusMode::Generic;
     bool warmDataDir = false; // True when reusing a pre-ingested data directory
+    SetupTimingMetrics setupTimings;
     std::string datasetName = "synthetic";
     std::string beirDatasetName; // Name of BEIR dataset (scifact, cqadupstack, etc.)
 
@@ -5661,6 +5672,16 @@ struct BenchFixture {
     }
 
     void setup() {
+        using SetupClock = std::chrono::steady_clock;
+        const auto setupStartedAt = SetupClock::now();
+        std::optional<SetupClock::time_point> coldIngestStartedAt;
+        std::optional<SetupClock::time_point> admissionCompletedAt;
+        const auto elapsedMsSince = [](SetupClock::time_point startedAt) {
+            return std::chrono::duration_cast<std::chrono::milliseconds>(SetupClock::now() -
+                                                                         startedAt)
+                .count();
+        };
+
         const char* env_dataset = std::getenv("YAMS_BENCH_DATASET");
         const char* env_debug_file = std::getenv("YAMS_BENCH_DEBUG_FILE");
         if (env_debug_file && std::strlen(env_debug_file) > 0) {
@@ -6631,6 +6652,8 @@ struct BenchFixture {
                 // Use directory ingestion for faster bulk add via IndexingService
                 fs::path corpusDir = useBEIR ? beirCorpus->corpusDir : corpus->corpusDir;
                 spdlog::info("Ingesting {} documents from {}...", corpusSize, corpusDir.string());
+                setupTimings.coldIngestPerformed = true;
+                coldIngestStartedAt = SetupClock::now();
 
                 yams::daemon::AddDocumentRequest addReq;
                 addReq.path = corpusDir.string();
@@ -6674,6 +6697,8 @@ struct BenchFixture {
                     throw std::runtime_error("Failed to ingest directory: " +
                                              addResult.error().message);
                 }
+                admissionCompletedAt = SetupClock::now();
+                setupTimings.admissionMs = elapsedMsSince(*coldIngestStartedAt);
                 spdlog::info("Directory ingestion request accepted: {}", addResult.value().message);
 
                 // Wait for directory ingestion to complete by monitoring document count
@@ -6938,6 +6963,10 @@ struct BenchFixture {
                     }
                     std::this_thread::sleep_for(500ms);
                 }
+
+                setupTimings.storageReadyMs = elapsedMsSince(*coldIngestStartedAt);
+                setupTimings.pipelineDrainMs =
+                    admissionCompletedAt.has_value() ? elapsedMsSince(*admissionCompletedAt) : 0;
 
             } else if (!vectorsDisabled) {
                 yams::daemon::RepairRequest repairReq;
@@ -7716,6 +7745,10 @@ struct BenchFixture {
             }
         }
 
+        if (coldIngestStartedAt.has_value()) {
+            setupTimings.searchabilityReadyMs = elapsedMsSince(*coldIngestStartedAt);
+        }
+
         auto effectiveKgReadinessPolicy = kgReadinessPolicy;
         if (kgReadinessPolicy != yams::search::BenchmarkKgReadinessPolicy::Skip) {
             auto statusForKgPolicy = benchRunSync(client->status(true), 5s);
@@ -7937,6 +7970,10 @@ struct BenchFixture {
             spdlog::info(
                 "Skipping KG readiness wait because the effective tuned search policy disables "
                 "graph rerank.");
+        }
+
+        if (coldIngestStartedAt.has_value()) {
+            setupTimings.enrichmentReadyMs = elapsedMsSince(*coldIngestStartedAt);
         }
 
         // Verify document count using status metrics (avoids degraded search false negatives)
@@ -8299,6 +8336,27 @@ struct BenchFixture {
             queries = corpus->generateQueries(numQueries);
         }
         spdlog::info("Generated {} test queries", queries.size());
+
+        setupTimings.setupTotalMs = elapsedMsSince(setupStartedAt);
+        if (g_debugOut) {
+            DebugLogEntry timingEntry;
+            timingEntry.searchType = "benchmark_setup";
+            timingEntry.extraFields = {
+                {"event", "benchmark_setup_metrics"},
+                {"ingestion",
+                 {{"cold_performed", setupTimings.coldIngestPerformed},
+                  {"admission_ms", setupTimings.admissionMs},
+                  {"storage_ready_ms", setupTimings.storageReadyMs},
+                  {"pipeline_drain_ms", setupTimings.pipelineDrainMs},
+                  {"searchability_ready_ms", setupTimings.searchabilityReadyMs},
+                  {"enrichment_ready_ms", setupTimings.enrichmentReadyMs},
+                  {"measurement_n", setupTimings.coldIngestPerformed ? 1 : 0}}},
+                {"setup_total_ms", setupTimings.setupTotalMs},
+                {"dataset", datasetName},
+                {"corpus_size", corpusSize},
+            };
+            debugLogWriteJsonLine(timingEntry);
+        }
     }
 
     void teardown() {
