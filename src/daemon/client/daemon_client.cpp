@@ -1703,6 +1703,10 @@ DaemonClient::streamingAddDocument(const AddDocumentRequest& req) {
         void onHeaderReceived(const Response& headerResponse) override {
             // In unary (non-streaming) server paths, the full AddDocumentResponse may arrive here.
             if (auto* add = std::get_if<AddDocumentResponse>(&headerResponse)) {
+                // The transport can retry on a fresh connection after EOF using the same
+                // handler. A valid response from that retry supersedes the prior attempt's
+                // transport error.
+                error.reset();
                 value = *add;
                 return;
             }
@@ -1739,6 +1743,7 @@ DaemonClient::streamingAddDocument(const AddDocumentRequest& req) {
                     // We expect the full response as the last chunk; ignore interim
                     return true;
                 }
+                error.reset();
                 value = *add;
                 return true;
             }
