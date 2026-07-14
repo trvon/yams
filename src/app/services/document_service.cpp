@@ -636,6 +636,53 @@ buildMetadataTagPairs(const api::ContentMetadata& metadata) {
     return tagPairs;
 }
 
+api::ContentMetadata buildStoreContentMetadata(const StoreDocumentRequest& req,
+                                               const std::string& snapshotId) {
+    api::ContentMetadata metadata;
+    if (!req.name.empty()) {
+        metadata.name = req.name;
+    }
+    if (!req.mimeType.empty()) {
+        metadata.tags["mime_type"] = req.mimeType;
+    }
+    addTagPairsToMap(req.tags, metadata.tags);
+    addMetadataToMap(req.metadata, metadata.tags);
+    if (!req.collection.empty()) {
+        metadata.tags["collection"] = req.collection;
+    }
+
+    const auto snapshotTime =
+        std::to_string(std::chrono::duration_cast<std::chrono::microseconds>(
+                           std::chrono::system_clock::now().time_since_epoch())
+                           .count());
+    metadata.tags["snapshot_id"] = snapshotId;
+    metadata.tags["snapshot_time"] = snapshotTime;
+    metadata.tags["snapshot_id:" + snapshotId] = snapshotId;
+    metadata.tags["snapshot_time:" + snapshotId] = snapshotTime;
+    if (!req.snapshotLabel.empty()) {
+        metadata.tags["snapshot_label"] = req.snapshotLabel;
+    }
+    if (req.noEmbeddings) {
+        metadata.tags["tag:no_embeddings"] = "no_embeddings";
+        metadata.tags["no_embeddings"] = "true";
+    }
+    if (!req.sessionId.empty() && !req.bypassSession) {
+        metadata.tags["session_id"] = req.sessionId;
+    }
+    if (!req.precomputedHash.empty()) {
+        metadata.contentHash = req.precomputedHash;
+        if (req.precomputedFileSize) {
+            metadata.size = *req.precomputedFileSize;
+        }
+        metadata.tags["__yams_trusted_hash_hint"] = "1";
+        if (req.precomputedLastWriteTimeNs) {
+            metadata.tags["__yams_hash_hint_mtime_ns"] =
+                std::to_string(*req.precomputedLastWriteTimeNs);
+        }
+    }
+    return metadata;
+}
+
 metadata::TreeSnapshotRecord
 buildIngestSnapshotRecord(const StoreDocumentRequest& req, const metadata::DocumentInfo& info,
                           const std::string& snapshotId,
@@ -1334,54 +1381,9 @@ public:
         if (!ctx_.store) {
             return Error{ErrorCode::NotInitialized, "Content store not available"};
         }
-        api::ContentMetadata md;
-        if (!req.name.empty())
-            md.name = req.name;
-        // Attach mime_type as a tag (for consistency with other parts of the system)
-        if (!req.mimeType.empty()) {
-            md.tags["mime_type"] = req.mimeType;
-        }
-        addTagPairsToMap(req.tags, md.tags);
-        addMetadataToMap(req.metadata, md.tags);
-
-        // Add collection and snapshot metadata if provided
-        if (!req.collection.empty()) {
-            md.tags["collection"] = req.collection;
-        }
         const auto snapshotId =
             req.snapshotId.empty() ? yams::core::generateSnapshotId() : req.snapshotId;
-        const auto snapshotTime =
-            std::to_string(std::chrono::duration_cast<std::chrono::microseconds>(
-                               std::chrono::system_clock::now().time_since_epoch())
-                               .count());
-        md.tags["snapshot_id"] = snapshotId;
-        md.tags["snapshot_time"] = snapshotTime;
-        md.tags["snapshot_id:" + snapshotId] = snapshotId;
-        md.tags["snapshot_time:" + snapshotId] = snapshotTime;
-        if (!req.snapshotLabel.empty()) {
-            md.tags["snapshot_label"] = req.snapshotLabel;
-        }
-        if (req.noEmbeddings) {
-            // Persist the opt-out as both:
-            // - a tag key (tag:no_embeddings) so tag queries and getDocumentTags() see it
-            // - a legacy metadata key (no_embeddings=true) for any existing consumers
-            md.tags["tag:no_embeddings"] = "no_embeddings";
-            md.tags["no_embeddings"] = "true";
-        }
-        if (!req.sessionId.empty() && !req.bypassSession) {
-            md.tags["session_id"] = req.sessionId;
-        }
-        if (!req.precomputedHash.empty()) {
-            md.contentHash = req.precomputedHash;
-            if (req.precomputedFileSize) {
-                md.size = *req.precomputedFileSize;
-            }
-            md.tags["__yams_trusted_hash_hint"] = "1";
-            if (req.precomputedLastWriteTimeNs) {
-                md.tags["__yams_hash_hint_mtime_ns"] =
-                    std::to_string(*req.precomputedLastWriteTimeNs);
-            }
-        }
+        auto md = buildStoreContentMetadata(req, snapshotId);
 
         auto input = resolveStoreInput(req);
         if (!input) {
@@ -1456,6 +1458,182 @@ public:
 
         recordDocumentStorePhase("store_total", storeTotalStart);
         return out;
+    }
+
+    std::vector<Result<StoreDocumentResponse>>
+    storeBatch(const std::vector<StoreDocumentRequest>& requests) override {
+        if (requests.empty()) {
+            return {};
+        }
+        if (requests.size() == 1) {
+            return {store(requests.front())};
+        }
+
+        const auto storeTotalStart = std::chrono::steady_clock::now();
+        std::vector<std::optional<Result<StoreDocumentResponse>>> outcomes(requests.size());
+        if (!ctx_.store) {
+            for (auto& outcome : outcomes) {
+                outcome = Error{ErrorCode::NotInitialized, "Content store not available"};
+            }
+        }
+
+        struct PreparedInput {
+            std::size_t requestIndex{0};
+            api::ContentMetadata metadata;
+            std::string snapshotId;
+            std::string usePath;
+            std::optional<std::filesystem::path> temporaryPath;
+        };
+
+        std::vector<PreparedInput> prepared;
+        prepared.reserve(requests.size());
+        if (ctx_.store) {
+            for (std::size_t i = 0; i < requests.size(); ++i) {
+                const auto& request = requests[i];
+                const auto snapshotId = request.snapshotId.empty()
+                                            ? yams::core::generateSnapshotId()
+                                            : request.snapshotId;
+                auto input = resolveStoreInput(request);
+                if (!input) {
+                    outcomes[i] = input.error();
+                    continue;
+                }
+                prepared.push_back({.requestIndex = i,
+                                    .metadata = buildStoreContentMetadata(request, snapshotId),
+                                    .snapshotId = snapshotId,
+                                    .usePath = std::move(input.value().usePath),
+                                    .temporaryPath = std::move(input.value().tmpToRemove)});
+            }
+        }
+
+        std::vector<std::filesystem::path> paths;
+        std::vector<api::ContentMetadata> contentMetadata;
+        paths.reserve(prepared.size());
+        contentMetadata.reserve(prepared.size());
+        for (const auto& item : prepared) {
+            paths.emplace_back(item.usePath);
+            contentMetadata.push_back(item.metadata);
+        }
+
+        const auto contentStoreStart = std::chrono::steady_clock::now();
+        auto contentResults = ctx_.store ? ctx_.store->storeBatch(paths, contentMetadata)
+                                         : std::vector<Result<api::StoreResult>>{};
+        recordDocumentStorePhase("content_store", contentStoreStart);
+        for (std::size_t i = 0; i < prepared.size(); ++i) {
+            if (i >= contentResults.size()) {
+                outcomes[prepared[i].requestIndex] =
+                    Error{ErrorCode::InternalError,
+                          "content store batch returned an invalid result count"};
+                if (prepared[i].temporaryPath) {
+                    std::error_code ec;
+                    std::filesystem::remove(*prepared[i].temporaryPath, ec);
+                }
+                continue;
+            }
+            if (!contentResults[i]) {
+                outcomes[prepared[i].requestIndex] = contentResults[i].error();
+                if (prepared[i].temporaryPath) {
+                    std::error_code ec;
+                    std::filesystem::remove(*prepared[i].temporaryPath, ec);
+                }
+            }
+        }
+
+        struct PendingMetadata {
+            std::size_t requestIndex{0};
+            std::chrono::steady_clock::time_point insertStartedAt;
+            metadata::DocumentInfo info;
+            std::string snapshotId;
+            std::string usePath;
+            std::future<Result<int64_t>> future;
+        };
+        std::vector<PendingMetadata> pendingMetadata;
+        pendingMetadata.reserve(prepared.size());
+
+        metadata::MetadataOpScope metadataScope("app_store_document_batch");
+        for (std::size_t i = 0; i < prepared.size(); ++i) {
+            auto& item = prepared[i];
+            if (outcomes[item.requestIndex]) {
+                continue;
+            }
+            auto& content = contentResults[i].value();
+            StoreDocumentResponse response{.hash = content.contentHash,
+                                           .bytesStored = content.bytesStored,
+                                           .bytesDeduped = content.bytesDeduped};
+            outcomes[item.requestIndex] = response;
+
+            if (!ctx_.metadataRepo) {
+                if (item.temporaryPath) {
+                    std::error_code ec;
+                    std::filesystem::remove(*item.temporaryPath, ec);
+                }
+                continue;
+            }
+            if (!ctx_.metadataInsertWriter) {
+                outcomes[item.requestIndex] = Error{
+                    ErrorCode::InternalError, "metadata insert writer unavailable in AppContext"};
+                if (item.temporaryPath) {
+                    std::error_code ec;
+                    std::filesystem::remove(*item.temporaryPath, ec);
+                }
+                continue;
+            }
+
+            const auto metadataPrepareStart = std::chrono::steady_clock::now();
+            const auto now = std::chrono::system_clock::now();
+            auto info = buildDocumentInfo(requests[item.requestIndex], item.usePath,
+                                          content.contentHash, item.temporaryPath, now);
+            auto tagPairs = buildMetadataTagPairs(item.metadata);
+            auto snapshotRecord =
+                buildIngestSnapshotRecord(requests[item.requestIndex], info, item.snapshotId, now);
+            recordDocumentStorePhase("metadata_prepare", metadataPrepareStart);
+
+            metadata::BatchDocumentInsert insertRecord{
+                info, std::move(tagPairs), std::move(snapshotRecord),
+                requests[item.requestIndex].combineMetadataPathTree};
+            const auto insertStartedAt = std::chrono::steady_clock::now();
+            auto future = ctx_.metadataInsertWriter->submit(std::move(insertRecord));
+            pendingMetadata.push_back({.requestIndex = item.requestIndex,
+                                       .insertStartedAt = insertStartedAt,
+                                       .info = std::move(info),
+                                       .snapshotId = item.snapshotId,
+                                       .usePath = item.usePath,
+                                       .future = std::move(future)});
+        }
+
+        for (auto& pending : pendingMetadata) {
+            auto inserted = pending.future.get();
+            recordDocumentStorePhase("metadata_insert", pending.insertStartedAt);
+            if (!inserted) {
+                spdlog::warn("Batch metadata insert failed for {}: {}", pending.info.filePath,
+                             inserted.error().message);
+                continue;
+            }
+
+            auto& response = outcomes[pending.requestIndex]->value();
+            response.documentId = inserted.value();
+            const auto& request = requests[pending.requestIndex];
+            applyStoreVersioning(pending.info, response.documentId);
+            applyStorePathTree(request, pending.info, response.documentId);
+            syncStoreKnowledgeGraph(pending.info, pending.snapshotId);
+            enqueueStoreFuzzyTerms(pending.info);
+            applyStoreInlineContentIndex(request, pending.info, response.documentId,
+                                         pending.usePath);
+        }
+
+        recordDocumentStorePhase("store_total", storeTotalStart);
+
+        std::vector<Result<StoreDocumentResponse>> results;
+        results.reserve(requests.size());
+        for (auto& outcome : outcomes) {
+            if (outcome) {
+                results.push_back(std::move(*outcome));
+            } else {
+                results.emplace_back(
+                    Error{ErrorCode::InternalError, "document batch produced no result"});
+            }
+        }
+        return results;
     }
 
     // --- store() side-effect helpers (behavior-preserving extractions) ---

@@ -1,4 +1,5 @@
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <condition_variable>
 #include <cstring>
 #include <filesystem>
@@ -203,12 +204,61 @@ public:
     // Batch operations
     std::vector<Result<void>>
     storeBatch(const std::vector<std::pair<std::string, std::vector<std::byte>>>& items) {
-        std::vector<Result<void>> results;
-        results.reserve(items.size());
-        for (const auto& [hash, data] : items) {
-            results.push_back(store(hash, std::span<const std::byte>(data)));
+        if (items.empty()) {
+            return {};
         }
-        return results;
+        if (!compressionEnabled_) {
+            return underlying_->storeBatch(items);
+        }
+
+        const auto compressionFloor =
+            std::max(config_.compressionThreshold, policy_.rules().neverCompressBelow);
+        const bool needsEncoding = std::any_of(items.begin(), items.end(), [&](const auto& item) {
+            const auto& data = item.second;
+            return !isCompressedData(data) && data.size() >= compressionFloor;
+        });
+        if (!needsEncoding) {
+            for (const auto& [_, data] : items) {
+                if (isCompressedData(data)) {
+                    updateStats([&](compression::CompressionStats& stats) {
+                        stats.totalCompressedFiles++;
+                        stats.totalCompressedBytes += data.size();
+                    });
+                }
+            }
+            return underlying_->storeBatch(items);
+        }
+
+        std::vector<std::pair<std::string, std::vector<std::byte>>> encoded;
+        encoded.reserve(items.size());
+        const auto level =
+            config_.policyRules.defaultZstdLevel == 0 ? 3 : config_.policyRules.defaultZstdLevel;
+        const auto decision = compression::CompressionDecision::compress(
+            compression::CompressionAlgorithm::Zstandard, level, "eager batch compression");
+        for (const auto& [hash, data] : items) {
+            if (isCompressedData(data)) {
+                updateStats([&](compression::CompressionStats& stats) {
+                    stats.totalCompressedFiles++;
+                    stats.totalCompressedBytes += data.size();
+                });
+                encoded.emplace_back(hash, data);
+                continue;
+            }
+            if (data.size() < compressionFloor) {
+                encoded.emplace_back(hash, data);
+                continue;
+            }
+
+            auto compressed = compressData(data, decision);
+            if (!compressed) {
+                spdlog::warn("Compression failed for hash {}, storing uncompressed: {}", hash,
+                             compressed.error().message);
+                encoded.emplace_back(hash, data);
+                continue;
+            }
+            encoded.emplace_back(hash, std::move(compressed).value());
+        }
+        return underlying_->storeBatch(encoded);
     }
 
     compression::CompressionStats getCompressionStats() const {

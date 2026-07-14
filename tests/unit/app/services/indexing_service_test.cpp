@@ -305,6 +305,27 @@ TEST_CASE("IndexingService defers content indexing when post-ingest is available
     CHECK_FALSE(document.value()->contentExtracted);
 }
 
+TEST_CASE("IndexingService submits directory content through the batch boundary",
+          "[indexing][service][batch]") {
+    IndexingFixture fixture;
+    for (int i = 0; i < 5; ++i) {
+        fixture.createFile("batched/file-" + std::to_string(i) + ".txt",
+                           "batched content " + std::to_string(i));
+    }
+    yams::api::resetContentStorePhaseTimings();
+
+    auto request = fixture.createRequest(fixture.testDir_ / "batched");
+    auto result = fixture.indexingService_->addDirectory(request);
+
+    REQUIRE(result.has_value());
+    CHECK(result.value().filesIndexed == 5);
+    CHECK(result.value().filesFailed == 0);
+    const auto timings = yams::api::getContentStorePhaseTimingsSnapshot();
+    REQUIRE(timings.contains("batch_ref_commit"));
+    CHECK(timings.at("batch_ref_commit").calls == 1);
+    CHECK(timings.at("ref_commit").calls == 0);
+}
+
 TEST_CASE("IndexingService - File Handling", "[indexing][service][files]") {
     IndexingFixture fixture;
 

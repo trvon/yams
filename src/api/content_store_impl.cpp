@@ -19,6 +19,7 @@
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace yams::api {
@@ -60,10 +61,16 @@ struct AtomicContentStorePhaseTiming {
     std::atomic<std::uint64_t> maxUs{0};
 };
 
-constexpr std::array<std::string_view, 11> kContentStorePhaseNames{
-    "file_stat",       "hash",           "chunk_file", "chunk_store_refs",
-    "manifest_create", "manifest_store", "ref_commit", "ref_submit",
-    "ref_future_wait", "metadata_stats", "store_total"};
+constexpr std::array<std::string_view, 17> kContentStorePhaseNames{
+    "file_stat",         "hash",
+    "chunk_file",        "chunk_store_refs",
+    "manifest_create",   "manifest_store",
+    "ref_commit",        "ref_submit",
+    "ref_future_wait",   "metadata_stats",
+    "store_total",       "batch_prepare",
+    "batch_chunk_store", "batch_manifest_store",
+    "batch_ref_commit",  "batch_publish",
+    "batch_total"};
 
 std::array<AtomicContentStorePhaseTiming, kContentStorePhaseNames.size()>& contentStoreTimings() {
     static std::array<AtomicContentStorePhaseTiming, kContentStorePhaseNames.size()> timings;
@@ -875,14 +882,216 @@ public:
     std::vector<Result<StoreResult>>
     storeBatch(const std::vector<std::filesystem::path>& paths,
                const std::vector<ContentMetadata>& metadata) override {
-        std::vector<Result<StoreResult>> results;
-        results.reserve(paths.size());
-
-        for (size_t i = 0; i < paths.size(); ++i) {
-            ContentMetadata meta = (i < metadata.size()) ? metadata[i] : ContentMetadata{};
-            results.push_back(store(paths[i], meta, nullptr));
+        if (paths.empty()) {
+            return {};
         }
 
+        const auto batchTotalStart = std::chrono::steady_clock::now();
+        const auto batchPrepareStart = std::chrono::steady_clock::now();
+        std::vector<std::optional<PreparedBatchStore>> prepared(paths.size());
+        std::vector<std::optional<Result<StoreResult>>> outcomes(paths.size());
+        for (std::size_t i = 0; i < paths.size(); ++i) {
+            auto item =
+                prepareBatchStore(paths[i], i < metadata.size() ? metadata[i] : ContentMetadata{});
+            if (!item) {
+                outcomes[i] = item.error();
+                continue;
+            }
+            prepared[i] = std::move(item).value();
+        }
+        recordContentStorePhase("batch_prepare", batchPrepareStart);
+
+        std::vector<std::pair<std::string, std::vector<std::byte>>> chunkWrites;
+        std::unordered_map<std::string, std::size_t> chunkWriteIndex;
+        for (std::size_t i = 0; i < prepared.size(); ++i) {
+            auto& item = prepared[i];
+            if (!item) {
+                continue;
+            }
+            for (const auto& chunk : item->chunks) {
+                auto exists = storage_->exists(chunk.hash);
+                if (!exists) {
+                    outcomes[i] = exists.error();
+                    break;
+                }
+                if (exists.value() || chunkWriteIndex.contains(chunk.hash)) {
+                    item->bytesDeduped += chunk.size;
+                    continue;
+                }
+                chunkWriteIndex.emplace(chunk.hash, chunkWrites.size());
+                chunkWrites.emplace_back(chunk.hash, chunk.data);
+                item->bytesStored += chunk.size;
+            }
+        }
+
+        std::vector<Result<void>> chunkWriteResults;
+        const auto batchChunkStoreStart = std::chrono::steady_clock::now();
+        if (!chunkWrites.empty()) {
+            chunkWriteResults = storage_->storeBatch(chunkWrites);
+            if (chunkWriteResults.size() != chunkWrites.size()) {
+                const Error error{ErrorCode::InternalError,
+                                  "storage batch returned an invalid result count"};
+                for (std::size_t i = 0; i < prepared.size(); ++i) {
+                    if (prepared[i] && !outcomes[i]) {
+                        outcomes[i] = error;
+                    }
+                }
+            }
+        }
+        recordContentStorePhase("batch_chunk_store", batchChunkStoreStart);
+
+        for (std::size_t i = 0; i < prepared.size(); ++i) {
+            auto& item = prepared[i];
+            if (!item || outcomes[i]) {
+                continue;
+            }
+            for (const auto& chunk : item->chunks) {
+                const auto write = chunkWriteIndex.find(chunk.hash);
+                if (write != chunkWriteIndex.end() && (write->second >= chunkWriteResults.size() ||
+                                                       !chunkWriteResults[write->second])) {
+                    outcomes[i] =
+                        write->second < chunkWriteResults.size()
+                            ? chunkWriteResults[write->second].error()
+                            : Error{ErrorCode::InternalError, "missing storage batch result"};
+                    break;
+                }
+
+                auto blockSize = storage_->getBlockSize(chunk.hash);
+                const auto compressedSize =
+                    blockSize ? static_cast<std::size_t>(blockSize.value()) : chunk.size;
+                item->refBatch.operations.push_back({.type = storage::RefDelta::Type::Increment,
+                                                     .blockHash = chunk.hash,
+                                                     .compressedSize = compressedSize,
+                                                     .uncompressedSize = chunk.size});
+            }
+        }
+
+        std::vector<std::pair<std::string, std::vector<std::byte>>> manifestWrites;
+        std::unordered_map<std::string, std::size_t> manifestWriteIndex;
+        for (std::size_t i = 0; i < prepared.size(); ++i) {
+            auto& item = prepared[i];
+            if (!item || outcomes[i]) {
+                continue;
+            }
+            auto [it, inserted] =
+                manifestWriteIndex.emplace(item->manifestHash, manifestWrites.size());
+            if (inserted) {
+                manifestWrites.emplace_back(item->manifestHash, item->manifestData);
+            } else {
+                // Match sequential store semantics when identical content appears more than
+                // once: the last request owns the durable manifest metadata.
+                manifestWrites[it->second].second = item->manifestData;
+            }
+        }
+
+        std::vector<Result<void>> manifestWriteResults;
+        const auto batchManifestStoreStart = std::chrono::steady_clock::now();
+        if (!manifestWrites.empty()) {
+            manifestWriteResults = storage_->storeBatch(manifestWrites);
+        }
+        recordContentStorePhase("batch_manifest_store", batchManifestStoreStart);
+        for (std::size_t i = 0; i < prepared.size(); ++i) {
+            auto& item = prepared[i];
+            if (!item || outcomes[i]) {
+                continue;
+            }
+            const auto write = manifestWriteIndex.find(item->manifestHash);
+            if (write == manifestWriteIndex.end() || write->second >= manifestWriteResults.size()) {
+                outcomes[i] =
+                    Error{ErrorCode::InternalError, "missing manifest storage batch result"};
+                continue;
+            }
+            const auto& stored = manifestWriteResults[write->second];
+            if (!stored && !reconcileAmbiguousManifestStore(item->manifestHash, item->manifestData,
+                                                            stored.error())) {
+                outcomes[i] = stored.error();
+            }
+        }
+
+        storage::RefTransactionBatch combinedRefs;
+        for (std::size_t i = 0; i < prepared.size(); ++i) {
+            auto& item = prepared[i];
+            if (!item || outcomes[i]) {
+                continue;
+            }
+            combinedRefs.operations.insert(combinedRefs.operations.end(),
+                                           item->refBatch.operations.begin(),
+                                           item->refBatch.operations.end());
+        }
+
+        const auto batchRefCommitStart = std::chrono::steady_clock::now();
+        auto refsCommitted = commitReferenceBatch(std::move(combinedRefs));
+        recordContentStorePhase("batch_ref_commit", batchRefCommitStart);
+        if (!refsCommitted) {
+            for (std::size_t i = 0; i < prepared.size(); ++i) {
+                auto& item = prepared[i];
+                if (!item || outcomes[i]) {
+                    continue;
+                }
+                cleanupStoredObject(item->manifestHash);
+                outcomes[i] = refsCommitted.error();
+            }
+        } else {
+            const auto batchPublishStart = std::chrono::steady_clock::now();
+            std::uint64_t totalStored = 0;
+            std::uint64_t totalDeduped = 0;
+            std::uint64_t storedDocuments = 0;
+            std::unordered_set<std::string> attributedNewChunks;
+            attributedNewChunks.reserve(chunkWriteIndex.size());
+            for (std::size_t i = 0; i < prepared.size(); ++i) {
+                auto& item = prepared[i];
+                if (!item || outcomes[i]) {
+                    continue;
+                }
+                item->bytesStored = 0;
+                item->bytesDeduped = 0;
+                for (const auto& chunk : item->chunks) {
+                    if (chunkWriteIndex.contains(chunk.hash) &&
+                        attributedNewChunks.insert(chunk.hash).second) {
+                        item->bytesStored += chunk.size;
+                    } else {
+                        item->bytesDeduped += chunk.size;
+                    }
+                }
+            }
+            const auto finishedAt = std::chrono::steady_clock::now();
+            {
+                std::unique_lock lock(metadataMutex_);
+                for (std::size_t i = 0; i < prepared.size(); ++i) {
+                    auto& item = prepared[i];
+                    if (!item || outcomes[i]) {
+                        continue;
+                    }
+                    metadataStore_[item->fileHash] =
+                        sanitizeStoredMetadata(item->metadata, item->fileHash, item->fileSize);
+                    totalStored += item->bytesStored;
+                    totalDeduped += item->bytesDeduped;
+                    ++storedDocuments;
+                    outcomes[i] = StoreResult{
+                        .contentHash = item->fileHash,
+                        .bytesStored = item->fileSize,
+                        .bytesDeduped = item->bytesDeduped,
+                        .duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            finishedAt - item->startedAt)};
+                }
+            }
+            if (storedDocuments > 0) {
+                updateStats(totalStored, totalDeduped, 0, storedDocuments, storedDocuments, 0, 0);
+            }
+            recordContentStorePhase("batch_publish", batchPublishStart);
+        }
+
+        std::vector<Result<StoreResult>> results;
+        results.reserve(paths.size());
+        for (auto& outcome : outcomes) {
+            if (outcome) {
+                results.push_back(std::move(*outcome));
+            } else {
+                results.emplace_back(
+                    Error{ErrorCode::InternalError, "batch store produced no result"});
+            }
+        }
+        recordContentStorePhase("batch_total", batchTotalStart);
         return results;
     }
 
@@ -1187,6 +1396,19 @@ public:
     }
 
 private:
+    struct PreparedBatchStore {
+        std::chrono::steady_clock::time_point startedAt;
+        ContentMetadata metadata;
+        std::string fileHash;
+        std::uint64_t fileSize{0};
+        std::vector<chunking::Chunk> chunks;
+        std::string manifestHash;
+        std::vector<std::byte> manifestData;
+        storage::RefTransactionBatch refBatch;
+        std::uint64_t bytesStored{0};
+        std::uint64_t bytesDeduped{0};
+    };
+
     // Components
     std::shared_ptr<storage::IStorageEngine> storage_;
     std::shared_ptr<chunking::IChunker> chunker_;
@@ -1203,6 +1425,62 @@ private:
     // Statistics
     mutable std::shared_mutex statsMutex_;
     ContentStoreStats stats_;
+
+    Result<PreparedBatchStore> prepareBatchStore(const std::filesystem::path& path,
+                                                 ContentMetadata metadata) {
+        PreparedBatchStore prepared;
+        prepared.startedAt = std::chrono::steady_clock::now();
+        prepared.metadata = std::move(metadata);
+
+        if (!std::filesystem::exists(path)) {
+            return Error{ErrorCode::FileNotFound, "file not found: " + path.string()};
+        }
+        prepared.fileSize = std::filesystem::file_size(path);
+
+        const auto trustedHint = prepared.metadata.tags.find(std::string{kTrustedHashHintTag});
+        if (trustedHint != prepared.metadata.tags.end() && trustedHint->second == "1" &&
+            !prepared.metadata.contentHash.empty() && prepared.metadata.size == prepared.fileSize) {
+            bool mtimeMatches = true;
+            const auto mtimeIt = prepared.metadata.tags.find(std::string{kHashHintMtimeNsTag});
+            if (mtimeIt != prepared.metadata.tags.end()) {
+                std::error_code ec;
+                const auto currentMtime = std::filesystem::last_write_time(path, ec);
+                const auto expectedMtime = parseInt64(mtimeIt->second);
+                mtimeMatches = !ec && expectedMtime && *expectedMtime == fileTimeNs(currentMtime);
+            }
+            if (mtimeMatches) {
+                prepared.fileHash = prepared.metadata.contentHash;
+            }
+        }
+        if (prepared.fileHash.empty()) {
+            auto fileHasher = crypto::createSHA256Hasher();
+            prepared.fileHash = fileHasher->hashFile(path);
+        }
+
+        try {
+            prepared.chunks = chunker_->chunkFile(path);
+        } catch (const std::exception& e) {
+            return Error{ErrorCode::InternalError,
+                         "failed to chunk file: " + std::string(e.what())};
+        } catch (...) {
+            return Error{ErrorCode::InternalError, "failed to chunk file: unknown error"};
+        }
+
+        FileInfo fileInfo{.hash = prepared.fileHash,
+                          .size = prepared.fileSize,
+                          .mimeType = prepared.metadata.mimeType,
+                          .createdAt = prepared.metadata.createdAt,
+                          .originalName = prepared.metadata.name.empty() ? path.filename().string()
+                                                                         : prepared.metadata.name};
+        auto manifest = createSerializedManifest(fileInfo, prepared.chunks);
+        if (!manifest) {
+            return manifest.error();
+        }
+        prepared.manifestHash = prepared.fileHash + ".manifest";
+        prepared.manifestData = std::move(manifest).value();
+        prepared.refBatch.operations.reserve(prepared.chunks.size());
+        return prepared;
+    }
 
     // Update statistics
     void updateStats(uint64_t bytesStored, uint64_t bytesDeduped,

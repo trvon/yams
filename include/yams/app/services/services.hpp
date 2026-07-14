@@ -803,6 +803,15 @@ public:
 
     // Storage operations
     virtual Result<StoreDocumentResponse> store(const StoreDocumentRequest& req) = 0;
+    virtual std::vector<Result<StoreDocumentResponse>>
+    storeBatch(const std::vector<StoreDocumentRequest>& requests) {
+        std::vector<Result<StoreDocumentResponse>> results;
+        results.reserve(requests.size());
+        for (const auto& request : requests) {
+            results.push_back(store(request));
+        }
+        return results;
+    }
     virtual Result<RetrieveDocumentResponse> retrieve(const RetrieveDocumentRequest& req) = 0;
     virtual Result<CatDocumentResponse> cat(const CatDocumentRequest& req) = 0;
 

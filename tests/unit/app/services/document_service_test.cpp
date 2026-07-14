@@ -270,6 +270,48 @@ private:
     Error error_;
 };
 
+TEST_CASE("DocumentService batches content before metadata publication",
+          "[document][service][batch][publication]") {
+    DocumentFixture fixture;
+    auto metadataWriter = std::make_shared<MetadataInsertWriter>(
+        fixture.metadataRepo_, MetadataInsertWriter::Options{
+                                   .maxBatchCount = 8, .maxDelay = std::chrono::milliseconds{5}});
+    fixture.appContext_.metadataInsertWriter = metadataWriter;
+    fixture.documentService_ = makeDocumentService(fixture.appContext_);
+    metadataWriter->resetMetrics();
+    resetDocumentStorePhaseTimings();
+
+    std::vector<StoreDocumentRequest> requests;
+    for (int i = 0; i < 2; ++i) {
+        auto path = fixture.testDir_ / ("document-batch-" + std::to_string(i) + ".txt");
+        std::ofstream(path) << "document batch " << i;
+        StoreDocumentRequest request;
+        request.path = path.string();
+        request.snapshotId = "document-service-batch";
+        request.skipInlineContentIndexing = true;
+        requests.push_back(std::move(request));
+    }
+
+    auto results = fixture.documentService_->storeBatch(requests);
+    REQUIRE(results.size() == requests.size());
+    for (const auto& result : results) {
+        REQUIRE(result.has_value());
+        REQUIRE(result.value().documentId > 0);
+        auto document = fixture.metadataRepo_->getDocumentByHash(result.value().hash);
+        REQUIRE(document.has_value());
+        REQUIRE(document.value().has_value());
+    }
+
+    const auto metrics = metadataWriter->metricsSnapshot();
+    CHECK(metrics.submittedItems == 2);
+    CHECK(metrics.completedItems == 2);
+    CHECK(metrics.batches == 1);
+    CHECK(metrics.maxBatchSize == 2);
+    const auto timings = getDocumentStorePhaseTimingsSnapshot();
+    CHECK(timings.at("content_store").calls == 1);
+    CHECK(timings.at("store_total").calls == 1);
+}
+
 TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
     DocumentFixture fixture;
 
