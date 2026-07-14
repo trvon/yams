@@ -240,10 +240,14 @@ public:
             if (backlog == 0) {
                 publishIngestMetrics(0, 0);
             } else {
-                constexpr std::size_t kMaxDirectoryBatchSize = 16;
+                constexpr std::size_t kMaxDirectoryBatchSize = 32;
                 publishIngestMetrics(backlog, 1);
-                for (std::size_t begin = 0; begin < backlog; begin += kMaxDirectoryBatchSize) {
-                    const auto count = std::min(kMaxDirectoryBatchSize, backlog - begin);
+                std::size_t begin = 0;
+                while (begin < backlog) {
+                    const auto remaining = backlog - begin;
+                    const auto count = remaining == kMaxDirectoryBatchSize + 1
+                                           ? kMaxDirectoryBatchSize - 1
+                                           : std::min(kMaxDirectoryBatchSize, remaining);
                     const auto end = begin + count;
                     AddDirectoryResponse localResponse;
                     processDirectoryBatch(
@@ -258,6 +262,7 @@ public:
                         response.results.push_back(std::move(result));
                     }
                     publishIngestQueued(backlog - end);
+                    begin = end;
                 }
                 publishIngestMetrics(0, 0);
             }
