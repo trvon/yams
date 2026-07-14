@@ -502,6 +502,54 @@ TEST_CASE("Shared pool does not set pool_keepalive", "[daemon][connection-pool][
     AsioConnectionPool::shutdown_all(100ms);
 }
 
+TEST_CASE("AsioConnectionPool retries a transient refused connection",
+          "[daemon][connection-pool][unit][ipc]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#else
+    auto runtimeDir = makeTempRuntimeDir("transient-refused-" + randomSuffix());
+    auto socketPath = runtimeDir / "ipc.sock";
+    std::error_code ec;
+    fs::remove(socketPath, ec);
+
+    int listener = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    REQUIRE(listener >= 0);
+
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    const auto socketString = socketPath.string();
+    REQUIRE(socketString.size() < sizeof(addr.sun_path));
+    std::strncpy(addr.sun_path, socketString.c_str(), sizeof(addr.sun_path) - 1);
+    REQUIRE(::bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+
+    TransportOptions opts;
+    opts.socketPath = socketPath;
+    opts.poolEnabled = false;
+    opts.requestTimeout = 500ms;
+
+    auto pool = AsioConnectionPool::get_or_create(opts);
+    auto future = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),
+                                        boost::asio::use_future);
+
+    // A bound-but-not-listening socket refuses immediately. The pool should retain the acquire
+    // while the transient retry backoff runs instead of surfacing that first refusal.
+    REQUIRE(future.wait_for(20ms) == std::future_status::timeout);
+    REQUIRE(::listen(listener, 1) == 0);
+
+    REQUIRE(future.wait_for(1s) == std::future_status::ready);
+    auto connection = future.get();
+    REQUIRE(connection);
+    const int accepted = ::accept(listener, nullptr, nullptr);
+    REQUIRE(accepted >= 0);
+    pool->release(connection.value());
+
+    REQUIRE(::close(accepted) == 0);
+    REQUIRE(::close(listener) == 0);
+    fs::remove(socketPath, ec);
+    AsioConnectionPool::shutdown_all(100ms);
+#endif
+}
+
 TEST_CASE("AsioConnectionPool does not double-wrap IPC failure prefixes",
           "[daemon][connection-pool][unit][ipc]") {
 #ifdef _WIN32

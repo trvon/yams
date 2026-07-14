@@ -720,7 +720,10 @@ awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::create_co
         if (socket_res) {
             break;
         }
-        if (socketMissing() && attempt + 1 < kMaxRetries) {
+
+        const auto failureKind = parseIpcFailureKind(socket_res.error().message);
+        const bool retryable = socketMissing() || failureKind == IpcFailureKind::Refused;
+        if (retryable && attempt + 1 < kMaxRetries) {
             auto exec = co_await this_coro::executor;
             boost::asio::steady_timer timer(exec);
             timer.expires_after(backoff);
