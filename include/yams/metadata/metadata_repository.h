@@ -1177,10 +1177,22 @@ private:
                             .count(),
                         connResult.error().message);
                 }
-                spdlog::error(
-                    "MetadataRepository::executeQueryOnPool route='{}' op='{}' acquire error: {}",
-                    route, op.empty() ? "(unknown)" : op, connResult.error().message);
-                return Error{connResult.error()};
+                const auto& acquireError = connResult.error();
+                const bool shutdownAcquire =
+                    acquireError.code == ErrorCode::OperationCancelled ||
+                    acquireError.code == ErrorCode::SystemShutdown ||
+                    (acquireError.code == ErrorCode::InvalidState &&
+                     acquireError.message.find("shut down") != std::string::npos);
+                if (shutdownAcquire) {
+                    spdlog::debug("MetadataRepository::executeQueryOnPool route='{}' op='{}' "
+                                  "acquire cancelled during shutdown: {}",
+                                  route, op.empty() ? "(unknown)" : op, acquireError.message);
+                } else {
+                    spdlog::error("MetadataRepository::executeQueryOnPool route='{}' op='{}' "
+                                  "acquire error: {}",
+                                  route, op.empty() ? "(unknown)" : op, acquireError.message);
+                }
+                return Error{acquireError};
             }
 
             Result<T> result;

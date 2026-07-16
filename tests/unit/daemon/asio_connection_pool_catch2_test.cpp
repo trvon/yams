@@ -95,6 +95,42 @@ TEST_CASE("AsioConnection socket close waits for the socket strand",
     CHECK_FALSE(conn->socket);
 }
 
+TEST_CASE("AsioConnection close does not hang when its executor is already stopped",
+          "[daemon][connection-pool][strand][shutdown][unit]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    boost::asio::io_context io;
+    TransportOptions opts;
+    opts.executor = io.get_executor();
+    auto conn = std::make_shared<AsioConnection>(opts);
+    conn->socket = std::make_unique<AsioConnection::socket_t>(conn->strand);
+    boost::system::error_code ec;
+    conn->socket->open(boost::asio::local::stream_protocol(), ec);
+    REQUIRE_FALSE(ec);
+
+    io.stop();
+
+    std::atomic<bool> closeReturned{false};
+    std::thread closeThread([&] {
+        conn->close();
+        closeReturned.store(true, std::memory_order_release);
+    });
+
+    if (!yams::test::wait_for_condition(
+            1s, 10ms, [&] { return closeReturned.load(std::memory_order_acquire); })) {
+        // Keep the regression test from stranding a blocked helper thread if the bug returns.
+        io.restart();
+        io.run_one();
+        closeThread.join();
+        FAIL("AsioConnection::close blocked on a stopped executor");
+    }
+
+    closeThread.join();
+    CHECK_FALSE(conn->socket);
+}
+
 TEST_CASE("AsioConnectionPool shutdown waits for in-progress connection creation",
           "[daemon][connection-pool][shutdown][unit]") {
 #ifdef _WIN32
@@ -115,10 +151,11 @@ TEST_CASE("AsioConnectionPool shutdown waits for in-progress connection creation
     auto fut = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),
                                      boost::asio::use_future);
 
-    std::this_thread::sleep_for(10ms);
+    REQUIRE(yams::test::wait_for_condition(2s, 10ms,
+                                           [&] { return pool->testing_pending_creates() > 0; }));
     pool->shutdown(500ms);
 
-    REQUIRE(fut.wait_for(0ms) == std::future_status::ready);
+    REQUIRE(fut.wait_for(1s) == std::future_status::ready);
     auto result = fut.get();
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error().code == yams::ErrorCode::SystemShutdown);

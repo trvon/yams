@@ -3,19 +3,22 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <yams/cli/doctor/doctor_context.h>
 #include <yams/cli/doctor/checks/db_integrity.h>
+#include <yams/cli/doctor/doctor_context.h>
 #include <yams/cli/yams_cli.h>
 
-#include <fstream>
 #include <filesystem>
-#include <sstream>
+#include <fstream>
 #include <memory>
+#include <sstream>
 
 #include "../../../common/test_helpers_catch2.h"
 
 namespace fs = std::filesystem;
 using namespace yams::cli::doctor;
+
+// Catch2's expression decomposition intentionally overloads comparison operators.
+// NOLINTBEGIN(bugprone-chained-comparison)
 
 namespace {
 
@@ -91,6 +94,19 @@ TEST_CASE("DbIntegrityCheck - warns on large WAL", "[doctor][db_integrity]") {
     CHECK(result.ok == false);
 }
 
+TEST_CASE("DbIntegrityCheck - readonly FTS validation row is not corruption",
+          "[doctor][db_integrity][readonly][fts5]") {
+    const std::string readonlyFtsRow =
+        "unable to validate the inverted index for FTS5 table main.kg_aliases_fts: attempt to "
+        "write a readonly database";
+
+    CHECK(testing_isReadOnlyFtsValidationLine(readonlyFtsRow));
+    CHECK_FALSE(testing_isReadOnlyFtsValidationLine(
+        "unable to validate the inverted index for FTS5 table main.kg_aliases_fts: database is "
+        "malformed"));
+    CHECK_FALSE(testing_isReadOnlyFtsValidationLine("row 3 missing from index idx_documents_path"));
+}
+
 TEST_CASE("DbIntegrityCheck - detects corrupt artifacts", "[doctor][db_integrity]") {
     DoctorTestEnv env;
 
@@ -127,3 +143,5 @@ TEST_CASE("DbIntegrityCheck - render produces output", "[doctor][db_integrity]")
     CHECK(output.find("yams.db-wal") != std::string::npos);
     CHECK(output.find("vectors.db-wal") != std::string::npos);
 }
+
+// NOLINTEND(bugprone-chained-comparison)

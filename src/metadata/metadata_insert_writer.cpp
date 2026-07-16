@@ -169,17 +169,18 @@ void MetadataInsertWriter::run() {
                 Result<DocumentInsertOutcome> single =
                     Error{ErrorCode::InternalError, "uninitialized"};
                 try {
-                    auto& rec = records[i];
-                    TreeSnapshotRecord* snap =
-                        rec.snapshot.has_value() ? &rec.snapshot.value() : nullptr;
-                    auto inserted = repo_->insertDocumentWithMetadata(
-                        rec.info, rec.tags, snap, rec.updatePathTreeInTransaction,
-                        rec.initializePathSeriesInTransaction);
-                    single = inserted ? Result<DocumentInsertOutcome>(
-                                            DocumentInsertOutcome{.documentId = inserted.value(),
-                                                                  .insertedNewDocument = false,
-                                                                  .pathSeriesInitialized = false})
-                                      : Result<DocumentInsertOutcome>(inserted.error());
+                    std::vector<BatchDocumentInsert> singleRecord;
+                    singleRecord.reserve(1);
+                    singleRecord.push_back(records[i]);
+                    auto inserted = repo_->batchInsertDocumentsWithMetadata(singleRecord);
+                    if (inserted && inserted.value().size() == 1) {
+                        single = inserted.value().front();
+                    } else if (inserted) {
+                        single = Error{ErrorCode::InternalError,
+                                       "single-document fallback produced no outcome"};
+                    } else {
+                        single = inserted.error();
+                    }
                 } catch (const std::exception& ex) {
                     single = Error{ErrorCode::InternalError, ex.what()};
                 } catch (...) {

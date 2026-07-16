@@ -37,6 +37,12 @@ bool isExpectedDisconnectError(const boost::system::error_code& ec) {
            msg.find("End of file") != std::string::npos || msg.find("EPIPE") != std::string::npos ||
            msg.find("ECONNRESET") != std::string::npos;
 }
+
+bool isExecutorStopped(const boost::asio::strand<boost::asio::any_io_executor>& executor) {
+    const auto& inner = executor.get_inner_executor();
+    const auto* ioExecutor = inner.target<boost::asio::io_context::executor_type>();
+    return ioExecutor != nullptr && ioExecutor->context().stopped();
+}
 } // namespace
 
 AsioConnection::~AsioConnection() {
@@ -94,16 +100,15 @@ void AsioConnection::closeSocketOnStrand(bool cancelFirst, bool resetSocket) {
     });
 
     // Socket ownership is strand-affine: pending async read/write operations also touch the
-    // socket on this strand. Waiting here is preferable to a timed off-strand fallback, which can
-    // race those operations under shutdown pressure. If the backing io_context is already stopped,
-    // no queued socket operation can run; avoid an indefinite destructor/shutdown hang without
-    // closing the socket off-strand.
+    // socket on this strand. If the backing io_context is still running, keep waiting rather than
+    // racing those operations. If it is already stopped, the dispatched close cannot make progress;
+    // complete exactly one close/reset best-effort off-strand so shutdown does not hang or leak.
     if (future.wait_for(kSocketCloseDispatchWait) != std::future_status::ready) {
-        if (!opts.executor.has_value() && GlobalIOContext::instance().get_io_context().stopped()) {
-            completed->store(true, std::memory_order_release);
-            if (resetSocket) {
-                auto* leakedSocket = socket.release();
-                (void)leakedSocket;
+        const bool globalExecutorStopped =
+            !opts.executor.has_value() && GlobalIOContext::instance().get_io_context().stopped();
+        if (isExecutorStopped(strand) || globalExecutorStopped) {
+            if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                closeOp();
             }
             return;
         }
@@ -239,9 +244,11 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
             writing = false;
             alive = false;
             boost::system::error_code close_ec;
-            // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload reports via
-            // close_ec.
-            (void)socket->close(close_ec);
+            const auto closeResult = socket->close(close_ec);
+            if (closeResult) {
+                spdlog::debug("AsioConnection::async_write_frame: close after timeout failed: {}",
+                              closeResult.message());
+            }
             co_return Error{ErrorCode::Timeout, "Write timeout"};
         }
 

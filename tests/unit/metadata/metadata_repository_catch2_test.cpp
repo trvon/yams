@@ -8,7 +8,9 @@
 #include <filesystem>
 #include <future>
 #include <iterator>
+#include <memory>
 #include <optional>
+#include <sstream>
 #include <thread>
 #include <variant>
 #include <vector>
@@ -16,6 +18,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <spdlog/sinks/ostream_sink.h>
 #include <boost/asio/io_context.hpp>
 #include <yams/common/utf8_utils.h>
 #include <yams/daemon/components/MetadataWriteFacade.h>
@@ -49,6 +52,34 @@ std::filesystem::path tempDbPath(const char* prefix) {
     (void)kSuppressInfoLogs;
     return yams::test::migrated_metadata_db_template().clone(prefix);
 }
+
+class SpdlogCaptureGuard {
+public:
+    explicit SpdlogCaptureGuard(spdlog::level::level_enum level)
+        : previousLogger_(spdlog::default_logger()), previousLevel_(spdlog::get_level()) {
+        auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(stream_);
+        logger_ = std::make_shared<spdlog::logger>("metadata_repository_capture", sink);
+        logger_->set_level(level);
+        logger_->set_pattern("[%l] %v");
+        spdlog::set_default_logger(logger_);
+        spdlog::set_level(level);
+    }
+
+    ~SpdlogCaptureGuard() {
+        if (previousLogger_) {
+            spdlog::set_default_logger(previousLogger_);
+        }
+        spdlog::set_level(previousLevel_);
+    }
+
+    std::string str() const { return stream_.str(); }
+
+private:
+    std::ostringstream stream_;
+    std::shared_ptr<spdlog::logger> previousLogger_;
+    std::shared_ptr<spdlog::logger> logger_;
+    spdlog::level::level_enum previousLevel_;
+};
 
 DocumentInfo makeDocumentWithPath(const std::string& path, const std::string& hash,
                                   const std::string& mime = "text/plain") {
@@ -330,8 +361,14 @@ TEST_CASE("MetadataRepository: dual-pool read/write routing behavior",
 
     readPool->shutdown();
 
+    SpdlogCaptureGuard logCapture(spdlog::level::err);
     auto readAfterShutdown = repository->getDocumentByHash("dual-pool-hash");
     REQUIRE_FALSE(readAfterShutdown.has_value());
+    CHECK(((readAfterShutdown.error().code == ErrorCode::OperationCancelled ||
+            readAfterShutdown.error().code == ErrorCode::InvalidState)));
+    CHECK((readAfterShutdown.error().message.find("shut down") != std::string::npos ||
+           readAfterShutdown.error().message.find("shutdown") != std::string::npos));
+    CHECK((logCapture.str().find("MetadataRepository::executeQueryOnPool") == std::string::npos));
 
     MetadataValue value;
     value.value = "still-writeable";
@@ -3673,9 +3710,8 @@ TEST_CASE("batchInsertContentAndIndex: stale extraction hints don't double-count
     MetadataRepositoryFixture fix;
     fix.repository_->initializeCounters();
 
-    auto inserted = fix.repository_->insertDocument(
-        makeDocumentWithPath("/tmp/stale-extraction-hint.txt", "stale_extraction_hint_hash",
-                             "text/plain"));
+    auto inserted = fix.repository_->insertDocument(makeDocumentWithPath(
+        "/tmp/stale-extraction-hint.txt", "stale_extraction_hint_hash", "text/plain"));
     REQUIRE((inserted.has_value()));
 
     auto staleEntry = makeBatchContentEntry(inserted.value(), "Title", "First content");
@@ -4743,6 +4779,70 @@ TEST_CASE("MetadataRepository: batchInsertDocumentsWithMetadata coalesces insert
         REQUIRE((emptyResult.has_value()));
         CHECK((emptyResult.value().empty()));
     }
+}
+
+TEST_CASE("MetadataInsertWriter fallback preserves single-document insert outcome",
+          "[metadata][batch][writer][fallback]") {
+    auto dbPath = tempDbPath("metadata_insert_writer_fallback_outcome_");
+    ConnectionPoolConfig config;
+    config.minConnections = 1;
+    config.maxConnections = 2;
+    auto pool = std::make_shared<ConnectionPool>(dbPath.string(), config);
+    REQUIRE((pool->initialize().has_value()));
+    auto repo = std::make_shared<MetadataRepository>(
+        *pool, nullptr, MetadataRepository::SchemaBootstrapMode::AssumeReady);
+
+    BatchDocumentInsert clean;
+    clean.info = makeDocumentWithPath("repo/writer/fallback-clean.txt", "writer-fallback-clean");
+    clean.initializePathSeriesInTransaction = true;
+
+    BatchDocumentInsert poison;
+    poison.info = makeDocumentWithPath("repo/writer/fallback-poison.txt", "writer-fallback-poison");
+    TreeSnapshotRecord poisonSnapshot;
+    poisonSnapshot.snapshotId = "writer-fallback-poison-snapshot";
+    poisonSnapshot.rootTreeHash = "root";
+    poisonSnapshot.createdTime = 1;
+    poisonSnapshot.fileCount = 1;
+    poison.snapshot = poisonSnapshot;
+    // No directory_path metadata: tree_snapshots.directory_path is NOT NULL. This poisons the
+    // coalesced batch transaction while leaving the clean document valid for per-item fallback.
+
+    {
+        MetadataInsertWriter writer(
+            repo, MetadataInsertWriter::Options{.maxBatchCount = 2,
+                                                .maxDelay = std::chrono::milliseconds{50}});
+        auto cleanFuture = writer.submit(clean);
+        auto poisonFuture = writer.submit(poison);
+
+        auto cleanResult = cleanFuture.get();
+        REQUIRE((cleanResult.has_value()));
+        CHECK((cleanResult.value().documentId > 0));
+        CHECK(cleanResult.value().insertedNewDocument);
+        CHECK(cleanResult.value().pathSeriesInitialized);
+
+        auto poisonResult = poisonFuture.get();
+        REQUIRE_FALSE((poisonResult.has_value()));
+
+        REQUIRE(writer.flush());
+        const auto metrics = writer.metricsSnapshot();
+        CHECK(metrics.failedBatches == 1);
+        CHECK(metrics.fallbackItems == 2);
+    }
+
+    auto cleanDoc = repo->getDocumentByHash("writer-fallback-clean");
+    REQUIRE((cleanDoc.has_value()));
+    REQUIRE((cleanDoc.value().has_value()));
+    auto version = repo->getMetadata(cleanDoc.value()->id, "version");
+    REQUIRE((version.has_value()));
+    CHECK((version.value().has_value()));
+
+    auto poisonDoc = repo->getDocumentByHash("writer-fallback-poison");
+    REQUIRE((poisonDoc.has_value()));
+    CHECK_FALSE((poisonDoc.value().has_value()));
+
+    pool->shutdown();
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
 }
 
 TEST_CASE("MetadataInsertWriter coalesces concurrent submits into correct per-doc ids",
