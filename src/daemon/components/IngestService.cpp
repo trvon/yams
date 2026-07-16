@@ -73,19 +73,6 @@ static void mergePendingPostIngest(PendingPostIngestByMime& target,
     }
 }
 
-static std::size_t getEnvIngestParallelism() {
-    static const std::size_t val = []() {
-        if (const char* env = std::getenv("YAMS_INGEST_PARALLELISM"); env && *env) {
-            try {
-                return static_cast<std::size_t>(std::stoul(env));
-            } catch (...) {
-            }
-        }
-        return std::size_t{0};
-    }();
-    return val;
-}
-
 static bool getEnvIngestCorrectnessMode() {
     static const bool val = []() {
         if (const char* s = std::getenv("YAMS_INGEST_CORRECTNESS_MODE")) {
@@ -97,33 +84,6 @@ static bool getEnvIngestCorrectnessMode() {
         return true;
     }();
     return val;
-}
-
-static std::size_t resolveIngestParallelism(WorkCoordinator* coordinator, bool underPressure) {
-    std::size_t parallelism = getEnvIngestParallelism();
-
-    if (parallelism == 0) {
-        const std::size_t workers = coordinator ? coordinator->getWorkerCount() : 0;
-        if (workers > 1) {
-            parallelism = std::max<std::size_t>(2, workers / 2);
-        } else {
-            parallelism = 2;
-        }
-    }
-
-    const bool correctnessMode = getEnvIngestCorrectnessMode();
-
-    const std::size_t maxParallel = correctnessMode ? 16 : 8;
-    parallelism = std::clamp<std::size_t>(parallelism, 1, maxParallel);
-    if (underPressure) {
-        if (correctnessMode) {
-            parallelism =
-                std::min<std::size_t>(maxParallel, std::max<std::size_t>(2, parallelism * 2));
-        } else {
-            parallelism = std::max<std::size_t>(1, parallelism / 2);
-        }
-    }
-    return parallelism;
 }
 
 static void flushPendingPostIngestBatches(ServiceManager* sm, PendingPostIngestByMime& pending) {
@@ -228,10 +188,10 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
 
     while (!stop_.load()) {
         // Keep request admission independent from downstream post-ingest transaction sizing.
-        // Parallel waves provide request fan-out; larger post-ingest batches must not delay a
-        // partially filled request wave.
-        constexpr int kIngestBatchLimit = 16;
-        int batchLimit = kIngestBatchLimit;
+        // Reuse the configured post-ingest bound so storage does not fragment a batch before the
+        // downstream queue applies the same transaction limit.
+        int batchLimit =
+            static_cast<int>(std::max<std::uint32_t>(1u, TuneAdvisor::postIngestBatchSize()));
         bool underPressure = false;
         try {
             auto snap = ResourceGovernor::instance().getSnapshot();
@@ -268,27 +228,13 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
 
         PendingPostIngestByMime pendingPostIngest;
         if (!batch.empty()) {
-            const std::size_t parallelism = resolveIngestParallelism(coordinator_, underPressure);
-
-            for (std::size_t offset = 0; offset < batch.size();) {
-                const std::size_t waveSize =
-                    std::min<std::size_t>(parallelism, batch.size() - offset);
-                std::vector<InternalEventBus::StoreDocumentTask> wave;
-                wave.reserve(waveSize);
-                for (std::size_t i = 0; i < waveSize; ++i) {
-                    wave.push_back(std::move(batch[offset + i]));
-                }
-
-                auto future = dispatchBatchToCoordinator(sm_, coordinator_, std::move(wave));
-                try {
-                    mergePendingPostIngest(pendingPostIngest, future.get());
-                } catch (const std::exception& e) {
-                    spdlog::error("[IngestService] task wave failed: {}", e.what());
-                } catch (...) {
-                    spdlog::error("[IngestService] task wave failed: unknown exception");
-                }
-
-                offset += waveSize;
+            auto future = dispatchBatchToCoordinator(sm_, coordinator_, std::move(batch));
+            try {
+                mergePendingPostIngest(pendingPostIngest, future.get());
+            } catch (const std::exception& e) {
+                spdlog::error("[IngestService] task batch failed: {}", e.what());
+            } catch (...) {
+                spdlog::error("[IngestService] task batch failed: unknown exception");
             }
         }
 

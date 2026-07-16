@@ -88,6 +88,14 @@ public:
     ~StoreDocumentChannelGuard() { drainStoreDocumentChannel(); }
 };
 
+class PostIngestBatchSizeGuard {
+public:
+    explicit PostIngestBatchSizeGuard(std::uint32_t batchSize) {
+        TuneAdvisor::setPostIngestBatchSize(batchSize);
+    }
+    ~PostIngestBatchSizeGuard() { TuneAdvisor::setPostIngestBatchSize(0); }
+};
+
 using yams::test::ScopedEnvVar;
 
 // =============================================================================
@@ -249,6 +257,7 @@ public:
     Result<api::StoreResult> store(const std::filesystem::path& path, const api::ContentMetadata&,
                                    api::ProgressCallback) override {
         singleCalls_.fetch_add(1, std::memory_order_relaxed);
+        storedItems_.fetch_add(1, std::memory_order_release);
         storeCv_.notify_all();
 
         api::StoreResult result;
@@ -285,6 +294,7 @@ public:
                const std::vector<api::ContentMetadata>&) override {
         batchCalls_.fetch_add(1, std::memory_order_relaxed);
         lastBatchSize_.store(paths.size(), std::memory_order_relaxed);
+        storedItems_.fetch_add(paths.size(), std::memory_order_release);
         storeCv_.notify_all();
 
         std::vector<Result<api::StoreResult>> results;
@@ -323,11 +333,10 @@ public:
         return lastBatchSize_.load(std::memory_order_relaxed);
     }
 
-    bool waitForStore(std::chrono::steady_clock::time_point deadline) {
+    bool waitForStoredItems(std::size_t expected, std::chrono::steady_clock::time_point deadline) {
         std::unique_lock lock(storeMutex_);
-        return storeCv_.wait_until(lock, deadline, [this] {
-            return singleCalls_.load(std::memory_order_relaxed) != 0 ||
-                   batchCalls_.load(std::memory_order_relaxed) != 0;
+        return storeCv_.wait_until(lock, deadline, [this, expected] {
+            return storedItems_.load(std::memory_order_acquire) >= expected;
         });
     }
 
@@ -337,6 +346,7 @@ private:
     std::atomic<std::size_t> singleCalls_{0};
     std::atomic<std::size_t> batchCalls_{0};
     std::atomic<std::size_t> lastBatchSize_{0};
+    std::atomic<std::size_t> storedItems_{0};
     std::mutex storeMutex_;
     std::condition_variable storeCv_;
 };
@@ -588,8 +598,12 @@ struct StoreCallSnapshot {
     std::size_t lastBatchSize{0};
 };
 
-StoreCallSnapshot runQueuedDocuments(std::size_t count) {
+StoreCallSnapshot runQueuedDocuments(std::size_t count, std::uint32_t batchSize = 0) {
     StoreDocumentChannelGuard channelGuard;
+    std::optional<PostIngestBatchSizeGuard> batchSizeGuard;
+    if (batchSize != 0) {
+        batchSizeGuard.emplace(batchSize);
+    }
     WorkCoordinatorThreadsGuard threadsGuard(1);
     yams::test::TempDirGuard testDir("yams_ingest_service_batch_");
 
@@ -614,8 +628,8 @@ StoreCallSnapshot runQueuedDocuments(std::size_t count) {
 
         IngestService ingestService(&serviceManager, serviceManager.getWorkCoordinator());
         ingestService.start();
-        CHECK(
-            contentStore->waitForStore(std::chrono::steady_clock::now() + std::chrono::seconds(2)));
+        CHECK(contentStore->waitForStoredItems(count, std::chrono::steady_clock::now() +
+                                                          std::chrono::seconds(2)));
         ingestService.stop();
     }
 
@@ -650,6 +664,22 @@ TEST_CASE("IngestService preserves single and batched queued storage paths",
         CHECK(calls.singleCalls == 0);
         CHECK(calls.batchCalls == 1);
         CHECK(calls.lastBatchSize == 2);
+    }
+
+    SECTION("one drained admission batch crosses one storage boundary") {
+        constexpr std::size_t kDocuments = 12;
+        const auto calls = runQueuedDocuments(kDocuments);
+        CHECK(calls.singleCalls == 0);
+        CHECK(calls.batchCalls == 1);
+        CHECK(calls.lastBatchSize == kDocuments);
+    }
+
+    SECTION("configured batch size also bounds the storage drain") {
+        constexpr std::size_t kDocuments = 24;
+        const auto calls = runQueuedDocuments(kDocuments, 32);
+        CHECK(calls.singleCalls == 0);
+        CHECK(calls.batchCalls == 1);
+        CHECK(calls.lastBatchSize == kDocuments);
     }
 }
 
