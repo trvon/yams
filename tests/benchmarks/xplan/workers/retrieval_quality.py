@@ -13,6 +13,7 @@ import os
 import re
 import resource
 import shutil
+import signal
 import statistics
 import sys
 import time
@@ -87,6 +88,34 @@ def _reset_measured_outputs(paths: list[Path]) -> None:
     """Make retries idempotent when a benchmark writes append-only diagnostics."""
     for path in paths:
         path.unlink(missing_ok=True)
+
+
+def describe_process_failure(returncode: int, output: str) -> str | None:
+    """Describe a failed native benchmark without flooding the xplan report."""
+    if returncode == 0:
+        return None
+
+    if returncode < 0:
+        signal_number = -returncode
+        try:
+            signal_name = signal.Signals(signal_number).name
+        except ValueError:
+            signal_name = f"signal {signal_number}"
+        summary = (
+            f"retrieval_quality benchmark terminated by {signal_name} "
+            f"({returncode})"
+        )
+    else:
+        summary = f"retrieval_quality benchmark exited with code {returncode}"
+
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return summary
+
+    tail = "\n".join(lines[-8:])
+    if len(tail) > 1200:
+        tail = "..." + tail[-1197:]
+    return f"{summary}; last output:\n{tail}"
 
 
 def _mark_shared_topology_seed_reuse(env: dict[str, str]) -> None:
@@ -1579,6 +1608,22 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         if stderr_path.exists()
         else ""
     )
+
+    process_failure = describe_process_failure(proc.returncode, combined)
+    if process_failure:
+        return WorkerResult(
+            status="failed",
+            exit_code=proc.returncode,
+            metrics={},
+            attributes={
+                "binary": str(binary),
+                "debug_file": str(debug_path),
+                "stdout_file": str(stdout_path),
+                "stderr_file": str(stderr_path),
+            },
+            message=process_failure,
+            raw_path=str(stderr_path if stderr_path.exists() else stdout_path),
+        )
 
     quality = parse_quality_from_text(combined)
     dbg = parse_debug_jsonl(debug_path, top_k=_as_int(env.get("YAMS_BENCH_TOPK", "10")))

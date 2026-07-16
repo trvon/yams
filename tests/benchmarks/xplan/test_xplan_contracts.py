@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import signal
 import sys
 import tempfile
 import unittest
@@ -44,6 +45,7 @@ from workers.retrieval_quality import (  # noqa: E402
     _merge_benchmark_env,
     _reset_measured_outputs,
     clone_benchmark_state,
+    describe_process_failure,
     parse_benchmark_setup_metrics,
     parse_debug_jsonl,
     require_shared_topology_construction_identity,
@@ -154,6 +156,19 @@ class RetrievalQualityEnvironmentTests(unittest.TestCase):
                 path.write_text("stale\n", encoding="utf-8")
             _reset_measured_outputs(paths)
             self.assertTrue(all(not path.exists() for path in paths))
+
+    def test_retrieval_quality_preserves_native_process_failure(self) -> None:
+        output = """startup noise
+[YAMS] dcheck failed
+src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocumentCount_
+"""
+
+        message = describe_process_failure(-signal.SIGABRT, output)
+
+        self.assertIsNotNone(message)
+        self.assertIn("SIGABRT", message or "")
+        self.assertIn("metadata_repository.cpp:1251", message or "")
+        self.assertIsNone(describe_process_failure(0, output))
 
     def test_shared_clone_reuses_primed_topology_inputs(self) -> None:
         env: dict[str, str] = {}
