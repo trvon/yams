@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -58,6 +59,8 @@ private:
     std::atomic<bool> shutdown_{false};
     std::atomic<int64_t> last_cleanup_ns_{0};
     std::mutex mutex_;
+    std::condition_variable pending_create_cv_;
+    std::size_t pending_creates_{0};
     boost::asio::cancellation_signal shutdown_signal_; // Emitted on shutdown to cancel pending ops
 
     // Pool of available connections (not just one!)

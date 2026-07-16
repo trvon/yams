@@ -698,6 +698,11 @@ void AsioConnectionPool::shutdown(std::chrono::milliseconds timeout) {
         }
     }
 
+    if (effective_timeout.count() > 0) {
+        std::unique_lock<std::mutex> lk(mutex_);
+        pending_create_cv_.wait_for(lk, effective_timeout, [&] { return pending_creates_ == 0; });
+    }
+
     {
         std::lock_guard<std::mutex> lk(mutex_);
         connection_pool_.clear();
@@ -708,8 +713,35 @@ awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::create_co
     YAMS_ZONE_SCOPED_N("ConnectionPool::create_connection");
     const auto create_start = std::chrono::steady_clock::now();
     auto io_guard = GlobalIOContext::instance().acquire_operation_guard();
-    // Check shutdown before starting
-    if (shutdown_.load(std::memory_order_acquire)) {
+
+    struct PendingCreateGuard {
+        AsioConnectionPool& pool;
+        bool active{false};
+
+        explicit PendingCreateGuard(AsioConnectionPool& p) : pool(p) {
+            std::lock_guard<std::mutex> lk(pool.mutex_);
+            if (pool.shutdown_.load(std::memory_order_acquire)) {
+                return;
+            }
+            ++pool.pending_creates_;
+            active = true;
+        }
+
+        ~PendingCreateGuard() {
+            if (!active) {
+                return;
+            }
+            {
+                std::lock_guard<std::mutex> lk(pool.mutex_);
+                if (pool.pending_creates_ > 0) {
+                    --pool.pending_creates_;
+                }
+            }
+            pool.pending_create_cv_.notify_all();
+        }
+    } pendingCreate(*this);
+
+    if (!pendingCreate.active) {
         co_return Error{ErrorCode::SystemShutdown, "Connection pool is shut down"};
     }
 
@@ -732,6 +764,10 @@ awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::create_co
                 boost::asio::steady_timer timer(exec);
                 timer.expires_after(backoff);
                 co_await timer.async_wait(use_awaitable);
+                if (shutdown_.load(std::memory_order_acquire)) {
+                    co_return Error{ErrorCode::SystemShutdown,
+                                    "Connection pool shut down while connecting"};
+                }
                 backoff = std::min(backoff * 2, std::chrono::milliseconds(250));
                 continue;
             }
@@ -748,6 +784,10 @@ awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::create_co
             boost::asio::steady_timer timer(exec);
             timer.expires_after(backoff);
             co_await timer.async_wait(use_awaitable);
+            if (shutdown_.load(std::memory_order_acquire)) {
+                co_return Error{ErrorCode::SystemShutdown,
+                                "Connection pool shut down while connecting"};
+            }
             backoff = std::min(backoff * 2, std::chrono::milliseconds(250));
             continue;
         }

@@ -56,6 +56,10 @@ void AsioConnection::cancel() {
 }
 
 void AsioConnection::closeSocketOnStrand(bool cancelFirst, bool resetSocket) {
+    if (!socket) {
+        return;
+    }
+
     auto closeOp = [this, cancelFirst, resetSocket] {
         if (!socket) {
             return;
@@ -63,8 +67,10 @@ void AsioConnection::closeSocketOnStrand(bool cancelFirst, bool resetSocket) {
         boost::system::error_code ec;
         if (socket->is_open()) {
             if (cancelFirst) {
+                // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload reports via ec.
                 (void)socket->cancel(ec);
             }
+            // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload reports via ec.
             (void)socket->close(ec);
         }
         if (resetSocket) {
@@ -87,12 +93,21 @@ void AsioConnection::closeSocketOnStrand(bool cancelFirst, bool resetSocket) {
         done->set_value();
     });
 
+    // Socket ownership is strand-affine: pending async read/write operations also touch the
+    // socket on this strand. Waiting here is preferable to a timed off-strand fallback, which can
+    // race those operations under shutdown pressure. If the backing io_context is already stopped,
+    // no queued socket operation can run; avoid an indefinite destructor/shutdown hang without
+    // closing the socket off-strand.
     if (future.wait_for(kSocketCloseDispatchWait) != std::future_status::ready) {
-        // If the executor is already stopped, avoid blocking shutdown indefinitely. In normal
-        // daemon/test shutdown the strand is still pumping and this fallback is not taken.
-        if (!completed->exchange(true, std::memory_order_acq_rel)) {
-            closeOp();
+        if (!opts.executor.has_value() && GlobalIOContext::instance().get_io_context().stopped()) {
+            completed->store(true, std::memory_order_release);
+            if (resetSocket) {
+                auto* leakedSocket = socket.release();
+                (void)leakedSocket;
+            }
+            return;
         }
+        future.wait();
     }
 }
 
@@ -224,6 +239,8 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
             writing = false;
             alive = false;
             boost::system::error_code close_ec;
+            // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload reports via
+            // close_ec.
             (void)socket->close(close_ec);
             co_return Error{ErrorCode::Timeout, "Write timeout"};
         }

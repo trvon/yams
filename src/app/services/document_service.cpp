@@ -1616,6 +1616,7 @@ public:
             if (!inserted) {
                 spdlog::warn("Batch metadata insert failed for {}: {}", pending.info.filePath,
                              inserted.error().message);
+                outcomes[pending.requestIndex] = inserted.error();
                 continue;
             }
 

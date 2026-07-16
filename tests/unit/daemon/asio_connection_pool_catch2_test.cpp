@@ -6,6 +6,7 @@
 #include <boost/asio/local/stream_protocol.hpp>
 #include <boost/asio/use_future.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -49,6 +50,79 @@ std::string randomSuffix() {
 }
 
 } // namespace
+
+TEST_CASE("AsioConnection socket close waits for the socket strand",
+          "[daemon][connection-pool][strand][unit]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    boost::asio::io_context io;
+    TransportOptions opts;
+    opts.executor = io.get_executor();
+    auto conn = std::make_shared<AsioConnection>(opts);
+    conn->socket = std::make_unique<AsioConnection::socket_t>(conn->strand);
+    boost::system::error_code ec;
+    conn->socket->open(boost::asio::local::stream_protocol(), ec);
+    REQUIRE_FALSE(ec);
+
+    std::promise<void> blockerEntered;
+    std::promise<void> releaseBlocker;
+    auto releaseFuture = releaseBlocker.get_future();
+    boost::asio::post(conn->strand, [&] {
+        blockerEntered.set_value();
+        releaseFuture.wait();
+    });
+
+    std::thread ioThread([&] { io.run(); });
+    REQUIRE(blockerEntered.get_future().wait_for(1s) == std::future_status::ready);
+
+    std::atomic<bool> closeReturned{false};
+    std::thread closeThread([&] {
+        conn->close();
+        closeReturned.store(true, std::memory_order_release);
+    });
+
+    std::this_thread::sleep_for(650ms);
+    CHECK_FALSE(closeReturned.load(std::memory_order_acquire));
+
+    releaseBlocker.set_value();
+    closeThread.join();
+    io.stop();
+    ioThread.join();
+
+    CHECK(closeReturned.load(std::memory_order_acquire));
+    CHECK_FALSE(conn->socket);
+}
+
+TEST_CASE("AsioConnectionPool shutdown waits for in-progress connection creation",
+          "[daemon][connection-pool][shutdown][unit]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    auto runtimeDir = makeTempRuntimeDir("shutdown-create-" + randomSuffix());
+    auto socketPath = runtimeDir / "missing.sock";
+    std::error_code ec;
+    fs::remove(socketPath, ec);
+
+    TransportOptions opts;
+    opts.socketPath = socketPath;
+    opts.requestTimeout = 2s;
+    opts.poolEnabled = false;
+
+    auto pool = std::make_shared<AsioConnectionPool>(opts, false);
+    auto fut = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),
+                                     boost::asio::use_future);
+
+    std::this_thread::sleep_for(10ms);
+    pool->shutdown(500ms);
+
+    REQUIRE(fut.wait_for(0ms) == std::future_status::ready);
+    auto result = fut.get();
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == yams::ErrorCode::SystemShutdown);
+}
 
 TEST_CASE("AsioConnectionPool drops closed socket on reuse", "[daemon][connection-pool][unit]") {
 #ifdef _WIN32

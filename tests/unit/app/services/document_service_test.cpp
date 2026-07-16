@@ -314,6 +314,48 @@ TEST_CASE("DocumentService batches content before metadata publication",
     CHECK(timings.at("store_total").calls == 1);
 }
 
+TEST_CASE("DocumentService batch reports metadata publication failures",
+          "[document][service][batch][metadata][failure]") {
+    DocumentFixture fixture;
+    auto metadataWriter = std::make_shared<MetadataInsertWriter>(
+        fixture.metadataRepo_, MetadataInsertWriter::Options{
+                                   .maxBatchCount = 8, .maxDelay = std::chrono::milliseconds{5}});
+    fixture.appContext_.metadataInsertWriter = metadataWriter;
+    fixture.documentService_ = makeDocumentService(fixture.appContext_);
+
+    auto conn = fixture.pool_->acquire();
+    REQUIRE(conn.has_value());
+    REQUIRE((*conn.value())
+                ->execute(R"(
+        CREATE TRIGGER abort_document_service_batch_insert
+        BEFORE INSERT ON documents
+        BEGIN
+            SELECT RAISE(ABORT, 'injected metadata insert failure');
+        END;
+    )")
+                .has_value());
+
+    std::vector<StoreDocumentRequest> requests;
+    for (int i = 0; i < 2; ++i) {
+        auto path = fixture.testDir_ / ("metadata-failure-batch-" + std::to_string(i) + ".txt");
+        std::ofstream(path) << "document whose metadata insert should fail " << i;
+        StoreDocumentRequest request;
+        request.path = path.string();
+        request.snapshotId = "document-service-metadata-failure";
+        request.skipInlineContentIndexing = true;
+        requests.push_back(request);
+    }
+
+    auto results = fixture.documentService_->storeBatch(requests);
+    REQUIRE(results.size() == requests.size());
+    for (const auto& result : results) {
+        REQUIRE_FALSE(result.has_value());
+        CHECK(result.error().code == ErrorCode::DatabaseError);
+        CHECK(
+            (result.error().message.find("injected metadata insert failure") != std::string::npos));
+    }
+}
+
 TEST_CASE("DocumentService batches fuzzy terms at the storage wave boundary",
           "[document][service][batch][symspell]") {
     DocumentFixture fixture;
