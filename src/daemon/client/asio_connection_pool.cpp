@@ -88,6 +88,7 @@ bool env_truthy(const char* value) {
 }
 
 bool cli_one_shot_shutdown_enabled() {
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only test/CLI process knob, not mutated here.
     return env_truthy(std::getenv("YAMS_CLI_ONE_SHOT"));
 }
 
@@ -95,6 +96,7 @@ void log_pool_debug(const char* message) noexcept {
     try {
         spdlog::debug("{}", message);
     } catch (...) {
+        return;
     }
 }
 
@@ -102,6 +104,7 @@ void log_pool_debug(const char* message, const std::exception& e) noexcept {
     try {
         spdlog::debug("{}: {}", message, e.what());
     } catch (...) {
+        return;
     }
 }
 
@@ -121,7 +124,8 @@ bool should_run_stale_cleanup(std::atomic<int64_t>& last_cleanup_ns,
 }
 
 awaitable<Result<std::unique_ptr<AsioConnection::socket_t>>>
-async_connect_with_timeout(const TransportOptions& opts) {
+async_connect_with_timeout(const TransportOptions& opts,
+                           boost::asio::any_io_executor socketExecutor) {
     // Check cancellation before proceeding
     auto cs = co_await this_coro::cancellation_state;
     if (cs.cancelled() != boost::asio::cancellation_type::none) {
@@ -133,7 +137,7 @@ async_connect_with_timeout(const TransportOptions& opts) {
     auto io_executor = opts.executor.has_value()
                            ? *opts.executor
                            : GlobalIOContext::instance().get_io_context().get_executor();
-    auto socket = std::make_unique<AsioConnection::socket_t>(io_executor);
+    auto socket = std::make_unique<AsioConnection::socket_t>(socketExecutor);
     boost::asio::local::stream_protocol::endpoint endpoint(opts.socketPath.string());
 
     if (trace) {
@@ -192,7 +196,13 @@ async_connect_with_timeout(const TransportOptions& opts) {
                 "[IPCWait] stage=pool.connect timeout elapsed_ms={} timeout_ms={} socket='{}'",
                 elapsed_ms, opts.requestTimeout.count(), opts.socketPath.string());
         }
-        socket->close();
+        co_await boost::asio::dispatch(socketExecutor, use_awaitable);
+        boost::system::error_code closeEc;
+        // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload reports via closeEc.
+        socket->close(closeEc);
+        if (closeEc) {
+            log_pool_debug("Timed-out connection close reported an error");
+        }
         co_return Error{ErrorCode::Timeout, formatIpcFailure(IpcFailureKind::Timeout,
                                                              "Connection timeout (socket='" +
                                                                  opts.socketPath.string() + "')")};
@@ -654,7 +664,16 @@ void AsioConnectionPool::shutdown(std::chrono::milliseconds timeout) {
     // This wakes up coroutines waiting on async_connect_with_timeout
     shutdown_signal_.emit(boost::asio::cancellation_type::terminal);
 
-    std::lock_guard<std::mutex> lk(mutex_);
+    std::vector<std::shared_ptr<AsioConnection>> connections;
+    {
+        std::lock_guard<std::mutex> lk(mutex_);
+        connections.reserve(connection_pool_.size());
+        for (auto& weak : connection_pool_) {
+            if (auto conn = weak.lock()) {
+                connections.push_back(std::move(conn));
+            }
+        }
+    }
 
     auto effective_timeout = timeout;
     if (cli_one_shot_shutdown_enabled()) {
@@ -662,26 +681,27 @@ void AsioConnectionPool::shutdown(std::chrono::milliseconds timeout) {
         effective_timeout = std::min(effective_timeout, std::chrono::milliseconds(100));
     }
 
-    for (auto& weak : connection_pool_) {
-        if (auto conn = weak.lock()) {
-            // Use cancel() to emit cancellation signals to all pending coroutines
-            // This properly notifies waiters before closing the socket
-            conn->cancel();
+    for (auto& conn : connections) {
+        // Use cancel() to emit cancellation signals to all pending coroutines. Socket cancellation
+        // is dispatched through the connection strand so it cannot race pending read/write ops.
+        conn->cancel();
 
-            if (effective_timeout.count() > 0 && conn->read_loop_future.valid()) {
-                try {
-                    auto status = conn->read_loop_future.wait_for(effective_timeout);
-                    (void)status;
-                } catch (const std::exception& e) {
-                    log_pool_debug("Timed wait on read loop future threw", e);
-                } catch (...) {
-                    log_pool_debug("Timed wait on read loop future threw unknown exception");
-                }
+        if (effective_timeout.count() > 0 && conn->read_loop_future.valid()) {
+            try {
+                auto status = conn->read_loop_future.wait_for(effective_timeout);
+                (void)status;
+            } catch (const std::exception& e) {
+                log_pool_debug("Timed wait on read loop future threw", e);
+            } catch (...) {
+                log_pool_debug("Timed wait on read loop future threw unknown exception");
             }
         }
     }
 
-    connection_pool_.clear();
+    {
+        std::lock_guard<std::mutex> lk(mutex_);
+        connection_pool_.clear();
+    }
 }
 
 awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::create_connection() {
@@ -716,7 +736,7 @@ awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::create_co
                 continue;
             }
         }
-        socket_res = co_await async_connect_with_timeout(opts_);
+        socket_res = co_await async_connect_with_timeout(opts_, conn->strand);
         if (socket_res) {
             break;
         }
@@ -738,8 +758,13 @@ awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::create_co
     if (shutdown_.load(std::memory_order_acquire)) {
         // Close the socket if we got one, then bail
         if (socket_res && socket_res.value()) {
+            co_await boost::asio::dispatch(conn->strand, use_awaitable);
             boost::system::error_code ec;
+            // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload reports via ec.
             socket_res.value()->close(ec);
+            if (ec) {
+                log_pool_debug("Shutdown connection close reported an error");
+            }
         }
         co_return Error{ErrorCode::SystemShutdown, "Connection pool shut down while connecting"};
     }
@@ -888,8 +913,9 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                         if (h.unary) {
                             try {
                                 h.unary->promise->set_value(Result<Response>(e));
-                            } catch (const std::future_error&) {
-                                // Promise already satisfied, ignore
+                            } catch (const std::future_error& e) {
+                                log_pool_debug("Promise already satisfied while completing handler",
+                                               e);
                             }
                             // Cancel timer to wake up waiter
                             if (h.unary->notify_timer) {
@@ -900,8 +926,9 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                             h.streaming->onError(e);
                             try {
                                 h.streaming->done_promise->set_value(Result<void>(e));
-                            } catch (const std::future_error&) {
-                                // Promise already satisfied, ignore
+                            } catch (const std::future_error& e) {
+                                log_pool_debug("Promise already satisfied while completing handler",
+                                               e);
                             }
                             // Cancel timer to wake up waiter
                             if (h.streaming->notify_timer) {
@@ -952,8 +979,9 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                             if (h.unary) {
                                 try {
                                     h.unary->promise->set_value(Result<Response>(e));
-                                } catch (const std::future_error&) {
-                                    // Promise already satisfied, ignore
+                                } catch (const std::future_error& ex) {
+                                    log_pool_debug(
+                                        "Promise already satisfied while completing handler", ex);
                                 }
                                 // Cancel timer to wake up waiter
                                 if (h.unary->notify_timer) {
@@ -964,8 +992,9 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                                 h.streaming->onError(e);
                                 try {
                                     h.streaming->done_promise->set_value(Result<void>(e));
-                                } catch (const std::future_error&) {
-                                    // Promise already satisfied, ignore
+                                } catch (const std::future_error& ex) {
+                                    log_pool_debug(
+                                        "Promise already satisfied while completing handler", ex);
                                 }
                                 // Cancel timer to wake up waiter
                                 if (h.streaming->notify_timer) {
@@ -1005,8 +1034,9 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                         if (h.unary) {
                             try {
                                 h.unary->promise->set_value(Result<Response>(e));
-                            } catch (const std::future_error&) {
-                                // Promise already satisfied, ignore
+                            } catch (const std::future_error& e) {
+                                log_pool_debug("Promise already satisfied while completing handler",
+                                               e);
                             }
                             // Cancel timer to wake up waiter
                             if (h.unary->notify_timer) {
@@ -1017,8 +1047,9 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                             h.streaming->onError(e);
                             try {
                                 h.streaming->done_promise->set_value(Result<void>(e));
-                            } catch (const std::future_error&) {
-                                // Promise already satisfied, ignore
+                            } catch (const std::future_error& e) {
+                                log_pool_debug("Promise already satisfied while completing handler",
+                                               e);
                             }
                             // Cancel timer to wake up waiter
                             if (h.streaming->notify_timer) {
@@ -1110,8 +1141,8 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                     if (handlerPtr->unary) {
                         try {
                             handlerPtr->unary->promise->set_value(Result<Response>(std::move(r)));
-                        } catch (const std::future_error&) {
-                            // Promise already satisfied, ignore
+                        } catch (const std::future_error& e) {
+                            log_pool_debug("Promise already satisfied while completing handler", e);
                         }
                         // Cancel the notify timer to wake up the waiter immediately
                         if (handlerPtr->unary->notify_timer) {
@@ -1123,8 +1154,8 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                         handlerPtr->streaming->onComplete();
                         try {
                             handlerPtr->streaming->done_promise->set_value(Result<void>());
-                        } catch (const std::future_error&) {
-                            // Promise already satisfied, ignore
+                        } catch (const std::future_error& e) {
+                            log_pool_debug("Promise already satisfied while completing handler", e);
                         }
                         // Cancel timer to wake up waiter
                         if (handlerPtr->streaming->notify_timer) {
@@ -1146,8 +1177,9 @@ awaitable<void> AsioConnectionPool::ensure_read_loop_started(std::shared_ptr<Asi
                             handlerPtr->streaming->onComplete();
                             try {
                                 handlerPtr->streaming->done_promise->set_value(Result<void>());
-                            } catch (const std::future_error&) {
-                                // Promise already satisfied, ignore
+                            } catch (const std::future_error& e) {
+                                log_pool_debug("Promise already satisfied while completing handler",
+                                               e);
                             }
                             // Cancel timer to wake up waiter
                             if (handlerPtr->streaming->notify_timer) {

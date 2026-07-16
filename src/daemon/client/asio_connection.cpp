@@ -23,6 +23,8 @@ using boost::asio::use_awaitable;
 namespace this_coro = boost::asio::this_coro;
 
 namespace {
+constexpr auto kSocketCloseDispatchWait = std::chrono::milliseconds{500};
+
 bool isExpectedDisconnectError(const boost::system::error_code& ec) {
     if (ec == boost::asio::error::broken_pipe || ec == boost::asio::error::connection_reset ||
         ec == boost::asio::error::eof) {
@@ -36,6 +38,63 @@ bool isExpectedDisconnectError(const boost::system::error_code& ec) {
            msg.find("ECONNRESET") != std::string::npos;
 }
 } // namespace
+
+AsioConnection::~AsioConnection() {
+    alive.store(false, std::memory_order_release);
+    closeSocketOnStrand(/*cancelFirst=*/true, /*resetSocket=*/true);
+}
+
+void AsioConnection::close() {
+    alive.store(false, std::memory_order_release);
+    closeSocketOnStrand(/*cancelFirst=*/false, /*resetSocket=*/true);
+}
+
+void AsioConnection::cancel() {
+    alive.store(false, std::memory_order_release);
+    cancel_signal.emit(boost::asio::cancellation_type::terminal);
+    closeSocketOnStrand(/*cancelFirst=*/true, /*resetSocket=*/false);
+}
+
+void AsioConnection::closeSocketOnStrand(bool cancelFirst, bool resetSocket) {
+    auto closeOp = [this, cancelFirst, resetSocket] {
+        if (!socket) {
+            return;
+        }
+        boost::system::error_code ec;
+        if (socket->is_open()) {
+            if (cancelFirst) {
+                (void)socket->cancel(ec);
+            }
+            (void)socket->close(ec);
+        }
+        if (resetSocket) {
+            socket.reset();
+        }
+    };
+
+    if (strand.running_in_this_thread()) {
+        closeOp();
+        return;
+    }
+
+    auto done = std::make_shared<std::promise<void>>();
+    auto completed = std::make_shared<std::atomic<bool>>(false);
+    auto future = done->get_future();
+    boost::asio::dispatch(strand, [closeOp, done, completed]() mutable {
+        if (!completed->exchange(true, std::memory_order_acq_rel)) {
+            closeOp();
+        }
+        done->set_value();
+    });
+
+    if (future.wait_for(kSocketCloseDispatchWait) != std::future_status::ready) {
+        // If the executor is already stopped, avoid blocking shutdown indefinitely. In normal
+        // daemon/test shutdown the strand is still pumping and this fallback is not taken.
+        if (!completed->exchange(true, std::memory_order_acq_rel)) {
+            closeOp();
+        }
+    }
+}
 
 boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vector<uint8_t> frame) {
     // Check cancellation before proceeding
