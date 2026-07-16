@@ -31,7 +31,7 @@ struct StorageConfig {
     size_t mutexPoolSize = 1024;
     bool enableCompression = false;
     size_t maxConcurrentReaders = 1000;
-    size_t maxConcurrentWriters = 100;
+    size_t maxConcurrentWriters = 16;
     /// When true (default), fsync the temp file before atomic rename() in
     /// store(). Guarantees written data survives a crash. Disable only when
     /// the caller accepts best-effort durability (e.g., test fixtures).
