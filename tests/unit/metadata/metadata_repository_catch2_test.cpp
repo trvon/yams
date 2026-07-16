@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <future>
+#include <iterator>
 #include <optional>
 #include <thread>
 #include <variant>
@@ -736,6 +737,44 @@ TEST_CASE(
     auto afterDisableStats = fix.repository_->getCorpusStats();
     REQUIRE((afterDisableStats.has_value()));
     CHECK((afterDisableStats.value().embeddingCount == 0));
+}
+
+TEST_CASE("MetadataRepository: embedding completion commits embedding and repair state together",
+          "[unit][metadata][repository][embeddings][completion]") {
+    MetadataRepositoryFixture fix;
+
+    auto doc = makeDocumentWithPath("/tmp/complete_embed.txt", "complete-embed-hash");
+    auto inserted = fix.repository_->insertDocument(doc);
+    REQUIRE((inserted.has_value()));
+
+    REQUIRE(
+        fix.repository_->batchCompleteDocumentEmbeddingsByHashes({}, "ignored-model").has_value());
+    REQUIRE(fix.repository_
+                ->batchCompleteDocumentEmbeddingsByHashes(
+                    {"missing-complete-hash", "complete-embed-hash", "complete-embed-hash"},
+                    "complete-model")
+                .has_value());
+
+    auto embedding = getEmbeddingStatusRow(*fix.pool_, "complete-embed-hash");
+    REQUIRE((embedding.has_value()));
+    REQUIRE((embedding.value().has_value()));
+    CHECK(embedding.value()->hasEmbedding);
+    REQUIRE((embedding.value()->modelId.has_value()));
+    CHECK((embedding.value()->modelId.value() == "complete-model"));
+
+    auto completed = fix.repository_->getDocument(inserted.value());
+    REQUIRE((completed.has_value()));
+    REQUIRE((completed.value().has_value()));
+    CHECK((completed.value()->repairStatus == RepairStatus::Completed));
+    CHECK((completed.value()->repairAttempts == 2));
+
+    auto missing = fix.repository_->hasDocumentEmbeddingByHash("missing-complete-hash");
+    REQUIRE((missing.has_value()));
+    CHECK_FALSE(missing.value());
+
+    auto stats = fix.repository_->getCorpusStats();
+    REQUIRE((stats.has_value()));
+    CHECK((stats.value().embeddingCount == 1));
 }
 
 TEST_CASE("MetadataRepository: reconcile empty vector-backed hash set clears embedding ownership",
@@ -3469,6 +3508,24 @@ TEST_CASE("batchInsertContentAndIndex: fresh documents increment extracted and i
     }
 }
 
+TEST_CASE("batchInsertContentAndIndex persists extracted title metadata in the content transaction",
+          "[unit][metadata-repo][batch-content][title]") {
+    MetadataRepositoryFixture fix;
+
+    auto inserted = fix.repository_->insertDocument(
+        makeDocumentWithPath("/tmp/content-title.txt", "content_title_hash", "text/plain"));
+    REQUIRE((inserted.has_value()));
+
+    auto entry = makeBatchContentEntry(inserted.value(), "FTS fallback title", "Content text");
+    entry.metadataTitle = "Extracted document title";
+    REQUIRE((fix.repository_->batchInsertContentAndIndex({entry}).has_value()));
+
+    auto title = fix.repository_->getMetadata(inserted.value(), "title");
+    REQUIRE((title.has_value()));
+    REQUIRE((title.value().has_value()));
+    CHECK((title.value()->value == "Extracted document title"));
+}
+
 TEST_CASE(
     "batchInsertContentAndIndex: duplicate document entries preserve per-entry repair attempts",
     "[unit][metadata-repo][batch-content][status-update][duplicates]") {
@@ -3606,6 +3663,34 @@ TEST_CASE("batchInsertContentAndIndex: already-extracted documents don't double-
     // Re-insert same document — counters should not change
     auto batch2 = fix.repository_->batchInsertContentAndIndex(entries);
     REQUIRE((batch2.has_value()));
+
+    CHECK((fix.repository_->getCachedExtractedCount() == extractedAfterFirst));
+    CHECK((fix.repository_->getCachedIndexedCount() == indexedAfterFirst));
+}
+
+TEST_CASE("batchInsertContentAndIndex: stale extraction hints don't double-count",
+          "[unit][metadata-repo][batch-content][counters]") {
+    MetadataRepositoryFixture fix;
+    fix.repository_->initializeCounters();
+
+    auto inserted = fix.repository_->insertDocument(
+        makeDocumentWithPath("/tmp/stale-extraction-hint.txt", "stale_extraction_hint_hash",
+                             "text/plain"));
+    REQUIRE((inserted.has_value()));
+
+    auto staleEntry = makeBatchContentEntry(inserted.value(), "Title", "First content");
+    staleEntry.priorStateKnown = true;
+    staleEntry.priorContentExtracted = false;
+    REQUIRE((fix.repository_->batchInsertContentAndIndex({staleEntry}).has_value()));
+
+    const auto extractedAfterFirst = fix.repository_->getCachedExtractedCount();
+    const auto indexedAfterFirst = fix.repository_->getCachedIndexedCount();
+
+    // Concurrent post-ingest tasks for duplicate content can carry the same pre-commit hint.
+    // The repository must reconcile each transaction against the database state it serializes
+    // behind, rather than trusting a hint captured before an earlier transaction committed.
+    staleEntry.contentText = "Second content";
+    REQUIRE((fix.repository_->batchInsertContentAndIndex({staleEntry}).has_value()));
 
     CHECK((fix.repository_->getCachedExtractedCount() == extractedAfterFirst));
     CHECK((fix.repository_->getCachedIndexedCount() == indexedAfterFirst));
@@ -3924,9 +4009,9 @@ TEST_CASE("batchGetDocumentsWithContentPreview: documents with content",
     // Insert content for each document
     std::vector<BatchContentEntry> entries;
     for (int i = 0; i < 3; ++i) {
-        entries.push_back({docIds[static_cast<size_t>(i)], "Title " + std::to_string(i),
-                           /* abstract */ "", "Content text for document " + std::to_string(i),
-                           "text/plain", "test", "en"});
+        entries.push_back(makeBatchContentEntry(docIds[static_cast<size_t>(i)],
+                                                "Title " + std::to_string(i),
+                                                "Content text for document " + std::to_string(i)));
     }
     auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
     REQUIRE((batchResult.has_value()));
@@ -4544,6 +4629,7 @@ TEST_CASE("MetadataRepository: batchInsertDocumentsWithMetadata coalesces insert
         item.info = makeDocumentWithPath(path, hash);
         item.tags.emplace_back(tagKey, MetadataValue(tagVal));
         item.updatePathTreeInTransaction = pathTree;
+        item.initializePathSeriesInTransaction = true;
         return item;
     };
 
@@ -4562,8 +4648,16 @@ TEST_CASE("MetadataRepository: batchInsertDocumentsWithMetadata coalesces insert
 
     auto batchResult = fix.repository_->batchInsertDocumentsWithMetadata(items);
     REQUIRE((batchResult.has_value()));
-    auto ids = batchResult.value();
+    const auto outcomes = batchResult.value();
+    std::vector<int64_t> ids;
+    ids.reserve(outcomes.size());
+    std::ranges::transform(outcomes, std::back_inserter(ids),
+                           [](const auto& outcome) { return outcome.documentId; });
     REQUIRE((ids.size() == 3));
+    CHECK(std::ranges::all_of(outcomes,
+                              [](const auto& outcome) { return outcome.insertedNewDocument; }));
+    CHECK(std::ranges::all_of(outcomes,
+                              [](const auto& outcome) { return outcome.pathSeriesInitialized; }));
 
     SECTION("ids are valid, distinct, and resolve to the right documents") {
         std::vector<int64_t> sorted = ids;
@@ -4592,6 +4686,23 @@ TEST_CASE("MetadataRepository: batchInsertDocumentsWithMetadata coalesces insert
         }
     }
 
+    SECTION("fresh paths initialize canonical path-series metadata") {
+        for (std::size_t i = 0; i < ids.size(); ++i) {
+            auto version = fix.repository_->getMetadata(ids[i], "version");
+            auto latest = fix.repository_->getMetadata(ids[i], "is_latest");
+            auto seriesKey = fix.repository_->getMetadata(ids[i], "series_key");
+            REQUIRE((version.has_value()));
+            REQUIRE((version.value().has_value()));
+            REQUIRE((latest.has_value()));
+            REQUIRE((latest.value().has_value()));
+            REQUIRE((seriesKey.has_value()));
+            REQUIRE((seriesKey.value().has_value()));
+            CHECK((version.value()->asInteger() == 1));
+            CHECK((latest.value()->asBoolean()));
+            CHECK((seriesKey.value()->asString() == items[i].info.filePath));
+        }
+    }
+
     SECTION("snapshot attached to one item is committed and bound to its document") {
         // All-or-nothing batch committed (batchResult ok), so the tree_snapshots row was written
         // without constraint failure. Verify the in-transaction wiring set ingestDocumentId.
@@ -4606,7 +4717,24 @@ TEST_CASE("MetadataRepository: batchInsertDocumentsWithMetadata coalesces insert
         auto dupResult = fix.repository_->batchInsertDocumentsWithMetadata(dupItems);
         REQUIRE((dupResult.has_value()));
         REQUIRE((dupResult.value().size() == 1));
-        CHECK((dupResult.value()[0] == ids[0]));
+        CHECK((dupResult.value()[0].documentId == ids[0]));
+        CHECK_FALSE(dupResult.value()[0].insertedNewDocument);
+        CHECK_FALSE(dupResult.value()[0].pathSeriesInitialized);
+    }
+
+    SECTION("a new hash at an existing path remains pending version assignment") {
+        std::vector<BatchDocumentInsert> nextVersion;
+        nextVersion.push_back(
+            makeItem("repo/batch/a.txt", "batch-hash-a-v2", "stage", "delta", true));
+        auto nextResult = fix.repository_->batchInsertDocumentsWithMetadata(nextVersion);
+        REQUIRE((nextResult.has_value()));
+        REQUIRE((nextResult.value().size() == 1));
+        CHECK(nextResult.value()[0].insertedNewDocument);
+        CHECK_FALSE(nextResult.value()[0].pathSeriesInitialized);
+
+        auto version = fix.repository_->getMetadata(nextResult.value()[0].documentId, "version");
+        REQUIRE((version.has_value()));
+        CHECK_FALSE(version.value().has_value());
     }
 
     SECTION("empty batch is a no-op success") {
@@ -4638,7 +4766,7 @@ TEST_CASE("MetadataInsertWriter coalesces concurrent submits into correct per-do
         // Submit from several threads to exercise concurrent coalescing.
         std::atomic<int> next{0};
         std::mutex futMutex;
-        std::vector<std::future<Result<int64_t>>> collected;
+        std::vector<std::future<Result<DocumentInsertOutcome>>> collected;
         collected.reserve(kDocs);
         constexpr int kThreads = 8;
         std::vector<std::thread> submitters;
@@ -4662,8 +4790,9 @@ TEST_CASE("MetadataInsertWriter coalesces concurrent submits into correct per-do
         for (auto& f : collected) {
             auto r = f.get();
             REQUIRE((r.has_value()));
-            CHECK((r.value() > 0));
-            ids.push_back(r.value());
+            CHECK((r.value().documentId > 0));
+            CHECK(r.value().insertedNewDocument);
+            ids.push_back(r.value().documentId);
         }
         REQUIRE((static_cast<int>(ids.size()) == kDocs));
         std::sort(ids.begin(), ids.end());

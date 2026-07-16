@@ -21,8 +21,8 @@ namespace yams::metadata {
 ///
 /// Coalesces concurrent single-document inserts into one BEGIN IMMEDIATE transaction via
 /// MetadataRepository::batchInsertDocumentsWithMetadata, amortizing per-document commit cost.
-/// Each submit() returns a future resolving to that document's id, so synchronous callers (e.g.
-/// DocumentService::store) preserve immediate-visibility semantics.
+/// Each submit() returns a future resolving to that document's insert outcome, so synchronous
+/// callers (e.g. DocumentService::store) preserve immediate-visibility semantics.
 ///
 /// Runs on its own worker thread (NOT the daemon io_context), so a caller running on the
 /// io_context may safely block on the returned future without deadlocking the strand-based
@@ -58,7 +58,7 @@ public:
     MetadataInsertWriter(const MetadataInsertWriter&) = delete;
     MetadataInsertWriter& operator=(const MetadataInsertWriter&) = delete;
 
-    std::future<Result<int64_t>> submit(BatchDocumentInsert record);
+    std::future<Result<DocumentInsertOutcome>> submit(BatchDocumentInsert record);
     Result<void> flush();
     [[nodiscard]] MetricsSnapshot metricsSnapshot() const noexcept;
     void resetMetrics() noexcept;
@@ -71,7 +71,7 @@ private:
         std::uint64_t sequence{0};
         std::chrono::steady_clock::time_point enqueuedAt{};
         BatchDocumentInsert record;
-        std::promise<Result<int64_t>> promise;
+        std::promise<Result<DocumentInsertOutcome>> promise;
     };
 
     void run();

@@ -128,6 +128,7 @@ private:
                                    std::string source);
     void enqueueEmbeddingStatusUpdate(std::vector<std::string> hashes, bool embedded,
                                       std::string modelName, std::string source);
+    void enqueueEmbeddingCompletion(std::vector<std::string> hashes, std::string modelName);
 
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::MetadataRepository> meta_;

@@ -34,7 +34,8 @@
 // Forward declare daemon ServiceManager used in AppContext
 namespace yams::daemon {
 class ServiceManager;
-}
+class WriteCoordinator;
+} // namespace yams::daemon
 
 // Forward declare KnowledgeGraphStore for AppContext
 namespace yams::metadata {
@@ -101,6 +102,7 @@ class IGraphQueryService;
 
 struct AppContext {
     yams::daemon::ServiceManager* service_manager = nullptr;
+    std::function<yams::daemon::WriteCoordinator*()> writeCoordinatorProvider;
     std::function<void(const std::vector<std::string>& hashes, const std::string& mime)>
         enqueuePostIngestBatch;
     // Host-owned daemon state without a yams_app_services -> yams_daemon link dependency.

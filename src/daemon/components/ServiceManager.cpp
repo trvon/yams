@@ -3945,6 +3945,9 @@ std::shared_ptr<search::SearchEngine> ServiceManager::getSearchEngineSnapshot() 
 yams::app::services::AppContext ServiceManager::getAppContext() const {
     app::services::AppContext ctx;
     ctx.service_manager = const_cast<ServiceManager*>(this);
+    ctx.writeCoordinatorProvider = [self = const_cast<ServiceManager*>(this)] {
+        return self->getWriteCoordinator();
+    };
     ctx.searchExecutionContextProvider = [self = const_cast<ServiceManager*>(this)] {
         auto context = search::defaultSearchExecutionContext();
         const auto metrics = self->getSearchLoadMetrics();

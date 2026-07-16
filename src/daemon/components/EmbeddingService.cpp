@@ -155,6 +155,24 @@ void EmbeddingService::enqueueEmbeddingStatusUpdate(std::vector<std::string> has
                  hashes.size(), source);
 }
 
+void EmbeddingService::enqueueEmbeddingCompletion(std::vector<std::string> hashes,
+                                                  std::string modelName) {
+    if (hashes.empty() || !meta_) {
+        return;
+    }
+    if (auto* coord = getWriteCoordinator_ ? getWriteCoordinator_() : nullptr) {
+        auto batch = std::make_unique<WriteBatch>();
+        batch->source = "EmbeddingService::completion";
+        batch->ops.emplace_back(
+            CompleteDocumentEmbeddingsByHashesOp{std::move(hashes), std::move(modelName)});
+        coord->enqueue(std::move(batch));
+        return;
+    }
+    spdlog::warn("EmbeddingService: WriteCoordinator unavailable; dropping {} embedding "
+                 "completion updates",
+                 hashes.size());
+}
+
 void EmbeddingService::shutdown() {
     YAMS_ZONE_SCOPED_N("Embedding::shutdown");
     if (stop_.exchange(true)) {
@@ -2992,12 +3010,8 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
             successHashes.push_back(docsToEmbed[docIdx].hash);
         }
     }
-    enqueueEmbeddingStatusUpdate(successHashes, true, modelName,
-                                 "EmbeddingService::embeddingStatusCompleted");
-
     const auto successCount = successHashes.size();
-    enqueueRepairStatusUpdate(successHashes, metadata::RepairStatus::Completed,
-                              "EmbeddingService::successCompleted");
+    enqueueEmbeddingCompletion(std::move(successHashes), modelName);
 
     logPhase("metadata_update", tMeta, fmt::format("docs={} model='{}'", successCount, modelName));
 

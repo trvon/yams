@@ -3217,6 +3217,7 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
             metadata::BatchContentEntry entry;
             entry.documentId = prepared.documentId;
             entry.title = prepared.title.empty() ? prepared.fileName : prepared.title;
+            entry.metadataTitle = prepared.title;
             entry.contentText = prepared.extractedText;
             entry.mimeType = prepared.mimeType;
             entry.extractionMethod = "post_ingest";
@@ -3276,41 +3277,6 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
         if (!successes.empty()) {
             spdlog::debug("[PostIngestQueue] Batch DB write succeeded for {} documents",
                           successes.size());
-            std::vector<std::tuple<int64_t, std::string, metadata::MetadataValue>> titleUpdates;
-            titleUpdates.reserve(successes.size());
-            for (const auto& prepared : successes) {
-                if (prepared.title.empty()) {
-                    continue;
-                }
-                titleUpdates.emplace_back(prepared.documentId, "title",
-                                          metadata::MetadataValue(prepared.title));
-            }
-            if (!titleUpdates.empty()) {
-                const auto titleWriteStart = std::chrono::steady_clock::now();
-                Result<void> metaResult;
-                if (writeCoordinator_) {
-                    auto wb = std::make_unique<WriteBatch>();
-                    wb->source = "PostIngestQueue::titleMetadata";
-                    for (const auto& prepared : successes) {
-                        if (!prepared.title.empty()) {
-                            wb->ops.emplace_back(
-                                SetMetadataBatchOp{{{prepared.documentId, "title",
-                                                     metadata::MetadataValue(prepared.title)}}});
-                        }
-                    }
-                    if (!wb->ops.empty()) {
-                        enqueueWithBackpressure(*writeCoordinator_, std::move(wb), "title metadata",
-                                                stop_);
-                    } else {
-                        spdlog::debug("[PostIngestQueue] Skipping empty title metadata batch");
-                    }
-                }
-                recordTiming("commit_title_metadata", titleWriteStart);
-                if (!metaResult) {
-                    spdlog::warn("[PostIngestQueue] Batch title metadata write failed: {}",
-                                 metaResult.error().message);
-                }
-            }
         }
     }
 

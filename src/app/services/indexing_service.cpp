@@ -321,8 +321,8 @@ public:
                         snapshot.metadata["collection"] = req.collection;
                     }
 
-                    auto* coord = ctx_.service_manager ? ctx_.service_manager->getWriteCoordinator()
-                                                       : nullptr;
+                    auto* coord =
+                        ctx_.writeCoordinatorProvider ? ctx_.writeCoordinatorProvider() : nullptr;
                     bool snapshotEnqueued = false;
                     if (coord) {
                         auto wb = std::make_unique<yams::daemon::WriteBatch>();

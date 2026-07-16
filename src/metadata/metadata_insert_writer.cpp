@@ -23,8 +23,8 @@ void updateMaxRelaxed(std::atomic<std::uint64_t>& maximum, std::uint64_t value) 
     }
 }
 
-std::future<Result<int64_t>> readyFuture(Result<int64_t> result) {
-    std::promise<Result<int64_t>> promise;
+std::future<Result<DocumentInsertOutcome>> readyFuture(Result<DocumentInsertOutcome> result) {
+    std::promise<Result<DocumentInsertOutcome>> promise;
     promise.set_value(std::move(result));
     return promise.get_future();
 }
@@ -50,11 +50,12 @@ MetadataInsertWriter::~MetadataInsertWriter() {
     shutdown();
 }
 
-std::future<Result<int64_t>> MetadataInsertWriter::submit(BatchDocumentInsert record) {
+std::future<Result<DocumentInsertOutcome>>
+MetadataInsertWriter::submit(BatchDocumentInsert record) {
     std::lock_guard lock(mutex_);
     if (!accepting_) {
         metrics_.rejectedItems.fetch_add(1, std::memory_order_relaxed);
-        return readyFuture(Result<int64_t>(ErrorCode::InvalidState));
+        return readyFuture(Result<DocumentInsertOutcome>(ErrorCode::InvalidState));
     }
 
     QueueItem item;
@@ -132,7 +133,8 @@ void MetadataInsertWriter::run() {
         // Do the (potentially throwing) batch insert inside a guard so an unexpected exception
         // cannot terminate the worker thread or strand the in-flight promises.
         bool batchThrew = false;
-        Result<std::vector<int64_t>> result = Error{ErrorCode::InternalError, "uninitialized"};
+        Result<std::vector<DocumentInsertOutcome>> result =
+            Error{ErrorCode::InternalError, "uninitialized"};
         const auto applyStartedAt = std::chrono::steady_clock::now();
         try {
             result = repo_->batchInsertDocumentsWithMetadata(records);
@@ -152,11 +154,11 @@ void MetadataInsertWriter::run() {
         }
 
         if (!batchThrew && result) {
-            const auto& ids = result.value();
+            const auto& outcomes = result.value();
             for (std::size_t i = 0; i < items.size(); ++i) {
-                items[i].promise.set_value(i < ids.size()
-                                               ? Result<int64_t>(ids[i])
-                                               : Result<int64_t>(ErrorCode::InternalError));
+                items[i].promise.set_value(
+                    i < outcomes.size() ? Result<DocumentInsertOutcome>(outcomes[i])
+                                        : Result<DocumentInsertOutcome>(ErrorCode::InternalError));
             }
         } else if (!batchThrew) {
             // The batch transaction failed as a unit (e.g. one poison document rolling back its
@@ -164,13 +166,20 @@ void MetadataInsertWriter::run() {
             // fails, preserving the pre-coalescing per-document isolation.
             metrics_.fallbackItems.fetch_add(batchSize, std::memory_order_relaxed);
             for (std::size_t i = 0; i < items.size(); ++i) {
-                Result<int64_t> single = Error{ErrorCode::InternalError, "uninitialized"};
+                Result<DocumentInsertOutcome> single =
+                    Error{ErrorCode::InternalError, "uninitialized"};
                 try {
                     auto& rec = records[i];
                     TreeSnapshotRecord* snap =
                         rec.snapshot.has_value() ? &rec.snapshot.value() : nullptr;
-                    single = repo_->insertDocumentWithMetadata(rec.info, rec.tags, snap,
-                                                               rec.updatePathTreeInTransaction);
+                    auto inserted = repo_->insertDocumentWithMetadata(
+                        rec.info, rec.tags, snap, rec.updatePathTreeInTransaction,
+                        rec.initializePathSeriesInTransaction);
+                    single = inserted ? Result<DocumentInsertOutcome>(
+                                            DocumentInsertOutcome{.documentId = inserted.value(),
+                                                                  .insertedNewDocument = false,
+                                                                  .pathSeriesInitialized = false})
+                                      : Result<DocumentInsertOutcome>(inserted.error());
                 } catch (const std::exception& ex) {
                     single = Error{ErrorCode::InternalError, ex.what()};
                 } catch (...) {
@@ -181,7 +190,7 @@ void MetadataInsertWriter::run() {
         } else {
             // Worker exception: fulfill every in-flight promise so callers do not block forever.
             for (auto& item : items) {
-                item.promise.set_value(Result<int64_t>(
+                item.promise.set_value(Result<DocumentInsertOutcome>(
                     Error{ErrorCode::InternalError, "metadata insert writer worker exception"}));
             }
         }
@@ -203,7 +212,7 @@ void MetadataInsertWriter::run() {
         }
     }
     for (auto& item : leftovers) {
-        item.promise.set_value(Result<int64_t>(ErrorCode::InvalidState));
+        item.promise.set_value(Result<DocumentInsertOutcome>(ErrorCode::InvalidState));
     }
     metrics_.completedItems.fetch_add(static_cast<std::uint64_t>(leftovers.size()),
                                       std::memory_order_relaxed);

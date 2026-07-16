@@ -239,6 +239,7 @@ struct BatchContentEntry {
     bool priorStateKnown = false;
     bool priorContentExtracted = false;
     ExtractionStatus priorExtractionStatus = ExtractionStatus::Pending;
+    std::string metadataTitle; ///< Extracted title to persist; empty keeps existing metadata
 };
 
 /**

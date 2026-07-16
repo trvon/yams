@@ -227,6 +227,7 @@ Result<MetadataTagDelta> calculateDocumentDeleteTagDelta(Database& db, int64_t d
 struct InsertDocumentWithMetadataResult {
     int64_t docId{0};
     bool insertedNewDocument{false};
+    bool pathSeriesInitialized{false};
     MetadataTagDelta metadataTagDelta{};
     uint64_t metadataWriteCount{0};
 };
@@ -309,6 +310,17 @@ Result<std::pair<int64_t, bool>> insertOrLookupDocumentRow(Database& db, const D
     const int64_t docId = checkStmt.getInt64(0);
     spdlog::debug("insertDocumentWithMetadata: existing hash={} id={}", info.sha256Hash, docId);
     return std::pair<int64_t, bool>{docId, false};
+}
+
+Result<bool> hasOtherDocumentAtPath(Database& db, std::string_view filePath, int64_t documentId) {
+    YAMS_TRY_UNWRAP(stmtHolder, db.prepareCached("SELECT 1 FROM documents "
+                                                 "WHERE file_path = ? AND id <> ? LIMIT 1"));
+    auto& stmt = *stmtHolder;
+    YAMS_TRY(stmt.reset());
+    YAMS_TRY(stmt.clearBindings());
+    YAMS_TRY(stmt.bind(1, filePath));
+    YAMS_TRY(stmt.bind(2, documentId));
+    return stmt.step();
 }
 
 Result<MetadataTagDelta> applyDocumentMetadataWrites(
@@ -611,7 +623,8 @@ Result<int64_t> MetadataRepository::insertDocument(const DocumentInfo& info) {
 
 Result<int64_t> MetadataRepository::insertDocumentWithMetadata(
     const DocumentInfo& info, const std::vector<std::pair<std::string, MetadataValue>>& tags,
-    TreeSnapshotRecord* snapshot, bool updatePathTreeInTransaction) {
+    TreeSnapshotRecord* snapshot, bool updatePathTreeInTransaction,
+    bool initializePathSeriesInTransaction) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::insertDocumentWithMetadata");
 
     const auto prepareWritesStart = std::chrono::steady_clock::now();
@@ -620,7 +633,6 @@ Result<int64_t> MetadataRepository::insertDocumentWithMetadata(
     for (const auto& [key, value] : tags) {
         metadataWrites.emplace_back(0, key, value);
     }
-    const auto dedupedMetadataWrites = repository::deduplicateMetadataWrites(metadataWrites);
     recordMetadataInsertPhase("prepare_writes", prepareWritesStart);
 
     auto result = executeQuery<InsertDocumentWithMetadataResult>(
@@ -640,6 +652,19 @@ Result<int64_t> MetadataRepository::insertDocumentWithMetadata(
             YAMS_TRY_UNWRAP(inserted, insertOrLookupDocumentRow(db, info, hasPathIndexing_));
             recordMetadataInsertPhase("insert_lookup_document", insertLookupStart);
             const auto [docId, insertedNewDocument] = inserted;
+
+            bool pathSeriesInitialized = false;
+            if (insertedNewDocument && initializePathSeriesInTransaction) {
+                YAMS_TRY_UNWRAP(hasPriorPath, hasOtherDocumentAtPath(db, info.filePath, docId));
+                pathSeriesInitialized = !hasPriorPath;
+            }
+            if (pathSeriesInitialized) {
+                metadataWrites.emplace_back(0, "version", MetadataValue(int64_t{1}));
+                metadataWrites.emplace_back(0, "is_latest", MetadataValue(true));
+                metadataWrites.emplace_back(0, "series_key", MetadataValue(info.filePath));
+            }
+            const auto dedupedMetadataWrites =
+                repository::deduplicateMetadataWrites(metadataWrites);
 
             const auto metadataWritesStart = std::chrono::steady_clock::now();
             YAMS_TRY_UNWRAP(metadataTagDelta,
@@ -681,7 +706,8 @@ Result<int64_t> MetadataRepository::insertDocumentWithMetadata(
             recordMetadataInsertPhase("commit", commitStart);
             committed = true;
 
-            return InsertDocumentWithMetadataResult{docId, insertedNewDocument, metadataTagDelta,
+            return InsertDocumentWithMetadataResult{docId, insertedNewDocument,
+                                                    pathSeriesInitialized, metadataTagDelta,
                                                     metadataWriteCount};
         });
 
@@ -733,11 +759,11 @@ Result<int64_t> MetadataRepository::insertDocumentWithMetadata(
     return update.docId;
 }
 
-Result<std::vector<int64_t>>
+Result<std::vector<DocumentInsertOutcome>>
 MetadataRepository::batchInsertDocumentsWithMetadata(std::vector<BatchDocumentInsert>& items) {
     YAMS_ZONE_SCOPED_N("MetadataRepo::batchInsertDocumentsWithMetadata");
     if (items.empty()) {
-        return std::vector<int64_t>{};
+        return std::vector<DocumentInsertOutcome>{};
     }
 
     auto result = executeQuery<std::vector<InsertDocumentWithMetadataResult>>(
@@ -760,16 +786,28 @@ MetadataRepository::batchInsertDocumentsWithMetadata(std::vector<BatchDocumentIn
 
             for (auto& item : items) {
                 std::vector<repository::MetadataWriteEntry> metadataWrites;
-                metadataWrites.reserve(item.tags.size());
+                metadataWrites.reserve(item.tags.size() + 3);
                 for (const auto& [key, value] : item.tags) {
                     metadataWrites.emplace_back(0, key, value);
                 }
-                const auto dedupedMetadataWrites =
-                    repository::deduplicateMetadataWrites(metadataWrites);
 
                 YAMS_TRY_UNWRAP(inserted,
                                 insertOrLookupDocumentRow(db, item.info, hasPathIndexing_));
                 const auto [docId, insertedNewDocument] = inserted;
+
+                bool pathSeriesInitialized = false;
+                if (insertedNewDocument && item.initializePathSeriesInTransaction) {
+                    YAMS_TRY_UNWRAP(hasPriorPath,
+                                    hasOtherDocumentAtPath(db, item.info.filePath, docId));
+                    pathSeriesInitialized = !hasPriorPath;
+                }
+                if (pathSeriesInitialized) {
+                    metadataWrites.emplace_back(0, "version", MetadataValue(int64_t{1}));
+                    metadataWrites.emplace_back(0, "is_latest", MetadataValue(true));
+                    metadataWrites.emplace_back(0, "series_key", MetadataValue(item.info.filePath));
+                }
+                const auto dedupedMetadataWrites =
+                    repository::deduplicateMetadataWrites(metadataWrites);
 
                 YAMS_TRY_UNWRAP(metadataTagDelta,
                                 applyDocumentMetadataWrites(db, dedupedMetadataWrites, docId));
@@ -795,7 +833,8 @@ MetadataRepository::batchInsertDocumentsWithMetadata(std::vector<BatchDocumentIn
                 }
 
                 perDoc.push_back(InsertDocumentWithMetadataResult{
-                    docId, insertedNewDocument, metadataTagDelta, metadataWriteCount});
+                    docId, insertedNewDocument, pathSeriesInitialized, metadataTagDelta,
+                    metadataWriteCount});
             }
 
             const auto commitStart = std::chrono::steady_clock::now();
@@ -810,12 +849,14 @@ MetadataRepository::batchInsertDocumentsWithMetadata(std::vector<BatchDocumentIn
     }
 
     const auto& perDoc = result.value();
-    std::vector<int64_t> ids;
-    ids.reserve(perDoc.size());
+    std::vector<DocumentInsertOutcome> outcomes;
+    outcomes.reserve(perDoc.size());
     for (std::size_t i = 0; i < perDoc.size(); ++i) {
         const auto& update = perDoc[i];
         const auto& info = items[i].info;
-        ids.push_back(update.docId);
+        outcomes.push_back({.documentId = update.docId,
+                            .insertedNewDocument = update.insertedNewDocument,
+                            .pathSeriesInitialized = update.pathSeriesInitialized});
         if (update.insertedNewDocument) {
             cachedDocumentCount_.fetch_add(1, std::memory_order_relaxed);
             cachedTotalSizeBytes_.fetch_add(
@@ -850,7 +891,7 @@ MetadataRepository::batchInsertDocumentsWithMetadata(std::vector<BatchDocumentIn
             metadataChangeCounter_.fetch_add(update.metadataWriteCount, std::memory_order_release);
         }
     }
-    return ids;
+    return outcomes;
 }
 
 Result<std::optional<DocumentInfo>> MetadataRepository::getDocument(int64_t id) {

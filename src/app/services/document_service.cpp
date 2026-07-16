@@ -154,15 +154,13 @@ collectDocumentTermsForFuzzySearch(const metadata::DocumentInfo& info) {
     return terms;
 }
 
-inline void enqueueDocumentTermsForFuzzySearch(daemon::WriteCoordinator* writeCoordinator,
-                                               const metadata::DocumentInfo& info) {
+inline void enqueueTermsForFuzzySearch(daemon::WriteCoordinator* writeCoordinator,
+                                       std::vector<std::string> terms) {
     if (!writeCoordinator) {
-        spdlog::debug("WriteCoordinator unavailable; skipping SymSpell terms for {}",
-                      info.filePath);
+        spdlog::debug("WriteCoordinator unavailable; skipping SymSpell terms");
         return;
     }
 
-    auto terms = collectDocumentTermsForFuzzySearch(info);
     if (terms.empty()) {
         return;
     }
@@ -1440,15 +1438,21 @@ public:
                 return Error{ErrorCode::InternalError,
                              "metadata insert writer unavailable in AppContext"};
             }
-            metadata::BatchDocumentInsert insertRecord{
-                info, std::move(tagPairs), std::move(snapshotRecord), req.combineMetadataPathTree};
+            metadata::BatchDocumentInsert insertRecord{.info = info,
+                                                       .tags = std::move(tagPairs),
+                                                       .snapshot = std::move(snapshotRecord),
+                                                       .updatePathTreeInTransaction =
+                                                           req.combineMetadataPathTree,
+                                                       .initializePathSeriesInTransaction = true};
             auto ins = ctx_.metadataInsertWriter->submit(std::move(insertRecord)).get();
             recordDocumentStorePhase("metadata_insert", repoInsertStart);
             if (ins) {
-                int64_t docId = ins.value();
+                const int64_t docId = ins.value().documentId;
                 out.documentId = docId;
 
-                applyStoreVersioning(info, docId);
+                if (!ins.value().pathSeriesInitialized) {
+                    applyStoreVersioning(info, docId);
+                }
                 applyStorePathTree(req, info, docId);
                 syncStoreKnowledgeGraph(info, snapshotId);
                 enqueueStoreFuzzyTerms(info);
@@ -1545,7 +1549,7 @@ public:
             metadata::DocumentInfo info;
             std::string snapshotId;
             std::string usePath;
-            std::future<Result<int64_t>> future;
+            std::future<Result<metadata::DocumentInsertOutcome>> future;
         };
         std::vector<PendingMetadata> pendingMetadata;
         pendingMetadata.reserve(prepared.size());
@@ -1589,8 +1593,11 @@ public:
             recordDocumentStorePhase("metadata_prepare", metadataPrepareStart);
 
             metadata::BatchDocumentInsert insertRecord{
-                info, std::move(tagPairs), std::move(snapshotRecord),
-                requests[item.requestIndex].combineMetadataPathTree};
+                .info = info,
+                .tags = std::move(tagPairs),
+                .snapshot = std::move(snapshotRecord),
+                .updatePathTreeInTransaction = requests[item.requestIndex].combineMetadataPathTree,
+                .initializePathSeriesInTransaction = true};
             const auto insertStartedAt = std::chrono::steady_clock::now();
             auto future = ctx_.metadataInsertWriter->submit(std::move(insertRecord));
             pendingMetadata.push_back({.requestIndex = item.requestIndex,
@@ -1601,6 +1608,8 @@ public:
                                        .future = std::move(future)});
         }
 
+        std::vector<std::string> batchFuzzyTerms;
+        batchFuzzyTerms.reserve(pendingMetadata.size() * 2);
         for (auto& pending : pendingMetadata) {
             auto inserted = pending.future.get();
             recordDocumentStorePhase("metadata_insert", pending.insertStartedAt);
@@ -1611,15 +1620,21 @@ public:
             }
 
             auto& response = outcomes[pending.requestIndex]->value();
-            response.documentId = inserted.value();
+            response.documentId = inserted.value().documentId;
             const auto& request = requests[pending.requestIndex];
-            applyStoreVersioning(pending.info, response.documentId);
+            if (!inserted.value().pathSeriesInitialized) {
+                applyStoreVersioning(pending.info, response.documentId);
+            }
             applyStorePathTree(request, pending.info, response.documentId);
             syncStoreKnowledgeGraph(pending.info, pending.snapshotId);
-            enqueueStoreFuzzyTerms(pending.info);
+            auto documentTerms = collectDocumentTermsForFuzzySearch(pending.info);
+            batchFuzzyTerms.insert(batchFuzzyTerms.end(),
+                                   std::make_move_iterator(documentTerms.begin()),
+                                   std::make_move_iterator(documentTerms.end()));
             applyStoreInlineContentIndex(request, pending.info, response.documentId,
                                          pending.usePath);
         }
+        enqueueStoreFuzzyTerms(std::move(batchFuzzyTerms), "document batch");
 
         recordDocumentStorePhase("store_total", storeTotalStart);
 
@@ -1642,8 +1657,7 @@ public:
         // Path-series versioning (best-effort)
         const auto versioningStart = std::chrono::steady_clock::now();
         try {
-            auto* writeCoord =
-                (ctx_.service_manager) ? ctx_.service_manager->getWriteCoordinator() : nullptr;
+            auto* writeCoord = getWriteCoordinator();
             if (writeCoord) {
                 int64_t maxVersion = 0;
                 std::optional<int64_t> prevLatestId;
@@ -1775,8 +1789,7 @@ public:
         const auto kgSyncStart = std::chrono::steady_clock::now();
         if (ctx_.kgStore) {
             try {
-                auto* writeCoord =
-                    (ctx_.service_manager) ? ctx_.service_manager->getWriteCoordinator() : nullptr;
+                auto* writeCoord = getWriteCoordinator();
                 if (writeCoord) {
                     std::string blobNodeKey = std::string("blob:") + info.sha256Hash;
                     std::string docNodeKey = std::string("doc:") + info.sha256Hash;
@@ -1872,16 +1885,22 @@ public:
         recordDocumentStorePhase("kg_sync", kgSyncStart);
     }
 
+    daemon::WriteCoordinator* getWriteCoordinator() const {
+        return ctx_.writeCoordinatorProvider ? ctx_.writeCoordinatorProvider() : nullptr;
+    }
+
     void enqueueStoreFuzzyTerms(const metadata::DocumentInfo& info) {
+        enqueueStoreFuzzyTerms(collectDocumentTermsForFuzzySearch(info), info.filePath);
+    }
+
+    void enqueueStoreFuzzyTerms(std::vector<std::string> terms, std::string_view context) {
         // Index document terms for fuzzy search through the centralized writer lane
         // (best-effort; lookup remains read-only).
         const auto fuzzyStart = std::chrono::steady_clock::now();
         try {
-            auto* writeCoord =
-                (ctx_.service_manager) ? ctx_.service_manager->getWriteCoordinator() : nullptr;
-            enqueueDocumentTermsForFuzzySearch(writeCoord, info);
+            enqueueTermsForFuzzySearch(getWriteCoordinator(), std::move(terms));
         } catch (const std::exception& ex) {
-            spdlog::debug("Failed to enqueue SymSpell terms for {}: {}", info.filePath, ex.what());
+            spdlog::debug("Failed to enqueue SymSpell terms for {}: {}", context, ex.what());
         }
         recordDocumentStorePhase("fuzzy_enqueue", fuzzyStart);
     }

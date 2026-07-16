@@ -376,6 +376,10 @@ public:
                                                             const std::string&) override {
         return Error{ErrorCode::NotImplemented, "NI"};
     }
+    Result<void> batchCompleteDocumentEmbeddingsByHashes(const std::vector<std::string>&,
+                                                         const std::string&) override {
+        return Error{ErrorCode::NotImplemented, "NI"};
+    }
     Result<void> reconcileDocumentEmbeddingStatusByHashes(const std::vector<std::string>&,
                                                           const std::string&) override {
         return Error{ErrorCode::NotImplemented, "NI"};
