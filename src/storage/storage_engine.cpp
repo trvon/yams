@@ -1,5 +1,6 @@
 #include <spdlog/spdlog.h>
 #include <yams/common/fs_utils.h>
+#include <yams/compat/thread_stop_compat.h>
 #include <yams/compression/compression_utils.h>
 #include <yams/compression/compressor_interface.h>
 #include <yams/core/assert.hpp>
@@ -15,7 +16,6 @@ namespace yamsfmt = fmt;
 #endif
 
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <cctype>
 #include <cerrno>
@@ -26,9 +26,7 @@ namespace yamsfmt = fmt;
 #include <optional>
 #include <random>
 #include <shared_mutex>
-#include <source_location>
 #include <system_error>
-#include <thread>
 #include <yams/compat/unistd.h>
 #ifdef _WIN32
 #include <windows.h> // CreateFileW / FlushFileBuffers (NOMINMAX/WIN32_LEAN_AND_MEAN set project-wide)
@@ -558,7 +556,7 @@ std::vector<Result<void>> StorageEngine::storeBatch(
     };
 
     {
-        std::vector<std::jthread> workers;
+        std::vector<yams::compat::jthread> workers;
         workers.reserve(workerCount - 1);
         for (std::size_t i = 1; i < workerCount; ++i) {
             workers.emplace_back(writeNext);
