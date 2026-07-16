@@ -3011,7 +3011,6 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         }
     }
     const auto successCount = successHashes.size();
-    enqueueEmbeddingCompletion(std::move(successHashes), modelName);
 
     logPhase("metadata_update", tMeta, fmt::format("docs={} model='{}'", successCount, modelName));
 
@@ -3048,15 +3047,18 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
             jobTag, modelName);
     }
     updateMonitorCounts([&](InternalEventBus::EmbedJobMonitor& mon) {
-        mon.succeededDocs += successHashes.size();
+        mon.succeededDocs += successCount;
         mon.processedChunks = mon.totalChunks;
         mon.processedDocs = mon.totalDocs;
-        mon.detail = "completed docs=" + std::to_string(successHashes.size());
+        mon.detail = "completed docs=" + std::to_string(successCount);
     });
 
     if (topologyRebuildRequester_ && !successHashes.empty()) {
         topologyRebuildRequester_(successHashes);
     }
+
+    // Transfer ownership only after every synchronous observer has consumed the hashes.
+    enqueueEmbeddingCompletion(std::move(successHashes), modelName);
 
     logPoolState("job_end");
     finishMonitor("completed", "embedding job completed");
@@ -3064,8 +3066,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     processed_.fetch_add(docsToEmbed.size());
 
     spdlog::debug("EmbeddingService: batch complete (succeeded={}, skipped={}, failed={})",
-                  successHashes.size(), skipped,
-                  failedGather + (docsToEmbed.size() - successHashes.size()));
+                  successCount, skipped, failedGather + (docsToEmbed.size() - successCount));
 }
 
 } // namespace daemon
