@@ -14,10 +14,12 @@
     YAMS_BENCH_POLL_INTERVAL_MS=N     - Queue polling interval (default: 100)
     YAMS_BENCH_INGEST_MODE=MODE       - directory, pipelined_single_file, or
                                         single_file_serial (default)
-    YAMS_BENCH_INGEST_CONCURRENCY=N   - Client count for pipelined_single_file
+    YAMS_BENCH_INGEST_CONCURRENCY=N   - In-flight window for pipelined_single_file
                                         (default: 4)
     YAMS_BENCH_POST_INGEST_COALESCE_MS=N
                                       - Typed post-ingest coalescing window (default: 2)
+    YAMS_BENCH_POST_INGEST_BATCH_SIZE=N
+                                      - Existing typed batch-size axis (default: product value)
     YAMS_BENCH_OUTPUT=path            - JSON output file (default: stdout)
     YAMS_BENCH_DISABLE_KG=1           - Disable KG post-ingest enrichment for ablation
     YAMS_BENCH_SEARCH_PROBES=0        - Disable fixed post-ingest search probes
@@ -39,6 +41,7 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <yams/api/content_store.h>
+#include <yams/app/services/document_ingestion_service.h>
 #include <yams/app/services/services.hpp>
 #include <yams/common/fs_utils.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -114,6 +117,22 @@ std::uint32_t benchPostIngestCoalesceMs() {
     try {
         const auto parsed = std::stoul(raw);
         return parsed <= kMaxCoalesceMs ? static_cast<std::uint32_t>(parsed) : defaultValue;
+    } catch (const std::exception&) {
+        return defaultValue;
+    }
+}
+
+std::uint32_t benchPostIngestBatchSize() {
+    constexpr std::uint32_t kMaxBatchSize = 256;
+    const auto defaultValue = yams::daemon::TuneAdvisor::postIngestBatchSize();
+    const char* raw = std::getenv("YAMS_BENCH_POST_INGEST_BATCH_SIZE");
+    if (!raw || !*raw) {
+        return defaultValue;
+    }
+    try {
+        const auto parsed = std::stoul(raw);
+        return parsed >= 1 && parsed <= kMaxBatchSize ? static_cast<std::uint32_t>(parsed)
+                                                      : defaultValue;
     } catch (const std::exception&) {
         return defaultValue;
     }
@@ -549,6 +568,32 @@ struct SearchImpactProbe {
     }
 };
 
+struct AddDispatchMetrics {
+    uint64_t samples = 0;
+    uint64_t total_us = 0;
+    uint64_t max_us = 0;
+    uint64_t fingerprint_total_us = 0;
+    uint64_t fingerprint_max_us = 0;
+    uint64_t enqueue_total_us = 0;
+    uint64_t enqueue_max_us = 0;
+
+    json toJson() const {
+        const auto average = [this](uint64_t total) {
+            return samples == 0 ? 0.0 : static_cast<double>(total) / static_cast<double>(samples);
+        };
+        return json{{"samples", samples},
+                    {"total_us", total_us},
+                    {"max_us", max_us},
+                    {"avg_us", average(total_us)},
+                    {"fingerprint_total_us", fingerprint_total_us},
+                    {"fingerprint_max_us", fingerprint_max_us},
+                    {"fingerprint_avg_us", average(fingerprint_total_us)},
+                    {"enqueue_total_us", enqueue_total_us},
+                    {"enqueue_max_us", enqueue_max_us},
+                    {"enqueue_avg_us", average(enqueue_total_us)}};
+    }
+};
+
 // ============================================================================
 // BenchmarkResult - Complete benchmark output
 // ============================================================================
@@ -588,6 +633,7 @@ struct BenchmarkResult {
     int64_t pipeline_drain_ms = 0;
     int64_t enrichment_ready_ms = 0;
     int64_t searchability_ready_ms = 0;
+    AddDispatchMetrics add_dispatch_metrics;
 
     // Per-stage metrics
     StageMetrics metadata_storage;
@@ -674,6 +720,7 @@ struct BenchmarkResult {
                               {"pipeline_drain_ms", pipeline_drain_ms},
                               {"enrichment_ready_ms", enrichment_ready_ms},
                               {"searchability_ready_ms", searchability_ready_ms}};
+        j["add_dispatch_metrics"] = add_dispatch_metrics.toJson();
 
         j["stages"] = {{"metadata_storage", metadata_storage.toJson()},
                        {"fts5_extraction", fts5_extraction.toJson()},
@@ -1114,6 +1161,8 @@ runSearchImpactProbes(const std::shared_ptr<yams::daemon::DaemonClient>& client,
 
 BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
                              std::string ingestMode, std::size_t ingestConcurrency) {
+    yams::daemon::TuneAdvisor::setPostIngestBatchSize(benchPostIngestBatchSize());
+
     BenchmarkResult result;
     result.corpus_size = corpusSize;
     result.doc_size = docSize;
@@ -1263,35 +1312,32 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
                          addResult.value().message);
         }
     } else if (result.ingest_mode == "pipelined_single_file") {
-        const std::size_t workerCount =
+        const std::size_t requestWindow =
             std::min<std::size_t>(result.ingest_concurrency, corpus.createdFiles.size());
-        std::atomic<std::size_t> nextFile{0};
-        std::vector<std::thread> workers;
-        workers.reserve(workerCount);
-        for (std::size_t worker = 0; worker < workerCount; ++worker) {
-            workers.emplace_back([&, worker]() {
-                auto workerClient = std::make_shared<yams::daemon::DaemonClient>(clientConfig);
-                auto workerConnect = yams::cli::run_sync(workerClient->connect(), 5s);
-                if (!workerConnect) {
-                    spdlog::warn("Pipelined ingest worker {} failed to connect: {}", worker,
-                                 workerConnect.error().message);
-                    while (nextFile.fetch_add(1, std::memory_order_relaxed) <
-                           corpus.createdFiles.size()) {
-                        failCount.fetch_add(1, std::memory_order_relaxed);
-                    }
-                    return;
-                }
-                while (true) {
-                    const std::size_t index = nextFile.fetch_add(1, std::memory_order_relaxed);
-                    if (index >= corpus.createdFiles.size()) {
-                        break;
-                    }
-                    addSingleFile(*workerClient, corpus.createdFiles[index]);
-                }
-            });
+        std::vector<yams::app::services::AddOptions> batch;
+        batch.reserve(corpus.createdFiles.size());
+        for (const auto& filename : corpus.createdFiles) {
+            yams::app::services::AddOptions options;
+            options.path = (corpusDir / filename).string();
+            options.noEmbeddings = vectorsDisabled;
+            batch.push_back(std::move(options));
         }
-        for (auto& worker : workers) {
-            worker.join();
+
+        yams::app::services::DocumentIngestionService ingestionService(client);
+        auto submitBatch =
+            [&]() -> boost::asio::awaitable<yams::Result<yams::app::services::BatchAddResult>> {
+            co_return co_await ingestionService.addBatchAsync(batch,
+                                                              static_cast<int>(requestWindow));
+        };
+        auto batchResult = yams::cli::run_sync(submitBatch(), 120s);
+        if (!batchResult) {
+            spdlog::warn("Pipelined ingestion failed: {}", batchResult.error().message);
+            failCount.store(corpusSize, std::memory_order_relaxed);
+        } else {
+            successCount.store(static_cast<int>(batchResult.value().succeeded),
+                               std::memory_order_relaxed);
+            failCount.store(static_cast<int>(batchResult.value().failed),
+                            std::memory_order_relaxed);
         }
     } else {
         result.ingest_mode = "single_file_serial";
@@ -1306,6 +1352,15 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
     result.admission_ms = nonNegativeDeltaMs(ingestEndMs, ingestStartMs);
     result.metadata_storage.count = static_cast<std::uint64_t>(successCount.load());
     result.metadata_storage.failures = static_cast<std::uint64_t>(failCount.load());
+    const auto& addStats = harness.daemon()->getState().stats;
+    result.add_dispatch_metrics = {
+        .samples = addStats.addDispatchSamples.load(std::memory_order_relaxed),
+        .total_us = addStats.addDispatchTotalUs.load(std::memory_order_relaxed),
+        .max_us = addStats.addDispatchMaxUs.load(std::memory_order_relaxed),
+        .fingerprint_total_us = addStats.addFingerprintTotalUs.load(std::memory_order_relaxed),
+        .fingerprint_max_us = addStats.addFingerprintMaxUs.load(std::memory_order_relaxed),
+        .enqueue_total_us = addStats.addEnqueueTotalUs.load(std::memory_order_relaxed),
+        .enqueue_max_us = addStats.addEnqueueMaxUs.load(std::memory_order_relaxed)};
 
     spdlog::info("Ingestion admission complete: {} succeeded, {} failed in {} ms",
                  successCount.load(), failCount.load(),

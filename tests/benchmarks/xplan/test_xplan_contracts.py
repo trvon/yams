@@ -831,6 +831,18 @@ class IngestionContractTests(unittest.TestCase):
                 "dropped_batches": 0,
                 "max_post_ingest": 4,
             },
+            "add_dispatch_metrics": {
+                "samples": 10,
+                "total_us": 6000,
+                "max_us": 900,
+                "avg_us": 600,
+                "fingerprint_total_us": 2000,
+                "fingerprint_max_us": 320,
+                "fingerprint_avg_us": 200,
+                "enqueue_total_us": 4000,
+                "enqueue_max_us": 700,
+                "enqueue_avg_us": 400,
+            },
             "enrichment_status": {
                 "kg": {"queued": 10, "consumed": 10, "dropped": 0},
                 "symbol": {"queued": 2, "consumed": 2, "dropped": 0},
@@ -942,6 +954,9 @@ class IngestionContractTests(unittest.TestCase):
         self.assertEqual(metrics["pipeline_drain_ms"], 30.0)
         self.assertEqual(metrics["searchability_ready_ms"], 45.0)
         self.assertEqual(metrics["queue_max_post_ingest"], 4.0)
+        self.assertEqual(metrics["add_dispatch_avg_us"], 600.0)
+        self.assertEqual(metrics["add_dispatch_fingerprint_avg_us"], 200.0)
+        self.assertEqual(metrics["add_dispatch_enqueue_avg_us"], 400.0)
         self.assertEqual(metrics["write_coordinator_batches_committed"], 12.0)
         self.assertEqual(metrics["write_coordinator_max_batch_queue_wait_ms"], 2.0)
         self.assertEqual(metrics["metadata_insert_writer_avg_batch_size"], 2.5)

@@ -148,6 +148,7 @@ def extract_metrics(raw: dict[str, Any]) -> dict[str, Any]:
             _flatten_numeric_block(metrics, f"stage_{_metric_token(stage)}", values)
 
     _flatten_numeric_block(metrics, "queue", queues)
+    _flatten_numeric_block(metrics, "add_dispatch", raw.get("add_dispatch_metrics"))
     _flatten_numeric_block(
         metrics,
         "metadata_insert_writer",
@@ -422,6 +423,7 @@ def run_ingestion_e2e(ctx: WorkerContext) -> WorkerResult:
     if post_ingest_coalesce_raw is None:
         post_ingest_coalesce_raw = ctx.params.get("post_ingest_coalesce_ms", 2)
     post_ingest_coalesce_ms = int(post_ingest_coalesce_raw)
+    post_ingest_batch_size = int(ctx.params.get("post_ingest_batch_size") or 0)
 
     env["YAMS_BENCH_CORPUS_SIZE"] = str(corpus_size)
     env["YAMS_BENCH_DOC_SIZE"] = str(doc_size)
@@ -431,6 +433,10 @@ def run_ingestion_e2e(ctx: WorkerContext) -> WorkerResult:
     env["YAMS_BENCH_POST_INGEST_COALESCE_MS"] = str(
         max(0, min(20, post_ingest_coalesce_ms))
     )
+    if post_ingest_batch_size > 0:
+        env["YAMS_BENCH_POST_INGEST_BATCH_SIZE"] = str(
+            max(1, min(256, post_ingest_batch_size))
+        )
     env["YAMS_BENCH_OUTPUT"] = str(raw_path)
 
     timeout = ctx.step.timeout_sec
