@@ -956,14 +956,14 @@ void PostIngestQueue::checkDrainAndSignal() {
     }
 }
 
-template <typename Task>
-PressureLimitedPollerConfig<Task> PostIngestQueue::makePollerConfig(
+template <typename Job>
+PressureLimitedPollerConfig<Job> PostIngestQueue::makePollerConfig(
     Stage stage, std::string stageName, std::function<GradientLimiter*()> getLimiter,
     std::function<std::size_t()> maxConcurrent, boost::asio::any_io_executor executor,
-    std::function<std::string(const Task&)> getHash,
+    std::function<std::string(const Job&)> getHash,
     std::shared_ptr<boost::asio::steady_timer> wakeTimer) {
     const auto index = static_cast<std::size_t>(stage);
-    PressureLimitedPollerConfig<Task> cfg;
+    PressureLimitedPollerConfig<Job> cfg;
     cfg.stageName = std::move(stageName);
     cfg.stopFlag = &stop_;
     cfg.startedFlag = &stageStarted_[index];

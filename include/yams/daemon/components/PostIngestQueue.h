@@ -417,11 +417,11 @@ public:
     [[nodiscard]] bool hasTitleExtractor() const;
 
 private:
-    template <typename Task>
-    PressureLimitedPollerConfig<Task> makePollerConfig(
+    template <typename Job>
+    PressureLimitedPollerConfig<Job> makePollerConfig(
         Stage stage, std::string stageName, std::function<GradientLimiter*()> getLimiter,
         std::function<std::size_t()> maxConcurrent, boost::asio::any_io_executor executor,
-        std::function<std::string(const Task&)> getHash,
+        std::function<std::string(const Job&)> getHash,
         std::shared_ptr<boost::asio::steady_timer> wakeTimer);
 
     boost::asio::awaitable<void> channelPoller();
