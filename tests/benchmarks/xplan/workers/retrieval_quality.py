@@ -118,9 +118,15 @@ def describe_process_failure(returncode: int, output: str) -> str | None:
     return f"{summary}; last output:\n{tail}"
 
 
+def _disable_semantic_neighbor_backfill(env: dict[str, str]) -> None:
+    """Prevent the daemon from mutating benchmark topology inputs in the background."""
+    env["YAMS_ENABLE_SEMANTIC_NEIGHBOR_BACKFILL"] = "0"
+
+
 def _mark_shared_topology_seed_reuse(env: dict[str, str]) -> None:
     """Keep cloned topology inputs immutable while allowing per-arm reconstruction."""
     env["YAMS_BENCH_REUSE_SEEDED_TOPOLOGY_INPUTS"] = "1"
+    _disable_semantic_neighbor_backfill(env)
 
 
 def _truthy(val: Any) -> bool:
@@ -257,12 +263,17 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         "topology_vector_filter_removed": 0,
         "topology_vector_allowed_set_ann_applied_queries": 0,
         "topology_vector_allowed_set_ann_fallback_queries": 0,
+        "topology_vector_global_fill_count": 0,
         "topology_shadow_evaluated_queries": 0,
         "topology_shadow_narrow_proposed_queries": 0,
         "topology_shadow_retained_candidates": 0,
         "topology_shadow_removed_candidates": 0,
         "route_representative_distance_evaluations": 0,
         "route_representative_count_max": 0,
+        "route_ann_used_queries": 0,
+        "route_ann_candidates": 0,
+        "route_ann_distance_evaluations": 0,
+        "route_exact_representative_distance_evaluations": 0,
     }
     added_vals: list[int] = []
     routed_docs: list[int] = []
@@ -271,6 +282,9 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
     route_boundary_score_margin_vals: list[float] = []
     route_representative_distance_evaluation_vals: list[int] = []
     route_representative_count_max_vals: list[int] = []
+    route_ann_candidate_vals: list[int] = []
+    route_ann_distance_evaluation_vals: list[int] = []
+    route_exact_representative_distance_evaluation_vals: list[int] = []
     structure_evidence_vals: dict[str, list[float]] = {
         "candidate_count": [],
         "scale_agreement": [],
@@ -287,11 +301,23 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
     vector_rows_visited_actual_vals: list[int] = []
     vector_exact_distance_evaluations_actual_vals: list[int] = []
     vector_ann_candidate_budget_actual_vals: list[int] = []
+    vector_candidate_index_cache_queries = 0
+    vector_candidate_index_payload_bytes_vals: list[int] = []
+    vector_phase_ns_vals: dict[str, list[int]] = {
+        "candidate_lookup": [],
+        "candidate_projection": [],
+        "pq_lut": [],
+        "adc_scoring": [],
+        "topk_selection": [],
+        "result_materialization": [],
+        "exact_rerank": [],
+    }
     topology_vector_filter_matched_vals: list[int] = []
     topology_vector_filter_removed_vals: list[int] = []
     topology_vector_filter_allowed_candidate_vals: list[int] = []
     topology_vector_filter_latency_vals: list[float] = []
     topology_vector_abstain_latency_vals: list[float] = []
+    topology_vector_global_fill_count_vals: list[int] = []
     skip_reasons: dict[str, int] = {}
     scoring_modes: dict[str, int] = {}
     routing_modes: dict[str, int] = {}
@@ -351,12 +377,18 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         "vector_ann_candidate_budget_actual": "vector_search_ann_candidate_budget_actual",
         "topology_vector_filter_matched": "topology_vector_filter_matched",
         "topology_vector_filter_removed": "topology_vector_filter_removed",
+        "topology_vector_global_fill_count": "topology_vector_global_fill_count",
         "topology_shadow_retained_candidates": "topology_shadow_retained_candidates",
         "topology_shadow_removed_candidates": "topology_shadow_removed_candidates",
         "route_representative_distance_evaluations": (
             "topology_route_representative_distance_evaluations"
         ),
         "route_representative_count_max": "topology_route_representative_count_max",
+        "route_ann_candidates": "topology_route_ann_candidates",
+        "route_ann_distance_evaluations": "topology_route_ann_distance_evaluations",
+        "route_exact_representative_distance_evaluations": (
+            "topology_route_exact_representative_distance_evaluations"
+        ),
     }
 
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -535,6 +567,17 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
             counters["topology_vector_allowed_set_ann_applied_queries"] += 1
         if _truthy(stats.get("topology_vector_allowed_set_ann_fallback")):
             counters["topology_vector_allowed_set_ann_fallback_queries"] += 1
+        if _truthy(stats.get("topology_route_ann_used")):
+            counters["route_ann_used_queries"] += 1
+        if _truthy(stats.get("vector_search_candidate_index_cache_used")):
+            vector_candidate_index_cache_queries += 1
+        vector_candidate_index_payload_bytes_vals.append(
+            _as_int(stats.get("vector_search_candidate_index_payload_bytes"))
+        )
+        for phase_name in vector_phase_ns_vals:
+            vector_phase_ns_vals[phase_name].append(
+                _as_int(stats.get(f"vector_search_{phase_name}_ns"))
+            )
         if _truthy(stats.get("topology_shadow_evaluated")):
             counters["topology_shadow_evaluated_queries"] += 1
             if stats.get("topology_shadow_proposed_action") == "narrow":
@@ -568,10 +611,18 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
                 topology_vector_filter_matched_vals.append(v)
             elif dst == "topology_vector_filter_removed":
                 topology_vector_filter_removed_vals.append(v)
+            elif dst == "topology_vector_global_fill_count":
+                topology_vector_global_fill_count_vals.append(v)
             elif dst == "route_representative_distance_evaluations":
                 route_representative_distance_evaluation_vals.append(v)
             elif dst == "route_representative_count_max":
                 route_representative_count_max_vals.append(v)
+            elif dst == "route_ann_candidates":
+                route_ann_candidate_vals.append(v)
+            elif dst == "route_ann_distance_evaluations":
+                route_ann_distance_evaluation_vals.append(v)
+            elif dst == "route_exact_representative_distance_evaluations":
+                route_exact_representative_distance_evaluation_vals.append(v)
 
         try:
             margin = stats.get("topology_route_boundary_score_margin")
@@ -650,6 +701,9 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         "topology_vector_filter_removed_sum": float(
             counters["topology_vector_filter_removed"]
         ),
+        "topology_vector_global_fill_count_sum": float(
+            counters["topology_vector_global_fill_count"]
+        ),
         "topology_shadow_retained_candidates_sum": float(
             counters["topology_shadow_retained_candidates"]
         ),
@@ -675,6 +729,13 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         ),
         "topology_route_representative_distance_evaluations_sum": float(
             counters["route_representative_distance_evaluations"]
+        ),
+        "topology_route_ann_candidates_sum": float(counters["route_ann_candidates"]),
+        "topology_route_ann_distance_evaluations_sum": float(
+            counters["route_ann_distance_evaluations"]
+        ),
+        "topology_route_exact_representative_distance_evaluations_sum": float(
+            counters["route_exact_representative_distance_evaluations"]
         ),
     }
     for mkey, mval in (hybrid_summary_metrics or {}).items():
@@ -751,6 +812,19 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         metrics["vector_ann_candidate_budget_actual_avg"] = float(
             statistics.mean(vector_ann_candidate_budget_actual_vals)
         )
+    if hybrid:
+        metrics["vector_candidate_index_cache_rate"] = float(
+            vector_candidate_index_cache_queries
+        ) / float(hybrid)
+    if vector_candidate_index_payload_bytes_vals:
+        metrics["vector_candidate_index_payload_bytes_max"] = float(
+            max(vector_candidate_index_payload_bytes_vals)
+        )
+    for phase_name, values in vector_phase_ns_vals.items():
+        if values:
+            metrics[f"vector_{phase_name}_ms_avg"] = float(
+                statistics.mean(values)
+            ) / 1_000_000.0
     if topology_vector_filter_matched_vals:
         metrics["topology_vector_filter_matched_avg"] = float(
             statistics.mean(topology_vector_filter_matched_vals)
@@ -759,6 +833,11 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         metrics["topology_vector_filter_removed_avg"] = float(
             statistics.mean(topology_vector_filter_removed_vals)
         )
+    metrics["topology_vector_global_fill_count_avg"] = (
+        float(statistics.mean(topology_vector_global_fill_count_vals))
+        if topology_vector_global_fill_count_vals
+        else 0.0
+    )
     metrics["topology_vector_filter_allowed_candidates_avg"] = (
         float(statistics.mean(topology_vector_filter_allowed_candidate_vals))
         if topology_vector_filter_allowed_candidate_vals
@@ -790,6 +869,19 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         metrics["topology_route_representative_count_max"] = float(
             max(route_representative_count_max_vals)
         )
+    metrics["topology_route_ann_candidates_avg"] = (
+        float(statistics.mean(route_ann_candidate_vals)) if route_ann_candidate_vals else 0.0
+    )
+    metrics["topology_route_ann_distance_evaluations_avg"] = (
+        float(statistics.mean(route_ann_distance_evaluation_vals))
+        if route_ann_distance_evaluation_vals
+        else 0.0
+    )
+    metrics["topology_route_exact_representative_distance_evaluations_avg"] = (
+        float(statistics.mean(route_exact_representative_distance_evaluation_vals))
+        if route_exact_representative_distance_evaluation_vals
+        else 0.0
+    )
     for evidence_name, values in structure_evidence_vals.items():
         metrics[f"topology_structure_{evidence_name}_avg"] = (
             float(statistics.mean(values)) if values else 0.0
@@ -821,6 +913,9 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         ) / float(hybrid)
         metrics["topology_vector_allowed_set_ann_fallback_rate"] = float(
             counters["topology_vector_allowed_set_ann_fallback_queries"]
+        ) / float(hybrid)
+        metrics["topology_route_ann_rate"] = float(
+            counters["route_ann_used_queries"]
         ) / float(hybrid)
         metrics["topology_shadow_evaluation_rate"] = float(
             counters["topology_shadow_evaluated_queries"]
@@ -1168,6 +1263,10 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
                 "topology_route_boundary_score_margin_avg": 0.0,
                 "topology_route_representative_distance_evaluations_avg": 0.0,
                 "topology_route_representative_count_max": 0.0,
+                "topology_route_ann_rate": 0.0,
+                "topology_route_ann_candidates_avg": 0.0,
+                "topology_route_ann_distance_evaluations_avg": 0.0,
+                "topology_route_exact_representative_distance_evaluations_avg": 0.0,
                 "topology_construction_fingerprint_count": 0.0,
                 "topology_structure_candidate_count_avg": 0.0,
                 "topology_structure_scale_agreement_avg": 0.0,
@@ -1185,12 +1284,22 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
                 "vector_rows_visited_actual_avg": 0.0,
                 "vector_exact_distance_evaluations_actual_avg": 0.0,
                 "vector_ann_candidate_budget_actual_avg": 0.0,
+                "vector_candidate_index_cache_rate": 0.0,
+                "vector_candidate_index_payload_bytes_max": 0.0,
+                "vector_candidate_lookup_ms_avg": 0.0,
+                "vector_candidate_projection_ms_avg": 0.0,
+                "vector_pq_lut_ms_avg": 0.0,
+                "vector_adc_scoring_ms_avg": 0.0,
+                "vector_topk_selection_ms_avg": 0.0,
+                "vector_result_materialization_ms_avg": 0.0,
+                "vector_exact_rerank_ms_avg": 0.0,
                 "vector_total_rows_visited_actual_avg": 0.0,
                 "vector_total_exact_distance_evaluations_actual_avg": 0.0,
                 "topology_vector_filter_rate": 0.0,
                 "topology_vector_filter_fallback_rate": 0.0,
                 "topology_vector_filter_matched_avg": 0.0,
                 "topology_vector_filter_removed_avg": 0.0,
+                "topology_vector_global_fill_count_avg": 0.0,
                 "topology_vector_filter_allowed_candidates_avg": 0.0,
                 "topology_vector_filter_latency_ms_avg": 0.0,
                 "topology_vector_abstain_latency_ms_avg": 0.0,
@@ -1325,6 +1434,9 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         ),
         "topology_route_representative_limit": (
             "YAMS_BENCH_TOPOLOGY_ROUTE_REPRESENTATIVE_LIMIT"
+        ),
+        "topology_route_ann_candidate_limit": (
+            "YAMS_BENCH_TOPOLOGY_ROUTE_ANN_CANDIDATE_LIMIT"
         ),
         "topology_source": "YAMS_BENCH_TOPOLOGY_SOURCE",
         "route_scoring": "YAMS_BENCH_TOPOLOGY_ROUTE_SCORING",
@@ -1513,6 +1625,8 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         if not ready_marker.is_file():
             shared_state_root.mkdir(parents=True, exist_ok=True)
             prime_env = dict(env)
+            if source == "vector":
+                _disable_semantic_neighbor_backfill(prime_env)
             prime_env["YAMS_BENCH_WARM_CACHE_DIR"] = str(seed_dir)
             prime_env["YAMS_BENCH_DEBUG_FILE"] = str(shared_state_root / "prime_debug.jsonl")
             prime_env["YAMS_BENCH_TOPOLOGY_CLUSTER_OUTPUT"] = str(

@@ -27,6 +27,7 @@ from analyze_query_class import (  # noqa: E402
 from model import ExperimentPlan  # noqa: E402
 from report import _baseline_row  # noqa: E402
 import runner as xplan_runner  # noqa: E402
+from artifacts import file_sha256  # noqa: E402
 from workers.multi_client import _clone_corpus_seed, _metrics_from_record  # noqa: E402
 from workers.mixed_corpus import (  # noqa: E402
     analyze_mixed_cluster_overlap,
@@ -41,6 +42,7 @@ from workers.ingestion_e2e import (  # noqa: E402
 )
 from workers.retrieval_quality import (  # noqa: E402
     _benchmark_command,
+    _disable_semantic_neighbor_backfill,
     _mark_shared_topology_seed_reuse,
     _merge_benchmark_env,
     _reset_measured_outputs,
@@ -54,6 +56,25 @@ from workers.retrieval_quality import (  # noqa: E402
 
 
 class RetrievalQualityEnvironmentTests(unittest.TestCase):
+    def test_binary_identity_hashes_executable_contents(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "bench"
+            binary.write_bytes(b"retrieval-binary")
+            self.assertEqual(
+                file_sha256(binary), hashlib.sha256(b"retrieval-binary").hexdigest()
+            )
+
+    def test_binary_identity_rejects_mid_run_relink(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "bench"
+            binary.write_bytes(b"first-binary")
+            expected = file_sha256(binary)
+            xplan_runner._require_binary_identity(binary, expected)
+
+            binary.write_bytes(b"second-binary")
+            with self.assertRaisesRegex(RuntimeError, "identity changed"):
+                xplan_runner._require_binary_identity(binary, expected)
+
     def test_report_replays_resolved_plan_instead_of_mutated_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -174,6 +195,13 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
         env: dict[str, str] = {}
         _mark_shared_topology_seed_reuse(env)
         self.assertEqual(env["YAMS_BENCH_REUSE_SEEDED_TOPOLOGY_INPUTS"], "1")
+        self.assertEqual(env["YAMS_ENABLE_SEMANTIC_NEIGHBOR_BACKFILL"], "0")
+
+    def test_shared_seed_disables_background_topology_input_mutation(self) -> None:
+        env: dict[str, str] = {}
+        _disable_semantic_neighbor_backfill(env)
+        self.assertEqual(env["YAMS_ENABLE_SEMANTIC_NEIGHBOR_BACKFILL"], "0")
+        self.assertNotIn("YAMS_BENCH_REUSE_SEEDED_TOPOLOGY_INPUTS", env)
 
     def test_resolved_plan_preserves_repeat_and_baseline_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -341,6 +369,10 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
         self.assertTrue(
             plan["fixed"]["params"]["require_topology_construction_stability"]
         )
+        self.assertEqual(
+            plan["fixed"]["env"]["YAMS_VECTOR_SEARCH_ENGINE"], "simeon_pq_adc"
+        )
+        self.assertNotIn("YAMS_VECTOR_VEC0_PHSS_ENABLED", plan["fixed"]["env"])
         self.assertNotIn(
             "require_topology_construction_identity", plan["fixed"]["params"]
         )
@@ -350,8 +382,21 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
             {
                 "global_ann_c32",
                 "shadow_margin020_min1",
+                "shadow_exact_margin020_min1",
                 "narrow_soar_lambda1_ratio105",
             },
+        )
+        self.assertEqual(
+            arms["shadow_margin020_min1"]["params"][
+                "topology_route_ann_candidate_limit"
+            ],
+            64,
+        )
+        self.assertEqual(
+            arms["shadow_exact_margin020_min1"]["params"][
+                "topology_route_ann_candidate_limit"
+            ],
+            0,
         )
         soar = arms["narrow_soar_lambda1_ratio105"]
         self.assertEqual(soar["params"]["topology_vector_policy"], "narrow")
@@ -523,6 +568,10 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
                     "topology_weak_query_narrow_applied": "1",
                     "topology_route_available_count": "3",
                     "topology_route_boundary_score_margin": "0.25",
+                    "topology_route_ann_used": "1",
+                    "topology_route_ann_candidates": "6",
+                    "topology_route_ann_distance_evaluations": "4",
+                    "topology_route_exact_representative_distance_evaluations": "3",
                     "topology_route_confidence_abstained": "0",
                     "topology_snapshot_cache_hit": "0",
                     "topology_weak_query_allowed_candidates": "8",
@@ -532,12 +581,22 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
                     "vector_search_rows_visited_actual": "16",
                     "vector_search_exact_distance_evaluations_actual": "8",
                     "vector_search_ann_candidate_budget_actual": "16",
+                    "vector_search_candidate_index_cache_used": "1",
+                    "vector_search_candidate_index_payload_bytes": "4096",
+                    "vector_search_candidate_lookup_ns": "2000000",
+                    "vector_search_candidate_projection_ns": "400000",
+                    "vector_search_pq_lut_ns": "600000",
+                    "vector_search_adc_scoring_ns": "800000",
+                    "vector_search_topk_selection_ns": "1000000",
+                    "vector_search_result_materialization_ns": "1200000",
+                    "vector_search_exact_rerank_ns": "1400000",
                     "topology_vector_filter_applied": "1",
                     "topology_vector_filter_fallback": "0",
                     "topology_vector_filter_matched": "6",
                     "topology_vector_filter_removed": "10",
                     "topology_vector_allowed_set_ann_applied": "1",
                     "topology_vector_allowed_set_ann_fallback": "0",
+                    "topology_vector_global_fill_count": "2",
                     "topology_vector_policy": "narrow",
                     "latency_ms": "30",
                     "topology_structure_candidate_count": "6",
@@ -556,6 +615,10 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
                     "topology_weak_query_narrow_applied": "0",
                     "topology_route_available_count": "1",
                     "topology_route_boundary_score_margin": "0.05",
+                    "topology_route_ann_used": "0",
+                    "topology_route_ann_candidates": "0",
+                    "topology_route_ann_distance_evaluations": "0",
+                    "topology_route_exact_representative_distance_evaluations": "8",
                     "topology_route_confidence_abstained": "1",
                     "topology_snapshot_cache_hit": "1",
                     "topology_weak_query_allowed_candidates": "4",
@@ -565,12 +628,22 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
                     "vector_search_rows_visited_actual": "8",
                     "vector_search_exact_distance_evaluations_actual": "4",
                     "vector_search_ann_candidate_budget_actual": "8",
+                    "vector_search_candidate_index_cache_used": "0",
+                    "vector_search_candidate_index_payload_bytes": "0",
+                    "vector_search_candidate_lookup_ns": "0",
+                    "vector_search_candidate_projection_ns": "0",
+                    "vector_search_pq_lut_ns": "0",
+                    "vector_search_adc_scoring_ns": "0",
+                    "vector_search_topk_selection_ns": "0",
+                    "vector_search_result_materialization_ns": "0",
+                    "vector_search_exact_rerank_ns": "0",
                     "topology_vector_filter_applied": "0",
                     "topology_vector_filter_fallback": "1",
                     "topology_vector_filter_matched": "0",
                     "topology_vector_filter_removed": "0",
                     "topology_vector_allowed_set_ann_applied": "0",
                     "topology_vector_allowed_set_ann_fallback": "1",
+                    "topology_vector_global_fill_count": "0",
                     "topology_vector_policy": "narrow",
                     "latency_ms": "10",
                     "topology_structure_candidate_count": "2",
@@ -597,6 +670,12 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
         self.assertAlmostEqual(
             metrics["topology_route_boundary_score_margin_avg"], 0.15
         )
+        self.assertEqual(metrics["topology_route_ann_rate"], 0.5)
+        self.assertEqual(metrics["topology_route_ann_candidates_avg"], 3.0)
+        self.assertEqual(metrics["topology_route_ann_distance_evaluations_avg"], 2.0)
+        self.assertEqual(
+            metrics["topology_route_exact_representative_distance_evaluations_avg"], 5.5
+        )
         self.assertEqual(metrics["topology_snapshot_cache_hit_rate"], 0.5)
         self.assertEqual(metrics["topology_allowed_candidates_avg"], 6.0)
         self.assertEqual(metrics["topology_vector_filter_allowed_candidates_avg"], 8.0)
@@ -608,6 +687,15 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
         self.assertEqual(metrics["vector_rows_visited_actual_avg"], 12.0)
         self.assertEqual(metrics["vector_exact_distance_evaluations_actual_avg"], 6.0)
         self.assertEqual(metrics["vector_ann_candidate_budget_actual_avg"], 12.0)
+        self.assertEqual(metrics["vector_candidate_index_cache_rate"], 0.5)
+        self.assertEqual(metrics["vector_candidate_index_payload_bytes_max"], 4096.0)
+        self.assertEqual(metrics["vector_candidate_lookup_ms_avg"], 1.0)
+        self.assertEqual(metrics["vector_candidate_projection_ms_avg"], 0.2)
+        self.assertEqual(metrics["vector_pq_lut_ms_avg"], 0.3)
+        self.assertEqual(metrics["vector_adc_scoring_ms_avg"], 0.4)
+        self.assertEqual(metrics["vector_topk_selection_ms_avg"], 0.5)
+        self.assertEqual(metrics["vector_result_materialization_ms_avg"], 0.6)
+        self.assertEqual(metrics["vector_exact_rerank_ms_avg"], 0.7)
         self.assertEqual(metrics["vector_candidate_work_budget_avg"], 10.0)
         self.assertEqual(metrics["vector_total_rows_visited_actual_avg"], 12.0)
         self.assertEqual(metrics["vector_total_exact_distance_evaluations_actual_avg"], 6.0)
@@ -617,6 +705,8 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
         self.assertEqual(metrics["topology_vector_filter_removed_avg"], 5.0)
         self.assertEqual(metrics["topology_vector_allowed_set_ann_rate"], 0.5)
         self.assertEqual(metrics["topology_vector_allowed_set_ann_fallback_rate"], 0.5)
+        self.assertEqual(metrics["topology_vector_global_fill_count_sum"], 2.0)
+        self.assertEqual(metrics["topology_vector_global_fill_count_avg"], 1.0)
         self.assertEqual(metrics["topology_structure_candidate_count_avg"], 4.0)
         self.assertAlmostEqual(metrics["topology_structure_scale_agreement_avg"], 0.6)
         self.assertAlmostEqual(metrics["topology_structure_overlap_support_avg"], 0.4)

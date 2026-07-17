@@ -28,6 +28,7 @@ if str(XPLAN_ROOT) not in sys.path:
 from artifacts import (  # noqa: E402
     arm_layout,
     ensure_dir,
+    file_sha256,
     host_info,
     try_git_sha,
     utc_stamp,
@@ -267,6 +268,16 @@ def _filter_arms(plan: ExperimentPlan, only: list[str]) -> None:
         raise SystemExit(f"no arms matched filters: {only}")
 
 
+def _require_binary_identity(binary: Path, expected_sha256: str | None) -> None:
+    actual_sha256 = file_sha256(binary)
+    if expected_sha256 is None or actual_sha256 != expected_sha256:
+        raise RuntimeError(
+            "benchmark binary identity changed during the run: "
+            f"expected={expected_sha256 or 'missing'} actual={actual_sha256 or 'missing'} "
+            f"path={binary}"
+        )
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     repo_root = repo_root_from()
     plan_path = resolve_plan_path(args.plan, repo_root)
@@ -296,23 +307,15 @@ def cmd_run(args: argparse.Namespace) -> int:
         run_dir / "plan.resolved.json",
         plan.resolved_dict(stamp=stamp, repo_root=repo_root, git_sha=git_sha),
     )
-    write_mode_manifest(
-        run_dir / "mode_manifest.json",
-        runner="xplan",
-        plan_name=plan.name,
-        mode=plan.mode,
-        build_dir=str(build_dir),
-        extra={"git_sha": git_sha, "host": host_info(), "dry_run": bool(args.dry_run)},
-    )
 
     print(f"ARTIFACT={run_dir}", flush=True)
     print(f"plan={plan.name} arms={len(plan.arms)} build_dir={build_dir}", flush=True)
 
     # One pre-run compile for quality plans when binary is missing (workers skip
     # rebuilds if the binary already exists to avoid mid-run link races).
+    quality_bin = build_dir / "tests" / "benchmarks" / "retrieval_quality_bench"
+    needs_quality = any(s.worker == "retrieval_quality" for s in plan.steps)
     if not args.dry_run:
-        quality_bin = build_dir / "tests" / "benchmarks" / "retrieval_quality_bench"
-        needs_quality = any(s.worker == "retrieval_quality" for s in plan.steps)
         if needs_quality and not quality_bin.is_file():
             from workers.util import maybe_meson_compile
 
@@ -324,6 +327,20 @@ def cmd_run(args: argparse.Namespace) -> int:
                 binary=quality_bin,
                 force=True,
             )
+    quality_binary_sha256 = file_sha256(quality_bin) if needs_quality else None
+    write_mode_manifest(
+        run_dir / "mode_manifest.json",
+        runner="xplan",
+        plan_name=plan.name,
+        mode=plan.mode,
+        build_dir=str(build_dir),
+        extra={
+            "git_sha": git_sha,
+            "host": host_info(),
+            "dry_run": bool(args.dry_run),
+            "retrieval_quality_binary_sha256": quality_binary_sha256,
+        },
+    )
 
     arm_results: list[dict[str, Any]] = []
     any_hard_fail = False
@@ -337,7 +354,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             mode=plan.mode,
             build_dir=str(build_dir),
             arm_name=arm.name,
-            extra={"factors": arm.factors, "dry_run": bool(args.dry_run)},
+            extra={
+                "factors": arm.factors,
+                "dry_run": bool(args.dry_run),
+                "retrieval_quality_binary_sha256": quality_binary_sha256,
+            },
         )
         write_json(
             arm_dir / "arm.json",
@@ -370,6 +391,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         messages: list[str] = []
 
         try:
+            if needs_quality and not args.dry_run:
+                _require_binary_identity(quality_bin, quality_binary_sha256)
             repeats = max(1, plan.repeats)
             rep_metrics: list[dict[str, Any]] = []
             for rep in range(repeats):
@@ -424,6 +447,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                         {"status": overall_status, "arm": arm.name, "rep": rep,
                          "metrics": rep_combined},
                     )
+
+            if needs_quality and not args.dry_run:
+                _require_binary_identity(quality_bin, quality_binary_sha256)
 
             combined_metrics = aggregate_reps(rep_metrics)
             combined_attrs["repeats"] = repeats

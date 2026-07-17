@@ -256,8 +256,8 @@ int main(int argc, char* argv[]) {
                     "comparable\n\n");
 
         if (cfg.filter_cell) {
-            std::printf("filtered-search cell: exact-scan fallback latency by candidate "
-                        "fraction\n");
+            std::printf("filtered-search cell: routed Simeon PQ/ADC versus exact allowed-set "
+                        "control\n");
             SqliteVecBackend::Config backend_cfg;
             backend_cfg.embedding_dim = cfg.dim;
             backend_cfg.search_engine = VectorSearchEngine::SimeonPqAdc;
@@ -273,7 +273,7 @@ int main(int argc, char* argv[]) {
             for (size_t i = 0; i < corpus.size(); ++i) {
                 VectorRecord rec;
                 rec.chunk_id = "chunk_" + std::to_string(i);
-                rec.document_hash = "doc_" + std::to_string(i);
+                rec.document_hash = "doc_" + std::to_string(i / 4);
                 rec.embedding = corpus[i];
                 rec.content = "benchmark content " + std::to_string(i);
                 records.push_back(std::move(rec));
@@ -281,31 +281,107 @@ int main(int argc, char* argv[]) {
             if (!backend.insertVectorsBatch(records)) {
                 throw std::runtime_error("insert failed");
             }
+            const auto buildStart = std::chrono::steady_clock::now();
+            if (!backend.buildIndex()) {
+                throw std::runtime_error("buildIndex failed");
+            }
+            const auto buildEnd = std::chrono::steady_clock::now();
+            std::printf("index_build_ms=%.1f vectors=%zu documents=%zu chunks_per_document=4\n",
+                        std::chrono::duration<double, std::milli>(buildEnd - buildStart).count(),
+                        cfg.corpus, (cfg.corpus + 3) / 4);
 
-            for (double fraction : {0.01, 0.10, 0.50}) {
-                const size_t n_candidates =
-                    std::max<size_t>(1, static_cast<size_t>(fraction * cfg.corpus));
+            const size_t documentCount = (cfg.corpus + 3) / 4;
+            const std::vector<size_t> candidateCounts = {2UL, 7UL, 16UL, 64UL, documentCount};
+            for (const size_t nCandidates : candidateCounts) {
+                const size_t candidateCount = std::min(nCandidates, documentCount);
                 std::unordered_set<std::string> candidates;
-                for (size_t i = 0; i < n_candidates; ++i) {
+                for (size_t i = 0; i < candidateCount; ++i) {
                     candidates.insert("doc_" + std::to_string(i));
                 }
 
-                std::vector<double> latencies;
-                latencies.reserve(queries.size());
-                for (const auto& q : queries) {
-                    const auto start = std::chrono::steady_clock::now();
-                    auto result = backend.searchSimilar(q, cfg.k, 0.0f, std::nullopt, candidates);
-                    const auto end = std::chrono::steady_clock::now();
-                    if (!result) {
-                        throw std::runtime_error(result.error().message);
-                    }
-                    latencies.push_back(
-                        std::chrono::duration<double, std::micro>(end - start).count());
+                VectorSearchDiagnostics warmupDiagnostics;
+                auto warmup = backend.searchSimilarWithDiagnostics(
+                    queries.front(), cfg.k, -1.0F, std::nullopt, candidates, {}, warmupDiagnostics);
+                if (!warmup) {
+                    throw std::runtime_error(warmup.error().message);
                 }
-                const double mean = std::accumulate(latencies.begin(), latencies.end(), 0.0) /
-                                    static_cast<double>(latencies.size());
-                std::printf("candidates=%5.0f%% (%6zu docs)  mean=%8.1f us  p95=%8.1f us\n",
-                            fraction * 100.0, n_candidates, mean, percentile(latencies, 0.95));
+
+                std::vector<double> annLatencies;
+                std::vector<double> exactLatencies;
+                annLatencies.reserve(queries.size());
+                exactLatencies.reserve(queries.size());
+                std::uint64_t lookupNs = 0;
+                std::uint64_t projectionNs = 0;
+                std::uint64_t lutNs = 0;
+                std::uint64_t adcNs = 0;
+                std::uint64_t selectionNs = 0;
+                std::uint64_t materializationNs = 0;
+                std::uint64_t rerankNs = 0;
+                size_t candidateIndexPayloadBytes = 0;
+                size_t recallHits = 0;
+                size_t recallDenominator = 0;
+                for (const auto& q : queries) {
+                    VectorSearchDiagnostics annDiagnostics;
+                    const auto annStart = std::chrono::steady_clock::now();
+                    auto ann = backend.searchSimilarWithDiagnostics(q, cfg.k, -1.0F, std::nullopt,
+                                                                    candidates, {}, annDiagnostics);
+                    const auto annEnd = std::chrono::steady_clock::now();
+                    if (!ann) {
+                        throw std::runtime_error(ann.error().message);
+                    }
+                    VectorSearchDiagnostics exactDiagnostics;
+                    const auto exactStart = std::chrono::steady_clock::now();
+                    auto exact = backend.searchExactCandidatesWithDiagnostics(
+                        q, cfg.k, -1.0F, candidates, exactDiagnostics);
+                    const auto exactEnd = std::chrono::steady_clock::now();
+                    if (!exact) {
+                        throw std::runtime_error(exact.error().message);
+                    }
+
+                    annLatencies.push_back(
+                        std::chrono::duration<double, std::micro>(annEnd - annStart).count());
+                    exactLatencies.push_back(
+                        std::chrono::duration<double, std::micro>(exactEnd - exactStart).count());
+                    lookupNs += annDiagnostics.candidateLookupNanoseconds;
+                    projectionNs += annDiagnostics.candidateProjectionNanoseconds;
+                    lutNs += annDiagnostics.pqLutNanoseconds;
+                    adcNs += annDiagnostics.adcScoringNanoseconds;
+                    selectionNs += annDiagnostics.topKSelectionNanoseconds;
+                    materializationNs += annDiagnostics.resultMaterializationNanoseconds;
+                    rerankNs += annDiagnostics.exactRerankNanoseconds;
+                    candidateIndexPayloadBytes = std::max(
+                        candidateIndexPayloadBytes, annDiagnostics.candidateIndexPayloadBytes);
+
+                    std::unordered_set<std::string> exactIds;
+                    for (const auto& record : exact.value()) {
+                        exactIds.insert(record.chunk_id);
+                    }
+                    recallDenominator += exactIds.size();
+                    for (const auto& record : ann.value()) {
+                        recallHits += exactIds.contains(record.chunk_id) ? 1 : 0;
+                    }
+                }
+                const double divisor = static_cast<double>(queries.size());
+                const double annMean =
+                    std::accumulate(annLatencies.begin(), annLatencies.end(), 0.0) / divisor;
+                const double exactMean =
+                    std::accumulate(exactLatencies.begin(), exactLatencies.end(), 0.0) / divisor;
+                const auto meanUs = [divisor](std::uint64_t nanoseconds) {
+                    return static_cast<double>(nanoseconds) / (1000.0 * divisor);
+                };
+                const double recall =
+                    recallDenominator == 0
+                        ? 1.0
+                        : static_cast<double>(recallHits) / static_cast<double>(recallDenominator);
+                std::printf(
+                    "allowed_docs=%2zu allowed_vectors<=%3zu ann_mean=%8.1f us ann_p95=%8.1f us "
+                    "exact_mean=%8.1f us recall=%5.1f%% phases_us{lookup=%.1f projection=%.1f "
+                    "lut=%.1f adc=%.1f select=%.1f materialize=%.1f rerank=%.1f} "
+                    "candidate_index_payload_kib=%.1f\n",
+                    candidateCount, candidateCount * 4, annMean, percentile(annLatencies, 0.95),
+                    exactMean, recall * 100.0, meanUs(lookupNs), meanUs(projectionNs),
+                    meanUs(lutNs), meanUs(adcNs), meanUs(selectionNs), meanUs(materializationNs),
+                    meanUs(rerankNs), static_cast<double>(candidateIndexPayloadBytes) / 1024.0);
             }
             return 0;
         }
