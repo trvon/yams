@@ -26,6 +26,7 @@ namespace yamsfmt = fmt;
 #include <optional>
 #include <random>
 #include <shared_mutex>
+#include <span>
 #include <system_error>
 #include <yams/compat/unistd.h>
 #ifdef _WIN32
@@ -551,7 +552,7 @@ std::vector<Result<void>> StorageEngine::storeBatch(
                 return;
             }
             const auto& [hash, data] = items[index];
-            results[index] = store(hash, data);
+            results[index] = store(hash, std::span<const std::byte>(data.data(), data.size()));
         }
     };
 

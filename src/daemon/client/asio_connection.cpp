@@ -244,10 +244,10 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
             writing = false;
             alive = false;
             boost::system::error_code close_ec;
-            const auto closeResult = socket->close(close_ec);
-            if (closeResult) {
+            socket->close(close_ec);
+            if (close_ec) {
                 spdlog::debug("AsioConnection::async_write_frame: close after timeout failed: {}",
-                              closeResult.message());
+                              close_ec.message());
             }
             co_return Error{ErrorCode::Timeout, "Write timeout"};
         }
