@@ -319,6 +319,7 @@ TEST_CASE("SearchEngineConfig default values", "[search][config][catch2]") {
     CHECK(cfg.topologyMaxClusters == 2U);
     CHECK(cfg.topologyMinClusters == 1U);
     CHECK(cfg.topologyMaxSeedDocuments == 32U);
+    CHECK(cfg.topologyRoutingAnnCandidateLimit == 64U);
     CHECK(cfg.topologyAdaptiveProbeScoreGap == Approx(0.0F));
     CHECK(cfg.topologyNarrowMinBoundaryMargin == Approx(0.2F));
     CHECK(std::string_view(SearchEngineConfig::topologyVectorPolicyToString(
@@ -343,6 +344,7 @@ TEST_CASE("SearchEngineConfig preserves typed execution policy across tuning",
     configured.topologyMaxClusters = 3;
     configured.topologyMinClusters = 2;
     configured.topologyMaxSeedDocuments = 24;
+    configured.topologyRoutingAnnCandidateLimit = 16;
     configured.topologyAdaptiveProbeScoreGap = 0.08F;
     configured.topologyNarrowMinBoundaryMargin = 0.12F;
     configured.topologyMaxDocs = 48;
@@ -365,6 +367,7 @@ TEST_CASE("SearchEngineConfig preserves typed execution policy across tuning",
     CHECK(tuned.topologyMaxClusters == 3);
     CHECK(tuned.topologyMinClusters == 2);
     CHECK(tuned.topologyMaxSeedDocuments == 24);
+    CHECK(tuned.topologyRoutingAnnCandidateLimit == 16);
     CHECK(tuned.topologyAdaptiveProbeScoreGap == Approx(0.08F));
     CHECK(tuned.topologyNarrowMinBoundaryMargin == Approx(0.12F));
     CHECK(tuned.topologyMaxDocs == 48);

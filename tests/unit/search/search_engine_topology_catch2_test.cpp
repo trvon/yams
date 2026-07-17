@@ -11,6 +11,7 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <yams/metadata/connection_pool.h>
@@ -277,6 +278,23 @@ SearchEngineConfig topologyRoutingTestConfig(bool enabled) {
     return config;
 }
 
+Result<SearchResponse>
+runTopologySearch(TopologySearchFixture& fix,
+                  const std::shared_ptr<vector::EmbeddingGenerator>& generator,
+                  const SearchEngineConfig& config, std::size_t limit) {
+    SearchExecutionContext context = defaultSearchExecutionContext();
+    context.freshness.lexicalReady = true;
+    context.freshness.vectorReady = true;
+    context.freshness.kgReady = true;
+    context.freshness.topologyReady = true;
+    SearchExecutionContextGuard contextGuard(context);
+
+    SearchEngine engine(fix.repo, fix.vectorDb, generator, fix.kgStore, config);
+    SearchParams params;
+    params.limit = limit;
+    return engine.searchWithResponse("unmatched query", params);
+}
+
 } // namespace
 
 TEST_CASE("SearchEngine topology routing narrows weak-query vector candidates",
@@ -382,6 +400,136 @@ TEST_CASE("SearchEngine topology routing narrows weak-query vector candidates",
     auto cachedResponse = engine.searchWithResponse("unmatched query", params);
     REQUIRE(cachedResponse.has_value());
     CHECK((cachedResponse.value().debugStats.at("topology_snapshot_cache_hit") == "1"));
+}
+
+TEST_CASE("SearchEngine topology routes Simeon PQ over allowed documents",
+          "[search][topology][spq][catch2]") {
+    TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
+    seedTopologyDocuments(fix);
+    seedTwoClusterTopology(fix);
+    REQUIRE(fix.vectorDb->buildIndex());
+
+    auto generator = makeFixedGenerator({0.1F, 0.9F});
+    auto config = topologyRoutingTestConfig(true);
+    config.topologyRoutingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    config.topologyNarrowMinBoundaryMargin = 0.0F;
+    config.topologyMaxDocs = 1;
+
+    auto response = runTopologySearch(fix, generator, config, 4);
+    REQUIRE(response.has_value());
+
+    const auto& debug = response.value().debugStats;
+    CHECK(debug.at("topology_weak_query_allowed_candidates") == "2");
+    CHECK(debug.at("topology_vector_allowed_set_ann_applied") == "1");
+    CHECK(debug.at("topology_vector_allowed_set_ann_fallback") == "0");
+    CHECK(debug.at("topology_weak_query_narrow_applied") == "1");
+    CHECK(debug.at("vector_search_ann_candidate_budget_actual") == "2");
+    CHECK(debug.at("vector_search_rows_visited_actual") == "2");
+    CHECK(debug.at("vector_search_exact_distance_evaluations_actual") == "2");
+    REQUIRE_FALSE(response.value().results.empty());
+    CHECK(response.value().results.front().document.sha256Hash == "y2");
+}
+
+TEST_CASE("SearchEngine topology balances query-ranked members across selected routes",
+          "[search][topology][spq][balance][catch2]") {
+    TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
+    seedTopologyDocuments(fix);
+    seedTwoClusterTopology(fix);
+    REQUIRE(fix.vectorDb->buildIndex());
+
+    auto generator = makeFixedGenerator({0.0F, 1.0F});
+    auto config = topologyRoutingTestConfig(true);
+    config.topologyRoutingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    config.topologyNarrowMinBoundaryMargin = 0.0F;
+    config.topologyMinClusters = 2;
+    config.topologyMaxClusters = 2;
+    config.topologyMaxDocs = 2;
+    config.similarityThreshold = -1.0F;
+
+    auto response = runTopologySearch(fix, generator, config, 2);
+    REQUIRE(response.has_value());
+    REQUIRE(response.value().results.size() == 2U);
+
+    std::unordered_set<std::string> resultHashes;
+    for (const auto& result : response.value().results) {
+        resultHashes.insert(result.document.sha256Hash);
+    }
+    CHECK((resultHashes.contains("x1") || resultHashes.contains("x2")));
+    CHECK((resultHashes.contains("y1") || resultHashes.contains("y2")));
+}
+
+TEST_CASE("SearchEngine topology keeps confident Simeon routes bounded without global fill",
+          "[search][topology][spq][fill][catch2]") {
+    TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
+    seedTopologyDocuments(fix);
+    seedTwoClusterTopology(fix);
+    REQUIRE(fix.vectorDb->buildIndex());
+
+    auto generator = makeFixedGenerator({0.0F, 1.0F});
+    auto config = topologyRoutingTestConfig(true);
+    config.topologyRoutingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    config.topologyNarrowMinBoundaryMargin = 0.0F;
+    config.topologyMinClusters = 1;
+    config.topologyMaxClusters = 1;
+    config.topologyMaxDocs = 4;
+    config.similarityThreshold = -1.0F;
+
+    auto response = runTopologySearch(fix, generator, config, 4);
+    REQUIRE(response.has_value());
+    CHECK(response.value().results.size() == 2U);
+    CHECK(response.value().debugStats.at("topology_vector_global_fill_count") == "0");
+    CHECK(response.value().debugStats.at("vector_search_ann_candidate_budget_actual") == "2");
+}
+
+TEST_CASE("SearchEngine topology fills unused routed Vec0 slots from global ANN",
+          "[search][topology][vec0][fill][catch2]") {
+    TopologySearchFixture fix{vector::VectorSearchEngine::Vec0L2};
+    seedTopologyDocuments(fix);
+    seedTwoClusterTopology(fix);
+    REQUIRE(fix.vectorDb->buildIndex());
+
+    auto generator = makeFixedGenerator({0.0F, 1.0F});
+    auto config = topologyRoutingTestConfig(true);
+    config.topologyRoutingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    config.topologyNarrowMinBoundaryMargin = 0.0F;
+    config.topologyMinClusters = 1;
+    config.topologyMaxClusters = 1;
+    config.topologyMaxDocs = 4;
+    config.similarityThreshold = -1.0F;
+
+    auto response = runTopologySearch(fix, generator, config, 4);
+    REQUIRE(response.has_value());
+    CHECK(response.value().results.size() == 4U);
+    CHECK(response.value().debugStats.at("topology_vector_global_fill_count") == "2");
+}
+
+TEST_CASE("SearchEngine topology abstains from narrowing at an ambiguous route boundary",
+          "[search][topology][spq][confidence][catch2]") {
+    TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
+    seedTopologyDocuments(fix);
+    seedTwoClusterTopology(fix);
+    REQUIRE(fix.vectorDb->buildIndex());
+
+    auto generator = makeFixedGenerator({1.0F, 1.0F});
+    auto config = topologyRoutingTestConfig(true);
+    config.topologyRoutingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    config.topologySparseDenseAlpha = 0.0F;
+    config.topologyMinClusters = 1;
+    config.topologyMaxClusters = 1;
+    config.topologyNarrowMinBoundaryMargin = 0.20F;
+    config.topologyMaxDocs = 2;
+    config.similarityThreshold = -1.0F;
+
+    auto response = runTopologySearch(fix, generator, config, 4);
+    REQUIRE(response.has_value());
+    CHECK(response.value().results.size() == 4U);
+
+    const auto& debug = response.value().debugStats;
+    CHECK(debug.at("topology_route_confidence_abstained") == "1");
+    CHECK(debug.at("topology_weak_query_skip_reason") == "route_low_confidence");
+    CHECK(debug.at("topology_weak_query_narrow_applied") == "0");
+    CHECK(debug.at("topology_vector_allowed_set_ann_applied") == "0");
+    CHECK(debug.at("vector_search_ann_candidate_budget_actual") == "4");
 }
 
 TEST_CASE("SearchEngine topology shadow annotates global results without removing candidates",
@@ -902,6 +1050,7 @@ TEST_CASE("Topology routing options preserve the typed product configuration",
     config.topologyMinClusters = 2;
     config.topologyMaxClusters = 5;
     config.topologyRoutingRepresentativeLimit = 3;
+    config.topologyRoutingAnnCandidateLimit = 19;
     config.topologyAdaptiveProbeScoreGap = 0.07F;
     config.topologyNarrowMinBoundaryMargin = 0.11F;
     config.topologyMaxDocs = 17;
@@ -921,6 +1070,7 @@ TEST_CASE("Topology routing options preserve the typed product configuration",
     CHECK(options.minClusters == 2U);
     CHECK(options.maxClusters == 5U);
     CHECK(options.representativeLimit == 3U);
+    CHECK(options.denseAnnCandidateLimit == 19U);
     CHECK(options.adaptiveProbeScoreGap == Catch::Approx(0.07F));
     CHECK(options.narrowMinBoundaryMargin == Catch::Approx(0.11F));
     CHECK(options.maxDocs == 17U);
@@ -1067,6 +1217,9 @@ TEST_CASE("Topology routing exposes selected multiscale structural evidence from
     const auto session = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
 
     REQUIRE(session.artifactAdmitted);
+    REQUIRE(session.routeAllowedDocumentHashGroups.size() == 2U);
+    CHECK(session.routeAllowedDocumentHashGroups[0].contains("y1"));
+    CHECK(session.routeAllowedDocumentHashGroups[1].contains("y1"));
     REQUIRE(session.candidateStructureEvidence.contains("y1"));
     const auto& evidence = session.candidateStructureEvidence.at("y1");
     CHECK(evidence.scaleAgreement == Catch::Approx(1.0F));

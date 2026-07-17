@@ -545,6 +545,7 @@ min_clusters = 1
 max_clusters = 3
 max_seed_documents = 24
 representative_limit = 2
+ann_candidate_limit = 16
 adaptive_probe_score_gap = 0.07
 narrow_min_boundary_margin = 0.03
 max_docs = 42
@@ -567,6 +568,8 @@ rrf_k = 33
     CHECK(*policy.maxSeedDocuments == 24U);
     REQUIRE(policy.representativeLimit.has_value());
     CHECK(*policy.representativeLimit == 2U);
+    REQUIRE(policy.annCandidateLimit.has_value());
+    CHECK(*policy.annCandidateLimit == 16U);
     REQUIRE(policy.adaptiveProbeScoreGap.has_value());
     CHECK(*policy.adaptiveProbeScoreGap == Catch::Approx(0.07F));
     REQUIRE(policy.narrowMinBoundaryMargin.has_value());

@@ -827,6 +827,9 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (auto it = kv.find("search.topology.representative_limit"); it != kv.end()) {
                 policy.representativeLimit = parseSize(it->second);
             }
+            if (auto it = kv.find("search.topology.ann_candidate_limit"); it != kv.end()) {
+                policy.annCandidateLimit = parseSize(it->second);
+            }
             if (auto it = kv.find("search.topology.adaptive_probe_score_gap"); it != kv.end()) {
                 policy.adaptiveProbeScoreGap = parseFloat(it->second);
             }

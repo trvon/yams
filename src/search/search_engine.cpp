@@ -97,6 +97,28 @@ using json = nlohmann::json;
 
 using detail::postWork;
 
+std::vector<std::size_t>
+allocateBalancedRouteQuotas(const std::vector<std::unordered_set<std::string>>& routeGroups,
+                            std::size_t limit) {
+    std::vector<std::size_t> quotas(routeGroups.size(), 0);
+    std::size_t remaining = limit;
+    while (remaining > 0) {
+        bool allocated = false;
+        for (std::size_t route = 0; route < routeGroups.size() && remaining > 0; ++route) {
+            if (quotas[route] >= routeGroups[route].size()) {
+                continue;
+            }
+            ++quotas[route];
+            --remaining;
+            allocated = true;
+        }
+        if (!allocated) {
+            break;
+        }
+    }
+    return quotas;
+}
+
 std::optional<std::int64_t>
 resolveGraphCandidateDocumentId(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore,
                                 std::string_view candidateId) {
@@ -1395,10 +1417,23 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                          const vector::VectorSearchDiagnostics& sample) {
             total.usedAnn = total.usedAnn || sample.usedAnn;
             total.usedExactScan = total.usedExactScan || sample.usedExactScan;
+            total.usedCandidateIndexCache =
+                total.usedCandidateIndexCache || sample.usedCandidateIndexCache;
             total.rowsVisited += sample.rowsVisited;
             total.exactDistanceEvaluations += sample.exactDistanceEvaluations;
             total.annCandidateBudget += sample.annCandidateBudget;
+            total.candidateLookupCount += sample.candidateLookupCount;
+            total.candidateIndexPayloadBytes =
+                std::max(total.candidateIndexPayloadBytes, sample.candidateIndexPayloadBytes);
+            total.materializedRows += sample.materializedRows;
             total.returnedRows += sample.returnedRows;
+            total.candidateLookupNanoseconds += sample.candidateLookupNanoseconds;
+            total.candidateProjectionNanoseconds += sample.candidateProjectionNanoseconds;
+            total.pqLutNanoseconds += sample.pqLutNanoseconds;
+            total.adcScoringNanoseconds += sample.adcScoringNanoseconds;
+            total.topKSelectionNanoseconds += sample.topKSelectionNanoseconds;
+            total.resultMaterializationNanoseconds += sample.resultMaterializationNanoseconds;
+            total.exactRerankNanoseconds += sample.exactRerankNanoseconds;
         };
         const auto runVectorQuery = [&](const SearchEngineConfig& config) {
             vector::VectorSearchDiagnostics sample;
@@ -1974,6 +2009,17 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             for (const auto& seed : topologySeedEvidence) {
                 topologyAssistReq.tier1SeedHashes.push_back(seed.documentHash);
             }
+            const bool vectorBackendSupportsAllowedSetAnn =
+                vectorDb_ &&
+                (vectorDb_->getConfig().search_engine == vector::VectorSearchEngine::Vec0L2 ||
+                 vectorDb_->getConfig().search_engine == vector::VectorSearchEngine::SimeonPqAdc);
+            const bool deferTopologyMemberLimitToVectorRanker =
+                vectorBackendSupportsAllowedSetAnn &&
+                workingConfig.topologyVectorPolicy ==
+                    SearchEngineConfig::TopologyVectorPolicy::Narrow;
+            if (deferTopologyMemberLimitToVectorRanker) {
+                topologyAssistReq.config.topologyMaxDocs = 0;
+            }
             topologyAssistReq.existingCandidateHashes = tier2Candidates;
             topologyAssistReq.queryEmbedding = queryEmbedding;
             topologyAssistReq.metadataRepo = metadataRepo_;
@@ -2003,8 +2049,14 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     SearchEngineConfig::TopologyVectorPolicy::Narrow &&
                 !topologySession.routeAllowedDocumentHashes.empty();
             const bool topologyVectorAllowedSetAnnEligible =
-                topologyVectorFilterEligible && vectorDb_ &&
-                vectorDb_->getConfig().search_engine == vector::VectorSearchEngine::Vec0L2;
+                topologyVectorFilterEligible && vectorBackendSupportsAllowedSetAnn;
+            const bool topologyVectorGlobalFillAllowed =
+                !vectorDb_ ||
+                vectorDb_->getConfig().search_engine != vector::VectorSearchEngine::SimeonPqAdc;
+            const std::size_t topologyVectorResultLimit =
+                deferTopologyMemberLimitToVectorRanker && workingConfig.topologyMaxDocs > 0
+                    ? std::min(effectiveVectorMaxResults, workingConfig.topologyMaxDocs)
+                    : effectiveVectorMaxResults;
             topologyWeakQueryNarrowApplied = false;
             topologyWeakQueryRoutingApplied = topologySession.applied && !topologyVectorShadow;
             setDebug(response.debugStats, metrics::kTopologyVectorPolicy,
@@ -2024,6 +2076,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             auto topologyRouteAllowedDocuments =
                 std::make_shared<const std::unordered_set<std::string>>(
                     topologySession.routeAllowedDocumentHashes);
+            auto topologyRouteAllowedDocumentGroups =
+                std::make_shared<const std::vector<std::unordered_set<std::string>>>(
+                    topologySession.routeAllowedDocumentHashGroups);
+            const auto topologyRouteQuotas = allocateBalancedRouteQuotas(
+                *topologyRouteAllowedDocumentGroups, topologyVectorResultLimit);
 
             // Decide whether to narrow vector search to Tier 1 candidates
             // Narrow if: config enabled AND Tier 1 has enough candidates
@@ -2099,6 +2156,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             std::size_t topologyVectorFilterRemoved = 0;
             bool topologyVectorAllowedSetAnnApplied = false;
             bool topologyVectorAllowedSetAnnFallback = false;
+            std::size_t topologyVectorGlobalFillCount = 0;
             std::size_t topologyShadowRetainedCandidates = 0;
             std::size_t topologyShadowRemovedCandidates = 0;
             std::vector<std::string> topologyShadowRetainedDocIds;
@@ -2110,24 +2168,95 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     [&queryEmbedding, &baselineTier2Candidates, shouldNarrow,
                      effectiveVectorMaxResults, &queryVectorWithRelaxedRetry,
                      &vectorSearchDiagnostics, topologyRouteAllowedDocuments,
+                     topologyRouteAllowedDocumentGroups, topologyRouteQuotas,
                      topologyVectorFilterEligible, topologyVectorAllowedSetAnnEligible,
+                     topologyVectorGlobalFillAllowed, topologyVectorResultLimit,
                      topologyVectorShadow, &topologyVectorFilterApplied,
                      &topologyVectorFilterFallback, &topologyVectorFilterMatched,
                      &topologyVectorFilterRemoved, &topologyVectorAllowedSetAnnApplied,
-                     &topologyVectorAllowedSetAnnFallback, stageTraceEnabled,
-                     &topologyShadowRetainedCandidates, &topologyShadowRemovedCandidates,
-                     &topologyShadowRetainedDocIds, &topologyShadowRemovedDocIds]() {
+                     &topologyVectorAllowedSetAnnFallback, &topologyVectorGlobalFillCount,
+                     stageTraceEnabled, &topologyShadowRetainedCandidates,
+                     &topologyShadowRemovedCandidates, &topologyShadowRetainedDocIds,
+                     &topologyShadowRemovedDocIds]() {
                         YAMS_ZONE_SCOPED_N("component::vector");
                         Result<std::vector<ComponentResult>> results = [&]() {
                             if (topologyVectorAllowedSetAnnEligible) {
-                                auto routed = queryVectorWithRelaxedRetry(
-                                    queryEmbedding.value(), effectiveVectorMaxResults,
-                                    topologyRouteAllowedDocuments.get(), &vectorSearchDiagnostics);
-                                if (routed && !routed.value().empty()) {
+                                std::vector<ComponentResult> routedResults;
+                                routedResults.reserve(topologyVectorResultLimit);
+                                std::unordered_set<std::string> seenDocuments;
+                                seenDocuments.reserve(topologyVectorResultLimit * 2);
+                                const auto appendUnique = [&](std::vector<ComponentResult> incoming,
+                                                              std::size_t limit) {
+                                    const auto before = routedResults.size();
+                                    for (auto& candidate : incoming) {
+                                        if (routedResults.size() >= limit) {
+                                            break;
+                                        }
+                                        if (candidate.documentHash.empty() ||
+                                            !seenDocuments.insert(candidate.documentHash).second) {
+                                            continue;
+                                        }
+                                        routedResults.push_back(std::move(candidate));
+                                    }
+                                    return routedResults.size() - before;
+                                };
+
+                                if (!topologyRouteAllowedDocumentGroups->empty()) {
+                                    for (std::size_t route = 0;
+                                         route < topologyRouteAllowedDocumentGroups->size();
+                                         ++route) {
+                                        const auto quota = topologyRouteQuotas[route];
+                                        if (quota == 0) {
+                                            continue;
+                                        }
+                                        auto routed = queryVectorWithRelaxedRetry(
+                                            queryEmbedding.value(), quota,
+                                            &(*topologyRouteAllowedDocumentGroups)[route],
+                                            &vectorSearchDiagnostics);
+                                        if (routed) {
+                                            appendUnique(std::move(routed.value()),
+                                                         topologyVectorResultLimit);
+                                        }
+                                    }
+                                } else {
+                                    auto routed = queryVectorWithRelaxedRetry(
+                                        queryEmbedding.value(), topologyVectorResultLimit,
+                                        topologyRouteAllowedDocuments.get(),
+                                        &vectorSearchDiagnostics);
+                                    if (routed) {
+                                        appendUnique(std::move(routed.value()),
+                                                     topologyVectorResultLimit);
+                                    }
+                                }
+
+                                if (!routedResults.empty()) {
                                     topologyVectorAllowedSetAnnApplied = true;
                                     topologyVectorFilterApplied = true;
-                                    topologyVectorFilterMatched = routed.value().size();
-                                    return routed;
+                                    topologyVectorFilterMatched = routedResults.size();
+                                    if (topologyVectorGlobalFillAllowed &&
+                                        routedResults.size() < topologyVectorResultLimit) {
+                                        auto global = queryVectorWithRelaxedRetry(
+                                            queryEmbedding.value(), topologyVectorResultLimit,
+                                            nullptr, &vectorSearchDiagnostics);
+                                        if (global) {
+                                            topologyVectorGlobalFillCount =
+                                                appendUnique(std::move(global.value()),
+                                                             topologyVectorResultLimit);
+                                        }
+                                    }
+                                    std::ranges::sort(
+                                        routedResults, [](const auto& lhs, const auto& rhs) {
+                                            if (lhs.score != rhs.score) {
+                                                return lhs.score > rhs.score;
+                                            }
+                                            return lhs.documentHash < rhs.documentHash;
+                                        });
+                                    for (std::size_t rank = 0; rank < routedResults.size();
+                                         ++rank) {
+                                        routedResults[rank].rank = rank;
+                                    }
+                                    return Result<std::vector<ComponentResult>>{
+                                        std::move(routedResults)};
                                 }
                                 topologyVectorAllowedSetAnnFallback = true;
                                 topologyVectorFilterFallback = true;
@@ -2218,6 +2347,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                          topologyVectorAllowedSetAnnApplied);
             setDebugBool(response.debugStats, metrics::kTopologyVectorAllowedSetAnnFallback,
                          topologyVectorAllowedSetAnnFallback);
+            setDebug(response.debugStats, metrics::kTopologyVectorGlobalFillCount,
+                     std::to_string(topologyVectorGlobalFillCount));
             setDebug(response.debugStats, metrics::kTopologyShadowRetainedCandidates,
                      std::to_string(topologyShadowRetainedCandidates));
             setDebug(response.debugStats, metrics::kTopologyShadowRemovedCandidates,
@@ -2239,6 +2370,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                               topologyVectorAllowedSetAnnApplied ? 1 : 0);
             traceCollector.recordStageCounter("vector", "topology_allowed_set_ann_fallback",
                                               topologyVectorAllowedSetAnnFallback ? 1 : 0);
+            traceCollector.recordStageCounter(
+                "vector", "topology_global_fill_count",
+                static_cast<std::int64_t>(topologyVectorGlobalFillCount));
         }
     } else {
         auto runSequential = [&](auto queryFn, const char* name, float weight,
@@ -3782,6 +3916,28 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
              std::to_string(vectorSearchDiagnostics.exactDistanceEvaluations));
     setDebug(response.debugStats, metrics::kVectorSearchAnnCandidateBudgetActual,
              std::to_string(vectorSearchDiagnostics.annCandidateBudget));
+    setDebug(response.debugStats, metrics::kVectorSearchCandidateLookupCount,
+             std::to_string(vectorSearchDiagnostics.candidateLookupCount));
+    setDebugBool(response.debugStats, metrics::kVectorSearchCandidateIndexCacheUsed,
+                 vectorSearchDiagnostics.usedCandidateIndexCache);
+    setDebug(response.debugStats, metrics::kVectorSearchCandidateIndexPayloadBytes,
+             std::to_string(vectorSearchDiagnostics.candidateIndexPayloadBytes));
+    setDebug(response.debugStats, metrics::kVectorSearchMaterializedRows,
+             std::to_string(vectorSearchDiagnostics.materializedRows));
+    setDebug(response.debugStats, metrics::kVectorSearchCandidateLookupNs,
+             std::to_string(vectorSearchDiagnostics.candidateLookupNanoseconds));
+    setDebug(response.debugStats, metrics::kVectorSearchCandidateProjectionNs,
+             std::to_string(vectorSearchDiagnostics.candidateProjectionNanoseconds));
+    setDebug(response.debugStats, metrics::kVectorSearchPqLutNs,
+             std::to_string(vectorSearchDiagnostics.pqLutNanoseconds));
+    setDebug(response.debugStats, metrics::kVectorSearchAdcScoringNs,
+             std::to_string(vectorSearchDiagnostics.adcScoringNanoseconds));
+    setDebug(response.debugStats, metrics::kVectorSearchTopKSelectionNs,
+             std::to_string(vectorSearchDiagnostics.topKSelectionNanoseconds));
+    setDebug(response.debugStats, metrics::kVectorSearchResultMaterializationNs,
+             std::to_string(vectorSearchDiagnostics.resultMaterializationNanoseconds));
+    setDebug(response.debugStats, metrics::kVectorSearchExactRerankNs,
+             std::to_string(vectorSearchDiagnostics.exactRerankNanoseconds));
     traceCollector.recordStageCounter(
         "vector", "rows_visited_actual",
         static_cast<std::int64_t>(vectorSearchDiagnostics.rowsVisited));
@@ -3791,6 +3947,26 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     traceCollector.recordStageCounter(
         "vector", "ann_candidate_budget_actual",
         static_cast<std::int64_t>(vectorSearchDiagnostics.annCandidateBudget));
+    traceCollector.recordStageCounter(
+        "vector", "candidate_lookup_ns",
+        static_cast<std::int64_t>(vectorSearchDiagnostics.candidateLookupNanoseconds));
+    traceCollector.recordStageCounter(
+        "vector", "candidate_projection_ns",
+        static_cast<std::int64_t>(vectorSearchDiagnostics.candidateProjectionNanoseconds));
+    traceCollector.recordStageCounter(
+        "vector", "pq_lut_ns", static_cast<std::int64_t>(vectorSearchDiagnostics.pqLutNanoseconds));
+    traceCollector.recordStageCounter(
+        "vector", "adc_scoring_ns",
+        static_cast<std::int64_t>(vectorSearchDiagnostics.adcScoringNanoseconds));
+    traceCollector.recordStageCounter(
+        "vector", "topk_selection_ns",
+        static_cast<std::int64_t>(vectorSearchDiagnostics.topKSelectionNanoseconds));
+    traceCollector.recordStageCounter(
+        "vector", "result_materialization_ns",
+        static_cast<std::int64_t>(vectorSearchDiagnostics.resultMaterializationNanoseconds));
+    traceCollector.recordStageCounter(
+        "vector", "exact_rerank_ns",
+        static_cast<std::int64_t>(vectorSearchDiagnostics.exactRerankNanoseconds));
     traceCollector.recordStageCounter("vector", "relaxed_retry_enabled",
                                       relaxedVectorRetryEnabled ? 1 : 0);
     traceCollector.recordStageCounter("vector", "relaxed_retry_attempted",

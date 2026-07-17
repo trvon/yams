@@ -209,6 +209,9 @@ struct TopologyRouteRequest {
     /// Maximum total dense representatives evaluated per cluster, including the centroid.
     /// Zero evaluates the complete prebuilt cover.
     std::size_t maxRoutingRepresentatives{0};
+    /// Maximum centroid candidates exact-scored after cached ANN routing. Zero preserves the
+    /// exhaustive centroid scan. Sparse-vote clusters are always unioned into the shortlist.
+    std::size_t denseAnnCandidateLimit{0};
 };
 
 struct ClusterRoute {

@@ -50,6 +50,12 @@ constexpr std::string_view kTopologyRouteRepresentativeDistanceEvaluations =
     "topology_route_representative_distance_evaluations";
 constexpr std::string_view kTopologyRouteRepresentativeCountMax =
     "topology_route_representative_count_max";
+constexpr std::string_view kTopologyRouteAnnUsed = "topology_route_ann_used";
+constexpr std::string_view kTopologyRouteAnnCandidates = "topology_route_ann_candidates";
+constexpr std::string_view kTopologyRouteAnnDistanceEvaluations =
+    "topology_route_ann_distance_evaluations";
+constexpr std::string_view kTopologyRouteExactRepresentativeDistanceEvaluations =
+    "topology_route_exact_representative_distance_evaluations";
 constexpr std::string_view kTopologyWeakQueryRoutedDocs = "topology_weak_query_routed_docs";
 constexpr std::string_view kTopologyWeakQueryAddedCandidates =
     "topology_weak_query_added_candidates";
@@ -88,6 +94,22 @@ constexpr std::string_view kVectorSearchExactDistanceEvaluationsActual =
     "vector_search_exact_distance_evaluations_actual";
 constexpr std::string_view kVectorSearchAnnCandidateBudgetActual =
     "vector_search_ann_candidate_budget_actual";
+constexpr std::string_view kVectorSearchCandidateLookupCount =
+    "vector_search_candidate_lookup_count";
+constexpr std::string_view kVectorSearchCandidateIndexCacheUsed =
+    "vector_search_candidate_index_cache_used";
+constexpr std::string_view kVectorSearchCandidateIndexPayloadBytes =
+    "vector_search_candidate_index_payload_bytes";
+constexpr std::string_view kVectorSearchMaterializedRows = "vector_search_materialized_rows";
+constexpr std::string_view kVectorSearchCandidateLookupNs = "vector_search_candidate_lookup_ns";
+constexpr std::string_view kVectorSearchCandidateProjectionNs =
+    "vector_search_candidate_projection_ns";
+constexpr std::string_view kVectorSearchPqLutNs = "vector_search_pq_lut_ns";
+constexpr std::string_view kVectorSearchAdcScoringNs = "vector_search_adc_scoring_ns";
+constexpr std::string_view kVectorSearchTopKSelectionNs = "vector_search_topk_selection_ns";
+constexpr std::string_view kVectorSearchResultMaterializationNs =
+    "vector_search_result_materialization_ns";
+constexpr std::string_view kVectorSearchExactRerankNs = "vector_search_exact_rerank_ns";
 constexpr std::string_view kTopologyVectorFilterApplied = "topology_vector_filter_applied";
 constexpr std::string_view kTopologyVectorFilterFallback = "topology_vector_filter_fallback";
 constexpr std::string_view kTopologyVectorFilterMatched = "topology_vector_filter_matched";
@@ -96,6 +118,7 @@ constexpr std::string_view kTopologyVectorAllowedSetAnnApplied =
     "topology_vector_allowed_set_ann_applied";
 constexpr std::string_view kTopologyVectorAllowedSetAnnFallback =
     "topology_vector_allowed_set_ann_fallback";
+constexpr std::string_view kTopologyVectorGlobalFillCount = "topology_vector_global_fill_count";
 constexpr std::string_view kTopologyShadowEvaluated = "topology_shadow_evaluated";
 constexpr std::string_view kTopologyShadowProposedAction = "topology_shadow_proposed_action";
 constexpr std::string_view kTopologyShadowRetainedCandidates =

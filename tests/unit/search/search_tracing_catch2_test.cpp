@@ -192,6 +192,10 @@ TEST_CASE("recordTopologyRoutingDebug emits the legacy topology key set",
     session.confidenceAbstained = true;
     session.routeRepresentativeDistanceEvaluations = 7;
     session.routeRepresentativeCountMax = 4;
+    session.routeAnnUsed = true;
+    session.routeAnnCandidates = 6;
+    session.routeAnnDistanceEvaluations = 4;
+    session.routeExactRepresentativeDistanceEvaluations = 3;
     session.addedCandidateHashes = {"hash-a", "hash-b"};
     session.routedCandidateHashes = {"hash-c", "hash-a"};
     session.candidateStructureEvidence.emplace("hash-a",
@@ -245,6 +249,10 @@ TEST_CASE("recordTopologyRoutingDebug emits the legacy topology key set",
     CHECK(debug.at("topology_route_confidence_abstained") == "1");
     CHECK(debug.at("topology_route_representative_distance_evaluations") == "7");
     CHECK(debug.at("topology_route_representative_count_max") == "4");
+    CHECK(debug.at("topology_route_ann_used") == "1");
+    CHECK(debug.at("topology_route_ann_candidates") == "6");
+    CHECK(debug.at("topology_route_ann_distance_evaluations") == "4");
+    CHECK(debug.at("topology_route_exact_representative_distance_evaluations") == "3");
     CHECK(debug.at("topology_weak_query_routed_docs") == "5");
     CHECK(debug.at("topology_weak_query_added_candidates") == "4");
     CHECK(debug.at("topology_weak_query_duplicate_candidates") == "3");

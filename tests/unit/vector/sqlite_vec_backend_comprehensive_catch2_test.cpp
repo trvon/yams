@@ -602,6 +602,65 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend SPQ rerank improves 
     CHECK((recall_rerank8 >= 0.85));
 }
 
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend Simeon PQ ranking is independent of insertion order",
+                 "[vector][backend][search][spq][determinism][catch2]") {
+    skipIfNeeded();
+
+    constexpr size_t kDim = 32;
+    constexpr size_t kCorpus = 96;
+    constexpr size_t kTopK = 8;
+
+    std::vector<VectorRecord> records;
+    records.reserve(kCorpus);
+    for (size_t i = 0; i < kCorpus; ++i) {
+        records.push_back(createVectorRecord("stable_" + std::to_string(i),
+                                             createEmbedding(kDim, static_cast<float>(i + 1))));
+    }
+
+    const auto buildBackend = [&](bool reverseInsertion) {
+        SqliteVecBackend::Config config;
+        config.search_engine = VectorSearchEngine::SimeonPqAdc;
+        config.embedding_dim = kDim;
+        config.simeon_pq_subquantizers = 8;
+        config.simeon_pq_centroids = 2;
+        config.simeon_pq_train_limit = 32;
+        config.simeon_pq_rerank_factor = 1;
+
+        auto backend = std::make_unique<SqliteVecBackend>(config);
+        REQUIRE((backend->initialize(":memory:").has_value()));
+        REQUIRE((backend->createTables(kDim).has_value()));
+        if (reverseInsertion) {
+            auto reversed = records;
+            std::ranges::reverse(reversed);
+            REQUIRE((backend->insertVectorsBatch(reversed).has_value()));
+        } else {
+            REQUIRE((backend->insertVectorsBatch(records).has_value()));
+        }
+        REQUIRE((backend->buildIndex().has_value()));
+        return backend;
+    };
+
+    auto forward = buildBackend(false);
+    auto reverse = buildBackend(true);
+    for (size_t queryIndex = 0; queryIndex < 12; ++queryIndex) {
+        const auto query = createEmbedding(kDim, static_cast<float>(5000 + queryIndex));
+        auto forwardResult = forward->searchSimilar(query, kTopK, -1.0F, std::nullopt, {});
+        auto reverseResult = reverse->searchSimilar(query, kTopK, -1.0F, std::nullopt, {});
+        REQUIRE((forwardResult.has_value()));
+        REQUIRE((reverseResult.has_value()));
+
+        std::vector<std::string> forwardIds;
+        std::vector<std::string> reverseIds;
+        std::ranges::transform(forwardResult.value(), std::back_inserter(forwardIds),
+                               &VectorRecord::chunk_id);
+        std::ranges::transform(reverseResult.value(), std::back_inserter(reverseIds),
+                               &VectorRecord::chunk_id);
+        CAPTURE(queryIndex, forwardIds, reverseIds);
+        CHECK((forwardIds == reverseIds));
+    }
+}
+
 TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend vec0 search engine basic",
                  "[vector][backend][search][vec0][catch2]") {
     skipIfNeeded();
@@ -860,6 +919,57 @@ TEST_CASE_METHOD(SqliteVecBackendFixture,
     for (const auto& r : filterResult.value()) {
         CHECK((r.document_hash == "doc_A"));
     }
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend Simeon PQ routes candidate documents through ADC",
+                 "[vector][backend][search][filter][spq][diagnostics][catch2]") {
+    skipIfNeeded();
+
+    constexpr size_t kDim = 64;
+    SqliteVecBackend::Config config;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.embedding_dim = kDim;
+    config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_rerank_factor = 2;
+    SqliteVecBackend backend(config);
+    REQUIRE((backend.initialize(":memory:").has_value()));
+    REQUIRE((backend.createTables(kDim).has_value()));
+
+    std::vector<std::vector<float>> embeddings;
+    for (int i = 0; i < 24; ++i) {
+        embeddings.push_back(createEmbedding(kDim, static_cast<float>(i + 1)));
+        REQUIRE((backend
+                     .insertVector(createVectorRecord("spq_route_" + std::to_string(i),
+                                                      embeddings.back(),
+                                                      "route_doc_" + std::to_string(i)))
+                     .has_value()));
+    }
+    REQUIRE((backend.buildIndex().has_value()));
+
+    const std::unordered_set<std::string> routedDocuments = {"route_doc_3", "route_doc_11",
+                                                             "route_doc_19"};
+    VectorSearchDiagnostics diagnostics;
+    auto routed =
+        backend.searchSimilarWithDiagnostics(embeddings[11], routedDocuments.size(), -1.0F,
+                                             std::nullopt, routedDocuments, {}, diagnostics);
+    REQUIRE((routed.has_value()));
+    REQUIRE((routed.value().size() == routedDocuments.size()));
+    CHECK((routed.value().front().document_hash == "route_doc_11"));
+    for (const auto& record : routed.value()) {
+        CHECK((routedDocuments.contains(record.document_hash)));
+    }
+
+    CHECK((diagnostics.usedAnn));
+    CHECK_FALSE(diagnostics.usedExactScan);
+    CHECK((diagnostics.annCandidateBudget == routedDocuments.size()));
+    CHECK((diagnostics.rowsVisited == routedDocuments.size()));
+    CHECK((diagnostics.exactDistanceEvaluations == routedDocuments.size()));
+    CHECK((diagnostics.usedCandidateIndexCache));
+    CHECK((diagnostics.candidateIndexPayloadBytes > 0));
+    CHECK((diagnostics.candidateLookupCount == 1));
+    CHECK((diagnostics.materializedRows == routedDocuments.size()));
+    CHECK((diagnostics.returnedRows == routedDocuments.size()));
 }
 
 TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend searchSimilar with metadata_filters",

@@ -87,6 +87,7 @@ struct TopologyRoutingOptions {
     std::size_t minClusters = 1;
     std::size_t maxClusters = 0;
     std::size_t representativeLimit = 0;
+    std::size_t denseAnnCandidateLimit = 0;
     float adaptiveProbeScoreGap = 0.0F;
     float narrowMinBoundaryMargin = 0.0F;
     /// Maximum documents in a materialized route allowed set or expansion result.
@@ -146,9 +147,16 @@ struct TopologyRoutingSessionResult {
     std::size_t staleCandidates = 0;
     std::size_t routeRepresentativeDistanceEvaluations = 0;
     std::size_t routeRepresentativeCountMax = 0;
+    bool routeAnnUsed = false;
+    std::size_t routeAnnCandidates = 0;
+    std::size_t routeAnnDistanceEvaluations = 0;
+    std::size_t routeExactRepresentativeDistanceEvaluations = 0;
     std::vector<std::string> addedCandidateHashes;
     std::unordered_set<std::string> routedCandidateHashes;
     std::unordered_set<std::string> routeAllowedDocumentHashes;
+    /// Full selected membership by accepted route, in route-score order. The union above remains
+    /// the backend filter; these groups let callers allocate balanced result quotas.
+    std::vector<std::unordered_set<std::string>> routeAllowedDocumentHashGroups;
     std::unordered_set<std::string> medoidHashes;
     std::unordered_map<std::string, TopologyCandidateStructureEvidence> candidateStructureEvidence;
     TopologyRoutingTimings timings;

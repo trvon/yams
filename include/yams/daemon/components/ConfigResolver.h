@@ -83,6 +83,7 @@ public:
         std::optional<std::size_t> maxClusters;
         std::optional<std::size_t> maxSeedDocuments;
         std::optional<std::size_t> representativeLimit;
+        std::optional<std::size_t> annCandidateLimit;
         std::optional<float> adaptiveProbeScoreGap;
         std::optional<float> narrowMinBoundaryMargin;
         std::optional<std::size_t> maxDocs;
@@ -443,6 +444,7 @@ public:
      * - search.topology.max_clusters = int
      * - search.topology.max_seed_documents = int
      * - search.topology.representative_limit = int
+     * - search.topology.ann_candidate_limit = int
      * - search.topology.adaptive_probe_score_gap = float
      * - search.topology.narrow_min_boundary_margin = float
      * - search.topology.max_docs = int
