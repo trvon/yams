@@ -52,38 +52,11 @@ struct AsioConnection {
           strand(o.executor ? *o.executor
                             : GlobalIOContext::instance().get_io_context().get_executor()) {}
 
-    ~AsioConnection() {
-        alive.store(false, std::memory_order_release);
-        if (socket) {
-            boost::system::error_code ec;
-            if (socket->is_open()) {
-                socket->cancel(ec);
-                socket->close(ec);
-            }
-            socket.reset();
-        }
-    }
+    ~AsioConnection();
 
-    void close() {
-        alive.store(false, std::memory_order_release);
-        if (socket) {
-            if (socket->is_open()) {
-                boost::system::error_code ec;
-                socket->close(ec);
-            }
-            socket.reset();
-        }
-    }
-
-    void cancel() {
-        alive.store(false, std::memory_order_release);
-        cancel_signal.emit(boost::asio::cancellation_type::terminal);
-        if (socket && socket->is_open()) {
-            boost::system::error_code ec;
-            socket->cancel(ec);
-            socket->close(ec);
-        }
-    }
+    void close();
+    void cancel();
+    void closeSocketOnStrand(bool cancelFirst, bool resetSocket);
 
     // Get cancellation slot for binding to async operations
     boost::asio::cancellation_slot cancellation_slot() { return cancel_signal.slot(); }

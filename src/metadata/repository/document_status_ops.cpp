@@ -355,6 +355,113 @@ Result<void> MetadataRepository::batchUpdateDocumentEmbeddingStatusByHashes(
                  "batchUpdateDocumentEmbeddingStatusByHashes: max retries exceeded"};
 }
 
+Result<void>
+MetadataRepository::batchCompleteDocumentEmbeddingsByHashes(const std::vector<std::string>& hashes,
+                                                            const std::string& modelId) {
+    if (hashes.empty()) {
+        return Result<void>();
+    }
+
+    const std::string completedStatus = RepairStatusUtils::toString(RepairStatus::Completed);
+    auto result = executeQuery<int64_t>([&](Database& db) -> Result<int64_t> {
+        YAMS_TRY(beginTransaction(db));
+        bool committed = false;
+        auto rollback = scope_exit([&] {
+            if (!committed) {
+                rollbackIgnoringErrors(db);
+            }
+        });
+
+        if (!modelId.empty()) {
+            YAMS_TRY_UNWRAP(modelStmt, db.prepareCached(R"(
+                INSERT OR IGNORE INTO vector_models (model_id, model_name, embedding_dim)
+                VALUES (?, ?, 0)
+            )"));
+            YAMS_TRY(modelStmt->bindAll(modelId, modelId));
+            YAMS_TRY(modelStmt->execute());
+        }
+
+        YAMS_TRY_UNWRAP(lookupStmt, db.prepareCached(R"(
+            SELECT d.id, COALESCE(des.has_embedding, 0)
+            FROM documents d
+            LEFT JOIN document_embeddings_status des ON d.id = des.document_id
+            WHERE d.sha256_hash = ?
+        )"));
+        YAMS_TRY_UNWRAP(embeddingStmt, db.prepareCached(R"(
+            INSERT INTO document_embeddings_status
+                (document_id, has_embedding, model_id, updated_at)
+            VALUES (?, 1, ?, unixepoch())
+            ON CONFLICT(document_id) DO UPDATE SET
+                has_embedding = 1,
+                model_id = excluded.model_id,
+                updated_at = excluded.updated_at
+        )"));
+        YAMS_TRY_UNWRAP(repairStmt, db.prepareCached(R"(
+            UPDATE documents
+            SET repair_status = ?,
+                repair_attempted_at = unixepoch(),
+                repair_attempts = repair_attempts + 1
+            WHERE id = ?
+        )"));
+
+        int64_t embeddedDelta = 0;
+        for (const auto& hash : hashes) {
+            if (hash.empty()) {
+                continue;
+            }
+
+            YAMS_TRY(lookupStmt->reset());
+            YAMS_TRY(lookupStmt->clearBindings());
+            YAMS_TRY(lookupStmt->bind(1, hash));
+            YAMS_TRY_UNWRAP(hasRow, lookupStmt->step());
+            if (!hasRow) {
+                continue;
+            }
+
+            const auto documentId = lookupStmt->getInt64(0);
+            const bool hadEmbedding = lookupStmt->getInt(1) != 0;
+
+            YAMS_TRY(embeddingStmt->reset());
+            YAMS_TRY(embeddingStmt->clearBindings());
+            YAMS_TRY(embeddingStmt->bind(1, documentId));
+            YAMS_TRY(embeddingStmt->bind(2, modelId.empty() ? nullptr : modelId.c_str()));
+            YAMS_TRY(embeddingStmt->execute());
+
+            YAMS_TRY(repairStmt->reset());
+            YAMS_TRY(repairStmt->clearBindings());
+            YAMS_TRY(repairStmt->bindAll(completedStatus, documentId));
+            YAMS_TRY(repairStmt->execute());
+
+            if (!hadEmbedding) {
+                ++embeddedDelta;
+            }
+        }
+
+        YAMS_TRY(commitOrRollback(db));
+        committed = true;
+        rollback.dismiss();
+        return embeddedDelta;
+    });
+
+    if (!result) {
+        if (storage::sqlite_retry::isBusyOrLockedMessage(result.error().message)) {
+            daemon::TuneAdvisor::reportDbLockError();
+        }
+        return result.error();
+    }
+
+    if (result.value() > 0) {
+        cachedEmbeddedCount_.fetch_add(static_cast<uint64_t>(result.value()),
+                                       std::memory_order_relaxed);
+    }
+    signalCorpusStatsStale();
+    YAMS_DCHECK(cachedEmbeddedCount_.load(std::memory_order_relaxed) <=
+                    cachedDocumentCount_.load(std::memory_order_relaxed),
+                "metadata: embedded count must not exceed total document count after "
+                "embedding completion batch");
+    return Result<void>();
+}
+
 Result<void> MetadataRepository::reconcileDocumentEmbeddingStatusByHashes(
     const std::vector<std::string>& embeddedHashes, const std::string& modelId) {
     constexpr int kMaxRetries = 5;

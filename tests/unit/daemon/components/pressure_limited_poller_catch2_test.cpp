@@ -12,7 +12,9 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <mutex>
 #include <thread>
+#include <vector>
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -32,9 +34,9 @@ namespace {
 /// so it immediately enters the capability-sleep branch (250ms timer loop).
 /// Fields that the poller never reaches in this path are left as no-op stubs.
 template <typename Task>
-PressureLimitedPollerConfig<Task> makeCapabilitySleepConfig(std::atomic<bool>& stopFlag,
-                                                            std::atomic<bool>& startedFlag,
-                                                            std::atomic<bool>& pauseFlag) {
+PressureLimitedPollerConfig<Task> makeCapabilitySleepConfig(
+    std::atomic<bool>& stopFlag, std::atomic<bool>& startedFlag, std::atomic<bool>& pauseFlag,
+    std::shared_ptr<boost::asio::steady_timer> wakeTimer, std::mutex& wakeMutex) {
     PressureLimitedPollerConfig<Task> cfg;
     cfg.stageName = "test-capability-sleep";
     cfg.stopFlag = &stopFlag;
@@ -54,6 +56,8 @@ PressureLimitedPollerConfig<Task> makeCapabilitySleepConfig(std::atomic<bool>& s
     thread_local std::atomic<std::size_t> tlsInFlight{0};
     cfg.wasActiveFlag = &tlsWasActive;
     cfg.inFlightCounter = &tlsInFlight;
+    cfg.wakeTimer = std::move(wakeTimer);
+    cfg.wakeTimerMutex = &wakeMutex;
     return cfg;
 }
 
@@ -89,7 +93,150 @@ makeWakeTimerConfig(std::atomic<bool>& stopFlag, std::atomic<bool>& startedFlag,
     return cfg;
 }
 
+class BatchPollerHarness {
+public:
+    explicit BatchPollerHarness(std::chrono::milliseconds coalesceWindow)
+        : coalesceWindow_(coalesceWindow),
+          wakeTimer_(std::make_shared<boost::asio::steady_timer>(ioContext_)),
+          channel_(std::make_shared<SpscQueue<int>>(16)) {}
+
+    bool pushNormal(int value) { return channel_->try_push(value); }
+
+    bool pushHighPriority(int value) {
+        if (!highPriorityChannel_) {
+            highPriorityChannel_ = std::make_shared<SpscQueue<int>>(16);
+        }
+        return highPriorityChannel_->try_push(value);
+    }
+
+    void scheduleNormal(int value, std::chrono::milliseconds delay) {
+        auto timer = std::make_shared<boost::asio::steady_timer>(ioContext_, delay);
+        timer->async_wait([this, value](boost::system::error_code ec) {
+            if (!ec) {
+                (void)channel_->try_push(value);
+                cancelWakeTimer();
+            }
+        });
+        arrivals_.push_back(std::move(timer));
+    }
+
+    void run(std::chrono::milliseconds timeout = 100ms) {
+        startedAt_ = std::chrono::steady_clock::now();
+        auto deadline = std::make_shared<boost::asio::steady_timer>(ioContext_, timeout);
+        deadline->async_wait([this](boost::system::error_code ec) {
+            if (!ec) {
+                timedOut = true;
+                stop();
+            }
+        });
+
+        auto cfg = makeConfig();
+        cfg.batchProcessFn = [this, deadline](std::vector<int>&& batch) {
+            observed = std::move(batch);
+            elapsed = std::chrono::steady_clock::now() - startedAt_;
+            stop();
+            deadline->cancel();
+        };
+        boost::asio::co_spawn(ioContext_, pressureLimitedPoll<int>(channel_, std::move(cfg)),
+                              boost::asio::detached);
+        ioContext_.run();
+    }
+
+    std::vector<int> observed;
+    std::chrono::steady_clock::duration elapsed{};
+    bool timedOut{false};
+
+private:
+    PressureLimitedPollerConfig<int> makeConfig() {
+        PressureLimitedPollerConfig<int> cfg;
+        cfg.stageName = "test-batch";
+        cfg.stopFlag = &stopFlag_;
+        cfg.startedFlag = &startedFlag_;
+        cfg.pauseFlag = &pauseFlag_;
+        cfg.wasActiveFlag = &wasActive_;
+        cfg.inFlightCounter = &inFlight_;
+        cfg.maxConcurrentFn = []() -> std::size_t { return 4; };
+        cfg.tryAcquireFn = [](GradientLimiter*, const std::string&, const std::string&) {
+            return true;
+        };
+        cfg.completeJobFn = [](const std::string&, bool) {};
+        cfg.getHashFn = [](const int& task) { return std::to_string(task); };
+        cfg.executor = ioContext_.get_executor();
+        cfg.batchMode = true;
+        cfg.batchSizeFn = []() -> std::size_t { return 4; };
+        cfg.batchCoalesceWindowFn = [this]() { return coalesceWindow_; };
+        cfg.highPriorityChannel = highPriorityChannel_;
+        cfg.highPriorityMaxPerBatchFn = []() -> std::size_t { return 4; };
+        cfg.enableCpuThrottling = false;
+        cfg.wakeTimer = wakeTimer_;
+        cfg.wakeTimerMutex = &wakeMutex_;
+        return cfg;
+    }
+
+    void cancelWakeTimer() {
+        std::lock_guard<std::mutex> lock(wakeMutex_);
+        boost::system::error_code ec;
+        wakeTimer_->cancel(ec);
+    }
+
+    void stop() {
+        stopFlag_.store(true, std::memory_order_release);
+        cancelWakeTimer();
+        for (const auto& timer : arrivals_) {
+            timer->cancel();
+        }
+    }
+
+    std::chrono::milliseconds coalesceWindow_;
+    boost::asio::io_context ioContext_;
+    std::atomic<bool> stopFlag_{false};
+    std::atomic<bool> startedFlag_{false};
+    std::atomic<bool> pauseFlag_{false};
+    std::atomic<bool> wasActive_{false};
+    std::atomic<std::size_t> inFlight_{0};
+    std::mutex wakeMutex_;
+    std::shared_ptr<boost::asio::steady_timer> wakeTimer_;
+    std::shared_ptr<SpscQueue<int>> channel_;
+    std::shared_ptr<SpscQueue<int>> highPriorityChannel_;
+    std::vector<std::shared_ptr<boost::asio::steady_timer>> arrivals_;
+    std::chrono::steady_clock::time_point startedAt_{};
+};
+
 } // namespace
+
+TEST_CASE("PressureLimitedPoller coalesces normal-priority trickle into a bounded batch",
+          "[daemon][poller][batch][coalesce][catch2]") {
+    BatchPollerHarness harness{10ms};
+    REQUIRE(harness.pushNormal(1));
+    for (int value = 2; value <= 4; ++value) {
+        harness.scheduleNormal(value, value * 1ms);
+    }
+    harness.run();
+
+    CHECK_FALSE(harness.timedOut);
+    CHECK(harness.observed == std::vector<int>{1, 2, 3, 4});
+}
+
+TEST_CASE("PressureLimitedPoller does not coalesce high-priority batch work",
+          "[daemon][poller][batch][coalesce][priority][catch2]") {
+    BatchPollerHarness harness{20ms};
+    REQUIRE(harness.pushHighPriority(42));
+    harness.scheduleNormal(7, 2ms);
+    harness.run();
+
+    CHECK(harness.observed == std::vector<int>{42});
+}
+
+TEST_CASE("PressureLimitedPoller bounds lone normal-task coalescing latency",
+          "[daemon][poller][batch][coalesce][latency][catch2]") {
+    BatchPollerHarness harness{3ms};
+    REQUIRE(harness.pushNormal(9));
+    harness.run(50ms);
+
+    CHECK_FALSE(harness.timedOut);
+    CHECK(harness.observed == std::vector<int>{9});
+    CHECK(harness.elapsed < 50ms);
+}
 
 // ---------------------------------------------------------------------------
 // Capability-sleep shutdown (the Windows title-poller crash path)
@@ -102,8 +249,11 @@ TEST_CASE("PressureLimitedPoller exits on stop while sleeping in capability chec
     std::atomic<bool> stopFlag{false};
     std::atomic<bool> startedFlag{false};
     std::atomic<bool> pauseFlag{false};
+    std::mutex wakeMutex;
+    auto wakeTimer = std::make_shared<boost::asio::steady_timer>(ioc);
 
-    auto cfg = makeCapabilitySleepConfig<int>(stopFlag, startedFlag, pauseFlag);
+    auto cfg =
+        makeCapabilitySleepConfig<int>(stopFlag, startedFlag, pauseFlag, wakeTimer, wakeMutex);
     auto channel = std::make_shared<SpscQueue<int>>(16);
 
     boost::asio::co_spawn(ioc, pressureLimitedPoll<int>(channel, std::move(cfg)),
@@ -141,8 +291,11 @@ TEST_CASE("PressureLimitedPoller stop before start is safe", "[daemon][poller][s
     std::atomic<bool> stopFlag{true}; // already stopped
     std::atomic<bool> startedFlag{false};
     std::atomic<bool> pauseFlag{false};
+    std::mutex wakeMutex;
+    auto wakeTimer = std::make_shared<boost::asio::steady_timer>(ioc);
 
-    auto cfg = makeCapabilitySleepConfig<int>(stopFlag, startedFlag, pauseFlag);
+    auto cfg =
+        makeCapabilitySleepConfig<int>(stopFlag, startedFlag, pauseFlag, wakeTimer, wakeMutex);
     auto channel = std::make_shared<SpscQueue<int>>(16);
 
     boost::asio::co_spawn(ioc, pressureLimitedPoll<int>(channel, std::move(cfg)),
@@ -253,8 +406,11 @@ TEST_CASE("PressureLimitedPoller survives start-stop-restart cycle",
     std::atomic<bool> stopFlag{false};
     std::atomic<bool> startedFlag{false};
     std::atomic<bool> pauseFlag{false};
+    std::mutex wakeMutex;
+    auto wakeTimer = std::make_shared<boost::asio::steady_timer>(ioc);
 
-    auto cfg = makeCapabilitySleepConfig<int>(stopFlag, startedFlag, pauseFlag);
+    auto cfg =
+        makeCapabilitySleepConfig<int>(stopFlag, startedFlag, pauseFlag, wakeTimer, wakeMutex);
     auto channel = std::make_shared<SpscQueue<int>>(16);
 
     // Cycle 1

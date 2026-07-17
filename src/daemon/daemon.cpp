@@ -17,6 +17,7 @@
 #include <boost/asio/use_future.hpp>
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/core/assert.hpp>
+#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/IOCoordinator.h>
 #include <yams/daemon/components/LifecycleComponent.h>
@@ -1397,64 +1398,18 @@ void YamsDaemon::reloadTuningConfig() {
             spdlog::warn("[Reload] Failed to parse config: {}", parsed.error().message);
             return;
         }
-        const auto& toml = parsed.value();
-        if (toml.find("tuning") == toml.end()) {
-            spdlog::info("[Reload] No [tuning] section in config; nothing to apply");
-            return;
-        }
-        const auto& tune = toml.at("tuning");
-        auto as_int = [&](const char* k) -> std::optional<int> {
-            auto it = tune.find(k);
-            if (it == tune.end())
-                return std::nullopt;
-            try {
-                return std::stoi(it->second);
-            } catch (const std::exception& e) {
-                spdlog::debug("[Reload] Failed to parse tuning key '{}': {}", k, e.what());
-                return std::nullopt;
-            }
-        };
-        if (auto v = as_int("cli_pool_threads")) {
-            TuneAdvisor::setCliRequestPoolThreads(static_cast<uint32_t>(*v));
-        }
-        if (auto v = as_int("list_inflight_limit")) {
-            TuneAdvisor::setListInflightLimit(static_cast<uint32_t>(*v));
-        }
-        if (auto v = as_int("list_admission_wait_ms")) {
-            TuneAdvisor::setListAdmissionWaitMs(static_cast<uint32_t>(*v));
-        }
-        if (auto v = as_int("grep_inflight_limit")) {
-            TuneAdvisor::setGrepInflightLimit(static_cast<uint32_t>(*v));
-        }
-        if (auto v = as_int("grep_admission_wait_ms")) {
-            TuneAdvisor::setGrepAdmissionWaitMs(static_cast<uint32_t>(*v));
-        }
-        TuningConfig tc = currentTuning; // preserve unspecified values from the live config
-        if (auto v = as_int("target_cpu_percent"))
-            tc.targetCpuPercent = static_cast<uint32_t>(*v);
-        if (auto v = as_int("post_ingest_capacity"))
-            tc.postIngestCapacity = static_cast<std::size_t>(*v);
-        if (auto v = as_int("post_ingest_threads_min"))
-            tc.postIngestThreadsMin = static_cast<std::size_t>(*v);
-        if (auto v = as_int("post_ingest_threads_max"))
-            tc.postIngestThreadsMax = static_cast<std::size_t>(*v);
-        if (auto v = as_int("admit_warn_threshold"))
-            tc.admitWarnThreshold = static_cast<std::size_t>(*v);
-        if (auto v = as_int("admit_stop_threshold"))
-            tc.admitStopThreshold = static_cast<std::size_t>(*v);
-        if (auto v = as_int("control_interval_ms"))
-            tc.controlIntervalMs = static_cast<uint32_t>(*v);
-        if (auto v = as_int("hold_ms"))
-            tc.holdMs = static_cast<uint32_t>(*v);
+        const auto tuning =
+            ConfigResolver::applyRuntimeTuning(parsed.value(), std::move(currentTuning));
         {
             std::lock_guard<std::mutex> lock(configMutex_);
-            config_.tuning = tc;
+            config_.tuning = tuning;
         }
         if (serviceManager_) {
-            serviceManager_->setTuningConfig(tc);
+            serviceManager_->setTuningConfig(tuning);
         }
         spdlog::info("[Reload] Applied tuning config: cap={}, threads={}..{}",
-                     tc.postIngestCapacity, tc.postIngestThreadsMin, tc.postIngestThreadsMax);
+                     tuning.postIngestCapacity, tuning.postIngestThreadsMin,
+                     tuning.postIngestThreadsMax);
     } catch (const std::exception& e) {
         spdlog::warn("[Reload] Exception during tuning reload: {}", e.what());
     } catch (...) {

@@ -3,9 +3,10 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
 import io
+import json
+import signal
 import sys
 import tempfile
 import unittest
@@ -32,12 +33,20 @@ from workers.mixed_corpus import (  # noqa: E402
     analyze_mixed_corpus_debug,
     materialize_mixed_beir_manifest,
 )
+from workers.ingestion_e2e import (  # noqa: E402
+    extract_metrics as extract_ingestion_metrics,
+    ingestion_experiment_identity,
+    require_ingestion_experiment_identity,
+    validate_ingestion_contract,
+)
 from workers.retrieval_quality import (  # noqa: E402
     _benchmark_command,
     _mark_shared_topology_seed_reuse,
     _merge_benchmark_env,
     _reset_measured_outputs,
     clone_benchmark_state,
+    describe_process_failure,
+    parse_benchmark_setup_metrics,
     parse_debug_jsonl,
     require_shared_topology_construction_identity,
     require_steady_state,
@@ -147,6 +156,19 @@ class RetrievalQualityEnvironmentTests(unittest.TestCase):
                 path.write_text("stale\n", encoding="utf-8")
             _reset_measured_outputs(paths)
             self.assertTrue(all(not path.exists() for path in paths))
+
+    def test_retrieval_quality_preserves_native_process_failure(self) -> None:
+        output = """startup noise
+[YAMS] dcheck failed
+src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocumentCount_
+"""
+
+        message = describe_process_failure(-signal.SIGABRT, output)
+
+        self.assertIsNotNone(message)
+        self.assertIn("SIGABRT", message or "")
+        self.assertIn("metadata_repository.cpp:1251", message or "")
+        self.assertIsNone(describe_process_failure(0, output))
 
     def test_shared_clone_reuses_primed_topology_inputs(self) -> None:
         env: dict[str, str] = {}
@@ -776,6 +798,274 @@ class RetrievalQualityEnvironmentTests(unittest.TestCase):
             )
 
             self.assertIsNone(require_steady_state(debug_path, require_vector=False))
+
+
+class IngestionContractTests(unittest.TestCase):
+    @staticmethod
+    def _complete_result() -> dict[str, object]:
+        return {
+            "test_config": {
+                "corpus_size": 10,
+                "doc_size": 1000,
+                "corpus_seed": 42,
+                "corpus_fingerprint": "fnv1a64:abc123",
+                "ingest_mode": "directory",
+                "ingest_concurrency": 1,
+                "post_ingest_coalesce_ms": 2,
+                "embedding_model": "simeon-default",
+                "embedding_backend": "simeon",
+                "simeon_recipe": "stable",
+                "kg_enabled": True,
+            },
+            "pipeline_status": {
+                "complete": True,
+                "expected_post": 10,
+                "observed_post": 10,
+                "expected_embed": 10,
+                "observed_embed": 10,
+                "expected_kg": 10,
+                "observed_kg": 10,
+                "enrichment_drained": True,
+                "write_coordinator_flushed": True,
+            },
+            "stages": {
+                "metadata_storage": {
+                    "duration_ms": 12,
+                    "count": 10,
+                    "failures": 0,
+                }
+            },
+            "phase_timings": {
+                "admission_ms": 12,
+                "storage_ready_ms": 25,
+                "pipeline_drain_ms": 30,
+                "enrichment_ready_ms": 42,
+                "searchability_ready_ms": 45,
+            },
+            "queues": {
+                "dropped_batches": 0,
+                "max_post_ingest": 4,
+            },
+            "add_dispatch_metrics": {
+                "samples": 10,
+                "total_us": 6000,
+                "max_us": 900,
+                "avg_us": 600,
+                "fingerprint_total_us": 2000,
+                "fingerprint_max_us": 320,
+                "fingerprint_avg_us": 200,
+                "enqueue_total_us": 4000,
+                "enqueue_max_us": 700,
+                "enqueue_avg_us": 400,
+            },
+            "enrichment_status": {
+                "kg": {"queued": 10, "consumed": 10, "dropped": 0},
+                "symbol": {"queued": 2, "consumed": 2, "dropped": 0},
+                "entity": {"queued": 0, "consumed": 0, "dropped": 0},
+                "title": {"queued": 10, "consumed": 10, "dropped": 0},
+            },
+            "write_coordinator": {
+                "batches_enqueued": 12,
+                "batches_committed": 12,
+                "ops_applied": 30,
+                "commit_errors": 0,
+                "max_queue_depth": 3,
+                "capacity_rejections": 0,
+                "forced_enqueues_over_capacity": 0,
+                "max_batch_apply_ms": 4,
+                "max_batch_queue_wait_ms": 2,
+                "max_batch_excess_queue_wait_ms": 0,
+                "hot_sources": [
+                    {
+                        "source": "doc_svc/versioning",
+                        "batches": 4,
+                        "ops": 8,
+                        "errors": 0,
+                        "max_queue_wait_ms": 6,
+                    }
+                ],
+            },
+            "metadata_insert_writer_metrics": {
+                "submitted_items": 10,
+                "completed_items": 10,
+                "rejected_items": 0,
+                "batches": 4,
+                "batch_items": 10,
+                "max_batch_size": 4,
+                "avg_batch_size": 2.5,
+                "queue_wait_samples": 10,
+                "queue_wait_total_us": 500,
+                "queue_wait_max_us": 90,
+                "queue_wait_avg_us": 50,
+                "batch_apply_samples": 4,
+                "batch_apply_total_us": 1200,
+                "batch_apply_max_us": 400,
+                "batch_apply_avg_us": 300,
+                "failed_batches": 0,
+                "fallback_items": 0,
+            },
+            "metadata_insert_phase_timings": {
+                "transaction_total": {
+                    "calls": 4,
+                    "total_us": 800,
+                    "max_us": 250,
+                    "avg_us": 200,
+                }
+            },
+            "search_impact": [
+                {
+                    "name": "keyword",
+                    "required_by_contract": True,
+                    "skipped": False,
+                    "ok": True,
+                    "total_count": 10,
+                    "returned_count": 10,
+                    "wall_ms": 3,
+                }
+            ],
+        }
+
+    def test_ingestion_contract_requires_complete_lossless_searchable_pipeline(self) -> None:
+        raw = self._complete_result()
+        self.assertEqual(validate_ingestion_contract(raw, require_full_searchability=True), [])
+
+        raw["queues"]["dropped_batches"] = 1  # type: ignore[index]
+        raw["pipeline_status"]["complete"] = False  # type: ignore[index]
+        raw["search_impact"][0]["total_count"] = 9  # type: ignore[index]
+
+        errors = validate_ingestion_contract(raw, require_full_searchability=True)
+        self.assertTrue(any("pipeline incomplete" in error for error in errors))
+        self.assertTrue(any("dropped" in error for error in errors))
+        self.assertTrue(any("searchable" in error for error in errors))
+
+    def test_disabled_kg_stage_is_not_misclassified_as_data_loss(self) -> None:
+        raw = self._complete_result()
+        raw["test_config"]["kg_enabled"] = False  # type: ignore[index]
+        raw["pipeline_status"]["expected_kg"] = 0  # type: ignore[index]
+        raw["pipeline_status"]["observed_kg"] = 0  # type: ignore[index]
+        raw["enrichment_status"]["kg"] = {  # type: ignore[index]
+            "queued": 0,
+            "consumed": 0,
+            "dropped": 10,
+        }
+
+        self.assertEqual(validate_ingestion_contract(raw), [])
+
+    def test_ingestion_contract_rejects_duplicate_pipeline_work(self) -> None:
+        raw = self._complete_result()
+        raw["pipeline_status"]["observed_post"] = 11  # type: ignore[index]
+        raw["pipeline_status"]["observed_embed"] = 11  # type: ignore[index]
+
+        errors = validate_ingestion_contract(raw)
+
+        self.assertTrue(any("post duplicate work" in error for error in errors))
+        self.assertTrue(any("embed duplicate work" in error for error in errors))
+
+    def test_ingestion_metrics_export_phase_queue_and_write_coordinator_details(self) -> None:
+        metrics = extract_ingestion_metrics(self._complete_result())
+
+        self.assertEqual(metrics["admission_ms"], 12.0)
+        self.assertEqual(metrics["storage_ready_ms"], 25.0)
+        self.assertEqual(metrics["pipeline_drain_ms"], 30.0)
+        self.assertEqual(metrics["searchability_ready_ms"], 45.0)
+        self.assertEqual(metrics["queue_max_post_ingest"], 4.0)
+        self.assertEqual(metrics["add_dispatch_avg_us"], 600.0)
+        self.assertEqual(metrics["add_dispatch_fingerprint_avg_us"], 200.0)
+        self.assertEqual(metrics["add_dispatch_enqueue_avg_us"], 400.0)
+        self.assertEqual(metrics["write_coordinator_batches_committed"], 12.0)
+        self.assertEqual(metrics["write_coordinator_max_batch_queue_wait_ms"], 2.0)
+        self.assertEqual(metrics["metadata_insert_writer_avg_batch_size"], 2.5)
+        self.assertEqual(metrics["metadata_insert_writer_queue_wait_avg_us"], 50.0)
+        self.assertEqual(metrics["metadata_insert_writer_batch_apply_avg_us"], 300.0)
+        self.assertEqual(
+            metrics["metadata_insert_writer_connection_wait_estimated_total_us"],
+            400.0,
+        )
+        self.assertEqual(
+            metrics["metadata_insert_writer_connection_wait_estimated_avg_us"],
+            100.0,
+        )
+        self.assertEqual(
+            metrics["write_coordinator_source_doc_svc_versioning_max_queue_wait_ms"],
+            6.0,
+        )
+
+    def test_ingestion_identity_is_stable_and_rejects_cross_repeat_drift(self) -> None:
+        raw = self._complete_result()
+        identity = ingestion_experiment_identity(raw)
+        self.assertEqual(identity["corpus_fingerprint"], "fnv1a64:abc123")
+        self.assertEqual(identity["post_ingest_coalesce_ms"], 2)
+        self.assertNotIn("timestamp", identity)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            identity_path = Path(tmp) / "identity.json"
+            self.assertIsNone(require_ingestion_experiment_identity(identity_path, identity))
+            self.assertIsNone(require_ingestion_experiment_identity(identity_path, identity))
+
+            drifted = dict(identity)
+            drifted["ingest_mode"] = "pipelined_single_file"
+            error = require_ingestion_experiment_identity(identity_path, drifted)
+            self.assertIsNotNone(error)
+            self.assertIn("identity mismatch", error or "")
+
+    def test_mixed_quality_seed_exports_one_honest_ingestion_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            debug_path = Path(tmp) / "prime_debug.jsonl"
+            debug_path.write_text(
+                json.dumps(
+                    {
+                        "event": "benchmark_setup_metrics",
+                        "ingestion": {
+                            "cold_performed": True,
+                            "admission_ms": 11,
+                            "storage_ready_ms": 25,
+                            "pipeline_drain_ms": 14,
+                            "searchability_ready_ms": 31,
+                            "enrichment_ready_ms": 37,
+                            "measurement_n": 1,
+                        },
+                        "setup_total_ms": 41,
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            metrics = parse_benchmark_setup_metrics(debug_path)
+            self.assertEqual(metrics["ingest_admission_ms"], 11.0)
+            self.assertEqual(metrics["ingest_pipeline_drain_ms"], 14.0)
+            self.assertEqual(metrics["ingest_enrichment_ready_ms"], 37.0)
+            self.assertEqual(metrics["ingest_measurement_n"], 1.0)
+
+    def test_ingestion_plans_are_decision_grade_and_keep_submission_paths_separate(self) -> None:
+        plans_dir = XPLAN_ROOT / "plans"
+        feature_plan = json.loads(
+            (plans_dir / "ingest_pipeline.json").read_text(encoding="utf-8")
+        )
+        path_plan = json.loads(
+            (plans_dir / "ingest_submission_path.json").read_text(encoding="utf-8")
+        )
+
+        self.assertEqual(feature_plan["repeats"], 3)
+        self.assertEqual(feature_plan["fixed"]["params"]["ingest_mode"], "directory")
+        self.assertEqual(feature_plan["fixed"]["params"]["post_ingest_coalesce_ms"], 2)
+        self.assertTrue(feature_plan["fixed"]["params"]["require_complete_pipeline"])
+        self.assertTrue(feature_plan["fixed"]["params"]["require_experiment_identity"])
+
+        self.assertEqual(path_plan["repeats"], 3)
+        modes = {arm["params"]["ingest_mode"] for arm in path_plan["arms"]}
+        self.assertEqual(modes, {"directory", "pipelined_single_file"})
+
+        quality_plan = json.loads(
+            (plans_dir / "search_generalized_memory_topology_gate.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        required = set(quality_plan["validate"]["require_metrics"])
+        self.assertIn("seed_ingest_admission_ms", required)
+        self.assertIn("seed_ingest_searchability_ready_ms", required)
+        self.assertIn("seed_ingest_measurement_n", required)
+
 
 class MultiClientMetricTests(unittest.TestCase):
     def test_read_write_latency_and_pool_pressure_are_preserved(self) -> None:

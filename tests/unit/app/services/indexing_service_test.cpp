@@ -189,6 +189,11 @@ TEST_CASE("IndexingService - Basic Operations", "[indexing][service][basic]") {
         CHECK(result.value().filesSkipped == 0);
         CHECK(result.value().filesFailed == 0);
         CHECK(result.value().filesProcessed == 1);
+        REQUIRE(result.value().results.size() == 1);
+        auto document = fixture.metadataRepo_->getDocumentByHash(result.value().results[0].hash);
+        REQUIRE(document);
+        REQUIRE(document.value().has_value());
+        CHECK(document.value()->contentExtracted);
     }
 
     SECTION("Indexing populates canonical doc and blob KG nodes") {
@@ -275,6 +280,59 @@ TEST_CASE("IndexingService - Basic Operations", "[indexing][service][basic]") {
         CHECK(result.value().filesIndexed == 0);
         CHECK(result.value().filesProcessed == 0);
     }
+}
+
+TEST_CASE("IndexingService defers content indexing when post-ingest is available",
+          "[indexing][service][post-ingest]") {
+    IndexingFixture fixture;
+    std::vector<std::vector<std::string>> dispatchedBatches;
+    fixture.appContext_.enqueuePostIngestBatch = [&](const std::vector<std::string>& hashes,
+                                                     const std::string&) {
+        dispatchedBatches.push_back(hashes);
+    };
+    fixture.indexingService_ = makeIndexingService(fixture.appContext_);
+
+    constexpr std::size_t kDocumentCount = 5;
+    for (std::size_t i = 0; i < kDocumentCount; ++i) {
+        fixture.createFile("deferred/content-" + std::to_string(i) + ".txt",
+                           "deferred indexing content " + std::to_string(i));
+    }
+
+    auto request = fixture.createRequest(fixture.testDir_ / "deferred");
+    auto result = fixture.indexingService_->addDirectory(request);
+
+    REQUIRE(result);
+    REQUIRE(result.value().filesIndexed == kDocumentCount);
+    REQUIRE(dispatchedBatches.size() == 1);
+    REQUIRE(dispatchedBatches.front().size() == kDocumentCount);
+    for (const auto& hash : dispatchedBatches.front()) {
+        auto document = fixture.metadataRepo_->getDocumentByHash(hash);
+        REQUIRE(document);
+        REQUIRE(document.value().has_value());
+        CHECK_FALSE(document.value()->contentExtracted);
+    }
+}
+
+TEST_CASE("IndexingService submits directory content through the batch boundary",
+          "[indexing][service][batch]") {
+    IndexingFixture fixture;
+    constexpr std::size_t kDocumentCount = 33;
+    for (std::size_t i = 0; i < kDocumentCount; ++i) {
+        fixture.createFile("batched/file-" + std::to_string(i) + ".txt",
+                           "batched content " + std::to_string(i));
+    }
+    yams::api::resetContentStorePhaseTimings();
+
+    auto request = fixture.createRequest(fixture.testDir_ / "batched");
+    auto result = fixture.indexingService_->addDirectory(request);
+
+    REQUIRE(result.has_value());
+    CHECK(result.value().filesIndexed == kDocumentCount);
+    CHECK(result.value().filesFailed == 0);
+    const auto timings = yams::api::getContentStorePhaseTimingsSnapshot();
+    REQUIRE(timings.contains("batch_ref_commit"));
+    CHECK(timings.at("batch_ref_commit").calls == 2);
+    CHECK(timings.at("ref_commit").calls == 0);
 }
 
 TEST_CASE("IndexingService - File Handling", "[indexing][service][files]") {

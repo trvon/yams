@@ -13,6 +13,7 @@ import os
 import re
 import resource
 import shutil
+import signal
 import statistics
 import sys
 import time
@@ -89,6 +90,34 @@ def _reset_measured_outputs(paths: list[Path]) -> None:
         path.unlink(missing_ok=True)
 
 
+def describe_process_failure(returncode: int, output: str) -> str | None:
+    """Describe a failed native benchmark without flooding the xplan report."""
+    if returncode == 0:
+        return None
+
+    if returncode < 0:
+        signal_number = -returncode
+        try:
+            signal_name = signal.Signals(signal_number).name
+        except ValueError:
+            signal_name = f"signal {signal_number}"
+        summary = (
+            f"retrieval_quality benchmark terminated by {signal_name} "
+            f"({returncode})"
+        )
+    else:
+        summary = f"retrieval_quality benchmark exited with code {returncode}"
+
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return summary
+
+    tail = "\n".join(lines[-8:])
+    if len(tail) > 1200:
+        tail = "..." + tail[-1197:]
+    return f"{summary}; last output:\n{tail}"
+
+
 def _mark_shared_topology_seed_reuse(env: dict[str, str]) -> None:
     """Keep cloned topology inputs immutable while allowing per-arm reconstruction."""
     env["YAMS_BENCH_REUSE_SEEDED_TOPOLOGY_INPUTS"] = "1"
@@ -161,6 +190,38 @@ def parse_quality_from_text(text: str) -> dict[str, float]:
             except ValueError:
                 pass
     return out
+
+
+def parse_benchmark_setup_metrics(path: Path) -> dict[str, float]:
+    """Read the structured cold-ingest/setup observation emitted by the benchmark."""
+    if not path.is_file():
+        return {}
+    metrics: dict[str, float] = {}
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict) or obj.get("event") != "benchmark_setup_metrics":
+            continue
+        ingestion = obj.get("ingestion") or {}
+        if not isinstance(ingestion, dict):
+            continue
+        metrics = {
+            "ingest_cold_performed": 1.0 if ingestion.get("cold_performed") else 0.0,
+            "ingest_admission_ms": float(ingestion.get("admission_ms") or 0),
+            "ingest_storage_ready_ms": float(ingestion.get("storage_ready_ms") or 0),
+            "ingest_pipeline_drain_ms": float(ingestion.get("pipeline_drain_ms") or 0),
+            "ingest_searchability_ready_ms": float(
+                ingestion.get("searchability_ready_ms") or 0
+            ),
+            "ingest_enrichment_ready_ms": float(
+                ingestion.get("enrichment_ready_ms") or 0
+            ),
+            "ingest_measurement_n": float(ingestion.get("measurement_n") or 0),
+            "benchmark_setup_total_ms": float(obj.get("setup_total_ms") or 0),
+        }
+    return metrics
 
 
 def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
@@ -1075,6 +1136,8 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         for left_index, left in enumerate(dry_sources):
             for right in dry_sources[left_index + 1 :]:
                 dry_run_metrics[f"mixed_cluster_overlap_jaccard_{left}_{right}"] = 0.0
+        # Plans can grow instrumentation without requiring a parallel dry-run registry.
+        dry_run_metrics.update({name: 0.0 for name in ctx.step.metrics})
         return WorkerResult(
             status="ok",
             exit_code=0,
@@ -1443,6 +1506,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
     # Let the bench's own ingest-stall logic (PROGRESS_TIMEOUT) fire before we kill the process.
     progress_timeout = int(env.get("YAMS_BENCH_PROGRESS_TIMEOUT", "0") or "0")
     timeout = max(timeout, progress_timeout + 120)
+    seed_setup_metrics: dict[str, float] = {}
     if shared_state_root is not None:
         seed_dir = shared_state_root / "seed"
         ready_marker = shared_state_root / "seed_ready"
@@ -1481,6 +1545,13 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
                     ),
                 )
             ready_marker.write_text("ready\n", encoding="utf-8")
+        prime_debug_path = shared_state_root / "prime_debug.jsonl"
+        seed_setup_metrics = parse_benchmark_setup_metrics(prime_debug_path)
+        if seed_setup_metrics:
+            write_json(
+                shared_state_root / "seed_ingestion_metrics.json",
+                {"metrics": seed_setup_metrics},
+            )
         isolated_data_dir = ctx.arm_dir / "isolated_data"
         try:
             clone_benchmark_state(seed_dir, isolated_data_dir)
@@ -1538,6 +1609,22 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         else ""
     )
 
+    process_failure = describe_process_failure(proc.returncode, combined)
+    if process_failure:
+        return WorkerResult(
+            status="failed",
+            exit_code=proc.returncode,
+            metrics={},
+            attributes={
+                "binary": str(binary),
+                "debug_file": str(debug_path),
+                "stdout_file": str(stdout_path),
+                "stderr_file": str(stderr_path),
+            },
+            message=process_failure,
+            raw_path=str(stderr_path if stderr_path.exists() else stdout_path),
+        )
+
     quality = parse_quality_from_text(combined)
     dbg = parse_debug_jsonl(debug_path, top_k=_as_int(env.get("YAMS_BENCH_TOPK", "10")))
     metrics: dict[str, Any] = {
@@ -1549,6 +1636,8 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
     }
     metrics.update(quality)
     metrics.update(dbg.get("metrics") or {})
+    metrics.update(parse_benchmark_setup_metrics(debug_path))
+    metrics.update({f"seed_{key}": value for key, value in seed_setup_metrics.items()})
     if mixed_corpus is not None:
         metrics.update(
             analyze_mixed_corpus_debug(

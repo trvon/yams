@@ -100,37 +100,6 @@ private:
 };
 
 // ============================================================================
-// Model Pool Configuration
-// ============================================================================
-
-struct ModelPoolConfig {
-    // Pool sizing
-    size_t maxLoadedModels = 3; // Maximum models in memory
-    size_t hotPoolSize = 1;     // Models to keep always loaded
-
-    // Memory management
-    size_t maxMemoryGB = 4;             // Maximum memory for all models
-    std::string evictionPolicy = "lru"; // lru, lfu, fifo
-
-    // Timeouts
-    std::chrono::seconds modelIdleTimeout{300}; // Unload after idle
-    std::chrono::seconds modelLoadTimeout{30};  // Max time to load model
-
-    // Preloading
-    std::vector<std::string> preloadModels; // Models to load on startup
-    bool lazyLoading = false;               // Load models only when needed
-
-    // Model discovery
-    std::string modelsRoot; // Optional root directory to search first (e.g., ~/.yams/models)
-
-    // Performance
-    bool enableGPU = false;
-    int numThreads = 4;
-    bool asyncLoading = false;    // When true, schedule loads on a worker pool
-    size_t loadWorkerThreads = 2; // Worker threads for async loading
-};
-
-// ============================================================================
 // ONNX Model Pool Manager
 // ============================================================================
 

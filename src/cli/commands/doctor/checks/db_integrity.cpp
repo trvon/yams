@@ -4,7 +4,6 @@
 
 #include <sqlite3.h>
 #include <filesystem>
-#include <iomanip>
 #include <sstream>
 #include <vector>
 
@@ -13,6 +12,12 @@ extern "C" int sqlite3_vec_init(sqlite3* db, char** pzErrMsg, const sqlite3_api_
 namespace yams::cli::doctor {
 
 namespace {
+bool isReadOnlyFtsValidationLine(std::string_view line) {
+    return line.find("unable to validate the inverted index for FTS5 table") !=
+               std::string_view::npos &&
+           line.find("attempt to write a readonly database") != std::string_view::npos;
+}
+
 std::vector<std::string> runIntegrityCheck(sqlite3* db, const std::string& dbName) {
     std::vector<std::string> issues;
     if (!db)
@@ -28,7 +33,7 @@ std::vector<std::string> runIntegrityCheck(sqlite3* db, const std::string& dbNam
         const unsigned char* txt = sqlite3_column_text(stmt, 0);
         if (txt) {
             std::string line(reinterpret_cast<const char*>(txt));
-            if (line != "ok")
+            if (line != "ok" && !isReadOnlyFtsValidationLine(line))
                 issues.push_back(dbName + ": " + line);
         }
     }
@@ -36,6 +41,10 @@ std::vector<std::string> runIntegrityCheck(sqlite3* db, const std::string& dbNam
     return issues;
 }
 } // namespace
+
+bool testing_isReadOnlyFtsValidationLine(std::string_view line) {
+    return isReadOnlyFtsValidationLine(line);
+}
 
 DbIntegrityCheck::DbIntegrityCheck() = default;
 

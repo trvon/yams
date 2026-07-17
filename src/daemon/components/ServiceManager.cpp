@@ -1,3 +1,4 @@
+#define YAMS_DAEMON_TEST_HOOKS_IMPL 1
 #include <sqlite3.h>
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
@@ -230,6 +231,8 @@ std::uint64_t nowUnixMillis() {
 } // namespace
 
 // Open the daemon namespace for all following member definitions.
+#undef YAMS_DAEMON_TEST_HOOKS_IMPL
+
 namespace yams::daemon {
 
 namespace {
@@ -2231,10 +2234,12 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         try {
             if (config_.tuning.postIngestCapacity > 0)
                 newPostIngest->setCapacity(config_.tuning.postIngestCapacity);
+            newPostIngest->setBatchCoalesceWindow(
+                std::chrono::milliseconds(config_.tuning.postIngestCoalesceMs));
         } catch (const std::exception& e) {
-            spdlog::debug("[ServiceManager] post-ingest capacity override failed: {}", e.what());
+            spdlog::debug("[ServiceManager] post-ingest tuning apply failed: {}", e.what());
         } catch (...) {
-            spdlog::debug("[ServiceManager] post-ingest capacity override failed");
+            spdlog::debug("[ServiceManager] post-ingest tuning apply failed");
         }
 
         std::atomic_store_explicit(&postIngest_, newPostIngest, std::memory_order_release);
@@ -3940,6 +3945,9 @@ std::shared_ptr<search::SearchEngine> ServiceManager::getSearchEngineSnapshot() 
 yams::app::services::AppContext ServiceManager::getAppContext() const {
     app::services::AppContext ctx;
     ctx.service_manager = const_cast<ServiceManager*>(this);
+    ctx.writeCoordinatorProvider = [self = const_cast<ServiceManager*>(this)] {
+        return self->getWriteCoordinator();
+    };
     ctx.searchExecutionContextProvider = [self = const_cast<ServiceManager*>(this)] {
         auto context = search::defaultSearchExecutionContext();
         const auto metrics = self->getSearchLoadMetrics();
@@ -3955,10 +3963,11 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
         context.topologyOverlayHashes = self->getTopologyOverlayHashes();
         return context;
     };
-    ctx.enqueuePostIngest = [self = const_cast<ServiceManager*>(this)](const std::string& hash,
-                                                                       const std::string& mime) {
-        self->enqueuePostIngest(hash, mime);
-    };
+    ctx.enqueuePostIngestBatch =
+        [self = const_cast<ServiceManager*>(this)](const std::vector<std::string>& hashes,
+                                                   const std::string& mime) {
+            self->enqueuePostIngestBatch(hashes, mime);
+        };
     ctx.store = getContentStore(); // Thread-safe via atomic_load
     auto metadataRepo = getMetadataRepo();
     ctx.metadataRepo = metadataRepo;
@@ -4168,7 +4177,7 @@ void ServiceManager::__test_setModelProviderDegraded(bool degraded, const std::s
     }
 }
 
-void ServiceManager::enqueuePostIngestBatch(std::vector<PostIngestQueue::Task> tasks) {
+void ServiceManager::enqueuePostIngestTasks(std::vector<PostIngestQueue::Task> tasks) {
     auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
     if (!piq || tasks.empty()) {
         return;
@@ -4184,7 +4193,13 @@ void ServiceManager::enqueuePostIngestBatch(std::vector<PostIngestQueue::Task> t
     if (!hashes.empty()) {
         searchEngineManager_.noteLexicalDeltaQueued(tasks.size());
         topologyManager_.markDirtyBatch(hashes);
-        piq->enqueueBatch(std::move(tasks));
+        const std::size_t interactiveQuota =
+            std::max<std::size_t>(1u, TuneAdvisor::postIngestRpcMaxPerBatch());
+        if (tasks.size() <= interactiveQuota) {
+            piq->enqueueRpcBatch(std::move(tasks));
+        } else {
+            piq->enqueueBatch(std::move(tasks));
+        }
     }
 }
 

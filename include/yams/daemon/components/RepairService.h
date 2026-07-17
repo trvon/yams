@@ -190,6 +190,62 @@ public:
     void setMaxBatch(std::uint32_t maxBatch) { cfg_.maxBatch = maxBatch; }
 
 private:
+    enum class OnDemandRepairOperation : std::uint8_t {
+        StuckDocuments,
+        Orphans,
+        Mime,
+        Downloads,
+        PathTree,
+        Dedupe,
+        Chunks,
+        BlockReferences,
+        Graph,
+        Fts5,
+        Embeddings,
+        Topology,
+        Optimize,
+    };
+
+    class RepairExecutionGuard {
+    public:
+        explicit RepairExecutionGuard(RepairService& owner);
+        ~RepairExecutionGuard();
+        RepairExecutionGuard(const RepairExecutionGuard&) = delete;
+        RepairExecutionGuard& operator=(const RepairExecutionGuard&) = delete;
+        [[nodiscard]] explicit operator bool() const noexcept { return owner_ != nullptr; }
+
+    private:
+        RepairService* owner_{nullptr};
+    };
+
+    class RepairRun {
+    public:
+        RepairRun(RepairService& owner, ProgressFn progress, std::atomic<bool>* cancelRequested);
+
+        [[nodiscard]] bool begin(std::string_view operation);
+        [[nodiscard]] bool complete(std::string_view operation, RepairOperationResult result);
+        [[nodiscard]] RepairResponse finish();
+        [[nodiscard]] const ProgressFn& progress() const noexcept { return progress_; }
+
+    private:
+        [[nodiscard]] bool isCanceled() const noexcept;
+        void emitCancellation(std::string_view operation);
+
+        RepairService& owner_;
+        ProgressFn progress_;
+        std::atomic<bool>* cancelRequested_;
+        RepairResponse response_;
+        std::vector<RepairOperationResult> results_;
+        std::vector<std::string> errors_;
+    };
+
+    static std::vector<OnDemandRepairOperation> buildRepairPlan(const RepairRequest& request);
+    static std::string_view repairOperationName(OnDemandRepairOperation operation) noexcept;
+    RepairOperationResult runRepairOperation(OnDemandRepairOperation operation,
+                                             const RepairRequest& request,
+                                             const ProgressFn& progress,
+                                             std::atomic<bool>* cancelRequested);
+
     // ── Shutdown coordination ──
     struct ShutdownState {
         std::atomic<bool> finished{false};
@@ -235,8 +291,7 @@ private:
                                               const ProgressFn& progress);
     RepairOperationResult repairBlockReferences(bool dryRun, bool verbose,
                                                 const ProgressFn& progress);
-    RepairOperationResult repairKnowledgeGraph(const RepairRequest& req,
-                                               const ProgressFn& progress,
+    RepairOperationResult repairKnowledgeGraph(const RepairRequest& req, const ProgressFn& progress,
                                                std::atomic<bool>* cancelRequested = nullptr);
     RepairOperationResult rebuildTopologyArtifacts(const RepairRequest& req,
                                                    const ProgressFn& progress);

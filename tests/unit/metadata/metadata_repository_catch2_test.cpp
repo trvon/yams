@@ -7,7 +7,10 @@
 #include <cstddef>
 #include <filesystem>
 #include <future>
+#include <iterator>
+#include <memory>
 #include <optional>
+#include <sstream>
 #include <thread>
 #include <variant>
 #include <vector>
@@ -15,6 +18,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <spdlog/sinks/ostream_sink.h>
 #include <boost/asio/io_context.hpp>
 #include <yams/common/utf8_utils.h>
 #include <yams/daemon/components/MetadataWriteFacade.h>
@@ -48,6 +52,34 @@ std::filesystem::path tempDbPath(const char* prefix) {
     (void)kSuppressInfoLogs;
     return yams::test::migrated_metadata_db_template().clone(prefix);
 }
+
+class SpdlogCaptureGuard {
+public:
+    explicit SpdlogCaptureGuard(spdlog::level::level_enum level)
+        : previousLogger_(spdlog::default_logger()), previousLevel_(spdlog::get_level()) {
+        auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(stream_);
+        logger_ = std::make_shared<spdlog::logger>("metadata_repository_capture", sink);
+        logger_->set_level(level);
+        logger_->set_pattern("[%l] %v");
+        spdlog::set_default_logger(logger_);
+        spdlog::set_level(level);
+    }
+
+    ~SpdlogCaptureGuard() {
+        if (previousLogger_) {
+            spdlog::set_default_logger(previousLogger_);
+        }
+        spdlog::set_level(previousLevel_);
+    }
+
+    std::string str() const { return stream_.str(); }
+
+private:
+    std::ostringstream stream_;
+    std::shared_ptr<spdlog::logger> previousLogger_;
+    std::shared_ptr<spdlog::logger> logger_;
+    spdlog::level::level_enum previousLevel_;
+};
 
 DocumentInfo makeDocumentWithPath(const std::string& path, const std::string& hash,
                                   const std::string& mime = "text/plain") {
@@ -329,8 +361,14 @@ TEST_CASE("MetadataRepository: dual-pool read/write routing behavior",
 
     readPool->shutdown();
 
+    SpdlogCaptureGuard logCapture(spdlog::level::err);
     auto readAfterShutdown = repository->getDocumentByHash("dual-pool-hash");
     REQUIRE_FALSE(readAfterShutdown.has_value());
+    CHECK(((readAfterShutdown.error().code == ErrorCode::OperationCancelled ||
+            readAfterShutdown.error().code == ErrorCode::InvalidState)));
+    CHECK((readAfterShutdown.error().message.find("shut down") != std::string::npos ||
+           readAfterShutdown.error().message.find("shutdown") != std::string::npos));
+    CHECK((logCapture.str().find("MetadataRepository::executeQueryOnPool") == std::string::npos));
 
     MetadataValue value;
     value.value = "still-writeable";
@@ -736,6 +774,44 @@ TEST_CASE(
     auto afterDisableStats = fix.repository_->getCorpusStats();
     REQUIRE((afterDisableStats.has_value()));
     CHECK((afterDisableStats.value().embeddingCount == 0));
+}
+
+TEST_CASE("MetadataRepository: embedding completion commits embedding and repair state together",
+          "[unit][metadata][repository][embeddings][completion]") {
+    MetadataRepositoryFixture fix;
+
+    auto doc = makeDocumentWithPath("/tmp/complete_embed.txt", "complete-embed-hash");
+    auto inserted = fix.repository_->insertDocument(doc);
+    REQUIRE((inserted.has_value()));
+
+    REQUIRE(
+        fix.repository_->batchCompleteDocumentEmbeddingsByHashes({}, "ignored-model").has_value());
+    REQUIRE(fix.repository_
+                ->batchCompleteDocumentEmbeddingsByHashes(
+                    {"missing-complete-hash", "complete-embed-hash", "complete-embed-hash"},
+                    "complete-model")
+                .has_value());
+
+    auto embedding = getEmbeddingStatusRow(*fix.pool_, "complete-embed-hash");
+    REQUIRE((embedding.has_value()));
+    REQUIRE((embedding.value().has_value()));
+    CHECK(embedding.value()->hasEmbedding);
+    REQUIRE((embedding.value()->modelId.has_value()));
+    CHECK((embedding.value()->modelId.value() == "complete-model"));
+
+    auto completed = fix.repository_->getDocument(inserted.value());
+    REQUIRE((completed.has_value()));
+    REQUIRE((completed.value().has_value()));
+    CHECK((completed.value()->repairStatus == RepairStatus::Completed));
+    CHECK((completed.value()->repairAttempts == 2));
+
+    auto missing = fix.repository_->hasDocumentEmbeddingByHash("missing-complete-hash");
+    REQUIRE((missing.has_value()));
+    CHECK_FALSE(missing.value());
+
+    auto stats = fix.repository_->getCorpusStats();
+    REQUIRE((stats.has_value()));
+    CHECK((stats.value().embeddingCount == 1));
 }
 
 TEST_CASE("MetadataRepository: reconcile empty vector-backed hash set clears embedding ownership",
@@ -2474,9 +2550,10 @@ TEST_CASE("MetadataRepository: fuzzy search honors minSimilarity threshold",
         fix.repository_
             ->indexDocumentContent(nearInsert.value(), nearDoc.fileName, kNearTerm, "text/plain")
             .has_value());
-    REQUIRE((fix.repository_->tryAddSymSpellTerms({std::pair<std::string, int64_t>{kExactTerm, 1},
-                                                   {kNearTerm, 1}})
-                 .has_value()));
+    REQUIRE(
+        (fix.repository_
+             ->tryAddSymSpellTerms({std::pair<std::string, int64_t>{kExactTerm, 1}, {kNearTerm, 1}})
+             .has_value()));
 
     auto lowThreshold = fix.repository_->fuzzySearch(kExactTerm, 0.0f, 10);
     REQUIRE((lowThreshold.has_value()));
@@ -3468,6 +3545,24 @@ TEST_CASE("batchInsertContentAndIndex: fresh documents increment extracted and i
     }
 }
 
+TEST_CASE("batchInsertContentAndIndex persists extracted title metadata in the content transaction",
+          "[unit][metadata-repo][batch-content][title]") {
+    MetadataRepositoryFixture fix;
+
+    auto inserted = fix.repository_->insertDocument(
+        makeDocumentWithPath("/tmp/content-title.txt", "content_title_hash", "text/plain"));
+    REQUIRE((inserted.has_value()));
+
+    auto entry = makeBatchContentEntry(inserted.value(), "FTS fallback title", "Content text");
+    entry.metadataTitle = "Extracted document title";
+    REQUIRE((fix.repository_->batchInsertContentAndIndex({entry}).has_value()));
+
+    auto title = fix.repository_->getMetadata(inserted.value(), "title");
+    REQUIRE((title.has_value()));
+    REQUIRE((title.value().has_value()));
+    CHECK((title.value()->value == "Extracted document title"));
+}
+
 TEST_CASE(
     "batchInsertContentAndIndex: duplicate document entries preserve per-entry repair attempts",
     "[unit][metadata-repo][batch-content][status-update][duplicates]") {
@@ -3605,6 +3700,33 @@ TEST_CASE("batchInsertContentAndIndex: already-extracted documents don't double-
     // Re-insert same document — counters should not change
     auto batch2 = fix.repository_->batchInsertContentAndIndex(entries);
     REQUIRE((batch2.has_value()));
+
+    CHECK((fix.repository_->getCachedExtractedCount() == extractedAfterFirst));
+    CHECK((fix.repository_->getCachedIndexedCount() == indexedAfterFirst));
+}
+
+TEST_CASE("batchInsertContentAndIndex: stale extraction hints don't double-count",
+          "[unit][metadata-repo][batch-content][counters]") {
+    MetadataRepositoryFixture fix;
+    fix.repository_->initializeCounters();
+
+    auto inserted = fix.repository_->insertDocument(makeDocumentWithPath(
+        "/tmp/stale-extraction-hint.txt", "stale_extraction_hint_hash", "text/plain"));
+    REQUIRE((inserted.has_value()));
+
+    auto staleEntry = makeBatchContentEntry(inserted.value(), "Title", "First content");
+    staleEntry.priorStateKnown = true;
+    staleEntry.priorContentExtracted = false;
+    REQUIRE((fix.repository_->batchInsertContentAndIndex({staleEntry}).has_value()));
+
+    const auto extractedAfterFirst = fix.repository_->getCachedExtractedCount();
+    const auto indexedAfterFirst = fix.repository_->getCachedIndexedCount();
+
+    // Concurrent post-ingest tasks for duplicate content can carry the same pre-commit hint.
+    // The repository must reconcile each transaction against the database state it serializes
+    // behind, rather than trusting a hint captured before an earlier transaction committed.
+    staleEntry.contentText = "Second content";
+    REQUIRE((fix.repository_->batchInsertContentAndIndex({staleEntry}).has_value()));
 
     CHECK((fix.repository_->getCachedExtractedCount() == extractedAfterFirst));
     CHECK((fix.repository_->getCachedIndexedCount() == indexedAfterFirst));
@@ -3923,9 +4045,9 @@ TEST_CASE("batchGetDocumentsWithContentPreview: documents with content",
     // Insert content for each document
     std::vector<BatchContentEntry> entries;
     for (int i = 0; i < 3; ++i) {
-        entries.push_back({docIds[static_cast<size_t>(i)], "Title " + std::to_string(i),
-                           /* abstract */ "", "Content text for document " + std::to_string(i),
-                           "text/plain", "test", "en"});
+        entries.push_back(makeBatchContentEntry(docIds[static_cast<size_t>(i)],
+                                                "Title " + std::to_string(i),
+                                                "Content text for document " + std::to_string(i)));
     }
     auto batchResult = fix.repository_->batchInsertContentAndIndex(entries);
     REQUIRE((batchResult.has_value()));
@@ -4543,6 +4665,7 @@ TEST_CASE("MetadataRepository: batchInsertDocumentsWithMetadata coalesces insert
         item.info = makeDocumentWithPath(path, hash);
         item.tags.emplace_back(tagKey, MetadataValue(tagVal));
         item.updatePathTreeInTransaction = pathTree;
+        item.initializePathSeriesInTransaction = true;
         return item;
     };
 
@@ -4561,8 +4684,16 @@ TEST_CASE("MetadataRepository: batchInsertDocumentsWithMetadata coalesces insert
 
     auto batchResult = fix.repository_->batchInsertDocumentsWithMetadata(items);
     REQUIRE((batchResult.has_value()));
-    auto ids = batchResult.value();
+    const auto outcomes = batchResult.value();
+    std::vector<int64_t> ids;
+    ids.reserve(outcomes.size());
+    std::ranges::transform(outcomes, std::back_inserter(ids),
+                           [](const auto& outcome) { return outcome.documentId; });
     REQUIRE((ids.size() == 3));
+    CHECK(std::ranges::all_of(outcomes,
+                              [](const auto& outcome) { return outcome.insertedNewDocument; }));
+    CHECK(std::ranges::all_of(outcomes,
+                              [](const auto& outcome) { return outcome.pathSeriesInitialized; }));
 
     SECTION("ids are valid, distinct, and resolve to the right documents") {
         std::vector<int64_t> sorted = ids;
@@ -4591,6 +4722,23 @@ TEST_CASE("MetadataRepository: batchInsertDocumentsWithMetadata coalesces insert
         }
     }
 
+    SECTION("fresh paths initialize canonical path-series metadata") {
+        for (std::size_t i = 0; i < ids.size(); ++i) {
+            auto version = fix.repository_->getMetadata(ids[i], "version");
+            auto latest = fix.repository_->getMetadata(ids[i], "is_latest");
+            auto seriesKey = fix.repository_->getMetadata(ids[i], "series_key");
+            REQUIRE((version.has_value()));
+            REQUIRE((version.value().has_value()));
+            REQUIRE((latest.has_value()));
+            REQUIRE((latest.value().has_value()));
+            REQUIRE((seriesKey.has_value()));
+            REQUIRE((seriesKey.value().has_value()));
+            CHECK((version.value()->asInteger() == 1));
+            CHECK((latest.value()->asBoolean()));
+            CHECK((seriesKey.value()->asString() == items[i].info.filePath));
+        }
+    }
+
     SECTION("snapshot attached to one item is committed and bound to its document") {
         // All-or-nothing batch committed (batchResult ok), so the tree_snapshots row was written
         // without constraint failure. Verify the in-transaction wiring set ingestDocumentId.
@@ -4605,7 +4753,24 @@ TEST_CASE("MetadataRepository: batchInsertDocumentsWithMetadata coalesces insert
         auto dupResult = fix.repository_->batchInsertDocumentsWithMetadata(dupItems);
         REQUIRE((dupResult.has_value()));
         REQUIRE((dupResult.value().size() == 1));
-        CHECK((dupResult.value()[0] == ids[0]));
+        CHECK((dupResult.value()[0].documentId == ids[0]));
+        CHECK_FALSE(dupResult.value()[0].insertedNewDocument);
+        CHECK_FALSE(dupResult.value()[0].pathSeriesInitialized);
+    }
+
+    SECTION("a new hash at an existing path remains pending version assignment") {
+        std::vector<BatchDocumentInsert> nextVersion;
+        nextVersion.push_back(
+            makeItem("repo/batch/a.txt", "batch-hash-a-v2", "stage", "delta", true));
+        auto nextResult = fix.repository_->batchInsertDocumentsWithMetadata(nextVersion);
+        REQUIRE((nextResult.has_value()));
+        REQUIRE((nextResult.value().size() == 1));
+        CHECK(nextResult.value()[0].insertedNewDocument);
+        CHECK_FALSE(nextResult.value()[0].pathSeriesInitialized);
+
+        auto version = fix.repository_->getMetadata(nextResult.value()[0].documentId, "version");
+        REQUIRE((version.has_value()));
+        CHECK_FALSE(version.value().has_value());
     }
 
     SECTION("empty batch is a no-op success") {
@@ -4614,6 +4779,70 @@ TEST_CASE("MetadataRepository: batchInsertDocumentsWithMetadata coalesces insert
         REQUIRE((emptyResult.has_value()));
         CHECK((emptyResult.value().empty()));
     }
+}
+
+TEST_CASE("MetadataInsertWriter fallback preserves single-document insert outcome",
+          "[metadata][batch][writer][fallback]") {
+    auto dbPath = tempDbPath("metadata_insert_writer_fallback_outcome_");
+    ConnectionPoolConfig config;
+    config.minConnections = 1;
+    config.maxConnections = 2;
+    auto pool = std::make_shared<ConnectionPool>(dbPath.string(), config);
+    REQUIRE((pool->initialize().has_value()));
+    auto repo = std::make_shared<MetadataRepository>(
+        *pool, nullptr, MetadataRepository::SchemaBootstrapMode::AssumeReady);
+
+    BatchDocumentInsert clean;
+    clean.info = makeDocumentWithPath("repo/writer/fallback-clean.txt", "writer-fallback-clean");
+    clean.initializePathSeriesInTransaction = true;
+
+    BatchDocumentInsert poison;
+    poison.info = makeDocumentWithPath("repo/writer/fallback-poison.txt", "writer-fallback-poison");
+    TreeSnapshotRecord poisonSnapshot;
+    poisonSnapshot.snapshotId = "writer-fallback-poison-snapshot";
+    poisonSnapshot.rootTreeHash = "root";
+    poisonSnapshot.createdTime = 1;
+    poisonSnapshot.fileCount = 1;
+    poison.snapshot = poisonSnapshot;
+    // No directory_path metadata: tree_snapshots.directory_path is NOT NULL. This poisons the
+    // coalesced batch transaction while leaving the clean document valid for per-item fallback.
+
+    {
+        MetadataInsertWriter writer(
+            repo, MetadataInsertWriter::Options{.maxBatchCount = 2,
+                                                .maxDelay = std::chrono::milliseconds{50}});
+        auto cleanFuture = writer.submit(clean);
+        auto poisonFuture = writer.submit(poison);
+
+        auto cleanResult = cleanFuture.get();
+        REQUIRE((cleanResult.has_value()));
+        CHECK((cleanResult.value().documentId > 0));
+        CHECK(cleanResult.value().insertedNewDocument);
+        CHECK(cleanResult.value().pathSeriesInitialized);
+
+        auto poisonResult = poisonFuture.get();
+        REQUIRE_FALSE((poisonResult.has_value()));
+
+        REQUIRE(writer.flush());
+        const auto metrics = writer.metricsSnapshot();
+        CHECK(metrics.failedBatches == 1);
+        CHECK(metrics.fallbackItems == 2);
+    }
+
+    auto cleanDoc = repo->getDocumentByHash("writer-fallback-clean");
+    REQUIRE((cleanDoc.has_value()));
+    REQUIRE((cleanDoc.value().has_value()));
+    auto version = repo->getMetadata(cleanDoc.value()->id, "version");
+    REQUIRE((version.has_value()));
+    CHECK((version.value().has_value()));
+
+    auto poisonDoc = repo->getDocumentByHash("writer-fallback-poison");
+    REQUIRE((poisonDoc.has_value()));
+    CHECK_FALSE((poisonDoc.value().has_value()));
+
+    pool->shutdown();
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
 }
 
 TEST_CASE("MetadataInsertWriter coalesces concurrent submits into correct per-doc ids",
@@ -4626,15 +4855,18 @@ TEST_CASE("MetadataInsertWriter coalesces concurrent submits into correct per-do
     REQUIRE((pool->initialize().has_value()));
     auto repo = std::make_shared<MetadataRepository>(
         *pool, nullptr, MetadataRepository::SchemaBootstrapMode::AssumeReady);
+    resetMetadataInsertPhaseTimings();
 
     constexpr int kDocs = 64;
     {
-        MetadataInsertWriter writer(repo);
+        MetadataInsertWriter writer(
+            repo, MetadataInsertWriter::Options{.maxBatchCount = kDocs,
+                                                .maxDelay = std::chrono::milliseconds{50}});
 
         // Submit from several threads to exercise concurrent coalescing.
         std::atomic<int> next{0};
         std::mutex futMutex;
-        std::vector<std::future<Result<int64_t>>> collected;
+        std::vector<std::future<Result<DocumentInsertOutcome>>> collected;
         collected.reserve(kDocs);
         constexpr int kThreads = 8;
         std::vector<std::thread> submitters;
@@ -4658,12 +4890,39 @@ TEST_CASE("MetadataInsertWriter coalesces concurrent submits into correct per-do
         for (auto& f : collected) {
             auto r = f.get();
             REQUIRE((r.has_value()));
-            CHECK((r.value() > 0));
-            ids.push_back(r.value());
+            CHECK((r.value().documentId > 0));
+            CHECK(r.value().insertedNewDocument);
+            ids.push_back(r.value().documentId);
         }
         REQUIRE((static_cast<int>(ids.size()) == kDocs));
         std::sort(ids.begin(), ids.end());
         CHECK((std::adjacent_find(ids.begin(), ids.end()) == ids.end()));
+
+        REQUIRE(writer.flush());
+        const auto metrics = writer.metricsSnapshot();
+        CHECK(metrics.submittedItems == kDocs);
+        CHECK(metrics.completedItems == kDocs);
+        CHECK(metrics.batchItems == kDocs);
+        CHECK(metrics.batches > 0);
+        CHECK(metrics.batches < kDocs);
+        CHECK(metrics.maxBatchSize > 1);
+        CHECK(metrics.queueWaitSamples == kDocs);
+        CHECK(metrics.batchApplySamples == metrics.batches);
+        CHECK(metrics.failedBatches == 0);
+        CHECK(metrics.fallbackItems == 0);
+
+        const auto phaseTimings = getMetadataInsertPhaseTimingsSnapshot();
+        const auto transaction = phaseTimings.find("transaction_total");
+        REQUIRE(transaction != phaseTimings.end());
+        CHECK(transaction->second.calls == metrics.batches);
+        CHECK(transaction->second.totalUs >= phaseTimings.at("commit").totalUs);
+
+        writer.resetMetrics();
+        const auto reset = writer.metricsSnapshot();
+        CHECK(reset.submittedItems == 0);
+        CHECK(reset.completedItems == 0);
+        CHECK(reset.batches == 0);
+        CHECK(reset.batchItems == 0);
     }
 
     // All documents are durable after the writer drains.

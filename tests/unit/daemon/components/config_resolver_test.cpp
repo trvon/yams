@@ -148,6 +148,43 @@ TEST_CASE("TuneAdvisor bounded override readers share env and override behavior"
     TuneAdvisor::setConnectionSlotsScaleStep(0);
 }
 
+TEST_CASE("ConfigResolver applies one typed tuning snapshot for startup and reload",
+          "[daemon][components][config][tuning][catch2]") {
+    ConfigResolver::ConfigSections sections;
+    sections["tuning"] = {{"target_cpu_percent", "175"},
+                          {"post_ingest_capacity", "4096"},
+                          {"post_ingest_threads_min", "3"},
+                          {"control_interval_ms", "250"}};
+    sections["tuning.post_ingest"] = {{"coalesce_ms", "3"}};
+
+    TuningConfig base;
+    base.postIngestThreadsMax = 12;
+    base.topologyAlgorithm = "multiscale";
+
+    const auto resolved = ConfigResolver::applyRuntimeTuning(sections, base);
+    CHECK(resolved.targetCpuPercent == 175);
+    CHECK(resolved.postIngestCapacity == 4096);
+    CHECK(resolved.postIngestThreadsMin == 3);
+    CHECK(resolved.postIngestCoalesceMs == 3);
+    CHECK(resolved.controlIntervalMs == 250);
+    CHECK(resolved.postIngestThreadsMax == 12);
+    CHECK(resolved.topologyAlgorithm == "multiscale");
+
+    sections["tuning"] = {{"target_cpu_percent", "-1"},
+                          {"post_ingest_capacity", "-2"},
+                          {"control_interval_ms", "4294967296"}};
+    sections["tuning.post_ingest"] = {{"coalesce_ms", "21"}};
+    base.targetCpuPercent = 80;
+    base.postIngestCapacity = 2048;
+    base.controlIntervalMs = 500;
+    base.postIngestCoalesceMs = 4;
+    const auto rejected = ConfigResolver::applyRuntimeTuning(sections, base);
+    CHECK(rejected.targetCpuPercent == 80);
+    CHECK(rejected.postIngestCapacity == 2048);
+    CHECK(rejected.controlIntervalMs == 500);
+    CHECK(rejected.postIngestCoalesceMs == 4);
+}
+
 TEST_CASE("ConfigResolver::resolveEmbeddingChunkingPolicy defaults are embedding-safe",
           "[daemon][components][config][chunking][catch2]") {
     // Ensure config file discovery doesn't accidentally pick up a user config during local dev.
@@ -767,14 +804,14 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
 
         // Efficient profile scale is 0.0, old totalBudget = 2
         // With active-stage floor: total = max(2, 6 active stages) = 6
-        // Each stage gets 1 slot; postIngestBatchSize = max(1, floor(8.0 * 0.0)) = 1
+        // Each stage gets 1 slot; batching remains a cap and does not reserve work.
         CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
         CHECK(TuneAdvisor::postKgConcurrent() == 1u);
         CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
         CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
         CHECK(TuneAdvisor::postTitleConcurrent() == 1u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
-        CHECK(TuneAdvisor::postIngestBatchSize() == 1u);
+        CHECK(TuneAdvisor::postIngestBatchSize() == 16u);
     }
 
     SECTION("balanced profile uses medium values") {
@@ -785,14 +822,14 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
 
         // Balanced profile scale is 0.5, old totalBudget = 2
         // With active-stage floor: total = max(2, 6 active stages) = 6
-        // Each stage gets 1 slot; postIngestBatchSize = max(1, floor(8.0 * 0.5)) = 4
+        // Each stage gets 1 slot; batching remains a cap and does not reserve work.
         CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
         CHECK(TuneAdvisor::postKgConcurrent() == 1u);
         CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
         CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
         CHECK(TuneAdvisor::postTitleConcurrent() == 1u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
-        CHECK(TuneAdvisor::postIngestBatchSize() == 4u);
+        CHECK(TuneAdvisor::postIngestBatchSize() == 16u);
     }
 
     SECTION("aggressive profile uses maximum values") {
@@ -803,14 +840,14 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
 
         // Aggressive profile scale is 1.0, old totalBudget = 3
         // With active-stage floor: total = max(3, 6 active stages) = 6
-        // Each stage gets 1 slot; postIngestBatchSize = max(1, floor(8.0 * 1.0)) = 8
+        // Each stage gets 1 slot; batching remains a cap and does not reserve work.
         CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
         CHECK(TuneAdvisor::postKgConcurrent() == 1u);
         CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
         CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
         CHECK(TuneAdvisor::postTitleConcurrent() == 1u);
         CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
-        CHECK(TuneAdvisor::postIngestBatchSize() == 8u);
+        CHECK(TuneAdvisor::postIngestBatchSize() == 16u);
     }
 
     SECTION("profile affects cpuBudgetPercent") {

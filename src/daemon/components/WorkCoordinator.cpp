@@ -209,7 +209,6 @@ void WorkCoordinator::stop() {
     for (const auto& signal : detachedSignals) {
         signal->emit(boost::asio::cancellation_type::all);
     }
-    cancelSignal_.emit(boost::asio::cancellation_type::all);
     ioContext_->stop();
     try {
         spdlog::info("[WorkCoordinator] Work guard reset and io_context stopped");

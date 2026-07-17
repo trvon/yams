@@ -1,4 +1,5 @@
 // Split from RequestDispatcher.cpp: document/search/grep/download/cancel handlers
+#define YAMS_DAEMON_TEST_HOOKS_IMPL 1
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
@@ -37,6 +38,7 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/profiling.h>
 #include <yams/vector/embedding_service.h>
+#undef YAMS_DAEMON_TEST_HOOKS_IMPL
 
 namespace yams::daemon {
 

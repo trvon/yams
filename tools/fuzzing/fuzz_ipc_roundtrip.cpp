@@ -69,14 +69,13 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     while (offset < size) {
         const size_t remaining = size - offset;
         const size_t to_feed = std::min(remaining, chunk);
-        reader.append(std::span<const uint8_t>(data + offset, to_feed));
-        offset += to_feed;
+        const auto feed_result = reader.feed(data + offset, to_feed);
+        offset += feed_result.consumed;
 
-        while (true) {
-            auto frame_result = reader.try_read_frame();
-            if (!frame_result) {
-                break;
-            }
+        if (reader.has_frame()) {
+            auto frame_result = reader.get_frame();
+            if (!frame_result)
+                continue;
 
             const auto& frame = frame_result.value();
             if (frame.size() < MessageFramer::HEADER_SIZE) {
@@ -120,6 +119,9 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
 
             auto parsed_response = framer.parse_frame(response_frame.value());
             (void)parsed_response;
+        }
+        if (feed_result.consumed == 0) {
+            break;
         }
     }
 

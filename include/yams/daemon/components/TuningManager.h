@@ -13,6 +13,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/strand.hpp>
 #include <yams/daemon/components/ResourceGovernor.h>
+#include <yams/daemon/components/test_hooks.h>
 
 namespace yams::daemon {
 
@@ -60,26 +61,29 @@ public:
         setConnectionSlots_ = std::move(cb);
     }
 
-    static void testing_rebalanceTargetsByQueue(std::array<uint32_t, 6>& targets,
-                                                const std::array<uint32_t, 6>& floors,
-                                                const std::array<std::size_t, 6>& queueDepths,
-                                                const std::array<bool, 6>& active);
-    static uint32_t testing_computeEmbedScaleBias(std::size_t embedQueued,
-                                                  uint64_t embedDroppedDelta,
-                                                  std::size_t postQueued,
-                                                  std::size_t embedInFlight);
-    static int32_t testing_computeContentionBudgetAdjustment(
+#if YAMS_DAEMON_TEST_HOOKS_ENABLED
+    YAMS_DAEMON_TEST_HOOK static void testing_rebalanceTargetsByQueue(
+        std::array<uint32_t, 6>& targets, const std::array<uint32_t, 6>& floors,
+        const std::array<std::size_t, 6>& queueDepths, const std::array<bool, 6>& active);
+    YAMS_DAEMON_TEST_HOOK static uint32_t testing_computeEmbedScaleBias(std::size_t embedQueued,
+                                                                        uint64_t embedDroppedDelta,
+                                                                        std::size_t postQueued,
+                                                                        std::size_t embedInFlight);
+    YAMS_DAEMON_TEST_HOOK static int32_t testing_computeContentionBudgetAdjustment(
         std::size_t waitingRequests, std::uint64_t waitMicrosDelta, std::size_t timeoutDelta,
         std::size_t failedDelta, std::size_t processedDelta, std::uint32_t healthyTicks);
-    static void testing_setPostIngestScaleTestMode(PostIngestScaleTestMode mode);
-    static PostIngestScaleTestMode testing_postIngestScaleTestMode();
-    static bool testing_shouldAllowZeroPostIngestTargets(bool daemonIdle, bool postIngestBusy);
+    YAMS_DAEMON_TEST_HOOK static void
+    testing_setPostIngestScaleTestMode(PostIngestScaleTestMode mode);
+    YAMS_DAEMON_TEST_HOOK static PostIngestScaleTestMode testing_postIngestScaleTestMode();
+    YAMS_DAEMON_TEST_HOOK static bool testing_shouldAllowZeroPostIngestTargets(bool daemonIdle,
+                                                                               bool postIngestBusy);
+#endif
 
     /// Notify the tuning loop to wake from idle sleep early (e.g., when work arrives).
     /// Thread-safe; can be called from any thread. No-op if the loop is not sleeping.
     static void notifyWakeup();
 
-#ifdef YAMS_TESTING
+#if YAMS_DAEMON_TEST_HOOKS_ENABLED
     /// Test-only: trigger a wakeup signal. Verifies the mechanism exists.
     static void testing_notifyWakeup() { notifyWakeup(); }
 #endif

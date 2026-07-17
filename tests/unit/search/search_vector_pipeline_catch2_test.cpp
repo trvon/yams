@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include "src/search/search_vector_pipeline_internal.h"
+#include "tests/common/test_helpers_catch2.h"
 #include <yams/vector/vector_database.h>
 
 using yams::search::SearchEngineConfig;
@@ -20,6 +21,9 @@ TEST_CASE("Vector pipeline over-fetches chunks for aggregating unique docs",
 
 TEST_CASE("Vector pipeline propagates exact routed work diagnostics",
           "[search][vector][topology][catch2]") {
+    yams::test::ScopedEnvVar enableVectors("YAMS_DISABLE_VECTORS", std::string("0"));
+    yams::test::ScopedEnvVar enableSqliteVecInit("YAMS_SQLITE_VEC_SKIP_INIT", std::string("0"));
+
     yams::vector::VectorDatabaseConfig dbConfig;
     dbConfig.database_path = ":memory:";
     dbConfig.embedding_dim = 2;

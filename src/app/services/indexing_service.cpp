@@ -4,8 +4,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <span>
 #include <sstream>
-#include <thread>
 #include <yams/app/services/services.hpp>
 #include <yams/common/pattern_utils.h>
 #include <yams/core/magic_numbers.hpp>
@@ -13,7 +13,6 @@
 #include <yams/crypto/hasher.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/ServiceManager.h>
-#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/metadata/tree_builder.h>
 
 namespace yams::app::services {
@@ -241,44 +240,30 @@ public:
             if (backlog == 0) {
                 publishIngestMetrics(0, 0);
             } else {
-                std::atomic<size_t> idx{0};
-                std::atomic<size_t> remaining{backlog};
-                size_t workers = resolveWorkerCount(backlog);
-                if (workers == 0)
-                    workers = 1;
-                publishIngestMetrics(backlog, workers);
-                std::mutex respMutex;
-                auto workerFn = [&]() {
-                    while (true) {
-                        size_t i = idx.fetch_add(1, std::memory_order_relaxed);
-                        if (i >= backlog)
-                            break;
-                        AddDirectoryResponse localResp; // partial counts
-                        const auto& ent = entries[i];
-                        bool willInclude = shouldIncludeFile(
-                            req.directoryPath, ent.path().string(), req.includePatterns,
-                            req.excludePatterns, gitignorePatterns);
-                        spdlog::debug("[IndexingService] candidate: '{}' -> {}",
-                                      ent.path().string(), willInclude ? "include" : "skip");
-                        processDirectoryEntry(ent, req, localResp, snapshotId, gitignorePatterns);
-                        auto leftBefore = remaining.fetch_sub(1, std::memory_order_relaxed);
-                        if (leftBefore > 0)
-                            publishIngestQueued(leftBefore - 1);
-                        std::lock_guard<std::mutex> lk(respMutex);
-                        response.filesProcessed += localResp.filesProcessed;
-                        response.filesIndexed += localResp.filesIndexed;
-                        response.filesSkipped += localResp.filesSkipped;
-                        response.filesFailed += localResp.filesFailed;
-                        for (auto& r : localResp.results)
-                            response.results.push_back(std::move(r));
+                constexpr std::size_t kMaxDirectoryBatchSize = 32;
+                publishIngestMetrics(backlog, 1);
+                std::size_t begin = 0;
+                while (begin < backlog) {
+                    const auto remaining = backlog - begin;
+                    const auto count = remaining == kMaxDirectoryBatchSize + 1
+                                           ? kMaxDirectoryBatchSize - 1
+                                           : std::min(kMaxDirectoryBatchSize, remaining);
+                    const auto end = begin + count;
+                    AddDirectoryResponse localResponse;
+                    processDirectoryBatch(
+                        std::span<const std::filesystem::directory_entry>{entries}.subspan(begin,
+                                                                                           count),
+                        req, localResponse, snapshotId, gitignorePatterns);
+                    response.filesProcessed += localResponse.filesProcessed;
+                    response.filesIndexed += localResponse.filesIndexed;
+                    response.filesSkipped += localResponse.filesSkipped;
+                    response.filesFailed += localResponse.filesFailed;
+                    for (auto& result : localResponse.results) {
+                        response.results.push_back(std::move(result));
                     }
-                };
-                std::vector<std::thread> threads;
-                threads.reserve(workers);
-                for (size_t t = 0; t < workers; ++t)
-                    threads.emplace_back(workerFn);
-                for (auto& th : threads)
-                    th.join();
+                    publishIngestQueued(backlog - end);
+                    begin = end;
+                }
                 publishIngestMetrics(0, 0);
             }
 
@@ -336,8 +321,8 @@ public:
                         snapshot.metadata["collection"] = req.collection;
                     }
 
-                    auto* coord = ctx_.service_manager ? ctx_.service_manager->getWriteCoordinator()
-                                                       : nullptr;
+                    auto* coord =
+                        ctx_.writeCoordinatorProvider ? ctx_.writeCoordinatorProvider() : nullptr;
                     bool snapshotEnqueued = false;
                     if (coord) {
                         auto wb = std::make_unique<yams::daemon::WriteBatch>();
@@ -591,137 +576,164 @@ private:
 
         return meta;
     }
-
-    void processDirectoryEntry(const std::filesystem::directory_entry& entry,
+    void processDirectoryBatch(std::span<const std::filesystem::directory_entry> entries,
                                const AddDirectoryRequest& req, AddDirectoryResponse& response,
                                const std::string& snapshotId,
                                const std::vector<std::string>& gitignorePatterns = {}) {
-        if (!entry.is_regular_file()) {
+        std::vector<StoreDocumentRequest> storeRequests;
+        std::vector<std::size_t> resultIndices;
+        std::vector<std::filesystem::path> sourcePaths;
+        storeRequests.reserve(entries.size());
+        resultIndices.reserve(entries.size());
+        sourcePaths.reserve(entries.size());
+
+        for (const auto& entry : entries) {
+            if (!entry.is_regular_file()) {
+                continue;
+            }
+
+            ++response.filesProcessed;
+            const auto filePath = entry.path().string();
+            const bool included =
+                shouldIncludeFile(req.directoryPath, filePath, req.includePatterns,
+                                  req.excludePatterns, gitignorePatterns);
+            spdlog::debug("[IndexingService] candidate: '{}' -> {}", filePath,
+                          included ? "include" : "skip");
+            if (!included) {
+                ++response.filesSkipped;
+                continue;
+            }
+
+            IndexedFileResult fileResult;
+            fileResult.path = filePath;
+            try {
+                StoreDocumentRequest storeRequest;
+                storeRequest.path = filePath;
+                storeRequest.metadata = req.metadata;
+                storeRequest.collection = req.collection;
+                storeRequest.tags = req.tags;
+                storeRequest.noEmbeddings = req.noEmbeddings;
+                storeRequest.skipInlineContentIndexing =
+                    static_cast<bool>(ctx_.enqueuePostIngestBatch);
+                storeRequest.snapshotId = snapshotId;
+                storeRequest.sessionId = req.sessionId;
+                storeRequest.bypassSession = req.bypassSession;
+                if (!req.collection.empty()) {
+                    storeRequest.metadata["collection"] = req.collection;
+                }
+
+                auto hasher = yams::crypto::createSHA256Hasher();
+                storeRequest.precomputedHash = hasher->hashFile(filePath);
+                std::error_code fingerprintError;
+                const auto fileSize = std::filesystem::file_size(entry.path(), fingerprintError);
+                if (!fingerprintError) {
+                    storeRequest.precomputedFileSize = fileSize;
+                }
+                const auto lastWriteTime =
+                    std::filesystem::last_write_time(entry.path(), fingerprintError);
+                if (!fingerprintError) {
+                    storeRequest.precomputedLastWriteTimeNs =
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            lastWriteTime.time_since_epoch())
+                            .count();
+                }
+
+                resultIndices.push_back(response.results.size());
+                sourcePaths.push_back(entry.path());
+                storeRequests.push_back(std::move(storeRequest));
+            } catch (const std::exception& error) {
+                fileResult.error = error.what();
+                ++response.filesFailed;
+            }
+            response.results.push_back(std::move(fileResult));
+        }
+
+        if (storeRequests.empty()) {
             return;
         }
 
-        response.filesProcessed++;
-
-        std::string filePath = entry.path().string();
-
-        // Apply include/exclude filters (gitignore patterns checked first)
-        if (!shouldIncludeFile(req.directoryPath, filePath, req.includePatterns,
-                               req.excludePatterns, gitignorePatterns)) {
-            response.filesSkipped++;
-            return;
-        }
-
-        // Store the file
-        IndexedFileResult fileResult;
-        fileResult.path = filePath;
-
+        std::vector<Result<StoreDocumentResponse>> storeResults;
         try {
-            // Use document service to store the file
-            StoreDocumentRequest storeReq;
-            storeReq.path = filePath;
-            storeReq.metadata = req.metadata;
-            // Propagate collection and tags to each stored file
-            storeReq.collection = req.collection;
-            storeReq.tags = req.tags;
-            storeReq.noEmbeddings = req.noEmbeddings;
-            // Set automatic snapshot ID for versioning
-            storeReq.snapshotId = snapshotId;
-            // Session-isolated memory (PBI-082)
-            storeReq.sessionId = req.sessionId;
-            storeReq.bypassSession = req.bypassSession;
-            if (!req.collection.empty()) {
-                storeReq.metadata["collection"] = req.collection;
+            storeResults = makeDocumentService(ctx_)->storeBatch(storeRequests);
+        } catch (const std::exception& error) {
+            for (const auto resultIndex : resultIndices) {
+                response.results[resultIndex].error = error.what();
+                ++response.filesFailed;
             }
-
-            // Pre-compute the file hash so ContentStore can reuse it instead
-            // of re-reading+re-hashing the file inside store().
-            auto hasher = yams::crypto::createSHA256Hasher();
-            storeReq.precomputedHash = hasher->hashFile(filePath);
-            std::error_code preHashEc;
-            auto preSize = std::filesystem::file_size(entry.path(), preHashEc);
-            if (!preHashEc) {
-                storeReq.precomputedFileSize = preSize;
-            }
-            auto preMtime = std::filesystem::last_write_time(entry.path(), preHashEc);
-            if (!preHashEc) {
-                storeReq.precomputedLastWriteTimeNs =
-                    std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        preMtime.time_since_epoch())
-                        .count();
-            }
-
-            auto docService = makeDocumentService(ctx_);
-            auto result = docService->store(storeReq);
-
-            if (result) {
-                fileResult.hash = result.value().hash;
-                fileResult.sizeBytes = result.value().bytesStored;
-                fileResult.success = true;
-                response.filesIndexed++;
-
-                // Dispatch to PostIngestQueue when the host provides a daemon scheduler.
-                if (!fileResult.hash.empty() && ctx_.enqueuePostIngest) {
-                    try {
-                        ctx_.enqueuePostIngest(fileResult.hash, "");
-                    } catch (const std::exception& e) {
-                        spdlog::debug("[IndexingService] Post-ingest dispatch failed: {}",
-                                      e.what());
-                    } catch (...) {
-                        spdlog::warn(
-                            "[IndexingService] Post-ingest dispatch failed with unknown exception");
-                    }
-                }
-
-                // Optional post-add verification
-                if (req.verify) {
-                    bool ok = true;
-                    std::string verr;
-                    try {
-                        // Verify content hash by hashing source file; also verify existence in
-                        // store
-                        auto hasher = yams::crypto::createSHA256Hasher();
-                        std::string fileHash = hasher->hashFile(entry.path());
-                        if (!fileHash.empty() && !fileResult.hash.empty() &&
-                            fileHash != fileResult.hash) {
-                            ok = false;
-                            verr = "hash mismatch (computed vs stored)";
-                        }
-                        if (ok && ctx_.store) {
-                            auto er = ctx_.store->exists(fileResult.hash);
-                            if (!er || !er.value()) {
-                                ok = false;
-                                verr = er ? std::string("content not found in store")
-                                          : er.error().message;
-                            }
-                        }
-                    } catch (const std::exception& ex) {
-                        ok = false;
-                        verr = ex.what();
-                    } catch (...) {
-                        ok = false;
-                        verr = "unknown verification error";
-                    }
-                    if (!ok) {
-                        fileResult.success = false;
-                        fileResult.error = verr;
-                        // Adjust counts: this file should be considered failed
-                        if (response.filesIndexed > 0)
-                            --response.filesIndexed;
-                        response.filesFailed++;
-                    }
-                }
-            } else {
-                fileResult.error = result.error().message;
-                fileResult.success = false;
-                response.filesFailed++;
-            }
-        } catch (const std::exception& e) {
-            fileResult.error = e.what();
-            fileResult.success = false;
-            response.filesFailed++;
+            return;
         }
 
-        response.results.push_back(std::move(fileResult));
+        std::vector<std::string> postIngestHashes;
+        postIngestHashes.reserve(storeResults.size());
+        for (std::size_t i = 0; i < resultIndices.size(); ++i) {
+            auto& fileResult = response.results[resultIndices[i]];
+            if (i >= storeResults.size()) {
+                fileResult.error = "document batch returned an invalid result count";
+                ++response.filesFailed;
+                continue;
+            }
+            if (!storeResults[i]) {
+                fileResult.error = storeResults[i].error().message;
+                ++response.filesFailed;
+                continue;
+            }
+
+            fileResult.hash = storeResults[i].value().hash;
+            fileResult.sizeBytes = storeResults[i].value().bytesStored;
+            fileResult.success = true;
+            ++response.filesIndexed;
+
+            if (!fileResult.hash.empty() && ctx_.enqueuePostIngestBatch) {
+                postIngestHashes.push_back(fileResult.hash);
+            }
+
+            if (!req.verify) {
+                continue;
+            }
+
+            bool verified = true;
+            std::string verificationError;
+            try {
+                auto hasher = yams::crypto::createSHA256Hasher();
+                const auto fileHash = hasher->hashFile(sourcePaths[i]);
+                if (!fileHash.empty() && !fileResult.hash.empty() && fileHash != fileResult.hash) {
+                    verified = false;
+                    verificationError = "hash mismatch (computed vs stored)";
+                }
+                if (verified && ctx_.store) {
+                    auto exists = ctx_.store->exists(fileResult.hash);
+                    if (!exists || !exists.value()) {
+                        verified = false;
+                        verificationError = exists ? std::string("content not found in store")
+                                                   : exists.error().message;
+                    }
+                }
+            } catch (const std::exception& error) {
+                verified = false;
+                verificationError = error.what();
+            } catch (...) {
+                verified = false;
+                verificationError = "unknown verification error";
+            }
+            if (!verified) {
+                fileResult.success = false;
+                fileResult.error = std::move(verificationError);
+                --response.filesIndexed;
+                ++response.filesFailed;
+            }
+        }
+
+        if (!postIngestHashes.empty()) {
+            try {
+                ctx_.enqueuePostIngestBatch(postIngestHashes, "");
+            } catch (const std::exception& error) {
+                spdlog::debug("[IndexingService] Post-ingest batch dispatch failed: {}",
+                              error.what());
+            } catch (...) {
+                spdlog::warn(
+                    "[IndexingService] Post-ingest batch dispatch failed with unknown exception");
+            }
+        }
     }
 
     bool shouldIncludeFile(const std::string& rootDir, const std::string& absPath,
@@ -781,34 +793,6 @@ private:
             return true;
         }
         return false;
-    }
-
-    std::size_t resolveWorkerCount(std::size_t backlog) const {
-        if (backlog == 0)
-            return 1;
-        if (ctx_.service_manager) {
-            auto target = ctx_.service_manager->ingestWorkerTarget();
-            if (target > 1)
-                return target;
-        }
-        if (!yams::daemon::TuneAdvisor::enableParallelIngest())
-            return 1;
-        std::size_t cap = yams::daemon::TuneAdvisor::maxIngestWorkers();
-        if (cap == 0)
-            cap = std::max<std::size_t>(1, std::thread::hardware_concurrency());
-        std::size_t storageCap = yams::daemon::TuneAdvisor::storagePoolSize();
-        if (storageCap > 0)
-            cap = std::min(cap, storageCap);
-        if (cap == 0)
-            cap = 1;
-        const std::size_t perWorker = std::max<std::size_t>(
-            1, static_cast<std::size_t>(yams::daemon::TuneAdvisor::ingestBacklogPerWorker()));
-        std::size_t desired = (backlog + perWorker - 1) / perWorker;
-        if (desired == 0)
-            desired = 1;
-        if (desired > cap)
-            desired = cap;
-        return desired;
     }
 
     void publishIngestMetrics(std::size_t queued, std::size_t active) const {

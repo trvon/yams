@@ -641,7 +641,11 @@ Result<void> Database::execute(const std::string& sql) {
     if (rc != SQLITE_OK) {
         std::string error = errMsg ? errMsg : "Unknown error";
         sqlite3_free(errMsg);
-        spdlog::error("SQL exec failed ({}): {}", error, sql);
+        if (rc == SQLITE_INTERRUPT) {
+            spdlog::debug("SQL exec interrupted: {}", sql);
+        } else {
+            spdlog::error("SQL exec failed ({}): {}", error, sql);
+        }
         return make_sqlite_error(rc, "Failed to execute SQL: " + error);
     }
     return {};

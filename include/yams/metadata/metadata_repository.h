@@ -110,6 +110,13 @@ struct BatchDocumentInsert {
     std::vector<std::pair<std::string, MetadataValue>> tags;
     std::optional<TreeSnapshotRecord> snapshot;
     bool updatePathTreeInTransaction = false;
+    bool initializePathSeriesInTransaction = false;
+};
+
+struct DocumentInsertOutcome {
+    int64_t documentId{0};
+    bool insertedNewDocument{false};
+    bool pathSeriesInitialized{false};
 };
 
 /**
@@ -487,6 +494,9 @@ public:
                                                bool hasEmbedding,
                                                const std::string& modelId = "") = 0;
     virtual Result<void>
+    batchCompleteDocumentEmbeddingsByHashes(const std::vector<std::string>& hashes,
+                                            const std::string& modelId = "") = 0;
+    virtual Result<void>
     reconcileDocumentEmbeddingStatusByHashes(const std::vector<std::string>& embeddedHashes,
                                              const std::string& modelId = "") = 0;
     virtual Result<bool> hasDocumentEmbeddingByHash(const std::string& hash) = 0;
@@ -579,7 +589,8 @@ public:
      */
     Result<int64_t> insertDocumentWithMetadata(
         const DocumentInfo& info, const std::vector<std::pair<std::string, MetadataValue>>& tags,
-        TreeSnapshotRecord* snapshot = nullptr, bool updatePathTreeInTransaction = false);
+        TreeSnapshotRecord* snapshot = nullptr, bool updatePathTreeInTransaction = false,
+        bool initializePathSeriesInTransaction = false);
 
     /**
      * @brief Insert multiple documents (+metadata/+snapshot/+path-tree) in ONE transaction.
@@ -590,9 +601,9 @@ public:
      *
      * @param items Documents to insert; each item's optional snapshot has its ingestDocumentId
      *              set internally to the corresponding new docId.
-     * @return Document IDs in the same order as @p items (new or existing).
+     * @return Insert outcomes in the same order as @p items.
      */
-    Result<std::vector<int64_t>>
+    Result<std::vector<DocumentInsertOutcome>>
     batchInsertDocumentsWithMetadata(std::vector<BatchDocumentInsert>& items);
 
     Result<std::optional<DocumentInfo>> getDocument(int64_t id) override;
@@ -847,6 +858,8 @@ public:
     batchUpdateDocumentEmbeddingStatusByHashes(const std::vector<std::string>& hashes,
                                                bool hasEmbedding,
                                                const std::string& modelId = "") override;
+    Result<void> batchCompleteDocumentEmbeddingsByHashes(const std::vector<std::string>& hashes,
+                                                         const std::string& modelId = "") override;
     Result<void>
     reconcileDocumentEmbeddingStatusByHashes(const std::vector<std::string>& embeddedHashes,
                                              const std::string& modelId = "") override;
@@ -1164,10 +1177,22 @@ private:
                             .count(),
                         connResult.error().message);
                 }
-                spdlog::error(
-                    "MetadataRepository::executeQueryOnPool route='{}' op='{}' acquire error: {}",
-                    route, op.empty() ? "(unknown)" : op, connResult.error().message);
-                return Error{connResult.error()};
+                const auto& acquireError = connResult.error();
+                const bool shutdownAcquire =
+                    acquireError.code == ErrorCode::OperationCancelled ||
+                    acquireError.code == ErrorCode::SystemShutdown ||
+                    (acquireError.code == ErrorCode::InvalidState &&
+                     acquireError.message.find("shut down") != std::string::npos);
+                if (shutdownAcquire) {
+                    spdlog::debug("MetadataRepository::executeQueryOnPool route='{}' op='{}' "
+                                  "acquire cancelled during shutdown: {}",
+                                  route, op.empty() ? "(unknown)" : op, acquireError.message);
+                } else {
+                    spdlog::error("MetadataRepository::executeQueryOnPool route='{}' op='{}' "
+                                  "acquire error: {}",
+                                  route, op.empty() ? "(unknown)" : op, acquireError.message);
+                }
+                return Error{acquireError};
             }
 
             Result<T> result;

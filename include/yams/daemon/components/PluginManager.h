@@ -7,6 +7,7 @@
 #include <yams/daemon/components/EmbeddingProviderFsm.h>
 #include <yams/daemon/components/IComponent.h>
 #include <yams/daemon/components/PluginHostFsm.h>
+#include <yams/daemon/components/test_hooks.h>
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/plugin_host.h>
 
@@ -345,8 +346,9 @@ public:
         cachedModelCount_.store(count, std::memory_order_relaxed);
     }
 
-    // --- Test Helpers ---
-    void testingSetEmbeddingDegraded(bool degraded, const std::string& error);
+#if YAMS_DAEMON_TEST_HOOKS_ENABLED
+    YAMS_DAEMON_TEST_HOOK void testingSetEmbeddingDegraded(bool degraded, const std::string& error);
+#endif
 #ifdef YAMS_TESTING
     void __test_setModelProvider(std::shared_ptr<IModelProvider> provider) {
         modelProvider_ = std::move(provider);
@@ -356,10 +358,6 @@ public:
     }
     void __test_setSharedPluginHost(AbiPluginHost* host) { sharedPluginHost_ = host; }
 #endif
-    // Out-of-line test hooks stay declared in all builds so production daemon
-    // libraries can satisfy test callers compiled with -DYAMS_TESTING=1.
-    void testingPluginLoadFailed(const std::string& error);
-    void testingPluginScanComplete(std::size_t count);
 
 private:
     static void ignoreFsmDispatchFailure() noexcept {}

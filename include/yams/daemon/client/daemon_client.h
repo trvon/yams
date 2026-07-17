@@ -62,8 +62,6 @@ public:
 
     // Connection management
     boost::asio::awaitable<Result<void>> connect();
-    // Compatibility alias for codepaths expecting connectAsync()
-    boost::asio::awaitable<Result<void>> connectAsync() { co_return co_await connect(); }
     void disconnect();
     bool isConnected() const;
 
@@ -136,7 +134,7 @@ public:
 
     // High-level streaming helpers
     boost::asio::awaitable<Result<void>> getToStdout(const GetInitRequest& req) {
-        if (auto c = co_await connectAsync(); !c)
+        if (auto c = co_await connect(); !c)
             co_return c.error();
         auto init = co_await call<GetInitRequest>(req);
         if (!init)
@@ -195,7 +193,7 @@ public:
 
     boost::asio::awaitable<Result<void>> getToFile(const GetInitRequest& req,
                                                    const std::filesystem::path& outputPath) {
-        if (auto c = co_await connectAsync(); !c)
+        if (auto c = co_await connect(); !c)
             co_return c.error();
         auto init = co_await call<GetInitRequest>(req);
         if (!init)

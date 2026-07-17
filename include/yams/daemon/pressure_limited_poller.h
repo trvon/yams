@@ -131,6 +131,7 @@ template <typename Task> struct PressureLimitedPollerConfig {
     bool batchLimiterPerTask = true;
     std::function<std::size_t()> batchSizeFn;
     std::function<void(std::vector<Task>&&)> batchProcessFn;
+    std::function<std::chrono::milliseconds()> batchCoalesceWindowFn;
 
     // Optional high-priority channel (for RPC / latency-sensitive work)
     std::shared_ptr<SpscQueue<Task>> highPriorityChannel;
@@ -142,9 +143,8 @@ template <typename Task> struct PressureLimitedPollerConfig {
     bool enableCpuThrottling = true;
 
     // Event-driven wake: the enqueuer cancels this timer to wake the poller.
-    // The timer is always armed with a 10ms safety-net expiry so that even if
-    // a cancel races past, the poller resumes within 10ms worst case.
-    // When nullptr, falls back to legacy adaptive-backoff timer.
+    // The timer is always armed with a safety-net expiry so that even if a
+    // cancel races past, the poller resumes promptly.
     std::shared_ptr<boost::asio::steady_timer> wakeTimer;
     std::mutex* wakeTimerMutex = nullptr;
 };
@@ -172,6 +172,8 @@ inline void validatePressureLimitedPollerConfig(const std::shared_ptr<SpscQueue<
     YAMS_ASSERT(cfg.completeJobFn,
                 "PressureLimitedPoller configured without completeJobFn completion hook");
     YAMS_ASSERT(cfg.getHashFn, "PressureLimitedPoller configured without getHashFn task identity");
+    YAMS_ASSERT(cfg.wakeTimer, "PressureLimitedPoller configured without wakeTimer");
+    YAMS_ASSERT(cfg.wakeTimerMutex, "PressureLimitedPoller configured without wakeTimerMutex");
     if (cfg.batchMode) {
         YAMS_ASSERT(cfg.batchProcessFn,
                     "PressureLimitedPoller batch mode configured without batchProcessFn");
@@ -182,44 +184,21 @@ inline void validatePressureLimitedPollerConfig(const std::shared_ptr<SpscQueue<
 }
 
 template <typename Task>
-boost::asio::awaitable<void> awaitPressureLimitedPollerIdle(
-    boost::asio::steady_timer& timer, const PressureLimitedPollerConfig<Task>& cfg,
-    std::chrono::milliseconds& idleDelay, std::chrono::milliseconds minIdleDelay) {
-    // Event-driven idle sleep: the enqueuer cancels wakeTimer to resume this coroutine
-    // immediately. The 10ms expiry is a safety net that handles the race where cancel()
-    // fires before async_wait is armed — worst case poller resumes in 10ms.
-    if (cfg.wakeTimer) {
-        if (cfg.wakeTimerMutex) {
+boost::asio::awaitable<void>
+awaitPressureLimitedPollerWake(const PressureLimitedPollerConfig<Task>& cfg,
+                               std::chrono::milliseconds timeout, std::string_view context) {
+    try {
+        auto waitOp = [&]() {
             std::lock_guard<std::mutex> lock(*cfg.wakeTimerMutex);
-            cfg.wakeTimer->expires_after(std::chrono::milliseconds(10));
-        } else {
-            cfg.wakeTimer->expires_after(std::chrono::milliseconds(10));
+            cfg.wakeTimer->expires_after(timeout);
+            return cfg.wakeTimer->async_wait(boost::asio::use_awaitable);
+        }();
+        co_await std::move(waitOp);
+    } catch (const boost::system::system_error& e) {
+        if (e.code() != boost::asio::error::operation_aborted) {
+            spdlog::warn("[PostIngestQueue] {} {} wait error: {}", cfg.stageName, context,
+                         e.what());
         }
-        try {
-            if (cfg.wakeTimerMutex) {
-                auto waitOp = [&]() {
-                    std::lock_guard<std::mutex> lock(*cfg.wakeTimerMutex);
-                    return cfg.wakeTimer->async_wait(boost::asio::use_awaitable);
-                }();
-                co_await std::move(waitOp);
-            } else {
-                co_await cfg.wakeTimer->async_wait(boost::asio::use_awaitable);
-            }
-        } catch (const boost::system::system_error& e) {
-            if (e.code() != boost::asio::error::operation_aborted) {
-                spdlog::warn("[PostIngestQueue] {} wake timer error: {}", cfg.stageName, e.what());
-            }
-        }
-        idleDelay = minIdleDelay;
-        co_return;
-    }
-
-    // Adaptive backoff when idle (legacy path, no wake timer).
-    const auto maxIdleDelay = pollerMaxIdleDelay();
-    timer.expires_after(idleDelay);
-    co_await timer.async_wait(boost::asio::use_awaitable);
-    if (idleDelay < maxIdleDelay) {
-        idleDelay = std::min(idleDelay * 2, maxIdleDelay);
     }
     co_return;
 }
@@ -258,40 +237,14 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
     }
     spdlog::info("[PostIngestQueue] {} poller started", cfg.stageName);
 
-    constexpr auto kMinIdleDelay = std::chrono::milliseconds(1);
-    auto idleDelay = kMinIdleDelay;
+    constexpr auto kAdmissionRetryDelay = std::chrono::milliseconds(1);
 
     while (!cfg.stopFlag->load()) {
         try {
             // Capability check (e.g., titlePoller requires titleExtractor_)
             if (cfg.isCapableFn && !cfg.isCapableFn()) {
-                if (cfg.wakeTimer) {
-                    if (cfg.wakeTimerMutex) {
-                        std::lock_guard<std::mutex> lock(*cfg.wakeTimerMutex);
-                        cfg.wakeTimer->expires_after(std::chrono::milliseconds(250));
-                    } else {
-                        cfg.wakeTimer->expires_after(std::chrono::milliseconds(250));
-                    }
-                    try {
-                        if (cfg.wakeTimerMutex) {
-                            auto waitOp = [&]() {
-                                std::lock_guard<std::mutex> lock(*cfg.wakeTimerMutex);
-                                return cfg.wakeTimer->async_wait(boost::asio::use_awaitable);
-                            }();
-                            co_await std::move(waitOp);
-                        } else {
-                            co_await cfg.wakeTimer->async_wait(boost::asio::use_awaitable);
-                        }
-                    } catch (const boost::system::system_error& e) {
-                        if (e.code() != boost::asio::error::operation_aborted) {
-                            spdlog::warn("[PostIngestQueue] {} capability wait error: {}",
-                                         cfg.stageName, e.what());
-                        }
-                    }
-                } else {
-                    timer.expires_after(std::chrono::milliseconds(250));
-                    co_await timer.async_wait(boost::asio::use_awaitable);
-                }
+                co_await detail::awaitPressureLimitedPollerWake(cfg, std::chrono::milliseconds(250),
+                                                                "capability");
                 continue;
             }
 
@@ -339,7 +292,7 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                     batchLimiterId = cfg.stageName + "#batch#" + std::to_string(seq);
                     if (!cfg.tryAcquireFn(lim, batchLimiterId, cfg.stageName)) {
                         // Unable to admit a new batch under current limiter settings.
-                        timer.expires_after(kMinIdleDelay);
+                        timer.expires_after(kAdmissionRetryDelay);
                         co_await timer.async_wait(boost::asio::use_awaitable);
                         continue;
                     }
@@ -350,22 +303,22 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                 // maxConcurrent is temporarily clamped low (e.g., pressure=Critical/Emergency).
                 // inFlightCounter tracks admitted tasks (not batches), so use a task budget.
                 const std::size_t taskBudget = std::max(maxConcurrent, batchSize);
-                while (cfg.inFlightCounter->load() < taskBudget && batch.size() < batchSize) {
-                    bool fromHighPriority = false;
-                    if (cfg.highPriorityChannel && hpTaken >= hpMax) {
-                        // Quota consumed; only pull from the normal channel for fairness.
-                        if (!channel->try_pop(task)) {
+                bool highPriorityTaken = false;
+                bool admissionBlocked = false;
+                const auto drainAvailable = [&]() {
+                    while (cfg.inFlightCounter->load() < taskBudget && batch.size() < batchSize) {
+                        bool fromHighPriority = false;
+                        if (cfg.highPriorityChannel && hpTaken >= hpMax) {
+                            // Quota consumed; only pull from the normal channel for fairness.
+                            if (!channel->try_pop(task)) {
+                                break;
+                            }
+                        } else if (!tryPopFromAny(task, fromHighPriority)) {
                             break;
                         }
-                        fromHighPriority = false;
-                    } else {
-                        if (!tryPopFromAny(task, fromHighPriority)) {
-                            break;
-                        }
-                    }
 
-                    if (cfg.batchLimiterPerTask) {
-                        if (!cfg.tryAcquireFn(lim, cfg.getHashFn(task), cfg.stageName)) {
+                        if (cfg.batchLimiterPerTask &&
+                            !cfg.tryAcquireFn(lim, cfg.getHashFn(task), cfg.stageName)) {
                             // Push back to the originating channel to preserve priority.
                             bool requeued = false;
                             if (fromHighPriority && cfg.highPriorityChannel) {
@@ -380,14 +333,41 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                                     "task; breaking to avoid hot-spin",
                                     cfg.stageName);
                             }
+                            admissionBlocked = true;
                             break;
                         }
+                        didWork = true;
+                        cfg.inFlightCounter->fetch_add(1);
+                        batch.push_back(std::move(task));
+                        if (fromHighPriority) {
+                            ++hpTaken;
+                            highPriorityTaken = true;
+                        }
                     }
-                    didWork = true;
-                    cfg.inFlightCounter->fetch_add(1);
-                    batch.push_back(std::move(task));
-                    if (fromHighPriority) {
-                        ++hpTaken;
+                };
+
+                drainAvailable();
+
+                // Normal-priority producers can arrive as a short trickle (notably directory
+                // ingestion). Keep the first partial batch open for a bounded interval so those
+                // tasks share one commit. High-priority work always bypasses this window.
+                const auto coalesceWindow = cfg.batchCoalesceWindowFn
+                                                ? cfg.batchCoalesceWindowFn()
+                                                : std::chrono::milliseconds{0};
+                if (didWork && !highPriorityTaken && !admissionBlocked &&
+                    batch.size() < batchSize && coalesceWindow.count() > 0) {
+                    const auto deadline = std::chrono::steady_clock::now() + coalesceWindow;
+                    while (!cfg.stopFlag->load() && !highPriorityTaken && !admissionBlocked &&
+                           batch.size() < batchSize) {
+                        const auto now = std::chrono::steady_clock::now();
+                        if (now >= deadline) {
+                            break;
+                        }
+                        const auto remaining =
+                            std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
+                        co_await detail::awaitPressureLimitedPollerWake(cfg, remaining,
+                                                                        "batch coalesce");
+                        drainAvailable();
                     }
                 }
 
@@ -485,14 +465,13 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                         co_await timer.async_wait(boost::asio::use_awaitable);
                     }
                 }
-                idleDelay = kMinIdleDelay;
                 continue;
             }
 
-            co_await detail::awaitPressureLimitedPollerIdle(timer, cfg, idleDelay, kMinIdleDelay);
+            co_await detail::awaitPressureLimitedPollerWake(cfg, std::chrono::milliseconds(10),
+                                                            "idle");
         } catch (const std::exception& e) {
             spdlog::error("[PostIngestQueue] {} poller exception: {}", cfg.stageName, e.what());
-            idleDelay = std::chrono::milliseconds(100);
         }
     }
 

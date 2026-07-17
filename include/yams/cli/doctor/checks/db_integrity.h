@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <ostream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace yams::cli {
@@ -37,5 +38,7 @@ public:
     /// Render the result to the given output stream using UI helpers.
     static void render(std::ostream& os, const Result& r);
 };
+
+bool testing_isReadOnlyFtsValidationLine(std::string_view line);
 
 } // namespace yams::cli::doctor

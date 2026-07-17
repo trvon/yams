@@ -355,6 +355,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                                   std::is_same_v<T, UpdateExtractionStatusOp> ||
                                   std::is_same_v<T, UpdateEmbeddingStatusByHashOp> ||
                                   std::is_same_v<T, UpdateEmbeddingStatusByHashesOp> ||
+                                  std::is_same_v<T, CompleteDocumentEmbeddingsByHashesOp> ||
                                   std::is_same_v<T, UpsertSymbolExtractionStateOp> ||
                                   std::is_same_v<T, InsertRelationshipOp> ||
                                   std::is_same_v<T, AddSymSpellTermsOp>) {
@@ -426,6 +427,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                                       std::is_same_v<T, UpdateExtractionStatusOp> ||
                                       std::is_same_v<T, UpdateEmbeddingStatusByHashOp> ||
                                       std::is_same_v<T, UpdateEmbeddingStatusByHashesOp> ||
+                                      std::is_same_v<T, CompleteDocumentEmbeddingsByHashesOp> ||
                                       std::is_same_v<T, UpsertSymbolExtractionStateOp> ||
                                       std::is_same_v<T, InsertRelationshipOp> ||
                                       std::is_same_v<T, AddSymSpellTermsOp>) {
@@ -519,6 +521,11 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
             std::string modelName;
             std::vector<std::string> hashes;
         };
+        struct EmbeddingCompletionGroup {
+            std::string source;
+            std::string modelName;
+            std::vector<std::string> hashes;
+        };
         struct ExtractionStatusGroup {
             std::string source;
             std::vector<metadata::ExtractionStatusUpdate> updates;
@@ -530,6 +537,8 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
             metadataBySource;
         std::unordered_map<std::string, RepairStatusGroup> repairStatusBySourceAndStatus;
         std::unordered_map<std::string, EmbeddingStatusGroup> embeddingStatusBySourceAndState;
+        std::unordered_map<std::string, EmbeddingCompletionGroup>
+            embeddingCompletionBySourceAndModel;
         std::unordered_map<std::string, ExtractionStatusGroup> extractionStatusBySource;
         std::unordered_map<std::string, std::unordered_map<std::string, std::int64_t>>
             symspellTermsBySource;
@@ -628,6 +637,21 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                             if (group.source.empty()) {
                                 group.source = batch->source;
                                 group.embedded = concrete.embedded;
+                                group.modelName = concrete.modelName;
+                            }
+                            group.hashes.insert(group.hashes.end(),
+                                                std::make_move_iterator(concrete.hashes.begin()),
+                                                std::make_move_iterator(concrete.hashes.end()));
+                            concrete.hashes.clear();
+                            return;
+                        } else if constexpr (std::is_same_v<T,
+                                                            CompleteDocumentEmbeddingsByHashesOp>) {
+                            if (concrete.hashes.empty())
+                                return;
+                            const auto key = batch->source + "\x1f" + concrete.modelName;
+                            auto& group = embeddingCompletionBySourceAndModel[key];
+                            if (group.source.empty()) {
+                                group.source = batch->source;
                                 group.modelName = concrete.modelName;
                             }
                             group.hashes.insert(group.hashes.end(),
@@ -770,6 +794,36 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                     stats_.opsApplied += hashCount;
                 }
                 recordMetaApply(group.source, hashCount, sourceApplyMs, !r);
+            }
+        }
+
+        for (auto& [_, group] : embeddingCompletionBySourceAndModel) {
+            for (std::size_t off = 0; off < group.hashes.size(); off += chunkMax) {
+                YAMS_ZONE_SCOPED_N("WriteCoordinator::coalesceEmbeddingCompletion");
+                const auto end = std::min(group.hashes.size(), off + chunkMax);
+                const auto sourceStart = std::chrono::steady_clock::now();
+                CompleteDocumentEmbeddingsByHashesOp op{
+                    std::vector<std::string>(
+                        std::make_move_iterator(group.hashes.begin() + static_cast<long>(off)),
+                        std::make_move_iterator(group.hashes.begin() + static_cast<long>(end))),
+                    group.modelName};
+                const auto hashCount = static_cast<std::uint64_t>(op.hashes.size());
+                const auto logicalOpCount = hashCount * 2;
+                YAMS_PLOT("wc.coalesce.embedding_completion", static_cast<int64_t>(hashCount));
+                auto r = applyMetadataOp(op);
+                const auto sourceApplyMs = static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - sourceStart)
+                        .count());
+                if (!r) {
+                    spdlog::warn("[WriteCoordinator] coalesced embedding-completion op '{}' "
+                                 "failed: {}",
+                                 group.source, r.error().message);
+                } else {
+                    std::lock_guard<std::mutex> lock(statsMutex_);
+                    stats_.opsApplied += logicalOpCount;
+                }
+                recordMetaApply(group.source, logicalOpCount, sourceApplyMs, !r);
             }
         }
 
@@ -1238,6 +1292,21 @@ Result<void> WriteCoordinator::applyMetadataOp(UpdateEmbeddingStatusByHashesOp& 
     if (r) {
         std::lock_guard<std::mutex> lock(statsMutex_);
         stats_.embeddingStatusesUpdated += op.hashes.size();
+    }
+    return r;
+}
+
+Result<void> WriteCoordinator::applyMetadataOp(CompleteDocumentEmbeddingsByHashesOp& op) {
+    if (!meta_)
+        return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
+    if (op.hashes.empty())
+        return Result<void>();
+    metadata::MetadataOpScope opScope("wc_embedding_completion_batch");
+    auto r = meta_->batchCompleteDocumentEmbeddingsByHashes(op.hashes, op.modelName);
+    if (r) {
+        std::lock_guard<std::mutex> lock(statsMutex_);
+        stats_.embeddingStatusesUpdated += op.hashes.size();
+        stats_.repairStatusesUpdated += op.hashes.size();
     }
     return r;
 }

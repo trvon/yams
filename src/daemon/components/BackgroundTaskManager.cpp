@@ -141,11 +141,6 @@ void BackgroundTaskManager::requestStopAndQuiesceTrackedCoroutines() {
     waitForTrackedCoroutines();
 }
 
-std::size_t BackgroundTaskManager::testingActiveCoroutineCount() const noexcept {
-    std::lock_guard<std::mutex> lock(trackedCoroutineMutex_);
-    return trackedCoroutineCount_;
-}
-
 void BackgroundTaskManager::start() {
     // Idempotent check
     bool expected = false;

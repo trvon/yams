@@ -2,10 +2,14 @@
 // Copyright 2026 YAMS Contributors
 
 #include <filesystem>
+#include <memory>
+#include <sstream>
 #include <string>
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <spdlog/sinks/ostream_sink.h>
+#include <spdlog/spdlog.h>
 #include <yams/metadata/database.h>
 
 #include "../../common/sqlite_corruption.h"
@@ -18,6 +22,34 @@ using namespace yams::test;
 namespace {
 
 constexpr int kSeedRows = 500;
+
+class SpdlogCaptureGuard {
+public:
+    explicit SpdlogCaptureGuard(spdlog::level::level_enum level)
+        : previousLogger_(spdlog::default_logger()), previousLevel_(spdlog::get_level()) {
+        auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(stream_);
+        logger_ = std::make_shared<spdlog::logger>("metadata_database_capture", sink);
+        logger_->set_level(level);
+        logger_->set_pattern("[%l] %v");
+        spdlog::set_default_logger(logger_);
+        spdlog::set_level(level);
+    }
+
+    ~SpdlogCaptureGuard() {
+        if (previousLogger_) {
+            spdlog::set_default_logger(previousLogger_);
+        }
+        spdlog::set_level(previousLevel_);
+    }
+
+    std::string str() const { return stream_.str(); }
+
+private:
+    std::ostringstream stream_;
+    std::shared_ptr<spdlog::logger> previousLogger_;
+    std::shared_ptr<spdlog::logger> logger_;
+    spdlog::level::level_enum previousLevel_;
+};
 
 std::filesystem::path makeSeededDb(std::string_view prefix, bool checkpoint = true) {
     auto dbPath = make_temp_sqlite_path(prefix);
@@ -215,6 +247,23 @@ TEST_CASE("mid-transaction crash snapshot replays to pre-transaction state",
     reopened.close();
 }
 
+TEST_CASE("interrupted VACUUM does not emit SQL error log",
+          "[unit][metadata][corruption][vacuum]") {
+    auto dbPath = makeSeededDb("yams_interrupt_vacuum_");
+    Database db;
+    REQUIRE(db.open(dbPath.string(), ConnectionMode::ReadWrite));
+
+    sqlite3_progress_handler(db.rawHandle(), 1, [](void*) -> int { return 1; }, nullptr);
+    SpdlogCaptureGuard capture(spdlog::level::err);
+    auto vacuum = db.execute("VACUUM");
+    sqlite3_progress_handler(db.rawHandle(), 0, nullptr, nullptr);
+
+    REQUIRE_FALSE(vacuum.has_value());
+    CHECK((capture.str().find("SQL exec failed") == std::string::npos));
+    CHECK((capture.str().find("VACUUM") == std::string::npos));
+    db.close();
+}
+
 TEST_CASE("transient integrity message classification", "[unit][metadata][corruption]") {
     using yams::metadata::testing_isTransientIntegrityCheckMessage;
 
@@ -223,8 +272,8 @@ TEST_CASE("transient integrity message classification", "[unit][metadata][corrup
     CHECK(testing_isTransientIntegrityCheckMessage("database is busy"));
 
     CHECK_FALSE(testing_isTransientIntegrityCheckMessage("database disk image is malformed"));
-    CHECK_FALSE(testing_isTransientIntegrityCheckMessage(
-        "row 3 missing from index idx_documents_path"));
+    CHECK_FALSE(
+        testing_isTransientIntegrityCheckMessage("row 3 missing from index idx_documents_path"));
     CHECK_FALSE(testing_isTransientIntegrityCheckMessage("btreeInitPage() returns error code 11"));
     CHECK_FALSE(testing_isTransientIntegrityCheckMessage(
         "unable to validate the inverted index for FTS5 table main.documents_fts: database is "

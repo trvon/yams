@@ -5,6 +5,7 @@
 #include <optional>
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
+#include <yams/daemon/components/test_hooks.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 
 namespace yams::daemon {
@@ -108,26 +109,29 @@ public:
     std::function<void(bool)> getWorkerJobSignal() const;
     // Optional accessor, used internally or by tests
     ServiceManager* getServiceManager() const;
-    static void __test_forceRestoreWriteFailureOnce();
-    static void __test_setListInflightRequests(uint32_t value);
-    static void __test_forceListExceptionOnce(const std::string& message);
-    static void __test_forceListUnknownExceptionOnce();
-    static void __test_forceCatMissingDocumentOnce();
-    static void __test_forceCatMissingContentOnce();
-    static void __test_forceCatNativeMissingDocumentOnce();
-    static void __test_forceCatNativeMissingContentOnce();
-    static void __test_forceDocumentsHashFailureOnce();
-    static void __test_setDocumentsEnqueueFailuresBeforeSuccess(int count);
-    static void __test_resetDownloadJobs();
-    static void __test_forgetDownloadJobsCache();
-    static void __test_seedDownloadJob(const DownloadResponse& response);
-    static void __test_forceGetResponseDocumentsVectorOnce();
-    static void __test_forceGetEmptyResultOnce();
-    static void __test_forceDownloadServiceUnavailableOnce();
-    static void __test_forceDownloadServiceSuccessOnce();
-    static void __test_forceDownloadServiceFailureOnce(const std::string& message);
-    static void __test_resetDownloadServiceRequestCapture();
-    static std::optional<bool> __test_lastDownloadServiceFollowRedirects();
+#if YAMS_DAEMON_TEST_HOOKS_ENABLED
+    YAMS_DAEMON_TEST_HOOK static void __test_forceRestoreWriteFailureOnce();
+    YAMS_DAEMON_TEST_HOOK static void __test_setListInflightRequests(uint32_t value);
+    YAMS_DAEMON_TEST_HOOK static void __test_forceListExceptionOnce(const std::string& message);
+    YAMS_DAEMON_TEST_HOOK static void __test_forceListUnknownExceptionOnce();
+    YAMS_DAEMON_TEST_HOOK static void __test_forceCatMissingDocumentOnce();
+    YAMS_DAEMON_TEST_HOOK static void __test_forceCatMissingContentOnce();
+    YAMS_DAEMON_TEST_HOOK static void __test_forceCatNativeMissingDocumentOnce();
+    YAMS_DAEMON_TEST_HOOK static void __test_forceCatNativeMissingContentOnce();
+    YAMS_DAEMON_TEST_HOOK static void __test_forceDocumentsHashFailureOnce();
+    YAMS_DAEMON_TEST_HOOK static void __test_setDocumentsEnqueueFailuresBeforeSuccess(int count);
+    YAMS_DAEMON_TEST_HOOK static void __test_resetDownloadJobs();
+    YAMS_DAEMON_TEST_HOOK static void __test_forgetDownloadJobsCache();
+    YAMS_DAEMON_TEST_HOOK static void __test_seedDownloadJob(const DownloadResponse& response);
+    YAMS_DAEMON_TEST_HOOK static void __test_forceGetResponseDocumentsVectorOnce();
+    YAMS_DAEMON_TEST_HOOK static void __test_forceGetEmptyResultOnce();
+    YAMS_DAEMON_TEST_HOOK static void __test_forceDownloadServiceUnavailableOnce();
+    YAMS_DAEMON_TEST_HOOK static void __test_forceDownloadServiceSuccessOnce();
+    YAMS_DAEMON_TEST_HOOK static void
+    __test_forceDownloadServiceFailureOnce(const std::string& message);
+    YAMS_DAEMON_TEST_HOOK static void __test_resetDownloadServiceRequestCapture();
+    YAMS_DAEMON_TEST_HOOK static std::optional<bool> __test_lastDownloadServiceFollowRedirects();
+#endif
 
     // PBI-008-11: Session prepare (warming) options and entrypoint
     struct PrepareSessionOptions {

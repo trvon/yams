@@ -1,13 +1,13 @@
 {
-  "name": "ingest_pipeline",
-  "description": "Ingest ablation (one-factor-off): KG, vectors, GLiNER, and full minimal path for optimization ranking.",
+  "name": "ingest_submission_path",
+  "description": "Equal-corpus lossless ingestion gate: compare one recursive directory request with concurrent pipelined single-file requests while preserving complete searchability and enrichment.",
   "build_dir": "build/release",
   "artifact_root": "build/benchmarks",
-  "timeout_sec": 900,
+  "timeout_sec": 1200,
   "continue_on_arm_failure": true,
   "mode": "synthetic",
   "repeats": 3,
-  "baseline": "baseline",
+  "baseline": "directory",
   "fixed": {
     "env": {
       "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1"
@@ -17,8 +17,6 @@
       "doc_size": 1000,
       "poll_interval_ms": 100,
       "post_ingest_coalesce_ms": 2,
-      "ingest_mode": "directory",
-      "ingest_concurrency": 1,
       "require_complete_pipeline": true,
       "require_full_searchability": true,
       "require_experiment_identity": true
@@ -26,28 +24,26 @@
   },
   "arms": [
     {
-      "name": "baseline",
-      "factors": { "kg": "on", "vectors": "on", "gliner": "on" }
+      "name": "directory",
+      "factors": {
+        "ingest_mode": "directory",
+        "ingest_concurrency": 1
+      },
+      "params": {
+        "ingest_mode": "directory",
+        "ingest_concurrency": 1
+      }
     },
     {
-      "name": "no_kg",
-      "factors": { "kg": "off", "vectors": "on", "gliner": "on" }
-    },
-    {
-      "name": "no_vectors",
-      "factors": { "kg": "on", "vectors": "off", "gliner": "on" }
-    },
-    {
-      "name": "no_gliner",
-      "factors": { "kg": "on", "vectors": "on", "gliner": "off" }
-    },
-    {
-      "name": "no_vectors_no_kg",
-      "factors": { "kg": "off", "vectors": "off", "gliner": "on" }
-    },
-    {
-      "name": "minimal",
-      "factors": { "kg": "off", "vectors": "off", "gliner": "off" }
+      "name": "pipelined_single_file_c4",
+      "factors": {
+        "ingest_mode": "pipelined_single_file",
+        "ingest_concurrency": 4
+      },
+      "params": {
+        "ingest_mode": "pipelined_single_file",
+        "ingest_concurrency": 4
+      }
     }
   ],
   "steps": [
@@ -68,6 +64,16 @@
         "pipeline_drain_ms",
         "enrichment_ready_ms",
         "searchability_ready_ms",
+        "metadata_insert_writer_batches",
+        "metadata_insert_writer_avg_batch_size",
+        "metadata_insert_writer_queue_wait_avg_us",
+        "metadata_insert_writer_queue_wait_max_us",
+        "metadata_insert_writer_batch_apply_avg_us",
+        "metadata_insert_writer_batch_apply_max_us",
+        "metadata_insert_writer_connection_wait_estimated_avg_us",
+        "metadata_insert_phase_timings_transaction_total_avg_us",
+        "metadata_insert_writer_failed_batches",
+        "metadata_insert_writer_fallback_items",
         "write_coordinator_batches_committed",
         "write_coordinator_commit_errors",
         "write_coordinator_max_queue_depth",
@@ -93,6 +99,11 @@
       "storage_ready_ms",
       "pipeline_drain_ms",
       "searchability_ready_ms",
+      "metadata_insert_writer_batches",
+      "metadata_insert_writer_avg_batch_size",
+      "metadata_insert_writer_batch_apply_avg_us",
+      "metadata_insert_writer_connection_wait_estimated_avg_us",
+      "metadata_insert_phase_timings_transaction_total_avg_us",
       "write_coordinator_batches_committed"
     ],
     "require_metric_status": ["ok"]
@@ -115,11 +126,26 @@
       "enrichment_ready_ms",
       "searchability_ready_ms",
       "document_store_total_ms",
-      "extract_ms",
-      "kg_ms",
-      "embed_prepare_ms",
+      "queue_max_store_document_tasks",
       "queue_max_post_ingest",
       "queue_max_embed_jobs",
+      "post_ingest_batch_extraction_batches",
+      "post_ingest_batch_content_index_calls",
+      "post_ingest_batch_content_index_avg_entries_per_call",
+      "post_ingest_batch_content_index_max_entries",
+      "metadata_insert_writer_batches",
+      "metadata_insert_writer_avg_batch_size",
+      "metadata_insert_writer_max_batch_size",
+      "metadata_insert_writer_queue_wait_avg_us",
+      "metadata_insert_writer_queue_wait_max_us",
+      "metadata_insert_writer_batch_apply_avg_us",
+      "metadata_insert_writer_batch_apply_max_us",
+      "metadata_insert_writer_connection_wait_estimated_total_us",
+      "metadata_insert_writer_connection_wait_estimated_avg_us",
+      "metadata_insert_phase_timings_transaction_total_total_us",
+      "metadata_insert_phase_timings_transaction_total_avg_us",
+      "metadata_insert_writer_failed_batches",
+      "metadata_insert_writer_fallback_items",
       "write_coordinator_batches_enqueued",
       "write_coordinator_batches_committed",
       "write_coordinator_ops_applied",
@@ -131,6 +157,6 @@
       "write_coordinator_max_batch_queue_wait_ms",
       "write_coordinator_max_batch_excess_queue_wait_ms"
     ],
-    "group_by": ["kg", "vectors", "gliner"]
+    "group_by": ["ingest_mode", "ingest_concurrency"]
   }
 }

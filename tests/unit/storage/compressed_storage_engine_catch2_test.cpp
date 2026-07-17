@@ -171,6 +171,10 @@ public:
 
     std::vector<Result<void>>
     storeBatch(const std::vector<std::pair<std::string, std::vector<std::byte>>>& items) override {
+        {
+            std::lock_guard lock(mutex_);
+            ++batchCalls_;
+        }
         std::vector<Result<void>> out;
         out.reserve(items.size());
         for (const auto& [hash, data] : items) {
@@ -204,9 +208,15 @@ public:
         return objects_.at(std::string(hash));
     }
 
+    std::size_t batchCalls() const {
+        std::lock_guard lock(mutex_);
+        return batchCalls_;
+    }
+
 private:
     mutable std::mutex mutex_;
     std::map<std::string, std::vector<std::byte>> objects_;
+    std::size_t batchCalls_{0};
 };
 
 struct ScopedZstdUnavailable {
@@ -363,7 +373,7 @@ TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine policy rules
     auto rules = engine->getPolicyRules();
 
     CompressionPolicy::Rules newRules;
-    newRules.neverCompressBelow = 8192;             // Change from default 4096
+    newRules.neverCompressBelow = 8192;                      // Change from default 4096
     newRules.alwaysCompressAbove = 5ULL * 1024ULL * 1024ULL; // 5MB instead of 10MB
     engine->setPolicyRules(newRules);
 
@@ -460,6 +470,33 @@ TEST_CASE_METHOD(CompressedStorageFixture, "CompressedStorageEngine batch operat
         }
     }
     CHECK((successCount == static_cast<int>(items.size())));
+}
+
+TEST_CASE("CompressedStorageEngine preserves the underlying batch boundary",
+          "[storage][compressed][batch][boundary][catch2]") {
+    auto underlying = std::make_shared<CapturingStorageEngine>();
+    CompressedStorageEngine::Config config;
+    config.enableCompression = true;
+    config.compressionThreshold = 64;
+    config.asyncCompression = false;
+    disableLiveResourceGates(config.policyRules);
+    CompressedStorageEngine engine(underlying, config);
+
+    std::vector<std::pair<std::string, std::vector<std::byte>>> items;
+    items.emplace_back(std::string(64, 'a'), generateCompressibleData(1024));
+    items.emplace_back(std::string(64, 'b'), generateHighEntropyData(1024));
+
+    auto results = engine.storeBatch(items);
+    REQUIRE(results.size() == items.size());
+    REQUIRE(results[0].has_value());
+    REQUIRE(results[1].has_value());
+    CHECK(underlying->batchCalls() == 1);
+    auto first = engine.retrieve(items[0].first);
+    REQUIRE(first.has_value());
+    CHECK(first.value() == items[0].second);
+    auto second = engine.retrieve(items[1].first);
+    REQUIRE(second.has_value());
+    CHECK(second.value() == items[1].second);
 }
 
 TEST_CASE_METHOD(CompressedStorageFixture,

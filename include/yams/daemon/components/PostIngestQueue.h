@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -14,6 +15,7 @@
 #include <unordered_map>
 #include <variant>
 #include <vector>
+#include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <yams/daemon/components/GradientLimiter.h>
@@ -40,6 +42,7 @@ class VectorDatabase;
 }
 
 namespace yams::daemon {
+template <typename Task> struct PressureLimitedPollerConfig;
 class ExternalEntityProviderAdapter;
 class IModelProvider;
 class WorkCoordinator;
@@ -232,6 +235,7 @@ public:
 
     void enqueue(Task t);
     void enqueueBatch(std::vector<Task> tasks);
+    void enqueueRpcBatch(std::vector<Task> tasks);
     bool tryEnqueue(const Task& t);
     bool tryEnqueue(Task&& t);
 
@@ -342,6 +346,12 @@ public:
             capacity_.store(cap, std::memory_order_relaxed);
         }
     }
+    void setBatchCoalesceWindow(std::chrono::milliseconds window) {
+        constexpr auto kMaxWindow = std::chrono::milliseconds{20};
+        const auto bounded = std::clamp(window, std::chrono::milliseconds{0}, kMaxWindow);
+        batchCoalesceMs_.store(static_cast<std::uint32_t>(bounded.count()),
+                               std::memory_order_relaxed);
+    }
 
     // ========================================================================
     // Pause/Resume Support (for ResourceGovernor pressure response)
@@ -407,6 +417,13 @@ public:
     [[nodiscard]] bool hasTitleExtractor() const;
 
 private:
+    template <typename Job>
+    PressureLimitedPollerConfig<Job> makePollerConfig(
+        Stage stage, std::string stageName, std::function<GradientLimiter*()> getLimiter,
+        std::function<std::size_t()> maxConcurrent, boost::asio::any_io_executor executor,
+        std::function<std::string(const Job&)> getHash,
+        std::shared_ptr<boost::asio::steady_timer> wakeTimer);
+
     boost::asio::awaitable<void> channelPoller();
     boost::asio::awaitable<void> kgPoller();
     boost::asio::awaitable<void> symbolPoller();
@@ -549,6 +566,7 @@ private:
     std::atomic<double> latencyMsEma_{0.0};
     std::atomic<double> ratePerSecEma_{0.0};
     std::atomic<std::size_t> capacity_{1000};
+    std::atomic<std::uint32_t> batchCoalesceMs_{0};
     // Concurrency limits now dynamic via TuneAdvisor (PBI-05a)
 
     // Drain detection: signals corpus stats stale once per drain cycle
@@ -596,6 +614,10 @@ private:
 
     /// Initialize cached channel pointers from InternalEventBus
     void initializeChannels();
+    void enqueueBatchToChannel(
+        std::vector<Task> tasks,
+        const std::shared_ptr<SpscQueue<InternalEventBus::PostIngestTask>>& channel,
+        const char* operation);
 
     // Gradient-based adaptive concurrency limiters (Netflix Gradient2 algorithm)
     // Index 0-4 = stages (Extraction..Title), index 5 = Embed

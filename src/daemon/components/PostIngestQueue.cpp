@@ -956,6 +956,37 @@ void PostIngestQueue::checkDrainAndSignal() {
     }
 }
 
+template <typename Job>
+PressureLimitedPollerConfig<Job> PostIngestQueue::makePollerConfig(
+    Stage stage, std::string stageName, std::function<GradientLimiter*()> getLimiter,
+    std::function<std::size_t()> maxConcurrent, boost::asio::any_io_executor executor,
+    std::function<std::string(const Job&)> getHash,
+    std::shared_ptr<boost::asio::steady_timer> wakeTimer) {
+    const auto index = static_cast<std::size_t>(stage);
+    PressureLimitedPollerConfig<Job> cfg;
+    cfg.stageName = std::move(stageName);
+    cfg.stopFlag = &stop_;
+    cfg.startedFlag = &stageStarted_[index];
+    cfg.pauseFlag = &stagePaused_[index];
+    cfg.wasActiveFlag = &wasActive_;
+    cfg.inFlightCounter = &stageInFlight_[index];
+    cfg.getLimiterFn = std::move(getLimiter);
+    cfg.maxConcurrentFn = std::move(maxConcurrent);
+    cfg.tryAcquireFn = [this](GradientLimiter* limiter, const std::string& id,
+                              const std::string& stageName) {
+        return tryAcquireLimiterSlot(limiter, id, stageName);
+    };
+    cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
+    cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
+    cfg.notifyLifecycleFn = [this]() { notifyLifecycle(); };
+    cfg.callbackInFlightCounter = &callbacksInFlight_;
+    cfg.executor = std::move(executor);
+    cfg.getHashFn = std::move(getHash);
+    cfg.wakeTimer = std::move(wakeTimer);
+    cfg.wakeTimerMutex = &wakeTimerMutex_;
+    return cfg;
+}
+
 boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
     spdlog::info("[PostIngestQueue] channelPoller coroutine STARTED");
     auto channel = postIngestChannel_;
@@ -970,24 +1001,11 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
         std::make_shared<boost::asio::steady_timer>(co_await boost::asio::this_coro::executor);
     setWakeTimer(Stage::Extraction, extractionWakeTimer);
 
-    PressureLimitedPollerConfig<InternalEventBus::PostIngestTask> cfg;
-    cfg.stageName = "extraction";
-    cfg.stopFlag = &stop_;
-    cfg.startedFlag = &stageStarted_[0];
-    cfg.pauseFlag = &stagePaused_[0];
-    cfg.wasActiveFlag = &wasActive_;
-    cfg.inFlightCounter = &stageInFlight_[0];
-    cfg.getLimiterFn = [this]() { return extractionLimiter(); };
-    cfg.maxConcurrentFn = &maxExtractionConcurrent;
-    cfg.tryAcquireFn = [this](GradientLimiter* l, const std::string& id, const std::string& s) {
-        return tryAcquireLimiterSlot(l, id, s);
-    };
-    cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
-    cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
-    cfg.notifyLifecycleFn = [this]() { notifyLifecycle(); };
-    cfg.callbackInFlightCounter = &callbacksInFlight_;
-    cfg.executor = coordinator_->getExecutor();
-    cfg.getHashFn = [](const InternalEventBus::PostIngestTask& t) -> std::string { return t.hash; };
+    auto cfg = makePollerConfig<InternalEventBus::PostIngestTask>(
+        Stage::Extraction, "extraction", [this]() { return extractionLimiter(); },
+        &maxExtractionConcurrent, coordinator_->getExecutor(),
+        [](const InternalEventBus::PostIngestTask& task) { return task.hash; },
+        extractionWakeTimer);
     cfg.batchMode = true;
     cfg.batchLimiterPerTask = false;
     cfg.batchSizeFn = [this]() -> std::size_t {
@@ -1017,14 +1035,14 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
     cfg.batchProcessFn = [this](std::vector<InternalEventBus::PostIngestTask>&& tasks) {
         processBatch(std::move(tasks));
     };
+    cfg.batchCoalesceWindowFn = [this]() {
+        return std::chrono::milliseconds(batchCoalesceMs_.load(std::memory_order_relaxed));
+    };
     // Disable CPU throttling for the extraction poller. Extraction concurrency is
     // already bounded by the poller's batch fan-out and maxExtractionConcurrent(). The
     // CPU throttle adds 2-25ms delays after every productive batch, compounding
     // across hundreds of documents and significantly reducing throughput.
     cfg.enableCpuThrottling = false;
-    cfg.wakeTimer = extractionWakeTimer;
-    cfg.wakeTimerMutex = &wakeTimerMutex_;
-
     co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
 }
 
@@ -1055,11 +1073,22 @@ void PostIngestQueue::enqueue(Task t) {
 }
 
 void PostIngestQueue::enqueueBatch(std::vector<Task> tasks) {
+    enqueueBatchToChannel(std::move(tasks), postIngestChannel_, "enqueueBatch");
+}
+
+void PostIngestQueue::enqueueRpcBatch(std::vector<Task> tasks) {
+    auto channel = postIngestRpcChannel_ ? postIngestRpcChannel_ : postIngestChannel_;
+    enqueueBatchToChannel(std::move(tasks), channel, "enqueueRpcBatch");
+}
+
+void PostIngestQueue::enqueueBatchToChannel(
+    std::vector<Task> tasks,
+    const std::shared_ptr<SpscQueue<InternalEventBus::PostIngestTask>>& channel,
+    const char* operation) {
     if (tasks.empty()) {
         return;
     }
-
-    auto channel = postIngestChannel_;
+    YAMS_ASSERT(channel, "PostIngestQueue batch enqueue requires an initialized channel");
 
     std::vector<InternalEventBus::PostIngestTask> busTasks;
     busTasks.reserve(tasks.size());
@@ -1091,9 +1120,8 @@ void PostIngestQueue::enqueueBatch(std::vector<Task> tasks) {
         }
         ++waits;
         if ((waits % 20u) == 1u) {
-            spdlog::debug(
-                "[PostIngestQueue] enqueueBatch waiting on full channel (remaining={}, waits={})",
-                busTasks.size() - next, waits);
+            spdlog::debug("[PostIngestQueue] {} waiting on full channel (remaining={}, waits={})",
+                          operation, busTasks.size() - next, waits);
         }
     }
     if (queuedAny) {
@@ -1717,24 +1745,10 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
         std::make_shared<boost::asio::steady_timer>(co_await boost::asio::this_coro::executor);
     setWakeTimer(Stage::KnowledgeGraph, kgWakeTimer);
 
-    PressureLimitedPollerConfig<InternalEventBus::KgJob> cfg;
-    cfg.stageName = "KG";
-    cfg.stopFlag = &stop_;
-    cfg.startedFlag = &stageStarted_[1];
-    cfg.pauseFlag = &stagePaused_[1];
-    cfg.wasActiveFlag = &wasActive_;
-    cfg.inFlightCounter = &stageInFlight_[1];
-    cfg.getLimiterFn = [this]() { return kgLimiter(); };
-    cfg.maxConcurrentFn = &maxKgConcurrent;
-    cfg.tryAcquireFn = [this](GradientLimiter* l, const std::string& id, const std::string& s) {
-        return tryAcquireLimiterSlot(l, id, s);
-    };
-    cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
-    cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
-    cfg.notifyLifecycleFn = [this]() { notifyLifecycle(); };
-    cfg.callbackInFlightCounter = &callbacksInFlight_;
-    cfg.executor = coordinator_->getExecutor();
-    cfg.getHashFn = [](const InternalEventBus::KgJob& j) -> std::string { return j.hash; };
+    auto cfg = makePollerConfig<InternalEventBus::KgJob>(
+        Stage::KnowledgeGraph, "KG", [this]() { return kgLimiter(); }, &maxKgConcurrent,
+        coordinator_->getExecutor(), [](const InternalEventBus::KgJob& job) { return job.hash; },
+        kgWakeTimer);
 
     cfg.batchMode = true;
     cfg.batchSizeFn = [this]() -> std::size_t {
@@ -1745,8 +1759,6 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
         processKnowledgeGraphBatch(std::move(jobs));
     };
 
-    cfg.wakeTimer = kgWakeTimer;
-    cfg.wakeTimerMutex = &wakeTimerMutex_;
     co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
 }
 
@@ -1756,26 +1768,10 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
         std::make_shared<boost::asio::steady_timer>(co_await boost::asio::this_coro::executor);
     setWakeTimer(Stage::Symbol, symbolWakeTimer);
 
-    PressureLimitedPollerConfig<InternalEventBus::SymbolExtractionJob> cfg;
-    cfg.stageName = "symbol";
-    cfg.stopFlag = &stop_;
-    cfg.startedFlag = &stageStarted_[2];
-    cfg.pauseFlag = &stagePaused_[2];
-    cfg.wasActiveFlag = &wasActive_;
-    cfg.inFlightCounter = &stageInFlight_[2];
-    cfg.getLimiterFn = [this]() { return symbolLimiter(); };
-    cfg.maxConcurrentFn = &maxSymbolConcurrent;
-    cfg.tryAcquireFn = [this](GradientLimiter* l, const std::string& id, const std::string& s) {
-        return tryAcquireLimiterSlot(l, id, s);
-    };
-    cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
-    cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
-    cfg.notifyLifecycleFn = [this]() { notifyLifecycle(); };
-    cfg.callbackInFlightCounter = &callbacksInFlight_;
-    cfg.executor = coordinator_->getExecutor();
-    cfg.getHashFn = [](const InternalEventBus::SymbolExtractionJob& j) -> std::string {
-        return j.hash;
-    };
+    auto cfg = makePollerConfig<InternalEventBus::SymbolExtractionJob>(
+        Stage::Symbol, "symbol", [this]() { return symbolLimiter(); }, &maxSymbolConcurrent,
+        coordinator_->getExecutor(),
+        [](const InternalEventBus::SymbolExtractionJob& job) { return job.hash; }, symbolWakeTimer);
 
     cfg.batchMode = true;
     cfg.batchSizeFn = [this]() -> std::size_t {
@@ -1786,8 +1782,6 @@ boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
         processSymbolExtractionBatch(std::move(jobs));
     };
 
-    cfg.wakeTimer = symbolWakeTimer;
-    cfg.wakeTimerMutex = &wakeTimerMutex_;
     co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
 }
 
@@ -1979,27 +1973,10 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
         std::make_shared<boost::asio::steady_timer>(co_await boost::asio::this_coro::executor);
     setWakeTimer(Stage::Entity, entityWakeTimer);
 
-    PressureLimitedPollerConfig<InternalEventBus::EntityExtractionJob> cfg;
-    cfg.stageName = "entity";
-    cfg.stopFlag = &stop_;
-    cfg.startedFlag = &stageStarted_[3];
-    cfg.pauseFlag = &stagePaused_[3];
-    cfg.wasActiveFlag = &wasActive_;
-    cfg.inFlightCounter = &stageInFlight_[3];
-    cfg.getLimiterFn = [this]() { return entityLimiter(); };
-    cfg.maxConcurrentFn = &maxEntityConcurrent;
-    cfg.tryAcquireFn = [this](GradientLimiter* l, const std::string& id, const std::string& s) {
-        return tryAcquireLimiterSlot(l, id, s);
-    };
-    cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
-    cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
-    cfg.notifyLifecycleFn = [this]() { notifyLifecycle(); };
-    cfg.callbackInFlightCounter = &callbacksInFlight_;
-    cfg.executor =
-        entityCoordinator_ ? entityCoordinator_->getExecutor() : coordinator_->getExecutor();
-    cfg.getHashFn = [](const InternalEventBus::EntityExtractionJob& j) -> std::string {
-        return j.hash;
-    };
+    auto cfg = makePollerConfig<InternalEventBus::EntityExtractionJob>(
+        Stage::Entity, "entity", [this]() { return entityLimiter(); }, &maxEntityConcurrent,
+        entityCoordinator_ ? entityCoordinator_->getExecutor() : coordinator_->getExecutor(),
+        [](const InternalEventBus::EntityExtractionJob& job) { return job.hash; }, entityWakeTimer);
     cfg.batchMode = true;
     cfg.batchSizeFn = [this]() -> std::size_t {
         const std::size_t tuned = std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
@@ -2009,8 +1986,6 @@ boost::asio::awaitable<void> PostIngestQueue::entityPoller() {
         processEntityExtractionBatch(std::move(jobs));
     };
 
-    cfg.wakeTimer = entityWakeTimer;
-    cfg.wakeTimerMutex = &wakeTimerMutex_;
     co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
 }
 
@@ -2338,26 +2313,10 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
         std::make_shared<boost::asio::steady_timer>(co_await boost::asio::this_coro::executor);
     setWakeTimer(Stage::Title, titleWakeTimer);
 
-    PressureLimitedPollerConfig<InternalEventBus::TitleExtractionJob> cfg;
-    cfg.stageName = "title";
-    cfg.stopFlag = &stop_;
-    cfg.startedFlag = &stageStarted_[4];
-    cfg.pauseFlag = &stagePaused_[4];
-    cfg.wasActiveFlag = &wasActive_;
-    cfg.inFlightCounter = &stageInFlight_[4];
-    cfg.getLimiterFn = [this]() { return titleLimiter(); };
-    cfg.maxConcurrentFn = &maxTitleConcurrent;
-    cfg.tryAcquireFn = [this](GradientLimiter* l, const std::string& id, const std::string& s) {
-        return tryAcquireLimiterSlot(l, id, s);
-    };
-    cfg.completeJobFn = [this](const std::string& id, bool ok) { completeJob(id, ok); };
-    cfg.checkDrainFn = [this]() { checkDrainAndSignal(); };
-    cfg.notifyLifecycleFn = [this]() { notifyLifecycle(); };
-    cfg.callbackInFlightCounter = &callbacksInFlight_;
-    cfg.executor = coordinator_->getExecutor();
-    cfg.getHashFn = [](const InternalEventBus::TitleExtractionJob& j) -> std::string {
-        return j.hash;
-    };
+    auto cfg = makePollerConfig<InternalEventBus::TitleExtractionJob>(
+        Stage::Title, "title", [this]() { return titleLimiter(); }, &maxTitleConcurrent,
+        coordinator_->getExecutor(),
+        [](const InternalEventBus::TitleExtractionJob& job) { return job.hash; }, titleWakeTimer);
     cfg.isCapableFn = [this]() -> bool { return hasTitleExtractor(); };
     cfg.batchMode = true;
     cfg.batchSizeFn = [this]() -> std::size_t {
@@ -2368,8 +2327,6 @@ boost::asio::awaitable<void> PostIngestQueue::titlePoller() {
         processTitleExtractionBatch(std::move(jobs));
     };
 
-    cfg.wakeTimer = titleWakeTimer;
-    cfg.wakeTimerMutex = &wakeTimerMutex_;
     co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
 }
 
@@ -3260,6 +3217,7 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
             metadata::BatchContentEntry entry;
             entry.documentId = prepared.documentId;
             entry.title = prepared.title.empty() ? prepared.fileName : prepared.title;
+            entry.metadataTitle = prepared.title;
             entry.contentText = prepared.extractedText;
             entry.mimeType = prepared.mimeType;
             entry.extractionMethod = "post_ingest";
@@ -3319,41 +3277,6 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
         if (!successes.empty()) {
             spdlog::debug("[PostIngestQueue] Batch DB write succeeded for {} documents",
                           successes.size());
-            std::vector<std::tuple<int64_t, std::string, metadata::MetadataValue>> titleUpdates;
-            titleUpdates.reserve(successes.size());
-            for (const auto& prepared : successes) {
-                if (prepared.title.empty()) {
-                    continue;
-                }
-                titleUpdates.emplace_back(prepared.documentId, "title",
-                                          metadata::MetadataValue(prepared.title));
-            }
-            if (!titleUpdates.empty()) {
-                const auto titleWriteStart = std::chrono::steady_clock::now();
-                Result<void> metaResult;
-                if (writeCoordinator_) {
-                    auto wb = std::make_unique<WriteBatch>();
-                    wb->source = "PostIngestQueue::titleMetadata";
-                    for (const auto& prepared : successes) {
-                        if (!prepared.title.empty()) {
-                            wb->ops.emplace_back(
-                                SetMetadataBatchOp{{{prepared.documentId, "title",
-                                                     metadata::MetadataValue(prepared.title)}}});
-                        }
-                    }
-                    if (!wb->ops.empty()) {
-                        enqueueWithBackpressure(*writeCoordinator_, std::move(wb), "title metadata",
-                                                stop_);
-                    } else {
-                        spdlog::debug("[PostIngestQueue] Skipping empty title metadata batch");
-                    }
-                }
-                recordTiming("commit_title_metadata", titleWriteStart);
-                if (!metaResult) {
-                    spdlog::warn("[PostIngestQueue] Batch title metadata write failed: {}",
-                                 metaResult.error().message);
-                }
-            }
         }
     }
 

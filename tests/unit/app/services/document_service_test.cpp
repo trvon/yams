@@ -5,12 +5,14 @@
 #include <future>
 #include <memory>
 #include <span>
+#include <thread>
 #include <catch2/catch_test_macros.hpp>
 #include <yams/api/content_store_builder.h>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/compat/unistd.h>
 #include <yams/core/cpp23_features.hpp>
+#include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/knowledge_graph_store.h>
@@ -269,6 +271,211 @@ private:
     std::string failHash_;
     Error error_;
 };
+
+TEST_CASE("DocumentService batches content before metadata publication",
+          "[document][service][batch][publication]") {
+    DocumentFixture fixture;
+    auto metadataWriter = std::make_shared<MetadataInsertWriter>(
+        fixture.metadataRepo_, MetadataInsertWriter::Options{
+                                   .maxBatchCount = 8, .maxDelay = std::chrono::milliseconds{5}});
+    fixture.appContext_.metadataInsertWriter = metadataWriter;
+    fixture.documentService_ = makeDocumentService(fixture.appContext_);
+    metadataWriter->resetMetrics();
+    resetDocumentStorePhaseTimings();
+
+    std::vector<StoreDocumentRequest> requests;
+    for (int i = 0; i < 2; ++i) {
+        auto path = fixture.testDir_ / ("document-batch-" + std::to_string(i) + ".txt");
+        std::ofstream(path) << "document batch " << i;
+        StoreDocumentRequest request;
+        request.path = path.string();
+        request.snapshotId = "document-service-batch";
+        request.skipInlineContentIndexing = true;
+        requests.push_back(std::move(request));
+    }
+
+    auto results = fixture.documentService_->storeBatch(requests);
+    REQUIRE(results.size() == requests.size());
+    for (const auto& result : results) {
+        REQUIRE(result.has_value());
+        REQUIRE(result.value().documentId > 0);
+        auto document = fixture.metadataRepo_->getDocumentByHash(result.value().hash);
+        REQUIRE(document.has_value());
+        REQUIRE(document.value().has_value());
+    }
+
+    const auto metrics = metadataWriter->metricsSnapshot();
+    CHECK(metrics.submittedItems == 2);
+    CHECK(metrics.completedItems == 2);
+    CHECK(metrics.batches == 1);
+    CHECK(metrics.maxBatchSize == 2);
+    const auto timings = getDocumentStorePhaseTimingsSnapshot();
+    CHECK(timings.at("content_store").calls == 1);
+    CHECK(timings.at("store_total").calls == 1);
+}
+
+TEST_CASE("DocumentService batch reports metadata publication failures",
+          "[document][service][batch][metadata][failure]") {
+    DocumentFixture fixture;
+    auto metadataWriter = std::make_shared<MetadataInsertWriter>(
+        fixture.metadataRepo_, MetadataInsertWriter::Options{
+                                   .maxBatchCount = 8, .maxDelay = std::chrono::milliseconds{5}});
+    fixture.appContext_.metadataInsertWriter = metadataWriter;
+    fixture.documentService_ = makeDocumentService(fixture.appContext_);
+
+    auto conn = fixture.pool_->acquire();
+    REQUIRE(conn.has_value());
+    REQUIRE((*conn.value())
+                ->execute(R"(
+        CREATE TRIGGER abort_document_service_batch_insert
+        BEFORE INSERT ON documents
+        BEGIN
+            SELECT RAISE(ABORT, 'injected metadata insert failure');
+        END;
+    )")
+                .has_value());
+
+    std::vector<StoreDocumentRequest> requests;
+    for (int i = 0; i < 2; ++i) {
+        auto path = fixture.testDir_ / ("metadata-failure-batch-" + std::to_string(i) + ".txt");
+        std::ofstream(path) << "document whose metadata insert should fail " << i;
+        StoreDocumentRequest request;
+        request.path = path.string();
+        request.snapshotId = "document-service-metadata-failure";
+        request.skipInlineContentIndexing = true;
+        requests.push_back(request);
+    }
+
+    auto results = fixture.documentService_->storeBatch(requests);
+    REQUIRE(results.size() == requests.size());
+    for (const auto& result : results) {
+        REQUIRE_FALSE(result.has_value());
+        CHECK(result.error().code == ErrorCode::DatabaseError);
+        CHECK(
+            (result.error().message.find("injected metadata insert failure") != std::string::npos));
+    }
+}
+
+TEST_CASE("DocumentService batches fuzzy terms at the storage wave boundary",
+          "[document][service][batch][symspell]") {
+    DocumentFixture fixture;
+    auto metadataWriter = std::make_shared<MetadataInsertWriter>(
+        fixture.metadataRepo_, MetadataInsertWriter::Options{
+                                   .maxBatchCount = 8, .maxDelay = std::chrono::milliseconds{5}});
+    boost::asio::io_context io;
+    daemon::WriteCoordinator::Config config;
+    config.maxBatchDelayMs = std::chrono::milliseconds{1};
+    daemon::WriteCoordinator coordinator(io, {}, fixture.metadataRepo_, config);
+
+    fixture.appContext_.metadataInsertWriter = metadataWriter;
+    fixture.appContext_.writeCoordinatorProvider = [&coordinator] { return &coordinator; };
+    fixture.documentService_ = makeDocumentService(fixture.appContext_);
+
+    std::vector<StoreDocumentRequest> requests;
+    constexpr std::size_t kDocumentCount = 4;
+    for (std::size_t i = 0; i < kDocumentCount; ++i) {
+        auto path = fixture.testDir_ / ("fuzzy-batch-" + std::to_string(i) + ".txt");
+        std::ofstream(path) << "fuzzy batch " << i;
+        StoreDocumentRequest request;
+        request.path = path.string();
+        request.snapshotId = "document-service-fuzzy-batch";
+        request.skipInlineContentIndexing = true;
+        requests.push_back(std::move(request));
+    }
+
+    auto results = fixture.documentService_->storeBatch(requests);
+    REQUIRE(results.size() == kDocumentCount);
+    for (const auto& result : results) {
+        REQUIRE(result.has_value());
+    }
+
+    coordinator.start();
+    std::thread writerLoop([&io] { io.run(); });
+    auto flushResult = coordinator.flush(std::chrono::seconds{10});
+    coordinator.shutdown();
+    io.stop();
+    writerLoop.join();
+    REQUIRE(flushResult.has_value());
+
+    const auto stats = coordinator.getStats();
+    const auto source = std::ranges::find_if(
+        stats.hotSources, [](const auto& hotspot) { return hotspot.source == "doc_svc/symspell"; });
+    REQUIRE(source != stats.hotSources.end());
+    CHECK(source->batches == 1);
+    CHECK(stats.symSpellTermsAdded == kDocumentCount * 2);
+
+    fixture.appContext_.writeCoordinatorProvider = {};
+    fixture.documentService_.reset();
+}
+
+TEST_CASE("DocumentService initializes fresh path series without follow-up writes",
+          "[document][service][batch][versioning]") {
+    DocumentFixture fixture;
+    auto metadataWriter = std::make_shared<MetadataInsertWriter>(
+        fixture.metadataRepo_, MetadataInsertWriter::Options{
+                                   .maxBatchCount = 8, .maxDelay = std::chrono::milliseconds{5}});
+    boost::asio::io_context io;
+    daemon::WriteCoordinator::Config config;
+    config.maxBatchDelayMs = std::chrono::milliseconds{1};
+    daemon::WriteCoordinator coordinator(io, {}, fixture.metadataRepo_, config);
+
+    fixture.appContext_.metadataInsertWriter = metadataWriter;
+    fixture.appContext_.writeCoordinatorProvider = [&coordinator] { return &coordinator; };
+    fixture.documentService_ = makeDocumentService(fixture.appContext_);
+
+    std::vector<StoreDocumentRequest> requests;
+    constexpr std::size_t kDocumentCount = 4;
+    for (std::size_t i = 0; i < kDocumentCount; ++i) {
+        auto path = fixture.testDir_ / ("versioned-batch-" + std::to_string(i) + ".txt");
+        std::ofstream(path) << "versioned batch " << i;
+        StoreDocumentRequest request;
+        request.path = path.string();
+        request.snapshotId = "document-service-versioned-batch";
+        request.skipInlineContentIndexing = true;
+        requests.push_back(std::move(request));
+    }
+
+    auto results = fixture.documentService_->storeBatch(requests);
+    REQUIRE(results.size() == kDocumentCount);
+
+    coordinator.start();
+    std::thread writerLoop([&io] { io.run(); });
+    auto flushResult = coordinator.flush(std::chrono::seconds{10});
+    coordinator.shutdown();
+    io.stop();
+    writerLoop.join();
+    REQUIRE(flushResult.has_value());
+
+    for (std::size_t i = 0; i < kDocumentCount; ++i) {
+        REQUIRE(results[i].has_value());
+        const auto documentId = results[i].value().documentId;
+        auto version = fixture.metadataRepo_->getMetadata(documentId, "version");
+        auto latest = fixture.metadataRepo_->getMetadata(documentId, "is_latest");
+        auto seriesKey = fixture.metadataRepo_->getMetadata(documentId, "series_key");
+        auto document = fixture.metadataRepo_->getDocument(documentId);
+        REQUIRE(version.has_value());
+        REQUIRE(version.value().has_value());
+        REQUIRE(latest.has_value());
+        REQUIRE(latest.value().has_value());
+        REQUIRE(seriesKey.has_value());
+        REQUIRE(seriesKey.value().has_value());
+        REQUIRE(document.has_value());
+        REQUIRE(document.value().has_value());
+        CHECK(version.value()->asInteger() == 1);
+        CHECK(latest.value()->asBoolean());
+        CHECK(seriesKey.value()->asString() == document.value()->filePath);
+    }
+
+    const auto stats = coordinator.getStats();
+    CHECK(stats.metadataEntriesSet == 0);
+    const auto versioning = std::ranges::find_if(stats.hotSources, [](const auto& hotspot) {
+        return hotspot.source == "doc_svc/versioning";
+    });
+    CHECK(versioning == stats.hotSources.end());
+
+    fixture.appContext_.writeCoordinatorProvider = {};
+    fixture.documentService_.reset();
+}
 
 TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
     DocumentFixture fixture;

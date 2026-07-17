@@ -6,6 +6,7 @@
 #include <boost/asio/local/stream_protocol.hpp>
 #include <boost/asio/use_future.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
@@ -49,6 +50,116 @@ std::string randomSuffix() {
 }
 
 } // namespace
+
+TEST_CASE("AsioConnection socket close waits for the socket strand",
+          "[daemon][connection-pool][strand][unit]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    boost::asio::io_context io;
+    TransportOptions opts;
+    opts.executor = io.get_executor();
+    auto conn = std::make_shared<AsioConnection>(opts);
+    conn->socket = std::make_unique<AsioConnection::socket_t>(conn->strand);
+    boost::system::error_code ec;
+    conn->socket->open(boost::asio::local::stream_protocol(), ec);
+    REQUIRE_FALSE(ec);
+
+    std::promise<void> blockerEntered;
+    std::promise<void> releaseBlocker;
+    auto releaseFuture = releaseBlocker.get_future();
+    boost::asio::post(conn->strand, [&] {
+        blockerEntered.set_value();
+        releaseFuture.wait();
+    });
+
+    std::thread ioThread([&] { io.run(); });
+    REQUIRE(blockerEntered.get_future().wait_for(1s) == std::future_status::ready);
+
+    std::atomic<bool> closeReturned{false};
+    std::thread closeThread([&] {
+        conn->close();
+        closeReturned.store(true, std::memory_order_release);
+    });
+
+    std::this_thread::sleep_for(650ms);
+    CHECK_FALSE(closeReturned.load(std::memory_order_acquire));
+
+    releaseBlocker.set_value();
+    closeThread.join();
+    io.stop();
+    ioThread.join();
+
+    CHECK(closeReturned.load(std::memory_order_acquire));
+    CHECK_FALSE(conn->socket);
+}
+
+TEST_CASE("AsioConnection close does not hang when its executor is already stopped",
+          "[daemon][connection-pool][strand][shutdown][unit]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    boost::asio::io_context io;
+    TransportOptions opts;
+    opts.executor = io.get_executor();
+    auto conn = std::make_shared<AsioConnection>(opts);
+    conn->socket = std::make_unique<AsioConnection::socket_t>(conn->strand);
+    boost::system::error_code ec;
+    conn->socket->open(boost::asio::local::stream_protocol(), ec);
+    REQUIRE_FALSE(ec);
+
+    io.stop();
+
+    std::atomic<bool> closeReturned{false};
+    std::thread closeThread([&] {
+        conn->close();
+        closeReturned.store(true, std::memory_order_release);
+    });
+
+    if (!yams::test::wait_for_condition(
+            1s, 10ms, [&] { return closeReturned.load(std::memory_order_acquire); })) {
+        // Keep the regression test from stranding a blocked helper thread if the bug returns.
+        io.restart();
+        io.run_one();
+        closeThread.join();
+        FAIL("AsioConnection::close blocked on a stopped executor");
+    }
+
+    closeThread.join();
+    CHECK_FALSE(conn->socket);
+}
+
+TEST_CASE("AsioConnectionPool shutdown waits for in-progress connection creation",
+          "[daemon][connection-pool][shutdown][unit]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    auto runtimeDir = makeTempRuntimeDir("shutdown-create-" + randomSuffix());
+    auto socketPath = runtimeDir / "missing.sock";
+    std::error_code ec;
+    fs::remove(socketPath, ec);
+
+    TransportOptions opts;
+    opts.socketPath = socketPath;
+    opts.requestTimeout = 2s;
+    opts.poolEnabled = false;
+
+    auto pool = std::make_shared<AsioConnectionPool>(opts, false);
+    auto fut = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),
+                                     boost::asio::use_future);
+
+    REQUIRE(yams::test::wait_for_condition(2s, 10ms,
+                                           [&] { return pool->testing_pending_creates() > 0; }));
+    pool->shutdown(500ms);
+
+    REQUIRE(fut.wait_for(1s) == std::future_status::ready);
+    auto result = fut.get();
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == yams::ErrorCode::SystemShutdown);
+}
 
 TEST_CASE("AsioConnectionPool drops closed socket on reuse", "[daemon][connection-pool][unit]") {
 #ifdef _WIN32
@@ -363,6 +474,72 @@ TEST_CASE("AsioConnectionPool handles read timeout", "[daemon][connection-pool][
     AsioConnectionPool::shutdown_all(100ms);
 }
 
+TEST_CASE("AsioConnectionPool shutdown cancels a pending read loop on the socket strand",
+          "[daemon][connection-pool][unit][tsan]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    auto runtimeDir = makeTempRuntimeDir("shutdown-pending-read-" + randomSuffix());
+    auto socketPath = runtimeDir / "ipc.sock";
+    std::error_code ec;
+    fs::remove(socketPath, ec);
+
+    boost::asio::io_context server_io;
+    boost::asio::local::stream_protocol::acceptor acceptor(
+        server_io, boost::asio::local::stream_protocol::endpoint(socketPath.string()));
+
+    std::atomic<bool> stop{false};
+    std::promise<void> connected;
+
+    std::thread server_thread([&] {
+        boost::system::error_code bec;
+        boost::asio::local::stream_protocol::socket sock(server_io);
+        acceptor.accept(sock, bec);
+        if (!bec) {
+            connected.set_value();
+            while (!stop.load(std::memory_order_acquire)) {
+                std::this_thread::sleep_for(10ms);
+            }
+            sock.close(bec);
+        }
+    });
+
+    TransportOptions opts;
+    opts.socketPath = socketPath;
+    opts.requestTimeout = 5s;
+    opts.headerTimeout = 5s;
+    opts.bodyTimeout = 5s;
+    opts.poolEnabled = true;
+
+    auto pool = AsioConnectionPool::get_or_create(opts);
+    auto fut = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),
+                                     boost::asio::use_future);
+    REQUIRE(fut.wait_for(1s) == std::future_status::ready);
+    auto conn_res = fut.get();
+    REQUIRE(conn_res);
+    auto conn = conn_res.value();
+    REQUIRE(conn);
+    REQUIRE(connected.get_future().wait_for(1s) == std::future_status::ready);
+
+    auto readLoopFut =
+        boost::asio::co_spawn(GlobalIOContext::global_executor(),
+                              pool->ensure_read_loop_started(conn), boost::asio::use_future);
+    REQUIRE(readLoopFut.wait_for(1s) == std::future_status::ready);
+    std::this_thread::sleep_for(50ms);
+    REQUIRE(conn->alive.load(std::memory_order_acquire));
+
+    AsioConnectionPool::shutdown_all(500ms);
+    CHECK(pool->is_shutdown());
+    CHECK_FALSE(conn->alive.load(std::memory_order_acquire));
+
+    stop.store(true, std::memory_order_release);
+    boost::system::error_code bec;
+    acceptor.close(bec);
+    server_thread.join();
+    fs::remove(socketPath, ec);
+}
+
 TEST_CASE("Non-shared pool connection stays alive via pool_keepalive",
           "[daemon][connection-pool][unit]") {
 #ifdef _WIN32
@@ -500,6 +677,54 @@ TEST_CASE("Shared pool does not set pool_keepalive", "[daemon][connection-pool][
     server_thread.join();
     fs::remove(socketPath, ec);
     AsioConnectionPool::shutdown_all(100ms);
+}
+
+TEST_CASE("AsioConnectionPool retries a transient refused connection",
+          "[daemon][connection-pool][unit][ipc]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#else
+    auto runtimeDir = makeTempRuntimeDir("transient-refused-" + randomSuffix());
+    auto socketPath = runtimeDir / "ipc.sock";
+    std::error_code ec;
+    fs::remove(socketPath, ec);
+
+    int listener = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    REQUIRE(listener >= 0);
+
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    const auto socketString = socketPath.string();
+    REQUIRE(socketString.size() < sizeof(addr.sun_path));
+    std::strncpy(addr.sun_path, socketString.c_str(), sizeof(addr.sun_path) - 1);
+    REQUIRE(::bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+
+    TransportOptions opts;
+    opts.socketPath = socketPath;
+    opts.poolEnabled = false;
+    opts.requestTimeout = 500ms;
+
+    auto pool = AsioConnectionPool::get_or_create(opts);
+    auto future = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),
+                                        boost::asio::use_future);
+
+    // A bound-but-not-listening socket refuses immediately. The pool should retain the acquire
+    // while the transient retry backoff runs instead of surfacing that first refusal.
+    REQUIRE(future.wait_for(20ms) == std::future_status::timeout);
+    REQUIRE(::listen(listener, 1) == 0);
+
+    REQUIRE(future.wait_for(1s) == std::future_status::ready);
+    auto connection = future.get();
+    REQUIRE(connection);
+    const int accepted = ::accept(listener, nullptr, nullptr);
+    REQUIRE(accepted >= 0);
+    pool->release(connection.value());
+
+    REQUIRE(::close(accepted) == 0);
+    REQUIRE(::close(listener) == 0);
+    fs::remove(socketPath, ec);
+    AsioConnectionPool::shutdown_all(100ms);
+#endif
 }
 
 TEST_CASE("AsioConnectionPool does not double-wrap IPC failure prefixes",

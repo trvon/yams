@@ -13,6 +13,7 @@
 #include <yams/api/content_store_error.h>
 #include <yams/api/progress_reporter.h>
 #include <yams/crypto/hasher.h>
+#include <yams/manifest/manifest_manager.h>
 #include <yams/storage/storage_engine.h>
 
 #include <algorithm>
@@ -73,6 +74,7 @@ public:
     bool failManifestStoreAmbiguously{false};
     bool failManifestStoreWithMismatchedDurableBytes{false};
     size_t storeCalls{0};
+    size_t storeBatchCalls{0};
     size_t removeCalls{0};
     std::vector<std::string> removedKeys;
 
@@ -163,6 +165,7 @@ public:
 
     std::vector<Result<void>>
     storeBatch(const std::vector<std::pair<std::string, std::vector<std::byte>>>& items) override {
+        ++storeBatchCalls;
         std::vector<Result<void>> results;
         results.reserve(items.size());
         for (const auto& [hash, data] : items) {
@@ -789,6 +792,136 @@ TEST_CASE("ContentStore: Batch operations", "[api][content-store][batch]") {
             CHECK(result.value());
         }
     }
+}
+
+TEST_CASE("ContentStore: Batch store commits references once before publishing metadata",
+          "[api][content-store][batch][publication]") {
+    auto tempDir = makeTempDir("content_store_batch_publication");
+    auto storage = std::make_shared<ScriptedStorageEngine>();
+    auto refCounter = std::make_shared<ScriptedReferenceCounter>();
+
+    ContentStoreBuilder builder;
+    auto built = builder.withConfig(readinessConfig(tempDir))
+                     .withStorageEngine(storage)
+                     .withReferenceCounter(refCounter)
+                     .build();
+    REQUIRE(built.has_value());
+    auto store = std::move(built).value();
+
+    std::vector<fs::path> files;
+    for (int i = 0; i < 2; ++i) {
+        auto path = tempDir / ("batch-" + std::to_string(i) + ".txt");
+        std::ofstream file(path, std::ios::binary);
+        file << "batch publication " << i;
+        file.close();
+        files.push_back(std::move(path));
+    }
+
+    auto results = store->storeBatch(files);
+    REQUIRE(results.size() == files.size());
+    REQUIRE(results[0].has_value());
+    REQUIRE(results[1].has_value());
+    CHECK(storage->storeBatchCalls == 2);
+    CHECK(refCounter->beginCalls == 1);
+    CHECK(refCounter->commitCalls == 1);
+    CHECK(refCounter->queuedIncrements == 2);
+
+    for (const auto& result : results) {
+        auto metadata = store->getMetadata(result.value().contentHash);
+        REQUIRE(metadata.has_value());
+    }
+
+    std::error_code ec;
+    fs::remove_all(tempDir, ec);
+}
+
+TEST_CASE("ContentStore: Batch store preserves last-writer manifest metadata for duplicate content",
+          "[api][content-store][batch][manifest]") {
+    auto tempDir = makeTempDir("content_store_batch_duplicate_manifest");
+    auto storage = std::make_shared<ScriptedStorageEngine>();
+    auto refCounter = std::make_shared<ScriptedReferenceCounter>();
+
+    ContentStoreBuilder builder;
+    auto built = builder.withConfig(readinessConfig(tempDir))
+                     .withStorageEngine(storage)
+                     .withReferenceCounter(refCounter)
+                     .build();
+    REQUIRE(built.has_value());
+    auto store = std::move(built).value();
+
+    const std::string content = "shared content with distinct manifest metadata";
+    std::vector<fs::path> files;
+    for (int i = 0; i < 2; ++i) {
+        auto path = tempDir / ("duplicate-" + std::to_string(i) + ".txt");
+        std::ofstream(path, std::ios::binary) << content;
+        files.push_back(std::move(path));
+    }
+    std::vector<ContentMetadata> metadata(2);
+    metadata[0].name = "first-name.txt";
+    metadata[1].name = "last-name.txt";
+
+    auto results = store->storeBatch(files, metadata);
+    REQUIRE(results.size() == files.size());
+    REQUIRE(results[0].has_value());
+    REQUIRE(results[1].has_value());
+    REQUIRE(results[0].value().contentHash == results[1].value().contentHash);
+
+    auto manifestBytes = storage->retrieve(results[0].value().contentHash + ".manifest");
+    REQUIRE(manifestBytes.has_value());
+    yams::manifest::ManifestManager manifestManager({});
+    auto manifest = manifestManager.deserialize(manifestBytes.value());
+    REQUIRE(manifest.has_value());
+    CHECK(manifest.value().originalName == "last-name.txt");
+
+    std::error_code ec;
+    fs::remove_all(tempDir, ec);
+}
+
+TEST_CASE("ContentStore: Batch reference failure publishes no metadata",
+          "[api][content-store][batch][publication][rollback]") {
+    auto tempDir = makeTempDir("content_store_batch_commit_failure");
+    auto storage = std::make_shared<ScriptedStorageEngine>();
+    auto refCounter = std::make_shared<ScriptedReferenceCounter>();
+    refCounter->failCommit = true;
+
+    ContentStoreBuilder builder;
+    auto built = builder.withConfig(readinessConfig(tempDir))
+                     .withStorageEngine(storage)
+                     .withReferenceCounter(refCounter)
+                     .build();
+    REQUIRE(built.has_value());
+    auto store = std::move(built).value();
+
+    std::vector<fs::path> files;
+    std::vector<std::string> hashes;
+    for (int i = 0; i < 2; ++i) {
+        auto path = tempDir / ("batch-fail-" + std::to_string(i) + ".txt");
+        std::ofstream file(path, std::ios::binary);
+        file << "batch failure " << i;
+        file.close();
+        hashes.push_back(yams::crypto::SHA256Hasher{}.hashFile(path));
+        files.push_back(std::move(path));
+    }
+
+    auto results = store->storeBatch(files);
+    REQUIRE(results.size() == files.size());
+    for (const auto& result : results) {
+        REQUIRE_FALSE(result.has_value());
+        CHECK(result.error().code == ErrorCode::TransactionFailed);
+    }
+    CHECK(refCounter->beginCalls == 1);
+    CHECK(refCounter->commitCalls == 1);
+    CHECK(refCounter->rollbackCalls == 1);
+    for (const auto& hash : hashes) {
+        auto metadata = store->getMetadata(hash);
+        REQUIRE_FALSE(metadata.has_value());
+        auto manifestExists = storage->exists(hash + ".manifest");
+        REQUIRE(manifestExists.has_value());
+        CHECK_FALSE(manifestExists.value());
+    }
+
+    std::error_code ec;
+    fs::remove_all(tempDir, ec);
 }
 
 // =============================================================================

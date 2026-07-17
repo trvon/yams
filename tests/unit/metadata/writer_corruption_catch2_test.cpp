@@ -93,7 +93,7 @@ TEST_CASE("MetadataInsertWriter resolves all futures with errors on corrupt DB",
     CorruptRepoFixture fix;
     MetadataInsertWriter writer(fix.repo_);
 
-    std::vector<std::future<Result<int64_t>>> futures;
+    std::vector<std::future<Result<DocumentInsertOutcome>>> futures;
     futures.reserve(8);
     for (int i = 0; i < 8; ++i) {
         futures.push_back(writer.submit(makeInsert(i)));
@@ -106,17 +106,22 @@ TEST_CASE("MetadataInsertWriter resolves all futures with errors on corrupt DB",
     }
 
     REQUIRE(writer.flush());
+    const auto metrics = writer.metricsSnapshot();
+    CHECK(metrics.submittedItems == 8);
+    CHECK(metrics.completedItems == 8);
+    CHECK(metrics.failedBatches > 0);
+    CHECK(metrics.fallbackItems == 8);
     writer.shutdown();
 }
 
 TEST_CASE("MetadataInsertWriter shutdown mid-queue abandons no promises",
           "[unit][metadata][corruption][writer]") {
     CorruptRepoFixture fix;
-    MetadataInsertWriter writer(fix.repo_, MetadataInsertWriter::Options{
-                                               .maxBatchCount = 2,
-                                               .maxDelay = std::chrono::microseconds{50000}});
+    MetadataInsertWriter writer(
+        fix.repo_, MetadataInsertWriter::Options{.maxBatchCount = 2,
+                                                 .maxDelay = std::chrono::microseconds{50000}});
 
-    std::vector<std::future<Result<int64_t>>> futures;
+    std::vector<std::future<Result<DocumentInsertOutcome>>> futures;
     futures.reserve(16);
     for (int i = 0; i < 16; ++i) {
         futures.push_back(writer.submit(makeInsert(i)));
@@ -134,6 +139,11 @@ TEST_CASE("MetadataInsertWriter shutdown mid-queue abandons no promises",
     auto rejectedResult = rejected.get();
     REQUIRE_FALSE(rejectedResult);
     CHECK(rejectedResult.error().code == ErrorCode::InvalidState);
+
+    const auto metrics = writer.metricsSnapshot();
+    CHECK(metrics.submittedItems == 16);
+    CHECK(metrics.completedItems == 16);
+    CHECK(metrics.rejectedItems == 1);
 }
 
 TEST_CASE("ContentIndexWriter resolves all futures with errors on corrupt DB",

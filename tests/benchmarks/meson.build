@@ -270,21 +270,30 @@ if benchmark_dep.found()
 
   alias_target('bench_kg_edge_insert', kg_edge_insert_bench)
 
-  # PBI-004: End-to-end ingestion pipeline benchmark
-  ingestion_e2e_bench_deps = search_bench_deps + [test_deps]
-
-  ingestion_e2e_bench = executable('ingestion_e2e_bench',
-    files('search/ingestion_e2e_bench.cpp'),
-    include_directories: incs,
-    dependencies: ingestion_e2e_bench_deps,
-    cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
-    install: false,
-  )
-
-  alias_target('bench_ingestion_e2e', ingestion_e2e_bench)
 else
   message('Google Benchmark not found; skipping service and metadata benchmark executables')
 endif
+
+# PBI-004: End-to-end ingestion pipeline benchmark. It provides its own main
+# and must remain buildable when the optional Google Benchmark dependency is absent.
+ingestion_e2e_bench = executable('ingestion_e2e_bench',
+  files('search/ingestion_e2e_bench.cpp'),
+  include_directories: incs,
+  dependencies: [
+    test_deps,
+    dependency('yams_metadata'),
+    dependency('yams_search'),
+    dependency('yams_vector'),
+    dependency('yams_daemon'),
+    dependency('yams_app_services'),
+    dependency('spdlog'),
+    dependency('nlohmann_json'),
+  ] + tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  install: false,
+)
+
+alias_target('bench_ingestion_e2e', ingestion_e2e_bench)
 
 # KPI 4: repair ability (standalone main, no Google Benchmark dependency)
 repair_ability_bench = executable('repair_ability_bench',

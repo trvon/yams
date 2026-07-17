@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include <yams/daemon/components/TuningConfig.h>
 #include <yams/vector/document_chunker.h>
 
 namespace yams::daemon {
@@ -45,6 +46,9 @@ struct ResolvedEmbeddingConfig {
  */
 class ConfigResolver {
 public:
+    using ConfigSection = std::map<std::string, std::string>;
+    using ConfigSections = std::map<std::string, ConfigSection>;
+
     struct EmbeddingSelectionPolicy {
         enum class Strategy { Ranked, IntroHeadings };
         enum class Mode { Full, Budgeted, Adaptive };
@@ -201,6 +205,15 @@ public:
     };
 
     ConfigResolver() = delete; // Static-only class
+
+    /**
+     * Resolve and apply daemon runtime tuning from parsed TOML sections.
+     *
+     * This is the single startup/reload path for TuneAdvisor, controller,
+     * post-ingest, and gradient-limiter settings. Unspecified controller
+     * values are preserved from @p base.
+     */
+    static TuningConfig applyRuntimeTuning(const ConfigSections& sections, TuningConfig base);
 
     /**
      * @brief Check if an environment variable value is "truthy".

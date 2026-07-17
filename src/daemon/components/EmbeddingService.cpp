@@ -155,6 +155,24 @@ void EmbeddingService::enqueueEmbeddingStatusUpdate(std::vector<std::string> has
                  hashes.size(), source);
 }
 
+void EmbeddingService::enqueueEmbeddingCompletion(std::vector<std::string> hashes,
+                                                  std::string modelName) {
+    if (hashes.empty() || !meta_) {
+        return;
+    }
+    if (auto* coord = getWriteCoordinator_ ? getWriteCoordinator_() : nullptr) {
+        auto batch = std::make_unique<WriteBatch>();
+        batch->source = "EmbeddingService::completion";
+        batch->ops.emplace_back(
+            CompleteDocumentEmbeddingsByHashesOp{std::move(hashes), std::move(modelName)});
+        coord->enqueue(std::move(batch));
+        return;
+    }
+    spdlog::warn("EmbeddingService: WriteCoordinator unavailable; dropping {} embedding "
+                 "completion updates",
+                 hashes.size());
+}
+
 void EmbeddingService::shutdown() {
     YAMS_ZONE_SCOPED_N("Embedding::shutdown");
     if (stop_.exchange(true)) {
@@ -2992,12 +3010,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
             successHashes.push_back(docsToEmbed[docIdx].hash);
         }
     }
-    enqueueEmbeddingStatusUpdate(successHashes, true, modelName,
-                                 "EmbeddingService::embeddingStatusCompleted");
-
     const auto successCount = successHashes.size();
-    enqueueRepairStatusUpdate(successHashes, metadata::RepairStatus::Completed,
-                              "EmbeddingService::successCompleted");
 
     logPhase("metadata_update", tMeta, fmt::format("docs={} model='{}'", successCount, modelName));
 
@@ -3034,15 +3047,18 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
             jobTag, modelName);
     }
     updateMonitorCounts([&](InternalEventBus::EmbedJobMonitor& mon) {
-        mon.succeededDocs += successHashes.size();
+        mon.succeededDocs += successCount;
         mon.processedChunks = mon.totalChunks;
         mon.processedDocs = mon.totalDocs;
-        mon.detail = "completed docs=" + std::to_string(successHashes.size());
+        mon.detail = "completed docs=" + std::to_string(successCount);
     });
 
     if (topologyRebuildRequester_ && !successHashes.empty()) {
         topologyRebuildRequester_(successHashes);
     }
+
+    // Transfer ownership only after every synchronous observer has consumed the hashes.
+    enqueueEmbeddingCompletion(std::move(successHashes), modelName);
 
     logPoolState("job_end");
     finishMonitor("completed", "embedding job completed");
@@ -3050,8 +3066,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     processed_.fetch_add(docsToEmbed.size());
 
     spdlog::debug("EmbeddingService: batch complete (succeeded={}, skipped={}, failed={})",
-                  successHashes.size(), skipped,
-                  failedGather + (docsToEmbed.size() - successHashes.size()));
+                  successCount, skipped, failedGather + (docsToEmbed.size() - successCount));
 }
 
 } // namespace daemon

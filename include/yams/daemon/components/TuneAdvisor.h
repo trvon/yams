@@ -1078,17 +1078,16 @@ public:
         }
         return 4;
     }
-    // Post-ingest batching size. Env override: YAMS_POST_INGEST_BATCH_SIZE
-    // Profile-scaled: Efficient=4, Balanced=6, Aggressive=8
+    // Post-ingest batching size. Env override: YAMS_POST_INGEST_BATCH_SIZE.
+    // This is a cap: partial batches still dispatch after the bounded coalesce window.
     // Dynamically scales down when DB lock contention is detected.
     static uint32_t postIngestBatchSize() {
         uint32_t ov = postIngestBatchSizeOverride_.load(std::memory_order_relaxed);
         if (ov != 0)
             return ov;
 
-        // Profile-scaled base: Efficient=4, Balanced=6, Aggressive=8
-        uint32_t baseBatchSize =
-            std::max(1u, static_cast<uint32_t>(8.0 * postIngestProfileScale()));
+        constexpr uint32_t kDefaultBatchSize = 16;
+        uint32_t baseBatchSize = kDefaultBatchSize;
         auto embedCap = static_cast<uint32_t>(getEmbedDocCap());
         if (embedCap == 0) {
             embedCap = 64;

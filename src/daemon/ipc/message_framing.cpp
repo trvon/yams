@@ -158,32 +158,6 @@ Result<void> MessageFramer::frame_message_chunk_into(const Message& message,
                               /*header_only=*/false);
 }
 
-Result<std::vector<uint8_t>> MessageFramer::frame_message(const Message& message) {
-    std::vector<uint8_t> frame;
-    auto res = frame_message_into(message, frame);
-    if (!res)
-        return res.error();
-    return frame;
-}
-
-Result<std::vector<uint8_t>> MessageFramer::frame_message_header(const Message& message,
-                                                                 uint64_t /*total_size*/) {
-    std::vector<uint8_t> frame;
-    auto res = frame_message_header_into(message, frame);
-    if (!res)
-        return res.error();
-    return frame;
-}
-
-Result<std::vector<uint8_t>> MessageFramer::frame_message_chunk(const Message& message,
-                                                                bool last_chunk) {
-    std::vector<uint8_t> frame;
-    auto res = frame_message_chunk_into(message, frame, last_chunk);
-    if (!res)
-        return res.error();
-    return frame;
-}
-
 Result<MessageFramer::ChunkedMessageInfo>
 MessageFramer::get_frame_info(std::span<const uint8_t> data) {
     if (data.size() < sizeof(FrameHeader)) {
@@ -274,38 +248,6 @@ void FrameReader::reset() {
     buffer_.reserve(sizeof(MessageFramer::FrameHeader));
     state_ = State::WaitingForHeader;
     expected_size_ = sizeof(MessageFramer::FrameHeader);
-    processing_chunked_ = false;
-    received_last_chunk_ = false;
-    chunks_received_ = 0;
-    total_bytes_received_ = 0;
-    expected_total_bytes_ = 0;
-}
-
-FrameReader::FrameInfo FrameReader::get_frame_info() const {
-    FrameInfo info;
-    info.status =
-        state_ == State::FrameReady ? FrameStatus::FrameComplete : FrameStatus::NeedMoreData;
-
-    if (buffer_.size() >= sizeof(MessageFramer::FrameHeader)) {
-        MessageFramer::FrameHeader header;
-        std::memcpy(&header, buffer_.data(), sizeof(header));
-        header.from_network();
-
-        if (header.is_valid()) {
-            info.is_chunked = header.is_chunked();
-            info.is_last_chunk = header.is_last_chunk();
-            info.is_header_only = header.is_header_only();
-            info.is_error = header.is_error();
-            info.payload_size = header.payload_size;
-
-            if (info.is_chunked) {
-                info.status =
-                    info.is_last_chunk ? FrameStatus::ChunkedComplete : FrameStatus::ChunkedFrame;
-            }
-        }
-    }
-
-    return info;
 }
 
 FrameReader::FeedResult FrameReader::feed(const uint8_t* data, size_t size) {
@@ -349,7 +291,6 @@ FrameReader::FeedResult FrameReader::feed(const uint8_t* data, size_t size) {
                     }
                     // Header-only frame is already complete
                     state_ = State::FrameReady;
-                    processing_chunked_ = header.is_chunked();
                     return {consumed,
                             FrameStatus::FrameComplete,
                             header.is_chunked(),
@@ -370,12 +311,7 @@ FrameReader::FeedResult FrameReader::feed(const uint8_t* data, size_t size) {
 
                 // Check if this is a chunked frame
                 if (current_header_.is_chunked()) {
-                    processing_chunked_ = true;
-                    chunks_received_++;
-                    total_bytes_received_ += current_header_.payload_size;
-
                     if (current_header_.is_last_chunk()) {
-                        received_last_chunk_ = true;
                         return {consumed, FrameStatus::ChunkedComplete, true, true,
                                 false,    current_header_.is_error()};
                     }

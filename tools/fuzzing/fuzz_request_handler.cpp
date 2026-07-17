@@ -120,16 +120,19 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     // Test 2: Feed data to FrameReader and try request handling
     {
         FrameReader reader;
-        reader.append(std::span<const uint8_t>(data, size));
-        auto frame_result = reader.try_read_frame();
+        (void)reader.feed(data, size);
 
-        if (frame_result) {
+        if (reader.has_frame()) {
+            auto frame_result = reader.get_frame();
             // Try to parse as a complete message
-            auto decode_result = ProtoSerializer::decode_payload(frame_result.value());
-            if (decode_result && std::holds_alternative<Request>(decode_result.value().payload)) {
-                // Successfully decoded a request - this tests the full parse path
-                const auto& request = std::get<Request>(decode_result.value().payload);
-                (void)request;
+            if (frame_result) {
+                auto decode_result = MessageFramer{}.parse_frame(frame_result.value());
+                if (decode_result &&
+                    std::holds_alternative<Request>(decode_result.value().payload)) {
+                    // Successfully decoded a request - this tests the full parse path
+                    const auto& request = std::get<Request>(decode_result.value().payload);
+                    (void)request;
+                }
             }
         }
     }

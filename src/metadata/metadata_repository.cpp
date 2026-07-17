@@ -41,6 +41,7 @@
 #include "repository/crud_ops.hpp"
 #include "repository/document_query_filters.hpp"
 #include "repository/metadata_value_count_ops.hpp"
+#include "repository/metadata_write_helpers.hpp"
 #include "repository/transaction_helpers.hpp"
 
 namespace yams::metadata {
@@ -696,6 +697,7 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
     struct BatchContentDelta {
         uint64_t newlyExtracted{0};
         uint64_t newlyIndexed{0};
+        uint64_t metadataWrites{0};
         std::vector<int64_t> indexedDocIds;
     };
     struct PreparedBatchContentEntry {
@@ -705,8 +707,7 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
         std::string boostedContent;
         std::string extractionMethod;
         std::string language;
-        bool priorStateKnown = false;
-        bool priorContentExtracted = false;
+        std::string metadataTitle;
     };
     struct BatchContentPhaseTimings {
         int64_t prepareInputUs{0};
@@ -782,8 +783,7 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
             prepared.documentId = entry.documentId;
             prepared.extractionMethod = entry.extractionMethod;
             prepared.language = entry.language;
-            prepared.priorStateKnown = entry.priorStateKnown;
-            prepared.priorContentExtracted = entry.priorContentExtracted;
+            prepared.metadataTitle = entry.metadataTitle;
 
             std::string contentStorage;
             prepared.sanitizedContent = common::ensureValidUtf8(contentView, contentStorage);
@@ -885,9 +885,6 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
             bool ftsIndexed = false;
         };
         std::unordered_map<int64_t, ExistingContentState> existingStates;
-        const bool allPriorContentKnown = std::all_of(
-            preparedEntries.begin(), preparedEntries.end(),
-            [](const PreparedBatchContentEntry& entry) { return entry.priorStateKnown; });
         std::vector<int64_t> precheckDocIds;
         precheckDocIds.reserve(preparedEntries.size());
         std::unordered_map<int64_t, std::size_t> firstPreparedIndexById;
@@ -907,10 +904,10 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                 phaseTimings.ftsPrecheckCacheMisses += preparedEntries.size();
             }
         }
-        const bool queryContentState = !allPriorContentKnown;
         const bool queryFtsState = hasFts5 && !cachedFtsStates.has_value();
-        // Always precheck document existence. Besides counter state, this prevents stale
-        // post-ingest entries from creating orphan FTS rows after a document row has been deleted.
+        // Always read the committed extraction state while checking document existence. A
+        // post-ingest hint can become stale while an earlier content transaction is queued, most
+        // commonly when multiple corpus files deduplicate to the same document.
         if (!preparedEntries.empty()) {
             YAMS_ZONE_SCOPED_N("MetadataRepo::batchContentPrecheckBatch");
             const auto phaseStart = std::chrono::steady_clock::now();
@@ -922,10 +919,7 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                 }
                 placeholders += '?';
             }
-            std::string sql = "SELECT id";
-            if (queryContentState) {
-                sql += ", COALESCE(content_extracted, 0)";
-            }
+            std::string sql = "SELECT id, COALESCE(content_extracted, 0)";
             if (queryFtsState) {
                 sql += ", CASE WHEN EXISTS(SELECT 1 FROM documents_fts WHERE rowid = documents.id) "
                        "THEN 1 ELSE 0 END";
@@ -951,9 +945,7 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
                 const auto entryIndex = indexIt->second;
                 int column = 1;
                 ExistingContentState state{};
-                state.contentExtracted = queryContentState
-                                             ? checkStmt.getInt(column++) == 1
-                                             : preparedEntries[entryIndex].priorContentExtracted;
+                state.contentExtracted = checkStmt.getInt(column++) == 1;
                 if (!hasFts5) {
                     state.ftsIndexed = true;
                 } else if (queryFtsState) {
@@ -975,10 +967,12 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
         uniqueStatusIds.reserve(preparedEntries.size());
         newlyExtractedIds.reserve(preparedEntries.size());
         newlyIndexedIds.reserve(preparedEntries.size());
+        std::vector<repository::MetadataWriteEntry> metadataWrites;
+        metadataWrites.reserve(preparedEntries.size());
         bool hasDuplicateStatusIds = false;
 
         for (const auto& entry : preparedEntries) {
-            bool wasExtracted = entry.priorContentExtracted;
+            bool wasExtracted = false;
             // Without FTS5 there is no documents_fts state to reconcile, so avoid
             // double-counting "indexed" documents in non-FTS builds.
             bool wasIndexed = !hasFts5;
@@ -1043,9 +1037,16 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
             if (!wasIndexed) {
                 newlyIndexedIds.insert(entry.documentId);
             }
+            if (!entry.metadataTitle.empty()) {
+                metadataWrites.emplace_back(entry.documentId, "title",
+                                            MetadataValue(entry.metadataTitle));
+            }
         }
         delta.newlyExtracted = newlyExtractedIds.size();
         delta.newlyIndexed = newlyIndexedIds.size();
+        delta.metadataWrites = metadataWrites.size();
+
+        YAMS_TRY(repository::upsertMetadataWrites(db, metadataWrites));
 
         if (!statusUpdateIds.empty()) {
             YAMS_ZONE_SCOPED_N("MetadataRepo::batchContentStatusUpdate");
@@ -1149,6 +1150,9 @@ MetadataRepository::batchInsertContentAndIndex(const std::vector<BatchContentEnt
             }
             if (delta.newlyIndexed > 0) {
                 cachedIndexedCount_.fetch_add(delta.newlyIndexed, std::memory_order_relaxed);
+            }
+            if (delta.metadataWrites > 0) {
+                metadataChangeCounter_.fetch_add(delta.metadataWrites, std::memory_order_release);
             }
             addElapsedUs(phaseTimings.counterUpdateUs, phaseStart);
         }

@@ -1,5 +1,6 @@
 #include <spdlog/spdlog.h>
 #include <yams/common/fs_utils.h>
+#include <yams/compat/thread_stop_compat.h>
 #include <yams/compression/compression_utils.h>
 #include <yams/compression/compressor_interface.h>
 #include <yams/core/assert.hpp>
@@ -15,7 +16,6 @@ namespace yamsfmt = fmt;
 #endif
 
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <cctype>
 #include <cerrno>
@@ -26,9 +26,7 @@ namespace yamsfmt = fmt;
 #include <optional>
 #include <random>
 #include <shared_mutex>
-#include <source_location>
 #include <system_error>
-#include <thread>
 #include <yams/compat/unistd.h>
 #ifdef _WIN32
 #include <windows.h> // CreateFileW / FlushFileBuffers (NOMINMAX/WIN32_LEAN_AND_MEAN set project-wide)
@@ -540,28 +538,32 @@ std::vector<Result<void>> StorageEngine::storeBatch(
     if (items.empty())
         return {};
 
-    // Launch parallel writes via storeAsync, respecting the concurrency cap.
-    // The mutex pool already serializes writes to the same hash. Different
-    // hashes are safe to write concurrently.
-    const std::size_t maxConcurrent = std::max<std::size_t>(1, pImpl->config.maxConcurrentWriters);
+    // Reuse the caller and a bounded set of workers. Per-item std::async calls copy every payload
+    // and create one thread per object even when the concurrency cap forces them into waves.
+    const std::size_t workerCount =
+        std::min(items.size(), std::max<std::size_t>(1, pImpl->config.maxConcurrentWriters));
     std::vector<Result<void>> results(items.size());
-    std::vector<std::future<Result<void>>> futures;
-    futures.reserve(items.size());
-
-    for (std::size_t i = 0; i < items.size(); ++i) {
-        futures.push_back(storeAsync(items[i].first, std::span<const std::byte>(items[i].second)));
-        // Throttle: wait for oldest futures when at capacity.
-        if (futures.size() >= maxConcurrent) {
-            const auto oldest = i + 1 - futures.size();
-            results[oldest] = futures.front().get();
-            futures.erase(futures.begin());
+    std::atomic<std::size_t> next{0};
+    auto writeNext = [&]() {
+        for (;;) {
+            const auto index = next.fetch_add(1, std::memory_order_relaxed);
+            if (index >= items.size()) {
+                return;
+            }
+            const auto& [hash, data] = items[index];
+            results[index] = store(hash, data);
         }
-    }
-    // Drain remaining futures.
-    for (std::size_t i = items.size() - futures.size(); i < items.size(); ++i) {
-        results[i] = futures.front().get();
-        futures.erase(futures.begin());
-    }
+    };
+
+    {
+        std::vector<yams::compat::jthread> workers;
+        workers.reserve(workerCount - 1);
+        for (std::size_t i = 1; i < workerCount; ++i) {
+            workers.emplace_back(writeNext);
+        }
+        writeNext();
+    } // Join before results can be moved to the caller.
+
     return results;
 }
 

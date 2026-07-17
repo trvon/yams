@@ -4,7 +4,9 @@
 #include <yams/config/config_helpers.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
+#define YAMS_DAEMON_TEST_HOOKS_IMPL 1
 #include <yams/daemon/components/PluginManager.h>
+#undef YAMS_DAEMON_TEST_HOOKS_IMPL
 #include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/daemon.h>
@@ -1236,14 +1238,6 @@ void PluginManager::testingSetEmbeddingDegraded(bool degraded, const std::string
     } else {
         embeddingFsm_.dispatch(ModelLoadedEvent{"", 0});
     }
-}
-
-void PluginManager::testingPluginLoadFailed(const std::string& error) {
-    pluginHostFsm_.dispatch(PluginLoadFailedEvent{error});
-}
-
-void PluginManager::testingPluginScanComplete(std::size_t count) {
-    pluginHostFsm_.dispatch(AllPluginsLoadedEvent{count});
 }
 
 } // namespace yams::daemon

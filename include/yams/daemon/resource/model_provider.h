@@ -14,8 +14,27 @@ class EmbeddingGenerator;
 }
 
 namespace yams::daemon {
-// Forward declaration
-struct ModelPoolConfig;
+
+struct ModelPoolConfig {
+    size_t maxLoadedModels = 3;
+    size_t hotPoolSize = 1;
+
+    size_t maxMemoryGB = 4;
+    std::string evictionPolicy = "lru";
+
+    std::chrono::seconds modelIdleTimeout{300};
+    std::chrono::seconds modelLoadTimeout{30};
+
+    std::vector<std::string> preloadModels;
+    bool lazyLoading = false;
+
+    std::string modelsRoot;
+
+    bool enableGPU = false;
+    int numThreads = 4;
+    bool asyncLoading = false;
+    size_t loadWorkerThreads = 2;
+};
 
 // ============================================================================
 // Model Information

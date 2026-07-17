@@ -34,7 +34,8 @@
 // Forward declare daemon ServiceManager used in AppContext
 namespace yams::daemon {
 class ServiceManager;
-}
+class WriteCoordinator;
+} // namespace yams::daemon
 
 // Forward declare KnowledgeGraphStore for AppContext
 namespace yams::metadata {
@@ -101,7 +102,9 @@ class IGraphQueryService;
 
 struct AppContext {
     yams::daemon::ServiceManager* service_manager = nullptr;
-    std::function<void(const std::string& hash, const std::string& mime)> enqueuePostIngest;
+    std::function<yams::daemon::WriteCoordinator*()> writeCoordinatorProvider;
+    std::function<void(const std::vector<std::string>& hashes, const std::string& mime)>
+        enqueuePostIngestBatch;
     // Host-owned daemon state without a yams_app_services -> yams_daemon link dependency.
     // When absent, standalone/in-process callers receive the conservative default context.
     std::function<search::SearchExecutionContext()> searchExecutionContextProvider;
@@ -803,6 +806,15 @@ public:
 
     // Storage operations
     virtual Result<StoreDocumentResponse> store(const StoreDocumentRequest& req) = 0;
+    virtual std::vector<Result<StoreDocumentResponse>>
+    storeBatch(const std::vector<StoreDocumentRequest>& requests) {
+        std::vector<Result<StoreDocumentResponse>> results;
+        results.reserve(requests.size());
+        for (const auto& request : requests) {
+            results.push_back(store(request));
+        }
+        return results;
+    }
     virtual Result<RetrieveDocumentResponse> retrieve(const RetrieveDocumentRequest& req) = 0;
     virtual Result<CatDocumentResponse> cat(const CatDocumentRequest& req) = 0;
 

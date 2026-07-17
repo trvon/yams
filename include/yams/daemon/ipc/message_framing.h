@@ -2,9 +2,8 @@
  * @file message_framing.h
  * @brief IPC message framing utilities for YAMS daemon.
  *
- * Provides compile‑time validated frame header definitions, CRC32 checksum
- * calculation, and functions to frame/unframe messages that satisfy the
- * @ref FramedMessage concept.
+ * Provides validated frame header definitions, CRC32 checksum calculation,
+ * and protobuf message framing.
  *
  */
 #pragma once
@@ -14,12 +13,11 @@
 #include <yams/daemon/ipc/ipc_protocol.h>
 
 #include <bit>
-#include <concepts>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <limits>
 #include <span>
+#include <type_traits>
 #include <vector>
 
 #ifdef _WIN32
@@ -29,19 +27,6 @@
 #endif
 
 namespace yams::daemon {
-
-/**
- * @brief Concept that a message type must satisfy to be framed.
- *
- * A @c FramedMessage must provide a `serialize()` method returning a
- * `std::vector<uint8_t>` and a static `deserialize(std::span<const uint8_t>)`
- * returning a `Result<T>`.
- */
-template <typename T>
-concept FramedMessage = requires(T msg) {
-    { msg.serialize() } -> std::convertible_to<std::vector<uint8_t>>;
-    { T::deserialize(std::span<const uint8_t>{}) } -> std::same_as<Result<T>>;
-};
 
 // Message framing for reliable transport
 class MessageFramer {
@@ -134,58 +119,6 @@ public:
     static_assert(std::is_standard_layout_v<FrameHeader>,
                   "FrameHeader must have standard layout for binary serialization");
 
-    // Frame a message with header and checksum
-    template <FramedMessage T>
-    [[nodiscard]] Result<std::vector<uint8_t>> frame(const T& message, bool chunked = false,
-                                                     bool last_chunk = false,
-                                                     bool header_only = false) {
-        // Serialize message
-        auto payload = message.serialize();
-        const auto payloadSize = payload.size();
-        if (payloadSize > std::numeric_limits<uint32_t>::max()) {
-            return Error{ErrorCode::InvalidData, "Frame payload exceeds uint32 size limit"};
-        }
-
-        // Create header
-        FrameHeader header;
-        header.payload_size = static_cast<uint32_t>(payloadSize);
-        header.checksum = calculate_crc32(payload);
-        header.set_chunked(chunked);
-        header.set_last_chunk(last_chunk);
-        header.set_header_only(header_only);
-        header.to_network();
-
-        // Combine header and payload
-        std::vector<uint8_t> frame;
-        frame.reserve(HEADER_SIZE + payload.size());
-
-        // Write header
-        const auto* header_bytes = reinterpret_cast<const uint8_t*>(&header);
-        frame.insert(frame.end(), header_bytes, header_bytes + sizeof(header));
-
-        // Write payload if not header-only frame
-        if (!header_only) {
-            frame.insert(frame.end(), payload.begin(), payload.end());
-        }
-
-        return frame;
-    }
-
-    // Create a header-only frame (for streaming responses)
-    template <FramedMessage T>
-    [[nodiscard]] Result<std::vector<uint8_t>>
-    frame_header(const T& message, uint64_t total_size = 0, bool chunked = true) {
-        (void)total_size;
-        return frame(message, chunked, false, true);
-    }
-
-    // Create a chunk frame (for streaming responses)
-    template <FramedMessage T>
-    [[nodiscard]] Result<std::vector<uint8_t>> frame_chunk(const T& message,
-                                                           bool last_chunk = false) {
-        return frame(message, true, last_chunk, false);
-    }
-
     // Parse frame header
     [[nodiscard]] Result<FrameHeader> parse_header(std::span<const uint8_t> data) {
         if (data.size() < HEADER_SIZE) {
@@ -203,56 +136,27 @@ public:
         return header;
     }
 
-    // Unframe a message
-    template <FramedMessage T> [[nodiscard]] Result<T> unframe(std::span<const uint8_t> frame) {
-        // Parse header
-        auto header_result = parse_header(frame);
-        if (!header_result) {
-            return header_result.error();
-        }
-
-        const auto& header = header_result.value();
-
-        // Validate frame size
-        if (frame.size() < HEADER_SIZE + header.payload_size) {
-            return Error{ErrorCode::InvalidData, "Incomplete frame"};
-        }
-
-        // Extract payload
-        auto payload = frame.subspan(HEADER_SIZE, header.payload_size);
-
-        // Verify checksum
-        uint32_t calculated_checksum = calculate_crc32(payload);
-        if (calculated_checksum != header.checksum) {
-            return Error{ErrorCode::InvalidData, "Checksum mismatch"};
-        }
-
-        // Deserialize message
-        return T::deserialize(payload);
-    }
-
-    // Check if we have a complete frame
-    [[nodiscard]] Result<size_t> get_frame_size(std::span<const uint8_t> data) {
-        auto header_result = parse_header(data);
-        if (!header_result) {
-            return header_result.error();
-        }
-
-        return HEADER_SIZE + header_result.value().payload_size;
-    }
-
-    // Legacy interface for compatibility
-    static constexpr uint32_t FRAME_MAGIC = MAGIC;
-    static constexpr uint32_t FRAME_VERSION = VERSION;
-
     explicit MessageFramer(size_t max_message_size = 16 * 1024 * 1024)
         : max_message_size_(max_message_size) {}
 
-    Result<std::vector<uint8_t>> frame_message(const Message& message);
-    Result<std::vector<uint8_t>> frame_message_header(const Message& message,
-                                                      uint64_t total_size = 0);
+    Result<std::vector<uint8_t>> frame_message(const Message& message) {
+        std::vector<uint8_t> frame;
+        auto result = frame_message_into(message, frame);
+        if (!result) {
+            return result.error();
+        }
+        return frame;
+    }
+
     Result<std::vector<uint8_t>> frame_message_chunk(const Message& message,
-                                                     bool last_chunk = false);
+                                                     bool last_chunk = false) {
+        std::vector<uint8_t> frame;
+        auto result = frame_message_chunk_into(message, frame, last_chunk);
+        if (!result) {
+            return result.error();
+        }
+        return frame;
+    }
 
     // Append framed bytes into the provided buffer, preserving existing contents. Callers may
     // reset or reuse the buffer between invocations to avoid reallocations.
@@ -296,48 +200,6 @@ public:
     FrameReader(FrameReader&&) = delete;
     FrameReader& operator=(FrameReader&&) = delete;
 
-    // Add data to buffer
-    void append(std::span<const uint8_t> data) {
-        size_t pos = buffer_.size();
-        buffer_.resize(pos + data.size());
-        std::memcpy(buffer_.data() + pos, data.data(), data.size());
-    }
-
-    // Try to extract a complete frame
-    [[nodiscard]] Result<std::vector<uint8_t>> try_read_frame() {
-        if (buffer_.size() < MessageFramer::HEADER_SIZE) {
-            return Error{ErrorCode::InvalidData, "Insufficient data"};
-        }
-
-        MessageFramer framer;
-        auto frame_size_result = framer.get_frame_size(buffer_);
-        if (!frame_size_result) {
-            return frame_size_result.error();
-        }
-
-        size_t frame_size = frame_size_result.value();
-        if (frame_size > max_frame_size_) {
-            return Error{ErrorCode::InvalidData, "Frame too large"};
-        }
-
-        if (buffer_.size() < frame_size) {
-            return Error{ErrorCode::InvalidData, "Incomplete frame"};
-        }
-
-        // Extract frame
-        std::vector<uint8_t> frame(buffer_.begin(), buffer_.begin() + frame_size);
-        buffer_.erase(buffer_.begin(), buffer_.begin() + frame_size);
-
-        return frame;
-    }
-
-    // Check if buffer has data
-    [[nodiscard]] bool has_data() const noexcept { return !buffer_.empty(); }
-
-    // Clear buffer
-    void clear() noexcept { buffer_.clear(); }
-
-    // Legacy interface for implementation
     void reset();
 
     enum class FrameStatus {
@@ -348,19 +210,6 @@ public:
         ChunkedFrame,   // Valid chunk in a chunked response
         ChunkedComplete // Final chunk in a chunked response
     };
-
-    // Information about the current frame being processed
-    struct FrameInfo {
-        FrameStatus status = FrameStatus::NeedMoreData;
-        bool is_chunked = false;
-        bool is_last_chunk = false;
-        bool is_header_only = false;
-        bool is_error = false;
-        uint32_t payload_size = 0;
-    };
-
-    // Get information about the current frame
-    [[nodiscard]] FrameInfo get_frame_info() const;
 
     struct FeedResult {
         size_t consumed;
@@ -375,10 +224,6 @@ public:
     bool has_frame() const;
     Result<std::vector<uint8_t>> get_frame();
 
-    // Handle chunked streaming responses
-    bool is_processing_chunked() const { return processing_chunked_; }
-    uint64_t get_chunks_received() const { return chunks_received_; }
-
 private:
     std::vector<uint8_t> buffer_;
     size_t max_frame_size_;
@@ -388,12 +233,6 @@ private:
     State state_ = State::WaitingForHeader;
     size_t expected_size_ = sizeof(MessageFramer::FrameHeader);
 
-    // Chunked streaming state
-    bool processing_chunked_ = false;
-    bool received_last_chunk_ = false;
-    uint64_t chunks_received_ = 0;
-    uint64_t total_bytes_received_ = 0;
-    uint64_t expected_total_bytes_ = 0;
     MessageFramer::FrameHeader current_header_{};
 };
 

@@ -140,6 +140,10 @@ struct UpdateEmbeddingStatusByHashesOp {
     bool embedded = false;
     std::string modelName;
 };
+struct CompleteDocumentEmbeddingsByHashesOp {
+    std::vector<std::string> hashes;
+    std::string modelName;
+};
 struct UpsertSymbolExtractionStateOp {
     std::string documentHash;
     metadata::SymbolExtractionState state;
@@ -158,8 +162,8 @@ using WriteOp =
                  DeleteEdgesByRelationOp, DeleteOrphanedEdgesOp, DeleteOrphanedDocEntitiesOp,
                  UpdateRepairStatusOp, UpsertTreeSnapshotOp, SetMetadataBatchOp,
                  UpdateExtractionStatusOp, UpdateEmbeddingStatusByHashOp,
-                 UpdateEmbeddingStatusByHashesOp, UpsertSymbolExtractionStateOp,
-                 InsertRelationshipOp, AddSymSpellTermsOp>;
+                 UpdateEmbeddingStatusByHashesOp, CompleteDocumentEmbeddingsByHashesOp,
+                 UpsertSymbolExtractionStateOp, InsertRelationshipOp, AddSymSpellTermsOp>;
 
 struct WriteBatch {
     std::string source;
@@ -323,6 +327,7 @@ private:
     Result<void> applyMetadataOp(UpdateExtractionStatusOp& op);
     Result<void> applyMetadataOp(UpdateEmbeddingStatusByHashOp& op);
     Result<void> applyMetadataOp(UpdateEmbeddingStatusByHashesOp& op);
+    Result<void> applyMetadataOp(CompleteDocumentEmbeddingsByHashesOp& op);
     Result<void> applyMetadataOp(UpsertSymbolExtractionStateOp& op);
     Result<void> applyMetadataOp(InsertRelationshipOp& op);
     Result<void> applyMetadataOp(AddSymSpellTermsOp& op);

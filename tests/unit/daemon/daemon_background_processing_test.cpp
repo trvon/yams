@@ -10,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <climits>
+#include <condition_variable>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
@@ -24,10 +25,15 @@
 #include "../../common/test_helpers_catch2.h"
 #include <catch2/catch_test_macros.hpp>
 #include <yams/api/content_store.h>
+#include <yams/daemon/components/DaemonLifecycleFsm.h>
+#include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PostIngestQueue.h>
+#include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/WorkCoordinator.h>
+#include <yams/daemon/daemon.h>
 #include <yams/extraction/content_extractor.h>
 #include <yams/metadata/metadata_repository.h>
 
@@ -66,6 +72,29 @@ void drainEmbedJobsChannel() {
     while (channel->try_pop(drain)) {
     }
 }
+
+void drainStoreDocumentChannel() {
+    auto channel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::StoreDocumentTask>(
+            "store_document_tasks", 64);
+    InternalEventBus::StoreDocumentTask drain;
+    while (channel->try_pop(drain)) {
+    }
+}
+
+class StoreDocumentChannelGuard {
+public:
+    StoreDocumentChannelGuard() { drainStoreDocumentChannel(); }
+    ~StoreDocumentChannelGuard() { drainStoreDocumentChannel(); }
+};
+
+class PostIngestBatchSizeGuard {
+public:
+    explicit PostIngestBatchSizeGuard(std::uint32_t batchSize) {
+        TuneAdvisor::setPostIngestBatchSize(batchSize);
+    }
+    ~PostIngestBatchSizeGuard() { TuneAdvisor::setPostIngestBatchSize(0); }
+};
 
 using yams::test::ScopedEnvVar;
 
@@ -149,6 +178,18 @@ private:
     uint32_t prevExtraction_{0};
 };
 
+class WorkCoordinatorThreadsGuard {
+public:
+    explicit WorkCoordinatorThreadsGuard(uint32_t threads)
+        : previous_(TuneAdvisor::workCoordinatorThreads()) {
+        TuneAdvisor::setWorkCoordinatorThreads(threads);
+    }
+    ~WorkCoordinatorThreadsGuard() { TuneAdvisor::setWorkCoordinatorThreads(previous_); }
+
+private:
+    uint32_t previous_{0};
+};
+
 // Unified StubContentStore (thread-safe, supports all required operations)
 class StubContentStore : public api::IContentStore {
 public:
@@ -213,10 +254,20 @@ public:
         return r;
     }
 
-    // Unused methods (required by interface)
-    Result<api::StoreResult> store(const std::filesystem::path&, const api::ContentMetadata&,
+    Result<api::StoreResult> store(const std::filesystem::path& path, const api::ContentMetadata&,
                                    api::ProgressCallback) override {
-        return ErrorCode::NotImplemented;
+        singleCalls_.fetch_add(1, std::memory_order_relaxed);
+        storedItems_.fetch_add(1, std::memory_order_release);
+        storeCv_.notify_all();
+
+        api::StoreResult result;
+        result.contentHash = "single-hash";
+        std::error_code error;
+        result.bytesStored = std::filesystem::file_size(path, error);
+        if (error) {
+            return Error{ErrorCode::IOError, error.message()};
+        }
+        return result;
     }
     Result<api::RetrieveResult> retrieve(const std::string&, const std::filesystem::path&,
                                          api::ProgressCallback) override {
@@ -239,9 +290,27 @@ public:
         return ErrorCode::NotImplemented;
     }
     std::vector<Result<api::StoreResult>>
-    storeBatch(const std::vector<std::filesystem::path>&,
+    storeBatch(const std::vector<std::filesystem::path>& paths,
                const std::vector<api::ContentMetadata>&) override {
-        return {};
+        batchCalls_.fetch_add(1, std::memory_order_relaxed);
+        lastBatchSize_.store(paths.size(), std::memory_order_relaxed);
+        storedItems_.fetch_add(paths.size(), std::memory_order_release);
+        storeCv_.notify_all();
+
+        std::vector<Result<api::StoreResult>> results;
+        results.reserve(paths.size());
+        for (std::size_t i = 0; i < paths.size(); ++i) {
+            api::StoreResult result;
+            result.contentHash = "batch-hash-" + std::to_string(i);
+            std::error_code error;
+            result.bytesStored = std::filesystem::file_size(paths[i], error);
+            if (error) {
+                results.emplace_back(Error{ErrorCode::IOError, error.message()});
+            } else {
+                results.emplace_back(std::move(result));
+            }
+        }
+        return results;
     }
     std::vector<Result<bool>> removeBatch(const std::vector<std::string>&) override { return {}; }
     api::ContentStoreStats getStats() const override { return {}; }
@@ -252,9 +321,34 @@ public:
         return ErrorCode::NotImplemented;
     }
 
+    [[nodiscard]] std::size_t batchCalls() const {
+        return batchCalls_.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] std::size_t singleCalls() const {
+        return singleCalls_.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] std::size_t lastBatchSize() const {
+        return lastBatchSize_.load(std::memory_order_relaxed);
+    }
+
+    bool waitForStoredItems(std::size_t expected, std::chrono::steady_clock::time_point deadline) {
+        std::unique_lock lock(storeMutex_);
+        return storeCv_.wait_until(lock, deadline, [this, expected] {
+            return storedItems_.load(std::memory_order_acquire) >= expected;
+        });
+    }
+
 private:
     mutable std::mutex mu_;
     std::unordered_map<std::string, ByteVector> blobs_;
+    std::atomic<std::size_t> singleCalls_{0};
+    std::atomic<std::size_t> batchCalls_{0};
+    std::atomic<std::size_t> lastBatchSize_{0};
+    std::atomic<std::size_t> storedItems_{0};
+    std::mutex storeMutex_;
+    std::condition_variable storeCv_;
 };
 
 // Minimal MetadataRepository stub for testing
@@ -498,12 +592,96 @@ public:
     }
 };
 
+struct StoreCallSnapshot {
+    std::size_t singleCalls{0};
+    std::size_t batchCalls{0};
+    std::size_t lastBatchSize{0};
+};
+
+StoreCallSnapshot runQueuedDocuments(std::size_t count, std::uint32_t batchSize = 0) {
+    StoreDocumentChannelGuard channelGuard;
+    std::optional<PostIngestBatchSizeGuard> batchSizeGuard;
+    if (batchSize != 0) {
+        batchSizeGuard.emplace(batchSize);
+    }
+    WorkCoordinatorThreadsGuard threadsGuard(1);
+    yams::test::TempDirGuard testDir("yams_ingest_service_batch_");
+
+    auto contentStore = std::make_shared<StubContentStore>();
+    {
+        DaemonConfig config;
+        config.dataDir = testDir.path();
+        StateComponent state;
+        DaemonLifecycleFsm lifecycleFsm;
+        ServiceManager serviceManager(config, state, lifecycleFsm);
+        serviceManager.__test_setContentStore(contentStore);
+
+        auto channel =
+            InternalEventBus::instance().get_or_create_channel<InternalEventBus::StoreDocumentTask>(
+                "store_document_tasks", 64);
+        for (std::size_t i = 0; i < count; ++i) {
+            InternalEventBus::StoreDocumentTask task;
+            task.request.name = "queued-" + std::to_string(i) + ".txt";
+            task.request.content = "queued content " + std::to_string(i);
+            REQUIRE(channel->try_push(std::move(task)));
+        }
+
+        IngestService ingestService(&serviceManager, serviceManager.getWorkCoordinator());
+        ingestService.start();
+        CHECK(contentStore->waitForStoredItems(count, std::chrono::steady_clock::now() +
+                                                          std::chrono::seconds(2)));
+        ingestService.stop();
+    }
+
+    return {.singleCalls = contentStore->singleCalls(),
+            .batchCalls = contentStore->batchCalls(),
+            .lastBatchSize = contentStore->lastBatchSize()};
+}
+
 bool isMpmcEnabled() {
     const char* m = std::getenv("YAMS_INTERNAL_BUS_MPMC");
     return m && std::string(m) == "1";
 }
 
 } // namespace
+
+// =============================================================================
+// IngestService Tests
+// =============================================================================
+
+TEST_CASE("IngestService preserves single and batched queued storage paths",
+          "[daemon][background][ingest][batch]") {
+    SpdlogCaptureGuard logGuard(spdlog::level::err);
+
+    SECTION("one task keeps the exact single-store path") {
+        const auto calls = runQueuedDocuments(1);
+        CHECK(calls.singleCalls == 1);
+        CHECK(calls.batchCalls == 0);
+    }
+
+    SECTION("two tasks cross one batch boundary") {
+        const auto calls = runQueuedDocuments(2);
+        CHECK(calls.singleCalls == 0);
+        CHECK(calls.batchCalls == 1);
+        CHECK(calls.lastBatchSize == 2);
+    }
+
+    SECTION("one drained admission batch crosses one storage boundary") {
+        constexpr std::size_t kDocuments = 12;
+        const auto calls = runQueuedDocuments(kDocuments);
+        CHECK(calls.singleCalls == 0);
+        CHECK(calls.batchCalls == 1);
+        CHECK(calls.lastBatchSize == kDocuments);
+    }
+
+    SECTION("configured batch size also bounds the storage drain") {
+        constexpr std::size_t kDocuments = 24;
+        const auto calls = runQueuedDocuments(kDocuments, 32);
+        CHECK(calls.singleCalls == 0);
+        CHECK(calls.batchCalls == 1);
+        CHECK(calls.lastBatchSize == kDocuments);
+    }
+}
 
 // =============================================================================
 // PostIngestQueue Tests
@@ -552,7 +730,7 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
         }
         REQUIRE(queue->started());
 
-        PostIngestQueue::Task task{doc.sha256Hash, doc.mimeType};
+        PostIngestQueue::Task task{.hash = doc.sha256Hash, .mime = doc.mimeType};
         task.noEmbeddings = true;
         REQUIRE(queue->tryEnqueue(std::move(task)));
 
@@ -621,7 +799,7 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
         }
         REQUIRE(queue->started());
 
-        PostIngestQueue::Task task{doc.sha256Hash, doc.mimeType};
+        PostIngestQueue::Task task{.hash = doc.sha256Hash, .mime = doc.mimeType};
         REQUIRE(queue->tryEnqueue(task));
 
         stopAndResetQueue(queue);
@@ -698,7 +876,7 @@ TEST_CASE("PostIngestQueue: Batch uses batched metadata lookup and enqueues embe
     REQUIRE(queue->started());
 
     for (const auto& doc : docs) {
-        PostIngestQueue::Task task{doc.sha256Hash, doc.mimeType};
+        PostIngestQueue::Task task{.hash = doc.sha256Hash, .mime = doc.mimeType};
         REQUIRE(queue->tryEnqueue(task));
     }
 
@@ -797,7 +975,7 @@ TEST_CASE("PostIngestQueue: Parallel extraction preserves per-task identity",
     REQUIRE(queue->started());
 
     for (const auto& doc : docs) {
-        PostIngestQueue::Task task{doc.sha256Hash, doc.mimeType};
+        PostIngestQueue::Task task{.hash = doc.sha256Hash, .mime = doc.mimeType};
         REQUIRE(queue->tryEnqueue(task));
     }
 
@@ -855,11 +1033,12 @@ TEST_CASE("PostIngestQueue: enqueueBatch submits all tasks without loss",
         metadataRepo->setDocument(doc);
         store->setContent(doc.sha256Hash, "batch-payload-" + std::to_string(i));
 
-        tasks.push_back(PostIngestQueue::Task{doc.sha256Hash, doc.mimeType});
+        tasks.push_back(PostIngestQueue::Task{.hash = doc.sha256Hash, .mime = doc.mimeType});
     }
 
     auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
                                                    nullptr, &coordinator, nullptr, 64);
+    queue->setBatchCoalesceWindow(std::chrono::milliseconds(20));
     queue->start();
     auto startDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (!queue->started() && std::chrono::steady_clock::now() < startDeadline) {
@@ -867,7 +1046,14 @@ TEST_CASE("PostIngestQueue: enqueueBatch submits all tasks without loss",
     }
     REQUIRE(queue->started());
 
-    queue->enqueueBatch(std::move(tasks));
+    bool highPriority = false;
+    SECTION("normal bulk work uses the configured batch cap") {
+        queue->enqueueBatch(std::move(tasks));
+    }
+    SECTION("priority work uses the interactive quota") {
+        highPriority = true;
+        queue->enqueueRpcBatch(std::move(tasks));
+    }
 
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (queue->processed() < kDocCount && std::chrono::steady_clock::now() < deadline) {
@@ -882,6 +1068,13 @@ TEST_CASE("PostIngestQueue: enqueueBatch submits all tasks without loss",
     std::sort(insertedDocIds.begin(), insertedDocIds.end());
     REQUIRE(
         (std::adjacent_find(insertedDocIds.begin(), insertedDocIds.end()) == insertedDocIds.end()));
+
+    const auto metrics = queue->metricsSnapshot();
+    const auto expectedBatches = highPriority ? 16u : 8u;
+    const auto expectedMaxBatchSize = highPriority ? 4u : 8u;
+    CHECK(metrics.batches.extractionBatches == expectedBatches);
+    CHECK(metrics.batches.contentIndexCalls == expectedBatches);
+    CHECK(metrics.batches.contentIndexMaxEntries == expectedMaxBatchSize);
 
     stopAndResetQueue(queue);
     coordinator.stop();
@@ -918,11 +1111,12 @@ TEST_CASE("PostIngestQueue: keeps multi-doc batches when extraction concurrency 
             std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
         metadataRepo->setDocument(doc);
         store->setContent(doc.sha256Hash, "payload-" + std::to_string(i));
-        tasks.push_back(PostIngestQueue::Task{doc.sha256Hash, doc.mimeType});
+        tasks.push_back(PostIngestQueue::Task{.hash = doc.sha256Hash, .mime = doc.mimeType});
     }
 
     auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
                                                    nullptr, &coordinator, nullptr, 64);
+    queue->setBatchCoalesceWindow(std::chrono::milliseconds(20));
     queue->start();
     auto startDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (!queue->started() && std::chrono::steady_clock::now() < startDeadline) {
@@ -940,6 +1134,13 @@ TEST_CASE("PostIngestQueue: keeps multi-doc batches when extraction concurrency 
     REQUIRE((queue->processed() == kDocCount));
     REQUIRE((queue->failed() == 0));
     REQUIRE((metadataRepo->maxBatchWriteSize() > 1));
+
+    const auto metrics = queue->metricsSnapshot();
+    CHECK(metrics.batches.extractionTasks == kDocCount);
+    CHECK(metrics.batches.extractionBatches == 3);
+    CHECK(metrics.batches.contentIndexCalls == 3);
+    CHECK(metrics.batches.contentIndexEntries == kDocCount);
+    CHECK(metrics.batches.contentIndexMaxEntries == 16);
 
     stopAndResetQueue(queue);
     coordinator.stop();
@@ -960,8 +1161,8 @@ TEST_CASE("PostIngestQueue: full-channel enqueueBatch waits only log at debug",
                                                    nullptr, nullptr, nullptr, 1);
 
     std::vector<PostIngestQueue::Task> tasks;
-    tasks.push_back(PostIngestQueue::Task{"log-test-hash-1", "text/plain"});
-    tasks.push_back(PostIngestQueue::Task{"log-test-hash-2", "text/plain"});
+    tasks.push_back(PostIngestQueue::Task{.hash = "log-test-hash-1", .mime = "text/plain"});
+    tasks.push_back(PostIngestQueue::Task{.hash = "log-test-hash-2", .mime = "text/plain"});
 
     std::thread producer([&queue, tasks]() mutable { queue->enqueueBatch(tasks); });
 
@@ -1024,7 +1225,7 @@ TEST_CASE("PostIngestQueue: InternalEventBus integration and stress",
                     metadataRepo->setDocument(doc);
                     store->setContent(hash, payload);
 
-                    InternalEventBus::PostIngestTask t{hash, doc.mimeType};
+                    InternalEventBus::PostIngestTask t{.hash = hash, .mime = doc.mimeType};
                     while (!chan->try_push(t)) {
                         std::this_thread::yield();
                     }

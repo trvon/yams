@@ -130,7 +130,107 @@ void writeListResponse(boost::asio::local::stream_protocol::socket& sock, uint64
     }
 }
 
+void writeAddResponse(boost::asio::local::stream_protocol::socket& sock, uint64_t requestId) {
+    MessageFramer framer;
+
+    AddDocumentResponse response{};
+    response.hash = "test-hash";
+    response.path = "/tmp/test.txt";
+    response.message = "queued";
+
+    Message responseMsg;
+    responseMsg.version = PROTOCOL_VERSION;
+    responseMsg.requestId = requestId;
+    responseMsg.timestamp = std::chrono::steady_clock::now();
+    responseMsg.payload = response;
+
+    auto framed = framer.frame_message(responseMsg);
+    if (!framed) {
+        throw std::runtime_error("failed to frame add response");
+    }
+
+    boost::system::error_code ec;
+    boost::asio::write(sock, boost::asio::buffer(framed.value()), ec);
+    if (ec) {
+        throw std::runtime_error("write add response failed: " + ec.message());
+    }
+}
+
 } // namespace
+
+TEST_CASE("DaemonClient add accepts a successful transport retry without replaying it again",
+          "[daemon][client][add][regression]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    auto runtimeDir = makeTempRuntimeDir("add-retry-success-" + randomSuffix());
+    auto socketPath = runtimeDir / "ipc.sock";
+    std::error_code ec;
+    fs::remove(socketPath, ec);
+
+    boost::asio::io_context serverIo;
+    boost::asio::local::stream_protocol::acceptor acceptor(
+        serverIo, boost::asio::local::stream_protocol::endpoint(socketPath.string()));
+    std::atomic<int> requestCount{0};
+
+    std::thread serverThread([&] {
+        try {
+            boost::asio::local::stream_protocol::socket first(serverIo);
+            acceptor.accept(first);
+            (void)readFrame(first);
+            requestCount.fetch_add(1, std::memory_order_relaxed);
+            first.close();
+
+            boost::asio::local::stream_protocol::socket retry(serverIo);
+            acceptor.accept(retry);
+            auto frame = readFrame(retry);
+            requestCount.fetch_add(1, std::memory_order_relaxed);
+            MessageFramer framer;
+            auto parsed = framer.parse_frame(frame);
+            if (!parsed) {
+                throw std::runtime_error("failed to parse retried add frame");
+            }
+            writeAddResponse(retry, parsed.value().requestId);
+
+            // A stale error in the request handler used to trigger an outer AddDocument retry
+            // after the transport retry had already succeeded. Give that replay time to arrive.
+            std::this_thread::sleep_for(250ms);
+            boost::system::error_code availableEc;
+            if (retry.available(availableEc) > 0 && !availableEc) {
+                auto replay = readFrame(retry);
+                requestCount.fetch_add(1, std::memory_order_relaxed);
+                auto replayParsed = framer.parse_frame(replay);
+                if (replayParsed) {
+                    writeAddResponse(retry, replayParsed.value().requestId);
+                }
+            }
+        } catch (...) {
+        }
+    });
+
+    ClientConfig cfg;
+    cfg.socketPath = socketPath;
+    cfg.requestTimeout = 3s;
+    cfg.headerTimeout = 3s;
+    cfg.bodyTimeout = 3s;
+    cfg.autoStart = false;
+
+    DaemonClient client(cfg);
+    AddDocumentRequest req;
+    req.path = "/tmp/test.txt";
+    auto result = yams::cli::run_sync(client.streamingAddDocument(req), 5s);
+
+    if (serverThread.joinable()) {
+        serverThread.join();
+    }
+    fs::remove(socketPath, ec);
+    AsioConnectionPool::shutdown_all(100ms);
+
+    REQUIRE(result.has_value());
+    CHECK(result.value().hash == "test-hash");
+    CHECK(requestCount.load(std::memory_order_relaxed) == 2);
+}
 
 TEST_CASE("DaemonClient list returns friendly retry error on StatusResponse",
           "[daemon][client][list][regression]") {
