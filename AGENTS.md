@@ -1,6 +1,6 @@
 ---
 description: YAMS repo supplement — conventions, structure, and repo-scoped rules
-argument-hint: [TASK=<description>] [MODE=<engineering|bug-bounty>] [PHASE=<start|checkpoint|complete>]
+argument-hint: "[TASK=<description>] [MODE=<engineering|bug-bounty>] [PHASE=<start|checkpoint|complete>]"
 ---
 
 # AGENTS.md (Repo Supplement)

@@ -49,8 +49,8 @@ YAMS-first Knowledge Workflow (mandatory)
   - printf "%s" "<snippet>" | yams add - --name "snippet-<desc>.txt" --metadata "lang=<lang>,label=Snippet:<desc>"
 - Retrieval:
   - Discover: yams search "<query>" --limit 20 [--fuzzy --similarity <v>]
-  - Inspect: yams cat --name "<name>" or yams cat <hash>
-  - Export: yams get <hash> -o <path> (or by name)
+  - Hydrate: execute the result's `yams cat --hash <hash>` hint; snippets alone are not recovered knowledge
+  - Export: yams get --hash <hash> -o <path> (or use `--name`)
 - Download-first with YAMS:
   - Prefer yams download "<URL>" to fetch PDFs/datasets/models directly into CAS (store-only). Use --export only when a filesystem copy is needed.
   - Use checksums, resume, and TLS verification; keep provenance in metadata where appropriate.

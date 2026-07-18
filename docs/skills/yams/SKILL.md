@@ -30,6 +30,10 @@ yams grep -g "*.cpp" "TODO"   # rg-style glob filtering
 yams grep --minimal "TODO"     # Compact grep-style output
 yams search "query"            # Semantic/hybrid search
 
+# Hydrate/export a selected search result
+yams cat --hash <hash>          # Inspect saved content on stdout
+yams get --hash <hash> -o <path> # Export only when a file copy is needed
+
 # Graph
 yams graph --explore <query>   # Agent context: symbols, relationships, snippets
 yams graph --name <file>       # Raw file relationships
@@ -93,6 +97,12 @@ yams list --limit 10           # Recent indexed files
 3. **Codebase shape / blast radius** → `yams graph --explore` from a search/grep hit
 4. **Path/tree/topology inspection** → use `yams graph`, not retired top-level `tree`
 5. **No results from grep** → Try `yams search`, then follow `graph_explore_hint` when present
+6. **Saved memory content** → search/list discovers candidates; `yams cat --hash <hash>` hydrates the selected artifact
+
+Search, list, and grep snippets are routing context, not the complete saved
+memory. Hydrate the most relevant one to three note/decision/research/evidence
+hits before using them. For code hits, prefer graph narrowing plus a targeted
+local read instead of reading every result in full.
 
 ### grep (Code Search)
 
@@ -196,17 +206,28 @@ Stateless, scalable, industry standard.
 ### Retrieve Knowledge
 
 ```bash
-# Find related decisions
-yams search "authentication decision"
+# Discover related decisions; results emit an exact cat command.
+yams search "authentication decision" --limit 10
 
-# Find by metadata (JSON list is the source of truth)
+# Hydrate a selected saved-memory artifact before relying on it.
+yams cat --hash <hash-from-result>
+
+# Export only when a filesystem copy is needed.
+yams get --hash <hash-from-result> -o <path>
+
+# Find by exact metadata.
 yams list --format json --show-metadata \
-  | jq '.documents[] | select(.metadata.task=="example-task")'
+  --metadata "owner=codex" --metadata "task=example-task" \
+  --metadata "source=decision" --limit 10
 
 # Metadata + tags are separate in JSON output
 yams list --format json --show-metadata \
   | jq '.documents[] | {name,metadata,tags}'
 ```
+
+For CLI workflows, `cat` is the inspection/hydration hop and `get -o` is the
+export hop. For MCP workflows, chain `search` to `get` with
+`include_content: true`, as shown below.
 
 ## Session Management
 

@@ -17,7 +17,8 @@ Before responding to any non-trivial request, follow this sequence:
 2. **YAMS second** — Search your persistent memory for prior work:
    - Call `query` with a search step: `{"steps": [{"op": "search", "params": {"query": "<keywords>", "limit": 10}}]}`
    - If results are thin, try grep: `{"steps": [{"op": "grep", "params": {"pattern": "<regex>"}}]}`
-   - If something exists, retrieve it: `{"steps": [{"op": "get", "params": {"name": "<name>"}}]}`
+   - Search/grep snippets only select candidates. If something exists, hydrate
+     the relevant artifact before using it: `{"steps": [{"op": "get", "params": {"hash": "<hash>", "include_content": true}}]}`
 
 3. **Web / browser third** — Only reach out externally if YAMS and Sage have no answer:
    - Use Exa for AI-powered semantic search
@@ -90,7 +91,7 @@ Runs a pipeline of read-only steps. Each step's result is available as `$prev` i
 {
   "steps": [
     {"op": "search", "params": {"query": "RLHF training", "limit": 5}},
-    {"op": "get", "params": {"hash": "$prev.results[0].hash"}}
+    {"op": "get", "params": {"hash": "$prev.results[0].hash", "include_content": true}}
   ]
 }
 ```
