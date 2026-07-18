@@ -84,6 +84,10 @@ namespace yams::daemon {
 class WorkCoordinator {
 private:
     struct DetachedCancellationState;
+    struct DetachedCancellationRequest {
+        std::shared_ptr<boost::asio::cancellation_signal> signal;
+        boost::asio::any_io_executor executor;
+    };
 
 public:
     enum class Priority {
@@ -126,10 +130,10 @@ public:
     void start(std::optional<std::size_t> numThreads = std::nullopt);
 
     /**
-     * @brief Stop accepting new work and drain io_context.
+     * @brief Stop accepting new work and interrupt the io_context.
      *
-     * Resets work guard, allowing io_context to exit when all posted work completes.
-     * Does NOT block - call join() to wait for threads.
+     * Serializes detached-coroutine cancellation on their executors, then stops the
+     * io_context. Does NOT block - call join() to wait for threads.
      *
      * Safe to call multiple times (idempotent).
      */
@@ -244,12 +248,14 @@ public:
 
     template <typename Executor, typename Awaitable>
     void spawnDetached(Executor&& executor, Awaitable&& awaitable) {
+        boost::asio::any_io_executor serializedExecutor = boost::asio::make_strand(
+            boost::asio::any_io_executor(std::forward<Executor>(executor)));
         auto signal = std::make_shared<boost::asio::cancellation_signal>();
-        registerDetachedCancellationSignal(signal);
+        registerDetachedCancellationSignal(signal, serializedExecutor);
         std::weak_ptr<DetachedCancellationState> state = detachedCancellationState_;
         const auto* completedSignal = signal.get();
         boost::asio::co_spawn(
-            std::forward<Executor>(executor), std::forward<Awaitable>(awaitable),
+            serializedExecutor, std::forward<Awaitable>(awaitable),
             boost::asio::bind_cancellation_slot(
                 signal->slot(),
                 [state, completedSignal, signal = std::move(signal)](std::exception_ptr) mutable {
@@ -259,9 +265,10 @@ public:
 
 private:
     void registerDetachedCancellationSignal(
-        const std::shared_ptr<boost::asio::cancellation_signal>& signal);
-    [[nodiscard]] std::vector<std::shared_ptr<boost::asio::cancellation_signal>>
-    snapshotDetachedCancellationSignals() const;
+        const std::shared_ptr<boost::asio::cancellation_signal>& signal,
+        boost::asio::any_io_executor executor);
+    [[nodiscard]] std::vector<DetachedCancellationRequest>
+    snapshotDetachedCancellationRequests() const;
     static void
     cleanupDetachedCancellationState(const std::weak_ptr<DetachedCancellationState>& state,
                                      const boost::asio::cancellation_signal* completedSignal);
@@ -313,7 +320,7 @@ private:
     boost::asio::strand<boost::asio::io_context::executor_type> normalPriorityStrand_;
     boost::asio::strand<boost::asio::io_context::executor_type> backgroundPriorityStrand_;
 
-    /// Registry of per-coroutine cancellation signals used by spawnDetached().
+    /// Registry of serialized per-coroutine cancellation requests used by spawnDetached().
     std::shared_ptr<DetachedCancellationState> detachedCancellationState_;
 };
 
