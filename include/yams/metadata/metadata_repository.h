@@ -207,6 +207,8 @@ struct DocumentQueryOptions {
     std::optional<std::string> likePattern;
     // Generic metadata filtering (replaces findDocumentsByCollection)
     std::vector<std::pair<std::string, std::string>> metadataFilters;
+    // Optional OR group, combined with metadataFilters and all other filters using AND.
+    std::vector<std::pair<std::string, std::string>> metadataAnyFilters;
 
     // --- Repair / health-check filters (added for targeted stuck-doc detection) ---
     /// Filter by extraction status (e.g., Failed, Pending). Multiple values → OR.
