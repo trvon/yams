@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import signal
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -56,6 +57,31 @@ from workers.retrieval_quality import (  # noqa: E402
 
 
 class RetrievalQualityEnvironmentTests(unittest.TestCase):
+    def test_retrieval_quality_imports_without_posix_resource_module(self) -> None:
+        script = f"""
+import builtins
+import sys
+
+real_import = builtins.__import__
+
+def import_without_resource(name, *args, **kwargs):
+    if name == "resource":
+        raise ModuleNotFoundError("No module named 'resource'")
+    return real_import(name, *args, **kwargs)
+
+builtins.__import__ = import_without_resource
+sys.path.insert(0, {str(XPLAN_ROOT)!r})
+import workers.retrieval_quality
+"""
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
     def test_binary_identity_hashes_executable_contents(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             binary = Path(tmp) / "bench"

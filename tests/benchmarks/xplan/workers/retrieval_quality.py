@@ -11,7 +11,6 @@ import json
 import math
 import os
 import re
-import resource
 import shutil
 import signal
 import statistics
@@ -36,6 +35,11 @@ from workers.mixed_corpus import (
     materialize_mixed_beir_manifest,
 )
 from workers.util import maybe_meson_compile, resolve_binary, run_captured
+
+try:
+    import resource as _resource
+except ModuleNotFoundError:  # Windows has no POSIX resource module.
+    _resource = None
 
 _METRIC_RE = re.compile(
     r"^\s*(MRR \(Mean Reciprocal Rank\)|Recall@K|Precision@K|"
@@ -73,6 +77,18 @@ EXPANSION_PRESETS: dict[str, dict[str, str]] = {
 _NON_VECTOR_SOURCES = frozenset(
     {"fts5", "keyphrase", "segment_keyphrase", "kg", "gliner", "header", "theme"}
 )
+
+
+def _child_resource_usage() -> tuple[float, float] | None:
+    """Return cumulative child CPU seconds and max RSS MiB when supported."""
+    if _resource is None:
+        return None
+    usage = _resource.getrusage(_resource.RUSAGE_CHILDREN)
+    rss_scale = 1.0 / (1024 * 1024) if sys.platform == "darwin" else 1.0 / 1024
+    return (
+        float(usage.ru_utime + usage.ru_stime),
+        float(usage.ru_maxrss) * rss_scale,
+    )
 
 
 def _benchmark_command(binary: Path, benchmark_filter: str) -> list[str]:
@@ -1680,7 +1696,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         env["YAMS_BENCH_WARM_CACHE_DIR"] = str(isolated_data_dir)
         if source == "vector":
             _mark_shared_topology_seed_reuse(env)
-    ru_before = resource.getrusage(resource.RUSAGE_CHILDREN)
+    resource_before = _child_resource_usage()
     wall_start = time.monotonic()
     try:
         proc = run_captured(
@@ -1699,14 +1715,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
             message=f"retrieval_quality timed out: {exc}",
         )
     wall_sec = time.monotonic() - wall_start
-    ru_after = resource.getrusage(resource.RUSAGE_CHILDREN)
-    # CPU time (utime+stime) is additive across children → reliable per-arm delta.
-    proc_cpu_sec = (ru_after.ru_utime + ru_after.ru_stime) - (
-        ru_before.ru_utime + ru_before.ru_stime
-    )
-    # ru_maxrss is a high-water mark (bytes on macOS, KiB on Linux); whole-process, coarse.
-    rss_scale = 1.0 / (1024 * 1024) if sys.platform == "darwin" else 1.0 / 1024
-    proc_maxrss_mb = float(ru_after.ru_maxrss) * rss_scale
+    resource_after = _child_resource_usage()
 
     (ctx.arm_dir / "exit_code").write_text(
         str(proc.returncode) + "\n", encoding="utf-8"
@@ -1765,9 +1774,12 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         )
         metrics.update(cluster_report.get("metrics") or {})
         write_json(ctx.arm_dir / "mixed_cluster_overlap.json", cluster_report)
-    metrics["proc_cpu_sec"] = float(proc_cpu_sec)
     metrics["proc_wall_sec"] = float(wall_sec)
-    metrics["proc_maxrss_mb"] = float(proc_maxrss_mb)
+    if resource_before is not None and resource_after is not None:
+        # CPU time is additive across children, so the delta is reliable per arm. Max RSS is
+        # a whole-process high-water mark and remains a deliberately coarse observation.
+        metrics["proc_cpu_sec"] = resource_after[0] - resource_before[0]
+        metrics["proc_maxrss_mb"] = resource_after[1]
 
     seed_enabled = _truthy(env.get("YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS", "0"))
     require_steady = _truthy(
