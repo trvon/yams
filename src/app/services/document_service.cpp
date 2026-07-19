@@ -2491,6 +2491,11 @@ public:
             queryOpts.metadataFilters.emplace_back("session_id", req.sessionId);
         }
 
+        auto& requestMetadataFilters =
+            req.matchAllMetadata ? queryOpts.metadataFilters : queryOpts.metadataAnyFilters;
+        requestMetadataFilters.insert(requestMetadataFilters.end(), req.metadataFilters.begin(),
+                                      req.metadataFilters.end());
+
         if (req.sortBy == "name") {
             queryOpts.orderByNameAsc = (req.sortOrder != "desc");
         } else {

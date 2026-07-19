@@ -1,6 +1,6 @@
 {
   "name": "topology_routing_budget_ablation",
-  "description": "Compact recall-work gate for the adaptive connected-component router versus global Vec0 PHSS. The routed arm is the measured topology winner; disproven fixed-width, KMeans, and global-hedge arms are intentionally excluded.",
+  "description": "Compact recall-work gate for cached centroid ANN versus exhaustive topology routing and global Vec0 PHSS at the same routed document budget.",
   "build_dir": "build/release",
   "artifact_root": "build/benchmarks",
   "timeout_sec": 7200,
@@ -72,12 +72,13 @@
       }
     },
     {
-      "name": "routed_cc_adaptive_docs16",
+      "name": "routed_cc_adaptive_exact_docs16",
       "factors": {
         "topology_mode": "hybrid_assist",
         "topology_vector_policy": "narrow",
         "route_candidate_budget": 16,
-        "adaptive_routing": true
+        "adaptive_routing": true,
+        "route_centroid_index": "exact"
       },
       "env": {
         "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
@@ -89,6 +90,32 @@
         "max_clusters": 4,
         "max_docs": 16,
         "max_seed_documents": 16,
+        "topology_route_ann_candidate_limit": 0,
+        "adaptive_probe_score_gap": 0.05,
+        "narrow_min_boundary_margin": 0.02,
+        "min_route_score": 0.15
+      }
+    },
+    {
+      "name": "routed_cc_adaptive_ann64_docs16",
+      "factors": {
+        "topology_mode": "hybrid_assist",
+        "topology_vector_policy": "narrow",
+        "route_candidate_budget": 64,
+        "adaptive_routing": true,
+        "route_centroid_index": "hnsw"
+      },
+      "env": {
+        "YAMS_BENCH_TOPOLOGY_MODE": "hybrid_assist",
+        "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY": "narrow"
+      },
+      "params": {
+        "topology_vector_policy": "narrow",
+        "min_clusters": 1,
+        "max_clusters": 4,
+        "max_docs": 16,
+        "max_seed_documents": 16,
+        "topology_route_ann_candidate_limit": 64,
         "adaptive_probe_score_gap": 0.05,
         "narrow_min_boundary_margin": 0.02,
         "min_route_score": 0.15
@@ -110,6 +137,11 @@
         "topology_route_available_avg",
         "topology_route_boundary_score_margin_avg",
         "topology_snapshot_cache_hit_rate",
+        "topology_route_ann_rate",
+        "topology_route_ann_candidates_avg",
+        "topology_route_ann_distance_evaluations_avg",
+        "topology_route_exact_representative_distance_evaluations_avg",
+        "topology_route_representative_distance_evaluations_avg",
         "topology_allowed_candidates_avg",
         "topology_vector_filter_allowed_candidates_avg",
         "topology_vector_filter_latency_ms_avg",
@@ -121,6 +153,15 @@
         "vector_rows_visited_actual_avg",
         "vector_exact_distance_evaluations_actual_avg",
         "vector_ann_candidate_budget_actual_avg",
+        "vector_candidate_index_cache_rate",
+        "vector_candidate_index_payload_bytes_max",
+        "vector_candidate_lookup_ms_avg",
+        "vector_candidate_projection_ms_avg",
+        "vector_pq_lut_ms_avg",
+        "vector_adc_scoring_ms_avg",
+        "vector_topk_selection_ms_avg",
+        "vector_result_materialization_ms_avg",
+        "vector_exact_rerank_ms_avg",
         "vector_total_rows_visited_actual_avg",
         "vector_total_exact_distance_evaluations_actual_avg"
       ]
@@ -142,6 +183,11 @@
       "topology_route_available_avg",
       "topology_route_boundary_score_margin_avg",
       "topology_snapshot_cache_hit_rate",
+      "topology_route_ann_rate",
+      "topology_route_ann_candidates_avg",
+      "topology_route_ann_distance_evaluations_avg",
+      "topology_route_exact_representative_distance_evaluations_avg",
+      "topology_route_representative_distance_evaluations_avg",
       "topology_allowed_candidates_avg",
       "topology_vector_filter_allowed_candidates_avg",
       "topology_vector_filter_latency_ms_avg",
@@ -149,6 +195,15 @@
       "vector_candidate_work_budget_avg",
       "vector_distance_evaluation_budget_avg",
       "vector_ann_candidate_budget_actual_avg",
+      "vector_candidate_index_cache_rate",
+      "vector_candidate_index_payload_bytes_max",
+      "vector_candidate_lookup_ms_avg",
+      "vector_candidate_projection_ms_avg",
+      "vector_pq_lut_ms_avg",
+      "vector_adc_scoring_ms_avg",
+      "vector_topk_selection_ms_avg",
+      "vector_result_materialization_ms_avg",
+      "vector_exact_rerank_ms_avg",
       "vector_total_rows_visited_actual_avg",
       "vector_total_exact_distance_evaluations_actual_avg"
     ]

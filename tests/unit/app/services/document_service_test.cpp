@@ -134,10 +134,14 @@ struct DocumentFixture {
         StoreDocumentRequest storeReq1;
         storeReq1.path = testFile1.string();
         storeReq1.tags = {"test", "document"};
+        storeReq1.metadata = {{"owner", "trace"}, {"source", "note"}, {"task", "alpha"}};
+        storeReq1.sessionId = "session-a";
 
         StoreDocumentRequest storeReq2;
         storeReq2.path = testFile2.string();
         storeReq2.tags = {"test", "markdown"};
+        storeReq2.metadata = {{"owner", "trace"}, {"source", "code"}, {"task", "beta"}};
+        storeReq2.sessionId = "session-b";
 
         StoreDocumentRequest storeReq3;
         storeReq3.path = testFile3.string();
@@ -574,6 +578,71 @@ TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
             }
         }
         CHECK(foundMarkdown);
+    }
+
+    SECTION("List with all metadata filters") {
+        ListDocumentsRequest request;
+        request.limit = 100;
+        request.metadataFilters = {{"source", "note"}, {"task", "alpha"}};
+
+        auto result = fixture.documentService_->list(request);
+
+        REQUIRE(result);
+        REQUIRE(result.value().documents.size() == 1);
+        CHECK(result.value().documents.front().hash == fixture.testHash1_);
+    }
+
+    SECTION("List with contradictory metadata filters") {
+        ListDocumentsRequest request;
+        request.limit = 100;
+        request.metadataFilters = {{"source", "code"}, {"task", "alpha"}};
+
+        auto result = fixture.documentService_->list(request);
+
+        REQUIRE(result);
+        CHECK(result.value().documents.empty());
+    }
+
+    SECTION("List with any metadata filter") {
+        ListDocumentsRequest request;
+        request.limit = 100;
+        request.metadataFilters = {{"source", "code"}, {"task", "alpha"}};
+        request.matchAllMetadata = false;
+
+        auto result = fixture.documentService_->list(request);
+
+        REQUIRE(result);
+        REQUIRE(result.value().documents.size() == 2);
+        CHECK(std::ranges::any_of(result.value().documents,
+                                  [&](const auto& doc) { return doc.hash == fixture.testHash1_; }));
+        CHECK(std::ranges::any_of(result.value().documents,
+                                  [&](const auto& doc) { return doc.hash == fixture.testHash2_; }));
+    }
+
+    SECTION("List keeps session filter mandatory with any metadata filter") {
+        ListDocumentsRequest request;
+        request.limit = 100;
+        request.sessionId = "session-a";
+        request.metadataFilters = {{"source", "code"}, {"task", "alpha"}};
+        request.matchAllMetadata = false;
+
+        auto result = fixture.documentService_->list(request);
+
+        REQUIRE(result);
+        REQUIRE(result.value().documents.size() == 1);
+        CHECK(result.value().documents.front().hash == fixture.testHash1_);
+    }
+
+    SECTION("List applies metadata filters before pagination") {
+        ListDocumentsRequest request;
+        request.limit = 1;
+        request.metadataFilters = {{"task", "alpha"}};
+
+        auto result = fixture.documentService_->list(request);
+
+        REQUIRE(result);
+        REQUIRE(result.value().documents.size() == 1);
+        CHECK(result.value().documents.front().hash == fixture.testHash1_);
     }
 
     SECTION("List with type filter") {

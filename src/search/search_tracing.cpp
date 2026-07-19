@@ -167,6 +167,13 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
              std::to_string(session.routeRepresentativeDistanceEvaluations));
     setDebug(debug, metrics::kTopologyRouteRepresentativeCountMax,
              std::to_string(session.routeRepresentativeCountMax));
+    setDebugBool(debug, metrics::kTopologyRouteAnnUsed, session.routeAnnUsed);
+    setDebug(debug, metrics::kTopologyRouteAnnCandidates,
+             std::to_string(session.routeAnnCandidates));
+    setDebug(debug, metrics::kTopologyRouteAnnDistanceEvaluations,
+             std::to_string(session.routeAnnDistanceEvaluations));
+    setDebug(debug, metrics::kTopologyRouteExactRepresentativeDistanceEvaluations,
+             std::to_string(session.routeExactRepresentativeDistanceEvaluations));
     setDebug(debug, metrics::kTopologyWeakQueryRoutedDocs, std::to_string(session.routedDocs));
     setDebug(debug, metrics::kTopologyWeakQueryAddedCandidates,
              std::to_string(shadowEvaluation ? 0 : session.addedCandidates));

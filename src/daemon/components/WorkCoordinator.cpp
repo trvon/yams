@@ -28,7 +28,7 @@ namespace yams::daemon {
 
 struct WorkCoordinator::DetachedCancellationState {
     mutable std::mutex mutex;
-    std::vector<std::shared_ptr<boost::asio::cancellation_signal>> signals;
+    std::vector<DetachedCancellationRequest> requests;
 };
 
 WorkCoordinator::WorkCoordinator()
@@ -204,14 +204,26 @@ void WorkCoordinator::stop() {
         stopRequestedAt_ = std::chrono::steady_clock::now();
         stopRequestedSet_ = true;
     }
-    workGuard_.reset();
-    auto detachedSignals = snapshotDetachedCancellationSignals();
-    for (const auto& signal : detachedSignals) {
-        signal->emit(boost::asio::cancellation_type::all);
+    auto detachedCancellationRequests = snapshotDetachedCancellationRequests();
+    if (detachedCancellationRequests.empty()) {
+        ioContext_->stop();
+    } else {
+        auto remaining =
+            std::make_shared<std::atomic<std::size_t>>(detachedCancellationRequests.size());
+        auto ioContext = ioContext_;
+        for (auto& request : detachedCancellationRequests) {
+            boost::asio::post(request.executor,
+                              [signal = std::move(request.signal), remaining, ioContext]() {
+                                  signal->emit(boost::asio::cancellation_type::all);
+                                  if (remaining->fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                                      ioContext->stop();
+                                  }
+                              });
+        }
     }
-    ioContext_->stop();
+    workGuard_.reset();
     try {
-        spdlog::info("[WorkCoordinator] Work guard reset and io_context stopped");
+        spdlog::info("[WorkCoordinator] Cancellation requested and work guard reset");
     } catch (...) {
         // Intentional best-effort path; keep the primary operation unaffected.
     }
@@ -417,36 +429,27 @@ bool WorkCoordinator::joinWithTimeout(std::chrono::milliseconds timeout) {
 }
 
 void WorkCoordinator::registerDetachedCancellationSignal(
-    const std::shared_ptr<boost::asio::cancellation_signal>& signal) {
+    const std::shared_ptr<boost::asio::cancellation_signal>& signal,
+    boost::asio::any_io_executor executor) {
     if (!signal || !detachedCancellationState_) {
         return;
     }
 
     std::lock_guard<std::mutex> lock(detachedCancellationState_->mutex);
-    auto& signals = detachedCancellationState_->signals;
-    signals.erase(std::remove_if(signals.begin(), signals.end(),
-                                 [](const auto& entry) { return entry == nullptr; }),
-                  signals.end());
-    signals.push_back(signal);
+    detachedCancellationState_->requests.push_back(
+        DetachedCancellationRequest{.signal = signal, .executor = std::move(executor)});
 }
 
-std::vector<std::shared_ptr<boost::asio::cancellation_signal>>
-WorkCoordinator::snapshotDetachedCancellationSignals() const {
-    std::vector<std::shared_ptr<boost::asio::cancellation_signal>> activeSignals;
+std::vector<WorkCoordinator::DetachedCancellationRequest>
+WorkCoordinator::snapshotDetachedCancellationRequests() const {
+    std::vector<DetachedCancellationRequest> requests;
     if (!detachedCancellationState_) {
-        return activeSignals;
+        return requests;
     }
 
     std::lock_guard<std::mutex> lock(detachedCancellationState_->mutex);
-    auto& signals = detachedCancellationState_->signals;
-    signals.erase(std::remove_if(signals.begin(), signals.end(),
-                                 [](const auto& entry) { return entry == nullptr; }),
-                  signals.end());
-    activeSignals.reserve(signals.size());
-    for (const auto& entry : signals) {
-        activeSignals.push_back(entry);
-    }
-    return activeSignals;
+    requests = detachedCancellationState_->requests;
+    return requests;
 }
 
 void WorkCoordinator::cleanupDetachedCancellationState(
@@ -454,12 +457,12 @@ void WorkCoordinator::cleanupDetachedCancellationState(
     const boost::asio::cancellation_signal* completedSignal) {
     if (auto locked = state.lock()) {
         std::lock_guard<std::mutex> lock(locked->mutex);
-        auto& signals = locked->signals;
-        signals.erase(std::remove_if(signals.begin(), signals.end(),
-                                     [completedSignal](const auto& entry) {
-                                         return !entry || entry.get() == completedSignal;
-                                     }),
-                      signals.end());
+        auto& requests = locked->requests;
+        requests.erase(std::remove_if(requests.begin(), requests.end(),
+                                      [completedSignal](const auto& request) {
+                                          return request.signal.get() == completedSignal;
+                                      }),
+                       requests.end());
     }
 }
 

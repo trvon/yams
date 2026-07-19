@@ -287,6 +287,21 @@ void appendDocumentQueryFilters(const DocumentQueryOptions& options, bool joinFt
         addTextParam(params, value);
     }
 
+    if (!options.metadataAnyFilters.empty()) {
+        std::string condition = "(";
+        for (std::size_t i = 0; i < options.metadataAnyFilters.size(); ++i) {
+            if (i > 0) {
+                condition += " OR ";
+            }
+            condition += "EXISTS (SELECT 1 FROM metadata m WHERE m.document_id = documents.id "
+                         "AND m.key = ? AND m.value = ?)";
+            addTextParam(params, options.metadataAnyFilters[i].first);
+            addTextParam(params, options.metadataAnyFilters[i].second);
+        }
+        condition += ')';
+        conditions.push_back(std::move(condition));
+    }
+
     if (!options.extractionStatuses.empty()) {
         if (options.extractionStatuses.size() == 1) {
             conditions.emplace_back("extraction_status = ?");

@@ -1,5 +1,6 @@
 #include <yams/topology/topology_baseline.h>
 #include <yams/topology/topology_representatives.h>
+#include <yams/vector/static_cosine_ann_index.h>
 
 #include <algorithm>
 #include <chrono>
@@ -712,6 +713,27 @@ SparseGuidedClusterRouter::buildRouteIndex(const TopologyArtifactBatch& artifact
         }
     }
 
+    std::vector<std::size_t> centroidIds;
+    std::vector<std::vector<float>> centroids;
+    centroidIds.reserve(artifacts.clusters.size());
+    centroids.reserve(artifacts.clusters.size());
+    for (std::size_t clusterIndex = 0; clusterIndex < artifacts.clusters.size(); ++clusterIndex) {
+        const auto& centroid = artifacts.clusters[clusterIndex].centroidEmbedding;
+        if (centroid.empty() || index.centroidNorms[clusterIndex] <= 0.0F) {
+            centroidIds.clear();
+            centroids.clear();
+            break;
+        }
+        centroidIds.push_back(clusterIndex);
+        centroids.push_back(centroid);
+    }
+    if (!centroids.empty()) {
+        auto annIndex = yams::vector::StaticCosineAnnIndex::build(centroidIds, centroids);
+        if (annIndex) {
+            index.centroidAnnIndex = std::move(annIndex).value();
+        }
+    }
+
     auto addMembership = [&](const std::string& hash, const std::string& clusterId) {
         const auto clusterIt = clusterIndexById.find(clusterId);
         if (hash.empty() || clusterIt == clusterIndexById.end()) {
@@ -807,11 +829,45 @@ SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
         maxSparseMass = std::max(maxSparseMass, signal.sparseMass);
     }
 
+    const float alpha = std::clamp(request.sparseDenseAlpha, 0.0F, 1.0F);
     const float queryNorm = vectorNorm(request.queryEmbedding);
     if (!request.queryEmbedding.empty() && work != nullptr) {
         ++work->queryNormEvaluations;
     }
+
+    std::vector<bool> routeCandidates(artifacts.clusters.size(), true);
+    const bool denseAnnEligible = alpha < 1.0F && queryNorm > 0.0F && request.limit > 0 &&
+                                  request.denseAnnCandidateLimit > 0 && index.centroidAnnIndex &&
+                                  artifacts.clusters.size() > request.denseAnnCandidateLimit;
+    if (denseAnnEligible) {
+        const auto candidateLimit = std::min(
+            artifacts.clusters.size(), std::max(request.denseAnnCandidateLimit, request.limit));
+        auto annResult = index.centroidAnnIndex->search(request.queryEmbedding, candidateLimit);
+        if (annResult) {
+            std::fill(routeCandidates.begin(), routeCandidates.end(), false);
+            for (const auto& hit : annResult.value().hits) {
+                if (hit.id < routeCandidates.size()) {
+                    routeCandidates[hit.id] = true;
+                }
+            }
+            for (std::size_t clusterIndex = 0; clusterIndex < signals.size(); ++clusterIndex) {
+                if (signals[clusterIndex].sparseMass > 0.0) {
+                    routeCandidates[clusterIndex] = true;
+                }
+            }
+            if (work != nullptr) {
+                work->denseAnnUsed = true;
+                work->denseAnnCandidates = annResult.value().hits.size();
+                work->denseAnnDistanceEvaluations = annResult.value().distanceEvaluations;
+                work->representativeDistanceEvaluations += annResult.value().distanceEvaluations;
+            }
+        }
+    }
+
     for (std::size_t clusterIndex = 0; clusterIndex < artifacts.clusters.size(); ++clusterIndex) {
+        if (!routeCandidates[clusterIndex] || alpha >= 1.0F) {
+            continue;
+        }
         const auto& cluster = artifacts.clusters[clusterIndex];
         const float centroidNorm = index.centroidNorms[clusterIndex];
         if (queryNorm > 0.0F && centroidNorm > 0.0F && !cluster.centroidEmbedding.empty()) {
@@ -821,6 +877,7 @@ SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
             signals[clusterIndex].dense = std::clamp((dense + 1.0F) * 0.5F, 0.0F, 1.0F);
             if (work != nullptr) {
                 ++work->representativeDistanceEvaluations;
+                ++work->exactRepresentativeDistanceEvaluations;
             }
         }
         const auto& representativeNorms = index.routingRepresentativeNorms[clusterIndex];
@@ -849,14 +906,17 @@ SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
             signals[clusterIndex].dense = std::max(signals[clusterIndex].dense, dense);
             if (work != nullptr) {
                 ++work->representativeDistanceEvaluations;
+                ++work->exactRepresentativeDistanceEvaluations;
             }
         }
     }
 
-    const float alpha = std::clamp(request.sparseDenseAlpha, 0.0F, 1.0F);
     std::vector<ClusterRoute> routes;
     routes.reserve(artifacts.clusters.size());
     for (std::size_t clusterIndex = 0; clusterIndex < artifacts.clusters.size(); ++clusterIndex) {
+        if (!routeCandidates[clusterIndex]) {
+            continue;
+        }
         const auto& cluster = artifacts.clusters[clusterIndex];
         const auto& clusterSignals = signals[clusterIndex];
         const float dense = clusterSignals.dense;

@@ -274,6 +274,32 @@ TEST_CASE("GraphContextService explore clamps zero-based symbol lines",
     CHECK((result.value().files.front().content.find("1\tint zeroBased() {") != std::string::npos));
 }
 
+TEST_CASE("GraphContextService explore tolerates stale symbol lines past end of file",
+          "[services][graph][context]") {
+    GraphContextServiceFixture fixture;
+    auto sourcePath = fixture.writeSource("src/stale_lines.cpp",
+                                          {"int staleLocation() {", "    return 42;", "}"});
+    auto staleLineSym =
+        fixture.symbol(sourcePath, "staleLocation", "demo::staleLocation", 100, 104);
+    fixture.upsertSymbols({staleLineSym});
+
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+
+    GraphExploreRequest req;
+    req.query = "staleLocation";
+
+    auto result = service->explore(req);
+    REQUIRE((result.has_value()));
+    REQUIRE((result.value().files.size() == 1));
+    CHECK(result.value().truncated);
+    CHECK((result.value().files.front().mode == GraphContextSnippetMode::Omitted));
+    CHECK(result.value().files.front().truncated);
+    CHECK(result.value().files.front().content.empty());
+    REQUIRE((result.value().warnings.size() == 1));
+    CHECK((result.value().warnings.front().find("stale source location") != std::string::npos));
+}
+
 TEST_CASE("GraphContextService explore supports file path queries", "[services][graph][context]") {
     GraphContextServiceFixture fixture;
     auto sourcePath =

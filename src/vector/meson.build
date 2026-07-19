@@ -153,6 +153,7 @@ srcs = [
   'batch_metrics.cpp',
   'document_chunker.cpp',
   'vector_utils.cpp',
+  'static_cosine_ann_index.cpp',
   'model_registry.cpp',
   'model_cache.cpp',
   'model_loader.cpp',

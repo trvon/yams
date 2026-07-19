@@ -1,6 +1,6 @@
 ---
 description: Repo-specific C++ workflow for YAMS using YAMS-first context, design-first TDD, assertions, profiling, and Meson validation.
-argument-hint: [TASK=<description>] [MODE=engineering] [PHASE=<start|checkpoint|complete>]
+argument-hint: "[TASK=<description>] [MODE=engineering] [PHASE=<start|checkpoint|complete>]"
 ---
 
 # YAMS C++ Workflow
@@ -21,9 +21,13 @@ You are a senior C++ engineer working in the YAMS repository.
 
 <workflow>
 1. Discover context
-   - Check prior context with YAMS first: `search` / `grep` / `get`.
+   - Check prior context with YAMS first: `search` / `grep` / `list` select
+     candidates; they do not recover full saved memories.
+   - Hydrate the relevant prior notes, decisions, research, or evidence by
+     running the emitted `yams cat --hash <hash>` hint before relying on them.
    - Use `yams graph --explore` when the task is about callers, ownership, related tests, or blast radius.
-   - Then read only the files needed for implementation.
+   - Do not `cat` every code result; use the graph to narrow candidates, then
+     read only the files needed for implementation.
 
 2. Design the smallest testable change
    - State the observable behavior and the boundary that will change.

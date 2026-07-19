@@ -1,6 +1,6 @@
 ---
 description: YAMS-first agent with blackboard coordination and persistent memory
-argument-hint: [TASK=<description>] [PHASE=<start|checkpoint|complete>]
+argument-hint: "[TASK=<description>] [PHASE=<start|checkpoint|complete>]"
 ---
 
 # Agent Workflow (YAMS + Blackboard)
@@ -100,11 +100,22 @@ bb_update_task({ task_id: "<task-id>", status: "working" })
 yams grep "<pattern>" --cwd .
 
 # Semantic/concept search
-yams search "$TASK" --limit 20
+yams search "$TASK" --limit 10
 
-# Structured metadata lookups
-yams search "task=$TASK" --type keyword --limit 20
+# Exact task-memory lookup
+yams list --format json --show-metadata \
+  --metadata "owner=opencode" --metadata "task=$TASK" \
+  --metadata "source=note" --limit 10
+
+# Search/list results are candidates, not recovered memory. Hydrate the
+# relevant note, decision, research, or evidence artifact by its exact hash.
+yams cat --hash <hash-from-result>
 ```
+
+Do not rely on a search snippet as task context. Hydrate the most relevant
+saved-memory artifacts before acting. For code hits, use the graph and then a
+targeted local read; use `yams get --hash <hash> -o <path>` only when a
+filesystem copy is needed.
 
 ### 1a) Use the Graph for Codebase Navigation
 
@@ -148,28 +159,28 @@ For C++ / systems implementation, do not jump straight from discovery to edits:
 - refactor only while tests stay green
 - profile before optimizing: define workload/KPI, baseline, change one thing, re-measure
 
-### 2) Start Work (Index Baseline + Claim)
+### 2) Start Work (Check Index + Claim)
 
 ```bash
-# Index baseline
+# Check first. Only rebuild a missing/stale repo index; do not attach the
+# current task to every source file in an already healthy index.
+yams status
 yams add . --recursive \
   --include "*.cpp,*.hpp,*.h,*.py,*.ts,*.js,*.md" \
-  --label "Working on: $TASK" \
-  --metadata "task=$TASK,phase=start,owner=opencode,source=code,agent_id=opencode-$TASK"
+  --label "Repository baseline" \
+  --metadata "task=repo-index,phase=checkpoint,owner=opencode,source=code"
 ```
 
-If blackboard is available, claim or create a task there. If not, "claim" files via YAMS metadata:
+Store the claim in YAMS even when blackboard coordination is available, so
+session recovery has one concise task artifact:
 
 ```bash
 yams add - --name "claim-$TASK.md" \
-  --metadata "task=$TASK,phase=start,owner=opencode,source=note,agent_id=opencode-$TASK" \
-  <<'EOF'
-## Claim
-Agent: opencode-$TASK
-Scope: <paths or subsystems>
-Goal: <one sentence>
-EOF
+  --metadata "task=$TASK,phase=start,owner=opencode,source=note,agent_id=opencode-$TASK"
 ```
+
+Send `TASK`, `SCOPE`, `GOAL`, and `NEXT` directly on stdin. Also claim or
+create the task on the blackboard when available.
 
 ### 3) Checkpoint (Index What Changed)
 
@@ -179,14 +190,10 @@ yams add <changed-files> \
   --metadata "task=$TASK,phase=checkpoint,owner=opencode,source=code,agent_id=opencode-$TASK"
 ```
 
-### 4) Complete (Index + Close Loop)
+### 4) Complete (Handoff + Close Loop)
 
-```bash
-yams add . --recursive \
-  --include "*.cpp,*.hpp,*.h,*.py,*.ts,*.js,*.md" \
-  --label "Completed: $TASK" \
-  --metadata "task=$TASK,phase=complete,owner=opencode,source=code,agent_id=opencode-$TASK"
-```
+Store the completed Response Template as a `source=note`, `phase=complete`
+artifact, then index only changed files with `phase=complete` metadata.
 
 ## Response Template
 
@@ -225,7 +232,19 @@ NEXT:
 
 ## Context Recovery
 
-If the chat context is compacted or lost, rebuild it from YAMS using `yams list` filtered by `owner=opencode`, `task`, and recent time.
+If the chat context is compacted or lost, rebuild it from YAMS with exact
+metadata filters, then hydrate the relevant artifacts. A list result alone is
+not recovered context.
+
+```bash
+yams list --format json --show-metadata \
+  --metadata "owner=opencode" --metadata "task=<task>" \
+  --metadata "source=note" --limit 10
+yams cat --hash <selected-note-or-decision-hash>
+```
+
+Change the `source` filter to `decision`, `research`, or `evidence` when that
+artifact type carries the needed context.
 
 ## References (Skills)
 

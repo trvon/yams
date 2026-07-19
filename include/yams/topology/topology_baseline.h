@@ -2,6 +2,12 @@
 
 #include <yams/topology/topology_engine.h>
 
+#include <memory>
+
+namespace yams::vector {
+class StaticCosineAnnIndex;
+}
+
 namespace yams::topology {
 
 /// Immutable query-time index derived from a validated topology artifact batch.
@@ -10,6 +16,7 @@ struct SparseRouteIndex {
     std::unordered_map<std::string, std::vector<std::size_t>> clustersByDocumentHash;
     std::vector<float> centroidNorms;
     std::vector<std::vector<float>> routingRepresentativeNorms;
+    std::shared_ptr<const yams::vector::StaticCosineAnnIndex> centroidAnnIndex;
 };
 
 struct SparseRouteWork {
@@ -17,6 +24,10 @@ struct SparseRouteWork {
     std::size_t clusterMemberHashesScanned{0};
     std::size_t queryNormEvaluations{0};
     std::size_t representativeDistanceEvaluations{0};
+    std::size_t exactRepresentativeDistanceEvaluations{0};
+    std::size_t denseAnnDistanceEvaluations{0};
+    std::size_t denseAnnCandidates{0};
+    bool denseAnnUsed{false};
 };
 
 class ConnectedComponentTopologyEngine final : public ITopologyEngine {

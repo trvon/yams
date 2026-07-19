@@ -22,10 +22,10 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
-#include <thread>
 #include <type_traits>
 #include <utility>
 
+#include <yams/compat/thread_stop_compat.h>
 #include <yams/compat/unistd.h>
 #include <yams/search/search_engine_builder.h>
 #include <yams/search/search_tuner.h>
@@ -47,14 +47,14 @@ TEST_CASE("SearchTuner parameter snapshots are safe during observation",
 
     std::atomic<bool> start{false};
     std::atomic<bool> snapshotsValid{true};
-    std::jthread writer([&] {
+    yams::compat::jthread writer([&] {
         while (!start.load(std::memory_order_acquire)) {
         }
         for (std::size_t i = 0; i < 1000; ++i) {
             tuner.observe(telemetry);
         }
     });
-    std::jthread reader([&] {
+    yams::compat::jthread reader([&] {
         while (!start.load(std::memory_order_acquire)) {
         }
         for (std::size_t i = 0; i < 1000; ++i) {
@@ -79,7 +79,7 @@ TEST_CASE("SearchTuner snapshot keeps config and parameters correlated",
     telemetry.latencyMs = 200.0;
 
     std::atomic<bool> start{false};
-    std::jthread writer([&] {
+    yams::compat::jthread writer([&] {
         while (!start.load(std::memory_order_acquire)) {
         }
         for (std::size_t i = 0; i < 500; ++i) {

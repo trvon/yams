@@ -426,6 +426,9 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         if (tp.representativeLimit) {
             opts.config.topologyRoutingRepresentativeLimit = *tp.representativeLimit;
         }
+        if (tp.annCandidateLimit) {
+            opts.config.topologyRoutingAnnCandidateLimit = *tp.annCandidateLimit;
+        }
         if (tp.adaptiveProbeScoreGap) {
             opts.config.topologyAdaptiveProbeScoreGap = std::max(0.0F, *tp.adaptiveProbeScoreGap);
         }

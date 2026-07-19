@@ -615,7 +615,7 @@ TEST_CASE("CliSubprocessSegfaultRegressionSmoke.ShortLivedCommandsExitCleanly",
     REQUIRE(warmListOk);
 
     SubprocessResult addResult;
-    const bool addOk = waitForCommandSuccess(*yamsBinary, {"add", docPath.string()}, baseEnv,
+    const bool addOk = waitForCommandSuccess(*yamsBinary, {"add", docPath.string()}, probeEnv,
                                              scaledTimeout(20s), &addResult);
     INFO(describeFailure({"add", docPath.string()}, addResult) << "\ndaemon log:\n"
                                                                << readTextFile(daemonLogPath));

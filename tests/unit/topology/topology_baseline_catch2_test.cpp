@@ -2,8 +2,11 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <memory>
+#include <numbers>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -466,6 +469,50 @@ TEST_CASE("Sparse-guided topology routing reuses a prepared membership index",
     CHECK(work.seedClusterLookups == 3);
     CHECK(work.clusterMemberHashesScanned == 0);
     CHECK(work.queryNormEvaluations == 1);
+}
+
+TEST_CASE("Sparse-guided topology routing shortlists centroids with cached ANN",
+          "[unit][topology][routing][ann]") {
+    TopologyArtifactBatch batch;
+    constexpr std::size_t clusterCount = 128;
+    batch.clusters.reserve(clusterCount);
+    for (std::size_t index = 0; index < clusterCount; ++index) {
+        const auto angle = static_cast<float>(index) * 2.0F * std::numbers::pi_v<float> /
+                           static_cast<float>(clusterCount);
+        batch.clusters.push_back(ClusterArtifact{
+            .clusterId = "cluster-" + std::to_string(index),
+            .memberCount = 1,
+            .memberDocumentHashes = {"doc-" + std::to_string(index)},
+            .centroidEmbedding = {std::cos(angle), std::sin(angle)},
+        });
+    }
+
+    const auto routeIndex = SparseGuidedClusterRouter::buildRouteIndex(batch);
+    SparseGuidedClusterRouter router;
+    TopologyRouteRequest request;
+    request.limit = 1;
+    request.queryEmbedding = {1.0F, 0.0F};
+    request.sparseDenseAlpha = 0.0F;
+    request.denseAnnCandidateLimit = 8;
+    SparseRouteWork work;
+
+    auto routed = router.route(request, batch, routeIndex, &work);
+
+    REQUIRE(routed.has_value());
+    REQUIRE(routed.value().size() == 1U);
+    CHECK(routed.value().front().clusterId == "cluster-0");
+    CHECK(work.denseAnnUsed);
+    CHECK(work.denseAnnCandidates <= 8U);
+    CHECK(work.denseAnnDistanceEvaluations > 0U);
+    CHECK(work.exactRepresentativeDistanceEvaluations <= 8U);
+
+    request.seedDocumentHashes = {"doc-64"};
+    request.sparseDenseAlpha = 1.0F;
+    work = {};
+    routed = router.route(request, batch, routeIndex, &work);
+    REQUIRE(routed.has_value());
+    REQUIRE(routed.value().size() == 1U);
+    CHECK(routed.value().front().clusterId == "cluster-64");
 }
 
 TEST_CASE("Topology construction emits a deterministic bounded diverse routing cover",

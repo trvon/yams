@@ -122,6 +122,16 @@ std::int64_t microsSince(std::chrono::steady_clock::time_point start) {
         .count();
 }
 
+void accumulateRouteWork(TopologyRoutingSessionResult& result,
+                         const yams::topology::SparseRouteWork& work) {
+    result.routeRepresentativeDistanceEvaluations += work.representativeDistanceEvaluations;
+    result.routeAnnUsed = result.routeAnnUsed || work.denseAnnUsed;
+    result.routeAnnCandidates += work.denseAnnCandidates;
+    result.routeAnnDistanceEvaluations += work.denseAnnDistanceEvaluations;
+    result.routeExactRepresentativeDistanceEvaluations +=
+        work.exactRepresentativeDistanceEvaluations;
+}
+
 /// Collect bidirectional semantic_neighbor edges for one document hash.
 /// Returns nullopt when the node is missing or edge lookup fails hard.
 std::optional<std::vector<NeighborTriple>>
@@ -295,6 +305,7 @@ tryMedoidGraphExpansion(const TopologyRoutingSessionRequest& request,
     routeRequest.scoringMode = topologyRouteScoringMode(request.options.routeScoringMode);
     routeRequest.sparseDenseAlpha = std::clamp(request.options.sparseDenseAlpha, 0.0F, 1.0F);
     routeRequest.maxRoutingRepresentatives = request.options.representativeLimit;
+    routeRequest.denseAnnCandidateLimit = request.options.denseAnnCandidateLimit;
     if (request.queryEmbedding.has_value()) {
         routeRequest.queryEmbedding = request.queryEmbedding.value();
     }
@@ -302,7 +313,7 @@ tryMedoidGraphExpansion(const TopologyRoutingSessionRequest& request,
     yams::topology::SparseGuidedClusterRouter router;
     yams::topology::SparseRouteWork routeWork;
     auto routes = router.route(routeRequest, topology, snapshot->sparseRouteIndex, &routeWork);
-    result.routeRepresentativeDistanceEvaluations += routeWork.representativeDistanceEvaluations;
+    accumulateRouteWork(result, routeWork);
     if (!routes) {
         return out;
     }
@@ -589,6 +600,11 @@ void materializeAllowedRouteMembers(
             entry->first,
             finalizeCandidateStructure(entry->second.structure, selectedScaleMask, acceptedRoutes));
     }
+    for (auto& routeGroup : result.routeAllowedDocumentHashGroups) {
+        std::erase_if(routeGroup, [&](const auto& hash) {
+            return !result.routeAllowedDocumentHashes.contains(hash);
+        });
+    }
     result.routedDocs = take;
 }
 
@@ -618,6 +634,7 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
     routeRequest.scoringMode = topologyRouteScoringMode(request.options.routeScoringMode);
     routeRequest.sparseDenseAlpha = std::clamp(request.options.sparseDenseAlpha, 0.0F, 1.0F);
     routeRequest.maxRoutingRepresentatives = request.options.representativeLimit;
+    routeRequest.denseAnnCandidateLimit = request.options.denseAnnCandidateLimit;
     if (request.queryEmbedding.has_value()) {
         routeRequest.queryEmbedding = request.queryEmbedding.value();
     }
@@ -627,7 +644,7 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
     const auto sparseRouteStart = std::chrono::steady_clock::now();
     yams::topology::SparseRouteWork routeWork;
     auto routes = router.route(routeRequest, topology, snapshot->sparseRouteIndex, &routeWork);
-    result.routeRepresentativeDistanceEvaluations += routeWork.representativeDistanceEvaluations;
+    accumulateRouteWork(result, routeWork);
     result.timings.routeMicros = microsSince(sparseRouteStart);
     if (!routes) {
         result.skipReason = std::string{"route_failed:"} + routes.error().message;
@@ -701,6 +718,10 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
         if (route.medoidDocumentHash.has_value()) {
             result.medoidHashes.insert(*route.medoidDocumentHash);
         }
+        std::unordered_set<std::string>* routeMemberGroup = nullptr;
+        if (request.options.collectRouteMembership && mayExpand) {
+            routeMemberGroup = &result.routeAllowedDocumentHashGroups.emplace_back();
+        }
 
         const auto clusterLookupStart = std::chrono::steady_clock::now();
         const auto clusterIt = snapshot->clustersById.find(route.clusterId);
@@ -714,6 +735,7 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
                 if (hash.empty()) {
                     continue;
                 }
+                routeMemberGroup->insert(hash);
                 auto& candidate = routedMembers[hash];
                 candidate.seed = candidate.seed || seedSet.contains(hash);
                 if (candidate.seed) {
@@ -860,6 +882,7 @@ makeTopologyRoutingOptions(const SearchEngineConfig& config,
         .minClusters = config.topologyMinClusters,
         .maxClusters = config.topologyMaxClusters,
         .representativeLimit = config.topologyRoutingRepresentativeLimit,
+        .denseAnnCandidateLimit = config.topologyRoutingAnnCandidateLimit,
         .adaptiveProbeScoreGap = config.topologyAdaptiveProbeScoreGap,
         .narrowMinBoundaryMargin = config.topologyNarrowMinBoundaryMargin,
         .maxDocs = config.topologyMaxDocs,

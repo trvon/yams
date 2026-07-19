@@ -202,10 +202,21 @@ struct EntitySearchParams {
 struct VectorSearchDiagnostics {
     bool usedAnn = false;
     bool usedExactScan = false;
+    bool usedCandidateIndexCache = false;
     size_t rowsVisited = 0;
     size_t exactDistanceEvaluations = 0;
     size_t annCandidateBudget = 0;
+    size_t candidateLookupCount = 0;
+    size_t candidateIndexPayloadBytes = 0;
+    size_t materializedRows = 0;
     size_t returnedRows = 0;
+    std::uint64_t candidateLookupNanoseconds = 0;
+    std::uint64_t candidateProjectionNanoseconds = 0;
+    std::uint64_t pqLutNanoseconds = 0;
+    std::uint64_t adcScoringNanoseconds = 0;
+    std::uint64_t topKSelectionNanoseconds = 0;
+    std::uint64_t resultMaterializationNanoseconds = 0;
+    std::uint64_t exactRerankNanoseconds = 0;
 };
 
 /// Controls how an explicit candidate-document set is evaluated. BackendDefault lets the selected

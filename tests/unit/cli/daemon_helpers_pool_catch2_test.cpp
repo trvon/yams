@@ -6,6 +6,9 @@
 #include <thread>
 
 #include <yams/cli/daemon_helpers.h>
+#include <yams/daemon/client/sandbox_probe.h>
+
+#include "../../common/test_helpers_catch2.h"
 
 using namespace std::chrono_literals;
 
@@ -53,4 +56,33 @@ TEST_CASE("is_transport_failure classifies 'Daemon not ready yet' as transport",
 
     yams::Error notFound{ErrorCode::NotFound, "missing key"};
     CHECK_FALSE(yams::cli::is_transport_failure(notFound));
+}
+
+TEST_CASE("Explicit pinned socket bypasses the generic sandbox probe", "[cli][daemon][transport]") {
+    struct ProbeReset {
+        ~ProbeReset() { yams::daemon::set_unix_socket_probe_for_tests(nullptr); }
+    } probeReset;
+
+    yams::daemon::set_unix_socket_probe_for_tests([] { return false; });
+    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::nullopt);
+    yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::nullopt);
+    yams::test::ScopedEnvVar config(
+        "YAMS_CONFIG", std::string("/nonexistent/yams-daemon-helper-test-config.toml"));
+    yams::test::ScopedEnvVar socketPath("YAMS_DAEMON_SOCKET_PATH",
+                                        std::string("/tmp/yams-pinned-test.sock"));
+    yams::test::ScopedEnvVar legacySocket("YAMS_DAEMON_SOCKET", std::nullopt);
+    yams::test::ScopedEnvVar noAutoStart("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", std::string("1"));
+
+    yams::daemon::ClientConfig configRequest;
+    auto plan = yams::cli::prepare_cli_daemon_client_plan(
+        configRequest, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
+
+    REQUIRE(plan);
+    const auto& resolved = plan.value();
+    CHECK(resolved.resolvedMode == yams::daemon::ClientTransportMode::Socket);
+    CHECK(resolved.config.transportMode == yams::daemon::ClientTransportMode::Socket);
+    CHECK(resolved.config.socketPath == "/tmp/yams-pinned-test.sock");
+    CHECK(resolved.requireSocket);
+    CHECK_FALSE(resolved.allowInProcessFallback);
+    CHECK_FALSE(resolved.config.autoStart);
 }

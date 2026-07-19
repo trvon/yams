@@ -53,7 +53,7 @@ Runs one or more read steps sequentially. Each step's result is available as `$p
 // Pipeline: search then retrieve first result
 {"steps": [
   {"op": "search", "params": {"query": "LLM reasoning"}},
-  {"op": "get", "params": {"hash": "$prev.results[0].hash"}}
+  {"op": "get", "params": {"hash": "$prev.results[0].hash", "include_content": true}}
 ]}
 
 // Discover search parameters
@@ -105,6 +105,10 @@ No tool needed when:
   - Call `query` with: `{"steps": [{"op": "search", "params": {"query": "<keywords>", "limit": 20}}]}`
   - For broader recall: add `"fuzzy": true, "similarity": 0.7` to search params
   - If terms are unclear: `{"steps": [{"op": "list", "params": {"pattern": "<glob>", "recent": 10}}]}`
+- Search/list/grep snippets only select candidates. Hydrate each saved-memory
+  artifact you rely on with a `get` step and `"include_content": true`; when
+  the top search hit is the intended artifact, chain search and get in one
+  `query` pipeline.
 - Prefer grep for pattern-based search:
   - `{"steps": [{"op": "grep", "params": {"pattern": "<regex>", "ignore_case": true}}]}`
 - Persist new external findings immediately:

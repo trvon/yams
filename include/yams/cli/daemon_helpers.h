@@ -821,15 +821,21 @@ inline bool is_socket_mode_forced_by_env() {
            mode == "daemon";
 }
 
-inline bool explicit_socket_without_autostart() {
+inline std::filesystem::path explicit_socket_path() {
     const char* socketPath = std::getenv("YAMS_DAEMON_SOCKET_PATH");
     if (socketPath == nullptr || *socketPath == '\0') {
         socketPath = std::getenv("YAMS_DAEMON_SOCKET");
     }
     if (socketPath == nullptr || *socketPath == '\0') {
+        return {};
+    }
+    return socketPath;
+}
+
+inline bool explicit_socket_without_autostart() {
+    if (explicit_socket_path().empty()) {
         return false;
     }
-
     const char* disableAutoStart = std::getenv("YAMS_CLI_DISABLE_DAEMON_AUTOSTART");
     if (disableAutoStart == nullptr || *disableAutoStart == '\0') {
         return false;
@@ -1010,19 +1016,26 @@ inline Result<CliDaemonClientPlan> prepare_cli_daemon_client_plan(
     plan.config = requestedCfg;
 
     const bool socketForcedByEnv = detail::is_socket_mode_forced_by_env();
+    const bool pinnedSocket = detail::explicit_socket_without_autostart();
     const bool requireSocket =
-        socketForcedByEnv || (policy == CliDaemonAccessPolicy::RequireSocket);
+        socketForcedByEnv || pinnedSocket || (policy == CliDaemonAccessPolicy::RequireSocket);
     plan.requireSocket = requireSocket;
     plan.allowInProcessFallback = !requireSocket;
     plan.allowLocalServiceFallback = false;
-    plan.allowSocketAutoStart = requireSocket;
+    plan.allowSocketAutoStart = requireSocket && !pinnedSocket;
 
     // Respect explicit CLI no-autostart intent even on socket-required paths.
     // This is especially important for test and pinned-socket flows where the caller
     // provides a concrete daemon endpoint and wants request execution to surface
     // connectivity errors directly, without a separate readiness/autostart phase.
-    if (detail::explicit_socket_without_autostart()) {
+    if (pinnedSocket) {
         plan.config.autoStart = false;
+        if (plan.config.socketPath.empty()) {
+            plan.config.socketPath = detail::explicit_socket_path();
+        }
+        if (plan.config.transportMode == yams::daemon::ClientTransportMode::Auto) {
+            plan.config.transportMode = yams::daemon::ClientTransportMode::Socket;
+        }
     }
 
     if (!requireSocket) {

@@ -926,7 +926,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Extraction status handling",
 }
 
 TEST_CASE_METHOD(MetadataSchemaFixture, "Performance metrics",
-                 "[unit][metadata][schema][performance]") {
+                 "[unit][metadata][schema][performance][slow]") {
     const int numDocs = 1000;
     auto start = std::chrono::high_resolution_clock::now();
 

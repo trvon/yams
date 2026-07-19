@@ -198,6 +198,9 @@ struct SearchEngineConfig {
     /// Maximum total dense representatives evaluated per cluster, including the centroid.
     /// Zero evaluates the complete representative cover stored in the topology snapshot.
     size_t topologyRoutingRepresentativeLimit = 0;
+    /// Exact-score this many cached centroid-ANN candidates when the topology exceeds the limit.
+    /// Sparse-vote clusters are always retained. Zero forces exhaustive centroid scoring.
+    size_t topologyRoutingAnnCandidateLimit = 64;
     /// Include another cluster while its score remains this close to the best route.
     float topologyAdaptiveProbeScoreGap = 0.0f;
     /// Abstain from hard narrowing when the selected/excluded boundary is closer
@@ -459,6 +462,7 @@ struct SearchEngineConfig {
         topologyMaxClusters = source.topologyMaxClusters;
         topologyMaxSeedDocuments = source.topologyMaxSeedDocuments;
         topologyRoutingRepresentativeLimit = source.topologyRoutingRepresentativeLimit;
+        topologyRoutingAnnCandidateLimit = source.topologyRoutingAnnCandidateLimit;
         topologyAdaptiveProbeScoreGap = source.topologyAdaptiveProbeScoreGap;
         topologyNarrowMinBoundaryMargin = source.topologyNarrowMinBoundaryMargin;
         topologyMaxDocs = source.topologyMaxDocs;

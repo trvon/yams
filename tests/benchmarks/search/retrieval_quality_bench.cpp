@@ -6085,6 +6085,8 @@ struct BenchFixture {
                 std::getenv("YAMS_BENCH_TOPOLOGY_BOUNDARY_SPILL");
             const char* topologyRepresentativeLimitEnv =
                 std::getenv("YAMS_BENCH_TOPOLOGY_ROUTE_REPRESENTATIVE_LIMIT");
+            const char* topologyAnnCandidateLimitEnv =
+                std::getenv("YAMS_BENCH_TOPOLOGY_ROUTE_ANN_CANDIDATE_LIMIT");
             const bool writeTopologyEngineConfig =
                 (topologyEngineEnv && *topologyEngineEnv) ||
                 (topologyRepresentativesEnv && *topologyRepresentativesEnv) ||
@@ -6097,6 +6099,7 @@ struct BenchFixture {
                 (std::getenv("YAMS_BENCH_TOPOLOGY_MIN_CLUSTERS") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_MAX_SEED_DOCUMENTS") != nullptr) ||
                 (topologyRepresentativeLimitEnv && *topologyRepresentativeLimitEnv) ||
+                (topologyAnnCandidateLimitEnv && *topologyAnnCandidateLimitEnv) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_ADAPTIVE_PROBE_SCORE_GAP") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_NARROW_MIN_BOUNDARY_MARGIN") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_EXPANSION") != nullptr) ||
@@ -6370,6 +6373,12 @@ struct BenchFixture {
                             configOut << "representative_limit = "
                                       << parseSizeEnvOrDefault(
                                              "YAMS_BENCH_TOPOLOGY_ROUTE_REPRESENTATIVE_LIMIT", 0)
+                                      << "\n";
+                        }
+                        if (topologyAnnCandidateLimitEnv && *topologyAnnCandidateLimitEnv) {
+                            configOut << "ann_candidate_limit = "
+                                      << parseSizeEnvOrDefault(
+                                             "YAMS_BENCH_TOPOLOGY_ROUTE_ANN_CANDIDATE_LIMIT", 64)
                                       << "\n";
                         }
                         configOut << "adaptive_probe_score_gap = "

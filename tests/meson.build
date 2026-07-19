@@ -1505,6 +1505,7 @@ if catch2_dep.found()
         'unit/vector/embedding_service_synthetic_catch2_test.cpp',
         'unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp',
         'unit/vector/sqlite_vec_backend_persistence_catch2_test.cpp',
+        'unit/vector/static_cosine_ann_index_catch2_test.cpp',
         'unit/vector/sqlite_vec_c_api_smoke_catch2_test.cpp',
         'unit/vector/vector_schema_migration_vec0_catch2_test.cpp',
         'unit/vector/vector_dimension_validation_catch2_test.cpp',
@@ -2496,8 +2497,17 @@ if catch2_dep.found()
 
   test('metadata_schema', catch2_metadata_schema_exe,
     suite: ['catch2', 'unit', 'metadata', 'schema'],
+    args: ['~[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 300  # Comprehensive tests including performance metrics
+    timeout: 300
+  )
+
+  test('metadata_schema_slow', catch2_metadata_schema_exe,
+    suite: ['catch2', 'slow', 'metadata', 'schema'],
+    args: ['[slow]', '--allow-running-no-tests'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 300,
+    is_parallel: false
   )
 
   test('fts5_failure_scenarios', catch2_fts5_failure_scenarios_exe,

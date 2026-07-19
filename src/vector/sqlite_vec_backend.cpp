@@ -21,6 +21,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -48,13 +49,48 @@ namespace yams::vector {
 struct SimeonPqIndexState {
     simeon::ProductQuantizer pq;
     std::vector<std::size_t> rowids;
+    std::vector<std::uint64_t> tie_break_keys;
+    std::unordered_map<std::string, std::vector<std::size_t>> document_indices;
     std::vector<std::uint8_t> codes;
     std::size_t rerank_factor = 2;
+    std::size_t document_index_payload_bytes = 0;
 
     explicit SimeonPqIndexState(simeon::PQConfig cfg) : pq(cfg) {}
+
+    void updateDocumentIndexPayloadBytes() noexcept {
+        document_index_payload_bytes = document_indices.bucket_count() * sizeof(void*);
+        for (const auto& [documentHash, indices] : document_indices) {
+            document_index_payload_bytes += sizeof(decltype(document_indices)::value_type) +
+                                            documentHash.size() +
+                                            indices.capacity() * sizeof(std::size_t);
+        }
+    }
 };
 
 namespace {
+
+std::uint64_t stableEmbeddingSampleKey(std::span<const float> embedding) noexcept {
+    std::uint64_t hash = 1469598103934665603ULL;
+    for (const float value : embedding) {
+        std::uint32_t bits = 0;
+        static_assert(sizeof(bits) == sizeof(value));
+        std::memcpy(&bits, &value, sizeof(bits));
+        for (std::size_t byte = 0; byte < sizeof(bits); ++byte) {
+            hash ^= static_cast<std::uint8_t>((bits >> (byte * 8U)) & 0xFFU);
+            hash *= 1099511628211ULL;
+        }
+    }
+    return hash;
+}
+
+std::uint64_t stableStringKey(std::string_view value) noexcept {
+    std::uint64_t hash = 1469598103934665603ULL;
+    for (const unsigned char byte : value) {
+        hash ^= byte;
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
 
 std::optional<std::string> getenvCopy(const char* name) {
     static std::mutex envMutex;
@@ -1261,7 +1297,15 @@ public:
 
             std::vector<int64_t> candidateRowids;
             if (!candidate_hashes.empty()) {
+                const auto lookupStart = std::chrono::steady_clock::now();
                 auto rowids = lookupCandidateRowidsUnlocked(query_dim, candidate_hashes);
+                if (diagnostics != nullptr) {
+                    ++diagnostics->candidateLookupCount;
+                    diagnostics->candidateLookupNanoseconds += static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - lookupStart)
+                            .count());
+                }
                 if (!rowids) {
                     return rowids.error();
                 }
@@ -1283,7 +1327,7 @@ public:
         if (usesSimeonPqSearchEngine()) {
             const size_t query_dim = query_embedding.size();
 
-            if (document_hash || !candidate_hashes.empty() || !metadata_filters.empty()) {
+            if (document_hash || !metadata_filters.empty()) {
                 spdlog::debug("[SPQ] filtered search falling back to exact cosine scan");
                 return bruteForceSearchUnlocked(query_embedding, k, similarity_threshold,
                                                 document_hash, candidate_hashes, metadata_filters,
@@ -1307,13 +1351,9 @@ public:
                 }
             }
 
-            auto result = simeonPqSearchUnlocked(query_embedding, k, similarity_threshold);
-            if (diagnostics && result) {
-                diagnostics->usedAnn = true;
-                diagnostics->annCandidateBudget = query_dim_counts_[query_dim];
-                diagnostics->returnedRows = result.value().size();
-            }
-            return result;
+            return simeonPqSearchUnlocked(query_embedding, k, similarity_threshold,
+                                          candidate_hashes.empty() ? nullptr : &candidate_hashes,
+                                          diagnostics);
         }
 
         return Error{ErrorCode::InvalidOperation, "no search engine configured"};
@@ -2860,6 +2900,52 @@ private:
         return rows;
     }
 
+    bool loadSimeonRowMetadataUnlocked(
+        size_t dim, std::span<const std::size_t> rowids, std::vector<std::uint64_t>& keys,
+        std::unordered_map<std::string, std::vector<std::size_t>>& documentIndices) const {
+        keys.clear();
+        keys.reserve(rowids.size());
+        documentIndices.clear();
+        sqlite3_stmt* stmt = nullptr;
+        constexpr const char* sql = "SELECT rowid, chunk_id, document_hash FROM vectors "
+                                    "WHERE embedding_dim = ? ORDER BY rowid";
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+            return false;
+        }
+        sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(dim));
+        std::size_t expected = 0;
+        while (expected < rowids.size() && sqlite3_step(stmt) == SQLITE_ROW) {
+            const auto rowid = static_cast<std::size_t>(sqlite3_column_int64(stmt, 0));
+            if (rowid < rowids[expected]) {
+                continue;
+            }
+            if (rowid != rowids[expected]) {
+                sqlite3_finalize(stmt);
+                keys.clear();
+                documentIndices.clear();
+                return false;
+            }
+            const auto* chunkId = sqlite3_column_text(stmt, 1);
+            const auto* documentHash = sqlite3_column_text(stmt, 2);
+            if (chunkId == nullptr || documentHash == nullptr) {
+                sqlite3_finalize(stmt);
+                keys.clear();
+                documentIndices.clear();
+                return false;
+            }
+            keys.push_back(stableStringKey(reinterpret_cast<const char*>(chunkId)));
+            documentIndices[reinterpret_cast<const char*>(documentHash)].push_back(expected);
+            ++expected;
+        }
+        sqlite3_finalize(stmt);
+        if (expected != rowids.size()) {
+            keys.clear();
+            documentIndices.clear();
+            return false;
+        }
+        return true;
+    }
+
     Result<void> rebuildVec0DimUnlocked(size_t dim) {
         auto table_result = ensureVec0TableUnlocked(dim);
         if (!table_result) {
@@ -3075,23 +3161,21 @@ private:
         const std::size_t trainCap = std::min(rows.size(), config_.simeon_pq_train_limit);
         state->rowids.reserve(rows.size());
 
-        // Pass 1: normalize in place, collect rowids, copy a bounded prefix
-        // into the training buffer. Normalized embeddings stay in `rows` so
-        // pass 2 can encode without re-reading SQLite.
-        std::vector<float> training;
-        training.reserve(trainCap * dim);
-        std::size_t trainSamples = 0;
-        for (auto& [rowid, embedding] : rows) {
+        // Pass 1: normalize in place and collect rowids. SQLite rowids reflect
+        // ingestion order, so they must not choose or order the PQ training set:
+        // two identical corpora inserted in different orders must build the same
+        // codebook and return the same neighbors.
+        std::vector<std::size_t> trainingOrder;
+        trainingOrder.reserve(rows.size());
+        for (std::size_t index = 0; index < rows.size(); ++index) {
+            auto& [rowid, embedding] = rows[index];
             if (!normalizeEmbeddingInPlace(embedding)) {
                 embedding.clear();
                 embedding.shrink_to_fit();
                 continue;
             }
-            if (trainSamples < trainCap) {
-                training.insert(training.end(), embedding.begin(), embedding.end());
-                ++trainSamples;
-            }
             state->rowids.push_back(rowid);
+            trainingOrder.push_back(index);
         }
 
         if (state->rowids.empty()) {
@@ -3099,6 +3183,33 @@ private:
             simeon_pq_ready_dims_.insert(dim);
             return Result<void>{};
         }
+
+        std::vector<std::uint64_t> trainingKeys(rows.size(), 0);
+        for (const auto index : trainingOrder) {
+            trainingKeys[index] = stableEmbeddingSampleKey(rows[index].second);
+        }
+        std::ranges::sort(trainingOrder, [&](std::size_t lhs, std::size_t rhs) {
+            if (trainingKeys[lhs] != trainingKeys[rhs]) {
+                return trainingKeys[lhs] < trainingKeys[rhs];
+            }
+            const auto& left = rows[lhs].second;
+            const auto& right = rows[rhs].second;
+            return std::lexicographical_compare(left.begin(), left.end(), right.begin(),
+                                                right.end());
+        });
+        if (trainingOrder.size() > trainCap) {
+            trainingOrder.resize(trainCap);
+        }
+
+        std::vector<float> training;
+        training.reserve(trainingOrder.size() * dim);
+        for (const auto index : trainingOrder) {
+            const auto& embedding = rows[index].second;
+            training.insert(training.end(), embedding.begin(), embedding.end());
+        }
+        const auto trainSamples = trainingOrder.size();
+        std::vector<std::uint64_t>().swap(trainingKeys);
+        std::vector<std::size_t>().swap(trainingOrder);
 
         try {
             if (trainSamples >= k) {
@@ -3129,6 +3240,12 @@ private:
             std::vector<float>().swap(embedding);
         }
         std::vector<std::pair<size_t, std::vector<float>>>().swap(rows);
+        if (!loadSimeonRowMetadataUnlocked(dim, state->rowids, state->tie_break_keys,
+                                           state->document_indices)) {
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to load Simeon PQ row metadata for dim " + std::to_string(dim)};
+        }
+        state->updateDocumentIndexPayloadBytes();
         state->rerank_factor = std::max<std::size_t>(1, config_.simeon_pq_rerank_factor);
         simeon_pq_indices_[dim] = std::move(state);
         simeon_pq_dirty_dims_.erase(dim);
@@ -3197,6 +3314,11 @@ private:
             state->rowids.size() != vectorCount) {
             return false;
         }
+        if (!loadSimeonRowMetadataUnlocked(dim, state->rowids, state->tie_break_keys,
+                                           state->document_indices)) {
+            return false;
+        }
+        state->updateDocumentIndexPayloadBytes();
         simeon_pq_indices_[dim] = std::move(state);
         simeon_pq_dirty_dims_.erase(dim);
         simeon_pq_ready_dims_.insert(dim);
@@ -3248,7 +3370,9 @@ private:
 
     Result<std::vector<VectorRecord>>
     simeonPqSearchUnlocked(const std::vector<float>& query_embedding, size_t k,
-                           float similarity_threshold) {
+                           float similarity_threshold,
+                           const std::unordered_set<std::string>* candidateHashes = nullptr,
+                           VectorSearchDiagnostics* diagnostics = nullptr) {
         if (!db_ || query_embedding.empty() || k == 0) {
             return std::vector<VectorRecord>{};
         }
@@ -3263,36 +3387,135 @@ private:
             return std::vector<VectorRecord>{};
         }
 
-        simeon::PQQuery pqQuery(it->second->pq, normalized_query.data());
+        const auto lutStart = std::chrono::steady_clock::now();
+        simeon::PQInnerProductQuery pqQuery(it->second->pq, normalized_query.data());
+        if (diagnostics != nullptr) {
+            diagnostics->pqLutNanoseconds +=
+                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                               std::chrono::steady_clock::now() - lutStart)
+                                               .count());
+        }
         const size_t m = it->second->pq.m();
-        const size_t approxK = std::min(it->second->rowids.size(),
-                                        std::max<std::size_t>(k, k * it->second->rerank_factor));
+
+        std::vector<std::size_t> candidateIndices;
+        if (candidateHashes != nullptr) {
+            const auto lookupStart = std::chrono::steady_clock::now();
+            for (const auto& documentHash : *candidateHashes) {
+                const auto found = it->second->document_indices.find(documentHash);
+                if (found != it->second->document_indices.end()) {
+                    candidateIndices.insert(candidateIndices.end(), found->second.begin(),
+                                            found->second.end());
+                }
+            }
+            if (diagnostics != nullptr) {
+                diagnostics->usedCandidateIndexCache = true;
+                ++diagnostics->candidateLookupCount;
+                diagnostics->candidateIndexPayloadBytes = it->second->document_index_payload_bytes;
+                diagnostics->candidateLookupNanoseconds +=
+                    static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                                   std::chrono::steady_clock::now() - lookupStart)
+                                                   .count());
+            }
+            const auto projectionStart = std::chrono::steady_clock::now();
+            std::ranges::sort(candidateIndices);
+            if (diagnostics != nullptr) {
+                diagnostics->candidateProjectionNanoseconds += static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - projectionStart)
+                        .count());
+            }
+        }
+
+        const size_t candidateCount =
+            candidateHashes == nullptr ? it->second->rowids.size() : candidateIndices.size();
+        if (diagnostics != nullptr) {
+            diagnostics->usedAnn = true;
+            diagnostics->annCandidateBudget = candidateCount;
+            diagnostics->rowsVisited = candidateCount;
+        }
+        if (candidateCount == 0) {
+            return std::vector<VectorRecord>{};
+        }
+
+        const auto rerankFactor = it->second->rerank_factor;
+        const size_t rerankBudget = k > std::numeric_limits<size_t>::max() / rerankFactor
+                                        ? std::numeric_limits<size_t>::max()
+                                        : k * rerankFactor;
+        const size_t approxK = std::min(candidateCount, std::max(k, rerankBudget));
+        YAMS_ASSERT(it->second->tie_break_keys.size() == it->second->rowids.size(),
+                    "Simeon PQ tie-break keys must align with indexed rowids");
 
         std::vector<std::pair<float, std::size_t>> scores;
-        scores.reserve(it->second->rowids.size());
-        for (std::size_t i = 0; i < it->second->rowids.size(); ++i) {
-            const float approxScore = pqQuery.inner_product(it->second->codes.data() + (i * m));
-            scores.emplace_back(approxScore, i);
+        scores.reserve(candidateCount);
+        const auto scoringStart = std::chrono::steady_clock::now();
+        const auto scoreIndex = [&](std::size_t index) {
+            const float approxScore = pqQuery.inner_product(it->second->codes.data() + (index * m));
+            scores.emplace_back(approxScore, index);
+        };
+        if (candidateHashes == nullptr) {
+            for (std::size_t index = 0; index < it->second->rowids.size(); ++index) {
+                scoreIndex(index);
+            }
+        } else {
+            for (const auto index : candidateIndices) {
+                scoreIndex(index);
+            }
         }
-        const auto cmp = [](const auto& a, const auto& b) { return a.first > b.first; };
+        if (diagnostics != nullptr) {
+            diagnostics->adcScoringNanoseconds +=
+                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                               std::chrono::steady_clock::now() - scoringStart)
+                                               .count());
+        }
+        const auto cmp = [&](const auto& a, const auto& b) {
+            if (a.first != b.first) {
+                return a.first > b.first;
+            }
+            return it->second->tie_break_keys[a.second] < it->second->tie_break_keys[b.second];
+        };
+        const auto selectionStart = std::chrono::steady_clock::now();
         if (scores.size() > approxK) {
             std::nth_element(scores.begin(), scores.begin() + approxK, scores.end(), cmp);
             scores.resize(approxK);
         }
         std::sort(scores.begin(), scores.end(), cmp);
+        if (diagnostics != nullptr) {
+            diagnostics->topKSelectionNanoseconds +=
+                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                               std::chrono::steady_clock::now() - selectionStart)
+                                               .count());
+        }
 
         std::vector<VectorRecord> records;
         records.reserve(scores.size());
         for (const auto& [approxScore, idx] : scores) {
+            const auto materializationStart = std::chrono::steady_clock::now();
             auto record_opt =
                 getVectorByRowidUnlocked(static_cast<int64_t>(it->second->rowids[idx]));
+            if (diagnostics != nullptr) {
+                diagnostics->resultMaterializationNanoseconds += static_cast<std::uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::steady_clock::now() - materializationStart)
+                        .count());
+            }
             if (!record_opt) {
                 continue;
             }
+            if (diagnostics != nullptr) {
+                ++diagnostics->materializedRows;
+            }
             float similarity = approxScore;
             if (!record_opt->embedding.empty()) {
+                const auto rerankStart = std::chrono::steady_clock::now();
                 similarity = static_cast<float>(VectorDatabase::computeCosineSimilarity(
                     query_embedding, record_opt->embedding));
+                if (diagnostics != nullptr) {
+                    ++diagnostics->exactDistanceEvaluations;
+                    diagnostics->exactRerankNanoseconds += static_cast<std::uint64_t>(
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            std::chrono::steady_clock::now() - rerankStart)
+                            .count());
+                }
             }
             if (similarity < similarity_threshold) {
                 continue;
@@ -3301,10 +3524,16 @@ private:
             records.push_back(std::move(*record_opt));
         }
         std::sort(records.begin(), records.end(), [](const auto& a, const auto& b) {
-            return a.relevance_score > b.relevance_score;
+            if (a.relevance_score != b.relevance_score) {
+                return a.relevance_score > b.relevance_score;
+            }
+            return a.chunk_id < b.chunk_id;
         });
         if (records.size() > k) {
             records.resize(k);
+        }
+        if (diagnostics != nullptr) {
+            diagnostics->returnedRows = records.size();
         }
         return records;
     }

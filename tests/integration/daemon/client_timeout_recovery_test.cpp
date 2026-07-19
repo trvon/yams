@@ -429,10 +429,7 @@ TEST_CASE("Client timeout recovery: Error message quality",
     auto client = createClient(harness.socketPath());
 
     SECTION("Provides descriptive errors when daemon unavailable") {
-        ListRequest req1;
-        req1.limit = 10;
-        auto result1 = yams::cli::run_sync(client.list(req1), 2s);
-        REQUIRE(result1.has_value());
+        REQUIRE(listWithRetry(client));
 
         std::this_thread::sleep_for(500ms);
 
