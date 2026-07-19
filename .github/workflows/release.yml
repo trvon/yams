@@ -163,6 +163,7 @@ jobs:
             arch_container: true
     runs-on: ${{ matrix.runs_on }}
     env:
+      BUILD_DIR: build/release
       STAGE_DIR: stage
     steps:
       - name: Checkout
@@ -833,6 +834,21 @@ jobs:
               linux-arm64) ARCH="armv8" ;;
               linux-x86_64) ARCH="x86_64" ;;
             esac
+          fi
+
+          # Hosted runners already provide CMake. Model it as a Conan platform
+          # tool so cold ARM64 caches do not download another CMake from cmake.org.
+          if [ "${{ matrix.hosted }}" = "true" ]; then
+            SYSTEM_CMAKE_VERSION="$(cmake --version | sed -n -E '1s/^cmake version ([0-9]+\.[0-9]+\.[0-9]+).*$/\1/p')"
+            if [ -z "$SYSTEM_CMAKE_VERSION" ]; then
+              echo "Unable to detect the hosted CMake version" >&2
+              exit 1
+            fi
+            CI_HOST_PROFILE="${RUNNER_TEMP}/yams-conan-host-${{ matrix.suffix }}"
+            cp "$HOST_PROFILE" "$CI_HOST_PROFILE"
+            printf '\n[platform_tool_requires]\ncmake/%s\n' "$SYSTEM_CMAKE_VERSION" >> "$CI_HOST_PROFILE"
+            HOST_PROFILE="$CI_HOST_PROFILE"
+            echo "Using platform CMake ${SYSTEM_CMAKE_VERSION} via ${HOST_PROFILE}"
           fi
 
           # Use setup.sh with CI environment variables for consistent configuration
