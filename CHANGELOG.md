@@ -26,6 +26,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * download logic improvements and ci test fixes. Stagging download fixes seperate from search features ([2d5c662](https://github.com/trvon/yams/commit/2d5c6625eb4e794c878441bb052911baf91169e0))
 Full changelog: [CHANGELOG.md](https://github.com/trvon/yams/blob/v0.14.1/CHANGELOG.md)
 
+## [0.19.0](https://github.com/trvon/yams/compare/v0.18.1...v0.19.0) (2026-07-19)
+
+
+### ⚠ BREAKING CHANGES
+
+* **ingest:** callers using connectAsync or legacy MessageFramer and FrameReader helpers must migrate to connect, frame_message_into, feed, and get_frame.
+* **search:** removes query parser, result ranker, search filter, and SearchResults container APIs from yams_search.
+
+### Added
+
+* **search:** make topology-assisted retrieval the default ([#57](https://github.com/trvon/yams/issues/57)) ([a3d065d](https://github.com/trvon/yams/commit/a3d065dd8d8871a863badfc3fb4443df13cffaf4))
+
+
+### Fixed
+
+* **daemon:** stop shutdown log storm ([bb8fe66](https://github.com/trvon/yams/commit/bb8fe66dece0cabc96747bf2ecb1f2c2df9bb346))
+* **release:** repair package repo publish ([80738eb](https://github.com/trvon/yams/commit/80738eb3e8c5c93374b01b755472e58407665738))
+
+
+### Performance
+
+* **ingest:** harden daemon batching and shutdown ([#58](https://github.com/trvon/yams/issues/58)) ([ae15bf3](https://github.com/trvon/yams/commit/ae15bf317a0b7ab5b613bedf58a0b168564a8035))
+* **search:** bound topology routing and harden runtime paths ([#59](https://github.com/trvon/yams/issues/59)) ([7df64b1](https://github.com/trvon/yams/commit/7df64b1161ec51743ea6db4e2d69c953957d68c6))
+
 ## [0.18.1](https://github.com/trvon/yams/compare/v0.18.0...v0.18.1) (2026-07-05)
 
 
