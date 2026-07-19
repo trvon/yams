@@ -1108,6 +1108,14 @@ private:
             if (startLine == std::numeric_limits<std::size_t>::max() || startLine == 0) {
                 startLine = 1;
             }
+            if (startLine > lines.size()) {
+                snippet.mode = GraphContextSnippetMode::Omitted;
+                snippet.truncated = true;
+                truncated = true;
+                warnings.push_back("Omitted snippet for stale source location: " + file);
+                outFiles.push_back(std::move(snippet));
+                continue;
+            }
             YAMS_DCHECK(
                 startLine >= 1,
                 "graph explore snippet start line must be normalized to one-based indexing");
