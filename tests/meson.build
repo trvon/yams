@@ -1203,6 +1203,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_symspell_search_exe = executable('catch2_symspell_search',
+    files('unit/search/symspell_search_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_evidence_search_pipeline_exe = executable('catch2_evidence_search_pipeline',
     files('unit/search/evidence_search_pipeline_catch2_test.cpp'),
     include_directories: incs,
@@ -3300,6 +3309,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'search', 'yams-1yq'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 180
+  )
+
+  test('symspell_search', catch2_symspell_search_exe,
+    suite: ['catch2', 'unit', 'search', 'symspell'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
   )
 
   test('evidence_search_pipeline', catch2_evidence_search_pipeline_exe,

@@ -42,7 +42,9 @@ void SymSpellSearch::addTermsBatch(const std::vector<std::pair<std::string, int6
 
 std::vector<SymSpellSearch::SearchResult>
 SymSpellSearch::search(const std::string& query, const SearchOptions& options) const {
-    std::shared_lock lock(mutex_);
+    // The SQLiteStore implementation reuses prepared statements for lookup. Even read-only
+    // lookups mutate those statements (bind/step/reset), so concurrent readers must serialize.
+    std::unique_lock lock(mutex_);
 
     // Determine verbosity based on options
     symspell::Verbosity verbosity =
@@ -76,7 +78,7 @@ SymSpellSearch::search(const std::string& query, const SearchOptions& options) c
 }
 
 bool SymSpellSearch::hasExactMatch(std::string_view term) const {
-    std::shared_lock lock(mutex_);
+    std::unique_lock lock(mutex_);
     return symspell_->termExists(term);
 }
 

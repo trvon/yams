@@ -110,7 +110,8 @@ public:
      * @param options Search options
      * @return Vector of search results sorted by (distance, frequency desc)
      *
-     * Thread-safe: acquires shared lock
+     * Thread-safe: acquires exclusive lock because the SQLite-backed store
+     * caches prepared statements that are mutated during lookup.
      */
     std::vector<SearchResult> search(const std::string& query,
                                      const SearchOptions& options = SearchOptions{}) const;
@@ -120,7 +121,8 @@ public:
      * @param term The term to check
      * @return true if term exists
      *
-     * Thread-safe: acquires shared lock
+     * Thread-safe: acquires exclusive lock because the SQLite-backed store
+     * caches prepared statements that are mutated during lookup.
      */
     bool hasExactMatch(std::string_view term) const;
 
