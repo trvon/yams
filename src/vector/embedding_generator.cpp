@@ -38,7 +38,6 @@ namespace yams::vector {
 
 // Forward declarations
 class DaemonBackend;
-class HybridBackend;
 
 /**
  * DaemonBackend - Daemon IPC backend
@@ -534,112 +533,6 @@ private:
     mutable size_t cached_seq_len_ = 0;
 };
 
-class HybridBackend : public IEmbeddingBackend {
-public:
-    explicit HybridBackend(const EmbeddingConfig& config)
-        : config_(config), daemon_backend_(std::make_unique<DaemonBackend>(config)),
-          initialized_(false) {}
-
-    bool initialize() override {
-        YAMS_ZONE_SCOPED_N("HybridBackend::initialize");
-
-        if (initialized_) {
-            return true;
-        }
-
-        if (daemon_backend_->initialize()) {
-            initialized_ = true;
-            return true;
-        }
-
-        spdlog::error("HybridBackend: daemon unavailable (legacy alias of daemon backend)");
-        return false;
-    }
-
-    void shutdown() override {
-        daemon_backend_->shutdown();
-        initialized_ = false;
-        stats_ = GenerationStats{};
-    }
-
-    bool isInitialized() const override { return initialized_; }
-
-    Result<std::vector<float>> generateEmbedding(const std::string& text) override {
-        YAMS_ZONE_SCOPED_N("HybridBackend::generateEmbedding");
-
-        if (!daemon_backend_->isAvailable()) {
-            return Error{ErrorCode::NotSupported,
-                         "Daemon not available - start with 'yams daemon start'"};
-        }
-
-        auto result = daemon_backend_->generateEmbedding(text);
-        if (result) {
-            daemon_uses_++;
-            mergeStats(daemon_backend_->getStats());
-        }
-        return result;
-    }
-
-    Result<std::vector<std::vector<float>>>
-    generateEmbeddings(std::span<const std::string> texts) override {
-        YAMS_EMBEDDING_ZONE_BATCH(texts.size());
-
-        if (!daemon_backend_->isAvailable()) {
-            return Error{ErrorCode::NotSupported,
-                         "Daemon not available - start with 'yams daemon start'"};
-        }
-
-        auto result = daemon_backend_->generateEmbeddings(texts);
-        if (result) {
-            daemon_uses_++;
-            mergeStats(daemon_backend_->getStats());
-        }
-        return result;
-    }
-
-    size_t getEmbeddingDimension() const override {
-        return daemon_backend_->getEmbeddingDimension();
-    }
-
-    size_t getMaxSequenceLength() const override { return daemon_backend_->getMaxSequenceLength(); }
-
-    std::string getBackendName() const override {
-        return "Daemon (uses: " + std::to_string(daemon_uses_) + ")";
-    }
-
-    bool isAvailable() const override { return daemon_backend_->isAvailable(); }
-
-    GenerationStats getStats() const override { return stats_; }
-    void resetStats() override {
-        stats_.total_texts_processed.store(0);
-        stats_.total_tokens_processed.store(0);
-        stats_.total_inference_time.store(0);
-        stats_.avg_inference_time.store(0);
-        stats_.batch_count.store(0);
-        stats_.total_batches.store(0);
-        stats_.throughput_texts_per_sec.store(0.0);
-        stats_.throughput_tokens_per_sec.store(0.0);
-        daemon_uses_ = 0;
-    }
-
-private:
-    void mergeStats(const GenerationStats& backend_stats) {
-        stats_.total_texts_processed.store(backend_stats.total_texts_processed.load());
-        stats_.total_tokens_processed.store(backend_stats.total_tokens_processed.load());
-        stats_.total_inference_time.store(backend_stats.total_inference_time.load());
-        stats_.avg_inference_time.store(backend_stats.avg_inference_time.load());
-        stats_.batch_count.store(backend_stats.batch_count.load());
-        stats_.total_batches.store(backend_stats.total_batches.load());
-        stats_.updateThroughput();
-    }
-
-    EmbeddingConfig config_;
-    std::unique_ptr<DaemonBackend> daemon_backend_;
-    bool initialized_;
-    GenerationStats stats_;
-    mutable size_t daemon_uses_ = 0;
-};
-
 // =============================================================================
 // EmbeddingGenerator Implementation with Variant Backend
 // =============================================================================
@@ -976,53 +869,6 @@ EmbeddingGenerator::generateEmbeddings(const std::vector<std::string>& texts) {
     return pImpl ? pImpl->generateEmbeddings(texts) : std::vector<std::vector<float>>();
 }
 
-std::future<std::vector<float>>
-EmbeddingGenerator::generateEmbeddingAsync(const std::string& text) {
-    return std::async(std::launch::async, [this, text]() { return generateEmbedding(text); });
-}
-
-std::future<std::vector<std::vector<float>>>
-EmbeddingGenerator::generateEmbeddingsAsync(const std::vector<std::string>& texts) {
-    auto promise = std::make_shared<std::promise<std::vector<std::vector<float>>>>();
-    std::future<std::vector<std::vector<float>>> future = promise->get_future();
-
-    std::thread([this, texts, promise]() {
-        try {
-            promise->set_value(generateEmbeddings(texts));
-        } catch (...) {
-            try {
-                promise->set_exception(std::current_exception());
-            } catch (...) {
-                spdlog::debug(
-                    "EmbeddingGenerator::generateEmbeddingsAsync: promise already satisfied");
-            }
-        }
-    }).detach();
-
-    return future;
-}
-
-bool EmbeddingGenerator::loadModel([[maybe_unused]] const std::string& model_path) {
-    // Update config and reinitialize
-    // This is a simplified implementation
-    return initialize();
-}
-
-bool EmbeddingGenerator::switchModel([[maybe_unused]] const std::string& model_name,
-                                     const EmbeddingConfig& new_config) {
-    shutdown();
-    pImpl = std::make_unique<Impl>(new_config);
-    return initialize();
-}
-
-bool EmbeddingGenerator::isModelLoaded() const {
-    return isInitialized();
-}
-
-void EmbeddingGenerator::unloadModel() {
-    shutdown();
-}
-
 size_t EmbeddingGenerator::getEmbeddingDimension() const {
     return pImpl ? pImpl->getEmbeddingDimension() : 0;
 }
@@ -1045,11 +891,6 @@ std::string EmbeddingGenerator::getBackendName() const {
     }
 }
 
-void EmbeddingGenerator::updateConfig(const EmbeddingConfig& new_config) {
-    shutdown();
-    pImpl = std::make_unique<Impl>(new_config);
-}
-
 GenerationStats EmbeddingGenerator::getStats() const {
     return pImpl ? pImpl->getStats() : GenerationStats{};
 }
@@ -1065,7 +906,7 @@ bool EmbeddingGenerator::validateText(const std::string& text) const {
 }
 
 size_t EmbeddingGenerator::estimateTokenCount(const std::string& text) const {
-    return pImpl->estimateTokenCount(text);
+    return pImpl ? pImpl->estimateTokenCount(text) : 0;
 }
 
 std::string EmbeddingGenerator::getModelInfo() const {
@@ -1078,14 +919,13 @@ std::string EmbeddingGenerator::getModelInfo() const {
 }
 
 std::string EmbeddingGenerator::getLastError() const {
-    return pImpl->getLastError();
+    return pImpl ? pImpl->getLastError() : std::string{};
 }
 
 bool EmbeddingGenerator::hasError() const {
-    return pImpl->hasError();
+    return pImpl && pImpl->hasError();
 }
 
-// Factory function
 std::unique_ptr<EmbeddingGenerator> createEmbeddingGenerator(const EmbeddingConfig& config) {
     auto generator = std::make_unique<EmbeddingGenerator>(config);
     if (!generator->initialize()) {
@@ -1173,18 +1013,6 @@ std::string embeddingToString(const std::vector<float>& embedding, size_t max_va
     return oss.str();
 }
 
-EmbeddingConfig loadConfigFromFile([[maybe_unused]] const std::string& config_path) {
-    // TODO: Implement JSON loading
-    // For now, return default config
-    return EmbeddingConfig{};
-}
-
-bool saveConfigToFile([[maybe_unused]] const EmbeddingConfig& config,
-                      [[maybe_unused]] const std::string& config_path) {
-    // TODO: Implement JSON saving
-    return false;
-}
-
 std::vector<std::string> getAvailableModels(const std::string& models_dir) {
     std::vector<std::string> models;
 
@@ -1197,12 +1025,6 @@ std::vector<std::string> getAvailableModels(const std::string& models_dir) {
     }
 
     return models;
-}
-
-bool downloadModel([[maybe_unused]] const std::string& model_name,
-                   [[maybe_unused]] const std::string& target_dir) {
-    // TODO: Implement model downloading
-    return false;
 }
 
 } // namespace embedding_utils

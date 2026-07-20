@@ -3,9 +3,6 @@
 #include <yams/compat/thread_stop_compat.h>
 #include <yams/core/types.h>
 
-#include <simeon/concept_mining.hpp>
-#include <simeon/fragment_geometry.hpp>
-
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -14,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <span>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <unordered_map>
@@ -21,6 +19,7 @@
 
 namespace simeon {
 class Bm25Index;
+class ConceptIndex;
 class Encoder;
 class PmiEmbeddings;
 class QueryRouter;
@@ -30,6 +29,7 @@ class RetrievalStrategy;
 class StrategyRouter;
 class TextAdapter;
 struct QueryProfile;
+struct SemanticFragment;
 } // namespace simeon
 
 namespace yams::metadata {
@@ -130,13 +130,12 @@ public:
         std::size_t fragment_geometry_pmi_sample_bytes = 32ULL * 1024ULL * 1024ULL;
         std::uint32_t fragment_build_top_sentences = 6;
         std::uint32_t fragment_build_signature_terms = 8;
-        simeon::FragmentGeometryConfig fragment_geometry_config{};
 
         // PMI-based concept mining: discovers word-bigram concepts from the
         // corpus at finalize time and blends them into BM25 scores at query
         // time. Training-free; enabled by default for prose corpora.
         bool concept_mining_enabled = false;
-        simeon::ConceptConfig concept_config{};
+        float concept_weight = 0.5f;
 
         // When concept_mining_enabled is true and this callback is set,
         // the build thread calls fn(docId, entityText, confidence) for
@@ -177,11 +176,7 @@ public:
     bool hasStrategyRouter() const noexcept { return strategy_router_ != nullptr; }
     std::size_t doc_count() const noexcept { return doc_count_; }
     bool concept_mining_enabled() const noexcept { return cfg_.concept_mining_enabled; }
-    std::uint32_t concept_count() const noexcept {
-        if (concept_index_)
-            return concept_index_->size();
-        return 0;
-    }
+    std::uint32_t concept_count() const noexcept;
     const Config& config() const noexcept { return cfg_; }
     bool fragmentGeometryReady() const noexcept {
         return fragment_encoder_ != nullptr && !doc_frags_.empty();

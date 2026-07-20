@@ -183,7 +183,7 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config)
     spdlog::info("  PID file: {}", config_.pidFile.string());
     spdlog::info("  Log file: {}", config_.logFile.string());
 
-    // Let in-process components (e.g., EmbeddingGenerator/HybridBackend) know they are running
+    // Let in-process components such as EmbeddingGenerator know they are running.
     // inside the daemon so they can avoid creating a DaemonBackend and self-calling the IPC API.
 #ifndef _WIN32
     ::setenv("YAMS_IN_DAEMON", "1", 1); // NOLINT(concurrency-mt-unsafe)

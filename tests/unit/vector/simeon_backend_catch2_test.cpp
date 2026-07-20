@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <string>
+#include <utility>
 #include <vector>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
@@ -104,6 +105,18 @@ TEST_CASE("EmbeddingGenerator selects Simeon when configured directly", "[vector
     REQUIRE(gen.getEmbeddingDimension() == 128u);
 }
 
+TEST_CASE("EmbeddingGenerator moved-from observers report neutral state",
+          "[vector][embedding-generator][move][catch2]") {
+    EmbeddingGenerator source(make_cfg(128));
+    EmbeddingGenerator destination(std::move(source));
+
+    CHECK_FALSE(source.isInitialized());
+    CHECK((source.estimateTokenCount("moved-from") == 0));
+    CHECK((source.getLastError().empty()));
+    CHECK_FALSE(source.hasError());
+    CHECK((destination.getConfig().embedding_dim == 128));
+}
+
 TEST_CASE("EmbeddingGenerator selects Daemon via env override", "[vector][daemon]") {
     setenv("YAMS_EMBED_BACKEND", "daemon", 1);
 
@@ -143,6 +156,14 @@ TEST_CASE("EmbeddingGenerator maps onnxruntime env override to Daemon path", "[v
 TEST_CASE("EmbeddingGenerator maps OnnxRuntime config to Daemon path", "[vector][daemon]") {
     EmbeddingConfig cfg;
     cfg.backend = EmbeddingConfig::Backend::OnnxRuntime;
+
+    EmbeddingGenerator gen(cfg);
+    REQUIRE_THAT(gen.getBackendName(), StartsWith("Daemon"));
+}
+
+TEST_CASE("EmbeddingGenerator maps legacy Hybrid config to Daemon path", "[vector][daemon]") {
+    EmbeddingConfig cfg;
+    cfg.backend = EmbeddingConfig::Backend::Hybrid;
 
     EmbeddingGenerator gen(cfg);
     REQUIRE_THAT(gen.getBackendName(), StartsWith("Daemon"));

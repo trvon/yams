@@ -5,7 +5,6 @@
 #include <atomic>
 #include <chrono>
 #include <concepts>
-#include <future>
 #include <memory>
 #include <span>
 #include <string>
@@ -128,7 +127,6 @@ struct GenerationStats {
 // Forward declarations for backend implementations
 class IEmbeddingBackend;
 class DaemonBackend;
-class HybridBackend;
 
 /**
  * C++20 Concept for embedding backends
@@ -207,24 +205,12 @@ public:
     // Batch embedding generation (synchronous)
     std::vector<std::vector<float>> generateEmbeddings(const std::vector<std::string>& texts);
 
-    // Asynchronous embedding generation
-    std::future<std::vector<float>> generateEmbeddingAsync(const std::string& text);
-    std::future<std::vector<std::vector<float>>>
-    generateEmbeddingsAsync(const std::vector<std::string>& texts);
-
-    // Model management
-    bool loadModel(const std::string& model_path);
-    bool switchModel(const std::string& model_name, const EmbeddingConfig& new_config);
-    bool isModelLoaded() const;
-    void unloadModel();
-
     // Configuration and information
     size_t getEmbeddingDimension() const;
     size_t getMaxSequenceLength() const;
     const EmbeddingConfig& getConfig() const;
     // Backend identity for diagnostics
     std::string getBackendName() const;
-    void updateConfig(const EmbeddingConfig& new_config);
 
     // Statistics and monitoring
     GenerationStats getStats() const;
@@ -245,9 +231,10 @@ private:
 };
 
 /**
- * Factory function for creating embedding generators
+ * Factory function for creating and initializing an embedding generator.
  */
-std::unique_ptr<EmbeddingGenerator> createEmbeddingGenerator(const EmbeddingConfig& config = {});
+std::unique_ptr<EmbeddingGenerator>
+createEmbeddingGenerator(const EmbeddingConfig& config = {});
 
 /**
  * Utility functions for embedding operations
@@ -280,24 +267,9 @@ bool validateEmbedding(const std::vector<float>& embedding, size_t expected_dim)
 std::string embeddingToString(const std::vector<float>& embedding, size_t max_values = 10);
 
 /**
- * Load model configuration from JSON file
- */
-EmbeddingConfig loadConfigFromFile(const std::string& config_path);
-
-/**
- * Save model configuration to JSON file
- */
-bool saveConfigToFile(const EmbeddingConfig& config, const std::string& config_path);
-
-/**
  * Get available models in models directory
  */
 std::vector<std::string> getAvailableModels(const std::string& models_dir = "models");
-
-/**
- * Download model files (placeholder for future implementation)
- */
-bool downloadModel(const std::string& model_name, const std::string& target_dir);
 } // namespace embedding_utils
 
 } // namespace yams::vector

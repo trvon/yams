@@ -114,9 +114,7 @@ TEST_CASE("SimeonLexicalBackend default config uses SabSmooth", "[search][simeon
     CHECK(cfg.fragment_geometry_max_corpus_bytes == 64ULL * 1024ULL * 1024ULL);
     CHECK(cfg.fragment_geometry_pmi_sample_docs == 8192u);
     CHECK(cfg.fragment_geometry_pmi_sample_bytes == 32ULL * 1024ULL * 1024ULL);
-    CHECK(cfg.fragment_geometry_config.use_phss);
-    CHECK(cfg.fragment_geometry_config.phss_config.criterion ==
-          simeon::PhssConfig::Criterion::LargestGapApprox);
+    CHECK(cfg.concept_weight == 0.5f);
 }
 
 TEST_CASE("SimeonLexicalBackend buildAsync flips ready on small corpus",

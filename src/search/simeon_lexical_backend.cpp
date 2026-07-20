@@ -293,6 +293,10 @@ SimeonLexicalBackend::~SimeonLexicalBackend() {
     }
 }
 
+std::uint32_t SimeonLexicalBackend::concept_count() const noexcept {
+    return concept_index_ ? concept_index_->size() : 0;
+}
+
 Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::MetadataRepository> repo) {
     if (!repo) {
         return Error{ErrorCode::InvalidArgument, "SimeonLexicalBackend: null metadata repo"};
@@ -500,9 +504,10 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
                     docViews.reserve(conceptTexts.size());
                     for (const auto& t : conceptTexts)
                         docViews.emplace_back(t);
-                    conceptIdx = std::make_unique<simeon::ConceptIndex>(
-                        simeon::mine_concepts(*primary, std::span<const std::string_view>(docViews),
-                                              cfg_.concept_config));
+                    simeon::ConceptConfig conceptConfig;
+                    conceptConfig.concept_weight = cfg_.concept_weight;
+                    conceptIdx = std::make_unique<simeon::ConceptIndex>(simeon::mine_concepts(
+                        *primary, std::span<const std::string_view>(docViews), conceptConfig));
                     const auto cmMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                           std::chrono::steady_clock::now() - cmt0)
                                           .count();
@@ -702,7 +707,7 @@ SimeonLexicalBackend::score(std::string_view query,
     // cfg_.score_cache_entries > 0 and no extra features are active.
     const bool cacheable = cfg_.score_cache_entries > 0 && !cfg_.bm25_variants_rrf &&
                            !cfg_.fragment_geometry_enabled &&
-                           (!concept_index_ || cfg_.concept_config.concept_weight <= 0.0f);
+                           (!concept_index_ || cfg_.concept_weight <= 0.0f);
     const auto currentDocCount = doc_count_;
     const auto currentConceptCount = concept_index_ ? concept_index_->size() : 0u;
     const std::string queryKey(query);
@@ -742,7 +747,7 @@ SimeonLexicalBackend::score(std::string_view query,
                                         query, std::span<float>{full});
     } else if (cfg_.fragment_geometry_enabled && fragment_encoder_ && !doc_frags_.empty()) {
         full = simeon::score_fragment_geometry(query, *index_, *fragment_encoder_, doc_frags_,
-                                               cfg_.fragment_geometry_config);
+                                               simeon::FragmentGeometryConfig{});
         lexical.assign(currentDocCount, 0.0f);
         index_->score(query, std::span<float>{lexical});
     } else {
@@ -750,10 +755,9 @@ SimeonLexicalBackend::score(std::string_view query,
     }
 
     // Blend concept scores when available (sparse: only matched-concept docs).
-    if (concept_index_ && cfg_.concept_config.concept_weight > 0.0f) {
+    if (concept_index_ && cfg_.concept_weight > 0.0f) {
         YAMS_ZONE_SCOPED_N("simeon::concept_blend");
-        concept_index_->blend_into(query, std::span<float>{full},
-                                   cfg_.concept_config.concept_weight);
+        concept_index_->blend_into(query, std::span<float>{full}, cfg_.concept_weight);
     }
 
     std::vector<float> out;
@@ -844,7 +848,7 @@ SimeonLexicalBackend::scoreRouted(std::string_view query,
                 cfg_.router_enabled ? simeon::recipe_name(recipe) : variantLabel(cfg_.variant);
             full = score_bm25(*chosen);
         } else {
-            auto geomCfg = cfg_.fragment_geometry_config;
+            simeon::FragmentGeometryConfig geomCfg;
             geomCfg.use_phss = true;
             geomCfg.phss_config.criterion = simeon::PhssConfig::Criterion::LargestGapApprox;
             geomCfg.top_fragments_per_doc =
@@ -871,10 +875,9 @@ SimeonLexicalBackend::scoreRouted(std::string_view query,
     }
 
     // Blend concept scores when available
-    if (concept_index_ && cfg_.concept_config.concept_weight > 0.0f) {
+    if (concept_index_ && cfg_.concept_weight > 0.0f) {
         YAMS_ZONE_SCOPED_N("simeon::concept_blend");
-        concept_index_->blend_into(query, std::span<float>{full},
-                                   cfg_.concept_config.concept_weight);
+        concept_index_->blend_into(query, std::span<float>{full}, cfg_.concept_weight);
     }
 
     RescoreDecision decision;
@@ -965,10 +968,9 @@ SimeonLexicalBackend::scoreStrategyRouted(std::string_view query,
     recipe_label = "StrategyRouted";
 
     // Blend concept scores when available.
-    if (concept_index_ && cfg_.concept_config.concept_weight > 0.0f) {
+    if (concept_index_ && cfg_.concept_weight > 0.0f) {
         YAMS_ZONE_SCOPED_N("simeon::concept_blend");
-        concept_index_->blend_into(query, std::span<float>{full},
-                                   cfg_.concept_config.concept_weight);
+        concept_index_->blend_into(query, std::span<float>{full}, cfg_.concept_weight);
     }
 
     RescoreDecision decision;
@@ -1041,10 +1043,9 @@ SimeonLexicalBackend::scoreBanditRouted(std::string_view query, std::string_view
     }
 
     // Blend concept scores when available.
-    if (concept_index_ && cfg_.concept_config.concept_weight > 0.0f) {
+    if (concept_index_ && cfg_.concept_weight > 0.0f) {
         YAMS_ZONE_SCOPED_N("simeon::concept_blend");
-        concept_index_->blend_into(query, std::span<float>{full},
-                                   cfg_.concept_config.concept_weight);
+        concept_index_->blend_into(query, std::span<float>{full}, cfg_.concept_weight);
     }
 
     RescoreDecision decision;
