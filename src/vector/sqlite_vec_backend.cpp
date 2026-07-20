@@ -40,7 +40,6 @@
 #include <sqlite-vec-cpp/distances/cosine.hpp>
 #include <sqlite-vec-cpp/distances/inner_product.hpp>
 #include <sqlite-vec-cpp/distances/l2.hpp>
-#include <sqlite-vec-cpp/index/hnsw_persistence.hpp>
 #include <sqlite-vec-cpp/sqlite/registration.hpp>
 #include <sqlite-vec-cpp/sqlite/vec0_module.hpp>
 
@@ -54,6 +53,11 @@ struct SimeonPqIndexState {
     std::vector<std::uint8_t> codes;
     std::size_t rerank_factor = 2;
     std::size_t document_index_payload_bytes = 0;
+    std::uint64_t source_generation = 0;
+    sqlite3_int64 persisted_total_changes = -1;
+    sqlite3_int64 persisted_data_version = -1;
+    bool exact_fallback = false;
+    bool persisted_snapshot = false;
 
     explicit SimeonPqIndexState(simeon::PQConfig cfg) : pq(cfg) {}
 
@@ -137,8 +141,6 @@ int count_live_statements(sqlite3* db) {
     }
     return count;
 }
-
-thread_local std::vector<sqlite3_stmt*> tl_deferred_finalize;
 
 // Helper to safely get string from sqlite column (avoids GNU ?: extension)
 inline std::string safeColumnText(sqlite3_stmt* stmt, int col) {
@@ -388,6 +390,17 @@ struct StmtResetGuard {
     StmtResetGuard& operator=(const StmtResetGuard&) = delete;
 };
 
+struct StmtFinalizeGuard {
+    sqlite3_stmt* stmt;
+    explicit StmtFinalizeGuard(sqlite3_stmt* s) : stmt(s) {}
+    ~StmtFinalizeGuard() {
+        if (stmt)
+            sqlite3_finalize(stmt);
+    }
+    StmtFinalizeGuard(const StmtFinalizeGuard&) = delete;
+    StmtFinalizeGuard& operator=(const StmtFinalizeGuard&) = delete;
+};
+
 // SQL statements
 constexpr const char* kCreateVectorsTable = R"sql(
 CREATE TABLE IF NOT EXISTS vectors (
@@ -446,16 +459,43 @@ CREATE TABLE IF NOT EXISTS turboquant_quantizer_meta (
 constexpr const char* kCreateSimeonPqMeta = R"sql(
 CREATE TABLE IF NOT EXISTS simeon_pq_meta (
     dim INTEGER PRIMARY KEY,
-    format_version INTEGER NOT NULL DEFAULT 1,
+    format_version INTEGER NOT NULL DEFAULT 2,
     m INTEGER NOT NULL,
     k INTEGER NOT NULL,
     seed INTEGER NOT NULL,
+    train_limit INTEGER NOT NULL DEFAULT 0,
+    source_generation INTEGER NOT NULL DEFAULT -1,
     rerank_factor INTEGER NOT NULL,
     trained INTEGER NOT NULL DEFAULT 0,
     vector_count INTEGER NOT NULL,
     codebooks_blob BLOB NOT NULL,
     updated_at INTEGER NOT NULL DEFAULT (unixepoch())
 ))sql";
+
+constexpr const char* kCreateVectorIndexGeneration = R"sql(
+CREATE TABLE IF NOT EXISTS vector_index_generation (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    generation INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO vector_index_generation (id, generation) VALUES (1, 0);
+)sql";
+
+constexpr const char* kCreateVectorIndexGenerationTriggers = R"sql(
+CREATE TRIGGER IF NOT EXISTS vectors_index_generation_insert
+AFTER INSERT ON vectors BEGIN
+    UPDATE vector_index_generation SET generation = generation + 1 WHERE id = 1;
+END;
+CREATE TRIGGER IF NOT EXISTS vectors_index_generation_update_v2
+AFTER UPDATE OF chunk_id, document_hash, embedding, embedding_dim, quantized_format,
+                quantized_bits, quantized_seed, quantized_packed_codes ON vectors BEGIN
+    UPDATE vector_index_generation SET generation = generation + 1 WHERE id = 1;
+END;
+DROP TRIGGER IF EXISTS vectors_index_generation_update;
+CREATE TRIGGER IF NOT EXISTS vectors_index_generation_delete
+AFTER DELETE ON vectors BEGIN
+    UPDATE vector_index_generation SET generation = generation + 1 WHERE id = 1;
+END;
+)sql";
 
 constexpr const char* kCreateSimeonPqCodes = R"sql(
 CREATE TABLE IF NOT EXISTS simeon_pq_codes (
@@ -509,12 +549,8 @@ FROM vectors WHERE document_hash = ?
 constexpr const char* kDeleteByChunkId = "DELETE FROM vectors WHERE chunk_id = ?";
 constexpr const char* kDeleteByDocumentHash = "DELETE FROM vectors WHERE document_hash = ?";
 constexpr const char* kGetRowidByChunkId = "SELECT rowid FROM vectors WHERE chunk_id = ?";
-constexpr const char* kGetRowidsByDocumentHash =
-    "SELECT rowid FROM vectors WHERE document_hash = ?";
 constexpr const char* kCountVectors = "SELECT COUNT(*) FROM vectors";
 constexpr const char* kHasEmbedding = "SELECT 1 FROM vectors WHERE document_hash = ? LIMIT 1";
-constexpr const char* kSelectFilterByRowid =
-    "SELECT document_hash, metadata FROM vectors WHERE rowid = ?";
 constexpr const char* kTableExists =
     "SELECT name FROM sqlite_master WHERE type='table' AND name='vectors'";
 
@@ -645,6 +681,10 @@ public:
         return config_.search_engine == VectorSearchEngine::SimeonPqAdc;
     }
 
+    bool usesExactSearchEngine() const {
+        return config_.search_engine == VectorSearchEngine::ExactScan;
+    }
+
     std::uint32_t normalizedSimeonPqSubquantizers(size_t dim) const {
         YAMS_PRECONDITION(config_.simeon_pq_subquantizers <=
                               static_cast<size_t>(std::numeric_limits<std::uint32_t>::max()),
@@ -695,6 +735,57 @@ public:
         for (size_t dim : dims) {
             markSimeonPqDimDirtyUnlocked(dim);
         }
+    }
+
+    std::optional<sqlite3_int64> sqliteDataVersionUnlocked() const {
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, "PRAGMA data_version", -1, &stmt, nullptr) != SQLITE_OK) {
+            return std::nullopt;
+        }
+        StmtFinalizeGuard finalize(stmt);
+        if (sqlite3_step(stmt) != SQLITE_ROW) {
+            return std::nullopt;
+        }
+        return sqlite3_column_int64(stmt, 0);
+    }
+
+    bool stampPersistedBackingStoreUnlocked(SimeonPqIndexState& state) const {
+        const auto dataVersion = sqliteDataVersionUnlocked();
+        if (!dataVersion) {
+            state.persisted_total_changes = -1;
+            state.persisted_data_version = -1;
+            return false;
+        }
+        state.persisted_total_changes = sqlite3_total_changes64(db_);
+        state.persisted_data_version = *dataVersion;
+        return true;
+    }
+
+    bool persistedBackingStoreUnchangedUnlocked(const SimeonPqIndexState& state) const {
+        if (state.persisted_total_changes < 0 || state.persisted_data_version < 0 ||
+            sqlite3_total_changes64(db_) != state.persisted_total_changes) {
+            return false;
+        }
+        const auto dataVersion = sqliteDataVersionUnlocked();
+        return dataVersion && *dataVersion == state.persisted_data_version;
+    }
+
+    bool hasCurrentSimeonPqStateUnlocked(size_t dim) {
+        const auto it = simeon_pq_indices_.find(dim);
+        if (it == simeon_pq_indices_.end() || !it->second) {
+            return false;
+        }
+        if (it->second->exact_fallback) {
+            return true;
+        }
+        std::uint64_t currentGeneration = 0;
+        return detail::loadVectorIndexGeneration(db_, currentGeneration) &&
+               currentGeneration == it->second->source_generation;
+    }
+
+    bool hasReadyCurrentSimeonPqStateUnlocked(size_t dim) {
+        return simeon_pq_ready_dims_.contains(dim) && !simeon_pq_dirty_dims_.contains(dim) &&
+               hasCurrentSimeonPqStateUnlocked(dim);
     }
 
     Result<void> initialize(const std::string& db_path) {
@@ -800,6 +891,13 @@ public:
                 bool exists = (rc == SQLITE_ROW);
                 sqlite3_finalize(check_stmt);
                 if (exists) {
+                    auto persistenceSchema = ensurePersistenceSchema();
+                    if (!persistenceSchema) {
+                        sqlite3_close_v2(db_);
+                        db_ = nullptr;
+                        initialized_.store(false, std::memory_order_release);
+                        return persistenceSchema.error();
+                    }
                     prepareStatements();
                 }
             }
@@ -910,12 +1008,119 @@ public:
             sqlite3_free(err_msg);
             return Error{ErrorCode::DatabaseError, "Failed to ensure simeon_pq_meta table: " + err};
         }
+
+        const auto columnExists = [&](const char* column) -> Result<bool> {
+            sqlite3_stmt* stmt = nullptr;
+            if (sqlite3_prepare_v2(db_, "PRAGMA table_info(simeon_pq_meta)", -1, &stmt, nullptr) !=
+                SQLITE_OK) {
+                return Error{ErrorCode::DatabaseError,
+                             std::string("Failed to inspect simeon_pq_meta: ") +
+                                 sqlite3_errmsg(db_)};
+            }
+            bool found = false;
+            int stepRc = SQLITE_OK;
+            while ((stepRc = sqlite3_step(stmt)) == SQLITE_ROW) {
+                const auto* name = sqlite3_column_text(stmt, 1);
+                if (name != nullptr &&
+                    std::string_view(reinterpret_cast<const char*>(name)) == column) {
+                    found = true;
+                    break;
+                }
+            }
+            sqlite3_finalize(stmt);
+            if (stepRc != SQLITE_ROW && stepRc != SQLITE_DONE) {
+                return Error{ErrorCode::DatabaseError,
+                             std::string("Failed to inspect simeon_pq_meta columns: ") +
+                                 sqlite3_errmsg(db_)};
+            }
+            return found;
+        };
+        const auto ensureColumn = [&](const char* column, const char* ddl) -> Result<void> {
+            auto exists = columnExists(column);
+            if (!exists) {
+                return exists.error();
+            }
+            if (exists.value()) {
+                return Result<void>{};
+            }
+            char* alterError = nullptr;
+            const int alterRc = sqlite3_exec(db_, ddl, nullptr, nullptr, &alterError);
+            if (alterRc != SQLITE_OK) {
+                std::string error = alterError ? alterError : "Unknown error";
+                sqlite3_free(alterError);
+                return Error{ErrorCode::DatabaseError,
+                             std::string("Failed to migrate simeon_pq_meta column ") + column +
+                                 ": " + error};
+            }
+            return Result<void>{};
+        };
+        if (auto result = ensureColumn(
+                "train_limit",
+                "ALTER TABLE simeon_pq_meta ADD COLUMN train_limit INTEGER NOT NULL DEFAULT 0");
+            !result) {
+            return result;
+        }
+        if (auto result = ensureColumn(
+                "source_generation",
+                "ALTER TABLE simeon_pq_meta ADD COLUMN source_generation INTEGER NOT NULL "
+                "DEFAULT -1");
+            !result) {
+            return result;
+        }
         rc = sqlite3_exec(db_, kCreateSimeonPqCodes, nullptr, nullptr, &err_msg);
         if (rc != SQLITE_OK) {
             std::string err = err_msg ? err_msg : "Unknown error";
             sqlite3_free(err_msg);
             return Error{ErrorCode::DatabaseError,
                          "Failed to ensure simeon_pq_codes table: " + err};
+        }
+        // Generation state and all mutation triggers form one correctness boundary. Install them
+        // under a write transaction so another connection cannot mutate vectors after the row is
+        // created but before every trigger is active. Respect a transaction already owned by the
+        // caller rather than committing or rolling it back here.
+        const bool ownsGenerationSchemaTransaction = sqlite3_get_autocommit(db_) != 0;
+        const auto executeGenerationSchemaStep = [&](const char* sql,
+                                                     std::string_view action) -> Result<void> {
+            char* stepError = nullptr;
+            const int stepRc = sqlite3_exec(db_, sql, nullptr, nullptr, &stepError);
+            if (stepRc == SQLITE_OK) {
+                return Result<void>{};
+            }
+            std::string detail = stepError ? stepError : "Unknown error";
+            sqlite3_free(stepError);
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to " + std::string(action) + ": " + detail};
+        };
+        const auto rollbackOwnedGenerationSchemaTransaction = [&] {
+            if (ownsGenerationSchemaTransaction) {
+                sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+            }
+        };
+
+        if (ownsGenerationSchemaTransaction) {
+            auto begin = executeGenerationSchemaStep("BEGIN IMMEDIATE", "begin generation schema");
+            if (!begin) {
+                return begin.error();
+            }
+        }
+        if (auto table = executeGenerationSchemaStep(kCreateVectorIndexGeneration,
+                                                     "ensure vector index generation table");
+            !table) {
+            rollbackOwnedGenerationSchemaTransaction();
+            return table.error();
+        }
+        if (auto triggers = executeGenerationSchemaStep(kCreateVectorIndexGenerationTriggers,
+                                                        "ensure vector index generation triggers");
+            !triggers) {
+            rollbackOwnedGenerationSchemaTransaction();
+            return triggers.error();
+        }
+        if (ownsGenerationSchemaTransaction) {
+            auto commit = executeGenerationSchemaStep("COMMIT", "commit generation schema");
+            if (!commit) {
+                rollbackOwnedGenerationSchemaTransaction();
+                return commit.error();
+            }
         }
         return Result<void>{};
     }
@@ -1270,6 +1475,11 @@ public:
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
+        if (usesExactSearchEngine()) {
+            return bruteForceSearchUnlocked(query_embedding, k, similarity_threshold, document_hash,
+                                            candidate_hashes, metadata_filters, diagnostics);
+        }
+
         if (usesVec0SearchEngine()) {
             const size_t query_dim = query_embedding.size();
 
@@ -1285,10 +1495,6 @@ public:
                 std::unique_lock write_lock(mutex_);
                 auto ready = ensureVec0ReadyUnlocked(query_dim);
                 write_lock.unlock();
-                for (auto* s : tl_deferred_finalize) {
-                    sqlite3_finalize(s);
-                }
-                tl_deferred_finalize.clear();
                 lock.lock();
                 if (!ready) {
                     return ready.error();
@@ -1334,26 +1540,42 @@ public:
                                                 diagnostics);
             }
 
-            if (!simeon_pq_ready_dims_.contains(query_dim) ||
-                simeon_pq_dirty_dims_.contains(query_dim) ||
-                !simeon_pq_indices_.contains(query_dim)) {
+            if (!hasReadyCurrentSimeonPqStateUnlocked(query_dim)) {
                 lock.unlock();
                 std::unique_lock write_lock(mutex_);
                 auto ready = ensureSimeonPqReadyUnlocked(query_dim);
                 write_lock.unlock();
-                for (auto* s : tl_deferred_finalize) {
-                    sqlite3_finalize(s);
-                }
-                tl_deferred_finalize.clear();
                 lock.lock();
                 if (!ready) {
                     return ready.error();
                 }
             }
 
-            return simeonPqSearchUnlocked(query_embedding, k, similarity_threshold,
-                                          candidate_hashes.empty() ? nullptr : &candidate_hashes,
-                                          diagnostics);
+            // A second backend can commit after the first readiness check. Never serve a stale
+            // compressed snapshot; instrumentation profiles that suppress rebuilding retain an
+            // authoritative exact-search fallback.
+            if (!hasReadyCurrentSimeonPqStateUnlocked(query_dim)) {
+                return bruteForceSearchUnlocked(query_embedding, k, similarity_threshold,
+                                                document_hash, candidate_hashes, metadata_filters,
+                                                diagnostics);
+            }
+
+            auto result = simeonPqSearchUnlocked(
+                query_embedding, k, similarity_threshold,
+                candidate_hashes.empty() ? nullptr : &candidate_hashes, diagnostics);
+            if (!result) {
+                return result.error();
+            }
+            // The generation may change after readiness validation while ADC candidates are
+            // being materialized from the live vectors table. Validate again at the return
+            // boundary so a search can be linearized before a concurrent commit, or discard the
+            // mixed snapshot and recompute from the authoritative table.
+            if (!hasReadyCurrentSimeonPqStateUnlocked(query_dim)) {
+                return bruteForceSearchUnlocked(query_embedding, k, similarity_threshold,
+                                                document_hash, candidate_hashes, metadata_filters,
+                                                diagnostics);
+            }
+            return result;
         }
 
         return Error{ErrorCode::InvalidOperation, "no search engine configured"};
@@ -1399,16 +1621,26 @@ public:
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
+        if (usesExactSearchEngine()) {
+            std::vector<std::vector<VectorRecord>> results;
+            results.reserve(query_embeddings.size());
+            for (const auto& query_embedding : query_embeddings) {
+                auto result = bruteForceSearchUnlocked(query_embedding, k, similarity_threshold,
+                                                       std::nullopt, {}, {});
+                if (!result) {
+                    return result.error();
+                }
+                results.push_back(std::move(result.value()));
+            }
+            return results;
+        }
+
         if (usesVec0SearchEngine()) {
             if (!vec0_ready_dims_.contains(query_dim) || vec0_dirty_dims_.contains(query_dim)) {
                 lock.unlock();
                 std::unique_lock write_lock(mutex_);
                 auto ready = ensureVec0ReadyUnlocked(query_dim);
                 write_lock.unlock();
-                for (auto* s : tl_deferred_finalize) {
-                    sqlite3_finalize(s);
-                }
-                tl_deferred_finalize.clear();
                 lock.lock();
                 if (!ready) {
                     return ready.error();
@@ -1428,17 +1660,11 @@ public:
         }
 
         if (usesSimeonPqSearchEngine()) {
-            if (!simeon_pq_ready_dims_.contains(query_dim) ||
-                simeon_pq_dirty_dims_.contains(query_dim) ||
-                !simeon_pq_indices_.contains(query_dim)) {
+            if (!hasReadyCurrentSimeonPqStateUnlocked(query_dim)) {
                 lock.unlock();
                 std::unique_lock write_lock(mutex_);
                 auto ready = ensureSimeonPqReadyUnlocked(query_dim);
                 write_lock.unlock();
-                for (auto* s : tl_deferred_finalize) {
-                    sqlite3_finalize(s);
-                }
-                tl_deferred_finalize.clear();
                 lock.lock();
                 if (!ready) {
                     return ready.error();
@@ -1447,12 +1673,38 @@ public:
 
             std::vector<std::vector<VectorRecord>> results;
             results.reserve(query_embeddings.size());
+            if (!hasReadyCurrentSimeonPqStateUnlocked(query_dim)) {
+                for (const auto& query_embedding : query_embeddings) {
+                    auto result = bruteForceSearchUnlocked(query_embedding, k, similarity_threshold,
+                                                           std::nullopt, {}, {});
+                    if (!result) {
+                        return result.error();
+                    }
+                    results.push_back(std::move(result.value()));
+                }
+                return results;
+            }
             for (const auto& query_embedding : query_embeddings) {
                 auto result = simeonPqSearchUnlocked(query_embedding, k, similarity_threshold);
                 if (!result) {
                     return result.error();
                 }
                 results.push_back(std::move(result.value()));
+            }
+            // Keep compressed results within one PQ vector-index generation. A concurrent vector
+            // commit during any query invalidates every PQ result in the batch, so discard them and
+            // rerun each query coherently against the authoritative table. This does not promise a
+            // database-wide snapshot spanning all exact fallback queries.
+            if (!hasReadyCurrentSimeonPqStateUnlocked(query_dim)) {
+                results.clear();
+                for (const auto& query_embedding : query_embeddings) {
+                    auto result = bruteForceSearchUnlocked(query_embedding, k, similarity_threshold,
+                                                           std::nullopt, {}, {});
+                    if (!result) {
+                        return result.error();
+                    }
+                    results.push_back(std::move(result.value()));
+                }
             }
             return results;
         }
@@ -1664,6 +1916,134 @@ FROM vectors WHERE level = ?
         return hashes;
     }
 
+    Result<std::vector<std::string>> getStaleEmbeddings(const std::string& modelId,
+                                                        const std::string& modelVersion) {
+        std::shared_lock lock(mutex_);
+        if (!db_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        static constexpr const char* kSql = R"sql(
+SELECT chunk_id
+FROM vectors
+WHERE is_stale = 1
+  AND (?1 = '' OR model_id = ?1)
+  AND (?2 = '' OR model_version = ?2)
+ORDER BY embedded_at DESC, rowid ASC
+)sql";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, kSql, -1, &stmt, nullptr) != SQLITE_OK) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string{"Failed to prepare stale embedding query: "} +
+                             sqlite3_errmsg(db_)};
+        }
+        StmtFinalizeGuard finalize(stmt);
+        sqlite3_bind_text(stmt, 1, modelId.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, modelVersion.c_str(), -1, SQLITE_TRANSIENT);
+
+        std::vector<std::string> chunkIds;
+        int rc = SQLITE_OK;
+        while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+            const char* chunkId = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+            if (chunkId != nullptr) {
+                chunkIds.emplace_back(chunkId);
+            }
+        }
+        if (rc != SQLITE_DONE) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string{"Failed to read stale embeddings: "} + sqlite3_errmsg(db_)};
+        }
+        return chunkIds;
+    }
+
+    Result<std::vector<VectorRecord>> getEmbeddingsByVersion(const std::string& modelVersion,
+                                                             size_t limit) {
+        std::shared_lock lock(mutex_);
+        if (!db_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        static constexpr const char* kSql = R"sql(
+SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
+       start_offset, end_offset, metadata,
+       model_id, model_version, embedding_version, content_hash,
+       created_at, embedded_at, is_stale, level,
+       source_chunk_ids, parent_document_hash, child_document_hashes,
+       quantized_format, quantized_bits, quantized_seed, quantized_packed_codes
+FROM vectors
+WHERE model_version = ?1
+ORDER BY embedded_at DESC, rowid ASC
+LIMIT ?2
+)sql";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, kSql, -1, &stmt, nullptr) != SQLITE_OK) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string{"Failed to prepare embedding version query: "} +
+                             sqlite3_errmsg(db_)};
+        }
+        StmtFinalizeGuard finalize(stmt);
+        sqlite3_bind_text(stmt, 1, modelVersion.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(limit));
+
+        std::vector<VectorRecord> records;
+        records.reserve(limit);
+        int rc = SQLITE_OK;
+        while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+            records.push_back(recordFromStatement(stmt));
+        }
+        if (rc != SQLITE_DONE) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string{"Failed to read embeddings by version: "} +
+                             sqlite3_errmsg(db_)};
+        }
+        return records;
+    }
+
+    Result<void> markAsStale(const std::string& chunkId) {
+        std::unique_lock lock(mutex_);
+        if (!db_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        sqlite3_stmt* existsStmt = nullptr;
+        static constexpr const char* kExistsSql =
+            "SELECT 1 FROM vectors WHERE chunk_id = ? LIMIT 1";
+        if (sqlite3_prepare_v2(db_, kExistsSql, -1, &existsStmt, nullptr) != SQLITE_OK) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string{"Failed to prepare stale existence query: "} +
+                             sqlite3_errmsg(db_)};
+        }
+        {
+            StmtFinalizeGuard finalize(existsStmt);
+            sqlite3_bind_text(existsStmt, 1, chunkId.c_str(), -1, SQLITE_TRANSIENT);
+            const int rc = sqlite3_step(existsStmt);
+            if (rc == SQLITE_DONE) {
+                return Error{ErrorCode::NotFound, "Vector not found for chunk_id: " + chunkId};
+            }
+            if (rc != SQLITE_ROW) {
+                return Error{ErrorCode::DatabaseError,
+                             std::string{"Failed to read stale embedding target: "} +
+                                 sqlite3_errmsg(db_)};
+            }
+        }
+
+        sqlite3_stmt* updateStmt = nullptr;
+        static constexpr const char* kUpdateSql =
+            "UPDATE vectors SET is_stale = 1 WHERE chunk_id = ?";
+        if (sqlite3_prepare_v2(db_, kUpdateSql, -1, &updateStmt, nullptr) != SQLITE_OK) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string{"Failed to prepare stale update statement: "} +
+                             sqlite3_errmsg(db_)};
+        }
+        StmtFinalizeGuard finalize(updateStmt);
+        sqlite3_bind_text(updateStmt, 1, chunkId.c_str(), -1, SQLITE_TRANSIENT);
+        if (const int rc = stepWithRetry(updateStmt); rc != SQLITE_DONE) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string{"Failed to mark vector as stale: "} + sqlite3_errmsg(db_)};
+        }
+        return {};
+    }
+
     Result<size_t> getVectorCount() {
         std::shared_lock lock(mutex_);
 
@@ -1671,6 +2051,7 @@ FROM vectors WHERE level = ?
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
+        std::lock_guard stmt_lock(stmt_mutex_);
         if (stmt_count_) {
             sqlite3_reset(stmt_count_);
             StmtResetGuard guard(stmt_count_);
@@ -1690,6 +2071,7 @@ FROM vectors WHERE level = ?
         }
 
         VectorDatabaseStats stats;
+        std::lock_guard stmt_lock(stmt_mutex_);
 
         // Get vector count
         if (stmt_count_) {
@@ -1725,6 +2107,9 @@ FROM vectors WHERE level = ?
         }
 
         const auto start = std::chrono::steady_clock::now();
+        if (usesExactSearchEngine()) {
+            return Result<void>{};
+        }
         if (usesVec0SearchEngine()) {
             auto result = rebuildVec0IndicesUnlocked();
             if (!result) {
@@ -1734,8 +2119,6 @@ FROM vectors WHERE level = ?
                                    std::chrono::steady_clock::now() - start)
                                    .count();
             spdlog::info("[vec0] buildIndex completed in {} ms", durMs);
-            // Persist ANN index so restarts avoid O(n log n) rebuild
-            persistVec0AnnIndexUnlocked();
             return Result<void>{};
         }
         if (usesSimeonPqSearchEngine()) {
@@ -1765,6 +2148,10 @@ FROM vectors WHERE level = ?
             return Result<void>{};
         }
 
+        if (usesExactSearchEngine()) {
+            return Result<void>{};
+        }
+
         if (usesVec0SearchEngine()) {
             auto rebuild = rebuildVec0IndicesUnlocked();
             if (!rebuild) {
@@ -1773,26 +2160,24 @@ FROM vectors WHERE level = ?
             return warmVec0IndicesUnlocked();
         }
         if (usesSimeonPqSearchEngine()) {
-            auto dims = queryVectorDimsUnlocked();
+            auto dimsResult = queryVectorDimsUnlocked();
+            if (!dimsResult) {
+                return dimsResult.error();
+            }
+            auto dims = std::move(dimsResult.value());
             if (dims.empty()) {
                 return Result<void>{};
             }
             for (size_t dim : dims) {
-                if (simeon_pq_ready_dims_.contains(dim) && !simeon_pq_dirty_dims_.contains(dim) &&
-                    simeon_pq_indices_.contains(dim)) {
+                if (hasReadyCurrentSimeonPqStateUnlocked(dim)) {
                     continue;
                 }
-                // Attempt to reload the persisted index first: loading the codebooks
-                // from disk clears the dirty flag. This avoids spurious "dirty" errors
-                // when vectors were inserted after the index was built and persisted
-                // (e.g., during a search-engine rebuild that races with PQ finalization).
-                if (loadPersistedSimeonPqDimUnlocked(dim)) {
-                    continue;
+                if (simeon_pq_indices_.contains(dim) && !hasCurrentSimeonPqStateUnlocked(dim)) {
+                    markSimeonPqDimDirtyUnlocked(dim);
                 }
-                // No persisted index exists and the dimension is dirty. Build the PQ
-                // index from scratch using the vectors that are already stored. This
-                // covers cold-run benchmarks where buildIndex() was not called ahead
-                // of prepareSearchIndex().
+                // Dirty means the live vectors have changed since the in-memory or persisted
+                // snapshot was built. Rebuild from current rows before considering disk state;
+                // loading an older snapshot here would silently omit committed mutations.
                 if (simeon_pq_dirty_dims_.contains(dim)) {
                     auto rebuild = rebuildSimeonPqDimUnlocked(dim);
                     if (!rebuild) {
@@ -1802,8 +2187,17 @@ FROM vectors WHERE level = ?
                     }
                     continue;
                 }
-                return Error{ErrorCode::NotFound, "No reusable persisted Simeon PQ index for dim " +
-                                                      std::to_string(dim)};
+                if (loadPersistedSimeonPqDimUnlocked(dim)) {
+                    continue;
+                }
+                // Missing, corrupt, or recipe-incompatible persisted state is not reusable.
+                // Rebuild from the authoritative vectors table.
+                auto rebuild = rebuildSimeonPqDimUnlocked(dim);
+                if (!rebuild) {
+                    return Error{ErrorCode::InvalidState,
+                                 std::string("Simeon PQ index for dim ") + std::to_string(dim) +
+                                     " build failed: " + rebuild.error().message};
+                }
             }
             return Result<void>{};
         }
@@ -1812,17 +2206,27 @@ FROM vectors WHERE level = ?
     }
 
     Result<bool> hasReusablePersistedSearchIndex() {
-        std::shared_lock lock(mutex_);
+        // A successful SPQ probe fully validates the persisted snapshot. Retain that state so
+        // startup does not immediately repeat the same codebook/code/metadata load in prepare().
+        std::unique_lock lock(mutex_);
 
         if (!db_) {
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        if (usesExactSearchEngine()) {
+            return Result<bool>(false);
         }
 
         if (usesVec0SearchEngine()) {
             return Result<bool>(false);
         }
         if (usesSimeonPqSearchEngine()) {
-            auto dims = queryVectorDimsUnlocked();
+            auto dimsResult = queryVectorDimsUnlocked();
+            if (!dimsResult) {
+                return dimsResult.error();
+            }
+            auto dims = std::move(dimsResult.value());
             if (dims.empty()) {
                 return Result<bool>(false);
             }
@@ -1844,6 +2248,10 @@ FROM vectors WHERE level = ?
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
+        if (usesExactSearchEngine()) {
+            return checkpointWalUnlocked();
+        }
+
         if (usesVec0SearchEngine()) {
             if (!vec0_dirty_dims_.empty()) {
                 if (config_.suppress_search_index_builds) {
@@ -1859,6 +2267,13 @@ FROM vectors WHERE level = ?
             return Result<void>{};
         }
         if (usesSimeonPqSearchEngine()) {
+            const std::vector<size_t> readyDims(simeon_pq_ready_dims_.begin(),
+                                                simeon_pq_ready_dims_.end());
+            for (size_t dim : readyDims) {
+                if (!hasCurrentSimeonPqStateUnlocked(dim)) {
+                    markSimeonPqDimDirtyUnlocked(dim);
+                }
+            }
             if (!simeon_pq_dirty_dims_.empty()) {
                 if (config_.suppress_search_index_builds) {
                     spdlog::warn(
@@ -1889,6 +2304,10 @@ FROM vectors WHERE level = ?
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
 
+        if (usesExactSearchEngine()) {
+            return checkpointWalUnlocked();
+        }
+
         if (usesVec0SearchEngine()) {
             if (!vec0_dirty_dims_.empty()) {
                 if (config_.suppress_search_index_builds) {
@@ -1904,6 +2323,13 @@ FROM vectors WHERE level = ?
             return checkpointWalUnlocked();
         }
         if (usesSimeonPqSearchEngine()) {
+            const std::vector<size_t> readyDims(simeon_pq_ready_dims_.begin(),
+                                                simeon_pq_ready_dims_.end());
+            for (size_t dim : readyDims) {
+                if (!hasCurrentSimeonPqStateUnlocked(dim)) {
+                    markSimeonPqDimDirtyUnlocked(dim);
+                }
+            }
             if (!simeon_pq_dirty_dims_.empty()) {
                 if (config_.suppress_search_index_builds) {
                     spdlog::warn(
@@ -2631,6 +3057,7 @@ private:
 
     // Get vector by chunk_id (assumes lock held)
     std::optional<VectorRecord> getVectorByChunkIdUnlocked(const std::string& chunk_id) {
+        std::lock_guard stmt_lock(stmt_mutex_);
         if (!stmt_select_by_chunk_id_) {
             return std::nullopt;
         }
@@ -2750,10 +3177,8 @@ private:
         sqlite3_prepare_v2(db_, kDeleteByChunkId, -1, &stmt_delete_by_chunk_id_, nullptr);
         sqlite3_prepare_v2(db_, kDeleteByDocumentHash, -1, &stmt_delete_by_doc_, nullptr);
         sqlite3_prepare_v2(db_, kGetRowidByChunkId, -1, &stmt_get_rowid_, nullptr);
-        sqlite3_prepare_v2(db_, kGetRowidsByDocumentHash, -1, &stmt_get_rowids_by_doc_, nullptr);
         sqlite3_prepare_v2(db_, kCountVectors, -1, &stmt_count_, nullptr);
         sqlite3_prepare_v2(db_, kHasEmbedding, -1, &stmt_has_embedding_, nullptr);
-        sqlite3_prepare_v2(db_, kSelectFilterByRowid, -1, &stmt_filter_by_rowid_, nullptr);
     }
 
     // Finalize all statements
@@ -2773,14 +3198,10 @@ private:
             sqlite3_finalize(stmt_delete_by_doc_);
         if (stmt_get_rowid_)
             sqlite3_finalize(stmt_get_rowid_);
-        if (stmt_get_rowids_by_doc_)
-            sqlite3_finalize(stmt_get_rowids_by_doc_);
         if (stmt_count_)
             sqlite3_finalize(stmt_count_);
         if (stmt_has_embedding_)
             sqlite3_finalize(stmt_has_embedding_);
-        if (stmt_filter_by_rowid_)
-            sqlite3_finalize(stmt_filter_by_rowid_);
 
         stmt_insert_ = nullptr;
         stmt_select_by_chunk_id_ = nullptr;
@@ -2789,28 +3210,33 @@ private:
         stmt_delete_by_chunk_id_ = nullptr;
         stmt_delete_by_doc_ = nullptr;
         stmt_get_rowid_ = nullptr;
-        stmt_get_rowids_by_doc_ = nullptr;
         stmt_count_ = nullptr;
         stmt_has_embedding_ = nullptr;
-        stmt_filter_by_rowid_ = nullptr;
     }
 
-    std::vector<size_t> queryVectorDimsUnlocked() {
+    Result<std::vector<size_t>> queryVectorDimsUnlocked() {
         std::vector<size_t> dims;
         sqlite3_stmt* stmt = nullptr;
         // Include both float-blob rows and quantized-primary rows (where embedding_dim > 0).
         // embedding_dim is now always populated even when embedding blob is NULL.
         const char* sql = "SELECT DISTINCT embedding_dim FROM vectors WHERE embedding_dim > 0 "
                           "ORDER BY embedding_dim";
-        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) == SQLITE_OK) {
-            while (sqlite3_step(stmt) == SQLITE_ROW) {
-                int64_t dim = sqlite3_column_int64(stmt, 0);
-                if (dim > 0) {
-                    dims.push_back(static_cast<size_t>(dim));
-                }
+        if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string{"Failed to prepare vector-dimension query: "} +
+                             sqlite3_errmsg(db_)};
+        }
+        StmtFinalizeGuard finalize(stmt);
+        int rc = SQLITE_OK;
+        while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+            int64_t dim = sqlite3_column_int64(stmt, 0);
+            if (dim > 0) {
+                dims.push_back(static_cast<size_t>(dim));
             }
-            sqlite3_reset(stmt);
-            tl_deferred_finalize.push_back(stmt);
+        }
+        if (rc != SQLITE_DONE) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string{"Failed to read vector dimensions: "} + sqlite3_errmsg(db_)};
         }
         return dims;
     }
@@ -2876,27 +3302,34 @@ private:
         return std::pair<size_t, std::vector<float>>{rowid, std::move(embedding)};
     }
 
-    std::vector<std::pair<size_t, std::vector<float>>> queryVectorsForDimUnlocked(size_t dim) {
+    Result<std::vector<std::pair<size_t, std::vector<float>>>>
+    queryVectorsForDimUnlocked(size_t dim) {
         std::vector<std::pair<size_t, std::vector<float>>> rows;
         const char* sql =
             "SELECT rowid, embedding, quantized_format, quantized_bits, quantized_seed, "
             "quantized_packed_codes FROM vectors WHERE embedding_dim = ? ORDER BY rowid";
         sqlite3_stmt* stmt = nullptr;
         if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
-            return rows;
+            return Error{ErrorCode::DatabaseError, "Failed to prepare vector scan for dim " +
+                                                       std::to_string(dim) + ": " +
+                                                       sqlite3_errmsg(db_)};
         }
+        StmtFinalizeGuard finalize(stmt);
 
         auto tq = makeTurboQuantForDimUnlocked(dim);
 
         sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(dim));
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
+        int rc = SQLITE_OK;
+        while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
             if (auto decoded = decodeVectorForDimRowUnlocked(stmt, dim, tq.get())) {
                 rows.push_back(std::move(*decoded));
             }
         }
-
-        sqlite3_reset(stmt);
-        tl_deferred_finalize.push_back(stmt);
+        if (rc != SQLITE_DONE) {
+            return Error{ErrorCode::DatabaseError, "Failed to scan vectors for dim " +
+                                                       std::to_string(dim) + ": " +
+                                                       sqlite3_errmsg(db_)};
+        }
         return rows;
     }
 
@@ -2914,7 +3347,14 @@ private:
         }
         sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(dim));
         std::size_t expected = 0;
-        while (expected < rowids.size() && sqlite3_step(stmt) == SQLITE_ROW) {
+        int stepRc = SQLITE_OK;
+        while ((stepRc = sqlite3_step(stmt)) == SQLITE_ROW) {
+            if (expected >= rowids.size()) {
+                sqlite3_finalize(stmt);
+                keys.clear();
+                documentIndices.clear();
+                return false;
+            }
             const auto rowid = static_cast<std::size_t>(sqlite3_column_int64(stmt, 0));
             if (rowid < rowids[expected]) {
                 continue;
@@ -2938,7 +3378,7 @@ private:
             ++expected;
         }
         sqlite3_finalize(stmt);
-        if (expected != rowids.size()) {
+        if (stepRc != SQLITE_DONE || expected != rowids.size()) {
             keys.clear();
             documentIndices.clear();
             return false;
@@ -3018,41 +3458,15 @@ private:
         vec0_dirty_dims_.erase(dim);
         vec0_ready_dims_.insert(dim);
 
-        // Try to restore a previously-persisted ANN index so we skip the
-        // O(n log n) rebuild on daemon restart. The shadow tables are named
-        // vectors_<dim>_hnsw_meta / vectors_<dim>_hnsw_nodes and are written
-        // by persistVec0AnnIndexUnlocked() when buildIndex() completes.
-        try {
-            char* err = nullptr;
-            auto restored =
-                sqlite_vec_cpp::index::load_hnsw_index<float,
-                                                       sqlite_vec_cpp::distances::L2Metric<float>>(
-                    db_, "main", ("vectors_" + std::to_string(dim)).c_str(), &err);
-            if (err == nullptr) {
-                auto ann =
-                    std::make_shared<sqlite_vec_cpp::sqlite::Vec0AnnIndex>(std::move(restored));
-                sqlite_vec_cpp::sqlite::vec0_with_table(
-                    db_, "main", vec0TableName(dim), [&](sqlite_vec_cpp::sqlite::Vec0Table* table) {
-                        if (!table) {
-                            return;
-                        }
-                        std::lock_guard<std::mutex> ann_lock(table->ann_mutex);
-                        table->ann_index = ann;
-                        table->ann_ready = true;
-                    });
-                spdlog::info("[vec0] restored persisted ANN index for dim {}", dim);
-            } else {
-                sqlite3_free(err);
-            }
-        } catch (...) {
-            spdlog::debug("[vec0] no persisted ANN index for dim {} — will rebuild", dim);
-        }
-
         return Result<void>{};
     }
 
     Result<void> rebuildVec0IndicesUnlocked(std::optional<size_t> focus_dim = std::nullopt) {
-        auto dims = queryVectorDimsUnlocked();
+        auto dimsResult = queryVectorDimsUnlocked();
+        if (!dimsResult) {
+            return dimsResult.error();
+        }
+        auto dims = std::move(dimsResult.value());
         std::unordered_set<size_t> available_dims(dims.begin(), dims.end());
 
         if (focus_dim) {
@@ -3122,7 +3536,11 @@ private:
     }
 
     Result<void> warmVec0IndicesUnlocked() {
-        auto dims = queryVectorDimsUnlocked();
+        auto dimsResult = queryVectorDimsUnlocked();
+        if (!dimsResult) {
+            return dimsResult.error();
+        }
+        auto dims = std::move(dimsResult.value());
         for (size_t dim : dims) {
             auto result = warmVec0DimUnlocked(dim);
             if (!result) {
@@ -3133,7 +3551,31 @@ private:
     }
 
     Result<void> rebuildSimeonPqDimUnlocked(size_t dim) {
-        auto rows = queryVectorsForDimUnlocked(dim);
+        std::uint64_t sourceGeneration = 0;
+        if (!detail::loadVectorIndexGeneration(db_, sourceGeneration)) {
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to read vector mutation generation before Simeon PQ rebuild"};
+        }
+        const auto verifySourceGeneration = [&]() -> Result<void> {
+            std::uint64_t currentGeneration = 0;
+            if (!detail::loadVectorIndexGeneration(db_, currentGeneration)) {
+                markSimeonPqDimDirtyUnlocked(dim);
+                return Error{ErrorCode::DatabaseError,
+                             "Failed to read vector mutation generation after Simeon PQ rebuild"};
+            }
+            if (currentGeneration != sourceGeneration) {
+                markSimeonPqDimDirtyUnlocked(dim);
+                return Error{ErrorCode::InvalidState,
+                             "Vectors changed while building the Simeon PQ snapshot"};
+            }
+            return Result<void>{};
+        };
+
+        auto rowsResult = queryVectorsForDimUnlocked(dim);
+        if (!rowsResult) {
+            return rowsResult.error();
+        }
+        auto rows = std::move(rowsResult.value());
         simeon_pq_indices_.erase(dim);
 
         if (rows.empty()) {
@@ -3211,14 +3653,33 @@ private:
         std::vector<std::uint64_t>().swap(trainingKeys);
         std::vector<std::size_t>().swap(trainingOrder);
 
-        try {
-            if (trainSamples >= k) {
+        bool trained = false;
+        if (trainSamples >= k) {
+            try {
                 state->pq.train(training.data(), static_cast<std::uint32_t>(trainSamples));
-            } else {
-                state->pq.init_random_gaussian();
+                trained = true;
+            } catch (const std::exception& e) {
+                spdlog::warn("[SPQ] Training failed for dim={}; using exact search: {}", dim,
+                             e.what());
             }
-        } catch (const std::exception&) {
-            state->pq.init_random_gaussian();
+        }
+        if (!trained) {
+            state->exact_fallback = true;
+            state->rerank_factor = std::max<std::size_t>(1, config_.simeon_pq_rerank_factor);
+            std::vector<float>().swap(training);
+            std::vector<std::pair<size_t, std::vector<float>>>().swap(rows);
+            auto generationCurrent = verifySourceGeneration();
+            if (!generationCurrent) {
+                return generationCurrent;
+            }
+            state->source_generation = sourceGeneration;
+            simeon_pq_indices_[dim] = std::move(state);
+            simeon_pq_dirty_dims_.erase(dim);
+            simeon_pq_ready_dims_.insert(dim);
+            spdlog::info("[SPQ] Using exact search for dim={} with {} vectors; PQ needs at least "
+                         "{} training samples",
+                         dim, simeon_pq_indices_[dim]->rowids.size(), k);
+            return Result<void>{};
         }
         // Training buffer is no longer needed; release before encoding so
         // peak footprint during encode == size(rows) rather than size(rows)
@@ -3247,11 +3708,16 @@ private:
         }
         state->updateDocumentIndexPayloadBytes();
         state->rerank_factor = std::max<std::size_t>(1, config_.simeon_pq_rerank_factor);
+        auto generationCurrent = verifySourceGeneration();
+        if (!generationCurrent) {
+            return generationCurrent;
+        }
+        state->source_generation = sourceGeneration;
         simeon_pq_indices_[dim] = std::move(state);
         simeon_pq_dirty_dims_.erase(dim);
         simeon_pq_ready_dims_.insert(dim);
         spdlog::info(
-            "[SPQ] Built persisted PQ index for dim={} with {} vectors m={} k={} rerank={}", dim,
+            "[SPQ] Built in-memory PQ index for dim={} with {} vectors m={} k={} rerank={}", dim,
             simeon_pq_indices_[dim]->rowids.size(), m, k, config_.simeon_pq_rerank_factor);
         // Return the bulk training/encode scratch pages to the OS.
         // The SPQ rebuild churns up to ~1 GB of transient float buffers
@@ -3266,7 +3732,11 @@ private:
     }
 
     Result<void> rebuildSimeonPqIndicesUnlocked(std::optional<size_t> focus_dim = std::nullopt) {
-        auto dims = queryVectorDimsUnlocked();
+        auto dimsResult = queryVectorDimsUnlocked();
+        if (!dimsResult) {
+            return dimsResult.error();
+        }
+        auto dims = std::move(dimsResult.value());
         std::unordered_set<size_t> available_dims(dims.begin(), dims.end());
         if (focus_dim) {
             if (!available_dims.contains(*focus_dim)) {
@@ -3286,20 +3756,34 @@ private:
         return Result<void>{};
     }
 
-    bool loadPersistedSimeonPqDimUnlocked(size_t dim) {
+    std::unique_ptr<SimeonPqIndexState> readReusablePersistedSimeonPqDimUnlocked(size_t dim) {
+        const auto dataVersionBefore = sqliteDataVersionUnlocked();
+        if (!dataVersionBefore) {
+            return nullptr;
+        }
+        std::uint32_t formatVersion = 0;
         std::uint32_t m = 0;
         std::uint32_t k = 0;
         std::uint64_t seed = 0;
-        std::size_t rerankFactor = 0;
+        std::size_t trainLimit = 0;
+        std::uint64_t sourceGeneration = 0;
+        std::uint64_t currentGeneration = 0;
+        std::size_t persistedRerankFactor = 0;
         bool trained = false;
         std::size_t vectorCount = 0;
         std::vector<float> codebooks;
-        if (!detail::loadPersistedSimeonPqMeta(db_, dim, m, k, seed, rerankFactor, trained,
-                                               vectorCount, codebooks)) {
-            return false;
+        if (!detail::loadPersistedSimeonPqMeta(
+                db_, dim, formatVersion, m, k, seed, trainLimit, sourceGeneration,
+                currentGeneration, persistedRerankFactor, trained, vectorCount, codebooks)) {
+            return nullptr;
         }
-        if (m == 0 || dim % m != 0) {
-            return false;
+        const auto expectedM = normalizedSimeonPqSubquantizers(dim);
+        const auto expectedK = static_cast<std::uint32_t>(
+            std::clamp<std::size_t>(config_.simeon_pq_centroids, 2, 256));
+        if (formatVersion != detail::kSimeonPqPersistenceFormatVersion || m == 0 || dim % m != 0 ||
+            m != expectedM || k != expectedK || seed != config_.simeon_pq_seed ||
+            trainLimit != config_.simeon_pq_train_limit || sourceGeneration != currentGeneration) {
+            return nullptr;
         }
         simeon::PQConfig pqConfig{
             .dim = static_cast<std::uint32_t>(dim),
@@ -3308,17 +3792,46 @@ private:
             .seed = seed,
         };
         auto state = std::make_unique<SimeonPqIndexState>(pqConfig);
-        state->pq.import_codebooks(codebooks, trained);
-        state->rerank_factor = std::max<std::size_t>(1, rerankFactor);
-        if (!detail::loadPersistedSimeonPqCodes(db_, dim, m, state->rowids, state->codes) ||
+        try {
+            state->pq.import_codebooks(codebooks, trained);
+        } catch (const std::exception&) {
+            return nullptr;
+        }
+        // Rerank depth affects only query-time exact rescoring. It is persisted for
+        // backward compatibility, but the current typed configuration is authoritative.
+        state->rerank_factor = std::max<std::size_t>(1, config_.simeon_pq_rerank_factor);
+        if (!detail::loadPersistedSimeonPqCodes(db_, dim, m, k, state->rowids, state->codes) ||
             state->rowids.size() != vectorCount) {
-            return false;
+            return nullptr;
         }
         if (!loadSimeonRowMetadataUnlocked(dim, state->rowids, state->tie_break_keys,
                                            state->document_indices)) {
+            return nullptr;
+        }
+        std::uint64_t generationAfterLoad = 0;
+        if (!detail::loadVectorIndexGeneration(db_, generationAfterLoad) ||
+            generationAfterLoad != sourceGeneration) {
+            return nullptr;
+        }
+        const auto dataVersionAfter = sqliteDataVersionUnlocked();
+        if (!dataVersionAfter || *dataVersionAfter != *dataVersionBefore) {
+            return nullptr;
+        }
+        state->source_generation = sourceGeneration;
+        state->persisted_snapshot = true;
+        state->persisted_total_changes = sqlite3_total_changes64(db_);
+        state->persisted_data_version = *dataVersionAfter;
+        state->updateDocumentIndexPayloadBytes();
+        return state;
+    }
+
+    bool loadPersistedSimeonPqDimUnlocked(size_t dim) {
+        auto state = readReusablePersistedSimeonPqDimUnlocked(dim);
+        if (!state) {
             return false;
         }
-        state->updateDocumentIndexPayloadBytes();
+        const auto m = state->pq.m();
+        const auto k = state->pq.k();
         simeon_pq_indices_[dim] = std::move(state);
         simeon_pq_dirty_dims_.erase(dim);
         simeon_pq_ready_dims_.insert(dim);
@@ -3332,27 +3845,49 @@ private:
         if (it == simeon_pq_indices_.end() || !it->second) {
             return Result<void>{};
         }
+        if (it->second->exact_fallback) {
+            return Result<void>{};
+        }
         std::string errorMessage;
         if (!detail::savePersistedSimeonPq(db_, dim, it->second->pq, config_.simeon_pq_seed,
-                                           it->second->rerank_factor, it->second->rowids,
+                                           config_.simeon_pq_train_limit, it->second->rerank_factor,
+                                           it->second->source_generation, it->second->rowids,
                                            it->second->codes, errorMessage)) {
             return Error{ErrorCode::DatabaseError, "Failed to persist Simeon PQ index for dim " +
                                                        std::to_string(dim) + ": " + errorMessage};
         }
+        it->second->persisted_snapshot = true;
+        (void)stampPersistedBackingStoreUnlocked(*it->second);
+        spdlog::info("[SPQ] Persisted PQ index for dim={} with {} vectors", dim,
+                     it->second->rowids.size());
         return Result<void>{};
     }
 
     bool hasReusablePersistedSimeonPqUnlocked(size_t dim) {
-        return detail::hasPersistedSimeonPqMeta(db_, dim);
+        const auto current = simeon_pq_indices_.find(dim);
+        if (current != simeon_pq_indices_.end() && current->second &&
+            current->second->persisted_snapshot && hasReadyCurrentSimeonPqStateUnlocked(dim) &&
+            persistedBackingStoreUnchangedUnlocked(*current->second)) {
+            return true;
+        }
+        if (simeon_pq_dirty_dims_.contains(dim)) {
+            return false;
+        }
+        // Loading validates the persistence recipe, every code width and rowid, live row
+        // metadata, and the source generation before and after the scan. Retain that validated
+        // state so subsequent probes need only the O(1) generation check above.
+        return loadPersistedSimeonPqDimUnlocked(dim);
     }
 
     Result<void> ensureSimeonPqReadyUnlocked(size_t dim) {
-        if (simeon_pq_ready_dims_.contains(dim) && !simeon_pq_dirty_dims_.contains(dim) &&
-            simeon_pq_indices_.contains(dim)) {
+        if (hasReadyCurrentSimeonPqStateUnlocked(dim)) {
             return Result<void>{};
         }
+        if (simeon_pq_indices_.contains(dim) && !hasCurrentSimeonPqStateUnlocked(dim)) {
+            markSimeonPqDimDirtyUnlocked(dim);
+        }
         if (config_.suppress_search_index_builds) {
-            if (simeon_pq_indices_.contains(dim)) {
+            if (hasReadyCurrentSimeonPqStateUnlocked(dim)) {
                 return Result<void>{};
             }
             if (!simeon_pq_dirty_dims_.contains(dim) && loadPersistedSimeonPqDimUnlocked(dim)) {
@@ -3380,6 +3915,13 @@ private:
         auto it = simeon_pq_indices_.find(query_dim);
         if (it == simeon_pq_indices_.end() || !it->second || it->second->rowids.empty()) {
             return std::vector<VectorRecord>{};
+        }
+
+        if (it->second->exact_fallback) {
+            static const std::unordered_set<std::string> kNoCandidateHashes;
+            return bruteForceSearchUnlocked(query_embedding, k, similarity_threshold, std::nullopt,
+                                            candidateHashes ? *candidateHashes : kNoCandidateHashes,
+                                            {}, diagnostics);
         }
 
         std::vector<float> normalized_query = query_embedding;
@@ -3430,6 +3972,9 @@ private:
             candidateHashes == nullptr ? it->second->rowids.size() : candidateIndices.size();
         if (diagnostics != nullptr) {
             diagnostics->usedAnn = true;
+            diagnostics->rowsVisitedObserved = true;
+            diagnostics->exactDistanceEvaluationsObserved = true;
+            diagnostics->annCandidateBudgetObserved = true;
             diagnostics->annCandidateBudget = candidateCount;
             diagnostics->rowsVisited = candidateCount;
         }
@@ -3637,8 +4182,14 @@ private:
         if (!db_ || query_embedding.empty() || k == 0) {
             return std::vector<VectorRecord>{};
         }
+        if (!isFiniteEmbedding(query_embedding) || isZeroNormEmbedding(query_embedding)) {
+            return Error{ErrorCode::InvalidArgument,
+                         "Exact vector search requires a finite, non-zero query embedding"};
+        }
         if (diagnostics) {
             diagnostics->usedExactScan = true;
+            diagnostics->rowsVisitedObserved = true;
+            diagnostics->exactDistanceEvaluationsObserved = true;
         }
 
         // Extended SQL to include quantized sidecar columns for dequantization in
@@ -3713,23 +4264,36 @@ WHERE embedding_dim = ?1
             }
         }
 
-        // Fast path (no metadata filters): score from the embedding column only,
-        // then materialize full records for the top-k winners. Metadata-filter
-        // queries need the parsed record per row, so they keep the slow path.
+        // Fast path (no metadata filters): score from the embedding column and retain full
+        // records only while they are top-k candidates. Keeping each winner from the same SQLite
+        // snapshot as its score prevents a concurrent writer from pairing an old score with a
+        // newly materialized embedding. Metadata-filter queries need the parsed record per row, so
+        // they keep the slow path.
         if (metadata_filters.empty()) {
             const size_t dim = query_embedding.size();
-            float query_norm_sq = 0.0f;
+            double query_norm_sq = 0.0;
             for (size_t i = 0; i < dim; ++i) {
-                query_norm_sq += query_embedding[i] * query_embedding[i];
+                const double value = static_cast<double>(query_embedding[i]);
+                query_norm_sq += value * value;
             }
-            const float query_norm = std::sqrt(query_norm_sq);
-            // Fixed-size min-heap on similarity keeps memory O(k) and work
-            // O(N log k) instead of accumulating every scanned row.
-            const auto heap_cmp = [](const auto& a, const auto& b) { return a.first > b.first; };
-            std::vector<std::pair<float, int64_t>> scored;
+            const double query_norm = std::sqrt(query_norm_sq);
+            // Fixed-size heap keeps the worst retained row at the front. Chunk ID is the stable
+            // secondary key so equal scores do not depend on SQLite insertion order.
+            struct ScoredRow {
+                float similarity;
+                VectorRecord record;
+            };
+            const auto better = [](const ScoredRow& a, const ScoredRow& b) {
+                if (a.similarity != b.similarity) {
+                    return a.similarity > b.similarity;
+                }
+                return a.record.chunk_id < b.record.chunk_id;
+            };
+            std::vector<ScoredRow> scored;
             scored.reserve(k + 1);
             std::vector<float> dequant_buffer;
-            while (sqlite3_step(stmt) == SQLITE_ROW) {
+            int scanRc = SQLITE_OK;
+            while ((scanRc = sqlite3_step(stmt)) == SQLITE_ROW) {
                 if (diagnostics) {
                     ++diagnostics->rowsVisited;
                 }
@@ -3767,49 +4331,69 @@ WHERE embedding_dim = ?1
                     ++diagnostics->exactDistanceEvaluations;
                 }
 
-                float norm_sq = 0.0f;
+                double norm_sq = 0.0;
                 bool finite = true;
-                float dot = 0.0f;
+                double dot = 0.0;
                 for (size_t i = 0; i < dim; ++i) {
                     const float v = embedding[i];
                     if (!std::isfinite(v)) {
                         finite = false;
                         break;
                     }
-                    norm_sq += v * v;
-                    dot += v * query_embedding[i];
+                    const double storedValue = static_cast<double>(v);
+                    const double queryValue = static_cast<double>(query_embedding[i]);
+                    norm_sq += storedValue * storedValue;
+                    dot += storedValue * queryValue;
                 }
-                if (!finite || norm_sq <= 1e-12f) {
+                if (!finite || norm_sq <= 1e-12) {
                     continue;
                 }
 
-                const float denom = std::sqrt(norm_sq) * query_norm;
-                const float similarity = denom > 0.0f ? dot / denom : 0.0f;
+                const double denom = std::sqrt(norm_sq) * query_norm;
+                const double similarityDouble = denom > 0.0 ? dot / denom : 0.0;
+                if (!std::isfinite(similarityDouble)) {
+                    continue;
+                }
+                const float similarity = static_cast<float>(similarityDouble);
                 if (similarity < similarity_threshold) {
                     continue;
                 }
+                const auto* chunkIdText = sqlite3_column_text(stmt, 1);
+                const std::string_view chunkId =
+                    chunkIdText ? reinterpret_cast<const char*>(chunkIdText) : "";
                 if (scored.size() < k) {
-                    scored.emplace_back(similarity, sqlite3_column_int64(stmt, 0));
-                    std::push_heap(scored.begin(), scored.end(), heap_cmp);
-                } else if (similarity > scored.front().first) {
-                    std::pop_heap(scored.begin(), scored.end(), heap_cmp);
-                    scored.back() = {similarity, sqlite3_column_int64(stmt, 0)};
-                    std::push_heap(scored.begin(), scored.end(), heap_cmp);
+                    auto record = recordFromStatement(stmt);
+                    if (record.embedding.empty() && !embedding.empty()) {
+                        record.embedding.assign(embedding.begin(), embedding.end());
+                    }
+                    scored.push_back({similarity, std::move(record)});
+                    std::push_heap(scored.begin(), scored.end(), better);
+                } else if (similarity > scored.front().similarity ||
+                           (similarity == scored.front().similarity &&
+                            chunkId < scored.front().record.chunk_id)) {
+                    std::pop_heap(scored.begin(), scored.end(), better);
+                    auto record = recordFromStatement(stmt);
+                    if (record.embedding.empty() && !embedding.empty()) {
+                        record.embedding.assign(embedding.begin(), embedding.end());
+                    }
+                    scored.back() = {similarity, std::move(record)};
+                    std::push_heap(scored.begin(), scored.end(), better);
                 }
+            }
+            if (scanRc != SQLITE_DONE) {
+                const std::string detail = sqlite3_errmsg(db_);
+                sqlite3_finalize(stmt);
+                return Error{ErrorCode::DatabaseError, "Exact vector scan failed: " + detail};
             }
             sqlite3_finalize(stmt);
 
-            std::sort_heap(scored.begin(), scored.end(), heap_cmp);
+            std::sort_heap(scored.begin(), scored.end(), better);
 
             std::vector<VectorRecord> records;
             records.reserve(scored.size());
-            for (const auto& [similarity, rowid] : scored) {
-                auto record_opt = getVectorByRowidUnlocked(rowid);
-                if (!record_opt) {
-                    continue;
-                }
-                record_opt->relevance_score = similarity;
-                records.push_back(std::move(*record_opt));
+            for (auto& row : scored) {
+                row.record.relevance_score = row.similarity;
+                records.push_back(std::move(row.record));
             }
             if (diagnostics) {
                 diagnostics->returnedRows = records.size();
@@ -3818,7 +4402,8 @@ WHERE embedding_dim = ?1
         }
 
         std::vector<std::pair<float, VectorRecord>> scored_results;
-        while (sqlite3_step(stmt) == SQLITE_ROW) {
+        int scanRc = SQLITE_OK;
+        while ((scanRc = sqlite3_step(stmt)) == SQLITE_ROW) {
             if (diagnostics) {
                 ++diagnostics->rowsVisited;
             }
@@ -3873,10 +4458,19 @@ WHERE embedding_dim = ?1
             record.relevance_score = similarity;
             scored_results.emplace_back(similarity, std::move(record));
         }
+        if (scanRc != SQLITE_DONE) {
+            const std::string detail = sqlite3_errmsg(db_);
+            sqlite3_finalize(stmt);
+            return Error{ErrorCode::DatabaseError, "Exact vector scan failed: " + detail};
+        }
         sqlite3_finalize(stmt);
 
-        std::sort(scored_results.begin(), scored_results.end(),
-                  [](const auto& a, const auto& b) { return a.first > b.first; });
+        std::sort(scored_results.begin(), scored_results.end(), [](const auto& a, const auto& b) {
+            if (a.first != b.first) {
+                return a.first > b.first;
+            }
+            return a.second.chunk_id < b.second.chunk_id;
+        });
 
         size_t count = std::min(k, scored_results.size());
         std::vector<VectorRecord> records;
@@ -4049,54 +4643,13 @@ ORDER BY rowid
     sqlite3_stmt* stmt_delete_by_chunk_id_ = nullptr;
     sqlite3_stmt* stmt_delete_by_doc_ = nullptr;
     sqlite3_stmt* stmt_get_rowid_ = nullptr;
-    sqlite3_stmt* stmt_get_rowids_by_doc_ = nullptr;
     sqlite3_stmt* stmt_count_ = nullptr;
     sqlite3_stmt* stmt_has_embedding_ = nullptr;
-    sqlite3_stmt* stmt_filter_by_rowid_ = nullptr;
 
     // Thread safety
     mutable std::shared_mutex mutex_;
     mutable std::mutex stmt_mutex_;
-
-    // Persist the vec0 ANN index so restarts skip the O(n log n) rebuild.
-    void persistVec0AnnIndexUnlocked();
 };
-
-// ============================================================================
-// SqliteVecBackend public interface
-// ============================================================================
-
-void SqliteVecBackend::Impl::persistVec0AnnIndexUnlocked() {
-    // Find the vec0 table via registry and persist its ANN index to shadow tables.
-    for (size_t dim : vec0_ready_dims_) {
-        std::shared_ptr<sqlite_vec_cpp::sqlite::Vec0AnnIndex> ann_index;
-        sqlite_vec_cpp::sqlite::vec0_with_table(db_, "main", std::to_string(dim) + "_vec0",
-                                                [&](sqlite_vec_cpp::sqlite::Vec0Table* table) {
-                                                    if (!table) {
-                                                        return;
-                                                    }
-                                                    std::lock_guard<std::mutex> ann_lock(
-                                                        table->ann_mutex);
-                                                    ann_index = table->ann_index;
-                                                });
-        if (!ann_index) {
-            continue;
-        }
-
-        char* err = nullptr;
-        int rc = sqlite_vec_cpp::index::save_hnsw_index<float,
-                                                        sqlite_vec_cpp::distances::L2Metric<float>>(
-            db_, "main", ("vectors_" + std::to_string(dim)).c_str(), *ann_index, &err);
-        if (rc != SQLITE_OK) {
-            spdlog::warn("[vec0] failed to persist ANN index for dim {}: {}", dim,
-                         err ? err : "unknown");
-            if (err)
-                sqlite3_free(err);
-        } else {
-            spdlog::info("[vec0] persisted ANN index for dim {} to shadow tables", dim);
-        }
-    }
-}
 
 // ============================================================================
 // SqliteVecBackend public interface
@@ -4225,6 +4778,20 @@ Result<bool> SqliteVecBackend::hasEmbedding(const std::string& document_hash) {
 
 Result<std::unordered_set<std::string>> SqliteVecBackend::getEmbeddedDocumentHashes() {
     return impl_->getEmbeddedDocumentHashes();
+}
+
+Result<std::vector<std::string>>
+SqliteVecBackend::getStaleEmbeddings(const std::string& modelId, const std::string& modelVersion) {
+    return impl_->getStaleEmbeddings(modelId, modelVersion);
+}
+
+Result<std::vector<VectorRecord>>
+SqliteVecBackend::getEmbeddingsByVersion(const std::string& modelVersion, size_t limit) {
+    return impl_->getEmbeddingsByVersion(modelVersion, limit);
+}
+
+Result<void> SqliteVecBackend::markAsStale(const std::string& chunkId) {
+    return impl_->markAsStale(chunkId);
 }
 
 Result<size_t> SqliteVecBackend::getVectorCount() {

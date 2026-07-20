@@ -12,13 +12,16 @@
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <limits>
 #include <random>
 #include <string>
+#include <thread>
 #include <unordered_set>
 #include <vector>
 
@@ -28,6 +31,8 @@
 #include <yams/vector/vector_index_manager.h>
 #include <yams/vector/vector_schema_migration.h>
 #include <yams/vector/vector_utils.h>
+
+#include "../../../src/vector/simeon_pq_persistence.h"
 
 using namespace yams::vector;
 using Catch::Matchers::WithinAbs;
@@ -128,6 +133,196 @@ int countRows(sqlite3* db, const char* table) {
     sqlite3_finalize(stmt);
     return count;
 }
+
+std::size_t countLiveStatements(sqlite3* db) {
+    std::size_t count = 0;
+    for (sqlite3_stmt* stmt = sqlite3_next_stmt(db, nullptr); stmt != nullptr;
+         stmt = sqlite3_next_stmt(db, stmt)) {
+        ++count;
+    }
+    return count;
+}
+
+std::vector<std::uint8_t> queryBlob(sqlite3* db, const char* sql, std::int64_t value) {
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return {};
+    }
+    sqlite3_bind_int64(stmt, 1, value);
+    std::vector<std::uint8_t> blob;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        const auto* bytes = static_cast<const std::uint8_t*>(sqlite3_column_blob(stmt, 0));
+        const int size = sqlite3_column_bytes(stmt, 0);
+        if (bytes && size > 0) {
+            blob.assign(bytes, bytes + size);
+        }
+    }
+    sqlite3_finalize(stmt);
+    return blob;
+}
+
+bool updateEmbeddingRaw(sqlite3* db, const std::string& chunkId,
+                        const std::vector<float>& embedding) {
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db,
+                           "UPDATE vectors SET embedding = ?1, embedding_dim = ?2 "
+                           "WHERE chunk_id = ?3",
+                           -1, &stmt, nullptr) != SQLITE_OK) {
+        return false;
+    }
+    sqlite3_bind_blob(stmt, 1, embedding.data(), static_cast<int>(embedding.size() * sizeof(float)),
+                      SQLITE_TRANSIENT);
+    sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(embedding.size()));
+    sqlite3_bind_text(stmt, 3, chunkId.c_str(), -1, SQLITE_TRANSIENT);
+    const int rc = sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+    return rc == SQLITE_DONE && sqlite3_changes(db) == 1;
+}
+
+struct UpdateEmbeddingOnMaterialization {
+    sqlite3* mutatorDb = nullptr;
+    const std::string* chunkId = nullptr;
+    const std::vector<float>* embedding = nullptr;
+    const std::vector<float>* secondEmbedding = nullptr;
+    bool attempted = false;
+    bool updated = false;
+    bool secondAttempted = false;
+    bool secondUpdated = false;
+};
+
+int updateEmbeddingOnMaterialization(unsigned event, void* context, void* statement, void*) {
+    if (event != SQLITE_TRACE_STMT || context == nullptr || statement == nullptr) {
+        return 0;
+    }
+    auto& update = *static_cast<UpdateEmbeddingOnMaterialization*>(context);
+    if (update.secondAttempted) {
+        return 0;
+    }
+    const char* sql = sqlite3_sql(static_cast<sqlite3_stmt*>(statement));
+    if (sql == nullptr ||
+        std::string{sql}.find("FROM vectors WHERE rowid = ?") == std::string::npos) {
+        return 0;
+    }
+    if (!update.attempted) {
+        update.attempted = true;
+        update.updated = updateEmbeddingRaw(update.mutatorDb, *update.chunkId, *update.embedding);
+    } else if (update.secondEmbedding != nullptr) {
+        update.secondAttempted = true;
+        update.secondUpdated =
+            updateEmbeddingRaw(update.mutatorDb, *update.chunkId, *update.secondEmbedding);
+    }
+    return 0;
+}
+
+struct MaterializationMutationGuard {
+    MaterializationMutationGuard(sqlite3* db, UpdateEmbeddingOnMaterialization& update) : db(db) {
+        sqlite3_trace_v2(db, SQLITE_TRACE_STMT, updateEmbeddingOnMaterialization, &update);
+    }
+    ~MaterializationMutationGuard() { sqlite3_trace_v2(db, 0, nullptr, nullptr); }
+
+    sqlite3* db;
+};
+
+struct UpdateDuringGenerationTriggerMigration {
+    sqlite3* mutatorDb = nullptr;
+    const std::string* chunkId = nullptr;
+    const std::vector<float>* embedding = nullptr;
+    bool requireProtectedInstall = false;
+    bool sawSafeReplacement = false;
+    bool sawProtectedInstall = false;
+    bool attempted = false;
+    bool updated = false;
+};
+
+int updateDuringGenerationTriggerMigration(unsigned event, void* context, void* statement, void*) {
+    if (event != SQLITE_TRACE_STMT || context == nullptr || statement == nullptr) {
+        return 0;
+    }
+    auto& update = *static_cast<UpdateDuringGenerationTriggerMigration*>(context);
+    const char* sql = sqlite3_sql(static_cast<sqlite3_stmt*>(statement));
+    if (sql == nullptr) {
+        return 0;
+    }
+    const std::string_view statementSql(sql);
+    if (statementSql.find("CREATE TRIGGER IF NOT EXISTS vectors_index_generation_update_v2") !=
+        std::string_view::npos) {
+        update.sawSafeReplacement = true;
+        auto* statementDb = sqlite3_db_handle(static_cast<sqlite3_stmt*>(statement));
+        update.sawProtectedInstall =
+            statementDb != nullptr && sqlite3_get_autocommit(statementDb) == 0;
+        if (update.requireProtectedInstall) {
+            if (!update.sawProtectedInstall && !update.attempted) {
+                update.attempted = true;
+                update.updated =
+                    updateEmbeddingRaw(update.mutatorDb, *update.chunkId, *update.embedding);
+            }
+        }
+        return 0;
+    }
+    const bool unsafeLegacyCreate =
+        statementSql.find("CREATE TRIGGER vectors_index_generation_update") !=
+            std::string_view::npos &&
+        statementSql.find("vectors_index_generation_update_v2") == std::string_view::npos;
+    const bool safeLegacyDrop =
+        update.sawSafeReplacement && !update.sawProtectedInstall &&
+        statementSql.find("DROP TRIGGER IF EXISTS vectors_index_generation_update") !=
+            std::string_view::npos;
+    if (!update.attempted && (unsafeLegacyCreate || safeLegacyDrop)) {
+        update.attempted = true;
+        update.updated = updateEmbeddingRaw(update.mutatorDb, *update.chunkId, *update.embedding);
+    }
+    return 0;
+}
+
+struct GenerationTriggerMigrationGuard {
+    GenerationTriggerMigrationGuard(sqlite3* db, UpdateDuringGenerationTriggerMigration& update)
+        : db(db) {
+        sqlite3_trace_v2(db, SQLITE_TRACE_STMT, updateDuringGenerationTriggerMigration, &update);
+    }
+    ~GenerationTriggerMigrationGuard() { sqlite3_trace_v2(db, 0, nullptr, nullptr); }
+
+    sqlite3* db;
+};
+
+int interruptSqlite(void*) {
+    return 1;
+}
+
+struct InterruptAfterProgressCalls {
+    int remaining = 0;
+};
+
+int interruptSqliteAfterProgressCalls(void* context) {
+    auto& state = *static_cast<InterruptAfterProgressCalls*>(context);
+    --state.remaining;
+    return state.remaining <= 0 ? 1 : 0;
+}
+
+struct SqliteProgressHandlerGuard {
+    explicit SqliteProgressHandlerGuard(sqlite3* db) : db(db) {}
+    ~SqliteProgressHandlerGuard() { sqlite3_progress_handler(db, 0, nullptr, nullptr); }
+
+    sqlite3* db;
+};
+
+int captureSqliteStatements(unsigned event, void* context, void* statement, void*) {
+    if (event != SQLITE_TRACE_STMT || context == nullptr || statement == nullptr) {
+        return 0;
+    }
+    if (const char* sql = sqlite3_sql(static_cast<sqlite3_stmt*>(statement)); sql != nullptr) {
+        static_cast<std::vector<std::string>*>(context)->emplace_back(sql);
+    }
+    return 0;
+}
+
+struct SqliteTraceGuard {
+    SqliteTraceGuard(sqlite3* db, std::vector<std::string>& statements) : db(db) {
+        sqlite3_trace_v2(db, SQLITE_TRACE_STMT, captureSqliteStatements, &statements);
+    }
+    ~SqliteTraceGuard() { sqlite3_trace_v2(db, 0, nullptr, nullptr); }
+
+    sqlite3* db;
+};
 
 } // namespace
 
@@ -343,6 +538,52 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend getVectorsBatch mixe
     CHECK((results.count("chunk_vec_2") == 1));
     CHECK((results.count("chunk_vec_4") == 1));
     CHECK((results.count("nonexistent") == 0));
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend serializes cached read statements",
+                 "[vector][backend][crud][concurrency][catch2]") {
+    skipIfNeeded();
+
+    SqliteVecBackend backend;
+    REQUIRE((backend.initialize(":memory:").has_value()));
+    REQUIRE((backend.createTables(64).has_value()));
+    REQUIRE((backend.insertVector(createVectorRecord("reader_a", createEmbedding(64, 1.0F)))
+                 .has_value()));
+    REQUIRE((backend.insertVector(createVectorRecord("reader_b", createEmbedding(64, 2.0F)))
+                 .has_value()));
+
+    std::promise<void> firstReady;
+    std::promise<void> secondReady;
+    std::promise<void> start;
+    auto startSignal = start.get_future().share();
+    std::atomic<std::size_t> failures{0};
+    constexpr std::size_t kIterations = 1'000;
+
+    auto reader = [&](std::string chunkId, std::promise<void>& ready) {
+        ready.set_value();
+        startSignal.wait();
+        for (std::size_t iteration = 0; iteration < kIterations; ++iteration) {
+            auto result = backend.getVector(chunkId);
+            if (!result || !result.value() || result.value()->chunk_id != chunkId) {
+                failures.fetch_add(1, std::memory_order_relaxed);
+            }
+            auto count = backend.getVectorCount();
+            auto stats = backend.getStats();
+            if (!count || count.value() != 2 || !stats || stats.value().total_vectors != 2) {
+                failures.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+    };
+
+    std::thread first(reader, "chunk_reader_a", std::ref(firstReady));
+    std::thread second(reader, "chunk_reader_b", std::ref(secondReady));
+    firstReady.get_future().wait();
+    secondReady.get_future().wait();
+    start.set_value();
+    first.join();
+    second.join();
+
+    CHECK((failures.load(std::memory_order_relaxed) == 0));
 }
 
 TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend getVectorsByDocument",
@@ -750,6 +991,52 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend Simeon PQ search eng
 }
 
 TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend uses exact search when a corpus cannot train its PQ codebook",
+                 "[vector][backend][search][spq][small-corpus][catch2]") {
+    skipIfNeeded();
+
+    constexpr size_t kDim = 64;
+    constexpr size_t kCorpus = 64;
+
+    SqliteVecBackend::Config config;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.embedding_dim = kDim;
+    config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_centroids = 256;
+    config.simeon_pq_rerank_factor = 2;
+
+    SqliteVecBackend backend(config);
+    REQUIRE((backend.initialize(":memory:").has_value()));
+    REQUIRE((backend.createTables(kDim).has_value()));
+
+    std::vector<VectorRecord> records;
+    records.reserve(kCorpus);
+    for (size_t i = 0; i < kCorpus; ++i) {
+        records.push_back(createVectorRecord("small_" + std::to_string(i),
+                                             createEmbedding(kDim, static_cast<float>(i + 1))));
+    }
+    REQUIRE((backend.insertVectorsBatch(records).has_value()));
+    REQUIRE((backend.buildIndex().has_value()));
+    REQUIRE((backend.persistIndex().has_value()));
+    auto reusable = backend.hasReusablePersistedSearchIndex();
+    REQUIRE((reusable.has_value()));
+    CHECK_FALSE(reusable.value());
+    CHECK((countRows(backend.getDbHandle(), "simeon_pq_meta") == 0));
+    CHECK((countRows(backend.getDbHandle(), "simeon_pq_codes") == 0));
+
+    VectorSearchDiagnostics diagnostics;
+    auto result = backend.searchSimilarWithDiagnostics(records[37].embedding, 1, -1.0F,
+                                                       std::nullopt, {}, {}, diagnostics);
+    REQUIRE((result.has_value()));
+    REQUIRE((result.value().size() == 1));
+    CHECK((result.value().front().chunk_id == records[37].chunk_id));
+    CHECK(diagnostics.usedExactScan);
+    CHECK_FALSE(diagnostics.usedAnn);
+    CHECK(diagnostics.exactDistanceEvaluationsObserved);
+    CHECK((diagnostics.exactDistanceEvaluations == kCorpus));
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
                  "SqliteVecBackend suppresses Simeon PQ rebuilds for memory instrumentation",
                  "[vector][backend][index][spq-suppressed][catch2]") {
     skipIfNeeded();
@@ -774,9 +1061,16 @@ TEST_CASE_METHOD(SqliteVecBackendFixture,
     CHECK((countRows(backend.getDbHandle(), "simeon_pq_codes") == 0));
 
     auto query = createEmbedding(64, 1.0f);
-    auto searchResult = backend.searchSimilar(query, 5, 0.0f, std::nullopt, {});
+    VectorSearchDiagnostics diagnostics;
+    auto searchResult =
+        backend.searchSimilarWithDiagnostics(query, 5, 0.0f, std::nullopt, {}, {}, diagnostics);
     REQUIRE((searchResult.has_value()));
-    CHECK((searchResult.value().empty()));
+    REQUIRE_FALSE((searchResult.value().empty()));
+    CHECK((searchResult.value().front().chunk_id == "chunk_spq_suppressed_0"));
+    CHECK(diagnostics.usedExactScan);
+    CHECK_FALSE(diagnostics.usedAnn);
+    CHECK(diagnostics.exactDistanceEvaluationsObserved);
+    CHECK((diagnostics.exactDistanceEvaluations == 12));
     CHECK((countRows(backend.getDbHandle(), "simeon_pq_meta") == 0));
 }
 
@@ -931,6 +1225,7 @@ TEST_CASE_METHOD(SqliteVecBackendFixture,
     config.search_engine = VectorSearchEngine::SimeonPqAdc;
     config.embedding_dim = kDim;
     config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_centroids = 16;
     config.simeon_pq_rerank_factor = 2;
     SqliteVecBackend backend(config);
     REQUIRE((backend.initialize(":memory:").has_value()));
@@ -962,6 +1257,9 @@ TEST_CASE_METHOD(SqliteVecBackendFixture,
 
     CHECK((diagnostics.usedAnn));
     CHECK_FALSE(diagnostics.usedExactScan);
+    CHECK(diagnostics.rowsVisitedObserved);
+    CHECK(diagnostics.exactDistanceEvaluationsObserved);
+    CHECK(diagnostics.annCandidateBudgetObserved);
     CHECK((diagnostics.annCandidateBudget == routedDocuments.size()));
     CHECK((diagnostics.rowsVisited == routedDocuments.size()));
     CHECK((diagnostics.exactDistanceEvaluations == routedDocuments.size()));
@@ -1021,6 +1319,58 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend searchSimilar empty 
     auto searchResult = backend.searchSimilar(query, 5, 0.0f, std::nullopt, {});
     REQUIRE((searchResult.has_value()));
     CHECK((searchResult.value().empty()));
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend exact scan propagates interruption",
+                 "[vector][backend][search][exact-scan][error][catch2]") {
+    skipIfNeeded();
+
+    SqliteVecBackend::Config config;
+    config.embedding_dim = 64;
+    config.search_engine = VectorSearchEngine::ExactScan;
+    SqliteVecBackend backend(config);
+    REQUIRE((backend.initialize(":memory:").has_value()));
+    REQUIRE((backend.createTables(64).has_value()));
+    for (int i = 0; i < 32; ++i) {
+        REQUIRE((backend
+                     .insertVector(createVectorRecord("interrupt_" + std::to_string(i),
+                                                      createEmbedding(64, i + 1.0F)))
+                     .has_value()));
+    }
+
+    sqlite3_progress_handler(backend.getDbHandle(), 100, interruptSqlite, nullptr);
+    SqliteProgressHandlerGuard progressGuard(backend.getDbHandle());
+    auto result = backend.searchSimilar(createEmbedding(64), 5, -1.0F);
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == yams::ErrorCode::DatabaseError);
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend PQ build propagates interruption",
+                 "[vector][backend][search][spq][error][catch2]") {
+    skipIfNeeded();
+
+    SqliteVecBackend::Config config;
+    config.embedding_dim = 64;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_centroids = 8;
+    SqliteVecBackend backend(config);
+    REQUIRE((backend.initialize(":memory:").has_value()));
+    REQUIRE((backend.createTables(64).has_value()));
+    for (int i = 0; i < 32; ++i) {
+        REQUIRE((backend
+                     .insertVector(createVectorRecord("pq_interrupt_" + std::to_string(i),
+                                                      createEmbedding(64, i + 1.0F)))
+                     .has_value()));
+    }
+
+    sqlite3_progress_handler(backend.getDbHandle(), 1, interruptSqlite, nullptr);
+    SqliteProgressHandlerGuard progressGuard(backend.getDbHandle());
+    auto result = backend.buildIndex();
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == yams::ErrorCode::DatabaseError);
 }
 
 TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend searchSimilar k greater than corpus",
@@ -1284,6 +1634,9 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend searchSimilar with c
     REQUIRE((filteredResultA.has_value()));
     CHECK(diagnostics.usedAnn);
     CHECK_FALSE(diagnostics.usedExactScan);
+    CHECK_FALSE(diagnostics.rowsVisitedObserved);
+    CHECK_FALSE(diagnostics.exactDistanceEvaluationsObserved);
+    CHECK_FALSE(diagnostics.annCandidateBudgetObserved);
     CHECK(diagnostics.rowsVisited == 0);
     CHECK(diagnostics.exactDistanceEvaluations == 0);
     CHECK(diagnostics.annCandidateBudget == 16);
@@ -1999,7 +2352,7 @@ TEST_CASE_METHOD(SqliteVecBackendFixture,
         config.simeon_pq_subquantizers = 8;
         config.simeon_pq_centroids = 16;
         config.simeon_pq_train_limit = 64;
-        config.simeon_pq_rerank_factor = 3;
+        config.simeon_pq_rerank_factor = 1;
         SqliteVecBackend writer(config);
         REQUIRE((writer.initialize(dbPath).has_value()));
         REQUIRE((writer.createTables(64).has_value()));
@@ -2027,7 +2380,9 @@ TEST_CASE_METHOD(SqliteVecBackendFixture,
         config.simeon_pq_subquantizers = 8;
         config.simeon_pq_centroids = 16;
         config.simeon_pq_train_limit = 64;
-        config.simeon_pq_rerank_factor = 3;
+        // Rerank depth is a query policy, not part of the persisted codebook recipe.
+        // A reopened index must honor the current typed configuration.
+        config.simeon_pq_rerank_factor = 4;
         SqliteVecBackend reader(config);
         REQUIRE((reader.initialize(dbPath).has_value()));
         auto reusable = reader.hasReusablePersistedSearchIndex();
@@ -2035,11 +2390,1082 @@ TEST_CASE_METHOD(SqliteVecBackendFixture,
         CHECK((reusable.value()));
         REQUIRE((reader.prepareSearchIndex().has_value()));
 
-        auto result = reader.searchSimilar(createEmbedding(64, 1.0f), 5, 0.0f);
+        VectorSearchDiagnostics diagnostics;
+        auto result = reader.searchSimilarWithDiagnostics(createEmbedding(64, 1.0f), 5, 0.0f,
+                                                          std::nullopt, {}, {}, diagnostics);
         REQUIRE((result.has_value()));
         REQUIRE_FALSE(result.value().empty());
         CHECK((result.value().front().chunk_id == "chunk_spq_0"));
+        CHECK((diagnostics.usedAnn));
+        CHECK((diagnostics.exactDistanceEvaluations == 20));
     }
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend prepare rebuilds dirty Simeon PQ instead of loading stale state",
+                 "[vector][backend][search][spq][persistence][catch2]") {
+    skipIfNeeded();
+
+    constexpr size_t kDim = 64;
+    SqliteVecBackend::Config config;
+    config.embedding_dim = kDim;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_centroids = 16;
+    config.simeon_pq_train_limit = 64;
+    config.simeon_pq_rerank_factor = 1;
+    SqliteVecBackend backend(config);
+    REQUIRE((backend.initialize(":memory:").has_value()));
+    REQUIRE((backend.createTables(kDim).has_value()));
+
+    for (int i = 0; i < 24; ++i) {
+        REQUIRE((backend
+                     .insertVector(createVectorRecord("stale_" + std::to_string(i),
+                                                      createEmbedding(kDim, float(i + 1))))
+                     .has_value()));
+    }
+    REQUIRE((backend.buildIndex().has_value()));
+    REQUIRE((backend.persistIndex().has_value()));
+
+    std::vector<float> exactQuery(kDim, 0.0F);
+    exactQuery.front() = 1.0F;
+    REQUIRE((backend.insertVector(createVectorRecord("fresh", exactQuery)).has_value()));
+    REQUIRE((backend.prepareSearchIndex().has_value()));
+
+    VectorSearchDiagnostics diagnostics;
+    auto result = backend.searchSimilarWithDiagnostics(exactQuery, 25, -1.0F, std::nullopt, {}, {},
+                                                       diagnostics);
+    REQUIRE((result.has_value()));
+    REQUIRE((result.value().size() == 25));
+    CHECK((result.value().front().chunk_id == "chunk_fresh"));
+    CHECK((diagnostics.rowsVisited == 25));
+}
+
+TEST_CASE_METHOD(
+    SqliteVecBackendFixture,
+    "SqliteVecBackend rejects a persisted Simeon PQ snapshot after a pre-restart mutation",
+    "[vector][backend][search][spq][persistence][restart][catch2]") {
+    skipIfNeeded();
+#ifdef _WIN32
+    SKIP("Simeon PQ persistence/reload is not bounded on Windows CI");
+#endif
+
+    constexpr size_t kDim = 64;
+    const std::string dbPath = createTempDbPath();
+    std::vector<float> exactQuery(kDim, 0.0F);
+    exactQuery.front() = 1.0F;
+
+    {
+        SqliteVecBackend::Config config;
+        config.embedding_dim = kDim;
+        config.search_engine = VectorSearchEngine::SimeonPqAdc;
+        config.simeon_pq_subquantizers = 8;
+        config.simeon_pq_centroids = 16;
+        config.simeon_pq_train_limit = 64;
+        config.simeon_pq_rerank_factor = 1;
+        SqliteVecBackend writer(config);
+        REQUIRE((writer.initialize(dbPath).has_value()));
+        REQUIRE((writer.createTables(kDim).has_value()));
+
+        for (int i = 0; i < 24; ++i) {
+            REQUIRE((writer
+                         .insertVector(createVectorRecord("restart_stale_" + std::to_string(i),
+                                                          createEmbedding(kDim, float(i + 1))))
+                         .has_value()));
+        }
+        REQUIRE((writer.buildIndex().has_value()));
+        REQUIRE((writer.persistIndex().has_value()));
+        REQUIRE((writer.insertVector(createVectorRecord("restart_fresh", exactQuery)).has_value()));
+        // Intentionally close without rebuilding or persisting the now-dirty index.
+    }
+
+    SqliteVecBackend::Config config;
+    config.embedding_dim = kDim;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_centroids = 16;
+    config.simeon_pq_train_limit = 64;
+    config.simeon_pq_rerank_factor = 1;
+    SqliteVecBackend reader(config);
+    REQUIRE((reader.initialize(dbPath).has_value()));
+
+    auto reusable = reader.hasReusablePersistedSearchIndex();
+    REQUIRE((reusable.has_value()));
+    CHECK_FALSE(reusable.value());
+    REQUIRE((reader.prepareSearchIndex().has_value()));
+
+    VectorSearchDiagnostics diagnostics;
+    auto result = reader.searchSimilarWithDiagnostics(exactQuery, 25, -1.0F, std::nullopt, {}, {},
+                                                      diagnostics);
+    REQUIRE((result.has_value()));
+    REQUIRE((result.value().size() == 25));
+    CHECK((result.value().front().chunk_id == "chunk_restart_fresh"));
+    CHECK((diagnostics.rowsVisited == 25));
+}
+
+TEST_CASE_METHOD(
+    SqliteVecBackendFixture,
+    "SqliteVecBackend does not bless a dirty Simeon PQ snapshot during suppressed persistence",
+    "[vector][backend][search][spq][persistence][restart][suppressed][catch2]") {
+    skipIfNeeded();
+#ifdef _WIN32
+    SKIP("Simeon PQ persistence/reload is not bounded on Windows CI");
+#endif
+
+    constexpr size_t kDim = 64;
+    const std::string dbPath = createTempDbPath();
+    std::vector<float> exactQuery(kDim, 0.0F);
+    exactQuery.front() = 1.0F;
+
+    SqliteVecBackend::Config config;
+    config.embedding_dim = kDim;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_centroids = 16;
+    config.simeon_pq_train_limit = 64;
+    config.simeon_pq_rerank_factor = 1;
+
+    {
+        SqliteVecBackend writer(config);
+        REQUIRE((writer.initialize(dbPath).has_value()));
+        REQUIRE((writer.createTables(kDim).has_value()));
+        for (int i = 0; i < 24; ++i) {
+            REQUIRE((writer
+                         .insertVector(createVectorRecord("suppressed_stale_" + std::to_string(i),
+                                                          createEmbedding(kDim, float(i + 1))))
+                         .has_value()));
+        }
+        REQUIRE((writer.buildIndex().has_value()));
+        REQUIRE((writer.persistIndex().has_value()));
+    }
+
+    {
+        auto suppressedConfig = config;
+        suppressedConfig.suppress_search_index_builds = true;
+        SqliteVecBackend suppressed(suppressedConfig);
+        REQUIRE((suppressed.initialize(dbPath).has_value()));
+
+        // Lazy search loads the reusable 24-row snapshot without building a new index.
+        auto loaded = suppressed.searchSimilar(createEmbedding(kDim, 1.0F), 5, -1.0F);
+        REQUIRE((loaded.has_value()));
+        REQUIRE((loaded.value().size() == 5));
+
+        REQUIRE((suppressed.insertVector(createVectorRecord("suppressed_fresh", exactQuery))
+                     .has_value()));
+        // A checkpoint may persist while instrumentation suppresses index builds. It must not
+        // stamp the now-stale 24-row in-memory snapshot with the 25-row vector generation.
+        REQUIRE((suppressed.persistIndex().has_value()));
+    }
+
+    SqliteVecBackend reader(config);
+    REQUIRE((reader.initialize(dbPath).has_value()));
+    auto reusable = reader.hasReusablePersistedSearchIndex();
+    REQUIRE((reusable.has_value()));
+    CHECK_FALSE(reusable.value());
+    REQUIRE((reader.prepareSearchIndex().has_value()));
+
+    VectorSearchDiagnostics diagnostics;
+    auto result = reader.searchSimilarWithDiagnostics(exactQuery, 25, -1.0F, std::nullopt, {}, {},
+                                                      diagnostics);
+    REQUIRE((result.has_value()));
+    REQUIRE((result.value().size() == 25));
+    CHECK((result.value().front().chunk_id == "chunk_suppressed_fresh"));
+    CHECK((diagnostics.rowsVisited == 25));
+}
+
+TEST_CASE_METHOD(
+    SqliteVecBackendFixture,
+    "SqliteVecBackend refreshes a loaded Simeon PQ after another backend updates a vector",
+    "[vector][backend][search][spq][persistence][generation][concurrency][catch2]") {
+    skipIfNeeded();
+#ifdef _WIN32
+    SKIP("Simeon PQ cross-connection persistence is not bounded on Windows CI");
+#endif
+
+    constexpr size_t kDim = 64;
+    const std::string dbPath = createTempDbPath();
+    std::vector<float> query(kDim, 0.0F);
+    query.front() = 1.0F;
+    auto staleTarget = query;
+    staleTarget.front() = -1.0F;
+
+    SqliteVecBackend::Config config;
+    config.embedding_dim = kDim;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_centroids = 16;
+    config.simeon_pq_train_limit = 64;
+    config.simeon_pq_rerank_factor = 1;
+
+    {
+        SqliteVecBackend seed(config);
+        REQUIRE((seed.initialize(dbPath).has_value()));
+        REQUIRE((seed.createTables(kDim).has_value()));
+        REQUIRE(
+            (seed.insertVector(createVectorRecord("external_target", staleTarget)).has_value()));
+        for (int i = 1; i < 32; ++i) {
+            REQUIRE((seed.insertVector(createVectorRecord("external_" + std::to_string(i),
+                                                          createEmbedding(kDim, float(i + 1))))
+                         .has_value()));
+        }
+        REQUIRE((seed.buildIndex().has_value()));
+        REQUIRE((seed.persistIndex().has_value()));
+    }
+
+    SqliteVecBackend reader(config);
+    REQUIRE((reader.initialize(dbPath).has_value()));
+    REQUIRE((reader.prepareSearchIndex().has_value()));
+
+    auto before = reader.searchSimilar(query, 1, -1.0F);
+    REQUIRE((before.has_value()));
+    REQUIRE((before.value().size() == 1));
+    REQUIRE((before.value().front().chunk_id != "chunk_external_target"));
+
+    SqliteVecBackend mutator(config);
+    REQUIRE((mutator.initialize(dbPath).has_value()));
+    REQUIRE((updateEmbeddingRaw(mutator.getDbHandle(), "chunk_external_target", query)));
+
+    auto after = reader.searchSimilar(query, 1, -1.0F);
+    REQUIRE((after.has_value()));
+    REQUIRE((after.value().size() == 1));
+    CHECK((after.value().front().chunk_id == "chunk_external_target"));
+}
+
+TEST_CASE_METHOD(
+    SqliteVecBackendFixture,
+    "SqliteVecBackend preserves vector generation tracking while migrating update triggers",
+    "[vector][backend][search][spq][persistence][generation][concurrency][migration][catch2]") {
+    skipIfNeeded();
+#ifdef _WIN32
+    SKIP("Simeon PQ cross-connection persistence is not bounded on Windows CI");
+#endif
+
+    constexpr size_t kDim = 64;
+    const std::string dbPath = createTempDbPath();
+    const std::string targetChunkId = "chunk_trigger_target";
+    auto initialEmbedding = createEmbedding(kDim, 1.0F);
+    auto updatedEmbedding = createEmbedding(kDim, 1001.0F);
+    SqliteVecBackend::Config config;
+    config.embedding_dim = kDim;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+
+    {
+        SqliteVecBackend seed(config);
+        REQUIRE((seed.initialize(dbPath).has_value()));
+        REQUIRE((seed.createTables(kDim).has_value()));
+        REQUIRE((
+            seed.insertVector(createVectorRecord("trigger_target", initialEmbedding)).has_value()));
+    }
+
+    sqlite3* mutator = nullptr;
+    REQUIRE((sqlite3_open(dbPath.c_str(), &mutator) == SQLITE_OK));
+    std::uint64_t generationBefore = 0;
+    REQUIRE((yams::vector::detail::loadVectorIndexGeneration(mutator, generationBefore)));
+
+    SqliteVecBackend initializer(config);
+    REQUIRE((initializer.initialize(dbPath).has_value()));
+    UpdateDuringGenerationTriggerMigration update{
+        .mutatorDb = mutator, .chunkId = &targetChunkId, .embedding = &updatedEmbedding};
+    {
+        GenerationTriggerMigrationGuard migrationGuard(initializer.getDbHandle(), update);
+        REQUIRE((initializer.createTables(kDim).has_value()));
+    }
+
+    if (!update.attempted) {
+        REQUIRE(update.sawProtectedInstall);
+        update.attempted = true;
+        update.updated = updateEmbeddingRaw(mutator, targetChunkId, updatedEmbedding);
+    }
+
+    REQUIRE(update.attempted);
+    REQUIRE(update.updated);
+    std::uint64_t generationAfter = 0;
+    REQUIRE((yams::vector::detail::loadVectorIndexGeneration(mutator, generationAfter)));
+    CHECK((generationAfter > generationBefore));
+    REQUIRE((sqlite3_close(mutator) == SQLITE_OK));
+}
+
+TEST_CASE_METHOD(
+    SqliteVecBackendFixture, "SqliteVecBackend installs vector generation tracking atomically",
+    "[vector][backend][search][spq][persistence][generation][concurrency][migration][catch2]") {
+    skipIfNeeded();
+#ifdef _WIN32
+    SKIP("Simeon PQ cross-connection persistence is not bounded on Windows CI");
+#endif
+
+    constexpr size_t kDim = 64;
+    const std::string dbPath = createTempDbPath();
+    const std::string targetChunkId = "chunk_trigger_install_target";
+    auto initialEmbedding = createEmbedding(kDim, 1.0F);
+    auto updatedEmbedding = createEmbedding(kDim, 1001.0F);
+    SqliteVecBackend::Config config;
+    config.embedding_dim = kDim;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+
+    SqliteVecBackend initializer(config);
+    REQUIRE((initializer.initialize(dbPath).has_value()));
+    REQUIRE((initializer.createTables(kDim).has_value()));
+    REQUIRE(
+        (initializer.insertVector(createVectorRecord("trigger_install_target", initialEmbedding))
+             .has_value()));
+
+    char* error = nullptr;
+    REQUIRE((sqlite3_exec(initializer.getDbHandle(),
+                          "DROP TRIGGER IF EXISTS vectors_index_generation_insert;"
+                          "DROP TRIGGER IF EXISTS vectors_index_generation_update_v2;"
+                          "DROP TRIGGER IF EXISTS vectors_index_generation_update;"
+                          "DROP TRIGGER IF EXISTS vectors_index_generation_delete;"
+                          "DROP TABLE vector_index_generation;",
+                          nullptr, nullptr, &error) == SQLITE_OK));
+    sqlite3_free(error);
+
+    sqlite3* mutator = nullptr;
+    REQUIRE((sqlite3_open(dbPath.c_str(), &mutator) == SQLITE_OK));
+    UpdateDuringGenerationTriggerMigration update{.mutatorDb = mutator,
+                                                  .chunkId = &targetChunkId,
+                                                  .embedding = &updatedEmbedding,
+                                                  .requireProtectedInstall = true};
+    {
+        GenerationTriggerMigrationGuard migrationGuard(initializer.getDbHandle(), update);
+        REQUIRE((initializer.ensurePersistenceSchema().has_value()));
+    }
+    if (!update.attempted) {
+        REQUIRE(update.sawProtectedInstall);
+        update.attempted = true;
+        update.updated = updateEmbeddingRaw(mutator, targetChunkId, updatedEmbedding);
+    }
+
+    REQUIRE(update.attempted);
+    REQUIRE(update.updated);
+    std::uint64_t generation = 0;
+    REQUIRE((yams::vector::detail::loadVectorIndexGeneration(mutator, generation)));
+    CHECK((generation > 0));
+    REQUIRE((sqlite3_close(mutator) == SQLITE_OK));
+}
+
+TEST_CASE_METHOD(
+    SqliteVecBackendFixture,
+    "SqliteVecBackend does not return a stale Simeon PQ result when another backend commits "
+    "during materialization",
+    "[vector][backend][search][spq][persistence][generation][concurrency][catch2]") {
+    skipIfNeeded();
+#ifdef _WIN32
+    SKIP("Simeon PQ cross-connection persistence is not bounded on Windows CI");
+#endif
+
+    constexpr size_t kDim = 64;
+    const std::string dbPath = createTempDbPath();
+    std::vector<float> query(kDim, 0.0F);
+    query.front() = 1.0F;
+    auto staleTarget = query;
+    staleTarget.front() = -1.0F;
+
+    SqliteVecBackend::Config config;
+    config.embedding_dim = kDim;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_centroids = 16;
+    config.simeon_pq_train_limit = 64;
+    config.simeon_pq_rerank_factor = 1;
+
+    {
+        SqliteVecBackend seed(config);
+        REQUIRE((seed.initialize(dbPath).has_value()));
+        REQUIRE((seed.createTables(kDim).has_value()));
+        REQUIRE(
+            (seed.insertVector(createVectorRecord("external_target", staleTarget)).has_value()));
+        for (int i = 1; i < 32; ++i) {
+            REQUIRE((seed.insertVector(createVectorRecord("external_" + std::to_string(i),
+                                                          createEmbedding(kDim, float(i + 1))))
+                         .has_value()));
+        }
+        REQUIRE((seed.buildIndex().has_value()));
+        REQUIRE((seed.persistIndex().has_value()));
+    }
+
+    SqliteVecBackend reader(config);
+    REQUIRE((reader.initialize(dbPath).has_value()));
+    REQUIRE((reader.prepareSearchIndex().has_value()));
+
+    auto before = reader.searchSimilar(query, 1, -1.0F);
+    REQUIRE((before.has_value()));
+    REQUIRE((before.value().size() == 1));
+    REQUIRE((before.value().front().chunk_id != "chunk_external_target"));
+
+    SqliteVecBackend mutator(config);
+    REQUIRE((mutator.initialize(dbPath).has_value()));
+    const std::string targetChunkId = "chunk_external_target";
+    UpdateEmbeddingOnMaterialization update{
+        .mutatorDb = mutator.getDbHandle(), .chunkId = &targetChunkId, .embedding = &query};
+    MaterializationMutationGuard mutationGuard(reader.getDbHandle(), update);
+
+    VectorSearchDiagnostics diagnostics;
+    auto after =
+        reader.searchSimilarWithDiagnostics(query, 1, -1.0F, std::nullopt, {}, {}, diagnostics);
+    REQUIRE(update.attempted);
+    REQUIRE(update.updated);
+    REQUIRE((after.has_value()));
+    REQUIRE((after.value().size() == 1));
+    CHECK((after.value().front().chunk_id == targetChunkId));
+    CHECK((diagnostics.usedExactScan));
+}
+
+TEST_CASE_METHOD(
+    SqliteVecBackendFixture,
+    "SqliteVecBackend restarts a stale Simeon PQ batch when another backend commits during it",
+    "[vector][backend][search][spq][persistence][generation][concurrency][batch][catch2]") {
+    skipIfNeeded();
+#ifdef _WIN32
+    SKIP("Simeon PQ cross-connection persistence is not bounded on Windows CI");
+#endif
+
+    constexpr size_t kDim = 64;
+    const std::string dbPath = createTempDbPath();
+    std::vector<float> query(kDim, 0.0F);
+    query.front() = 1.0F;
+    auto staleTarget = query;
+    staleTarget.front() = -1.0F;
+
+    SqliteVecBackend::Config config;
+    config.embedding_dim = kDim;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_centroids = 16;
+    config.simeon_pq_train_limit = 64;
+    config.simeon_pq_rerank_factor = 1;
+
+    {
+        SqliteVecBackend seed(config);
+        REQUIRE((seed.initialize(dbPath).has_value()));
+        REQUIRE((seed.createTables(kDim).has_value()));
+        REQUIRE((seed.insertVector(createVectorRecord("batch_external_target", staleTarget))
+                     .has_value()));
+        for (int i = 1; i < 32; ++i) {
+            REQUIRE((seed.insertVector(createVectorRecord("batch_external_" + std::to_string(i),
+                                                          createEmbedding(kDim, float(i + 1))))
+                         .has_value()));
+        }
+        REQUIRE((seed.buildIndex().has_value()));
+        REQUIRE((seed.persistIndex().has_value()));
+    }
+
+    SqliteVecBackend reader(config);
+    REQUIRE((reader.initialize(dbPath).has_value()));
+    REQUIRE((reader.prepareSearchIndex().has_value()));
+
+    SqliteVecBackend mutator(config);
+    REQUIRE((mutator.initialize(dbPath).has_value()));
+    const std::string targetChunkId = "chunk_batch_external_target";
+    UpdateEmbeddingOnMaterialization update{
+        .mutatorDb = mutator.getDbHandle(), .chunkId = &targetChunkId, .embedding = &query};
+    MaterializationMutationGuard mutationGuard(reader.getDbHandle(), update);
+
+    auto results = reader.searchSimilarBatch({query, query}, 1, -1.0F);
+    REQUIRE(update.attempted);
+    REQUIRE(update.updated);
+    REQUIRE((results.has_value()));
+    REQUIRE((results.value().size() == 2));
+    for (const auto& result : results.value()) {
+        REQUIRE((result.size() == 1));
+        CHECK((result.front().chunk_id == targetChunkId));
+    }
+}
+
+TEST_CASE_METHOD(
+    SqliteVecBackendFixture,
+    "SqliteVecBackend returns exact scores from one snapshot after Simeon PQ invalidation",
+    "[vector][backend][search][spq][generation][concurrency][snapshot][catch2]") {
+    skipIfNeeded();
+#ifdef _WIN32
+    SKIP("Simeon PQ cross-connection persistence is not bounded on Windows CI");
+#endif
+
+    constexpr size_t kDim = 64;
+    const std::string dbPath = createTempDbPath();
+    std::vector<float> query(kDim, 0.0F);
+    query.front() = 1.0F;
+    auto opposite = query;
+    opposite.front() = -1.0F;
+
+    SqliteVecBackend::Config config;
+    config.embedding_dim = kDim;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_centroids = 16;
+    config.simeon_pq_train_limit = 64;
+    config.simeon_pq_rerank_factor = 1;
+
+    {
+        SqliteVecBackend seed(config);
+        REQUIRE((seed.initialize(dbPath).has_value()));
+        REQUIRE((seed.createTables(kDim).has_value()));
+        REQUIRE((seed.insertVector(createVectorRecord("snapshot_target", opposite)).has_value()));
+        for (int i = 1; i < 32; ++i) {
+            REQUIRE((seed.insertVector(createVectorRecord("snapshot_" + std::to_string(i),
+                                                          createEmbedding(kDim, float(i + 1))))
+                         .has_value()));
+        }
+        REQUIRE((seed.buildIndex().has_value()));
+        REQUIRE((seed.persistIndex().has_value()));
+    }
+
+    SqliteVecBackend reader(config);
+    REQUIRE((reader.initialize(dbPath).has_value()));
+    REQUIRE((reader.prepareSearchIndex().has_value()));
+
+    SqliteVecBackend mutator(config);
+    REQUIRE((mutator.initialize(dbPath).has_value()));
+    const std::string targetChunkId = "chunk_snapshot_target";
+    UpdateEmbeddingOnMaterialization update{.mutatorDb = mutator.getDbHandle(),
+                                            .chunkId = &targetChunkId,
+                                            .embedding = &query,
+                                            .secondEmbedding = &opposite};
+    MaterializationMutationGuard mutationGuard(reader.getDbHandle(), update);
+
+    VectorSearchDiagnostics diagnostics;
+    auto result =
+        reader.searchSimilarWithDiagnostics(query, 1, -1.0F, std::nullopt, {}, {}, diagnostics);
+    REQUIRE(update.attempted);
+    REQUIRE(update.updated);
+    REQUIRE((result.has_value()));
+    REQUIRE((result.value().size() == 1));
+    REQUIRE((result.value().front().chunk_id == targetChunkId));
+    double returnedNormSquared = 0.0;
+    double returnedDot = 0.0;
+    for (std::size_t i = 0; i < kDim; ++i) {
+        returnedNormSquared +=
+            result.value().front().embedding[i] * result.value().front().embedding[i];
+        returnedDot += query[i] * result.value().front().embedding[i];
+    }
+    const auto returnedSimilarity = returnedDot / std::sqrt(returnedNormSquared);
+    CHECK_THAT(result.value().front().relevance_score, WithinAbs(returnedSimilarity, 1.0e-5));
+    CHECK((diagnostics.usedExactScan));
+}
+
+TEST_CASE_METHOD(
+    SqliteVecBackendFixture,
+    "SqliteVecBackend does not restamp a loaded Simeon PQ after another backend mutates vectors",
+    "[vector][backend][search][spq][persistence][generation][concurrency][suppressed][catch2]") {
+    skipIfNeeded();
+#ifdef _WIN32
+    SKIP("Simeon PQ cross-connection persistence is not bounded on Windows CI");
+#endif
+
+    constexpr size_t kDim = 64;
+    const std::string dbPath = createTempDbPath();
+    SqliteVecBackend::Config config;
+    config.embedding_dim = kDim;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_centroids = 16;
+    config.simeon_pq_train_limit = 64;
+    config.simeon_pq_rerank_factor = 1;
+
+    {
+        SqliteVecBackend seed(config);
+        REQUIRE((seed.initialize(dbPath).has_value()));
+        REQUIRE((seed.createTables(kDim).has_value()));
+        for (int i = 0; i < 24; ++i) {
+            REQUIRE((seed.insertVector(createVectorRecord("external_persist_" + std::to_string(i),
+                                                          createEmbedding(kDim, float(i + 1))))
+                         .has_value()));
+        }
+        REQUIRE((seed.buildIndex().has_value()));
+        REQUIRE((seed.persistIndex().has_value()));
+    }
+
+    auto suppressedConfig = config;
+    suppressedConfig.suppress_search_index_builds = true;
+    SqliteVecBackend suppressed(suppressedConfig);
+    REQUIRE((suppressed.initialize(dbPath).has_value()));
+    auto loaded = suppressed.searchSimilar(createEmbedding(kDim, 1.0F), 5, -1.0F);
+    REQUIRE((loaded.has_value()));
+    REQUIRE((loaded.value().size() == 5));
+
+    SqliteVecBackend mutator(config);
+    REQUIRE((mutator.initialize(dbPath).has_value()));
+    REQUIRE((updateEmbeddingRaw(mutator.getDbHandle(), "chunk_external_persist_0",
+                                createEmbedding(kDim, 1001.0F))));
+
+    REQUIRE((suppressed.persistIndex().has_value()));
+
+    SqliteVecBackend verifier(config);
+    REQUIRE((verifier.initialize(dbPath).has_value()));
+    auto reusable = verifier.hasReusablePersistedSearchIndex();
+    REQUIRE((reusable.has_value()));
+    CHECK_FALSE(reusable.value());
+}
+
+TEST_CASE_METHOD(
+    SqliteVecBackendFixture,
+    "SqliteVecBackend keeps persisted Simeon PQ reusable across metadata-only stale marking",
+    "[vector][backend][search][spq][persistence][generation][migration][catch2]") {
+    skipIfNeeded();
+#ifdef _WIN32
+    SKIP("Simeon PQ persistence/reload is not bounded on Windows CI");
+#endif
+
+    constexpr size_t kDim = 64;
+    const std::string dbPath = createTempDbPath();
+    const auto query = createEmbedding(kDim, 1.0F);
+
+    SqliteVecBackend::Config config;
+    config.embedding_dim = kDim;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_centroids = 16;
+    config.simeon_pq_train_limit = 64;
+    config.simeon_pq_rerank_factor = 1;
+
+    {
+        SqliteVecBackend writer(config);
+        REQUIRE((writer.initialize(dbPath).has_value()));
+        REQUIRE((writer.createTables(kDim).has_value()));
+        for (int i = 0; i < 24; ++i) {
+            REQUIRE((writer
+                         .insertVector(createVectorRecord("generation_" + std::to_string(i),
+                                                          createEmbedding(kDim, float(i + 1))))
+                         .has_value()));
+        }
+        REQUIRE((writer.buildIndex().has_value()));
+        REQUIRE((writer.persistIndex().has_value()));
+
+        // Model the broad trigger installed by earlier builds. Reopen must migrate it to an
+        // index-payload-aware UPDATE trigger rather than preserving it via IF NOT EXISTS.
+        char* error = nullptr;
+        REQUIRE((sqlite3_exec(writer.getDbHandle(),
+                              "DROP TRIGGER IF EXISTS vectors_index_generation_update_v2;"
+                              "DROP TRIGGER IF EXISTS vectors_index_generation_update;"
+                              "CREATE TRIGGER vectors_index_generation_update "
+                              "AFTER UPDATE ON vectors BEGIN "
+                              "UPDATE vector_index_generation SET generation = generation + 1 "
+                              "WHERE id = 1; END",
+                              nullptr, nullptr, &error) == SQLITE_OK));
+        sqlite3_free(error);
+    }
+
+    SqliteVecBackend reader(config);
+    REQUIRE((reader.initialize(dbPath).has_value()));
+    auto reusable = reader.hasReusablePersistedSearchIndex();
+    REQUIRE((reusable.has_value()));
+    REQUIRE((reusable.value()));
+
+    auto before = reader.searchSimilar(query, 5, -1.0F);
+    REQUIRE((before.has_value()));
+    REQUIRE((before.value().size() == 5));
+    std::vector<std::string> beforeOrder;
+    for (const auto& record : before.value()) {
+        beforeOrder.push_back(record.chunk_id);
+    }
+
+    REQUIRE((reader.markAsStale("chunk_generation_0").has_value()));
+    reusable = reader.hasReusablePersistedSearchIndex();
+    REQUIRE((reusable.has_value()));
+    CHECK((reusable.value()));
+
+    auto after = reader.searchSimilar(query, 5, -1.0F);
+    REQUIRE((after.has_value()));
+    REQUIRE((after.value().size() == beforeOrder.size()));
+    for (std::size_t i = 0; i < beforeOrder.size(); ++i) {
+        CHECK((after.value()[i].chunk_id == beforeOrder[i]));
+    }
+
+    REQUIRE((reader
+                 .updateVector("chunk_generation_0",
+                               createVectorRecord("generation_0", createEmbedding(kDim, 101.0F)))
+                 .has_value()));
+    reusable = reader.hasReusablePersistedSearchIndex();
+    REQUIRE((reusable.has_value()));
+    CHECK_FALSE(reusable.value());
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend rejects persisted Simeon PQ with a different recipe",
+                 "[vector][backend][search][spq][persistence][catch2]") {
+    skipIfNeeded();
+#ifdef _WIN32
+    SKIP("Simeon PQ persistence/reload is not bounded on Windows CI");
+#endif
+
+    constexpr size_t kDim = 64;
+    const std::string dbPath = createTempDbPath();
+    {
+        SqliteVecBackend::Config config;
+        config.embedding_dim = kDim;
+        config.search_engine = VectorSearchEngine::SimeonPqAdc;
+        config.simeon_pq_subquantizers = 8;
+        config.simeon_pq_centroids = 16;
+        config.simeon_pq_train_limit = 16;
+        SqliteVecBackend writer(config);
+        REQUIRE((writer.initialize(dbPath).has_value()));
+        REQUIRE((writer.createTables(kDim).has_value()));
+        for (int i = 0; i < 32; ++i) {
+            REQUIRE((writer
+                         .insertVector(createVectorRecord("recipe_" + std::to_string(i),
+                                                          createEmbedding(kDim, float(i + 1))))
+                         .has_value()));
+        }
+        REQUIRE((writer.buildIndex().has_value()));
+        REQUIRE((writer.persistIndex().has_value()));
+    }
+
+    SqliteVecBackend::Config config;
+    config.embedding_dim = kDim;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_centroids = 16;
+    config.simeon_pq_train_limit = 16;
+
+    SECTION("subquantizer count is part of the persisted recipe") {
+        config.simeon_pq_subquantizers = 16;
+    }
+    SECTION("centroid count is part of the persisted recipe") {
+        config.simeon_pq_centroids = 8;
+    }
+    SECTION("training seed is part of the persisted recipe") {
+        config.simeon_pq_seed = 0x123456789ULL;
+    }
+    SECTION("training sample limit is part of the persisted recipe") {
+        config.simeon_pq_train_limit = 24;
+    }
+
+    SqliteVecBackend reader(config);
+    REQUIRE((reader.initialize(dbPath).has_value()));
+    auto reusable = reader.hasReusablePersistedSearchIndex();
+    REQUIRE((reusable.has_value()));
+    CHECK_FALSE(reusable.value());
+    REQUIRE((reader.prepareSearchIndex().has_value()));
+    REQUIRE((reader.persistIndex().has_value()));
+
+    sqlite3_stmt* stmt = nullptr;
+    REQUIRE((sqlite3_prepare_v2(reader.getDbHandle(),
+                                "SELECT m, k, seed, train_limit FROM simeon_pq_meta WHERE dim = ?1",
+                                -1, &stmt, nullptr) == SQLITE_OK));
+    sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(kDim));
+    REQUIRE((sqlite3_step(stmt) == SQLITE_ROW));
+    CHECK((sqlite3_column_int64(stmt, 0) ==
+           static_cast<sqlite3_int64>(config.simeon_pq_subquantizers)));
+    CHECK(
+        (sqlite3_column_int64(stmt, 1) == static_cast<sqlite3_int64>(config.simeon_pq_centroids)));
+    CHECK((static_cast<std::uint64_t>(sqlite3_column_int64(stmt, 2)) == config.simeon_pq_seed));
+    CHECK(
+        (static_cast<std::size_t>(sqlite3_column_int64(stmt, 3)) == config.simeon_pq_train_limit));
+    sqlite3_finalize(stmt);
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend reusable probe rejects corrupt Simeon PQ codes",
+                 "[vector][backend][search][spq][persistence][corruption][catch2]") {
+    skipIfNeeded();
+
+    constexpr size_t kDim = 32;
+    SqliteVecBackend::Config config;
+    config.embedding_dim = kDim;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_centroids = 8;
+    config.simeon_pq_train_limit = 16;
+    SqliteVecBackend backend(config);
+    REQUIRE((backend.initialize(":memory:").has_value()));
+    REQUIRE((backend.createTables(kDim).has_value()));
+
+    for (int i = 0; i < 16; ++i) {
+        REQUIRE((backend
+                     .insertVector(createVectorRecord("corrupt_probe_" + std::to_string(i),
+                                                      createEmbedding(kDim, float(i + 1))))
+                     .has_value()));
+    }
+    REQUIRE((backend.buildIndex().has_value()));
+    REQUIRE((backend.persistIndex().has_value()));
+
+    char* error = nullptr;
+    REQUIRE((sqlite3_exec(backend.getDbHandle(),
+                          "UPDATE simeon_pq_codes SET code = x'00' "
+                          "WHERE rowid = (SELECT MIN(rowid) FROM simeon_pq_codes)",
+                          nullptr, nullptr, &error) == SQLITE_OK));
+    sqlite3_free(error);
+
+    auto reusable = backend.hasReusablePersistedSearchIndex();
+    REQUIRE((reusable.has_value()));
+    CHECK_FALSE(reusable.value());
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend rejects zero-width persisted Simeon PQ metadata",
+                 "[vector][backend][search][spq][persistence][corruption][catch2]") {
+    skipIfNeeded();
+
+    constexpr size_t kDim = 32;
+    const std::string dbPath = createTempDbPath();
+    SqliteVecBackend::Config config;
+    config.embedding_dim = kDim;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_centroids = 8;
+    config.simeon_pq_train_limit = 32;
+
+    {
+        SqliteVecBackend writer(config);
+        REQUIRE((writer.initialize(dbPath).has_value()));
+        REQUIRE((writer.createTables(kDim).has_value()));
+        for (int i = 0; i < 32; ++i) {
+            REQUIRE((writer
+                         .insertVector(createVectorRecord("zero_m_" + std::to_string(i),
+                                                          createEmbedding(kDim, float(i + 1))))
+                         .has_value()));
+        }
+        REQUIRE((writer.buildIndex().has_value()));
+        REQUIRE((writer.persistIndex().has_value()));
+    }
+
+    sqlite3* corruptor = nullptr;
+    REQUIRE((sqlite3_open(dbPath.c_str(), &corruptor) == SQLITE_OK));
+    char* error = nullptr;
+    REQUIRE((sqlite3_exec(corruptor, "UPDATE simeon_pq_meta SET m = 0", nullptr, nullptr, &error) ==
+             SQLITE_OK));
+    sqlite3_free(error);
+    REQUIRE((sqlite3_close(corruptor) == SQLITE_OK));
+
+    SqliteVecBackend reader(config);
+    REQUIRE((reader.initialize(dbPath).has_value()));
+    auto reusable = reader.hasReusablePersistedSearchIndex();
+    REQUIRE((reusable.has_value()));
+    CHECK_FALSE(reusable.value());
+    REQUIRE((reader.prepareSearchIndex().has_value()));
+
+    auto results = reader.searchSimilar(createEmbedding(kDim, 1.0f), 5, 0.0f);
+    REQUIRE((results.has_value()));
+    CHECK_FALSE(results.value().empty());
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend rejects out-of-range persisted Simeon PQ codes",
+                 "[vector][backend][search][spq][persistence][corruption][catch2]") {
+    skipIfNeeded();
+
+    constexpr size_t kDim = 32;
+    const std::string dbPath = createTempDbPath();
+    SqliteVecBackend::Config config;
+    config.embedding_dim = kDim;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_centroids = 8;
+    config.simeon_pq_train_limit = 32;
+
+    {
+        SqliteVecBackend writer(config);
+        REQUIRE((writer.initialize(dbPath).has_value()));
+        REQUIRE((writer.createTables(kDim).has_value()));
+        for (int i = 0; i < 32; ++i) {
+            REQUIRE((writer
+                         .insertVector(createVectorRecord("bad_code_" + std::to_string(i),
+                                                          createEmbedding(kDim, float(i + 1))))
+                         .has_value()));
+        }
+        REQUIRE((writer.buildIndex().has_value()));
+        REQUIRE((writer.persistIndex().has_value()));
+    }
+
+    sqlite3* corruptor = nullptr;
+    REQUIRE((sqlite3_open(dbPath.c_str(), &corruptor) == SQLITE_OK));
+    char* error = nullptr;
+    REQUIRE((sqlite3_exec(corruptor,
+                          "UPDATE simeon_pq_codes SET code = x'FFFFFFFFFFFFFFFF' "
+                          "WHERE rowid = (SELECT MIN(rowid) FROM simeon_pq_codes)",
+                          nullptr, nullptr, &error) == SQLITE_OK));
+    sqlite3_free(error);
+    REQUIRE((sqlite3_close(corruptor) == SQLITE_OK));
+
+    SqliteVecBackend reader(config);
+    REQUIRE((reader.initialize(dbPath).has_value()));
+    auto reusable = reader.hasReusablePersistedSearchIndex();
+    REQUIRE((reusable.has_value()));
+    CHECK_FALSE(reusable.value());
+    REQUIRE((reader.prepareSearchIndex().has_value()));
+
+    auto results = reader.searchSimilar(createEmbedding(kDim, 1.0f), 5, 0.0f);
+    REQUIRE((results.has_value()));
+    CHECK_FALSE(results.value().empty());
+}
+
+TEST_CASE("Simeon PQ codec rejects non-finite persisted codebooks",
+          "[vector][backend][search][spq][persistence][corruption][catch2]") {
+    constexpr std::uint32_t kDim = 8;
+    constexpr std::uint32_t kSubquantizers = 2;
+    constexpr std::uint32_t kCentroids = 2;
+    std::vector<float> persistedCodebooks(kDim * kCentroids, 0.5F);
+    persistedCodebooks.front() = std::numeric_limits<float>::quiet_NaN();
+    auto blob = yams::vector::detail::serializeSimeonPqCodebooks(kDim, kSubquantizers, kCentroids,
+                                                                 true, persistedCodebooks);
+
+    bool trained = false;
+    std::vector<float> loadedCodebooks;
+    CHECK_FALSE((yams::vector::detail::deserializeSimeonPqCodebooks(
+        blob, kDim, kSubquantizers, kCentroids, trained, loadedCodebooks)));
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend persisted-index probes release transient SQLite statements",
+                 "[vector][backend][search][spq][persistence][lifetime][catch2]") {
+    skipIfNeeded();
+
+    SqliteVecBackend::Config config;
+    config.embedding_dim = 32;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_centroids = 8;
+    SqliteVecBackend backend(config);
+    REQUIRE((backend.initialize(":memory:").has_value()));
+    REQUIRE((backend.createTables(32).has_value()));
+    REQUIRE((backend.insertVector(createVectorRecord("probe", createEmbedding(32))).has_value()));
+
+    const auto baseline = countLiveStatements(backend.getDbHandle());
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        auto reusable = backend.hasReusablePersistedSearchIndex();
+        REQUIRE((reusable.has_value()));
+        CHECK_FALSE(reusable.value());
+    }
+    CHECK((countLiveStatements(backend.getDbHandle()) == baseline));
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend retains a fully validated Simeon PQ probe for later reuse",
+                 "[vector][backend][search][spq][persistence][readiness][catch2]") {
+    skipIfNeeded();
+#ifdef _WIN32
+    SKIP("Simeon PQ persistence/reload is not bounded on Windows CI");
+#endif
+
+    constexpr size_t kDim = 32;
+    const std::string dbPath = createTempDbPath();
+    SqliteVecBackend::Config config;
+    config.embedding_dim = kDim;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_centroids = 8;
+    config.simeon_pq_train_limit = 32;
+
+    {
+        SqliteVecBackend seed(config);
+        REQUIRE((seed.initialize(dbPath).has_value()));
+        REQUIRE((seed.createTables(kDim).has_value()));
+        for (int i = 0; i < 32; ++i) {
+            REQUIRE((seed.insertVector(createVectorRecord("retained_" + std::to_string(i),
+                                                          createEmbedding(kDim, float(i + 1))))
+                         .has_value()));
+        }
+        REQUIRE((seed.buildIndex().has_value()));
+        REQUIRE((seed.persistIndex().has_value()));
+    }
+
+    SqliteVecBackend reader(config);
+    REQUIRE((reader.initialize(dbPath).has_value()));
+    auto firstProbe = reader.hasReusablePersistedSearchIndex();
+    REQUIRE((firstProbe.has_value()));
+    REQUIRE((firstProbe.value()));
+
+    std::vector<std::string> statements;
+    {
+        SqliteTraceGuard trace(reader.getDbHandle(), statements);
+        auto secondProbe = reader.hasReusablePersistedSearchIndex();
+        REQUIRE((secondProbe.has_value()));
+        REQUIRE((secondProbe.value()));
+    }
+
+    CHECK((std::ranges::none_of(statements, [](const std::string& sql) {
+        return sql.find("FROM simeon_pq_codes") != std::string::npos;
+    })));
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "Simeon PQ code loading rejects an interrupted partial result",
+                 "[vector][backend][search][spq][persistence][corruption][catch2]") {
+    skipIfNeeded();
+
+    constexpr size_t kDim = 32;
+    constexpr size_t kSubquantizers = 8;
+    SqliteVecBackend::Config config;
+    config.embedding_dim = kDim;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.simeon_pq_subquantizers = kSubquantizers;
+    config.simeon_pq_centroids = 8;
+    config.simeon_pq_train_limit = 32;
+    SqliteVecBackend backend(config);
+    REQUIRE((backend.initialize(":memory:").has_value()));
+    REQUIRE((backend.createTables(kDim).has_value()));
+    for (int i = 0; i < 32; ++i) {
+        REQUIRE((backend
+                     .insertVector(createVectorRecord("partial_" + std::to_string(i),
+                                                      createEmbedding(kDim, float(i + 1))))
+                     .has_value()));
+    }
+    REQUIRE((backend.buildIndex().has_value()));
+    REQUIRE((backend.persistIndex().has_value()));
+
+    std::vector<std::size_t> rowids;
+    std::vector<std::uint8_t> codes;
+    InterruptAfterProgressCalls interrupt{40};
+    sqlite3_progress_handler(backend.getDbHandle(), 1, interruptSqliteAfterProgressCalls,
+                             &interrupt);
+    SqliteProgressHandlerGuard progressGuard(backend.getDbHandle());
+
+    CHECK_FALSE((yams::vector::detail::loadPersistedSimeonPqCodes(
+        backend.getDbHandle(), kDim, kSubquantizers, config.simeon_pq_centroids, rowids, codes)));
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend persists Simeon PQ metadata and codes atomically",
+                 "[vector][backend][search][spq][persistence][transaction][catch2]") {
+    skipIfNeeded();
+
+    constexpr size_t kDim = 32;
+    SqliteVecBackend::Config config;
+    config.embedding_dim = kDim;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_centroids = 8;
+    config.simeon_pq_train_limit = 32;
+    SqliteVecBackend backend(config);
+    REQUIRE((backend.initialize(":memory:").has_value()));
+    REQUIRE((backend.createTables(kDim).has_value()));
+
+    for (int i = 0; i < 32; ++i) {
+        REQUIRE((backend
+                     .insertVector(createVectorRecord("atomic_" + std::to_string(i),
+                                                      createEmbedding(kDim, float(i + 1))))
+                     .has_value()));
+    }
+    REQUIRE((backend.buildIndex().has_value()));
+    REQUIRE((backend.persistIndex().has_value()));
+    const auto originalCodebooks = queryBlob(
+        backend.getDbHandle(), "SELECT codebooks_blob FROM simeon_pq_meta WHERE dim = ?1", kDim);
+    REQUIRE_FALSE(originalCodebooks.empty());
+
+    for (int i = 0; i < 32; ++i) {
+        const auto chunkId = "chunk_atomic_" + std::to_string(i);
+        REQUIRE(
+            (backend
+                 .updateVector(chunkId, createVectorRecord("atomic_" + std::to_string(i),
+                                                           createEmbedding(kDim, float(i + 1001))))
+                 .has_value()));
+    }
+    REQUIRE((backend.buildIndex().has_value()));
+
+    char* error = nullptr;
+    REQUIRE((sqlite3_exec(backend.getDbHandle(),
+                          "CREATE TRIGGER reject_simeon_pq_code_insert "
+                          "BEFORE INSERT ON simeon_pq_codes BEGIN "
+                          "SELECT RAISE(ABORT, 'forced code failure'); END",
+                          nullptr, nullptr, &error) == SQLITE_OK));
+    sqlite3_free(error);
+
+    auto persist = backend.persistIndex();
+    REQUIRE_FALSE(persist.has_value());
+    CHECK(persist.error().code == yams::ErrorCode::DatabaseError);
+    CHECK(queryBlob(backend.getDbHandle(),
+                    "SELECT codebooks_blob FROM simeon_pq_meta WHERE dim = ?1",
+                    kDim) == originalCodebooks);
+    CHECK((countRows(backend.getDbHandle(), "simeon_pq_codes") == 32));
 }
 
 // ============================================================================
@@ -2074,8 +3500,8 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "VectorIndexManager delegates to backe
     REQUIRE_FALSE(result.value().empty());
 }
 
-TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend vec0 ANN index persists across reopen",
-                 "[vector][regression][vec0_persist][catch2]") {
+TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend rebuilds vec0 ANN across reopen",
+                 "[vector][regression][vec0_reopen][catch2]") {
     skipIfNeeded();
     std::string dbPath = createTempDbPath();
 
@@ -2094,9 +3520,12 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend vec0 ANN index persi
             REQUIRE((writer.insertVector(rec).has_value()));
         }
         REQUIRE((writer.buildIndex().has_value()));
+        auto reusable = writer.hasReusablePersistedSearchIndex();
+        REQUIRE((reusable.has_value()));
+        CHECK_FALSE(reusable.value());
     }
 
-    // Reopen: tables should exist, search should work without rebuild
+    // Reopen: data tables remain, while search preparation explicitly rebuilds and warms ANN.
     {
         SqliteVecBackend::Config config;
         config.embedding_dim = 64;
@@ -2104,6 +3533,9 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend vec0 ANN index persi
         SqliteVecBackend reader(config);
         REQUIRE((reader.initialize(dbPath).has_value()));
         CHECK((reader.tablesExist()));
+        auto reusable = reader.hasReusablePersistedSearchIndex();
+        REQUIRE((reusable.has_value()));
+        CHECK_FALSE(reusable.value());
 
         REQUIRE((reader.prepareSearchIndex().has_value()));
         auto result = reader.searchSimilar(createEmbedding(64, 1.0f), 5, 0.0f);

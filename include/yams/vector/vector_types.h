@@ -14,8 +14,7 @@ namespace yams::vector {
 
 enum class EmbeddingLevel { CHUNK, DOCUMENT };
 
-// Lightweight search result shared by vector backends and downstream aggregators
-// (previously defined in the removed vector_index_manager.h).
+// Lightweight search result shared by vector backends and downstream aggregators.
 struct SearchResult {
     std::string id;
     float distance = 0.0f;
@@ -33,6 +32,7 @@ struct SearchResult {
 enum class VectorSearchEngine {
     SimeonPqAdc,
     Vec0L2,
+    ExactScan,
 };
 
 [[nodiscard]] inline const char* vectorSearchEngineName(VectorSearchEngine engine) {
@@ -41,6 +41,8 @@ enum class VectorSearchEngine {
             return "simeon_pq_adc";
         case VectorSearchEngine::Vec0L2:
             return "vec0_l2";
+        case VectorSearchEngine::ExactScan:
+            return "exact_scan";
     }
     return "unknown";
 }
@@ -57,6 +59,9 @@ parseVectorSearchEngine(std::string_view raw) {
     }
     if (raw == "vec0" || raw == "vec0_l2" || raw == "l2") {
         return VectorSearchEngine::Vec0L2;
+    }
+    if (raw == "exact" || raw == "exact_scan" || raw == "brute_force") {
+        return VectorSearchEngine::ExactScan;
     }
     return std::nullopt;
 }
@@ -94,8 +99,9 @@ struct VectorDatabaseConfig {
     /// Training corpus size for PQ k-means. Standard practice: >> k centroids.
     /// 4096 provides good convergence for typical corpus sizes.
     size_t simeon_pq_train_limit = 4096;
-    /// ADC rerank multiplier. Jégou et al. 2011: fetch rerank_factor * k candidates
-    /// from compressed search, then score exactly. 2-4 is typical; 2 favours speed.
+    /// ADC rerank factor: fetch rerank_factor * k candidates from the compressed scan,
+    /// score them exactly, then return the exact top-k. Factor 2 is the conservative
+    /// product default; re-run vector_pq_rerank_quality before changing it.
     size_t simeon_pq_rerank_factor = 2;
     uint64_t simeon_pq_seed = 0xC0FFEE5EED5EEDC0ULL;
     bool suppress_search_index_builds = false;
@@ -195,14 +201,15 @@ struct EntitySearchParams {
     bool include_embeddings = false;
 };
 
-/// Per-call backend work counters. ANN libraries do not always expose graph
-/// traversal or distance counts, so rowsVisited and exactDistanceEvaluations
-/// remain zero when unavailable; annCandidateBudget records the configured ANN
-/// frontier without presenting an estimate as observed work.
+/// Per-call backend work counters. A zero is meaningful only when its matching
+/// `*Observed` flag is true; ANN libraries do not always expose internal work.
 struct VectorSearchDiagnostics {
     bool usedAnn = false;
     bool usedExactScan = false;
     bool usedCandidateIndexCache = false;
+    bool rowsVisitedObserved = false;
+    bool exactDistanceEvaluationsObserved = false;
+    bool annCandidateBudgetObserved = false;
     size_t rowsVisited = 0;
     size_t exactDistanceEvaluations = 0;
     size_t annCandidateBudget = 0;

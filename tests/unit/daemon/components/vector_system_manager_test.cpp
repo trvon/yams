@@ -325,6 +325,34 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
 
         CHECK_FALSE(warmMgr.getVectorDatabase()->hasReusablePersistedSearchIndex());
     }
+
+    SECTION("initializeOnce applies the configured Simeon PQ rerank factor") {
+        yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",
+                                                std::optional<std::string>("0"));
+        yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB",
+                                                 std::optional<std::string>("0"));
+        yams::test::ScopedEnvVar enableSqliteVecInit("YAMS_SQLITE_VEC_SKIP_INIT",
+                                                     std::optional<std::string>("0"));
+        yams::test::ScopedEnvVar disableInMemory("YAMS_VDB_IN_MEMORY", std::nullopt);
+        yams::test::ScopedEnvVar searchEngineEnv("YAMS_VECTOR_SEARCH_ENGINE", std::nullopt);
+        const auto configPath = yams::test::write_file(
+            tempDir / "config.toml",
+            "[vector_database]\n"
+            "search_engine = \"simeon_pq_adc\"\n"
+            "simeon_pq_rerank_factor = 7\n");
+        yams::test::ScopedEnvVar configPathEnv("YAMS_CONFIG_PATH", configPath.string());
+
+        auto configuredDeps = makeDeps();
+        configuredDeps.getEmbeddingDimension = []() { return static_cast<size_t>(64); };
+        VectorSystemManager configuredMgr(configuredDeps);
+
+        const auto result = configuredMgr.initializeOnce(tempDir);
+        REQUIRE(result.has_value());
+        REQUIRE(configuredMgr.getVectorDatabase() != nullptr);
+        CHECK(configuredMgr.getVectorDatabase()->getConfig().search_engine ==
+              yams::vector::VectorSearchEngine::SimeonPqAdc);
+        CHECK(configuredMgr.getVectorDatabase()->getConfig().simeon_pq_rerank_factor == 7);
+    }
 }
 
 TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager accessors before/after init",

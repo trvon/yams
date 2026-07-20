@@ -140,9 +140,8 @@ public:
     /**
      * @brief One-shot initial build/load called by ServiceManager after VDB is ready.
      *
-     * If the database has rows but no persisted HNSW index, triggers a rebuild.
-     * If the persisted index exists, loads it and marks vectorIndexReady.
-     * No-ops if no rows exist.
+     * Validates any backend-supported persisted search index and otherwise prepares a query-ready
+     * index from authoritative vector rows. No-ops if no rows exist.
      */
     boost::asio::awaitable<Result<void>> initialBuildIfNeeded();
 

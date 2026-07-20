@@ -396,6 +396,14 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                                  cfg.vec0_phss_candidates, cfgPath.string());
                 }
             }
+            if (auto it = kv.find("vector_database.simeon_pq_rerank_factor");
+                it != kv.end() && !it->second.empty()) {
+                if (auto factor = parseUnsigned<size_t>(it->second)) {
+                    cfg.simeon_pq_rerank_factor = std::max<size_t>(1, *factor);
+                    spdlog::info("[VectorInit] Simeon PQ rerank factor configured as {} from {}",
+                                 cfg.simeon_pq_rerank_factor, cfgPath.string());
+                }
+            }
         } catch (...) {
             spdlog::debug("[VectorInit] optional vector config overrides parse failed");
         }

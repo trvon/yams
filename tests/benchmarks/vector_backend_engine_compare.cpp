@@ -181,6 +181,14 @@ EngineResult runEngine(VectorSearchEngine engine, const Config& cfg,
     }
     const auto build_end = std::chrono::steady_clock::now();
 
+    // Exclude one-time lazy index initialization from steady-state query timing. Run the same
+    // unmeasured query for every engine so Vec0, Simeon PQ, and exact scan enter the measured loop
+    // from the same query-ready boundary.
+    auto warmup = backend.searchSimilar(queries.front(), cfg.k, 0.0f, std::nullopt, {});
+    if (!warmup) {
+        throw std::runtime_error(warmup.error().message);
+    }
+
     std::vector<double> latencies_us;
     latencies_us.reserve(queries.size());
     size_t total_hits = 0;
@@ -212,6 +220,9 @@ EngineResult runEngine(VectorSearchEngine engine, const Config& cfg,
             break;
         case VectorSearchEngine::Vec0L2:
             out.name = "vec0-l2";
+            break;
+        case VectorSearchEngine::ExactScan:
+            out.name = "exact-scan";
             break;
     }
     out.build_ms = std::chrono::duration<double, std::milli>(build_end - build_start).count();
