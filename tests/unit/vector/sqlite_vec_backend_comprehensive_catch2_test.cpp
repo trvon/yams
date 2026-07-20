@@ -647,6 +647,33 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend updateVector",
     CHECK((countResult.value() == 1));
 }
 
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend preserves the original vector when replacement fails",
+                 "[vector][backend][crud][transaction][catch2]") {
+    skipIfNeeded();
+
+    SqliteVecBackend backend;
+    REQUIRE((backend.initialize(":memory:").has_value()));
+    REQUIRE((backend.createTables(64).has_value()));
+
+    auto original = createVectorRecord("update_atomic_a", createEmbedding(64, 1.0F));
+    original.content = "original";
+    REQUIRE((backend.insertVector(original).has_value()));
+    REQUIRE((backend.insertVector(createVectorRecord("update_atomic_b", createEmbedding(64, 2.0F)))
+                 .has_value()));
+
+    auto conflicting = createVectorRecord("update_atomic_b", createEmbedding(64, 3.0F));
+    conflicting.content = "replacement";
+    auto update = backend.updateVector(original.chunk_id, conflicting);
+    REQUIRE_FALSE(update.has_value());
+
+    auto preserved = backend.getVector(original.chunk_id);
+    REQUIRE((preserved.has_value()));
+    REQUIRE((preserved.value().has_value()));
+    CHECK((preserved.value()->content == "original"));
+    CHECK((backend.getVectorCount().value() == 2));
+}
+
 TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend deleteVector",
                  "[vector][backend][crud][catch2]") {
     skipIfNeeded();
@@ -709,6 +736,42 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend deleteVectorsByDocum
     auto countAfter = backend.getVectorCount();
     REQUIRE((countAfter.has_value()));
     CHECK((countAfter.value() == 1));
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend reports SQLite delete failures without changing rows",
+                 "[vector][backend][crud][errors][catch2]") {
+    skipIfNeeded();
+
+    SqliteVecBackend backend;
+    REQUIRE((backend.initialize(":memory:").has_value()));
+    REQUIRE((backend.createTables(64).has_value()));
+    REQUIRE((backend
+                 .insertVector(createVectorRecord("delete_blocked", createEmbedding(64, 1.0F),
+                                                  "delete_blocked_doc"))
+                 .has_value()));
+
+    char* error = nullptr;
+    REQUIRE((sqlite3_exec(backend.getDbHandle(),
+                          "CREATE TRIGGER reject_vector_delete BEFORE DELETE ON vectors BEGIN "
+                          "SELECT RAISE(ABORT, 'forced delete failure'); END",
+                          nullptr, nullptr, &error) == SQLITE_OK));
+    sqlite3_free(error);
+
+    SECTION("single vector") {
+        auto deleted = backend.deleteVector("chunk_delete_blocked");
+        CHECK_FALSE(deleted.has_value());
+    }
+
+    SECTION("document") {
+        auto deleted = backend.deleteVectorsByDocument("delete_blocked_doc");
+        CHECK_FALSE(deleted.has_value());
+    }
+
+    auto preserved = backend.getVector("chunk_delete_blocked");
+    REQUIRE((preserved.has_value()));
+    CHECK((preserved.value().has_value()));
+    CHECK((backend.getVectorCount().value() == 1));
 }
 
 TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend hasEmbedding",
@@ -1469,6 +1532,66 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend transaction rollback
     auto getResult = backend.getVector("chunk_during_txn");
     REQUIRE((getResult.has_value()));
     CHECK_FALSE(getResult.value().has_value());
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend batch commit failure rolls back its internal transaction",
+                 "[vector][backend][transaction][errors][catch2]") {
+    skipIfNeeded();
+
+    SqliteVecBackend backend;
+    REQUIRE((backend.initialize(":memory:").has_value()));
+    REQUIRE((backend.createTables(64).has_value()));
+
+    char* error = nullptr;
+    REQUIRE((sqlite3_exec(backend.getDbHandle(), "PRAGMA foreign_keys = ON", nullptr, nullptr,
+                          &error) == SQLITE_OK));
+    sqlite3_free(error);
+    error = nullptr;
+    REQUIRE((sqlite3_exec(backend.getDbHandle(),
+                          "CREATE TABLE deferred_parent(id INTEGER PRIMARY KEY);"
+                          "CREATE TABLE deferred_child(parent_id INTEGER, "
+                          "FOREIGN KEY(parent_id) REFERENCES deferred_parent(id) "
+                          "DEFERRABLE INITIALLY DEFERRED);"
+                          "CREATE TRIGGER reject_vector_commit AFTER INSERT ON vectors BEGIN "
+                          "INSERT INTO deferred_child(parent_id) VALUES (999); END",
+                          nullptr, nullptr, &error) == SQLITE_OK));
+    sqlite3_free(error);
+
+    std::vector<VectorRecord> records{
+        createVectorRecord("commit_failure", createEmbedding(64, 1.0F))};
+    auto inserted = backend.insertVectorsBatch(records);
+    CHECK_FALSE(inserted.has_value());
+    CHECK((sqlite3_get_autocommit(backend.getDbHandle()) == 1));
+    CHECK((backend.getVectorCount().value() == 0));
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend rejects writes from outside the explicit transaction owner",
+                 "[vector][backend][transaction][concurrency][catch2]") {
+    skipIfNeeded();
+
+    SqliteVecBackend backend;
+    REQUIRE((backend.initialize(":memory:").has_value()));
+    REQUIRE((backend.createTables(64).has_value()));
+    REQUIRE((backend.beginTransaction().has_value()));
+    REQUIRE((backend.insertVector(createVectorRecord("owner_write", createEmbedding(64, 1.0F)))
+                 .has_value()));
+
+    auto foreignWrite = std::async(std::launch::async, [&] {
+        return backend.insertVector(createVectorRecord("foreign_write", createEmbedding(64, 2.0F)));
+    });
+    auto foreignResult = foreignWrite.get();
+    REQUIRE_FALSE(foreignResult.has_value());
+    CHECK((foreignResult.error().code == yams::ErrorCode::InvalidState));
+
+    auto foreignCommit =
+        std::async(std::launch::async, [&] { return backend.commitTransaction(); }).get();
+    REQUIRE_FALSE(foreignCommit.has_value());
+    CHECK((foreignCommit.error().code == yams::ErrorCode::InvalidState));
+
+    REQUIRE((backend.rollbackTransaction().has_value()));
+    CHECK((backend.getVectorCount().value() == 0));
 }
 
 // =============================================================================
@@ -2240,6 +2363,62 @@ TEST_CASE_METHOD(SqliteVecBackendFixture,
     CHECK((results[0].chunk_id == "dim_test_0"));
     CHECK((results[0].relevance_score >
            0.5f)); // TurboQuant causes some distortion; just verify reasonable similarity
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend trained Simeon PQ reranks quantized-primary candidates",
+                 "[sqlite_vec_backend][turboquant][quantized_primary][spq][rerank][catch2]") {
+    skipIfNeeded();
+
+    constexpr size_t kDim = 32;
+    constexpr size_t kCorpus = 16;
+    constexpr size_t kResultCount = 4;
+
+    SqliteVecBackend::Config config;
+    config.embedding_dim = kDim;
+    config.enable_turboquant_storage = true;
+    config.quantized_primary_storage = true;
+    config.turboquant_bits = 4;
+    config.turboquant_seed = 23;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_centroids = 8;
+    config.simeon_pq_train_limit = kCorpus;
+    config.simeon_pq_rerank_factor = 2;
+
+    TurboQuantConfig tqConfig;
+    tqConfig.dimension = kDim;
+    tqConfig.bits_per_channel = config.turboquant_bits;
+    tqConfig.seed = config.turboquant_seed;
+    TurboQuantMSE tq(tqConfig);
+
+    SqliteVecBackend backend(config);
+    REQUIRE((backend.initialize(":memory:").has_value()));
+    REQUIRE((backend.createTables(kDim).has_value()));
+
+    std::vector<float> query;
+    for (size_t i = 0; i < kCorpus; ++i) {
+        auto embedding = createEmbedding(kDim, static_cast<float>(i + 1));
+        if (i == 0) {
+            query = embedding;
+        }
+        auto record = createVectorRecord("quantized_spq_" + std::to_string(i), embedding);
+        record.quantized.format = VectorRecord::QuantizedFormat::TURBOquant_1;
+        record.quantized.bits_per_channel = config.turboquant_bits;
+        record.quantized.seed = config.turboquant_seed;
+        record.quantized.packed_codes = vector_utils::packedQuantizeVector(embedding, &tq);
+        REQUIRE((backend.insertVector(record).has_value()));
+    }
+    REQUIRE((backend.buildIndex().has_value()));
+
+    VectorSearchDiagnostics diagnostics;
+    auto result = backend.searchSimilarWithDiagnostics(query, kResultCount, -1.0F, std::nullopt, {},
+                                                       {}, diagnostics);
+    REQUIRE((result.has_value()));
+    REQUIRE((result.value().size() == kResultCount));
+    CHECK(diagnostics.usedAnn);
+    CHECK(diagnostics.exactDistanceEvaluationsObserved);
+    CHECK((diagnostics.exactDistanceEvaluations == kResultCount * config.simeon_pq_rerank_factor));
 }
 
 TEST_CASE_METHOD(

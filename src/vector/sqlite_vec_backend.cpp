@@ -30,6 +30,7 @@
 #include <shared_mutex>
 #include <span>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -911,6 +912,12 @@ public:
         trace_vector_db_lifetime("close.begin", this, db_path_, db_, SQLITE_OK,
                                  count_live_statements(db_));
 
+        if (db_ && in_transaction_) {
+            (void)execWithRetry(db_, "ROLLBACK");
+            in_transaction_ = false;
+            transaction_owner_ = {};
+        }
+
         // Finalize prepared statements
         finalizeStatements();
 
@@ -1150,6 +1157,9 @@ public:
         if (!db_) {
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
+        if (auto owner = requireTransactionOwnerUnlocked("insert vector"); !owner) {
+            return owner;
+        }
 
         auto rowid_result = insertVectorUnlocked(record);
         if (!rowid_result) {
@@ -1175,6 +1185,13 @@ public:
 
         if (!db_) {
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+        if (auto owner = requireTransactionOwnerUnlocked("insert vector batch"); !owner) {
+            return owner;
+        }
+        if (in_transaction_) {
+            return Error{ErrorCode::InvalidState,
+                         "Batch insertion cannot start inside an explicit transaction"};
         }
 
         if (records.empty()) {
@@ -1236,7 +1253,12 @@ public:
                     sqlite3_reset(stmt_delete_by_chunk_id_);
                     sqlite3_bind_text(stmt_delete_by_chunk_id_, 1, record.chunk_id.c_str(), -1,
                                       SQLITE_TRANSIENT);
-                    stepWithRetry(stmt_delete_by_chunk_id_);
+                    if (const int rc = stepWithRetry(stmt_delete_by_chunk_id_); rc != SQLITE_DONE) {
+                        (void)execWithRetry(db_, "ROLLBACK");
+                        return Error{ErrorCode::DatabaseError,
+                                     "Failed to replace existing vector in batch: " +
+                                         std::string(sqlite3_errmsg(db_))};
+                    }
                 }
 
                 auto rowid_result = insertVectorUnlocked(record);
@@ -1268,16 +1290,20 @@ public:
             ++inserted_count;
         }
 
+        // Commit transaction with retry
+        if (!execWithRetry(db_, "COMMIT")) {
+            const std::string commitError = sqlite3_errmsg(db_);
+            const bool rolledBack = execWithRetry(db_, "ROLLBACK");
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to commit vector batch transaction: " + commitError +
+                             (rolledBack ? "" : "; rollback also failed")};
+        }
+
         if (usesVec0SearchEngine()) {
             markVec0DimsDirtyUnlocked(vec0_affected_dims);
         }
         if (usesSimeonPqSearchEngine()) {
             markSimeonPqDimsDirtyUnlocked(vec0_affected_dims);
-        }
-
-        // Commit transaction with retry
-        if (!execWithRetry(db_, "COMMIT")) {
-            return Error{ErrorCode::DatabaseError, "Failed to commit transaction"};
         }
 
         for (size_t idx : unique_indices) {
@@ -1302,6 +1328,9 @@ public:
         if (!db_) {
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
+        if (auto owner = requireTransactionOwnerUnlocked("update vector"); !owner) {
+            return owner;
+        }
 
         // Get existing rowid
         auto rowid_opt = getRowidByChunkIdUnlocked(chunk_id);
@@ -1320,17 +1349,38 @@ public:
                                                      : old_record->embedding_dim;
         }
 
-        // Delete old record
+        if (!execWithRetry(db_, "SAVEPOINT yams_update_vector")) {
+            return Error{ErrorCode::DatabaseError, "Failed to begin atomic vector replacement: " +
+                                                       std::string(sqlite3_errmsg(db_))};
+        }
+        const auto rollbackReplacement = [&] {
+            (void)execWithRetry(db_, "ROLLBACK TO yams_update_vector");
+            (void)execWithRetry(db_, "RELEASE yams_update_vector");
+        };
+
+        // Delete old record inside the savepoint.
         if (stmt_delete_by_chunk_id_) {
             sqlite3_reset(stmt_delete_by_chunk_id_);
             sqlite3_bind_text(stmt_delete_by_chunk_id_, 1, chunk_id.c_str(), -1, SQLITE_TRANSIENT);
-            stepWithRetry(stmt_delete_by_chunk_id_);
+            if (const int rc = stepWithRetry(stmt_delete_by_chunk_id_); rc != SQLITE_DONE) {
+                const std::string error = sqlite3_errmsg(db_);
+                rollbackReplacement();
+                return Error{ErrorCode::DatabaseError,
+                             "Failed to delete vector during replacement: " + error};
+            }
         }
 
         // Insert new record
         auto rowid_result = insertVectorUnlocked(record);
         if (!rowid_result) {
+            rollbackReplacement();
             return rowid_result.error();
+        }
+        if (!execWithRetry(db_, "RELEASE yams_update_vector")) {
+            const std::string error = sqlite3_errmsg(db_);
+            rollbackReplacement();
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to commit atomic vector replacement: " + error};
         }
 
         (void)old_rowid;
@@ -1368,6 +1418,9 @@ public:
         if (!db_) {
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
+        if (auto owner = requireTransactionOwnerUnlocked("delete vector"); !owner) {
+            return owner;
+        }
 
         // Get rowid and dimension first
         auto rowid_opt = getRowidByChunkIdUnlocked(chunk_id);
@@ -1384,6 +1437,16 @@ public:
             dim = !record->embedding.empty() ? record->embedding.size() : record->embedding_dim;
         }
 
+        // Delete from SQLite
+        if (stmt_delete_by_chunk_id_) {
+            sqlite3_reset(stmt_delete_by_chunk_id_);
+            sqlite3_bind_text(stmt_delete_by_chunk_id_, 1, chunk_id.c_str(), -1, SQLITE_TRANSIENT);
+            if (const int rc = stepWithRetry(stmt_delete_by_chunk_id_); rc != SQLITE_DONE) {
+                return Error{ErrorCode::DatabaseError,
+                             "Failed to delete vector: " + std::string(sqlite3_errmsg(db_))};
+            }
+        }
+
         if (dim) {
             auto dimIt = query_dim_counts_.find(*dim);
             if (dimIt != query_dim_counts_.end() && dimIt->second > 0) {
@@ -1397,13 +1460,6 @@ public:
             }
         }
 
-        // Delete from SQLite
-        if (stmt_delete_by_chunk_id_) {
-            sqlite3_reset(stmt_delete_by_chunk_id_);
-            sqlite3_bind_text(stmt_delete_by_chunk_id_, 1, chunk_id.c_str(), -1, SQLITE_TRANSIENT);
-            stepWithRetry(stmt_delete_by_chunk_id_);
-        }
-
         (void)rowid;
         return Result<void>{};
     }
@@ -1414,50 +1470,58 @@ public:
         if (!db_) {
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
         }
+        if (auto owner = requireTransactionOwnerUnlocked("delete document vectors"); !owner) {
+            return owner;
+        }
 
         // Get all rowids and their dimensions for this document
         // We need to query rowid and embedding_dim together
         std::vector<std::pair<int64_t, size_t>> rowid_dims; // (rowid, dimension)
         const char* query_sql = "SELECT rowid, embedding_dim FROM vectors WHERE document_hash = ?";
         sqlite3_stmt* stmt = nullptr;
-        if (sqlite3_prepare_v2(db_, query_sql, -1, &stmt, nullptr) == SQLITE_OK) {
-            sqlite3_bind_text(stmt, 1, document_hash.c_str(), -1, SQLITE_TRANSIENT);
-            while (sqlite3_step(stmt) == SQLITE_ROW) {
-                int64_t rowid = sqlite3_column_int64(stmt, 0);
-                int64_t dim = sqlite3_column_int64(stmt, 1);
-                if (dim > 0) {
-                    rowid_dims.emplace_back(rowid, static_cast<size_t>(dim));
-                }
-            }
-            sqlite3_finalize(stmt);
+        if (sqlite3_prepare_v2(db_, query_sql, -1, &stmt, nullptr) != SQLITE_OK) {
+            return Error{ErrorCode::DatabaseError, "Failed to prepare document-vector deletion: " +
+                                                       std::string(sqlite3_errmsg(db_))};
         }
-
-        for (const auto& [_, dim] : rowid_dims) {
-            auto dimIt = query_dim_counts_.find(dim);
-            if (dimIt != query_dim_counts_.end() && dimIt->second > 0) {
-                --dimIt->second;
+        sqlite3_bind_text(stmt, 1, document_hash.c_str(), -1, SQLITE_TRANSIENT);
+        int queryRc = SQLITE_OK;
+        while ((queryRc = sqlite3_step(stmt)) == SQLITE_ROW) {
+            int64_t rowid = sqlite3_column_int64(stmt, 0);
+            int64_t dim = sqlite3_column_int64(stmt, 1);
+            if (dim > 0) {
+                rowid_dims.emplace_back(rowid, static_cast<size_t>(dim));
             }
         }
-        if (usesVec0SearchEngine()) {
-            std::unordered_set<size_t> affected_dims;
-            for (const auto& [_, dim] : rowid_dims) {
-                affected_dims.insert(dim);
-            }
-            markVec0DimsDirtyUnlocked(affected_dims);
-        }
-        if (usesSimeonPqSearchEngine()) {
-            std::unordered_set<size_t> affected_dims;
-            for (const auto& [_, dim] : rowid_dims) {
-                affected_dims.insert(dim);
-            }
-            markSimeonPqDimsDirtyUnlocked(affected_dims);
+        sqlite3_finalize(stmt);
+        if (queryRc != SQLITE_DONE) {
+            return Error{ErrorCode::DatabaseError,
+                         "Failed to read document vectors before deletion: " +
+                             std::string(sqlite3_errmsg(db_))};
         }
 
         // Delete from SQLite
         if (stmt_delete_by_doc_) {
             sqlite3_reset(stmt_delete_by_doc_);
             sqlite3_bind_text(stmt_delete_by_doc_, 1, document_hash.c_str(), -1, SQLITE_TRANSIENT);
-            stepWithRetry(stmt_delete_by_doc_);
+            if (const int rc = stepWithRetry(stmt_delete_by_doc_); rc != SQLITE_DONE) {
+                return Error{ErrorCode::DatabaseError, "Failed to delete document vectors: " +
+                                                           std::string(sqlite3_errmsg(db_))};
+            }
+        }
+
+        std::unordered_set<size_t> affectedDims;
+        for (const auto& [_, dim] : rowid_dims) {
+            auto dimIt = query_dim_counts_.find(dim);
+            if (dimIt != query_dim_counts_.end() && dimIt->second > 0) {
+                --dimIt->second;
+            }
+            affectedDims.insert(dim);
+        }
+        if (usesVec0SearchEngine()) {
+            markVec0DimsDirtyUnlocked(affectedDims);
+        }
+        if (usesSimeonPqSearchEngine()) {
+            markSimeonPqDimsDirtyUnlocked(affectedDims);
         }
 
         return Result<void>{};
@@ -2370,6 +2434,15 @@ LIMIT ?2
     Result<void> finalizeBulkLoad() { return finalizeBulkLoadUnlocked(); }
 
 private:
+    Result<void> requireTransactionOwnerUnlocked(std::string_view operation) const {
+        if (in_transaction_ && transaction_owner_ != std::this_thread::get_id()) {
+            return Error{ErrorCode::InvalidState,
+                         std::string(operation) +
+                             " rejected: explicit transaction belongs to another thread"};
+        }
+        return Result<void>{};
+    }
+
     Result<void> checkpointWalUnlocked() {
         int walLog = 0, walCkpt = 0;
 
@@ -2421,6 +2494,7 @@ public:
         }
 
         in_transaction_ = true;
+        transaction_owner_ = std::this_thread::get_id();
         return Result<void>{};
     }
 
@@ -2434,12 +2508,17 @@ public:
         if (!in_transaction_) {
             return Error{ErrorCode::InvalidState, "Not in transaction"};
         }
+        if (transaction_owner_ != std::this_thread::get_id()) {
+            return Error{ErrorCode::InvalidState,
+                         "Only the transaction owner may commit the transaction"};
+        }
 
         if (!execWithRetry(db_, "COMMIT")) {
             return Error{ErrorCode::DatabaseError, "Failed to commit transaction"};
         }
 
         in_transaction_ = false;
+        transaction_owner_ = {};
         return Result<void>{};
     }
 
@@ -2453,12 +2532,17 @@ public:
         if (!in_transaction_) {
             return Error{ErrorCode::InvalidState, "Not in transaction"};
         }
+        if (transaction_owner_ != std::this_thread::get_id()) {
+            return Error{ErrorCode::InvalidState,
+                         "Only the transaction owner may roll back the transaction"};
+        }
 
         if (!execWithRetry(db_, "ROLLBACK")) {
             return Error{ErrorCode::DatabaseError, "Failed to rollback transaction"};
         }
 
         in_transaction_ = false;
+        transaction_owner_ = {};
         return Result<void>{};
     }
 
@@ -4031,6 +4115,20 @@ private:
                                                .count());
         }
 
+        std::unique_ptr<TurboQuantMSE> rerankQuantizer;
+        if (config_.quantized_primary_storage) {
+            TurboQuantConfig quantizerConfig;
+            quantizerConfig.dimension = query_dim;
+            quantizerConfig.bits_per_channel = config_.turboquant_bits;
+            quantizerConfig.seed = config_.turboquant_seed;
+            rerankQuantizer = std::make_unique<TurboQuantMSE>(quantizerConfig);
+            auto scales = loadTurboQuantPerCoordScales(db_, query_dim, config_.turboquant_bits,
+                                                       config_.turboquant_seed);
+            if (!scales.empty()) {
+                rerankQuantizer->setPerCoordScales(std::move(scales));
+            }
+        }
+
         std::vector<VectorRecord> records;
         records.reserve(scores.size());
         for (const auto& [approxScore, idx] : scores) {
@@ -4048,6 +4146,17 @@ private:
             }
             if (diagnostics != nullptr) {
                 ++diagnostics->materializedRows;
+            }
+            if (record_opt->embedding.empty() && rerankQuantizer &&
+                record_opt->quantized.format == VectorRecord::QuantizedFormat::TURBOquant_1 &&
+                !record_opt->quantized.packed_codes.empty()) {
+                record_opt->embedding = vector_utils::packedDequantizeVector(
+                    record_opt->quantized.packed_codes, query_dim, rerankQuantizer.get());
+                if (record_opt->embedding.size() != query_dim ||
+                    !isFiniteEmbedding(record_opt->embedding) ||
+                    isZeroNormEmbedding(record_opt->embedding)) {
+                    record_opt->embedding.clear();
+                }
             }
             float similarity = approxScore;
             if (!record_opt->embedding.empty()) {
@@ -4627,6 +4736,7 @@ ORDER BY rowid
     sqlite3* db_ = nullptr;
     std::atomic<bool> initialized_{false};
     bool in_transaction_ = false;
+    std::thread::id transaction_owner_{};
 
     std::unordered_map<size_t, std::unique_ptr<SimeonPqIndexState>> simeon_pq_indices_;
     std::unordered_set<size_t> simeon_pq_ready_dims_;
