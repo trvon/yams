@@ -14,7 +14,6 @@ import re
 import shutil
 import signal
 import statistics
-import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -79,16 +78,12 @@ _NON_VECTOR_SOURCES = frozenset(
 )
 
 
-def _child_resource_usage() -> tuple[float, float] | None:
-    """Return cumulative child CPU seconds and max RSS MiB when supported."""
+def _child_cpu_seconds() -> float | None:
+    """Return cumulative child CPU seconds when supported."""
     if _resource is None:
         return None
     usage = _resource.getrusage(_resource.RUSAGE_CHILDREN)
-    rss_scale = 1.0 / (1024 * 1024) if sys.platform == "darwin" else 1.0 / 1024
-    return (
-        float(usage.ru_utime + usage.ru_stime),
-        float(usage.ru_maxrss) * rss_scale,
-    )
+    return float(usage.ru_utime + usage.ru_stime)
 
 
 def _benchmark_command(binary: Path, benchmark_filter: str) -> list[str]:
@@ -229,6 +224,9 @@ def parse_benchmark_setup_metrics(path: Path) -> dict[str, float]:
         ingestion = obj.get("ingestion") or {}
         if not isinstance(ingestion, dict):
             continue
+        vector_index = obj.get("vector_index") or {}
+        if not isinstance(vector_index, dict):
+            vector_index = {}
         metrics = {
             "ingest_cold_performed": 1.0 if ingestion.get("cold_performed") else 0.0,
             "ingest_admission_ms": float(ingestion.get("admission_ms") or 0),
@@ -241,8 +239,85 @@ def parse_benchmark_setup_metrics(path: Path) -> dict[str, float]:
                 ingestion.get("enrichment_ready_ms") or 0
             ),
             "ingest_measurement_n": float(ingestion.get("measurement_n") or 0),
+            "vector_index_prepared": 1.0 if vector_index.get("prepared") else 0.0,
+            "vector_index_persisted": 1.0 if vector_index.get("persisted") else 0.0,
+            "vector_index_reusable_before": (
+                1.0 if vector_index.get("reusable_before") else 0.0
+            ),
+            "vector_index_reusable_after": (
+                1.0 if vector_index.get("reusable_after") else 0.0
+            ),
+            "vector_query_ready_after": (
+                1.0 if vector_index.get("query_ready_after") else 0.0
+            ),
+            "vector_index_prepare_ms": float(vector_index.get("prepare_ms") or 0),
+            "vector_index_persist_ms": float(vector_index.get("persist_ms") or 0),
+            "vector_index_reusable_probe_ms": float(
+                vector_index.get("reusable_probe_ms") or 0
+            ),
+            "vector_index_reusable_probe_count": float(
+                vector_index.get("reusable_probe_count") or 0
+            ),
             "benchmark_setup_total_ms": float(obj.get("setup_total_ms") or 0),
         }
+    return metrics
+
+
+def parse_benchmark_cache_metrics(path: Path) -> dict[str, float]:
+    """Export the persisted vector database and backend-index footprint."""
+    if not path.is_file():
+        return {}
+    try:
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(metadata, dict):
+        return {}
+
+    fields = {
+        "vectors_db_bytes": "vector_database_bytes",
+        "vectors_wal_bytes": "vector_wal_bytes",
+        "persisted_hnsw_nodes": "vector_persisted_hnsw_nodes",
+        "persisted_hnsw_meta_rows": "vector_persisted_hnsw_meta_rows",
+        "persisted_vec0_tables": "vector_persisted_vec0_tables",
+        "persisted_vec0_rows": "vector_persisted_vec0_rows",
+        "persisted_pq_codes": "vector_persisted_pq_codes",
+        "persisted_pq_meta": "vector_persisted_pq_meta_rows",
+    }
+    metrics: dict[str, float] = {}
+    for source, target in fields.items():
+        value = metadata.get(source)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            metrics[target] = float(value)
+    return metrics
+
+
+def parse_process_resource_metrics(path: Path) -> dict[str, float]:
+    """Read process-local resource observations emitted by the benchmark itself."""
+    metrics = {"proc_maxrss_observation_rate": 0.0}
+    if not path.is_file():
+        return metrics
+
+    peak_rss_values: list[float] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or event.get("event") != "process_resource_metrics":
+            continue
+        process = event.get("process")
+        if not isinstance(process, dict) or process.get("peak_rss_observed") is not True:
+            continue
+        value = process.get("peak_rss_mb")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            numeric = float(value)
+            if math.isfinite(numeric) and numeric > 0.0:
+                peak_rss_values.append(numeric)
+
+    if peak_rss_values:
+        metrics["proc_maxrss_mb"] = max(peak_rss_values)
+        metrics["proc_maxrss_observation_rate"] = 1.0
     return metrics
 
 
@@ -272,6 +347,9 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         "vector_rows_visited_actual": 0,
         "vector_exact_distance_evaluations_actual": 0,
         "vector_ann_candidate_budget_actual": 0,
+        "vector_rows_visited_observed_queries": 0,
+        "vector_exact_distance_evaluations_observed_queries": 0,
+        "vector_ann_candidate_budget_observed_queries": 0,
         "topology_vector_filter_applied_queries": 0,
         "topology_vector_filter_fallback_queries": 0,
         "topology_vector_filter_allowed_candidates": 0,
@@ -301,6 +379,13 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
     route_ann_candidate_vals: list[int] = []
     route_ann_distance_evaluation_vals: list[int] = []
     route_exact_representative_distance_evaluation_vals: list[int] = []
+    coordinate_query_count = 0
+    coordinate_row_count = 0
+    coordinate_values: dict[str, list[float]] = {
+        "distortion": [],
+        "intrinsic_dimension": [],
+        "uncertainty": [],
+    }
     structure_evidence_vals: dict[str, list[float]] = {
         "candidate_count": [],
         "scale_agreement": [],
@@ -373,6 +458,9 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
     post_fusion_recall_sum = 0.0
     returned_trace_recall_sum = 0.0
     recall_at_k_ceiling_sum = 0.0
+    warmup_first_latency_ms: float | None = None
+    warmup_query_count = 0
+    warmup_completed_queries = 0
 
     int_keys = {
         "added": "topology_weak_query_added_candidates",
@@ -406,6 +494,15 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
             "topology_route_exact_representative_distance_evaluations"
         ),
     }
+    actual_status_keys = {
+        "vector_rows_visited_actual": "vector_search_rows_visited_status",
+        "vector_exact_distance_evaluations_actual": (
+            "vector_search_exact_distance_evaluations_status"
+        ),
+        "vector_ann_candidate_budget_actual": (
+            "vector_search_ann_candidate_budget_status"
+        ),
+    }
 
     for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
         line = line.strip()
@@ -416,6 +513,17 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         except json.JSONDecodeError:
             continue
         if not isinstance(obj, dict):
+            continue
+
+        if obj.get("event") == "query_warmup_summary":
+            try:
+                warmup_first_latency_ms = float(obj["first_query_latency_ms"])
+                warmup_query_count = int(obj.get("query_count") or 0)
+                warmup_completed_queries = int(obj.get("completed_queries") or 0)
+            except (KeyError, TypeError, ValueError):
+                warmup_first_latency_ms = None
+                warmup_query_count = 0
+                warmup_completed_queries = 0
             continue
 
         if obj.get("event") == "topology_construction_certificate":
@@ -598,7 +706,51 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
             counters["topology_shadow_evaluated_queries"] += 1
             if stats.get("topology_shadow_proposed_action") == "narrow":
                 counters["topology_shadow_narrow_proposed_queries"] += 1
+
+        coordinate_rows = stats.get("topology_route_coordinate_rows")
+        if coordinate_rows:
+            try:
+                parsed_rows = (
+                    json.loads(coordinate_rows)
+                    if isinstance(coordinate_rows, str)
+                    else coordinate_rows
+                )
+            except (TypeError, ValueError, json.JSONDecodeError):
+                parsed_rows = None
+            if isinstance(parsed_rows, list) and parsed_rows:
+                coordinate_query_count += 1
+                for row in parsed_rows:
+                    if not isinstance(row, dict):
+                        continue
+                    coordinate_row_count += 1
+                    for metric_name, field_name in (
+                        ("distortion", "distortion_penalty"),
+                        ("intrinsic_dimension", "local_intrinsic_dimension"),
+                        ("uncertainty", "uncertainty_penalty"),
+                    ):
+                        value = row.get(field_name)
+                        if value is None:
+                            continue
+                        try:
+                            numeric = float(value)
+                        except (TypeError, ValueError):
+                            continue
+                        if math.isfinite(numeric):
+                            coordinate_values[metric_name].append(numeric)
+        actual_observed: dict[str, bool] = {}
+        for dst, status_key in actual_status_keys.items():
+            status = str(stats.get(status_key, "") or "").strip().lower()
+            value_key = int_keys[dst]
+            observed = status == "observed" or (not status and value_key in stats)
+            actual_observed[dst] = observed
+            if observed:
+                counters[f"{dst.removesuffix('_actual')}_observed_queries"] += 1
+
         for dst, key in int_keys.items():
+            if dst in actual_status_keys and (
+                not actual_observed[dst] or key not in stats
+            ):
+                continue
             v = _as_int(stats.get(key))
             counters[dst] += v
             if dst == "added":
@@ -731,13 +883,6 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         "vector_distance_evaluation_budget_sum": float(
             counters["vector_distance_evaluation_budget"]
         ),
-        "vector_rows_visited_actual_sum": float(counters["vector_rows_visited_actual"]),
-        "vector_exact_distance_evaluations_actual_sum": float(
-            counters["vector_exact_distance_evaluations_actual"]
-        ),
-        "vector_ann_candidate_budget_actual_sum": float(
-            counters["vector_ann_candidate_budget_actual"]
-        ),
         "topology_cert_seen": float(cert_seen),
         "topology_cert_ok": float(cert_ok),
         "topology_construction_fingerprint_count": float(
@@ -787,6 +932,32 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
             len(sorted_lat) - 1, max(0, math.ceil(0.95 * len(sorted_lat)) - 1)
         )
         metrics["search_latency_ms_p95"] = float(sorted_lat[p95_idx])
+        p99_idx = min(
+            len(sorted_lat) - 1, max(0, math.ceil(0.99 * len(sorted_lat)) - 1)
+        )
+        metrics["search_latency_ms_p99"] = float(sorted_lat[p99_idx])
+        total_latency_ms = float(sum(latency_vals))
+        if total_latency_ms > 0.0:
+            # Queries are issued serially by the quality fixture, so this is observed
+            # end-to-end single-client throughput rather than backend-only QPS.
+            metrics["search_throughput_qps"] = (
+                1000.0 * float(len(latency_vals)) / total_latency_ms
+            )
+        if (
+            warmup_first_latency_ms is not None
+            and warmup_query_count > 0
+            and warmup_completed_queries == warmup_query_count
+        ):
+            metrics["search_latency_ms_cold_first"] = warmup_first_latency_ms
+            metrics["search_latency_ms_first_pass_first"] = warmup_first_latency_ms
+            metrics["search_latency_ms_first"] = warmup_first_latency_ms
+            metrics["search_latency_ms_warmed_p50"] = float(
+                statistics.median(latency_vals)
+            )
+            metrics["search_warmup_query_count"] = float(warmup_query_count)
+            metrics["search_warmup_completed_queries"] = float(
+                warmup_completed_queries
+            )
     for sname, mass in fusion_source_mass.items():
         metrics[f"fusion_mass_{sname}"] = float(mass)
     for sname, docs in fusion_source_docs.items():
@@ -817,14 +988,23 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
             statistics.mean(vector_distance_evaluation_budget_vals)
         )
     if vector_rows_visited_actual_vals:
+        metrics["vector_rows_visited_actual_sum"] = float(
+            counters["vector_rows_visited_actual"]
+        )
         metrics["vector_rows_visited_actual_avg"] = float(
             statistics.mean(vector_rows_visited_actual_vals)
         )
     if vector_exact_distance_evaluations_actual_vals:
+        metrics["vector_exact_distance_evaluations_actual_sum"] = float(
+            counters["vector_exact_distance_evaluations_actual"]
+        )
         metrics["vector_exact_distance_evaluations_actual_avg"] = float(
             statistics.mean(vector_exact_distance_evaluations_actual_vals)
         )
     if vector_ann_candidate_budget_actual_vals:
+        metrics["vector_ann_candidate_budget_actual_sum"] = float(
+            counters["vector_ann_candidate_budget_actual"]
+        )
         metrics["vector_ann_candidate_budget_actual_avg"] = float(
             statistics.mean(vector_ann_candidate_budget_actual_vals)
         )
@@ -903,6 +1083,18 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
             float(statistics.mean(values)) if values else 0.0
         )
     if hybrid > 0:
+        metrics["topology_coordinate_query_coverage"] = float(
+            coordinate_query_count
+        ) / float(hybrid)
+        metrics["vector_rows_visited_observation_rate"] = float(
+            counters["vector_rows_visited_observed_queries"]
+        ) / float(hybrid)
+        metrics["vector_exact_distance_evaluations_observation_rate"] = float(
+            counters["vector_exact_distance_evaluations_observed_queries"]
+        ) / float(hybrid)
+        metrics["vector_ann_candidate_budget_observation_rate"] = float(
+            counters["vector_ann_candidate_budget_observed_queries"]
+        ) / float(hybrid)
         metrics["corpus_warming_rate"] = float(warming_queries) / float(hybrid)
         metrics["search_engine_ready_rate"] = float(search_ready_queries) / float(hybrid)
         metrics["vector_ready_rate"] = float(vector_ready_queries) / float(hybrid)
@@ -912,12 +1104,14 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
             counters["vector_candidate_budget"]
             + counters["topology_vector_filter_allowed_candidates"]
         ) / float(hybrid)
-        metrics["vector_total_rows_visited_actual_avg"] = float(
-            counters["vector_rows_visited_actual"]
-        ) / float(hybrid)
-        metrics["vector_total_exact_distance_evaluations_actual_avg"] = float(
-            counters["vector_exact_distance_evaluations_actual"]
-        ) / float(hybrid)
+        if counters["vector_rows_visited_observed_queries"] > 0:
+            metrics["vector_total_rows_visited_actual_avg"] = float(
+                counters["vector_rows_visited_actual"]
+            ) / float(counters["vector_rows_visited_observed_queries"])
+        if counters["vector_exact_distance_evaluations_observed_queries"] > 0:
+            metrics["vector_total_exact_distance_evaluations_actual_avg"] = float(
+                counters["vector_exact_distance_evaluations_actual"]
+            ) / float(counters["vector_exact_distance_evaluations_observed_queries"])
         metrics["topology_vector_filter_rate"] = float(
             counters["topology_vector_filter_applied_queries"]
         ) / float(hybrid)
@@ -936,6 +1130,15 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         metrics["topology_shadow_evaluation_rate"] = float(
             counters["topology_shadow_evaluated_queries"]
         ) / float(hybrid)
+    if coordinate_row_count > 0:
+        for metric_name, values in coordinate_values.items():
+            metrics[f"topology_coordinate_{metric_name}_observation_rate"] = float(
+                len(values)
+            ) / float(coordinate_row_count)
+            if values:
+                metrics[f"topology_coordinate_{metric_name}_avg"] = float(
+                    statistics.mean(values)
+                )
     shadow_evaluated = counters["topology_shadow_evaluated_queries"]
     if shadow_evaluated > 0:
         metrics["topology_shadow_narrow_proposal_rate"] = float(
@@ -1028,6 +1231,224 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
     }
 
 
+_VECTOR_WORK_OBSERVATION_METRICS = {
+    "rows_visited": (
+        "vector_rows_visited_observation_rate",
+        "vector_rows_visited_actual_avg",
+    ),
+    "exact_distance_evaluations": (
+        "vector_exact_distance_evaluations_observation_rate",
+        "vector_exact_distance_evaluations_actual_avg",
+    ),
+    "ann_candidate_budget": (
+        "vector_ann_candidate_budget_observation_rate",
+        "vector_ann_candidate_budget_actual_avg",
+    ),
+}
+
+
+def require_vector_work_observation_contract(
+    metrics: dict[str, Any], contract: Any
+) -> str | None:
+    """Validate whether an engine promises or explicitly lacks actual-work counters."""
+    if contract in (None, {}):
+        return None
+    if not isinstance(contract, dict):
+        return "vector_work_observation_contract must be an object"
+
+    errors: list[str] = []
+    for counter, expectation in contract.items():
+        metric_names = _VECTOR_WORK_OBSERVATION_METRICS.get(str(counter))
+        if metric_names is None:
+            errors.append(f"unknown vector work counter {counter!r}")
+            continue
+        if expectation not in {"required", "unavailable"}:
+            errors.append(
+                f"invalid expectation {expectation!r} for vector work counter {counter!r}"
+            )
+            continue
+        rate_name, actual_name = metric_names
+        try:
+            rate = float(metrics[rate_name])
+        except (KeyError, TypeError, ValueError):
+            errors.append(f"{counter}: missing numeric {rate_name}")
+            continue
+        actual_present = actual_name in metrics
+        if expectation == "required":
+            if not math.isclose(rate, 1.0, rel_tol=0.0, abs_tol=1e-12):
+                errors.append(f"{counter}: required observation rate 1.0, observed {rate}")
+            if not actual_present:
+                errors.append(f"{counter}: required actual metric {actual_name} is missing")
+        else:
+            if not math.isclose(rate, 0.0, rel_tol=0.0, abs_tol=1e-12):
+                errors.append(f"{counter}: expected unavailable, observed rate {rate}")
+            if actual_present:
+                errors.append(
+                    f"{counter}: expected unavailable, but {actual_name} was reported"
+                )
+    return "; ".join(errors) if errors else None
+
+
+def require_vector_index_persistence_contract(
+    metrics: dict[str, Any], expectation: Any
+) -> str | None:
+    """Validate restart persistence separately from in-process query readiness."""
+    if expectation is None:
+        return None
+    if expectation not in {"required", "unavailable"}:
+        return f"invalid vector_index_persistence_contract {expectation!r}"
+
+    try:
+        query_ready = float(metrics["vector_query_ready_after"])
+        reusable = float(metrics["vector_index_reusable_after"])
+        reusable_probe_count = float(metrics["vector_index_reusable_probe_count"])
+    except (KeyError, TypeError, ValueError):
+        return "vector index lifecycle metrics are missing or non-numeric"
+
+    if not math.isfinite(reusable_probe_count) or reusable_probe_count <= 0.0:
+        return "vector index reusability probe was not observed"
+    if not math.isclose(query_ready, 1.0, rel_tol=0.0, abs_tol=1e-12):
+        return "vector query path is not ready after setup"
+    if expectation == "required" and not math.isclose(
+        reusable, 1.0, rel_tol=0.0, abs_tol=1e-12
+    ):
+        return "persisted vector index is not reusable after setup"
+    if expectation == "required":
+        try:
+            reusable_before = float(metrics["vector_index_reusable_before"])
+        except (KeyError, TypeError, ValueError):
+            return "persisted vector index reuse-before metric is missing or non-numeric"
+        if not math.isclose(reusable_before, 1.0, rel_tol=0.0, abs_tol=1e-12):
+            return "persisted vector index was not reusable before setup"
+    if expectation == "unavailable" and not math.isclose(
+        reusable, 0.0, rel_tol=0.0, abs_tol=1e-12
+    ):
+        return "persisted vector index was unexpectedly reported reusable"
+    return None
+
+
+def require_process_resource_contract(
+    metrics: dict[str, Any], expectation: Any
+) -> str | None:
+    """Require peak RSS emitted by the benchmark process itself."""
+    if expectation is None:
+        return None
+    if expectation != "required":
+        return f"invalid process_resource_contract {expectation!r}"
+    try:
+        observation_rate = float(metrics["proc_maxrss_observation_rate"])
+        peak_rss_mb = float(metrics["proc_maxrss_mb"])
+    except (KeyError, TypeError, ValueError):
+        return "process peak RSS metric or observation rate is missing or non-numeric"
+    if not math.isclose(observation_rate, 1.0, rel_tol=0.0, abs_tol=1e-12):
+        return f"process peak RSS was not observed by the benchmark process: {observation_rate}"
+    if not math.isfinite(peak_rss_mb) or peak_rss_mb <= 0.0:
+        return f"process peak RSS is invalid: {peak_rss_mb}"
+    return None
+
+
+def require_complete_query_trace(debug_path: Path, identity_path: Path) -> str | None:
+    """Require one successful measured hybrid trace per mixed-corpus query."""
+    if not debug_path.is_file():
+        return f"missing debug log for query completeness validation: {debug_path}"
+    if not identity_path.is_file():
+        return f"missing mixed-corpus identity for query completeness validation: {identity_path}"
+    try:
+        identity = json.loads(identity_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return f"mixed-corpus identity is unreadable: {exc}"
+    query_order = list(identity.get("query_order") or [])
+    query_sources = dict(identity.get("query_sources") or {})
+    query_texts = dict(identity.get("query_texts") or {})
+    if not query_order:
+        return "mixed-corpus identity has no query_order"
+    if any(query_id not in query_sources for query_id in query_order):
+        return "mixed-corpus identity is missing query source assignments"
+    if any(query_id not in query_texts for query_id in query_order):
+        return "mixed-corpus identity is missing query text assignments"
+
+    index_counts: dict[int, int] = {}
+    observed_query_texts: dict[int, str] = {}
+    failed_indices: list[int] = []
+    invalid_json_lines: list[int] = []
+    saw_summary = False
+    warmup_query_count: int | None = None
+    warmup_completed_queries: int | None = None
+    for line_number, line in enumerate(
+        debug_path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1
+    ):
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            invalid_json_lines.append(line_number)
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("event") == "hybrid_summary":
+            saw_summary = True
+            continue
+        if event.get("event") == "query_warmup_summary":
+            try:
+                warmup_query_count = int(event.get("query_count") or 0)
+                warmup_completed_queries = int(event.get("completed_queries") or 0)
+            except (TypeError, ValueError):
+                warmup_query_count = 0
+                warmup_completed_queries = 0
+            continue
+        if event.get("search_type") != "hybrid":
+            continue
+        query_index = event.get("query_index")
+        if not isinstance(query_index, int):
+            continue
+        index_counts[query_index] = index_counts.get(query_index, 0) + 1
+        query_text = event.get("query")
+        if isinstance(query_text, str):
+            observed_query_texts[query_index] = query_text
+        stats = event.get("search_stats")
+        latency = stats.get("latency_ms") if isinstance(stats, dict) else None
+        try:
+            latency_value = float(latency)
+        except (TypeError, ValueError):
+            failed_indices.append(query_index)
+            continue
+        if not math.isfinite(latency_value) or latency_value < 0.0:
+            failed_indices.append(query_index)
+
+    expected_indices = set(range(len(query_order)))
+    observed_indices = set(index_counts)
+    missing = sorted(expected_indices - observed_indices)
+    unexpected = sorted(observed_indices - expected_indices)
+    duplicates = sorted(index for index, count in index_counts.items() if count != 1)
+    if invalid_json_lines:
+        return f"debug trace contains invalid JSON lines {invalid_json_lines[:8]}"
+    if missing:
+        return f"mixed query trace missing query indices {missing}"
+    if unexpected:
+        return f"mixed query trace has unexpected query indices {unexpected}"
+    if duplicates:
+        return f"mixed query trace has duplicate query indices {duplicates}"
+    identity_mismatches = [
+        index
+        for index, query_id in enumerate(query_order)
+        if observed_query_texts.get(index) != query_texts.get(query_id)
+    ]
+    if identity_mismatches:
+        return f"mixed query identity mismatch at indices {identity_mismatches}"
+    if failed_indices:
+        return f"mixed query trace has unsuccessful query indices {sorted(set(failed_indices))}"
+    if not saw_summary:
+        return "mixed query trace is missing the terminal hybrid_summary event"
+    if warmup_query_count != len(query_order) or warmup_completed_queries != len(query_order):
+        return (
+            "mixed query warmup is incomplete "
+            f"(expected={len(query_order)}, query_count={warmup_query_count}, "
+            f"completed={warmup_completed_queries})"
+        )
+    return None
+
+
 def require_steady_state(path: Path, *, require_vector: bool) -> str | None:
     """Return an experiment-identity error when hybrid queries ran while warming."""
     if not path.is_file():
@@ -1066,6 +1487,12 @@ def require_steady_state(path: Path, *, require_vector: bool) -> str | None:
     )
 
 
+def include_shared_seed_metrics(arm_dir: Path) -> bool:
+    """Expose one run-scoped seed observation without pseudo-replicating it."""
+    match = re.fullmatch(r"rep(\d+)", arm_dir.name)
+    return match is None or int(match.group(1)) == 0
+
+
 def require_shared_topology_construction_identity(
     identity_path: Path, fingerprints: dict[str, int]
 ) -> str | None:
@@ -1097,6 +1524,32 @@ def clone_benchmark_state(source: Path, destination: Path) -> None:
         shutil.rmtree(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source, destination, symlinks=True)
+
+
+def _retarget_benchmark_cache_engine(cache_dir: Path, search_engine: str) -> None:
+    """Reuse immutable corpus/embedding state while rebuilding an arm-specific index.
+
+    The benchmark cache identity includes the vector engine because persisted indexes are
+    engine-specific.  Xplan clones, however, intentionally share the expensive corpus and
+    embedding seed between engine arms.  Rewrite only the cloned index identity so the benchmark
+    preserves those common inputs and rebuilds (or bypasses) the index for this arm.
+    """
+    metadata_path = cache_dir / "retrieval_bench_cache.json"
+    if not metadata_path.is_file():
+        raise ValueError(f"benchmark cache metadata is missing: {metadata_path}")
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"benchmark cache metadata is invalid: {metadata_path}: {exc}") from exc
+    if not isinstance(metadata, dict):
+        raise ValueError(f"benchmark cache metadata must be an object: {metadata_path}")
+    engine_changed = metadata.get("search_engine") != search_engine
+    metadata["search_engine"] = search_engine
+    if engine_changed:
+        metadata["vector_index_ready"] = False
+    temporary = metadata_path.with_suffix(metadata_path.suffix + ".tmp")
+    temporary.write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(metadata_path)
 
 
 def require_topology_certificate(
@@ -1148,10 +1601,11 @@ def _merge_benchmark_env(
 ) -> dict[str, str]:
     """Merge benchmark configuration with deterministic experiment precedence.
 
-    Plan parameters override ambient shell state. Explicit fixed/arm/step env is
-    authoritative when a plan intentionally expresses the same axis as an env var.
+    YAMS behavior is experiment input, so it must come from plan parameters or
+    explicit fixed/arm/step env rather than an unrecorded developer shell. Keep
+    ordinary process state (PATH, sanitizer options, loader paths, and so on).
     """
-    env = dict(ambient)
+    env = {key: value for key, value in ambient.items() if not key.startswith("YAMS_")}
     for pkey, ekey in param_env.items():
         if pkey in params:
             env[ekey] = str(params[pkey])
@@ -1163,12 +1617,10 @@ def _merge_benchmark_env(
 
 
 def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
-    explicit = (
-        ctx.params.get("binary")
-        or os.environ.get("YAMS_TOPOLOGY_EXPANSION_BIN")
-        or os.environ.get("YAMS_TOPOLOGY_ABLATION_BIN")
-        or os.environ.get("YAMS_BENCH_BIN")
-    )
+    # The runner resolves, fingerprints, and binds one executable across all arms.
+    # Do not consult ambient binary overrides here or the executed file can diverge
+    # from the identity recorded in the run manifest.
+    explicit = ctx.params.get("binary")
     binary = resolve_binary(
         ctx.build_dir,
         "tests",
@@ -1263,6 +1715,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
                 "search_latency_ms_p50": 0.0,
                 "search_latency_ms_p95": 0.0,
                 "proc_maxrss_mb": 0.0,
+                "proc_maxrss_observation_rate": 0.0,
                 "topology_applied": 0.0,
                 "topology_added_avg": 0.0,
                 "topology_routed_docs_avg": 0.0,
@@ -1486,6 +1939,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         "rerank_weight": "YAMS_SEARCH_RERANK_WEIGHT",
         "embed_backend": "YAMS_EMBED_BACKEND",
         "vector_search_engine": "YAMS_VECTOR_SEARCH_ENGINE",
+        "simeon_pq_rerank_factor": "YAMS_BENCH_SIMEON_PQ_RERANK_FACTOR",
         "ingest_min_fraction": "YAMS_BENCH_INGEST_MIN_FRACTION",
         "progress_timeout_sec": "YAMS_BENCH_PROGRESS_TIMEOUT",
     }
@@ -1685,6 +2139,10 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         isolated_data_dir = ctx.arm_dir / "isolated_data"
         try:
             clone_benchmark_state(seed_dir, isolated_data_dir)
+            _retarget_benchmark_cache_engine(
+                isolated_data_dir,
+                env.get("YAMS_VECTOR_SEARCH_ENGINE", "simeon_pq_adc"),
+            )
         except (OSError, ValueError) as exc:
             return WorkerResult(
                 status="failed",
@@ -1696,7 +2154,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         env["YAMS_BENCH_WARM_CACHE_DIR"] = str(isolated_data_dir)
         if source == "vector":
             _mark_shared_topology_seed_reuse(env)
-    resource_before = _child_resource_usage()
+    cpu_before = _child_cpu_seconds()
     wall_start = time.monotonic()
     try:
         proc = run_captured(
@@ -1715,7 +2173,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
             message=f"retrieval_quality timed out: {exc}",
         )
     wall_sec = time.monotonic() - wall_start
-    resource_after = _child_resource_usage()
+    cpu_after = _child_cpu_seconds()
 
     (ctx.arm_dir / "exit_code").write_text(
         str(proc.returncode) + "\n", encoding="utf-8"
@@ -1760,7 +2218,19 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
     metrics.update(quality)
     metrics.update(dbg.get("metrics") or {})
     metrics.update(parse_benchmark_setup_metrics(debug_path))
-    metrics.update({f"seed_{key}": value for key, value in seed_setup_metrics.items()})
+    metrics.update(parse_process_resource_metrics(debug_path))
+    cache_dir_value = env.get("YAMS_BENCH_WARM_CACHE_DIR") or env.get(
+        "YAMS_BENCH_DATA_DIR"
+    )
+    if cache_dir_value:
+        metrics.update(
+            parse_benchmark_cache_metrics(
+                Path(cache_dir_value) / "retrieval_bench_cache.json"
+            )
+        )
+    if include_shared_seed_metrics(ctx.arm_dir):
+        metrics.update({f"seed_{key}": value for key, value in seed_setup_metrics.items()})
+    query_trace_error: str | None = None
     if mixed_corpus is not None:
         metrics.update(
             analyze_mixed_corpus_debug(
@@ -1774,12 +2244,108 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         )
         metrics.update(cluster_report.get("metrics") or {})
         write_json(ctx.arm_dir / "mixed_cluster_overlap.json", cluster_report)
+        query_trace_error = require_complete_query_trace(
+            debug_path, mixed_corpus.identity_path
+        )
     metrics["proc_wall_sec"] = float(wall_sec)
-    if resource_before is not None and resource_after is not None:
-        # CPU time is additive across children, so the delta is reliable per arm. Max RSS is
-        # a whole-process high-water mark and remains a deliberately coarse observation.
-        metrics["proc_cpu_sec"] = resource_after[0] - resource_before[0]
-        metrics["proc_maxrss_mb"] = resource_after[1]
+    if cpu_before is not None and cpu_after is not None:
+        # CPU time is additive across children, so the delta is reliable per arm. Peak RSS is
+        # emitted by the benchmark process itself and parsed above.
+        metrics["proc_cpu_sec"] = cpu_after - cpu_before
+
+    if query_trace_error:
+        write_json(
+            ctx.arm_dir / "quality_parse.json",
+            {
+                "quality": quality,
+                "debug": dbg,
+                "query_trace_error": query_trace_error,
+            },
+        )
+        return WorkerResult(
+            status="failed",
+            exit_code=proc.returncode if proc.returncode != 0 else 1,
+            metrics=metrics,
+            attributes={
+                "binary": str(binary),
+                "query_trace_error": query_trace_error,
+                "seed_setup_metric_scope": "shared_run_single_observation",
+            },
+            message=query_trace_error,
+            raw_path=str(debug_path),
+        )
+
+    vector_work_error = require_vector_work_observation_contract(
+        metrics, ctx.params.get("vector_work_observation_contract")
+    )
+    if vector_work_error:
+        write_json(
+            ctx.arm_dir / "quality_parse.json",
+            {
+                "quality": quality,
+                "debug": dbg,
+                "vector_work_observation_error": vector_work_error,
+            },
+        )
+        return WorkerResult(
+            status="failed",
+            exit_code=proc.returncode if proc.returncode != 0 else 1,
+            metrics=metrics,
+            attributes={
+                "binary": str(binary),
+                "vector_work_observation_error": vector_work_error,
+            },
+            message=vector_work_error,
+            raw_path=str(debug_path),
+        )
+
+    vector_persistence_error = require_vector_index_persistence_contract(
+        metrics, ctx.params.get("vector_index_persistence_contract")
+    )
+    if vector_persistence_error:
+        write_json(
+            ctx.arm_dir / "quality_parse.json",
+            {
+                "quality": quality,
+                "debug": dbg,
+                "vector_index_persistence_error": vector_persistence_error,
+            },
+        )
+        return WorkerResult(
+            status="failed",
+            exit_code=proc.returncode if proc.returncode != 0 else 1,
+            metrics=metrics,
+            attributes={
+                "binary": str(binary),
+                "vector_index_persistence_error": vector_persistence_error,
+            },
+            message=vector_persistence_error,
+            raw_path=str(debug_path),
+        )
+
+    process_resource_error = require_process_resource_contract(
+        metrics, ctx.params.get("process_resource_contract")
+    )
+    if process_resource_error:
+        write_json(
+            ctx.arm_dir / "quality_parse.json",
+            {
+                "quality": quality,
+                "debug": dbg,
+                "process_resource_error": process_resource_error,
+            },
+        )
+        return WorkerResult(
+            status="failed",
+            exit_code=proc.returncode if proc.returncode != 0 else 1,
+            metrics=metrics,
+            attributes={
+                "binary": str(binary),
+                "process_resource_error": process_resource_error,
+            },
+            message=process_resource_error,
+            raw_path=str(debug_path),
+        )
 
     seed_enabled = _truthy(env.get("YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS", "0"))
     require_steady = _truthy(
@@ -1933,6 +2499,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
             "scoring_modes": dbg.get("scoring_modes"),
             "routing_modes": dbg.get("routing_modes"),
             "construction_fingerprints": dbg.get("construction_fingerprints"),
+            "seed_setup_metric_scope": "shared_run_single_observation",
             "certificate": dbg.get("certificate"),
             "dataset": env.get("YAMS_BENCH_DATASET"),
             "corpus_size": env.get("YAMS_BENCH_CORPUS_SIZE"),

@@ -1,0 +1,297 @@
+{
+  "name": "vector_pq_rerank_quality",
+  "description": "Topology-disabled 1024d product-hybrid SciFact+NFCorpus single-factor gate for Simeon PQ exact-rerank depth. Promotion requires a positive paired-query bootstrap confidence lower bound, no per-source regression above 0.005, steady-state p50 within 5%, and p95 within 10% of factor 2; exact scan is an exhaustive vector-scoring reference, not a retrieval upper bound or promotion arm. vectors.db metrics describe the cloned product store, not a standalone backend footprint; setup metrics describe warm/restart work after shared seed construction.",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 10800,
+  "continue_on_arm_failure": false,
+  "mode": "live-ish",
+  "repeats": 3,
+  "baseline": "simeon_rerank_2",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SEARCH_STAGE_TRACE": "1",
+      "YAMS_ENABLE_ENV_OVERRIDES": "1",
+      "YAMS_BENCH_TOPOLOGY_MODE": "disabled",
+      "YAMS_VECTOR_MAX_RESULTS": "32",
+      "YAMS_SEARCH_LEXICAL_FLOOR_TOPN": "0",
+      "YAMS_SEARCH_LEXICAL_FLOOR_BOOST": "0"
+    },
+    "params": {
+      "datasets": ["scifact", "nfcorpus"],
+      "documents_per_dataset": 2000,
+      "queries_per_dataset": 50,
+      "topk": 10,
+      "require_steady_state": true,
+      "process_resource_contract": "required",
+      "shared_warm_cache": "vector_pq_rerank_quality_1024"
+    }
+  },
+  "arms": [
+    {
+      "name": "simeon_rerank_1",
+      "factors": {
+        "retrieval": "product_hybrid",
+        "vector_engine": "simeon_pq_adc",
+        "candidate_generation": "global_adc",
+        "rerank_factor": "1"
+      },
+      "params": {
+        "vector_search_engine": "simeon_pq_adc",
+        "vector_index_persistence_contract": "required",
+        "simeon_pq_rerank_factor": 1,
+        "vector_work_observation_contract": {
+          "rows_visited": "required",
+          "exact_distance_evaluations": "required",
+          "ann_candidate_budget": "required"
+        }
+      }
+    },
+    {
+      "name": "simeon_rerank_2",
+      "factors": {
+        "retrieval": "product_hybrid",
+        "vector_engine": "simeon_pq_adc",
+        "candidate_generation": "global_adc",
+        "rerank_factor": "2"
+      },
+      "params": {
+        "vector_search_engine": "simeon_pq_adc",
+        "vector_index_persistence_contract": "required",
+        "simeon_pq_rerank_factor": 2,
+        "vector_work_observation_contract": {
+          "rows_visited": "required",
+          "exact_distance_evaluations": "required",
+          "ann_candidate_budget": "required"
+        }
+      }
+    },
+    {
+      "name": "simeon_rerank_4",
+      "factors": {
+        "retrieval": "product_hybrid",
+        "vector_engine": "simeon_pq_adc",
+        "candidate_generation": "global_adc",
+        "rerank_factor": "4"
+      },
+      "params": {
+        "vector_search_engine": "simeon_pq_adc",
+        "vector_index_persistence_contract": "required",
+        "simeon_pq_rerank_factor": 4,
+        "vector_work_observation_contract": {
+          "rows_visited": "required",
+          "exact_distance_evaluations": "required",
+          "ann_candidate_budget": "required"
+        }
+      }
+    },
+    {
+      "name": "simeon_rerank_8",
+      "factors": {
+        "retrieval": "product_hybrid",
+        "vector_engine": "simeon_pq_adc",
+        "candidate_generation": "global_adc",
+        "rerank_factor": "8"
+      },
+      "params": {
+        "vector_search_engine": "simeon_pq_adc",
+        "vector_index_persistence_contract": "required",
+        "simeon_pq_rerank_factor": 8,
+        "vector_work_observation_contract": {
+          "rows_visited": "required",
+          "exact_distance_evaluations": "required",
+          "ann_candidate_budget": "required"
+        }
+      }
+    },
+    {
+      "name": "exact_scan_oracle",
+      "factors": {
+        "retrieval": "product_hybrid",
+        "vector_engine": "exact_scan",
+        "candidate_generation": "exhaustive",
+        "rerank_factor": "oracle"
+      },
+      "params": {
+        "vector_search_engine": "exact_scan",
+        "vector_index_persistence_contract": "unavailable",
+        "vector_work_observation_contract": {
+          "rows_visited": "required",
+          "exact_distance_evaluations": "required",
+          "ann_candidate_budget": "unavailable"
+        }
+      }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_quality",
+      "metrics": [
+        "mrr",
+        "ndcg_at_k",
+        "recall_at_k",
+        "mixed_source_min_mrr",
+        "mixed_source_min_recall_at_k",
+        "mixed_source_min_ndcg_at_k",
+        "mixed_mrr_scifact",
+        "mixed_mrr_nfcorpus",
+        "mixed_recall_at_k_scifact",
+        "mixed_recall_at_k_nfcorpus",
+        "mixed_ndcg_at_k_scifact",
+        "mixed_ndcg_at_k_nfcorpus",
+        "mixed_query_count_scifact",
+        "mixed_query_count_nfcorpus",
+        "candidate_pre_fusion_recall",
+        "mixed_candidate_pre_fusion_recall_scifact",
+        "mixed_candidate_pre_fusion_recall_nfcorpus",
+        "search_latency_ms_cold_first",
+        "search_latency_ms_first_pass_first",
+        "search_latency_ms_warmed_p50",
+        "search_warmup_query_count",
+        "search_warmup_completed_queries",
+        "search_latency_ms_p50",
+        "search_latency_ms_p95",
+        "search_latency_ms_p99",
+        "search_throughput_qps",
+        "benchmark_setup_total_ms",
+        "vector_index_prepare_ms",
+        "vector_index_persist_ms",
+        "vector_index_reusable_probe_ms",
+        "vector_index_reusable_probe_count",
+        "vector_database_bytes",
+        "vector_wal_bytes",
+        "vector_query_ready_after",
+        "vector_index_reusable_before",
+        "vector_index_reusable_after",
+        "proc_maxrss_mb",
+        "proc_maxrss_observation_rate",
+        "vector_rows_visited_observation_rate",
+        "vector_exact_distance_evaluations_observation_rate",
+        "vector_ann_candidate_budget_observation_rate",
+        "vector_total_rows_visited_actual_avg",
+        "vector_total_exact_distance_evaluations_actual_avg",
+        "vector_pq_lut_ms_avg",
+        "vector_adc_scoring_ms_avg",
+        "vector_topk_selection_ms_avg",
+        "vector_result_materialization_ms_avg",
+        "vector_exact_rerank_ms_avg"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json", "stdout.log", "debug.jsonl"],
+    "require_metrics": [
+      "mrr",
+      "recall_at_k",
+      "search_latency_ms_p50",
+      "search_latency_ms_warmed_p50",
+      "search_latency_ms_cold_first",
+      "search_latency_ms_first_pass_first",
+      "search_warmup_completed_queries",
+      "search_latency_ms_p99",
+      "search_throughput_qps",
+      "vector_index_prepare_ms",
+      "vector_index_persist_ms",
+      "vector_index_reusable_probe_ms",
+      "vector_index_reusable_probe_count",
+      "vector_database_bytes",
+      "vector_wal_bytes",
+      "mixed_query_count_scifact",
+      "mixed_query_count_nfcorpus",
+      "mixed_mrr_scifact",
+      "mixed_mrr_nfcorpus",
+      "mixed_recall_at_k_scifact",
+      "mixed_recall_at_k_nfcorpus",
+      "mixed_ndcg_at_k_scifact",
+      "mixed_ndcg_at_k_nfcorpus",
+      "vector_query_ready_after",
+      "vector_exact_distance_evaluations_observation_rate",
+      "proc_maxrss_observation_rate"
+    ],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "mrr",
+      "ndcg_at_k",
+      "recall_at_k",
+      "mixed_source_min_mrr",
+      "mixed_source_min_recall_at_k",
+      "mixed_source_min_ndcg_at_k",
+      "mixed_mrr_scifact",
+      "mixed_mrr_nfcorpus",
+      "mixed_recall_at_k_scifact",
+      "mixed_recall_at_k_nfcorpus",
+      "mixed_ndcg_at_k_scifact",
+      "mixed_ndcg_at_k_nfcorpus",
+      "candidate_pre_fusion_recall",
+      "search_latency_ms_first_pass_first",
+      "search_latency_ms_warmed_p50",
+      "search_warmup_completed_queries",
+      "search_latency_ms_p50",
+      "search_latency_ms_p95",
+      "search_latency_ms_p99",
+      "search_throughput_qps",
+      "benchmark_setup_total_ms",
+      "vector_index_prepare_ms",
+      "vector_index_persist_ms",
+      "vector_index_reusable_probe_ms",
+      "vector_index_reusable_probe_count",
+      "vector_database_bytes",
+      "vector_wal_bytes",
+      "vector_query_ready_after",
+      "vector_index_reusable_before",
+      "vector_index_reusable_after",
+      "proc_maxrss_mb",
+      "proc_maxrss_observation_rate",
+      "vector_total_rows_visited_actual_avg",
+      "vector_total_exact_distance_evaluations_actual_avg",
+      "vector_pq_lut_ms_avg",
+      "vector_adc_scoring_ms_avg",
+      "vector_topk_selection_ms_avg",
+      "vector_result_materialization_ms_avg",
+      "vector_exact_rerank_ms_avg",
+      "vector_exact_oracle_recall_at_k",
+      "vector_exact_oracle_gap_at_k",
+      "vector_exact_oracle_paired_queries",
+      "vector_exact_oracle_paired_observations",
+      "vector_exact_oracle_recall_at_k_scifact",
+      "vector_exact_oracle_recall_at_k_nfcorpus",
+      "paired_query_mrr_delta",
+      "paired_query_mrr_ci_low",
+      "paired_query_mrr_ci_high",
+      "paired_query_recall_at_k_delta",
+      "paired_query_recall_at_k_ci_low",
+      "paired_query_recall_at_k_ci_high",
+      "paired_query_ndcg_at_k_delta",
+      "paired_query_ndcg_at_k_ci_low",
+      "paired_query_ndcg_at_k_ci_high"
+    ],
+    "group_by": ["rerank_factor", "vector_engine", "candidate_generation"],
+    "paired_vector_oracle": {
+      "arm": "exact_scan_oracle",
+      "component": "vector",
+      "top_k": 10,
+      "identity_file": "datasets/mixed_beir/mixed_corpus_identity.json"
+    },
+    "paired_query_analysis": {
+      "metrics": ["mrr", "recall_at_k", "ndcg_at_k"],
+      "confidence_level": 0.95,
+      "bootstrap_samples": 5000,
+      "seed": 1729,
+      "identity_file": "datasets/mixed_beir/mixed_corpus_identity.json"
+    },
+    "promotion_gates": {
+      "candidate_arms": ["simeon_rerank_1", "simeon_rerank_4", "simeon_rerank_8"],
+      "quality_metric": "mrr",
+      "quality_ci_lower_min": 0.0,
+      "per_source_metrics": ["mrr", "recall_at_k", "ndcg_at_k"],
+      "max_source_regression": 0.005,
+      "latency_relative_max": {
+        "search_latency_ms_warmed_p50": 1.05,
+        "search_latency_ms_p95": 1.10
+      }
+    }
+  }
+}

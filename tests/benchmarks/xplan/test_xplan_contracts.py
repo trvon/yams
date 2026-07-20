@@ -6,6 +6,8 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import math
+import os
 import signal
 import subprocess
 import sys
@@ -27,8 +29,11 @@ from analyze_query_class import (  # noqa: E402
 )
 from model import ExperimentPlan  # noqa: E402
 from report import _baseline_row  # noqa: E402
+import artifacts as xplan_artifacts  # noqa: E402
 import runner as xplan_runner  # noqa: E402
-from artifacts import file_sha256  # noqa: E402
+import summarize as xplan_summarize  # noqa: E402
+import workers.retrieval_quality as retrieval_quality_worker  # noqa: E402
+from artifacts import file_sha256, source_set_sha256  # noqa: E402
 from workers.multi_client import _clone_corpus_seed, _metrics_from_record  # noqa: E402
 from workers.mixed_corpus import (  # noqa: E402
     analyze_mixed_cluster_overlap,
@@ -47,13 +52,159 @@ from workers.retrieval_quality import (  # noqa: E402
     _mark_shared_topology_seed_reuse,
     _merge_benchmark_env,
     _reset_measured_outputs,
+    _retarget_benchmark_cache_engine,
     clone_benchmark_state,
     describe_process_failure,
+    parse_benchmark_cache_metrics,
     parse_benchmark_setup_metrics,
     parse_debug_jsonl,
     require_shared_topology_construction_identity,
     require_steady_state,
 )
+
+
+class VectorBuildCompositionTests(unittest.TestCase):
+    @staticmethod
+    def _target_block(meson_source: str, target_name: str) -> str:
+        start = meson_source.index(f"static_library('{target_name}'")
+        end = meson_source.index("\n)", start)
+        return meson_source[start:end]
+
+    def test_optional_sqlite_vec_isa_flags_stay_in_vendor_translation_units(
+        self,
+    ) -> None:
+        meson_source = (
+            XPLAN_ROOT.parents[2] / "src" / "vector" / "meson.build"
+        ).read_text(encoding="utf-8")
+
+        vendor_start = meson_source.index(
+            "sqlite_vec_cpp_lib = static_library('yams_sqlite_vec_cpp'"
+        )
+        vendor_end = meson_source.index("\n  )", vendor_start)
+        vendor_target = meson_source[vendor_start:vendor_end]
+
+        backend_start = meson_source.index(
+            "sqlite_vec_backend_lib = static_library('yams_sqlite_vec_backend'"
+        )
+        backend_end = meson_source.index("\n)", backend_start)
+        backend_target = meson_source[backend_start:backend_end]
+
+        self.assertIn("vec_simd_cppargs", vendor_target)
+        self.assertNotIn("vec_simd_cppargs", backend_target)
+        self.assertNotIn("sqlite_vec_feature_cppargs", backend_target)
+
+    def test_simeon_vector_and_retrieval_sources_are_separate_targets(self) -> None:
+        meson_source = (
+            XPLAN_ROOT.parents[2] / "src" / "vector" / "meson.build"
+        ).read_text(encoding="utf-8")
+
+        common_target = self._target_block(meson_source, "yams_simeon_common")
+        vector_target = self._target_block(meson_source, "yams_simeon_vector")
+        retrieval_target = self._target_block(meson_source, "yams_simeon_retrieval")
+
+        self.assertIn("simeon_common_srcs", common_target)
+        self.assertIn("simeon_vector_srcs", vector_target)
+        self.assertNotIn("simeon_retrieval_srcs", vector_target)
+        self.assertIn("simeon_retrieval_srcs", retrieval_target)
+        self.assertNotIn("simeon_vector_srcs", retrieval_target)
+
+    def test_public_vector_dependency_does_not_export_simeon_build_internals(self) -> None:
+        meson_source = (
+            XPLAN_ROOT.parents[2] / "src" / "vector" / "meson.build"
+        ).read_text(encoding="utf-8")
+        start = meson_source.index("yams_vector_dep = declare_dependency(")
+        end = meson_source.index("\n)", start)
+        public_dependency = meson_source[start:end]
+
+        self.assertNotIn("simeon_inc", public_dependency)
+        self.assertNotIn("simeon_simd_defines", public_dependency)
+
+    def test_vector_database_uses_lifecycle_capability_without_raw_sqlite_access(
+        self,
+    ) -> None:
+        source = (
+            XPLAN_ROOT.parents[2] / "src" / "vector" / "vector_database.cpp"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("IEmbeddingLifecycleStore", source)
+        self.assertNotIn("#include <sqlite3.h>", source)
+        self.assertNotIn("getDbHandle()", source)
+        self.assertNotIn("sqlite3_prepare", source)
+
+    def test_public_simeon_backend_config_does_not_expose_vendor_configs(self) -> None:
+        header = (
+            XPLAN_ROOT.parents[2]
+            / "include"
+            / "yams"
+            / "search"
+            / "simeon_lexical_backend.h"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("#include <simeon/concept_mining.hpp>", header)
+        self.assertNotIn("#include <simeon/fragment_geometry.hpp>", header)
+        self.assertNotIn("simeon::ConceptConfig", header)
+        self.assertNotIn("simeon::FragmentGeometryConfig", header)
+
+    def test_retrieval_cache_readiness_requires_backend_validation(self) -> None:
+        source = (
+            XPLAN_ROOT.parents[2]
+            / "tests"
+            / "benchmarks"
+            / "search"
+            / "retrieval_quality_bench.cpp"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("bool validatedIndexReusable", source)
+        self.assertIn("metadata.vectorIndexReady = validatedIndexReusable;", source)
+        self.assertNotIn("persistedHnsw.reusable(", source)
+
+    def test_engine_comparator_warms_each_backend_before_timing(self) -> None:
+        source = (
+            XPLAN_ROOT.parents[2]
+            / "tests"
+            / "benchmarks"
+            / "vector_backend_engine_compare.cpp"
+        ).read_text(encoding="utf-8")
+
+        warmup = source.index("auto warmup = backend.searchSimilar(queries.front()")
+        timed_loop = source.index("for (size_t i = 0; i < queries.size(); ++i)")
+        self.assertLess(warmup, timed_loop)
+
+    def test_vec0_non_persistence_contract_has_no_stale_positive_claims(self) -> None:
+        coordinator = (
+            XPLAN_ROOT.parents[2]
+            / "include"
+            / "yams"
+            / "daemon"
+            / "components"
+            / "VectorIndexCoordinator.h"
+        ).read_text(encoding="utf-8")
+        benchmark = (
+            XPLAN_ROOT.parents[2]
+            / "tests"
+            / "benchmarks"
+            / "search"
+            / "retrieval_quality_bench.cpp"
+        ).read_text(encoding="utf-8")
+        vector_tests = (
+            XPLAN_ROOT.parents[2]
+            / "tests"
+            / "unit"
+            / "vector"
+            / "sqlite_vec_backend_comprehensive_catch2_test.cpp"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("persisted HNSW index", coordinator)
+        self.assertNotIn("persisted HNSW is still unusable", benchmark)
+        self.assertNotIn("search should work without rebuild", vector_tests)
+        self.assertNotIn("[vec0_persist]", vector_tests)
+
+    def test_vector_build_messages_do_not_overstate_simd_uplift(self) -> None:
+        meson_source = (
+            XPLAN_ROOT.parents[2] / "src" / "vector" / "meson.build"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("~33x faster", meson_source)
 
 
 class RetrievalQualityEnvironmentTests(unittest.TestCase):
@@ -90,6 +241,51 @@ import workers.retrieval_quality
                 file_sha256(binary), hashlib.sha256(b"retrieval-binary").hexdigest()
             )
 
+    def test_source_identity_hashes_paths_and_contents(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worker = root / "workers" / "quality.py"
+            worker.parent.mkdir()
+            worker.write_text("VERSION = 1\n", encoding="utf-8")
+            plan = root / "plan.json"
+            plan.write_text('{"name":"identity"}\n', encoding="utf-8")
+
+            before = source_set_sha256(root, [worker, plan])
+            worker.write_text("VERSION = 2\n", encoding="utf-8")
+            after = source_set_sha256(root, [worker, plan])
+
+            self.assertRegex(before, r"^[0-9a-f]{64}$")
+            self.assertNotEqual(before, after)
+
+    def test_dirty_git_source_snapshot_preserves_patch_and_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "config", "user.email", "xplan@example.invalid"],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(root), "config", "user.name", "xplan-test"], check=True
+            )
+            source = root / "source.cpp"
+            source.write_text("int value = 1;\n", encoding="utf-8")
+            subprocess.run(["git", "-C", str(root), "add", "source.cpp"], check=True)
+            subprocess.run(
+                ["git", "-C", str(root), "commit", "-qm", "baseline"], check=True
+            )
+            source.write_text("int value = 2;\n", encoding="utf-8")
+            run_dir = root / "artifacts"
+            run_dir.mkdir()
+
+            snapshot = xplan_artifacts.capture_git_source_snapshot(root, run_dir)
+
+            self.assertTrue(snapshot["worktree_dirty"])
+            self.assertRegex(snapshot["worktree_patch_sha256"], r"^[0-9a-f]{64}$")
+            patch_path = run_dir / snapshot["worktree_patch_path"]
+            self.assertTrue(patch_path.is_file())
+            self.assertIn("+int value = 2;", patch_path.read_text(encoding="utf-8"))
+
     def test_binary_identity_rejects_mid_run_relink(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             binary = Path(tmp) / "bench"
@@ -100,6 +296,62 @@ import workers.retrieval_quality
             binary.write_bytes(b"second-binary")
             with self.assertRaisesRegex(RuntimeError, "identity changed"):
                 xplan_runner._require_binary_identity(binary, expected)
+
+    def test_runner_resolves_and_binds_the_actual_quality_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan_path = root / "plan.json"
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "name": "binary_identity",
+                        "fixed": {"params": {}},
+                        "arms": [{"name": "control"}],
+                        "steps": [{"worker": "retrieval_quality"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            override = root / "explicit-bench"
+            override.write_bytes(b"explicit")
+            plan = ExperimentPlan.load(plan_path)
+
+            actual = xplan_runner._resolve_retrieval_quality_binary(
+                plan,
+                repo_root=root,
+                build_dir=root / "build",
+                ambient={"YAMS_BENCH_BIN": str(override)},
+            )
+
+            self.assertEqual(actual, override.resolve())
+            self.assertEqual(file_sha256(actual), hashlib.sha256(b"explicit").hexdigest())
+
+    def test_runner_rejects_arm_specific_quality_binaries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan_path = root / "plan.json"
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "name": "binary_identity",
+                        "arms": [
+                            {"name": "one", "params": {"binary": "one"}},
+                            {"name": "two", "params": {"binary": "two"}},
+                        ],
+                        "steps": [{"worker": "retrieval_quality"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            plan = ExperimentPlan.load(plan_path)
+
+            with self.assertRaisesRegex(ValueError, "one quality binary"):
+                xplan_runner._resolve_retrieval_quality_binary(
+                    plan,
+                    repo_root=root,
+                    build_dir=root / "build",
+                    ambient={},
+                )
 
     def test_report_replays_resolved_plan_instead_of_mutated_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -276,6 +528,54 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
             )
             self.assertFalse((destination / "stale").exists())
 
+    def test_shared_seed_retargets_only_vector_index_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp)
+            metadata_path = cache / "retrieval_bench_cache.json"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "dataset": "local-manifest",
+                        "search_engine": "simeon_pq_adc",
+                        "status": "primed",
+                        "embedded_docs": 3985,
+                        "vector_count": 12699,
+                        "vector_index_ready": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            _retarget_benchmark_cache_engine(cache, "exact_scan")
+
+            retargeted = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertEqual(retargeted["search_engine"], "exact_scan")
+            self.assertFalse(retargeted["vector_index_ready"])
+            self.assertEqual(retargeted["status"], "primed")
+            self.assertEqual(retargeted["embedded_docs"], 3985)
+            self.assertEqual(retargeted["vector_count"], 12699)
+
+    def test_shared_seed_preserves_ready_index_for_same_engine(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp)
+            metadata_path = cache / "retrieval_bench_cache.json"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "search_engine": "simeon_pq_adc",
+                        "status": "primed",
+                        "vector_index_ready": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            _retarget_benchmark_cache_engine(cache, "simeon_pq_adc")
+
+            retargeted = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertEqual(retargeted["search_engine"], "simeon_pq_adc")
+            self.assertTrue(retargeted["vector_index_ready"])
+
     def test_shared_topology_identity_pins_repeats_and_arms(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             identity = Path(tmp) / "topology_fingerprint.txt"
@@ -352,10 +652,609 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
         vector_arms = [
             arm for arm in plan["arms"] if arm["factors"]["retrieval"] == "vector_only"
         ]
-        self.assertEqual(len(vector_arms), 2)
+        self.assertEqual(len(vector_arms), 3)
         for arm in vector_arms:
             self.assertEqual(arm["factors"].get("text"), "off")
             self.assertEqual(arm["factors"].get("simeon_text"), "off")
+
+    def test_vector_pq_coarse_routing_plan_has_truthful_oracle_and_transfer_gate(
+        self,
+    ) -> None:
+        plan = json.loads(
+            (XPLAN_ROOT / "plans" / "vector_pq_coarse_routing.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertGreaterEqual(plan["repeats"], 3)
+        self.assertIn("does not encode a product-promotion", plan["description"])
+        self.assertEqual(plan["fixed"]["env"]["YAMS_BENCH_TOPOLOGY_MODE"], "disabled")
+        self.assertEqual(plan["fixed"]["params"]["datasets"], ["scifact", "nfcorpus"])
+        arms = {arm["name"]: arm for arm in plan["arms"]}
+        self.assertEqual(
+            set(arms),
+            {"exact_scan_oracle", "simeon_pq_global", "vec0_global_ann"},
+        )
+        self.assertEqual(
+            arms["exact_scan_oracle"]["params"]["vector_search_engine"],
+            "exact_scan",
+        )
+        self.assertEqual(
+            arms["simeon_pq_global"]["params"]["vector_search_engine"],
+            "simeon_pq_adc",
+        )
+        self.assertEqual(
+            arms["vec0_global_ann"]["params"]["vector_search_engine"],
+            "vec0_l2",
+        )
+        self.assertEqual(
+            arms["vec0_global_ann"]["params"]["vector_index_persistence_contract"],
+            "unavailable",
+        )
+        self.assertGreaterEqual(
+            int(
+                arms["vec0_global_ann"]["env"][
+                    "YAMS_BENCH_DAEMON_READY_TIMEOUT_MS"
+                ]
+            ),
+            60_000,
+        )
+        for arm in arms.values():
+            self.assertEqual(arm["factors"]["retrieval"], "product_hybrid")
+        self.assertEqual(
+            arms["simeon_pq_global"]["params"]["vector_work_observation_contract"],
+            {
+                "rows_visited": "required",
+                "exact_distance_evaluations": "required",
+                "ann_candidate_budget": "required",
+            },
+        )
+        self.assertEqual(
+            arms["exact_scan_oracle"]["params"]["vector_work_observation_contract"],
+            {
+                "rows_visited": "required",
+                "exact_distance_evaluations": "required",
+                "ann_candidate_budget": "unavailable",
+            },
+        )
+        self.assertEqual(
+            arms["vec0_global_ann"]["params"]["vector_work_observation_contract"],
+            {
+                "rows_visited": "unavailable",
+                "exact_distance_evaluations": "unavailable",
+                "ann_candidate_budget": "unavailable",
+            },
+        )
+        metrics = set(plan["steps"][0]["metrics"])
+        self.assertTrue(
+            {
+                "mrr",
+                "recall_at_k",
+                "mixed_source_min_ndcg_at_k",
+                "mixed_mrr_scifact",
+                "mixed_mrr_nfcorpus",
+                "mixed_recall_at_k_scifact",
+                "mixed_recall_at_k_nfcorpus",
+                "mixed_ndcg_at_k_scifact",
+                "mixed_ndcg_at_k_nfcorpus",
+                "search_latency_ms_cold_first",
+                "search_latency_ms_first_pass_first",
+                "search_latency_ms_warmed_p50",
+                "search_warmup_completed_queries",
+                "search_latency_ms_p99",
+                "search_throughput_qps",
+                "vector_index_prepare_ms",
+                "vector_index_persist_ms",
+                "vector_database_bytes",
+                "vector_wal_bytes",
+                "vector_query_ready_after",
+                "vector_rows_visited_observation_rate",
+                "vector_exact_distance_evaluations_observation_rate",
+            }.issubset(metrics)
+        )
+        summarized = set(plan["summarize"]["primary"])
+        self.assertTrue(
+            {
+                "vector_total_rows_visited_actual_avg",
+                "vector_total_exact_distance_evaluations_actual_avg",
+                "vector_exact_oracle_recall_at_k",
+                "vector_exact_oracle_gap_at_k",
+                "vector_exact_oracle_paired_queries",
+                "paired_query_mrr_delta",
+                "paired_query_mrr_ci_low",
+                "paired_query_mrr_ci_high",
+                "search_latency_ms_p99",
+                "search_throughput_qps",
+                "vector_index_prepare_ms",
+                "vector_index_persist_ms",
+                "vector_database_bytes",
+                "vector_wal_bytes",
+                "vector_persisted_hnsw_nodes",
+                "vector_persisted_vec0_rows",
+                "vector_persisted_pq_codes",
+            }.issubset(summarized)
+        )
+        self.assertEqual(
+            plan["summarize"]["paired_vector_oracle"],
+            {
+                "arm": "exact_scan_oracle",
+                "component": "vector",
+                "top_k": 10,
+                "identity_file": "datasets/mixed_beir/mixed_corpus_identity.json",
+            },
+        )
+        self.assertEqual(
+            plan["summarize"]["paired_query_analysis"]["metrics"],
+            ["mrr", "recall_at_k", "ndcg_at_k"],
+        )
+        self.assertNotIn("promotion_gates", plan["summarize"])
+
+    def test_vector_pq_crossover_uses_real_generalized_memory_corpora(self) -> None:
+        plan = json.loads(
+            (XPLAN_ROOT / "plans" / "vector_pq_crossover.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertEqual(plan["name"], "vector_pq_scale_checkpoint")
+        self.assertIn("not a crossover sweep", plan["description"].lower())
+        self.assertGreaterEqual(plan["repeats"], 3)
+        self.assertEqual(
+            plan["fixed"]["params"]["datasets"],
+            ["scifact", "nfcorpus", "fiqa"],
+        )
+        self.assertEqual(plan["fixed"]["params"]["documents_per_dataset"], 0)
+        self.assertEqual(plan["fixed"]["env"]["YAMS_BENCH_TOPOLOGY_MODE"], "disabled")
+        self.assertEqual(
+            plan["arms"][0]["params"]["vector_search_engine"], "simeon_pq_adc"
+        )
+        self.assertEqual(plan["arms"][0]["factors"]["retrieval"], "product_hybrid")
+        self.assertIn(
+            "vector_adc_scoring_ms_avg", set(plan["steps"][0]["metrics"])
+        )
+        self.assertTrue(
+            {
+                "search_latency_ms_first_pass_first",
+                "search_latency_ms_p99",
+                "search_throughput_qps",
+                "vector_index_prepare_ms",
+                "vector_index_persist_ms",
+                "vector_database_bytes",
+                "vector_wal_bytes",
+            }.issubset(set(plan["steps"][0]["metrics"]))
+        )
+        self.assertIn(
+            "vector_total_rows_visited_actual_avg",
+            set(plan["summarize"]["primary"]),
+        )
+
+    def test_vector_pq_rerank_quality_is_a_single_factor_multicorpus_gate(
+        self,
+    ) -> None:
+        plan = json.loads(
+            (XPLAN_ROOT / "plans" / "vector_pq_rerank_quality.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertGreaterEqual(plan["repeats"], 3)
+        self.assertEqual(plan["fixed"]["env"]["YAMS_BENCH_TOPOLOGY_MODE"], "disabled")
+        self.assertEqual(plan["fixed"]["params"]["datasets"], ["scifact", "nfcorpus"])
+        self.assertEqual(plan["baseline"], "simeon_rerank_2")
+        arms = {arm["name"]: arm for arm in plan["arms"]}
+        self.assertEqual(
+            set(arms),
+            {
+                "simeon_rerank_1",
+                "simeon_rerank_2",
+                "simeon_rerank_4",
+                "simeon_rerank_8",
+                "exact_scan_oracle",
+            },
+        )
+        for factor in (1, 2, 4, 8):
+            arm = arms[f"simeon_rerank_{factor}"]
+            self.assertEqual(arm["factors"]["retrieval"], "product_hybrid")
+            self.assertEqual(arm["params"]["vector_search_engine"], "simeon_pq_adc")
+            self.assertEqual(arm["params"]["simeon_pq_rerank_factor"], factor)
+            self.assertEqual(arm["factors"]["rerank_factor"], str(factor))
+            self.assertEqual(
+                arm["params"]["vector_work_observation_contract"],
+                {
+                    "rows_visited": "required",
+                    "exact_distance_evaluations": "required",
+                    "ann_candidate_budget": "required",
+                },
+            )
+        self.assertNotIn(
+            "simeon_pq_rerank_factor", arms["exact_scan_oracle"]["params"]
+        )
+        self.assertEqual(
+            arms["exact_scan_oracle"]["factors"]["retrieval"], "product_hybrid"
+        )
+        self.assertEqual(
+            arms["exact_scan_oracle"]["params"]["vector_work_observation_contract"],
+            {
+                "rows_visited": "required",
+                "exact_distance_evaluations": "required",
+                "ann_candidate_budget": "unavailable",
+            },
+        )
+        metrics = set(plan["steps"][0]["metrics"])
+        self.assertTrue(
+            {
+                "mrr",
+                "recall_at_k",
+                "mixed_source_min_mrr",
+                "mixed_source_min_recall_at_k",
+                "mixed_source_min_ndcg_at_k",
+                "mixed_mrr_scifact",
+                "mixed_mrr_nfcorpus",
+                "mixed_recall_at_k_scifact",
+                "mixed_recall_at_k_nfcorpus",
+                "mixed_ndcg_at_k_scifact",
+                "mixed_ndcg_at_k_nfcorpus",
+                "search_latency_ms_cold_first",
+                "search_latency_ms_first_pass_first",
+                "search_latency_ms_warmed_p50",
+                "search_warmup_completed_queries",
+                "search_latency_ms_p95",
+                "search_latency_ms_p99",
+                "search_throughput_qps",
+                "vector_index_prepare_ms",
+                "vector_index_persist_ms",
+                "vector_database_bytes",
+                "vector_wal_bytes",
+                "vector_query_ready_after",
+                "vector_total_exact_distance_evaluations_actual_avg",
+                "vector_result_materialization_ms_avg",
+                "vector_exact_rerank_ms_avg",
+            }.issubset(metrics)
+        )
+        required = set(plan["validate"]["require_metrics"])
+        self.assertTrue(
+            {
+                "mixed_mrr_scifact",
+                "mixed_mrr_nfcorpus",
+                "mixed_recall_at_k_scifact",
+                "mixed_recall_at_k_nfcorpus",
+                "mixed_ndcg_at_k_scifact",
+                "mixed_ndcg_at_k_nfcorpus",
+            }.issubset(required)
+        )
+        self.assertEqual(
+            plan["summarize"]["paired_vector_oracle"],
+            {
+                "arm": "exact_scan_oracle",
+                "component": "vector",
+                "top_k": 10,
+                "identity_file": "datasets/mixed_beir/mixed_corpus_identity.json",
+            },
+        )
+        self.assertTrue(
+            {
+                "vector_exact_oracle_recall_at_k",
+                "vector_exact_oracle_gap_at_k",
+                "vector_exact_oracle_paired_queries",
+                "search_latency_ms_p99",
+                "search_throughput_qps",
+                "vector_database_bytes",
+            }.issubset(set(plan["summarize"]["primary"]))
+        )
+        self.assertEqual(
+            plan["summarize"]["paired_query_analysis"]["metrics"],
+            ["mrr", "recall_at_k", "ndcg_at_k"],
+        )
+        self.assertEqual(
+            plan["summarize"]["promotion_gates"]["candidate_arms"],
+            ["simeon_rerank_1", "simeon_rerank_4", "simeon_rerank_8"],
+        )
+
+    def test_vector_pq_plans_surface_restart_reuse_evidence(self) -> None:
+        for filename in (
+            "vector_pq_coarse_routing.json",
+            "vector_pq_rerank_quality.json",
+            "vector_pq_crossover.json",
+        ):
+            with self.subTest(plan=filename):
+                plan = json.loads(
+                    (XPLAN_ROOT / "plans" / filename).read_text(encoding="utf-8")
+                )
+                self.assertIn(
+                    "vector_index_reusable_before",
+                    set(plan["steps"][0]["metrics"]),
+                )
+                self.assertIn(
+                    "vector_index_reusable_before",
+                    set(plan["summarize"]["primary"]),
+                )
+
+    def test_paired_vector_oracle_summary_is_query_aligned_and_fail_closed(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan_path = root / "plan.json"
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "name": "paired-vector-oracle",
+                        "repeats": 1,
+                        "baseline": "pq",
+                        "arms": [
+                            {"name": "pq", "factors": {"vector_engine": "pq"}},
+                            {
+                                "name": "exact",
+                                "factors": {"vector_engine": "exact_scan"},
+                            },
+                        ],
+                        "steps": [{"worker": "retrieval_quality"}],
+                        "summarize": {
+                            "primary": ["vector_exact_oracle_recall_at_k"],
+                            "paired_vector_oracle": {
+                                "arm": "exact",
+                                "component": "vector",
+                                "top_k": 3,
+                                "identity_file": (
+                                    "datasets/mixed_beir/mixed_corpus_identity.json"
+                                ),
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            plan = ExperimentPlan.load(plan_path)
+            self.assertEqual(plan.summarize.paired_vector_oracle.arm, "exact")
+            self.assertEqual(plan.summarize.paired_vector_oracle.top_k, 3)
+            self.assertEqual(
+                plan.resolved_dict(stamp="test", repo_root=root, git_sha=None)[
+                    "summarize"
+                ]["paired_vector_oracle"]["component"],
+                "vector",
+            )
+
+            run_dir = root / "run"
+            identity_path = run_dir / "datasets" / "mixed_beir"
+            identity_path.mkdir(parents=True)
+            (identity_path / "mixed_corpus_identity.json").write_text(
+                json.dumps(
+                    {
+                        "query_order": ["nfcorpus__q0", "scifact__q1"],
+                        "query_sources": {
+                            "nfcorpus__q0": "nfcorpus",
+                            "scifact__q1": "scifact",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def write_arm(name: str, vector_ids: list[list[str]]) -> None:
+                arm_dir = run_dir / "arms" / name
+                arm_dir.mkdir(parents=True, exist_ok=True)
+                (arm_dir / "metrics.json").write_text(
+                    json.dumps({"status": "ok", "metrics": {"mrr": 0.5}}),
+                    encoding="utf-8",
+                )
+                (arm_dir / "validation.json").write_text(
+                    json.dumps({"ok": True, "issues": []}), encoding="utf-8"
+                )
+                events = []
+                for query_index, ids in enumerate(vector_ids):
+                    events.append(
+                        {
+                            "query_index": query_index,
+                            "search_type": "hybrid",
+                            "search_stats": {
+                                "trace_component_hits_json": json.dumps(
+                                    {
+                                        "vector": {
+                                            "unique_top_doc_ids": ids,
+                                        }
+                                    }
+                                )
+                            },
+                        }
+                    )
+                (arm_dir / "debug.jsonl").write_text(
+                    "".join(json.dumps(event) + "\n" for event in events),
+                    encoding="utf-8",
+                )
+
+            write_arm("exact", [["a", "b", "c"], ["d", "e", "f"]])
+            write_arm("pq", [["a", "c", "x"], ["d", "y", "z"]])
+
+            summary = xplan_summarize.write_summary(plan, run_dir, stamp="paired")
+            rows = {row["arm"]: row for row in summary["arms"]}
+            pq_metrics = rows["pq"]["metrics"]
+            self.assertAlmostEqual(
+                pq_metrics["vector_exact_oracle_recall_at_k"], 0.5
+            )
+            self.assertAlmostEqual(pq_metrics["vector_exact_oracle_gap_at_k"], 0.5)
+            self.assertEqual(pq_metrics["vector_exact_oracle_paired_queries"], 2.0)
+            self.assertEqual(
+                pq_metrics["vector_exact_oracle_paired_observations"], 2.0
+            )
+            self.assertAlmostEqual(
+                pq_metrics["vector_exact_oracle_recall_at_k_nfcorpus"], 2.0 / 3.0
+            )
+            self.assertAlmostEqual(
+                pq_metrics["vector_exact_oracle_recall_at_k_scifact"], 1.0 / 3.0
+            )
+            self.assertEqual(
+                rows["exact"]["metrics"]["vector_exact_oracle_recall_at_k"], 1.0
+            )
+            self.assertTrue((run_dir / "paired_vector_oracle.json").is_file())
+
+            write_arm("pq", [["a", "c", "x"]])
+            invalid = xplan_summarize.write_summary(plan, run_dir, stamp="missing")
+            invalid_rows = {row["arm"]: row for row in invalid["arms"]}
+            self.assertFalse(invalid_rows["pq"]["valid"])
+            self.assertIn(
+                "query indices",
+                json.dumps(invalid_rows["pq"]["validation_issues"]),
+            )
+
+    def test_summary_validation_failure_is_a_runner_hard_failure(self) -> None:
+        self.assertFalse(
+            xplan_runner._summary_has_hard_failure(
+                {"arm_count": 2, "valid_count": 2, "failed_count": 0}
+            )
+        )
+
+    def test_retrieval_benchmark_emits_per_query_quality_samples(self) -> None:
+        source = (
+            XPLAN_ROOT.parents[2]
+            / "tests"
+            / "benchmarks"
+            / "search"
+            / "retrieval_quality_bench.cpp"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('debugEntry.extraFields["query_metrics"]', source)
+        for metric in ("mrr", "recall_at_k", "ndcg_at_k"):
+            self.assertIn(f'{{"{metric}", scoreSample.', source)
+
+    def test_paired_query_uncertainty_drives_machine_promotion_gates(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan_path = root / "plan.json"
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "name": "paired-query-gate",
+                        "repeats": 1,
+                        "baseline": "baseline",
+                        "arms": [{"name": "baseline"}, {"name": "target"}],
+                        "steps": [{"worker": "retrieval_quality"}],
+                        "summarize": {
+                            "primary": ["paired_query_mrr_delta"],
+                            "paired_query_analysis": {
+                                "metrics": ["mrr", "recall_at_k", "ndcg_at_k"],
+                                "confidence_level": 0.95,
+                                "bootstrap_samples": 200,
+                                "seed": 17,
+                                "identity_file": (
+                                    "datasets/mixed_beir/mixed_corpus_identity.json"
+                                ),
+                            },
+                            "promotion_gates": {
+                                "candidate_arms": ["target"],
+                                "quality_metric": "mrr",
+                                "quality_ci_lower_min": 0.0,
+                                "per_source_metrics": [
+                                    "mrr",
+                                    "recall_at_k",
+                                    "ndcg_at_k",
+                                ],
+                                "max_source_regression": 0.005,
+                                "latency_relative_max": {
+                                    "search_latency_ms_p50": 1.05,
+                                    "search_latency_ms_p95": 1.10,
+                                },
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            plan = ExperimentPlan.load(plan_path)
+            self.assertEqual(
+                plan.summarize.paired_query_analysis.metrics,
+                ["mrr", "recall_at_k", "ndcg_at_k"],
+            )
+            self.assertEqual(plan.summarize.promotion_gates.quality_metric, "mrr")
+
+            run_dir = root / "run"
+            identity_dir = run_dir / "datasets" / "mixed_beir"
+            identity_dir.mkdir(parents=True)
+            (identity_dir / "mixed_corpus_identity.json").write_text(
+                json.dumps(
+                    {
+                        "query_order": ["nfcorpus__q0", "scifact__q1"],
+                        "query_sources": {
+                            "nfcorpus__q0": "nfcorpus",
+                            "scifact__q1": "scifact",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def write_arm(
+                name: str,
+                query_values: list[float],
+                *,
+                p50: float,
+                p95: float,
+            ) -> None:
+                arm_dir = run_dir / "arms" / name
+                arm_dir.mkdir(parents=True, exist_ok=True)
+                (arm_dir / "metrics.json").write_text(
+                    json.dumps(
+                        {
+                            "status": "ok",
+                            "metrics": {
+                                "search_latency_ms_p50": p50,
+                                "search_latency_ms_p95": p95,
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                (arm_dir / "validation.json").write_text(
+                    json.dumps({"ok": True, "issues": []}), encoding="utf-8"
+                )
+                events = []
+                for query_index, value in enumerate(query_values):
+                    events.append(
+                        {
+                            "query_index": query_index,
+                            "search_type": "hybrid",
+                            "query_metrics": {
+                                "mrr": value,
+                                "recall_at_k": value,
+                                "ndcg_at_k": value,
+                            },
+                            "search_stats": {"latency_ms": str(p50)},
+                        }
+                    )
+                (arm_dir / "debug.jsonl").write_text(
+                    "".join(json.dumps(event) + "\n" for event in events),
+                    encoding="utf-8",
+                )
+
+            write_arm("baseline", [0.2, 0.3], p50=10.0, p95=20.0)
+            write_arm("target", [0.3, 0.4], p50=10.4, p95=21.5)
+
+            summary = xplan_summarize.write_summary(plan, run_dir, stamp="passing")
+            rows = {row["arm"]: row for row in summary["arms"]}
+            target = rows["target"]
+            self.assertAlmostEqual(target["metrics"]["paired_query_mrr_delta"], 0.1)
+            self.assertAlmostEqual(target["metrics"]["paired_query_mrr_ci_low"], 0.1)
+            self.assertAlmostEqual(target["metrics"]["paired_query_mrr_ci_high"], 0.1)
+            self.assertEqual(target["metrics"]["paired_query_mrr_query_count"], 2.0)
+            self.assertAlmostEqual(
+                target["metrics"]["paired_query_mrr_delta_nfcorpus"], 0.1
+            )
+            self.assertTrue(target["promotion"]["eligible"])
+            self.assertTrue((run_dir / "paired_query_analysis.json").is_file())
+            self.assertTrue((run_dir / "promotion_gates.json").is_file())
+
+            write_arm("target", [0.3, 0.4], p50=10.4, p95=22.1)
+            failed = xplan_summarize.write_summary(plan, run_dir, stamp="failing")
+            failed_rows = {row["arm"]: row for row in failed["arms"]}
+            self.assertFalse(failed_rows["target"]["promotion"]["eligible"])
+            self.assertIn(
+                "search_latency_ms_p95",
+                json.dumps(failed_rows["target"]["promotion"]["reasons"]),
+            )
+        self.assertTrue(
+            xplan_runner._summary_has_hard_failure(
+                {"arm_count": 2, "valid_count": 1, "failed_count": 1}
+            )
+        )
 
     def test_product_search_plans_use_the_topology_ann_default(self) -> None:
         product_plans = (
@@ -388,6 +1287,10 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
         )
         self.assertGreaterEqual(plan["repeats"], 3)
         self.assertEqual(plan["baseline"], "shadow_margin020_min1")
+        self.assertEqual(
+            plan["fixed"]["params"]["datasets"],
+            ["scifact", "nfcorpus", "fiqa"],
+        )
         self.assertEqual(
             plan["fixed"]["params"]["shared_warm_cache"],
             "generalized_memory_soar_boundary",
@@ -434,6 +1337,31 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
             soar["params"]["topology_boundary_spill_distance_ratio"], 1.05
         )
         self.assertEqual(soar["factors"]["ann_candidate_budget"], 32)
+        requested_metrics = set(plan["steps"][0]["metrics"])
+        self.assertIn("topology_coordinate_query_coverage", requested_metrics)
+        self.assertIn(
+            "topology_coordinate_distortion_observation_rate", requested_metrics
+        )
+        self.assertIn(
+            "topology_coordinate_intrinsic_dimension_observation_rate",
+            requested_metrics,
+        )
+        self.assertIn(
+            "topology_coordinate_uncertainty_observation_rate", requested_metrics
+        )
+        required_metrics = set(plan["validate"]["require_metrics"])
+        self.assertIn("vector_rows_visited_observation_rate", required_metrics)
+        self.assertIn(
+            "vector_exact_distance_evaluations_observation_rate", required_metrics
+        )
+        self.assertIn(
+            "vector_ann_candidate_budget_observation_rate", required_metrics
+        )
+        self.assertIn("vector_total_rows_visited_actual_avg", required_metrics)
+        self.assertIn(
+            "vector_total_exact_distance_evaluations_actual_avg", required_metrics
+        )
+        self.assertIn("vector_ann_candidate_budget_actual_avg", required_metrics)
 
     def test_query_class_loader_ignores_missing_or_directory_paths(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -560,6 +1488,7 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
             ambient={
                 "YAMS_BENCH_DATASET": "scifact",
                 "YAMS_BENCH_CORPUS_SIZE": "2000",
+                "YAMS_VECTOR_SEARCH_ENGINE": "ambient-engine",
                 "UNRELATED": "kept",
             },
             declared_env={"YAMS_BENCH_CORPUS_SIZE": "500"},
@@ -572,6 +1501,7 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
 
         self.assertEqual(merged["YAMS_BENCH_DATASET"], "nfcorpus")
         self.assertEqual(merged["YAMS_BENCH_CORPUS_SIZE"], "500")
+        self.assertNotIn("YAMS_VECTOR_SEARCH_ENGINE", merged)
         self.assertEqual(merged["UNRELATED"], "kept")
 
     def test_explicit_arm_config_cannot_be_shadowed_by_ambient_config_path(
@@ -742,6 +1672,64 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
         self.assertAlmostEqual(metrics["topology_structure_density_support_avg"], 0.7)
         self.assertEqual(metrics["topology_construction_fingerprint_count"], 1.0)
 
+    def test_unavailable_vector_work_is_not_reported_as_zero_observation(self) -> None:
+        event = {
+            "search_type": "hybrid",
+            "search_stats": {
+                "vector_search_rows_visited_status": "unavailable",
+                "vector_search_exact_distance_evaluations_status": "unavailable",
+                "vector_search_ann_candidate_budget_status": "unavailable",
+                "vector_search_candidate_budget": "32",
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            debug_path = Path(tmp) / "debug.jsonl"
+            debug_path.write_text(json.dumps(event) + "\n", encoding="utf-8")
+            metrics = parse_debug_jsonl(debug_path)["metrics"]
+
+        self.assertEqual(metrics["vector_candidate_budget_avg"], 32.0)
+        self.assertEqual(metrics["vector_rows_visited_observation_rate"], 0.0)
+        self.assertEqual(metrics["vector_exact_distance_evaluations_observation_rate"], 0.0)
+        self.assertEqual(metrics["vector_ann_candidate_budget_observation_rate"], 0.0)
+        self.assertNotIn("vector_rows_visited_actual_avg", metrics)
+        self.assertNotIn("vector_exact_distance_evaluations_actual_avg", metrics)
+        self.assertNotIn("vector_ann_candidate_budget_actual_avg", metrics)
+        self.assertNotIn("vector_rows_visited_actual_sum", metrics)
+        self.assertNotIn("vector_exact_distance_evaluations_actual_sum", metrics)
+        self.assertNotIn("vector_ann_candidate_budget_actual_sum", metrics)
+
+    def test_vector_work_contract_rejects_missing_required_actual_counters(self) -> None:
+        error = retrieval_quality_worker.require_vector_work_observation_contract(
+            {
+                "vector_rows_visited_observation_rate": 0.0,
+                "vector_exact_distance_evaluations_observation_rate": 1.0,
+                "vector_exact_distance_evaluations_actual_avg": 4.0,
+            },
+            {
+                "rows_visited": "required",
+                "exact_distance_evaluations": "required",
+            },
+        )
+
+        self.assertIsNotNone(error)
+        self.assertIn("rows_visited", error or "")
+
+    def test_vector_work_contract_accepts_explicit_unavailable_counters(self) -> None:
+        error = retrieval_quality_worker.require_vector_work_observation_contract(
+            {
+                "vector_rows_visited_observation_rate": 0.0,
+                "vector_exact_distance_evaluations_observation_rate": 0.0,
+                "vector_ann_candidate_budget_observation_rate": 0.0,
+            },
+            {
+                "rows_visited": "unavailable",
+                "exact_distance_evaluations": "unavailable",
+                "ann_candidate_budget": "unavailable",
+            },
+        )
+
+        self.assertIsNone(error)
+
     def test_shadow_projection_metrics_are_aggregated_without_counting_application(
         self,
     ) -> None:
@@ -779,6 +1767,44 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
         self.assertEqual(metrics["topology_shadow_retained_candidates_avg"], 1.5)
         self.assertEqual(metrics["topology_shadow_removed_candidates_avg"], 2.5)
         self.assertEqual(metrics["topology_applied"], 0.0)
+
+    def test_coordinate_rows_report_observation_coverage_without_zero_imputation(
+        self,
+    ) -> None:
+        rows = [
+            {
+                "cluster_id": "a",
+                "distortion_penalty": 0.1,
+                "local_intrinsic_dimension": 2.0,
+                "uncertainty_penalty": 0.25,
+            },
+            {
+                "cluster_id": "b",
+                "distortion_penalty": None,
+                "local_intrinsic_dimension": 4.0,
+                "uncertainty_penalty": None,
+            },
+        ]
+        event = {
+            "search_type": "hybrid",
+            "search_stats": {
+                "topology_route_coordinate_rows": json.dumps(rows),
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            debug_path = Path(tmp) / "debug.jsonl"
+            debug_path.write_text(json.dumps(event) + "\n", encoding="utf-8")
+            metrics = parse_debug_jsonl(debug_path)["metrics"]
+
+        self.assertEqual(metrics["topology_coordinate_query_coverage"], 1.0)
+        self.assertEqual(metrics["topology_coordinate_distortion_observation_rate"], 0.5)
+        self.assertEqual(
+            metrics["topology_coordinate_intrinsic_dimension_observation_rate"], 1.0
+        )
+        self.assertEqual(metrics["topology_coordinate_uncertainty_observation_rate"], 0.5)
+        self.assertEqual(metrics["topology_coordinate_distortion_avg"], 0.1)
+        self.assertEqual(metrics["topology_coordinate_intrinsic_dimension_avg"], 3.0)
+        self.assertEqual(metrics["topology_coordinate_uncertainty_avg"], 0.25)
 
     def test_disabled_topology_zero_fills_vector_seed_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1140,6 +2166,17 @@ class IngestionContractTests(unittest.TestCase):
                             "enrichment_ready_ms": 37,
                             "measurement_n": 1,
                         },
+                        "vector_index": {
+                            "prepared": True,
+                            "persisted": True,
+                            "reusable_before": False,
+                            "reusable_after": False,
+                            "query_ready_after": True,
+                            "prepare_ms": 17,
+                            "persist_ms": 3,
+                            "reusable_probe_ms": 9,
+                            "reusable_probe_count": 2,
+                        },
                         "setup_total_ms": 41,
                     }
                 )
@@ -1152,6 +2189,370 @@ class IngestionContractTests(unittest.TestCase):
             self.assertEqual(metrics["ingest_pipeline_drain_ms"], 14.0)
             self.assertEqual(metrics["ingest_enrichment_ready_ms"], 37.0)
             self.assertEqual(metrics["ingest_measurement_n"], 1.0)
+            self.assertEqual(metrics["vector_index_prepare_ms"], 17.0)
+            self.assertEqual(metrics["vector_index_persist_ms"], 3.0)
+            self.assertEqual(metrics["vector_index_reusable_probe_ms"], 9.0)
+            self.assertEqual(metrics["vector_index_reusable_probe_count"], 2.0)
+            self.assertEqual(metrics["vector_index_prepared"], 1.0)
+            self.assertEqual(metrics["vector_index_persisted"], 1.0)
+            self.assertEqual(metrics["vector_index_reusable_before"], 0.0)
+            self.assertEqual(metrics["vector_index_reusable_after"], 0.0)
+            self.assertEqual(metrics["vector_query_ready_after"], 1.0)
+
+    def test_vector_cache_metadata_exports_storage_and_index_footprint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            metadata_path = Path(tmp) / "retrieval_bench_cache.json"
+            metadata_path.write_text(
+                json.dumps(
+                    {
+                        "vectors_db_bytes": 4096,
+                        "vectors_wal_bytes": 512,
+                        "persisted_hnsw_nodes": 11,
+                        "persisted_vec0_rows": 12,
+                        "persisted_pq_codes": 13,
+                        "persisted_pq_meta": 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            metrics = parse_benchmark_cache_metrics(metadata_path)
+
+            self.assertEqual(metrics["vector_database_bytes"], 4096.0)
+            self.assertEqual(metrics["vector_wal_bytes"], 512.0)
+            self.assertEqual(metrics["vector_persisted_hnsw_nodes"], 11.0)
+            self.assertEqual(metrics["vector_persisted_vec0_rows"], 12.0)
+            self.assertEqual(metrics["vector_persisted_pq_codes"], 13.0)
+            self.assertEqual(metrics["vector_persisted_pq_meta_rows"], 1.0)
+
+    def test_shared_seed_metrics_are_emitted_once_per_arm_not_once_per_repeat(
+        self,
+    ) -> None:
+        self.assertTrue(
+            retrieval_quality_worker.include_shared_seed_metrics(
+                Path("/tmp/run/arms/control/rep00")
+            )
+        )
+        self.assertFalse(
+            retrieval_quality_worker.include_shared_seed_metrics(
+                Path("/tmp/run/arms/control/rep01")
+            )
+        )
+        self.assertTrue(
+            retrieval_quality_worker.include_shared_seed_metrics(
+                Path("/tmp/run/arms/control")
+            )
+        )
+
+        aggregated = xplan_runner.aggregate_reps(
+            [
+                {"seed_ingest_admission_ms": 11.0},
+                {"mrr": 0.4},
+                {"mrr": 0.5},
+            ]
+        )
+        self.assertEqual(aggregated["seed_ingest_admission_ms_n"], 1.0)
+
+    def test_single_observation_delta_is_not_marked_as_beyond_noise(self) -> None:
+        cell, detail = xplan_summarize._delta_cell(
+            {"setup_ms": 11.0, "setup_ms_n": 1.0, "setup_ms_stdev": 0.0},
+            {"setup_ms": 10.0, "setup_ms_n": 1.0, "setup_ms_stdev": 0.0},
+            "setup_ms",
+        )
+
+        self.assertEqual(cell, "+1")
+        self.assertIsNotNone(detail)
+        self.assertIsNone((detail or {}).get("pooled_stdev"))
+
+    def test_query_warmup_is_a_distinct_pass_not_first_sample_elision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            debug_path = Path(tmp) / "debug.jsonl"
+            debug_path.write_text(
+                "".join(
+                    json.dumps(event) + "\n"
+                    for event in [
+                        {
+                            "event": "query_warmup_summary",
+                            "search_type": "benchmark_warmup",
+                            "first_query_latency_ms": 31.0,
+                            "query_count": 2,
+                            "completed_queries": 2,
+                        },
+                        {
+                            "query_index": 0,
+                            "search_type": "hybrid",
+                            "search_stats": {"latency_ms": "10"},
+                        },
+                        {
+                            "query_index": 1,
+                            "search_type": "hybrid",
+                            "search_stats": {"latency_ms": "20"},
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            metrics = parse_debug_jsonl(debug_path)["metrics"]
+
+        self.assertEqual(metrics["search_latency_ms_cold_first"], 31.0)
+        self.assertEqual(metrics["search_latency_ms_first_pass_first"], 31.0)
+        self.assertEqual(metrics["search_latency_ms_warmed_p50"], 15.0)
+        self.assertEqual(metrics["search_latency_ms_p95"], 20.0)
+        self.assertEqual(metrics["search_latency_ms_p99"], 20.0)
+        self.assertAlmostEqual(metrics["search_throughput_qps"], 2000.0 / 30.0)
+        self.assertEqual(metrics["search_warmup_query_count"], 2.0)
+        self.assertEqual(metrics["search_warmup_completed_queries"], 2.0)
+
+    def test_mixed_query_trace_contract_rejects_missing_or_failed_queries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            identity_path = root / "identity.json"
+            identity_path.write_text(
+                json.dumps(
+                    {
+                        "query_order": ["alpha__q1", "beta__q2"],
+                        "query_sources": {
+                            "alpha__q1": "alpha",
+                            "beta__q2": "beta",
+                        },
+                        "query_texts": {
+                            "alpha__q1": "alpha question",
+                            "beta__q2": "beta question",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            debug_path = root / "debug.jsonl"
+            debug_path.write_text(
+                json.dumps(
+                    {
+                        "query_index": 0,
+                        "query": "alpha question",
+                        "search_type": "hybrid",
+                        "search_stats": {"latency_ms": "4"},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            error = retrieval_quality_worker.require_complete_query_trace(
+                debug_path, identity_path
+            )
+
+        self.assertIsNotNone(error)
+        self.assertIn("missing query indices [1]", error or "")
+
+    def test_mixed_query_trace_contract_accepts_one_success_per_expected_query(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            identity_path = root / "identity.json"
+            identity_path.write_text(
+                json.dumps(
+                    {
+                        "query_order": ["alpha__q1", "beta__q2"],
+                        "query_sources": {
+                            "alpha__q1": "alpha",
+                            "beta__q2": "beta",
+                        },
+                        "query_texts": {
+                            "alpha__q1": "alpha question",
+                            "beta__q2": "beta question",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            debug_path = root / "debug.jsonl"
+            debug_path.write_text(
+                "".join(
+                    json.dumps(event) + "\n"
+                    for event in [
+                        {
+                            "event": "query_warmup_summary",
+                            "search_type": "benchmark_warmup",
+                            "query_count": 2,
+                            "completed_queries": 2,
+                            "first_query_latency_ms": 3,
+                        },
+                        *[
+                            {
+                            "query_index": index,
+                            "query": ("alpha question" if index == 0 else "beta question"),
+                            "search_type": "hybrid",
+                            "search_stats": {"latency_ms": str(index + 1)},
+                        }
+                            for index in range(2)
+                        ],
+                        {
+                            "event": "hybrid_summary",
+                            "search_type": "benchmark_summary",
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            error = retrieval_quality_worker.require_complete_query_trace(
+                debug_path, identity_path
+            )
+
+        self.assertIsNone(error)
+
+    def test_mixed_query_trace_contract_rejects_swapped_query_text(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            identity_path = root / "identity.json"
+            identity_path.write_text(
+                json.dumps(
+                    {
+                        "query_order": ["alpha__q1", "beta__q2"],
+                        "query_sources": {
+                            "alpha__q1": "alpha",
+                            "beta__q2": "beta",
+                        },
+                        "query_texts": {
+                            "alpha__q1": "alpha question",
+                            "beta__q2": "beta question",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            debug_path = root / "debug.jsonl"
+            debug_path.write_text(
+                "".join(
+                    json.dumps(event) + "\n"
+                    for event in [
+                        {
+                            "event": "query_warmup_summary",
+                            "search_type": "benchmark_warmup",
+                            "query_count": 2,
+                            "completed_queries": 2,
+                        },
+                        {
+                            "query_index": 0,
+                            "query": "beta question",
+                            "search_type": "hybrid",
+                            "search_stats": {"latency_ms": "1"},
+                        },
+                        {
+                            "query_index": 1,
+                            "query": "alpha question",
+                            "search_type": "hybrid",
+                            "search_stats": {"latency_ms": "1"},
+                        },
+                        {
+                            "event": "hybrid_summary",
+                            "search_type": "benchmark_summary",
+                        },
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            error = retrieval_quality_worker.require_complete_query_trace(
+                debug_path, identity_path
+            )
+
+        self.assertIsNotNone(error)
+        self.assertIn("query identity mismatch", error or "")
+
+    def test_process_peak_rss_parser_uses_benchmark_self_observation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            debug_path = Path(tmp) / "debug.jsonl"
+            debug_path.write_text(
+                json.dumps(
+                    {
+                        "event": "process_resource_metrics",
+                        "search_type": "benchmark_summary",
+                        "process": {"peak_rss_mb": 321.5, "peak_rss_observed": True},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            metrics = retrieval_quality_worker.parse_process_resource_metrics(debug_path)
+
+        self.assertEqual(metrics["proc_maxrss_mb"], 321.5)
+        self.assertEqual(metrics["proc_maxrss_observation_rate"], 1.0)
+
+    def test_required_vector_persistence_rejects_query_ready_only_state(self) -> None:
+        error = retrieval_quality_worker.require_vector_index_persistence_contract(
+            {
+                "vector_query_ready_after": 1.0,
+                "vector_index_reusable_after": 0.0,
+                "vector_index_reusable_probe_count": 1.0,
+            },
+            "required",
+        )
+
+        self.assertIsNotNone(error)
+        self.assertIn("persisted vector index is not reusable", error or "")
+
+    def test_required_vector_persistence_rejects_in_run_rebuild_as_restart_evidence(
+        self,
+    ) -> None:
+        error = retrieval_quality_worker.require_vector_index_persistence_contract(
+            {
+                "vector_query_ready_after": 1.0,
+                "vector_index_reusable_before": 0.0,
+                "vector_index_reusable_after": 1.0,
+                "vector_index_reusable_probe_count": 1.0,
+            },
+            "required",
+        )
+
+        self.assertIsNotNone(error)
+        self.assertIn("not reusable before setup", error or "")
+
+    def test_vector_persistence_contract_rejects_missing_reuse_probe(self) -> None:
+        error = retrieval_quality_worker.require_vector_index_persistence_contract(
+            {
+                "vector_query_ready_after": 1.0,
+                "vector_index_reusable_before": 1.0,
+                "vector_index_reusable_after": 1.0,
+                "vector_index_reusable_probe_count": 0.0,
+            },
+            "required",
+        )
+
+        self.assertIsNotNone(error)
+        self.assertIn("reusability probe", error or "")
+
+    def test_required_process_rss_rejects_missing_benchmark_self_observation(self) -> None:
+        error = retrieval_quality_worker.require_process_resource_contract(
+            {"proc_maxrss_observation_rate": 0.0}, "required"
+        )
+
+        self.assertIsNotNone(error)
+        self.assertIn("process peak RSS", error or "")
+
+    def test_required_process_rss_accepts_observed_benchmark_self_metric(self) -> None:
+        error = retrieval_quality_worker.require_process_resource_contract(
+            {
+                "proc_maxrss_mb": 321.5,
+                "proc_maxrss_observation_rate": 1.0,
+            },
+            "required",
+        )
+
+        self.assertIsNone(error)
+
+    def test_unavailable_vector_persistence_accepts_exact_scan(self) -> None:
+        error = retrieval_quality_worker.require_vector_index_persistence_contract(
+            {
+                "vector_query_ready_after": 1.0,
+                "vector_index_reusable_after": 0.0,
+                "vector_index_reusable_probe_count": 1.0,
+            },
+            "unavailable",
+        )
+
+        self.assertIsNone(error)
 
     def test_ingestion_plans_are_decision_grade_and_keep_submission_paths_separate(self) -> None:
         plans_dir = XPLAN_ROOT / "plans"
@@ -1366,6 +2767,95 @@ class MixedCorpusTests(unittest.TestCase):
         )
         self.assertEqual(identity["document_hashes"]["alpha__a1"], shared_hash)
         self.assertEqual(identity["query_order"], ["alpha__qa", "beta__qb"])
+        self.assertEqual(
+            identity["query_texts"],
+            {"alpha__qa": "alpha memory", "beta__qb": "beta memory"},
+        )
+
+    def test_materializer_excludes_unsearchable_empty_documents(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            alpha = root / "alpha"
+            beta = root / "beta"
+            self._write_beir_dataset(
+                alpha,
+                documents=[
+                    {"_id": "a1", "title": "Alpha", "text": "searchable"},
+                    {"_id": "empty", "title": "", "text": ""},
+                ],
+                queries=[{"_id": "qa", "text": "alpha"}],
+                qrels=[("qa", "a1", 1)],
+            )
+            self._write_beir_dataset(
+                beta,
+                documents=[{"_id": "b1", "title": "Beta", "text": "searchable"}],
+                queries=[{"_id": "qb", "text": "beta"}],
+                qrels=[("qb", "b1", 1)],
+            )
+
+            prepared = materialize_mixed_beir_manifest(
+                {"alpha": alpha, "beta": beta}, root / "mixed"
+            )
+            manifest = json.loads(prepared.manifest_path.read_text(encoding="utf-8"))
+            identity = json.loads(prepared.identity_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(prepared.document_count, 2)
+        self.assertNotIn("alpha__empty", {doc["id"] for doc in manifest["documents"]})
+        self.assertEqual(identity["source_counts"]["alpha"]["empty_documents_skipped"], 1)
+
+    def test_materializer_identity_detects_same_size_same_mtime_source_changes(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            alpha = root / "alpha"
+            beta = root / "beta"
+            self._write_beir_dataset(
+                alpha,
+                documents=[{"_id": "a1", "title": "Alpha", "text": "one"}],
+                queries=[{"_id": "qa", "text": "alpha"}],
+                qrels=[("qa", "a1", 1)],
+            )
+            self._write_beir_dataset(
+                beta,
+                documents=[{"_id": "b1", "title": "Beta", "text": "stable"}],
+                queries=[{"_id": "qb", "text": "beta"}],
+                qrels=[("qb", "b1", 1)],
+            )
+            output = root / "mixed"
+            first = materialize_mixed_beir_manifest(
+                {"alpha": alpha, "beta": beta}, output
+            )
+            first_identity = json.loads(
+                first.identity_path.read_text(encoding="utf-8")
+            )
+
+            corpus_path = alpha / "corpus.jsonl"
+            before = corpus_path.stat()
+            original = corpus_path.read_text(encoding="utf-8")
+            changed = original.replace('"text": "one"', '"text": "two"')
+            self.assertEqual(len(changed), len(original))
+            corpus_path.write_text(changed, encoding="utf-8")
+            os.utime(
+                corpus_path,
+                ns=(before.st_atime_ns, before.st_mtime_ns),
+            )
+
+            second = materialize_mixed_beir_manifest(
+                {"alpha": alpha, "beta": beta}, output
+            )
+            second_identity = json.loads(
+                second.identity_path.read_text(encoding="utf-8")
+            )
+            second_manifest = json.loads(
+                second.manifest_path.read_text(encoding="utf-8")
+            )
+
+        self.assertNotEqual(first_identity["spec"], second_identity["spec"])
+        alpha_document = next(
+            row for row in second_manifest["documents"] if row["id"] == "alpha__a1"
+        )
+        self.assertEqual(alpha_document["text"], "two")
 
     def test_mixed_debug_metrics_report_each_source_and_cross_source_results(
         self,
@@ -1378,6 +2868,10 @@ class MixedCorpusTests(unittest.TestCase):
                     {
                         "query_order": ["alpha__qa", "beta__qb"],
                         "query_sources": {"alpha__qa": "alpha", "beta__qb": "beta"},
+                        "query_qrels": {
+                            "alpha__qa": {"alpha__a1": 1},
+                            "beta__qb": {"beta__b1": 1, "beta__b2": 1},
+                        },
                         "document_sources": {
                             "alpha__a1": ["alpha"],
                             "beta__b1": ["beta"],
@@ -1472,6 +2966,23 @@ class MixedCorpusTests(unittest.TestCase):
         self.assertEqual(metrics["mixed_mrr_beta"], 1.0)
         self.assertEqual(metrics["mixed_recall_at_k_alpha"], 1.0)
         self.assertEqual(metrics["mixed_recall_at_k_beta"], 0.5)
+        self.assertAlmostEqual(metrics["mixed_ndcg_at_k_alpha"], 1.0 / math.log2(3.0))
+        self.assertAlmostEqual(
+            metrics["mixed_ndcg_at_k_beta"],
+            1.0 / (1.0 + 1.0 / math.log2(3.0)),
+        )
+        self.assertAlmostEqual(
+            metrics["mixed_source_macro_ndcg_at_k"],
+            (
+                1.0 / math.log2(3.0)
+                + 1.0 / (1.0 + 1.0 / math.log2(3.0))
+            )
+            / 2.0,
+        )
+        self.assertAlmostEqual(
+            metrics["mixed_source_min_ndcg_at_k"],
+            1.0 / (1.0 + 1.0 / math.log2(3.0)),
+        )
         self.assertEqual(metrics["mixed_cross_source_result_rate"], 0.5)
         self.assertEqual(metrics["mixed_cross_source_top1_rate"], 0.5)
         self.assertEqual(metrics["mixed_source_macro_mrr"], 0.75)

@@ -27,9 +27,11 @@ if str(XPLAN_ROOT) not in sys.path:
 
 from artifacts import (  # noqa: E402
     arm_layout,
+    capture_git_source_snapshot,
     ensure_dir,
     file_sha256,
     host_info,
+    source_set_sha256,
     try_git_sha,
     utc_stamp,
     write_json,
@@ -268,6 +270,49 @@ def _filter_arms(plan: ExperimentPlan, only: list[str]) -> None:
         raise SystemExit(f"no arms matched filters: {only}")
 
 
+def _resolve_retrieval_quality_binary(
+    plan: ExperimentPlan,
+    *,
+    repo_root: Path,
+    build_dir: Path,
+    ambient: dict[str, str],
+) -> Path:
+    """Resolve the one executable that the runner will hash and every arm will use."""
+    plan_overrides: set[str] = set()
+    for arm in plan.arms:
+        for step in plan.steps:
+            if step.worker != "retrieval_quality":
+                continue
+            params: dict[str, Any] = {}
+            params.update(plan.fixed_params)
+            params.update(arm.params)
+            params.update(step.params)
+            if params.get("binary"):
+                plan_overrides.add(str(params["binary"]))
+    if len(plan_overrides) > 1:
+        raise ValueError(
+            "retrieval_quality plans must use one quality binary across every arm"
+        )
+
+    explicit = next(iter(plan_overrides), None)
+    if explicit is None:
+        for key in (
+            "YAMS_TOPOLOGY_EXPANSION_BIN",
+            "YAMS_TOPOLOGY_ABLATION_BIN",
+            "YAMS_BENCH_BIN",
+        ):
+            if ambient.get(key):
+                explicit = ambient[key]
+                break
+
+    binary = Path(explicit) if explicit else (
+        build_dir / "tests" / "benchmarks" / "retrieval_quality_bench"
+    )
+    if not binary.is_absolute():
+        binary = repo_root / binary
+    return binary.resolve()
+
+
 def _require_binary_identity(binary: Path, expected_sha256: str | None) -> None:
     actual_sha256 = file_sha256(binary)
     if expected_sha256 is None or actual_sha256 != expected_sha256:
@@ -276,6 +321,13 @@ def _require_binary_identity(binary: Path, expected_sha256: str | None) -> None:
             f"expected={expected_sha256 or 'missing'} actual={actual_sha256 or 'missing'} "
             f"path={binary}"
         )
+
+
+def _summary_has_hard_failure(summary: dict[str, Any]) -> bool:
+    try:
+        return int(summary.get("failed_count", 0)) > 0
+    except (TypeError, ValueError):
+        return True
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -303,6 +355,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     ensure_dir(run_dir / "arms")
 
     git_sha = try_git_sha(repo_root)
+    source_snapshot = capture_git_source_snapshot(repo_root, run_dir)
+    provenance_sources = sorted(
+        path
+        for path in XPLAN_ROOT.rglob("*.py")
+        if "__pycache__" not in path.parts and not path.name.startswith("test_")
+    )
+    provenance_sources.append(plan_path)
+    xplan_source_sha256 = source_set_sha256(repo_root, provenance_sources)
     write_json(
         run_dir / "plan.resolved.json",
         plan.resolved_dict(stamp=stamp, repo_root=repo_root, git_sha=git_sha),
@@ -313,10 +373,22 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     # One pre-run compile for quality plans when binary is missing (workers skip
     # rebuilds if the binary already exists to avoid mid-run link races).
-    quality_bin = build_dir / "tests" / "benchmarks" / "retrieval_quality_bench"
     needs_quality = any(s.worker == "retrieval_quality" for s in plan.steps)
+    quality_bin = _resolve_retrieval_quality_binary(
+        plan,
+        repo_root=repo_root,
+        build_dir=build_dir,
+        ambient=os.environ,
+    )
+    default_quality_bin = (
+        build_dir / "tests" / "benchmarks" / "retrieval_quality_bench"
+    ).resolve()
     if not args.dry_run:
         if needs_quality and not quality_bin.is_file():
+            if quality_bin != default_quality_bin:
+                raise FileNotFoundError(
+                    f"explicit retrieval_quality binary is missing: {quality_bin}"
+                )
             from workers.util import maybe_meson_compile
 
             print(f"prebuild: meson compile -C {build_dir} bench_retrieval_quality", flush=True)
@@ -338,6 +410,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             "git_sha": git_sha,
             "host": host_info(),
             "dry_run": bool(args.dry_run),
+            "xplan_source_sha256": xplan_source_sha256,
+            "xplan_source_file_count": len(provenance_sources),
+            **source_snapshot,
+            "retrieval_quality_binary_path": str(quality_bin) if needs_quality else None,
             "retrieval_quality_binary_sha256": quality_binary_sha256,
         },
     )
@@ -357,6 +433,12 @@ def cmd_run(args: argparse.Namespace) -> int:
             extra={
                 "factors": arm.factors,
                 "dry_run": bool(args.dry_run),
+                "xplan_source_sha256": xplan_source_sha256,
+                "xplan_source_file_count": len(provenance_sources),
+                "worktree_dirty": source_snapshot["worktree_dirty"],
+                "worktree_patch_sha256": source_snapshot["worktree_patch_sha256"],
+                "source_snapshot_sha256": source_snapshot["source_snapshot_sha256"],
+                "retrieval_quality_binary_path": str(quality_bin) if needs_quality else None,
                 "retrieval_quality_binary_sha256": quality_binary_sha256,
             },
         )
@@ -403,12 +485,15 @@ def cmd_run(args: argparse.Namespace) -> int:
                 rep_combined: dict[str, Any] = {}
                 for idx, step in enumerate(plan.steps):
                     worker_fn = get_worker(step.worker)
+                    worker_params = rep_ctx.merged_params(step)
+                    if step.worker == "retrieval_quality":
+                        worker_params["binary"] = str(quality_bin)
                     wctx = WorkerContext(
                         arm=rep_ctx,
                         step=step,
                         step_index=idx,
                         env=rep_ctx.merged_env(step),
-                        params=rep_ctx.merged_params(step),
+                        params=worker_params,
                     )
                     result = worker_fn(wctx)
                     step_results.append(
@@ -576,6 +661,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"-> {run_dir / 'summary.md'} | REPORT={run_dir / 'REPORT.md'}",
             flush=True,
         )
+        if _summary_has_hard_failure(summary):
+            any_hard_fail = True
 
     print(f"ARTIFACT={run_dir}", flush=True)
     return 1 if any_hard_fail else 0

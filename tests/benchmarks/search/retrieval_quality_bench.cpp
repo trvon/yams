@@ -2135,16 +2135,6 @@ struct PersistedHnswState {
     std::uintmax_t vec0Rows = 0;
     std::uintmax_t pqCodeRows = 0;
     std::uintmax_t pqMetaRows = 0;
-
-    bool reusable(yams::vector::VectorSearchEngine engine) const {
-        if (engine == yams::vector::VectorSearchEngine::Vec0L2) {
-            return vec0Tables > 0 && vec0Rows > 0;
-        }
-        if (engine == yams::vector::VectorSearchEngine::SimeonPqAdc) {
-            return pqCodeRows > 0 && pqMetaRows > 0;
-        }
-        return nodeRows > 0 && metaRows > 0;
-    }
 };
 
 static std::string g_benchmark_search_engine =
@@ -2617,13 +2607,14 @@ preferStrongerBenchCacheMetadata(BenchCacheMetadata preferred,
 
 static BenchCacheMetadata currentBenchCacheMetadata(BenchCacheMetadata metadata,
                                                     const yams::daemon::StatusResponse& status,
-                                                    const fs::path& dataDir) {
+                                                    const fs::path& dataDir,
+                                                    bool validatedIndexReusable) {
     auto getCount = [&](std::string_view key) -> std::uintmax_t {
         auto it = status.requestCounts.find(std::string(key));
         return it == status.requestCounts.end() ? 0 : it->second;
     };
     const auto persistedHnsw = inspectPersistedHnswState(dataDir);
-    metadata.vectorIndexReady = persistedHnsw.reusable(benchmarkVectorSearchEngine());
+    metadata.vectorIndexReady = validatedIndexReusable;
     metadata.vectorsDbBytes = persistedHnsw.vectorsDbBytes;
     metadata.vectorsWalBytes = persistedHnsw.vectorsWalBytes;
     metadata.persistedHnswNodes = persistedHnsw.nodeRows;
@@ -4455,7 +4446,9 @@ static void ingestStageRetrievalMetrics(QueryDiagnosticsSummary& summary,
 RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::path& corpusDir,
                                  const std::vector<TestQuery>& queries, int k,
                                  const std::string& searchType = "hybrid",
-                                 QueryDiagnosticsSummary* diagnostics = nullptr) {
+                                 QueryDiagnosticsSummary* diagnostics = nullptr,
+                                 bool emitDebug = true,
+                                 std::vector<double>* latencySamplesMs = nullptr) {
     RetrievalMetrics metrics;
     metrics.numQueries = static_cast<int>(queries.size());
     double totalMRR = 0.0, totalRecall = 0.0, totalPrecision = 0.0, totalNDCG = 0.0, totalMAP = 0.0;
@@ -4537,7 +4530,9 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
             const json relevantDecisionTrace = buildRelevantDecisionTrace(
                 failedEntry.relevantDocIds, failedEntry.returnedDocIds, failedEntry.searchStats);
             failedEntry.extraFields["relevant_decision_trace"] = relevantDecisionTrace;
-            debugLogWriteJsonLine(failedEntry);
+            if (emitDebug) {
+                debugLogWriteJsonLine(failedEntry);
+            }
             if (diagnostics) {
                 ingestQueryDiagnostics(*diagnostics, failedEntry.searchStats, relevantDecisionTrace,
                                        true, false, false, -1);
@@ -4554,6 +4549,22 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
             literalRetryCount++;
 
         const auto& results = run.value().response.results;
+        if (latencySamplesMs) {
+            const auto latencyIt = run.value().response.searchStats.find("latency_ms");
+            if (latencyIt != run.value().response.searchStats.end()) {
+                try {
+                    const double latencyMs = std::stod(latencyIt->second);
+                    if (std::isfinite(latencyMs) && latencyMs >= 0.0) {
+                        latencySamplesMs->push_back(latencyMs);
+                    }
+                } catch (const std::exception& e) {
+                    if (benchVerbose) {
+                        spdlog::debug("Ignoring malformed benchmark latency '{}': {}",
+                                      latencyIt->second, e.what());
+                    }
+                }
+            }
+        }
         if (benchVerbose) {
             spdlog::debug("Search returned {} results for query '{}' (attempts={}, streaming={}, "
                           "fuzzy_retry={}, literal_retry={})",
@@ -4619,6 +4630,14 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
         const json relevantDecisionTrace = buildRelevantDecisionTrace(
             debugEntry.relevantDocIds, debugEntry.returnedDocIds, debugEntry.searchStats);
         debugEntry.extraFields["relevant_decision_trace"] = relevantDecisionTrace;
+        debugEntry.extraFields["query_metrics"] = {
+            {"mrr", scoreSample.reciprocalRank},
+            {"recall_at_k", scoreSample.recallAtK},
+            {"precision_at_k", scoreSample.precisionAtK},
+            {"ndcg_at_k", scoreSample.ndcgAtK},
+            {"map", scoreSample.averagePrecision},
+            {"first_relevant_rank", scoreSample.firstRelevantRank},
+        };
 
         if (benchDiagEnabled && results.empty() && tq.useDocIds && !tq.relevantDocIds.empty()) {
             // Opt-in diagnostic: show a snippet of the relevant BEIR doc file(s).
@@ -4652,7 +4671,7 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
 
         // Opt-in diagnostic: run a few "shadow" queries for failing cases.
         // This does not affect scoring; it only emits diagnostic entries.
-        if (benchDiagEnabled && results.empty()) {
+        if (emitDebug && benchDiagEnabled && results.empty()) {
             // 1) Try a shorter query with a few salient tokens to test whether the full
             // sentence query is failing due to strict AND semantics / tokenization.
             std::istringstream iss(tq.query);
@@ -4722,7 +4741,9 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
             }
         }
 
-        debugLogWriteJsonLine(debugEntry);
+        if (emitDebug) {
+            debugLogWriteJsonLine(debugEntry);
+        }
 
         if (diagnostics) {
             ingestQueryDiagnostics(*diagnostics, run.value().response.searchStats,
@@ -4839,6 +4860,15 @@ struct BenchFixture {
         int64_t pipelineDrainMs = 0;
         int64_t searchabilityReadyMs = 0;
         int64_t enrichmentReadyMs = 0;
+        bool vectorIndexPrepared = false;
+        bool vectorIndexPersisted = false;
+        bool vectorIndexReusableBefore = false;
+        bool vectorIndexReusableAfter = false;
+        bool vectorQueryReadyAfter = false;
+        int64_t vectorIndexPrepareMs = 0;
+        int64_t vectorIndexPersistMs = 0;
+        int64_t vectorIndexReusableProbeMs = 0;
+        std::uint64_t vectorIndexReusableProbeCount = 0;
         int64_t setupTotalMs = 0;
     };
 
@@ -6078,6 +6108,8 @@ struct BenchFixture {
             bool resetPluginTrustFile = harnessOptions.dataDir.has_value();
             bool useIsolatedBenchmarkConfig = true;
             const char* topologyModeEnv = std::getenv("YAMS_BENCH_TOPOLOGY_MODE");
+            const bool topologyDisabled =
+                topologyModeEnv && std::string_view{topologyModeEnv} == "disabled";
             const char* topologyEngineEnv = std::getenv("YAMS_BENCH_TOPOLOGY_ENGINE");
             const char* topologyRepresentativesEnv =
                 std::getenv("YAMS_BENCH_TOPOLOGY_ROUTING_REPRESENTATIVES");
@@ -6344,6 +6376,17 @@ struct BenchFixture {
                         configOut << "embedding_dim = 768\n\n";
                         configOut << "[daemon.models]\n";
                         configOut << "preload_models = [\"embeddinggemma-300m\"]\n";
+                    }
+                    yams::bench::writeTopologyDisabledEmbeddingSelection(configOut,
+                                                                         topologyDisabled);
+                    configOut << "\n[vector_database]\n";
+                    configOut << "search_engine = \"" << g_benchmark_search_engine << "\"\n";
+                    if (std::getenv("YAMS_BENCH_SIMEON_PQ_RERANK_FACTOR") != nullptr) {
+                        configOut << "simeon_pq_rerank_factor = "
+                                  << std::max<std::size_t>(
+                                         1, parseSizeEnvOrDefault(
+                                                "YAMS_BENCH_SIMEON_PQ_RERANK_FACTOR", 2))
+                                  << "\n";
                     }
                     if ((topologyModeEnv && *topologyModeEnv) || writeTopologyRouteConfig) {
                         configOut << "\n[search.topology]\n";
@@ -6629,6 +6672,21 @@ struct BenchFixture {
         const uint64_t initialEmbedInFlight =
             warmCacheMetadataReusable ? 0 : getInitialCount("embed_in_flight");
         const PersistedHnswState initialPersistedHnsw = inspectPersistedHnswState(effectiveDataDir);
+        bool initialBackendIndexReusable = false;
+        if (auto* daemon = harness ? harness->daemon() : nullptr) {
+            if (auto* serviceManager = daemon->getServiceManager()) {
+                if (auto vectorDb = serviceManager->getVectorDatabase();
+                    vectorDb && vectorDb->isInitialized()) {
+                    const auto probeStart = std::chrono::steady_clock::now();
+                    initialBackendIndexReusable = vectorDb->hasReusablePersistedSearchIndex();
+                    setupTimings.vectorIndexReusableProbeMs +=
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - probeStart)
+                            .count();
+                    ++setupTimings.vectorIndexReusableProbeCount;
+                }
+            }
+        }
         const bool cacheHasIndexedCorpus =
             usingExternalBenchDataDir &&
             initialIndexedDocCount >= static_cast<uint64_t>(corpusSize);
@@ -6638,7 +6696,8 @@ struct BenchFixture {
             initialEmbedInFlight == 0;
         const bool cacheHasReusableVectorIndex =
             vectorsDisabled || (usingExternalBenchDataDir &&
-                                initialPersistedHnsw.reusable(benchmarkVectorSearchEngine()));
+                                yams::bench::benchmarkSearchIndexReusable(
+                                    benchmarkVectorSearchEngine(), initialBackendIndexReusable));
 
         if (usingExternalBenchDataDir) {
             spdlog::info("[Bench] External data dir status: indexed_docs={} embedded_docs={} "
@@ -6739,7 +6798,6 @@ struct BenchFixture {
                 uint64_t lastEmbedInFlight = 0;
                 uint64_t lastVectorCount = 0;
                 uint32_t lastDepth = 0;
-                bool completed = false;
                 int stableChecks = 0;
 
                 // Helper to get metric from requestCounts with presence flag
@@ -6786,7 +6844,6 @@ struct BenchFixture {
                             spdlog::warn(
                                 "Ingestion progress timeout reached, but last observed metrics "
                                 "already indicate completion; accepting completion.");
-                            completed = true;
                             break;
                         }
 
@@ -6828,7 +6885,6 @@ struct BenchFixture {
                                     "shows completion (docs_total={}, docs_indexed={}, "
                                     "extracted={}, post_processed={}); accepting completion.",
                                     docsTotal, docsIndexed, extracted, postProcessed);
-                                completed = true;
                                 break;
                             }
                         }
@@ -6961,7 +7017,6 @@ struct BenchFixture {
                                 "drained (extracted={}, processed={})",
                                 docCount, indexedCount, corpusSize, contentExtracted,
                                 postProcessed);
-                            completed = true;
                             break;
                         }
                     } else {
@@ -7487,6 +7542,7 @@ struct BenchFixture {
                          "vector index already present)");
         } // end if (!warmDataDir) / else
 
+        bool benchmarkVectorIndexReusableAfter = vectorsDisabled;
         auto ensureVectorIndexReady = [&]() -> bool {
             if (vectorsDisabled) {
                 return true;
@@ -7502,10 +7558,24 @@ struct BenchFixture {
                 spdlog::warn("[Bench] Cannot ensure vector index readiness: vector DB unavailable");
                 return false;
             }
+            const auto probeBackendReusable = [&]() {
+                const auto probeStart = std::chrono::steady_clock::now();
+                const bool reusable = vectorDb->hasReusablePersistedSearchIndex();
+                setupTimings.vectorIndexReusableProbeMs +=
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - probeStart)
+                        .count();
+                ++setupTimings.vectorIndexReusableProbeCount;
+                return reusable;
+            };
 
             auto persisted = vectorIndexDataDir.empty()
                                  ? PersistedHnswState{}
                                  : inspectPersistedHnswState(vectorIndexDataDir);
+            const auto benchmarkEngine = benchmarkVectorSearchEngine();
+            const bool backendReusableBefore = probeBackendReusable();
+            setupTimings.vectorIndexReusableBefore =
+                yams::bench::benchmarkSearchIndexReusable(benchmarkEngine, backendReusableBefore);
             const auto updateVectorIndexReadiness = [&](bool ready) {
                 if (!daemon) {
                     return;
@@ -7525,9 +7595,10 @@ struct BenchFixture {
                 return false;
             }
 
-            const auto benchmarkEngine = benchmarkVectorSearchEngine();
+            const bool indexlessExact =
+                benchmarkEngine == yams::vector::VectorSearchEngine::ExactScan;
             bool preparedThisRun = false;
-            if (!persisted.reusable(benchmarkEngine)) {
+            if (!indexlessExact && !setupTimings.vectorIndexReusableBefore) {
                 const char* modeLabel = warmDataDirPath.empty() ? "cold-run" : "warm-cache";
                 spdlog::info("[Bench] Finalizing {} vector index (vectors={} persisted_nodes={} "
                              "persisted_meta={})",
@@ -7537,6 +7608,8 @@ struct BenchFixture {
                 const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                            std::chrono::steady_clock::now() - start)
                                            .count();
+                setupTimings.vectorIndexPrepared = prepared;
+                setupTimings.vectorIndexPrepareMs = elapsedMs;
 
                 if (!prepared) {
                     spdlog::warn("[Bench] Vector index finalize failed after {} ms: {}", elapsedMs,
@@ -7544,11 +7617,25 @@ struct BenchFixture {
                     return false;
                 }
                 preparedThisRun = true;
+                const auto persistStart = std::chrono::steady_clock::now();
+                const bool saved = vectorDb->persistIndex();
+                setupTimings.vectorIndexPersistMs =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - persistStart)
+                        .count();
+                setupTimings.vectorIndexPersisted = saved;
+                if (!saved) {
+                    spdlog::warn("[Bench] Vector index persist failed after {} ms: {}",
+                                 setupTimings.vectorIndexPersistMs, vectorDb->getLastError());
+                    return false;
+                }
 
                 persisted = vectorIndexDataDir.empty()
                                 ? PersistedHnswState{}
                                 : inspectPersistedHnswState(vectorIndexDataDir);
-                if (persisted.reusable(benchmarkEngine)) {
+                const bool backendReusableAfterPersist = probeBackendReusable();
+                if (yams::bench::benchmarkSearchIndexReusable(benchmarkEngine,
+                                                              backendReusableAfterPersist)) {
                     spdlog::info("[Bench] Vector index finalized in {} ms "
                                  "(persisted_nodes={} persisted_meta={})",
                                  elapsedMs, persisted.nodeRows, persisted.metaRows);
@@ -7556,17 +7643,24 @@ struct BenchFixture {
                     spdlog::info("[Bench] Vector index finalized in {} ms for {} "
                                  "(persisted PQ rows not required for this cold-run process)",
                                  elapsedMs, yams::vector::vectorSearchEngineName(benchmarkEngine));
+                } else if (benchmarkEngine == yams::vector::VectorSearchEngine::Vec0L2) {
+                    spdlog::info("[Bench] Vec0 index finalized in {} ms and is query-ready for "
+                                 "this process (restart persistence unavailable)",
+                                 elapsedMs);
                 } else {
-                    spdlog::warn("[Bench] Vector index finalize completed in {} ms but persisted "
-                                 "HNSW is still unusable (persisted_nodes={} persisted_meta={})",
-                                 elapsedMs, persisted.nodeRows, persisted.metaRows);
+                    spdlog::info("[Bench] Exact-scan engine query-ready after {} ms; no persisted "
+                                 "search index is required",
+                                 elapsedMs);
                 }
             }
 
-            bool ready = persisted.reusable(benchmarkEngine) ||
-                         vectorDb->hasReusablePersistedSearchIndex() ||
-                         (preparedThisRun &&
-                          benchmarkEngine == yams::vector::VectorSearchEngine::SimeonPqAdc);
+            bool reusable =
+                yams::bench::benchmarkSearchIndexReusable(benchmarkEngine, probeBackendReusable());
+            bool ready = yams::bench::benchmarkSearchIndexQueryReady(benchmarkEngine, reusable,
+                                                                     preparedThisRun);
+            benchmarkVectorIndexReusableAfter = reusable;
+            setupTimings.vectorIndexReusableAfter = reusable;
+            setupTimings.vectorQueryReadyAfter = ready;
             updateVectorIndexReadiness(ready);
 
             int readyTimeoutSec = 60;
@@ -7576,22 +7670,21 @@ struct BenchFixture {
             const auto readyDeadline =
                 std::chrono::steady_clock::now() + std::chrono::seconds(readyTimeoutSec);
             while (!ready && std::chrono::steady_clock::now() < readyDeadline) {
-                auto statusCheck = benchRunSync(client->status(true), 5s);
-                if (statusCheck) {
-                    if (auto it = statusCheck.value().readinessStates.find("vector_index");
-                        it != statusCheck.value().readinessStates.end() && it->second) {
-                        ready = true;
-                    }
-                }
-                if (!ready && !vectorIndexDataDir.empty()) {
+                if (!vectorIndexDataDir.empty()) {
                     persisted = inspectPersistedHnswState(vectorIndexDataDir);
-                    ready = persisted.reusable(benchmarkVectorSearchEngine());
+                    reusable = yams::bench::benchmarkSearchIndexReusable(benchmarkEngine,
+                                                                         probeBackendReusable());
                 }
+                ready = yams::bench::benchmarkSearchIndexQueryReady(benchmarkEngine, reusable,
+                                                                    preparedThisRun);
                 if (!ready) {
                     std::this_thread::sleep_for(500ms);
                 }
             }
 
+            benchmarkVectorIndexReusableAfter = reusable;
+            setupTimings.vectorIndexReusableAfter = reusable;
+            setupTimings.vectorQueryReadyAfter = ready;
             updateVectorIndexReadiness(ready);
             return ready;
         };
@@ -7608,8 +7701,9 @@ struct BenchFixture {
                     : expectedCacheMetadata;
             auto finalStatusForCache = benchRunSync(client->status(true), 5s);
             if (finalStatusForCache) {
-                finalCacheMetadata = currentBenchCacheMetadata(
-                    finalCacheMetadata, finalStatusForCache.value(), warmDataDirPath);
+                finalCacheMetadata =
+                    currentBenchCacheMetadata(finalCacheMetadata, finalStatusForCache.value(),
+                                              warmDataDirPath, benchmarkVectorIndexReusableAfter);
             }
             finalCacheMetadata =
                 preferStrongerBenchCacheMetadata(finalCacheMetadata, warmCacheMetadata);
@@ -8360,6 +8454,16 @@ struct BenchFixture {
                   {"searchability_ready_ms", setupTimings.searchabilityReadyMs},
                   {"enrichment_ready_ms", setupTimings.enrichmentReadyMs},
                   {"measurement_n", setupTimings.coldIngestPerformed ? 1 : 0}}},
+                {"vector_index",
+                 {{"prepared", setupTimings.vectorIndexPrepared},
+                  {"persisted", setupTimings.vectorIndexPersisted},
+                  {"reusable_before", setupTimings.vectorIndexReusableBefore},
+                  {"reusable_after", setupTimings.vectorIndexReusableAfter},
+                  {"query_ready_after", setupTimings.vectorQueryReadyAfter},
+                  {"prepare_ms", setupTimings.vectorIndexPrepareMs},
+                  {"persist_ms", setupTimings.vectorIndexPersistMs},
+                  {"reusable_probe_ms", setupTimings.vectorIndexReusableProbeMs},
+                  {"reusable_probe_count", setupTimings.vectorIndexReusableProbeCount}}},
                 {"setup_total_ms", setupTimings.setupTotalMs},
                 {"dataset", datasetName},
                 {"corpus_size", corpusSize},
@@ -8768,6 +8872,20 @@ void BM_RetrievalQuality(benchmark::State& state) {
     auto& fixture = *g_fixture;
     RetrievalMetrics metrics;
     for (auto _ : state) {
+        std::vector<double> warmupLatencyMs;
+        evaluateQueries(*fixture.client, fixture.benchCorpusDir, fixture.queries, fixture.topK,
+                        "hybrid", nullptr, false, &warmupLatencyMs);
+        if (g_debugOut) {
+            DebugLogEntry warmupEntry;
+            warmupEntry.searchType = "benchmark_warmup";
+            warmupEntry.extraFields = {
+                {"event", "query_warmup_summary"},
+                {"query_count", fixture.queries.size()},
+                {"completed_queries", warmupLatencyMs.size()},
+                {"first_query_latency_ms", warmupLatencyMs.empty() ? 0.0 : warmupLatencyMs.front()},
+            };
+            debugLogWriteJsonLine(warmupEntry);
+        }
         g_final_hybrid_diagnostics = QueryDiagnosticsSummary{};
         metrics = evaluateQueries(*fixture.client, fixture.benchCorpusDir, fixture.queries,
                                   fixture.topK, "hybrid", &g_final_hybrid_diagnostics);
@@ -8826,6 +8944,19 @@ void BM_RetrievalQuality(benchmark::State& state) {
     g_grep_metrics = evaluateGrepQueries(*fixture.client, fixture.queries, fixture.topK);
     state.counters["MRR_grep"] = g_grep_metrics.mrr;
     state.counters["Recall_grep"] = g_grep_metrics.recallAtK;
+
+    if (g_debugOut) {
+        const auto peakRssMb = yams::bench::processPeakRssMb();
+        DebugLogEntry resourceEntry;
+        resourceEntry.searchType = "benchmark_summary";
+        resourceEntry.extraFields = {
+            {"event", "process_resource_metrics"},
+            {"process",
+             {{"peak_rss_observed", peakRssMb.has_value()},
+              {"peak_rss_mb", peakRssMb.value_or(0.0)}}},
+        };
+        debugLogWriteJsonLine(resourceEntry);
+    }
 }
 // Retrieval quality is a long-running, end-to-end evaluation.
 // Force a single iteration to avoid repeated full-corpus evaluations.

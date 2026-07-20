@@ -1,0 +1,171 @@
+{
+  "name": "vector_pq_scale_checkpoint",
+  "description": "Single representative-scale 1024d product-hybrid generalized-memory checkpoint over full SciFact, NFCorpus, and FiQA; this is not a crossover sweep. The compatibility filename is retained because existing artifacts and invocations use it. vectors.db metrics describe the cloned product store, not a standalone backend footprint; setup metrics describe warm/restart work after shared seed construction. The 2026-07-19 run found global Simeon PQ ADC was not a large enough end-to-end cost center to support the proposed coarse-posting speedup; require a separate multi-size exact-versus-PQ sweep before claiming a crossover.",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 10800,
+  "continue_on_arm_failure": false,
+  "mode": "live-ish",
+  "repeats": 3,
+  "baseline": "simeon_pq_global_generalized",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SEARCH_STAGE_TRACE": "1",
+      "YAMS_ENABLE_ENV_OVERRIDES": "1",
+      "YAMS_BENCH_TOPOLOGY_MODE": "disabled",
+      "YAMS_VECTOR_MAX_RESULTS": "32",
+      "YAMS_SEARCH_LEXICAL_FLOOR_TOPN": "0",
+      "YAMS_SEARCH_LEXICAL_FLOOR_BOOST": "0"
+    },
+    "params": {
+      "datasets": ["scifact", "nfcorpus", "fiqa"],
+      "documents_per_dataset": 0,
+      "queries_per_dataset": 10,
+      "topk": 10,
+      "require_steady_state": true,
+      "process_resource_contract": "required",
+      "shared_warm_cache": "vector_pq_crossover_generalized_1024"
+    }
+  },
+  "arms": [
+    {
+      "name": "simeon_pq_global_generalized",
+      "factors": {
+        "retrieval": "product_hybrid",
+        "vector_engine": "simeon_pq_adc",
+        "candidate_generation": "global_adc",
+        "scale": "generalized_memory"
+      },
+      "params": {
+        "vector_search_engine": "simeon_pq_adc",
+        "vector_index_persistence_contract": "required",
+        "vector_work_observation_contract": {
+          "rows_visited": "required",
+          "exact_distance_evaluations": "required",
+          "ann_candidate_budget": "required"
+        }
+      }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_quality",
+      "metrics": [
+        "mrr",
+        "ndcg_at_k",
+        "recall_at_k",
+        "mixed_source_min_mrr",
+        "mixed_source_min_recall_at_k",
+        "mixed_source_min_ndcg_at_k",
+        "mixed_ndcg_at_k_scifact",
+        "mixed_ndcg_at_k_nfcorpus",
+        "mixed_ndcg_at_k_fiqa",
+        "mixed_query_count_scifact",
+        "mixed_query_count_nfcorpus",
+        "mixed_query_count_fiqa",
+        "candidate_pre_fusion_recall",
+        "search_latency_ms_cold_first",
+        "search_latency_ms_first_pass_first",
+        "search_latency_ms_warmed_p50",
+        "search_warmup_query_count",
+        "search_warmup_completed_queries",
+        "search_latency_ms_p50",
+        "search_latency_ms_p95",
+        "search_latency_ms_p99",
+        "search_throughput_qps",
+        "benchmark_setup_total_ms",
+        "vector_index_prepare_ms",
+        "vector_index_persist_ms",
+        "vector_index_reusable_probe_ms",
+        "vector_index_reusable_probe_count",
+        "vector_database_bytes",
+        "vector_wal_bytes",
+        "vector_query_ready_after",
+        "vector_index_reusable_before",
+        "vector_index_reusable_after",
+        "proc_maxrss_mb",
+        "proc_maxrss_observation_rate",
+        "vector_rows_visited_observation_rate",
+        "vector_exact_distance_evaluations_observation_rate",
+        "vector_ann_candidate_budget_observation_rate",
+        "vector_pq_lut_ms_avg",
+        "vector_adc_scoring_ms_avg",
+        "vector_topk_selection_ms_avg",
+        "vector_result_materialization_ms_avg",
+        "vector_exact_rerank_ms_avg"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json", "stdout.log", "debug.jsonl"],
+    "require_metrics": [
+      "mrr",
+      "recall_at_k",
+      "search_latency_ms_p50",
+      "search_latency_ms_warmed_p50",
+      "search_latency_ms_cold_first",
+      "search_latency_ms_first_pass_first",
+      "search_warmup_completed_queries",
+      "search_latency_ms_p99",
+      "search_throughput_qps",
+      "vector_index_prepare_ms",
+      "vector_index_persist_ms",
+      "vector_index_reusable_probe_ms",
+      "vector_index_reusable_probe_count",
+      "vector_database_bytes",
+      "vector_wal_bytes",
+      "mixed_query_count_scifact",
+      "mixed_query_count_nfcorpus",
+      "mixed_query_count_fiqa",
+      "mixed_ndcg_at_k_scifact",
+      "mixed_ndcg_at_k_nfcorpus",
+      "mixed_ndcg_at_k_fiqa",
+      "vector_query_ready_after",
+      "vector_rows_visited_observation_rate",
+      "proc_maxrss_observation_rate"
+    ],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "mrr",
+      "ndcg_at_k",
+      "recall_at_k",
+      "mixed_source_min_mrr",
+      "mixed_source_min_recall_at_k",
+      "mixed_source_min_ndcg_at_k",
+      "mixed_ndcg_at_k_scifact",
+      "mixed_ndcg_at_k_nfcorpus",
+      "mixed_ndcg_at_k_fiqa",
+      "candidate_pre_fusion_recall",
+      "search_latency_ms_first_pass_first",
+      "search_latency_ms_warmed_p50",
+      "search_warmup_completed_queries",
+      "search_latency_ms_p50",
+      "search_latency_ms_p95",
+      "search_latency_ms_p99",
+      "search_throughput_qps",
+      "benchmark_setup_total_ms",
+      "vector_index_prepare_ms",
+      "vector_index_persist_ms",
+      "vector_index_reusable_probe_ms",
+      "vector_index_reusable_probe_count",
+      "vector_database_bytes",
+      "vector_wal_bytes",
+      "vector_query_ready_after",
+      "vector_index_reusable_before",
+      "vector_index_reusable_after",
+      "proc_maxrss_mb",
+      "proc_maxrss_observation_rate",
+      "vector_total_rows_visited_actual_avg",
+      "vector_total_exact_distance_evaluations_actual_avg",
+      "vector_pq_lut_ms_avg",
+      "vector_adc_scoring_ms_avg",
+      "vector_topk_selection_ms_avg",
+      "vector_result_materialization_ms_avg",
+      "vector_exact_rerank_ms_avg"
+    ],
+    "group_by": ["scale", "vector_engine", "candidate_generation"]
+  }
+}
