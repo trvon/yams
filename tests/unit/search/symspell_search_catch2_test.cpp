@@ -20,7 +20,7 @@ TEST_CASE("SymSpellSearch serializes SQLite-backed readers",
         REQUIRE(schema.has_value());
 
         yams::search::SymSpellSearch index(db);
-        index.addTermsBatch({{"alpha", 100}, {"beta", 80}, {"gamma", 60}});
+        REQUIRE(index.addTermsBatch({{"alpha", 100}, {"beta", 80}, {"gamma", 60}}).has_value());
 
         constexpr std::size_t kThreadCount = 8;
         constexpr std::size_t kIterations = 256;
@@ -58,6 +58,51 @@ TEST_CASE("SymSpellSearch serializes SQLite-backed readers",
         }
 
         CHECK_FALSE(failed.load(std::memory_order_relaxed));
+    }
+
+    CHECK(sqlite3_close(db) == SQLITE_OK);
+}
+
+TEST_CASE("SymSpellSearch reports rejected SQLite writes",
+          "[search][symspell][persistence][errors][catch2]") {
+    sqlite3* db = nullptr;
+    REQUIRE(sqlite3_open(":memory:", &db) == SQLITE_OK);
+
+    {
+        REQUIRE(yams::search::SymSpellSearch::initializeSchema(db).has_value());
+        char* error = nullptr;
+        REQUIRE(sqlite3_exec(db,
+                             "CREATE TRIGGER reject_symspell_term BEFORE INSERT ON symspell_terms "
+                             "BEGIN SELECT RAISE(ABORT, 'forced term failure'); END",
+                             nullptr, nullptr, &error) == SQLITE_OK);
+        sqlite3_free(error);
+
+        yams::search::SymSpellSearch index(db);
+        SECTION("single term") {
+            CHECK_FALSE(index.addTerm("alpha", 100).has_value());
+        }
+        SECTION("transactional batch") {
+            CHECK_FALSE(index.addTermsBatch({{"alpha", 100}, {"beta", 80}}).has_value());
+            CHECK_FALSE(index.hasExactMatch("beta"));
+        }
+        CHECK_FALSE(index.hasExactMatch("alpha"));
+    }
+
+    CHECK(sqlite3_close(db) == SQLITE_OK);
+}
+
+TEST_CASE("SymSpellSearch clear removes terms", "[search][symspell][persistence][catch2]") {
+    sqlite3* db = nullptr;
+    REQUIRE(sqlite3_open(":memory:", &db) == SQLITE_OK);
+
+    {
+        REQUIRE(yams::search::SymSpellSearch::initializeSchema(db).has_value());
+        yams::search::SymSpellSearch index(db);
+        REQUIRE(index.addTerm("alpha", 100).has_value());
+        REQUIRE(index.hasExactMatch("alpha"));
+
+        REQUIRE(index.clear().has_value());
+        CHECK_FALSE(index.hasExactMatch("alpha"));
     }
 
     CHECK(sqlite3_close(db) == SQLITE_OK);

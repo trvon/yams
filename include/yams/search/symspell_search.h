@@ -90,11 +90,11 @@ public:
      * @brief Add a term to the dictionary
      * @param term The term to add
      * @param frequency Initial frequency count (default 1)
-     * @return true if term was added (new), false if frequency was updated
+     * @return Whether the term was new, or a storage error
      *
      * Thread-safe: acquires exclusive lock
      */
-    bool addTerm(std::string_view term, int64_t frequency = 1);
+    Result<bool> addTerm(std::string_view term, int64_t frequency = 1);
 
     /**
      * @brief Add multiple terms in a batch (faster than individual adds)
@@ -102,7 +102,7 @@ public:
      *
      * Thread-safe: acquires exclusive lock, uses transaction
      */
-    void addTermsBatch(const std::vector<std::pair<std::string, int64_t>>& terms);
+    Result<void> addTermsBatch(const std::vector<std::pair<std::string, int64_t>>& terms);
 
     /**
      * @brief Search for terms similar to query
@@ -137,7 +137,7 @@ public:
      *
      * Thread-safe: acquires exclusive lock
      */
-    void clear();
+    Result<void> clear();
 
 private:
     std::unique_ptr<symspell::SymSpell> symspell_;
