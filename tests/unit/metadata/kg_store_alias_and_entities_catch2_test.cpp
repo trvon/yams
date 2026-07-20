@@ -112,6 +112,32 @@ TEST_CASE("KGStoreAliasAndEntities: alias exact and fuzzy resolution and removal
         CHECK((fuzzy.value().front().nodeId == nid.value()));
     }
 
+    SECTION("Fuzzy resolution treats C++ qualified alias queries as literal text") {
+        KGAlias qualifiedAlias;
+        qualifiedAlias.nodeId = nid.value();
+        qualifiedAlias.alias = "yams::vector::SqliteVecBackend::Impl::bruteForceSearch";
+        qualifiedAlias.source = std::string("test");
+        qualifiedAlias.confidence = 1.0f;
+        auto qualifiedAid = fix.store_->addAlias(qualifiedAlias);
+        REQUIRE((qualifiedAid.has_value()));
+
+        // Shortened qualifier: must not surface an FTS5 "no such column" error.
+        auto shortened = fix.store_->resolveAliasFuzzy("SqliteVecBackend::bruteForceSearch", 10);
+        REQUIRE((shortened.has_value()));
+
+        // Fully indexed qualified name: must not error and must resolve the node.
+        auto full = fix.store_->resolveAliasFuzzy(
+            "yams::vector::SqliteVecBackend::Impl::bruteForceSearch", 10);
+        REQUIRE((full.has_value()));
+        REQUIRE_FALSE(full.value().empty());
+        CHECK((full.value().front().nodeId == nid.value()));
+
+        // Nonexistent qualified symbol: miss, not an SQL error.
+        auto missing = fix.store_->resolveAliasFuzzy("Missing::doesNotExist", 10);
+        REQUIRE((missing.has_value()));
+        CHECK(missing.value().empty());
+    }
+
     SECTION("Remove aliases clears lookup") {
         auto rm = fix.store_->removeAliasesForNode(nid.value());
         REQUIRE((rm.has_value()));

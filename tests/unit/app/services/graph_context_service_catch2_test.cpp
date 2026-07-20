@@ -179,6 +179,87 @@ TEST_CASE("GraphContextService explore ranks source symbols before tests by defa
     CHECK((response.files.front().content.find("5\t}") != std::string::npos));
 }
 
+TEST_CASE("GraphContextService explore resolves C++ qualified symbol queries",
+          "[services][graph][context]") {
+    GraphContextServiceFixture fixture;
+    auto sourcePath = fixture.writeSource("src/vector/sqlite_vec_backend.cpp",
+                                          {
+                                              "namespace yams::vector {",
+                                              "class SqliteVecBackend {",
+                                              "    struct Impl {",
+                                              "        void bruteForceSearch();",
+                                              "    };",
+                                              "};",
+                                              "}",
+                                          });
+
+    const std::string qualified = "yams::vector::SqliteVecBackend::Impl::bruteForceSearch";
+    auto sym = fixture.symbol(sourcePath, "bruteForceSearch", qualified, 4, 4);
+    fixture.upsertSymbols({sym});
+
+    // Mirror production alias extraction (EntityGraphService): simple name, fully
+    // qualified name, and partial qualified suffixes.
+    const auto nodeId = fixture.upsertNodeFor(sym);
+    const std::vector<std::string> aliases = {
+        "bruteForceSearch",
+        qualified,
+        "vector::SqliteVecBackend::Impl::bruteForceSearch",
+        "SqliteVecBackend::Impl::bruteForceSearch",
+        "Impl::bruteForceSearch",
+    };
+    for (const auto& text : aliases) {
+        KGAlias alias;
+        alias.nodeId = nodeId;
+        alias.alias = text;
+        alias.source = std::string("test");
+        alias.confidence = 1.0f;
+        REQUIRE((fixture.kgStore->addAlias(alias).has_value()));
+    }
+
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+
+    const auto explore = [&](const std::string& query) {
+        GraphExploreRequest req;
+        req.query = query;
+        req.budget.maxFiles = 4;
+        req.budget.maxSymbols = 4;
+        return service->explore(req);
+    };
+    const auto findsSymbol = [](const GraphExploreResponse& response) {
+        for (const auto& entry : response.entrySymbols) {
+            if (entry.qualifiedName == "yams::vector::SqliteVecBackend::Impl::bruteForceSearch") {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    SECTION("Shortened qualifier resolves instead of failing with an SQL error") {
+        auto result = explore("SqliteVecBackend::bruteForceSearch");
+        REQUIRE((result.has_value()));
+        CHECK((findsSymbol(result.value())));
+    }
+
+    SECTION("Fully indexed qualified name resolves") {
+        auto result = explore("yams::vector::SqliteVecBackend::Impl::bruteForceSearch");
+        REQUIRE((result.has_value()));
+        CHECK((findsSymbol(result.value())));
+    }
+
+    SECTION("Unqualified simple name resolves") {
+        auto result = explore("bruteForceSearch");
+        REQUIRE((result.has_value()));
+        CHECK((findsSymbol(result.value())));
+    }
+
+    SECTION("Nonexistent qualified symbol misses without an SQL error") {
+        auto result = explore("Missing::doesNotExist");
+        REQUIRE((result.has_value()));
+        CHECK(result.value().entrySymbols.empty());
+    }
+}
+
 TEST_CASE("GraphContextService explore can include tests when requested",
           "[services][graph][context]") {
     GraphContextServiceFixture fixture;

@@ -113,4 +113,24 @@ TEST_CASE("Search query helpers: hasAdvancedFts5Operators distinguishes power-us
     CHECK_FALSE((hasAdvancedFts5Operators("path:/tmp/file.txt")));
     CHECK_FALSE((hasAdvancedFts5Operators("hello and world")));
     CHECK_FALSE((hasAdvancedFts5Operators("plain terms only")));
+
+    // C++ scope qualifiers are literal content, not FTS field selectors.
+    CHECK_FALSE((hasAdvancedFts5Operators("SqliteVecBackend::bruteForceSearch")));
+    CHECK_FALSE(
+        (hasAdvancedFts5Operators("yams::vector::SqliteVecBackend::Impl::bruteForceSearch")));
+}
+
+TEST_CASE("Search query helpers: sanitizeFts5UserQuery quotes C++ qualified names",
+          "[unit][metadata][fts5][search-query-helpers]") {
+    using yams::metadata::sanitizeFts5UserQuery;
+
+    // A C++ qualified name must reach SQLite as a quoted literal phrase; otherwise FTS5
+    // parses the leading qualifier as a column selector and fails with "no such column".
+    CHECK((sanitizeFts5UserQuery("SqliteVecBackend::bruteForceSearch") ==
+           "\"SqliteVecBackend::bruteForceSearch\""));
+    CHECK((sanitizeFts5UserQuery("yams::vector::SqliteVecBackend::Impl::bruteForceSearch") ==
+           "\"yams::vector::SqliteVecBackend::Impl::bruteForceSearch\""));
+
+    // Single-colon field syntax remains available for power users.
+    CHECK((sanitizeFts5UserQuery("title:hello") == "title:hello"));
 }

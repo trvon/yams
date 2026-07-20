@@ -658,7 +658,13 @@ public:
                     return stmtR.error();
                 auto stmt = std::move(stmtR).value();
 
-                auto sanitizedQuery = sanitizeFts5UserQuery(std::string(aliasQuery));
+                // kg_aliases_fts has a single column (alias); FTS field-selector syntax
+                // can only fail with "no such column" here. Quote queries containing
+                // ':' (C++ qualified names, paths, drive letters) as literal phrases.
+                const std::string sanitizedQuery =
+                    aliasQuery.find(':') != std::string_view::npos
+                        ? quoteFts5Literal(aliasQuery)
+                        : sanitizeFts5UserQuery(std::string(aliasQuery));
                 auto br = stmt.bind(1, sanitizedQuery);
                 if (!br)
                     return br.error();
