@@ -205,6 +205,46 @@ TEST_CASE("Topology baseline engine builds cluster artifacts", "[unit][topology]
     CHECK((routes.value().front().clusterId == pairClusterIt->clusterId));
 }
 
+TEST_CASE("Topology baseline measures local chart geometry",
+          "[unit][topology][baseline][coordinates]") {
+    ConnectedComponentTopologyEngine engine;
+    TopologyBuildConfig config;
+    config.reciprocalOnly = true;
+    config.minEdgeScore = 0.5;
+
+    std::vector<TopologyDocumentInput> docs{
+        TopologyDocumentInput{
+            .documentHash = "a",
+            .embedding = {1.0F, 0.0F},
+            .neighbors = {{.documentHash = "b", .score = 0.95F, .reciprocal = true}}},
+        TopologyDocumentInput{
+            .documentHash = "b",
+            .embedding = {0.8F, 0.2F},
+            .neighbors = {{.documentHash = "c", .score = 0.70F, .reciprocal = true}}},
+        TopologyDocumentInput{
+            .documentHash = "c",
+            .embedding = {0.0F, 1.0F},
+            .neighbors = {{.documentHash = "d", .score = 0.50F, .reciprocal = true}}},
+        TopologyDocumentInput{
+            .documentHash = "d",
+            .embedding = {-1.0F, 0.0F},
+            .neighbors = {},
+        },
+    };
+
+    const auto result = engine.buildArtifacts(docs, config);
+    REQUIRE(result);
+    REQUIRE(result.value().clusters.size() == 1);
+    const auto& chart = result.value().clusters.front();
+    CHECK(chart.distortionObservationCount == 3);
+    REQUIRE(chart.coordinateDistortion.has_value());
+    CHECK(*chart.coordinateDistortion >= 0.0);
+    CHECK(*chart.coordinateDistortion <= 1.0);
+    REQUIRE(chart.localIntrinsicDimension.has_value());
+    CHECK(std::isfinite(*chart.localIntrinsicDimension));
+    CHECK(*chart.localIntrinsicDimension > 0.0);
+}
+
 TEST_CASE("Topology baseline enforces Lean edge-filter contract",
           "[unit][topology][baseline][contract]") {
     ConnectedComponentTopologyEngine engine;
@@ -426,6 +466,54 @@ TEST_CASE("Sparse-guided topology routing uses weighted lexical evidence",
     REQUIRE(routes.has_value());
     REQUIRE(routes.value().size() == 1);
     CHECK(routes.value().front().clusterId == "focused");
+}
+
+TEST_CASE("Sparse-guided topology routing exposes pre-scalarization coordinates",
+          "[unit][topology][routing][coordinates]") {
+    TopologyArtifactBatch batch;
+    batch.clusters = {
+        ClusterArtifact{.clusterId = "focused",
+                        .memberCount = 3,
+                        .persistenceScore = 0.8,
+                        .cohesionScore = 0.6,
+                        .memberDocumentHashes = {"high"},
+                        .centroidEmbedding = {1.0F, 0.0F}},
+        ClusterArtifact{.clusterId = "broad",
+                        .memberCount = 7,
+                        .persistenceScore = 0.2,
+                        .cohesionScore = 0.3,
+                        .memberDocumentHashes = {"low"},
+                        .centroidEmbedding = {0.0F, 1.0F}},
+    };
+
+    TopologyRouteRequest request;
+    request.weightedSeedDocuments = {
+        WeightedDocumentSeed{.documentHash = "high", .weight = 1.0F},
+        WeightedDocumentSeed{.documentHash = "low", .weight = 0.2F},
+    };
+    request.queryEmbedding = {1.0F, 0.0F};
+    request.limit = 2;
+    request.sparseDenseAlpha = 0.25F;
+
+    SparseGuidedClusterRouter router;
+    auto routes = router.route(request, batch);
+
+    REQUIRE(routes.has_value());
+    REQUIRE(routes.value().size() == 2);
+    const auto& focused = routes.value().front();
+    REQUIRE(focused.semanticCost.has_value());
+    REQUIRE(focused.sparseCost.has_value());
+    CHECK(*focused.semanticCost == Catch::Approx(0.0));
+    CHECK(*focused.sparseCost == Catch::Approx(0.0));
+    CHECK(focused.persistencePenalty == Catch::Approx(0.2));
+    CHECK(focused.cohesionPenalty == Catch::Approx(0.4));
+    CHECK(focused.sizePenalty > 0.0);
+
+    const auto& broad = routes.value().back();
+    REQUIRE(broad.semanticCost.has_value());
+    REQUIRE(broad.sparseCost.has_value());
+    CHECK(*broad.semanticCost == Catch::Approx(0.5));
+    CHECK(*broad.sparseCost == Catch::Approx(0.8));
 }
 
 TEST_CASE("Sparse-guided topology routing reuses a prepared membership index",
@@ -658,6 +746,46 @@ TEST_CASE("Sparse-guided routing scores the closest bounded cluster representati
     CHECK(work.representativeDistanceEvaluations == 3);
 }
 
+TEST_CASE("Sparse-guided routing exposes measured chart risk and route uncertainty",
+          "[unit][topology][routing][coordinates]") {
+    TopologyArtifactBatch batch;
+    batch.clusters = {
+        ClusterArtifact{
+            .clusterId = "near",
+            .memberCount = 4,
+            .coordinateDistortion = 0.10,
+            .distortionObservationCount = 6,
+            .localIntrinsicDimension = 2.5,
+            .centroidEmbedding = {1.0F, 0.0F},
+        },
+        ClusterArtifact{
+            .clusterId = "far",
+            .memberCount = 4,
+            .coordinateDistortion = 0.25,
+            .distortionObservationCount = 5,
+            .localIntrinsicDimension = 3.5,
+            .centroidEmbedding = {0.0F, 1.0F},
+        },
+    };
+
+    TopologyRouteRequest request;
+    request.queryEmbedding = {1.0F, 0.0F};
+    request.sparseDenseAlpha = 0.0F;
+    request.limit = 2;
+
+    SparseGuidedClusterRouter router;
+    const auto routes = router.route(request, batch);
+    REQUIRE(routes);
+    REQUIRE(routes.value().size() == 2);
+    REQUIRE(routes.value().front().distortionPenalty.has_value());
+    CHECK(*routes.value().front().distortionPenalty == Catch::Approx(0.10));
+    REQUIRE(routes.value().front().localIntrinsicDimension.has_value());
+    CHECK(*routes.value().front().localIntrinsicDimension == Catch::Approx(2.5));
+    REQUIRE(routes.value().front().uncertaintyPenalty.has_value());
+    CHECK(*routes.value().front().uncertaintyPenalty >= 0.0);
+    CHECK(*routes.value().front().uncertaintyPenalty <= 1.0);
+}
+
 TEST_CASE("Sparse-guided routing limits a prebuilt representative cover at query time",
           "[unit][topology][routing][representatives]") {
     TopologyArtifactBatch batch;
@@ -743,6 +871,12 @@ TEST_CASE("Metadata KG topology store persists memberships and latest snapshot",
     REQUIRE_FALSE(loadedBatchResult.value()->clusters.empty());
     CHECK(loadedBatchResult.value()->clusters.front().densityScore ==
           Catch::Approx(batchResult.value().clusters.front().densityScore));
+    CHECK(loadedBatchResult.value()->clusters.front().distortionObservationCount ==
+          batchResult.value().clusters.front().distortionObservationCount);
+    REQUIRE(loadedBatchResult.value()->clusters.front().coordinateDistortion.has_value());
+    REQUIRE(batchResult.value().clusters.front().coordinateDistortion.has_value());
+    CHECK(*loadedBatchResult.value()->clusters.front().coordinateDistortion ==
+          Catch::Approx(*batchResult.value().clusters.front().coordinateDistortion));
     REQUIRE(loadedBatchResult.value()->clusters.front().routingRepresentatives.size() == 1);
     CHECK(loadedBatchResult.value()->clusters.front().routingRepresentatives.front().documentHash ==
           batchResult.value().clusters.front().routingRepresentatives.front().documentHash);

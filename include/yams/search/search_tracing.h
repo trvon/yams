@@ -42,11 +42,16 @@ void setDebugBool(std::unordered_map<std::string, std::string>& debug, std::stri
 void recordIndexReadinessDebug(std::unordered_map<std::string, std::string>& debug,
                                const IndexFreshnessSnapshot& freshness);
 
+struct TopologyRoutingDebugOptions {
+    bool shadowEvaluation = false;
+    bool includeDetailedTrace = false;
+};
+
 void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConfig& config,
                                 SearchEngineConfig::TopologyRoutingMode mode,
                                 const TopologyRoutingSessionResult& session,
                                 const std::string& skipReason, std::size_t totalCandidates,
-                                bool shadowEvaluation = false, bool includeDocumentIds = false);
+                                TopologyRoutingDebugOptions options = {});
 
 std::string joinWithTab(const std::vector<std::string>& values);
 

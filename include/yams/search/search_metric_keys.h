@@ -56,6 +56,8 @@ constexpr std::string_view kTopologyRouteAnnDistanceEvaluations =
     "topology_route_ann_distance_evaluations";
 constexpr std::string_view kTopologyRouteExactRepresentativeDistanceEvaluations =
     "topology_route_exact_representative_distance_evaluations";
+constexpr std::string_view kTopologyRouteCoordinateCount = "topology_route_coordinate_count";
+constexpr std::string_view kTopologyRouteCoordinateRows = "topology_route_coordinate_rows";
 constexpr std::string_view kTopologyWeakQueryRoutedDocs = "topology_weak_query_routed_docs";
 constexpr std::string_view kTopologyWeakQueryAddedCandidates =
     "topology_weak_query_added_candidates";
@@ -90,10 +92,15 @@ constexpr std::string_view kVectorSearchResultBudget = "vector_search_result_bud
 constexpr std::string_view kVectorSearchDistanceEvaluationBudget =
     "vector_search_distance_evaluation_budget";
 constexpr std::string_view kVectorSearchRowsVisitedActual = "vector_search_rows_visited_actual";
+constexpr std::string_view kVectorSearchRowsVisitedStatus = "vector_search_rows_visited_status";
 constexpr std::string_view kVectorSearchExactDistanceEvaluationsActual =
     "vector_search_exact_distance_evaluations_actual";
+constexpr std::string_view kVectorSearchExactDistanceEvaluationsStatus =
+    "vector_search_exact_distance_evaluations_status";
 constexpr std::string_view kVectorSearchAnnCandidateBudgetActual =
     "vector_search_ann_candidate_budget_actual";
+constexpr std::string_view kVectorSearchAnnCandidateBudgetStatus =
+    "vector_search_ann_candidate_budget_status";
 constexpr std::string_view kVectorSearchCandidateLookupCount =
     "vector_search_candidate_lookup_count";
 constexpr std::string_view kVectorSearchCandidateIndexCacheUsed =

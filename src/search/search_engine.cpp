@@ -1419,6 +1419,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             total.usedExactScan = total.usedExactScan || sample.usedExactScan;
             total.usedCandidateIndexCache =
                 total.usedCandidateIndexCache || sample.usedCandidateIndexCache;
+            total.rowsVisitedObserved = total.rowsVisitedObserved || sample.rowsVisitedObserved;
+            total.exactDistanceEvaluationsObserved =
+                total.exactDistanceEvaluationsObserved ||
+                sample.exactDistanceEvaluationsObserved;
+            total.annCandidateBudgetObserved =
+                total.annCandidateBudgetObserved || sample.annCandidateBudgetObserved;
             total.rowsVisited += sample.rowsVisited;
             total.exactDistanceEvaluations += sample.exactDistanceEvaluations;
             total.annCandidateBudget += sample.annCandidateBudget;
@@ -2111,6 +2117,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                             std::min(vectorCount, effectiveVectorMaxResults *
                                                       vectorConfig.simeon_pq_rerank_factor);
                         break;
+                    case vector::VectorSearchEngine::ExactScan:
+                        vectorSearchCandidateBudget = vectorCount;
+                        vectorSearchDistanceEvaluationBudget = vectorCount;
+                        break;
                 }
             }
             setDebug(response.debugStats, metrics::kVectorSearchCandidateBudget,
@@ -2120,9 +2130,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             setDebug(response.debugStats, metrics::kVectorSearchDistanceEvaluationBudget,
                      std::to_string(vectorSearchDistanceEvaluationBudget));
 
-            recordTopologyRoutingDebug(response, workingConfig, topologyRoutingMode,
-                                       topologySession, topologySkipReason, tier2Candidates.size(),
-                                       topologyVectorShadow, stageTraceEnabled);
+            recordTopologyRoutingDebug(
+                response, workingConfig, topologyRoutingMode, topologySession, topologySkipReason,
+                tier2Candidates.size(),
+                TopologyRoutingDebugOptions{.shadowEvaluation = topologyVectorShadow,
+                                            .includeDetailedTrace = stageTraceEnabled});
             setDebugBool(response.debugStats, metrics::kTopologyWeakQueryNarrowApplied,
                          topologyWeakQueryNarrowApplied);
 
@@ -3910,12 +3922,25 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         std::to_string(relaxedPrimaryHitFinal);
     response.debugStats["relaxed_vector_retry_threshold"] =
         fmt::format("{:.3f}", static_cast<double>(relaxedRetryThresholdMilliFinal) / 1000.0);
-    setDebug(response.debugStats, metrics::kVectorSearchRowsVisitedActual,
-             std::to_string(vectorSearchDiagnostics.rowsVisited));
-    setDebug(response.debugStats, metrics::kVectorSearchExactDistanceEvaluationsActual,
-             std::to_string(vectorSearchDiagnostics.exactDistanceEvaluations));
-    setDebug(response.debugStats, metrics::kVectorSearchAnnCandidateBudgetActual,
-             std::to_string(vectorSearchDiagnostics.annCandidateBudget));
+    setDebug(response.debugStats, metrics::kVectorSearchRowsVisitedStatus,
+             vectorSearchDiagnostics.rowsVisitedObserved ? "observed" : "unavailable");
+    setDebug(response.debugStats, metrics::kVectorSearchExactDistanceEvaluationsStatus,
+             vectorSearchDiagnostics.exactDistanceEvaluationsObserved ? "observed"
+                                                                       : "unavailable");
+    setDebug(response.debugStats, metrics::kVectorSearchAnnCandidateBudgetStatus,
+             vectorSearchDiagnostics.annCandidateBudgetObserved ? "observed" : "unavailable");
+    if (vectorSearchDiagnostics.rowsVisitedObserved) {
+        setDebug(response.debugStats, metrics::kVectorSearchRowsVisitedActual,
+                 std::to_string(vectorSearchDiagnostics.rowsVisited));
+    }
+    if (vectorSearchDiagnostics.exactDistanceEvaluationsObserved) {
+        setDebug(response.debugStats, metrics::kVectorSearchExactDistanceEvaluationsActual,
+                 std::to_string(vectorSearchDiagnostics.exactDistanceEvaluations));
+    }
+    if (vectorSearchDiagnostics.annCandidateBudgetObserved) {
+        setDebug(response.debugStats, metrics::kVectorSearchAnnCandidateBudgetActual,
+                 std::to_string(vectorSearchDiagnostics.annCandidateBudget));
+    }
     setDebug(response.debugStats, metrics::kVectorSearchCandidateLookupCount,
              std::to_string(vectorSearchDiagnostics.candidateLookupCount));
     setDebugBool(response.debugStats, metrics::kVectorSearchCandidateIndexCacheUsed,
@@ -3938,15 +3963,29 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
              std::to_string(vectorSearchDiagnostics.resultMaterializationNanoseconds));
     setDebug(response.debugStats, metrics::kVectorSearchExactRerankNs,
              std::to_string(vectorSearchDiagnostics.exactRerankNanoseconds));
+    traceCollector.recordStageCounter("vector", "rows_visited_observed",
+                                      vectorSearchDiagnostics.rowsVisitedObserved ? 1 : 0);
     traceCollector.recordStageCounter(
-        "vector", "rows_visited_actual",
-        static_cast<std::int64_t>(vectorSearchDiagnostics.rowsVisited));
+        "vector", "exact_distance_evaluations_observed",
+        vectorSearchDiagnostics.exactDistanceEvaluationsObserved ? 1 : 0);
     traceCollector.recordStageCounter(
-        "vector", "exact_distance_evaluations_actual",
-        static_cast<std::int64_t>(vectorSearchDiagnostics.exactDistanceEvaluations));
-    traceCollector.recordStageCounter(
-        "vector", "ann_candidate_budget_actual",
-        static_cast<std::int64_t>(vectorSearchDiagnostics.annCandidateBudget));
+        "vector", "ann_candidate_budget_observed",
+        vectorSearchDiagnostics.annCandidateBudgetObserved ? 1 : 0);
+    if (vectorSearchDiagnostics.rowsVisitedObserved) {
+        traceCollector.recordStageCounter(
+            "vector", "rows_visited_actual",
+            static_cast<std::int64_t>(vectorSearchDiagnostics.rowsVisited));
+    }
+    if (vectorSearchDiagnostics.exactDistanceEvaluationsObserved) {
+        traceCollector.recordStageCounter(
+            "vector", "exact_distance_evaluations_actual",
+            static_cast<std::int64_t>(vectorSearchDiagnostics.exactDistanceEvaluations));
+    }
+    if (vectorSearchDiagnostics.annCandidateBudgetObserved) {
+        traceCollector.recordStageCounter(
+            "vector", "ann_candidate_budget_actual",
+            static_cast<std::int64_t>(vectorSearchDiagnostics.annCandidateBudget));
+    }
     traceCollector.recordStageCounter(
         "vector", "candidate_lookup_ns",
         static_cast<std::int64_t>(vectorSearchDiagnostics.candidateLookupNanoseconds));

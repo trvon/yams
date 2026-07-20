@@ -137,7 +137,7 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
                                 SearchEngineConfig::TopologyRoutingMode mode,
                                 const TopologyRoutingSessionResult& session,
                                 const std::string& skipReason, std::size_t totalCandidates,
-                                bool shadowEvaluation, bool includeDocumentIds) {
+                                TopologyRoutingDebugOptions options) {
     auto& debug = response.debugStats;
     setDebug(debug, metrics::kTopologyRoutingMode,
              SearchEngineConfig::topologyRoutingModeToString(mode));
@@ -151,9 +151,10 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
     setDebugBool(debug, metrics::kTopologyWeakQueryLoadAttempted, session.loadAttempted);
     setDebugBool(debug, metrics::kTopologyWeakQueryLoadSucceeded, session.loadSucceeded);
     setDebugBool(debug, metrics::kTopologyArtifactAdmitted, session.artifactAdmitted);
-    setDebugBool(debug, metrics::kTopologyWeakQueryApplied, session.applied && !shadowEvaluation);
+    setDebugBool(debug, metrics::kTopologyWeakQueryApplied,
+                 session.applied && !options.shadowEvaluation);
     setDebugBool(debug, metrics::kTopologyWeakQueryNarrowApplied,
-                 session.narrowApplied && !shadowEvaluation);
+                 session.narrowApplied && !options.shadowEvaluation);
     setDebug(debug, metrics::kTopologyWeakQuerySkipReason, skipReason);
     setDebug(debug, metrics::kTopologyWeakQueryRoutesRejected,
              std::to_string(session.routesRejected));
@@ -174,22 +175,57 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
              std::to_string(session.routeAnnDistanceEvaluations));
     setDebug(debug, metrics::kTopologyRouteExactRepresentativeDistanceEvaluations,
              std::to_string(session.routeExactRepresentativeDistanceEvaluations));
+    setDebug(debug, metrics::kTopologyRouteCoordinateCount,
+             std::to_string(session.routeCoordinateEvidence.size()));
+    if (options.includeDetailedTrace) {
+        json coordinateRows = json::array();
+        for (const auto& evidence : session.routeCoordinateEvidence) {
+            json row;
+            row["cluster_id"] = evidence.clusterId;
+            row["semantic_cost"] =
+                evidence.semanticCost.has_value() ? json(*evidence.semanticCost) : json(nullptr);
+            row["sparse_cost"] =
+                evidence.sparseCost.has_value() ? json(*evidence.sparseCost) : json(nullptr);
+            // Unavailable atlas axes stay null so downstream analysis cannot confuse missing
+            // evidence with zero cost.
+            row["graph_cost"] = nullptr;
+            row["metadata_cost"] = nullptr;
+            row["distortion_penalty"] = evidence.distortionPenalty.has_value()
+                                            ? json(*evidence.distortionPenalty)
+                                            : json(nullptr);
+            row["local_intrinsic_dimension"] = evidence.localIntrinsicDimension.has_value()
+                                                   ? json(*evidence.localIntrinsicDimension)
+                                                   : json(nullptr);
+            row["uncertainty_penalty"] = evidence.uncertaintyPenalty.has_value()
+                                             ? json(*evidence.uncertaintyPenalty)
+                                             : json(nullptr);
+            row["persistence_penalty"] = evidence.persistencePenalty;
+            row["cohesion_penalty"] = evidence.cohesionPenalty;
+            row["size_penalty"] = evidence.sizePenalty;
+            row["route_score"] = evidence.routeScore;
+            row["score_eligible"] = evidence.scoreEligible;
+            row["in_selected_prefix"] = evidence.inSelectedPrefix;
+            coordinateRows.push_back(std::move(row));
+        }
+        setDebug(debug, metrics::kTopologyRouteCoordinateRows, coordinateRows.dump());
+    }
     setDebug(debug, metrics::kTopologyWeakQueryRoutedDocs, std::to_string(session.routedDocs));
     setDebug(debug, metrics::kTopologyWeakQueryAddedCandidates,
-             std::to_string(shadowEvaluation ? 0 : session.addedCandidates));
+             std::to_string(options.shadowEvaluation ? 0 : session.addedCandidates));
     setDebug(debug, metrics::kTopologyWeakQueryDuplicateCandidates,
-             std::to_string(shadowEvaluation ? 0 : session.duplicateCandidates));
+             std::to_string(options.shadowEvaluation ? 0 : session.duplicateCandidates));
     setDebug(debug, metrics::kTopologyWeakQueryStaleCandidates,
              std::to_string(session.staleCandidates));
-    if (includeDocumentIds) {
+    if (options.includeDetailedTrace) {
         setDebug(debug, metrics::kTopologyWeakQueryAddedCandidateHashes,
-                 shadowEvaluation ? std::string{} : joinWithTab(session.addedCandidateHashes));
+                 options.shadowEvaluation ? std::string{}
+                                          : joinWithTab(session.addedCandidateHashes));
     }
     setDebug(debug, metrics::kTopologyWeakQueryTotalCandidates, std::to_string(totalCandidates));
     const auto& allowedCandidateHashes = session.routeAllowedDocumentHashes.empty()
                                              ? session.routedCandidateHashes
                                              : session.routeAllowedDocumentHashes;
-    const bool shadowEvaluated = shadowEvaluation && session.loadAttempted;
+    const bool shadowEvaluated = options.shadowEvaluation && session.loadAttempted;
     const char* shadowAction = "global";
     if (shadowEvaluated && session.narrowApplied && !allowedCandidateHashes.empty()) {
         shadowAction = "narrow";
@@ -198,7 +234,7 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
     setDebug(debug, metrics::kTopologyShadowProposedAction, shadowAction);
     setDebug(debug, metrics::kTopologyWeakQueryAllowedCandidates,
              std::to_string(allowedCandidateHashes.size()));
-    if (includeDocumentIds) {
+    if (options.includeDetailedTrace) {
         std::vector<std::string> routedCandidateHashes(allowedCandidateHashes.begin(),
                                                        allowedCandidateHashes.end());
         std::sort(routedCandidateHashes.begin(), routedCandidateHashes.end());

@@ -103,6 +103,7 @@ struct TopologySearchFixture {
         vectorConfig.search_engine = searchEngine;
         vectorConfig.vec0_phss_enabled = searchEngine == vector::VectorSearchEngine::Vec0L2;
         vectorConfig.vec0_phss_candidates = 4;
+        vectorConfig.simeon_pq_centroids = 4;
         vectorDb = std::make_shared<vector::VectorDatabase>(vectorConfig);
         REQUIRE(vectorDb->initialize());
     }
@@ -389,9 +390,12 @@ TEST_CASE("SearchEngine topology routing narrows weak-query vector candidates",
     CHECK_FALSE(debug.contains("topology_vector_scores_reused_count"));
     CHECK_FALSE(debug.contains("topology_member_rerank_rows_visited_actual"));
     CHECK_FALSE(debug.contains("topology_member_rerank_distance_evaluations_actual"));
-    CHECK((std::stoull(debug.at("vector_search_rows_visited_actual")) +
-               std::stoull(debug.at("vector_search_ann_candidate_budget_actual")) >
-           0));
+    CHECK(debug.at("vector_search_rows_visited_status") == "unavailable");
+    CHECK(debug.at("vector_search_exact_distance_evaluations_status") == "unavailable");
+    CHECK(debug.at("vector_search_ann_candidate_budget_status") == "unavailable");
+    CHECK_FALSE(debug.contains("vector_search_rows_visited_actual"));
+    CHECK_FALSE(debug.contains("vector_search_exact_distance_evaluations_actual"));
+    CHECK_FALSE(debug.contains("vector_search_ann_candidate_budget_actual"));
     CHECK((debug.at("topology_weak_query_routed_clusters") == "1"));
     CHECK((debug.at("topology_weak_query_added_candidates") == "0"));
     CHECK((debug.at("topology_weak_query_total_candidates") == "0"));
@@ -423,6 +427,9 @@ TEST_CASE("SearchEngine topology routes Simeon PQ over allowed documents",
     CHECK(debug.at("topology_vector_allowed_set_ann_applied") == "1");
     CHECK(debug.at("topology_vector_allowed_set_ann_fallback") == "0");
     CHECK(debug.at("topology_weak_query_narrow_applied") == "1");
+    CHECK(debug.at("vector_search_rows_visited_status") == "observed");
+    CHECK(debug.at("vector_search_exact_distance_evaluations_status") == "observed");
+    CHECK(debug.at("vector_search_ann_candidate_budget_status") == "observed");
     CHECK(debug.at("vector_search_ann_candidate_budget_actual") == "2");
     CHECK(debug.at("vector_search_rows_visited_actual") == "2");
     CHECK(debug.at("vector_search_exact_distance_evaluations_actual") == "2");

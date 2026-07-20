@@ -16,7 +16,7 @@ yams_topology = static_library('yams_topology',
     'topology_sgc.cpp',
   ],
   include_directories: include_directories('../../include'),
-  dependencies: [nlohmann_json_dep, spdlog_dep, yams_core, yams_metadata, yams_vector],
+  dependencies: [nlohmann_json_dep, spdlog_dep, yams_core, yams_metadata, yams_vector, simeon_retrieval_dep],
   install: true,
 )
 
@@ -30,7 +30,7 @@ pkg.generate(yams_topology,
 yams_topology_dep = declare_dependency(
   link_with: yams_topology,
   include_directories: include_directories('../../include'),
-  dependencies: [nlohmann_json_dep, spdlog_dep, yams_core, yams_metadata, yams_vector],
+  dependencies: [nlohmann_json_dep, spdlog_dep, yams_core, yams_metadata, yams_vector, simeon_retrieval_dep],
 )
 
 meson.override_dependency('yams_topology', yams_topology_dep)

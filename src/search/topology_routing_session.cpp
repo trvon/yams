@@ -668,6 +668,41 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
     result.routeBoundaryScoreMargin = selection.boundaryScoreMargin;
     result.confidenceAbstained = selection.abstained;
     result.routedClusters = selection.routes.size();
+    std::unordered_set<std::string> selectedClusterIds;
+    selectedClusterIds.reserve(selection.routes.size());
+    for (const auto& route : selection.routes) {
+        selectedClusterIds.insert(route.clusterId);
+    }
+    result.routeCoordinateEvidence.reserve(routes.value().size());
+    for (const auto& route : routes.value()) {
+        result.routeCoordinateEvidence.push_back(TopologyRouteCoordinateEvidence{
+            .clusterId = route.clusterId,
+            .semanticCost = route.semanticCost.has_value()
+                                ? std::optional<float>(static_cast<float>(*route.semanticCost))
+                                : std::nullopt,
+            .sparseCost = route.sparseCost.has_value()
+                              ? std::optional<float>(static_cast<float>(*route.sparseCost))
+                              : std::nullopt,
+            .distortionPenalty =
+                route.distortionPenalty.has_value()
+                    ? std::optional<float>(static_cast<float>(*route.distortionPenalty))
+                    : std::nullopt,
+            .localIntrinsicDimension =
+                route.localIntrinsicDimension.has_value()
+                    ? std::optional<float>(static_cast<float>(*route.localIntrinsicDimension))
+                    : std::nullopt,
+            .uncertaintyPenalty =
+                route.uncertaintyPenalty.has_value()
+                    ? std::optional<float>(static_cast<float>(*route.uncertaintyPenalty))
+                    : std::nullopt,
+            .persistencePenalty = static_cast<float>(route.persistencePenalty),
+            .cohesionPenalty = static_cast<float>(route.cohesionPenalty),
+            .sizePenalty = static_cast<float>(route.sizePenalty),
+            .routeScore = static_cast<float>(route.routeScore),
+            .scoreEligible = route.routeScore >= request.options.minRouteScore,
+            .inSelectedPrefix = selectedClusterIds.contains(route.clusterId),
+        });
+    }
     if (selection.abstained) {
         result.artifactAdmitted = true;
         result.skipReason = "route_low_confidence";
@@ -693,11 +728,8 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
         }
     }
     std::unordered_set<std::string> seedsCovered;
-    std::unordered_set<std::string> selectedClusterIds;
-    selectedClusterIds.reserve(selection.routes.size());
     std::uint64_t selectedScaleMask = 0;
     for (const auto& route : selection.routes) {
-        selectedClusterIds.insert(route.clusterId);
         const auto clusterIt = snapshot->clustersById.find(route.clusterId);
         if (clusterIt != snapshot->clustersById.end()) {
             selectedScaleMask |= topologyScaleBit(topology.clusters[clusterIt->second].level);
@@ -1062,6 +1094,17 @@ topologyRoutingConstructionFingerprint(const yams::topology::TopologyArtifactBat
         fingerprintDouble(hash, cluster->cohesionScore);
         fingerprintDouble(hash, cluster->densityScore);
         fingerprintDouble(hash, cluster->bridgeMass);
+        fingerprintIntegral(hash,
+                            static_cast<std::uint8_t>(cluster->coordinateDistortion.has_value()));
+        if (cluster->coordinateDistortion.has_value()) {
+            fingerprintDouble(hash, *cluster->coordinateDistortion);
+        }
+        fingerprintIntegral(hash, cluster->distortionObservationCount);
+        fingerprintIntegral(
+            hash, static_cast<std::uint8_t>(cluster->localIntrinsicDimension.has_value()));
+        if (cluster->localIntrinsicDimension.has_value()) {
+            fingerprintDouble(hash, *cluster->localIntrinsicDimension);
+        }
         fingerprintString(hash, cluster->medoid.has_value() ? cluster->medoid->documentHash : "");
 
         auto members = cluster->memberDocumentHashes;

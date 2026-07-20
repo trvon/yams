@@ -143,6 +143,13 @@ struct ClusterArtifact {
     /// retrieval postings and do not alter this structural statistic.
     double densityScore{0.0};
     double bridgeMass{0.0};
+    /// Mean absolute disagreement between protected semantic-edge similarity and local embedding
+    /// cosine. Absent when the chart has no protected edge with compatible embeddings.
+    std::optional<double> coordinateDistortion;
+    std::size_t distortionObservationCount{0};
+    /// Radial maximum-likelihood intrinsic-dimension estimate around centroidEmbedding.
+    /// Absent when fewer than three non-zero radial observations are available.
+    std::optional<double> localIntrinsicDimension;
     std::optional<ClusterRepresentative> medoid;
     std::vector<std::string> memberDocumentHashes;
     std::vector<std::string> overlapClusterIds;
@@ -220,6 +227,16 @@ struct ClusterRoute {
     double routeScore{0.0};
     double stabilityScore{0.0};
     std::size_t memberCount{0};
+    /// Pre-scalarization query-to-chart costs. Missing values mean that the route request did not
+    /// provide usable evidence on that axis; they must not be interpreted as zero cost.
+    std::optional<double> semanticCost;
+    std::optional<double> sparseCost;
+    std::optional<double> distortionPenalty;
+    std::optional<double> localIntrinsicDimension;
+    std::optional<double> uncertaintyPenalty;
+    double persistencePenalty{1.0};
+    double cohesionPenalty{1.0};
+    double sizePenalty{0.0};
 };
 
 } // namespace yams::topology

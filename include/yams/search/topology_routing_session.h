@@ -119,6 +119,23 @@ struct TopologyRoutingSessionRequest {
     std::shared_ptr<TopologyRoutingSnapshotCache> snapshotCache;
 };
 
+/// Query-to-chart coordinates retained before the router scalarizes them into routeScore.
+/// Optional axes are absent when the query supplied no usable evidence on that axis.
+struct TopologyRouteCoordinateEvidence {
+    std::string clusterId;
+    std::optional<float> semanticCost;
+    std::optional<float> sparseCost;
+    std::optional<float> distortionPenalty;
+    std::optional<float> localIntrinsicDimension;
+    std::optional<float> uncertaintyPenalty;
+    float persistencePenalty{1.0F};
+    float cohesionPenalty{1.0F};
+    float sizePenalty{0.0F};
+    float routeScore{0.0F};
+    bool scoreEligible{false};
+    bool inSelectedPrefix{false};
+};
+
 struct TopologyRoutingSessionResult {
     bool enabled = false;
     bool loadAttempted = false;
@@ -151,6 +168,7 @@ struct TopologyRoutingSessionResult {
     std::size_t routeAnnCandidates = 0;
     std::size_t routeAnnDistanceEvaluations = 0;
     std::size_t routeExactRepresentativeDistanceEvaluations = 0;
+    std::vector<TopologyRouteCoordinateEvidence> routeCoordinateEvidence;
     std::vector<std::string> addedCandidateHashes;
     std::unordered_set<std::string> routedCandidateHashes;
     std::unordered_set<std::string> routeAllowedDocumentHashes;

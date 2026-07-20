@@ -163,6 +163,13 @@ json clusterToJson(const ClusterArtifact& cluster) {
     j["cohesion_score"] = cluster.cohesionScore;
     j["density_score"] = cluster.densityScore;
     j["bridge_mass"] = cluster.bridgeMass;
+    j["distortion_observation_count"] = cluster.distortionObservationCount;
+    j["coordinate_distortion"] = cluster.coordinateDistortion.has_value()
+                                     ? json(*cluster.coordinateDistortion)
+                                     : json(nullptr);
+    j["local_intrinsic_dimension"] = cluster.localIntrinsicDimension.has_value()
+                                         ? json(*cluster.localIntrinsicDimension)
+                                         : json(nullptr);
     j["member_document_hashes"] = cluster.memberDocumentHashes;
     j["overlap_cluster_ids"] = cluster.overlapClusterIds;
     if (cluster.medoid.has_value()) {
@@ -192,6 +199,13 @@ ClusterArtifact clusterFromJson(const json& j) {
     cluster.cohesionScore = j.value("cohesion_score", 0.0);
     cluster.densityScore = j.value("density_score", 0.0);
     cluster.bridgeMass = j.value("bridge_mass", 0.0);
+    cluster.distortionObservationCount = j.value("distortion_observation_count", std::size_t{0});
+    if (j.contains("coordinate_distortion") && !j["coordinate_distortion"].is_null()) {
+        cluster.coordinateDistortion = j["coordinate_distortion"].get<double>();
+    }
+    if (j.contains("local_intrinsic_dimension") && !j["local_intrinsic_dimension"].is_null()) {
+        cluster.localIntrinsicDimension = j["local_intrinsic_dimension"].get<double>();
+    }
     if (j.contains("medoid") && j["medoid"].is_object()) {
         cluster.medoid = representativeFromJson(j["medoid"]);
     }

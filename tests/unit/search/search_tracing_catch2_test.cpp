@@ -196,6 +196,32 @@ TEST_CASE("recordTopologyRoutingDebug emits the legacy topology key set",
     session.routeAnnCandidates = 6;
     session.routeAnnDistanceEvaluations = 4;
     session.routeExactRepresentativeDistanceEvaluations = 3;
+    session.routeCoordinateEvidence = {
+        yams::search::TopologyRouteCoordinateEvidence{
+            .clusterId = "cluster-a",
+            .semanticCost = 0.1F,
+            .sparseCost = 0.2F,
+            .distortionPenalty = 0.15F,
+            .localIntrinsicDimension = 2.5F,
+            .uncertaintyPenalty = 0.25F,
+            .persistencePenalty = 0.3F,
+            .cohesionPenalty = 0.4F,
+            .sizePenalty = 0.5F,
+            .routeScore = 0.9F,
+            .scoreEligible = true,
+            .inSelectedPrefix = true,
+        },
+        yams::search::TopologyRouteCoordinateEvidence{
+            .clusterId = "cluster-b",
+            .sparseCost = 0.8F,
+            .persistencePenalty = 0.7F,
+            .cohesionPenalty = 0.6F,
+            .sizePenalty = 0.5F,
+            .routeScore = 0.3F,
+            .scoreEligible = false,
+            .inSelectedPrefix = false,
+        },
+    };
     session.addedCandidateHashes = {"hash-a", "hash-b"};
     session.routedCandidateHashes = {"hash-c", "hash-a"};
     session.candidateStructureEvidence.emplace("hash-a",
@@ -226,9 +252,9 @@ TEST_CASE("recordTopologyRoutingDebug emits the legacy topology key set",
     session.timings.candidateInsertMicros = 70;
 
     yams::search::SearchResponse response;
-    yams::search::recordTopologyRoutingDebug(response, config,
-                                             SearchEngineConfig::TopologyRoutingMode::HybridAssist,
-                                             session, "skip-reason", 42, false, true);
+    yams::search::recordTopologyRoutingDebug(
+        response, config, SearchEngineConfig::TopologyRoutingMode::HybridAssist, session,
+        "skip-reason", 42, yams::search::TopologyRoutingDebugOptions{.includeDetailedTrace = true});
 
     const auto& debug = response.debugStats;
     CHECK(debug.at("topology_routing_mode") == "hybrid_assist");
@@ -253,6 +279,22 @@ TEST_CASE("recordTopologyRoutingDebug emits the legacy topology key set",
     CHECK(debug.at("topology_route_ann_candidates") == "6");
     CHECK(debug.at("topology_route_ann_distance_evaluations") == "4");
     CHECK(debug.at("topology_route_exact_representative_distance_evaluations") == "3");
+    CHECK(debug.at("topology_route_coordinate_count") == "2");
+    const auto coordinateRows = nlohmann::json::parse(debug.at("topology_route_coordinate_rows"));
+    REQUIRE(coordinateRows.size() == 2);
+    CHECK(coordinateRows.at(0).at("cluster_id") == "cluster-a");
+    CHECK(coordinateRows.at(0).at("semantic_cost").get<float>() == Catch::Approx(0.1F));
+    CHECK(coordinateRows.at(0).at("in_selected_prefix") == true);
+    CHECK(coordinateRows.at(0).at("graph_cost").is_null());
+    CHECK(coordinateRows.at(0).at("distortion_penalty").get<float>() == Catch::Approx(0.15F));
+    CHECK(coordinateRows.at(0).at("local_intrinsic_dimension").get<float>() == Catch::Approx(2.5F));
+    CHECK(coordinateRows.at(0).at("uncertainty_penalty").get<float>() == Catch::Approx(0.25F));
+    CHECK(coordinateRows.at(1).at("semantic_cost").is_null());
+    CHECK(coordinateRows.at(1).at("distortion_penalty").is_null());
+    CHECK(coordinateRows.at(1).at("local_intrinsic_dimension").is_null());
+    CHECK(coordinateRows.at(1).at("uncertainty_penalty").is_null());
+    CHECK(coordinateRows.at(1).at("score_eligible") == false);
+    CHECK(coordinateRows.at(1).at("in_selected_prefix") == false);
     CHECK(debug.at("topology_weak_query_routed_docs") == "5");
     CHECK(debug.at("topology_weak_query_added_candidates") == "4");
     CHECK(debug.at("topology_weak_query_duplicate_candidates") == "3");
@@ -339,6 +381,8 @@ TEST_CASE("metric key constants are stable strings", "[search][tracing][catch2]"
     CHECK(metrics::kTopologyRouteBestScore == "topology_route_best_score");
     CHECK(metrics::kTopologyRouteMeanAcceptedScore == "topology_route_mean_accepted_score");
     CHECK(metrics::kTopologyRouteAcceptedCount == "topology_route_accepted_count");
+    CHECK(metrics::kTopologyRouteCoordinateCount == "topology_route_coordinate_count");
+    CHECK(metrics::kTopologyRouteCoordinateRows == "topology_route_coordinate_rows");
     CHECK(metrics::kTopologySeedCount == "topology_seed_count");
     CHECK(metrics::kTopologySeedCoverageCount == "topology_seed_coverage_count");
 }
