@@ -806,6 +806,8 @@ public:
         std::atomic<std::uint64_t> bmhPrefilterSkips{0};
         std::atomic<std::uint64_t> regexSearchCalls{0};
         std::atomic<std::uint64_t> regexScanNs{0};
+        std::atomic<std::uint64_t> matchRenderNs{0};
+        std::atomic<std::uint64_t> matchesRendered{0};
         std::atomic<std::uint64_t> contentRetrievalMs{0};
         std::atomic<bool> stop{false};
         std::mutex errorMutex;
@@ -816,6 +818,7 @@ public:
             std::uint64_t totalMs{0};
             std::uint64_t retrievalMs{0};
             std::uint64_t regexMs{0};
+            std::uint64_t renderMicros{0};
             std::uint64_t otherMs{0};
             std::uint64_t docsScanned{0};
             std::uint64_t linesScanned{0};
@@ -834,6 +837,8 @@ public:
             std::uint64_t localBmhPrefilterSkips = 0;
             std::uint64_t localRegexSearchCalls = 0;
             std::uint64_t localRegexScanNs = 0;
+            std::uint64_t localMatchRenderNs = 0;
+            std::uint64_t localMatchesRendered = 0;
             std::uint64_t localContentRetrievalMs = 0;
             const auto workerStart = GrepClock::now();
             std::vector<size_t> docBatchIndices;
@@ -1000,6 +1005,7 @@ public:
                         fileResult.matchCount += n;
                         if (req.count)
                             return;
+                        const auto renderFieldsStart = GrepClock::now();
                         GrepMatch gm;
                         gm.matchType =
                             req.literalText ? std::string("literal") : std::string("regex");
@@ -1007,6 +1013,10 @@ public:
                         if (req.lineNumbers)
                             gm.lineNumber = ln_counter;
                         gm.line = yams::common::sanitizeUtf8(line);
+                        localMatchRenderNs += static_cast<std::uint64_t>(
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(GrepClock::now() -
+                                                                                 renderFieldsStart)
+                                .count());
                         if (!req.invert && !req.literalText) {
                             const auto regexScanStart = GrepClock::now();
                             ++localRegexSearchCalls;
@@ -1026,7 +1036,13 @@ public:
                                 gm.columnEnd = gm.columnStart + rawPattern.size();
                             }
                         }
+                        const auto renderAppendStart = GrepClock::now();
                         fileResult.matches.push_back(std::move(gm));
+                        localMatchRenderNs += static_cast<std::uint64_t>(
+                            std::chrono::duration_cast<std::chrono::nanoseconds>(GrepClock::now() -
+                                                                                 renderAppendStart)
+                                .count());
+                        ++localMatchesRendered;
                     };
 
                     // Consolidated scan path: prefer indexed blob bytes, then fall back to
@@ -1158,6 +1174,8 @@ public:
             bmhPrefilterSkips.fetch_add(localBmhPrefilterSkips, std::memory_order_relaxed);
             regexSearchCalls.fetch_add(localRegexSearchCalls, std::memory_order_relaxed);
             regexScanNs.fetch_add(localRegexScanNs, std::memory_order_relaxed);
+            matchRenderNs.fetch_add(localMatchRenderNs, std::memory_order_relaxed);
+            matchesRendered.fetch_add(localMatchesRendered, std::memory_order_relaxed);
             contentRetrievalMs.fetch_add(localContentRetrievalMs, std::memory_order_relaxed);
 
             const auto workerTotalMs =
@@ -1168,7 +1186,12 @@ public:
                 static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                                std::chrono::nanoseconds(localRegexScanNs))
                                                .count());
-            const auto accountedMs = workerRegexMs + localContentRetrievalMs;
+            const auto workerRenderMicros =
+                static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                               std::chrono::nanoseconds(localMatchRenderNs))
+                                               .count());
+            const auto workerRenderMs = workerRenderMicros / 1000;
+            const auto accountedMs = workerRegexMs + localContentRetrievalMs + workerRenderMs;
             const auto workerOtherMs =
                 (workerTotalMs > accountedMs) ? (workerTotalMs - accountedMs) : 0;
 
@@ -1177,6 +1200,7 @@ public:
                 workerBreakdowns.push_back(WorkerBreakdown{.totalMs = workerTotalMs,
                                                            .retrievalMs = localContentRetrievalMs,
                                                            .regexMs = workerRegexMs,
+                                                           .renderMicros = workerRenderMicros,
                                                            .otherMs = workerOtherMs,
                                                            .docsScanned = localDocsScanned,
                                                            .linesScanned = localLinesScanned});
@@ -1217,7 +1241,14 @@ public:
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::nanoseconds(regexScanNs.load(std::memory_order_relaxed)))
                 .count());
+        const auto matchRenderUs = static_cast<int64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::nanoseconds(matchRenderNs.load(std::memory_order_relaxed)))
+                .count());
         YAMS_PLOT("grep::regex_scan_ms", regexScanMs);
+        YAMS_PLOT("grep::match_render_us", matchRenderUs);
+        YAMS_PLOT("grep::matches_rendered",
+                  static_cast<int64_t>(matchesRendered.load(std::memory_order_relaxed)));
         YAMS_PLOT("grep::content_retrieval_ms",
                   static_cast<int64_t>(contentRetrievalMs.load(std::memory_order_relaxed)));
 
@@ -1225,6 +1256,7 @@ public:
         std::uint64_t workerTotalSumMs = 0;
         std::uint64_t workerRetrievalSumMs = 0;
         std::uint64_t workerRegexSumMs = 0;
+        std::uint64_t workerRenderSumMicros = 0;
         std::uint64_t workerOtherSumMs = 0;
         {
             std::lock_guard<std::mutex> lk(workerBreakdownMutex);
@@ -1232,6 +1264,7 @@ public:
                 workerTotalSumMs += worker.totalMs;
                 workerRetrievalSumMs += worker.retrievalMs;
                 workerRegexSumMs += worker.regexMs;
+                workerRenderSumMicros += worker.renderMicros;
                 workerOtherSumMs += worker.otherMs;
                 if (worker.totalMs > criticalWorker.totalMs) {
                     criticalWorker = worker;
@@ -1245,6 +1278,8 @@ public:
                   static_cast<int64_t>(criticalWorker.retrievalMs));
         YAMS_PLOT("grep::phase::worker_critical_regex_scan_ms",
                   static_cast<int64_t>(criticalWorker.regexMs));
+        YAMS_PLOT("grep::phase::worker_critical_match_render_us",
+                  static_cast<int64_t>(criticalWorker.renderMicros));
         YAMS_PLOT("grep::phase::worker_critical_other_ms",
                   static_cast<int64_t>(criticalWorker.otherMs));
 
@@ -1425,6 +1460,9 @@ public:
         response.searchStats["regex_search_calls"] =
             std::to_string(regexSearchCalls.load(std::memory_order_relaxed));
         response.searchStats["regex_scan_ms"] = std::to_string(regexScanMs);
+        response.searchStats["match_render_us"] = std::to_string(matchRenderUs);
+        response.searchStats["matches_rendered"] =
+            std::to_string(matchesRendered.load(std::memory_order_relaxed));
         response.searchStats["content_retrieval_ms"] =
             std::to_string(contentRetrievalMs.load(std::memory_order_relaxed));
         response.searchStats["worker_critical_total_ms"] = std::to_string(criticalWorker.totalMs);
@@ -1432,6 +1470,8 @@ public:
             std::to_string(criticalWorker.retrievalMs);
         response.searchStats["worker_critical_regex_scan_ms"] =
             std::to_string(criticalWorker.regexMs);
+        response.searchStats["worker_critical_match_render_us"] =
+            std::to_string(criticalWorker.renderMicros);
         response.searchStats["worker_critical_other_ms"] = std::to_string(criticalWorker.otherMs);
         response.searchStats["worker_critical_docs_scanned"] =
             std::to_string(criticalWorker.docsScanned);
@@ -1440,6 +1480,7 @@ public:
         response.searchStats["worker_total_sum_ms"] = std::to_string(workerTotalSumMs);
         response.searchStats["worker_retrieval_sum_ms"] = std::to_string(workerRetrievalSumMs);
         response.searchStats["worker_regex_sum_ms"] = std::to_string(workerRegexSumMs);
+        response.searchStats["worker_render_sum_us"] = std::to_string(workerRenderSumMicros);
         response.searchStats["worker_other_sum_ms"] = std::to_string(workerOtherSumMs);
         response.searchStats["worker_breakdown_threads"] = std::to_string(workerBreakdowns.size());
         response.searchStats["metadata_operations"] =
@@ -1471,8 +1512,8 @@ public:
         const auto workerScanMs = phaseTimings["phase_worker_scan_ms"];
         const auto contentRetrievalTotalMs =
             static_cast<int64_t>(contentRetrievalMs.load(std::memory_order_relaxed));
-        const auto decodeEstimateMs =
-            std::max<int64_t>(0, workerScanMs - contentRetrievalTotalMs - regexScanMs);
+        const auto decodeEstimateMs = std::max<int64_t>(
+            0, workerScanMs - contentRetrievalTotalMs - regexScanMs - (matchRenderUs / 1000));
         response.searchStats["content_decode_ms_estimate"] = std::to_string(decodeEstimateMs);
         YAMS_PLOT("grep::latency_ms", totalElapsed);
         if (budget_ms > 0) {

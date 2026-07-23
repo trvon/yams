@@ -92,6 +92,8 @@ struct GraphExploreResponse {
     std::size_t totalSymbolsConsidered{0};
     std::size_t totalFilesConsidered{0};
     std::size_t emittedChars{0};
+    std::int64_t snippetRenderMicros{0};
+    std::size_t snippetsRendered{0};
     bool kgAvailable{true};
     bool truncated{false};
 };
@@ -110,6 +112,8 @@ struct GraphSymbolLookupResponse {
     std::vector<GraphContextSnippet> snippets;
     std::vector<GraphContextRelation> trail;
     std::vector<std::string> warnings;
+    std::int64_t snippetRenderMicros{0};
+    std::size_t snippetsRendered{0};
     bool ambiguous{false};
     bool truncated{false};
 };
@@ -127,6 +131,8 @@ struct GraphTraceResponse {
     std::vector<GraphContextRelation> path;
     std::vector<GraphContextSnippet> snippets;
     std::vector<std::string> warnings;
+    std::int64_t snippetRenderMicros{0};
+    std::size_t snippetsRendered{0};
     bool found{false};
     bool truncated{false};
 };

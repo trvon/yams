@@ -854,6 +854,48 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (auto it = kv.find("search.topology.min_route_score"); it != kv.end()) {
                 policy.minRouteScore = parseFloat(it->second);
             }
+            if (auto it = kv.find("search.topology.route_calibration_fingerprint");
+                it != kv.end()) {
+                policy.routeCalibrationFingerprint = std::string(trimView(it->second));
+            }
+            if (auto it = kv.find("search.topology.route_calibration_queries"); it != kv.end()) {
+                policy.routeCalibrationQueries = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.route_calibration_protected_candidates");
+                it != kv.end()) {
+                policy.routeCalibrationProtectedCandidates = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.route_calibration_missed_protected_candidates");
+                it != kv.end()) {
+                policy.routeCalibrationMissedProtectedCandidates = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.route_min_calibration_queries");
+                it != kv.end()) {
+                policy.routeMinCalibrationQueries = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.route_max_misses_per_thousand");
+                it != kv.end()) {
+                policy.routeMaxMissesPerThousand = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.route_calibration_min_boundary_margin");
+                it != kv.end()) {
+                policy.routeCalibrationMinBoundaryMargin = parseFloat(it->second);
+            }
+            if (auto it = kv.find("search.topology.route_calibration_min_seed_hits");
+                it != kv.end()) {
+                policy.routeCalibrationMinSeedHits = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.route_work_max_rows_visited"); it != kv.end()) {
+                policy.routeWorkMaxRowsVisited = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.route_work_max_exact_distance_evaluations");
+                it != kv.end()) {
+                policy.routeWorkMaxExactDistanceEvaluations = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.route_work_max_ann_candidates");
+                it != kv.end()) {
+                policy.routeWorkMaxAnnCandidates = parseSize(it->second);
+            }
             if (auto it = kv.find("search.topology.expansion_source"); it != kv.end()) {
                 policy.expansionSource = std::string(trimView(it->second));
             }

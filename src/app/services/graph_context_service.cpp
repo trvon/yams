@@ -8,6 +8,7 @@
 
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
@@ -653,7 +654,8 @@ public:
             bool truncated = false;
             std::size_t totalFiles = 0;
             buildSnippets(response.matches, req.budget, true, response.snippets, response.warnings,
-                          truncated, totalFiles);
+                          truncated, totalFiles, response.snippetRenderMicros,
+                          response.snippetsRendered);
             if (truncated) {
                 response.truncated = true;
             }
@@ -748,7 +750,8 @@ public:
             bool truncated = false;
             std::size_t totalFiles = 0;
             buildSnippets(pathSyms.value(), req.budget, true, response.snippets, response.warnings,
-                          truncated, totalFiles);
+                          truncated, totalFiles, response.snippetRenderMicros,
+                          response.snippetsRendered);
             if (truncated) {
                 response.truncated = true;
             }
@@ -1044,7 +1047,9 @@ private:
         bool truncated = false;
         std::size_t totalFilesConsidered = 0;
         const auto emitted = buildSnippets(symbols, req.budget, req.includeCode, response.files,
-                                           response.warnings, truncated, totalFilesConsidered);
+                                           response.warnings, truncated, totalFilesConsidered,
+                                           response.snippetRenderMicros,
+                                           response.snippetsRendered);
         response.totalFilesConsidered = totalFilesConsidered;
         response.emittedChars = emitted;
         if (truncated) {
@@ -1056,8 +1061,11 @@ private:
                               const GraphContextBudget& budget, bool includeCode,
                               std::vector<GraphContextSnippet>& outFiles,
                               std::vector<std::string>& warnings, bool& truncated,
-                              std::size_t& totalFilesConsidered) {
+                              std::size_t& totalFilesConsidered, std::int64_t& renderMicros,
+                              std::size_t& snippetsRendered) {
         YAMS_ZONE_SCOPED_N("graph_context::buildSnippets");
+        renderMicros = 0;
+        snippetsRendered = 0;
         std::unordered_map<std::string, std::vector<GraphContextSymbol>> byFile;
         for (const auto& symbol : symbols) {
             if (symbol.filePath.empty()) {
@@ -1154,9 +1162,17 @@ private:
 
             const auto remaining = budget.maxTotalChars - totalChars;
             const auto fileBudget = std::min(budget.maxCharsPerFile, remaining);
-            snippet.content =
-                lineNumberedContent(lines, startLine, endLine, budget.includeLineNumbers,
-                                    fileBudget, snippet.truncated);
+            const auto renderStart = std::chrono::steady_clock::now();
+            {
+                YAMS_ZONE_SCOPED_N("graph_context::snippet_render");
+                snippet.content =
+                    lineNumberedContent(lines, startLine, endLine, budget.includeLineNumbers,
+                                        fileBudget, snippet.truncated);
+            }
+            renderMicros += std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now() - renderStart)
+                                .count();
+            ++snippetsRendered;
             snippet.startLine = static_cast<std::int32_t>(startLine);
             snippet.endLine = static_cast<std::int32_t>(endLine);
             totalChars += snippet.content.size();
@@ -1167,6 +1183,8 @@ private:
             }
             outFiles.push_back(std::move(snippet));
         }
+        YAMS_PLOT("graph_context::snippet_render_us", renderMicros);
+        YAMS_PLOT("graph_context::snippets_rendered", static_cast<std::int64_t>(snippetsRendered));
         return totalChars;
     }
 

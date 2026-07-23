@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <thread>
 
 namespace yams::daemon {
 
@@ -32,6 +33,11 @@ std::uint64_t nextLexicalDeltaEpoch(std::atomic<std::uint64_t>& counter) {
 }
 
 constexpr std::size_t kMaxRecentLexicalDeltaDocs = 256;
+
+std::size_t searchRuntimeThreadCount() {
+    const auto hardwareThreads = std::max(1u, std::thread::hardware_concurrency());
+    return std::clamp<std::size_t>(hardwareThreads / 2u, 2u, 8u);
+}
 
 std::string normalizeTopologyToken(std::string raw) {
     raw.erase(std::remove_if(raw.begin(), raw.end(),
@@ -79,6 +85,9 @@ std::optional<yams::search::SearchEngineConfig::TopologyVectorPolicy>
 parseTopologyVectorPolicy(std::string raw) {
     raw = normalizeTopologyToken(std::move(raw));
     using Policy = yams::search::SearchEngineConfig::TopologyVectorPolicy;
+    if (raw == "augment" || raw == "expand" || raw == "rescue") {
+        return Policy::Augment;
+    }
     if (raw == "narrow" || raw == "filter" || raw == "replace") {
         return Policy::Narrow;
     }
@@ -88,6 +97,13 @@ parseTopologyVectorPolicy(std::string raw) {
     return std::nullopt;
 }
 } // namespace
+
+SearchEngineManager::SearchEngineManager() : runtimeExecutor_(searchRuntimeThreadCount()) {}
+
+SearchEngineManager::~SearchEngineManager() {
+    runtimeExecutor_.stop();
+    runtimeExecutor_.join();
+}
 
 std::shared_ptr<yams::search::SearchEngine> SearchEngineManager::getCachedEngine() const {
     std::shared_lock lock(snapshotMutex_);
@@ -185,6 +201,9 @@ std::shared_ptr<yams::search::SearchEngine> SearchEngineManager::getEngine() con
 
 void SearchEngineManager::setEngine(const std::shared_ptr<yams::search::SearchEngine>& engine,
                                     bool vectorEnabled) {
+    if (engine) {
+        engine->setExecutor(runtimeExecutor_.get_executor());
+    }
     {
         std::unique_lock lock(engineMutex_);
         engine_ = engine;
@@ -314,6 +333,21 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
             }
             if (bm25Policy.fragmentGeometryEnabled) {
                 lexicalCfg.fragment_geometry_enabled = *bm25Policy.fragmentGeometryEnabled;
+            }
+            if (bm25Policy.fragmentGeometryEncoderProfile) {
+                const auto& profile = *bm25Policy.fragmentGeometryEncoderProfile;
+                if (profile == "fixed_hash_384") {
+                    lexicalCfg.fragment_encoder_profile =
+                        yams::search::SimeonLexicalBackend::FragmentEncoderProfile::FixedHash384;
+                } else if (profile == "corpus_pmi") {
+                    lexicalCfg.fragment_encoder_profile =
+                        yams::search::SimeonLexicalBackend::FragmentEncoderProfile::CorpusPmi;
+                } else {
+                    spdlog::warn("[simeon-lexical] unknown fragment encoder profile '{}'; "
+                                 "fragment geometry disabled",
+                                 profile);
+                    lexicalCfg.fragment_geometry_enabled = false;
+                }
             }
             if (bm25Policy.fragmentGeometryMaxDocs) {
                 lexicalCfg.fragment_geometry_max_docs = *bm25Policy.fragmentGeometryMaxDocs;
@@ -459,6 +493,47 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         if (tp.minRouteScore) {
             opts.config.topologyMinRouteScore = std::max(0.0f, *tp.minRouteScore);
         }
+        if (tp.routeCalibrationFingerprint) {
+            opts.config.topologyRouteRiskCalibration.constructionFingerprint =
+                *tp.routeCalibrationFingerprint;
+        }
+        if (tp.routeCalibrationQueries) {
+            opts.config.topologyRouteRiskCalibration.calibrationQueries =
+                *tp.routeCalibrationQueries;
+        }
+        if (tp.routeCalibrationProtectedCandidates) {
+            opts.config.topologyRouteRiskCalibration.protectedCandidates =
+                *tp.routeCalibrationProtectedCandidates;
+        }
+        if (tp.routeCalibrationMissedProtectedCandidates) {
+            opts.config.topologyRouteRiskCalibration.missedProtectedCandidates =
+                *tp.routeCalibrationMissedProtectedCandidates;
+        }
+        if (tp.routeMinCalibrationQueries) {
+            opts.config.topologyRouteRiskCalibration.minCalibrationQueries =
+                std::max<std::size_t>(1, *tp.routeMinCalibrationQueries);
+        }
+        if (tp.routeMaxMissesPerThousand) {
+            opts.config.topologyRouteRiskCalibration.maxMissesPerThousand =
+                std::min<std::size_t>(1000, *tp.routeMaxMissesPerThousand);
+        }
+        if (tp.routeCalibrationMinBoundaryMargin) {
+            opts.config.topologyRouteRiskCalibration.minBoundaryMargin =
+                std::max(0.0F, *tp.routeCalibrationMinBoundaryMargin);
+        }
+        if (tp.routeCalibrationMinSeedHits) {
+            opts.config.topologyRouteRiskCalibration.minSeedHits = *tp.routeCalibrationMinSeedHits;
+        }
+        if (tp.routeWorkMaxRowsVisited) {
+            opts.config.topologyRouteWorkBudget.maxRowsVisited = *tp.routeWorkMaxRowsVisited;
+        }
+        if (tp.routeWorkMaxExactDistanceEvaluations) {
+            opts.config.topologyRouteWorkBudget.maxExactDistanceEvaluations =
+                *tp.routeWorkMaxExactDistanceEvaluations;
+        }
+        if (tp.routeWorkMaxAnnCandidates) {
+            opts.config.topologyRouteWorkBudget.maxAnnCandidates = *tp.routeWorkMaxAnnCandidates;
+        }
         if (tp.expansionSource) {
             const auto s = *tp.expansionSource;
             if (s == "graph_neighbors" || s == "graph" || s == "neighbors" || s == "relations") {
@@ -524,7 +599,7 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                     auto r = builder->buildEmbedded(opts);
                     if (r) {
                         auto newEngine = r.value();
-                        newEngine->setExecutor(workerExecutor);
+                        newEngine->setExecutor(runtimeExecutor_.get_executor());
                         {
                             std::unique_lock lock(engineMutex_);
                             engine_ = newEngine;

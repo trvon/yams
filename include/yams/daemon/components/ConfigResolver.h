@@ -92,6 +92,17 @@ public:
         std::optional<std::string> routeScoring;
         std::optional<float> sparseDenseAlpha;
         std::optional<float> minRouteScore;
+        std::optional<std::string> routeCalibrationFingerprint;
+        std::optional<std::size_t> routeCalibrationQueries;
+        std::optional<std::size_t> routeCalibrationProtectedCandidates;
+        std::optional<std::size_t> routeCalibrationMissedProtectedCandidates;
+        std::optional<std::size_t> routeMinCalibrationQueries;
+        std::optional<std::size_t> routeMaxMissesPerThousand;
+        std::optional<float> routeCalibrationMinBoundaryMargin;
+        std::optional<std::size_t> routeCalibrationMinSeedHits;
+        std::optional<std::size_t> routeWorkMaxRowsVisited;
+        std::optional<std::size_t> routeWorkMaxExactDistanceEvaluations;
+        std::optional<std::size_t> routeWorkMaxAnnCandidates;
         // clusters | graph_neighbors
         std::optional<std::string> expansionSource;
         std::optional<float> graphNeighborMinScore;
@@ -145,6 +156,7 @@ public:
     };
 
     struct SimeonEncoderPolicy {
+        std::optional<std::string> encoderProfile;
         std::optional<std::string> ngramMode;
         std::optional<std::uint32_t> ngramMin;
         std::optional<std::uint32_t> ngramMax;
@@ -164,6 +176,7 @@ public:
         std::optional<std::size_t> buildDocChunkBytes;
         std::optional<std::size_t> buildDocMaxChunks;
         std::optional<bool> fragmentGeometryEnabled;
+        std::optional<std::string> fragmentGeometryEncoderProfile;
         std::optional<std::size_t> fragmentGeometryMaxDocs;
         std::optional<std::size_t> fragmentGeometryMaxCorpusBytes;
         std::optional<std::size_t> fragmentGeometryPmiSampleDocs;
@@ -439,7 +452,7 @@ public:
      * Config keys:
      * - search.topology.mode = disabled|weak_query_only|hybrid_assist
      * - search.topology.enable_weak_query_routing = true|false
-     * - search.topology.vector_policy = narrow|shadow
+     * - search.topology.vector_policy = augment|narrow|shadow
      * - search.topology.min_clusters = int
      * - search.topology.max_clusters = int
      * - search.topology.max_seed_documents = int
@@ -453,6 +466,17 @@ public:
      * - search.topology.route_scoring = current|size_weighted|seed_coverage
      * - search.topology.sparse_dense_alpha = float in [0,1]
      * - search.topology.min_route_score = float
+     * - search.topology.route_calibration_fingerprint = string
+     * - search.topology.route_calibration_queries = int
+     * - search.topology.route_calibration_protected_candidates = int
+     * - search.topology.route_calibration_missed_protected_candidates = int
+     * - search.topology.route_min_calibration_queries = int
+     * - search.topology.route_max_misses_per_thousand = int
+     * - search.topology.route_calibration_min_boundary_margin = float
+     * - search.topology.route_calibration_min_seed_hits = int
+     * - search.topology.route_work_max_rows_visited = int
+     * - search.topology.route_work_max_exact_distance_evaluations = int
+     * - search.topology.route_work_max_ann_candidates = int
      * - search.topology.expansion_source = clusters|graph_neighbors
      * - search.topology.graph_neighbor_min_score = float
      * - search.topology.graph_neighbor_reciprocal_only = true|false
@@ -497,6 +521,7 @@ public:
      *
      * Precedence: env var > TOML > default. Env vars map to legacy
      * YAMS_SIMEON_* names kept for test-only overrides. Canonical keys:
+     * - embeddings.simeon.encoder_profile = "configurable" | "fixed_hash_384"
      * - embeddings.simeon.ngram_mode     = "char" | "word" | "char_and_word"
      * - embeddings.simeon.ngram_min      = int
      * - embeddings.simeon.ngram_max      = int

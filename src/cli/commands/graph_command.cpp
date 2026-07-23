@@ -1189,6 +1189,8 @@ private:
             nlohmann::json j;
             j["symbol"] = resp.symbol;
             j["ambiguous"] = resp.ambiguous;
+            j["snippetRenderMicros"] = resp.snippetRenderMicros;
+            j["snippetsRendered"] = resp.snippetsRendered;
             j["matches"] = nlohmann::json::array();
             for (const auto& m : resp.matches)
                 appendSymbolJson(j["matches"], m);
@@ -1247,6 +1249,8 @@ private:
             j["from"] = resp.from;
             j["to"] = resp.to;
             j["found"] = resp.found;
+            j["snippetRenderMicros"] = resp.snippetRenderMicros;
+            j["snippetsRendered"] = resp.snippetsRendered;
             j["path"] = nlohmann::json::array();
             for (const auto& r : resp.path)
                 j["path"].push_back({{"relation", r.relation},

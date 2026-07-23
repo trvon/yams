@@ -191,6 +191,9 @@ public:
 
     std::string getProviderName() const override { return "Simeon"; }
     std::string getProviderVersion() const override { return "1.0.0"; }
+    std::string getEmbeddingSpaceIdentity(const std::string& /*modelName*/) const override {
+        return backend_ ? backend_->getEmbeddingSpaceIdentity() : std::string{};
+    }
     bool isAvailable() const override { return backend_ != nullptr; }
     bool isTrainingFree() const override { return true; }
     size_t getMemoryUsage() const override { return 0; }

@@ -758,6 +758,33 @@ TEST_CASE("SearchService: paths only", "[unit][services][search]") {
     }
 }
 
+TEST_CASE("SearchService: snippet hydration exports bounded stage telemetry",
+          "[unit][services][search][hydration][profiling]") {
+    SearchServiceFixture f;
+    auto slowRepo =
+        std::make_shared<SlowSnippetMetadataRepository>(*f.pool, std::chrono::milliseconds{25});
+    slowRepo->setKnowledgeGraphStore(f.kgStore);
+    f.metadataRepo = slowRepo;
+    f.appContext.metadataRepo = slowRepo;
+    f.searchService = makeSearchService(f.appContext);
+
+    auto request = f.createBasicSearchRequest("programming");
+    request.type = "keyword";
+    request.snippetHydrationTimeoutMs = 1;
+
+    auto result = runAwait(f.searchService->search(request));
+    REQUIRE(result);
+    const auto& stats = result.value().searchStats;
+    REQUIRE(stats.contains("timing_snippet_hydration_us"));
+    REQUIRE(stats.contains("timing_snippet_lookup_us"));
+    REQUIRE(stats.contains("timing_snippet_content_fetch_us"));
+    REQUIRE(stats.contains("snippet_hydration_candidates"));
+    REQUIRE(stats.contains("snippet_hydration_missing"));
+    CHECK(std::stoll(stats.at("timing_snippet_hydration_us")) >=
+          std::stoll(stats.at("timing_snippet_content_fetch_us")));
+    CHECK(stats.at("snippet_timeout_hit") == "true");
+}
+
 TEST_CASE("SearchService: lightIndex retries transient metadata errors",
           "[unit][services][search]") {
     SearchServiceFixture f;

@@ -2902,6 +2902,8 @@ template <> struct ProtoBinding<GraphExploreResponse> {
         o->set_emitted_chars(r.emittedChars);
         o->set_kg_available(r.kgAvailable);
         o->set_truncated(r.truncated);
+        o->set_snippet_render_us(r.snippetRenderMicros);
+        o->set_snippets_rendered(r.snippetsRendered);
     }
 
     static GraphExploreResponse get(const Envelope& env) {
@@ -2950,6 +2952,8 @@ template <> struct ProtoBinding<GraphExploreResponse> {
         r.emittedChars = i.emitted_chars();
         r.kgAvailable = i.kg_available();
         r.truncated = i.truncated();
+        r.snippetRenderMicros = i.snippet_render_us();
+        r.snippetsRendered = i.snippets_rendered();
         return r;
     }
 };
@@ -3105,6 +3109,8 @@ template <> struct ProtoBinding<GraphSymbolLookupResponse> {
         set_string_list(r.warnings, o->mutable_warnings());
         o->set_ambiguous(r.ambiguous);
         o->set_truncated(r.truncated);
+        o->set_snippet_render_us(r.snippetRenderMicros);
+        o->set_snippets_rendered(r.snippetsRendered);
     }
     static GraphSymbolLookupResponse get(const Envelope& env) {
         const auto& i = env.graph_symbol_lookup_response();
@@ -3125,6 +3131,8 @@ template <> struct ProtoBinding<GraphSymbolLookupResponse> {
         r.warnings = get_string_list(i.warnings());
         r.ambiguous = i.ambiguous();
         r.truncated = i.truncated();
+        r.snippetRenderMicros = i.snippet_render_us();
+        r.snippetsRendered = i.snippets_rendered();
         return r;
     }
 };
@@ -3174,6 +3182,8 @@ template <> struct ProtoBinding<GraphTraceResponse> {
         set_string_list(r.warnings, o->mutable_warnings());
         o->set_found(r.found);
         o->set_truncated(r.truncated);
+        o->set_snippet_render_us(r.snippetRenderMicros);
+        o->set_snippets_rendered(r.snippetsRendered);
     }
     static GraphTraceResponse get(const Envelope& env) {
         const auto& i = env.graph_trace_response();
@@ -3191,6 +3201,8 @@ template <> struct ProtoBinding<GraphTraceResponse> {
         r.warnings = get_string_list(i.warnings());
         r.found = i.found();
         r.truncated = i.truncated();
+        r.snippetRenderMicros = i.snippet_render_us();
+        r.snippetsRendered = i.snippets_rendered();
         return r;
     }
 };

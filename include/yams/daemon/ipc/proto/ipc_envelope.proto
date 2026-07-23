@@ -1013,6 +1013,8 @@ message GraphExploreResponse {
   uint64 emitted_chars = 8;
   bool kg_available = 9;
   bool truncated = 10;
+  uint64 snippet_render_us = 11;
+  uint64 snippets_rendered = 12;
 }
 
 message GraphSymbolLookupRequest {
@@ -1038,6 +1040,8 @@ message GraphSymbolLookupResponse {
   repeated string warnings = 5;
   bool ambiguous = 6;
   bool truncated = 7;
+  uint64 snippet_render_us = 8;
+  uint64 snippets_rendered = 9;
 }
 
 message GraphTraceRequest {
@@ -1060,6 +1064,8 @@ message GraphTraceResponse {
   repeated string warnings = 5;
   bool found = 6;
   bool truncated = 7;
+  uint64 snippet_render_us = 8;
+  uint64 snippets_rendered = 9;
 }
 
 message GraphImpactRequest {

@@ -321,6 +321,8 @@ TEST_CASE("GraphContextService explore applies snippet budgets and omits code wh
     CHECK(limited.value().truncated);
     CHECK(limited.value().files.front().truncated);
     CHECK((limited.value().files.front().content.size() <= 10));
+    CHECK((limited.value().snippetsRendered == 1));
+    CHECK((limited.value().snippetRenderMicros >= 0));
 
     GraphExploreRequest omittedReq;
     omittedReq.query = "budgetedSymbol";
@@ -331,6 +333,8 @@ TEST_CASE("GraphContextService explore applies snippet budgets and omits code wh
     REQUIRE((omitted.value().files.size() == 1));
     CHECK((omitted.value().files.front().mode == GraphContextSnippetMode::Omitted));
     CHECK(omitted.value().files.front().content.empty());
+    CHECK((omitted.value().snippetsRendered == 0));
+    CHECK((omitted.value().snippetRenderMicros == 0));
 }
 
 TEST_CASE("GraphContextService explore clamps zero-based symbol lines",
