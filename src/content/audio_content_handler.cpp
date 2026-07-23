@@ -12,6 +12,8 @@
 #include <yams/common/format.h>
 #include <yams/content/audio_content_handler.h>
 
+#include "buffer_processing_helpers.hpp"
+
 #ifdef YAMS_HAVE_TAGLIB
 #include <taglib/attachedpictureframe.h>
 #include <taglib/audioproperties.h>
@@ -240,23 +242,6 @@ extractUsingFFProbe(const std::filesystem::path& path) {
     return std::nullopt;
 }
 
-std::string normalizeExtensionHint(std::string_view hint) {
-    if (hint.empty()) {
-        return {};
-    }
-
-    std::filesystem::path hintPath{std::string(hint)};
-    std::string extension = hintPath.extension().string();
-    if (extension.empty() && hint.front() == '.') {
-        extension = std::string(hint);
-    }
-
-    std::ranges::transform(extension, extension.begin(),
-                           [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-    return std::ranges::find(audioExtensions, extension) == audioExtensions.end() ? std::string{}
-                                                                                  : extension;
-}
-
 std::string extensionForAudioMime(std::string_view mimeType) {
     if (mimeType == "audio/mpeg" || mimeType == "audio/mp3")
         return ".mp3";
@@ -301,76 +286,7 @@ bool hasAudioContainerMagic(std::span<const std::byte> data) {
 }
 
 std::string chooseAudioTempExtension(std::span<const std::byte> data, std::string_view hint) {
-    if (auto extension = normalizeExtensionHint(hint); !extension.empty()) {
-        return extension;
-    }
-
-    auto signatureResult = detection::FileTypeDetector::instance().detectFromBuffer(data);
-    if (signatureResult) {
-        if (auto extension = extensionForAudioMime(signatureResult.value().mimeType);
-            !extension.empty()) {
-            return extension;
-        }
-    }
-
-    return ".wav";
-}
-
-Result<std::filesystem::path> writeAudioBufferToTempFile(std::span<const std::byte> data,
-                                                         std::string_view extension) {
-    if (data.empty()) {
-        return Error{ErrorCode::InvalidArgument, "Empty audio data"};
-    }
-
-    static thread_local std::random_device rd;
-    static thread_local std::mt19937_64 gen(rd());
-
-    std::filesystem::path tempDir;
-    std::error_code ec;
-    bool created = false;
-    for (int attempt = 0; attempt < 16; ++attempt) {
-        tempDir = std::filesystem::temp_directory_path() /
-                  yams::fmt_format("yams-audio-buffer-{:016x}", gen());
-        if (std::filesystem::create_directory(tempDir, ec)) {
-            created = true;
-            std::filesystem::permissions(tempDir, std::filesystem::perms::owner_all,
-                                         std::filesystem::perm_options::replace, ec);
-            if (ec) {
-                std::filesystem::remove_all(tempDir);
-                return Error{
-                    ErrorCode::IOError,
-                    yams::fmt_format("Failed to secure temp audio directory: {}", ec.message())};
-            }
-            break;
-        }
-        if (ec) {
-            return Error{
-                ErrorCode::IOError,
-                yams::fmt_format("Failed to create temp audio directory: {}", ec.message())};
-        }
-    }
-    if (!created) {
-        return Error{ErrorCode::IOError, "Failed to allocate temp audio directory"};
-    }
-
-    const auto tempPath = tempDir / yams::fmt_format("buffer{}", extension);
-
-    std::ofstream file(tempPath, std::ios::binary | std::ios::trunc);
-    if (!file) {
-        return Error{ErrorCode::IOError,
-                     yams::fmt_format("Failed to create temp audio file: {}", tempPath.string())};
-    }
-
-    file.write(reinterpret_cast<const char*>(data.data()),
-               static_cast<std::streamsize>(data.size()));
-    if (!file) {
-        std::error_code ec;
-        std::filesystem::remove_all(tempPath.parent_path(), ec);
-        return Error{ErrorCode::IOError,
-                     yams::fmt_format("Failed to write temp audio file: {}", tempPath.string())};
-    }
-
-    return tempPath;
+    return detail::chooseTempExtension(data, hint, ".wav", audioExtensions, extensionForAudioMime);
 }
 
 } // anonymous namespace
@@ -384,15 +300,8 @@ AudioContentHandler::AudioContentHandler(AudioProcessingConfig config)
 }
 
 AudioContentHandler::~AudioContentHandler() {
-    cancelProcessing();
-
-    // Wait for processing threads to complete
-    std::lock_guard lock(threadsMutex_);
-    for (auto& thread : processingThreads_) {
-        if (thread.joinable()) {
-            thread.join();
-        }
-    }
+    detail::cancelAndJoinProcessing([this] { cancelProcessing(); }, threadsMutex_,
+                                    processingThreads_);
 }
 
 std::vector<std::string> AudioContentHandler::supportedMimeTypes() const {
@@ -400,14 +309,7 @@ std::vector<std::string> AudioContentHandler::supportedMimeTypes() const {
 }
 
 bool AudioContentHandler::canHandle(const detection::FileSignature& signature) const {
-    // Check MIME type
-    const auto& mimeTypes = supportedMimeTypes();
-    if (std::ranges::find(mimeTypes, signature.mimeType) != mimeTypes.end()) {
-        return true;
-    }
-
-    // Check if it's an audio file type
-    return signature.fileType == "audio";
+    return detail::canHandleMediaSignature(signature, supportedMimeTypes(), "audio");
 }
 
 Result<ContentResult> AudioContentHandler::process(const std::filesystem::path& path,
@@ -534,64 +436,19 @@ Result<ContentResult> AudioContentHandler::process(const std::filesystem::path& 
 Result<ContentResult> AudioContentHandler::processBuffer(std::span<const std::byte> data,
                                                          const std::string& hint,
                                                          const ContentConfig& config) {
-    auto signatureResult = detection::FileTypeDetector::instance().detectFromBuffer(data);
-    bool requiresParserConfirmation = false;
-    if (signatureResult && !canHandle(signatureResult.value())) {
-        const auto& signature = signatureResult.value();
-        requiresParserConfirmation = isGenericAudioDetection(signature);
-        if (!requiresParserConfirmation) {
-            return Error{ErrorCode::NotSupported,
-                         yams::fmt_format("Not an audio file: detected as {} ({})",
-                                          signature.mimeType, signature.fileType)};
-        }
-    }
-
-    auto tempPath = writeAudioBufferToTempFile(data, chooseAudioTempExtension(data, hint));
-    if (!tempPath) {
-        return tempPath.error();
-    }
-
-    const auto cleanup = [&tempPath] {
-        std::error_code ec;
-        std::filesystem::remove_all(tempPath.value().parent_path(), ec);
-    };
-
-    auto result = process(tempPath.value(), config);
-    cleanup();
-    if (result && requiresParserConfirmation && !hasConfirmedAudioMetadata(result.value()) &&
-        !hasAudioContainerMagic(data)) {
-        return Error{ErrorCode::NotSupported, "Buffer did not contain parseable audio metadata"};
-    }
-    if (result) {
-        result.value().metadata["source"] = "buffer";
-        if (!hint.empty()) {
-            result.value().metadata["hint"] = hint;
-        }
-    }
-    return result;
+    return detail::processBufferWithTempFile(
+        data, hint, config, "audio",
+        [this](const detection::FileSignature& signature) { return canHandle(signature); },
+        isGenericAudioDetection, chooseAudioTempExtension,
+        [this](const std::filesystem::path& path, const ContentConfig& processConfig) {
+            return process(path, processConfig);
+        },
+        hasConfirmedAudioMetadata, hasAudioContainerMagic);
 }
 
 Result<void> AudioContentHandler::validate(const std::filesystem::path& path) const {
-    if (!std::filesystem::exists(path)) {
-        return Error{ErrorCode::FileNotFound, "Audio file not found"};
-    }
-
-    if (!std::filesystem::is_regular_file(path)) {
-        return Error{ErrorCode::InvalidData, "Not a regular file"};
-    }
-
-    const auto fileSize = std::filesystem::file_size(path);
-    if (fileSize > audioConfig_.maxFileSize) {
-        return Error{
-            ErrorCode::ResourceExhausted,
-            yams::fmt_format("File too large: {} > {}", fileSize, audioConfig_.maxFileSize)};
-    }
-
-    if (fileSize == 0) {
-        return Error{ErrorCode::InvalidData, "Empty audio file"};
-    }
-
-    return {};
+    return detail::validateMediaFile(path, audioConfig_.maxFileSize, 1, "Audio file not found",
+                                     "Empty audio file");
 }
 
 AudioContentHandler::ProcessingStats AudioContentHandler::getStats() const noexcept {
@@ -601,19 +458,7 @@ AudioContentHandler::ProcessingStats AudioContentHandler::getStats() const noexc
 
 void AudioContentHandler::updateStats(bool success, std::chrono::milliseconds duration,
                                       size_t bytes) noexcept {
-    std::lock_guard lock(statsMutex_);
-    stats_.totalFilesProcessed++;
-    if (success) {
-        stats_.successfulProcessing++;
-    } else {
-        stats_.failedProcessing++;
-    }
-    stats_.totalProcessingTime += duration;
-    stats_.totalBytesProcessed += bytes;
-
-    if (stats_.totalFilesProcessed > 0) {
-        stats_.averageProcessingTime = stats_.totalProcessingTime / stats_.totalFilesProcessed;
-    }
+    detail::updateProcessingStats(statsMutex_, stats_, success, duration, bytes);
 }
 
 // Helper implementations

@@ -346,54 +346,6 @@ private:
         return printDocumentGraphResponse(resp);
     }
 
-    static std::string displayNodePath(const yams::daemon::GraphNode& node) {
-        if (!node.documentPath.empty()) {
-            return node.documentPath;
-        }
-        auto extracted = extractNodePath(node);
-        if (extracted.has_value()) {
-            return extracted->generic_string();
-        }
-        return {};
-    }
-
-    static json parsePropertiesField(const std::string& properties) {
-        try {
-            return json::parse(properties);
-        } catch (const std::exception& e) {
-            spdlog::trace("graph: treating node properties as raw JSON string: {}", e.what());
-            return json(properties);
-        }
-    }
-
-    json makeGraphNodeJson(
-        const yams::daemon::GraphNode& node, bool includeDistance = false,
-        const std::unordered_map<int64_t, std::string>* traversalHints = nullptr) const {
-        json out;
-        out["nodeId"] = node.nodeId;
-        out["nodeKey"] = node.nodeKey;
-        out["label"] = node.label;
-        out["type"] = node.type;
-        if (includeDistance) {
-            out["distance"] = node.distance;
-        }
-        if (!node.documentHash.empty()) {
-            out["documentHash"] = node.documentHash;
-        }
-        if (auto nodePath = displayNodePath(node); !nodePath.empty()) {
-            out["path"] = nodePath;
-        }
-        if (traversalHints != nullptr) {
-            if (auto hintIt = traversalHints->find(node.nodeId); hintIt != traversalHints->end()) {
-                out["via"] = hintIt->second;
-            }
-        }
-        if (!node.properties.empty()) {
-            out["properties"] = parsePropertiesField(node.properties);
-        }
-        return out;
-    }
-
     struct GraphSearchGroup {
         std::string key;
         std::string label;
@@ -413,7 +365,7 @@ private:
     }
 
     static std::string canonicalGraphSearchPath(const yams::daemon::GraphNode& node) {
-        auto path = displayNodePath(node);
+        auto path = displayGraphNodePath(node);
         if (path.empty()) {
             path = node.label;
         }
@@ -444,7 +396,7 @@ private:
             auto& group = byKey[key];
             if (group.key.empty()) {
                 group.key = key;
-                group.path = displayNodePath(node);
+                group.path = displayGraphNodePath(node);
                 if (group.path.empty() && key.find('/') != std::string::npos) {
                     group.path = key;
                 }
@@ -488,27 +440,6 @@ private:
             out["nodeIds"].push_back(node->nodeId);
         }
         return out;
-    }
-
-    void renderNodePropertiesSection(const std::vector<yams::daemon::GraphNode>& nodes) const {
-        bool hasProps = false;
-        for (const auto& node : nodes) {
-            if (!node.properties.empty()) {
-                hasProps = true;
-                break;
-            }
-        }
-        if (!hasProps) {
-            return;
-        }
-
-        std::cout << "\n" << yams::cli::ui::subsection_header("Node Properties") << "\n";
-        for (const auto& node : nodes) {
-            if (!node.properties.empty()) {
-                std::cout << yams::cli::ui::bullet(node.label, 2) << "\n";
-                std::cout << yams::cli::ui::indent(node.properties, 6) << "\n";
-            }
-        }
     }
 
     GraphTopologySupport topologySupport() const {
@@ -945,7 +876,7 @@ private:
 
             // Properties in verbose mode (after table)
             if (verbose_) {
-                renderNodePropertiesSection(nodes);
+                renderGraphNodePropertiesSection(std::cout, nodes);
             }
 
             if (resp.truncated) {
@@ -966,7 +897,7 @@ private:
         std::vector<yams::daemon::GraphNode> filtered;
         filtered.reserve(nodes.size());
         for (const auto& node : nodes) {
-            auto nodePathOpt = extractNodePath(node);
+            auto nodePathOpt = extractGraphNodePath(node);
             if (!nodePathOpt.has_value()) {
                 continue;
             }
@@ -976,49 +907,6 @@ private:
             }
         }
         return filtered;
-    }
-
-    static std::optional<std::filesystem::path>
-    extractNodePath(const yams::daemon::GraphNode& node) {
-        if (node.nodeKey.rfind("path:file:", 0) == 0) {
-            return std::filesystem::path(node.nodeKey.substr(10));
-        }
-        if (node.nodeKey.rfind("path:dir:", 0) == 0) {
-            return std::filesystem::path(node.nodeKey.substr(9));
-        }
-        if (node.nodeKey.rfind("path:logical:", 0) == 0) {
-            return std::filesystem::path(node.nodeKey.substr(13));
-        }
-        if (node.nodeKey.rfind("path:", 0) == 0) {
-            // Historical path nodes use path:<timestamp>Z:<absolute-path>. Prefer the delimiter
-            // after the timestamp; a simple second-colon split truncates paths at HH:MM.
-            auto timestampEnd = node.nodeKey.find("Z:", 5);
-            if (timestampEnd != std::string::npos && timestampEnd + 2 < node.nodeKey.size()) {
-                return std::filesystem::path(node.nodeKey.substr(timestampEnd + 2));
-            }
-            auto secondColon = node.nodeKey.find(':', 5);
-            if (secondColon != std::string::npos && secondColon + 1 < node.nodeKey.size()) {
-                return std::filesystem::path(node.nodeKey.substr(secondColon + 1));
-            }
-        }
-        auto at = node.nodeKey.rfind('@');
-        if (at != std::string::npos && at + 1 < node.nodeKey.size()) {
-            return std::filesystem::path(node.nodeKey.substr(at + 1));
-        }
-        if (!node.properties.empty()) {
-            try {
-                auto props = json::parse(node.properties);
-                if (props.contains("file_path")) {
-                    return std::filesystem::path(props["file_path"].get<std::string>());
-                }
-                if (props.contains("path")) {
-                    return std::filesystem::path(props["path"].get<std::string>());
-                }
-            } catch (...) {
-                return std::nullopt;
-            }
-        }
-        return std::nullopt;
     }
 
     boost::asio::awaitable<Result<void>> executeGraphTraversal() {

@@ -32,6 +32,8 @@ template <typename... Args> inline void error(const char*, Args&&...) {}
 // Ensure formatting uses unified wrapper
 #include <yams/common/format.h>
 
+#include "buffer_processing_helpers.hpp"
+
 namespace yams::content {
 
 namespace {
@@ -234,23 +236,6 @@ std::optional<ExtendedVideoMetadata> extractUsingFFProbe(const std::filesystem::
     return std::nullopt;
 }
 
-std::string normalizeExtensionHint(std::string_view hint) {
-    if (hint.empty()) {
-        return {};
-    }
-
-    std::filesystem::path hintPath{std::string(hint)};
-    std::string extension = hintPath.extension().string();
-    if (extension.empty() && hint.front() == '.') {
-        extension = std::string(hint);
-    }
-
-    std::ranges::transform(extension, extension.begin(),
-                           [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-    return std::ranges::find(videoExtensions, extension) == videoExtensions.end() ? std::string{}
-                                                                                  : extension;
-}
-
 std::string extensionForVideoMime(std::string_view mimeType) {
     if (mimeType == "video/mp4")
         return ".mp4";
@@ -303,76 +288,7 @@ bool hasVideoContainerMagic(std::span<const std::byte> data) {
 }
 
 std::string chooseVideoTempExtension(std::span<const std::byte> data, std::string_view hint) {
-    if (auto extension = normalizeExtensionHint(hint); !extension.empty()) {
-        return extension;
-    }
-
-    auto signatureResult = detection::FileTypeDetector::instance().detectFromBuffer(data);
-    if (signatureResult) {
-        if (auto extension = extensionForVideoMime(signatureResult.value().mimeType);
-            !extension.empty()) {
-            return extension;
-        }
-    }
-
-    return ".mp4";
-}
-
-Result<std::filesystem::path> writeVideoBufferToTempFile(std::span<const std::byte> data,
-                                                         std::string_view extension) {
-    if (data.empty()) {
-        return Error{ErrorCode::InvalidArgument, "Empty video data"};
-    }
-
-    static thread_local std::random_device rd;
-    static thread_local std::mt19937_64 gen(rd());
-
-    std::filesystem::path tempDir;
-    std::error_code ec;
-    bool created = false;
-    for (int attempt = 0; attempt < 16; ++attempt) {
-        tempDir = std::filesystem::temp_directory_path() /
-                  yams::fmt_format("yams-video-buffer-{:016x}", gen());
-        if (std::filesystem::create_directory(tempDir, ec)) {
-            created = true;
-            std::filesystem::permissions(tempDir, std::filesystem::perms::owner_all,
-                                         std::filesystem::perm_options::replace, ec);
-            if (ec) {
-                std::filesystem::remove_all(tempDir);
-                return Error{
-                    ErrorCode::IOError,
-                    yams::fmt_format("Failed to secure temp video directory: {}", ec.message())};
-            }
-            break;
-        }
-        if (ec) {
-            return Error{
-                ErrorCode::IOError,
-                yams::fmt_format("Failed to create temp video directory: {}", ec.message())};
-        }
-    }
-    if (!created) {
-        return Error{ErrorCode::IOError, "Failed to allocate temp video directory"};
-    }
-
-    const auto tempPath = tempDir / yams::fmt_format("buffer{}", extension);
-
-    std::ofstream file(tempPath, std::ios::binary | std::ios::trunc);
-    if (!file) {
-        return Error{ErrorCode::IOError,
-                     yams::fmt_format("Failed to create temp video file: {}", tempPath.string())};
-    }
-
-    file.write(reinterpret_cast<const char*>(data.data()),
-               static_cast<std::streamsize>(data.size()));
-    if (!file) {
-        std::error_code ec;
-        std::filesystem::remove_all(tempPath.parent_path(), ec);
-        return Error{ErrorCode::IOError,
-                     yams::fmt_format("Failed to write temp video file: {}", tempPath.string())};
-    }
-
-    return tempPath;
+    return detail::chooseTempExtension(data, hint, ".mp4", videoExtensions, extensionForVideoMime);
 }
 
 } // anonymous namespace
@@ -386,15 +302,8 @@ VideoContentHandler::VideoContentHandler(VideoProcessingConfig config)
 }
 
 VideoContentHandler::~VideoContentHandler() {
-    cancelProcessing();
-
-    // Wait for processing threads to complete
-    std::lock_guard lock(threadsMutex_);
-    for (auto& thread : processingThreads_) {
-        if (thread.joinable()) {
-            thread.join();
-        }
-    }
+    detail::cancelAndJoinProcessing([this] { cancelProcessing(); }, threadsMutex_,
+                                    processingThreads_);
 }
 
 std::vector<std::string> VideoContentHandler::supportedMimeTypes() const {
@@ -402,14 +311,7 @@ std::vector<std::string> VideoContentHandler::supportedMimeTypes() const {
 }
 
 bool VideoContentHandler::canHandle(const detection::FileSignature& signature) const {
-    // Check MIME type
-    const auto& mimeTypes = supportedMimeTypes();
-    if (std::ranges::find(mimeTypes, signature.mimeType) != mimeTypes.end()) {
-        return true;
-    }
-
-    // Check if it's a video file type
-    return signature.fileType == "video";
+    return detail::canHandleMediaSignature(signature, supportedMimeTypes(), "video");
 }
 
 Result<ContentResult> VideoContentHandler::process(const std::filesystem::path& path,
@@ -493,64 +395,19 @@ Result<ContentResult> VideoContentHandler::process(const std::filesystem::path& 
 Result<ContentResult> VideoContentHandler::processBuffer(std::span<const std::byte> data,
                                                          const std::string& hint,
                                                          const ContentConfig& config) {
-    auto signatureResult = detection::FileTypeDetector::instance().detectFromBuffer(data);
-    bool requiresParserConfirmation = false;
-    if (signatureResult && !canHandle(signatureResult.value())) {
-        const auto& signature = signatureResult.value();
-        requiresParserConfirmation = isGenericVideoDetection(signature);
-        if (!requiresParserConfirmation) {
-            return Error{ErrorCode::NotSupported,
-                         yams::fmt_format("Not a video file: detected as {} ({})",
-                                          signature.mimeType, signature.fileType)};
-        }
-    }
-
-    auto tempPath = writeVideoBufferToTempFile(data, chooseVideoTempExtension(data, hint));
-    if (!tempPath) {
-        return tempPath.error();
-    }
-
-    const auto cleanup = [&tempPath] {
-        std::error_code ec;
-        std::filesystem::remove_all(tempPath.value().parent_path(), ec);
-    };
-
-    auto result = process(tempPath.value(), config);
-    cleanup();
-    if (result && requiresParserConfirmation && !hasConfirmedVideoMetadata(result.value()) &&
-        !hasVideoContainerMagic(data)) {
-        return Error{ErrorCode::NotSupported, "Buffer did not contain parseable video metadata"};
-    }
-    if (result) {
-        result.value().metadata["source"] = "buffer";
-        if (!hint.empty()) {
-            result.value().metadata["hint"] = hint;
-        }
-    }
-    return result;
+    return detail::processBufferWithTempFile(
+        data, hint, config, "video",
+        [this](const detection::FileSignature& signature) { return canHandle(signature); },
+        isGenericVideoDetection, chooseVideoTempExtension,
+        [this](const std::filesystem::path& path, const ContentConfig& processConfig) {
+            return process(path, processConfig);
+        },
+        hasConfirmedVideoMetadata, hasVideoContainerMagic);
 }
 
 Result<void> VideoContentHandler::validate(const std::filesystem::path& path) const {
-    if (!std::filesystem::exists(path)) {
-        return Error{ErrorCode::FileNotFound, "Video file not found"};
-    }
-
-    if (!std::filesystem::is_regular_file(path)) {
-        return Error{ErrorCode::InvalidData, "Not a regular file"};
-    }
-
-    const auto fileSize = std::filesystem::file_size(path);
-    if (fileSize > videoConfig_.maxFileSize) {
-        return Error{
-            ErrorCode::ResourceExhausted,
-            yams::fmt_format("File too large: {} > {}", fileSize, videoConfig_.maxFileSize)};
-    }
-
-    if (fileSize == 0) {
-        return Error{ErrorCode::InvalidData, "Empty video file"};
-    }
-
-    return {};
+    return detail::validateMediaFile(path, videoConfig_.maxFileSize, 1, "Video file not found",
+                                     "Empty video file");
 }
 
 VideoFormat VideoContentHandler::getFormatFromMimeType(const std::string& mimeType) const noexcept {
@@ -589,19 +446,7 @@ void VideoContentHandler::resetStats() {
 
 void VideoContentHandler::updateStats(bool success, std::chrono::milliseconds duration,
                                       size_t bytes) noexcept {
-    std::lock_guard lock(statsMutex_);
-    stats_.totalFilesProcessed++;
-    if (success) {
-        stats_.successfulProcessing++;
-    } else {
-        stats_.failedProcessing++;
-    }
-    stats_.totalProcessingTime += duration;
-    stats_.totalBytesProcessed += bytes;
-
-    if (stats_.totalFilesProcessed > 0) {
-        stats_.averageProcessingTime = stats_.totalProcessingTime / stats_.totalFilesProcessed;
-    }
+    detail::updateProcessingStats(statsMutex_, stats_, success, duration, bytes);
 }
 
 // Helper implementations
