@@ -75,35 +75,68 @@ const char* ngram_mode_label(simeon::NGramMode m) noexcept {
     }
 }
 
-simeon::EncoderConfig build_encoder_config(const EmbeddingConfig& yams_cfg) {
+struct ResolvedSimeonEncoder {
+    simeon::EncoderConfig config;
+    std::string spaceIdentity;
+};
+
+bool usesFixedHash384Profile(const EmbeddingConfig& yamsConfig,
+                             const daemon::ConfigResolver::SimeonEncoderPolicy& policy) {
+    if (yamsConfig.simeon_encoder_profile == EmbeddingConfig::SimeonEncoderProfile::FixedHash384) {
+        return true;
+    }
+    if (!policy.encoderProfile.has_value()) {
+        return false;
+    }
+    if (*policy.encoderProfile == "fixed_hash_384" || *policy.encoderProfile == "simeon-v1-384") {
+        return true;
+    }
+    if (*policy.encoderProfile != "configurable") {
+        spdlog::warn("Ignoring unknown embeddings.simeon.encoder_profile='{}'",
+                     *policy.encoderProfile);
+    }
+    return false;
+}
+
+std::string configurableSpaceIdentity(const simeon::EncoderConfig& config) {
+    std::string identity = "simeon-config-v1:";
+    identity += ngram_mode_label(config.ngram_mode);
+    identity += ':';
+    identity += std::to_string(config.ngram_min);
+    identity += '-';
+    identity += std::to_string(config.ngram_max);
+    identity += ":sketch=";
+    identity += std::to_string(config.sketch_dim);
+    identity += ":output=";
+    identity += std::to_string(config.output_dim);
+    identity += ":projection=";
+    identity += projection_mode_label(config.projection);
+    identity += ":l2=";
+    identity += config.l2_normalize ? '1' : '0';
+    return identity;
+}
+
+ResolvedSimeonEncoder resolveEncoder(const EmbeddingConfig& yamsConfig) {
     const auto policy = daemon::ConfigResolver::resolveSimeonEncoderPolicy();
-    simeon::EncoderConfig cfg;
-    cfg.ngram_mode = parse_ngram_mode(policy.ngramMode.value_or(std::string{}));
-    cfg.ngram_min = policy.ngramMin.value_or(3);
-    cfg.ngram_max = policy.ngramMax.value_or(5);
-    cfg.sketch_dim = policy.sketchDim.value_or(4096);
-    cfg.output_dim = policy.outputDim.value_or(static_cast<uint32_t>(yams_cfg.embedding_dim));
-    cfg.projection = parse_projection_mode(policy.projection.value_or(std::string{}));
-    cfg.l2_normalize = policy.l2Normalize.value_or(yams_cfg.normalize_embeddings);
-    return cfg;
+    if (usesFixedHash384Profile(yamsConfig, policy)) {
+        return ResolvedSimeonEncoder{.config = simeon::simeon_v1_384_config(),
+                                     .spaceIdentity = std::string{simeon::simeon_v1_384_identity}};
+    }
+
+    simeon::EncoderConfig config;
+    config.ngram_mode = parse_ngram_mode(policy.ngramMode.value_or(std::string{}));
+    config.ngram_min = policy.ngramMin.value_or(3);
+    config.ngram_max = policy.ngramMax.value_or(5);
+    config.sketch_dim = policy.sketchDim.value_or(4096);
+    config.output_dim = policy.outputDim.value_or(static_cast<uint32_t>(yamsConfig.embedding_dim));
+    config.projection = parse_projection_mode(policy.projection.value_or(std::string{}));
+    config.l2_normalize = policy.l2Normalize.value_or(yamsConfig.normalize_embeddings);
+    return ResolvedSimeonEncoder{.config = config,
+                                 .spaceIdentity = configurableSpaceIdentity(config)};
 }
 
 std::string compute_simeon_recipe_label() {
-    const auto policy = daemon::ConfigResolver::resolveSimeonEncoderPolicy();
-    const auto proj = parse_projection_mode(policy.projection.value_or(std::string{}));
-    const auto sketch = policy.sketchDim.value_or(4096);
-    const auto out = policy.outputDim.value_or(1024);
-    const auto pq = policy.pqBytes.value_or(0);
-    std::string s = projection_mode_label(proj);
-    s += '_';
-    s += std::to_string(sketch);
-    s += '_';
-    s += std::to_string(out);
-    if (pq > 0) {
-        s += "+pq";
-        s += std::to_string(pq);
-    }
-    return s;
+    return resolveEncoder(EmbeddingConfig{}).spaceIdentity;
 }
 
 class SimeonBackend final : public IEmbeddingBackend {
@@ -116,7 +149,8 @@ public:
         std::lock_guard<std::mutex> lock(mu_);
         if (initialized_.load())
             return true;
-        auto enc_cfg = build_encoder_config(config_);
+        auto resolved = resolveEncoder(config_);
+        auto& enc_cfg = resolved.config;
         spdlog::info("SimeonBackend encoder_config: ngram_mode={} ngram_min={} ngram_max={} "
                      "sketch_dim={} output_dim={} projection={} l2_normalize={}",
                      ngram_mode_label(enc_cfg.ngram_mode), enc_cfg.ngram_min, enc_cfg.ngram_max,
@@ -129,6 +163,7 @@ public:
             return false;
         }
         dim_ = encoder_->output_dim();
+        spaceIdentity_ = std::move(resolved.spaceIdentity);
         initialized_.store(true);
         spdlog::info("SimeonBackend initialized: dim={} tier={}", dim_,
                      simeon::simd_tier_name(simeon::active_simd_tier()));
@@ -140,6 +175,7 @@ public:
         encoder_.reset();
         initialized_.store(false);
         dim_ = 0;
+        spaceIdentity_.clear();
     }
 
     bool isInitialized() const override { return initialized_.load(); }
@@ -175,6 +211,7 @@ public:
     size_t getEmbeddingDimension() const override { return dim_; }
     size_t getMaxSequenceLength() const override { return config_.max_sequence_length; }
     std::string getBackendName() const override { return "Simeon"; }
+    std::string getEmbeddingSpaceIdentity() const override { return spaceIdentity_; }
     bool isAvailable() const override { return true; }
 
     GenerationStats getStats() const override { return stats_; }
@@ -228,6 +265,7 @@ private:
     std::mutex mu_;
     std::atomic<bool> initialized_{false};
     size_t dim_ = 0;
+    std::string spaceIdentity_;
     mutable GenerationStats stats_;
 };
 
@@ -235,6 +273,10 @@ private:
 
 std::unique_ptr<IEmbeddingBackend> makeSimeonBackend(const EmbeddingConfig& config) {
     return std::make_unique<SimeonBackend>(config);
+}
+
+std::string simeonEmbeddingSpaceIdentity(const EmbeddingConfig& config) {
+    return resolveEncoder(config).spaceIdentity;
 }
 
 std::string simeonRecipeLabel() {

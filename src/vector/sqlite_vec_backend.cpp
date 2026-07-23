@@ -804,7 +804,14 @@ public:
 
         query_dim_counts_.clear();
 
-        int rc = sqlite3_open(db_path.c_str(), &db_);
+        // Embedding workers can concurrently search this one backend while semantic graph
+        // ingestion materializes Simeon PQ candidates. Some release configurations link SQLite
+        // in multi-thread mode, where sqlite3_open() leaves an individual connection unprotected.
+        // Require a serialized connection explicitly so the backend remains safe regardless of
+        // the linked SQLite library's process-wide default.
+        constexpr int kOpenFlags =
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX;
+        int rc = sqlite3_open_v2(db_path.c_str(), &db_, kOpenFlags, nullptr);
         if (rc != SQLITE_OK) {
             std::string err = db_ ? sqlite3_errmsg(db_) : "Unknown error";
             if (db_) {
@@ -812,6 +819,12 @@ public:
                 db_ = nullptr;
             }
             return Error{ErrorCode::DatabaseError, "Failed to open database: " + err};
+        }
+        if (sqlite3_db_mutex(db_) == nullptr) {
+            sqlite3_close(db_);
+            db_ = nullptr;
+            return Error{ErrorCode::DatabaseError,
+                         "Vector backend requires a serialized SQLite connection"};
         }
 
         // Set busy timeout so lock contention waits rather than failing immediately.

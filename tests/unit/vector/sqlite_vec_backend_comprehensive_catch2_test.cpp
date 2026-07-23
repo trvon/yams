@@ -364,6 +364,20 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend initialize with new 
     REQUIRE_FALSE(backend.isInitialized());
 }
 
+TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend serializes one SQLite connection across worker threads",
+                 "[vector][backend][init][concurrency][catch2]") {
+    skipIfNeeded();
+
+    SqliteVecBackend backend;
+    REQUIRE((backend.initialize(":memory:").has_value()));
+
+    // Graph ingestion and Simeon PQ routing can search the same backend concurrently.
+    // A non-null connection mutex proves this handle was opened in serialized mode even
+    // when SQLite's process default is the multi-thread (connection-unprotected) mode.
+    CHECK((sqlite3_db_mutex(backend.getDbHandle()) != nullptr));
+}
+
 TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend initialize with existing DB",
                  "[vector][backend][init][catch2]") {
     skipIfNeeded();

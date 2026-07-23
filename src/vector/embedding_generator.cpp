@@ -723,6 +723,15 @@ public:
         }
     }
 
+    std::string getEmbeddingSpaceIdentity() const {
+        try {
+            return backend_ ? backend_->getEmbeddingSpaceIdentity() : std::string{};
+        } catch (...) {
+            spdlog::debug("EmbeddingGenerator::Impl::getEmbeddingSpaceIdentity failed");
+            return {};
+        }
+    }
+
     GenerationStats getStats() const {
         if (!backend_) {
             return GenerationStats{};
@@ -888,6 +897,15 @@ std::string EmbeddingGenerator::getBackendName() const {
     } catch (...) {
         spdlog::debug("EmbeddingGenerator::getBackendName failed");
         return "unknown";
+    }
+}
+
+std::string EmbeddingGenerator::getEmbeddingSpaceIdentity() const {
+    try {
+        return pImpl ? pImpl->getEmbeddingSpaceIdentity() : std::string{};
+    } catch (...) {
+        spdlog::debug("EmbeddingGenerator::getEmbeddingSpaceIdentity failed");
+        return {};
     }
 }
 

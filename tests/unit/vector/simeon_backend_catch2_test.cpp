@@ -38,6 +38,19 @@ TEST_CASE("SimeonBackend initializes and reports its dimension", "[vector][simeo
     REQUIRE(backend->getBackendName() == "Simeon");
 }
 
+TEST_CASE("SimeonBackend fixed hash profile exposes the frozen retrieval space",
+          "[vector][simeon][identity]") {
+    auto cfg = make_cfg(1024);
+    cfg.simeon_encoder_profile = EmbeddingConfig::SimeonEncoderProfile::FixedHash384;
+
+    auto backend = makeSimeonBackend(cfg);
+    REQUIRE(backend != nullptr);
+    REQUIRE(backend->initialize());
+    CHECK(backend->getEmbeddingDimension() == 384u);
+    CHECK(backend->getEmbeddingSpaceIdentity() == "simeon-v1-384");
+    CHECK(simeonEmbeddingSpaceIdentity(cfg) == "simeon-v1-384");
+}
+
 TEST_CASE("SimeonBackend produces deterministic, unit-norm embeddings", "[vector][simeon]") {
     auto backend = makeSimeonBackend(make_cfg(256));
     REQUIRE(backend->initialize());

@@ -26,6 +26,16 @@ struct EmbeddingConfig {
     };
     Backend backend = Backend::Daemon; // Daemon-only embedding path
 
+    enum class SimeonEncoderProfile {
+        Configurable,
+        FixedHash384,
+    };
+
+    // Named profiles are stable coordinate systems. Configurable preserves the
+    // existing [embeddings.simeon] tuning surface; FixedHash384 selects the
+    // frozen Simeon v1 recipe shared with theorem-facing fragment reranking.
+    SimeonEncoderProfile simeon_encoder_profile = SimeonEncoderProfile::Configurable;
+
     // Model configuration (used by daemon and fallback/mock providers)
     std::string model_name = "all-MiniLM-L6-v2";
     size_t max_sequence_length = 512;
@@ -142,6 +152,7 @@ concept EmbeddingBackend =
         { t.getEmbeddingDimension() } -> std::convertible_to<size_t>;
         { t.getMaxSequenceLength() } -> std::convertible_to<size_t>;
         { t.getBackendName() } -> std::convertible_to<std::string>;
+        { t.getEmbeddingSpaceIdentity() } -> std::convertible_to<std::string>;
         { t.isAvailable() } -> std::convertible_to<bool>;
     };
 
@@ -165,6 +176,9 @@ public:
     virtual size_t getMaxSequenceLength() const = 0;
 
     virtual std::string getBackendName() const = 0;
+    // Versioned identity of the coordinate system, not merely the provider.
+    // Empty means that the backend cannot support construction-bound routing.
+    virtual std::string getEmbeddingSpaceIdentity() const { return {}; }
     virtual bool isAvailable() const = 0;
     virtual GenerationStats getStats() const = 0;
     virtual void resetStats() = 0;
@@ -211,6 +225,7 @@ public:
     const EmbeddingConfig& getConfig() const;
     // Backend identity for diagnostics
     std::string getBackendName() const;
+    std::string getEmbeddingSpaceIdentity() const;
 
     // Statistics and monitoring
     GenerationStats getStats() const;
@@ -233,8 +248,7 @@ private:
 /**
  * Factory function for creating and initializing an embedding generator.
  */
-std::unique_ptr<EmbeddingGenerator>
-createEmbeddingGenerator(const EmbeddingConfig& config = {});
+std::unique_ptr<EmbeddingGenerator> createEmbeddingGenerator(const EmbeddingConfig& config = {});
 
 /**
  * Utility functions for embedding operations
