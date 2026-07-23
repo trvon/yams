@@ -1,419 +1,243 @@
-# Retrieval as routing through a trusted coordinate atlas
+# Theorem-guided candidate expansion
 
-Status: research model, not a product-default claim
-Updated: 2026-07-19
+Status: experimental; product-default topology routing remains disabled
+Updated: 2026-07-22
 
-## Thesis and boundary
+## Decision
 
-The useful idea is not that general topology gives YAMS one new global
-coordinate system. General topology gives neighborhoods, overlap, refinement,
-connectedness, and invariance across scale. It does not give a ranking distance
-or make retrieval computationally cheap.
+YAMS uses topology only as an additive candidate producer. The search engine keeps the global
+Simeon result set and may add candidates reached from query-admissible seeds through a persisted,
+typed relation. It does not use embedding geometry, cluster shape, or route confidence as a recall
+certificate.
 
-The stronger and more testable thesis is:
+The implementation has three modes:
 
-> Embeddings and graph-derived coordinates can define local charts over a
-> multiscale overlapping cover. YAMS may route through a small set of charts
-> only when their local distortion, uncertainty, retrieval loss, and work are
-> bounded; otherwise it augments or falls back to global ANN.
+- `disabled`: run the unchanged global search path;
+- `shadow`: produce and score the expansion, record theorem diagnostics, but return the unchanged
+  global path; and
+- `augment`: union scored expansion candidates with the global candidates before ordinary fusion.
 
-This replaces the fragile picture of one globally faithful embedding space with
-an **atlas**: several local coordinate systems whose overlap allows recovery
-when one chart fragments, drifts, or poorly represents a query.
+Hard narrowing is not part of the candidate-expansion experiment and cannot be promoted from these
+results.
 
-## Four objects that must not be conflated
+## Formal contract
 
-| Object | What it contributes | What it does not establish |
-|---|---|---|
-| Topology | neighborhoods, covers, refinement, bridges, persistence | a distance or ranking |
-| Geometry | coordinates, distance, local distortion, intrinsic dimension | relevance or confidence |
-| Measure/statistics | density, uncertainty, calibrated miss risk | a fast index |
-| Index/policy | candidate budget, work, fallback, action selection | semantic correctness |
+The active theorem is in `formal/topology/Yams/Topology/CandidateExpansion.lean`.
 
-An embedding is therefore a coordinate map, not proof that Euclidean or cosine
-proximity preserves every retrieval-relevant relation. The property needed for
-routing is weaker and measurable: protected local neighborhoods must be
-preserved well enough inside the selected charts.
+For a query `q`, let:
 
-## Formal problem
+- `B(q)` be the baseline candidate list;
+- `A(q)` be the selected query-admissible seeds;
+- `R` be the persisted protected relation;
+- `E(q)` be the independently scored documents reached from `A(q)` through `R`; and
+- `P(q)` be the relevant documents for the evaluated query class.
 
-Let `X` be a finite document corpus and `q` a query. Let `N*k(q)` denote the
-unknown ideal relevant top-`k` set. The system observes several views:
-
-- semantic embedding `phi_e : X -> R^d` and query vector `z_q`;
-- sparse evidence `l(q, x)` from lexical retrieval;
-- a weighted relation graph `G = (X, E, w)`;
-- metadata or policy predicates `m(q, x)`.
-
-At scale `s`, topology supplies an overlapping cover
+The implementation constructs the additive candidate list
 
 ```text
-U_s = {U_s,1, ..., U_s,n}.
+C(q) = augment(B(q), E(q))
 ```
 
-A local chart is
+where `augment` preserves baseline order and appends only documents not already present. The Lean
+development proves:
+
+1. every baseline candidate remains present after augmentation;
+2. a missing relevant document reachable from an admissible seed is present after augmentation;
+3. enrichment of a document already in the baseline is distinct from a novel-document rescue; and
+4. if the output budget preserves the baseline relevant candidates and at least one reachable
+   missing relevant document survives, budgeted candidate recall strictly improves.
+
+The theorem is conditional. It does not prove that semantic-neighbor edges contain a missing
+relevant document, that a chosen seed is query-admissible, or that fusion preserves a rescued
+document. Those are empirical obligations.
+
+## Runtime boundary
+
+The production path is intentionally small:
 
 ```text
-C_i = (U_i, psi_i, mu_i, r_i, delta_i, u_i),
+PostIngestQueue / EmbeddingService
+            |
+            v
+persisted semantic_neighbor graph
+            |
+            v
+query-admissible baseline seeds --bounded traversal--> relation candidates
+            |
+            v
+independent Simeon scoring
+            |
+            v
+shadow observation or additive union before fusion
 ```
 
-where `psi_i` is a bounded-dimensional coordinate map, `mu_i` is a routing
-representative, `r_i` is observed local intrinsic dimension, `delta_i` is local
-distortion on protected pairs, and `u_i` is route uncertainty. Charts may
-overlap and fine charts may refine coarse charts.
+The daemon owns ingestion, embeddings, graph construction, and graph repair. Benchmark code waits
+for the production queues to drain and invokes the production graph rebuild seam; it does not build
+a parallel retrieval graph.
 
-The protected relation `P` is deliberately retrieval-specific. It can include
-judged-relevant pairs, reciprocal semantic neighbors, KG edges, citations, and
-vector-unique rescues. A chart is not trusted merely because its clusters look
-cohesive. It needs enough protected observations and a bounded disagreement
-quantity, for example
+The search trace distinguishes:
 
-```text
-delta_i = sum_{(x,y) in P intersect U_i^2} |w(x,y) - sim(psi_i(x), psi_i(y))|
-          / |P intersect U_i^2|.
-```
+- attempted versus applied expansion;
+- all scored expansion candidates;
+- novel candidates versus evidence enrichment of baseline candidates;
+- relevant documents reachable from the selected seeds;
+- relevant expansions surviving fusion and returned top-k; and
+- preservation of baseline relevant candidates at the evaluated budget.
 
-This is an empirical local certificate, not a claim that `psi_i` is a global
-isometry.
+These observations map directly to the theorem. Route geometry, oracle candidate injection, and
+counterfactual rerank-window placement are intentionally outside this experiment.
 
-## The retrieval coordinate
+## Deterministic construction identity
 
-For a query and chart, define a normalized cost vector
+Every comparison must use the same persisted graph. The benchmark records the exact topology
+construction fingerprint, document/node counts, semantic-edge counts, connected-document count,
+isolates, and drained daemon queue state. Cross-arm or cross-repeat identity drift invalidates the
+run.
 
-```text
-Psi(q, C_i) = [d_e, d_s, d_g, d_m, delta_i, u_i].
-```
+A daemon race previously allowed background semantic backfill to interleave with clear-and-rebuild.
+`EmbeddingService` now serializes streaming updates, backfill discovery/write, and full rebuild
+through one mutation boundary. This fix is part of measurement validity, not a search-quality lever.
 
-- `d_e`: semantic cost, initially `1 - max remapped-cosine affinity` to match
-  the current router; use angular distance if a true metric is required;
-- `d_s`: sparse cost, initially `1 - normalized seed mass`;
-- `d_g`: graph/diffusion cost from query seeds to the chart;
-- `d_m`: metadata mismatch or constraint cost;
-- `delta_i`: observed local coordinate distortion;
-- `u_i`: calibrated uncertainty for this chart and query class.
+## Current evidence
 
-With nonnegative typed weights, charts can be ordered by the routing energy
+The daemon-native shadow run at
+`build/benchmarks/search_candidate_rescue_graph/20260722-daemon-native-serialized-r13/`
+completed three valid SciFact repeats with the same construction fingerprint
+`2fd5ab4da463e241`.
 
-```text
-E(q, C_i) = w_e d_e + w_s d_s + w_g d_g + w_m d_m
-          + w_delta delta_i + w_u u_i.
-```
+The decision pair at
+`build/benchmarks/search_candidate_rescue_graph/20260722-daemon-native-serialized-r14/`
+compared global Simeon `c32` with active graph rescue `c32+16`, three repeats per arm. Across 150
+paired queries:
 
-`E` is intentionally called an **energy**, not a metric: sparse evidence,
-metadata mismatch, and query-conditioned uncertainty need not be symmetric or
-satisfy the triangle inequality. This distinction lets the system use several
-useful signals without making a false geometric claim.
+- baseline relevant preservation was `1.0`;
+- the producer proposed 1,393 scored items: 457 novel documents and 936 evidence enrichments;
+- no relevant document was reachable, novelly rescued, or enriched;
+- MRR remained `0.6775`, nDCG@10 remained `0.7071`, and Recall@10 remained `0.8133`; and
+- no relevant expansion reached fusion, so this is not evidence about reranking.
 
-The current C++ router is an early two-axis instance of this scalarization. It
-combines normalized seed mass and remapped centroid cosine, then adds heuristic
-persistence/cohesion terms and sometimes a size dampener. The new model treats
-those constants as an uncalibrated ordering function. They cannot admit hard
-narrowing by themselves.
+The r14 arm used direct graph neighbors from lexical candidates, but its Simeon vector-seed probe
+was disabled (`topology_vector_seed_probe=0`). It therefore did not test whether baseline semantic
+candidates were better admissible seeds.
 
-## Lean formula: minimum work under two trust certificates
+The follow-up shadow run at
+`build/benchmarks/search_candidate_rescue_graph/20260722-admissible-simeon-seeds-r15/`
+enabled the existing 16-result Simeon ANN seed probe for three repeats. Every query used direct
+seed-neighbor traversal, with 8.24 newly admitted vector seeds per query on average. Each repeat
+scored 515 selected candidates (167 novel documents and 348 evidence enrichments). None of the
+three baseline pre-fusion misses appeared in that bounded, post-filter, post-cap set, so no relevant
+novel candidate was produced.
 
-For an admissible chart set `A(q)`, route to chart subset `S` under work budget
-`B`. The compact objective is
+That observation did not establish that the raw one-hop relation lacked the missing documents. The
+old `reachable` metric was populated from the selected 16-document allow-list after per-seed edge
+fetch, eligibility filtering, global ranking, and capping. It therefore conflated the theorem's raw
+relation premise with materialization and selection survival. The relation-level premise remained
+unknown.
 
-```text
-S*(q; B) = argmin_{S subset A(q)} Work(q, S)
+### Stage-ledger result
 
-subject to
-  RequiredEvidenceObserved(q, S),
-  ChartRiskUpper(q, S) <= delta,
-  MissRiskUpper(q, S, corpus(q)) <= epsilon_corpus,
-  Work(q, S) <= B.
-```
+The three-repeat r16 shadow audit at
+`build/benchmarks/search_candidate_rescue_graph/20260723-reachability-stage-ledger-r16/`
+separated raw relation membership, bounded fetch, eligibility, graph selection, and scoped Simeon
+output. All repeats agreed exactly:
 
-`ChartRiskUpper` covers support, local distortion, overlap, intrinsic dimension,
-and uncertainty. `MissRiskUpper` covers protected-candidate and judged retrieval
-loss on a disjoint calibration set. These are separate because a geometrically
-clean chart can still be irrelevant, and a relevant-looking route can still be
-geometrically unstable. `RequiredEvidenceObserved` requires positive observation
-status for chart risk, route risk, and work; a zero-valued counter without such
-status is unavailable evidence, not measured zero work.
+| query | missing qrel | raw relation | fetched / eligible | graph rank | selected 16 | Simeon output |
+|---|---:|---:|---:|---:|---:|---:|
+| 0 | 31715818 | yes | yes | 392 | no | no |
+| 37 | 30655442 | yes | yes | 37 | no | no |
+| 46 | 14407673 | no | no | — | no | no |
 
-The action remains three-way:
+The graph rank is after the bounded fetch and orders candidates by seed-hit count, then maximum edge
+weight. Thus the earlier categorical relation-failure claim was false for two of the three misses.
+Those misses were lost by graph ranking and the 16-document cap. The third miss genuinely failed
+the raw one-hop relation premise for the observed seeds.
 
-```text
-narrow   if required evidence observed AND chart certificate
-         AND route-risk certificate AND budget pass
-augment  if a useful route exists but either certificate fails
-global   if no useful route exists
-```
+The three-repeat r17 full-relation shadow audit at
+`build/benchmarks/search_candidate_rescue_graph/20260723-full-relation-simeon-shadow-r17/`
+removed edge truncation and materialized every observed one-hop candidate (`max_docs=2048`). The two
+reachable qrels entered allow-lists of 731 and 414 documents, respectively, but neither appeared in
+the scoped Simeon result list. All repeats again agreed exactly. The metric named `missing_scored`
+means absent from the scorer's returned result list; it does not claim that the backend skipped the
+candidate's internal PQ/ADC evaluation.
 
-This is represented in
-`formal/topology/Yams/Topology/RetrievalCoordinates.lean`. The proved boundary is
+This localizes two independent obligations:
 
-```text
-selectCoordinateRoutingAction(cfg, observation) = narrow
-  iff RequiredCoordinateEvidenceObserved(observation)
-  and CoordinateChartAdmissible(cfg.chart, observation.chart)
-  and RouteCertificateAdmissible(cfg.route, observation.certificate).
-```
+- relation reachability currently holds for two of the three baseline misses;
+- graph-cap materialization fails those two at 16, while full materialization succeeds;
+- the scoped Simeon output then fails to select either reachable qrel; and
+- the third miss needs a different seed/relation path.
 
-The model also proves that an untrusted chart can never select hard narrowing.
-It extends rather than replaces the existing cover/refinement, fallback,
-protected-candidate, effort-budget, and per-corpus recall theorems.
+No relevant expansion reached fusion in either audit. These runs therefore provide no evidence
+against fusion or reranking, and the conditional Lean theorem remains correct but empirically
+uninstantiated for this query sample.
 
-### Geometry-to-recall theorem
+### ANN vehicle decision
 
-The earlier preservation theorem assumed directly that the route certificate
-covered every protected candidate. That assumption was safe but circular: it
-did not explain why local geometry supplied the coverage. The coordinate model
-now derives candidate-stage recall from three independently testable premises:
+The three-repeat r18 audit at
+`build/benchmarks/search_candidate_rescue_graph/20260723-ann-vs-exact-shadow-r18/`
+kept global retrieval on Simeon PQ/ADC and added a trace-only exhaustive scorer over the identical
+topology allow-list. The exhaustive control uses the stored full-precision embeddings; it does not
+replace the product retrieval arm or alter returned results.
 
-```text
-RelevantSetProtected(q, P, R)
-and PreservesLocalPairs(selectedCover, P)
-and CertificateMaterializesCover(certificate, selectedCover)
-────────────────────────────────────────────────────────────────
-R ∩ GlobalCandidates(q) ⊆ CoordinateRoutedCandidates(q).
-```
+| query | missing qrel | full relation | selected relation | Simeon top 32 | exact top 32 |
+|---|---:|---:|---:|---:|---:|
+| 0 | 31715818 | yes | yes | no | no |
+| 37 | 30655442 | yes | yes | no | no |
+| 46 | 14407673 | no | no | no | no |
 
-`RelevantSetProtected` says each relevant document is connected to the query
-anchor by a protected relation. `PreservesLocalPairs` is the atlas-construction
-obligation. `CertificateMaterializesCover` is the runtime obligation that every
-document in the selected cover reaches the vector allow-list. None directly
-assumes that the relevant candidates are already in that allow-list.
+All repeats agreed. Increasing only the global Simeon result budget from 32 to 48 left Recall@10 at
+`0.8133`; active 16-document graph augmentation also left MRR (`0.6775`), nDCG@10 (`0.7071`), and
+Recall@10 unchanged. The full-relation shadow retained the two reachable qrels, but neither the
+approximate nor exhaustive embedding scorer selected them in its top 32.
 
-Lean proves this as
-`coordinateRoute_relevantTopK_subset_routedCandidates`. It also proves
-`coordinateRoute_admitted_strictlyFocusesRelevantTopK`: when an admitted chart
-preserves the relevant top-k and at least one global candidate lies outside the
-materialized chart, the route retains every relevant candidate, invents no
-global candidate, and removes at least one non-selected candidate. This is a
-strictly better-focused candidate set, not a theorem about final ranking,
-latency, or whether the current atlas satisfies the premises.
+This rules out PQ/ADC approximation as the immediate cause of these misses. ANN remains an
+appropriate acceleration mechanism for broad seed retrieval, but it is not the semantic witness
+for the theorem's candidate-survival premise. Exact nearest-neighbor scoring is not that witness
+either: both implement the same embedding-similarity order, and that order does not select the two
+reachable qrels at the current budget.
 
-## Atlas construction hypothesis
+The architecture should therefore distinguish:
 
-Start with a training-free, multiscale construction:
+- the protected relation \(R(s,d)\), which supplies a candidate superset;
+- a query-conditional selection score \(g(q,d)\), which must preserve missing relevant documents
+  under a bounded `Top_b`;
+- an exact implementation of `Top_b(g)` used as the experimental reference; and
+- ANN only as an optional approximation to that reference, with a separately measured containment
+  obligation.
 
-1. Build a reciprocal semantic-neighbor graph and retain lexical/KG relations
-   as protected edges rather than blindly mixing all edge types.
-2. Construct bounded overlapping neighborhoods at several scales using nets,
-   connected refinements, or a Mapper-like cover.
-3. Give each chart a semantic representative and optionally local spectral or
-   diffusion coordinates.
-4. Measure support, overlap, protected-pair disagreement, local intrinsic
-   dimension, drift, and route uncertainty.
-5. Rank admissible charts by `E`; calibrate action classes separately.
+This matches adaptive corpus-graph reranking: the graph proposes neighbors, while online
+query-dependent document scores decide which neighborhood to expand rather than relying on a
+static graph score alone (MacAvaney, Tonellotto, and Macdonald, *Adaptive Re-Ranking with a Corpus
+Graph*, CIKM 2022, DOI `10.1145/3511808.3557231`).
 
-Do not introduce hyperbolic, diffusion, or learned coordinates as a new default
-without evidence. They are alternative chart families. For example, hyperbolic
-coordinates are plausible for hierarchy-heavy KG regions, while diffusion
-coordinates are plausible where many paths define neighborhood similarity.
-Neither is expected to dominate semantic coordinates for every query class.
+## Next experiment
 
-## Falsifiable obligations and xplan observables
+The next experiment needs an unthresholded exhaustive rank for every relation-reachable judged
+document, followed by a scorer ablation at the same relation and output budget. Compare exact
+embedding similarity with an existing query-dependent lexical/relevance score and an adaptive
+graph-feedback score. This will determine whether increasing the output window is sufficient or the
+selection function itself must change. In parallel, query 46 is the bounded case for a different
+typed relation or multi-hop path. Do not change fusion or reranking until one selection producer
+actually carries a missing qrel into the candidate union.
 
-| Formal quantity | Required observation |
-|---|---|
-| semantic/sparse/graph costs | per-chart component values before scalarization |
-| local chart support | documents and protected pairs per chart |
-| local distortion | mean absolute protected-edge similarity disagreement and observation count |
-| local intrinsic dimension | radial chart-level MLE and its support status |
-| uncertainty | nearest competing route-score gap plus held-out upper bound by query class |
-| atlas behavior | scale, overlap multiplicity, selected charts, uncovered query rate |
-| miss risk | global-vector-unique relevant candidates retained/lost before fusion |
-| work | rows visited, distance evaluations, candidates, exact reranks, latency |
-| action | global, augment, narrow, plus abstention reason |
+The active xplan is `search_candidate_rescue_graph`. Add new arms to that plan only when they test a
+single producer choice at equal budgets. Do not restore the superseded coordinate matrix or an
+oracle-candidate path.
 
-The next decision-grade experiment should not compare another cluster score.
-It should log `Psi(q, C_i)` in shadow mode, pair every proposal with global ANN,
-and answer:
+## Promotion gate
 
-1. Does low chart distortion predict low retrieval miss risk?
-2. Does local intrinsic dimension identify queries where routing saves work?
-3. Do overlapping multiscale charts recover relevant documents lost by a flat
-   partition?
-4. At the same exact-distance budget, does an admitted route preserve per-corpus
-   recall while reducing work?
+Candidate expansion remains experimental unless repeated multi-corpus runs show all of the
+following:
 
-If the first two relationships do not transfer across SciFact, NFCorpus, and a
-third structurally different corpus, the proposed coordinate certificate is not
-useful for product routing.
+- stable daemon-native construction identity;
+- non-zero conditional recall of missing relevant documents from admissible seeds;
+- complete baseline relevant preservation;
+- positive strict budgeted candidate-improvement rate;
+- positive post-fusion and returned rescue survival; and
+- no material latency regression relative to the global Simeon baseline.
 
-### Implemented coordinate trace
-
-The first observability seam is implemented in the sparse-guided router and
-`recordTopologyRoutingDebug`. With stage tracing enabled, each query now emits:
-
-```text
-topology_route_coordinate_count
-topology_route_coordinate_rows
-```
-
-`topology_route_coordinate_rows` is a JSON array in descending score order. Each row has
-the cluster ID, semantic and sparse costs, persistence/cohesion/size penalties,
-measured distortion, measured local intrinsic dimension, route uncertainty,
-the scalar route score, score eligibility, and whether the chart lies in the
-selected score prefix. Graph and metadata axes remain `null` because the current
-router does not measure them. Distortion and local intrinsic dimension also remain
-`null` for charts without their minimum observation support. Missing evidence is
-never encoded as zero.
-
-The detailed rows are emitted whenever stage tracing is enabled. In shadow mode
-they do not affect candidate selection, scoring, or the returned result set. In
-active routing experiments they describe the route that was actually applied;
-consumers must check `topology_shadow_evaluated` before treating a row as a
-counterfactual proposal. Existing `topology_routing_budget_ablation` arms enable
-stage tracing, so their per-query `debug.jsonl` artifacts can carry the rows
-without a new product or benchmark environment knob.
-
-### First observation run
-
-The debug-build `topology_routing_budget_ablation` run at
-`build/benchmarks/topology_routing_budget_ablation/20260719T232313Z` exercised
-both exact and ANN representative routing over three repeats. Across 300 routed
-query records and 900 coordinate rows, declared counts matched, rows were in
-descending score order, the selected-prefix field used the stable
-`in_selected_prefix` name, and every unavailable axis remained `null`.
-
-This run is exploratory rather than decision-grade. All five arms completed,
-but the equal-work gate rejected every arm because actual vector rows visited,
-exact-distance evaluations, and ANN candidate work were unavailable. The routed
-arms also applied narrowing on every query, so they are active interventions,
-not shadow counterfactuals.
-
-At the router boundary, ANN representative selection reduced exact
-representative evaluations from 1095 to 71.18 on average, but added 975.7 ANN
-distance evaluations. Total representative work therefore moved only from
-1095 to 1047, while routed p50 latency remained approximately 101 ms. Exact and
-ANN routing selected the same top chart for 39 of 50 paired queries and produced
-the same final ranking for 38; reciprocal rank was unchanged for all 50. This
-does not establish a work win. It does establish the next admission rule:
-missing work status must force `augment` or `global`, never `narrow`.
-
-The first measured implementation defines chart distortion as mean absolute
-disagreement between a protected semantic-edge score and the member-embedding
-cosine. It estimates chart-level intrinsic dimension from non-zero
-member-to-centroid cosine radii using a radial maximum-likelihood estimator.
-Query-route uncertainty is `1 - clamp(gap, 0, 1)`, where `gap` is the nearest
-competing route-score difference. Each value remains absent when its minimum
-observation support is unavailable.
-
-`search_generalized_memory_topology_gate` supplies the true shadow arm: topology
-constructs and scores the proposed allowed set while the vector leg returns the
-unchanged global ranking. Its current corpus gate covers SciFact, NFCorpus, and
-FiQA. Active narrowing remains a separate arm and cannot inherit a promotion
-claim from shadow quality alone.
-
-### Three-corpus shadow observation
-
-The three-repeat `shadow_margin020_min1` observation at
-`build/benchmarks/search_generalized_memory_topology_gate/20260720T010711Z`
-evaluated 150 queries per repeat, split evenly across SciFact, NFCorpus, and
-FiQA. Shadow evaluation coverage was 1.0 and the counterfactual policy proposed
-narrowing for 40.67% of queries (SciFact 48%, NFCorpus 46%, FiQA 28%) without
-changing the global result set. All three vector-work statuses were observed on
-every query. Mean global work was 17,261 rows visited and 47.68 exact distance
-evaluations; these are measurements of the unchanged arm, not projected savings
-from narrowing.
-
-Coordinate rows covered every query, but chart support was sparse: distortion
-was observed on 26.22% of rows and local intrinsic dimension on 19.33%, while
-competitor-gap uncertainty was observed on 100%. The construction produced
-5,130 charts with a 93.70% singleton rate and no overlap membership. This is the
-dominant geometric result: the current connected-component atlas is too
-fragmented to provide a broadly observed chart certificate.
-
-The offline shadow calibration found only one unique query with a
-global-vector-protected candidate in an admitted counterfactual route. Repeated
-three times, it was an NFCorpus case and retained that candidate, but `n=1`
-cannot calibrate miss risk and provides no SciFact or FiQA transfer evidence.
-Consequently this run does not admit active narrowing or establish that
-distortion or local intrinsic dimension predicts miss risk.
-
-The xplan arm remains formally invalid: its quality pass completed, but early
-warmup searches timed out under concurrent host load, leaving 143, 143, and 144
-of 150 warmup queries complete. The measured rows are retained as an observation
-artifact, not promoted as a decision-grade result. A rerun should occur on an
-isolated host only after changing the atlas construction to increase
-non-singleton protected-pair support and adding overlap; rerunning the same
-fragmented atlas would not repair the missing calibration evidence.
-
-## Literature map
-
-The literature supports components of the model, not the complete YAMS claim.
-Entries were checked through Paperbridge against primary publication metadata
-and available abstracts.
-
-### Metric covers and scalable neighborhood search
-
-- Har-Peled and Mendel,
-  [Fast Construction of Nets in Low-Dimensional Metrics and Their Applications](https://doi.org/10.1137/S0097539704446281),
-  gives the basis for hierarchical nets in metrics with bounded doubling
-  dimension. YAMS must measure local dimensionality; it cannot assume this
-  favorable regime globally.
-- Beygelzimer, Kakade, and Langford,
-  [Cover Trees for Nearest Neighbor](https://doi.org/10.1145/1143844.1143857),
-  supports multiscale metric indexing without requiring Euclidean coordinates.
-  It is a candidate construction principle, not evidence that current semantic
-  distance has a benign expansion constant.
-- Malkov and Yashunin,
-  [Efficient and Robust Approximate Nearest Neighbor Search Using Hierarchical
-  Navigable Small World Graphs](https://doi.org/10.1109/TPAMI.2018.2889473),
-  demonstrates the practical value of scale-separated navigation. HNSW remains
-  the global ANN baseline that an atlas router must beat at equal recall/work.
-
-### Coordinates from local geometry
-
-- Tenenbaum, de Silva, and Langford,
-  [A Global Geometric Framework for Nonlinear Dimensionality Reduction](https://doi.org/10.1126/science.290.5500.2319),
-  shows how local metric observations can recover global manifold coordinates
-  under stated manifold assumptions. Those assumptions are hypotheses to test,
-  not properties granted to text embeddings.
-- Coifman and Lafon,
-  [Diffusion Maps](https://doi.org/10.1016/j.acha.2006.04.006), and Nadler et al.,
-  [Diffusion Maps, Spectral Clustering and Reaction Coordinates](https://doi.org/10.1016/j.acha.2005.07.004),
-  motivate graph-derived coordinates and diffusion distance when connectivity
-  across many paths is more meaningful than one centroid.
-- Aumüller and Ceccarello,
-  [The Role of Local Dimensionality Measures in Benchmarking Nearest Neighbor
-  Search](https://doi.org/10.1016/j.is.2021.101807),
-  shows that local intrinsic dimensionality and relative contrast expose query
-  difficulty and runtime behavior. This directly motivates LID as an abstention
-  feature and stratification variable.
-
-### Topological covers and stability
-
-- Singh, Mémoli, and Carlsson,
-  [Topological Methods for the Analysis of High Dimensional Data Sets and 3D
-  Object Recognition](https://doi.org/10.2312/SPBG/SPBG07/091-100),
-  introduces Mapper as partial clustering guided by filter functions and encoded
-  as a simplicial complex. It supports overlapping, guided covers rather than a
-  single final partition.
-- Cohen-Steiner, Edelsbrunner, and Harer,
-  [Stability of Persistence Diagrams](https://doi.org/10.1145/1064092.1064133),
-  supplies the mathematical reason to prefer features that persist under small
-  perturbations. YAMS still needs an operational drift test tied to retrieval,
-  rather than treating persistence score as automatic relevance.
-- Carlsson,
-  [Topological Pattern Recognition for Point Cloud Data](https://doi.org/10.1017/S0962492914000051),
-  gives a broader account of persistent homology on finite metric samples. Its
-  role here is diagnostic chart stability, not online ranking.
-
-### Risk-aware routing
-
-- Lu, Xiao, and Ishikawa,
-  [Probabilistic Routing for Graph-Based Approximate Nearest Neighbor Search](https://arxiv.org/abs/2402.11354),
-  formulates skipping exact neighbor evaluations with a probabilistic routing
-  guarantee. It is currently an arXiv result in this map, so it is a mechanism
-  precedent rather than a settled product guarantee.
-- Angelopoulos et al.,
-  [Conformal Risk Control](https://arxiv.org/abs/2208.02814),
-  motivates calibration of monotone loss and explicit risk control. YAMS adopts
-  the calibration/runtime separation only; exchangeability and transfer across
-  changing corpora must be tested before claiming a conformal guarantee.
-
-## Non-claims
-
-- A semantic embedding is not assumed to be an isometry of relevance.
-- A low-dimensional visualization is not automatically a retrieval index.
-- Persistent topology does not imply query relevance.
-- A weighted multi-signal energy is not called a metric without metric axioms.
-- A pooled quality gain cannot hide a corpus-specific recall loss.
-- Synthetic data may test construction and throughput, but not rank retrieval
-  coordinate systems for product use.
+Failure of reachability means refine the seed/relation producer. Failure before the scoped Simeon
+output means inspect materialization, output budget, or embedding-space ranking. A candidate present
+in that output but absent after fusion implicates fusion; survival through fusion but not returned
+top-k implicates final ranking. Keeping those stages separate prevents more search-engine machinery
+from being added without evidence.
