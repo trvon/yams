@@ -144,6 +144,8 @@ TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentI
     TopologyArtifactBatch batch;
     batch.snapshotId = makeSnapshotId(ts.unixMillis);
     batch.algorithm = std::move(algorithm);
+    batch.inputKind = config.inputKind;
+    batch.embeddingSpaceIdentity = config.embeddingSpaceIdentity;
     batch.generatedAtUnixSeconds = ts.unixSeconds;
 
     if (documents.empty()) {
@@ -180,6 +182,8 @@ TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentI
         double cohesion = 0.0;
         double persistence = 0.0;
         std::size_t internalEdgeCount = 0;
+        std::size_t protectedPairCount = 0;
+        std::size_t preservedProtectedPairCount = 0;
         std::unordered_map<std::size_t, double> weightedDegree;
         weightedDegree.reserve(members.size());
         std::size_t bridgeCount = 0;
@@ -187,7 +191,11 @@ TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentI
         for (std::size_t idx : members) {
             std::size_t degree = 0;
             for (const auto& [neighborIdx, weight] : adjacency[idx]) {
-                if (!memberSet.contains(neighborIdx)) {
+                const bool neighborInCluster = memberSet.contains(neighborIdx);
+                if (!neighborInCluster || idx < neighborIdx) {
+                    ++protectedPairCount;
+                }
+                if (!neighborInCluster) {
                     continue;
                 }
                 weightedDegree[idx] += weight;
@@ -195,6 +203,7 @@ TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentI
                 // Undirected edge stored twice in adjacency; accumulate
                 // cohesion/persistence only on the ordered half.
                 if (idx < neighborIdx) {
+                    ++preservedProtectedPairCount;
                     cohesion += weight;
                     persistence =
                         internalEdgeCount == 0 ? weight : std::min<double>(persistence, weight);
@@ -238,6 +247,8 @@ TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentI
             possibleEdges > 0.0 ? static_cast<double>(internalEdgeCount) / possibleEdges : 0.0;
         cluster.bridgeMass =
             members.empty() ? 0.0 : static_cast<double>(bridgeCount) / members.size();
+        cluster.protectedPairCount = protectedPairCount;
+        cluster.preservedProtectedPairCount = preservedProtectedPairCount;
         cluster.medoid = ClusterRepresentative{.clusterId = clusterId,
                                                .documentHash = documents[medoidIdx].documentHash,
                                                .filePath = documents[medoidIdx].filePath,
@@ -630,6 +641,7 @@ LouvainTopologyEngine::buildArtifacts(std::span<const TopologyDocumentInput> doc
         batch.snapshotId = makeSnapshotId(ts.unixMillis);
         batch.algorithm = "louvain_v1";
         batch.inputKind = config.inputKind;
+        batch.embeddingSpaceIdentity = config.embeddingSpaceIdentity;
         batch.generatedAtUnixSeconds = ts.unixSeconds;
         return batch;
     }
@@ -679,6 +691,7 @@ KMeansTopologyEngine::buildArtifacts(std::span<const TopologyDocumentInput> docu
         batch.snapshotId = makeSnapshotId(ts.unixMillis);
         batch.algorithm = "kmeans_v1";
         batch.inputKind = config.inputKind;
+        batch.embeddingSpaceIdentity = config.embeddingSpaceIdentity;
         batch.generatedAtUnixSeconds = ts.unixSeconds;
         return batch;
     }

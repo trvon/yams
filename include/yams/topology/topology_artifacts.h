@@ -53,6 +53,9 @@ struct TopologyDocumentInput {
 struct TopologyBuildConfig {
     TopologyBuildMode mode{TopologyBuildMode::Incremental};
     TopologyInputKind inputKind{TopologyInputKind::Hybrid};
+    // Versioned identity of the dense coordinates used for centroids and
+    // representatives. Empty means theorem-backed narrowing must fail closed.
+    std::string embeddingSpaceIdentity;
     std::size_t maxDocuments{0};
     std::size_t maxNeighborsPerDocument{32};
     std::size_t maxDirtyRegionDocs{256};
@@ -143,6 +146,10 @@ struct ClusterArtifact {
     /// retrieval postings and do not alter this structural statistic.
     double densityScore{0.0};
     double bridgeMass{0.0};
+    /// Protected construction pairs incident to this primary chart and the subset whose endpoints
+    /// remain together inside it. Both are zero when the construction supplied no pair evidence.
+    std::size_t protectedPairCount{0};
+    std::size_t preservedProtectedPairCount{0};
     std::optional<ClusterRepresentative> medoid;
     std::vector<std::string> memberDocumentHashes;
     std::vector<std::string> overlapClusterIds;
@@ -157,6 +164,7 @@ struct TopologyArtifactBatch {
     std::string snapshotId;
     std::string algorithm;
     TopologyInputKind inputKind{TopologyInputKind::Hybrid};
+    std::string embeddingSpaceIdentity;
     uint64_t generatedAtUnixSeconds{0};
     // Monotonically increasing epoch stamped by the builder on every published batch.
     // Distinct from snapshotId (which is a timestamp) so query-side code can detect
@@ -220,6 +228,13 @@ struct ClusterRoute {
     double routeScore{0.0};
     double stabilityScore{0.0};
     std::size_t memberCount{0};
+    /// Pre-scalarization query-to-chart costs. Missing values mean that the route request did not
+    /// provide usable evidence on that axis; they must not be interpreted as zero cost.
+    std::optional<double> semanticCost;
+    std::optional<double> sparseCost;
+    double persistencePenalty{1.0};
+    double cohesionPenalty{1.0};
+    double sizePenalty{0.0};
 };
 
 } // namespace yams::topology

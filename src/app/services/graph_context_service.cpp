@@ -8,6 +8,7 @@
 
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
@@ -375,32 +376,51 @@ lookupFallbackNodeSymbols(metadata::KnowledgeGraphStore& kgStore,
         return Result<void>();
     };
 
-    for (const auto& term : terms) {
-        auto exactAliases = hydrateAliases(kgStore.resolveAliasExact(term, limit), 95.0);
+    const auto lookupTerm = [&](const std::string& lookupTerm) -> Result<void> {
+        auto exactAliases = hydrateAliases(kgStore.resolveAliasExact(lookupTerm, limit), 95.0);
         if (!exactAliases) {
             return exactAliases.error();
         }
         if (symbols.size() >= limit) {
-            break;
+            return Result<void>();
         }
 
-        auto labelMatches = kgStore.searchNodesByLabel(term, limit, 0);
+        auto labelMatches = kgStore.searchNodesByLabel(lookupTerm, limit, 0);
         if (!labelMatches) {
             return labelMatches.error();
         }
         for (const auto& node : labelMatches.value()) {
-            maybeAddNode(node, term.find(' ') != std::string::npos ? 90.0 : 80.0);
+            maybeAddNode(node, lookupTerm.find(' ') != std::string::npos ? 90.0 : 80.0);
             if (symbols.size() >= limit) {
                 break;
             }
         }
         if (symbols.size() >= limit) {
-            break;
+            return Result<void>();
         }
 
-        auto fuzzyAliases = hydrateAliases(kgStore.resolveAliasFuzzy(term, limit), 70.0);
+        auto fuzzyAliases = hydrateAliases(kgStore.resolveAliasFuzzy(lookupTerm, limit), 70.0);
         if (!fuzzyAliases) {
             return fuzzyAliases.error();
+        }
+        return Result<void>();
+    };
+
+    for (const auto& term : terms) {
+        if (auto res = lookupTerm(term); !res) {
+            return res.error();
+        }
+        if (symbols.size() >= limit) {
+            break;
+        }
+        // Indexed symbols may carry internal qualifiers (e.g. Ns::Impl::method) that a
+        // shortened C++ qualified query (Ns::method) cannot match verbatim; retry with
+        // the simple name so qualified queries resolve like unqualified ones.
+        const std::string simpleName = simpleNameOf(term);
+        if (simpleName != term) {
+            if (auto res = lookupTerm(simpleName); !res) {
+                return res.error();
+            }
         }
         if (symbols.size() >= limit) {
             break;
@@ -634,13 +654,13 @@ public:
             bool truncated = false;
             std::size_t totalFiles = 0;
             buildSnippets(response.matches, req.budget, true, response.snippets, response.warnings,
-                          truncated, totalFiles);
+                          truncated, totalFiles, response.snippetRenderMicros,
+                          response.snippetsRendered);
             if (truncated) {
                 response.truncated = true;
             }
         }
-        YAMS_PLOT("graph_context::lookup_matches",
-                  static_cast<int64_t>(response.matches.size()));
+        YAMS_PLOT("graph_context::lookup_matches", static_cast<int64_t>(response.matches.size()));
         return response;
     }
 
@@ -730,7 +750,8 @@ public:
             bool truncated = false;
             std::size_t totalFiles = 0;
             buildSnippets(pathSyms.value(), req.budget, true, response.snippets, response.warnings,
-                          truncated, totalFiles);
+                          truncated, totalFiles, response.snippetRenderMicros,
+                          response.snippetsRendered);
             if (truncated) {
                 response.truncated = true;
             }
@@ -751,7 +772,8 @@ public:
             return Error{ErrorCode::InvalidArgument, "graph impact requires a symbol"};
         }
 
-        auto entry = resolveEntrySymbols(req.symbol, std::nullopt, std::nullopt, req.budget.maxSymbols);
+        auto entry =
+            resolveEntrySymbols(req.symbol, std::nullopt, std::nullopt, req.budget.maxSymbols);
         if (!entry) {
             return entry.error();
         }
@@ -760,8 +782,8 @@ public:
         std::unordered_set<std::int64_t> seedSeen;
         // Seed from the literal query name first: callers reference the call-site surface form
         // (`symbol_ref:<name>`), which does not always match the substring-resolved definition.
-        if (auto r = collectCallTargetNodeIds(simpleNameOf(req.symbol), req.symbol, seedSeen,
-                                              seedIds);
+        if (auto r =
+                collectCallTargetNodeIds(simpleNameOf(req.symbol), req.symbol, seedSeen, seedIds);
             !r) {
             return r.error();
         }
@@ -791,8 +813,7 @@ public:
             !r) {
             return r.error();
         }
-        YAMS_PLOT("graph_context::impact_affected",
-                  static_cast<int64_t>(affected.size()));
+        YAMS_PLOT("graph_context::impact_affected", static_cast<int64_t>(affected.size()));
         response.affectedSymbols.reserve(affected.size());
         for (const auto& node : affected) {
             response.affectedSymbols.push_back(makeContextSymbol(node, req.symbol, 0.0));
@@ -810,7 +831,8 @@ public:
         return response;
     }
 
-    Result<GraphAffectedTestsResponse> affectedTests(const GraphAffectedTestsRequest& req) override {
+    Result<GraphAffectedTestsResponse>
+    affectedTests(const GraphAffectedTestsRequest& req) override {
         YAMS_ZONE_SCOPED_N("graph_context::affectedTests");
         GraphAffectedTestsResponse response;
         response.changedFiles = req.changedFiles;
@@ -853,7 +875,8 @@ public:
 
         std::vector<metadata::KGNode> affected;
         const auto depth = std::clamp<std::size_t>(req.depth == 0 ? 5 : req.depth, 1, 5);
-        if (auto r = collectReverseDependents(seedIds, depth, 256, affected, response.relationships);
+        if (auto r =
+                collectReverseDependents(seedIds, depth, 256, affected, response.relationships);
             !r) {
             return r.error();
         }
@@ -864,9 +887,8 @@ public:
             if (sym.filePath.empty()) {
                 continue;
             }
-            const bool matchesPattern =
-                !req.testPathPattern.empty() &&
-                sym.filePath.find(req.testPathPattern) != std::string::npos;
+            const bool matchesPattern = !req.testPathPattern.empty() &&
+                                        sym.filePath.find(req.testPathPattern) != std::string::npos;
             if (sym.testFile || matchesPattern) {
                 testFiles.insert(sym.filePath);
             }
@@ -1025,7 +1047,9 @@ private:
         bool truncated = false;
         std::size_t totalFilesConsidered = 0;
         const auto emitted = buildSnippets(symbols, req.budget, req.includeCode, response.files,
-                                           response.warnings, truncated, totalFilesConsidered);
+                                           response.warnings, truncated, totalFilesConsidered,
+                                           response.snippetRenderMicros,
+                                           response.snippetsRendered);
         response.totalFilesConsidered = totalFilesConsidered;
         response.emittedChars = emitted;
         if (truncated) {
@@ -1037,8 +1061,11 @@ private:
                               const GraphContextBudget& budget, bool includeCode,
                               std::vector<GraphContextSnippet>& outFiles,
                               std::vector<std::string>& warnings, bool& truncated,
-                              std::size_t& totalFilesConsidered) {
+                              std::size_t& totalFilesConsidered, std::int64_t& renderMicros,
+                              std::size_t& snippetsRendered) {
         YAMS_ZONE_SCOPED_N("graph_context::buildSnippets");
+        renderMicros = 0;
+        snippetsRendered = 0;
         std::unordered_map<std::string, std::vector<GraphContextSymbol>> byFile;
         for (const auto& symbol : symbols) {
             if (symbol.filePath.empty()) {
@@ -1135,9 +1162,17 @@ private:
 
             const auto remaining = budget.maxTotalChars - totalChars;
             const auto fileBudget = std::min(budget.maxCharsPerFile, remaining);
-            snippet.content = lineNumberedContent(lines, startLine, endLine,
-                                                  budget.includeLineNumbers, fileBudget,
-                                                  snippet.truncated);
+            const auto renderStart = std::chrono::steady_clock::now();
+            {
+                YAMS_ZONE_SCOPED_N("graph_context::snippet_render");
+                snippet.content =
+                    lineNumberedContent(lines, startLine, endLine, budget.includeLineNumbers,
+                                        fileBudget, snippet.truncated);
+            }
+            renderMicros += std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now() - renderStart)
+                                .count();
+            ++snippetsRendered;
             snippet.startLine = static_cast<std::int32_t>(startLine);
             snippet.endLine = static_cast<std::int32_t>(endLine);
             totalChars += snippet.content.size();
@@ -1148,6 +1183,8 @@ private:
             }
             outFiles.push_back(std::move(snippet));
         }
+        YAMS_PLOT("graph_context::snippet_render_us", renderMicros);
+        YAMS_PLOT("graph_context::snippets_rendered", static_cast<std::int64_t>(snippetsRendered));
         return totalChars;
     }
 
@@ -1165,10 +1202,9 @@ private:
         return std::optional<std::int64_t>{node.value()->id};
     }
 
-    Result<std::vector<GraphContextSymbol>> resolveEntrySymbols(const std::string& name,
-                                                                const std::optional<std::string>& file,
-                                                                std::optional<std::int32_t> line,
-                                                                std::size_t limit) {
+    Result<std::vector<GraphContextSymbol>>
+    resolveEntrySymbols(const std::string& name, const std::optional<std::string>& file,
+                        std::optional<std::int32_t> line, std::size_t limit) {
         YAMS_ZONE_SCOPED_N("graph_context::resolveEntrySymbols");
         std::vector<GraphContextSymbol> out;
         std::unordered_set<std::string> seen;
@@ -1191,8 +1227,8 @@ private:
             }
         }
         if (out.empty()) {
-            auto fallback = lookupFallbackNodeSymbols(*kgStore_, extractQueryTerms(name), name,
-                                                      true, limit);
+            auto fallback =
+                lookupFallbackNodeSymbols(*kgStore_, extractQueryTerms(name), name, true, limit);
             if (!fallback) {
                 return fallback.error();
             }
@@ -1249,17 +1285,17 @@ private:
         const auto suffix = "::" + lowerSimple;
         for (const auto& node : matches.value()) {
             const auto& type = node.type;
-            const bool callTargetType =
-                type == "symbol_reference" || type == "function" || type == "method" ||
-                type == "function_version" || type == "method_version" || type == "class" ||
-                type == "struct";
+            const bool callTargetType = type == "symbol_reference" || type == "function" ||
+                                        type == "method" || type == "function_version" ||
+                                        type == "method_version" || type == "class" ||
+                                        type == "struct";
             if (!callTargetType) {
                 continue;
             }
             const auto label = lowerAscii(node.label.value_or(std::string{}));
-            const bool nameMatch =
-                label == lowerSimple || (!lowerQualified.empty() && label == lowerQualified) ||
-                (label.size() > suffix.size() && label.ends_with(suffix));
+            const bool nameMatch = label == lowerSimple ||
+                                   (!lowerQualified.empty() && label == lowerQualified) ||
+                                   (label.size() > suffix.size() && label.ends_with(suffix));
             if (!nameMatch) {
                 continue;
             }
@@ -1268,10 +1304,11 @@ private:
             }
             // If a reconciliation pass linked placeholders to this definition, seed those
             // deterministically (avoids relying solely on surface-form name matching).
-            const bool isDefinition = type == "function" || type == "method" ||
-                                      type == "class" || type == "struct";
+            const bool isDefinition =
+                type == "function" || type == "method" || type == "class" || type == "struct";
             if (isDefinition) {
-                auto resolved = kgStore_->getEdgesTo(node.id, std::string_view("resolves_to"), 64, 0);
+                auto resolved =
+                    kgStore_->getEdgesTo(node.id, std::string_view("resolves_to"), 64, 0);
                 if (resolved) {
                     for (const auto& edge : resolved.value()) {
                         if (seedSet.insert(edge.srcNodeId).second) {
@@ -1382,8 +1419,8 @@ private:
 
     Result<void> shortestPathToAny(std::int64_t fromId,
                                    const std::unordered_set<std::int64_t>& targets,
-                                   std::size_t maxDepth,
-                                   std::vector<GraphContextRelation>& path, bool& found) {
+                                   std::size_t maxDepth, std::vector<GraphContextRelation>& path,
+                                   bool& found) {
         YAMS_ZONE_SCOPED_N("graph_context::shortestPathToAny");
         found = false;
         if (targets.contains(fromId)) {

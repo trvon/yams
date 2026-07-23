@@ -1222,6 +1222,8 @@ TEST_CASE("ProtoSerializer: Response roundtrip", "[daemon][protocol][serializati
         response.totalSymbolsConsidered = 2;
         response.totalFilesConsidered = 1;
         response.emittedChars = 64;
+        response.snippetRenderMicros = 123;
+        response.snippetsRendered = 1;
         response.kgAvailable = true;
         response.truncated = true;
         response.warnings = {"budget reached"};
@@ -1279,7 +1281,49 @@ TEST_CASE("ProtoSerializer: Response roundtrip", "[daemon][protocol][serializati
         REQUIRE(gotGraph->relationships.size() == 1);
         CHECK(gotGraph->relationships[0].relation == "calls");
         CHECK(gotGraph->warnings.at(0) == "budget reached");
+        CHECK(gotGraph->snippetRenderMicros == 123);
+        CHECK(gotGraph->snippetsRendered == 1);
         CHECK(gotGraph->truncated);
+    }
+
+    SECTION("GraphSymbolLookupResponse roundtrips snippet render metrics") {
+        GraphSymbolLookupResponse response;
+        response.symbol = "processTask";
+        response.snippetRenderMicros = 456;
+        response.snippetsRendered = 2;
+
+        auto encoded = ProtoSerializer::encode_payload(
+            makeMessageWith(Response{std::in_place_type<GraphSymbolLookupResponse>, response}, 6));
+        REQUIRE(encoded);
+
+        auto decoded = ProtoSerializer::decode_payload(encoded.value());
+        REQUIRE(decoded);
+        REQUIRE(std::holds_alternative<Response>(decoded.value().payload));
+        auto* got =
+            std::get_if<GraphSymbolLookupResponse>(&std::get<Response>(decoded.value().payload));
+        REQUIRE(got != nullptr);
+        CHECK(got->snippetRenderMicros == 456);
+        CHECK(got->snippetsRendered == 2);
+    }
+
+    SECTION("GraphTraceResponse roundtrips snippet render metrics") {
+        GraphTraceResponse response;
+        response.from = "processTask";
+        response.to = "helper";
+        response.snippetRenderMicros = 789;
+        response.snippetsRendered = 3;
+
+        auto encoded = ProtoSerializer::encode_payload(
+            makeMessageWith(Response{std::in_place_type<GraphTraceResponse>, response}, 7));
+        REQUIRE(encoded);
+
+        auto decoded = ProtoSerializer::decode_payload(encoded.value());
+        REQUIRE(decoded);
+        REQUIRE(std::holds_alternative<Response>(decoded.value().payload));
+        auto* got = std::get_if<GraphTraceResponse>(&std::get<Response>(decoded.value().payload));
+        REQUIRE(got != nullptr);
+        CHECK(got->snippetRenderMicros == 789);
+        CHECK(got->snippetsRendered == 3);
     }
 
     SECTION("ErrorResponse sanitizes invalid UTF-8 message") {

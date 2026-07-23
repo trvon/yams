@@ -50,6 +50,9 @@ struct TopologyExtractionStats {
     std::size_t documentsRequested{0};
     std::size_t documentsLoaded{0};
     std::size_t documentsReturned{0};
+    // Common vector-record model identity. Empty when absent or mixed.
+    std::string embeddingSpaceIdentity;
+    bool mixedEmbeddingSpaces{false};
     std::size_t documentsMissingEmbeddings{0};
     std::size_t documentsMissingGraphNodes{0};
     std::size_t metadataMapsLoaded{0};

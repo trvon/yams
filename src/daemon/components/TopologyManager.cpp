@@ -583,6 +583,7 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     if (!extracted) {
         return Result<RebuildStats>(extracted.error());
     }
+    buildConfig.embeddingSpaceIdentity = extractionStats.embeddingSpaceIdentity;
 
     if (!documentHashes.empty() && extracted.value().empty()) {
         RebuildStats skipped;

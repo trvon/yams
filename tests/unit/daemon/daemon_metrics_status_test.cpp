@@ -4858,6 +4858,7 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         CHECK(fullResp.files.front().content.find("fallbackEntry") != std::string::npos);
         CHECK(fullResp.entrySymbols.size() == 1);
         CHECK(fullResp.entrySymbols.front().label == "fallbackEntry");
+        CHECK(fullResp.snippetsRendered == 1);
 
         GraphExploreRequest omittedReq;
         omittedReq.query = "fallbackEntry";
@@ -4869,6 +4870,8 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         REQUIRE(omittedResp.files.size() == 1);
         CHECK(omittedResp.files.front().mode == "omitted");
         CHECK(omittedResp.files.front().content.empty());
+        CHECK(omittedResp.snippetRenderMicros == 0);
+        CHECK(omittedResp.snippetsRendered == 0);
     }
 
     SECTION("graph query lists node types") {

@@ -150,6 +150,43 @@ TEST_CASE("Database: prepared statements", "[unit][metadata][database]") {
     }
 }
 
+TEST_CASE("Database: statement failures include sqlite error detail",
+          "[unit][metadata][database]") {
+    DatabaseFixture fix;
+    Database db;
+    auto openResult = db.open(fix.dbPath_.string(), ConnectionMode::Create);
+    REQUIRE(openResult.has_value());
+
+    auto ftsResult = db.execute("CREATE VIRTUAL TABLE docs_fts USING fts5(content)");
+    if (!ftsResult.has_value()) {
+        SKIP("FTS5 unavailable in this environment");
+    }
+
+    SECTION("step failure surfaces sqlite3_errmsg detail") {
+        auto stmtResult = db.prepare("SELECT rowid FROM docs_fts WHERE docs_fts MATCH ?");
+        REQUIRE(stmtResult.has_value());
+        Statement stmt = std::move(stmtResult).value();
+        REQUIRE(stmt.bind(1, std::string("NoSuchColumn:value")).has_value());
+
+        auto stepResult = stmt.step();
+        REQUIRE_FALSE(stepResult.has_value());
+        CHECK(
+            (stepResult.error().message.find("no such column: NoSuchColumn") != std::string::npos));
+    }
+
+    SECTION("execute failure surfaces sqlite3_errmsg detail") {
+        auto stmtResult = db.prepare("SELECT rowid FROM docs_fts WHERE docs_fts MATCH ?");
+        REQUIRE(stmtResult.has_value());
+        Statement stmt = std::move(stmtResult).value();
+        REQUIRE(stmt.bind(1, std::string("NoSuchColumn:value")).has_value());
+
+        auto execResult = stmt.execute();
+        REQUIRE_FALSE(execResult.has_value());
+        CHECK(
+            (execResult.error().message.find("no such column: NoSuchColumn") != std::string::npos));
+    }
+}
+
 TEST_CASE("Database: transactions", "[unit][metadata][database]") {
     DatabaseFixture fix;
     Database db;

@@ -1310,10 +1310,31 @@ private:
             co_return;
         }
 
+        YAMS_ZONE_SCOPED_N("search_service::snippet_hydration");
+        const auto hydrationStart = std::chrono::steady_clock::now();
+        bool hydrationTimingRecorded = false;
+        resp.componentTimingMicros["snippet_lookup"] = 0;
+        resp.componentTimingMicros["snippet_content_fetch"] = 0;
+        resp.componentTimingMicros["snippet_render"] = 0;
+        auto finishHydrationTiming = [&]() {
+            if (hydrationTimingRecorded)
+                return;
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                                     std::chrono::steady_clock::now() - hydrationStart)
+                                     .count();
+            resp.componentTimingMicros["snippet_hydration"] = elapsed;
+            YAMS_PLOT("search_service::snippet_hydration_us", static_cast<double>(elapsed));
+            hydrationTimingRecorded = true;
+        };
+
         // Defensive cap: avoid hydrating snippets for very large result sets.
         constexpr size_t kMaxSnippetHydration = 200;
         const size_t hydrateCount = std::min(resp.results.size(), kMaxSnippetHydration);
+        resp.searchStats["snippet_hydration_candidates"] = std::to_string(hydrateCount);
         if (hydrateCount == 0) {
+            resp.searchStats["snippet_hydration_missing"] = "0";
+            resp.searchStats["snippet_hydrated_results"] = "0";
+            finishHydrationTiming();
             co_return;
         }
 
@@ -1324,10 +1345,12 @@ private:
         hashToIndices.reserve(hydrateCount);
         std::unordered_map<std::string, std::vector<size_t>> pathToIndices;
         pathToIndices.reserve(hydrateCount);
+        size_t missingCount = 0;
 
         for (size_t i = 0; i < hydrateCount; ++i) {
             const auto& it = resp.results[i];
             if (it.snippet.empty()) {
+                ++missingCount;
                 if (!it.hash.empty()) {
                     if (hashToIndices[it.hash].empty()) {
                         hashes.push_back(it.hash);
@@ -1338,12 +1361,16 @@ private:
                 }
             }
         }
+        resp.searchStats["snippet_hydration_missing"] = std::to_string(missingCount);
+        resp.searchStats["snippet_hydrated_results"] = "0";
 
         if (hashes.empty() && pathToIndices.empty()) {
+            finishHydrationTiming();
             co_return;
         }
 
         // Batch fetch documents by hash (1 query instead of N)
+        const auto lookupStart = std::chrono::steady_clock::now();
         std::unordered_map<std::string, metadata::DocumentInfo> docsMap;
         docsMap.reserve(hashes.size() + pathToIndices.size());
         if (!hashes.empty()) {
@@ -1369,6 +1396,11 @@ private:
                 }
             }
         }
+        const auto lookupElapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                                       std::chrono::steady_clock::now() - lookupStart)
+                                       .count();
+        resp.componentTimingMicros["snippet_lookup"] = lookupElapsed;
+        YAMS_PLOT("search_service::snippet_lookup_us", static_cast<double>(lookupElapsed));
 
         // Collect all document IDs for content fetch
         std::vector<int64_t> docIds;
@@ -1377,7 +1409,7 @@ private:
         const auto snippetBudget =
             std::chrono::milliseconds(std::max<int>(0, req.snippetHydrationTimeoutMs));
         const bool budgetEnabled = snippetBudget.count() > 0;
-        const auto snippetStart = std::chrono::steady_clock::now();
+        const auto snippetStart = hydrationStart;
         bool snippetTimeoutRecorded = false;
         auto markSnippetTimeout = [&]() {
             if (!snippetTimeoutRecorded && budgetEnabled) {
@@ -1412,12 +1444,22 @@ private:
         // Batch fetch content for all documents (1 query instead of N)
         if (!docIds.empty()) {
             YAMS_ZONE_SCOPED_N("search_service::snippet_batch_fetch");
+            const auto contentFetchStart = std::chrono::steady_clock::now();
             auto contentResult = co_await retryMetadataOp(
                 [&]() { return ctx_.metadataRepo->batchGetContent(docIds); }, 4,
                 std::chrono::milliseconds(25), telemetry);
+            const auto contentFetchElapsed =
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - contentFetchStart)
+                    .count();
+            resp.componentTimingMicros["snippet_content_fetch"] = contentFetchElapsed;
+            YAMS_PLOT("search_service::snippet_content_fetch_us",
+                      static_cast<double>(contentFetchElapsed));
 
-            if (budgetExceeded())
+            if (budgetExceeded()) {
+                finishHydrationTiming();
                 co_return;
+            }
 
             if (contentResult) {
                 const auto& contentMap = contentResult.value();
@@ -1427,6 +1469,8 @@ private:
                 // Hydrate snippets from in-memory maps (no DB queries!)
                 // Limit content text to first 10KB for faster snippet generation
                 constexpr size_t kMaxContentForSnippet = 10240;
+                const auto renderStart = std::chrono::steady_clock::now();
+                size_t hydratedResults = 0;
                 for (const auto& [docId, content] : contentMap) {
                     if (budgetExceeded())
                         break;
@@ -1439,13 +1483,22 @@ private:
                         if (auto it = docIdToIndices.find(docId); it != docIdToIndices.end()) {
                             for (size_t idx : it->second) {
                                 resp.results[idx].snippet = snippet;
+                                ++hydratedResults;
                             }
                         }
                     }
                 }
+                const auto renderElapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                                               std::chrono::steady_clock::now() - renderStart)
+                                               .count();
+                resp.componentTimingMicros["snippet_render"] = renderElapsed;
+                resp.searchStats["snippet_hydrated_results"] = std::to_string(hydratedResults);
+                YAMS_PLOT("search_service::snippet_render_us", static_cast<double>(renderElapsed));
 
-                if (budgetExceeded())
+                if (budgetExceeded()) {
+                    finishHydrationTiming();
                     co_return;
+                }
             }
         }
 
@@ -1456,6 +1509,7 @@ private:
                 markSnippetTimeout();
             }
         }
+        finishHydrationTiming();
     }
 
     boost::asio::awaitable<void>

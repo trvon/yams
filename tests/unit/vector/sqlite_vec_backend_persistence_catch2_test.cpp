@@ -69,6 +69,24 @@ struct PersistenceFixture {
         return present;
     }
 
+    static bool columnExists(sqlite3* db, const char* table, const char* column) {
+        const std::string sql = "PRAGMA table_info(" + std::string(table) + ")";
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+            return false;
+        }
+        bool present = false;
+        while (sqlite3_step(stmt) == SQLITE_ROW) {
+            const auto* name = sqlite3_column_text(stmt, 1);
+            if (name != nullptr && std::string_view(reinterpret_cast<const char*>(name)) == column) {
+                present = true;
+                break;
+            }
+        }
+        sqlite3_finalize(stmt);
+        return present;
+    }
+
     std::string skipReason;
     std::vector<std::string> tempFiles;
     static inline int tempCounter = 0;
@@ -138,79 +156,35 @@ TEST_CASE_METHOD(PersistenceFixture,
 }
 
 TEST_CASE_METHOD(PersistenceFixture,
-                 "corrupt vec0 HNSW shadow tables degrade to rebuild on reopen",
-                 "[unit][vector][persistence][catch2]") {
+                 "ensurePersistenceSchema migrates legacy Simeon PQ metadata in place",
+                 "[unit][vector][persistence][migration][catch2]") {
     skipIfNeeded();
 
-    constexpr size_t kDim = 32;
-    const auto dbPath = createTempDbPath();
+    SqliteVecBackend::Config cfg;
+    cfg.embedding_dim = 64;
+    cfg.search_engine = VectorSearchEngine::SimeonPqAdc;
+    SqliteVecBackend backend(cfg);
+    REQUIRE(backend.initialize(createTempDbPath()).has_value());
+    REQUIRE(backend.createTables(cfg.embedding_dim).has_value());
 
-    auto makeRecord = [](size_t i) {
-        VectorRecord rec;
-        rec.chunk_id = "chunk_" + std::to_string(i);
-        rec.document_hash = "doc_" + std::to_string(i);
-        rec.content = "content " + std::to_string(i);
-        std::mt19937 rng(static_cast<uint32_t>(100 + i));
-        std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-        rec.embedding.resize(kDim);
-        float norm = 0.0f;
-        for (auto& v : rec.embedding) {
-            v = dist(rng);
-            norm += v * v;
-        }
-        norm = std::sqrt(norm);
-        for (auto& v : rec.embedding) {
-            v /= norm;
-        }
-        return rec;
-    };
+    sqlite3* db = backend.getDbHandle();
+    REQUIRE(db != nullptr);
+    char* err = nullptr;
+    REQUIRE(sqlite3_exec(db, "DROP TABLE simeon_pq_meta", nullptr, nullptr, &err) == SQLITE_OK);
+    REQUIRE(sqlite3_exec(db,
+                         "CREATE TABLE simeon_pq_meta ("
+                         "dim INTEGER PRIMARY KEY, format_version INTEGER NOT NULL DEFAULT 1, "
+                         "m INTEGER NOT NULL, k INTEGER NOT NULL, seed INTEGER NOT NULL, "
+                         "rerank_factor INTEGER NOT NULL, trained INTEGER NOT NULL DEFAULT 0, "
+                         "vector_count INTEGER NOT NULL, codebooks_blob BLOB NOT NULL, "
+                         "updated_at INTEGER NOT NULL DEFAULT (unixepoch()))",
+                         nullptr, nullptr, &err) == SQLITE_OK);
+    REQUIRE_FALSE(columnExists(db, "simeon_pq_meta", "train_limit"));
+    REQUIRE_FALSE(columnExists(db, "simeon_pq_meta", "source_generation"));
 
-    std::vector<float> query;
-    {
-        SqliteVecBackend::Config cfg;
-        cfg.embedding_dim = kDim;
-        cfg.search_engine = VectorSearchEngine::Vec0L2;
-        SqliteVecBackend backend(cfg);
+    REQUIRE(backend.ensurePersistenceSchema().has_value());
 
-        REQUIRE(backend.initialize(dbPath).has_value());
-        REQUIRE(backend.createTables(kDim).has_value());
-
-        std::vector<VectorRecord> records;
-        for (size_t i = 0; i < 64; ++i) {
-            records.push_back(makeRecord(i));
-        }
-        query = records[0].embedding;
-        REQUIRE(backend.insertVectorsBatch(records).has_value());
-        REQUIRE(backend.buildIndex().has_value());
-
-        auto results = backend.searchSimilar(query, 5);
-        REQUIRE(results.has_value());
-        REQUIRE_FALSE(results.value().empty());
-
-        sqlite3* db = backend.getDbHandle();
-        REQUIRE(db != nullptr);
-        const std::string shadow = "vectors_" + std::to_string(kDim) + "_hnsw_nodes";
-        if (tableExists(db, shadow.c_str())) {
-            std::string corrupt = "UPDATE \"" + shadow + "\" SET data = x'DEADBEEFDEADBEEF'";
-            char* err = nullptr;
-            REQUIRE(sqlite3_exec(db, corrupt.c_str(), nullptr, nullptr, &err) == SQLITE_OK);
-            sqlite3_free(err);
-        }
-        backend.close();
-    }
-
-    {
-        SqliteVecBackend::Config cfg;
-        cfg.embedding_dim = kDim;
-        cfg.search_engine = VectorSearchEngine::Vec0L2;
-        SqliteVecBackend backend(cfg);
-
-        REQUIRE(backend.initialize(dbPath).has_value());
-        REQUIRE(backend.createTables(kDim).has_value());
-
-        auto results = backend.searchSimilar(query, 5);
-        REQUIRE(results.has_value());
-        REQUIRE_FALSE(results.value().empty());
-        CHECK(results.value().front().chunk_id == "chunk_0");
-    }
+    CHECK(columnExists(db, "simeon_pq_meta", "train_limit"));
+    CHECK(columnExists(db, "simeon_pq_meta", "source_generation"));
+    CHECK(tableExists(db, "vector_index_generation"));
 }

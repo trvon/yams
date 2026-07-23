@@ -29,6 +29,7 @@ struct TopologyAssistStageRequest {
     std::vector<yams::topology::WeightedDocumentSeed> tier1SeedEvidence;
     std::unordered_set<std::string> existingCandidateHashes;
     std::optional<std::vector<float>> queryEmbedding;
+    std::string queryEmbeddingSpaceIdentity;
     std::shared_ptr<yams::metadata::MetadataRepository> metadataRepo;
     std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore;
     std::shared_ptr<TopologyRoutingSnapshotCache> snapshotCache;
@@ -37,6 +38,8 @@ struct TopologyAssistStageRequest {
     std::vector<std::string> vectorSeedHashes;
     /// Cap on newly added vector seeds. 0 = add none (Tier-1 only).
     std::size_t maxVectorSeeds{0};
+    /// Existing stage-trace switch; enables diagnostic reads without changing routing output.
+    bool collectGraphDiagnostics{false};
 };
 
 struct TopologyAssistStageResult {

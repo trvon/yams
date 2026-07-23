@@ -4,6 +4,24 @@
 
 namespace yams::search {
 
+namespace {
+
+template <typename T> Result<T> convertResult(symspell::Result<T> result) {
+    if (!result) {
+        return Error{ErrorCode::DatabaseError, result.error().message};
+    }
+    return result.value();
+}
+
+Result<void> convertResult(symspell::Result<void> result) {
+    if (!result) {
+        return Error{ErrorCode::DatabaseError, result.error().message};
+    }
+    return {};
+}
+
+} // namespace
+
 SymSpellSearch::SymSpellSearch(sqlite3* db, int maxEditDistance, int prefixLength, bool readOnly)
     : maxEditDistance_(maxEditDistance), prefixLength_(prefixLength) {
     symspell_ = std::make_unique<symspell::SymSpell>(
@@ -19,30 +37,44 @@ Result<void> SymSpellSearch::initializeSchema(sqlite3* db) {
     return Result<void>();
 }
 
-bool SymSpellSearch::addTerm(std::string_view term, int64_t frequency) {
+Result<bool> SymSpellSearch::addTerm(std::string_view term, int64_t frequency) {
     std::unique_lock lock(mutex_);
-    return symspell_->createDictionaryEntry(term, frequency);
+    return convertResult(symspell_->createDictionaryEntry(term, frequency));
 }
 
-void SymSpellSearch::addTermsBatch(const std::vector<std::pair<std::string, int64_t>>& terms) {
+Result<void>
+SymSpellSearch::addTermsBatch(const std::vector<std::pair<std::string, int64_t>>& terms) {
     std::unique_lock lock(mutex_);
 
     // Use transaction for batch performance
-    symspell_->beginTransaction();
+    auto begin = symspell_->beginTransaction();
+    if (!begin) {
+        return Error{ErrorCode::DatabaseError, begin.error().message};
+    }
     try {
         for (const auto& [term, freq] : terms) {
-            symspell_->createDictionaryEntry(term, freq);
+            auto inserted = symspell_->createDictionaryEntry(term, freq);
+            if (!inserted) {
+                (void)symspell_->rollbackTransaction();
+                return Error{ErrorCode::DatabaseError, inserted.error().message};
+            }
         }
-        symspell_->commitTransaction();
+        auto commit = symspell_->commitTransaction();
+        if (!commit) {
+            return Error{ErrorCode::DatabaseError, commit.error().message};
+        }
     } catch (...) {
-        symspell_->rollbackTransaction();
+        (void)symspell_->rollbackTransaction();
         throw;
     }
+    return {};
 }
 
 std::vector<SymSpellSearch::SearchResult>
 SymSpellSearch::search(const std::string& query, const SearchOptions& options) const {
-    std::shared_lock lock(mutex_);
+    // The SQLiteStore implementation reuses prepared statements for lookup. Even read-only
+    // lookups mutate those statements (bind/step/reset), so concurrent readers must serialize.
+    std::unique_lock lock(mutex_);
 
     // Determine verbosity based on options
     symspell::Verbosity verbosity =
@@ -76,7 +108,7 @@ SymSpellSearch::search(const std::string& query, const SearchOptions& options) c
 }
 
 bool SymSpellSearch::hasExactMatch(std::string_view term) const {
-    std::shared_lock lock(mutex_);
+    std::unique_lock lock(mutex_);
     return symspell_->termExists(term);
 }
 
@@ -90,11 +122,9 @@ SymSpellSearch::IndexStats SymSpellSearch::getStats() const {
     return stats;
 }
 
-void SymSpellSearch::clear() {
+Result<void> SymSpellSearch::clear() {
     std::unique_lock lock(mutex_);
-    // Would need to execute DELETE FROM symspell_terms; DELETE FROM symspell_deletes;
-    // For now, this is a placeholder - full implementation needs db access
-    // Placeholder: full implementation needs direct SQL access to purge the backing tables.
+    return convertResult(symspell_->clear());
 }
 
 SymSpellSearch::~SymSpellSearch() = default;

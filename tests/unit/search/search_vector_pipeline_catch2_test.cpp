@@ -89,3 +89,74 @@ TEST_CASE("Vector pipeline filters global hits by routed membership with zero-ov
     REQUIRE(fallback.results.size() == 3U);
     CHECK(fallback.results[0].documentHash == "distractor");
 }
+
+TEST_CASE("Vector pipeline candidate rescue preserves baseline and appends novel routed hits",
+          "[search][vector][candidate-rescue][catch2]") {
+    using yams::search::ComponentResult;
+    std::vector<ComponentResult> baseline{
+        {.documentHash = "baseline-a", .score = 0.90F, .rank = 0},
+        {.documentHash = "shared", .score = 0.70F, .rank = 1},
+    };
+    std::vector<ComponentResult> expansion{
+        {.documentHash = "rescued-hash",
+         .filePath = "/corpus/rescued-doc.txt",
+         .score = 0.95F,
+         .rank = 0},
+        {.documentHash = "shared", .score = 0.70F, .rank = 1},
+    };
+
+    auto merged = yams::search::detail::mergeVectorCandidateRescues(std::move(baseline),
+                                                                    std::move(expansion));
+
+    CHECK(merged.added == 1U);
+    CHECK(merged.novelDocuments == 1U);
+    CHECK(merged.evidenceRescues == 0U);
+    CHECK(merged.duplicates == 1U);
+    CHECK(merged.novelDocumentHashes == std::vector<std::string>{"rescued-hash"});
+    CHECK(merged.novelDocumentIds == std::vector<std::string>{"rescued-doc"});
+    CHECK(merged.evidenceRescueDocumentHashes.empty());
+    CHECK(merged.evidenceRescueDocumentIds.empty());
+    REQUIRE(merged.addedDocumentHashes.size() == 1U);
+    CHECK(merged.addedDocumentHashes[0] == "rescued-hash");
+    REQUIRE(merged.addedDocumentIds.size() == 1U);
+    CHECK(merged.addedDocumentIds[0] == "rescued-doc");
+    REQUIRE(merged.results.size() == 3U);
+    CHECK(merged.results[0].documentHash == "rescued-hash");
+    CHECK(merged.results[0].rank == 0U);
+    CHECK(merged.results[0].debugInfo.at("candidate_rescue") == "1");
+    CHECK(merged.results[1].documentHash == "baseline-a");
+    CHECK(merged.results[1].rank == 1U);
+    CHECK(merged.results[2].documentHash == "shared");
+    CHECK(merged.results[2].rank == 2U);
+}
+
+TEST_CASE("Vector pipeline candidate rescue enriches an existing lexical candidate",
+          "[search][vector][candidate-rescue][evidence][catch2]") {
+    using yams::search::ComponentResult;
+    std::vector<ComponentResult> baseline{
+        {.documentHash = "global-vector", .score = 0.90F, .rank = 0},
+    };
+    std::vector<ComponentResult> expansion{
+        {.documentHash = "buried-lexical",
+         .filePath = "/corpus/buried-lexical.txt",
+         .score = 0.80F,
+         .rank = 0},
+    };
+
+    auto merged = yams::search::detail::mergeVectorCandidateRescues(
+        std::move(baseline), std::move(expansion),
+        std::unordered_set<std::string>{"buried-lexical"});
+
+    CHECK(merged.added == 1U);
+    CHECK(merged.novelDocuments == 0U);
+    CHECK(merged.evidenceRescues == 1U);
+    CHECK(merged.duplicates == 0U);
+    CHECK(merged.novelDocumentHashes.empty());
+    CHECK(merged.novelDocumentIds.empty());
+    CHECK(merged.evidenceRescueDocumentHashes == std::vector<std::string>{"buried-lexical"});
+    CHECK(merged.evidenceRescueDocumentIds == std::vector<std::string>{"buried-lexical"});
+    REQUIRE(merged.results.size() == 2U);
+    CHECK(merged.results[1].documentHash == "buried-lexical");
+    CHECK(merged.results[1].debugInfo.at("candidate_rescue") == "1");
+    CHECK(merged.results[1].debugInfo.at("candidate_rescue_kind") == "evidence");
+}

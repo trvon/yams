@@ -63,6 +63,8 @@ GraphExploreResponse mapGraphExploreResponse(const app::services::GraphExploreRe
     out.totalSymbolsConsidered = in.totalSymbolsConsidered;
     out.totalFilesConsidered = in.totalFilesConsidered;
     out.emittedChars = in.emittedChars;
+    out.snippetRenderMicros = static_cast<std::uint64_t>(in.snippetRenderMicros);
+    out.snippetsRendered = static_cast<std::uint64_t>(in.snippetsRendered);
     out.kgAvailable = in.kgAvailable;
     out.truncated = in.truncated;
     out.warnings = in.warnings;
@@ -143,6 +145,8 @@ mapGraphSymbolLookupResponse(const app::services::GraphSymbolLookupResponse& in)
     out.symbol = in.symbol;
     out.ambiguous = in.ambiguous;
     out.truncated = in.truncated;
+    out.snippetRenderMicros = static_cast<std::uint64_t>(in.snippetRenderMicros);
+    out.snippetsRendered = static_cast<std::uint64_t>(in.snippetsRendered);
     out.warnings = in.warnings;
     out.matches.reserve(in.matches.size());
     for (const auto& match : in.matches) {
@@ -165,6 +169,8 @@ GraphTraceResponse mapGraphTraceResponse(const app::services::GraphTraceResponse
     out.to = in.to;
     out.found = in.found;
     out.truncated = in.truncated;
+    out.snippetRenderMicros = static_cast<std::uint64_t>(in.snippetRenderMicros);
+    out.snippetsRendered = static_cast<std::uint64_t>(in.snippetsRendered);
     out.warnings = in.warnings;
     out.path.reserve(in.path.size());
     for (const auto& relation : in.path) {

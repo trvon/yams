@@ -1,7 +1,9 @@
 #pragma once
 
+#include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <span>
 #include <vector>
 
@@ -58,16 +60,41 @@ inline bool deserializeSimeonPqCodebooks(const std::vector<std::uint8_t>& blob, 
         !readSimeonPod(blob, offset, codebookCount)) {
         return false;
     }
-    const std::size_t expected = static_cast<std::size_t>(m) * k * (dim / m);
     if (version != kSimeonPqBlobVersion || storedDim != dim || storedM != m || storedK != k ||
-        codebookCount != expected || offset + expected * sizeof(float) != blob.size()) {
+        storedTrained > 1 || dim == 0 || m == 0 || k == 0 || dim % m != 0) {
         return false;
     }
 
-    codebooks.resize(expected);
-    if (expected > 0) {
-        std::memcpy(codebooks.data(), blob.data() + offset, expected * sizeof(float));
+    constexpr auto kMaxSize = std::numeric_limits<std::size_t>::max();
+    const auto subvectorDim = static_cast<std::size_t>(dim / m);
+    const auto mSize = static_cast<std::size_t>(m);
+    const auto kSize = static_cast<std::size_t>(k);
+    if (mSize > kMaxSize / kSize) {
+        return false;
     }
+    const auto centroidCount = mSize * kSize;
+    if (centroidCount > kMaxSize / subvectorDim) {
+        return false;
+    }
+    const auto expected = centroidCount * subvectorDim;
+    if (codebookCount != expected || expected > kMaxSize / sizeof(float)) {
+        return false;
+    }
+    const auto payloadBytes = expected * sizeof(float);
+    if (offset > blob.size() || blob.size() - offset != payloadBytes) {
+        return false;
+    }
+
+    std::vector<float> decoded(expected);
+    if (expected > 0) {
+        std::memcpy(decoded.data(), blob.data() + offset, payloadBytes);
+    }
+    for (const float centroid : decoded) {
+        if (!std::isfinite(centroid)) {
+            return false;
+        }
+    }
+    codebooks.swap(decoded);
     trained = storedTrained != 0;
     return true;
 }

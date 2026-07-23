@@ -284,23 +284,25 @@ Result<void> Statement::execute() {
             storage::sqlite_retry::sleepAndBackoff(backoff);
             continue;
         }
-        // Non-retryable error or max retries exceeded
-        // Include SQL snippet for constraint failures to aid debugging
+        // Non-retryable error or max retries exceeded.
+        // Append the sqlite3_errmsg() detail (e.g. "FOREIGN KEY constraint failed",
+        // "no such column: t.c") for every failure class, not just constraints, so
+        // actionable causes are not masked behind the generic sqlite3_errstr() token
+        // (e.g. "SQL logic error"). The generic token is retained for callers that
+        // match on it.
         std::string errMsg = "Failed to execute statement: " + std::string(sqlite3_errstr(rc));
-        if (rc == SQLITE_CONSTRAINT && stmt_) {
-            // Append the specific constraint detail (e.g. "FOREIGN KEY constraint failed",
-            // "UNIQUE constraint failed: t.c") so the retry classifier and logs can tell a
-            // transient FK race from a deterministic violation. The generic token above is
-            // retained for callers that match on "constraint failed".
+        if (stmt_) {
             if (const char* detail = sqlite3_errmsg(sqlite3_db_handle(stmt_));
-                detail && *detail) {
+                detail && *detail && errMsg.find(detail) == std::string::npos) {
                 errMsg += " (" + std::string(detail) + ")";
             }
-            const char* sql = sqlite3_sql(stmt_);
-            if (sql) {
-                // Include first 100 chars of SQL for context
-                std::string sqlSnippet(sql, std::min(strlen(sql), size_t{100}));
-                errMsg += " [SQL: " + sqlSnippet + (strlen(sql) > 100 ? "..." : "") + "]";
+            if (rc == SQLITE_CONSTRAINT) {
+                const char* sql = sqlite3_sql(stmt_);
+                if (sql) {
+                    // Include first 100 chars of SQL for context
+                    std::string sqlSnippet(sql, std::min(strlen(sql), size_t{100}));
+                    errMsg += " [SQL: " + sqlSnippet + (strlen(sql) > 100 ? "..." : "") + "]";
+                }
             }
         }
         return make_sqlite_error(rc, errMsg);
@@ -329,11 +331,12 @@ Result<bool> Statement::step() {
             storage::sqlite_retry::sleepAndBackoff(backoff);
             continue;
         }
-        // Non-retryable error or max retries exceeded
+        // Non-retryable error or max retries exceeded. Attach the sqlite3_errmsg()
+        // detail for every failure class (see execute() above).
         std::string errMsg = "Failed to step statement: " + std::string(sqlite3_errstr(rc));
-        if (rc == SQLITE_CONSTRAINT && stmt_) {
+        if (stmt_) {
             if (const char* detail = sqlite3_errmsg(sqlite3_db_handle(stmt_));
-                detail && *detail) {
+                detail && *detail && errMsg.find(detail) == std::string::npos) {
                 errMsg += " (" + std::string(detail) + ")";
             }
         }

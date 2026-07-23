@@ -70,6 +70,7 @@ tests/benchmarks/xplan/
 | `leg_stage_ablation` / `simeon_rerank*` | Search pipeline / rerank arms |
 | `ingest_pipeline` | Ingest kg/vectors/gliner (synthetic — throughput, not ranking) |
 | `retrieval_load` / `repair_ability` / `ops_timeline` / `daemon_ops_core` | Daemon KPIs 2–5 |
+| `retrieval_hydration_pressure` | Search snippet lookup/content-fetch/render plus grep match-render and graph snippet-render p50/p95/p99 under concurrent writes; paths-only search control (repeats=3) |
 | `read_write_pressure` | Equal-budget write-heavy/balanced/read-heavy/read-only daemon load; per-op latency, DB pools, WriteCoordinator pressure, WAL growth, drain, and recovery (repeats=3) |
 | `topology_purity_validate` / `topology_routing_budget_ablation` | Topology construction purity and routed-vs-global ANN budget gate (repeats=3) |
 | `search_generalized_memory_topology_gate` | SciFact + NF-Corpus in one index; per-source quality, cross-source interference, and topology-vs-global cost (repeats=3) |

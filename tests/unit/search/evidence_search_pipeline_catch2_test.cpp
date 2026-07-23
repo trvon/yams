@@ -52,7 +52,7 @@ TEST_CASE("Topology membership becomes bounded candidate-only evidence",
     route.routeBoundaryScoreMargin = 0.4F;
     route.seedCount = 2;
     route.seedsInRoutedClusters = 2;
-    route.routeAllowedDocumentHashes = {"member", "medoid"};
+    route.certificate.allowedDocumentHashes = {"member", "medoid"};
     route.routedCandidateHashes = {"medoid"};
     route.medoidHashes = {"medoid"};
     route.candidateStructureEvidence.emplace(

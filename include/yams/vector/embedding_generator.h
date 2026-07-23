@@ -5,7 +5,6 @@
 #include <atomic>
 #include <chrono>
 #include <concepts>
-#include <future>
 #include <memory>
 #include <span>
 #include <string>
@@ -26,6 +25,16 @@ struct EmbeddingConfig {
         OnnxRuntime, // ONNX Runtime embeddings via the daemon/plugin model provider path
     };
     Backend backend = Backend::Daemon; // Daemon-only embedding path
+
+    enum class SimeonEncoderProfile {
+        Configurable,
+        FixedHash384,
+    };
+
+    // Named profiles are stable coordinate systems. Configurable preserves the
+    // existing [embeddings.simeon] tuning surface; FixedHash384 selects the
+    // frozen Simeon v1 recipe shared with theorem-facing fragment reranking.
+    SimeonEncoderProfile simeon_encoder_profile = SimeonEncoderProfile::Configurable;
 
     // Model configuration (used by daemon and fallback/mock providers)
     std::string model_name = "all-MiniLM-L6-v2";
@@ -128,7 +137,6 @@ struct GenerationStats {
 // Forward declarations for backend implementations
 class IEmbeddingBackend;
 class DaemonBackend;
-class HybridBackend;
 
 /**
  * C++20 Concept for embedding backends
@@ -144,6 +152,7 @@ concept EmbeddingBackend =
         { t.getEmbeddingDimension() } -> std::convertible_to<size_t>;
         { t.getMaxSequenceLength() } -> std::convertible_to<size_t>;
         { t.getBackendName() } -> std::convertible_to<std::string>;
+        { t.getEmbeddingSpaceIdentity() } -> std::convertible_to<std::string>;
         { t.isAvailable() } -> std::convertible_to<bool>;
     };
 
@@ -167,6 +176,9 @@ public:
     virtual size_t getMaxSequenceLength() const = 0;
 
     virtual std::string getBackendName() const = 0;
+    // Versioned identity of the coordinate system, not merely the provider.
+    // Empty means that the backend cannot support construction-bound routing.
+    virtual std::string getEmbeddingSpaceIdentity() const { return {}; }
     virtual bool isAvailable() const = 0;
     virtual GenerationStats getStats() const = 0;
     virtual void resetStats() = 0;
@@ -207,24 +219,13 @@ public:
     // Batch embedding generation (synchronous)
     std::vector<std::vector<float>> generateEmbeddings(const std::vector<std::string>& texts);
 
-    // Asynchronous embedding generation
-    std::future<std::vector<float>> generateEmbeddingAsync(const std::string& text);
-    std::future<std::vector<std::vector<float>>>
-    generateEmbeddingsAsync(const std::vector<std::string>& texts);
-
-    // Model management
-    bool loadModel(const std::string& model_path);
-    bool switchModel(const std::string& model_name, const EmbeddingConfig& new_config);
-    bool isModelLoaded() const;
-    void unloadModel();
-
     // Configuration and information
     size_t getEmbeddingDimension() const;
     size_t getMaxSequenceLength() const;
     const EmbeddingConfig& getConfig() const;
     // Backend identity for diagnostics
     std::string getBackendName() const;
-    void updateConfig(const EmbeddingConfig& new_config);
+    std::string getEmbeddingSpaceIdentity() const;
 
     // Statistics and monitoring
     GenerationStats getStats() const;
@@ -245,7 +246,7 @@ private:
 };
 
 /**
- * Factory function for creating embedding generators
+ * Factory function for creating and initializing an embedding generator.
  */
 std::unique_ptr<EmbeddingGenerator> createEmbeddingGenerator(const EmbeddingConfig& config = {});
 
@@ -280,24 +281,9 @@ bool validateEmbedding(const std::vector<float>& embedding, size_t expected_dim)
 std::string embeddingToString(const std::vector<float>& embedding, size_t max_values = 10);
 
 /**
- * Load model configuration from JSON file
- */
-EmbeddingConfig loadConfigFromFile(const std::string& config_path);
-
-/**
- * Save model configuration to JSON file
- */
-bool saveConfigToFile(const EmbeddingConfig& config, const std::string& config_path);
-
-/**
  * Get available models in models directory
  */
 std::vector<std::string> getAvailableModels(const std::string& models_dir = "models");
-
-/**
- * Download model files (placeholder for future implementation)
- */
-bool downloadModel(const std::string& model_name, const std::string& target_dir);
 } // namespace embedding_utils
 
 } // namespace yams::vector

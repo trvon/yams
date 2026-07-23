@@ -123,9 +123,184 @@ class ValidateSpec:
 
 
 @dataclass
+class PairedVectorOracleSpec:
+    arm: str
+    component: str = "vector"
+    top_k: int = 10
+    identity_file: str = "datasets/mixed_beir/mixed_corpus_identity.json"
+
+    @classmethod
+    def from_dict(
+        cls, raw: dict[str, Any] | None
+    ) -> PairedVectorOracleSpec | None:
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise ValueError("summarize.paired_vector_oracle must be an object")
+        arm = str(raw.get("arm") or "").strip()
+        component = str(raw.get("component") or "vector").strip()
+        identity_file = str(
+            raw.get("identity_file")
+            or "datasets/mixed_beir/mixed_corpus_identity.json"
+        ).strip()
+        top_k = int(raw.get("top_k") or 10)
+        if not arm:
+            raise ValueError("summarize.paired_vector_oracle.arm is required")
+        if not component:
+            raise ValueError("summarize.paired_vector_oracle.component is required")
+        if not identity_file:
+            raise ValueError("summarize.paired_vector_oracle.identity_file is required")
+        if top_k <= 0:
+            raise ValueError("summarize.paired_vector_oracle.top_k must be positive")
+        return cls(
+            arm=arm,
+            component=component,
+            top_k=top_k,
+            identity_file=identity_file,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "arm": self.arm,
+            "component": self.component,
+            "top_k": self.top_k,
+            "identity_file": self.identity_file,
+        }
+
+
+@dataclass
+class PairedQueryAnalysisSpec:
+    metrics: list[str] = field(
+        default_factory=lambda: ["mrr", "recall_at_k", "ndcg_at_k"]
+    )
+    confidence_level: float = 0.95
+    bootstrap_samples: int = 5000
+    seed: int = 1729
+    identity_file: str = "datasets/mixed_beir/mixed_corpus_identity.json"
+
+    @classmethod
+    def from_dict(
+        cls, raw: dict[str, Any] | None
+    ) -> PairedQueryAnalysisSpec | None:
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise ValueError("summarize.paired_query_analysis must be an object")
+        metrics = [str(value).strip() for value in (raw.get("metrics") or [])]
+        confidence_level = float(raw.get("confidence_level", 0.95))
+        bootstrap_samples = int(raw.get("bootstrap_samples", 5000))
+        seed = int(raw.get("seed", 1729))
+        identity_file = str(
+            raw.get("identity_file")
+            or "datasets/mixed_beir/mixed_corpus_identity.json"
+        ).strip()
+        if not metrics or any(not metric for metric in metrics):
+            raise ValueError("summarize.paired_query_analysis.metrics is required")
+        if not 0.0 < confidence_level < 1.0:
+            raise ValueError(
+                "summarize.paired_query_analysis.confidence_level must be between 0 and 1"
+            )
+        if bootstrap_samples < 100:
+            raise ValueError(
+                "summarize.paired_query_analysis.bootstrap_samples must be at least 100"
+            )
+        if not identity_file:
+            raise ValueError(
+                "summarize.paired_query_analysis.identity_file is required"
+            )
+        return cls(
+            metrics=metrics,
+            confidence_level=confidence_level,
+            bootstrap_samples=bootstrap_samples,
+            seed=seed,
+            identity_file=identity_file,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "metrics": self.metrics,
+            "confidence_level": self.confidence_level,
+            "bootstrap_samples": self.bootstrap_samples,
+            "seed": self.seed,
+            "identity_file": self.identity_file,
+        }
+
+
+@dataclass
+class PromotionGatesSpec:
+    candidate_arms: list[str]
+    quality_metric: str = "mrr"
+    quality_ci_lower_min: float = 0.0
+    per_source_metrics: list[str] = field(
+        default_factory=lambda: ["mrr", "recall_at_k", "ndcg_at_k"]
+    )
+    max_source_regression: float = 0.005
+    latency_relative_max: dict[str, float] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any] | None) -> PromotionGatesSpec | None:
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise ValueError("summarize.promotion_gates must be an object")
+        candidate_arms = [
+            str(value).strip() for value in (raw.get("candidate_arms") or [])
+        ]
+        quality_metric = str(raw.get("quality_metric") or "mrr").strip()
+        per_source_metrics = [
+            str(value).strip() for value in (raw.get("per_source_metrics") or [])
+        ]
+        latency_relative_max = {
+            str(metric): float(limit)
+            for metric, limit in (raw.get("latency_relative_max") or {}).items()
+        }
+        max_source_regression = float(raw.get("max_source_regression", 0.005))
+        if not candidate_arms or any(not arm for arm in candidate_arms):
+            raise ValueError("summarize.promotion_gates.candidate_arms is required")
+        if not quality_metric:
+            raise ValueError("summarize.promotion_gates.quality_metric is required")
+        if not per_source_metrics or any(not metric for metric in per_source_metrics):
+            raise ValueError(
+                "summarize.promotion_gates.per_source_metrics is required"
+            )
+        if max_source_regression < 0.0:
+            raise ValueError(
+                "summarize.promotion_gates.max_source_regression cannot be negative"
+            )
+        if not latency_relative_max or any(
+            not metric or limit < 1.0
+            for metric, limit in latency_relative_max.items()
+        ):
+            raise ValueError(
+                "summarize.promotion_gates.latency_relative_max must contain ratios >= 1"
+            )
+        return cls(
+            candidate_arms=candidate_arms,
+            quality_metric=quality_metric,
+            quality_ci_lower_min=float(raw.get("quality_ci_lower_min", 0.0)),
+            per_source_metrics=per_source_metrics,
+            max_source_regression=max_source_regression,
+            latency_relative_max=latency_relative_max,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "candidate_arms": self.candidate_arms,
+            "quality_metric": self.quality_metric,
+            "quality_ci_lower_min": self.quality_ci_lower_min,
+            "per_source_metrics": self.per_source_metrics,
+            "max_source_regression": self.max_source_regression,
+            "latency_relative_max": self.latency_relative_max,
+        }
+
+
+@dataclass
 class SummarizeSpec:
     primary: list[str] = field(default_factory=list)
     group_by: list[str] = field(default_factory=list)
+    paired_vector_oracle: PairedVectorOracleSpec | None = None
+    paired_query_analysis: PairedQueryAnalysisSpec | None = None
+    promotion_gates: PromotionGatesSpec | None = None
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any] | None) -> SummarizeSpec:
@@ -133,6 +308,13 @@ class SummarizeSpec:
         return cls(
             primary=[str(x) for x in (raw.get("primary") or [])],
             group_by=[str(x) for x in (raw.get("group_by") or [])],
+            paired_vector_oracle=PairedVectorOracleSpec.from_dict(
+                raw.get("paired_vector_oracle")
+            ),
+            paired_query_analysis=PairedQueryAnalysisSpec.from_dict(
+                raw.get("paired_query_analysis")
+            ),
+            promotion_gates=PromotionGatesSpec.from_dict(raw.get("promotion_gates")),
         )
 
 
@@ -268,6 +450,21 @@ class ExperimentPlan:
             "summarize": {
                 "primary": self.summarize.primary,
                 "group_by": self.summarize.group_by,
+                "paired_vector_oracle": (
+                    self.summarize.paired_vector_oracle.to_dict()
+                    if self.summarize.paired_vector_oracle
+                    else None
+                ),
+                "paired_query_analysis": (
+                    self.summarize.paired_query_analysis.to_dict()
+                    if self.summarize.paired_query_analysis
+                    else None
+                ),
+                "promotion_gates": (
+                    self.summarize.promotion_gates.to_dict()
+                    if self.summarize.promotion_gates
+                    else None
+                ),
             },
             "raw": deepcopy(self.raw),
         }

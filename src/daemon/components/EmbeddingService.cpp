@@ -367,6 +367,14 @@ void EmbeddingService::updateSemanticNeighborGraph(
     const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore,
     const std::shared_ptr<yams::vector::VectorDatabase>& vdb, const std::string& modelName,
     const std::vector<std::pair<std::string, std::string>>& sourceDocuments, bool sourceAllCorpus) {
+    const std::lock_guard lock(semanticGraphMutationMutex_);
+    updateSemanticNeighborGraphUnlocked(kgStore, vdb, modelName, sourceDocuments, sourceAllCorpus);
+}
+
+void EmbeddingService::updateSemanticNeighborGraphUnlocked(
+    const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore,
+    const std::shared_ptr<yams::vector::VectorDatabase>& vdb, const std::string& modelName,
+    const std::vector<std::pair<std::string, std::string>>& sourceDocuments, bool sourceAllCorpus) {
     if (!kgStore || !vdb || (!sourceAllCorpus && sourceDocuments.empty())) {
         return;
     }
@@ -1109,6 +1117,7 @@ void EmbeddingService::updateSemanticNeighborGraph(
 
 Result<std::size_t>
 EmbeddingService::rebuildSemanticNeighborGraphForCorpus(const std::string& modelName) {
+    const std::lock_guard lock(semanticGraphMutationMutex_);
     auto kgStore = getKgStore_ ? getKgStore_() : nullptr;
     auto vdb = getVectorDatabase_ ? getVectorDatabase_() : nullptr;
     if (!kgStore || !vdb) {
@@ -1135,7 +1144,7 @@ EmbeddingService::rebuildSemanticNeighborGraphForCorpus(const std::string& model
         "EmbeddingService: cleared existing semantic_neighbor edges before corpus rebuild");
 
     const auto before = semanticEdgesCreated_.load(std::memory_order_relaxed);
-    updateSemanticNeighborGraph(kgStore, vdb, modelName, {}, true);
+    updateSemanticNeighborGraphUnlocked(kgStore, vdb, modelName, {}, true);
     if (auto* coord = getWriteCoordinator_ ? getWriteCoordinator_() : nullptr) {
         auto flushRes = coord->flush();
         if (!flushRes) {
@@ -1151,6 +1160,7 @@ Result<std::size_t> EmbeddingService::backfillSemanticNeighborGraph(const std::s
     if (batchLimit == 0) {
         return std::size_t{0};
     }
+    const std::lock_guard lock(semanticGraphMutationMutex_);
     auto kgStore = getKgStore_ ? getKgStore_() : nullptr;
     auto vdb = getVectorDatabase_ ? getVectorDatabase_() : nullptr;
     if (!kgStore || !vdb) {
@@ -1181,7 +1191,8 @@ Result<std::size_t> EmbeddingService::backfillSemanticNeighborGraph(const std::s
         return std::size_t{0};
     }
 
-    updateSemanticNeighborGraph(kgStore, vdb, modelName, sources, /*sourceAllCorpus=*/false);
+    updateSemanticNeighborGraphUnlocked(kgStore, vdb, modelName, sources,
+                                        /*sourceAllCorpus=*/false);
     return sources.size();
 }
 
@@ -1814,6 +1825,8 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         markHashesFailed("embedding providers unavailable");
         return;
     }
+    const std::string embeddingSpaceIdentity = provider->getEmbeddingSpaceIdentity(modelName);
+    const std::string embeddingProviderVersion = provider->getProviderVersion();
 
     if (stop_.load(std::memory_order_acquire)) {
         InternalEventBus::instance().incEmbedDropped(job.hashes.size());
@@ -2915,6 +2928,9 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
             rec.document_hash = doc.hash;
             rec.chunk_id = chunk.chunkId;
             rec.embedding = std::move(emb);
+            rec.model_id = embeddingSpaceIdentity;
+            rec.model_version = embeddingProviderVersion;
+            rec.embedding_dim = rec.embedding.size();
             rec.content = std::move(subBatch[local]);
             rec.start_offset = chunk.startOffset;
             rec.end_offset = chunk.endOffset;
@@ -2969,6 +2985,9 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         docRec.document_hash = doc.hash;
         docRec.chunk_id = yams::vector::utils::generateChunkId(doc.hash, 999999);
         docRec.embedding = std::move(acc.sumEmbedding);
+        docRec.model_id = embeddingSpaceIdentity;
+        docRec.model_version = embeddingProviderVersion;
+        docRec.embedding_dim = docRec.embedding.size();
         docRec.content = std::move(docPreviews[docIdx]);
         docRec.level = yams::vector::EmbeddingLevel::DOCUMENT;
         docRec.source_chunk_ids = std::move(acc.sourceChunkIds);

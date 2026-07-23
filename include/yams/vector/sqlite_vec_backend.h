@@ -26,6 +26,7 @@ namespace yams::vector {
  *   vectors_vec0_*: sqlite-vec virtual-table shadow tables for Vec0L2.
  */
 class SqliteVecBackend : public IVectorBackend,
+                         public IEmbeddingLifecycleStore,
                          public IDiagnosticVectorStore,
                          public IExactCandidateVectorStore {
 public:
@@ -62,10 +63,8 @@ public:
         size_t simeon_pq_train_limit = 4096;
         /// ADC rerank factor: fetch rerank_factor * k candidates from the
         /// compressed scan, score them exactly, return the exact top-k.
-        /// Measured (2K vectors, 128d, m=32, k=10):
-        ///   rerank=2: recall@10 94.0% @ 1.0x latency (default)
-        ///   rerank=4: recall@10 99.4% @ 1.3x latency
-        ///   rerank=8: recall@10 100%  @ 1.6x latency
+        /// Factor 2 is the conservative product default. Re-run the
+        /// decision-grade vector_pq_rerank_quality plan before changing it.
         size_t simeon_pq_rerank_factor = 2;
         uint64_t simeon_pq_seed = 0xC0FFEE5EED5EEDC0ULL;
         bool suppress_search_index_builds =
@@ -137,6 +136,11 @@ public:
 
     Result<bool> hasEmbedding(const std::string& document_hash) override;
     Result<std::unordered_set<std::string>> getEmbeddedDocumentHashes() override;
+    Result<std::vector<std::string>> getStaleEmbeddings(const std::string& modelId,
+                                                        const std::string& modelVersion) override;
+    Result<std::vector<VectorRecord>> getEmbeddingsByVersion(const std::string& modelVersion,
+                                                             size_t limit) override;
+    Result<void> markAsStale(const std::string& chunkId) override;
     Result<size_t> getVectorCount() override;
     Result<VectorDatabaseStats> getStats() override;
 

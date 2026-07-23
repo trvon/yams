@@ -1,6 +1,7 @@
 #pragma once
 
 #include <yams/search/search_engine_config.h>
+#include <yams/topology/protected_relation_cover.h>
 #include <yams/topology/topology_artifacts.h>
 #include <yams/topology/topology_baseline.h>
 
@@ -10,6 +11,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -39,7 +41,9 @@ struct TopologyRoutingSnapshot {
     std::string constructionFingerprint;
     std::unordered_map<std::string, std::size_t> clustersById;
     std::unordered_map<std::string, std::size_t> membershipsByDocumentHash;
+    yams::topology::ProtectedRelationCoverIndex protectedRelationCover;
     yams::topology::SparseRouteIndex sparseRouteIndex;
+    bool denseAnnBuildAttempted = false;
 };
 
 struct TopologyRoutingSnapshotLookup {
@@ -55,7 +59,8 @@ class TopologyRoutingSnapshotCache {
 public:
     explicit TopologyRoutingSnapshotCache(TopologyRoutingSnapshotLoader loader);
 
-    [[nodiscard]] Result<TopologyRoutingSnapshotLookup> get(std::uint64_t expectedEpoch = 0);
+    [[nodiscard]] Result<TopologyRoutingSnapshotLookup> get(std::uint64_t expectedEpoch = 0,
+                                                            bool requireDenseAnnIndex = true);
 
 private:
     TopologyRoutingSnapshotLoader loader_;
@@ -95,18 +100,23 @@ struct TopologyRoutingOptions {
     std::size_t maxDocs = 0;
     float sparseDenseAlpha = 0.5F;
     float minRouteScore = 0.0F;
+    SearchEngineConfig::TopologyRouteRiskCalibration routeRiskCalibration;
+    SearchEngineConfig::TopologyRouteWorkBudget routeWorkBudget;
     /// Materialize full membership for confidently selected clusters so callers can gate an
     /// existing candidate stream without query-scoring every member.
     bool collectRouteMembership = false;
     float graphNeighborMinScore = 0.25F;
     bool graphNeighborReciprocalOnly = true;
+    /// Collect a trace-only ledger of relation, fetch, filter, and selection boundaries.
+    /// This may perform additional graph and metadata reads but must not alter routing output.
+    bool collectGraphDiagnostics = false;
 };
 
 /// Snapshot the topology fields from SearchEngineConfig at the stage/session boundary.
 [[nodiscard]] TopologyRoutingOptions
 makeTopologyRoutingOptions(const SearchEngineConfig& config,
                            SearchEngineConfig::TopologyRoutingMode routingMode, bool weakTier1Query,
-                           bool collectRouteMembership = false) noexcept;
+                           bool collectRouteMembership = false);
 
 struct TopologyRoutingSessionRequest {
     std::string query;
@@ -114,9 +124,145 @@ struct TopologyRoutingSessionRequest {
     std::vector<yams::topology::WeightedDocumentSeed> weightedSeedDocuments;
     std::unordered_set<std::string> existingCandidateHashes;
     std::optional<std::vector<float>> queryEmbedding;
+    std::string queryEmbeddingSpaceIdentity;
     TopologyRoutingOptions options;
     std::uint64_t expectedTopologyEpoch = 0;
     std::shared_ptr<TopologyRoutingSnapshotCache> snapshotCache;
+};
+
+/// Query-to-cover evidence retained before the router scalarizes it into routeScore.
+struct TopologyRouteEvidence {
+    std::string clusterId;
+    std::optional<float> semanticCost;
+    std::optional<float> sparseCost;
+    float persistencePenalty{1.0F};
+    float cohesionPenalty{1.0F};
+    float sizePenalty{0.0F};
+    float routeScore{0.0F};
+    bool scoreEligible{false};
+    bool inSelectedPrefix{false};
+};
+
+/// State of one independently produced proof obligation for hard topology narrowing.
+/// Unavailable is distinct from Satisfied so default-valued measurements cannot admit a route.
+enum class TopologyProofObligationStatus {
+    Unavailable,
+    Satisfied,
+    Violated,
+};
+
+[[nodiscard]] constexpr std::string_view
+topologyProofObligationStatusToString(TopologyProofObligationStatus status) noexcept {
+    switch (status) {
+        case TopologyProofObligationStatus::Unavailable:
+            return "unavailable";
+        case TopologyProofObligationStatus::Satisfied:
+            return "satisfied";
+        case TopologyProofObligationStatus::Violated:
+            return "violated";
+    }
+    return "unavailable";
+}
+
+/// Runtime counterpart of the independent protected-relation obligations in
+/// RetrievalCoordinates.lean.
+/// Producers satisfy these fields separately; route scoring alone never changes admission.
+struct TopologyRouteAdmission {
+    TopologyProofObligationStatus coordinateSpaceAlignment{
+        TopologyProofObligationStatus::Unavailable};
+    TopologyProofObligationStatus protectedRelationCoverage{
+        TopologyProofObligationStatus::Unavailable};
+    TopologyProofObligationStatus protectedFibersRepresented{
+        TopologyProofObligationStatus::Unavailable};
+    TopologyProofObligationStatus certificateSaturatesProtectedFibers{
+        TopologyProofObligationStatus::Unavailable};
+    TopologyProofObligationStatus routeRisk{TopologyProofObligationStatus::Unavailable};
+    TopologyProofObligationStatus work{TopologyProofObligationStatus::Unavailable};
+    TopologyProofObligationStatus coverMaterialization{TopologyProofObligationStatus::Unavailable};
+    std::size_t selectedCoverDocuments{0};
+    std::size_t materializedCoverDocuments{0};
+
+    [[nodiscard]] std::string_view denialReason() const noexcept;
+    [[nodiscard]] bool eligibleForTrialNarrowing() const noexcept;
+    [[nodiscard]] bool eligibleForNarrowing() const noexcept { return denialReason().empty(); }
+};
+
+/// Counterfactual or committed routed-vector work. The observation bit is explicit because
+/// zero work is meaningful only when every backend counter was available.
+struct TopologyRouteWorkObservation {
+    bool observed{false};
+    std::size_t rowsVisited{0};
+    std::size_t exactDistanceEvaluations{0};
+    std::size_t annCandidateBudget{0};
+};
+
+enum class TopologyRouteAction {
+    Global,
+    Augment,
+    Narrow,
+};
+
+[[nodiscard]] constexpr std::string_view
+topologyRouteActionToString(TopologyRouteAction action) noexcept {
+    switch (action) {
+        case TopologyRouteAction::Global:
+            return "global";
+        case TopologyRouteAction::Augment:
+            return "augment";
+        case TopologyRouteAction::Narrow:
+            return "narrow";
+    }
+    return "global";
+}
+
+/// Construction-bound runtime counterpart of `SelectiveRouteCertificate`. Topology owns cover
+/// selection and materialization; SearchEngine consumes this object without reconstructing theorem
+/// premises from raw routing state.
+struct TopologyRouteCertificate {
+    std::string constructionFingerprint;
+    std::string coordinateSpaceIdentity;
+    std::vector<std::string> selectedCoverIds;
+    std::vector<std::string> selectedProtectedRelationFiberIds;
+    std::unordered_set<std::string> allowedDocumentHashes;
+    /// Full selected membership by accepted route, in route-score order. The union above remains
+    /// the backend filter; these groups let callers allocate balanced result quotas.
+    std::vector<std::unordered_set<std::string>> allowedDocumentHashGroups;
+    TopologyRouteAdmission admission;
+    TopologyRouteWorkObservation work;
+
+    [[nodiscard]] bool hasUsefulRoute() const noexcept { return !allowedDocumentHashes.empty(); }
+    [[nodiscard]] bool isConstructionBound() const noexcept {
+        return !constructionFingerprint.empty() && !selectedCoverIds.empty() &&
+               !selectedProtectedRelationFiberIds.empty();
+    }
+    [[nodiscard]] bool eligibleForTrialNarrowing() const noexcept {
+        return hasUsefulRoute() && isConstructionBound() && admission.eligibleForTrialNarrowing();
+    }
+    [[nodiscard]] TopologyRouteAction action() const noexcept {
+        if (hasUsefulRoute() && isConstructionBound() && admission.eligibleForNarrowing()) {
+            return TopologyRouteAction::Narrow;
+        }
+        return hasUsefulRoute() ? TopologyRouteAction::Augment : TopologyRouteAction::Global;
+    }
+};
+
+/// Trace-only attribution for the graph-neighbor producer. Candidate document IDs preserve
+/// seed-hit/score order except for seed IDs, which are sorted for stable comparison.
+struct GraphNeighborStageTrace {
+    bool collected{false};
+    std::size_t edgeFetchLimit{0};
+    std::size_t fetchTruncatedSeedCount{0};
+    std::vector<std::string> seedDocumentIds;
+    std::size_t seedUnresolvedCount{0};
+    std::size_t relationCandidateCount{0};
+    std::vector<std::string> relationCandidateDocumentIds;
+    std::size_t relationUnresolvedCount{0};
+    std::size_t fetchedCandidateCount{0};
+    std::vector<std::string> fetchedCandidateDocumentIds;
+    std::size_t fetchedUnresolvedCount{0};
+    std::size_t eligibleCandidateCount{0};
+    std::vector<std::string> eligibleCandidateDocumentIds;
+    std::size_t eligibleUnresolvedCount{0};
 };
 
 struct TopologyRoutingSessionResult {
@@ -125,11 +271,9 @@ struct TopologyRoutingSessionResult {
     bool loadSucceeded = false;
     bool artifactAdmitted = false;
     bool applied = false;
-    bool narrowApplied = false;
     bool artifactsFresh = false;
     bool snapshotCacheHit = false;
     std::uint64_t topologyEpoch = 0;
-    std::string constructionFingerprint;
     std::string skipReason;
     std::size_t routedClusters = 0;
     std::size_t availableRoutes = 0;
@@ -151,14 +295,17 @@ struct TopologyRoutingSessionResult {
     std::size_t routeAnnCandidates = 0;
     std::size_t routeAnnDistanceEvaluations = 0;
     std::size_t routeExactRepresentativeDistanceEvaluations = 0;
+    TopologyRouteCertificate certificate;
+    std::vector<TopologyRouteEvidence> routeEvidence;
     std::vector<std::string> addedCandidateHashes;
+    /// Query-trace identifiers for materialized relation candidates. These are
+    /// populated at the same document-lookup boundary as routedCandidateHashes
+    /// so benchmark qrels can distinguish reachability from later vector scoring.
+    std::vector<std::string> routedCandidateDocIds;
     std::unordered_set<std::string> routedCandidateHashes;
-    std::unordered_set<std::string> routeAllowedDocumentHashes;
-    /// Full selected membership by accepted route, in route-score order. The union above remains
-    /// the backend filter; these groups let callers allocate balanced result quotas.
-    std::vector<std::unordered_set<std::string>> routeAllowedDocumentHashGroups;
     std::unordered_set<std::string> medoidHashes;
     std::unordered_map<std::string, TopologyCandidateStructureEvidence> candidateStructureEvidence;
+    GraphNeighborStageTrace graphNeighborTrace;
     TopologyRoutingTimings timings;
 };
 

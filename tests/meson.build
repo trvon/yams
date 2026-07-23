@@ -1203,6 +1203,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_symspell_search_exe = executable('catch2_symspell_search',
+    files('unit/search/symspell_search_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_evidence_search_pipeline_exe = executable('catch2_evidence_search_pipeline',
     files('unit/search/evidence_search_pipeline_catch2_test.cpp'),
     include_directories: incs,
@@ -3302,6 +3311,12 @@ if catch2_dep.found()
     timeout: 180
   )
 
+  test('symspell_search', catch2_symspell_search_exe,
+    suite: ['catch2', 'unit', 'search', 'symspell'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
+  )
+
   test('evidence_search_pipeline', catch2_evidence_search_pipeline_exe,
     suite: ['catch2', 'unit', 'search', 'evidence_pipeline'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -3347,6 +3362,11 @@ if catch2_dep.found()
     test('xplan_contracts', xplan_python,
       args: [meson.current_source_dir() / 'benchmarks/xplan/test_xplan_contracts.py'],
       suite: ['unit', 'search', 'benchmark', 'xplan'],
+      timeout: 30
+    )
+    test('xplan_hydration_metrics', xplan_python,
+      args: [meson.current_source_dir() / 'benchmarks/xplan/test_hydration_metrics.py'],
+      suite: ['unit', 'search', 'benchmark', 'xplan', 'hydration'],
       timeout: 30
     )
   endif

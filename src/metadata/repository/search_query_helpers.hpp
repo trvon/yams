@@ -11,6 +11,8 @@ enum class Fts5QueryMode { Smart, Simple, Natural };
 // Core FTS token/query helpers shared by document query filters and search paths.
 bool hasAdvancedFts5Operators(const std::string& query);
 std::string sanitizeFts5UserQuery(std::string query, bool allowPrefixWildcard = true);
+// Quote text as a single FTS5 literal phrase, escaping embedded double quotes.
+std::string quoteFts5Literal(std::string_view text);
 std::string stripPunctuation(std::string term);
 std::string renderFts5Token(const std::string& token, bool prefix);
 

@@ -350,6 +350,10 @@ TEST_CASE("GrepService - Basic Functionality", "[grep][service][basic]") {
         REQUIRE(res.value().searchStats.contains("metadata_operations"));
         CHECK(res.value().searchStats.at("metadata_operations") != "0");
         REQUIRE(res.value().searchStats.contains("latency_ms"));
+        REQUIRE(res.value().searchStats.contains("match_render_us"));
+        REQUIRE(res.value().searchStats.contains("matches_rendered"));
+        CHECK(std::stoll(res.value().searchStats.at("match_render_us")) >= 0);
+        CHECK(std::stoll(res.value().searchStats.at("matches_rendered")) > 0);
     }
 
     SECTION("Relation metadata is added for matched files") {

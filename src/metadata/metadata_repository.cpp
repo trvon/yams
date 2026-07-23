@@ -3385,7 +3385,10 @@ void MetadataRepository::addSymSpellTerm(std::string_view term, int64_t frequenc
             return schemaResult.error();
         }
         search::SymSpellSearch writer(rawDb);
-        writer.addTerm(ownedTerm, frequency);
+        auto addResult = writer.addTerm(ownedTerm, frequency);
+        if (!addResult) {
+            return addResult.error();
+        }
         return Result<void>();
     });
 
@@ -3449,8 +3452,7 @@ MetadataRepository::tryAddSymSpellTerms(const std::vector<std::pair<std::string,
                 symspellSchemaReady_.store(true, std::memory_order_release);
             }
             search::SymSpellSearch writer(rawDb);
-            writer.addTermsBatch(chunk);
-            return Result<void>();
+            return writer.addTermsBatch(chunk);
         });
 
         if (!result) {

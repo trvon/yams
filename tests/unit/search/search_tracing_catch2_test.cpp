@@ -177,10 +177,12 @@ TEST_CASE("recordTopologyRoutingDebug emits the legacy topology key set",
     session.loadSucceeded = true;
     session.artifactAdmitted = true;
     session.applied = true;
-    session.narrowApplied = false;
     session.artifactsFresh = true;
     session.topologyEpoch = 7;
-    session.constructionFingerprint = "0123456789abcdef";
+    session.certificate.constructionFingerprint = "0123456789abcdef";
+    session.certificate.allowedDocumentHashes = {"hash-a", "hash-c"};
+    session.certificate.selectedCoverIds = {"cluster-a"};
+    session.certificate.selectedProtectedRelationFiberIds = {"fiber-a", "fiber-b"};
     session.routedClusters = 2;
     session.availableRoutes = 3;
     session.routedDocs = 5;
@@ -196,8 +198,54 @@ TEST_CASE("recordTopologyRoutingDebug emits the legacy topology key set",
     session.routeAnnCandidates = 6;
     session.routeAnnDistanceEvaluations = 4;
     session.routeExactRepresentativeDistanceEvaluations = 3;
+    session.certificate.admission.coverMaterialization =
+        yams::search::TopologyProofObligationStatus::Violated;
+    session.certificate.admission.protectedFibersRepresented =
+        yams::search::TopologyProofObligationStatus::Satisfied;
+    session.certificate.admission.certificateSaturatesProtectedFibers =
+        yams::search::TopologyProofObligationStatus::Violated;
+    session.certificate.admission.selectedCoverDocuments = 5;
+    session.certificate.admission.materializedCoverDocuments = 4;
+    session.routeEvidence = {
+        yams::search::TopologyRouteEvidence{
+            .clusterId = "cluster-a",
+            .semanticCost = 0.1F,
+            .sparseCost = 0.2F,
+            .persistencePenalty = 0.3F,
+            .cohesionPenalty = 0.4F,
+            .sizePenalty = 0.5F,
+            .routeScore = 0.9F,
+            .scoreEligible = true,
+            .inSelectedPrefix = true,
+        },
+        yams::search::TopologyRouteEvidence{
+            .clusterId = "cluster-b",
+            .sparseCost = 0.8F,
+            .persistencePenalty = 0.7F,
+            .cohesionPenalty = 0.6F,
+            .sizePenalty = 0.5F,
+            .routeScore = 0.3F,
+            .scoreEligible = false,
+            .inSelectedPrefix = false,
+        },
+    };
     session.addedCandidateHashes = {"hash-a", "hash-b"};
+    session.routedCandidateDocIds = {"doc-c", "doc-a", "doc-a"};
     session.routedCandidateHashes = {"hash-c", "hash-a"};
+    session.graphNeighborTrace.collected = true;
+    session.graphNeighborTrace.edgeFetchLimit = 128;
+    session.graphNeighborTrace.fetchTruncatedSeedCount = 1;
+    session.graphNeighborTrace.seedDocumentIds = {"seed-a", "seed-b"};
+    session.graphNeighborTrace.seedUnresolvedCount = 1;
+    session.graphNeighborTrace.relationCandidateCount = 4;
+    session.graphNeighborTrace.relationCandidateDocumentIds = {"raw-b", "raw-a"};
+    session.graphNeighborTrace.relationUnresolvedCount = 2;
+    session.graphNeighborTrace.fetchedCandidateCount = 3;
+    session.graphNeighborTrace.fetchedCandidateDocumentIds = {"fetched-b", "fetched-a"};
+    session.graphNeighborTrace.fetchedUnresolvedCount = 1;
+    session.graphNeighborTrace.eligibleCandidateCount = 2;
+    session.graphNeighborTrace.eligibleCandidateDocumentIds = {"eligible-b", "eligible-a"};
+    session.graphNeighborTrace.eligibleUnresolvedCount = 0;
     session.candidateStructureEvidence.emplace("hash-a",
                                                yams::search::TopologyCandidateStructureEvidence{
                                                    .scaleAgreement = 0.8F,
@@ -226,9 +274,9 @@ TEST_CASE("recordTopologyRoutingDebug emits the legacy topology key set",
     session.timings.candidateInsertMicros = 70;
 
     yams::search::SearchResponse response;
-    yams::search::recordTopologyRoutingDebug(response, config,
-                                             SearchEngineConfig::TopologyRoutingMode::HybridAssist,
-                                             session, "skip-reason", 42, false, true);
+    yams::search::recordTopologyRoutingDebug(
+        response, config, SearchEngineConfig::TopologyRoutingMode::HybridAssist, session,
+        "skip-reason", 42, yams::search::TopologyRoutingDebugOptions{.includeDetailedTrace = true});
 
     const auto& debug = response.debugStats;
     CHECK(debug.at("topology_routing_mode") == "hybrid_assist");
@@ -253,12 +301,51 @@ TEST_CASE("recordTopologyRoutingDebug emits the legacy topology key set",
     CHECK(debug.at("topology_route_ann_candidates") == "6");
     CHECK(debug.at("topology_route_ann_distance_evaluations") == "4");
     CHECK(debug.at("topology_route_exact_representative_distance_evaluations") == "3");
+    CHECK(debug.at("topology_route_evidence_count") == "2");
+    CHECK(debug.at("topology_route_narrow_proposed") == "1");
+    CHECK(debug.at("topology_route_action") == "augment");
+    CHECK(debug.at("topology_route_selected_cover_count") == "1");
+    CHECK(debug.at("topology_route_selected_protected_relation_fiber_count") == "2");
+    CHECK(debug.at("topology_route_admission_eligible") == "0");
+    CHECK(debug.at("topology_route_admission_denial_reason") == "cover_materialization_incomplete");
+    CHECK(debug.at("topology_route_protected_relation_coverage_status") == "unavailable");
+    CHECK(debug.at("topology_route_risk_status") == "unavailable");
+    CHECK(debug.at("topology_route_work_status") == "unavailable");
+    CHECK(debug.at("topology_route_cover_materialization_status") == "violated");
+    CHECK(debug.at("topology_route_protected_fibers_represented_status") == "satisfied");
+    CHECK(debug.at("topology_route_certificate_saturates_protected_fibers_status") == "violated");
+    CHECK(debug.at("topology_route_selected_cover_documents") == "5");
+    CHECK(debug.at("topology_route_materialized_cover_documents") == "4");
+    const auto evidenceRows = nlohmann::json::parse(debug.at("topology_route_evidence_rows"));
+    REQUIRE(evidenceRows.size() == 2);
+    CHECK(evidenceRows.at(0).at("cluster_id") == "cluster-a");
+    CHECK(evidenceRows.at(0).at("semantic_cost").get<float>() == Catch::Approx(0.1F));
+    CHECK(evidenceRows.at(0).at("in_selected_prefix") == true);
+    CHECK(evidenceRows.at(0).at("graph_cost").is_null());
+    CHECK(evidenceRows.at(1).at("semantic_cost").is_null());
+    CHECK(evidenceRows.at(1).at("score_eligible") == false);
+    CHECK(evidenceRows.at(1).at("in_selected_prefix") == false);
     CHECK(debug.at("topology_weak_query_routed_docs") == "5");
     CHECK(debug.at("topology_weak_query_added_candidates") == "4");
     CHECK(debug.at("topology_weak_query_duplicate_candidates") == "3");
     CHECK(debug.at("topology_weak_query_stale_candidates") == "1");
     CHECK(debug.at("topology_weak_query_added_candidate_hashes") == "hash-a\thash-b");
     CHECK(debug.at("topology_weak_query_allowed_candidate_hashes") == "hash-a\thash-c");
+    CHECK(debug.at("topology_weak_query_allowed_candidate_doc_ids") == "doc-a\tdoc-c");
+    CHECK(debug.at("topology_graph_trace_collected") == "1");
+    CHECK(debug.at("topology_graph_edge_fetch_limit") == "128");
+    CHECK(debug.at("topology_graph_fetch_truncated_seed_count") == "1");
+    CHECK(debug.at("topology_graph_seed_doc_ids") == "seed-a\tseed-b");
+    CHECK(debug.at("topology_graph_seed_unresolved_count") == "1");
+    CHECK(debug.at("topology_graph_relation_candidate_count") == "4");
+    CHECK(debug.at("topology_graph_relation_candidate_doc_ids") == "raw-b\traw-a");
+    CHECK(debug.at("topology_graph_relation_unresolved_count") == "2");
+    CHECK(debug.at("topology_graph_fetched_candidate_count") == "3");
+    CHECK(debug.at("topology_graph_fetched_candidate_doc_ids") == "fetched-b\tfetched-a");
+    CHECK(debug.at("topology_graph_fetched_unresolved_count") == "1");
+    CHECK(debug.at("topology_graph_eligible_candidate_count") == "2");
+    CHECK(debug.at("topology_graph_eligible_candidate_doc_ids") == "eligible-b\teligible-a");
+    CHECK(debug.at("topology_graph_eligible_unresolved_count") == "0");
     CHECK(debug.at("topology_weak_query_total_candidates") == "42");
     CHECK(debug.at("topology_structure_candidate_count") == "2");
     CHECK(std::stof(debug.at("topology_structure_scale_agreement_mean")) == Catch::Approx(0.5F));
@@ -303,6 +390,7 @@ TEST_CASE("recordTopologyRoutingDebug omits readiness and timing when load not a
     CHECK_FALSE(debug.contains("topology_epoch"));
     CHECK_FALSE(debug.contains("topology_weak_query_added_candidate_hashes"));
     CHECK_FALSE(debug.contains("topology_weak_query_allowed_candidate_hashes"));
+    CHECK_FALSE(debug.contains("topology_weak_query_allowed_candidate_doc_ids"));
     CHECK(response.componentTimingMicros.empty());
 }
 
@@ -339,6 +427,8 @@ TEST_CASE("metric key constants are stable strings", "[search][tracing][catch2]"
     CHECK(metrics::kTopologyRouteBestScore == "topology_route_best_score");
     CHECK(metrics::kTopologyRouteMeanAcceptedScore == "topology_route_mean_accepted_score");
     CHECK(metrics::kTopologyRouteAcceptedCount == "topology_route_accepted_count");
+    CHECK(metrics::kTopologyRouteEvidenceCount == "topology_route_evidence_count");
+    CHECK(metrics::kTopologyRouteEvidenceRows == "topology_route_evidence_rows");
     CHECK(metrics::kTopologySeedCount == "topology_seed_count");
     CHECK(metrics::kTopologySeedCoverageCount == "topology_seed_coverage_count");
 }

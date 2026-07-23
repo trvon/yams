@@ -5,11 +5,26 @@
 #include <yams/app/services/graph_query_service.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/daemon/components/dispatch_response.hpp>
+#include <yams/daemon/components/search_request_mapper.hpp>
 
 #include <string>
 #include <unordered_set>
 
 using namespace yams::app::services;
+
+TEST_CASE("Search request mapper preserves stage timeout budgets", "[unit][daemon][mapper]") {
+    yams::daemon::SearchRequest source;
+    source.vectorStageTimeoutMs = 11;
+    source.keywordStageTimeoutMs = 22;
+    source.snippetHydrationTimeoutMs = 33;
+    SearchRequest destination;
+
+    yams::daemon::dispatch::mapSearchStageTimeouts(source, destination);
+
+    CHECK(destination.vectorStageTimeoutMs == 11);
+    CHECK(destination.keywordStageTimeoutMs == 22);
+    CHECK(destination.snippetHydrationTimeoutMs == 33);
+}
 
 TEST_CASE("SearchResultMapper preserves service metadata", "[unit][daemon][mapper]") {
     SearchItem item;

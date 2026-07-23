@@ -2,6 +2,7 @@
 
 #include <spdlog/spdlog.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/search/search_tracing.h>
 #include <yams/vector/vector_database.h>
 
 #include <algorithm>
@@ -259,6 +260,64 @@ queryVectorIndexImpl(const std::shared_ptr<yams::metadata::MetadataRepository>& 
 }
 
 } // namespace
+
+CandidateRescueMergeResult
+mergeVectorCandidateRescues(std::vector<ComponentResult> baseline,
+                            std::vector<ComponentResult> expansion,
+                            const std::unordered_set<std::string>& existingCandidates) {
+    CandidateRescueMergeResult out;
+    out.results = std::move(baseline);
+    out.results.reserve(out.results.size() + expansion.size());
+
+    const auto candidateId = [](const ComponentResult& candidate) -> const std::string& {
+        return candidate.documentHash.empty() ? candidate.filePath : candidate.documentHash;
+    };
+
+    std::unordered_set<std::string> seen;
+    seen.reserve(out.results.size() + expansion.size());
+    for (const auto& candidate : out.results) {
+        const auto& id = candidateId(candidate);
+        if (!id.empty()) {
+            seen.insert(id);
+        }
+    }
+
+    for (auto& candidate : expansion) {
+        const auto& id = candidateId(candidate);
+        if (id.empty() || !seen.insert(id).second) {
+            ++out.duplicates;
+            continue;
+        }
+        candidate.debugInfo["candidate_rescue"] = "1";
+        const auto documentId = documentIdForTrace(candidate.filePath, candidate.documentHash);
+        if (existingCandidates.contains(id)) {
+            candidate.debugInfo["candidate_rescue_kind"] = "evidence";
+            out.evidenceRescueDocumentHashes.push_back(id);
+            out.evidenceRescueDocumentIds.push_back(documentId);
+            ++out.evidenceRescues;
+        } else {
+            candidate.debugInfo["candidate_rescue_kind"] = "novel_document";
+            out.novelDocumentHashes.push_back(id);
+            out.novelDocumentIds.push_back(documentId);
+            ++out.novelDocuments;
+        }
+        out.addedDocumentHashes.push_back(id);
+        out.addedDocumentIds.push_back(documentId);
+        out.results.push_back(std::move(candidate));
+        ++out.added;
+    }
+
+    std::stable_sort(out.results.begin(), out.results.end(), [&](const auto& lhs, const auto& rhs) {
+        if (lhs.score != rhs.score) {
+            return lhs.score > rhs.score;
+        }
+        return candidateId(lhs) < candidateId(rhs);
+    });
+    for (std::size_t rank = 0; rank < out.results.size(); ++rank) {
+        out.results[rank].rank = rank;
+    }
+    return out;
+}
 
 RoutedVectorFilterResult
 filterVectorResultsByAllowedDocuments(std::vector<ComponentResult> globalResults,

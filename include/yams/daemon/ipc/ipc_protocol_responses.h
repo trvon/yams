@@ -3585,6 +3585,8 @@ struct GraphExploreResponse {
     uint64_t totalSymbolsConsidered{0};
     uint64_t totalFilesConsidered{0};
     uint64_t emittedChars{0};
+    uint64_t snippetRenderMicros{0};
+    uint64_t snippetsRendered{0};
     bool kgAvailable{true};
     bool truncated{false};
 
@@ -3604,7 +3606,7 @@ struct GraphExploreResponse {
             relation.serialize(ser);
         }
         ser << warnings << totalSymbolsConsidered << totalFilesConsidered << emittedChars
-            << kgAvailable << truncated;
+            << kgAvailable << truncated << snippetRenderMicros << snippetsRendered;
     }
 
     template <typename Deserializer>
@@ -3669,6 +3671,14 @@ struct GraphExploreResponse {
             response.truncated = r.value();
         else
             return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            response.snippetRenderMicros = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            response.snippetsRendered = r.value();
+        else
+            return r.error();
         return response;
     }
 };
@@ -3679,6 +3689,8 @@ struct GraphSymbolLookupResponse {
     std::vector<GraphExploreSnippet> snippets;
     std::vector<GraphExploreRelation> trail;
     std::vector<std::string> warnings;
+    uint64_t snippetRenderMicros{0};
+    uint64_t snippetsRendered{0};
     bool ambiguous{false};
     bool truncated{false};
 
@@ -3697,7 +3709,7 @@ struct GraphSymbolLookupResponse {
         for (const auto& relation : trail) {
             relation.serialize(ser);
         }
-        ser << warnings << ambiguous << truncated;
+        ser << warnings << ambiguous << truncated << snippetRenderMicros << snippetsRendered;
     }
 
     template <typename Deserializer>
@@ -3750,6 +3762,14 @@ struct GraphSymbolLookupResponse {
             response.truncated = r.value();
         else
             return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            response.snippetRenderMicros = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            response.snippetsRendered = r.value();
+        else
+            return r.error();
         return response;
     }
 };
@@ -3760,6 +3780,8 @@ struct GraphTraceResponse {
     std::vector<GraphExploreRelation> path;
     std::vector<GraphExploreSnippet> snippets;
     std::vector<std::string> warnings;
+    uint64_t snippetRenderMicros{0};
+    uint64_t snippetsRendered{0};
     bool found{false};
     bool truncated{false};
 
@@ -3774,7 +3796,7 @@ struct GraphTraceResponse {
         for (const auto& snippet : snippets) {
             snippet.serialize(ser);
         }
-        ser << warnings << found << truncated;
+        ser << warnings << found << truncated << snippetRenderMicros << snippetsRendered;
     }
 
     template <typename Deserializer>
@@ -3819,6 +3841,14 @@ struct GraphTraceResponse {
             return r.error();
         if (auto r = deser.template read<bool>(); r)
             response.truncated = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            response.snippetRenderMicros = r.value();
+        else
+            return r.error();
+        if (auto r = deser.template read<uint64_t>(); r)
+            response.snippetsRendered = r.value();
         else
             return r.error();
         return response;

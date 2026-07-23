@@ -4,10 +4,15 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <limits>
 #include <string>
+#include <string_view>
+#include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
 
 using namespace yams::vector;
@@ -154,6 +159,287 @@ TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke insert and search with Simeon 
     auto results = db.search(embedding, params);
     REQUIRE(results.size() == 1);
     CHECK(results[0].chunk_id == "spq_hash_001");
+}
+
+TEST_CASE("Vector search engine names and compatibility aliases are stable",
+          "[vector][contract][engine]") {
+    CHECK(std::string_view(vectorSearchEngineName(VectorSearchEngine::SimeonPqAdc)) ==
+          "simeon_pq_adc");
+    CHECK(std::string_view(vectorSearchEngineName(VectorSearchEngine::Vec0L2)) == "vec0_l2");
+    CHECK(std::string_view(vectorSearchEngineName(VectorSearchEngine::ExactScan)) == "exact_scan");
+
+    CHECK(parseVectorSearchEngine("simeon_pq_adc") == VectorSearchEngine::SimeonPqAdc);
+    CHECK(parseVectorSearchEngine("compressed_primary") == VectorSearchEngine::SimeonPqAdc);
+    CHECK(parseVectorSearchEngine("hnsw") == VectorSearchEngine::SimeonPqAdc);
+    CHECK(parseVectorSearchEngine("vec0_l2") == VectorSearchEngine::Vec0L2);
+    CHECK(parseVectorSearchEngine("exact_scan") == VectorSearchEngine::ExactScan);
+    CHECK_FALSE(parseVectorSearchEngine("unknown").has_value());
+}
+
+TEST_CASE("Embedding generator factory remains a linkable public API",
+          "[vector][contract][embedding-generator]") {
+    using Factory = std::unique_ptr<EmbeddingGenerator> (*)(const EmbeddingConfig&);
+    Factory factory = &createEmbeddingGenerator;
+    CHECK(factory != nullptr);
+}
+
+TEST_CASE_METHOD(VectorSmokeFixture, "VectorDatabase exact scan is a global vector reference",
+                 "[vector][contract][exact-scan][catch2]") {
+    skipIfNeeded();
+
+    VectorDatabaseConfig config;
+    config.database_path = ":memory:";
+    config.embedding_dim = 4;
+    config.use_in_memory = true;
+    config.search_engine = VectorSearchEngine::ExactScan;
+
+    VectorDatabase db(config);
+    REQUIRE(db.initializeChecked().has_value());
+    for (std::size_t i = 0; i < 6; ++i) {
+        VectorRecord record;
+        record.chunk_id = "exact_" + std::to_string(i);
+        record.document_hash = "doc_" + std::to_string(i);
+        record.embedding = {1.0F, static_cast<float>(i), 0.0F, 0.0F};
+        REQUIRE(db.insertVectorChecked(record).has_value());
+    }
+
+    VectorSearchDiagnostics diagnostics;
+    VectorSearchParams params;
+    params.k = 3;
+    params.similarity_threshold = -1.0F;
+    params.diagnostics = &diagnostics;
+    auto results = db.searchSimilarChecked({1.0F, 0.0F, 0.0F, 0.0F}, params);
+
+    REQUIRE(results.has_value());
+    REQUIRE(results.value().size() == 3U);
+    CHECK(results.value().front().chunk_id == "exact_0");
+    CHECK(diagnostics.usedExactScan);
+    CHECK_FALSE(diagnostics.usedAnn);
+    CHECK(diagnostics.rowsVisitedObserved);
+    CHECK(diagnostics.exactDistanceEvaluationsObserved);
+    CHECK_FALSE(diagnostics.annCandidateBudgetObserved);
+    CHECK(diagnostics.rowsVisited == 6U);
+    CHECK(diagnostics.exactDistanceEvaluations == 6U);
+}
+
+TEST_CASE_METHOD(VectorSmokeFixture, "VectorDatabase exact scan rejects invalid query vectors",
+                 "[vector][contract][exact-scan][catch2]") {
+    skipIfNeeded();
+
+    VectorDatabaseConfig config;
+    config.database_path = ":memory:";
+    config.embedding_dim = 4;
+    config.use_in_memory = true;
+    config.search_engine = VectorSearchEngine::ExactScan;
+
+    VectorDatabase db(config);
+    REQUIRE(db.initializeChecked().has_value());
+    VectorRecord record;
+    record.chunk_id = "valid";
+    record.document_hash = "doc";
+    record.embedding = {1.0F, 0.0F, 0.0F, 0.0F};
+    REQUIRE(db.insertVectorChecked(record).has_value());
+
+    VectorSearchParams params;
+    params.k = 1;
+    params.similarity_threshold = -1.0F;
+
+    SECTION("zero norm") {
+        auto result = db.searchSimilarChecked({0.0F, 0.0F, 0.0F, 0.0F}, params);
+        REQUIRE_FALSE(result.has_value());
+        CHECK(result.error().code == yams::ErrorCode::InvalidArgument);
+    }
+
+    SECTION("non-finite") {
+        auto result = db.searchSimilarChecked(
+            {1.0F, std::numeric_limits<float>::quiet_NaN(), 0.0F, 0.0F}, params);
+        REQUIRE_FALSE(result.has_value());
+        CHECK(result.error().code == yams::ErrorCode::InvalidArgument);
+    }
+}
+
+TEST_CASE_METHOD(VectorSmokeFixture,
+                 "VectorDatabase exact scan keeps large finite scores consistent across paths",
+                 "[vector][contract][exact-scan][numerics][catch2]") {
+    skipIfNeeded();
+
+    VectorDatabaseConfig config;
+    config.database_path = ":memory:";
+    config.embedding_dim = 4;
+    config.use_in_memory = true;
+    config.search_engine = VectorSearchEngine::ExactScan;
+
+    VectorDatabase db(config);
+    REQUIRE(db.initializeChecked().has_value());
+    const float large = std::numeric_limits<float>::max() / 4.0F;
+    const std::vector<float> embedding = {large, -large, large, -large};
+    VectorRecord record;
+    record.chunk_id = "large_finite";
+    record.document_hash = "doc_large_finite";
+    record.embedding = embedding;
+    record.metadata["lane"] = "large";
+    REQUIRE(db.insertVectorChecked(record).has_value());
+
+    VectorSearchParams unfiltered;
+    unfiltered.k = 1;
+    unfiltered.similarity_threshold = -1.0F;
+    auto global = db.searchSimilarChecked(embedding, unfiltered);
+    REQUIRE(global.has_value());
+    REQUIRE(global.value().size() == 1U);
+
+    VectorSearchParams filtered = unfiltered;
+    filtered.metadata_filters["lane"] = "large";
+    auto constrained = db.searchSimilarChecked(embedding, filtered);
+    REQUIRE(constrained.has_value());
+    REQUIRE(constrained.value().size() == 1U);
+
+    CHECK(std::isfinite(global.value().front().relevance_score));
+    CHECK(std::isfinite(constrained.value().front().relevance_score));
+    CHECK(global.value().front().relevance_score > 0.999F);
+    CHECK(constrained.value().front().relevance_score > 0.999F);
+}
+
+TEST_CASE_METHOD(VectorSmokeFixture, "VectorDatabase exact scan breaks score ties deterministically",
+                 "[vector][contract][exact-scan][catch2]") {
+    skipIfNeeded();
+
+    const auto searchAfterInsertion = [](const std::vector<std::string>& chunkIds,
+                                         bool useMetadataFilter) {
+        VectorDatabaseConfig config;
+        config.database_path = ":memory:";
+        config.embedding_dim = 4;
+        config.use_in_memory = true;
+        config.search_engine = VectorSearchEngine::ExactScan;
+
+        VectorDatabase db(config);
+        REQUIRE(db.initializeChecked().has_value());
+        for (const auto& chunkId : chunkIds) {
+            VectorRecord record;
+            record.chunk_id = chunkId;
+            record.document_hash = "doc_" + chunkId;
+            record.embedding = {1.0F, 0.0F, 0.0F, 0.0F};
+            record.metadata["lane"] = "tie";
+            REQUIRE(db.insertVectorChecked(record).has_value());
+        }
+
+        VectorSearchParams params;
+        params.k = 2;
+        params.similarity_threshold = -1.0F;
+        if (useMetadataFilter) {
+            params.metadata_filters["lane"] = "tie";
+        }
+        auto result = db.searchSimilarChecked({1.0F, 0.0F, 0.0F, 0.0F}, params);
+        REQUIRE(result.has_value());
+
+        std::vector<std::string> resultIds;
+        for (const auto& record : result.value()) {
+            resultIds.push_back(record.chunk_id);
+        }
+        return resultIds;
+    };
+
+    const auto first = searchAfterInsertion({"tie_c", "tie_a", "tie_b"}, false);
+    const auto second = searchAfterInsertion({"tie_b", "tie_a", "tie_c"}, false);
+    CHECK(first == std::vector<std::string>{"tie_a", "tie_b"});
+    CHECK(second == first);
+
+    const auto filteredFirst = searchAfterInsertion({"tie_c", "tie_a", "tie_b"}, true);
+    const auto filteredSecond = searchAfterInsertion({"tie_b", "tie_a", "tie_c"}, true);
+    CHECK(filteredFirst == std::vector<std::string>{"tie_a", "tie_b"});
+    CHECK(filteredSecond == filteredFirst);
+}
+
+TEST_CASE_METHOD(VectorSmokeFixture,
+                 "VectorDatabase exact candidate mode scores only allowed documents",
+                 "[vector][contract][exact-candidates][catch2]") {
+    skipIfNeeded();
+
+    VectorDatabaseConfig config;
+    config.database_path = ":memory:";
+    config.embedding_dim = 4;
+    config.use_in_memory = true;
+
+    VectorDatabase db(config);
+    REQUIRE(db.initializeChecked().has_value());
+
+    const auto insert = [&](std::string chunkId, std::string documentHash,
+                            std::vector<float> embedding) {
+        VectorRecord record;
+        record.chunk_id = std::move(chunkId);
+        record.document_hash = std::move(documentHash);
+        record.embedding = std::move(embedding);
+        return db.insertVectorChecked(record);
+    };
+
+    REQUIRE(insert("allowed_best", "allowed", {1.0F, 0.0F, 0.0F, 0.0F}).has_value());
+    REQUIRE(insert("allowed_second", "allowed", {0.8F, 0.6F, 0.0F, 0.0F}).has_value());
+    REQUIRE(insert("blocked", "blocked", {1.0F, 0.0F, 0.0F, 0.0F}).has_value());
+
+    VectorSearchDiagnostics diagnostics;
+    VectorSearchParams params;
+    params.k = 4;
+    params.similarity_threshold = -1.0F;
+    params.candidate_hashes = {"allowed"};
+    params.candidate_filter_mode = CandidateFilterMode::Exact;
+    params.diagnostics = &diagnostics;
+
+    auto results = db.searchSimilarChecked({1.0F, 0.0F, 0.0F, 0.0F}, params);
+    REQUIRE(results.has_value());
+    REQUIRE(results.value().size() == 2U);
+    CHECK(results.value().front().chunk_id == "allowed_best");
+    CHECK(results.value().at(1).chunk_id == "allowed_second");
+    CHECK(diagnostics.usedExactScan);
+    CHECK_FALSE(diagnostics.usedAnn);
+    CHECK(diagnostics.rowsVisitedObserved);
+    CHECK(diagnostics.exactDistanceEvaluationsObserved);
+    CHECK(diagnostics.rowsVisited == 2U);
+    CHECK(diagnostics.exactDistanceEvaluations == 2U);
+    CHECK(diagnostics.returnedRows == 2U);
+}
+
+TEST_CASE_METHOD(VectorSmokeFixture,
+                 "VectorDatabase deletion invalidates a built Simeon PQ snapshot",
+                 "[vector][contract][delete][spq][catch2]") {
+    skipIfNeeded();
+
+    VectorDatabaseConfig config;
+    config.database_path = ":memory:";
+    config.embedding_dim = 4;
+    config.use_in_memory = true;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.simeon_pq_subquantizers = 2;
+    config.simeon_pq_centroids = 4;
+    config.simeon_pq_train_limit = 16;
+
+    VectorDatabase db(config);
+    REQUIRE(db.initializeChecked().has_value());
+    for (std::size_t i = 0; i < 12; ++i) {
+        VectorRecord record;
+        record.chunk_id = "delete_" + std::to_string(i);
+        record.document_hash = "doc_" + std::to_string(i);
+        record.embedding = {1.0F, static_cast<float>(i) / 12.0F, 0.0F, 0.0F};
+        REQUIRE(db.insertVectorChecked(record).has_value());
+    }
+    REQUIRE(db.buildIndexChecked().has_value());
+
+    VectorSearchParams params;
+    params.k = 4;
+    params.similarity_threshold = -1.0F;
+    auto before = db.searchSimilarChecked({1.0F, 0.0F, 0.0F, 0.0F}, params);
+    REQUIRE(before.has_value());
+    REQUIRE_FALSE(before.value().empty());
+    const auto deletedChunk = before.value().front().chunk_id;
+
+    REQUIRE(db.deleteVectorChecked(deletedChunk).has_value());
+    VectorSearchDiagnostics diagnostics;
+    params.diagnostics = &diagnostics;
+    auto after = db.searchSimilarChecked({1.0F, 0.0F, 0.0F, 0.0F}, params);
+    REQUIRE(after.has_value());
+    CHECK(diagnostics.usedAnn);
+    CHECK(std::ranges::none_of(after.value(), [&](const VectorRecord& record) {
+        return record.chunk_id == deletedChunk;
+    }));
+    CHECK_FALSE(db.getVector(deletedChunk).has_value());
 }
 
 TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke get vector count", "[vector][smoke][catch2]") {

@@ -76,6 +76,20 @@ public:
     virtual Result<void> rollbackTransaction() = 0;
 };
 
+/// Optional lifecycle capability for stores that persist embedding recipe metadata.
+/// Keeping it separate from IVectorStore avoids forcing non-SQL backends to emulate
+/// version/staleness semantics they do not support.
+class IEmbeddingLifecycleStore {
+public:
+    virtual ~IEmbeddingLifecycleStore() = default;
+
+    virtual Result<std::vector<std::string>>
+    getStaleEmbeddings(const std::string& modelId, const std::string& modelVersion) = 0;
+    virtual Result<std::vector<VectorRecord>>
+    getEmbeddingsByVersion(const std::string& modelVersion, size_t limit) = 0;
+    virtual Result<void> markAsStale(const std::string& chunkId) = 0;
+};
+
 /// Optional per-call diagnostics seam. Backends implement this when they can
 /// report work without global counters or cross-request races.
 class IDiagnosticVectorStore {

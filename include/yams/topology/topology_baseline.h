@@ -60,7 +60,9 @@ public:
 // when cluster.centroidEmbedding is empty (skips dense leg for that cluster).
 class SparseGuidedClusterRouter final {
 public:
-    [[nodiscard]] static SparseRouteIndex buildRouteIndex(const TopologyArtifactBatch& artifacts);
+    /// Build immutable exact-routing structures and optionally the centroid ANN shortlist.
+    [[nodiscard]] static SparseRouteIndex buildRouteIndex(const TopologyArtifactBatch& artifacts,
+                                                          bool buildDenseAnnIndex = true);
 
     Result<std::vector<ClusterRoute>> route(const TopologyRouteRequest& request,
                                             const TopologyArtifactBatch& artifacts) const;

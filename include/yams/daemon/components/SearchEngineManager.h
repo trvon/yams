@@ -10,7 +10,9 @@
 #include <unordered_set>
 #include <vector>
 #include "SearchEngineFsm.h"
+#include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
+#include <boost/asio/thread_pool.hpp>
 #include <yams/core/types.h> // For Result type
 
 namespace yams::app::services {
@@ -60,8 +62,8 @@ public:
         std::uint64_t recentDocs{0};
     };
 
-    SearchEngineManager() = default;
-    ~SearchEngineManager() = default;
+    SearchEngineManager();
+    ~SearchEngineManager();
 
     // Non-copyable, non-movable
     SearchEngineManager(const SearchEngineManager&) = delete;
@@ -170,6 +172,12 @@ public:
         fsm_.setRebuildCallback(std::move(callback));
     }
 
+#ifdef YAMS_TESTING
+    boost::asio::any_io_executor testingRuntimeExecutor() {
+        return runtimeExecutor_.get_executor();
+    }
+#endif
+
 private:
     void refreshSnapshot();
 
@@ -194,6 +202,11 @@ private:
     std::deque<std::string> recentLexicalDeltaOrder_;
     std::unordered_set<std::string> recentLexicalDeltaSet_;
     std::filesystem::path tunerStatePath_;
+
+    // Search fanout and query embedding work must not share the ingestion/repair executor.
+    // Blocking downstream backpressure can otherwise prevent the futures awaited by every
+    // request worker from ever starting.
+    boost::asio::thread_pool runtimeExecutor_;
 };
 
 } // namespace yams::daemon

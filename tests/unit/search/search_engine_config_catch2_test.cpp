@@ -324,6 +324,8 @@ TEST_CASE("SearchEngineConfig default values", "[search][config][catch2]") {
     CHECK(cfg.topologyNarrowMinBoundaryMargin == Approx(0.2F));
     CHECK(std::string_view(SearchEngineConfig::topologyVectorPolicyToString(
               SearchEngineConfig::TopologyVectorPolicy::Shadow)) == "shadow");
+    CHECK(std::string_view(SearchEngineConfig::topologyVectorPolicyToString(
+              SearchEngineConfig::TopologyVectorPolicy::Augment)) == "augment");
     CHECK(cfg.topologyMaxDocs == 64U);
     CHECK(cfg.topologyEvidenceWeight == Approx(0.02F));
     CHECK(cfg.rrfK == Approx(12.0f));
