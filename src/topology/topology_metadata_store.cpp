@@ -163,13 +163,8 @@ json clusterToJson(const ClusterArtifact& cluster) {
     j["cohesion_score"] = cluster.cohesionScore;
     j["density_score"] = cluster.densityScore;
     j["bridge_mass"] = cluster.bridgeMass;
-    j["distortion_observation_count"] = cluster.distortionObservationCount;
-    j["coordinate_distortion"] = cluster.coordinateDistortion.has_value()
-                                     ? json(*cluster.coordinateDistortion)
-                                     : json(nullptr);
-    j["local_intrinsic_dimension"] = cluster.localIntrinsicDimension.has_value()
-                                         ? json(*cluster.localIntrinsicDimension)
-                                         : json(nullptr);
+    j["protected_pair_count"] = cluster.protectedPairCount;
+    j["preserved_protected_pair_count"] = cluster.preservedProtectedPairCount;
     j["member_document_hashes"] = cluster.memberDocumentHashes;
     j["overlap_cluster_ids"] = cluster.overlapClusterIds;
     if (cluster.medoid.has_value()) {
@@ -199,13 +194,8 @@ ClusterArtifact clusterFromJson(const json& j) {
     cluster.cohesionScore = j.value("cohesion_score", 0.0);
     cluster.densityScore = j.value("density_score", 0.0);
     cluster.bridgeMass = j.value("bridge_mass", 0.0);
-    cluster.distortionObservationCount = j.value("distortion_observation_count", std::size_t{0});
-    if (j.contains("coordinate_distortion") && !j["coordinate_distortion"].is_null()) {
-        cluster.coordinateDistortion = j["coordinate_distortion"].get<double>();
-    }
-    if (j.contains("local_intrinsic_dimension") && !j["local_intrinsic_dimension"].is_null()) {
-        cluster.localIntrinsicDimension = j["local_intrinsic_dimension"].get<double>();
-    }
+    cluster.protectedPairCount = j.value("protected_pair_count", std::size_t{0});
+    cluster.preservedProtectedPairCount = j.value("preserved_protected_pair_count", std::size_t{0});
     if (j.contains("medoid") && j["medoid"].is_object()) {
         cluster.medoid = representativeFromJson(j["medoid"]);
     }
@@ -233,6 +223,7 @@ json batchToJson(const TopologyArtifactBatch& batch) {
     json j{{"snapshot_id", batch.snapshotId},
            {"algorithm", batch.algorithm},
            {"input_kind", inputKindToString(batch.inputKind)},
+           {"embedding_space_identity", batch.embeddingSpaceIdentity},
            {"generated_at_unix_seconds", batch.generatedAtUnixSeconds},
            {"topology_epoch", batch.topologyEpoch}};
     j["clusters"] = json::array();
@@ -254,6 +245,7 @@ Result<TopologyArtifactBatch> batchFromJson(const json& j) {
     batch.snapshotId = j.value("snapshot_id", "");
     batch.algorithm = j.value("algorithm", "");
     batch.inputKind = inputKindFromString(j.value("input_kind", std::string{"hybrid"}));
+    batch.embeddingSpaceIdentity = j.value("embedding_space_identity", "");
     batch.generatedAtUnixSeconds = j.value("generated_at_unix_seconds", uint64_t{0});
     batch.topologyEpoch = j.value("topology_epoch", uint64_t{0});
     if (j.contains("clusters") && j["clusters"].is_array()) {

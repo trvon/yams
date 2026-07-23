@@ -8,6 +8,7 @@ yams_topology = static_library('yams_topology',
   [
     'topology_alternate_engines.cpp',
     'topology_baseline.cpp',
+  'protected_relation_cover.cpp',
     'topology_factory.cpp',
     'topology_input_extractor.cpp',
     'topology_metadata_store.cpp',

@@ -53,6 +53,9 @@ struct TopologyDocumentInput {
 struct TopologyBuildConfig {
     TopologyBuildMode mode{TopologyBuildMode::Incremental};
     TopologyInputKind inputKind{TopologyInputKind::Hybrid};
+    // Versioned identity of the dense coordinates used for centroids and
+    // representatives. Empty means theorem-backed narrowing must fail closed.
+    std::string embeddingSpaceIdentity;
     std::size_t maxDocuments{0};
     std::size_t maxNeighborsPerDocument{32};
     std::size_t maxDirtyRegionDocs{256};
@@ -143,13 +146,10 @@ struct ClusterArtifact {
     /// retrieval postings and do not alter this structural statistic.
     double densityScore{0.0};
     double bridgeMass{0.0};
-    /// Mean absolute disagreement between protected semantic-edge similarity and local embedding
-    /// cosine. Absent when the chart has no protected edge with compatible embeddings.
-    std::optional<double> coordinateDistortion;
-    std::size_t distortionObservationCount{0};
-    /// Radial maximum-likelihood intrinsic-dimension estimate around centroidEmbedding.
-    /// Absent when fewer than three non-zero radial observations are available.
-    std::optional<double> localIntrinsicDimension;
+    /// Protected construction pairs incident to this primary chart and the subset whose endpoints
+    /// remain together inside it. Both are zero when the construction supplied no pair evidence.
+    std::size_t protectedPairCount{0};
+    std::size_t preservedProtectedPairCount{0};
     std::optional<ClusterRepresentative> medoid;
     std::vector<std::string> memberDocumentHashes;
     std::vector<std::string> overlapClusterIds;
@@ -164,6 +164,7 @@ struct TopologyArtifactBatch {
     std::string snapshotId;
     std::string algorithm;
     TopologyInputKind inputKind{TopologyInputKind::Hybrid};
+    std::string embeddingSpaceIdentity;
     uint64_t generatedAtUnixSeconds{0};
     // Monotonically increasing epoch stamped by the builder on every published batch.
     // Distinct from snapshotId (which is a timestamp) so query-side code can detect
@@ -231,9 +232,6 @@ struct ClusterRoute {
     /// provide usable evidence on that axis; they must not be interpreted as zero cost.
     std::optional<double> semanticCost;
     std::optional<double> sparseCost;
-    std::optional<double> distortionPenalty;
-    std::optional<double> localIntrinsicDimension;
-    std::optional<double> uncertaintyPenalty;
     double persistencePenalty{1.0};
     double cohesionPenalty{1.0};
     double sizePenalty{0.0};

@@ -17,6 +17,7 @@
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
+#include <yams/topology/protected_relation_cover.h>
 #include <yams/topology/topology_baseline.h>
 #include <yams/topology/topology_input_extractor.h>
 #include <yams/topology/topology_metadata_store.h>
@@ -29,6 +30,33 @@
 using namespace yams;
 using namespace yams::metadata;
 using namespace yams::topology;
+
+TEST_CASE("Protected relation cover preserves overlapping chart memberships",
+          "[unit][topology][protected-relation][cover]") {
+    TopologyArtifactBatch artifacts;
+    artifacts.clusters = {
+        {.clusterId = "left", .memberDocumentHashes = {"a", "b", "c"}},
+        {.clusterId = "primary", .memberDocumentHashes = {"a", "b", "c"}},
+        {.clusterId = "right", .memberDocumentHashes = {"a", "b"}},
+    };
+    artifacts.memberships = {
+        {.documentHash = "a", .clusterId = "primary", .overlapClusterIds = {"right", "left"}},
+        {.documentHash = "b", .clusterId = "primary", .overlapClusterIds = {"left", "right"}},
+        {.documentHash = "c", .clusterId = "primary", .overlapClusterIds = {"left"}},
+    };
+
+    auto indexResult = buildProtectedRelationCoverIndex(artifacts);
+    REQUIRE(indexResult.has_value());
+    const auto& index = indexResult.value();
+
+    REQUIRE(index.fiberById.contains("primary"));
+    REQUIRE(index.fiberById.contains("left"));
+    REQUIRE(index.fiberById.contains("right"));
+    CHECK(index.fibers[index.fiberById.at("right")].documentHashes ==
+          std::vector<std::string>{"a", "b"});
+    CHECK(index.fiberIndicesByDocumentHash.at("a").size() == 3U);
+    CHECK(index.fiberIndicesByDocumentHash.at("c").size() == 2U);
+}
 
 namespace {
 
@@ -205,8 +233,8 @@ TEST_CASE("Topology baseline engine builds cluster artifacts", "[unit][topology]
     CHECK((routes.value().front().clusterId == pairClusterIt->clusterId));
 }
 
-TEST_CASE("Topology baseline measures local chart geometry",
-          "[unit][topology][baseline][coordinates]") {
+TEST_CASE("Topology baseline records protected relation coverage",
+          "[unit][topology][baseline][relations]") {
     ConnectedComponentTopologyEngine engine;
     TopologyBuildConfig config;
     config.reciprocalOnly = true;
@@ -235,14 +263,9 @@ TEST_CASE("Topology baseline measures local chart geometry",
     const auto result = engine.buildArtifacts(docs, config);
     REQUIRE(result);
     REQUIRE(result.value().clusters.size() == 1);
-    const auto& chart = result.value().clusters.front();
-    CHECK(chart.distortionObservationCount == 3);
-    REQUIRE(chart.coordinateDistortion.has_value());
-    CHECK(*chart.coordinateDistortion >= 0.0);
-    CHECK(*chart.coordinateDistortion <= 1.0);
-    REQUIRE(chart.localIntrinsicDimension.has_value());
-    CHECK(std::isfinite(*chart.localIntrinsicDimension));
-    CHECK(*chart.localIntrinsicDimension > 0.0);
+    const auto& relationCover = result.value().clusters.front();
+    CHECK(relationCover.protectedPairCount == 3);
+    CHECK(relationCover.preservedProtectedPairCount == 3);
 }
 
 TEST_CASE("Topology baseline enforces Lean edge-filter contract",
@@ -603,6 +626,41 @@ TEST_CASE("Sparse-guided topology routing shortlists centroids with cached ANN",
     CHECK(routed.value().front().clusterId == "cluster-64");
 }
 
+TEST_CASE("Sparse-guided exact routing can omit the centroid ANN index",
+          "[unit][topology][routing][exact]") {
+    TopologyArtifactBatch batch;
+    batch.clusters = {
+        ClusterArtifact{.clusterId = "east",
+                        .memberCount = 1,
+                        .memberDocumentHashes = {"east-doc"},
+                        .centroidEmbedding = {1.0F, 0.0F}},
+        ClusterArtifact{.clusterId = "north",
+                        .memberCount = 1,
+                        .memberDocumentHashes = {"north-doc"},
+                        .centroidEmbedding = {0.0F, 1.0F}},
+    };
+
+    const auto routeIndex = SparseGuidedClusterRouter::buildRouteIndex(batch, false);
+    CHECK_FALSE(routeIndex.centroidAnnIndex);
+
+    TopologyRouteRequest request;
+    request.limit = 1;
+    request.queryEmbedding = {1.0F, 0.0F};
+    request.sparseDenseAlpha = 0.0F;
+    request.denseAnnCandidateLimit = 0;
+    SparseRouteWork work;
+    SparseGuidedClusterRouter router;
+
+    const auto routed = router.route(request, batch, routeIndex, &work);
+
+    REQUIRE(routed.has_value());
+    REQUIRE(routed.value().size() == 1U);
+    CHECK(routed.value().front().clusterId == "east");
+    CHECK_FALSE(work.denseAnnUsed);
+    CHECK(work.denseAnnDistanceEvaluations == 0U);
+    CHECK(work.exactRepresentativeDistanceEvaluations == batch.clusters.size());
+}
+
 TEST_CASE("Topology construction emits a deterministic bounded diverse routing cover",
           "[unit][topology][routing][representatives]") {
     ConnectedComponentTopologyEngine engine;
@@ -708,6 +766,64 @@ TEST_CASE("SOAR boundary spill chooses a complementary secondary residual",
     CHECK(naive.memberships.front().overlapClusterIds == std::vector<std::string>{"near"});
 }
 
+TEST_CASE("SOAR boundary spill covers a singleton with a nearby observed chart radius",
+          "[unit][topology][construction][overlap][soar][singleton]") {
+    std::vector<TopologyDocumentInput> documents{
+        TopologyDocumentInput{.documentHash = "singleton", .embedding = {1.02F, 0.0F}},
+        TopologyDocumentInput{.documentHash = "near-a", .embedding = {0.8F, 0.0F}},
+        TopologyDocumentInput{.documentHash = "near-b", .embedding = {1.0F, 0.0F}},
+        TopologyDocumentInput{.documentHash = "far-a", .embedding = {-1.0F, 0.0F}},
+        TopologyDocumentInput{.documentHash = "far-b", .embedding = {-0.8F, 0.0F}},
+    };
+    TopologyArtifactBatch artifacts;
+    artifacts.clusters = {
+        ClusterArtifact{.clusterId = "singleton-chart",
+                        .memberCount = 1,
+                        .memberDocumentHashes = {"singleton"},
+                        .centroidEmbedding = {1.02F, 0.0F}},
+        ClusterArtifact{.clusterId = "near-chart",
+                        .memberCount = 2,
+                        .memberDocumentHashes = {"near-a", "near-b"},
+                        .centroidEmbedding = {0.9F, 0.0F}},
+        ClusterArtifact{.clusterId = "far-chart",
+                        .memberCount = 2,
+                        .memberDocumentHashes = {"far-a", "far-b"},
+                        .centroidEmbedding = {-0.9F, 0.0F}},
+    };
+    artifacts.memberships = {
+        DocumentClusterMembership{.documentHash = "singleton",
+                                  .clusterId = "singleton-chart",
+                                  .role = DocumentTopologyRole::Outlier},
+    };
+    for (std::size_t index = 0; index < 40; ++index) {
+        const auto angle = 0.5F + static_cast<float>(index) * 0.05F;
+        const std::string prefix = "ann-far-" + std::to_string(index);
+        const std::vector<float> centroid{std::cos(angle), std::sin(angle)};
+        documents.push_back(TopologyDocumentInput{.documentHash = prefix + "-a",
+                                                  .embedding = {centroid[0] - 0.01F, centroid[1]}});
+        documents.push_back(TopologyDocumentInput{.documentHash = prefix + "-b",
+                                                  .embedding = {centroid[0] + 0.01F, centroid[1]}});
+        artifacts.clusters.push_back(ClusterArtifact{
+            .clusterId = prefix + "-chart",
+            .memberCount = 2,
+            .memberDocumentHashes = {prefix + "-a", prefix + "-b"},
+            .centroidEmbedding = centroid,
+        });
+    }
+
+    TopologyBuildConfig config;
+    config.allowOverlap = true;
+    config.overlapLimit = 1;
+    config.overlapBoundaryDistanceRatio = 1.25;
+    config.overlapResidualPenalty = 1.0;
+
+    CHECK(applyOrthogonalBoundarySpill(documents, config, artifacts) == 1);
+    CHECK(artifacts.memberships.front().overlapClusterIds ==
+          std::vector<std::string>{"near-chart"});
+    CHECK(containsHash(artifacts.clusters[1].memberDocumentHashes, "singleton"));
+    CHECK_FALSE(containsHash(artifacts.clusters[2].memberDocumentHashes, "singleton"));
+}
+
 TEST_CASE("Sparse-guided routing scores the closest bounded cluster representative",
           "[unit][topology][routing][representatives]") {
     TopologyArtifactBatch batch;
@@ -744,46 +860,6 @@ TEST_CASE("Sparse-guided routing scores the closest bounded cluster representati
     REQUIRE(routed.value().size() == 1);
     CHECK(routed.value().front().clusterId == "cover-winner");
     CHECK(work.representativeDistanceEvaluations == 3);
-}
-
-TEST_CASE("Sparse-guided routing exposes measured chart risk and route uncertainty",
-          "[unit][topology][routing][coordinates]") {
-    TopologyArtifactBatch batch;
-    batch.clusters = {
-        ClusterArtifact{
-            .clusterId = "near",
-            .memberCount = 4,
-            .coordinateDistortion = 0.10,
-            .distortionObservationCount = 6,
-            .localIntrinsicDimension = 2.5,
-            .centroidEmbedding = {1.0F, 0.0F},
-        },
-        ClusterArtifact{
-            .clusterId = "far",
-            .memberCount = 4,
-            .coordinateDistortion = 0.25,
-            .distortionObservationCount = 5,
-            .localIntrinsicDimension = 3.5,
-            .centroidEmbedding = {0.0F, 1.0F},
-        },
-    };
-
-    TopologyRouteRequest request;
-    request.queryEmbedding = {1.0F, 0.0F};
-    request.sparseDenseAlpha = 0.0F;
-    request.limit = 2;
-
-    SparseGuidedClusterRouter router;
-    const auto routes = router.route(request, batch);
-    REQUIRE(routes);
-    REQUIRE(routes.value().size() == 2);
-    REQUIRE(routes.value().front().distortionPenalty.has_value());
-    CHECK(*routes.value().front().distortionPenalty == Catch::Approx(0.10));
-    REQUIRE(routes.value().front().localIntrinsicDimension.has_value());
-    CHECK(*routes.value().front().localIntrinsicDimension == Catch::Approx(2.5));
-    REQUIRE(routes.value().front().uncertaintyPenalty.has_value());
-    CHECK(*routes.value().front().uncertaintyPenalty >= 0.0);
-    CHECK(*routes.value().front().uncertaintyPenalty <= 1.0);
 }
 
 TEST_CASE("Sparse-guided routing limits a prebuilt representative cover at query time",
@@ -857,6 +933,7 @@ TEST_CASE("Metadata KG topology store persists memberships and latest snapshot",
     };
     TopologyBuildConfig buildConfig;
     buildConfig.routingRepresentativeCount = 2;
+    buildConfig.embeddingSpaceIdentity = "test-space-v1";
     auto batchResult = engine.buildArtifacts(docs, buildConfig);
     REQUIRE(batchResult.has_value());
 
@@ -867,16 +944,15 @@ TEST_CASE("Metadata KG topology store persists memberships and latest snapshot",
     REQUIRE(loadedBatchResult.has_value());
     REQUIRE(loadedBatchResult.value().has_value());
     CHECK((loadedBatchResult.value()->snapshotId == batchResult.value().snapshotId));
+    CHECK(loadedBatchResult.value()->embeddingSpaceIdentity == "test-space-v1");
     CHECK((loadedBatchResult.value()->clusters.size() == batchResult.value().clusters.size()));
     REQUIRE_FALSE(loadedBatchResult.value()->clusters.empty());
     CHECK(loadedBatchResult.value()->clusters.front().densityScore ==
           Catch::Approx(batchResult.value().clusters.front().densityScore));
-    CHECK(loadedBatchResult.value()->clusters.front().distortionObservationCount ==
-          batchResult.value().clusters.front().distortionObservationCount);
-    REQUIRE(loadedBatchResult.value()->clusters.front().coordinateDistortion.has_value());
-    REQUIRE(batchResult.value().clusters.front().coordinateDistortion.has_value());
-    CHECK(*loadedBatchResult.value()->clusters.front().coordinateDistortion ==
-          Catch::Approx(*batchResult.value().clusters.front().coordinateDistortion));
+    CHECK(loadedBatchResult.value()->clusters.front().protectedPairCount ==
+          batchResult.value().clusters.front().protectedPairCount);
+    CHECK(loadedBatchResult.value()->clusters.front().preservedProtectedPairCount ==
+          batchResult.value().clusters.front().preservedProtectedPairCount);
     REQUIRE(loadedBatchResult.value()->clusters.front().routingRepresentatives.size() == 1);
     CHECK(loadedBatchResult.value()->clusters.front().routingRepresentatives.front().documentHash ==
           batchResult.value().clusters.front().routingRepresentatives.front().documentHash);
@@ -989,6 +1065,7 @@ TEST_CASE("Topology extractor and offline analyzer use real stores",
     aVec.chunk_id = "doc-aaa";
     aVec.document_hash = "aaa";
     aVec.embedding = {1.0F, 0.0F, 0.0F, 0.0F};
+    aVec.model_id = "test-space-v1";
     aVec.level = vector::EmbeddingLevel::DOCUMENT;
     REQUIRE(fix.vectorDb->insertVector(aVec));
 
@@ -996,6 +1073,7 @@ TEST_CASE("Topology extractor and offline analyzer use real stores",
     bVec.chunk_id = "doc-bbb";
     bVec.document_hash = "bbb";
     bVec.embedding = {0.9F, 0.1F, 0.0F, 0.0F};
+    bVec.model_id = "test-space-v1";
     bVec.level = vector::EmbeddingLevel::DOCUMENT;
     REQUIRE(fix.vectorDb->insertVector(bVec));
 
@@ -1003,6 +1081,7 @@ TEST_CASE("Topology extractor and offline analyzer use real stores",
     cVec.chunk_id = "doc-ccc";
     cVec.document_hash = "ccc";
     cVec.embedding = {0.0F, 1.0F, 0.0F, 0.0F};
+    cVec.model_id = "test-space-v1";
     cVec.level = vector::EmbeddingLevel::DOCUMENT;
     REQUIRE(fix.vectorDb->insertVector(cVec));
 
@@ -1051,6 +1130,8 @@ TEST_CASE("Topology extractor and offline analyzer use real stores",
     REQUIRE(extracted.has_value());
     REQUIRE((extracted.value().size() == 3));
     CHECK((extractionStats.documentsReturned == 3));
+    CHECK(extractionStats.embeddingSpaceIdentity == "test-space-v1");
+    CHECK_FALSE(extractionStats.mixedEmbeddingSpaces);
 
     const auto aExtracted = std::find_if(
         extracted.value().begin(), extracted.value().end(),
@@ -1074,6 +1155,7 @@ TEST_CASE("Topology extractor and offline analyzer use real stores",
         TopologyBuildConfig{.inputKind = TopologyInputKind::Hybrid, .reciprocalOnly = true});
     REQUIRE(analysis.has_value());
     CHECK((analysis.value().artifacts.clusters.size() == 2));
+    CHECK(analysis.value().artifacts.embeddingSpaceIdentity == "test-space-v1");
     CHECK((analysis.value().extractionStats.documentsReturned == 3));
 }
 
@@ -1122,6 +1204,34 @@ TEST_CASE("Topology update replaces removed cluster memberships consistently",
     CHECK((aaaMembership == updated.value().memberships.end()));
     CHECK((updated.value().memberships.size() == 3));
     CHECK((stats.membershipsUpdated >= 3));
+}
+
+TEST_CASE("Partial topology updates preserve only a common embedding space identity",
+          "[unit][topology][update][embedding-space]") {
+    ConnectedComponentTopologyEngine engine;
+    const std::vector<TopologyDocumentInput> existingDocs{
+        TopologyDocumentInput{.documentHash = "aaa", .filePath = "/repo/a.md"},
+        TopologyDocumentInput{.documentHash = "bbb", .filePath = "/repo/b.md"},
+    };
+    const std::vector<TopologyDocumentInput> changedRegion{
+        TopologyDocumentInput{.documentHash = "bbb", .filePath = "/repo/b.md"},
+    };
+
+    auto existing = engine.buildArtifacts(
+        existingDocs, TopologyBuildConfig{.embeddingSpaceIdentity = "test-space-v1"});
+    REQUIRE(existing.has_value());
+
+    auto aligned =
+        engine.updateArtifacts(existing.value(), changedRegion,
+                               TopologyBuildConfig{.embeddingSpaceIdentity = "test-space-v1"});
+    REQUIRE(aligned.has_value());
+    CHECK(aligned.value().embeddingSpaceIdentity == "test-space-v1");
+
+    auto mismatched =
+        engine.updateArtifacts(existing.value(), changedRegion,
+                               TopologyBuildConfig{.embeddingSpaceIdentity = "test-space-v2"});
+    REQUIRE(mismatched.has_value());
+    CHECK(mismatched.value().embeddingSpaceIdentity.empty());
 }
 
 TEST_CASE("Topology update preserves cluster identity when old medoid survives",
@@ -1214,6 +1324,9 @@ TEST_CASE("Topology baseline splits oversized CC components (anti-giant)",
     }
     // Must produce more than one published cluster once the giant is split.
     CHECK((capped.value().clusters.size() >= 2));
+    CHECK(std::ranges::any_of(capped.value().clusters, [](const auto& cluster) {
+        return cluster.protectedPairCount > cluster.preservedProtectedPairCount;
+    }));
 }
 
 TEST_CASE("Topology baseline minEdgeScore filters weak links",

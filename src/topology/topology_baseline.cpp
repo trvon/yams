@@ -92,43 +92,6 @@ std::optional<double> normalizedCosine(std::span<const float> lhs, std::span<con
     return std::clamp(cosine, 0.0, 1.0);
 }
 
-std::optional<double>
-estimateRadialIntrinsicDimension(std::span<const TopologyDocumentInput> documents,
-                                 const std::vector<std::size_t>& members,
-                                 std::span<const float> centroid) {
-    constexpr double kMinimumRadius = 1e-9;
-    std::vector<double> radii;
-    radii.reserve(members.size());
-    for (const auto member : members) {
-        if (member >= documents.size()) {
-            continue;
-        }
-        const auto similarity = normalizedCosine(documents[member].embedding, centroid);
-        if (!similarity.has_value()) {
-            continue;
-        }
-        const auto radius = 1.0 - *similarity;
-        if (radius > kMinimumRadius) {
-            radii.push_back(radius);
-        }
-    }
-    if (radii.size() < 3) {
-        return std::nullopt;
-    }
-    std::ranges::sort(radii);
-    const auto outerRadius = radii.back();
-    double logRatioSum = 0.0;
-    for (const auto radius : std::span{radii}.first(radii.size() - 1)) {
-        logRatioSum += std::log(radius / outerRadius);
-    }
-    if (logRatioSum >= -kMinimumRadius) {
-        return std::nullopt;
-    }
-    const auto estimate = -static_cast<double>(radii.size() - 1) / logRatioSum;
-    return std::isfinite(estimate) && estimate > 0.0 ? std::optional<double>{estimate}
-                                                     : std::nullopt;
-}
-
 void sortComponentByHash(std::vector<std::size_t>& component,
                          std::span<const TopologyDocumentInput> documents) {
     std::ranges::sort(component, [&](std::size_t lhs, std::size_t rhs) {
@@ -229,9 +192,9 @@ void emitComponent(TopologyArtifactBatch& batch, const std::vector<std::size_t>&
 
     double cohesion = 0.0;
     double persistence = 0.0;
-    double distortionSum = 0.0;
     std::size_t internalEdgeCount = 0;
-    std::size_t distortionObservationCount = 0;
+    std::size_t protectedPairCount = 0;
+    std::size_t preservedProtectedPairCount = 0;
     std::unordered_map<std::size_t, double> weightedDegree;
     weightedDegree.reserve(component.size());
     std::size_t bridgeCount = 0;
@@ -239,23 +202,21 @@ void emitComponent(TopologyArtifactBatch& batch, const std::vector<std::size_t>&
     for (std::size_t idx : component) {
         std::size_t degree = 0;
         for (const auto& [neighborIdx, weight] : adjacency[idx]) {
-            if (!componentSet.contains(neighborIdx)) {
+            const bool neighborInComponent = componentSet.contains(neighborIdx);
+            if (!neighborInComponent || idx < neighborIdx) {
+                ++protectedPairCount;
+            }
+            if (!neighborInComponent) {
                 continue;
             }
             weightedDegree[idx] += weight;
             ++degree;
             if (idx < neighborIdx) {
+                ++preservedProtectedPairCount;
                 cohesion += weight;
                 persistence =
                     internalEdgeCount == 0 ? weight : std::min<double>(persistence, weight);
                 ++internalEdgeCount;
-                const auto embeddingSimilarity =
-                    normalizedCosine(documents[idx].embedding, documents[neighborIdx].embedding);
-                if (embeddingSimilarity.has_value()) {
-                    distortionSum += std::abs(std::clamp(static_cast<double>(weight), 0.0, 1.0) -
-                                              *embeddingSimilarity);
-                    ++distortionObservationCount;
-                }
             }
         }
         if (component.size() > 2 && degree >= 2) {
@@ -293,18 +254,13 @@ void emitComponent(TopologyArtifactBatch& batch, const std::vector<std::size_t>&
     cluster.densityScore =
         possibleEdges > 0.0 ? static_cast<double>(internalEdgeCount) / possibleEdges : 0.0;
     cluster.bridgeMass = static_cast<double>(bridgeCount) / static_cast<double>(component.size());
-    cluster.distortionObservationCount = distortionObservationCount;
-    if (distortionObservationCount > 0) {
-        cluster.coordinateDistortion =
-            distortionSum / static_cast<double>(distortionObservationCount);
-    }
+    cluster.protectedPairCount = protectedPairCount;
+    cluster.preservedProtectedPairCount = preservedProtectedPairCount;
     cluster.medoid = ClusterRepresentative{.clusterId = clusterId,
                                            .documentHash = documents[medoidIdx].documentHash,
                                            .filePath = documents[medoidIdx].filePath,
                                            .representativeScore = std::max(0.0, medoidScore)};
     cluster.centroidEmbedding = meanEmbedding(documents, component);
-    cluster.localIntrinsicDimension =
-        estimateRadialIntrinsicDimension(documents, component, cluster.centroidEmbedding);
     cluster.routingRepresentatives = selectDiverseRoutingRepresentatives(
         documents, component, cluster.centroidEmbedding, routingRepresentativeCount);
     cluster.memberDocumentHashes.reserve(component.size());
@@ -351,6 +307,7 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
     batch.snapshotId = makeSnapshotId(static_cast<std::uint64_t>(nowMillis));
     batch.algorithm = "connected_components_v1";
     batch.inputKind = config.inputKind;
+    batch.embeddingSpaceIdentity = config.embeddingSpaceIdentity;
     batch.generatedAtUnixSeconds = static_cast<std::uint64_t>(nowSeconds);
 
     if (documents.empty()) {
@@ -607,6 +564,10 @@ Result<TopologyArtifactBatch> ConnectedComponentTopologyEngine::updateArtifacts(
     merged.snapshotId = rebuilt.value().snapshotId;
     merged.algorithm = rebuilt.value().algorithm;
     merged.inputKind = rebuilt.value().inputKind;
+    merged.embeddingSpaceIdentity =
+        existing.embeddingSpaceIdentity == rebuilt.value().embeddingSpaceIdentity
+            ? existing.embeddingSpaceIdentity
+            : std::string{};
     merged.generatedAtUnixSeconds = rebuilt.value().generatedAtUnixSeconds;
     merged.topologyEpoch = existing.topologyEpoch + 1;
 
@@ -766,12 +727,12 @@ float vectorNorm(const std::vector<float>& a) {
 Result<std::vector<ClusterRoute>>
 SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
                                  const TopologyArtifactBatch& artifacts) const {
-    const auto index = buildRouteIndex(artifacts);
+    const auto index = buildRouteIndex(artifacts, request.denseAnnCandidateLimit > 0);
     return route(request, artifacts, index);
 }
 
-SparseRouteIndex
-SparseGuidedClusterRouter::buildRouteIndex(const TopologyArtifactBatch& artifacts) {
+SparseRouteIndex SparseGuidedClusterRouter::buildRouteIndex(const TopologyArtifactBatch& artifacts,
+                                                            bool buildDenseAnnIndex) {
     SparseRouteIndex index;
     index.centroidNorms.reserve(artifacts.clusters.size());
     index.routingRepresentativeNorms.reserve(artifacts.clusters.size());
@@ -802,7 +763,7 @@ SparseGuidedClusterRouter::buildRouteIndex(const TopologyArtifactBatch& artifact
         centroidIds.push_back(clusterIndex);
         centroids.push_back(centroid);
     }
-    if (!centroids.empty()) {
+    if (buildDenseAnnIndex && !centroids.empty()) {
         auto annIndex = yams::vector::StaticCosineAnnIndex::build(centroidIds, centroids);
         if (annIndex) {
             index.centroidAnnIndex = std::move(annIndex).value();
@@ -1033,8 +994,6 @@ SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
             .sparseCost = maxSparseMass > 0.0
                               ? std::optional<double>(1.0 - static_cast<double>(sparseNorm))
                               : std::nullopt,
-            .distortionPenalty = cluster.coordinateDistortion,
-            .localIntrinsicDimension = cluster.localIntrinsicDimension,
             .persistencePenalty = 1.0 - stability,
             .cohesionPenalty = 1.0 - cohesion,
             .sizePenalty = 1.0 - sizeDamp});
@@ -1046,18 +1005,6 @@ SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
         }
         return lhs.clusterId < rhs.clusterId;
     });
-    if (routes.size() > 1) {
-        for (std::size_t index = 0; index < routes.size(); ++index) {
-            const auto upperGap = index > 0
-                                      ? routes[index - 1].routeScore - routes[index].routeScore
-                                      : std::numeric_limits<double>::infinity();
-            const auto lowerGap = index + 1 < routes.size()
-                                      ? routes[index].routeScore - routes[index + 1].routeScore
-                                      : std::numeric_limits<double>::infinity();
-            const auto nearestCompetitorGap = std::min(upperGap, lowerGap);
-            routes[index].uncertaintyPenalty = 1.0 - std::clamp(nearestCompetitorGap, 0.0, 1.0);
-        }
-    }
     if (request.limit > 0 && routes.size() > request.limit) {
         routes.resize(request.limit);
     }

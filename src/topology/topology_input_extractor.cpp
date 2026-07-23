@@ -496,6 +496,21 @@ TopologyInputExtractor::extract(const TopologyExtractionConfig& config,
     if (config.includeEmbeddings && vectorDb_) {
         docLevelVectors = vectorDb_->getDocumentLevelVectorsAll();
     }
+    std::optional<std::string> commonEmbeddingSpaceIdentity;
+    bool embeddingSpaceIdentityUnavailable = false;
+
+    const auto observeEmbeddingSpaceIdentity = [&](std::string_view identity) {
+        if (identity.empty()) {
+            embeddingSpaceIdentityUnavailable = true;
+            return;
+        }
+        if (!commonEmbeddingSpaceIdentity.has_value()) {
+            commonEmbeddingSpaceIdentity = identity;
+        } else if (*commonEmbeddingSpaceIdentity != identity) {
+            embeddingSpaceIdentityUnavailable = true;
+            localStats.mixedEmbeddingSpaces = true;
+        }
+    };
 
     // Phase V — feature composer prep:
     //   1. (V-A) build corpus top-K canonical entity-type histogram once
@@ -528,19 +543,35 @@ TopologyInputExtractor::extract(const TopologyExtractionConfig& config,
     extracted.reserve(documents.size());
     for (const auto& document : documents) {
         std::vector<float> embedding;
+        std::string embeddingSpaceIdentity;
         if (config.includeEmbeddings && vectorDb_) {
             auto it = docLevelVectors.find(document.sha256Hash);
             if (it != docLevelVectors.end() && !it->second.embedding.empty()) {
                 embedding = it->second.embedding;
+                embeddingSpaceIdentity = it->second.model_id;
             } else {
                 auto vectors = vectorDb_->getVectorsByDocument(document.sha256Hash);
                 embedding = aggregateEmbedding(vectors);
+                for (const auto& record : vectors) {
+                    if (record.embedding.empty()) {
+                        continue;
+                    }
+                    if (embeddingSpaceIdentity.empty()) {
+                        embeddingSpaceIdentity = record.model_id;
+                    } else if (embeddingSpaceIdentity != record.model_id) {
+                        embeddingSpaceIdentity.clear();
+                        localStats.mixedEmbeddingSpaces = true;
+                        break;
+                    }
+                }
             }
             if (embedding.empty()) {
                 ++localStats.documentsMissingEmbeddings;
                 if (config.requireEmbeddings) {
                     continue;
                 }
+            } else {
+                observeEmbeddingSpaceIdentity(embeddingSpaceIdentity);
             }
         }
 
@@ -627,6 +658,9 @@ TopologyInputExtractor::extract(const TopologyExtractionConfig& config,
     localStats.regionDocuments = extracted.size();
     if (!extracted.empty()) {
         localStats.composedFeatureDim = extracted.front().embedding.size();
+    }
+    if (!embeddingSpaceIdentityUnavailable && commonEmbeddingSpaceIdentity.has_value()) {
+        localStats.embeddingSpaceIdentity = std::move(*commonEmbeddingSpaceIdentity);
     }
     if (stats != nullptr) {
         *stats = localStats;
