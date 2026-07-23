@@ -117,6 +117,9 @@ def materialize_mixed_beir_manifest(
     *,
     documents_per_dataset: int = 0,
     queries_per_dataset: int = 0,
+    query_offset_per_dataset: int = 0,
+    document_queries_per_dataset: int = 0,
+    document_query_offset_per_dataset: int = 0,
 ) -> PreparedMixedCorpus:
     """Merge BEIR datasets into one manifest while preserving source identity.
 
@@ -126,7 +129,13 @@ def materialize_mixed_beir_manifest(
     """
     if len(dataset_roots) < 2:
         raise ValueError("mixed corpus benchmarks require at least two datasets")
-    if documents_per_dataset < 0 or queries_per_dataset < 0:
+    if (
+        documents_per_dataset < 0
+        or queries_per_dataset < 0
+        or query_offset_per_dataset < 0
+        or document_queries_per_dataset < 0
+        or document_query_offset_per_dataset < 0
+    ):
         raise ValueError("mixed corpus document/query limits cannot be negative")
 
     normalized: dict[str, Path] = {}
@@ -142,9 +151,12 @@ def materialize_mixed_beir_manifest(
         original_names[source] = name
 
     spec = {
-        "version": 6,
+        "version": 8,
         "documents_per_dataset": documents_per_dataset,
         "queries_per_dataset": queries_per_dataset,
+        "query_offset_per_dataset": query_offset_per_dataset,
+        "document_queries_per_dataset": document_queries_per_dataset,
+        "document_query_offset_per_dataset": document_query_offset_per_dataset,
         "sources": [
             {
                 "name": source,
@@ -192,15 +204,24 @@ def materialize_mixed_beir_manifest(
             if query_id in queries and document_id in documents:
                 qrels_by_query[query_id].append((document_id, score))
 
-        selected_query_ids = sorted(
+        eligible_query_ids = sorted(
             query_id for query_id in queries if qrels_by_query.get(query_id)
         )
+        selected_query_ids = eligible_query_ids
+        if query_offset_per_dataset:
+            selected_query_ids = selected_query_ids[query_offset_per_dataset:]
         if queries_per_dataset:
             selected_query_ids = selected_query_ids[:queries_per_dataset]
 
+        document_query_ids = selected_query_ids
+        if document_queries_per_dataset or document_query_offset_per_dataset:
+            document_query_ids = eligible_query_ids[document_query_offset_per_dataset:]
+            if document_queries_per_dataset:
+                document_query_ids = document_query_ids[:document_queries_per_dataset]
+
         required_document_ids = {
             document_id
-            for query_id in selected_query_ids
+            for query_id in document_query_ids
             for document_id, _ in qrels_by_query[query_id]
         }
         selected_document_ids = set(required_document_ids)

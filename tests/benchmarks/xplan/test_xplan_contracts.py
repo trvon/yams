@@ -16,6 +16,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 XPLAN_ROOT = Path(__file__).resolve().parent
 if str(XPLAN_ROOT) not in sys.path:
@@ -24,8 +25,8 @@ if str(XPLAN_ROOT) not in sys.path:
 from analyze_query_class import (  # noqa: E402
     compare_arms,
     load_by_type,
+    paired_candidate_rescue,
     paired_route_risk,
-    shadow_route_risk,
 )
 from model import ExperimentPlan  # noqa: E402
 from report import _baseline_row  # noqa: E402
@@ -35,6 +36,7 @@ import summarize as xplan_summarize  # noqa: E402
 import workers.retrieval_quality as retrieval_quality_worker  # noqa: E402
 from artifacts import file_sha256, source_set_sha256  # noqa: E402
 from workers.multi_client import _clone_corpus_seed, _metrics_from_record  # noqa: E402
+from workers.base import WorkerResult  # noqa: E402
 from workers.mixed_corpus import (  # noqa: E402
     analyze_mixed_cluster_overlap,
     analyze_mixed_corpus_debug,
@@ -54,10 +56,13 @@ from workers.retrieval_quality import (  # noqa: E402
     _reset_measured_outputs,
     _retarget_benchmark_cache_engine,
     clone_benchmark_state,
+    daemon_graph_construction_fingerprint,
     describe_process_failure,
     parse_benchmark_cache_metrics,
     parse_benchmark_setup_metrics,
+    parse_daemon_graph_topology_fingerprint,
     parse_debug_jsonl,
+    require_daemon_native_graph_inputs,
     require_shared_topology_construction_identity,
     require_steady_state,
 )
@@ -208,6 +213,57 @@ class VectorBuildCompositionTests(unittest.TestCase):
 
 
 class RetrievalQualityEnvironmentTests(unittest.TestCase):
+    def test_daemon_native_graph_rejects_benchmark_owned_topology_inputs(self) -> None:
+        params = {"require_daemon_native_graph": True}
+
+        self.assertIsNone(require_daemon_native_graph_inputs(params, {}))
+        self.assertIn(
+            "benchmark semantic-neighbor seeding",
+            require_daemon_native_graph_inputs(
+                params, {"YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS": "1"}
+            ),
+        )
+        self.assertIn(
+            "shared warm cache",
+            require_daemon_native_graph_inputs(
+                {**params, "shared_warm_cache": "seed"}, {}
+            ),
+        )
+        self.assertIn(
+            "semantic-neighbor backfill",
+            require_daemon_native_graph_inputs(
+                params, {"YAMS_ENABLE_SEMANTIC_NEIGHBOR_BACKFILL": "0"}
+            ),
+        )
+
+    def test_candidate_rescue_plan_uses_daemon_native_graph_inputs(self) -> None:
+        plan = json.loads(
+            (XPLAN_ROOT / "plans" / "search_candidate_rescue_graph.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        env = plan["fixed"]["env"]
+        params = plan["fixed"]["params"]
+
+        self.assertTrue(params["require_daemon_native_graph"])
+        self.assertNotIn("YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS", env)
+        self.assertNotIn("seed_semantic_neighbors", params)
+        self.assertNotIn("shared_warm_cache", params)
+        self.assertEqual(params["graph_vector_seed_probe"], 16)
+        self.assertIn(
+            "topology_vector_seeds_nonzero_rate",
+            plan["validate"]["require_metrics"],
+        )
+        self.assertIn(
+            "topology_path_seed_neighbors_rate",
+            plan["validate"]["require_metrics"],
+        )
+        self.assertIsNone(require_daemon_native_graph_inputs(params, env))
+        self.assertIn(
+            "--yams-require-daemon-native-graph=true",
+            _benchmark_command(Path("bench"), "BM_RetrievalQuality", params),
+        )
+
     def test_retrieval_quality_imports_without_posix_resource_module(self) -> None:
         script = f"""
 import builtins
@@ -437,6 +493,75 @@ import workers.retrieval_quality
             self.assertEqual(stale_seed.read_text(encoding="utf-8"), "ready\n")
             self.assertFalse((run_dir / "plan.resolved.json").exists())
 
+    def test_multi_repeat_metrics_keep_each_repeat_status_independent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan_path = root / "plan.json"
+            run_dir = root / "run"
+            plan_path.write_text(
+                json.dumps(
+                    {
+                        "name": "repeat_status",
+                        "repeats": 2,
+                        "arms": [{"name": "control"}],
+                        "steps": [{"worker": "external_script"}],
+                        "validate": {
+                            "require_files": ["metrics.json"],
+                            "require_metric_status": ["ok", "failed"],
+                            "require_metrics": [],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            results = iter(
+                [
+                    WorkerResult(status="failed", exit_code=1, metrics={"probe": 1.0}),
+                    WorkerResult(status="ok", exit_code=0, metrics={"probe": 2.0}),
+                ]
+            )
+
+            def run_worker(_context):
+                return next(results)
+
+            source_snapshot = {
+                "worktree_dirty": False,
+                "worktree_patch_sha256": "",
+                "source_snapshot_sha256": "test-snapshot",
+            }
+            with (
+                patch.object(xplan_runner, "get_worker", return_value=run_worker),
+                patch.object(
+                    xplan_runner,
+                    "capture_git_source_snapshot",
+                    return_value=source_snapshot,
+                ),
+                patch.object(xplan_runner, "source_set_sha256", return_value="test-source"),
+                redirect_stdout(io.StringIO()),
+            ):
+                exit_code = xplan_runner.cmd_run(
+                    SimpleNamespace(
+                        plan=str(plan_path),
+                        arm=[],
+                        stamp="",
+                        build_dir="",
+                        out_dir=str(run_dir),
+                        dry_run=True,
+                        continue_on_failure=False,
+                        skip_summary=True,
+                    )
+                )
+
+            self.assertEqual(exit_code, 1)
+            rep00 = json.loads(
+                (run_dir / "arms" / "control" / "rep00" / "metrics.json").read_text()
+            )
+            rep01 = json.loads(
+                (run_dir / "arms" / "control" / "rep01" / "metrics.json").read_text()
+            )
+            self.assertEqual(rep00["status"], "failed")
+            self.assertEqual(rep01["status"], "ok")
+
     def test_retrieval_quality_uses_one_google_benchmark_iteration(self) -> None:
         command = _benchmark_command(Path("retrieval_quality_bench"), "BM_RetrievalQuality")
         self.assertEqual(
@@ -447,6 +572,26 @@ import workers.retrieval_quality
                 "--benchmark_min_time=1x",
             ],
         )
+
+    def test_retrieval_quality_passes_typed_simeon_space_config(self) -> None:
+        command = _benchmark_command(
+            Path("retrieval_quality_bench"),
+            "BM_RetrievalQuality",
+            {
+                "simeon_encoder_profile": "fixed_hash_384",
+                "simeon_fragment_encoder_profile": "fixed_hash_384",
+                "simeon_fragment_geometry": True,
+                "simeon_bm25": True,
+                "simeon_router": True,
+            },
+        )
+        self.assertIn("--yams-simeon-encoder-profile=fixed_hash_384", command)
+        self.assertIn(
+            "--yams-simeon-fragment-encoder-profile=fixed_hash_384", command
+        )
+        self.assertIn("--yams-simeon-fragment-geometry=true", command)
+        self.assertIn("--yams-simeon-bm25=true", command)
+        self.assertIn("--yams-simeon-router=true", command)
 
     def test_retrieval_quality_retry_clears_append_only_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -591,6 +736,35 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
                 require_shared_topology_construction_identity(identity, {"different": 100})
                 or "",
             )
+
+    def test_daemon_graph_fingerprint_uses_canonical_persisted_shape(self) -> None:
+        metrics = {
+            "daemon_graph_canonicalized": 1.0,
+            "daemon_graph_canonical_edges_generated": 32000.0,
+            "daemon_graph_topology_document_nodes": 2000.0,
+            "daemon_graph_topology_semantic_edges": 13914.0,
+            "daemon_graph_topology_documents_with_neighbors": 2000.0,
+            "daemon_graph_topology_isolated_documents": 0.0,
+            "daemon_graph_semantic_edges_created": 64000.0,
+        }
+
+        fingerprint = daemon_graph_construction_fingerprint(metrics, "fixed-topology")
+
+        self.assertEqual(
+            json.loads(fingerprint),
+            {
+                "document_nodes": 2000,
+                "semantic_edges": 13914,
+                "documents_with_neighbors": 2000,
+                "isolated_documents": 0,
+                "topology_fingerprint": "fixed-topology",
+            },
+        )
+        metrics["daemon_graph_semantic_edges_created"] = 59360.0
+        metrics["daemon_graph_canonical_edges_generated"] = 33024.0
+        self.assertEqual(
+            daemon_graph_construction_fingerprint(metrics, "fixed-topology"), fingerprint
+        )
 
     def test_query_class_comparison_uses_all_repeats(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1337,18 +1511,6 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
             soar["params"]["topology_boundary_spill_distance_ratio"], 1.05
         )
         self.assertEqual(soar["factors"]["ann_candidate_budget"], 32)
-        requested_metrics = set(plan["steps"][0]["metrics"])
-        self.assertIn("topology_coordinate_query_coverage", requested_metrics)
-        self.assertIn(
-            "topology_coordinate_distortion_observation_rate", requested_metrics
-        )
-        self.assertIn(
-            "topology_coordinate_intrinsic_dimension_observation_rate",
-            requested_metrics,
-        )
-        self.assertIn(
-            "topology_coordinate_uncertainty_observation_rate", requested_metrics
-        )
         required_metrics = set(plan["validate"]["require_metrics"])
         self.assertIn("vector_rows_visited_observation_rate", required_metrics)
         self.assertIn(
@@ -1396,6 +1558,7 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
                     "topology_weak_query_narrow_applied": "1" if narrow else "0",
                     "topology_route_boundary_score_margin": "0.42",
                     "topology_seed_coverage_count": "2",
+                    "topology_construction_fingerprint": "fixed-topology",
                     "vector_search_exact_distance_evaluations_actual": str(exact),
                 },
             }
@@ -1439,48 +1602,11 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
         self.assertEqual(summary["all"]["missed_protected_candidates"], 1)
         self.assertEqual(summary["all"]["misses_per_thousand"], 500.0)
         self.assertEqual(summary["all"]["mean_exact_work_delta"], -12.0)
-        self.assertEqual(summary["nfcorpus"], summary["all"])
-
-    def test_shadow_route_risk_uses_projected_removals_without_a_routed_arm(self) -> None:
-        event = {
-            "search_type": "hybrid",
-            "query": "shared query",
-            "relevant_doc_ids": ["nfcorpus__a", "nfcorpus__b"],
-            "returned_doc_ids": ["nfcorpus__a", "nfcorpus__b"],
-            "relevant_decision_trace": {
-                "relevant_docs": [
-                    {
-                        "doc_id": "nfcorpus__a",
-                        "in_pre_fusion": True,
-                        "component_top_hits": ["vector"],
-                    },
-                    {
-                        "doc_id": "nfcorpus__b",
-                        "in_pre_fusion": True,
-                        "component_top_hits": ["vector"],
-                    },
-                ]
-            },
-            "search_stats": {
-                "topology_shadow_evaluated": "1",
-                "topology_shadow_proposed_action": "narrow",
-                "topology_shadow_retained_candidate_doc_ids": "nfcorpus__a",
-                "topology_shadow_removed_candidate_doc_ids": "nfcorpus__b\tirrelevant",
-                "topology_route_boundary_score_margin": "0.42",
-                "topology_seed_coverage_count": "2",
-                "vector_search_exact_distance_evaluations_actual": "8",
-            },
-        }
-
-        with tempfile.TemporaryDirectory() as tmp:
-            debug_path = Path(tmp) / "debug.jsonl"
-            debug_path.write_text(json.dumps(event) + "\n", encoding="utf-8")
-            summary = shadow_route_risk(load_by_type(debug_path).get("hybrid", []))
-
-        self.assertEqual(summary["all"]["calibration_queries"], 1)
-        self.assertEqual(summary["all"]["protected_candidates"], 2)
-        self.assertEqual(summary["all"]["missed_protected_candidates"], 1)
-        self.assertEqual(summary["all"]["misses_per_thousand"], 500.0)
+        self.assertEqual(
+            summary["all"]["construction_fingerprint"], "fixed-topology"
+        )
+        self.assertEqual(summary["all"]["minimum_observed_route_margin"], 0.42)
+        self.assertEqual(summary["all"]["minimum_observed_seed_hits"], 2)
         self.assertEqual(summary["nfcorpus"], summary["all"])
 
     def test_declared_params_override_ambient_and_arm_env_wins(self) -> None:
@@ -1504,6 +1630,20 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
         self.assertNotIn("YAMS_VECTOR_SEARCH_ENGINE", merged)
         self.assertEqual(merged["UNRELATED"], "kept")
 
+    def test_boolean_params_use_numeric_environment_encoding(self) -> None:
+        merged = _merge_benchmark_env(
+            ambient={},
+            declared_env={},
+            params={"enabled": True, "disabled": False},
+            param_env={
+                "enabled": "YAMS_TEST_ENABLED",
+                "disabled": "YAMS_TEST_DISABLED",
+            },
+        )
+
+        self.assertEqual(merged["YAMS_TEST_ENABLED"], "1")
+        self.assertEqual(merged["YAMS_TEST_DISABLED"], "0")
+
     def test_explicit_arm_config_cannot_be_shadowed_by_ambient_config_path(
         self,
     ) -> None:
@@ -1520,8 +1660,25 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
         events = [
             {
                 "search_type": "hybrid",
+                "relevant_decision_trace": {
+                    "relevant_docs": [
+                        {"doc_id": "a", "component_top_hits": ["vector"]},
+                        {"doc_id": "b", "component_top_hits": ["vector"]},
+                    ]
+                },
                 "search_stats": {
                     "topology_weak_query_narrow_applied": "1",
+                    "topology_route_narrow_proposed": "1",
+                    "topology_route_admission_eligible": "1",
+                    "topology_route_coordinate_space_alignment_status": "satisfied",
+                    "topology_route_protected_fibers_represented_status": "satisfied",
+                    "topology_route_certificate_saturates_protected_fibers_status": "satisfied",
+                    "topology_route_protected_relation_coverage_status": "satisfied",
+                    "topology_route_work_status": "satisfied",
+                    "topology_route_cover_materialization_status": "satisfied",
+                    "topology_shadow_evaluated": "1",
+                    "topology_shadow_proposed_action": "narrow",
+                    "topology_shadow_removed_candidate_doc_ids": "b\tirrelevant",
                     "topology_route_available_count": "3",
                     "topology_route_boundary_score_margin": "0.25",
                     "topology_route_ann_used": "1",
@@ -1569,6 +1726,11 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
                 "search_type": "hybrid",
                 "search_stats": {
                     "topology_weak_query_narrow_applied": "0",
+                    "topology_route_narrow_proposed": "1",
+                    "topology_route_admission_eligible": "0",
+                    "topology_route_coordinate_space_alignment_status": "violated",
+                    "topology_route_protected_fibers_represented_status": "violated",
+                    "topology_route_certificate_saturates_protected_fibers_status": "violated",
                     "topology_route_available_count": "1",
                     "topology_route_boundary_score_margin": "0.05",
                     "topology_route_ann_used": "0",
@@ -1621,6 +1783,31 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
             metrics = parse_debug_jsonl(debug_path)["metrics"]
 
         self.assertEqual(metrics["topology_narrow_rate"], 0.5)
+        self.assertEqual(metrics["topology_narrow_proposal_rate"], 1.0)
+        self.assertEqual(metrics["topology_route_admission_rate"], 0.5)
+        self.assertEqual(metrics["topology_coordinate_space_alignment_rate"], 0.5)
+        self.assertEqual(
+            metrics["topology_protected_fiber_representation_observation_rate"], 1.0
+        )
+        self.assertEqual(
+            metrics["topology_protected_fiber_representation_satisfaction_rate"], 0.5
+        )
+        self.assertEqual(
+            metrics["topology_certificate_fiber_saturation_observation_rate"], 1.0
+        )
+        self.assertEqual(
+            metrics["topology_certificate_fiber_saturation_satisfaction_rate"], 0.5
+        )
+        self.assertEqual(metrics["topology_shadow_fiber_calibration_queries"], 1.0)
+        self.assertEqual(metrics["topology_shadow_protected_fiber_candidates"], 2.0)
+        self.assertEqual(
+            metrics["topology_shadow_represented_protected_candidates"], 1.0
+        )
+        self.assertEqual(metrics["topology_shadow_unresolved_protected_fibers"], 1.0)
+        self.assertEqual(
+            metrics["topology_shadow_protected_fiber_representation_rate"], 0.5
+        )
+        self.assertEqual(metrics["topology_shadow_protected_fiber_unresolved_rate"], 0.5)
         self.assertEqual(metrics["topology_confidence_abstain_rate"], 0.5)
         self.assertEqual(metrics["topology_route_available_avg"], 2.0)
         self.assertAlmostEqual(
@@ -1634,6 +1821,7 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
         )
         self.assertEqual(metrics["topology_snapshot_cache_hit_rate"], 0.5)
         self.assertEqual(metrics["topology_allowed_candidates_avg"], 6.0)
+        self.assertEqual(metrics["cross_rerank_apply_rate"], 0.0)
         self.assertEqual(metrics["topology_vector_filter_allowed_candidates_avg"], 8.0)
         self.assertEqual(metrics["topology_vector_filter_latency_ms_avg"], 30.0)
         self.assertEqual(metrics["topology_vector_abstain_latency_ms_avg"], 10.0)
@@ -1671,6 +1859,293 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
         self.assertAlmostEqual(metrics["topology_structure_bridge_support_avg"], 0.3)
         self.assertAlmostEqual(metrics["topology_structure_density_support_avg"], 0.7)
         self.assertEqual(metrics["topology_construction_fingerprint_count"], 1.0)
+
+    def test_candidate_rescue_metrics_measure_relevance_and_survival(self) -> None:
+        events = [
+            {
+                "search_type": "hybrid",
+                "relevant_doc_ids": ["relevant", "other"],
+                "returned_doc_ids": ["relevant"],
+                "relevant_decision_trace": {
+                    "relevant_docs": [
+                        {
+                            "doc_id": "relevant",
+                            "in_pre_fusion": True,
+                            "in_post_fusion": True,
+                        },
+                        {
+                            "doc_id": "other",
+                            "in_pre_fusion": False,
+                            "in_post_fusion": False,
+                        },
+                    ]
+                },
+                "search_stats": {
+                    "topology_candidate_rescue_attempted": "1",
+                    "topology_candidate_rescue_applied": "1",
+                    "topology_candidate_rescue_added_candidates": "2",
+                    "topology_candidate_rescue_novel_candidates": "1",
+                    "topology_candidate_rescue_evidence_rescues": "1",
+                    "topology_candidate_rescue_duplicate_candidates": "1",
+                    "topology_candidate_rescue_added_candidate_hashes": "sha-relevant\tsha-irrelevant",
+                    "topology_candidate_rescue_added_candidate_doc_ids": "relevant\tirrelevant",
+                    "topology_candidate_rescue_novel_candidate_doc_ids": "irrelevant",
+                    "topology_candidate_rescue_evidence_rescue_doc_ids": "relevant",
+                    "topology_candidate_rescue_scored_candidate_doc_ids": "irrelevant",
+                    "topology_candidate_rescue_exact_scored_candidate_doc_ids": "relevant\tother",
+                    "topology_graph_relation_candidate_doc_ids": "relevant\tother",
+                    "topology_graph_fetched_candidate_doc_ids": "relevant\tother",
+                    "topology_graph_eligible_candidate_doc_ids": "relevant\tother",
+                    "topology_weak_query_allowed_candidate_doc_ids": "relevant\tother",
+                },
+            },
+            {
+                "search_type": "hybrid",
+                "relevant_doc_ids": ["shadow-relevant"],
+                "returned_doc_ids": [],
+                "relevant_decision_trace": {
+                    "relevant_docs": [
+                        {
+                            "doc_id": "shadow-relevant",
+                            "in_pre_fusion": False,
+                            "in_post_fusion": False,
+                        }
+                    ]
+                },
+                "search_stats": {
+                    "topology_candidate_rescue_attempted": "1",
+                    "topology_candidate_rescue_applied": "0",
+                    "topology_candidate_rescue_added_candidates": "1",
+                    "topology_candidate_rescue_novel_candidates": "1",
+                    "topology_candidate_rescue_evidence_rescues": "0",
+                    "topology_candidate_rescue_duplicate_candidates": "0",
+                    "topology_candidate_rescue_added_candidate_hashes": "sha-shadow-relevant",
+                    "topology_candidate_rescue_added_candidate_doc_ids": "shadow-relevant",
+                    "topology_candidate_rescue_novel_candidate_doc_ids": "shadow-relevant",
+                    "topology_candidate_rescue_evidence_rescue_doc_ids": "",
+                    "topology_candidate_rescue_scored_candidate_doc_ids": "shadow-relevant",
+                    "topology_candidate_rescue_exact_scored_candidate_doc_ids": "shadow-relevant",
+                    "topology_graph_relation_candidate_doc_ids": "shadow-relevant",
+                    "topology_graph_fetched_candidate_doc_ids": "shadow-relevant",
+                    "topology_graph_eligible_candidate_doc_ids": "shadow-relevant",
+                    "topology_weak_query_allowed_candidate_doc_ids": "shadow-relevant",
+                },
+            },
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            debug_path = Path(tmp) / "debug.jsonl"
+            debug_path.write_text(
+                "".join(json.dumps(event) + "\n" for event in events), encoding="utf-8"
+            )
+            metrics = parse_debug_jsonl(debug_path)["metrics"]
+
+        self.assertEqual(metrics["topology_candidate_rescue_attempt_rate"], 1.0)
+        self.assertEqual(metrics["topology_candidate_rescue_apply_rate"], 0.5)
+        self.assertEqual(metrics["topology_candidate_rescue_added_sum"], 3.0)
+        self.assertEqual(metrics["topology_candidate_rescue_novel_sum"], 2.0)
+        self.assertEqual(metrics["topology_candidate_rescue_evidence_rescue_sum"], 1.0)
+        self.assertEqual(metrics["topology_candidate_rescue_duplicate_sum"], 1.0)
+        self.assertEqual(metrics["topology_candidate_rescue_relevant_query_rate"], 1.0)
+        self.assertEqual(metrics["topology_candidate_rescue_relevant_added"], 2.0)
+        self.assertEqual(metrics["topology_candidate_rescue_relevant_novel"], 1.0)
+        self.assertEqual(metrics["topology_candidate_rescue_relevant_evidence"], 1.0)
+        self.assertEqual(
+            metrics["topology_candidate_rescue_relevant_novel_query_rate"], 0.5
+        )
+        self.assertEqual(
+            metrics["topology_candidate_rescue_relevant_evidence_query_rate"], 0.5
+        )
+        self.assertEqual(metrics["topology_candidate_rescue_relevant_reachable"], 3.0)
+        self.assertEqual(
+            metrics["topology_candidate_rescue_relevant_reachable_query_rate"], 1.0
+        )
+        self.assertAlmostEqual(
+            metrics["topology_candidate_rescue_reachable_to_scored_rate"], 1.0 / 3.0
+        )
+        self.assertEqual(
+            metrics["topology_candidate_rescue_baseline_miss_queries"], 2.0
+        )
+        self.assertEqual(
+            metrics["topology_candidate_rescue_missing_relation_reachable_query_rate"],
+            1.0,
+        )
+        self.assertEqual(
+            metrics["topology_candidate_rescue_missing_fetched_query_rate"], 1.0
+        )
+        self.assertEqual(
+            metrics["topology_candidate_rescue_missing_eligible_query_rate"], 1.0
+        )
+        self.assertEqual(
+            metrics["topology_candidate_rescue_missing_selected_query_rate"], 1.0
+        )
+        self.assertEqual(
+            metrics["topology_candidate_rescue_missing_scored_query_rate"], 0.5
+        )
+        self.assertEqual(
+            metrics["topology_candidate_rescue_missing_exact_scored_query_rate"], 1.0
+        )
+        self.assertEqual(
+            metrics["topology_candidate_rescue_post_fusion_survival_rate"], 0.5
+        )
+        self.assertEqual(
+            metrics["topology_candidate_rescue_returned_survival_rate"], 0.5
+        )
+        self.assertEqual(
+            metrics["topology_candidate_rescue_evidence_post_fusion_survival_rate"], 1.0
+        )
+        self.assertEqual(
+            metrics["topology_candidate_rescue_evidence_returned_survival_rate"], 1.0
+        )
+
+    def test_candidate_rescue_stage_ledger_localizes_bounded_fetch_loss(self) -> None:
+        event = {
+            "search_type": "hybrid",
+            "relevant_doc_ids": ["missing"],
+            "returned_doc_ids": [],
+            "relevant_decision_trace": {
+                "relevant_docs": [
+                    {
+                        "doc_id": "missing",
+                        "in_pre_fusion": False,
+                        "in_post_fusion": False,
+                    }
+                ]
+            },
+            "search_stats": {
+                "topology_graph_trace_collected": "1",
+                "topology_graph_fetch_truncated_seed_count": "1",
+                "topology_graph_relation_candidate_count": "3",
+                "topology_graph_fetched_candidate_count": "2",
+                "topology_graph_eligible_candidate_count": "1",
+                "topology_graph_seed_unresolved_count": "0",
+                "topology_graph_relation_unresolved_count": "0",
+                "topology_graph_fetched_unresolved_count": "0",
+                "topology_graph_eligible_unresolved_count": "0",
+                "topology_graph_relation_candidate_doc_ids": "missing",
+                "topology_graph_fetched_candidate_doc_ids": "",
+                "topology_graph_eligible_candidate_doc_ids": "",
+                "topology_weak_query_allowed_candidate_doc_ids": "",
+                "topology_candidate_rescue_scored_candidate_doc_ids": "",
+                "topology_candidate_rescue_exact_scored_candidate_doc_ids": "",
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            debug_path = Path(tmp) / "debug.jsonl"
+            debug_path.write_text(json.dumps(event) + "\n", encoding="utf-8")
+            metrics = parse_debug_jsonl(debug_path)["metrics"]
+
+        self.assertEqual(
+            metrics["topology_candidate_rescue_missing_relation_reachable_query_rate"],
+            1.0,
+        )
+        self.assertEqual(
+            metrics["topology_candidate_rescue_missing_fetched_query_rate"], 0.0
+        )
+        self.assertEqual(
+            metrics["topology_candidate_rescue_missing_selected_query_rate"], 0.0
+        )
+        self.assertEqual(metrics["topology_graph_trace_query_rate"], 1.0)
+        self.assertEqual(
+            metrics["topology_graph_fetch_truncated_seed_count_sum"], 1.0
+        )
+        self.assertEqual(metrics["topology_graph_relation_candidate_count_avg"], 3.0)
+        self.assertEqual(metrics["topology_graph_fetched_candidate_count_avg"], 2.0)
+        self.assertEqual(metrics["topology_graph_eligible_candidate_count_avg"], 1.0)
+
+    def test_query_class_loader_prefers_rescue_doc_ids_over_content_hashes(self) -> None:
+        event = {
+            "query": "query",
+            "search_type": "hybrid",
+            "relevant_doc_ids": ["relevant"],
+            "returned_doc_ids": ["relevant"],
+            "relevant_decision_trace": {
+                "relevant_docs": [
+                    {
+                        "doc_id": "relevant",
+                        "in_pre_fusion": True,
+                        "in_post_fusion": True,
+                        "in_returned_topk": True,
+                    }
+                ]
+            },
+            "search_stats": {
+                "topology_candidate_rescue_added_candidate_hashes": "sha-relevant",
+                "topology_candidate_rescue_added_candidate_doc_ids": "relevant",
+                "topology_candidate_rescue_novel_candidate_doc_ids": "",
+                "topology_candidate_rescue_evidence_rescue_doc_ids": "relevant",
+                "topology_weak_query_allowed_candidate_doc_ids": "reachable\trelevant",
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            debug_path = Path(tmp) / "debug.jsonl"
+            debug_path.write_text(json.dumps(event) + "\n", encoding="utf-8")
+            records = load_by_type(debug_path).get("hybrid", [])
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["candidate_rescue_added_doc_ids"], {"relevant"})
+        self.assertEqual(records[0]["candidate_rescue_relevant_doc_ids"], {"relevant"})
+        self.assertEqual(records[0]["candidate_rescue_novel_relevant_doc_ids"], set())
+        self.assertEqual(
+            records[0]["candidate_rescue_evidence_relevant_doc_ids"], {"relevant"}
+        )
+        self.assertEqual(
+            records[0]["candidate_rescue_reachable_relevant_doc_ids"], {"relevant"}
+        )
+
+    def test_paired_candidate_rescue_checks_preservation_and_strict_improvement(
+        self,
+    ) -> None:
+        baseline = [
+            {
+                "repeat": "rep00",
+                "corpus": "scifact",
+                "query": "query",
+                "rr": 0.0,
+                "pre_fusion_relevant": {"baseline-relevant"},
+                "post_fusion_relevant": {"baseline-relevant"},
+            }
+        ]
+        rescue = [
+            {
+                "repeat": "rep00",
+                "corpus": "scifact",
+                "query": "query",
+                "rr": 1.0,
+                "pre_fusion_relevant": {"baseline-relevant", "rescued-relevant"},
+                "post_fusion_relevant": {"baseline-relevant", "rescued-relevant"},
+                "returned_relevant": {"baseline-relevant", "rescued-relevant"},
+                "candidate_rescue_relevant_doc_ids": {"rescued-relevant"},
+                "candidate_rescue_novel_relevant_doc_ids": {"rescued-relevant"},
+                "candidate_rescue_evidence_relevant_doc_ids": {
+                    "baseline-relevant"
+                },
+                "candidate_rescue_reachable_relevant_doc_ids": {"rescued-relevant"},
+                "candidate_rescue_attempted": True,
+                "candidate_rescue_applied": True,
+            }
+        ]
+
+        summary = paired_candidate_rescue(baseline, rescue)["all"]
+
+        self.assertEqual(summary["paired_queries"], 1)
+        self.assertEqual(summary["baseline_relevant_preservation_rate"], 1.0)
+        self.assertEqual(
+            summary["budgeted_baseline_relevant_preservation_rate"], 1.0
+        )
+        self.assertEqual(summary["missing_relevant_rescues"], 1)
+        self.assertEqual(summary["reachable_missing_relevant_candidates"], 1)
+        self.assertEqual(summary["reachable_to_scored_rescue_rate"], 1.0)
+        self.assertEqual(summary["materialized_relevant_rescues"], 1)
+        self.assertEqual(summary["strict_candidate_improvement_queries"], 1)
+        self.assertEqual(summary["strict_budgeted_improvement_queries"], 1)
+        self.assertEqual(summary["post_fusion_rescue_survival_rate"], 1.0)
+        self.assertEqual(summary["returned_rescue_survival_rate"], 1.0)
+        self.assertEqual(summary["existing_relevant_evidence_rescues"], 1)
+        self.assertEqual(summary["post_fusion_relevant_evidence_rescues"], 1)
+        self.assertEqual(summary["returned_relevant_evidence_rescues"], 1)
+        self.assertEqual(summary["post_fusion_evidence_survival_rate"], 1.0)
+        self.assertEqual(summary["returned_evidence_survival_rate"], 1.0)
+        self.assertEqual(summary["mean_rr_delta"], 1.0)
 
     def test_unavailable_vector_work_is_not_reported_as_zero_observation(self) -> None:
         event = {
@@ -1742,6 +2217,10 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
                     "topology_shadow_retained_candidates": "3",
                     "topology_shadow_removed_candidates": "5",
                     "topology_weak_query_applied": "0",
+                    "topology_route_work_observed": "1",
+                    "topology_route_work_rows_visited_actual": "3",
+                    "topology_route_work_exact_distance_evaluations_actual": "2",
+                    "topology_route_work_ann_candidate_budget_actual": "4",
                 },
             },
             {
@@ -1752,6 +2231,7 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
                     "topology_shadow_retained_candidates": "0",
                     "topology_shadow_removed_candidates": "0",
                     "topology_weak_query_applied": "0",
+                    "topology_route_work_observed": "0",
                 },
             },
         ]
@@ -1766,45 +2246,15 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
         self.assertEqual(metrics["topology_shadow_narrow_proposal_rate"], 0.5)
         self.assertEqual(metrics["topology_shadow_retained_candidates_avg"], 1.5)
         self.assertEqual(metrics["topology_shadow_removed_candidates_avg"], 2.5)
-        self.assertEqual(metrics["topology_applied"], 0.0)
-
-    def test_coordinate_rows_report_observation_coverage_without_zero_imputation(
-        self,
-    ) -> None:
-        rows = [
-            {
-                "cluster_id": "a",
-                "distortion_penalty": 0.1,
-                "local_intrinsic_dimension": 2.0,
-                "uncertainty_penalty": 0.25,
-            },
-            {
-                "cluster_id": "b",
-                "distortion_penalty": None,
-                "local_intrinsic_dimension": 4.0,
-                "uncertainty_penalty": None,
-            },
-        ]
-        event = {
-            "search_type": "hybrid",
-            "search_stats": {
-                "topology_route_coordinate_rows": json.dumps(rows),
-            },
-        }
-        with tempfile.TemporaryDirectory() as tmp:
-            debug_path = Path(tmp) / "debug.jsonl"
-            debug_path.write_text(json.dumps(event) + "\n", encoding="utf-8")
-            metrics = parse_debug_jsonl(debug_path)["metrics"]
-
-        self.assertEqual(metrics["topology_coordinate_query_coverage"], 1.0)
-        self.assertEqual(metrics["topology_coordinate_distortion_observation_rate"], 0.5)
+        self.assertEqual(metrics["topology_route_work_observation_rate"], 0.5)
+        self.assertEqual(metrics["topology_route_work_rows_visited_actual_avg"], 3.0)
         self.assertEqual(
-            metrics["topology_coordinate_intrinsic_dimension_observation_rate"], 1.0
+            metrics["topology_route_work_exact_distance_evaluations_actual_avg"], 2.0
         )
-        self.assertEqual(metrics["topology_coordinate_uncertainty_observation_rate"], 0.5)
-        self.assertEqual(metrics["topology_coordinate_distortion_avg"], 0.1)
-        self.assertEqual(metrics["topology_coordinate_intrinsic_dimension_avg"], 3.0)
-        self.assertEqual(metrics["topology_coordinate_uncertainty_avg"], 0.25)
+        self.assertEqual(
+            metrics["topology_route_work_ann_candidate_budget_actual_avg"], 4.0
+        )
+        self.assertEqual(metrics["topology_applied"], 0.0)
 
     def test_disabled_topology_zero_fills_vector_seed_metrics(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2177,6 +2627,24 @@ class IngestionContractTests(unittest.TestCase):
                             "reusable_probe_ms": 9,
                             "reusable_probe_count": 2,
                         },
+                        "daemon_graph": {
+                            "required": True,
+                            "ready": True,
+                            "source": "post_ingest_queue_embedding_service",
+                            "canonicalized": True,
+                            "canonical_edges_generated": 32000,
+                            "canonical_topology_snapshot": "topology-test",
+                            "canonical_topology_fingerprint": "fixed-topology",
+                            "semantic_documents_processed": 2000,
+                            "semantic_edges_created": 3792,
+                            "semantic_update_errors": 0,
+                            "topology_document_nodes": 2000,
+                            "topology_semantic_edges": 3792,
+                            "topology_documents_with_neighbors": 2000,
+                            "topology_isolated_documents": 0,
+                            "post_ingest_queued": 0,
+                            "post_ingest_in_flight": 0,
+                        },
                         "setup_total_ms": 41,
                     }
                 )
@@ -2185,6 +2653,9 @@ class IngestionContractTests(unittest.TestCase):
             )
 
             metrics = parse_benchmark_setup_metrics(debug_path)
+            self.assertEqual(
+                parse_daemon_graph_topology_fingerprint(debug_path), "fixed-topology"
+            )
             self.assertEqual(metrics["ingest_admission_ms"], 11.0)
             self.assertEqual(metrics["ingest_pipeline_drain_ms"], 14.0)
             self.assertEqual(metrics["ingest_enrichment_ready_ms"], 37.0)
@@ -2198,6 +2669,25 @@ class IngestionContractTests(unittest.TestCase):
             self.assertEqual(metrics["vector_index_reusable_before"], 0.0)
             self.assertEqual(metrics["vector_index_reusable_after"], 0.0)
             self.assertEqual(metrics["vector_query_ready_after"], 1.0)
+            self.assertEqual(metrics["daemon_graph_required"], 1.0)
+            self.assertEqual(metrics["daemon_graph_ready"], 1.0)
+            self.assertEqual(metrics["daemon_graph_canonicalized"], 1.0)
+            self.assertEqual(
+                metrics["daemon_graph_canonical_edges_generated"], 32000.0
+            )
+            self.assertEqual(
+                metrics["daemon_graph_semantic_documents_processed"], 2000.0
+            )
+            self.assertEqual(metrics["daemon_graph_semantic_edges_created"], 3792.0)
+            self.assertEqual(metrics["daemon_graph_semantic_update_errors"], 0.0)
+            self.assertEqual(metrics["daemon_graph_topology_document_nodes"], 2000.0)
+            self.assertEqual(metrics["daemon_graph_topology_semantic_edges"], 3792.0)
+            self.assertEqual(
+                metrics["daemon_graph_topology_documents_with_neighbors"], 2000.0
+            )
+            self.assertEqual(metrics["daemon_graph_topology_isolated_documents"], 0.0)
+            self.assertEqual(metrics["daemon_graph_post_ingest_queued"], 0.0)
+            self.assertEqual(metrics["daemon_graph_post_ingest_in_flight"], 0.0)
 
     def test_vector_cache_metadata_exports_storage_and_index_footprint(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2277,6 +2767,8 @@ class IngestionContractTests(unittest.TestCase):
                             "first_query_latency_ms": 31.0,
                             "query_count": 2,
                             "completed_queries": 2,
+                            "retried_queries": 0,
+                            "retry_failed_queries": 0,
                         },
                         {
                             "query_index": 0,
@@ -2299,10 +2791,81 @@ class IngestionContractTests(unittest.TestCase):
         self.assertEqual(metrics["search_latency_ms_first_pass_first"], 31.0)
         self.assertEqual(metrics["search_latency_ms_warmed_p50"], 15.0)
         self.assertEqual(metrics["search_latency_ms_p95"], 20.0)
+        self.assertEqual(metrics["search_warmup_retried_queries"], 0.0)
+        self.assertEqual(metrics["search_warmup_retry_failed_queries"], 0.0)
         self.assertEqual(metrics["search_latency_ms_p99"], 20.0)
         self.assertAlmostEqual(metrics["search_throughput_qps"], 2000.0 / 30.0)
         self.assertEqual(metrics["search_warmup_query_count"], 2.0)
         self.assertEqual(metrics["search_warmup_completed_queries"], 2.0)
+
+    def test_warmup_retry_suppresses_invalid_cold_first_latency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            debug_path = Path(tmp) / "debug.jsonl"
+            debug_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "event": "query_warmup_summary",
+                                "first_query_latency_ms": 11.0,
+                                "query_count": 1,
+                                "completed_queries": 1,
+                                "retried_queries": 1,
+                                "retry_failed_queries": 0,
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "query_index": 0,
+                                "search_type": "hybrid",
+                                "search_stats": {"latency_ms": "10"},
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            metrics = parse_debug_jsonl(debug_path)["metrics"]
+
+        self.assertEqual(metrics["search_warmup_retried_queries"], 1.0)
+        self.assertEqual(metrics["search_warmup_retry_failed_queries"], 0.0)
+        self.assertEqual(metrics["search_latency_ms_warmed_p50"], 10.0)
+        self.assertNotIn("search_latency_ms_cold_first", metrics)
+        self.assertNotIn("search_latency_ms_first_pass_first", metrics)
+
+    def test_legacy_warmup_summary_does_not_impute_retry_telemetry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            debug_path = Path(tmp) / "debug.jsonl"
+            debug_path.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "event": "query_warmup_summary",
+                                "first_query_latency_ms": 31.0,
+                                "query_count": 1,
+                                "completed_queries": 1,
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "query_index": 0,
+                                "search_type": "hybrid",
+                                "search_stats": {"latency_ms": "10"},
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            metrics = parse_debug_jsonl(debug_path)["metrics"]
+
+        self.assertNotIn("search_warmup_retried_queries", metrics)
+        self.assertNotIn("search_warmup_retry_failed_queries", metrics)
 
     def test_mixed_query_trace_contract_rejects_missing_or_failed_queries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2802,6 +3365,104 @@ class MixedCorpusTests(unittest.TestCase):
         self.assertEqual(prepared.document_count, 2)
         self.assertNotIn("alpha__empty", {doc["id"] for doc in manifest["documents"]})
         self.assertEqual(identity["source_counts"]["alpha"]["empty_documents_skipped"], 1)
+
+    def test_materializer_applies_a_disjoint_query_offset_per_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            datasets: dict[str, Path] = {}
+            for source in ("alpha", "beta"):
+                dataset = root / source
+                datasets[source] = dataset
+                self._write_beir_dataset(
+                    dataset,
+                    documents=[
+                        {"_id": f"d{index}", "title": source, "text": f"doc {index}"}
+                        for index in range(4)
+                    ],
+                    queries=[
+                        {"_id": f"q{index}", "text": f"query {index}"}
+                        for index in range(4)
+                    ],
+                    qrels=[(f"q{index}", f"d{index}", 1) for index in range(4)],
+                )
+
+            prepared = materialize_mixed_beir_manifest(
+                datasets,
+                root / "mixed",
+                queries_per_dataset=2,
+                query_offset_per_dataset=2,
+            )
+            manifest = json.loads(prepared.manifest_path.read_text(encoding="utf-8"))
+            identity = json.loads(prepared.identity_path.read_text(encoding="utf-8"))
+
+        self.assertEqual(
+            {query["id"] for query in manifest["queries"]},
+            {"alpha__q2", "alpha__q3", "beta__q2", "beta__q3"},
+        )
+        self.assertEqual(identity["spec"]["query_offset_per_dataset"], 2)
+
+    def test_materializer_keeps_document_construction_fixed_across_query_splits(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            datasets: dict[str, Path] = {}
+            for source in ("alpha", "beta"):
+                dataset = root / source
+                datasets[source] = dataset
+                self._write_beir_dataset(
+                    dataset,
+                    documents=[
+                        {"_id": f"d{index}", "title": source, "text": f"doc {index}"}
+                        for index in range(4)
+                    ],
+                    queries=[
+                        {"_id": f"q{index}", "text": f"query {index}"}
+                        for index in range(4)
+                    ],
+                    qrels=[(f"q{index}", f"d{index}", 1) for index in range(4)],
+                )
+
+            calibration = materialize_mixed_beir_manifest(
+                datasets,
+                root / "calibration",
+                documents_per_dataset=1,
+                queries_per_dataset=2,
+                query_offset_per_dataset=0,
+                document_queries_per_dataset=4,
+                document_query_offset_per_dataset=0,
+            )
+            evaluation = materialize_mixed_beir_manifest(
+                datasets,
+                root / "evaluation",
+                documents_per_dataset=1,
+                queries_per_dataset=2,
+                query_offset_per_dataset=2,
+                document_queries_per_dataset=4,
+                document_query_offset_per_dataset=0,
+            )
+            calibration_manifest = json.loads(
+                calibration.manifest_path.read_text(encoding="utf-8")
+            )
+            evaluation_manifest = json.loads(
+                evaluation.manifest_path.read_text(encoding="utf-8")
+            )
+            evaluation_identity = json.loads(
+                evaluation.identity_path.read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(
+            calibration_manifest["documents"], evaluation_manifest["documents"]
+        )
+        self.assertNotEqual(
+            calibration_manifest["queries"], evaluation_manifest["queries"]
+        )
+        self.assertEqual(
+            evaluation_identity["spec"]["document_queries_per_dataset"], 4
+        )
+        self.assertEqual(
+            evaluation_identity["spec"]["document_query_offset_per_dataset"], 0
+        )
 
     def test_materializer_identity_detects_same_size_same_mtime_source_changes(
         self,

@@ -70,6 +70,25 @@ def _clone_corpus_seed(source: Path, destination: Path) -> str:
     return "copy"
 
 
+def _has_hydration_telemetry(record: dict[str, Any]) -> bool:
+    required_blocks = (
+        ("search_server", "timing_snippet_hydration_us"),
+        ("search_server", "timing_snippet_lookup_us"),
+        ("search_server", "timing_snippet_content_fetch_us"),
+        ("search_server", "timing_snippet_render_us"),
+        ("grep_server", "content_retrieval_ms"),
+        ("grep_server", "worker_critical_total_ms"),
+        ("grep_server", "match_render_us"),
+        ("graph_server", "snippet_render_us"),
+    )
+    return all(
+        isinstance(record.get(server), dict)
+        and isinstance(record[server].get(metric), dict)
+        and "count" in record[server][metric]
+        for server, metric in required_blocks
+    )
+
+
 def run_multi_client(
     ctx: WorkerContext,
     *,
@@ -154,6 +173,9 @@ def run_multi_client(
     # If ablation wants vectors on, clear the default disable.
     if ablation.get("axes", {}).get("vectors") == "on":
         env.pop("YAMS_DISABLE_VECTORS", None)
+    if "hydrate_snippets" in arm_factors:
+        hydrate_snippets = bool(arm_factors["hydrate_snippets"])
+        env["YAMS_BENCH_SEARCH_PATHS_ONLY"] = "0" if hydrate_snippets else "1"
 
     # Workload knobs from plan params / factor values.
     clients = ctx.params.get("search_clients") or ctx.params.get("num_clients") or 4
@@ -173,6 +195,12 @@ def run_multi_client(
     env["YAMS_BENCH_SEARCH_RATIO"] = str(float(search_ratio))
     env["YAMS_BENCH_WARMUP_DOCS"] = str(int(warmup))
     env["YAMS_BENCH_SEARCH_TYPE"] = str(search_type)
+    env["YAMS_BENCH_SEARCH_LIMIT"] = str(int(ctx.params.get("search_limit") or 5))
+    env["YAMS_BENCH_SNIPPET_HYDRATION_TIMEOUT_MS"] = str(
+        int(ctx.params.get("snippet_hydration_timeout_ms") or 5000)
+    )
+    if ctx.params.get("profile_hydration_surfaces"):
+        env["YAMS_BENCH_PROFILE_HYDRATION_SURFACES"] = "1"
     if ctx.params.get("search_query"):
         env["YAMS_BENCH_SEARCH_QUERY"] = str(ctx.params["search_query"])
     env["YAMS_BENCH_MIXED_SEARCHERS"] = str(int(clients))
@@ -223,6 +251,15 @@ def run_multi_client(
             message=f"multi_client exited {proc.returncode} without JSONL metrics",
             raw_path=str(raw_path),
         )
+    if proc.returncode == 0 and record is None:
+        return WorkerResult(
+            status="failed",
+            exit_code=proc.returncode,
+            metrics={},
+            attributes={"binary": str(binary), "catch_filter": catch_filter},
+            message="multi_client completed without JSONL metrics",
+            raw_path=str(raw_path),
+        )
 
     return WorkerResult(
         status="ok" if proc.returncode == 0 else "failed",
@@ -236,9 +273,14 @@ def run_multi_client(
             "ablation": ablation,
             "search_type": search_type,
             "search_query": env.get("YAMS_BENCH_SEARCH_QUERY"),
+            "hydrate_snippets": not (
+                env.get("YAMS_BENCH_SEARCH_PATHS_ONLY", "0").lower()
+                in {"1", "true", "yes", "on"}
+            ),
             "data_dir": env.get("YAMS_BENCH_DATA_DIR"),
             "corpus_seed_dir": str(corpus_seed) if corpus_seed else None,
             "corpus_clone_method": corpus_clone_method,
+            "hydration_telemetry_present": _has_hydration_telemetry(record),
         },
         message="multi_client completed" if proc.returncode == 0 else f"exit {proc.returncode}",
         raw_path=str(raw_path),
@@ -254,6 +296,9 @@ def _metrics_from_record(record: dict[str, Any]) -> dict[str, Any]:
     drain = record.get("drain_metrics") or {}
     peaks = record.get("resource_peaks") or {}
     baseline = record.get("resource_baseline") or {}
+    search_server = record.get("search_server") or {}
+    grep_server = record.get("grep_server") or {}
+    graph_server = record.get("graph_server") or {}
     if not isinstance(baseline, dict):
         baseline = {}
 
@@ -267,6 +312,78 @@ def _metrics_from_record(record: dict[str, Any]) -> dict[str, Any]:
         "num_clients": float(record.get("num_clients") or 0),
         "drained": 1.0 if record.get("drained") else 0.0,
     }
+
+    def summary_value(block: Any, percentile: str, *, micros: bool) -> float:
+        if not isinstance(block, dict):
+            return 0.0
+        keys = (f"{percentile}_us", percentile) if micros else (percentile, f"{percentile}_us")
+        for key in keys:
+            if key in block and block[key] is not None:
+                value = float(block[key])
+                return value / 1000.0 if micros or key.endswith("_us") else value
+        return 0.0
+
+    def search_timing(name: str, metric_prefix: str) -> float:
+        block = search_server.get(name) if isinstance(search_server, dict) else None
+        count = float(block.get("count") or 0) if isinstance(block, dict) else 0.0
+        metrics[f"{metric_prefix}_samples"] = count
+        for percentile in ("p50", "p95", "p99", "max"):
+            metrics[f"{metric_prefix}_{percentile}_ms"] = summary_value(
+                block, percentile, micros=True
+            )
+        return count
+
+    hydration_samples = search_timing(
+        "timing_snippet_hydration_us", "search_snippet_hydration"
+    )
+    search_timing("timing_snippet_lookup_us", "search_snippet_lookup")
+    search_timing(
+        "timing_snippet_content_fetch_us", "search_snippet_content_fetch"
+    )
+    search_timing("timing_snippet_render_us", "search_snippet_render")
+    snippet_timeout_hits = (
+        float(search_server.get("snippet_timeout_hits") or 0)
+        if isinstance(search_server, dict)
+        else 0.0
+    )
+    metrics["search_snippet_timeout_hits"] = snippet_timeout_hits
+    metrics["search_snippet_timeout_rate"] = (
+        snippet_timeout_hits / hydration_samples if hydration_samples > 0 else 0.0
+    )
+    for counter in (
+        "snippet_hydration_candidates",
+        "snippet_hydration_missing",
+        "snippet_hydrated_results",
+    ):
+        metrics[f"search_{counter}"] = (
+            float(search_server.get(counter) or 0)
+            if isinstance(search_server, dict)
+            else 0.0
+        )
+
+    metrics["grep_content_retrieval_p95_ms"] = summary_value(
+        grep_server.get("content_retrieval_ms") if isinstance(grep_server, dict) else None,
+        "p95",
+        micros=False,
+    )
+    metrics["grep_worker_critical_p95_ms"] = summary_value(
+        grep_server.get("worker_critical_total_ms") if isinstance(grep_server, dict) else None,
+        "p95",
+        micros=False,
+    )
+
+    def server_render_timing(server: Any, name: str, metric_prefix: str) -> None:
+        block = server.get(name) if isinstance(server, dict) else None
+        metrics[f"{metric_prefix}_samples"] = (
+            float(block.get("count") or 0) if isinstance(block, dict) else 0.0
+        )
+        for percentile in ("p50", "p95", "p99", "max"):
+            metrics[f"{metric_prefix}_{percentile}_ms"] = summary_value(
+                block, percentile, micros=True
+            )
+
+    server_render_timing(grep_server, "match_render_us", "grep_match_render")
+    server_render_timing(graph_server, "snippet_render_us", "graph_snippet_render")
 
     p50 = latency_ms_from_us_block(search if isinstance(search, dict) else None, "p50_us")
     p90 = latency_ms_from_us_block(search if isinstance(search, dict) else None, "p90_us")

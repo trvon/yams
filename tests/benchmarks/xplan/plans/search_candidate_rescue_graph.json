@@ -1,0 +1,237 @@
+{
+  "name": "search_candidate_rescue_graph",
+  "description": "Daemon-native candidate-finding gate for theorem-aligned graph rescue: PostIngestQueue and EmbeddingService produce the graph, then unchanged global Simeon ANN is compared with true shadow rescue, active augmentation, and an equal maximum vector-result-budget control.",
+  "build_dir": "build/vector-opt-release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 7200,
+  "continue_on_arm_failure": false,
+  "mode": "live-ish",
+  "repeats": 3,
+  "baseline": "global_ann_c32",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SEARCH_STAGE_TRACE": "1",
+      "YAMS_ENABLE_ENV_OVERRIDES": "1",
+      "YAMS_BENCH_EMBED_BACKEND": "simeon",
+      "YAMS_VECTOR_SEARCH_ENGINE": "simeon_pq_adc",
+      "YAMS_SEARCH_ENABLE_RERANKING": "0",
+      "YAMS_VECTOR_MAX_RESULTS": "32"
+    },
+    "params": {
+      "dataset": "scifact",
+      "corpus_size": 2000,
+      "num_queries": 50,
+      "topk": 10,
+      "topology_source": "vector",
+      "topology_engine": "connected",
+      "expansion_source": "graph_neighbors",
+      "require_daemon_native_graph": true,
+      "graph_neighbor_min_score": 0.0,
+      "graph_neighbor_reciprocal_only": false,
+      "graph_vector_seed_probe": 16,
+      "max_seed_documents": 16,
+      "max_docs": 16,
+      "require_daemon_graph_construction_identity": true,
+      "require_steady_state": true
+    }
+  },
+  "arms": [
+    {
+      "name": "global_ann_c32",
+      "factors": {
+        "topology_mode": "disabled",
+        "vector_result_budget": 32
+      },
+      "params": {
+        "topology_mode": "disabled"
+      }
+    },
+    {
+      "name": "global_ann_c48_budget_control",
+      "factors": {
+        "topology_mode": "disabled",
+        "vector_result_budget": 48
+      },
+      "params": {
+        "topology_mode": "disabled"
+      },
+      "env": {
+        "YAMS_VECTOR_MAX_RESULTS": "48"
+      }
+    },
+    {
+      "name": "graph_rescue_shadow_c32_plus16",
+      "factors": {
+        "topology_mode": "hybrid_assist",
+        "topology_vector_policy": "shadow",
+        "vector_result_budget": 32,
+        "route_result_budget": 16
+      },
+      "params": {
+        "topology_mode": "hybrid_assist",
+        "topology_vector_policy": "shadow"
+      }
+    },
+    {
+      "name": "graph_rescue_shadow_full_relation",
+      "factors": {
+        "topology_mode": "hybrid_assist",
+        "topology_vector_policy": "shadow",
+        "vector_result_budget": 32,
+        "route_result_budget": 2048
+      },
+      "params": {
+        "topology_mode": "hybrid_assist",
+        "topology_vector_policy": "shadow",
+        "max_docs": 2048
+      }
+    },
+    {
+      "name": "graph_rescue_augment_c32_plus16",
+      "factors": {
+        "topology_mode": "hybrid_assist",
+        "topology_vector_policy": "augment",
+        "vector_result_budget": 32,
+        "route_result_budget": 16
+      },
+      "params": {
+        "topology_mode": "hybrid_assist",
+        "topology_vector_policy": "augment"
+      }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_quality",
+      "metrics": [
+        "mrr",
+        "ndcg_at_k",
+        "map",
+        "recall_at_k",
+        "candidate_pre_fusion_recall",
+        "candidate_post_fusion_recall",
+        "returned_trace_recall",
+        "topology_candidate_rescue_attempt_rate",
+        "topology_candidate_rescue_apply_rate",
+        "topology_candidate_rescue_added_sum",
+        "topology_candidate_rescue_novel_sum",
+        "topology_candidate_rescue_evidence_rescue_sum",
+        "topology_candidate_rescue_duplicate_sum",
+        "topology_candidate_rescue_relevant_query_rate",
+        "topology_candidate_rescue_relevant_novel_query_rate",
+        "topology_candidate_rescue_relevant_evidence_query_rate",
+        "topology_candidate_rescue_relevant_added",
+        "topology_candidate_rescue_relevant_reachable_query_rate",
+        "topology_candidate_rescue_reachable_to_scored_rate",
+        "topology_candidate_rescue_baseline_miss_queries",
+        "topology_candidate_rescue_missing_relation_reachable_query_rate",
+        "topology_candidate_rescue_missing_fetched_query_rate",
+        "topology_candidate_rescue_missing_eligible_query_rate",
+        "topology_candidate_rescue_missing_selected_query_rate",
+        "topology_candidate_rescue_missing_scored_query_rate",
+        "topology_candidate_rescue_missing_exact_scored_query_rate",
+        "topology_candidate_rescue_post_fusion_survival_rate",
+        "topology_candidate_rescue_returned_survival_rate",
+        "topology_candidate_rescue_evidence_post_fusion_survival_rate",
+        "topology_candidate_rescue_evidence_returned_survival_rate",
+        "topology_graph_trace_query_rate",
+        "topology_graph_fetch_truncated_seed_count_sum",
+        "topology_graph_relation_candidate_count_avg",
+        "topology_graph_fetched_candidate_count_avg",
+        "topology_graph_eligible_candidate_count_avg",
+        "topology_graph_relation_unresolved_count_sum",
+        "topology_path_seed_neighbors_rate",
+        "topology_vector_seeds_added_avg",
+        "topology_vector_seeds_nonzero_rate",
+        "topology_vector_seed_probe_avg",
+        "daemon_graph_ready",
+        "daemon_graph_canonicalized",
+        "daemon_graph_canonical_edges_generated",
+        "daemon_graph_semantic_documents_processed",
+        "daemon_graph_semantic_edges_created",
+        "daemon_graph_topology_document_nodes",
+        "daemon_graph_topology_semantic_edges",
+        "daemon_graph_topology_documents_with_neighbors",
+        "daemon_graph_topology_isolated_documents",
+        "daemon_graph_post_ingest_queued",
+        "daemon_graph_post_ingest_in_flight",
+        "search_latency_ms_p50",
+        "search_latency_ms_p95"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json", "stdout.log", "debug.jsonl"],
+    "require_metrics": [
+      "mrr",
+      "recall_at_k",
+      "candidate_pre_fusion_recall",
+      "topology_candidate_rescue_attempt_rate",
+      "topology_candidate_rescue_baseline_miss_queries",
+      "topology_candidate_rescue_missing_relation_reachable_query_rate",
+      "topology_candidate_rescue_missing_fetched_query_rate",
+      "topology_candidate_rescue_missing_eligible_query_rate",
+      "topology_candidate_rescue_missing_selected_query_rate",
+      "topology_candidate_rescue_missing_scored_query_rate",
+      "topology_candidate_rescue_missing_exact_scored_query_rate",
+      "topology_graph_trace_query_rate",
+      "topology_path_seed_neighbors_rate",
+      "topology_vector_seeds_nonzero_rate",
+      "daemon_graph_ready",
+      "daemon_graph_canonicalized",
+      "daemon_graph_topology_documents_with_neighbors",
+      "daemon_graph_topology_isolated_documents",
+      "daemon_graph_post_ingest_queued",
+      "daemon_graph_post_ingest_in_flight",
+      "search_latency_ms_p50"
+    ],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "mrr",
+      "ndcg_at_k",
+      "recall_at_k",
+      "candidate_pre_fusion_recall",
+      "candidate_post_fusion_recall",
+      "topology_candidate_rescue_relevant_query_rate",
+      "topology_candidate_rescue_relevant_novel_query_rate",
+      "topology_candidate_rescue_relevant_evidence_query_rate",
+      "topology_candidate_rescue_relevant_reachable_query_rate",
+      "topology_candidate_rescue_reachable_to_scored_rate",
+      "topology_candidate_rescue_baseline_miss_queries",
+      "topology_candidate_rescue_missing_relation_reachable_query_rate",
+      "topology_candidate_rescue_missing_fetched_query_rate",
+      "topology_candidate_rescue_missing_eligible_query_rate",
+      "topology_candidate_rescue_missing_selected_query_rate",
+      "topology_candidate_rescue_missing_scored_query_rate",
+      "topology_candidate_rescue_missing_exact_scored_query_rate",
+      "topology_candidate_rescue_post_fusion_survival_rate",
+      "topology_candidate_rescue_returned_survival_rate",
+      "topology_candidate_rescue_evidence_post_fusion_survival_rate",
+      "topology_candidate_rescue_evidence_returned_survival_rate",
+      "topology_graph_trace_query_rate",
+      "topology_graph_fetch_truncated_seed_count_sum",
+      "topology_graph_relation_candidate_count_avg",
+      "topology_graph_fetched_candidate_count_avg",
+      "topology_graph_eligible_candidate_count_avg",
+      "topology_graph_relation_unresolved_count_sum",
+      "topology_path_seed_neighbors_rate",
+      "topology_vector_seeds_added_avg",
+      "topology_vector_seeds_nonzero_rate",
+      "topology_vector_seed_probe_avg",
+      "daemon_graph_ready",
+      "daemon_graph_canonicalized",
+      "daemon_graph_canonical_edges_generated",
+      "daemon_graph_semantic_documents_processed",
+      "daemon_graph_semantic_edges_created",
+      "daemon_graph_topology_document_nodes",
+      "daemon_graph_topology_semantic_edges",
+      "daemon_graph_topology_documents_with_neighbors",
+      "daemon_graph_topology_isolated_documents",
+      "search_latency_ms_p50"
+    ],
+    "group_by": ["topology_mode", "topology_vector_policy"]
+  }
+}

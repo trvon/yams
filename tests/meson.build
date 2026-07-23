@@ -3364,6 +3364,11 @@ if catch2_dep.found()
       suite: ['unit', 'search', 'benchmark', 'xplan'],
       timeout: 30
     )
+    test('xplan_hydration_metrics', xplan_python,
+      args: [meson.current_source_dir() / 'benchmarks/xplan/test_hydration_metrics.py'],
+      suite: ['unit', 'search', 'benchmark', 'xplan', 'hydration'],
+      timeout: 30
+    )
   endif
 
   test('relevance_label_store', catch2_relevance_label_store_exe,

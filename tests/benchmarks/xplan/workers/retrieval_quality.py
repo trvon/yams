@@ -86,13 +86,34 @@ def _child_cpu_seconds() -> float | None:
     return float(usage.ru_utime + usage.ru_stime)
 
 
-def _benchmark_command(binary: Path, benchmark_filter: str) -> list[str]:
+def _benchmark_command(
+    binary: Path, benchmark_filter: str, params: dict[str, Any] | None = None
+) -> list[str]:
     """Run one heavy workload iteration; xplan owns isolated statistical repeats."""
-    return [
+    command = [
         str(binary),
         f"--benchmark_filter={benchmark_filter}",
         "--benchmark_min_time=1x",
     ]
+    params = params or {}
+    for key, argument in (
+        ("simeon_encoder_profile", "--yams-simeon-encoder-profile"),
+        (
+            "simeon_fragment_encoder_profile",
+            "--yams-simeon-fragment-encoder-profile",
+        ),
+        ("simeon_fragment_geometry", "--yams-simeon-fragment-geometry"),
+        ("simeon_bm25", "--yams-simeon-bm25"),
+        ("simeon_router", "--yams-simeon-router"),
+        ("require_daemon_native_graph", "--yams-require-daemon-native-graph"),
+    ):
+        if key not in params:
+            continue
+        value = params[key]
+        if isinstance(value, bool):
+            value = "true" if value else "false"
+        command.append(f"{argument}={value}")
+    return command
 
 
 def _reset_measured_outputs(paths: list[Path]) -> None:
@@ -142,6 +163,37 @@ def _mark_shared_topology_seed_reuse(env: dict[str, str]) -> None:
 
 def _truthy(val: Any) -> bool:
     return str(val).lower() in {"1", "true", "yes", "on"}
+
+
+def require_daemon_native_graph_inputs(
+    params: dict[str, Any], env: dict[str, str]
+) -> str | None:
+    """Reject benchmark-owned graph state when a plan measures daemon ingestion."""
+    if not _truthy(params.get("require_daemon_native_graph", False)):
+        return None
+
+    if str(params.get("shared_warm_cache") or "").strip():
+        return (
+            "daemon-native graph measurement cannot use a shared warm cache because "
+            "the clone path freezes topology inputs and disables daemon graph evolution"
+        )
+    if _truthy(env.get("YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS", "0")):
+        return (
+            "daemon-native graph measurement cannot enable benchmark semantic-neighbor "
+            "seeding"
+        )
+    if _truthy(env.get("YAMS_BENCH_REUSE_SEEDED_TOPOLOGY_INPUTS", "0")):
+        return (
+            "daemon-native graph measurement cannot reuse benchmark-seeded topology inputs"
+        )
+    if "YAMS_ENABLE_SEMANTIC_NEIGHBOR_BACKFILL" in env and not _truthy(
+        env["YAMS_ENABLE_SEMANTIC_NEIGHBOR_BACKFILL"]
+    ):
+        return (
+            "daemon-native graph measurement cannot disable daemon semantic-neighbor "
+            "backfill"
+        )
+    return None
 
 
 def _as_int(val: Any) -> int:
@@ -227,6 +279,9 @@ def parse_benchmark_setup_metrics(path: Path) -> dict[str, float]:
         vector_index = obj.get("vector_index") or {}
         if not isinstance(vector_index, dict):
             vector_index = {}
+        daemon_graph = obj.get("daemon_graph") or {}
+        if not isinstance(daemon_graph, dict):
+            daemon_graph = {}
         metrics = {
             "ingest_cold_performed": 1.0 if ingestion.get("cold_performed") else 0.0,
             "ingest_admission_ms": float(ingestion.get("admission_ms") or 0),
@@ -258,9 +313,62 @@ def parse_benchmark_setup_metrics(path: Path) -> dict[str, float]:
             "vector_index_reusable_probe_count": float(
                 vector_index.get("reusable_probe_count") or 0
             ),
+            "daemon_graph_required": 1.0 if daemon_graph.get("required") else 0.0,
+            "daemon_graph_ready": 1.0 if daemon_graph.get("ready") else 0.0,
+            "daemon_graph_canonicalized": (
+                1.0 if daemon_graph.get("canonicalized") else 0.0
+            ),
+            "daemon_graph_canonical_edges_generated": float(
+                daemon_graph.get("canonical_edges_generated") or 0
+            ),
+            "daemon_graph_semantic_documents_processed": float(
+                daemon_graph.get("semantic_documents_processed") or 0
+            ),
+            "daemon_graph_semantic_edges_created": float(
+                daemon_graph.get("semantic_edges_created") or 0
+            ),
+            "daemon_graph_semantic_update_errors": float(
+                daemon_graph.get("semantic_update_errors") or 0
+            ),
+            "daemon_graph_topology_document_nodes": float(
+                daemon_graph.get("topology_document_nodes") or 0
+            ),
+            "daemon_graph_topology_semantic_edges": float(
+                daemon_graph.get("topology_semantic_edges") or 0
+            ),
+            "daemon_graph_topology_documents_with_neighbors": float(
+                daemon_graph.get("topology_documents_with_neighbors") or 0
+            ),
+            "daemon_graph_topology_isolated_documents": float(
+                daemon_graph.get("topology_isolated_documents") or 0
+            ),
+            "daemon_graph_post_ingest_queued": float(
+                daemon_graph.get("post_ingest_queued") or 0
+            ),
+            "daemon_graph_post_ingest_in_flight": float(
+                daemon_graph.get("post_ingest_in_flight") or 0
+            ),
             "benchmark_setup_total_ms": float(obj.get("setup_total_ms") or 0),
         }
     return metrics
+
+
+def parse_daemon_graph_topology_fingerprint(path: Path) -> str:
+    """Read the canonical routing-artifact identity emitted by the benchmark."""
+    if not path.is_file():
+        return ""
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict) or obj.get("event") != "benchmark_setup_metrics":
+            continue
+        daemon_graph = obj.get("daemon_graph")
+        if not isinstance(daemon_graph, dict):
+            continue
+        return str(daemon_graph.get("canonical_topology_fingerprint") or "")
+    return ""
 
 
 def parse_benchmark_cache_metrics(path: Path) -> dict[str, float]:
@@ -330,6 +438,10 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         "load_succeeded": 0,
         "admitted": 0,
         "applied": 0,
+        "narrow_proposed": 0,
+        "admission_eligible": 0,
+        "coordinate_space_aligned": 0,
+        "fragment_space_aligned": 0,
         "narrow_applied": 0,
         "confidence_abstained": 0,
         "snapshot_cache_hit": 0,
@@ -358,6 +470,12 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         "topology_vector_allowed_set_ann_applied_queries": 0,
         "topology_vector_allowed_set_ann_fallback_queries": 0,
         "topology_vector_global_fill_count": 0,
+        "topology_candidate_rescue_attempted_queries": 0,
+        "topology_candidate_rescue_applied_queries": 0,
+        "topology_candidate_rescue_added": 0,
+        "topology_candidate_rescue_novel": 0,
+        "topology_candidate_evidence_rescues": 0,
+        "topology_candidate_rescue_duplicates": 0,
         "topology_shadow_evaluated_queries": 0,
         "topology_shadow_narrow_proposed_queries": 0,
         "topology_shadow_retained_candidates": 0,
@@ -379,13 +497,6 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
     route_ann_candidate_vals: list[int] = []
     route_ann_distance_evaluation_vals: list[int] = []
     route_exact_representative_distance_evaluation_vals: list[int] = []
-    coordinate_query_count = 0
-    coordinate_row_count = 0
-    coordinate_values: dict[str, list[float]] = {
-        "distortion": [],
-        "intrinsic_dimension": [],
-        "uncertainty": [],
-    }
     structure_evidence_vals: dict[str, list[float]] = {
         "candidate_count": [],
         "scale_agreement": [],
@@ -419,6 +530,26 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
     topology_vector_filter_latency_vals: list[float] = []
     topology_vector_abstain_latency_vals: list[float] = []
     topology_vector_global_fill_count_vals: list[int] = []
+    topology_route_work_rows_visited_vals: list[int] = []
+    topology_route_work_exact_distance_evaluations_vals: list[int] = []
+    topology_route_work_ann_candidate_budget_vals: list[int] = []
+    topology_route_work_observed_queries = 0
+    shadow_fiber_calibration_queries = 0
+    shadow_protected_fiber_candidates = 0
+    shadow_represented_protected_candidates = 0
+    shadow_unresolved_protected_fibers = 0
+    fiber_obligation_status_counts: dict[str, dict[str, int]] = {
+        "protected_fibers_represented": {
+            "satisfied": 0,
+            "violated": 0,
+            "unavailable": 0,
+        },
+        "certificate_saturates_protected_fibers": {
+            "satisfied": 0,
+            "violated": 0,
+            "unavailable": 0,
+        },
+    }
     skip_reasons: dict[str, int] = {}
     scoring_modes: dict[str, int] = {}
     routing_modes: dict[str, int] = {}
@@ -454,6 +585,41 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
     text_relevant_queries = 0
     vector_relevant_queries = 0
     vector_unique_rescue_queries = 0
+    candidate_rescue_relevant_added_queries = 0
+    candidate_rescue_relevant_added = 0
+    candidate_rescue_relevant_novel_queries = 0
+    candidate_rescue_relevant_novel = 0
+    candidate_rescue_relevant_evidence_queries = 0
+    candidate_rescue_relevant_evidence = 0
+    candidate_rescue_relevant_evidence_post_fusion = 0
+    candidate_rescue_relevant_evidence_returned = 0
+    candidate_rescue_relevant_reachable_queries = 0
+    candidate_rescue_relevant_reachable = 0
+    candidate_rescue_relevant_scored = 0
+    candidate_rescue_baseline_miss_queries = 0
+    candidate_rescue_baseline_missing_documents = 0
+    candidate_rescue_missing_stage_queries = {
+        "relation_reachable": 0,
+        "fetched": 0,
+        "eligible": 0,
+        "selected": 0,
+        "scored": 0,
+        "exact_scored": 0,
+    }
+    candidate_rescue_missing_stage_documents = {
+        stage: 0 for stage in candidate_rescue_missing_stage_queries
+    }
+    graph_trace_queries = 0
+    graph_fetch_truncated_seed_counts: list[int] = []
+    graph_relation_candidate_counts: list[int] = []
+    graph_fetched_candidate_counts: list[int] = []
+    graph_eligible_candidate_counts: list[int] = []
+    graph_seed_unresolved_counts: list[int] = []
+    graph_relation_unresolved_counts: list[int] = []
+    graph_fetched_unresolved_counts: list[int] = []
+    graph_eligible_unresolved_counts: list[int] = []
+    candidate_rescue_relevant_post_fusion = 0
+    candidate_rescue_relevant_returned = 0
     pre_fusion_recall_sum = 0.0
     post_fusion_recall_sum = 0.0
     returned_trace_recall_sum = 0.0
@@ -461,6 +627,8 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
     warmup_first_latency_ms: float | None = None
     warmup_query_count = 0
     warmup_completed_queries = 0
+    warmup_retried_queries: int | None = None
+    warmup_retry_failed_queries: int | None = None
 
     int_keys = {
         "added": "topology_weak_query_added_candidates",
@@ -482,6 +650,14 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         "topology_vector_filter_matched": "topology_vector_filter_matched",
         "topology_vector_filter_removed": "topology_vector_filter_removed",
         "topology_vector_global_fill_count": "topology_vector_global_fill_count",
+        "topology_candidate_rescue_added": "topology_candidate_rescue_added_candidates",
+        "topology_candidate_rescue_novel": "topology_candidate_rescue_novel_candidates",
+        "topology_candidate_evidence_rescues": (
+            "topology_candidate_rescue_evidence_rescues"
+        ),
+        "topology_candidate_rescue_duplicates": (
+            "topology_candidate_rescue_duplicate_candidates"
+        ),
         "topology_shadow_retained_candidates": "topology_shadow_retained_candidates",
         "topology_shadow_removed_candidates": "topology_shadow_removed_candidates",
         "route_representative_distance_evaluations": (
@@ -520,10 +696,18 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
                 warmup_first_latency_ms = float(obj["first_query_latency_ms"])
                 warmup_query_count = int(obj.get("query_count") or 0)
                 warmup_completed_queries = int(obj.get("completed_queries") or 0)
+                if "retried_queries" in obj:
+                    warmup_retried_queries = int(obj.get("retried_queries") or 0)
+                if "retry_failed_queries" in obj:
+                    warmup_retry_failed_queries = int(
+                        obj.get("retry_failed_queries") or 0
+                    )
             except (KeyError, TypeError, ValueError):
                 warmup_first_latency_ms = None
                 warmup_query_count = 0
                 warmup_completed_queries = 0
+                warmup_retried_queries = None
+                warmup_retry_failed_queries = None
             continue
 
         if obj.get("event") == "topology_construction_certificate":
@@ -574,6 +758,7 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         except (TypeError, ValueError):
             pass
 
+        vector_unique_protected_docs: set[str] = set()
         trace = obj.get("relevant_decision_trace") or {}
         relevant_docs = trace.get("relevant_docs") if isinstance(trace, dict) else None
         if isinstance(relevant_docs, list) and relevant_docs:
@@ -603,7 +788,165 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
             )
             text_relevant_queries += int(text_relevant)
             vector_relevant_queries += int(vector_relevant)
+            vector_unique_protected_docs = {
+                str(doc.get("doc_id"))
+                for doc in relevant_docs
+                if isinstance(doc, dict)
+                and set(doc.get("component_top_hits") or []) == {"vector"}
+            }
             vector_unique_rescue_queries += int(vector_relevant and not text_relevant)
+
+        if _truthy(stats.get("topology_candidate_rescue_attempted")):
+            counters["topology_candidate_rescue_attempted_queries"] += 1
+        if _truthy(stats.get("topology_candidate_rescue_applied")):
+            counters["topology_candidate_rescue_applied_queries"] += 1
+
+        rescue_added_docs = {
+            doc_id
+            for doc_id in str(
+                stats.get("topology_candidate_rescue_added_candidate_doc_ids")
+                or stats.get("topology_candidate_rescue_added_candidate_hashes", "")
+                or ""
+            ).split("\t")
+            if doc_id
+        }
+        rescue_novel_docs = {
+            doc_id
+            for doc_id in str(
+                stats.get("topology_candidate_rescue_novel_candidate_doc_ids", "")
+                or ""
+            ).split("\t")
+            if doc_id
+        }
+        rescue_evidence_docs = {
+            doc_id
+            for doc_id in str(
+                stats.get("topology_candidate_rescue_evidence_rescue_doc_ids", "")
+                or ""
+            ).split("\t")
+            if doc_id
+        }
+        judged_relevant_docs = {
+            str(doc_id) for doc_id in (obj.get("relevant_doc_ids") or [])
+        }
+        reachable_docs = {
+            doc_id
+            for doc_id in str(
+                stats.get("topology_weak_query_allowed_candidate_doc_ids", "") or ""
+            ).split("\t")
+            if doc_id
+        }
+        relevant_reachable = reachable_docs & judged_relevant_docs
+        if relevant_reachable:
+            candidate_rescue_relevant_reachable_queries += 1
+            candidate_rescue_relevant_reachable += len(relevant_reachable)
+        scored_docs = {
+            doc_id
+            for doc_id in str(
+                stats.get("topology_candidate_rescue_scored_candidate_doc_ids", "") or ""
+            ).split("\t")
+            if doc_id
+        }
+        candidate_rescue_relevant_scored += len(scored_docs & judged_relevant_docs)
+        missing_relevant_docs = {
+            str(doc.get("doc_id"))
+            for doc in relevant_docs or []
+            if isinstance(doc, dict)
+            and "in_pre_fusion" in doc
+            and not bool(doc.get("in_pre_fusion"))
+        }
+        if missing_relevant_docs:
+            candidate_rescue_baseline_miss_queries += 1
+            candidate_rescue_baseline_missing_documents += len(missing_relevant_docs)
+
+            def traced_doc_ids(key: str) -> set[str]:
+                return {
+                    doc_id
+                    for doc_id in str(stats.get(key, "") or "").split("\t")
+                    if doc_id
+                }
+
+            stage_documents = {
+                "relation_reachable": traced_doc_ids(
+                    "topology_graph_relation_candidate_doc_ids"
+                ),
+                "fetched": traced_doc_ids(
+                    "topology_graph_fetched_candidate_doc_ids"
+                ),
+                "eligible": traced_doc_ids(
+                    "topology_graph_eligible_candidate_doc_ids"
+                ),
+                "selected": reachable_docs,
+                "scored": traced_doc_ids(
+                    "topology_candidate_rescue_scored_candidate_doc_ids"
+                ),
+                "exact_scored": traced_doc_ids(
+                    "topology_candidate_rescue_exact_scored_candidate_doc_ids"
+                ),
+            }
+            for stage, documents in stage_documents.items():
+                reached = documents & missing_relevant_docs
+                if reached:
+                    candidate_rescue_missing_stage_queries[stage] += 1
+                    candidate_rescue_missing_stage_documents[stage] += len(reached)
+        if _truthy(stats.get("topology_graph_trace_collected")):
+            graph_trace_queries += 1
+            graph_fetch_truncated_seed_counts.append(
+                _as_int(stats.get("topology_graph_fetch_truncated_seed_count"))
+            )
+            graph_relation_candidate_counts.append(
+                _as_int(stats.get("topology_graph_relation_candidate_count"))
+            )
+            graph_fetched_candidate_counts.append(
+                _as_int(stats.get("topology_graph_fetched_candidate_count"))
+            )
+            graph_eligible_candidate_counts.append(
+                _as_int(stats.get("topology_graph_eligible_candidate_count"))
+            )
+            graph_seed_unresolved_counts.append(
+                _as_int(stats.get("topology_graph_seed_unresolved_count"))
+            )
+            graph_relation_unresolved_counts.append(
+                _as_int(stats.get("topology_graph_relation_unresolved_count"))
+            )
+            graph_fetched_unresolved_counts.append(
+                _as_int(stats.get("topology_graph_fetched_unresolved_count"))
+            )
+            graph_eligible_unresolved_counts.append(
+                _as_int(stats.get("topology_graph_eligible_unresolved_count"))
+            )
+        relevant_rescues = rescue_added_docs & judged_relevant_docs
+        relevant_novel = rescue_novel_docs & judged_relevant_docs
+        relevant_evidence = rescue_evidence_docs & judged_relevant_docs
+        if relevant_novel:
+            candidate_rescue_relevant_novel_queries += 1
+            candidate_rescue_relevant_novel += len(relevant_novel)
+        if relevant_evidence:
+            candidate_rescue_relevant_evidence_queries += 1
+            candidate_rescue_relevant_evidence += len(relevant_evidence)
+            if isinstance(relevant_docs, list):
+                candidate_rescue_relevant_evidence_post_fusion += sum(
+                    bool(doc.get("in_post_fusion"))
+                    for doc in relevant_docs
+                    if isinstance(doc, dict)
+                    and str(doc.get("doc_id")) in relevant_evidence
+                )
+            returned_docs = {str(doc_id) for doc_id in (obj.get("returned_doc_ids") or [])}
+            candidate_rescue_relevant_evidence_returned += len(
+                relevant_evidence & returned_docs
+            )
+        if relevant_rescues:
+            candidate_rescue_relevant_added_queries += 1
+            candidate_rescue_relevant_added += len(relevant_rescues)
+            if isinstance(relevant_docs, list):
+                candidate_rescue_relevant_post_fusion += sum(
+                    bool(doc.get("in_post_fusion"))
+                    for doc in relevant_docs
+                    if isinstance(doc, dict)
+                    and str(doc.get("doc_id")) in relevant_rescues
+                )
+            returned_docs = {str(doc_id) for doc_id in (obj.get("returned_doc_ids") or [])}
+            candidate_rescue_relevant_returned += len(relevant_rescues & returned_docs)
 
         latency_value: float | None = None
         try:
@@ -663,6 +1006,28 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
             counters["admitted"] += 1
         if _truthy(stats.get("topology_weak_query_applied")):
             counters["applied"] += 1
+        if _truthy(stats.get("topology_route_narrow_proposed")):
+            counters["narrow_proposed"] += 1
+        if _truthy(stats.get("topology_route_admission_eligible")):
+            counters["admission_eligible"] += 1
+        if stats.get("topology_route_coordinate_space_alignment_status") == "satisfied":
+            counters["coordinate_space_aligned"] += 1
+        if _truthy(stats.get("simeon_fragment_space_aligned")):
+            counters["fragment_space_aligned"] += 1
+        for obligation, stat_key in (
+            (
+                "protected_fibers_represented",
+                "topology_route_protected_fibers_represented_status",
+            ),
+            (
+                "certificate_saturates_protected_fibers",
+                "topology_route_certificate_saturates_protected_fibers_status",
+            ),
+        ):
+            status = str(stats.get(stat_key, "unavailable") or "unavailable")
+            if status not in fiber_obligation_status_counts[obligation]:
+                status = "unavailable"
+            fiber_obligation_status_counts[obligation][status] += 1
         if _truthy(stats.get("topology_weak_query_narrow_applied")):
             counters["narrow_applied"] += 1
         if _truthy(stats.get("topology_route_confidence_abstained")):
@@ -706,37 +1071,47 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
             counters["topology_shadow_evaluated_queries"] += 1
             if stats.get("topology_shadow_proposed_action") == "narrow":
                 counters["topology_shadow_narrow_proposed_queries"] += 1
-
-        coordinate_rows = stats.get("topology_route_coordinate_rows")
-        if coordinate_rows:
-            try:
-                parsed_rows = (
-                    json.loads(coordinate_rows)
-                    if isinstance(coordinate_rows, str)
-                    else coordinate_rows
+                other_obligations_satisfied = all(
+                    stats.get(status_key) == "satisfied"
+                    for status_key in (
+                        "topology_route_coordinate_space_alignment_status",
+                        "topology_route_protected_relation_coverage_status",
+                        "topology_route_certificate_saturates_protected_fibers_status",
+                        "topology_route_work_status",
+                        "topology_route_cover_materialization_status",
+                    )
                 )
-            except (TypeError, ValueError, json.JSONDecodeError):
-                parsed_rows = None
-            if isinstance(parsed_rows, list) and parsed_rows:
-                coordinate_query_count += 1
-                for row in parsed_rows:
-                    if not isinstance(row, dict):
-                        continue
-                    coordinate_row_count += 1
-                    for metric_name, field_name in (
-                        ("distortion", "distortion_penalty"),
-                        ("intrinsic_dimension", "local_intrinsic_dimension"),
-                        ("uncertainty", "uncertainty_penalty"),
-                    ):
-                        value = row.get(field_name)
-                        if value is None:
-                            continue
-                        try:
-                            numeric = float(value)
-                        except (TypeError, ValueError):
-                            continue
-                        if math.isfinite(numeric):
-                            coordinate_values[metric_name].append(numeric)
+                if other_obligations_satisfied and vector_unique_protected_docs:
+                    removed = {
+                        doc_id
+                        for doc_id in str(
+                            stats.get("topology_shadow_removed_candidate_doc_ids", "") or ""
+                        ).split("\t")
+                        if doc_id
+                    }
+                    unresolved = vector_unique_protected_docs & removed
+                    shadow_fiber_calibration_queries += 1
+                    shadow_protected_fiber_candidates += len(vector_unique_protected_docs)
+                    shadow_unresolved_protected_fibers += len(unresolved)
+                    shadow_represented_protected_candidates += (
+                        len(vector_unique_protected_docs) - len(unresolved)
+                    )
+        if _truthy(stats.get("topology_route_work_observed")):
+            topology_route_work_observed_queries += 1
+            topology_route_work_rows_visited_vals.append(
+                _as_int(stats.get("topology_route_work_rows_visited_actual"))
+            )
+            topology_route_work_exact_distance_evaluations_vals.append(
+                _as_int(
+                    stats.get(
+                        "topology_route_work_exact_distance_evaluations_actual"
+                    )
+                )
+            )
+            topology_route_work_ann_candidate_budget_vals.append(
+                _as_int(stats.get("topology_route_work_ann_candidate_budget_actual"))
+            )
+
         actual_observed: dict[str, bool] = {}
         for dst, status_key in actual_status_keys.items():
             status = str(stats.get(status_key, "") or "").strip().lower()
@@ -853,6 +1228,34 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         "topology_load_succeeded": float(counters["load_succeeded"]),
         "topology_admitted": float(counters["admitted"]),
         "topology_applied": float(counters["applied"]),
+        "topology_narrow_proposed": float(counters["narrow_proposed"]),
+        "topology_route_admission_eligible": float(counters["admission_eligible"]),
+        "topology_coordinate_space_aligned": float(
+            counters["coordinate_space_aligned"]
+        ),
+        "simeon_fragment_space_aligned": float(counters["fragment_space_aligned"]),
+        "topology_protected_fiber_representation_observed": float(
+            fiber_obligation_status_counts["protected_fibers_represented"]["satisfied"]
+            + fiber_obligation_status_counts["protected_fibers_represented"]["violated"]
+        ),
+        "topology_certificate_fiber_saturation_observed": float(
+            fiber_obligation_status_counts["certificate_saturates_protected_fibers"][
+                "satisfied"
+            ]
+            + fiber_obligation_status_counts["certificate_saturates_protected_fibers"][
+                "violated"
+            ]
+        ),
+        "topology_shadow_fiber_calibration_queries": float(shadow_fiber_calibration_queries),
+        "topology_shadow_protected_fiber_candidates": float(
+            shadow_protected_fiber_candidates
+        ),
+        "topology_shadow_represented_protected_candidates": float(
+            shadow_represented_protected_candidates
+        ),
+        "topology_shadow_unresolved_protected_fibers": float(
+            shadow_unresolved_protected_fibers
+        ),
         "topology_narrow_applied": float(counters["narrow_applied"]),
         "topology_confidence_abstained": float(counters["confidence_abstained"]),
         "topology_snapshot_cache_hits": float(counters["snapshot_cache_hit"]),
@@ -871,6 +1274,60 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         ),
         "topology_vector_global_fill_count_sum": float(
             counters["topology_vector_global_fill_count"]
+        ),
+        "topology_candidate_rescue_attempted": float(
+            counters["topology_candidate_rescue_attempted_queries"]
+        ),
+        "topology_candidate_rescue_applied": float(
+            counters["topology_candidate_rescue_applied_queries"]
+        ),
+        "topology_candidate_rescue_added_sum": float(
+            counters["topology_candidate_rescue_added"]
+        ),
+        "topology_candidate_rescue_novel_sum": float(
+            counters["topology_candidate_rescue_novel"]
+        ),
+        "topology_candidate_rescue_evidence_rescue_sum": float(
+            counters["topology_candidate_evidence_rescues"]
+        ),
+        "topology_candidate_rescue_duplicate_sum": float(
+            counters["topology_candidate_rescue_duplicates"]
+        ),
+        "topology_candidate_rescue_relevant_added_queries": float(
+            candidate_rescue_relevant_added_queries
+        ),
+        "topology_candidate_rescue_relevant_added": float(
+            candidate_rescue_relevant_added
+        ),
+        "topology_candidate_rescue_relevant_novel_queries": float(
+            candidate_rescue_relevant_novel_queries
+        ),
+        "topology_candidate_rescue_relevant_novel": float(
+            candidate_rescue_relevant_novel
+        ),
+        "topology_candidate_rescue_relevant_evidence_queries": float(
+            candidate_rescue_relevant_evidence_queries
+        ),
+        "topology_candidate_rescue_relevant_evidence": float(
+            candidate_rescue_relevant_evidence
+        ),
+        "topology_candidate_rescue_relevant_evidence_post_fusion": float(
+            candidate_rescue_relevant_evidence_post_fusion
+        ),
+        "topology_candidate_rescue_relevant_evidence_returned": float(
+            candidate_rescue_relevant_evidence_returned
+        ),
+        "topology_candidate_rescue_relevant_reachable_queries": float(
+            candidate_rescue_relevant_reachable_queries
+        ),
+        "topology_candidate_rescue_relevant_reachable": float(
+            candidate_rescue_relevant_reachable
+        ),
+        "topology_candidate_rescue_relevant_post_fusion": float(
+            candidate_rescue_relevant_post_fusion
+        ),
+        "topology_candidate_rescue_relevant_returned": float(
+            candidate_rescue_relevant_returned
         ),
         "topology_shadow_retained_candidates_sum": float(
             counters["topology_shadow_retained_candidates"]
@@ -919,6 +1376,8 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         metrics["cross_rerank_apply_rate"] = float(rerank_applied) / float(
             rerank_configured
         )
+    else:
+        metrics["cross_rerank_apply_rate"] = 0.0
     if rerank_blend_weights:
         metrics["cross_rerank_blend_weight"] = float(
             statistics.mean(rerank_blend_weights)
@@ -943,21 +1402,29 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
             metrics["search_throughput_qps"] = (
                 1000.0 * float(len(latency_vals)) / total_latency_ms
             )
-        if (
-            warmup_first_latency_ms is not None
-            and warmup_query_count > 0
-            and warmup_completed_queries == warmup_query_count
-        ):
-            metrics["search_latency_ms_cold_first"] = warmup_first_latency_ms
-            metrics["search_latency_ms_first_pass_first"] = warmup_first_latency_ms
-            metrics["search_latency_ms_first"] = warmup_first_latency_ms
-            metrics["search_latency_ms_warmed_p50"] = float(
-                statistics.median(latency_vals)
-            )
+        if warmup_first_latency_ms is not None and warmup_query_count > 0:
             metrics["search_warmup_query_count"] = float(warmup_query_count)
             metrics["search_warmup_completed_queries"] = float(
                 warmup_completed_queries
             )
+            if warmup_retried_queries is not None:
+                metrics["search_warmup_retried_queries"] = float(
+                    warmup_retried_queries
+                )
+            if warmup_retry_failed_queries is not None:
+                metrics["search_warmup_retry_failed_queries"] = float(
+                    warmup_retry_failed_queries
+                )
+            if warmup_completed_queries == warmup_query_count:
+                metrics["search_latency_ms_warmed_p50"] = float(
+                    statistics.median(latency_vals)
+                )
+                if warmup_retried_queries in (None, 0):
+                    metrics["search_latency_ms_cold_first"] = warmup_first_latency_ms
+                    metrics["search_latency_ms_first_pass_first"] = (
+                        warmup_first_latency_ms
+                    )
+                    metrics["search_latency_ms_first"] = warmup_first_latency_ms
     for sname, mass in fusion_source_mass.items():
         metrics[f"fusion_mass_{sname}"] = float(mass)
     for sname, docs in fusion_source_docs.items():
@@ -1083,9 +1550,6 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
             float(statistics.mean(values)) if values else 0.0
         )
     if hybrid > 0:
-        metrics["topology_coordinate_query_coverage"] = float(
-            coordinate_query_count
-        ) / float(hybrid)
         metrics["vector_rows_visited_observation_rate"] = float(
             counters["vector_rows_visited_observed_queries"]
         ) / float(hybrid)
@@ -1130,15 +1594,19 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         metrics["topology_shadow_evaluation_rate"] = float(
             counters["topology_shadow_evaluated_queries"]
         ) / float(hybrid)
-    if coordinate_row_count > 0:
-        for metric_name, values in coordinate_values.items():
-            metrics[f"topology_coordinate_{metric_name}_observation_rate"] = float(
-                len(values)
-            ) / float(coordinate_row_count)
-            if values:
-                metrics[f"topology_coordinate_{metric_name}_avg"] = float(
-                    statistics.mean(values)
-                )
+        metrics["topology_route_work_observation_rate"] = float(
+            topology_route_work_observed_queries
+        ) / float(hybrid)
+    if topology_route_work_rows_visited_vals:
+        metrics["topology_route_work_rows_visited_actual_avg"] = float(
+            statistics.mean(topology_route_work_rows_visited_vals)
+        )
+        metrics["topology_route_work_exact_distance_evaluations_actual_avg"] = float(
+            statistics.mean(topology_route_work_exact_distance_evaluations_vals)
+        )
+        metrics["topology_route_work_ann_candidate_budget_actual_avg"] = float(
+            statistics.mean(topology_route_work_ann_candidate_budget_vals)
+        )
     shadow_evaluated = counters["topology_shadow_evaluated_queries"]
     if shadow_evaluated > 0:
         metrics["topology_shadow_narrow_proposal_rate"] = float(
@@ -1154,6 +1622,18 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         metrics["topology_shadow_narrow_proposal_rate"] = 0.0
         metrics["topology_shadow_retained_candidates_avg"] = 0.0
         metrics["topology_shadow_removed_candidates_avg"] = 0.0
+    metrics["topology_shadow_protected_fiber_representation_rate"] = (
+        float(shadow_represented_protected_candidates)
+        / float(shadow_protected_fiber_candidates)
+        if shadow_protected_fiber_candidates > 0
+        else 0.0
+    )
+    metrics["topology_shadow_protected_fiber_unresolved_rate"] = (
+        float(shadow_unresolved_protected_fibers)
+        / float(shadow_protected_fiber_candidates)
+        if shadow_protected_fiber_candidates > 0
+        else 0.0
+    )
     if effective_vector_caps:
         metrics["effective_vector_cap_min"] = float(min(effective_vector_caps))
         metrics["effective_vector_cap_max"] = float(max(effective_vector_caps))
@@ -1178,6 +1658,36 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
             returned_recall / recall_ceiling if recall_ceiling > 0.0 else 0.0
         )
     if hybrid > 0:
+        metrics["topology_narrow_proposal_rate"] = float(
+            counters["narrow_proposed"]
+        ) / float(hybrid)
+        metrics["topology_route_admission_rate"] = float(
+            counters["admission_eligible"]
+        ) / float(hybrid)
+        metrics["topology_coordinate_space_alignment_rate"] = float(
+            counters["coordinate_space_aligned"]
+        ) / float(hybrid)
+        metrics["simeon_fragment_space_alignment_rate"] = float(
+            counters["fragment_space_aligned"]
+        ) / float(hybrid)
+        representation_counts = fiber_obligation_status_counts[
+            "protected_fibers_represented"
+        ]
+        saturation_counts = fiber_obligation_status_counts[
+            "certificate_saturates_protected_fibers"
+        ]
+        metrics["topology_protected_fiber_representation_observation_rate"] = float(
+            representation_counts["satisfied"] + representation_counts["violated"]
+        ) / float(hybrid)
+        metrics["topology_protected_fiber_representation_satisfaction_rate"] = float(
+            representation_counts["satisfied"]
+        ) / float(hybrid)
+        metrics["topology_certificate_fiber_saturation_observation_rate"] = float(
+            saturation_counts["satisfied"] + saturation_counts["violated"]
+        ) / float(hybrid)
+        metrics["topology_certificate_fiber_saturation_satisfaction_rate"] = float(
+            saturation_counts["satisfied"]
+        ) / float(hybrid)
         metrics["topology_narrow_rate"] = float(counters["narrow_applied"]) / float(
             hybrid
         )
@@ -1187,6 +1697,86 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         metrics["topology_snapshot_cache_hit_rate"] = float(
             counters["snapshot_cache_hit"]
         ) / float(hybrid)
+        metrics["topology_candidate_rescue_attempt_rate"] = float(
+            counters["topology_candidate_rescue_attempted_queries"]
+        ) / float(hybrid)
+        metrics["topology_candidate_rescue_apply_rate"] = float(
+            counters["topology_candidate_rescue_applied_queries"]
+        ) / float(hybrid)
+        metrics["topology_candidate_rescue_relevant_query_rate"] = float(
+            candidate_rescue_relevant_added_queries
+        ) / float(hybrid)
+        metrics["topology_candidate_rescue_relevant_novel_query_rate"] = float(
+            candidate_rescue_relevant_novel_queries
+        ) / float(hybrid)
+        metrics["topology_candidate_rescue_relevant_evidence_query_rate"] = float(
+            candidate_rescue_relevant_evidence_queries
+        ) / float(hybrid)
+        metrics["topology_candidate_rescue_relevant_reachable_query_rate"] = float(
+            candidate_rescue_relevant_reachable_queries
+        ) / float(hybrid)
+    metrics["topology_candidate_rescue_reachable_to_scored_rate"] = (
+        float(candidate_rescue_relevant_scored)
+        / float(candidate_rescue_relevant_reachable)
+        if candidate_rescue_relevant_reachable
+        else 0.0
+    )
+    metrics["topology_candidate_rescue_baseline_miss_queries"] = float(
+        candidate_rescue_baseline_miss_queries
+    )
+    metrics["topology_candidate_rescue_baseline_missing_documents"] = float(
+        candidate_rescue_baseline_missing_documents
+    )
+    for stage, query_count in candidate_rescue_missing_stage_queries.items():
+        metrics[f"topology_candidate_rescue_missing_{stage}_queries"] = float(
+            query_count
+        )
+        metrics[f"topology_candidate_rescue_missing_{stage}_query_rate"] = (
+            float(query_count) / float(candidate_rescue_baseline_miss_queries)
+            if candidate_rescue_baseline_miss_queries
+            else 0.0
+        )
+        metrics[f"topology_candidate_rescue_missing_{stage}_documents"] = float(
+            candidate_rescue_missing_stage_documents[stage]
+        )
+    metrics["topology_graph_trace_query_rate"] = (
+        float(graph_trace_queries) / float(hybrid) if hybrid else 0.0
+    )
+    graph_trace_series = {
+        "fetch_truncated_seed_count": graph_fetch_truncated_seed_counts,
+        "relation_candidate_count": graph_relation_candidate_counts,
+        "fetched_candidate_count": graph_fetched_candidate_counts,
+        "eligible_candidate_count": graph_eligible_candidate_counts,
+        "seed_unresolved_count": graph_seed_unresolved_counts,
+        "relation_unresolved_count": graph_relation_unresolved_counts,
+        "fetched_unresolved_count": graph_fetched_unresolved_counts,
+        "eligible_unresolved_count": graph_eligible_unresolved_counts,
+    }
+    for name, values in graph_trace_series.items():
+        metrics[f"topology_graph_{name}_avg"] = (
+            float(statistics.mean(values)) if values else 0.0
+        )
+        metrics[f"topology_graph_{name}_sum"] = float(sum(values))
+    if candidate_rescue_relevant_added > 0:
+        metrics["topology_candidate_rescue_post_fusion_survival_rate"] = float(
+            candidate_rescue_relevant_post_fusion
+        ) / float(candidate_rescue_relevant_added)
+        metrics["topology_candidate_rescue_returned_survival_rate"] = float(
+            candidate_rescue_relevant_returned
+        ) / float(candidate_rescue_relevant_added)
+    else:
+        metrics["topology_candidate_rescue_post_fusion_survival_rate"] = 0.0
+        metrics["topology_candidate_rescue_returned_survival_rate"] = 0.0
+    if candidate_rescue_relevant_evidence > 0:
+        metrics["topology_candidate_rescue_evidence_post_fusion_survival_rate"] = float(
+            candidate_rescue_relevant_evidence_post_fusion
+        ) / float(candidate_rescue_relevant_evidence)
+        metrics["topology_candidate_rescue_evidence_returned_survival_rate"] = float(
+            candidate_rescue_relevant_evidence_returned
+        ) / float(candidate_rescue_relevant_evidence)
+    else:
+        metrics["topology_candidate_rescue_evidence_post_fusion_survival_rate"] = 0.0
+        metrics["topology_candidate_rescue_evidence_returned_survival_rate"] = 0.0
 
     # Path / seed-ANN mechanism rates (for quality×cost loops).
     if hybrid > 0:
@@ -1516,6 +2106,29 @@ def require_shared_topology_construction_identity(
     return None
 
 
+def daemon_graph_construction_fingerprint(
+    metrics: dict[str, Any], topology_fingerprint: str
+) -> str:
+    """Return the canonical persisted graph identity used for cross-arm gating."""
+    if (
+        float(metrics.get("daemon_graph_canonicalized") or 0) != 1.0
+        or not topology_fingerprint
+    ):
+        return ""
+    identity = {
+        "topology_fingerprint": topology_fingerprint,
+        "document_nodes": int(metrics.get("daemon_graph_topology_document_nodes") or 0),
+        "semantic_edges": int(metrics.get("daemon_graph_topology_semantic_edges") or 0),
+        "documents_with_neighbors": int(
+            metrics.get("daemon_graph_topology_documents_with_neighbors") or 0
+        ),
+        "isolated_documents": int(
+            metrics.get("daemon_graph_topology_isolated_documents") or 0
+        ),
+    }
+    return json.dumps(identity, sort_keys=True, separators=(",", ":"))
+
+
 def clone_benchmark_state(source: Path, destination: Path) -> None:
     """Clone an immutable prepared store into one isolated measured workload."""
     if not source.is_dir():
@@ -1608,7 +2221,8 @@ def _merge_benchmark_env(
     env = {key: value for key, value in ambient.items() if not key.startswith("YAMS_")}
     for pkey, ekey in param_env.items():
         if pkey in params:
-            env[ekey] = str(params[pkey])
+            value = params[pkey]
+            env[ekey] = "1" if value is True else "0" if value is False else str(value)
     env.update(declared_env)
     # The benchmark writes a per-process config and DaemonHarness makes it
     # authoritative. Never let a developer's ambient config shadow that file.
@@ -1875,6 +2489,15 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
                 ctx.arm.run_dir / "datasets" / "mixed_beir",
                 documents_per_dataset=_as_int(ctx.params.get("documents_per_dataset")),
                 queries_per_dataset=_as_int(ctx.params.get("queries_per_dataset")),
+                query_offset_per_dataset=_as_int(
+                    ctx.params.get("query_offset_per_dataset")
+                ),
+                document_queries_per_dataset=_as_int(
+                    ctx.params.get("document_queries_per_dataset")
+                ),
+                document_query_offset_per_dataset=_as_int(
+                    ctx.params.get("document_query_offset_per_dataset")
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             return WorkerResult(
@@ -1895,6 +2518,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         "topk": "YAMS_BENCH_TOPK",
         "dataset": "YAMS_BENCH_DATASET",
         "dataset_path": "YAMS_BENCH_DATASET_PATH",
+        "evaluate_grep_baseline": "YAMS_BENCH_EVALUATE_GREP_BASELINE",
         "topology_mode": "YAMS_BENCH_TOPOLOGY_MODE",
         "topology_vector_policy": "YAMS_BENCH_TOPOLOGY_VECTOR_POLICY",
         "topology_engine": "YAMS_BENCH_TOPOLOGY_ENGINE",
@@ -1917,6 +2541,39 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         "max_seed_documents": "YAMS_BENCH_TOPOLOGY_MAX_SEED_DOCUMENTS",
         "adaptive_probe_score_gap": "YAMS_BENCH_TOPOLOGY_ADAPTIVE_PROBE_SCORE_GAP",
         "narrow_min_boundary_margin": "YAMS_BENCH_TOPOLOGY_NARROW_MIN_BOUNDARY_MARGIN",
+        "route_calibration_fingerprint": (
+            "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_FINGERPRINT"
+        ),
+        "route_calibration_queries": (
+            "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_QUERIES"
+        ),
+        "route_calibration_protected_candidates": (
+            "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_PROTECTED_CANDIDATES"
+        ),
+        "route_calibration_missed_protected_candidates": (
+            "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MISSED_PROTECTED_CANDIDATES"
+        ),
+        "route_min_calibration_queries": (
+            "YAMS_BENCH_TOPOLOGY_ROUTE_MIN_CALIBRATION_QUERIES"
+        ),
+        "route_max_misses_per_thousand": (
+            "YAMS_BENCH_TOPOLOGY_ROUTE_MAX_MISSES_PER_THOUSAND"
+        ),
+        "route_calibration_min_boundary_margin": (
+            "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MIN_BOUNDARY_MARGIN"
+        ),
+        "route_calibration_min_seed_hits": (
+            "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MIN_SEED_HITS"
+        ),
+        "route_work_max_rows_visited": (
+            "YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_ROWS_VISITED"
+        ),
+        "route_work_max_exact_distance_evaluations": (
+            "YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_EXACT_DISTANCE_EVALUATIONS"
+        ),
+        "route_work_max_ann_candidates": (
+            "YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_ANN_CANDIDATES"
+        ),
         "max_component_docs": "YAMS_BENCH_TOPOLOGY_MAX_COMPONENT_DOCS",
         "topology_boundary_spill": "YAMS_BENCH_TOPOLOGY_BOUNDARY_SPILL",
         "topology_boundary_spill_limit": "YAMS_BENCH_TOPOLOGY_BOUNDARY_SPILL_LIMIT",
@@ -1933,6 +2590,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         "seed_semantic_threshold": "YAMS_BENCH_SEED_SEMANTIC_THRESHOLD",
         "graph_neighbor_min_score": "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE",
         "graph_neighbor_reciprocal_only": "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_RECIPROCAL_ONLY",
+        "graph_vector_seed_probe": "YAMS_SEARCH_TOPOLOGY_GRAPH_VECTOR_SEED_PROBE",
         "enable_reranking": "YAMS_SEARCH_ENABLE_RERANKING",
         "rerank_topk": "YAMS_SEARCH_RERANK_TOPK",
         "rerank_replace_scores": "YAMS_SEARCH_RERANK_REPLACE_SCORES",
@@ -2079,8 +2737,17 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
     if source in _NON_VECTOR_SOURCES:
         env.setdefault("YAMS_BENCH_SEED_SEMANTIC_NEIGHBORS", "1")
 
+    daemon_graph_error = require_daemon_native_graph_inputs(ctx.params, env)
+    if daemon_graph_error:
+        return WorkerResult(
+            status="failed",
+            exit_code=2,
+            metrics={},
+            message=daemon_graph_error,
+        )
+
     bench_filter = str(ctx.params.get("benchmark_filter") or "BM_RetrievalQuality")
-    cmd = _benchmark_command(binary, bench_filter)
+    cmd = _benchmark_command(binary, bench_filter, ctx.params)
 
     timeout = ctx.step.timeout_sec or int(
         ctx.params.get("timeout_sec") or ctx.arm.plan.timeout_sec
@@ -2274,6 +2941,38 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
             message=query_trace_error,
             raw_path=str(debug_path),
         )
+
+    if _truthy(ctx.params.get("require_daemon_graph_construction_identity", False)):
+        topology_fingerprint = parse_daemon_graph_topology_fingerprint(debug_path)
+        graph_fingerprint = daemon_graph_construction_fingerprint(
+            metrics, topology_fingerprint
+        )
+        graph_identity_error = (
+            require_shared_topology_construction_identity(
+                ctx.arm.run_dir / "daemon_graph_construction_identity.txt",
+                {graph_fingerprint: 1} if graph_fingerprint else {},
+            )
+        )
+        if graph_identity_error:
+            write_json(
+                ctx.arm_dir / "quality_parse.json",
+                {
+                    "quality": quality,
+                    "debug": dbg,
+                    "daemon_graph_construction_identity_error": graph_identity_error,
+                },
+            )
+            return WorkerResult(
+                status="failed",
+                exit_code=proc.returncode if proc.returncode != 0 else 1,
+                metrics=metrics,
+                attributes={
+                    "binary": str(binary),
+                    "daemon_graph_construction_identity_error": graph_identity_error,
+                },
+                message=graph_identity_error,
+                raw_path=str(debug_path),
+            )
 
     vector_work_error = require_vector_work_observation_contract(
         metrics, ctx.params.get("vector_work_observation_contract")

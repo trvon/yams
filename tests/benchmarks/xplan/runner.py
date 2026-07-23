@@ -478,6 +478,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             repeats = max(1, plan.repeats)
             rep_metrics: list[dict[str, Any]] = []
             for rep in range(repeats):
+                rep_status = "ok"
+                rep_exit = 0
                 rep_dir = arm_dir if repeats == 1 else (arm_dir / f"rep{rep:02d}")
                 if repeats > 1:
                     ensure_dir(rep_dir)
@@ -510,15 +512,10 @@ def cmd_run(args: argparse.Namespace) -> int:
                     combined_attrs[f"step{idx}_{step.worker}"] = result.attributes
                     messages.append(result.message)
                     if result.status in {"failed", "skipped"} or result.exit_code not in (0,):
-                        if result.status == "stub" and result.exit_code == 0:
-                            pass
-                        elif result.status == "stub":
-                            overall_status = "stub"
-                        else:
-                            overall_status = "failed"
-                            overall_exit = result.exit_code or 1
-                    elif result.status == "stub" and overall_status == "ok":
-                        overall_status = "stub"
+                        rep_status = "failed"
+                        rep_exit = result.exit_code or 1
+                    elif result.status == "stub" and rep_status == "ok":
+                        rep_status = "stub"
 
                     # Persist per-step metrics snapshot for multi-step plans.
                     write_json(
@@ -526,10 +523,15 @@ def cmd_run(args: argparse.Namespace) -> int:
                         result.to_metrics_doc(worker=step.worker, arm=arm.name),
                     )
                 rep_metrics.append(rep_combined)
+                if rep_status == "failed":
+                    overall_status = "failed"
+                    overall_exit = rep_exit or 1
+                elif rep_status == "stub" and overall_status == "ok":
+                    overall_status = "stub"
                 if repeats > 1:
                     write_json(
                         rep_dir / "metrics.json",
-                        {"status": overall_status, "arm": arm.name, "rep": rep,
+                        {"status": rep_status, "arm": arm.name, "rep": rep,
                          "metrics": rep_combined},
                     )
 

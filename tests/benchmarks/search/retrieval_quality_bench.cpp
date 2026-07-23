@@ -99,6 +99,7 @@
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_trust.h>
 #include <yams/search/internal_benchmark.h>
+#include <yams/search/topology_routing_session.h>
 #include <yams/topology/topology_metadata_store.h>
 #include <yams/vector/vector_database.h>
 
@@ -251,6 +252,116 @@ static Result<T> benchRunSync(boost::asio::awaitable<Result<T>> aw,
     return yams::cli::run_sync<T, Rep, Period>(std::move(aw), timeout);
 }
 
+static std::uint64_t parseAdditionalStat(const std::map<std::string, std::string>& stats,
+                                         std::string_view key) {
+    const auto it = stats.find(std::string(key));
+    if (it == stats.end() || it->second.empty()) {
+        return 0;
+    }
+    try {
+        return std::stoull(it->second);
+    } catch (...) {
+        return 0;
+    }
+}
+
+static Result<yams::search::BenchmarkDaemonGraphState>
+observeDaemonGraphState(yams::daemon::DaemonClient& client) {
+    yams::daemon::GetStatsRequest request;
+    request.includeHealth = true;
+    auto statsResult = benchRunSync(client.getStats(request), 30s);
+    if (!statsResult) {
+        return statsResult.error();
+    }
+
+    const auto& stats = statsResult.value().additionalStats;
+    yams::search::BenchmarkDaemonGraphState state;
+    state.semanticDocumentsProcessed = parseAdditionalStat(stats, "embed_semantic_docs_processed");
+    state.semanticEdgesCreated = parseAdditionalStat(stats, "embed_semantic_edges_created");
+    state.semanticUpdateErrors = parseAdditionalStat(stats, "embed_semantic_update_errors");
+    state.topologyDocumentNodes = parseAdditionalStat(stats, "kg_topology_document_nodes");
+    state.topologySemanticEdges = parseAdditionalStat(stats, "kg_topology_semantic_edges");
+    state.topologyDocumentsWithNeighbors =
+        parseAdditionalStat(stats, "kg_topology_documents_with_neighbors");
+    state.topologyIsolatedDocuments = parseAdditionalStat(stats, "kg_topology_isolated_documents");
+    state.postIngestQueued = parseAdditionalStat(stats, "post_ingest_queued");
+    state.postIngestInFlight = parseAdditionalStat(stats, "post_ingest_inflight");
+    state.embeddingQueued = parseAdditionalStat(stats, "embed_svc_queued");
+    state.embeddingInFlight = parseAdditionalStat(stats, "embed_in_flight");
+    state.writeQueued = parseAdditionalStat(stats, "write_queue_depth");
+    state.writeInFlight = parseAdditionalStat(stats, "write_in_flight");
+    return state;
+}
+
+static std::string describeDaemonGraphState(const yams::search::BenchmarkDaemonGraphState& state) {
+    std::ostringstream message;
+    message << "semantic_docs_processed=" << state.semanticDocumentsProcessed
+            << ", semantic_edges_created=" << state.semanticEdgesCreated
+            << ", topology_document_nodes=" << state.topologyDocumentNodes
+            << ", topology_semantic_edges=" << state.topologySemanticEdges
+            << ", topology_documents_with_neighbors=" << state.topologyDocumentsWithNeighbors
+            << ", topology_isolated_documents=" << state.topologyIsolatedDocuments
+            << ", semantic_update_errors=" << state.semanticUpdateErrors
+            << ", post_ingest_queued=" << state.postIngestQueued
+            << ", post_ingest_in_flight=" << state.postIngestInFlight
+            << ", embed_queued=" << state.embeddingQueued
+            << ", embed_in_flight=" << state.embeddingInFlight
+            << ", write_queued=" << state.writeQueued
+            << ", write_in_flight=" << state.writeInFlight;
+    return message.str();
+}
+
+static Result<yams::search::BenchmarkDaemonGraphState>
+waitForDaemonNativeGraph(yams::daemon::DaemonClient& client,
+                         std::uint64_t minimumSemanticDocuments) {
+    spdlog::info("Waiting for daemon-native semantic graph production before query evaluation...");
+    const auto deadline = std::chrono::steady_clock::now() + 300s;
+
+    // Semantic-neighbor backfill is intentionally idle-only. A tight getStats loop keeps a
+    // non-health IPC connection active and prevents TuningManager from publishing an idle
+    // snapshot, so observing readiness too frequently can stop the work itself.
+    constexpr auto kObservationInterval = 15s;
+    auto observationAt = std::chrono::steady_clock::now() + kObservationInterval;
+    yams::search::BenchmarkDaemonGraphState state;
+    std::optional<yams::search::BenchmarkDaemonGraphState> previousReadyState;
+
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now < observationAt) {
+            std::this_thread::sleep_for(std::min(
+                500ms, std::chrono::duration_cast<std::chrono::milliseconds>(observationAt - now)));
+            continue;
+        }
+        observationAt = now + kObservationInterval;
+
+        auto observation = observeDaemonGraphState(client);
+        if (!observation) {
+            previousReadyState.reset();
+            spdlog::warn("Daemon graph observation failed: {}", observation.error().message);
+            continue;
+        }
+        state = std::move(observation.value());
+        spdlog::info("Daemon graph wait: {}", describeDaemonGraphState(state));
+
+        if (!yams::search::benchmarkDaemonGraphReady(state, minimumSemanticDocuments)) {
+            previousReadyState.reset();
+            continue;
+        }
+        if (!previousReadyState.has_value() ||
+            !yams::search::benchmarkDaemonGraphProductionStable(*previousReadyState, state)) {
+            previousReadyState = state;
+            continue;
+        }
+
+        spdlog::info("Daemon-native semantic graph ready: {}", describeDaemonGraphState(state));
+        return state;
+    }
+
+    return Error{ErrorCode::Timeout,
+                 "Daemon-native semantic graph not ready before benchmark queries (" +
+                     describeDaemonGraphState(state) + ")."};
+}
+
 static Result<void> exportTopologyClusters(yams::daemon::ServiceManager& serviceManager,
                                            std::string_view snapshotId) {
     const char* rawOutput = std::getenv("YAMS_BENCH_TOPOLOGY_CLUSTER_OUTPUT");
@@ -307,6 +418,51 @@ static Result<void> exportTopologyClusters(yams::daemon::ServiceManager& service
         return Error{ErrorCode::WriteError, "failed to write topology cluster output"};
     }
     return {};
+}
+
+static Result<yams::daemon::TopologyManager::RebuildStats>
+rebuildCanonicalDaemonTopology(yams::daemon::ServiceManager& serviceManager,
+                               std::string_view topologyAlgorithm) {
+    auto& topologyManager = serviceManager.getTopologyManager();
+    const auto deadline = std::chrono::steady_clock::now() + 60s;
+    do {
+        if (topologyManager.isRebuildInProgress()) {
+            std::this_thread::sleep_for(50ms);
+            continue;
+        }
+        auto rebuilt =
+            topologyManager.rebuildArtifacts("benchmark_daemon_native_graph_canonicalization",
+                                             false, {}, std::string(topologyAlgorithm));
+        if (!rebuilt) {
+            return rebuilt.error();
+        }
+        if (!rebuilt.value().skipped) {
+            if (!rebuilt.value().stored) {
+                return Error{ErrorCode::InvalidState,
+                             "canonical topology rebuild did not publish a stored snapshot"};
+            }
+            return std::move(rebuilt.value());
+        }
+        std::this_thread::sleep_for(50ms);
+    } while (std::chrono::steady_clock::now() < deadline);
+
+    return Error{ErrorCode::Timeout, "timed out waiting for canonical topology rebuild"};
+}
+
+static Result<std::string>
+loadTopologyRoutingConstructionFingerprint(yams::daemon::ServiceManager& serviceManager,
+                                           std::string_view snapshotId) {
+    yams::topology::MetadataKgTopologyArtifactStore store(serviceManager.getMetadataRepo(),
+                                                          serviceManager.getKgStore());
+    auto loaded = store.loadLatest(snapshotId);
+    if (!loaded) {
+        return loaded.error();
+    }
+    if (!loaded.value().has_value()) {
+        return Error{ErrorCode::NotFound,
+                     "canonical topology snapshot unavailable for fingerprinting"};
+    }
+    return yams::search::topologyRoutingConstructionFingerprint(*loaded.value());
 }
 
 // Helper to discover GLiNER model path for entity extraction
@@ -863,12 +1019,28 @@ static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantD
                         : "");
     const auto finalWindowSet = splitTabSet(
         searchStats.contains("trace_final_doc_ids") ? searchStats.at("trace_final_doc_ids") : "");
-    const auto topologyAddedSet =
-        splitTabSet(searchStats.contains("topology_weak_query_added_candidate_doc_ids")
-                        ? searchStats.at("topology_weak_query_added_candidate_doc_ids")
-                        : (searchStats.contains("topology_weak_query_added_candidate_hashes")
-                               ? searchStats.at("topology_weak_query_added_candidate_hashes")
-                               : ""));
+    std::string topologyAddedIds;
+    for (const std::string_view key : {
+             std::string_view{"topology_candidate_rescue_added_candidate_doc_ids"},
+             std::string_view{"topology_candidate_rescue_added_candidate_hashes"},
+             std::string_view{"topology_weak_query_added_candidate_doc_ids"},
+             std::string_view{"topology_weak_query_added_candidate_hashes"},
+         }) {
+        if (const auto it = searchStats.find(std::string(key));
+            it != searchStats.end() && !it->second.empty()) {
+            topologyAddedIds = it->second;
+            break;
+        }
+    }
+    const auto topologyAddedSet = splitTabSet(topologyAddedIds);
+    const auto topologyNovelSet =
+        splitTabSet(searchStats.contains("topology_candidate_rescue_novel_candidate_doc_ids")
+                        ? searchStats.at("topology_candidate_rescue_novel_candidate_doc_ids")
+                        : "");
+    const auto topologyEvidenceRescueSet =
+        splitTabSet(searchStats.contains("topology_candidate_rescue_evidence_rescue_doc_ids")
+                        ? searchStats.at("topology_candidate_rescue_evidence_rescue_doc_ids")
+                        : "");
     const std::unordered_set<std::string> returnedTopKSet(returnedDocIds.begin(),
                                                           returnedDocIds.end());
 
@@ -1002,6 +1174,8 @@ static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantD
             graphDisplacedRelevant.push_back(docId);
         }
         const bool topologyAddedCandidate = topologyAddedSet.contains(docId);
+        const bool topologyNovelCandidate = topologyNovelSet.contains(docId);
+        const bool topologyEvidenceRescue = topologyEvidenceRescueSet.contains(docId);
         if (topologyAddedCandidate && inPost) {
             topologyAddedRelevantPostFusion.push_back(docId);
         }
@@ -1035,6 +1209,8 @@ static json buildRelevantDecisionTrace(const std::vector<std::string>& relevantD
             {"in_final_window", inFinalWindow},
             {"in_returned_topk", inReturnedTopK},
             {"topology_added_candidate", topologyAddedCandidate},
+            {"topology_novel_candidate", topologyNovelCandidate},
+            {"topology_evidence_rescue", topologyEvidenceRescue},
             {"component_top_hits", componentSources},
             {"component_top_hit_details", findComponentHit(componentHits, docId)},
         };
@@ -2139,7 +2315,56 @@ struct PersistedHnswState {
 
 static std::string g_benchmark_search_engine =
     yams::vector::vectorSearchEngineName(yams::vector::VectorSearchEngine::SimeonPqAdc);
+static std::string g_simeonEncoderProfile;
+static std::string g_simeonFragmentEncoderProfile;
+static std::optional<bool> g_simeonFragmentGeometryEnabled;
+static std::optional<bool> g_simeonBm25Enabled;
+static std::optional<bool> g_simeonRouterEnabled;
+static bool g_requireDaemonNativeGraph = false;
 static PersistedHnswState g_final_vector_index_state;
+
+static void consumeXplanConfigArguments(int& argc, char** argv) {
+    const auto takeValue = [](std::string_view argument,
+                              std::string_view prefix) -> std::optional<std::string> {
+        if (!argument.starts_with(prefix)) {
+            return std::nullopt;
+        }
+        return std::string{argument.substr(prefix.size())};
+    };
+    int outputIndex = 1;
+    for (int inputIndex = 1; inputIndex < argc; ++inputIndex) {
+        const std::string_view argument{argv[inputIndex]};
+        if (auto value = takeValue(argument, "--yams-simeon-encoder-profile="); value.has_value()) {
+            g_simeonEncoderProfile = std::move(*value);
+            continue;
+        }
+        if (auto value = takeValue(argument, "--yams-simeon-fragment-encoder-profile=");
+            value.has_value()) {
+            g_simeonFragmentEncoderProfile = std::move(*value);
+            continue;
+        }
+        if (auto value = takeValue(argument, "--yams-simeon-fragment-geometry=");
+            value.has_value()) {
+            g_simeonFragmentGeometryEnabled = *value == "true" || *value == "1";
+            continue;
+        }
+        if (auto value = takeValue(argument, "--yams-simeon-bm25="); value.has_value()) {
+            g_simeonBm25Enabled = *value == "true" || *value == "1";
+            continue;
+        }
+        if (auto value = takeValue(argument, "--yams-simeon-router="); value.has_value()) {
+            g_simeonRouterEnabled = *value == "true" || *value == "1";
+            continue;
+        }
+        if (auto value = takeValue(argument, "--yams-require-daemon-native-graph=");
+            value.has_value()) {
+            g_requireDaemonNativeGraph = *value == "true" || *value == "1";
+            continue;
+        }
+        argv[outputIndex++] = argv[inputIndex];
+    }
+    argc = outputIndex;
+}
 
 static bool envTruthy(const char* value) {
     if (!value) {
@@ -2179,6 +2404,11 @@ static bool benchUseStreamingSearch() {
     // Default to unary search so streaming transport stalls do not skew IR evaluation,
     // while preserving an opt-in path for transport debugging.
     return envTruthy(std::getenv("YAMS_BENCH_ENABLE_STREAMING_SEARCH"));
+}
+
+static bool benchEvaluateGrepBaseline() {
+    const char* value = std::getenv("YAMS_BENCH_EVALUATE_GREP_BASELINE");
+    return value == nullptr || envTruthy(value);
 }
 
 static int parseIntEnvOrDefault(const char* key, int defaultValue, int minValue, int maxValue) {
@@ -4421,6 +4651,14 @@ static std::chrono::milliseconds defaultBenchQueryTimeout(const std::string& sea
     return std::chrono::milliseconds{20000};
 }
 
+static std::chrono::milliseconds configuredBenchQueryTimeout(const std::string& searchType) {
+    if (const char* env = std::getenv("YAMS_BENCH_QUERY_TIMEOUT_MS")) {
+        return std::chrono::milliseconds{
+            static_cast<std::chrono::milliseconds::rep>(std::stoll(env))};
+    }
+    return defaultBenchQueryTimeout(searchType);
+}
+
 static void ingestStageRetrievalMetrics(QueryDiagnosticsSummary& summary,
                                         const std::map<std::string, std::string>& searchStats,
                                         const TestQuery& tq, int k) {
@@ -4448,7 +4686,8 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
                                  const std::string& searchType = "hybrid",
                                  QueryDiagnosticsSummary* diagnostics = nullptr,
                                  bool emitDebug = true,
-                                 std::vector<double>* latencySamplesMs = nullptr) {
+                                 std::vector<double>* latencySamplesMs = nullptr,
+                                 std::vector<TestQuery>* failedQueries = nullptr) {
     RetrievalMetrics metrics;
     metrics.numQueries = static_cast<int>(queries.size());
     double totalMRR = 0.0, totalRecall = 0.0, totalPrecision = 0.0, totalNDCG = 0.0, totalMAP = 0.0;
@@ -4466,11 +4705,7 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
         opts.query = tq.query;
         opts.searchType = searchType;
         opts.limit = static_cast<std::size_t>(k);
-        std::chrono::milliseconds queryTimeout = defaultBenchQueryTimeout(searchType);
-        if (const char* env = std::getenv("YAMS_BENCH_QUERY_TIMEOUT_MS")) {
-            queryTimeout = std::chrono::milliseconds{
-                static_cast<std::chrono::milliseconds::rep>(std::stoll(env))};
-        }
+        const auto queryTimeout = configuredBenchQueryTimeout(searchType);
         opts.timeout = queryTimeout;
         opts.symbolRank = true;
         opts.allowFuzzyRetry = false;
@@ -4508,6 +4743,9 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
             waitBudget);
         if (!run) {
             spdlog::warn("Search failed for query '{}': {}", tq.query, run.error().message);
+            if (failedQueries) {
+                failedQueries->push_back(tq);
+            }
             DebugLogEntry failedEntry;
             failedEntry.query = tq.query;
             failedEntry.queryIndex = static_cast<int>(queryIndex);
@@ -4800,11 +5038,7 @@ RetrievalMetrics evaluateGrepQueries(yams::daemon::DaemonClient& client,
         req.maxMatches = 1;
         req.useSession = false;
 
-        std::chrono::milliseconds queryTimeout = defaultBenchQueryTimeout("grep");
-        if (const char* env = std::getenv("YAMS_BENCH_QUERY_TIMEOUT_MS")) {
-            queryTimeout = std::chrono::milliseconds{
-                static_cast<std::chrono::milliseconds::rep>(std::stoll(env))};
-        }
+        const auto queryTimeout = configuredBenchQueryTimeout("grep");
         auto waitBudget = queryTimeout + std::chrono::seconds(10);
         if (waitBudget < std::chrono::seconds(10)) {
             waitBudget = std::chrono::seconds(10);
@@ -6119,6 +6353,24 @@ struct BenchFixture {
                 std::getenv("YAMS_BENCH_TOPOLOGY_ROUTE_REPRESENTATIVE_LIMIT");
             const char* topologyAnnCandidateLimitEnv =
                 std::getenv("YAMS_BENCH_TOPOLOGY_ROUTE_ANN_CANDIDATE_LIMIT");
+            const auto hasBenchmarkSetting = [](const char* name) {
+                const char* value = std::getenv(name);
+                return value && *value;
+            };
+            const bool writeTopologyAdmissionConfig =
+                hasBenchmarkSetting("YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_FINGERPRINT") ||
+                hasBenchmarkSetting("YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_QUERIES") ||
+                hasBenchmarkSetting("YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_PROTECTED_CANDIDATES") ||
+                hasBenchmarkSetting(
+                    "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MISSED_PROTECTED_CANDIDATES") ||
+                hasBenchmarkSetting("YAMS_BENCH_TOPOLOGY_ROUTE_MIN_CALIBRATION_QUERIES") ||
+                hasBenchmarkSetting("YAMS_BENCH_TOPOLOGY_ROUTE_MAX_MISSES_PER_THOUSAND") ||
+                hasBenchmarkSetting("YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MIN_BOUNDARY_MARGIN") ||
+                hasBenchmarkSetting("YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MIN_SEED_HITS") ||
+                hasBenchmarkSetting("YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_ROWS_VISITED") ||
+                hasBenchmarkSetting(
+                    "YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_EXACT_DISTANCE_EVALUATIONS") ||
+                hasBenchmarkSetting("YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_ANN_CANDIDATES");
             const bool writeTopologyEngineConfig =
                 (topologyEngineEnv && *topologyEngineEnv) ||
                 (topologyRepresentativesEnv && *topologyRepresentativesEnv) ||
@@ -6135,7 +6387,8 @@ struct BenchFixture {
                 (std::getenv("YAMS_BENCH_TOPOLOGY_ADAPTIVE_PROBE_SCORE_GAP") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_NARROW_MIN_BOUNDARY_MARGIN") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_EXPANSION") != nullptr) ||
-                (std::getenv("YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE") != nullptr);
+                (std::getenv("YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE") != nullptr) ||
+                writeTopologyAdmissionConfig;
 
             // Select a plugin root that satisfies the plugins the benchmark enables.
             // Preferring the first ONNX-capable tree can silently disable entity extraction
@@ -6368,7 +6621,37 @@ struct BenchFixture {
                     configOut << "[embeddings]\n";
                     if (embedBackendSimeon) {
                         configOut << "preferred_model = \"simeon-default\"\n";
-                        configOut << "embedding_dim = 1024\n\n";
+                        const bool fixedHash384 = g_simeonEncoderProfile == "fixed_hash_384";
+                        configOut << "embedding_dim = " << (fixedHash384 ? 384 : 1024) << "\n\n";
+                        if (!g_simeonEncoderProfile.empty()) {
+                            configOut << "[embeddings.simeon]\n";
+                            configOut << "encoder_profile = \"" << g_simeonEncoderProfile
+                                      << "\"\n\n";
+                        }
+                        if (g_simeonBm25Enabled.has_value()) {
+                            configOut << "[embeddings.simeon.bm25]\n";
+                            configOut << "enabled = " << (*g_simeonBm25Enabled ? "true" : "false")
+                                      << "\n\n";
+                        }
+                        if (g_simeonRouterEnabled.has_value()) {
+                            configOut << "[embeddings.simeon.bm25.router]\n";
+                            configOut << "enabled = " << (*g_simeonRouterEnabled ? "true" : "false")
+                                      << "\n\n";
+                        }
+                        if (g_simeonFragmentGeometryEnabled.has_value() ||
+                            !g_simeonFragmentEncoderProfile.empty()) {
+                            configOut << "[embeddings.simeon.bm25.fragment_geometry]\n";
+                            if (g_simeonFragmentGeometryEnabled.has_value()) {
+                                configOut << "enabled = "
+                                          << (*g_simeonFragmentGeometryEnabled ? "true" : "false")
+                                          << "\n";
+                            }
+                            if (!g_simeonFragmentEncoderProfile.empty()) {
+                                configOut << "encoder_profile = \""
+                                          << g_simeonFragmentEncoderProfile << "\"\n";
+                            }
+                            configOut << "\n";
+                        }
                         configOut << "[daemon.models]\n";
                         configOut << "preload_models = []\n";
                     } else {
@@ -6447,6 +6730,52 @@ struct BenchFixture {
                                       << parseFloatEnvOrDefault(
                                              "YAMS_BENCH_TOPOLOGY_MIN_ROUTE_SCORE", 0.0F)
                                       << "\n";
+                        }
+                        if (writeTopologyAdmissionConfig) {
+                            const auto writeSizeSetting = [&](const char* envName,
+                                                              const char* key) {
+                                if (hasBenchmarkSetting(envName)) {
+                                    configOut << key << " = " << parseSizeEnvOrDefault(envName, 0)
+                                              << "\n";
+                                }
+                            };
+                            const auto writeFloatSetting = [&](const char* envName,
+                                                               const char* key) {
+                                if (hasBenchmarkSetting(envName)) {
+                                    configOut << key << " = "
+                                              << parseFloatEnvOrDefault(envName, 0.0F) << "\n";
+                                }
+                            };
+                            if (const char* fingerprint = std::getenv(
+                                    "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_FINGERPRINT");
+                                fingerprint && *fingerprint) {
+                                configOut << "route_calibration_fingerprint = \"" << fingerprint
+                                          << "\"\n";
+                            }
+                            writeSizeSetting("YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_QUERIES",
+                                             "route_calibration_queries");
+                            writeSizeSetting(
+                                "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_PROTECTED_CANDIDATES",
+                                "route_calibration_protected_candidates");
+                            writeSizeSetting(
+                                "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MISSED_PROTECTED_CANDIDATES",
+                                "route_calibration_missed_protected_candidates");
+                            writeSizeSetting("YAMS_BENCH_TOPOLOGY_ROUTE_MIN_CALIBRATION_QUERIES",
+                                             "route_min_calibration_queries");
+                            writeSizeSetting("YAMS_BENCH_TOPOLOGY_ROUTE_MAX_MISSES_PER_THOUSAND",
+                                             "route_max_misses_per_thousand");
+                            writeFloatSetting(
+                                "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MIN_BOUNDARY_MARGIN",
+                                "route_calibration_min_boundary_margin");
+                            writeSizeSetting("YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_MIN_SEED_HITS",
+                                             "route_calibration_min_seed_hits");
+                            writeSizeSetting("YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_ROWS_VISITED",
+                                             "route_work_max_rows_visited");
+                            writeSizeSetting(
+                                "YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_EXACT_DISTANCE_EVALUATIONS",
+                                "route_work_max_exact_distance_evaluations");
+                            writeSizeSetting("YAMS_BENCH_TOPOLOGY_ROUTE_WORK_MAX_ANN_CANDIDATES",
+                                             "route_work_max_ann_candidates");
                         }
                         if (const char* exp = std::getenv("YAMS_BENCH_TOPOLOGY_EXPANSION");
                             exp && *exp) {
@@ -6558,7 +6887,10 @@ struct BenchFixture {
             }
         }
         clientCfg.connectTimeout = 5s;
-        clientCfg.requestTimeout = 300s; // 5 minutes for bulk ingestion
+        const auto benchmarkRequestTimeout =
+            std::max(std::chrono::duration_cast<std::chrono::milliseconds>(300s),
+                     configuredBenchQueryTimeout("hybrid"));
+        clientCfg.requestTimeout = benchmarkRequestTimeout;
         clientCfg.autoStart = false;
 
         auto isEofLikeError = [](const yams::Error& error) {
@@ -6576,8 +6908,8 @@ struct BenchFixture {
             // Override header/body timeouts to handle slow reranker queries.
             // Default headerTimeout=30s is too short when cross-encoder reranking
             // takes 20-60s before any response header is sent.
-            client->setHeaderTimeout(std::chrono::milliseconds(300000)); // 5 min
-            client->setBodyTimeout(std::chrono::milliseconds(300000));   // 5 min
+            client->setHeaderTimeout(benchmarkRequestTimeout);
+            client->setBodyTimeout(benchmarkRequestTimeout);
             auto connectResult = benchRunSync(client->connect(), 5s);
             if (!connectResult) {
                 throw std::runtime_error("Failed to connect: " + connectResult.error().message);
@@ -8075,6 +8407,64 @@ struct BenchFixture {
                 "graph rerank.");
         }
 
+        yams::search::BenchmarkDaemonGraphState daemonGraphState;
+        bool daemonGraphReady = false;
+        bool daemonGraphCanonicalized = false;
+        std::size_t daemonGraphCanonicalEdgesGenerated = 0;
+        std::string daemonGraphCanonicalTopologySnapshot;
+        std::string daemonGraphCanonicalTopologyFingerprint;
+        if (g_requireDaemonNativeGraph) {
+            auto graphState =
+                waitForDaemonNativeGraph(*client, static_cast<std::uint64_t>(corpusSize));
+            if (!graphState) {
+                throw std::runtime_error(graphState.error().message);
+            }
+            daemonGraphState = std::move(graphState.value());
+
+            auto* daemon = harness ? harness->daemon() : nullptr;
+            auto* serviceManager = daemon ? daemon->getServiceManager() : nullptr;
+            if (!serviceManager) {
+                throw std::runtime_error(
+                    "Daemon-native graph canonicalization requires ServiceManager");
+            }
+            auto semanticRebuild = serviceManager->rebuildSemanticNeighborGraph(
+                "benchmark_daemon_native_graph_canonicalization");
+            if (!semanticRebuild) {
+                throw std::runtime_error("Failed to canonicalize daemon semantic graph: " +
+                                         semanticRebuild.error().message);
+            }
+            daemonGraphCanonicalEdgesGenerated = semanticRebuild.value();
+
+            auto canonicalGraphState =
+                waitForDaemonNativeGraph(*client, static_cast<std::uint64_t>(corpusSize));
+            if (!canonicalGraphState) {
+                throw std::runtime_error(canonicalGraphState.error().message);
+            }
+            daemonGraphState = std::move(canonicalGraphState.value());
+
+            std::string topologyAlgorithm = "connected";
+            if (const char* raw = std::getenv("YAMS_BENCH_TOPOLOGY_ENGINE"); raw && *raw) {
+                topologyAlgorithm = raw;
+            }
+            auto topologyRebuild =
+                rebuildCanonicalDaemonTopology(*serviceManager, topologyAlgorithm);
+            if (!topologyRebuild) {
+                throw std::runtime_error("Failed to canonicalize daemon topology artifacts: " +
+                                         topologyRebuild.error().message);
+            }
+            daemonGraphCanonicalTopologySnapshot = topologyRebuild.value().snapshotId;
+            auto topologyFingerprint = loadTopologyRoutingConstructionFingerprint(
+                *serviceManager, daemonGraphCanonicalTopologySnapshot);
+            if (!topologyFingerprint) {
+                throw std::runtime_error(
+                    "Failed to fingerprint canonical daemon topology artifacts: " +
+                    topologyFingerprint.error().message);
+            }
+            daemonGraphCanonicalTopologyFingerprint = std::move(topologyFingerprint.value());
+            daemonGraphCanonicalized = true;
+            daemonGraphReady = true;
+        }
+
         if (coldIngestStartedAt.has_value()) {
             setupTimings.enrichmentReadyMs = elapsedMsSince(*coldIngestStartedAt);
         }
@@ -8099,11 +8489,7 @@ struct BenchFixture {
             testReq.query = "test";
             testReq.searchType = "hybrid";
             testReq.limit = 1000;
-            std::chrono::milliseconds queryTimeout{20000};
-            if (const char* env = std::getenv("YAMS_BENCH_QUERY_TIMEOUT_MS")) {
-                queryTimeout = std::chrono::milliseconds{
-                    static_cast<std::chrono::milliseconds::rep>(std::stoll(env))};
-            }
+            const auto queryTimeout = configuredBenchQueryTimeout("hybrid");
             testReq.timeout = queryTimeout;
             auto waitBudget = queryTimeout + std::chrono::seconds(10);
             if (waitBudget < std::chrono::seconds(10)) {
@@ -8377,11 +8763,7 @@ struct BenchFixture {
                 opts.query = std::move(query);
                 opts.searchType = std::move(searchType);
                 opts.limit = 25;
-                std::chrono::milliseconds queryTimeout{20000};
-                if (const char* env = std::getenv("YAMS_BENCH_QUERY_TIMEOUT_MS")) {
-                    queryTimeout = std::chrono::milliseconds{
-                        static_cast<std::chrono::milliseconds::rep>(std::stoll(env))};
-                }
+                const auto queryTimeout = configuredBenchQueryTimeout(opts.searchType);
                 opts.timeout = queryTimeout;
                 opts.symbolRank = symbolRank;
                 opts.allowFuzzyRetry = false;
@@ -8439,7 +8821,6 @@ struct BenchFixture {
             queries = corpus->generateQueries(numQueries);
         }
         spdlog::info("Generated {} test queries", queries.size());
-
         setupTimings.setupTotalMs = elapsedMsSince(setupStartedAt);
         if (g_debugOut) {
             DebugLogEntry timingEntry;
@@ -8467,6 +8848,28 @@ struct BenchFixture {
                 {"setup_total_ms", setupTimings.setupTotalMs},
                 {"dataset", datasetName},
                 {"corpus_size", corpusSize},
+                {"daemon_graph",
+                 {{"required", g_requireDaemonNativeGraph},
+                  {"ready", daemonGraphReady},
+                  {"source", "post_ingest_queue_embedding_service"},
+                  {"canonicalized", daemonGraphCanonicalized},
+                  {"canonical_edges_generated", daemonGraphCanonicalEdgesGenerated},
+                  {"canonical_topology_snapshot", daemonGraphCanonicalTopologySnapshot},
+                  {"canonical_topology_fingerprint", daemonGraphCanonicalTopologyFingerprint},
+                  {"semantic_documents_processed", daemonGraphState.semanticDocumentsProcessed},
+                  {"semantic_edges_created", daemonGraphState.semanticEdgesCreated},
+                  {"semantic_update_errors", daemonGraphState.semanticUpdateErrors},
+                  {"topology_document_nodes", daemonGraphState.topologyDocumentNodes},
+                  {"topology_semantic_edges", daemonGraphState.topologySemanticEdges},
+                  {"topology_documents_with_neighbors",
+                   daemonGraphState.topologyDocumentsWithNeighbors},
+                  {"topology_isolated_documents", daemonGraphState.topologyIsolatedDocuments},
+                  {"post_ingest_queued", daemonGraphState.postIngestQueued},
+                  {"post_ingest_in_flight", daemonGraphState.postIngestInFlight},
+                  {"embedding_queued", daemonGraphState.embeddingQueued},
+                  {"embedding_in_flight", daemonGraphState.embeddingInFlight},
+                  {"write_queued", daemonGraphState.writeQueued},
+                  {"write_in_flight", daemonGraphState.writeInFlight}}},
             };
             debugLogWriteJsonLine(timingEntry);
         }
@@ -8873,8 +9276,17 @@ void BM_RetrievalQuality(benchmark::State& state) {
     RetrievalMetrics metrics;
     for (auto _ : state) {
         std::vector<double> warmupLatencyMs;
+        std::vector<TestQuery> failedWarmupQueries;
         evaluateQueries(*fixture.client, fixture.benchCorpusDir, fixture.queries, fixture.topK,
-                        "hybrid", nullptr, false, &warmupLatencyMs);
+                        "hybrid", nullptr, false, &warmupLatencyMs, &failedWarmupQueries);
+        const auto retriedWarmupQueries = failedWarmupQueries.size();
+        if (!failedWarmupQueries.empty()) {
+            std::vector<TestQuery> retryFailures;
+            evaluateQueries(*fixture.client, fixture.benchCorpusDir, failedWarmupQueries,
+                            fixture.topK, "hybrid", nullptr, false, &warmupLatencyMs,
+                            &retryFailures);
+            failedWarmupQueries = std::move(retryFailures);
+        }
         if (g_debugOut) {
             DebugLogEntry warmupEntry;
             warmupEntry.searchType = "benchmark_warmup";
@@ -8883,6 +9295,8 @@ void BM_RetrievalQuality(benchmark::State& state) {
                 {"query_count", fixture.queries.size()},
                 {"completed_queries", warmupLatencyMs.size()},
                 {"first_query_latency_ms", warmupLatencyMs.empty() ? 0.0 : warmupLatencyMs.front()},
+                {"retried_queries", retriedWarmupQueries},
+                {"retry_failed_queries", failedWarmupQueries.size()},
             };
             debugLogWriteJsonLine(warmupEntry);
         }
@@ -8940,10 +9354,14 @@ void BM_RetrievalQuality(benchmark::State& state) {
     state.counters["MRR_keyword"] = g_keyword_metrics.mrr;
     state.counters["Recall_keyword"] = g_keyword_metrics.recallAtK;
 
-    spdlog::info("=== Evaluating GREP literal baseline for exact-match comparison ===");
-    g_grep_metrics = evaluateGrepQueries(*fixture.client, fixture.queries, fixture.topK);
-    state.counters["MRR_grep"] = g_grep_metrics.mrr;
-    state.counters["Recall_grep"] = g_grep_metrics.recallAtK;
+    if (benchEvaluateGrepBaseline()) {
+        spdlog::info("=== Evaluating GREP literal baseline for exact-match comparison ===");
+        g_grep_metrics = evaluateGrepQueries(*fixture.client, fixture.queries, fixture.topK);
+        state.counters["MRR_grep"] = g_grep_metrics.mrr;
+        state.counters["Recall_grep"] = g_grep_metrics.recallAtK;
+    } else {
+        spdlog::info("=== Skipping GREP literal baseline for this benchmark plan ===");
+    }
 
     if (g_debugOut) {
         const auto peakRssMb = yams::bench::processPeakRssMb();
@@ -8963,6 +9381,7 @@ void BM_RetrievalQuality(benchmark::State& state) {
 BENCHMARK(BM_RetrievalQuality)->Iterations(1);
 
 int main(int argc, char** argv) {
+    consumeXplanConfigArguments(argc, argv);
     if (envTruthy(std::getenv("YAMS_BENCH_OPT_LOOP"))) {
         return runOptimizationLoop();
     }
