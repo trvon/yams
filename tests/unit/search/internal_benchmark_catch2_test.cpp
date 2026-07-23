@@ -508,6 +508,61 @@ TEST_CASE("BenchmarkKgReadinessPolicy: explicit require preserves strict wait de
     CHECK(refinedPolicy == BenchmarkKgReadinessPolicy::RequireSignal);
 }
 
+TEST_CASE("BenchmarkDaemonGraphState requires graph production and drained daemon writers",
+          "[unit][internal_benchmark][daemon_graph]") {
+    BenchmarkDaemonGraphState state;
+    CHECK_FALSE(benchmarkDaemonGraphReady(state));
+
+    state.semanticDocumentsProcessed = 2000;
+    state.semanticEdgesCreated = 3792;
+    state.topologyDocumentNodes = 2000;
+    state.topologySemanticEdges = 3792;
+    state.topologyDocumentsWithNeighbors = 2000;
+    CHECK(benchmarkDaemonGraphReady(state));
+    CHECK(benchmarkDaemonGraphReady(state, 2000));
+    CHECK_FALSE(benchmarkDaemonGraphReady(state, 2001));
+
+    state.topologyDocumentsWithNeighbors = 1999;
+    state.topologyIsolatedDocuments = 1;
+    CHECK_FALSE(benchmarkDaemonGraphReady(state, 2000));
+    state.topologyDocumentsWithNeighbors = 2000;
+    state.topologyIsolatedDocuments = 0;
+
+    state.semanticUpdateErrors = 1;
+    CHECK_FALSE(benchmarkDaemonGraphReady(state));
+    state.semanticUpdateErrors = 0;
+    state.writeInFlight = 1;
+    CHECK_FALSE(benchmarkDaemonGraphReady(state));
+    state.writeInFlight = 0;
+    state.postIngestQueued = 1;
+    CHECK_FALSE(benchmarkDaemonGraphReady(state));
+    state.postIngestQueued = 0;
+    state.postIngestInFlight = 1;
+    CHECK_FALSE(benchmarkDaemonGraphReady(state));
+}
+
+TEST_CASE("BenchmarkDaemonGraphState requires stable graph production counters",
+          "[unit][internal_benchmark][daemon_graph]") {
+    BenchmarkDaemonGraphState previous;
+    previous.semanticDocumentsProcessed = 2000;
+    previous.semanticEdgesCreated = 32000;
+    previous.topologyDocumentNodes = 2000;
+    previous.topologySemanticEdges = 15720;
+    previous.topologyDocumentsWithNeighbors = 2000;
+
+    auto current = previous;
+    CHECK(benchmarkDaemonGraphProductionStable(previous, current));
+
+    current.semanticDocumentsProcessed++;
+    CHECK_FALSE(benchmarkDaemonGraphProductionStable(previous, current));
+    current = previous;
+    current.semanticEdgesCreated++;
+    CHECK_FALSE(benchmarkDaemonGraphProductionStable(previous, current));
+    current = previous;
+    current.topologySemanticEdges++;
+    CHECK_FALSE(benchmarkDaemonGraphProductionStable(previous, current));
+}
+
 // =============================================================================
 // QueryExecution tests
 // =============================================================================

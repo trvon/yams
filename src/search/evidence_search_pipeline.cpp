@@ -76,7 +76,7 @@ deriveTopologyCandidateEvidence(const TopologyRoutingSessionResult& route,
                                 float maxScoreAdjustment) {
     TopologyEvidenceByCandidate evidence;
     if (!route.artifactAdmitted || route.confidenceAbstained ||
-        route.routeAllowedDocumentHashes.empty() || maxScoreAdjustment <= 0.0F) {
+        !route.certificate.hasUsefulRoute() || maxScoreAdjustment <= 0.0F) {
         return evidence;
     }
 
@@ -93,8 +93,8 @@ deriveTopologyCandidateEvidence(const TopologyRoutingSessionResult& route,
         0.40F * best + 0.25F * mean + 0.20F * relativeBoundary + 0.15F * seedCoverage, 0.0F, 1.0F);
     const float boundedAdjustment = std::clamp(maxScoreAdjustment, 0.0F, 1.0F);
 
-    evidence.reserve(route.routeAllowedDocumentHashes.size());
-    for (const auto& candidate : route.routeAllowedDocumentHashes) {
+    evidence.reserve(route.certificate.allowedDocumentHashes.size());
+    for (const auto& candidate : route.certificate.allowedDocumentHashes) {
         const float localSupport = route.routedCandidateHashes.contains(candidate) ? 1.0F : 0.0F;
         const float medoidSupport = route.medoidHashes.contains(candidate) ? 1.0F : 0.0F;
         const float baseSupport = 0.65F + 0.20F * localSupport + 0.15F * medoidSupport;

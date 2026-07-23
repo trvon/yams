@@ -121,9 +121,10 @@ void fillTopologySkipReason(std::string& skipReason, const TopologyRoutingOption
 
 TopologyAssistStageResult runTopologyAssistStage(const TopologyAssistStageRequest& request) {
     TopologyAssistStageResult out;
-    const auto options =
+    auto options =
         makeTopologyRoutingOptions(request.config, request.routingMode, request.weakTier1Query,
                                    /*collectRouteMembership=*/true);
+    options.collectGraphDiagnostics = request.collectGraphDiagnostics;
 
     const bool useVectorSeeds =
         options.expansionSource == SearchEngineConfig::TopologyExpansionSource::GraphNeighbors &&
@@ -147,6 +148,7 @@ TopologyAssistStageResult runTopologyAssistStage(const TopologyAssistStageReques
     sessionRequest.weightedSeedDocuments = request.tier1SeedEvidence;
     sessionRequest.existingCandidateHashes = request.existingCandidateHashes;
     sessionRequest.queryEmbedding = request.queryEmbedding;
+    sessionRequest.queryEmbeddingSpaceIdentity = request.queryEmbeddingSpaceIdentity;
     sessionRequest.options = options;
     sessionRequest.expectedTopologyEpoch = request.expectedTopologyEpoch;
     sessionRequest.snapshotCache = request.snapshotCache;

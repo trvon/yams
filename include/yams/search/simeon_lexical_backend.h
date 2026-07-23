@@ -67,6 +67,11 @@ public:
         SabSmooth, // SubwordAwareBackoff γ=5 — "best of simeon" default
     };
 
+    enum class FragmentEncoderProfile : std::uint8_t {
+        CorpusPmi,
+        FixedHash384,
+    };
+
     struct RouterPreset {
         // passE_scq0_clar3 — the shippable router config from simeon's BEIR
         // bench. NFCorpus +0.009 nDCG@10 vs single-variant SAB; ties MiniLM.
@@ -110,14 +115,15 @@ public:
         // improve nDCG@10 by +0.009 on NFCorpus in simeon benchmarks.
         bool bm25_variants_rrf = false;
 
-        // Fragment-geometry (PHSS topology) reranker. OFF by default: a per-arm
-        // retrieval bench showed it loses to plain SAB and lead_field even after
-        // its scale-mixing bug was fixed (nDCG@10 0.243 vs 0.35 baseline) while
-        // costing the bulk of index-build time (PMI learn + fragment build +
-        // PHSS). Opt-in for prose corpora via this flag; the scoreRouted path
-        // still consumes it (quality-router gated) when enabled. The simeon
-        // fragment_geometry/PHSS code remains as the research asset.
+        // Fragment-geometry reranking. OFF by default: the corpus-PMI PHSS arm
+        // lost to plain SAB/lead-field retrieval, while the deterministic
+        // fixed-hash arm has mixed corpus-specific holdout results. Opt-in for
+        // controlled experiments; scoreRouted() remains quality-router gated.
         bool fragment_geometry_enabled = false;
+        // CorpusPmi preserves the existing corpus-adaptive 32-dimensional
+        // encoder. FixedHash384 is Simeon's deterministic `simeon-v1-384`
+        // identity (4096-dimensional sketch + Achlioptas projection).
+        FragmentEncoderProfile fragment_encoder_profile = FragmentEncoderProfile::CorpusPmi;
         std::size_t fragment_geometry_min_corpus_docs = 1000;
         // Fragment geometry is bounded separately from the lexical build. The
         // builder keeps only a bounded PMI sample in memory, then streams a
@@ -181,6 +187,9 @@ public:
     bool fragmentGeometryReady() const noexcept {
         return fragment_encoder_ != nullptr && !doc_frags_.empty();
     }
+    // Empty for corpus-trained PMI because that space requires an artifact
+    // fingerprint before it can participate in a construction-bound proof.
+    [[nodiscard]] std::string fragmentEmbeddingSpaceIdentity() const;
 
     // Rescore an FTS5 candidate pool. Runs the full-corpus
     // simeon::Bm25Index::score() internally and projects to the requested
@@ -281,7 +290,7 @@ private:
         index_; // variant per cfg_.variant (or SabSmooth if router on)
     std::unique_ptr<simeon::Bm25Index> atire_index_; // built only when router_enabled
     std::unique_ptr<simeon::QueryRouter> router_;    // built only when router_enabled
-    std::unique_ptr<simeon::PmiEmbeddings> pmi_;     // built only when fragment geometry is on
+    std::unique_ptr<simeon::PmiEmbeddings> pmi_;     // only for the CorpusPmi fragment profile
     std::unique_ptr<simeon::Encoder> fragment_encoder_;
     std::unique_ptr<simeon::ConceptIndex> concept_index_;
     std::vector<std::vector<simeon::SemanticFragment>> doc_frags_;

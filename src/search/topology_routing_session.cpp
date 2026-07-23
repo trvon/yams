@@ -2,6 +2,7 @@
 
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/search/search_tracing.h>
 #include <yams/topology/topology_metadata_store.h>
 
 #include <algorithm>
@@ -63,6 +64,67 @@ std::string fingerprintHex(std::uint64_t hash) {
 }
 
 } // namespace
+
+std::string_view TopologyRouteAdmission::denialReason() const noexcept {
+    using Status = TopologyProofObligationStatus;
+
+    if (coordinateSpaceAlignment == Status::Violated) {
+        return "coordinate_space_mismatch";
+    }
+    if (protectedRelationCoverage == Status::Violated) {
+        return "protected_relation_coverage_violated";
+    }
+    if (coverMaterialization == Status::Violated) {
+        return "cover_materialization_incomplete";
+    }
+    if (protectedFibersRepresented == Status::Violated) {
+        return "protected_fibers_unrepresented";
+    }
+    if (certificateSaturatesProtectedFibers == Status::Violated) {
+        return "protected_fiber_saturation_violated";
+    }
+    if (routeRisk == Status::Violated) {
+        return "route_risk_violated";
+    }
+    if (work == Status::Violated) {
+        return "work_budget_violated";
+    }
+    if (protectedRelationCoverage != Status::Satisfied) {
+        return "protected_relation_coverage_unavailable";
+    }
+    if (protectedFibersRepresented != Status::Satisfied) {
+        return "protected_fibers_representation_unavailable";
+    }
+    if (certificateSaturatesProtectedFibers != Status::Satisfied) {
+        return "protected_fiber_saturation_unavailable";
+    }
+    if (routeRisk != Status::Satisfied) {
+        return "route_risk_unavailable";
+    }
+    if (work != Status::Satisfied) {
+        return "work_observation_unavailable";
+    }
+    if (coverMaterialization != Status::Satisfied) {
+        return "cover_materialization_unavailable";
+    }
+    if (coordinateSpaceAlignment != Status::Satisfied) {
+        return "coordinate_space_identity_unavailable";
+    }
+    if (selectedCoverDocuments == 0 || materializedCoverDocuments != selectedCoverDocuments) {
+        return "cover_materialization_incomplete";
+    }
+    return {};
+}
+
+bool TopologyRouteAdmission::eligibleForTrialNarrowing() const noexcept {
+    using Status = TopologyProofObligationStatus;
+    return coordinateSpaceAlignment == Status::Satisfied &&
+           protectedRelationCoverage == Status::Satisfied &&
+           protectedFibersRepresented == Status::Satisfied &&
+           certificateSaturatesProtectedFibers == Status::Satisfied &&
+           routeRisk == Status::Satisfied && coverMaterialization == Status::Satisfied &&
+           selectedCoverDocuments > 0 && materializedCoverDocuments == selectedCoverDocuments;
+}
 
 TopologyRouteSelection
 selectTopologyRoutesForNarrowing(const std::vector<yams::topology::ClusterRoute>& routes,
@@ -226,6 +288,85 @@ std::size_t edgeFetchLimit(std::size_t maxDocs) {
     return std::max<std::size_t>(maxDocs * 8, 64);
 }
 
+void collectGraphNeighborStageTrace(
+    TopologyRoutingSessionResult& result, const TopologyRoutingSessionRequest& request,
+    const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
+    const SeedNeighborMap& fetchedNeighbors, const SeedNeighborMap& relationNeighbors,
+    std::size_t fetchLimit) {
+    auto& trace = result.graphNeighborTrace;
+    trace.collected = true;
+    trace.edgeFetchLimit = fetchLimit;
+
+    for (const auto& seed : request.seedDocumentHashes) {
+        const auto relationIt = relationNeighbors.find(seed);
+        if (relationIt == relationNeighbors.end()) {
+            continue;
+        }
+        std::unordered_set<std::string> fetched;
+        if (const auto fetchedIt = fetchedNeighbors.find(seed);
+            fetchedIt != fetchedNeighbors.end()) {
+            fetched.reserve(fetchedIt->second.size());
+            for (const auto& neighbor : fetchedIt->second) {
+                fetched.insert(std::get<0>(neighbor));
+            }
+        }
+        if (std::ranges::any_of(relationIt->second, [&](const auto& neighbor) {
+                return !fetched.contains(std::get<0>(neighbor));
+            })) {
+            ++trace.fetchTruncatedSeedCount;
+        }
+    }
+
+    const auto relationCandidates =
+        rankGraphNeighborCandidates(relationNeighbors, request.seedDocumentHashes, /*maxDocs=*/0,
+                                    std::numeric_limits<float>::lowest(), /*reciprocalOnly=*/false);
+    const auto fetchedCandidates =
+        rankGraphNeighborCandidates(fetchedNeighbors, request.seedDocumentHashes, /*maxDocs=*/0,
+                                    std::numeric_limits<float>::lowest(), /*reciprocalOnly=*/false);
+    const auto eligibleCandidates = rankGraphNeighborCandidates(
+        fetchedNeighbors, request.seedDocumentHashes, /*maxDocs=*/0,
+        request.options.graphNeighborMinScore, request.options.graphNeighborReciprocalOnly);
+
+    trace.relationCandidateCount = relationCandidates.size();
+    trace.fetchedCandidateCount = fetchedCandidates.size();
+    trace.eligibleCandidateCount = eligibleCandidates.size();
+
+    std::unordered_map<std::string, std::optional<std::string>> documentIds;
+    documentIds.reserve(request.seedDocumentHashes.size() + relationCandidates.size());
+    auto resolveDocumentId = [&](const std::string& hash) -> const std::optional<std::string>& {
+        auto [it, inserted] = documentIds.try_emplace(hash);
+        if (!inserted) {
+            return it->second;
+        }
+        auto document = metadataRepo->getDocumentByHash(hash);
+        if (document && document.value().has_value()) {
+            it->second = documentIdForTrace(document.value()->filePath, hash);
+        }
+        return it->second;
+    };
+    auto resolveStage = [&](const std::vector<std::string>& hashes, std::vector<std::string>& ids,
+                            std::size_t& unresolved) {
+        ids.reserve(hashes.size());
+        for (const auto& hash : hashes) {
+            const auto& documentId = resolveDocumentId(hash);
+            if (documentId.has_value()) {
+                ids.push_back(*documentId);
+            } else {
+                ++unresolved;
+            }
+        }
+    };
+
+    resolveStage(request.seedDocumentHashes, trace.seedDocumentIds, trace.seedUnresolvedCount);
+    std::ranges::sort(trace.seedDocumentIds);
+    resolveStage(relationCandidates, trace.relationCandidateDocumentIds,
+                 trace.relationUnresolvedCount);
+    resolveStage(fetchedCandidates, trace.fetchedCandidateDocumentIds,
+                 trace.fetchedUnresolvedCount);
+    resolveStage(eligibleCandidates, trace.eligibleCandidateDocumentIds,
+                 trace.eligibleUnresolvedCount);
+}
+
 std::shared_ptr<TopologyRoutingSnapshotCache>
 makeSnapshotCache(const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
                   const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore) {
@@ -240,7 +381,8 @@ bool loadRoutingSnapshot(const TopologyRoutingSessionRequest& request,
                          TopologyRoutingSessionResult& result,
                          std::shared_ptr<const TopologyRoutingSnapshot>& snapshot) {
     const auto loadStart = std::chrono::steady_clock::now();
-    auto lookup = snapshotCache->get(request.expectedTopologyEpoch);
+    auto lookup = snapshotCache->get(request.expectedTopologyEpoch,
+                                     request.options.denseAnnCandidateLimit > 0);
     result.timings.loadMicros += microsSince(loadStart);
     if (!lookup) {
         const auto& message = lookup.error().message;
@@ -264,7 +406,22 @@ bool loadRoutingSnapshot(const TopologyRoutingSessionRequest& request,
     result.artifactsFresh = request.expectedTopologyEpoch == 0 ||
                             snapshot->artifacts->topologyEpoch == request.expectedTopologyEpoch;
     result.topologyEpoch = snapshot->artifacts->topologyEpoch;
-    result.constructionFingerprint = snapshot->constructionFingerprint;
+    result.certificate.constructionFingerprint = snapshot->constructionFingerprint;
+    result.certificate.coordinateSpaceIdentity = snapshot->artifacts->embeddingSpaceIdentity;
+    if (!request.queryEmbedding.has_value()) {
+        result.certificate.admission.coordinateSpaceAlignment =
+            TopologyProofObligationStatus::Unavailable;
+    } else if (request.queryEmbeddingSpaceIdentity.empty() ||
+               snapshot->artifacts->embeddingSpaceIdentity.empty()) {
+        result.certificate.admission.coordinateSpaceAlignment =
+            TopologyProofObligationStatus::Unavailable;
+    } else if (request.queryEmbeddingSpaceIdentity == snapshot->artifacts->embeddingSpaceIdentity) {
+        result.certificate.admission.coordinateSpaceAlignment =
+            TopologyProofObligationStatus::Satisfied;
+    } else {
+        result.certificate.admission.coordinateSpaceAlignment =
+            TopologyProofObligationStatus::Violated;
+    }
     for (const auto& cluster : snapshot->artifacts->clusters) {
         const auto availableRepresentativeCount =
             (cluster.centroidEmbedding.empty() ? std::size_t{0} : std::size_t{1}) +
@@ -367,9 +524,11 @@ void admitRankedCandidates(TopologyRoutingSessionResult& result,
             continue;
         }
         if (request.options.collectRouteMembership) {
-            result.routeAllowedDocumentHashes.insert(hash);
+            result.certificate.allowedDocumentHashes.insert(hash);
         }
         result.routedCandidateHashes.insert(hash);
+        result.routedCandidateDocIds.push_back(
+            documentIdForTrace(docLookup.value()->filePath, hash));
         const auto insertStart = std::chrono::steady_clock::now();
         const auto [_, inserted] = candidateHashes.insert(hash);
         result.timings.candidateInsertMicros += microsSince(insertStart);
@@ -380,10 +539,10 @@ void admitRankedCandidates(TopologyRoutingSessionResult& result,
             ++result.duplicateCandidates;
         }
     }
-    result.narrowApplied = request.options.collectRouteMembership
-                               ? !result.routeAllowedDocumentHashes.empty()
-                               : !result.routedCandidateHashes.empty();
-    result.applied = result.narrowApplied || result.addedCandidates > 0;
+    const bool routeProposed = request.options.collectRouteMembership
+                                   ? result.certificate.hasUsefulRoute()
+                                   : !result.routedCandidateHashes.empty();
+    result.applied = routeProposed || result.addedCandidates > 0;
 }
 
 /// Returns true when graph expansion finished the session (caller should return).
@@ -400,8 +559,16 @@ bool tryRunGraphNeighborExpansion(
     }
 
     const auto loadStart = std::chrono::steady_clock::now();
-    auto seedNeighbors = collectSeedNeighborMap(*kgStore, request.seedDocumentHashes,
-                                                edgeFetchLimit(request.options.maxDocs));
+    const auto fetchLimit = edgeFetchLimit(request.options.maxDocs);
+    auto seedNeighbors = collectSeedNeighborMap(*kgStore, request.seedDocumentHashes, fetchLimit);
+    if (request.options.collectGraphDiagnostics) {
+        constexpr auto kDiagnosticEdgeLimit =
+            static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max());
+        const auto relationNeighbors =
+            collectSeedNeighborMap(*kgStore, request.seedDocumentHashes, kDiagnosticEdgeLimit);
+        collectGraphNeighborStageTrace(result, request, metadataRepo, seedNeighbors,
+                                       relationNeighbors, fetchLimit);
+    }
     result.timings.loadMicros = microsSince(loadStart);
     result.loadSucceeded = true;
     result.artifactsFresh = true;
@@ -483,6 +650,7 @@ struct RoutedMemberAccumulator {
     std::size_t firstRoute{std::numeric_limits<std::size_t>::max()};
     bool seed{false};
     bool medoid{false};
+    bool selectedCoverMember{false};
 };
 
 std::uint64_t topologyScaleBit(std::size_t level) {
@@ -552,14 +720,58 @@ finalizeCandidateStructure(const CandidateStructureAccumulator& accumulator,
     return evidence;
 }
 
+TopologyProofObligationStatus
+evaluateProtectedRelationFiberSaturation(const TopologyRoutingSnapshot& snapshot,
+                                         const TopologyRoutingSessionResult& result) {
+    using Status = TopologyProofObligationStatus;
+    if (!result.certificate.hasUsefulRoute() ||
+        result.certificate.selectedProtectedRelationFiberIds.empty()) {
+        return Status::Unavailable;
+    }
+
+    for (const auto& fiberId : result.certificate.selectedProtectedRelationFiberIds) {
+        const auto fiberIt = snapshot.protectedRelationCover.fiberById.find(fiberId);
+        if (fiberIt == snapshot.protectedRelationCover.fiberById.end()) {
+            return Status::Unavailable;
+        }
+        for (const auto& documentHash :
+             snapshot.protectedRelationCover.fibers[fiberIt->second].documentHashes) {
+            if (!result.certificate.allowedDocumentHashes.contains(documentHash)) {
+                return Status::Violated;
+            }
+        }
+    }
+    return Status::Satisfied;
+}
+
 void materializeAllowedRouteMembers(
     const std::unordered_map<std::string, RoutedMemberAccumulator>& routedMembers,
-    std::size_t maxDocs, std::uint64_t selectedScaleMask, std::size_t acceptedRoutes,
-    TopologyRoutingSessionResult& result) {
+    const TopologyRoutingSnapshot& snapshot, std::size_t maxDocs, std::uint64_t selectedScaleMask,
+    std::size_t acceptedRoutes, TopologyRoutingSessionResult& result) {
     using Entry = std::pair<const std::string, RoutedMemberAccumulator>;
+    auto fiberClosedMembers = routedMembers;
+    result.certificate.selectedProtectedRelationFiberIds.reserve(
+        result.certificate.selectedCoverIds.size());
+    for (std::size_t routeIndex = 0; routeIndex < result.certificate.selectedCoverIds.size();
+         ++routeIndex) {
+        const auto& fiberId = result.certificate.selectedCoverIds[routeIndex];
+        const auto fiberIt = snapshot.protectedRelationCover.fiberById.find(fiberId);
+        if (fiberIt == snapshot.protectedRelationCover.fiberById.end()) {
+            continue;
+        }
+        const auto& fiber = snapshot.protectedRelationCover.fibers[fiberIt->second];
+        result.certificate.selectedProtectedRelationFiberIds.push_back(fiber.fiberId);
+        for (const auto& documentHash : fiber.documentHashes) {
+            fiberClosedMembers.try_emplace(documentHash);
+            if (routeIndex < result.certificate.allowedDocumentHashGroups.size()) {
+                result.certificate.allowedDocumentHashGroups[routeIndex].insert(documentHash);
+            }
+        }
+    }
+
     std::vector<const Entry*> ranked;
-    ranked.reserve(routedMembers.size());
-    for (const auto& entry : routedMembers) {
+    ranked.reserve(fiberClosedMembers.size());
+    for (const auto& entry : fiberClosedMembers) {
         ranked.push_back(&entry);
     }
 
@@ -569,6 +781,9 @@ void materializeAllowedRouteMembers(
     std::ranges::sort(ranked, [](const Entry* lhs, const Entry* rhs) {
         const auto& left = lhs->second;
         const auto& right = rhs->second;
+        if (left.selectedCoverMember != right.selectedCoverMember) {
+            return left.selectedCoverMember > right.selectedCoverMember;
+        }
         if (left.seed != right.seed) {
             return left.seed > right.seed;
         }
@@ -589,10 +804,19 @@ void materializeAllowedRouteMembers(
 
     // maxDocs=0 is the explicit unbounded mode used by callers that want full route membership.
     const auto take = maxDocs == 0 ? ranked.size() : std::min(maxDocs, ranked.size());
-    result.routeAllowedDocumentHashes.reserve(take);
+    result.certificate.admission.selectedCoverDocuments = routedMembers.size();
+    const auto materializedCoverDocuments = static_cast<std::size_t>(
+        std::ranges::count_if(ranked | std::views::take(take),
+                              [](const auto* entry) { return entry->second.selectedCoverMember; }));
+    result.certificate.admission.materializedCoverDocuments = materializedCoverDocuments;
+    result.certificate.admission.coverMaterialization =
+        materializedCoverDocuments == routedMembers.size() && !routedMembers.empty()
+            ? TopologyProofObligationStatus::Satisfied
+            : TopologyProofObligationStatus::Violated;
+    result.certificate.allowedDocumentHashes.reserve(take);
     result.candidateStructureEvidence.reserve(take);
     for (const auto* entry : ranked | std::views::take(take)) {
-        result.routeAllowedDocumentHashes.insert(entry->first);
+        result.certificate.allowedDocumentHashes.insert(entry->first);
         if (entry->second.medoid) {
             result.routedCandidateHashes.insert(entry->first);
         }
@@ -600,12 +824,71 @@ void materializeAllowedRouteMembers(
             entry->first,
             finalizeCandidateStructure(entry->second.structure, selectedScaleMask, acceptedRoutes));
     }
-    for (auto& routeGroup : result.routeAllowedDocumentHashGroups) {
+    for (auto& routeGroup : result.certificate.allowedDocumentHashGroups) {
         std::erase_if(routeGroup, [&](const auto& hash) {
-            return !result.routeAllowedDocumentHashes.contains(hash);
+            return !result.certificate.allowedDocumentHashes.contains(hash);
         });
     }
     result.routedDocs = take;
+}
+
+void produceTopologyRouteAdmission(const std::vector<yams::topology::ClusterRoute>& selectedRoutes,
+                                   const TopologyRoutingSnapshot& snapshot,
+                                   const TopologyRoutingOptions& options,
+                                   TopologyRoutingSessionResult& result) {
+    using Status = TopologyProofObligationStatus;
+
+    bool relationEvidenceObserved = !selectedRoutes.empty();
+    bool relationCoverageViolated = false;
+    for (const auto& route : selectedRoutes) {
+        const auto clusterIt = snapshot.clustersById.find(route.clusterId);
+        if (clusterIt == snapshot.clustersById.end()) {
+            relationEvidenceObserved = false;
+            continue;
+        }
+        const auto& cluster = snapshot.artifacts->clusters[clusterIt->second];
+        if (cluster.protectedPairCount == 0) {
+            relationEvidenceObserved = false;
+        } else if (cluster.preservedProtectedPairCount != cluster.protectedPairCount) {
+            relationCoverageViolated = true;
+        }
+    }
+
+    result.certificate.admission.protectedRelationCoverage =
+        relationCoverageViolated
+            ? Status::Violated
+            : (relationEvidenceObserved ? Status::Satisfied : Status::Unavailable);
+    result.certificate.admission.certificateSaturatesProtectedFibers =
+        evaluateProtectedRelationFiberSaturation(snapshot, result);
+
+    const auto& calibration = options.routeRiskCalibration;
+    const bool calibrationObserved =
+        !calibration.constructionFingerprint.empty() &&
+        calibration.constructionFingerprint == result.certificate.constructionFingerprint &&
+        calibration.calibrationQueries > 0 && calibration.protectedCandidates > 0;
+    if (!calibrationObserved) {
+        result.certificate.admission.protectedFibersRepresented = Status::Unavailable;
+        result.certificate.admission.routeRisk = Status::Unavailable;
+        return;
+    }
+
+    const auto missedPerThousand =
+        static_cast<long double>(calibration.missedProtectedCandidates) * 1000.0L;
+    const auto allowedMisses = static_cast<long double>(calibration.maxMissesPerThousand) *
+                               static_cast<long double>(calibration.protectedCandidates);
+    const bool riskWithinCalibration =
+        calibration.calibrationQueries >= calibration.minCalibrationQueries &&
+        missedPerThousand <= allowedMisses;
+    const bool routeClassMatches =
+        result.routeBoundaryScoreMargin >= calibration.minBoundaryMargin &&
+        result.seedsInRoutedClusters >= calibration.minSeedHits;
+    const bool calibrationClassObserved =
+        calibration.calibrationQueries >= calibration.minCalibrationQueries && routeClassMatches;
+    result.certificate.admission.protectedFibersRepresented =
+        calibrationClassObserved && calibration.missedProtectedCandidates == 0 ? Status::Satisfied
+                                                                               : Status::Violated;
+    result.certificate.admission.routeRisk =
+        riskWithinCalibration && routeClassMatches ? Status::Satisfied : Status::Violated;
 }
 
 TopologyRoutingSessionResult
@@ -672,10 +955,11 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
     selectedClusterIds.reserve(selection.routes.size());
     for (const auto& route : selection.routes) {
         selectedClusterIds.insert(route.clusterId);
+        result.certificate.selectedCoverIds.push_back(route.clusterId);
     }
-    result.routeCoordinateEvidence.reserve(routes.value().size());
+    result.routeEvidence.reserve(routes.value().size());
     for (const auto& route : routes.value()) {
-        result.routeCoordinateEvidence.push_back(TopologyRouteCoordinateEvidence{
+        result.routeEvidence.push_back(TopologyRouteEvidence{
             .clusterId = route.clusterId,
             .semanticCost = route.semanticCost.has_value()
                                 ? std::optional<float>(static_cast<float>(*route.semanticCost))
@@ -683,18 +967,6 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
             .sparseCost = route.sparseCost.has_value()
                               ? std::optional<float>(static_cast<float>(*route.sparseCost))
                               : std::nullopt,
-            .distortionPenalty =
-                route.distortionPenalty.has_value()
-                    ? std::optional<float>(static_cast<float>(*route.distortionPenalty))
-                    : std::nullopt,
-            .localIntrinsicDimension =
-                route.localIntrinsicDimension.has_value()
-                    ? std::optional<float>(static_cast<float>(*route.localIntrinsicDimension))
-                    : std::nullopt,
-            .uncertaintyPenalty =
-                route.uncertaintyPenalty.has_value()
-                    ? std::optional<float>(static_cast<float>(*route.uncertaintyPenalty))
-                    : std::nullopt,
             .persistencePenalty = static_cast<float>(route.persistencePenalty),
             .cohesionPenalty = static_cast<float>(route.cohesionPenalty),
             .sizePenalty = static_cast<float>(route.sizePenalty),
@@ -752,7 +1024,7 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
         }
         std::unordered_set<std::string>* routeMemberGroup = nullptr;
         if (request.options.collectRouteMembership && mayExpand) {
-            routeMemberGroup = &result.routeAllowedDocumentHashGroups.emplace_back();
+            routeMemberGroup = &result.certificate.allowedDocumentHashGroups.emplace_back();
         }
 
         const auto clusterLookupStart = std::chrono::steady_clock::now();
@@ -769,6 +1041,7 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
                 }
                 routeMemberGroup->insert(hash);
                 auto& candidate = routedMembers[hash];
+                candidate.selectedCoverMember = true;
                 candidate.seed = candidate.seed || seedSet.contains(hash);
                 if (candidate.seed) {
                     seedsCovered.insert(hash);
@@ -807,6 +1080,8 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
                 continue;
             }
             result.routedCandidateHashes.insert(hash);
+            result.routedCandidateDocIds.push_back(
+                documentIdForTrace(docLookup.value()->filePath, hash));
             const auto insertStart = std::chrono::steady_clock::now();
             const auto [_, inserted] = candidateHashes.insert(hash);
             result.timings.candidateInsertMicros += microsSince(insertStart);
@@ -828,13 +1103,14 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
             static_cast<float>(acceptedRouteScoreSum / static_cast<double>(result.acceptedRoutes));
     }
     if (request.options.collectRouteMembership && mayExpand) {
-        materializeAllowedRouteMembers(routedMembers, request.options.maxDocs, selectedScaleMask,
-                                       result.acceptedRoutes, result);
+        materializeAllowedRouteMembers(routedMembers, *snapshot, request.options.maxDocs,
+                                       selectedScaleMask, result.acceptedRoutes, result);
     }
-    result.narrowApplied = mayExpand && (request.options.collectRouteMembership
-                                             ? !result.routeAllowedDocumentHashes.empty()
-                                             : !result.routedCandidateHashes.empty());
-    result.applied = result.narrowApplied || result.addedCandidates > 0;
+    produceTopologyRouteAdmission(selection.routes, *snapshot, request.options, result);
+    result.applied = (mayExpand && (request.options.collectRouteMembership
+                                        ? result.certificate.hasUsefulRoute()
+                                        : !result.routedCandidateHashes.empty())) ||
+                     result.addedCandidates > 0;
     // Preserve graph fallthrough skip reason when cluster path also fails.
     if (result.applied && result.skipReason == "graph_no_neighbors_fallback_clusters") {
         result.skipReason.clear();
@@ -905,7 +1181,7 @@ std::vector<std::string> rankGraphNeighborCandidates(
 TopologyRoutingOptions
 makeTopologyRoutingOptions(const SearchEngineConfig& config,
                            SearchEngineConfig::TopologyRoutingMode routingMode, bool weakTier1Query,
-                           bool collectRouteMembership) noexcept {
+                           bool collectRouteMembership) {
     return TopologyRoutingOptions{
         .routingMode = routingMode,
         .routeScoringMode = config.topologyRouteScoringMode,
@@ -920,6 +1196,8 @@ makeTopologyRoutingOptions(const SearchEngineConfig& config,
         .maxDocs = config.topologyMaxDocs,
         .sparseDenseAlpha = config.topologySparseDenseAlpha,
         .minRouteScore = config.topologyMinRouteScore,
+        .routeRiskCalibration = config.topologyRouteRiskCalibration,
+        .routeWorkBudget = config.topologyRouteWorkBudget,
         .collectRouteMembership = collectRouteMembership,
         .graphNeighborMinScore = config.topologyGraphNeighborMinScore,
         .graphNeighborReciprocalOnly = config.topologyGraphNeighborReciprocalOnly,
@@ -1027,6 +1305,9 @@ validateTopologyArtifactBatchForRouting(const yams::topology::TopologyArtifactBa
         if (cluster.medoid.has_value() && !members.contains(cluster.medoid->documentHash)) {
             return "medoid_not_cluster_member";
         }
+        if (cluster.preservedProtectedPairCount > cluster.protectedPairCount) {
+            return "preserved_protected_pair_count_exceeds_observed";
+        }
         for (const auto& representative : cluster.routingRepresentatives) {
             if (representative.documentHash.empty()) {
                 return "empty_routing_representative_hash";
@@ -1077,6 +1358,7 @@ topologyRoutingConstructionFingerprint(const yams::topology::TopologyArtifactBat
     std::uint64_t hash = kFnvOffset;
     fingerprintString(hash, batch.algorithm);
     fingerprintIntegral(hash, static_cast<std::uint8_t>(batch.inputKind));
+    fingerprintString(hash, batch.embeddingSpaceIdentity);
 
     std::vector<const yams::topology::ClusterArtifact*> clusters;
     clusters.reserve(batch.clusters.size());
@@ -1094,17 +1376,8 @@ topologyRoutingConstructionFingerprint(const yams::topology::TopologyArtifactBat
         fingerprintDouble(hash, cluster->cohesionScore);
         fingerprintDouble(hash, cluster->densityScore);
         fingerprintDouble(hash, cluster->bridgeMass);
-        fingerprintIntegral(hash,
-                            static_cast<std::uint8_t>(cluster->coordinateDistortion.has_value()));
-        if (cluster->coordinateDistortion.has_value()) {
-            fingerprintDouble(hash, *cluster->coordinateDistortion);
-        }
-        fingerprintIntegral(hash, cluster->distortionObservationCount);
-        fingerprintIntegral(
-            hash, static_cast<std::uint8_t>(cluster->localIntrinsicDimension.has_value()));
-        if (cluster->localIntrinsicDimension.has_value()) {
-            fingerprintDouble(hash, *cluster->localIntrinsicDimension);
-        }
+        fingerprintIntegral(hash, cluster->protectedPairCount);
+        fingerprintIntegral(hash, cluster->preservedProtectedPairCount);
         fingerprintString(hash, cluster->medoid.has_value() ? cluster->medoid->documentHash : "");
 
         auto members = cluster->memberDocumentHashes;
@@ -1159,10 +1432,17 @@ topologyRoutingConstructionFingerprint(const yams::topology::TopologyArtifactBat
 TopologyRoutingSnapshotCache::TopologyRoutingSnapshotCache(TopologyRoutingSnapshotLoader loader)
     : loader_(std::move(loader)) {}
 
-Result<TopologyRoutingSnapshotLookup>
-TopologyRoutingSnapshotCache::get(std::uint64_t expectedEpoch) {
+Result<TopologyRoutingSnapshotLookup> TopologyRoutingSnapshotCache::get(std::uint64_t expectedEpoch,
+                                                                        bool requireDenseAnnIndex) {
     std::lock_guard lock(mutex_);
     if (cached_ && (expectedEpoch == 0 || cached_->artifacts->topologyEpoch == expectedEpoch)) {
+        if (requireDenseAnnIndex && !cached_->denseAnnBuildAttempted) {
+            auto upgraded = std::make_shared<TopologyRoutingSnapshot>(*cached_);
+            upgraded->sparseRouteIndex = yams::topology::SparseGuidedClusterRouter::buildRouteIndex(
+                *upgraded->artifacts, true);
+            upgraded->denseAnnBuildAttempted = true;
+            cached_ = std::move(upgraded);
+        }
         return TopologyRoutingSnapshotLookup{.snapshot = cached_, .cacheHit = true};
     }
     if (!loader_) {
@@ -1192,8 +1472,9 @@ TopologyRoutingSnapshotCache::get(std::uint64_t expectedEpoch) {
     snapshot->artifacts = std::move(artifacts);
     snapshot->constructionFingerprint =
         topologyRoutingConstructionFingerprint(*snapshot->artifacts);
-    snapshot->sparseRouteIndex =
-        yams::topology::SparseGuidedClusterRouter::buildRouteIndex(*snapshot->artifacts);
+    snapshot->sparseRouteIndex = yams::topology::SparseGuidedClusterRouter::buildRouteIndex(
+        *snapshot->artifacts, requireDenseAnnIndex);
+    snapshot->denseAnnBuildAttempted = requireDenseAnnIndex;
     snapshot->clustersById.reserve(snapshot->artifacts->clusters.size());
     for (std::size_t index = 0; index < snapshot->artifacts->clusters.size(); ++index) {
         snapshot->clustersById.emplace(snapshot->artifacts->clusters[index].clusterId, index);
@@ -1203,6 +1484,13 @@ TopologyRoutingSnapshotCache::get(std::uint64_t expectedEpoch) {
         snapshot->membershipsByDocumentHash.emplace(
             snapshot->artifacts->memberships[index].documentHash, index);
     }
+    auto protectedRelationCover =
+        yams::topology::buildProtectedRelationCoverIndex(*snapshot->artifacts);
+    if (!protectedRelationCover) {
+        return Error{ErrorCode::InvalidData,
+                     std::string{"invalid_artifact:"} + protectedRelationCover.error().message};
+    }
+    snapshot->protectedRelationCover = std::move(protectedRelationCover.value());
     cached_ = std::move(snapshot);
     return TopologyRoutingSnapshotLookup{.snapshot = cached_, .cacheHit = false};
 }

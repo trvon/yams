@@ -151,10 +151,12 @@ struct SearchEngineConfig {
     }
 
     /// How routed topology members interact with the global vector retriever.
-    /// Narrow filters Vec0 ANN traversal by routed cluster membership. Other vector engines
-    /// post-filter their bounded global results. Shadow records the proposed narrowing projection
-    /// while returning the unchanged global vector leg.
+    /// Augment query-scores routed members and unions novel documents with global vector results.
+    /// Narrow filters Vec0 ANN traversal by certified routed membership; other vector engines
+    /// post-filter their bounded global results. Shadow records counterfactual route evidence while
+    /// returning the unchanged global vector leg.
     enum class TopologyVectorPolicy {
+        Augment,
         Narrow,
         Shadow,
     } topologyVectorPolicy = TopologyVectorPolicy::Shadow;
@@ -162,6 +164,8 @@ struct SearchEngineConfig {
     [[nodiscard]] static constexpr const char*
     topologyVectorPolicyToString(TopologyVectorPolicy policy) noexcept {
         switch (policy) {
+            case TopologyVectorPolicy::Augment:
+                return "augment";
             case TopologyVectorPolicy::Narrow:
                 return "narrow";
             case TopologyVectorPolicy::Shadow:
@@ -212,6 +216,27 @@ struct SearchEngineConfig {
     float topologyEvidenceWeight = 0.02f;
     float topologySparseDenseAlpha = 0.5f;
     float topologyMinRouteScore = 0.0f;
+
+    /// Held-out, construction-specific miss-risk observation. An empty fingerprint or a zero
+    /// observation count leaves route risk unavailable rather than treating it as zero loss.
+    struct TopologyRouteRiskCalibration {
+        std::string constructionFingerprint;
+        size_t calibrationQueries = 0;
+        size_t protectedCandidates = 0;
+        size_t missedProtectedCandidates = 0;
+        size_t minCalibrationQueries = 1;
+        size_t maxMissesPerThousand = 0;
+        float minBoundaryMargin = 0.0f;
+        size_t minSeedHits = 1;
+    } topologyRouteRiskCalibration;
+
+    /// Trial-route work budget. Every zero-valued limit means that the certificate is unavailable;
+    /// it is not an unlimited budget.
+    struct TopologyRouteWorkBudget {
+        size_t maxRowsVisited = 0;
+        size_t maxExactDistanceEvaluations = 0;
+        size_t maxAnnCandidates = 0;
+    } topologyRouteWorkBudget;
 
     /// Where topology candidates come from at search time.
     /// Clusters: seed → cluster router → member expansion (legacy).
@@ -454,7 +479,7 @@ struct SearchEngineConfig {
     /// Topology routing is an execution policy, not a corpus-derived relevance
     /// weight, so tuning must not silently change the product default or an
     /// explicit override.
-    void applyTopologyPolicyFrom(const SearchEngineConfig& source) noexcept {
+    void applyTopologyPolicyFrom(const SearchEngineConfig& source) {
         topologyRoutingMode = source.topologyRoutingMode;
         topologyVectorPolicy = source.topologyVectorPolicy;
         topologyRouteScoringMode = source.topologyRouteScoringMode;
@@ -470,6 +495,8 @@ struct SearchEngineConfig {
         topologyEvidenceWeight = source.topologyEvidenceWeight;
         topologySparseDenseAlpha = source.topologySparseDenseAlpha;
         topologyMinRouteScore = source.topologyMinRouteScore;
+        topologyRouteRiskCalibration = source.topologyRouteRiskCalibration;
+        topologyRouteWorkBudget = source.topologyRouteWorkBudget;
         topologyExpansionSource = source.topologyExpansionSource;
         topologyGraphNeighborMinScore = source.topologyGraphNeighborMinScore;
         topologyGraphNeighborReciprocalOnly = source.topologyGraphNeighborReciprocalOnly;
@@ -478,7 +505,7 @@ struct SearchEngineConfig {
 
     /// Reapply operator-selected execution policies after a corpus tuner replaces relevance
     /// weights. These switches define which implementation runs and are not tuning outputs.
-    void applyExecutionPolicyFrom(const SearchEngineConfig& source) noexcept {
+    void applyExecutionPolicyFrom(const SearchEngineConfig& source) {
         applyTopologyPolicyFrom(source);
     }
 };

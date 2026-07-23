@@ -47,6 +47,9 @@ struct TopologyRoutingDebugOptions {
     bool includeDetailedTrace = false;
 };
 
+void recordTopologyRouteAdmissionDebug(SearchResponse& response,
+                                       const TopologyRoutingSessionResult& session);
+
 void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConfig& config,
                                 SearchEngineConfig::TopologyRoutingMode mode,
                                 const TopologyRoutingSessionResult& session,

@@ -2,6 +2,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
@@ -109,6 +110,7 @@ TEST_CASE("SimeonLexicalBackend default config uses SabSmooth", "[search][simeon
     CHECK(cfg.build_doc_chunk_bytes == 16ULL * 1024ULL);
     CHECK(cfg.build_doc_max_chunks == 4u);
     CHECK_FALSE(cfg.fragment_geometry_enabled); // retired by default; opt-in only
+    CHECK(cfg.fragment_encoder_profile == SimeonLexicalBackend::FragmentEncoderProfile::CorpusPmi);
     CHECK(cfg.fragment_geometry_min_corpus_docs == 1000u);
     CHECK(cfg.fragment_geometry_max_docs == 20'000u);
     CHECK(cfg.fragment_geometry_max_corpus_bytes == 64ULL * 1024ULL * 1024ULL);
@@ -291,6 +293,31 @@ TEST_CASE("SimeonLexicalBackend skips fragment geometry below the default corpus
     REQUIRE(backend.buildAsync(corpus.repo).has_value());
     REQUIRE(waitReady(backend, std::chrono::seconds(10)));
     CHECK_FALSE(backend.fragmentGeometryReady());
+}
+
+TEST_CASE("SimeonLexicalBackend fixed-hash fragments do not require a PMI vocabulary",
+          "[search][simeon][catch2]") {
+    auto corpus = makeCorpus({
+        {"hash_a", "alpha beta gamma delta. alpha beta."},
+        {"hash_b", "beta gamma epsilon zeta. beta epsilon."},
+        {"hash_c", "omega sigma tau upsilon. omega tau."},
+    });
+
+    SimeonLexicalBackend::Config cfg;
+    cfg.fragment_geometry_enabled = true;
+    cfg.fragment_geometry_min_corpus_docs = 1;
+    cfg.fragment_encoder_profile = SimeonLexicalBackend::FragmentEncoderProfile::FixedHash384;
+    SimeonLexicalBackend backend(cfg);
+
+    REQUIRE(backend.buildAsync(corpus.repo).has_value());
+    REQUIRE(waitReady(backend, std::chrono::seconds(10)));
+    CHECK(backend.fragmentGeometryReady());
+    CHECK(backend.fragmentEmbeddingSpaceIdentity() == "simeon-v1-384");
+
+    auto scores = backend.score("alpha beta", corpus.docIds);
+    REQUIRE(scores.has_value());
+    REQUIRE(scores.value().size() == corpus.docIds.size());
+    CHECK(std::isfinite(scores.value().front()));
 }
 
 TEST_CASE("SimeonLexicalBackend score returns 0 for unknown doc_ids", "[search][simeon][catch2]") {

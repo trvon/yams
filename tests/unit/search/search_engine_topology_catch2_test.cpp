@@ -70,6 +70,7 @@ public:
     size_t getEmbeddingDimension() const override { return embedding_.size(); }
     size_t getMaxSequenceLength() const override { return 512; }
     std::string getBackendName() const override { return "fixed-test"; }
+    std::string getEmbeddingSpaceIdentity() const override { return "test-space-v1"; }
     bool isAvailable() const override { return true; }
     vector::GenerationStats getStats() const override { return {}; }
     void resetStats() override {}
@@ -167,6 +168,7 @@ yams::topology::TopologyArtifactBatch buildTwoClusterTopologyBatch() {
     yams::topology::TopologyBuildConfig topologyConfig;
     topologyConfig.reciprocalOnly = true;
     topologyConfig.minEdgeScore = 0.5;
+    topologyConfig.embeddingSpaceIdentity = "test-space-v1";
     std::vector<yams::topology::TopologyDocumentInput> topologyDocs{
         {.documentHash = "x1",
          .filePath = "/tmp/x1.txt",
@@ -279,10 +281,9 @@ SearchEngineConfig topologyRoutingTestConfig(bool enabled) {
     return config;
 }
 
-Result<SearchResponse>
-runTopologySearch(TopologySearchFixture& fix,
-                  const std::shared_ptr<vector::EmbeddingGenerator>& generator,
-                  const SearchEngineConfig& config, std::size_t limit) {
+Result<SearchResponse> runTopologySearch(
+    TopologySearchFixture& fix, const std::shared_ptr<vector::EmbeddingGenerator>& generator,
+    const SearchEngineConfig& config, std::size_t limit, std::string query = "unmatched query") {
     SearchExecutionContext context = defaultSearchExecutionContext();
     context.freshness.lexicalReady = true;
     context.freshness.vectorReady = true;
@@ -293,13 +294,31 @@ runTopologySearch(TopologySearchFixture& fix,
     SearchEngine engine(fix.repo, fix.vectorDb, generator, fix.kgStore, config);
     SearchParams params;
     params.limit = limit;
-    return engine.searchWithResponse("unmatched query", params);
+    return engine.searchWithResponse(query, params);
+}
+
+void configureCertifiedTopologyRoute(SearchEngineConfig& config,
+                                     std::string constructionFingerprint,
+                                     std::size_t maxRowsVisited = 2) {
+    config.topologyRouteRiskCalibration.constructionFingerprint =
+        std::move(constructionFingerprint);
+    config.topologyRouteRiskCalibration.calibrationQueries = 50;
+    config.topologyRouteRiskCalibration.protectedCandidates = 100;
+    config.topologyRouteRiskCalibration.missedProtectedCandidates = 0;
+    config.topologyRouteRiskCalibration.minCalibrationQueries = 30;
+    config.topologyRouteRiskCalibration.maxMissesPerThousand = 10;
+    config.topologyRouteRiskCalibration.minBoundaryMargin = 0.0F;
+    config.topologyRouteRiskCalibration.minSeedHits = 1;
+
+    config.topologyRouteWorkBudget.maxRowsVisited = maxRowsVisited;
+    config.topologyRouteWorkBudget.maxExactDistanceEvaluations = 2;
+    config.topologyRouteWorkBudget.maxAnnCandidates = 2;
 }
 
 } // namespace
 
-TEST_CASE("SearchEngine topology routing narrows weak-query vector candidates",
-          "[search][topology][catch2]") {
+TEST_CASE("SearchEngine topology refuses uncertified weak-query narrowing",
+          "[search][topology][admission][catch2]") {
     TopologySearchFixture fix{vector::VectorSearchEngine::Vec0L2};
     fix.addDocument("x1", "alpha one", {1.0F, 0.0F});
     fix.addDocument("x2", "alpha two", {0.9F, 0.1F});
@@ -377,14 +396,18 @@ TEST_CASE("SearchEngine topology routing narrows weak-query vector candidates",
     CHECK((debug.at("topology_weak_query_load_succeeded") == "1"));
     CHECK(debug.at("topology_weak_query_skip_reason").empty());
     CHECK((debug.at("topology_weak_query_applied") == "1"));
-    CHECK((debug.at("topology_weak_query_narrow_applied") == "1"));
+    CHECK((debug.at("topology_route_narrow_proposed") == "1"));
+    CHECK((debug.at("topology_route_admission_eligible") == "0"));
+    CHECK((debug.at("topology_route_admission_denial_reason") ==
+           "protected_fibers_representation_unavailable"));
+    CHECK((debug.at("topology_weak_query_narrow_applied") == "0"));
     CHECK((debug.at("topology_weak_query_allowed_candidates") == "2"));
-    CHECK((debug.at("topology_vector_filter_applied") == "1"));
+    CHECK((debug.at("topology_vector_filter_applied") == "0"));
     CHECK((debug.at("topology_vector_filter_fallback") == "0"));
-    CHECK((debug.at("topology_vector_allowed_set_ann_applied") == "1"));
+    CHECK((debug.at("topology_vector_allowed_set_ann_applied") == "0"));
     CHECK((debug.at("topology_vector_allowed_set_ann_fallback") == "0"));
     CHECK_FALSE(debug.contains("topology_vector_partition_ann_applied"));
-    CHECK((debug.at("topology_vector_filter_matched") == "2"));
+    CHECK((debug.at("topology_vector_filter_matched") == "0"));
     CHECK((debug.at("topology_vector_filter_removed") == "0"));
     CHECK_FALSE(debug.contains("topology_vector_scores_reused"));
     CHECK_FALSE(debug.contains("topology_vector_scores_reused_count"));
@@ -406,8 +429,8 @@ TEST_CASE("SearchEngine topology routing narrows weak-query vector candidates",
     CHECK((cachedResponse.value().debugStats.at("topology_snapshot_cache_hit") == "1"));
 }
 
-TEST_CASE("SearchEngine topology routes Simeon PQ over allowed documents",
-          "[search][topology][spq][catch2]") {
+TEST_CASE("SearchEngine keeps Simeon PQ global while route admission is unavailable",
+          "[search][topology][spq][admission][catch2]") {
     TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
     seedTopologyDocuments(fix);
     seedTwoClusterTopology(fix);
@@ -424,21 +447,159 @@ TEST_CASE("SearchEngine topology routes Simeon PQ over allowed documents",
 
     const auto& debug = response.value().debugStats;
     CHECK(debug.at("topology_weak_query_allowed_candidates") == "2");
-    CHECK(debug.at("topology_vector_allowed_set_ann_applied") == "1");
+    CHECK(debug.at("topology_route_narrow_proposed") == "1");
+    CHECK(debug.at("topology_route_admission_eligible") == "0");
+    CHECK(debug.at("topology_route_admission_denial_reason") ==
+          "protected_fibers_representation_unavailable");
+    CHECK(debug.at("topology_vector_allowed_set_ann_applied") == "0");
     CHECK(debug.at("topology_vector_allowed_set_ann_fallback") == "0");
-    CHECK(debug.at("topology_weak_query_narrow_applied") == "1");
+    CHECK(debug.at("topology_weak_query_narrow_applied") == "0");
     CHECK(debug.at("vector_search_rows_visited_status") == "observed");
     CHECK(debug.at("vector_search_exact_distance_evaluations_status") == "observed");
     CHECK(debug.at("vector_search_ann_candidate_budget_status") == "observed");
-    CHECK(debug.at("vector_search_ann_candidate_budget_actual") == "2");
-    CHECK(debug.at("vector_search_rows_visited_actual") == "2");
-    CHECK(debug.at("vector_search_exact_distance_evaluations_actual") == "2");
+    CHECK(debug.at("vector_search_ann_candidate_budget_actual") == "4");
+    CHECK(debug.at("vector_search_rows_visited_actual") == "4");
+    CHECK(debug.at("vector_search_exact_distance_evaluations_actual") == "4");
     REQUIRE_FALSE(response.value().results.empty());
-    CHECK(response.value().results.front().document.sha256Hash == "y2");
 }
 
-TEST_CASE("SearchEngine topology balances query-ranked members across selected routes",
-          "[search][topology][spq][balance][catch2]") {
+TEST_CASE("SearchEngine commits hard narrowing when every theorem certificate passes",
+          "[search][topology][admission][work][catch2]") {
+    TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
+    seedTopologyDocuments(fix);
+    auto batch = buildTwoClusterTopologyBatch();
+    const auto constructionFingerprint = topologyRoutingConstructionFingerprint(batch);
+    yams::topology::MetadataKgTopologyArtifactStore topologyStore(fix.repo, fix.kgStore);
+    REQUIRE(topologyStore.storeBatch(batch).has_value());
+
+    auto generator = makeFixedGenerator({0.0F, 1.0F});
+    auto config = topologyRoutingTestConfig(true);
+    configureCertifiedTopologyRoute(config, constructionFingerprint);
+
+    auto response = runTopologySearch(fix, generator, config, 4, "omega");
+    REQUIRE(response.has_value());
+    const auto& debug = response.value().debugStats;
+    CHECK(debug.at("topology_route_coordinate_space_identity") == "test-space-v1");
+    CHECK(debug.at("topology_route_coordinate_space_alignment_status") == "satisfied");
+    CHECK(debug.at("topology_route_protected_relation_coverage_status") == "satisfied");
+    CHECK(debug.at("topology_route_protected_fibers_represented_status") == "satisfied");
+    CHECK(debug.at("topology_route_certificate_saturates_protected_fibers_status") == "satisfied");
+    CHECK(debug.at("topology_route_risk_status") == "satisfied");
+    CHECK(debug.at("topology_route_work_status") == "satisfied");
+    CHECK(debug.at("topology_route_cover_materialization_status") == "satisfied");
+    CHECK(debug.at("topology_route_admission_eligible") == "1");
+    CHECK(debug.at("topology_weak_query_narrow_applied") == "1");
+    CHECK(debug.at("topology_vector_allowed_set_ann_applied") == "1");
+    CHECK(debug.at("topology_vector_global_fill_count") == "0");
+    REQUIRE(response.value().results.size() == 2U);
+    CHECK(std::ranges::all_of(response.value().results, [](const auto& result) {
+        return result.document.sha256Hash == "y1" || result.document.sha256Hash == "y2";
+    }));
+}
+
+TEST_CASE("SearchEngine discards a trial route whose observed vector work exceeds its budget",
+          "[search][topology][admission][work][fallback][catch2]") {
+    TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
+    seedTopologyDocuments(fix);
+    auto batch = buildTwoClusterTopologyBatch();
+    const auto constructionFingerprint = topologyRoutingConstructionFingerprint(batch);
+    yams::topology::MetadataKgTopologyArtifactStore topologyStore(fix.repo, fix.kgStore);
+    REQUIRE(topologyStore.storeBatch(batch).has_value());
+
+    auto generator = makeFixedGenerator({0.0F, 1.0F});
+    auto config = topologyRoutingTestConfig(true);
+    configureCertifiedTopologyRoute(config, constructionFingerprint, 1);
+
+    auto response = runTopologySearch(fix, generator, config, 4, "omega");
+    REQUIRE(response.has_value());
+    const auto& debug = response.value().debugStats;
+    CHECK(debug.at("topology_route_work_status") == "violated");
+    CHECK(debug.at("topology_route_admission_eligible") == "0");
+    CHECK(debug.at("topology_route_admission_denial_reason") == "work_budget_violated");
+    CHECK(debug.at("topology_weak_query_narrow_applied") == "0");
+    CHECK(debug.at("topology_vector_filter_fallback") == "1");
+    CHECK(response.value().results.size() == 4U);
+}
+
+TEST_CASE("SearchEngine rejects a relation cover that cuts an observed protected pair",
+          "[search][topology][admission][pairs][fallback][catch2]") {
+    TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
+    seedTopologyDocuments(fix);
+    auto batch = buildTwoClusterTopologyBatch();
+    auto selectedChart = std::ranges::find_if(batch.clusters, [](const auto& cluster) {
+        return std::ranges::find(cluster.memberDocumentHashes, "y1") !=
+               cluster.memberDocumentHashes.end();
+    });
+    REQUIRE(selectedChart != batch.clusters.end());
+    REQUIRE(selectedChart->protectedPairCount > 0);
+    selectedChart->preservedProtectedPairCount = 0;
+    const auto constructionFingerprint = topologyRoutingConstructionFingerprint(batch);
+    yams::topology::MetadataKgTopologyArtifactStore topologyStore(fix.repo, fix.kgStore);
+    REQUIRE(topologyStore.storeBatch(batch).has_value());
+
+    auto generator = makeFixedGenerator({0.0F, 1.0F});
+    auto config = topologyRoutingTestConfig(true);
+    configureCertifiedTopologyRoute(config, constructionFingerprint);
+
+    auto response = runTopologySearch(fix, generator, config, 4, "omega");
+    REQUIRE(response.has_value());
+    const auto& debug = response.value().debugStats;
+    CHECK(debug.at("topology_route_protected_relation_coverage_status") == "violated");
+    CHECK(debug.at("topology_route_admission_denial_reason") ==
+          "protected_relation_coverage_violated");
+    CHECK(debug.at("topology_route_work_status") == "unavailable");
+    CHECK(debug.at("topology_weak_query_narrow_applied") == "0");
+    CHECK(response.value().results.size() == 4U);
+}
+
+TEST_CASE("SearchEngine rejects route calibration from a different topology construction",
+          "[search][topology][admission][risk][fallback][catch2]") {
+    TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
+    seedTopologyDocuments(fix);
+    auto batch = buildTwoClusterTopologyBatch();
+    yams::topology::MetadataKgTopologyArtifactStore topologyStore(fix.repo, fix.kgStore);
+    REQUIRE(topologyStore.storeBatch(batch).has_value());
+
+    auto generator = makeFixedGenerator({0.0F, 1.0F});
+    auto config = topologyRoutingTestConfig(true);
+    configureCertifiedTopologyRoute(config, "different-construction");
+
+    auto response = runTopologySearch(fix, generator, config, 4, "omega");
+    REQUIRE(response.has_value());
+    const auto& debug = response.value().debugStats;
+    CHECK(debug.at("topology_route_protected_relation_coverage_status") == "satisfied");
+    CHECK(debug.at("topology_route_risk_status") == "unavailable");
+    CHECK(debug.at("topology_route_admission_denial_reason") ==
+          "protected_fibers_representation_unavailable");
+    CHECK(debug.at("topology_weak_query_narrow_applied") == "0");
+    CHECK(response.value().results.size() == 4U);
+}
+
+TEST_CASE("SearchEngine does not infer protected fiber representation from bounded miss risk",
+          "[search][topology][admission][fiber][fallback][catch2]") {
+    TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
+    seedTopologyDocuments(fix);
+    auto batch = buildTwoClusterTopologyBatch();
+    const auto constructionFingerprint = topologyRoutingConstructionFingerprint(batch);
+    yams::topology::MetadataKgTopologyArtifactStore topologyStore(fix.repo, fix.kgStore);
+    REQUIRE(topologyStore.storeBatch(batch).has_value());
+
+    auto generator = makeFixedGenerator({0.0F, 1.0F});
+    auto config = topologyRoutingTestConfig(true);
+    configureCertifiedTopologyRoute(config, constructionFingerprint);
+    config.topologyRouteRiskCalibration.missedProtectedCandidates = 1;
+
+    auto response = runTopologySearch(fix, generator, config, 4, "omega");
+    REQUIRE(response.has_value());
+    const auto& debug = response.value().debugStats;
+    CHECK(debug.at("topology_route_risk_status") == "satisfied");
+    CHECK(debug.at("topology_route_protected_fibers_represented_status") == "violated");
+    CHECK(debug.at("topology_route_admission_denial_reason") == "protected_fibers_unrepresented");
+    CHECK(debug.at("topology_weak_query_narrow_applied") == "0");
+}
+
+TEST_CASE("SearchEngine keeps multi-route proposals global until admitted",
+          "[search][topology][spq][balance][admission][catch2]") {
     TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
     seedTopologyDocuments(fix);
     seedTwoClusterTopology(fix);
@@ -461,12 +622,14 @@ TEST_CASE("SearchEngine topology balances query-ranked members across selected r
     for (const auto& result : response.value().results) {
         resultHashes.insert(result.document.sha256Hash);
     }
-    CHECK((resultHashes.contains("x1") || resultHashes.contains("x2")));
+    CHECK_FALSE((resultHashes.contains("x1") || resultHashes.contains("x2")));
     CHECK((resultHashes.contains("y1") || resultHashes.contains("y2")));
+    CHECK(response.value().debugStats.at("topology_route_narrow_proposed") == "1");
+    CHECK(response.value().debugStats.at("topology_route_admission_eligible") == "0");
 }
 
-TEST_CASE("SearchEngine topology keeps confident Simeon routes bounded without global fill",
-          "[search][topology][spq][fill][catch2]") {
+TEST_CASE("SearchEngine does not bound Simeon to an uncertified route",
+          "[search][topology][spq][fill][admission][catch2]") {
     TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
     seedTopologyDocuments(fix);
     seedTwoClusterTopology(fix);
@@ -483,17 +646,17 @@ TEST_CASE("SearchEngine topology keeps confident Simeon routes bounded without g
 
     auto response = runTopologySearch(fix, generator, config, 4);
     REQUIRE(response.has_value());
-    CHECK(response.value().results.size() == 2U);
+    CHECK(response.value().results.size() == 4U);
     CHECK(response.value().debugStats.at("topology_vector_global_fill_count") == "0");
-    CHECK(response.value().debugStats.at("vector_search_ann_candidate_budget_actual") == "2");
+    CHECK(response.value().debugStats.at("vector_search_ann_candidate_budget_actual") == "4");
+    CHECK(response.value().debugStats.at("topology_route_admission_eligible") == "0");
 }
 
-TEST_CASE("SearchEngine topology fills unused routed Vec0 slots from global ANN",
-          "[search][topology][vec0][fill][catch2]") {
+TEST_CASE("SearchEngine uses global Vec0 directly for an uncertified route",
+          "[search][topology][vec0][fill][admission][catch2]") {
     TopologySearchFixture fix{vector::VectorSearchEngine::Vec0L2};
     seedTopologyDocuments(fix);
     seedTwoClusterTopology(fix);
-    REQUIRE(fix.vectorDb->buildIndex());
 
     auto generator = makeFixedGenerator({0.0F, 1.0F});
     auto config = topologyRoutingTestConfig(true);
@@ -507,7 +670,8 @@ TEST_CASE("SearchEngine topology fills unused routed Vec0 slots from global ANN"
     auto response = runTopologySearch(fix, generator, config, 4);
     REQUIRE(response.has_value());
     CHECK(response.value().results.size() == 4U);
-    CHECK(response.value().debugStats.at("topology_vector_global_fill_count") == "2");
+    CHECK(response.value().debugStats.at("topology_vector_global_fill_count") == "0");
+    CHECK(response.value().debugStats.at("topology_route_admission_eligible") == "0");
 }
 
 TEST_CASE("SearchEngine topology abstains from narrowing at an ambiguous route boundary",
@@ -539,13 +703,14 @@ TEST_CASE("SearchEngine topology abstains from narrowing at an ambiguous route b
     CHECK(debug.at("vector_search_ann_candidate_budget_actual") == "4");
 }
 
-TEST_CASE("SearchEngine topology shadow annotates global results without removing candidates",
+TEST_CASE("SearchEngine topology shadow leaves global ranking and scores unchanged",
           "[search][topology][shadow][catch2]") {
     yams::test::ScopedEnvVar stageTrace("YAMS_SEARCH_STAGE_TRACE", std::optional<std::string>("1"));
 
-    TopologySearchFixture fix{vector::VectorSearchEngine::Vec0L2};
+    TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
     seedTopologyDocuments(fix);
     seedTwoClusterTopology(fix);
+    REQUIRE(fix.vectorDb->buildIndex());
     auto generator = makeFixedGenerator({0.0F, 1.0F});
 
     SearchExecutionContext context = defaultSearchExecutionContext();
@@ -563,6 +728,9 @@ TEST_CASE("SearchEngine topology shadow annotates global results without removin
     shadowConfig.topologyVectorPolicy = SearchEngineConfig::TopologyVectorPolicy::Shadow;
     shadowConfig.topologySparseDenseAlpha = 0.0F;
     shadowConfig.topologyNarrowMinBoundaryMargin = 0.0F;
+    shadowConfig.topologyRouteWorkBudget.maxRowsVisited = 4;
+    shadowConfig.topologyRouteWorkBudget.maxExactDistanceEvaluations = 4;
+    shadowConfig.topologyRouteWorkBudget.maxAnnCandidates = 4;
     SearchEngine shadowEngine(fix.repo, fix.vectorDb, generator, fix.kgStore, shadowConfig);
 
     SearchParams params;
@@ -579,7 +747,7 @@ TEST_CASE("SearchEngine topology shadow annotates global results without removin
         scoreChanged = scoreChanged ||
                        shadow.value().results[index].score != global.value().results[index].score;
     }
-    CHECK(scoreChanged);
+    CHECK_FALSE(scoreChanged);
 
     const auto& debug = shadow.value().debugStats;
     CHECK(debug.at("topology_vector_policy") == "shadow");
@@ -589,6 +757,11 @@ TEST_CASE("SearchEngine topology shadow annotates global results without removin
     CHECK(debug.at("topology_shadow_removed_candidates") == "2");
     CHECK(debug.at("topology_shadow_retained_candidate_doc_ids") == "y1\ty2");
     CHECK(debug.at("topology_shadow_removed_candidate_doc_ids") == "x1\tx2");
+    CHECK(debug.at("topology_route_work_status") == "satisfied");
+    CHECK(debug.at("topology_route_work_observed") == "1");
+    CHECK(debug.at("topology_route_work_rows_visited_actual") == "2");
+    CHECK(debug.at("topology_route_work_exact_distance_evaluations_actual") == "2");
+    CHECK(debug.at("topology_route_work_ann_candidate_budget_actual") == "2");
     CHECK(debug.at("topology_weak_query_applied") == "0");
     CHECK(debug.at("topology_weak_query_narrow_applied") == "0");
     CHECK(debug.at("topology_weak_query_added_candidates") == "0");
@@ -596,7 +769,96 @@ TEST_CASE("SearchEngine topology shadow annotates global results without removin
     CHECK(debug.at("topology_vector_allowed_set_ann_applied") == "0");
 }
 
-TEST_CASE("Evidence candidates keep topology non-destructive under a shadow policy",
+TEST_CASE("SearchEngine topology augmentation materializes query-scored rescue candidates",
+          "[search][topology][candidate-rescue][catch2]") {
+    yams::test::ScopedEnvVar stageTrace("YAMS_SEARCH_STAGE_TRACE", std::optional<std::string>("1"));
+
+    for (const auto searchEngine : {vector::VectorSearchEngine::SimeonPqAdc,
+                                    vector::VectorSearchEngine::ExactScan}) {
+        CAPTURE(searchEngine);
+        TopologySearchFixture fix{searchEngine};
+        seedTopologyDocuments(fix);
+        seedTwoClusterTopology(fix);
+        REQUIRE(fix.vectorDb->buildIndex());
+        auto generator = makeFixedGenerator({0.0F, 1.0F});
+
+        auto config = topologyRoutingTestConfig(true);
+        config.topologyRoutingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+        config.topologyVectorPolicy = SearchEngineConfig::TopologyVectorPolicy::Augment;
+        config.topologySparseDenseAlpha = 1.0F;
+        config.topologyNarrowMinBoundaryMargin = 0.0F;
+        config.textMaxResults = 1;
+        config.vectorMaxResults = 1;
+        config.topologyMaxDocs = 2;
+        config.similarityThreshold = -1.0F;
+
+        auto response = runTopologySearch(fix, generator, config, 4, "alpha one");
+        REQUIRE(response.has_value());
+
+        std::vector<std::string> resultHashes;
+        for (const auto& result : response.value().results) {
+            resultHashes.push_back(result.document.sha256Hash);
+        }
+        CHECK(std::ranges::find(resultHashes, "x2") != resultHashes.end());
+
+        const auto& debug = response.value().debugStats;
+        CHECK(debug.at("topology_vector_policy") == "augment");
+        CHECK(debug.at("topology_candidate_rescue_attempted") == "1");
+        CHECK(debug.at("topology_candidate_rescue_applied") == "1");
+        CHECK(debug.at("topology_candidate_rescue_added_candidates") == "2");
+        CHECK(debug.at("topology_candidate_rescue_novel_candidates") == "1");
+        CHECK(debug.at("topology_candidate_rescue_evidence_rescues") == "1");
+        CHECK(debug.at("topology_candidate_rescue_added_candidate_hashes") == "x2\tx1");
+        CHECK(debug.at("topology_candidate_rescue_added_candidate_doc_ids") == "x2\tx1");
+        CHECK(debug.at("topology_candidate_rescue_novel_candidate_doc_ids") == "x2");
+        CHECK(debug.at("topology_candidate_rescue_evidence_rescue_doc_ids") == "x1");
+    }
+}
+
+TEST_CASE("SearchEngine shadow policy measures candidate rescue without changing results",
+          "[search][topology][candidate-rescue][shadow][catch2]") {
+    yams::test::ScopedEnvVar stageTrace("YAMS_SEARCH_STAGE_TRACE", std::optional<std::string>("1"));
+
+    TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
+    seedTopologyDocuments(fix);
+    seedTwoClusterTopology(fix);
+    REQUIRE(fix.vectorDb->buildIndex());
+    auto generator = makeFixedGenerator({0.0F, 1.0F});
+
+    auto config = topologyRoutingTestConfig(true);
+    config.topologyRoutingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    config.topologyVectorPolicy = SearchEngineConfig::TopologyVectorPolicy::Shadow;
+    config.topologySparseDenseAlpha = 1.0F;
+    config.topologyNarrowMinBoundaryMargin = 0.0F;
+    config.textMaxResults = 1;
+    config.vectorMaxResults = 1;
+    config.topologyMaxDocs = 2;
+    config.similarityThreshold = -1.0F;
+
+    auto response = runTopologySearch(fix, generator, config, 4, "alpha one");
+    REQUIRE(response.has_value());
+
+    std::vector<std::string> resultHashes;
+    for (const auto& result : response.value().results) {
+        resultHashes.push_back(result.document.sha256Hash);
+    }
+    CHECK(std::ranges::find(resultHashes, "x2") == resultHashes.end());
+
+    const auto& debug = response.value().debugStats;
+    CHECK(debug.at("topology_vector_policy") == "shadow");
+    CHECK(debug.at("topology_candidate_rescue_attempted") == "1");
+    CHECK(debug.at("topology_candidate_rescue_applied") == "0");
+    CHECK(debug.at("topology_candidate_rescue_added_candidates") == "2");
+    CHECK(debug.at("topology_candidate_rescue_novel_candidates") == "1");
+    CHECK(debug.at("topology_candidate_rescue_evidence_rescues") == "1");
+    CHECK(debug.at("topology_candidate_rescue_added_candidate_hashes") == "x2\tx1");
+    CHECK(debug.at("topology_candidate_rescue_added_candidate_doc_ids") == "x2\tx1");
+    CHECK(debug.at("topology_candidate_rescue_novel_candidate_doc_ids") == "x2");
+    CHECK(debug.at("topology_candidate_rescue_evidence_rescue_doc_ids") == "x1");
+    CHECK(debug.at("topology_candidate_rescue_exact_scored_candidate_doc_ids") == "x1\tx2");
+}
+
+TEST_CASE("Evidence pipeline receives no topology adjustments under a shadow policy",
           "[search][topology][evidence_pipeline][catch2]") {
     TopologySearchFixture fix{vector::VectorSearchEngine::Vec0L2};
     seedTopologyDocuments(fix);
@@ -649,11 +911,11 @@ TEST_CASE("Evidence candidates keep topology non-destructive under a shadow poli
     CHECK_FALSE(debug.contains("topology_shadow_removed_candidate_doc_ids"));
     CHECK_FALSE(debug.contains("trace_stage_summary_json"));
     CHECK_FALSE(debug.contains("trace_fusion_source_summary_json"));
-    CHECK(std::stoull(debug.at("candidate_pipeline_topology_annotated_candidates")) > 0);
+    CHECK(debug.at("candidate_pipeline_topology_annotated_candidates") == "0");
 }
 
-TEST_CASE("Hybrid topology routing does not copy unrelated lexical hits into vector narrowing",
-          "[search][topology][narrowing][catch2]") {
+TEST_CASE("Hybrid topology keeps lexical hits while uncertified narrowing falls back",
+          "[search][topology][narrowing][admission][catch2]") {
     TopologySearchFixture fix;
     seedTopologyDocuments(fix);
     fix.addDocument("lexical-only", "unique needle", {1.0F, 0.0F});
@@ -678,9 +940,11 @@ TEST_CASE("Hybrid topology routing does not copy unrelated lexical hits into vec
     REQUIRE(response.has_value());
 
     const auto& debug = response.value().debugStats;
-    REQUIRE(debug.at("topology_weak_query_narrow_applied") == "1");
+    REQUIRE(debug.at("topology_weak_query_narrow_applied") == "0");
+    CHECK(debug.at("topology_route_narrow_proposed") == "1");
+    CHECK(debug.at("topology_route_admission_eligible") == "0");
     CHECK(debug.at("topology_weak_query_allowed_candidates") == "2");
-    CHECK(debug.at("topology_vector_filter_applied") == "1");
+    CHECK(debug.at("topology_vector_filter_applied") == "0");
     CHECK_FALSE(debug.contains("topology_vector_scores_reused"));
     CHECK_FALSE(debug.contains("topology_member_rerank_distance_evaluations_actual"));
 
@@ -864,8 +1128,8 @@ TEST_CASE("SearchEngine weak-only topology routing skips strong tier-1 queries",
     CHECK((debug.at("topology_weak_query_added_candidates") == "0"));
 }
 
-TEST_CASE("SearchEngine hybrid-assist keeps outside-route lexical hits without vector scoring",
-          "[search][topology][catch2]") {
+TEST_CASE("SearchEngine global fallback vector-scores outside-route lexical hits",
+          "[search][topology][admission][catch2]") {
     TopologySearchFixture fix;
     seedTopologyDocuments(fix);
     fix.addDocument("z1", "alpha outside route", {0.0F, 1.0F});
@@ -895,14 +1159,16 @@ TEST_CASE("SearchEngine hybrid-assist keeps outside-route lexical hits without v
     CHECK((debug.at("topology_weak_query_load_succeeded") == "1"));
     CHECK(debug.at("topology_weak_query_skip_reason").empty());
     CHECK((debug.at("topology_weak_query_applied") == "1"));
-    CHECK((debug.at("topology_weak_query_narrow_applied") == "1"));
+    CHECK((debug.at("topology_weak_query_narrow_applied") == "0"));
+    CHECK((debug.at("topology_route_narrow_proposed") == "1"));
+    CHECK((debug.at("topology_route_admission_eligible") == "0"));
     CHECK((debug.at("topology_weak_query_allowed_candidates") == "2"));
 
     const auto outsideRoute =
         std::find_if(response.value().results.begin(), response.value().results.end(),
                      [](const auto& result) { return result.document.sha256Hash == "z1"; });
     REQUIRE((outsideRoute != response.value().results.end()));
-    CHECK_FALSE(outsideRoute->vectorScore.has_value());
+    CHECK(outsideRoute->vectorScore.has_value());
 
     const bool hasTopologyVectorScore = std::any_of(
         response.value().results.begin(), response.value().results.end(), [](const auto& result) {
@@ -1063,6 +1329,8 @@ TEST_CASE("Topology routing options preserve the typed product configuration",
     config.topologyMaxDocs = 17;
     config.topologySparseDenseAlpha = 0.65F;
     config.topologyMinRouteScore = 0.22F;
+    config.topologyRouteRiskCalibration.constructionFingerprint = "atlas-fingerprint";
+    config.topologyRouteWorkBudget.maxRowsVisited = 23;
     config.topologyGraphNeighborMinScore = 0.31F;
     config.topologyGraphNeighborReciprocalOnly = false;
 
@@ -1083,9 +1351,77 @@ TEST_CASE("Topology routing options preserve the typed product configuration",
     CHECK(options.maxDocs == 17U);
     CHECK(options.sparseDenseAlpha == Catch::Approx(0.65F));
     CHECK(options.minRouteScore == Catch::Approx(0.22F));
+    CHECK(options.routeRiskCalibration.constructionFingerprint == "atlas-fingerprint");
+    CHECK(options.routeWorkBudget.maxRowsVisited == 23U);
     CHECK(options.collectRouteMembership);
     CHECK(options.graphNeighborMinScore == Catch::Approx(0.31F));
     CHECK_FALSE(options.graphNeighborReciprocalOnly);
+}
+
+TEST_CASE("Topology route admission requires the protected-relation proof obligations",
+          "[search][topology][admission][catch2]") {
+    TopologyRouteAdmission admission;
+    CHECK_FALSE(admission.eligibleForNarrowing());
+    CHECK(admission.denialReason() == "protected_relation_coverage_unavailable");
+
+    admission.protectedRelationCoverage = TopologyProofObligationStatus::Satisfied;
+    admission.coordinateSpaceAlignment = TopologyProofObligationStatus::Satisfied;
+    admission.protectedFibersRepresented = TopologyProofObligationStatus::Satisfied;
+    admission.certificateSaturatesProtectedFibers = TopologyProofObligationStatus::Satisfied;
+    admission.routeRisk = TopologyProofObligationStatus::Satisfied;
+    admission.work = TopologyProofObligationStatus::Satisfied;
+    admission.coverMaterialization = TopologyProofObligationStatus::Satisfied;
+    admission.selectedCoverDocuments = 2;
+    admission.materializedCoverDocuments = 2;
+
+    CHECK(admission.eligibleForTrialNarrowing());
+    CHECK(admission.eligibleForNarrowing());
+    CHECK(admission.denialReason().empty());
+
+    admission.protectedRelationCoverage = TopologyProofObligationStatus::Violated;
+    CHECK_FALSE(admission.eligibleForTrialNarrowing());
+    CHECK_FALSE(admission.eligibleForNarrowing());
+    CHECK(admission.denialReason() == "protected_relation_coverage_violated");
+
+    admission.protectedRelationCoverage = TopologyProofObligationStatus::Satisfied;
+    admission.protectedFibersRepresented = TopologyProofObligationStatus::Unavailable;
+    CHECK(admission.denialReason() == "protected_fibers_representation_unavailable");
+
+    admission.protectedFibersRepresented = TopologyProofObligationStatus::Satisfied;
+    admission.certificateSaturatesProtectedFibers = TopologyProofObligationStatus::Violated;
+    CHECK(admission.denialReason() == "protected_fiber_saturation_violated");
+}
+
+TEST_CASE("Topology route certificate owns the theorem action boundary",
+          "[search][topology][certificate][catch2]") {
+    TopologyRouteCertificate certificate;
+    CHECK(certificate.action() == TopologyRouteAction::Global);
+    CHECK_FALSE(certificate.eligibleForTrialNarrowing());
+
+    certificate.allowedDocumentHashes.insert("document");
+    CHECK(certificate.action() == TopologyRouteAction::Augment);
+
+    auto& admission = certificate.admission;
+    admission.coordinateSpaceAlignment = TopologyProofObligationStatus::Satisfied;
+    admission.protectedRelationCoverage = TopologyProofObligationStatus::Satisfied;
+    admission.protectedFibersRepresented = TopologyProofObligationStatus::Satisfied;
+    admission.certificateSaturatesProtectedFibers = TopologyProofObligationStatus::Satisfied;
+    admission.routeRisk = TopologyProofObligationStatus::Satisfied;
+    admission.coverMaterialization = TopologyProofObligationStatus::Satisfied;
+    admission.selectedCoverDocuments = 1;
+    admission.materializedCoverDocuments = 1;
+
+    CHECK_FALSE(certificate.isConstructionBound());
+    CHECK_FALSE(certificate.eligibleForTrialNarrowing());
+    certificate.constructionFingerprint = "construction";
+    certificate.selectedCoverIds = {"cover"};
+    certificate.selectedProtectedRelationFiberIds = {"fiber"};
+    CHECK(certificate.isConstructionBound());
+    CHECK(certificate.eligibleForTrialNarrowing());
+    CHECK(certificate.action() == TopologyRouteAction::Augment);
+
+    admission.work = TopologyProofObligationStatus::Satisfied;
+    CHECK(certificate.action() == TopologyRouteAction::Narrow);
 }
 
 TEST_CASE("Topology routing session reports route confidence and seed coverage",
@@ -1161,8 +1497,8 @@ TEST_CASE("Topology routing expands through query-independent medoids",
     CHECK((session.routedCandidateHashes.size() <= session.acceptedRoutes));
 }
 
-TEST_CASE("Topology routing caps selected membership while preserving seed anchors",
-          "[search][topology][narrowing][catch2]") {
+TEST_CASE("Topology routing refuses hard narrowing without complete theorem evidence",
+          "[search][topology][narrowing][admission][catch2]") {
     TopologySearchFixture fix;
     seedTopologyDocuments(fix);
     seedTwoClusterTopology(fix);
@@ -1180,24 +1516,44 @@ TEST_CASE("Topology routing caps selected membership while preserving seed ancho
     const auto session = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
 
     REQUIRE(session.artifactAdmitted);
-    REQUIRE(session.narrowApplied);
+    REQUIRE(session.certificate.hasUsefulRoute());
+    CHECK_FALSE(session.certificate.admission.eligibleForNarrowing());
+    CHECK(session.certificate.admission.coverMaterialization ==
+          TopologyProofObligationStatus::Violated);
+    CHECK(session.certificate.admission.certificateSaturatesProtectedFibers ==
+          TopologyProofObligationStatus::Violated);
+    CHECK(session.certificate.admission.selectedCoverDocuments == 2U);
+    CHECK(session.certificate.admission.materializedCoverDocuments == 1U);
+    CHECK(session.certificate.admission.denialReason() == "cover_materialization_incomplete");
     CHECK(session.routedCandidateHashes.empty());
     CHECK(session.routedDocs == 1U);
-    CHECK(session.routeAllowedDocumentHashes.size() == 1U);
+    CHECK(session.certificate.allowedDocumentHashes.size() == 1U);
     CHECK(session.addedCandidates == 0U);
     CHECK(session.addedCandidateHashes.empty());
-    CHECK(session.routeAllowedDocumentHashes.contains("y2"));
-    CHECK_FALSE(session.routeAllowedDocumentHashes.contains("y1"));
+    CHECK(session.certificate.allowedDocumentHashes.contains("y2"));
+    CHECK_FALSE(session.certificate.allowedDocumentHashes.contains("y1"));
     CHECK(session.candidateStructureEvidence.size() == 1U);
     REQUIRE(session.candidateStructureEvidence.contains("y2"));
     CHECK(session.candidateStructureEvidence.at("y2").scaleAgreement == Catch::Approx(0.0F));
 
     request.options.maxDocs = 0;
     const auto unbounded = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
-    REQUIRE(unbounded.narrowApplied);
-    CHECK(unbounded.routeAllowedDocumentHashes.size() == 2U);
-    CHECK(unbounded.routeAllowedDocumentHashes.contains("y1"));
-    CHECK(unbounded.routeAllowedDocumentHashes.contains("y2"));
+    REQUIRE(unbounded.certificate.hasUsefulRoute());
+    CHECK_FALSE(unbounded.certificate.admission.eligibleForNarrowing());
+    CHECK(unbounded.certificate.admission.coverMaterialization ==
+          TopologyProofObligationStatus::Satisfied);
+    CHECK(unbounded.certificate.admission.certificateSaturatesProtectedFibers ==
+          TopologyProofObligationStatus::Satisfied);
+    CHECK(unbounded.certificate.admission.selectedCoverDocuments == 2U);
+    CHECK(unbounded.certificate.admission.materializedCoverDocuments == 2U);
+    CHECK(unbounded.certificate.admission.denialReason() ==
+          "protected_fibers_representation_unavailable");
+    CHECK(unbounded.certificate.allowedDocumentHashes.size() == 2U);
+    CHECK(unbounded.certificate.allowedDocumentHashes.contains("y1"));
+    CHECK(unbounded.certificate.allowedDocumentHashes.contains("y2"));
+    CHECK_FALSE(unbounded.certificate.constructionFingerprint.empty());
+    REQUIRE(unbounded.certificate.selectedCoverIds.size() == 1U);
+    REQUIRE(unbounded.certificate.selectedProtectedRelationFiberIds.size() == 1U);
     CHECK(unbounded.routedCandidateHashes.contains("y1"));
 }
 
@@ -1224,9 +1580,9 @@ TEST_CASE("Topology routing exposes selected multiscale structural evidence from
     const auto session = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
 
     REQUIRE(session.artifactAdmitted);
-    REQUIRE(session.routeAllowedDocumentHashGroups.size() == 2U);
-    CHECK(session.routeAllowedDocumentHashGroups[0].contains("y1"));
-    CHECK(session.routeAllowedDocumentHashGroups[1].contains("y1"));
+    REQUIRE(session.certificate.allowedDocumentHashGroups.size() == 2U);
+    CHECK(session.certificate.allowedDocumentHashGroups[0].contains("y1"));
+    CHECK(session.certificate.allowedDocumentHashGroups[1].contains("y1"));
     REQUIRE(session.candidateStructureEvidence.contains("y1"));
     const auto& evidence = session.candidateStructureEvidence.at("y1");
     CHECK(evidence.scaleAgreement == Catch::Approx(1.0F));
@@ -1261,6 +1617,31 @@ TEST_CASE("Topology snapshot cache validates once and reuses the admitted epoch"
     CHECK((loadCalls == 1));
 }
 
+TEST_CASE("Topology snapshot cache upgrades an exact index when ANN is later required",
+          "[search][topology][cache][ann][catch2]") {
+    auto batch = buildTwoClusterTopologyBatch();
+    int loadCalls = 0;
+    TopologyRoutingSnapshotCache cache([&]() {
+        ++loadCalls;
+        return Result<std::optional<yams::topology::TopologyArtifactBatch>>{
+            std::optional<yams::topology::TopologyArtifactBatch>{batch}};
+    });
+
+    const auto exact = cache.get(batch.topologyEpoch, false);
+    REQUIRE(exact.has_value());
+    REQUIRE(exact.value().snapshot);
+    CHECK_FALSE(exact.value().snapshot->denseAnnBuildAttempted);
+    CHECK_FALSE(exact.value().snapshot->sparseRouteIndex.centroidAnnIndex);
+
+    const auto upgraded = cache.get(batch.topologyEpoch, true);
+    REQUIRE(upgraded.has_value());
+    REQUIRE(upgraded.value().snapshot);
+    CHECK(upgraded.value().cacheHit);
+    CHECK(upgraded.value().snapshot->denseAnnBuildAttempted);
+    CHECK(upgraded.value().snapshot->sparseRouteIndex.centroidAnnIndex);
+    CHECK(loadCalls == 1);
+}
+
 TEST_CASE("Topology construction fingerprint excludes publication and routing representatives",
           "[search][topology][cache][identity][catch2]") {
     auto baseline = buildTwoClusterTopologyBatch();
@@ -1277,8 +1658,55 @@ TEST_CASE("Topology construction fingerprint excludes publication and routing re
     REQUIRE(baselineIdentity.size() == 16);
     CHECK(experimentalIdentity == baselineIdentity);
 
+    experimental.embeddingSpaceIdentity = "test-space-v2";
+    CHECK(topologyRoutingConstructionFingerprint(experimental) != baselineIdentity);
+    experimental.embeddingSpaceIdentity = baseline.embeddingSpaceIdentity;
+
     experimental.clusters.front().memberDocumentHashes.push_back("new-member");
     CHECK(topologyRoutingConstructionFingerprint(experimental) != baselineIdentity);
+}
+
+TEST_CASE("Topology routing refuses theorem admission across coordinate spaces",
+          "[search][topology][identity][admission][catch2]") {
+    TopologySearchFixture fix;
+    seedTopologyDocuments(fix);
+    auto batch = buildTwoClusterTopologyBatch();
+    const auto constructionFingerprint = topologyRoutingConstructionFingerprint(batch);
+
+    TopologyRoutingSessionRequest request;
+    request.query = "omega";
+    request.seedDocumentHashes = {"y2"};
+    request.queryEmbedding = std::vector<float>{0.0F, 1.0F};
+    request.queryEmbeddingSpaceIdentity = "different-space-v1";
+    request.options.routingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    request.options.weakTier1Query = true;
+    request.options.maxClusters = 1;
+    request.options.maxDocs = 0;
+    request.options.collectRouteMembership = true;
+    request.options.routeRiskCalibration.constructionFingerprint = constructionFingerprint;
+    request.options.routeRiskCalibration.calibrationQueries = 50;
+    request.options.routeRiskCalibration.protectedCandidates = 100;
+    request.options.routeRiskCalibration.missedProtectedCandidates = 0;
+    request.options.routeRiskCalibration.minCalibrationQueries = 30;
+    request.options.routeRiskCalibration.maxMissesPerThousand = 10;
+    request.options.routeRiskCalibration.minBoundaryMargin = 0.0F;
+    request.options.routeRiskCalibration.minSeedHits = 1;
+    request.snapshotCache = std::make_shared<TopologyRoutingSnapshotCache>([batch]() mutable {
+        return Result<std::optional<yams::topology::TopologyArtifactBatch>>{
+            std::optional<yams::topology::TopologyArtifactBatch>{std::move(batch)}};
+    });
+
+    const auto mismatched = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
+    REQUIRE(mismatched.certificate.hasUsefulRoute());
+    CHECK(mismatched.certificate.admission.coordinateSpaceAlignment ==
+          TopologyProofObligationStatus::Violated);
+    CHECK(mismatched.certificate.admission.denialReason() == "coordinate_space_mismatch");
+    CHECK(mismatched.certificate.action() == TopologyRouteAction::Augment);
+
+    request.queryEmbeddingSpaceIdentity = "test-space-v1";
+    const auto aligned = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
+    CHECK(aligned.certificate.admission.coordinateSpaceAlignment ==
+          TopologyProofObligationStatus::Satisfied);
 }
 
 TEST_CASE("Topology snapshot cache rejects duplicate cluster identifiers",
@@ -1477,4 +1905,60 @@ TEST_CASE("rankGraphNeighborCandidates ranks multi-seed hits and filters score/r
     auto oneWayStrict =
         rankGraphNeighborCandidates(oneWay, {"s1"}, 5, 0.25F, /*reciprocalOnly=*/true);
     CHECK(oneWayStrict.empty());
+}
+
+TEST_CASE("Graph-neighbor trace separates stored relation from the selected cap",
+          "[unit][search][topology][graph_neighbors][trace]") {
+    TopologySearchFixture fix;
+    fix.addDocument("seed", "seed", {1.0F, 0.0F});
+    fix.addDocument("near", "near", {0.9F, 0.1F});
+    fix.addDocument("far", "far", {0.8F, 0.2F});
+
+    const auto nodeIds = fix.kgStore->upsertNodes({
+        KGNode{.nodeKey = "doc:seed", .type = "document"},
+        KGNode{.nodeKey = "doc:near", .type = "document"},
+        KGNode{.nodeKey = "doc:far", .type = "document"},
+    });
+    REQUIRE(nodeIds.has_value());
+    REQUIRE(nodeIds.value().size() == 3);
+    REQUIRE(fix.kgStore
+                ->addEdge(KGEdge{.srcNodeId = nodeIds.value()[0],
+                                 .dstNodeId = nodeIds.value()[1],
+                                 .relation = "semantic_neighbor",
+                                 .weight = 0.9F})
+                .has_value());
+    REQUIRE(fix.kgStore
+                ->addEdge(KGEdge{.srcNodeId = nodeIds.value()[0],
+                                 .dstNodeId = nodeIds.value()[2],
+                                 .relation = "semantic_neighbor",
+                                 .weight = 0.8F})
+                .has_value());
+
+    TopologyRoutingSessionRequest request;
+    request.seedDocumentHashes = {"seed"};
+    request.options.routingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    request.options.expansionSource = SearchEngineConfig::TopologyExpansionSource::GraphNeighbors;
+    request.options.maxDocs = 1;
+    request.options.collectRouteMembership = true;
+    request.options.collectGraphDiagnostics = true;
+    request.options.graphNeighborMinScore = 0.0F;
+    request.options.graphNeighborReciprocalOnly = false;
+
+    const auto result = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
+
+    REQUIRE(result.graphNeighborTrace.collected);
+    CHECK(result.graphNeighborTrace.edgeFetchLimit == 64);
+    CHECK(result.graphNeighborTrace.fetchTruncatedSeedCount == 0);
+    CHECK(result.graphNeighborTrace.seedDocumentIds == std::vector<std::string>{"seed"});
+    CHECK(result.graphNeighborTrace.relationCandidateCount == 2);
+    CHECK(result.graphNeighborTrace.relationCandidateDocumentIds ==
+          std::vector<std::string>{"near", "far"});
+    CHECK(result.graphNeighborTrace.fetchedCandidateCount == 2);
+    CHECK(result.graphNeighborTrace.fetchedCandidateDocumentIds ==
+          std::vector<std::string>{"near", "far"});
+    CHECK(result.graphNeighborTrace.eligibleCandidateCount == 2);
+    CHECK(result.graphNeighborTrace.eligibleCandidateDocumentIds ==
+          std::vector<std::string>{"near", "far"});
+    REQUIRE(result.routedCandidateDocIds.size() == 1);
+    CHECK(result.routedCandidateDocIds.front() == "near");
 }
