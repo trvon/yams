@@ -144,6 +144,34 @@ def RelevantExpansionSurvivesSelection
       CandidateDocPresent doc expansion →
         CandidateDocPresent doc selected
 
+/-- A bounded relation producer retains every relevant baseline miss that is
+reachable from one of its selected seeds. Unlike `RelationExpansionMaterialized`,
+this premise does not require the producer to emit every relation neighbor. It
+is the end-to-end empirical boundary observed after relation selection, chunk
+scoring, and document aggregation. -/
+def ReachableRelevantSurvivesBoundedProducer
+    (relation : Yams.Core.DocumentId → Yams.Core.DocumentId → Prop)
+    (relevantDocs : List Yams.Core.DocumentId)
+    (baseline : List ComponentCandidate)
+    (seeds : List Yams.Core.DocumentId)
+    (expansion : List ComponentCandidate) : Prop :=
+  ∀ doc ∈ relevantDocs,
+    ¬ CandidateDocPresent doc baseline →
+      (∃ seed ∈ seeds, relation seed doc) →
+        CandidateDocPresent doc expansion
+
+/-- Every relevant baseline miss admitted by the relation producer survives the
+scoped scorer's row budget and document aggregation. This isolates the
+document-level proof obligation from an implementation that ranks chunk rows
+before it constructs document candidates. -/
+def RelevantAdmittedSurvivesScopedScoring
+    (relevantDocs : List Yams.Core.DocumentId)
+    (baseline admitted scored : List ComponentCandidate) : Prop :=
+  ∀ doc ∈ relevantDocs,
+    ¬ CandidateDocPresent doc baseline →
+      CandidateDocPresent doc admitted →
+        CandidateDocPresent doc scored
+
 /-- Plain augmentation cannot remove a baseline candidate. -/
 theorem augmentCandidates_preservesBaseline
     (baseline expansion : List ComponentCandidate)
@@ -166,6 +194,56 @@ theorem materializedRelationExpansion_exposesReachableRelevant
       ¬ CandidateDocPresent doc baseline ∧ CandidateDocPresent doc expansion := by
   rcases hReachable with ⟨doc, hRelevant, hMissing, seed, hSeed, hRelation⟩
   exact ⟨doc, hRelevant, hMissing, hMaterialized seed hSeed doc hRelation⟩
+
+/-- A bounded producer exposes a reachable relevant baseline miss when its
+query-conditioned survival premise holds. -/
+theorem boundedRelationProducer_exposesReachableRelevant
+    {relation : Yams.Core.DocumentId → Yams.Core.DocumentId → Prop}
+    {relevantDocs : List Yams.Core.DocumentId}
+    {baseline expansion : List ComponentCandidate}
+    {seeds : List Yams.Core.DocumentId}
+    (hReachable : MissingRelevantReachable relation relevantDocs baseline seeds)
+    (hProducer :
+      ReachableRelevantSurvivesBoundedProducer
+        relation relevantDocs baseline seeds expansion) :
+    ∃ doc ∈ relevantDocs,
+      ¬ CandidateDocPresent doc baseline ∧ CandidateDocPresent doc expansion := by
+  rcases hReachable with ⟨doc, hRelevant, hMissing, seed, hSeed, hRelation⟩
+  exact ⟨doc, hRelevant, hMissing,
+    hProducer doc hRelevant hMissing ⟨seed, hSeed, hRelation⟩⟩
+
+/-- Relation-level survival and document-level scoped-scoring survival compose
+to the end-to-end bounded producer premise. -/
+theorem boundedRelationProducer_and_scopedScoring_implySurvival
+    {relation : Yams.Core.DocumentId → Yams.Core.DocumentId → Prop}
+    {relevantDocs : List Yams.Core.DocumentId}
+    {baseline admitted scored : List ComponentCandidate}
+    {seeds : List Yams.Core.DocumentId}
+    (hAdmitted :
+      ReachableRelevantSurvivesBoundedProducer
+        relation relevantDocs baseline seeds admitted)
+    (hScored :
+      RelevantAdmittedSurvivesScopedScoring
+        relevantDocs baseline admitted scored) :
+    ReachableRelevantSurvivesBoundedProducer
+      relation relevantDocs baseline seeds scored := by
+  intro doc hRelevant hMissing hReachable
+  exact hScored doc hRelevant hMissing
+    (hAdmitted doc hRelevant hMissing hReachable)
+
+/-- Complete relation materialization is sufficient for the weaker bounded
+producer survival premise. -/
+theorem materializedRelationExpansion_impliesBoundedProducerSurvival
+    {relation : Yams.Core.DocumentId → Yams.Core.DocumentId → Prop}
+    {relevantDocs : List Yams.Core.DocumentId}
+    {baseline expansion : List ComponentCandidate}
+    {seeds : List Yams.Core.DocumentId}
+    (hMaterialized : RelationExpansionMaterialized relation seeds expansion) :
+    ReachableRelevantSurvivesBoundedProducer
+      relation relevantDocs baseline seeds expansion := by
+  intro doc _hRelevant _hMissing hReachable
+  rcases hReachable with ⟨seed, hSeed, hRelation⟩
+  exact hMaterialized seed hSeed doc hRelation
 
 /-- Materialized routed evidence enriches a reachable relevant document that
 was already present through another component. This theorem explains evidence
@@ -245,6 +323,28 @@ theorem materializedRelationExpansion_strictlyImprovesBudgetedRecall
       hReachable hMaterialized with ⟨doc, hRelevant, hMissing, hExpanded⟩
   exact ⟨doc, hRelevant, hMissing, hSurvives doc hRelevant hMissing hExpanded⟩
 
+/-- Budgeted candidate rescue through a bounded producer. The producer need not
+materialize the complete relation, but it must retain reachable relevant misses
+through exact scoped scoring. The final selector must then preserve baseline
+relevance and retain the scored rescue. -/
+theorem boundedRelationExpansion_strictlyImprovesBudgetedRecall
+    {relation : Yams.Core.DocumentId → Yams.Core.DocumentId → Prop}
+    {relevantDocs : List Yams.Core.DocumentId}
+    {baseline expansion selected : List ComponentCandidate}
+    {seeds : List Yams.Core.DocumentId}
+    (hPreservesBaseline : PreservesBaselineRelevant relevantDocs baseline selected)
+    (hReachable : MissingRelevantReachable relation relevantDocs baseline seeds)
+    (hProducer :
+      ReachableRelevantSurvivesBoundedProducer
+        relation relevantDocs baseline seeds expansion)
+    (hSurvives :
+      RelevantExpansionSurvivesSelection relevantDocs baseline expansion selected) :
+    StrictlyImprovesCandidateRecall relevantDocs baseline selected := by
+  refine ⟨hPreservesBaseline, ?_⟩
+  rcases boundedRelationProducer_exposesReachableRelevant
+      hReachable hProducer with ⟨doc, hRelevant, hMissing, hExpanded⟩
+  exact ⟨doc, hRelevant, hMissing, hSurvives doc hRelevant hMissing hExpanded⟩
+
 /-- Literature-aligned adaptive candidate-rescue theorem. A query-admissible
 baseline result seeds relation expansion; a missing relevant neighbor is
 materialized; and the budgeted selector preserves baseline relevance and keeps
@@ -267,6 +367,32 @@ theorem admissibleSeedExpansion_strictlyImprovesBudgetedRecall
     hPreservesBaseline
     (admissibleSeedReachability_impliesReachability hReachable)
     hMaterialized
+    hSurvives
+
+/-- Adaptive bounded-producer variant of the candidate-rescue theorem. This is
+the live experiment contract: query-admissible reachability, bounded producer
+survival through exact scoped scoring, baseline preservation, and final
+selection survival imply strict candidate-recall improvement. -/
+theorem admissibleSeedBoundedExpansion_strictlyImprovesBudgetedRecall
+    {relation : Yams.Core.DocumentId → Yams.Core.DocumentId → Prop}
+    {admissible : Yams.Core.DocumentId → Prop}
+    {relevantDocs : List Yams.Core.DocumentId}
+    {baseline expansion selected : List ComponentCandidate}
+    {seeds : List Yams.Core.DocumentId}
+    (hPreservesBaseline : PreservesBaselineRelevant relevantDocs baseline selected)
+    (hReachable :
+      MissingRelevantReachableFromAdmissibleSeed
+        relation admissible relevantDocs baseline seeds)
+    (hProducer :
+      ReachableRelevantSurvivesBoundedProducer
+        relation relevantDocs baseline seeds expansion)
+    (hSurvives :
+      RelevantExpansionSurvivesSelection relevantDocs baseline expansion selected) :
+    StrictlyImprovesCandidateRecall relevantDocs baseline selected := by
+  exact boundedRelationExpansion_strictlyImprovesBudgetedRecall
+    hPreservesBaseline
+    (admissibleSeedReachability_impliesReachability hReachable)
+    hProducer
     hSurvives
 
 end Yams.SearchEngine
