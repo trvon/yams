@@ -24,9 +24,10 @@ constexpr std::size_t kPruneSignatureBytes = 4096;
 magic::PruneCategory classifyPruneCandidate(const metadata::DocumentInfo& doc,
                                             const std::shared_ptr<api::IContentStore>& contentStore) {
     auto category = magic::getPruneCategory(doc.filePath, doc.fileExtension, doc.mimeType);
-    const bool needsSignature =
-        doc.fileExtension.empty() &&
-        (doc.mimeType.empty() || doc.mimeType == "application/octet-stream");
+    // MIME inference for short or malformed binaries may label an extensionless executable as
+    // text/plain. Restrict the bounded content read to extensionless candidates, but do not trust
+    // an otherwise non-prunable MIME classification over a definitive file signature.
+    const bool needsSignature = doc.fileExtension.empty();
     if (category != magic::PruneCategory::None || !needsSignature || !contentStore ||
         doc.sha256Hash.empty()) {
         return category;
