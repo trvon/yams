@@ -53,14 +53,17 @@ public:
 //
 //     score(c) = alpha * normalized_bm25_mass(c) + (1-alpha) * cosine(query_emb, centroid(c))
 //
-// where bm25_mass(c) = count of request.seedDocumentHashes whose primary or
-// hierarchical membership is c. Secondary boundary-spill postings do not vote
-// for routes; they enlarge retrieval only after a route is selected. Falls back
-// gracefully when queryEmbedding is empty (degrades to pure seed scoring) or
-// when cluster.centroidEmbedding is empty (skips dense leg for that cluster).
+// where bm25_mass(c) = count of request.seedDocumentHashes whose primary,
+// hierarchical, or protected overlap membership is c. This makes route selection
+// consume the same document-to-many-fibers relation used by certificate closure.
+// Falls back gracefully when queryEmbedding is empty (degrades to pure seed
+// scoring) or when cluster.centroidEmbedding is empty (skips dense leg for that
+// cluster).
 class SparseGuidedClusterRouter final {
 public:
-    [[nodiscard]] static SparseRouteIndex buildRouteIndex(const TopologyArtifactBatch& artifacts);
+    /// Build immutable exact-routing structures and optionally the centroid ANN shortlist.
+    [[nodiscard]] static SparseRouteIndex buildRouteIndex(const TopologyArtifactBatch& artifacts,
+                                                          bool buildDenseAnnIndex = true);
 
     Result<std::vector<ClusterRoute>> route(const TopologyRouteRequest& request,
                                             const TopologyArtifactBatch& artifacts) const;

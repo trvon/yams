@@ -1,4 +1,5 @@
 #include <yams/topology/topology_representatives.h>
+#include <yams/vector/static_cosine_ann_index.h>
 
 #include <algorithm>
 #include <cmath>
@@ -114,6 +115,54 @@ std::size_t applyOrthogonalBoundarySpill(std::span<const TopologyDocumentInput> 
         }
     }
 
+    constexpr double kResidualEpsilon = 1e-12;
+    std::vector<double> observedRadiusSquared(artifacts.clusters.size(), 0.0);
+    for (std::size_t clusterIndex = 0; clusterIndex < artifacts.clusters.size(); ++clusterIndex) {
+        const auto& cluster = artifacts.clusters[clusterIndex];
+        for (const auto& documentHash : cluster.memberDocumentHashes) {
+            const auto documentIt = documentByHash.find(documentHash);
+            if (documentIt == documentByHash.end() ||
+                documentIt->second->embedding.size() != cluster.centroidEmbedding.size()) {
+                continue;
+            }
+            double radiusSquared = 0.0;
+            for (std::size_t dimension = 0; dimension < cluster.centroidEmbedding.size();
+                 ++dimension) {
+                const double residual =
+                    static_cast<double>(documentIt->second->embedding[dimension]) -
+                    cluster.centroidEmbedding[dimension];
+                radiusSquared += residual * residual;
+            }
+            if (std::isfinite(radiusSquared)) {
+                observedRadiusSquared[clusterIndex] =
+                    std::max(observedRadiusSquared[clusterIndex], radiusSquared);
+            }
+        }
+    }
+
+    constexpr std::size_t kMinimumOverlapCandidateLimit = 32;
+    const auto overlapCandidateLimit =
+        std::max({kMinimumOverlapCandidateLimit, config.maxNeighborsPerDocument,
+                  config.overlapLimit + static_cast<std::size_t>(1)});
+    std::vector<std::size_t> indexedClusterIds;
+    std::vector<std::vector<float>> indexedCentroids;
+    indexedClusterIds.reserve(artifacts.clusters.size());
+    indexedCentroids.reserve(artifacts.clusters.size());
+    for (std::size_t clusterIndex = 0; clusterIndex < artifacts.clusters.size(); ++clusterIndex) {
+        const auto& centroid = artifacts.clusters[clusterIndex].centroidEmbedding;
+        if (observedRadiusSquared[clusterIndex] > kResidualEpsilon && !centroid.empty()) {
+            indexedClusterIds.push_back(clusterIndex);
+            indexedCentroids.push_back(centroid);
+        }
+    }
+    std::shared_ptr<const yams::vector::StaticCosineAnnIndex> centroidAnnIndex;
+    if (indexedClusterIds.size() > overlapCandidateLimit) {
+        auto built = yams::vector::StaticCosineAnnIndex::build(indexedClusterIds, indexedCentroids);
+        if (built) {
+            centroidAnnIndex = std::move(built).value();
+        }
+    }
+
     struct Candidate {
         std::size_t clusterIndex{0};
         double loss{0.0};
@@ -121,7 +170,6 @@ std::size_t applyOrthogonalBoundarySpill(std::span<const TopologyDocumentInput> 
     std::size_t assignments = 0;
     const double boundaryRatioSquared =
         config.overlapBoundaryDistanceRatio * config.overlapBoundaryDistanceRatio;
-    constexpr double kResidualEpsilon = 1e-12;
 
     for (auto& membership : artifacts.memberships) {
         if (!membership.overlapClusterIds.empty()) {
@@ -145,13 +193,38 @@ std::size_t applyOrthogonalBoundarySpill(std::span<const TopologyDocumentInput> 
                 static_cast<double>(embedding[dimension]) - primaryCentroid[dimension];
             primaryNormSquared += primaryResidual[dimension] * primaryResidual[dimension];
         }
-        if (!std::isfinite(primaryNormSquared) || primaryNormSquared <= kResidualEpsilon) {
+        if (!std::isfinite(primaryNormSquared)) {
+            continue;
+        }
+        const bool primaryDirectionObserved = primaryNormSquared > kResidualEpsilon;
+        if (!primaryDirectionObserved && membership.role != DocumentTopologyRole::Outlier) {
             continue;
         }
 
+        std::vector<std::size_t> candidateClusterIndices;
+        if (centroidAnnIndex && embedding.size() == centroidAnnIndex->dimension()) {
+            auto nearest = centroidAnnIndex->search(embedding, overlapCandidateLimit);
+            if (nearest) {
+                candidateClusterIndices.reserve(nearest.value().hits.size());
+                for (const auto& hit : nearest.value().hits) {
+                    candidateClusterIndices.push_back(hit.id);
+                }
+            }
+        }
+        if (candidateClusterIndices.empty()) {
+            candidateClusterIndices.reserve(artifacts.clusters.size());
+            for (std::size_t clusterIndex = 0; clusterIndex < artifacts.clusters.size();
+                 ++clusterIndex) {
+                candidateClusterIndices.push_back(clusterIndex);
+            }
+        }
+
         std::vector<Candidate> candidates;
-        candidates.reserve(artifacts.clusters.size() - 1);
-        for (std::size_t clusterIndex = 0; clusterIndex < artifacts.clusters.size(); ++clusterIndex) {
+        candidates.reserve(candidateClusterIndices.size());
+        for (const auto clusterIndex : candidateClusterIndices) {
+            if (clusterIndex >= artifacts.clusters.size()) {
+                continue;
+            }
             if (clusterIndex == primaryIt->second) {
                 continue;
             }
@@ -167,14 +240,23 @@ std::size_t applyOrthogonalBoundarySpill(std::span<const TopologyDocumentInput> 
                 candidateNormSquared += residual * residual;
                 residualDot += primaryResidual[dimension] * residual;
             }
-            if (!std::isfinite(candidateNormSquared) ||
-                candidateNormSquared > primaryNormSquared * boundaryRatioSquared) {
+            if (!std::isfinite(candidateNormSquared)) {
                 continue;
             }
-            const double projectionSquared =
-                (residualDot * residualDot) / primaryNormSquared;
-            const double loss = candidateNormSquared +
-                                config.overlapResidualPenalty * projectionSquared;
+            double loss = candidateNormSquared;
+            if (primaryDirectionObserved) {
+                if (candidateNormSquared > primaryNormSquared * boundaryRatioSquared) {
+                    continue;
+                }
+                const double projectionSquared = (residualDot * residualDot) / primaryNormSquared;
+                loss += config.overlapResidualPenalty * projectionSquared;
+            } else {
+                const double candidateRadiusSquared = observedRadiusSquared[clusterIndex];
+                if (candidateRadiusSquared <= kResidualEpsilon ||
+                    candidateNormSquared > candidateRadiusSquared * boundaryRatioSquared) {
+                    continue;
+                }
+            }
             if (std::isfinite(loss)) {
                 candidates.push_back(Candidate{.clusterIndex = clusterIndex, .loss = loss});
             }

@@ -1,3 +1,4 @@
+#include <yams/topology/protected_relation_cover.h>
 #include <yams/topology/topology_baseline.h>
 #include <yams/topology/topology_representatives.h>
 #include <yams/vector/static_cosine_ann_index.h>
@@ -68,6 +69,28 @@ std::vector<float> meanEmbedding(std::span<const TopologyDocumentInput> document
         v /= static_cast<float>(count);
     }
     return centroid;
+}
+
+std::optional<double> normalizedCosine(std::span<const float> lhs, std::span<const float> rhs) {
+    if (lhs.empty() || lhs.size() != rhs.size()) {
+        return std::nullopt;
+    }
+    double dot = 0.0;
+    double lhsSquaredNorm = 0.0;
+    double rhsSquaredNorm = 0.0;
+    for (std::size_t index = 0; index < lhs.size(); ++index) {
+        dot += static_cast<double>(lhs[index]) * static_cast<double>(rhs[index]);
+        lhsSquaredNorm += static_cast<double>(lhs[index]) * static_cast<double>(lhs[index]);
+        rhsSquaredNorm += static_cast<double>(rhs[index]) * static_cast<double>(rhs[index]);
+    }
+    if (lhsSquaredNorm <= 0.0 || rhsSquaredNorm <= 0.0) {
+        return std::nullopt;
+    }
+    const auto cosine = dot / std::sqrt(lhsSquaredNorm * rhsSquaredNorm);
+    if (!std::isfinite(cosine)) {
+        return std::nullopt;
+    }
+    return std::clamp(cosine, 0.0, 1.0);
 }
 
 void sortComponentByHash(std::vector<std::size_t>& component,
@@ -171,6 +194,8 @@ void emitComponent(TopologyArtifactBatch& batch, const std::vector<std::size_t>&
     double cohesion = 0.0;
     double persistence = 0.0;
     std::size_t internalEdgeCount = 0;
+    std::size_t protectedPairCount = 0;
+    std::size_t preservedProtectedPairCount = 0;
     std::unordered_map<std::size_t, double> weightedDegree;
     weightedDegree.reserve(component.size());
     std::size_t bridgeCount = 0;
@@ -178,12 +203,17 @@ void emitComponent(TopologyArtifactBatch& batch, const std::vector<std::size_t>&
     for (std::size_t idx : component) {
         std::size_t degree = 0;
         for (const auto& [neighborIdx, weight] : adjacency[idx]) {
-            if (!componentSet.contains(neighborIdx)) {
+            const bool neighborInComponent = componentSet.contains(neighborIdx);
+            if (!neighborInComponent || idx < neighborIdx) {
+                ++protectedPairCount;
+            }
+            if (!neighborInComponent) {
                 continue;
             }
             weightedDegree[idx] += weight;
             ++degree;
             if (idx < neighborIdx) {
+                ++preservedProtectedPairCount;
                 cohesion += weight;
                 persistence =
                     internalEdgeCount == 0 ? weight : std::min<double>(persistence, weight);
@@ -225,6 +255,8 @@ void emitComponent(TopologyArtifactBatch& batch, const std::vector<std::size_t>&
     cluster.densityScore =
         possibleEdges > 0.0 ? static_cast<double>(internalEdgeCount) / possibleEdges : 0.0;
     cluster.bridgeMass = static_cast<double>(bridgeCount) / static_cast<double>(component.size());
+    cluster.protectedPairCount = protectedPairCount;
+    cluster.preservedProtectedPairCount = preservedProtectedPairCount;
     cluster.medoid = ClusterRepresentative{.clusterId = clusterId,
                                            .documentHash = documents[medoidIdx].documentHash,
                                            .filePath = documents[medoidIdx].filePath,
@@ -276,6 +308,8 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
     batch.snapshotId = makeSnapshotId(static_cast<std::uint64_t>(nowMillis));
     batch.algorithm = "connected_components_v1";
     batch.inputKind = config.inputKind;
+    batch.embeddingSpaceIdentity = config.embeddingSpaceIdentity;
+    batch.protectedRelationIdentity = protectedRelationConstructionIdentity(documents, config);
     batch.generatedAtUnixSeconds = static_cast<std::uint64_t>(nowSeconds);
 
     if (documents.empty()) {
@@ -374,18 +408,59 @@ Result<TopologyDirtyRegion> ConnectedComponentTopologyEngine::defineDirtyRegion(
     TopologyDirtyRegion region;
     region.seedDocumentHashes.reserve(changedDocuments.size());
     std::unordered_map<std::string, std::vector<std::string>> clusterMembersById;
-    std::unordered_map<std::string, std::string> clusterIdByDocument;
+    std::unordered_map<std::string, std::vector<std::string>> clusterIdsByDocument;
     clusterMembersById.reserve(existing.clusters.size());
     for (const auto& cluster : existing.clusters) {
         clusterMembersById.emplace(cluster.clusterId, cluster.memberDocumentHashes);
     }
-    clusterIdByDocument.reserve(existing.memberships.size());
+    clusterIdsByDocument.reserve(existing.memberships.size());
+    auto addDocumentCluster = [&](const std::string& documentHash, const std::string& clusterId) {
+        if (documentHash.empty() || clusterId.empty()) {
+            return;
+        }
+        auto& clusterIds = clusterIdsByDocument[documentHash];
+        if (std::ranges::find(clusterIds, clusterId) == clusterIds.end()) {
+            clusterIds.push_back(clusterId);
+        }
+    };
     for (const auto& membership : existing.memberships) {
-        clusterIdByDocument.emplace(membership.documentHash, membership.clusterId);
+        addDocumentCluster(membership.documentHash, membership.clusterId);
+        if (membership.parentClusterId.has_value()) {
+            addDocumentCluster(membership.documentHash, *membership.parentClusterId);
+        }
+        for (const auto& overlapClusterId : membership.overlapClusterIds) {
+            addDocumentCluster(membership.documentHash, overlapClusterId);
+        }
     }
 
     std::unordered_set<std::string> seen;
     seen.reserve(changedDocuments.size() * 2);
+    auto includePriorClusterMembers = [&](const std::string& documentHash) {
+        const auto clustersIt = clusterIdsByDocument.find(documentHash);
+        if (clustersIt == clusterIdsByDocument.end()) {
+            return;
+        }
+        region.includedPriorClusterMembers = true;
+        for (const auto& clusterId : clustersIt->second) {
+            const auto membersIt = clusterMembersById.find(clusterId);
+            if (membersIt == clusterMembersById.end()) {
+                continue;
+            }
+            for (const auto& memberHash : membersIt->second) {
+                if (memberHash.empty()) {
+                    continue;
+                }
+                if (seen.insert(memberHash).second) {
+                    region.expandedDocumentHashes.push_back(memberHash);
+                }
+                if (region.expandedDocumentHashes.size() >= config.maxDirtyRegionDocs) {
+                    region.exceededRegionBudget = true;
+                    region.requiresWiderRebuild = true;
+                    return;
+                }
+            }
+        }
+    };
 
     for (const auto& document : changedDocuments) {
         if (document.documentHash.empty()) {
@@ -401,26 +476,7 @@ Result<TopologyDirtyRegion> ConnectedComponentTopologyEngine::defineDirtyRegion(
         }
 
         if (config.dirtyRegionExpansion != DirtyRegionExpansionMode::NeighborsOnly) {
-            region.includedPriorClusterMembers = true;
-            if (auto clusterIt = clusterIdByDocument.find(document.documentHash);
-                clusterIt != clusterIdByDocument.end()) {
-                if (auto membersIt = clusterMembersById.find(clusterIt->second);
-                    membersIt != clusterMembersById.end()) {
-                    for (const auto& memberHash : membersIt->second) {
-                        if (memberHash.empty()) {
-                            continue;
-                        }
-                        if (seen.insert(memberHash).second) {
-                            region.expandedDocumentHashes.push_back(memberHash);
-                        }
-                        if (region.expandedDocumentHashes.size() >= config.maxDirtyRegionDocs) {
-                            region.exceededRegionBudget = true;
-                            region.requiresWiderRebuild = true;
-                            break;
-                        }
-                    }
-                }
-            }
+            includePriorClusterMembers(document.documentHash);
         }
         if (region.requiresWiderRebuild) {
             break;
@@ -468,28 +524,7 @@ Result<TopologyDirtyRegion> ConnectedComponentTopologyEngine::defineDirtyRegion(
             secondWave.push_back(hash);
         }
         for (const auto& hash : secondWave) {
-            auto clusterIt = clusterIdByDocument.find(hash);
-            if (clusterIt == clusterIdByDocument.end()) {
-                continue;
-            }
-            auto membersIt = clusterMembersById.find(clusterIt->second);
-            if (membersIt == clusterMembersById.end()) {
-                continue;
-            }
-            region.includedPriorClusterMembers = true;
-            for (const auto& memberHash : membersIt->second) {
-                if (memberHash.empty()) {
-                    continue;
-                }
-                if (seen.insert(memberHash).second) {
-                    region.expandedDocumentHashes.push_back(memberHash);
-                }
-                if (region.expandedDocumentHashes.size() >= config.maxDirtyRegionDocs) {
-                    region.exceededRegionBudget = true;
-                    region.requiresWiderRebuild = true;
-                    break;
-                }
-            }
+            includePriorClusterMembers(hash);
             if (region.requiresWiderRebuild) {
                 break;
             }
@@ -532,6 +567,13 @@ Result<TopologyArtifactBatch> ConnectedComponentTopologyEngine::updateArtifacts(
     merged.snapshotId = rebuilt.value().snapshotId;
     merged.algorithm = rebuilt.value().algorithm;
     merged.inputKind = rebuilt.value().inputKind;
+    merged.embeddingSpaceIdentity =
+        existing.embeddingSpaceIdentity == rebuilt.value().embeddingSpaceIdentity
+            ? existing.embeddingSpaceIdentity
+            : std::string{};
+    // A partial update cannot reconstruct the full-corpus relation digest. Fail closed until a
+    // full rebuild provides relation-bound calibration evidence.
+    merged.protectedRelationIdentity.clear();
     merged.generatedAtUnixSeconds = rebuilt.value().generatedAtUnixSeconds;
     merged.topologyEpoch = existing.topologyEpoch + 1;
 
@@ -630,6 +672,28 @@ Result<TopologyArtifactBatch> ConnectedComponentTopologyEngine::updateArtifacts(
     merged.memberships.insert(merged.memberships.end(), rebuilt.value().memberships.begin(),
                               rebuilt.value().memberships.end());
 
+    std::unordered_set<std::string> finalClusterIds;
+    finalClusterIds.reserve(merged.clusters.size());
+    std::unordered_map<std::string, std::unordered_set<std::string>> finalMembersByCluster;
+    finalMembersByCluster.reserve(merged.clusters.size());
+    for (const auto& cluster : merged.clusters) {
+        finalClusterIds.insert(cluster.clusterId);
+        finalMembersByCluster.emplace(
+            cluster.clusterId, std::unordered_set<std::string>{cluster.memberDocumentHashes.begin(),
+                                                               cluster.memberDocumentHashes.end()});
+    }
+    for (auto& cluster : merged.clusters) {
+        std::erase_if(cluster.overlapClusterIds,
+                      [&](const auto& overlapId) { return !finalClusterIds.contains(overlapId); });
+    }
+    for (auto& membership : merged.memberships) {
+        std::erase_if(membership.overlapClusterIds, [&](const auto& overlapId) {
+            const auto membersIt = finalMembersByCluster.find(overlapId);
+            return membersIt == finalMembersByCluster.end() ||
+                   !membersIt->second.contains(membership.documentHash);
+        });
+    }
+
     std::sort(merged.clusters.begin(), merged.clusters.end(),
               [](const ClusterArtifact& lhs, const ClusterArtifact& rhs) {
                   return lhs.clusterId < rhs.clusterId;
@@ -691,12 +755,12 @@ float vectorNorm(const std::vector<float>& a) {
 Result<std::vector<ClusterRoute>>
 SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
                                  const TopologyArtifactBatch& artifacts) const {
-    const auto index = buildRouteIndex(artifacts);
+    const auto index = buildRouteIndex(artifacts, request.denseAnnCandidateLimit > 0);
     return route(request, artifacts, index);
 }
 
-SparseRouteIndex
-SparseGuidedClusterRouter::buildRouteIndex(const TopologyArtifactBatch& artifacts) {
+SparseRouteIndex SparseGuidedClusterRouter::buildRouteIndex(const TopologyArtifactBatch& artifacts,
+                                                            bool buildDenseAnnIndex) {
     SparseRouteIndex index;
     index.centroidNorms.reserve(artifacts.clusters.size());
     index.routingRepresentativeNorms.reserve(artifacts.clusters.size());
@@ -727,7 +791,7 @@ SparseGuidedClusterRouter::buildRouteIndex(const TopologyArtifactBatch& artifact
         centroidIds.push_back(clusterIndex);
         centroids.push_back(centroid);
     }
-    if (!centroids.empty()) {
+    if (buildDenseAnnIndex && !centroids.empty()) {
         auto annIndex = yams::vector::StaticCosineAnnIndex::build(centroidIds, centroids);
         if (annIndex) {
             index.centroidAnnIndex = std::move(annIndex).value();
@@ -749,6 +813,9 @@ SparseGuidedClusterRouter::buildRouteIndex(const TopologyArtifactBatch& artifact
             addMembership(membership.documentHash, membership.clusterId);
             if (membership.parentClusterId.has_value()) {
                 addMembership(membership.documentHash, *membership.parentClusterId);
+            }
+            for (const auto& overlapClusterId : membership.overlapClusterIds) {
+                addMembership(membership.documentHash, overlapClusterId);
             }
         }
     } else {
@@ -790,6 +857,7 @@ SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
     struct ClusterSignals {
         double sparseMass{0.0};
         float dense{0.0F};
+        bool denseObserved{false};
     };
     std::vector<ClusterSignals> signals(artifacts.clusters.size());
 
@@ -875,6 +943,7 @@ SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
                          (queryNorm * centroidNorm);
             // Map [-1,1] -> [0,1] so it composes with the bm25 mass cleanly.
             signals[clusterIndex].dense = std::clamp((dense + 1.0F) * 0.5F, 0.0F, 1.0F);
+            signals[clusterIndex].denseObserved = true;
             if (work != nullptr) {
                 ++work->representativeDistanceEvaluations;
                 ++work->exactRepresentativeDistanceEvaluations;
@@ -904,6 +973,7 @@ SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
                                 (queryNorm * representativeNorm);
             const auto dense = std::clamp((cosine + 1.0F) * 0.5F, 0.0F, 1.0F);
             signals[clusterIndex].dense = std::max(signals[clusterIndex].dense, dense);
+            signals[clusterIndex].denseObserved = true;
             if (work != nullptr) {
                 ++work->representativeDistanceEvaluations;
                 ++work->exactRepresentativeDistanceEvaluations;
@@ -924,13 +994,12 @@ SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
                                      ? static_cast<float>(clusterSignals.sparseMass / maxSparseMass)
                                      : 0.0F;
         const double blended = static_cast<double>(alpha * sparseNorm + (1.0F - alpha) * dense);
+        const double cohesion = std::clamp(cluster.cohesionScore, 0.0, 1.0);
+        const double stability = std::clamp(cluster.persistenceScore, 0.0, 1.0);
+        const double sizeDamp = 1.0 / (1.0 + std::log1p(static_cast<double>(cluster.memberCount)));
         double routeScore = blended + (cluster.persistenceScore * 0.05);
         switch (request.scoringMode) {
             case RouteScoringMode::SizeWeighted: {
-                const double cohesion = std::clamp(cluster.cohesionScore, 0.0, 1.0);
-                const double stability = std::clamp(cluster.persistenceScore, 0.0, 1.0);
-                const double sizeDamp =
-                    1.0 / (1.0 + std::log1p(static_cast<double>(cluster.memberCount)));
                 routeScore = (blended + (0.05 * stability) + (0.05 * cohesion)) * sizeDamp;
                 break;
             }
@@ -949,7 +1018,16 @@ SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
                                       : std::nullopt,
             .routeScore = routeScore,
             .stabilityScore = cluster.persistenceScore,
-            .memberCount = cluster.memberCount});
+            .memberCount = cluster.memberCount,
+            .semanticCost = clusterSignals.denseObserved
+                                ? std::optional<double>(1.0 - static_cast<double>(dense))
+                                : std::nullopt,
+            .sparseCost = maxSparseMass > 0.0
+                              ? std::optional<double>(1.0 - static_cast<double>(sparseNorm))
+                              : std::nullopt,
+            .persistencePenalty = 1.0 - stability,
+            .cohesionPenalty = 1.0 - cohesion,
+            .sizePenalty = 1.0 - sizeDamp});
     }
 
     std::sort(routes.begin(), routes.end(), [](const ClusterRoute& lhs, const ClusterRoute& rhs) {

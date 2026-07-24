@@ -837,7 +837,7 @@ private:
     std::string pruneSmallerThan_;
     bool pruneVerbose_{false};
     bool pruneInvoked_{false}; // Track if prune subcommand was actually invoked
-    void runPrune();
+    Result<void> runPrune();
     // Benchmark state
     bool benchmarkInvoked_{false};
     size_t benchmarkQueries_{100};
@@ -1018,7 +1018,10 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
         subcommandInvoked_ = true;
         immediateSubcommandHandled_ = true;
         pruneInvoked_ = true;
-        runPrune();
+        auto result = runPrune();
+        if (!result) {
+            throw CLI::RuntimeError(1);
+        }
     });
 
     // Search quality benchmark
@@ -1129,7 +1132,7 @@ void DoctorCommand::runDedupe() {
     cmd.execute(std::cout, cli_, cfg);
 }
 
-void DoctorCommand::runPrune() {
+Result<void> DoctorCommand::runPrune() {
     doctor::PruneCommand::Config cfg;
     cfg.categories = pruneCategories_;
     cfg.extensions = pruneExtensions_;
@@ -1139,7 +1142,7 @@ void DoctorCommand::runPrune() {
     cfg.apply = pruneApply_;
     cfg.verbose = pruneVerbose_;
     doctor::PruneCommand cmd(cli_, cfg);
-    cmd.execute(std::cout);
+    return cmd.execute(std::cout);
 }
 
 void DoctorCommand::runBenchmark() {

@@ -369,6 +369,55 @@ refineBenchmarkKgReadinessPolicy(BenchmarkKgReadinessPolicy initialPolicy,
 }
 
 /**
+ * @brief Daemon-owned semantic graph production state observed by a benchmark.
+ */
+struct BenchmarkDaemonGraphState {
+    std::uint64_t semanticDocumentsProcessed{0};
+    std::uint64_t semanticEdgesCreated{0};
+    std::uint64_t semanticUpdateErrors{0};
+    std::uint64_t topologyDocumentNodes{0};
+    std::uint64_t topologySemanticEdges{0};
+    std::uint64_t topologyDocumentsWithNeighbors{0};
+    std::uint64_t topologyIsolatedDocuments{0};
+    std::uint64_t postIngestQueued{0};
+    std::uint64_t postIngestInFlight{0};
+    std::uint64_t embeddingQueued{0};
+    std::uint64_t embeddingInFlight{0};
+    std::uint64_t writeQueued{0};
+    std::uint64_t writeInFlight{0};
+};
+
+/**
+ * @brief Require graph production plus drained embedding and write queues.
+ */
+[[nodiscard]] constexpr bool
+benchmarkDaemonGraphReady(const BenchmarkDaemonGraphState& state,
+                          std::uint64_t minimumSemanticDocuments = 1) noexcept {
+    return state.semanticDocumentsProcessed >= minimumSemanticDocuments &&
+           state.semanticEdgesCreated > 0 && state.semanticUpdateErrors == 0 &&
+           state.topologyDocumentNodes >= minimumSemanticDocuments &&
+           state.topologySemanticEdges > 0 &&
+           state.topologyDocumentsWithNeighbors >= minimumSemanticDocuments &&
+           state.topologyIsolatedDocuments == 0 && state.postIngestQueued == 0 &&
+           state.postIngestInFlight == 0 && state.embeddingQueued == 0 &&
+           state.embeddingInFlight == 0 && state.writeQueued == 0 && state.writeInFlight == 0;
+}
+
+/**
+ * @brief Require graph-production counters to remain unchanged between observations.
+ */
+[[nodiscard]] constexpr bool
+benchmarkDaemonGraphProductionStable(const BenchmarkDaemonGraphState& previous,
+                                     const BenchmarkDaemonGraphState& current) noexcept {
+    return current.semanticDocumentsProcessed == previous.semanticDocumentsProcessed &&
+           current.semanticEdgesCreated == previous.semanticEdgesCreated &&
+           current.topologyDocumentNodes == previous.topologyDocumentNodes &&
+           current.topologySemanticEdges == previous.topologySemanticEdges &&
+           current.topologyDocumentsWithNeighbors == previous.topologyDocumentsWithNeighbors &&
+           current.topologyIsolatedDocuments == previous.topologyIsolatedDocuments;
+}
+
+/**
  * @brief Internal benchmark runner for search quality measurement.
  *
  * Runs synthetic queries against the search engine and measures retrieval

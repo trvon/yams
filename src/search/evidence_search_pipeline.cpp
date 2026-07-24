@@ -76,7 +76,7 @@ deriveTopologyCandidateEvidence(const TopologyRoutingSessionResult& route,
                                 float maxScoreAdjustment) {
     TopologyEvidenceByCandidate evidence;
     if (!route.artifactAdmitted || route.confidenceAbstained ||
-        route.routeAllowedDocumentHashes.empty() || maxScoreAdjustment <= 0.0F) {
+        !route.certificate.hasUsefulRoute() || maxScoreAdjustment <= 0.0F) {
         return evidence;
     }
 
@@ -93,8 +93,8 @@ deriveTopologyCandidateEvidence(const TopologyRoutingSessionResult& route,
         0.40F * best + 0.25F * mean + 0.20F * relativeBoundary + 0.15F * seedCoverage, 0.0F, 1.0F);
     const float boundedAdjustment = std::clamp(maxScoreAdjustment, 0.0F, 1.0F);
 
-    evidence.reserve(route.routeAllowedDocumentHashes.size());
-    for (const auto& candidate : route.routeAllowedDocumentHashes) {
+    evidence.reserve(route.certificate.allowedDocumentHashes.size());
+    for (const auto& candidate : route.certificate.allowedDocumentHashes) {
         const float localSupport = route.routedCandidateHashes.contains(candidate) ? 1.0F : 0.0F;
         const float medoidSupport = route.medoidHashes.contains(candidate) ? 1.0F : 0.0F;
         const float baseSupport = 0.65F + 0.20F * localSupport + 0.15F * medoidSupport;
@@ -221,7 +221,9 @@ EvidenceSearchPipeline::execute(std::span<const ComponentResult> components,
                 std::clamp(static_cast<double>(evidence.topology->confidence), 0.0, 1.0);
             const double adjustment =
                 std::clamp(static_cast<double>(evidence.topology->scoreAdjustment), -1.0, 1.0);
-            result.score += confidence * adjustment;
+            const double topologyContribution = confidence * adjustment;
+            result.score += topologyContribution;
+            result.topologyScore = topologyContribution;
         }
         output.results.push_back(std::move(result));
     }
@@ -245,7 +247,28 @@ EvidenceSearchPipeline::execute(std::span<const ComponentResult> components,
 
     const std::size_t effectiveLimit = limit > 0 ? limit : config.maxResults;
     if (output.results.size() > effectiveLimit) {
-        output.results.resize(effectiveLimit);
+        std::size_t keep = effectiveLimit;
+        if (config.topologyFusionRescueSlots > 0) {
+            const double minScore =
+                std::max(0.0, static_cast<double>(config.topologyFusionRescueMinScore));
+            for (std::size_t i = effectiveLimit;
+                 i < output.results.size() &&
+                 output.trace.topologyFusionRescuedCandidates < config.topologyFusionRescueSlots;
+                 ++i) {
+                if (output.results[i].topologyScore.value_or(0.0) < minScore) {
+                    continue;
+                }
+                // Additive only: swap the eligible candidate into the next open tail slot rather
+                // than displacing anything inside [0, effectiveLimit). This keeps
+                // PreservesBaselineRelevant trivially true for this boundary.
+                if (i != keep) {
+                    std::swap(output.results[keep], output.results[i]);
+                }
+                ++keep;
+                ++output.trace.topologyFusionRescuedCandidates;
+            }
+        }
+        output.results.resize(keep);
     }
     output.trace.finalCandidates = output.results.size();
     return output;

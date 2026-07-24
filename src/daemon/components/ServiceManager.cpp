@@ -362,6 +362,27 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             spdlog::info("Topology SOAR boundary spill applied via config: enabled={}",
                          topologyManager_.boundarySpillEnabled());
         }
+        topology::FeatureComposition featureComposition;
+        featureComposition.enableEntityFusion =
+            enginePolicy.featureEntityFusion.value_or(featureComposition.enableEntityFusion);
+        featureComposition.entitySignatureK =
+            enginePolicy.featureEntitySignatureK.value_or(featureComposition.entitySignatureK);
+        featureComposition.entityFusionAlpha =
+            enginePolicy.featureEntityFusionAlpha.value_or(featureComposition.entityFusionAlpha);
+        featureComposition.entityMinConfidence = enginePolicy.featureEntityMinConfidence.value_or(
+            featureComposition.entityMinConfidence);
+        featureComposition.enableMatryoshkaCoarseView =
+            enginePolicy.featureMatryoshkaCoarseView.value_or(
+                featureComposition.enableMatryoshkaCoarseView);
+        featureComposition.matryoshkaTargetDim = enginePolicy.featureMatryoshkaTargetDim.value_or(
+            featureComposition.matryoshkaTargetDim);
+        featureComposition.enableMinHashSketch =
+            enginePolicy.featureMinHashSketch.value_or(featureComposition.enableMinHashSketch);
+        featureComposition.minhashSketchDim =
+            enginePolicy.featureMinHashSketchDim.value_or(featureComposition.minhashSketchDim);
+        featureComposition.minhashAlpha =
+            enginePolicy.featureMinHashAlpha.value_or(featureComposition.minhashAlpha);
+        topologyManager_.setFeatureComposition(std::move(featureComposition));
     }
 
     // Audit-fix #1: throttle topology rebuild scheduling. During bulk ingest

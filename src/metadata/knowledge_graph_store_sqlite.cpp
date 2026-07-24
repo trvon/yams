@@ -75,10 +75,10 @@ constexpr auto kKgAliasUpsertSql = R"(
 std::string buildSqlPlaceholders(std::size_t count) {
     std::string placeholders;
     placeholders.reserve(count * 3);
+    const char* separator = "";
     for (std::size_t i = 0; i < count; ++i) {
-        if (i > 0) {
-            placeholders += ", ";
-        }
+        placeholders += separator;
+        separator = ", ";
         placeholders += "?";
     }
     return placeholders;
@@ -658,7 +658,13 @@ public:
                     return stmtR.error();
                 auto stmt = std::move(stmtR).value();
 
-                auto sanitizedQuery = sanitizeFts5UserQuery(std::string(aliasQuery));
+                // kg_aliases_fts has a single column (alias); FTS field-selector syntax
+                // can only fail with "no such column" here. Quote queries containing
+                // ':' (C++ qualified names, paths, drive letters) as literal phrases.
+                const std::string sanitizedQuery =
+                    aliasQuery.find(':') != std::string_view::npos
+                        ? quoteFts5Literal(aliasQuery)
+                        : sanitizeFts5UserQuery(std::string(aliasQuery));
                 auto br = stmt.bind(1, sanitizedQuery);
                 if (!br)
                     return br.error();
@@ -3347,7 +3353,7 @@ public:
 
         thread_local std::mt19937 rng(std::random_device{}());
 
-        for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
+        for (int attempt = 1;; ++attempt) {
             auto result = (*conn_)->commit();
             if (result) {
                 if (owner_) {
@@ -3356,9 +3362,6 @@ public:
                                                   aliasCountDelta_);
                 }
                 committed_ = true;
-                if (attempt > 0) {
-                    spdlog::debug("WriteBatch::commit succeeded after {} retries", attempt);
-                }
                 return result;
             }
 
@@ -3367,16 +3370,16 @@ public:
                 result.error().message.find("database is locked") != std::string::npos ||
                 result.error().message.find("SQLITE_BUSY") != std::string::npos;
 
-            if (!isLockError || attempt == kMaxRetries - 1) {
+            if (!isLockError || attempt >= kMaxRetries) {
                 if (isLockError) {
-                    spdlog::warn("WriteBatch::commit: lock error after {} retries: {}", attempt + 1,
+                    spdlog::warn("WriteBatch::commit: lock error after {} attempts: {}", attempt,
                                  result.error().message);
                 }
                 return result;
             }
 
             // Exponential backoff with jitter (±25%), capped at kMaxDelayMs
-            int baseDelayMs = std::min(kBaseDelayMs * (1 << attempt), kMaxDelayMs);
+            int baseDelayMs = std::min(kBaseDelayMs * (1 << (attempt - 1)), kMaxDelayMs);
             int jitter = static_cast<int>(baseDelayMs * 0.25);
             std::uniform_int_distribution<int> dist(-jitter, jitter);
             int delayMs = baseDelayMs + dist(rng);

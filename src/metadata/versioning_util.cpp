@@ -1,13 +1,101 @@
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <cstdlib>
+#include <iterator>
+#include <stdexcept>
 #include <string_view>
 #include <tuple>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
 #include <yams/metadata/versioning_util.h>
 
 namespace yams::metadata {
+
+Result<std::vector<VersionRetentionCandidate>>
+selectVersionRetentionCandidates(IMetadataRepository& repo, const VersionRetentionPolicy& policy) {
+    if (policy.keepLatest == 0) {
+        return Error{ErrorCode::InvalidArgument, "keepLatest must be at least one"};
+    }
+
+    DocumentQueryOptions options;
+    if (policy.seriesKey) {
+        options.metadataFilters.emplace_back("series_key", *policy.seriesKey);
+    }
+    auto documentsResult = repo.queryDocuments(options);
+    if (!documentsResult) {
+        return documentsResult.error();
+    }
+
+    std::vector<int64_t> ids;
+    ids.reserve(documentsResult.value().size());
+    for (const auto& document : documentsResult.value()) {
+        ids.push_back(document.id);
+    }
+    auto metadataResult = repo.getMetadataForDocuments(ids);
+    if (!metadataResult) {
+        return metadataResult.error();
+    }
+
+    std::unordered_map<std::string, std::vector<VersionRetentionCandidate>> series;
+    std::unordered_set<int64_t> latestDocumentIds;
+    for (const auto& document : documentsResult.value()) {
+        const auto metadataIt = metadataResult.value().find(document.id);
+        if (metadataIt == metadataResult.value().end()) {
+            continue;
+        }
+        const auto seriesIt = metadataIt->second.find("series_key");
+        if (seriesIt == metadataIt->second.end() || seriesIt->second.asString().empty()) {
+            continue;
+        }
+
+        int64_t version = 0;
+        if (const auto latestIt = metadataIt->second.find("is_latest");
+            latestIt != metadataIt->second.end() && latestIt->second.asBoolean()) {
+            latestDocumentIds.insert(document.id);
+        }
+        if (const auto versionIt = metadataIt->second.find("version");
+            versionIt != metadataIt->second.end()) {
+            try {
+                version = versionIt->second.asInteger();
+            } catch (const std::exception&) {
+                // Sort malformed versions behind well-formed history. The latest
+                // marker below still ensures the current document is protected.
+            }
+        }
+        series[seriesIt->second.asString()].push_back(
+            {document, version, seriesIt->second.asString()});
+    }
+
+    std::vector<VersionRetentionCandidate> candidates;
+    for (auto& entry : series) {
+        auto& versions = entry.second;
+        std::sort(versions.begin(), versions.end(),
+                  [&latestDocumentIds](const auto& left, const auto& right) {
+                      const bool leftLatest = latestDocumentIds.contains(left.document.id);
+                      const bool rightLatest = latestDocumentIds.contains(right.document.id);
+                      if (leftLatest != rightLatest) {
+                          return leftLatest;
+                      }
+                      if (left.version != right.version) {
+                          return left.version > right.version;
+                      }
+                      return left.document.indexedTime > right.document.indexedTime;
+                  });
+        if (versions.size() > policy.keepLatest) {
+            for (auto it =
+                     std::next(versions.begin(), static_cast<std::ptrdiff_t>(policy.keepLatest));
+                 it != versions.end(); ++it) {
+                if (!latestDocumentIds.contains(it->document.id)) {
+                    candidates.push_back(*it);
+                }
+            }
+        }
+    }
+    return candidates;
+}
 
 static bool versioningEnabled() {
     if (const char* env = std::getenv("YAMS_ENABLE_VERSIONING")) { // NOLINT(concurrency-mt-unsafe)

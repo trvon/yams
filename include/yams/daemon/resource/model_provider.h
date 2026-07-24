@@ -204,6 +204,14 @@ public:
      */
     virtual std::string getProviderVersion() const = 0;
 
+    // Versioned coordinate-system identity used to bind persisted vectors,
+    // topology artifacts, and query embeddings. Providers with multiple
+    // recipes should override this instead of returning only a model name.
+    virtual std::string getEmbeddingSpaceIdentity(const std::string& modelName) const {
+        return getProviderName() + ":" + modelName + ":" + getProviderVersion() + ":" +
+               std::to_string(getEmbeddingDim(modelName));
+    }
+
     /**
      * Check if the provider is available and functional
      * @return true if provider can be used

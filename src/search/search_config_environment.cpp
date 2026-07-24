@@ -513,6 +513,30 @@ SearchEnvironmentPins LegacySearchConfigEnvironment::applyTo(SearchEngineConfig&
         spdlog::info("SearchEngine fusionEvidenceRescueMinScore overridden to {:.3f} via env",
                      config.fusionEvidenceRescueMinScore);
     }
+    if (auto topologyFusionRescueSlots = getEnvInt("YAMS_SEARCH_TOPOLOGY_FUSION_RESCUE_SLOTS")) {
+        config.topologyFusionRescueSlots =
+            static_cast<size_t>(std::max(0, *topologyFusionRescueSlots));
+        spdlog::info("SearchEngine topologyFusionRescueSlots overridden to {} via env",
+                     config.topologyFusionRescueSlots);
+    }
+    if (auto topologyFusionRescueMinScore =
+            getEnvFloat("YAMS_SEARCH_TOPOLOGY_FUSION_RESCUE_MIN_SCORE")) {
+        config.topologyFusionRescueMinScore = std::max(0.0f, *topologyFusionRescueMinScore);
+        spdlog::info("SearchEngine topologyFusionRescueMinScore overridden to {:.3f} via env",
+                     config.topologyFusionRescueMinScore);
+    }
+    if (auto topologyFinalRescueSlots = getEnvInt("YAMS_SEARCH_TOPOLOGY_FINAL_RESCUE_SLOTS")) {
+        config.topologyFinalRescueSlots =
+            static_cast<size_t>(std::max(0, *topologyFinalRescueSlots));
+        spdlog::info("SearchEngine topologyFinalRescueSlots overridden to {} via env",
+                     config.topologyFinalRescueSlots);
+    }
+    if (auto topologyFinalRescueMinScore =
+            getEnvFloat("YAMS_SEARCH_TOPOLOGY_FINAL_RESCUE_MIN_SCORE")) {
+        config.topologyFinalRescueMinScore = std::max(0.0f, *topologyFinalRescueMinScore);
+        spdlog::info("SearchEngine topologyFinalRescueMinScore overridden to {:.3f} via env",
+                     config.topologyFinalRescueMinScore);
+    }
     if (auto graphQueryExpansion = getEnvBool("YAMS_SEARCH_ENABLE_GRAPH_QUERY_EXPANSION")) {
         config.enableGraphQueryExpansion = *graphQueryExpansion;
         spdlog::info("SearchEngine enableGraphQueryExpansion overridden to {} via env",

@@ -207,6 +207,11 @@ TEST_CASE("Prune category detection", "[core][magic][prune]") {
         REQUIRE(matchesPruneGroup(getPruneCategory("bazel-out/darwin-fastbuild/bin/app"), "build"));
         REQUIRE(matchesPruneGroup(getPruneCategory(".next/static/chunks/app.js"), "build"));
         REQUIRE(matchesPruneGroup(getPruneCategory("obj/Debug/app.pdb"), "build"));
+        REQUIRE(matchesPruneGroup(getPruneCategory("x64/Release/app.ilk"), "build-artifacts"));
+        REQUIRE(matchesPruneGroup(
+            getPruneCategory("build/Debug/app.dSYM/Contents/Resources/DWARF/app"), "build"));
+        REQUIRE(matchesPruneGroup(getPruneCategory("build-release/tools/yams"), "build"));
+        REQUIRE(matchesPruneGroup(getPruneCategory("build-release/tools/yams"), "build"));
     }
 
     SECTION("Package caches and deps") {
@@ -218,6 +223,12 @@ TEST_CASE("Prune category detection", "[core][magic][prune]") {
         REQUIRE(
             matchesPruneGroup(getPruneCategory(".ipynb_checkpoints/notebook.ipynb"), "packages"));
         REQUIRE(matchesPruneGroup(getPruneCategory(".gradle/caches/modules.bin"), "packages"));
+        REQUIRE(matchesPruneGroup(getPruneCategory("ios/Pods/Alamofire/Source.swift"), "packages"));
+        REQUIRE(matchesPruneGroup(
+            getPruneCategory(".terraform/providers/registry.terraform.io/provider"), "packages"));
+        REQUIRE(matchesPruneGroup(getPruneCategory("ios/Pods/Alamofire/Source.swift"), "packages"));
+        REQUIRE(matchesPruneGroup(
+            getPruneCategory(".terraform/providers/registry.terraform.io/provider"), "packages"));
     }
 
     SECTION("Coverage and IDE outputs") {
@@ -226,6 +237,21 @@ TEST_CASE("Prune category detection", "[core][magic][prune]") {
         REQUIRE(getPruneCategory(".vs/slnx.sqlite") == PruneCategory::IdeProject);
         REQUIRE(getPruneCategory("meson-private/coredata.dat") == PruneCategory::SystemMeson);
         REQUIRE(getPruneCategory("CMakeFiles/rules.ninja") == PruneCategory::SystemCMake);
+        REQUIRE(getPruneCategory(".cache/tool/entry") == PruneCategory::Cache);
+        REQUIRE(getPruneCategory(".cache/tool/entry") == PruneCategory::Cache);
+    }
+
+    SECTION("Stored extensions retain their leading dot") {
+        REQUIRE(getPruneCategory("/corpus/daemon.log", ".log") == PruneCategory::Logs);
+        REQUIRE(getPruneCategory("/corpus/module.o", ".o") == PruneCategory::BuildObject);
+        REQUIRE(getPruneCategory("/corpus/default.gcda", ".gcda") == PruneCategory::Coverage);
+    }
+
+    SECTION("MIME evidence identifies extensionless build artifacts") {
+        REQUIRE(getPruneCategory("/corpus/worker", "", "application/x-executable") ==
+                PruneCategory::BuildExecutable);
+        REQUIRE(getPruneCategory("/corpus/module", "", "application/x-llvm-bc") ==
+                PruneCategory::BuildObject);
     }
 
     SECTION("Git artifacts") {

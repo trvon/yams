@@ -10,16 +10,19 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <map>
 #include <optional>
 #include <set>
 #include <thread>
+#include <vector>
 #include "../../common/test_helpers_catch2.h"
 #include <yams/compat/unistd.h>
 
 #include <yams/daemon/components/IOCoordinator.h>
 #include <yams/daemon/components/ResourceGovernor.h>
+#include <yams/daemon/components/SearchEngineManager.h>
 #include <yams/daemon/components/SocketServer.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/WorkCoordinator.h>
@@ -68,6 +71,37 @@ fs::path makeTempRuntimeDir(const std::string& name) {
     std::error_code ec;
     fs::create_directories(dir, ec);
     return dir;
+}
+
+TEST_CASE("SearchEngineManager runtime executor is isolated from unavailable shared workers",
+          "[daemon][search][executor][liveness]") {
+    constexpr std::size_t kRequestConcurrency = 8;
+    boost::asio::io_context unavailableSharedContext;
+    std::atomic<std::size_t> sharedWorkRan{0};
+    for (std::size_t i = 0; i < kRequestConcurrency; ++i) {
+        boost::asio::post(unavailableSharedContext, [&sharedWorkRan]() {
+            sharedWorkRan.fetch_add(1, std::memory_order_release);
+        });
+    }
+
+    SearchEngineManager manager;
+    std::vector<std::promise<void>> searchWorkCompleted(kRequestConcurrency);
+    std::vector<std::future<void>> searchWorkFutures;
+    searchWorkFutures.reserve(kRequestConcurrency);
+    for (std::size_t i = 0; i < searchWorkCompleted.size(); ++i) {
+        searchWorkFutures.push_back(searchWorkCompleted[i].get_future());
+        boost::asio::post(manager.testingRuntimeExecutor(),
+                          [&searchWorkCompleted, i]() { searchWorkCompleted[i].set_value(); });
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + 500ms;
+    for (auto& future : searchWorkFutures) {
+        CHECK(future.wait_until(deadline) == std::future_status::ready);
+    }
+    CHECK(sharedWorkRan.load(std::memory_order_acquire) == 0);
+
+    unavailableSharedContext.run();
+    CHECK(sharedWorkRan.load(std::memory_order_acquire) == kRequestConcurrency);
 }
 
 std::string randomSuffix() {

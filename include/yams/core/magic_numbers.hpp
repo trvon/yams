@@ -669,13 +669,15 @@ inline constexpr const char* getPruneCategoryDescription(PruneCategory cat) {
  * Uses comprehensive pattern matching across multiple languages and build systems.
  * Supports C/C++, Java, .NET, Python, JavaScript, Rust, Go, OCaml, Haskell, Erlang, and more.
  */
-inline PruneCategory getPruneCategory(std::string_view filename, std::string_view ext = "") {
+inline PruneCategory getPruneCategory(std::string_view filename, std::string_view ext = "",
+                                      std::string_view mimeType = "") {
     std::string extLower, filenameLower;
 
     // Extract and lowercase extension
     if (!ext.empty()) {
-        extLower.reserve(ext.size());
-        for (char c : ext)
+        const auto extension = ext.starts_with('.') ? ext.substr(1) : ext;
+        extLower.reserve(extension.size());
+        for (char c : extension)
             extLower += (c >= 'A' && c <= 'Z') ? (c + 32) : c;
     } else {
         auto dotPos = filename.rfind('.');
@@ -699,7 +701,9 @@ inline PruneCategory getPruneCategory(std::string_view filename, std::string_vie
     // === Build Objects ===
     if (extLower == "o" || extLower == "obj" || extLower == "lo" || extLower == "al" ||
         extLower == "class" || extLower == "pyc" || extLower == "pyo" || extLower == "rlib" ||
-        extLower == "rmeta" || // Rust
+        extLower == "rmeta" || extLower == "pdb" || extLower == "ilk" || extLower == "exp" ||
+        extLower == "dwo" || extLower == "dwp" || extLower == "d" || // Native build byproducts
+        // Rust
         extLower == "cmo" || extLower == "cmi" || extLower == "cmx" || extLower == "cma" ||
         extLower == "cmxa" ||                                              // OCaml
         extLower == "hi" || extLower == "dyn_hi" || extLower == "dyn_o" || // Haskell
@@ -776,7 +780,15 @@ inline PruneCategory getPruneCategory(std::string_view filename, std::string_vie
         has_dir("bazel-testlogs") || has_dir(".stack-work")) {
         return PruneCategory::BuildObject;
     }
-    if (has_dir_prefix("builddir-") || has_dir_prefix("cmake-build-") || has_dir_prefix("bazel-")) {
+    // Visual Studio commonly emits binaries outside bin/obj, under an
+    // architecture/configuration pair such as x64/Release.
+    if ((has_dir("x64") || has_dir("x86") || has_dir("arm64")) &&
+        (has_dir("debug") || has_dir("release") || has_dir("relwithdebinfo") ||
+         has_dir("minsizerel"))) {
+        return PruneCategory::BuildObject;
+    }
+    if (has_dir_prefix("build-") || has_dir_prefix("builddir-") ||
+        has_dir_prefix("cmake-build-") || has_dir_prefix("bazel-")) {
         return PruneCategory::BuildObject;
     }
     if (has_dir(".next") || has_dir(".nuxt") || has_dir(".svelte-kit") ||
@@ -818,8 +830,10 @@ inline PruneCategory getPruneCategory(std::string_view filename, std::string_vie
     }
 
     // === Cache ===
-    if (extLower == "pch" || extLower == "gch" || extLower == "ipch")
+    if (extLower == "pch" || extLower == "gch" || extLower == "ipch" || has_dir(".cache") ||
+        has_dir("ccache") || has_dir("sccache")) {
         return PruneCategory::Cache;
+    }
 
     // === Temp ===
     if (extLower == "tmp" || extLower == "temp" || extLower == "bak" || extLower == "backup" ||
@@ -877,6 +891,9 @@ inline PruneCategory getPruneCategory(std::string_view filename, std::string_vie
     // Node.js
     if (filename.find("/node_modules/") != std::string_view::npos ||
         filename.find("node_modules/") == 0) {
+        return PruneCategory::PackageNodeModules;
+    }
+    if (has_dir("pods")) {
         return PruneCategory::PackageNodeModules;
     }
     if (filenameLower.find("/.pnpm-store/") != std::string::npos ||
@@ -942,6 +959,9 @@ inline PruneCategory getPruneCategory(std::string_view filename, std::string_vie
         filenameLower.find("/.gradle/") != std::string::npos ||
         filenameLower.rfind(".gradle/", 0) == 0) {
         return PruneCategory::PackageGradleCache;
+    }
+    if (has_dir(".terraform")) {
+        return PruneCategory::PackageGoCache;
     }
 
     // PHP Composer
@@ -1043,6 +1063,14 @@ inline PruneCategory getPruneCategory(std::string_view filename, std::string_vie
     if (extLower == "dart.js" || extLower == "dart.js.map" || extLower == "dart.js.deps" ||
         extLower == "dart.js.tar.gz") {
         return PruneCategory::SystemDart;
+    }
+
+    if (mimeType == "application/x-msdownload" || mimeType == "application/x-executable" ||
+        mimeType == "application/x-mach-binary" || mimeType == "application/wasm") {
+        return PruneCategory::BuildExecutable;
+    }
+    if (mimeType == "application/x-llvm-bc" || mimeType == "application/vnd.android.dex") {
+        return PruneCategory::BuildObject;
     }
 
     return PruneCategory::None;

@@ -1,6 +1,7 @@
 // Copyright 2025 The YAMS Authors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <yams/app/services/services.hpp>
 #include <yams/daemon/components/BackgroundTaskManager.h>
 #include <yams/daemon/components/CheckpointManager.h>
 #include <yams/daemon/components/InternalEventBus.h>
@@ -175,6 +176,7 @@ void BackgroundTaskManager::start() {
         launchCheckpointTask();
         launchStorageGcTask();
         launchGraphPruneTask();
+        launchDocumentRetentionTask();
         launchAutoRepairTask();
         spdlog::debug("[BackgroundTaskManager] Background tasks launched successfully");
     } catch (const std::exception& e) {
@@ -736,6 +738,64 @@ void BackgroundTaskManager::launchGraphPruneTask() {
                     }
                 }
 
+                co_return;
+            },
+            boost::asio::detached);
+    } catch (...) {
+        unregisterTrackedCoroutine();
+        throw;
+    }
+}
+
+void BackgroundTaskManager::launchDocumentRetentionTask() {
+    auto self = deps_.serviceManager.lock();
+    if (!self) {
+        throw std::runtime_error("BackgroundTaskManager: ServiceManager weak_ptr expired in "
+                                 "launchDocumentRetentionTask");
+    }
+
+    const auto& cfg = self->getConfig().documentRetention;
+    if (!cfg.enabled) {
+        spdlog::debug("[BackgroundTaskManager] Document retention disabled, skipping task");
+        return;
+    }
+
+    const auto interval = cfg.interval;
+    const auto initialDelay = cfg.initialDelay;
+    const auto keepLatest = cfg.keepLatest;
+    auto stopFlag = stopRequested_;
+    registerTrackedCoroutine();
+    try {
+        boost::asio::co_spawn(
+            deps_.executor,
+            [this, self, stopFlag, interval, initialDelay,
+             keepLatest]() -> boost::asio::awaitable<void> {
+                auto coroutineGuard =
+                    std::shared_ptr<void>(nullptr, [this](void*) { unregisterTrackedCoroutine(); });
+                auto executor = co_await boost::asio::this_coro::executor;
+                auto timer =
+                    std::make_shared<boost::asio::steady_timer>(boost::asio::make_strand(executor));
+                registerTrackedTimer(timer);
+                if (initialDelay.count() > 0 && !co_await coWaitForDelay(timer, initialDelay)) {
+                    co_return;
+                }
+
+                while (!stopFlag->load(std::memory_order_acquire)) {
+                    auto documentService =
+                        app::services::makeDocumentService(self->getAppContext());
+                    auto result = documentService->pruneVersions(
+                        {.keepLatest = keepLatest, .seriesKey = std::nullopt, .dryRun = false});
+                    if (!result) {
+                        spdlog::warn("[DocumentRetention] prune failed: {}",
+                                     result.error().message);
+                    } else if (result.value().count > 0) {
+                        spdlog::info("[DocumentRetention] pruned {} superseded version(s)",
+                                     result.value().deleted.size());
+                    }
+                    if (!co_await coWaitForDelay(timer, interval)) {
+                        break;
+                    }
+                }
                 co_return;
             },
             boost::asio::detached);

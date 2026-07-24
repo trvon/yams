@@ -15,11 +15,62 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#if defined(__APPLE__) || defined(__GLIBC__)
+#include <sys/resource.h>
+#endif
+
 #include <spdlog/spdlog.h>
 
 namespace fs = std::filesystem;
 
 namespace yams::bench {
+
+bool benchmarkSearchIndexReusable(yams::vector::VectorSearchEngine engine,
+                                  bool backendPersistedReusable) {
+    switch (engine) {
+        case yams::vector::VectorSearchEngine::Vec0L2:
+            return false;
+        case yams::vector::VectorSearchEngine::SimeonPqAdc:
+            return backendPersistedReusable;
+        case yams::vector::VectorSearchEngine::ExactScan:
+            return false;
+    }
+    return false;
+}
+
+bool benchmarkSearchIndexQueryReady(yams::vector::VectorSearchEngine engine,
+                                    bool persistedIndexReusable, bool preparedThisRun) {
+    if (engine == yams::vector::VectorSearchEngine::ExactScan) {
+        return true;
+    }
+    return persistedIndexReusable || preparedThisRun;
+}
+
+void writeTopologyDisabledEmbeddingSelection(std::ostream& out, bool topologyDisabled) {
+    if (!topologyDisabled) {
+        return;
+    }
+    out << "\n[embeddings.selection]\n";
+    out << "update_semantic_graph_during_ingest = false\n\n";
+}
+
+std::optional<double> processPeakRssMb() noexcept {
+#if defined(__APPLE__) || defined(__GLIBC__)
+    rusage usage{};
+    if (::getrusage(RUSAGE_SELF, &usage) != 0 || usage.ru_maxrss <= 0) {
+        return std::nullopt;
+    }
+#if defined(__APPLE__)
+    constexpr double kBytesPerMiB = 1024.0 * 1024.0;
+    return static_cast<double>(usage.ru_maxrss) / kBytesPerMiB;
+#else
+    constexpr double kKiBPerMiB = 1024.0;
+    return static_cast<double>(usage.ru_maxrss) / kKiBPerMiB;
+#endif
+#else
+    return std::nullopt;
+#endif
+}
 
 std::string topologySignalKindName(BenchmarkTopologySignalKind kind) {
     switch (kind) {

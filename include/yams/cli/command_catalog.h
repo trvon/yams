@@ -13,9 +13,9 @@ struct CommandCatalogEntry {
 };
 
 #ifdef YAMS_BUILD_MCP_SERVER
-inline constexpr std::array<CommandCatalogEntry, 29> kTopLevelCommands = {{
+inline constexpr std::array<CommandCatalogEntry, 26> kTopLevelCommands = {{
 #else
-inline constexpr std::array<CommandCatalogEntry, 28> kTopLevelCommands = {{
+inline constexpr std::array<CommandCatalogEntry, 25> kTopLevelCommands = {{
 #endif
     {"init", "Initialize YAMS storage and configuration"},
     {"add", "Add files or content to YAMS"},
@@ -29,9 +29,6 @@ inline constexpr std::array<CommandCatalogEntry, 28> kTopLevelCommands = {{
     {"config", "Manage YAMS configuration settings"},
     {"auth", "Manage authentication keys and tokens"},
     {"status", "Show quick system status and health overview"},
-    {"stats", "Show quick system status and health overview"},
-    {"uninstall", "Remove YAMS from your system"},
-    {"migrate", "Migrate YAMS data and configuration"},
     {"update", "Update stored content"},
     {"download", "Download and ingest remote content"},
     {"session", "Manage YAMS sessions"},
@@ -42,7 +39,7 @@ inline constexpr std::array<CommandCatalogEntry, 28> kTopLevelCommands = {{
     {"daemon", "Manage YAMS daemon process"},
     {"plugin", "Manage plugins and plugin trust"},
     {"doctor", "Run diagnostics and health checks"},
-    {"dr", "Disaster Recovery (gated by plugins)"},
+    {"prune", "Remove build artifacts, logs, cache, and temporary files"},
     {"graph", "Explore the knowledge graph"},
     {"diff", "Compare snapshots and paths"},
 #ifdef YAMS_BUILD_MCP_SERVER

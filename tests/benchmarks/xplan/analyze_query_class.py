@@ -12,7 +12,7 @@ Usage:
       --route-calibration global_ann_c32 routed_margin020_min1
 
   python3 tests/benchmarks/xplan/analyze_query_class.py RUN_DIR \
-      --shadow-calibration shadow_margin020_min1
+      --candidate-rescue-calibration global_ann_c32 graph_rescue_augment_c32_plus16
 """
 
 from __future__ import annotations
@@ -81,6 +81,16 @@ def load_by_type(debug_path: Path) -> dict[str, list[dict[str, Any]]]:
             for doc in trace_docs or []
             if isinstance(doc, dict) and doc.get("in_pre_fusion") is True
         }
+        post_fusion_relevant = {
+            str(doc.get("doc_id"))
+            for doc in trace_docs or []
+            if isinstance(doc, dict) and doc.get("in_post_fusion") is True
+        }
+        returned_relevant = {
+            str(doc.get("doc_id"))
+            for doc in trace_docs or []
+            if isinstance(doc, dict) and doc.get("in_returned_topk") is True
+        }
         vector_unique_relevant = {
             str(doc.get("doc_id"))
             for doc in trace_docs or []
@@ -90,6 +100,33 @@ def load_by_type(debug_path: Path) -> dict[str, list[dict[str, Any]]]:
         stats = o.get("search_stats") or {}
         if not isinstance(stats, dict):
             stats = {}
+        rescue_added_doc_ids = _tab_set(
+            stats.get("topology_candidate_rescue_added_candidate_doc_ids")
+            or stats.get("topology_candidate_rescue_added_candidate_hashes")
+        )
+        rescue_classification_available = any(
+            key in stats
+            for key in (
+                "topology_candidate_rescue_novel_candidate_doc_ids",
+                "topology_candidate_rescue_novel_candidate_hashes",
+                "topology_candidate_rescue_evidence_rescue_doc_ids",
+                "topology_candidate_rescue_evidence_rescue_hashes",
+            )
+        )
+        rescue_novel_doc_ids = _tab_set(
+            stats.get("topology_candidate_rescue_novel_candidate_doc_ids")
+            or stats.get("topology_candidate_rescue_novel_candidate_hashes")
+        )
+        rescue_evidence_doc_ids = _tab_set(
+            stats.get("topology_candidate_rescue_evidence_rescue_doc_ids")
+            or stats.get("topology_candidate_rescue_evidence_rescue_hashes")
+        )
+        if not rescue_classification_available:
+            rescue_novel_doc_ids = rescue_added_doc_ids
+        reachable_doc_ids = _tab_set(
+            stats.get("topology_weak_query_allowed_candidate_doc_ids")
+        )
+        relevant_rescue_doc_ids = rescue_added_doc_ids & rel
         exact_work = _as_int(stats.get("vector_search_exact_distance_evaluations_actual"))
         out.setdefault(st, []).append(
             {
@@ -101,28 +138,78 @@ def load_by_type(debug_path: Path) -> dict[str, list[dict[str, Any]]]:
                 "n_tok": len(tokens),
                 "has_digit": any(any(c.isdigit() for c in t) for t in tokens),
                 "pre_fusion_relevant": pre_fusion_relevant,
+                "post_fusion_relevant": post_fusion_relevant,
+                "returned_relevant": returned_relevant,
                 "vector_unique_relevant": vector_unique_relevant,
+                "candidate_rescue_added_doc_ids": rescue_added_doc_ids,
+                "candidate_rescue_relevant_doc_ids": relevant_rescue_doc_ids,
+                "candidate_rescue_novel_relevant_doc_ids": (
+                    rescue_novel_doc_ids & rel
+                ),
+                "candidate_rescue_evidence_relevant_doc_ids": (
+                    rescue_evidence_doc_ids & rel
+                ),
+                "candidate_rescue_reachable_relevant_doc_ids": reachable_doc_ids & rel,
+                "candidate_rescue_returned_doc_ids": relevant_rescue_doc_ids & set(ret),
+                "candidate_rescue_attempted": str(
+                    stats.get("topology_candidate_rescue_attempted", "0")
+                ).lower()
+                in {"1", "true", "yes", "on"},
+                "candidate_rescue_applied": str(
+                    stats.get("topology_candidate_rescue_applied", "0")
+                ).lower()
+                in {"1", "true", "yes", "on"},
                 "narrow_applied": str(
                     stats.get("topology_weak_query_narrow_applied", "0")
                 ).lower()
                 in {"1", "true", "yes", "on"},
+                "narrow_proposed": str(
+                    stats.get("topology_route_narrow_proposed", "0")
+                ).lower()
+                in {"1", "true", "yes", "on"},
+                "admission_eligible": str(
+                    stats.get("topology_route_admission_eligible", "0")
+                ).lower()
+                in {"1", "true", "yes", "on"},
+                "admission_denial_reason": str(
+                    stats.get("topology_route_admission_denial_reason", "")
+                ),
+                "protected_relation_coverage_status": str(
+                    stats.get(
+                        "topology_route_protected_relation_coverage_status",
+                        "unavailable",
+                    )
+                ),
+                "protected_fibers_represented_status": str(
+                    stats.get(
+                        "topology_route_protected_fibers_represented_status",
+                        "unavailable",
+                    )
+                ),
+                "certificate_saturates_protected_fibers_status": str(
+                    stats.get(
+                        "topology_route_certificate_saturates_protected_fibers_status",
+                        "unavailable",
+                    )
+                ),
+                "route_risk_status": str(
+                    stats.get("topology_route_risk_status", "unavailable")
+                ),
+                "work_status": str(
+                    stats.get("topology_route_work_status", "unavailable")
+                ),
+                "cover_materialization_status": str(
+                    stats.get(
+                        "topology_route_cover_materialization_status", "unavailable"
+                    )
+                ),
                 "route_margin": _as_float(
                     stats.get("topology_route_boundary_score_margin")
                 ),
                 "seed_hits": _as_int(stats.get("topology_seed_coverage_count")),
                 "exact_work": exact_work,
-                "shadow_evaluated": str(
-                    stats.get("topology_shadow_evaluated", "0")
-                ).lower()
-                in {"1", "true", "yes", "on"},
-                "shadow_proposed_action": str(
-                    stats.get("topology_shadow_proposed_action", "global")
-                ),
-                "shadow_retained_doc_ids": _tab_set(
-                    stats.get("topology_shadow_retained_candidate_doc_ids")
-                ),
-                "shadow_removed_doc_ids": _tab_set(
-                    stats.get("topology_shadow_removed_candidate_doc_ids")
+                "construction_fingerprint": str(
+                    stats.get("topology_construction_fingerprint", "") or ""
                 ),
             }
         )
@@ -154,7 +241,16 @@ def mean(xs: list[float]) -> float:
     return statistics.mean(xs) if xs else float("nan")
 
 
-def _summarize_route_rows(rows: list[dict[str, Any]]) -> dict[str, float | int]:
+def _common_construction_fingerprint(rows: list[dict[str, Any]]) -> str:
+    fingerprints = {
+        str(row.get("construction_fingerprint") or "") for row in rows
+    }
+    return fingerprints.pop() if len(fingerprints) == 1 else ""
+
+
+def _summarize_route_rows(
+    rows: list[dict[str, Any]],
+) -> dict[str, float | int | str]:
     protected = sum(len(row["protected"]) for row in rows)
     missed = sum(len(row["missed"]) for row in rows)
     if not rows:
@@ -162,27 +258,41 @@ def _summarize_route_rows(rows: list[dict[str, Any]]) -> dict[str, float | int]:
             "calibration_queries": 0,
             "protected_candidates": 0,
             "missed_protected_candidates": 0,
+            "represented_protected_candidates": 0,
+            "unresolved_protected_fibers": 0,
             "misses_per_thousand": 0.0,
             "mean_rr_delta": 0.0,
             "mean_exact_work_delta": 0.0,
             "mean_route_margin": 0.0,
+            "minimum_observed_route_margin": 0.0,
             "mean_seed_hits": 0.0,
+            "minimum_observed_seed_hits": 0,
+            "construction_fingerprint": "",
         }
     return {
         "calibration_queries": len(rows),
         "protected_candidates": protected,
         "missed_protected_candidates": missed,
+        # A projected removal is unresolved until an independent protected-relation cover
+        # witness is observed.
+        "represented_protected_candidates": protected - missed,
+        "unresolved_protected_fibers": missed,
         "misses_per_thousand": (1000.0 * missed / protected) if protected else 0.0,
         "mean_rr_delta": mean([float(row["rr_delta"]) for row in rows]),
         "mean_exact_work_delta": mean([float(row["exact_work_delta"]) for row in rows]),
         "mean_route_margin": mean([float(row["route_margin"]) for row in rows]),
+        "minimum_observed_route_margin": min(
+            float(row["route_margin"]) for row in rows
+        ),
         "mean_seed_hits": mean([float(row["seed_hits"]) for row in rows]),
+        "minimum_observed_seed_hits": min(int(row["seed_hits"]) for row in rows),
+        "construction_fingerprint": _common_construction_fingerprint(rows),
     }
 
 
 def paired_route_risk(
     baseline: list[dict[str, Any]], routed: list[dict[str, Any]]
-) -> dict[str, dict[str, float | int]]:
+) -> dict[str, dict[str, float | int | str]]:
     """Summarize admitted narrowing loss relative to paired global ANN queries.
 
     Judged-relevant vector candidates that no other global component produced are
@@ -218,6 +328,9 @@ def paired_route_risk(
                 - int(before["exact_work"]),
                 "route_margin": float(current["route_margin"]),
                 "seed_hits": int(current["seed_hits"]),
+                "construction_fingerprint": str(
+                    current.get("construction_fingerprint") or ""
+                ),
             }
         )
 
@@ -229,68 +342,164 @@ def paired_route_risk(
     return summaries
 
 
-def _summarize_shadow_rows(rows: list[dict[str, Any]]) -> dict[str, float | int]:
-    protected = sum(len(row["protected"]) for row in rows)
-    missed = sum(len(row["missed"]) for row in rows)
-    if not rows:
-        return {
-            "calibration_queries": 0,
-            "protected_candidates": 0,
-            "missed_protected_candidates": 0,
-            "misses_per_thousand": 0.0,
-            "mean_global_rr": 0.0,
-            "mean_exact_work": 0.0,
-            "mean_projected_removed_candidates": 0.0,
-            "mean_route_margin": 0.0,
-            "mean_seed_hits": 0.0,
-        }
+def _summarize_candidate_rescue_rows(
+    rows: list[dict[str, Any]],
+) -> dict[str, float | int]:
+    baseline_relevant = sum(len(row["baseline_relevant"]) for row in rows)
+    displaced = sum(len(row["displaced_baseline_relevant"]) for row in rows)
+    budgeted_baseline_relevant = sum(
+        len(row["budgeted_baseline_relevant"]) for row in rows
+    )
+    budgeted_displaced = sum(
+        len(row["displaced_budgeted_baseline_relevant"]) for row in rows
+    )
+    missing_rescues = sum(len(row["missing_relevant_rescues"]) for row in rows)
+    reachable_missing = sum(
+        len(row["reachable_missing_relevant_candidates"]) for row in rows
+    )
+    materialized = sum(len(row["materialized_relevant_rescues"]) for row in rows)
+    post_fusion = sum(len(row["post_fusion_relevant_rescues"]) for row in rows)
+    returned = sum(len(row["returned_relevant_rescues"]) for row in rows)
+    evidence_rescues = sum(
+        len(row["existing_relevant_evidence_rescues"]) for row in rows
+    )
+    post_fusion_evidence = sum(
+        len(row["post_fusion_relevant_evidence_rescues"]) for row in rows
+    )
+    returned_evidence = sum(
+        len(row["returned_relevant_evidence_rescues"]) for row in rows
+    )
     return {
-        "calibration_queries": len(rows),
-        "protected_candidates": protected,
-        "missed_protected_candidates": missed,
-        "misses_per_thousand": (1000.0 * missed / protected) if protected else 0.0,
-        "mean_global_rr": mean([float(row["global_rr"]) for row in rows]),
-        "mean_exact_work": mean([float(row["exact_work"]) for row in rows]),
-        "mean_projected_removed_candidates": mean(
-            [float(row["projected_removed_candidates"]) for row in rows]
+        "paired_queries": len(rows),
+        "attempted_queries": sum(bool(row["attempted"]) for row in rows),
+        "applied_queries": sum(bool(row["applied"]) for row in rows),
+        "baseline_relevant_candidates": baseline_relevant,
+        "displaced_baseline_relevant_candidates": displaced,
+        "baseline_relevant_preservation_rate": (
+            float(baseline_relevant - displaced) / float(baseline_relevant)
+            if baseline_relevant
+            else 1.0
         ),
-        "mean_route_margin": mean([float(row["route_margin"]) for row in rows]),
-        "mean_seed_hits": mean([float(row["seed_hits"]) for row in rows]),
+        "budgeted_baseline_relevant_candidates": budgeted_baseline_relevant,
+        "displaced_budgeted_baseline_relevant_candidates": budgeted_displaced,
+        "budgeted_baseline_relevant_preservation_rate": (
+            float(budgeted_baseline_relevant - budgeted_displaced)
+            / float(budgeted_baseline_relevant)
+            if budgeted_baseline_relevant
+            else 1.0
+        ),
+        "missing_relevant_rescues": missing_rescues,
+        "reachable_missing_relevant_candidates": reachable_missing,
+        "reachable_to_scored_rescue_rate": (
+            float(missing_rescues) / float(reachable_missing)
+            if reachable_missing
+            else 0.0
+        ),
+        "materialized_relevant_rescues": materialized,
+        "strict_candidate_improvement_queries": sum(
+            not row["displaced_baseline_relevant"] and bool(row["materialized_relevant_rescues"])
+            for row in rows
+        ),
+        "strict_budgeted_improvement_queries": sum(
+            not row["displaced_budgeted_baseline_relevant"]
+            and bool(row["post_fusion_relevant_rescues"])
+            for row in rows
+        ),
+        "post_fusion_relevant_rescues": post_fusion,
+        "returned_relevant_rescues": returned,
+        "post_fusion_rescue_survival_rate": (
+            float(post_fusion) / float(materialized) if materialized else 0.0
+        ),
+        "returned_rescue_survival_rate": (
+            float(returned) / float(materialized) if materialized else 0.0
+        ),
+        "existing_relevant_evidence_rescues": evidence_rescues,
+        "post_fusion_relevant_evidence_rescues": post_fusion_evidence,
+        "returned_relevant_evidence_rescues": returned_evidence,
+        "post_fusion_evidence_survival_rate": (
+            float(post_fusion_evidence) / float(evidence_rescues)
+            if evidence_rescues
+            else 0.0
+        ),
+        "returned_evidence_survival_rate": (
+            float(returned_evidence) / float(evidence_rescues)
+            if evidence_rescues
+            else 0.0
+        ),
+        "mean_rr_delta": mean([float(row["rr_delta"]) for row in rows]) if rows else 0.0,
     }
 
 
-def shadow_route_risk(
-    records: list[dict[str, Any]],
+def paired_candidate_rescue(
+    baseline: list[dict[str, Any]], rescue: list[dict[str, Any]]
 ) -> dict[str, dict[str, float | int]]:
-    """Calibrate proposed narrowing from one global-result shadow arm."""
+    """Measure the budgeted candidate-rescue theorem against paired global queries."""
 
+    baseline_by_key = {
+        (row.get("repeat"), row["corpus"], row["query"]): row for row in baseline
+    }
     rows: list[dict[str, Any]] = []
-    for record in records:
-        if (
-            not record.get("shadow_evaluated")
-            or record.get("shadow_proposed_action") != "narrow"
-        ):
+    for current in rescue:
+        key = (current.get("repeat"), current["corpus"], current["query"])
+        before = baseline_by_key.get(key)
+        if before is None:
             continue
-        protected = set(record.get("vector_unique_relevant") or set())
-        if not protected:
-            continue
-        removed = set(record.get("shadow_removed_doc_ids") or set())
+        baseline_relevant = set(before.get("pre_fusion_relevant") or set())
+        current_relevant = set(current.get("pre_fusion_relevant") or set())
+        budgeted_baseline_relevant = set(before.get("post_fusion_relevant") or set())
+        budgeted_current_relevant = set(current.get("post_fusion_relevant") or set())
+        claimed_rescues = set(
+            current.get("candidate_rescue_novel_relevant_doc_ids") or set()
+        )
+        claimed_evidence_rescues = set(
+            current.get("candidate_rescue_evidence_relevant_doc_ids") or set()
+        )
+        reachable_relevant = set(
+            current.get("candidate_rescue_reachable_relevant_doc_ids") or set()
+        )
+        missing_rescues = claimed_rescues - baseline_relevant
+        existing_relevant_evidence_rescues = (
+            claimed_evidence_rescues & baseline_relevant
+        )
         rows.append(
             {
-                "corpus": record["corpus"],
-                "protected": protected,
-                "missed": protected & removed,
-                "global_rr": float(record["rr"]),
-                "exact_work": int(record["exact_work"]),
-                "projected_removed_candidates": len(removed),
-                "route_margin": float(record["route_margin"]),
-                "seed_hits": int(record["seed_hits"]),
+                "corpus": current["corpus"],
+                "attempted": bool(current.get("candidate_rescue_attempted")),
+                "applied": bool(current.get("candidate_rescue_applied")),
+                "baseline_relevant": baseline_relevant,
+                "displaced_baseline_relevant": baseline_relevant - current_relevant,
+                "budgeted_baseline_relevant": budgeted_baseline_relevant,
+                "displaced_budgeted_baseline_relevant": (
+                    budgeted_baseline_relevant - budgeted_current_relevant
+                ),
+                "missing_relevant_rescues": missing_rescues,
+                "reachable_missing_relevant_candidates": (
+                    reachable_relevant - baseline_relevant
+                ),
+                "materialized_relevant_rescues": missing_rescues & current_relevant,
+                "post_fusion_relevant_rescues": (
+                    claimed_rescues - budgeted_baseline_relevant
+                )
+                & budgeted_current_relevant,
+                "returned_relevant_rescues": missing_rescues
+                & set(current.get("returned_relevant") or set()),
+                "existing_relevant_evidence_rescues": (
+                    existing_relevant_evidence_rescues
+                ),
+                "post_fusion_relevant_evidence_rescues": (
+                    existing_relevant_evidence_rescues & budgeted_current_relevant
+                ),
+                "returned_relevant_evidence_rescues": (
+                    existing_relevant_evidence_rescues
+                    & set(current.get("returned_relevant") or set())
+                ),
+                "rr_delta": float(current["rr"]) - float(before["rr"]),
             }
         )
 
-    summaries = {"all": _summarize_shadow_rows(rows)}
+    summaries = {"all": _summarize_candidate_rescue_rows(rows)}
     for corpus in sorted({str(row["corpus"]) for row in rows}):
-        summaries[corpus] = _summarize_shadow_rows(
+        summaries[corpus] = _summarize_candidate_rescue_rows(
             [row for row in rows if row["corpus"] == corpus]
         )
     return summaries
@@ -393,16 +602,22 @@ def route_calibration(baseline_dir: Path, routed_dir: Path) -> None:
     print(json.dumps(paired_route_risk(baseline, routed), indent=2, sort_keys=True))
 
 
-def shadow_calibration(shadow_dir: Path) -> None:
-    debug_paths = all_rep_debugs(shadow_dir)
-    if not debug_paths:
-        print(f"no debug.jsonl under {shadow_dir}")
+def candidate_rescue_calibration(baseline_dir: Path, rescue_dir: Path) -> None:
+    baseline_debugs = all_rep_debugs(baseline_dir)
+    rescue_debugs = all_rep_debugs(rescue_dir)
+    common_repeats = sorted(set(baseline_debugs) & set(rescue_debugs))
+    if not common_repeats:
+        missing = baseline_dir if not baseline_debugs else rescue_dir
+        print(f"no debug.jsonl under {missing}")
         return
-    records: list[dict[str, Any]] = []
-    for repeat, debug_path in sorted(debug_paths.items()):
-        for row in load_by_type(debug_path).get("hybrid", []):
-            records.append({**row, "repeat": repeat})
-    print(json.dumps(shadow_route_risk(records), indent=2, sort_keys=True))
+    baseline: list[dict[str, Any]] = []
+    rescue: list[dict[str, Any]] = []
+    for repeat in common_repeats:
+        for row in load_by_type(baseline_debugs[repeat]).get("hybrid", []):
+            baseline.append({**row, "repeat": repeat})
+        for row in load_by_type(rescue_debugs[repeat]).get("hybrid", []):
+            rescue.append({**row, "repeat": repeat})
+    print(json.dumps(paired_candidate_rescue(baseline, rescue), indent=2, sort_keys=True))
 
 
 def main() -> int:
@@ -428,9 +643,10 @@ def main() -> int:
         help="measure protected global candidates lost by admitted narrowing",
     )
     ap.add_argument(
-        "--shadow-calibration",
-        metavar="SHADOW_ARM",
-        help="measure projected route loss from one non-mutating shadow arm",
+        "--candidate-rescue-calibration",
+        nargs=2,
+        metavar=("GLOBAL_ARM", "RESCUE_ARM"),
+        help="measure candidate rescue and baseline displacement on paired queries",
     )
     args = ap.parse_args()
     root: Path = args.root
@@ -446,8 +662,9 @@ def main() -> int:
         route_calibration(arms_root / baseline, arms_root / routed)
         return 0
 
-    if args.shadow_calibration:
-        shadow_calibration(arms_root / args.shadow_calibration)
+    if args.candidate_rescue_calibration:
+        baseline, rescue = args.candidate_rescue_calibration
+        candidate_rescue_calibration(arms_root / baseline, arms_root / rescue)
         return 0
 
     if args.hybrid_vs_keyword:
@@ -462,7 +679,8 @@ def main() -> int:
 
     ap.error(
         "pass --compare ARM_A ARM_B, --route-calibration GLOBAL ROUTED, "
-        "--shadow-calibration SHADOW, or --hybrid-vs-keyword"
+        "--candidate-rescue-calibration GLOBAL RESCUE, "
+        "or --hybrid-vs-keyword"
     )
     return 2
 

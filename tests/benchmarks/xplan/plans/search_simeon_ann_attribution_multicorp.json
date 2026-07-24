@@ -1,6 +1,6 @@
 {
   "name": "search_simeon_ann_attribution_multicorp",
-  "description": "Topology-disabled scientific control: isolate text, current Simeon PQ ANN, and exact vec0 retrieval over identical Simeon embeddings. The exact arm is a candidate-quality oracle, not an equal-distance-cost competitor.",
+  "description": "Topology-disabled scientific control: isolate text, current Simeon PQ ADC, vec0 global ANN, and exhaustive exact vector scoring over identical Simeon embeddings. Exact scan is a vector-scoring reference rather than a retrieval upper bound.",
   "build_dir": "build/release",
   "artifact_root": "build/benchmarks",
   "timeout_sec": 10800,
@@ -57,7 +57,7 @@
       }
     },
     {
-      "name": "vector_only_exact_vec0",
+      "name": "vector_only_vec0_global_ann",
       "factors": {
         "retrieval": "vector_only",
         "text": "off",
@@ -67,6 +67,20 @@
       "params": {"vector_search_engine": "vec0_l2"},
       "env": {
         "YAMS_VECTOR_VEC0_PHSS_ENABLED": "0",
+        "YAMS_SEARCH_LEXICAL_FLOOR_TOPN": "0",
+        "YAMS_SEARCH_LEXICAL_FLOOR_BOOST": "0"
+      }
+    },
+    {
+      "name": "vector_only_exact_scan",
+      "factors": {
+        "retrieval": "vector_only",
+        "text": "off",
+        "simeon_text": "off",
+        "vector_engine": "exact_scan"
+      },
+      "params": {"vector_search_engine": "exact_scan"},
+      "env": {
         "YAMS_SEARCH_LEXICAL_FLOOR_TOPN": "0",
         "YAMS_SEARCH_LEXICAL_FLOOR_BOOST": "0"
       }
@@ -81,6 +95,11 @@
         "recall_at_k",
         "mixed_source_min_mrr",
         "mixed_source_min_recall_at_k",
+        "mixed_source_min_ndcg_at_k",
+        "mixed_ndcg_at_k_scifact",
+        "mixed_ndcg_at_k_nfcorpus",
+        "mixed_query_count_scifact",
+        "mixed_query_count_nfcorpus",
         "candidate_pre_fusion_hit_rate",
         "candidate_pre_fusion_recall",
         "mixed_candidate_pre_fusion_recall_scifact",
@@ -93,8 +112,13 @@
         "recall_at_k_ceiling",
         "ceiling_normalized_returned_recall",
         "steady_state_query_rate",
+        "search_latency_ms_cold_first",
+        "search_latency_ms_warmed_p50",
+        "search_warmup_completed_queries",
         "search_latency_ms_p50",
         "search_latency_ms_p95",
+        "vector_query_ready_after",
+        "vector_index_reusable_after",
         "proc_maxrss_mb",
         "vector_total_rows_visited_actual_avg",
         "vector_total_exact_distance_evaluations_actual_avg"
@@ -108,7 +132,15 @@
       "candidate_pre_fusion_hit_rate",
       "returned_trace_hit_rate",
       "steady_state_query_rate",
-      "search_latency_ms_p50"
+      "mixed_query_count_scifact",
+      "mixed_query_count_nfcorpus",
+      "mixed_ndcg_at_k_scifact",
+      "mixed_ndcg_at_k_nfcorpus",
+      "search_latency_ms_cold_first",
+      "search_latency_ms_warmed_p50",
+      "search_warmup_completed_queries",
+      "search_latency_ms_p50",
+      "vector_query_ready_after"
     ],
     "require_metric_status": ["ok"]
   },
@@ -119,6 +151,9 @@
       "recall_at_k",
       "mixed_source_min_mrr",
       "mixed_source_min_recall_at_k",
+      "mixed_source_min_ndcg_at_k",
+      "mixed_ndcg_at_k_scifact",
+      "mixed_ndcg_at_k_nfcorpus",
       "candidate_pre_fusion_hit_rate",
       "candidate_pre_fusion_recall",
       "mixed_candidate_pre_fusion_recall_scifact",
@@ -131,8 +166,13 @@
       "recall_at_k_ceiling",
       "ceiling_normalized_returned_recall",
       "steady_state_query_rate",
+      "search_latency_ms_cold_first",
+      "search_latency_ms_warmed_p50",
+      "search_warmup_completed_queries",
       "search_latency_ms_p50",
       "search_latency_ms_p95",
+      "vector_query_ready_after",
+      "vector_index_reusable_after",
       "proc_maxrss_mb",
       "vector_total_rows_visited_actual_avg",
       "vector_total_exact_distance_evaluations_actual_avg"

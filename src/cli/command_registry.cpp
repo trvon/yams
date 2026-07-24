@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <array>
 #include <optional>
 #include <string_view>
@@ -113,6 +114,11 @@ std::optional<CommandRegistration> findRegistration(std::string_view commandName
     return std::nullopt;
 }
 
+bool containsRegistration(std::string_view commandName, const auto& registrations) {
+    return std::any_of(registrations.begin(), registrations.end(),
+                       [commandName](const auto& entry) { return entry.name == commandName; });
+}
+
 } // namespace
 
 void CommandRegistry::registerAllCommands(YamsCLI* cli) {
@@ -138,6 +144,18 @@ bool CommandRegistry::registerMinimalCommandSet(YamsCLI* cli, std::string_view c
         return true;
     }
     return false;
+}
+
+bool CommandRegistry::isRegisteredTopLevelCommand(std::string_view commandName) {
+    if (commandName == "rm" || commandName == "ls") {
+        return true;
+    }
+    return containsRegistration(commandName, kCoreCommandRegistrations) ||
+           containsRegistration(commandName, kConfigCommandRegistrations) ||
+           containsRegistration(commandName, kWorkflowCommandRegistrations) ||
+           containsRegistration(commandName, kRuntimeCommandRegistrations) ||
+           containsRegistration(commandName, kAnalysisCommandRegistrations) ||
+           containsRegistration(commandName, kTransportCommandRegistrations);
 }
 
 } // namespace yams::cli

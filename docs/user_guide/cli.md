@@ -465,6 +465,10 @@ Options:
   - Preview what would be deleted without actually deleting
 - --keep-refs
   - Keep reference counts (don't decrement)
+- --keep-versions <count>
+  - Preview pruning older document versions while retaining the newest count in every version series
+- --series <series-key>
+  - Limit `--keep-versions` to one version series
 - -v, --verbose
   - Show detailed deletion progress
 
@@ -475,6 +479,8 @@ Description:
 - Pattern matching supports standard glob patterns (* for any characters, ? for single character).
 - Dry-run mode shows what would be deleted without making changes.
 - Bulk deletions show progress and report both successes and failures.
+- Version retention is preview-first: `--keep-versions` only applies changes with `--force`.
+  The newest version marked by YAMS is always protected.
 
 Examples:
 
@@ -499,7 +505,24 @@ yams delete --pattern "temp_*" --force
 
 # Verbose output
 yams delete --names "file1.txt,file2.txt" --verbose
+
+# Preview retention, then explicitly apply it
+yams delete --keep-versions 3
+yams delete --keep-versions 3 --force
 ```
+
+To enable scheduled retention, add this opt-in policy to `config.toml`:
+
+```toml
+[daemon.document_retention]
+enabled = true
+keep_latest = 3
+interval_minutes = 1440
+initial_delay_minutes = 10
+```
+
+Scheduled retention uses the same document deletion path as the CLI, so removed
+versions have their metadata, vectors, graph nodes, and storage references cleaned up.
 
 ---
 
@@ -1302,7 +1325,7 @@ Synopsis:
 - yams doctor repair [--embeddings] [--fts5] [--graph] [--all]
 - yams doctor validate
 - yams doctor dedupe
-- yams doctor prune
+- yams prune (alias for yams doctor prune)
 - yams doctor tuning
 
 Subcommands:
@@ -1350,7 +1373,7 @@ yams doctor repair --graph
 yams doctor repair --all
 yams doctor --recreate-vectors --dim 768 --stop-daemon
 yams doctor dedupe --dry-run
-yams doctor prune
+yams prune
 yams doctor tuning
 ```
 

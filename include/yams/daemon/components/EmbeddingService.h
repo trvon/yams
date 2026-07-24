@@ -123,6 +123,11 @@ private:
         const std::shared_ptr<yams::vector::VectorDatabase>& vdb, const std::string& modelName,
         const std::vector<std::pair<std::string, std::string>>& sourceDocuments,
         bool sourceAllCorpus = false);
+    void updateSemanticNeighborGraphUnlocked(
+        const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore,
+        const std::shared_ptr<yams::vector::VectorDatabase>& vdb, const std::string& modelName,
+        const std::vector<std::pair<std::string, std::string>>& sourceDocuments,
+        bool sourceAllCorpus);
     void recordPhaseTiming(const std::string& phase, std::chrono::steady_clock::time_point start);
     void enqueueRepairStatusUpdate(std::vector<std::string> hashes, metadata::RepairStatus status,
                                    std::string source);
@@ -188,6 +193,10 @@ private:
     std::unordered_map<std::string, SemanticCorpusEntry> semanticCorpusCache_;
     mutable std::mutex semanticNodeIdCacheMutex_;
     std::unordered_map<std::string, std::optional<std::int64_t>> semanticNodeIdCache_;
+    // Serializes semantic relation writers. Corpus rebuild holds this across
+    // clear + reconstruction; backfill holds it across missing-node discovery
+    // + write so a stale discovery cannot mutate the rebuilt relation.
+    std::mutex semanticGraphMutationMutex_;
     mutable std::mutex semanticGraphPendingMutex_;
     std::unordered_map<std::string, std::vector<std::pair<std::string, std::string>>>
         semanticGraphPendingByModel_;

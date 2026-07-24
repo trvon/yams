@@ -18,6 +18,7 @@
 #include <yams/daemon/ipc/mux_metrics_registry.h>
 #include <yams/daemon/ipc/stream_metrics_registry.h>
 #include <yams/daemon/metric_keys.h>
+#include <yams/metadata/kg_topology_analysis.h>
 #include <yams/storage/corpus_stats.h>
 #include <yams/vector/vector_database.h>
 #include <yams/version.hpp>
@@ -36,6 +37,25 @@ uint32_t computeSnapshotRetryAfter(const MetricsSnapshot& snap, bool detailed) {
         detailed
             ? static_cast<uint32_t>(std::min<std::uint64_t>(snap.statusDetailAgeMs, 1000ULL))
             : static_cast<uint32_t>(std::min<std::uint64_t>(snap.statusSnapshotAgeMs, 1000ULL)));
+}
+
+void populateSemanticTopologyStats(GetStatsResponse& response, ServiceManager* serviceManager,
+                                   bool requested) {
+    if (!requested || serviceManager == nullptr) {
+        return;
+    }
+    auto topology = metadata::analyzeDocumentTopology(serviceManager->getKgStore().get());
+    if (!topology) {
+        return;
+    }
+    response.additionalStats["kg_topology_document_nodes"] =
+        std::to_string(topology->documentNodeCount);
+    response.additionalStats["kg_topology_semantic_edges"] =
+        std::to_string(topology->semanticEdgeCount);
+    response.additionalStats["kg_topology_documents_with_neighbors"] =
+        std::to_string(topology->documentsWithSemanticNeighbors);
+    response.additionalStats["kg_topology_isolated_documents"] =
+        std::to_string(topology->isolatedDocumentCount);
 }
 
 void populateStatusCoreFromSnapshot(StatusResponse& res, const MetricsSnapshot& snap) {
@@ -1229,6 +1249,7 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                     }
                 }
             }
+            populateSemanticTopologyStats(response, serviceManager_, req.includeHealth);
         } catch (...) {
         }
         // Minimal readiness hint (align to lifecycle readiness)

@@ -58,6 +58,8 @@ mapGraphExploreResponseFromDaemon(const yams::daemon::GraphExploreResponse& resp
     out.totalSymbolsConsidered = static_cast<std::size_t>(response.totalSymbolsConsidered);
     out.totalFilesConsidered = static_cast<std::size_t>(response.totalFilesConsidered);
     out.emittedChars = static_cast<std::size_t>(response.emittedChars);
+    out.snippetRenderMicros = static_cast<std::int64_t>(response.snippetRenderMicros);
+    out.snippetsRendered = static_cast<std::size_t>(response.snippetsRendered);
     out.kgAvailable = response.kgAvailable;
     out.truncated = response.truncated;
     out.warnings = response.warnings;
@@ -111,6 +113,8 @@ nlohmann::json makeGraphExploreJson(const app::services::GraphExploreResponse& r
     out["totalSymbolsConsidered"] = response.totalSymbolsConsidered;
     out["totalFilesConsidered"] = response.totalFilesConsidered;
     out["emittedChars"] = response.emittedChars;
+    out["snippetRenderMicros"] = response.snippetRenderMicros;
+    out["snippetsRendered"] = response.snippetsRendered;
     out["warnings"] = response.warnings;
 
     out["entrySymbols"] = nlohmann::json::array();

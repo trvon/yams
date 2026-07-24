@@ -1287,6 +1287,15 @@ TEST_CASE("Daemon client prune request execution", "[daemon][socket][requests][p
     REQUIRE_FALSE(largeResult.value().hash.empty());
     REQUIRE(getWithRetry(client, largeResult.value().hash, 50, 200ms).has_value());
 
+    AddDocumentRequest signatureReq;
+    signatureReq.name = "dispatcher_coverage_binary";
+    signatureReq.content = std::string("\x7F" "ELF", 4);
+    auto signatureResult = yams::cli::run_sync(client.streamingAddDocument(signatureReq), 10s);
+
+    REQUIRE(signatureResult.has_value());
+    REQUIRE_FALSE(signatureResult.value().hash.empty());
+    REQUIRE(getWithRetry(client, signatureResult.value().hash, 50, 200ms).has_value());
+
     auto smallDocResult = metadataRepo->getDocumentByHash(addResult.value().hash);
     REQUIRE(smallDocResult.has_value());
     REQUIRE(smallDocResult.value().has_value());
@@ -1314,6 +1323,15 @@ TEST_CASE("Daemon client prune request execution", "[daemon][socket][requests][p
     CHECK(pruneResult.value().totalBytesFreed >=
           static_cast<uint64_t>(smallDoc.fileSize + largeDoc.fileSize));
     CHECK_FALSE(pruneResult.value().categoryCounts.empty());
+
+    PruneRequest signaturePruneReq;
+    signaturePruneReq.categories = {"build-artifacts"};
+    signaturePruneReq.dryRun = true;
+    auto signaturePruneResult =
+        yams::cli::run_sync(client.call<PruneRequest>(signaturePruneReq), 30s);
+
+    REQUIRE(signaturePruneResult.has_value());
+    CHECK(signaturePruneResult.value().categoryCounts["build-executable"] == 1);
 
     PruneRequest olderThanReq;
     olderThanReq.extensions = {"log"};
@@ -1362,13 +1380,22 @@ TEST_CASE("Daemon client prune request execution", "[daemon][socket][requests][p
     auto applyResult = yams::cli::run_sync(client.call<PruneRequest>(applyReq), 30s);
 
     REQUIRE(applyResult.has_value());
-    CHECK(applyResult.value().filesDeleted == 1);
+    CHECK_FALSE(applyResult.value().statusMessage.empty());
+    CHECK(applyResult.value().filesDeleted == 0);
     CHECK(applyResult.value().filesFailed == 0);
-    CHECK(applyResult.value().totalBytesFreed == static_cast<uint64_t>(largeDoc.fileSize));
 
-    auto largeDocAfterPrune = metadataRepo->getDocumentByHash(largeResult.value().hash);
-    REQUIRE(largeDocAfterPrune.has_value());
-    CHECK_FALSE(largeDocAfterPrune.value().has_value());
+    const auto pruneDeadline = std::chrono::steady_clock::now() + 30s;
+    bool largeDocumentPruned = false;
+    while (std::chrono::steady_clock::now() < pruneDeadline) {
+        auto largeDocAfterPrune = metadataRepo->getDocumentByHash(largeResult.value().hash);
+        REQUIRE(largeDocAfterPrune.has_value());
+        if (!largeDocAfterPrune.value().has_value()) {
+            largeDocumentPruned = true;
+            break;
+        }
+        std::this_thread::sleep_for(25ms);
+    }
+    CHECK(largeDocumentPruned);
 
     auto smallDocAfterPrune = metadataRepo->getDocumentByHash(addResult.value().hash);
     REQUIRE(smallDocAfterPrune.has_value());

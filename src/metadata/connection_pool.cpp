@@ -453,12 +453,12 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout, ConnectionPriority pr
     }
 
     std::unique_ptr<PooledConnection> conn;
-    bool foundValid = false;
+    bool createdConnection = false;
     const uint64_t currentGen = currentGeneration_.load();
 
     // Try up to 3 connections from the pool before creating a new one
     // Note: Validation is performed outside the lock to avoid blocking other threads
-    for (int attempt = 0; attempt < 3 && !foundValid; ++attempt) {
+    for (int attempt = 0; attempt < 3; ++attempt) {
         // Pop connection under lock
         if (available_.empty()) {
             break;
@@ -483,7 +483,6 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout, ConnectionPriority pr
         lock.lock();
 
         if (valid) {
-            foundValid = true;
             break;
         } else {
             // Connection is stale, discard it
@@ -495,7 +494,7 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout, ConnectionPriority pr
     }
 
     // If no valid connection found, create a new one
-    if (!foundValid) {
+    if (!conn) {
         lock.unlock();
         auto connResult = createConnection();
         lock.lock();
@@ -508,6 +507,7 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout, ConnectionPriority pr
         conn = std::make_unique<PooledConnection>(
             std::move(connResult).value(), [this](PooledConnection* c) { returnConnection(c); },
             currentGeneration_.load());
+        createdConnection = true;
         totalConnections_++;
     }
 
@@ -530,7 +530,7 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout, ConnectionPriority pr
                      activeConnections_.load(std::memory_order_relaxed), available_.size(),
                      totalConnections_.load(std::memory_order_relaxed),
                      waitingRequests_.load(std::memory_order_relaxed),
-                     foundValid ? "false" : "true");
+                     createdConnection ? "true" : "false");
     }
 
     return conn;

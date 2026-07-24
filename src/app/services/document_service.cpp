@@ -2957,6 +2957,34 @@ public:
         return resp;
     }
 
+    Result<DeleteByNameResponse> pruneVersions(const PruneVersionsRequest& req) override {
+        if (!ctx_.store || !ctx_.metadataRepo) {
+            return Error{ErrorCode::NotInitialized, "Document storage is not available"};
+        }
+
+        auto candidates = metadata::selectVersionRetentionCandidates(
+            *ctx_.metadataRepo, {.keepLatest = req.keepLatest, .seriesKey = req.seriesKey});
+        if (!candidates) {
+            return candidates.error();
+        }
+
+        DeleteByNameResponse response;
+        response.dryRun = req.dryRun;
+        DeleteByNameRequest deleteRequest;
+        deleteRequest.dryRun = req.dryRun;
+        deleteRequest.force = true;
+        for (const auto& candidate : candidates.value()) {
+            DeleteTarget target;
+            target.doc = candidate.document;
+            target.hash = candidate.document.sha256Hash;
+            target.name = candidate.document.fileName.empty() ? candidate.document.filePath
+                                                              : candidate.document.fileName;
+            executeDeleteTarget(deleteRequest, target, response);
+        }
+        response.count = candidates.value().size();
+        return response;
+    }
+
 private:
     AppContext ctx_;
 };

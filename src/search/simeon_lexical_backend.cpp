@@ -46,6 +46,20 @@ namespace yams::search {
 
 namespace {
 
+std::unique_ptr<simeon::Encoder> makeFixedHashFragmentEncoder() {
+    return std::make_unique<simeon::Encoder>(simeon::simeon_v1_384_config());
+}
+
+const char* fragmentEncoderProfileLabel(SimeonLexicalBackend::FragmentEncoderProfile profile) {
+    switch (profile) {
+        case SimeonLexicalBackend::FragmentEncoderProfile::CorpusPmi:
+            return "corpus_pmi";
+        case SimeonLexicalBackend::FragmentEncoderProfile::FixedHash384:
+            return "fixed_hash_384";
+    }
+    return "unknown";
+}
+
 // Reconcile fragment-geometry rerank scores with a BM25 baseline.
 // score_fragment_geometry returns a z-scored blend (~[-3,+3]) for in-pool docs
 // and -inf for out-of-pool docs. Backfilling -inf with raw BM25 (~[0,88]) and
@@ -293,6 +307,18 @@ SimeonLexicalBackend::~SimeonLexicalBackend() {
     }
 }
 
+std::uint32_t SimeonLexicalBackend::concept_count() const noexcept {
+    return concept_index_ ? concept_index_->size() : 0;
+}
+
+std::string SimeonLexicalBackend::fragmentEmbeddingSpaceIdentity() const {
+    if (!fragmentGeometryReady() ||
+        cfg_.fragment_encoder_profile != FragmentEncoderProfile::FixedHash384) {
+        return {};
+    }
+    return std::string{simeon::simeon_v1_384_identity};
+}
+
 Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::MetadataRepository> repo) {
     if (!repo) {
         return Error{ErrorCode::InvalidArgument, "SimeonLexicalBackend: null metadata repo"};
@@ -389,6 +415,8 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         mapping.reserve(ids.size());
         const bool considerFragmentGeometry =
             cfg_.fragment_geometry_enabled && ids.size() >= cfg_.fragment_geometry_min_corpus_docs;
+        const bool useCorpusPmi =
+            cfg_.fragment_encoder_profile == FragmentEncoderProfile::CorpusPmi;
         std::vector<std::int64_t> dense_doc_ids;
         dense_doc_ids.reserve(ids.size());
         std::vector<std::string> pmi_sample_texts;
@@ -396,7 +424,7 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         // leadText already computed for the BM25 aux field) so no second
         // extract_lead_tokens pass / full-corpus text copy is needed.
         std::vector<std::string> docLeadTexts;
-        if (considerFragmentGeometry) {
+        if (considerFragmentGeometry && useCorpusPmi) {
             const auto reserveDocs =
                 cfg_.fragment_geometry_pmi_sample_docs == 0
                     ? ids.size()
@@ -447,7 +475,7 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
             if (atire) {
                 atire->add_doc(buildText.view, leadText);
             }
-            if (considerFragmentGeometry) {
+            if (considerFragmentGeometry && useCorpusPmi) {
                 const bool sampleDocsOk =
                     cfg_.fragment_geometry_pmi_sample_docs == 0 ||
                     pmi_sample_texts.size() < cfg_.fragment_geometry_pmi_sample_docs;
@@ -500,9 +528,10 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
                     docViews.reserve(conceptTexts.size());
                     for (const auto& t : conceptTexts)
                         docViews.emplace_back(t);
-                    conceptIdx = std::make_unique<simeon::ConceptIndex>(
-                        simeon::mine_concepts(*primary, std::span<const std::string_view>(docViews),
-                                              cfg_.concept_config));
+                    simeon::ConceptConfig conceptConfig;
+                    conceptConfig.concept_weight = cfg_.concept_weight;
+                    conceptIdx = std::make_unique<simeon::ConceptIndex>(simeon::mine_concepts(
+                        *primary, std::span<const std::string_view>(docViews), conceptConfig));
                     const auto cmMs = std::chrono::duration_cast<std::chrono::milliseconds>(
                                           std::chrono::steady_clock::now() - cmt0)
                                           .count();
@@ -553,43 +582,57 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         std::unique_ptr<simeon::PmiEmbeddings> pmi;
         std::unique_ptr<simeon::Encoder> fragmentEncoder;
         std::vector<std::vector<simeon::SemanticFragment>> docFrags;
-        const std::size_t uniqueWordCount =
-            considerFragmentGeometry ? estimateUniqueWordCount(pmi_sample_texts) : 0;
-        if (considerFragmentGeometry && uniqueWordCount >= 64 && !pmi_sample_texts.empty()) {
+        const std::size_t uniqueWordCount = useCorpusPmi && considerFragmentGeometry
+                                                ? estimateUniqueWordCount(pmi_sample_texts)
+                                                : 0;
+        if (considerFragmentGeometry) {
             try {
-                std::vector<std::string_view> seedViews;
-                seedViews.reserve(pmi_sample_texts.size());
-                for (const auto& doc : pmi_sample_texts) {
-                    seedViews.emplace_back(doc);
+                if (useCorpusPmi) {
+                    if (uniqueWordCount < 64 || pmi_sample_texts.empty()) {
+                        spdlog::info(
+                            "[simeon-lexical] fragment geometry skipped: sample {} docs / {} "
+                            "unique words below thresholds (min_docs={}, min_unique_words=64)",
+                            pmi_sample_texts.size(), uniqueWordCount,
+                            cfg_.fragment_geometry_min_corpus_docs);
+                    } else {
+                        std::vector<std::string_view> seedViews;
+                        seedViews.reserve(pmi_sample_texts.size());
+                        for (const auto& doc : pmi_sample_texts) {
+                            seedViews.emplace_back(doc);
+                        }
+
+                        simeon::PmiConfig pcfg;
+                        pcfg.target_rank = 32;
+                        pcfg.min_token_count = 5;
+                        pcfg.max_vocab_size = 20'000;
+                        auto learned = simeon::PmiEmbeddings::learn(
+                            std::span<const std::string_view>(seedViews), pcfg);
+
+                        simeon::EncoderConfig ecfg;
+                        ecfg.ngram_mode = simeon::NGramMode::WordOnly;
+                        ecfg.ngram_min = 1;
+                        ecfg.ngram_max = 1;
+                        ecfg.sketch_dim = 0;
+                        ecfg.output_dim = learned.dim();
+                        ecfg.projection = simeon::ProjectionMode::None;
+                        ecfg.l2_normalize = true;
+
+                        pmi = std::make_unique<simeon::PmiEmbeddings>(std::move(learned));
+                        ecfg.pmi_rows = pmi.get();
+                        fragmentEncoder = std::make_unique<simeon::Encoder>(ecfg);
+                    }
+                } else {
+                    fragmentEncoder = makeFixedHashFragmentEncoder();
                 }
 
-                simeon::PmiConfig pcfg;
-                pcfg.target_rank = 32;
-                pcfg.min_token_count = 5;
-                pcfg.max_vocab_size = 20'000;
-                auto learned = simeon::PmiEmbeddings::learn(
-                    std::span<const std::string_view>(seedViews), pcfg);
-
-                simeon::EncoderConfig ecfg;
-                ecfg.ngram_mode = simeon::NGramMode::WordOnly;
-                ecfg.ngram_min = 1;
-                ecfg.ngram_max = 1;
-                ecfg.sketch_dim = 0;
-                ecfg.output_dim = learned.dim();
-                ecfg.projection = simeon::ProjectionMode::None;
-                ecfg.l2_normalize = true;
-
-                pmi = std::make_unique<simeon::PmiEmbeddings>(std::move(learned));
-                ecfg.pmi_rows = pmi.get();
-                fragmentEncoder = std::make_unique<simeon::Encoder>(ecfg);
-
-                {
-                    std::vector<std::string>().swap(pmi_sample_texts);
-                    std::vector<std::string_view>().swap(seedViews);
+                std::vector<std::string>().swap(pmi_sample_texts);
+                if (useCorpusPmi && fragmentEncoder) {
+                    releaseTransientPages("post-pmi-learn");
                 }
-                releaseTransientPages("post-pmi-learn");
 
-                docFrags.resize(dense);
+                if (fragmentEncoder) {
+                    docFrags.resize(dense);
+                }
                 const auto fragmentDocCap =
                     cfg_.fragment_geometry_max_docs == 0
                         ? dense_doc_ids.size()
@@ -598,7 +641,8 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
                 std::size_t fragmentBytes = 0;
                 std::size_t fragmentDocsBuilt = 0;
                 std::size_t fragmentChunkedDocs = 0;
-                for (std::size_t i = 0; i < dense_doc_ids.size() && i < fragmentDocCap; ++i) {
+                for (std::size_t i = 0;
+                     fragmentEncoder && i < dense_doc_ids.size() && i < fragmentDocCap; ++i) {
                     if ((i & 0x3ffu) == 0u && stop.stop_requested()) {
                         building_.store(false, std::memory_order_release);
                         return;
@@ -627,10 +671,10 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
                     ++fragmentDocsBuilt;
                 }
                 spdlog::info(
-                    "[simeon-lexical] fragment geometry built: docs={} bytes={} chunked_docs={} "
-                    "sample_docs={} sample_bytes={} unique_words={}",
-                    fragmentDocsBuilt, fragmentBytes, fragmentChunkedDocs, pmi_sample_texts.size(),
-                    pmiSampleBytes, uniqueWordCount);
+                    "[simeon-lexical] fragment geometry built: profile={} docs={} bytes={} "
+                    "chunked_docs={} sample_bytes={} unique_words={}",
+                    fragmentEncoderProfileLabel(cfg_.fragment_encoder_profile), fragmentDocsBuilt,
+                    fragmentBytes, fragmentChunkedDocs, pmiSampleBytes, uniqueWordCount);
                 if (fragmentDocsBuilt == 0) {
                     pmi.reset();
                     fragmentEncoder.reset();
@@ -642,11 +686,6 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
                 fragmentEncoder.reset();
                 docFrags.clear();
             }
-        } else if (considerFragmentGeometry && !pmi_sample_texts.empty()) {
-            spdlog::info("[simeon-lexical] fragment geometry skipped: sample {} docs / {} unique "
-                         "words below thresholds (min_docs={}, min_unique_words=64)",
-                         pmi_sample_texts.size(), uniqueWordCount,
-                         cfg_.fragment_geometry_min_corpus_docs);
         }
         if (!pmi_sample_texts.empty()) {
             std::vector<std::string>().swap(pmi_sample_texts);
@@ -702,7 +741,7 @@ SimeonLexicalBackend::score(std::string_view query,
     // cfg_.score_cache_entries > 0 and no extra features are active.
     const bool cacheable = cfg_.score_cache_entries > 0 && !cfg_.bm25_variants_rrf &&
                            !cfg_.fragment_geometry_enabled &&
-                           (!concept_index_ || cfg_.concept_config.concept_weight <= 0.0f);
+                           (!concept_index_ || cfg_.concept_weight <= 0.0f);
     const auto currentDocCount = doc_count_;
     const auto currentConceptCount = concept_index_ ? concept_index_->size() : 0u;
     const std::string queryKey(query);
@@ -742,7 +781,7 @@ SimeonLexicalBackend::score(std::string_view query,
                                         query, std::span<float>{full});
     } else if (cfg_.fragment_geometry_enabled && fragment_encoder_ && !doc_frags_.empty()) {
         full = simeon::score_fragment_geometry(query, *index_, *fragment_encoder_, doc_frags_,
-                                               cfg_.fragment_geometry_config);
+                                               simeon::FragmentGeometryConfig{});
         lexical.assign(currentDocCount, 0.0f);
         index_->score(query, std::span<float>{lexical});
     } else {
@@ -750,10 +789,9 @@ SimeonLexicalBackend::score(std::string_view query,
     }
 
     // Blend concept scores when available (sparse: only matched-concept docs).
-    if (concept_index_ && cfg_.concept_config.concept_weight > 0.0f) {
+    if (concept_index_ && cfg_.concept_weight > 0.0f) {
         YAMS_ZONE_SCOPED_N("simeon::concept_blend");
-        concept_index_->blend_into(query, std::span<float>{full},
-                                   cfg_.concept_config.concept_weight);
+        concept_index_->blend_into(query, std::span<float>{full}, cfg_.concept_weight);
     }
 
     std::vector<float> out;
@@ -844,7 +882,7 @@ SimeonLexicalBackend::scoreRouted(std::string_view query,
                 cfg_.router_enabled ? simeon::recipe_name(recipe) : variantLabel(cfg_.variant);
             full = score_bm25(*chosen);
         } else {
-            auto geomCfg = cfg_.fragment_geometry_config;
+            simeon::FragmentGeometryConfig geomCfg;
             geomCfg.use_phss = true;
             geomCfg.phss_config.criterion = simeon::PhssConfig::Criterion::LargestGapApprox;
             geomCfg.top_fragments_per_doc =
@@ -871,10 +909,9 @@ SimeonLexicalBackend::scoreRouted(std::string_view query,
     }
 
     // Blend concept scores when available
-    if (concept_index_ && cfg_.concept_config.concept_weight > 0.0f) {
+    if (concept_index_ && cfg_.concept_weight > 0.0f) {
         YAMS_ZONE_SCOPED_N("simeon::concept_blend");
-        concept_index_->blend_into(query, std::span<float>{full},
-                                   cfg_.concept_config.concept_weight);
+        concept_index_->blend_into(query, std::span<float>{full}, cfg_.concept_weight);
     }
 
     RescoreDecision decision;
@@ -965,10 +1002,9 @@ SimeonLexicalBackend::scoreStrategyRouted(std::string_view query,
     recipe_label = "StrategyRouted";
 
     // Blend concept scores when available.
-    if (concept_index_ && cfg_.concept_config.concept_weight > 0.0f) {
+    if (concept_index_ && cfg_.concept_weight > 0.0f) {
         YAMS_ZONE_SCOPED_N("simeon::concept_blend");
-        concept_index_->blend_into(query, std::span<float>{full},
-                                   cfg_.concept_config.concept_weight);
+        concept_index_->blend_into(query, std::span<float>{full}, cfg_.concept_weight);
     }
 
     RescoreDecision decision;
@@ -1041,10 +1077,9 @@ SimeonLexicalBackend::scoreBanditRouted(std::string_view query, std::string_view
     }
 
     // Blend concept scores when available.
-    if (concept_index_ && cfg_.concept_config.concept_weight > 0.0f) {
+    if (concept_index_ && cfg_.concept_weight > 0.0f) {
         YAMS_ZONE_SCOPED_N("simeon::concept_blend");
-        concept_index_->blend_into(query, std::span<float>{full},
-                                   cfg_.concept_config.concept_weight);
+        concept_index_->blend_into(query, std::span<float>{full}, cfg_.concept_weight);
     }
 
     RescoreDecision decision;

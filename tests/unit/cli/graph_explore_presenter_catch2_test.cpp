@@ -14,6 +14,8 @@ TEST_CASE("Graph explore presenter maps daemon response to app response", "[cli]
     in.totalSymbolsConsidered = 2;
     in.totalFilesConsidered = 1;
     in.emittedChars = 32;
+    in.snippetRenderMicros = 123;
+    in.snippetsRendered = 1;
     in.kgAvailable = true;
     in.truncated = false;
     in.warnings.push_back("fallback warning");
@@ -66,6 +68,8 @@ TEST_CASE("Graph explore presenter maps daemon response to app response", "[cli]
     const auto out = yams::cli::mapGraphExploreResponseFromDaemon(in);
 
     CHECK(out.query == in.query);
+    CHECK(out.snippetRenderMicros == 123);
+    CHECK(out.snippetsRendered == 1);
     REQUIRE(out.entrySymbols.size() == 1);
     CHECK(out.entrySymbols.front().qualifiedName == "demo::processTask");
     REQUIRE(out.files.size() == 2);
@@ -109,10 +113,14 @@ TEST_CASE("Graph explore presenter renders json and markdown", "[cli][graph]") {
     relation.sourceLabel = "processTask";
     relation.targetLabel = "helper";
     response.relationships.push_back(relation);
+    response.snippetRenderMicros = 123;
+    response.snippetsRendered = 1;
 
     const auto json = yams::cli::makeGraphExploreJson(response);
     CHECK(json["files"][0]["mode"] == "full");
     CHECK(json["entrySymbols"][0]["label"] == "processTask");
+    CHECK(json["snippetRenderMicros"] == 123);
+    CHECK(json["snippetsRendered"] == 1);
 
     std::ostringstream out;
     yams::cli::renderGraphExploreMarkdown(out, response, cwd);

@@ -800,6 +800,12 @@ struct DeleteByNameResponse {
     std::vector<DeleteByNameResult> errors;
 };
 
+struct PruneVersionsRequest {
+    std::size_t keepLatest{1};
+    std::optional<std::string> seriesKey;
+    bool dryRun{true};
+};
+
 class IDocumentService {
 public:
     virtual ~IDocumentService() = default;
@@ -825,6 +831,7 @@ public:
     // Name-based helpers
     virtual Result<std::string> resolveNameToHash(const std::string& name, bool oldest = false) = 0;
     virtual Result<DeleteByNameResponse> deleteByName(const DeleteByNameRequest& req) = 0;
+    virtual Result<DeleteByNameResponse> pruneVersions(const PruneVersionsRequest& req) = 0;
 };
 
 // ===========================

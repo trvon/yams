@@ -518,50 +518,9 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     extractionConfig.requireEmbeddings = true;
     extractionConfig.requireGraphNode = true;
 
-    // Phase V feature composer configuration via env (default off → composer is no-op).
     {
-        auto& fc = extractionConfig.featureComposition;
-        const auto envBool = [](const char* n) -> bool {
-            const char* r = std::getenv(n);
-            if (r == nullptr || *r == '\0') {
-                return false;
-            }
-            const std::string v{r};
-            return v == "1" || v == "true" || v == "yes" || v == "on";
-        };
-        const auto envSize = [](const char* n, std::size_t fallback) -> std::size_t {
-            const char* r = std::getenv(n);
-            if (r == nullptr || *r == '\0') {
-                return fallback;
-            }
-            try {
-                return static_cast<std::size_t>(std::stoull(r));
-            } catch (...) {
-                return fallback;
-            }
-        };
-        const auto envFloat = [](const char* n, float fallback) -> float {
-            const char* r = std::getenv(n);
-            if (r == nullptr || *r == '\0') {
-                return fallback;
-            }
-            try {
-                return std::stof(r);
-            } catch (...) {
-                return fallback;
-            }
-        };
-        fc.enableEntityFusion = envBool("YAMS_TOPOLOGY_FEATURE_ENTITY_FUSION");
-        fc.entitySignatureK = envSize("YAMS_TOPOLOGY_FEATURE_ENTITY_K", fc.entitySignatureK);
-        fc.entityFusionAlpha = envFloat("YAMS_TOPOLOGY_FEATURE_ENTITY_ALPHA", fc.entityFusionAlpha);
-        fc.entityMinConfidence =
-            envFloat("YAMS_TOPOLOGY_FEATURE_ENTITY_MIN_CONF", fc.entityMinConfidence);
-        fc.enableMatryoshkaCoarseView = envBool("YAMS_TOPOLOGY_FEATURE_MATRYOSHKA");
-        fc.matryoshkaTargetDim =
-            envSize("YAMS_TOPOLOGY_FEATURE_MATRYOSHKA_DIM", fc.matryoshkaTargetDim);
-        fc.enableMinHashSketch = envBool("YAMS_TOPOLOGY_FEATURE_MINHASH");
-        fc.minhashSketchDim = envSize("YAMS_TOPOLOGY_FEATURE_MINHASH_DIM", fc.minhashSketchDim);
-        fc.minhashAlpha = envFloat("YAMS_TOPOLOGY_FEATURE_MINHASH_ALPHA", fc.minhashAlpha);
+        std::lock_guard lock(featureCompositionMutex_);
+        extractionConfig.featureComposition = featureComposition_;
     }
 
     topology::TopologyBuildConfig buildConfig;
@@ -583,6 +542,7 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     if (!extracted) {
         return Result<RebuildStats>(extracted.error());
     }
+    buildConfig.embeddingSpaceIdentity = extractionStats.embeddingSpaceIdentity;
 
     if (!documentHashes.empty() && extracted.value().empty()) {
         RebuildStats skipped;

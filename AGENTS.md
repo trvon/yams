@@ -18,6 +18,19 @@ Dogfood YAMS as the distributed memory across sessions, agents, and handoffs —
 contract in the prompt; the graph here is rich: function-level nodes with
 `calls`/`defined_in` edges, so "who uses X" is one `yams graph --explore`).
 
+## Mobile Host Consumers
+
+When YAMS is embedded in a mobile app, treat `libyams_mobile` as a local corpus
+SDK, not an inference or account SDK. Keep host UI focused on explicit import,
+library, retrieval, result inspection, and confirmation-gated deletion. Do not
+make a paid entitlement, account, or remote service a prerequisite for reading,
+exporting, or deleting a person's local corpus.
+
+Before asserting mobile support, record the exact native artifact, ABI version,
+device/OS, and architecture slice. A host-only unit test proves lifecycle logic;
+it does not prove that an Android `.so` or iOS XCFramework loads on hardware.
+Keep physical-device claims separate and reproducible.
+
 ## CLI Philosophy
 
 - Clean default behavior over feature flags and one-off env vars.

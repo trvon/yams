@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <set>
+#include <sstream>
 
 namespace fs = std::filesystem;
 
@@ -23,6 +24,49 @@ using yams::bench::loadBenchmarkManifestDataset;
 using yams::bench::SyntheticCorpusMode;
 using yams::bench::topologyConstructionCertificateToJson;
 using yams::bench::validateTopologyConstructionCertificate;
+
+TEST_CASE("Benchmark index readiness trusts backend-validated Simeon persistence",
+          "[bench][retrieval][vector]") {
+    using yams::vector::VectorSearchEngine;
+
+    CHECK_FALSE(yams::bench::benchmarkSearchIndexReusable(VectorSearchEngine::SimeonPqAdc, false));
+    CHECK(yams::bench::benchmarkSearchIndexReusable(VectorSearchEngine::SimeonPqAdc, true));
+    CHECK_FALSE(yams::bench::benchmarkSearchIndexReusable(VectorSearchEngine::Vec0L2, false));
+    CHECK_FALSE(yams::bench::benchmarkSearchIndexReusable(VectorSearchEngine::ExactScan, true));
+}
+
+TEST_CASE("Benchmark support observes process-local peak RSS", "[bench][retrieval][resources]") {
+    const auto peakRssMb = yams::bench::processPeakRssMb();
+#if defined(__APPLE__) || defined(__GLIBC__)
+    REQUIRE(peakRssMb.has_value());
+    CHECK((*peakRssMb > 0.0));
+#else
+    CHECK_FALSE(peakRssMb.has_value());
+#endif
+}
+
+TEST_CASE("Benchmark query readiness accepts a prepared Simeon exact fallback",
+          "[bench][retrieval][vector]") {
+    using yams::vector::VectorSearchEngine;
+
+    CHECK(
+        yams::bench::benchmarkSearchIndexQueryReady(VectorSearchEngine::SimeonPqAdc, false, true));
+    CHECK_FALSE(
+        yams::bench::benchmarkSearchIndexQueryReady(VectorSearchEngine::SimeonPqAdc, false, false));
+    CHECK(yams::bench::benchmarkSearchIndexQueryReady(VectorSearchEngine::ExactScan, false, false));
+}
+
+TEST_CASE("Topology-disabled benchmark config suppresses semantic graph ingestion",
+          "[bench][retrieval][config][topology]") {
+    std::ostringstream disabled;
+    yams::bench::writeTopologyDisabledEmbeddingSelection(disabled, true);
+    CHECK((disabled.str() == "\n[embeddings.selection]\n"
+                             "update_semantic_graph_during_ingest = false\n\n"));
+
+    std::ostringstream enabled;
+    yams::bench::writeTopologyDisabledEmbeddingSelection(enabled, false);
+    CHECK((enabled.str().empty()));
+}
 
 TEST_CASE("Lexical topology neighbor builder links reciprocal topical peers",
           "[bench][retrieval][topology]") {

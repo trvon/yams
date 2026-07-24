@@ -76,6 +76,20 @@ public:
     virtual Result<void> rollbackTransaction() = 0;
 };
 
+/// Optional lifecycle capability for stores that persist embedding recipe metadata.
+/// Keeping it separate from IVectorStore avoids forcing non-SQL backends to emulate
+/// version/staleness semantics they do not support.
+class IEmbeddingLifecycleStore {
+public:
+    virtual ~IEmbeddingLifecycleStore() = default;
+
+    virtual Result<std::vector<std::string>>
+    getStaleEmbeddings(const std::string& modelId, const std::string& modelVersion) = 0;
+    virtual Result<std::vector<VectorRecord>>
+    getEmbeddingsByVersion(const std::string& modelVersion, size_t limit) = 0;
+    virtual Result<void> markAsStale(const std::string& chunkId) = 0;
+};
+
 /// Optional per-call diagnostics seam. Backends implement this when they can
 /// report work without global counters or cross-request races.
 class IDiagnosticVectorStore {
@@ -90,6 +104,18 @@ public:
                                  VectorSearchDiagnostics& diagnostics) = 0;
 };
 
+/// Optional backend-native document candidate scoring. This keeps document-budget semantics
+/// explicit without changing the vector-row contract of ordinary nearest-neighbor search.
+class IDocumentCandidateVectorStore {
+public:
+    virtual ~IDocumentCandidateVectorStore() = default;
+    virtual Result<std::vector<VectorRecord>>
+    searchDocumentCandidatesWithDiagnostics(const std::vector<float>& query_embedding, size_t k,
+                                            float similarity_threshold,
+                                            const std::unordered_set<std::string>& candidate_hashes,
+                                            VectorSearchDiagnostics& diagnostics) = 0;
+};
+
 /// Optional explicit exhaustive candidate-scoring seam. Keeping this separate from searchSimilar
 /// prevents filtered ANN backends from silently changing exact rerank/control semantics.
 class IExactCandidateVectorStore {
@@ -100,6 +126,15 @@ public:
                                          float similarity_threshold,
                                          const std::unordered_set<std::string>& candidate_hashes,
                                          VectorSearchDiagnostics& diagnostics) = 0;
+};
+
+class IAllExactCandidateVectorStore {
+public:
+    virtual ~IAllExactCandidateVectorStore() = default;
+    virtual Result<std::vector<VectorRecord>> searchAllExactCandidateRowsWithDiagnostics(
+        const std::vector<float>& query_embedding, float similarity_threshold,
+        const std::unordered_set<std::string>& candidate_hashes,
+        VectorSearchDiagnostics& diagnostics) = 0;
 };
 
 } // namespace yams::vector

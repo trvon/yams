@@ -27,6 +27,10 @@ static std::string quoteFTS5Term(const std::string& term) {
     return escaped;
 }
 
+std::string quoteFts5Literal(std::string_view text) {
+    return quoteFTS5Term(std::string(text));
+}
+
 static inline bool isLikelyUtf8WordByte(unsigned char c) {
     return c >= 0x80 || std::isalnum(c);
 }
@@ -156,7 +160,10 @@ bool hasAdvancedFts5Operators(const std::string& query) {
             upper.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
         }
         auto colonPos = token.find(':');
-        if (colonPos != std::string::npos && colonPos > 0) {
+        // C++ scope qualifiers (Ns::symbol) are literal content, not FTS field selectors.
+        const bool scopeQualifier = colonPos != std::string::npos && colonPos + 1 < token.size() &&
+                                    token[colonPos + 1] == ':';
+        if (colonPos != std::string::npos && colonPos > 0 && !scopeQualifier) {
             bool validField = true;
             for (size_t i = 0; i < colonPos; ++i) {
                 char c = token[i];

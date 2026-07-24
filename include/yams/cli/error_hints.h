@@ -48,7 +48,14 @@ inline ErrorHint getErrorHint(ErrorCode code, std::string_view message,
                 hint.command = "yams daemon start";
                 return hint;
             case IpcFailureKind::Timeout:
-                hint.hint = std::string(kDaemonLoadMessage);
+                if (command == "prune") {
+                    hint.hint =
+                        "Daemon did not complete prune; inspect it before retrying or narrow the "
+                        "category";
+                    hint.command = "yams daemon status";
+                } else {
+                    hint.hint = std::string(kDaemonLoadMessage);
+                }
                 return hint;
             case IpcFailureKind::ResetOrBrokenPipe:
             case IpcFailureKind::Eof:

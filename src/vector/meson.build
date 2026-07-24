@@ -136,7 +136,7 @@ elif target_is_arm
   '''
   if cpp_comp.compiles(dotprod_test, args: ['-march=armv8.2-a+dotprod'], name: 'ARM DotProd (vdotq_s32)')
     vec_simd_cppargs += ['-march=armv8.2-a+dotprod']
-    message('ARM DotProd: enabled for sqlite-vec-cpp (int8 cosine/IP ~33x faster)')
+    message('ARM DotProd: enabled for sqlite-vec-cpp')
   endif
 endif
 
@@ -164,6 +164,7 @@ srcs = [
   'tokenizer.cpp',
   'turboquant.cpp',
 ]
+srcs += yams_embedding_simeon_srcs
 
 if faiss_dep.found()
   srcs += ['faiss_backend.cpp']
@@ -192,8 +193,7 @@ endif
 simeon_dir = join_paths(meson.project_source_root(), 'third_party', 'simeon')
 simeon_inc = include_directories('../../third_party/simeon/include', is_system: true)
 
-simeon_core_srcs = [
-  join_paths(simeon_dir, 'src', 'simeon.cpp'),
+simeon_common_srcs = [
   join_paths(simeon_dir, 'src', 'tokenizer.cpp'),
   join_paths(simeon_dir, 'src', 'tokenizer_bpe.cpp'),
   join_paths(simeon_dir, 'src', 'hasher.cpp'),
@@ -201,12 +201,21 @@ simeon_core_srcs = [
   join_paths(simeon_dir, 'src', 'hash_crc32c.cpp'),
   join_paths(simeon_dir, 'src', 'hash_tabulation.cpp'),
   join_paths(simeon_dir, 'src', 'projection.cpp'),
-  join_paths(simeon_dir, 'src', 'pq.cpp'),
   join_paths(simeon_dir, 'src', 'pmi.cpp'),
+  join_paths(simeon_dir, 'src', 'hashed_idf.cpp'),
+  join_paths(simeon_dir, 'src', 'arch', 'scalar.cpp'),
+]
+
+simeon_vector_srcs = [
+  join_paths(simeon_dir, 'src', 'simeon.cpp'),
+  join_paths(simeon_dir, 'src', 'pq.cpp'),
+  join_paths(simeon_dir, 'src', 'matryoshka.cpp'),
+]
+
+simeon_retrieval_srcs = [
   join_paths(simeon_dir, 'src', 'bm25.cpp'),
   join_paths(simeon_dir, 'src', 'fusion.cpp'),
   join_paths(simeon_dir, 'src', 'minhash.cpp'),
-  join_paths(simeon_dir, 'src', 'matryoshka.cpp'),
   join_paths(simeon_dir, 'src', 'prf.cpp'),
   join_paths(simeon_dir, 'src', 'concept_mining.cpp'),
   join_paths(simeon_dir, 'src', 'aho_corasick.cpp'),
@@ -216,7 +225,6 @@ simeon_core_srcs = [
   join_paths(simeon_dir, 'src', 'query_router.cpp'),
   join_paths(simeon_dir, 'src', 'retrieval_strategy.cpp'),
   join_paths(simeon_dir, 'src', 'corpus_adapter.cpp'),
-  join_paths(simeon_dir, 'src', 'arch', 'scalar.cpp'),
 ]
 
 # SIMD tier defines — must be visible to every TU that includes
@@ -250,8 +258,8 @@ elif target_is_x86
   endif
 endif
 
-simeon_lib = static_library('yams_simeon',
-  simeon_core_srcs + yams_embedding_simeon_srcs,
+simeon_common_lib = static_library('yams_simeon_common',
+  simeon_common_srcs,
   include_directories: [simeon_inc, include_directories('../../include')],
   dependencies: [spdlog_dep, tl_expected_dep, yams_core],
   cpp_args: simeon_simd_defines,
@@ -259,8 +267,29 @@ simeon_lib = static_library('yams_simeon',
   install: false,
 )
 
-# NOTE: no separate simeon_dep export is declared — yams_vector_dep below
-# already propagates simeon linkage and include paths to consumers.
+simeon_vector_lib = static_library('yams_simeon_vector',
+  simeon_vector_srcs,
+  include_directories: [simeon_inc, include_directories('../../include')],
+  dependencies: [spdlog_dep, tl_expected_dep, yams_core],
+  cpp_args: simeon_simd_defines,
+  link_with: [simeon_common_lib] + simeon_extra_libs,
+  install: false,
+)
+
+simeon_retrieval_lib = static_library('yams_simeon_retrieval',
+  simeon_retrieval_srcs,
+  include_directories: [simeon_inc, include_directories('../../include')],
+  dependencies: [spdlog_dep, tl_expected_dep, yams_core],
+  cpp_args: simeon_simd_defines,
+  link_with: [simeon_vector_lib, simeon_common_lib] + simeon_extra_libs,
+  install: false,
+)
+
+simeon_retrieval_dep = declare_dependency(
+  link_with: [simeon_retrieval_lib, simeon_vector_lib, simeon_common_lib] + simeon_extra_libs,
+  include_directories: simeon_inc,
+  compile_args: simeon_simd_defines,
+)
 
 # Define SQLITE_VEC_STATIC based on whether we have sqlite-vec-cpp sources
 if sqlite_vec_cpp_src.length() > 0
@@ -303,7 +332,7 @@ sqlite_vec_backend_lib = static_library('yams_sqlite_vec_backend',
   ['sqlite_vec_backend.cpp'],
   include_directories: [include_directories('../../include'), include_directories('.'), sqlite_vec_cpp_inc, simeon_inc],
   dependencies: deps_vec + vector_platform_deps,
-  cpp_args: vector_cppargs + sqlite_vec_feature_cppargs + vec_simd_cppargs + simeon_simd_defines,
+  cpp_args: vector_cppargs + simeon_simd_defines,
   install: false,
 )
 
@@ -311,7 +340,7 @@ yams_vector = static_library('yams_vector',
   srcs,
   include_directories: [include_directories('../../include'), include_directories('.'), sqlite_vec_cpp_inc, simeon_inc] + faiss_extra_inc,
   dependencies: deps_vec + vector_platform_deps,
-  link_with: [simeon_lib, sqlite_vec_backend_lib] + sqlite_vec_cpp_lib,
+  link_with: [simeon_vector_lib, simeon_common_lib, sqlite_vec_backend_lib] + simeon_extra_libs + sqlite_vec_cpp_lib,
   cpp_args: vector_cppargs + simeon_simd_defines,
   install: true,
 )
@@ -324,9 +353,8 @@ pkg.generate(yams_vector,
 )
 
 yams_vector_dep = declare_dependency(
-  link_with: yams_vector,
-  include_directories: [include_directories('../../include'), simeon_inc],
+  link_with: [yams_vector, simeon_vector_lib, simeon_common_lib] + simeon_extra_libs,
+  include_directories: include_directories('../../include'),
   dependencies: vector_platform_deps,
-  compile_args: simeon_simd_defines,
 )
 meson.override_dependency('yams_vector', yams_vector_dep)

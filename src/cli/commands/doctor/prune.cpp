@@ -1,5 +1,6 @@
 #include <yams/cli/doctor/prune.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/error_hints.h>
 #include <yams/cli/result_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
@@ -13,7 +14,7 @@ namespace yams::cli::doctor {
 
 PruneCommand::PruneCommand(YamsCLI* cli, Config config) : cli_(cli), config_(std::move(config)) {}
 
-void PruneCommand::execute(std::ostream& os) {
+Result<void> PruneCommand::execute(std::ostream& os) {
     using namespace yams::cli::ui;
     namespace daemon = yams::daemon;
 
@@ -49,12 +50,12 @@ void PruneCommand::execute(std::ostream& os) {
            << "\n\n";
         os << colorize("Note:", Ansi::YELLOW)
            << " Use --apply to actually delete files (dry-run by default).\n\n";
-        return;
+        return Result<void>();
     }
 
     if (!cli_) {
         os << "  " << status_error("CLI context unavailable") << "\n";
-        return;
+        return Error{ErrorCode::NotInitialized, "CLI context unavailable"};
     }
 
     daemon::PruneRequest req;
@@ -74,35 +75,41 @@ void PruneCommand::execute(std::ostream& os) {
         os << "  " << status_error("Daemon not running on socket: " + clientCfg.socketPath.string())
            << "\n";
         os << colorize("\nHint:", Ansi::YELLOW) << " Start the daemon with 'yams daemon start'\n\n";
-        return;
+        return Error{ErrorCode::NotFound,
+                     "Daemon not running on socket: " + clientCfg.socketPath.string()};
     }
 
     os << "\n" << colorize("Sending prune request to daemon...", Ansi::CYAN) << "\n";
 
     auto leaseRes = acquire_cli_daemon_client(clientCfg, 1, 4);
     if (!leaseRes) {
-        os << "  " << status_error("Failed to acquire daemon client: " + leaseRes.error().message)
+        os << "  "
+           << status_error(formatErrorWithHint(leaseRes.error().code, leaseRes.error().message,
+                                               "prune"))
            << "\n";
-        return;
+        return leaseRes.error();
     }
     auto lease = std::move(leaseRes.value());
 
     auto respRes = run_result(lease->call<daemon::PruneRequest>(req), std::chrono::minutes(10));
     if (!respRes) {
-        os << "  " << status_error("Prune request failed: " + respRes.error().message) << "\n";
-        return;
+        os << "  "
+           << status_error(formatErrorWithHint(respRes.error().code, respRes.error().message,
+                                               "prune"))
+           << "\n";
+        return respRes.error();
     }
     auto resp = respRes.value();
 
     if (!resp.errorMessage.empty()) {
         os << "  " << status_error("Prune operation failed: " + resp.errorMessage) << "\n";
-        return;
+        return Error{ErrorCode::InvalidOperation, resp.errorMessage};
     }
 
     if (!resp.statusMessage.empty()) {
         os << "\n" << colorize(resp.statusMessage, Ansi::CYAN) << "\n";
         os << "Note: Prune is running in the background. Check daemon logs for progress.\n";
-        return;
+        return Result<void>();
     }
 
     os << "\n" << section_header("Prune Summary") << "\n\n";
@@ -142,6 +149,7 @@ void PruneCommand::execute(std::ostream& os) {
                << "\n";
         os << "\n";
     }
+    return Result<void>();
 }
 
 } // namespace yams::cli::doctor

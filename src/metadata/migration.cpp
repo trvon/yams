@@ -741,9 +741,10 @@ MigrationBuilder& MigrationBuilder::createIndex(const std::string& index, const 
     if (unique)
         sql << "UNIQUE ";
     sql << "INDEX " << index << " ON " << table << " (";
+    const char* separator = "";
     for (size_t i = 0; i < columns.size(); ++i) {
-        if (i > 0)
-            sql << ", ";
+        sql << separator;
+        separator = ", ";
         sql << columns[i];
     }
     sql << ")";

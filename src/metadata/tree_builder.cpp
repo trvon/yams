@@ -6,6 +6,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <span>
 #include <fmt/format.h>
 #include <openssl/sha.h>
 #include <yams/storage/storage_engine.h>
@@ -61,9 +62,9 @@ std::string TreeNode::computeHash() const {
     // Convert to hex string
     std::string hexHash;
     hexHash.reserve(SHA256_DIGEST_LENGTH * 2);
-    for (int i = 0; i < SHA256_DIGEST_LENGTH; ++i) {
+    for (unsigned char byte : hash) {
         char buf[3];
-        snprintf(buf, sizeof(buf), "%02x", hash[i]);
+        snprintf(buf, sizeof(buf), "%02x", byte);
         hexHash.append(buf);
     }
 
@@ -145,9 +146,9 @@ Result<TreeNode> TreeNode::deserialize(std::span<const uint8_t> data) {
         }
 
         entry.hash.reserve(64);
-        for (size_t i = 0; i < 32; ++i) {
+        for (uint8_t byte : std::span<const uint8_t>{data.data() + pos, 32}) {
             char buf[3];
-            snprintf(buf, sizeof(buf), "%02x", data[pos + i]);
+            snprintf(buf, sizeof(buf), "%02x", byte);
             entry.hash.append(buf);
         }
         pos += 32;

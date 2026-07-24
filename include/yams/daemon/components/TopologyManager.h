@@ -11,6 +11,7 @@
 #include <unordered_set>
 #include <vector>
 #include <yams/core/types.h>
+#include <yams/topology/topology_input_extractor.h>
 
 namespace yams::metadata {
 class MetadataRepository;
@@ -172,6 +173,10 @@ public:
     [[nodiscard]] bool boundarySpillEnabled() const noexcept {
         return boundarySpillEnabled_.load(std::memory_order_acquire);
     }
+    void setFeatureComposition(topology::FeatureComposition composition) {
+        std::lock_guard lock(featureCompositionMutex_);
+        featureComposition_ = std::move(composition);
+    }
     void clearScheduled();
 
     void setAutoRebuildEnabled(bool enabled) {
@@ -219,6 +224,8 @@ private:
     std::atomic<std::size_t> boundarySpillLimit_{1};
     std::atomic<double> boundarySpillDistanceRatio_{1.05};
     std::atomic<double> boundarySpillResidualPenalty_{1.0};
+    mutable std::mutex featureCompositionMutex_;
+    topology::FeatureComposition featureComposition_;
     std::atomic<bool> autoRebuildEnabled_{true};
     std::atomic<std::uint64_t> publishedEpoch_{0};
     // Tuner state (Phase G). Protected by tunerMutex_ since multiple

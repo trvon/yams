@@ -208,9 +208,10 @@ std::string buildInList(size_t count) {
     std::string list;
     list.reserve(count * 2 + 2);
     list += '(';
+    const char* separator = "";
     for (size_t i = 0; i < count; ++i) {
-        if (i)
-            list += ',';
+        list += separator;
+        separator = ",";
         list += '?';
     }
     list += ')';
@@ -1926,62 +1927,61 @@ Result<void> MetadataRepository::removeFromIndex(int64_t documentId) {
 }
 
 Result<void> MetadataRepository::removeFromIndexByHash(const std::string& hash) {
-    int64_t removedDocId = 0;
-    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
-        // First check if FTS5 is available
-        auto fts5Result = db.hasFTS5();
-        if (!fts5Result)
-            return fts5Result.error();
+    auto result =
+        executeQuery<std::optional<int64_t>>([&](Database& db) -> Result<std::optional<int64_t>> {
+            // First check if FTS5 is available
+            auto fts5Result = db.hasFTS5();
+            if (!fts5Result)
+                return fts5Result.error();
 
-        if (!fts5Result.value()) {
-            return {};
-        }
+            if (!fts5Result.value()) {
+                return std::optional<int64_t>{};
+            }
 
-        // Get document ID from hash first
-        auto stmtResult = db.prepare("SELECT id FROM documents WHERE sha256_hash = ?");
-        if (!stmtResult)
-            return stmtResult.error();
+            // Get document ID from hash first
+            auto stmtResult = db.prepare("SELECT id FROM documents WHERE sha256_hash = ?");
+            if (!stmtResult)
+                return stmtResult.error();
 
-        Statement stmt = std::move(stmtResult).value();
-        auto bindResult = stmt.bind(1, hash);
-        if (!bindResult)
-            return bindResult.error();
+            Statement stmt = std::move(stmtResult).value();
+            auto bindResult = stmt.bind(1, hash);
+            if (!bindResult)
+                return bindResult.error();
 
-        auto stepResult = stmt.step();
-        if (!stepResult)
-            return stepResult.error();
+            auto stepResult = stmt.step();
+            if (!stepResult)
+                return stepResult.error();
 
-        if (!stepResult.value()) {
-            // Document not found - treat as success (already removed/doesn't exist)
-            return {};
-        }
+            if (!stepResult.value()) {
+                // Document not found - treat as success (already removed/doesn't exist)
+                return std::optional<int64_t>{};
+            }
 
-        int64_t docId = stmt.getInt64(0);
+            int64_t docId = stmt.getInt64(0);
 
-        // Now remove from FTS5 index
-        auto delStmtResult = db.prepare("DELETE FROM documents_fts WHERE rowid = ?");
-        if (!delStmtResult)
-            return delStmtResult.error();
+            // Now remove from FTS5 index
+            auto delStmtResult = db.prepare("DELETE FROM documents_fts WHERE rowid = ?");
+            if (!delStmtResult)
+                return delStmtResult.error();
 
-        Statement delStmt = std::move(delStmtResult).value();
-        auto delBindResult = delStmt.bind(1, docId);
-        if (!delBindResult)
-            return delBindResult.error();
+            Statement delStmt = std::move(delStmtResult).value();
+            auto delBindResult = delStmt.bind(1, docId);
+            if (!delBindResult)
+                return delBindResult.error();
 
-        auto execResult = delStmt.execute();
-        if (execResult) {
-            removedDocId = docId;
-        }
-        return execResult;
-    });
+            YAMS_TRY(delStmt.execute());
+            return std::optional<int64_t>{docId};
+        });
 
-    if (result) {
-        if (removedDocId > 0) {
-            eraseFtsIndexedId(removedDocId);
-        }
-        invalidateQueryCache();
+    if (!result) {
+        return result.error();
     }
-    return result;
+
+    if (result.value().has_value()) {
+        eraseFtsIndexedId(result.value().value());
+    }
+    invalidateQueryCache();
+    return {};
 }
 
 Result<size_t>
@@ -3385,7 +3385,10 @@ void MetadataRepository::addSymSpellTerm(std::string_view term, int64_t frequenc
             return schemaResult.error();
         }
         search::SymSpellSearch writer(rawDb);
-        writer.addTerm(ownedTerm, frequency);
+        auto addResult = writer.addTerm(ownedTerm, frequency);
+        if (!addResult) {
+            return addResult.error();
+        }
         return Result<void>();
     });
 
@@ -3449,8 +3452,7 @@ MetadataRepository::tryAddSymSpellTerms(const std::vector<std::pair<std::string,
                 symspellSchemaReady_.store(true, std::memory_order_release);
             }
             search::SymSpellSearch writer(rawDb);
-            writer.addTermsBatch(chunk);
-            return Result<void>();
+            return writer.addTermsBatch(chunk);
         });
 
         if (!result) {
@@ -4361,9 +4363,10 @@ std::string MetadataQueryBuilder::buildQuery() const {
 
     if (!conditions_.empty()) {
         query += " WHERE ";
+        const char* separator = "";
         for (size_t i = 0; i < conditions_.size(); ++i) {
-            if (i > 0)
-                query += " AND ";
+            query += separator;
+            separator = " AND ";
             query += conditions_[i];
         }
     }

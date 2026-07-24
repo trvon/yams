@@ -1392,10 +1392,10 @@ TEST_CASE("RequestDispatcher: prune handler covers parsing and execution branche
         CHECK(pruneResp.filesFailed == 0);
         CHECK(pruneResp.totalBytesFreed == (2048 + 3 * 1024 * 1024 + 4096));
         REQUIRE(pruneResp.categoryCounts.count("build-object") == 1);
-        REQUIRE(pruneResp.categoryCounts.count("none") == 1);
+        REQUIRE(pruneResp.categoryCounts.count("logs") == 1);
         REQUIRE(pruneResp.categoryCounts.count("temp") == 1);
         CHECK(pruneResp.categoryCounts.at("build-object") == 1);
-        CHECK(pruneResp.categoryCounts.at("none") == 1);
+        CHECK(pruneResp.categoryCounts.at("logs") == 1);
         CHECK(pruneResp.categoryCounts.at("temp") == 1);
     }
 
@@ -1451,10 +1451,10 @@ TEST_CASE("RequestDispatcher: prune handler covers parsing and execution branche
         const auto& pruneResp = std::get<PruneResponse>(resp);
         CHECK(pruneResp.totalBytesFreed == (2048 + 3 * 1024 * 1024 + 4096));
         REQUIRE(pruneResp.categoryCounts.count("build-object") == 1);
-        REQUIRE(pruneResp.categoryCounts.count("none") == 1);
+        REQUIRE(pruneResp.categoryCounts.count("logs") == 1);
         REQUIRE(pruneResp.categoryCounts.count("temp") == 1);
         CHECK(pruneResp.categoryCounts.at("build-object") == 1);
-        CHECK(pruneResp.categoryCounts.at("none") == 1);
+        CHECK(pruneResp.categoryCounts.at("logs") == 1);
         CHECK(pruneResp.categoryCounts.at("temp") == 1);
     }
 
@@ -1474,10 +1474,10 @@ TEST_CASE("RequestDispatcher: prune handler covers parsing and execution branche
         CHECK(pruneResp.categoryCounts.at("build-object") == 1);
     }
 
-    SECTION("dry run matches dotted extensions when category is none") {
+    SECTION("dry run matches dotted extensions when category is logs") {
         PruneRequest req;
         req.dryRun = true;
-        req.categories = {"none"};
+        req.categories = {"logs"};
         req.extensions = {"log"};
 
         auto resp = dispatchRequest(dispatcher, Request{req});
@@ -1486,8 +1486,8 @@ TEST_CASE("RequestDispatcher: prune handler covers parsing and execution branche
         const auto& pruneResp = std::get<PruneResponse>(resp);
         CHECK(pruneResp.totalBytesFreed == 3 * 1024 * 1024);
         CHECK(pruneResp.categoryCounts.size() == 1);
-        REQUIRE(pruneResp.categoryCounts.count("none") == 1);
-        CHECK(pruneResp.categoryCounts.at("none") == 1);
+        REQUIRE(pruneResp.categoryCounts.count("logs") == 1);
+        CHECK(pruneResp.categoryCounts.at("logs") == 1);
     }
 
     SECTION("dry run handles query failures from repository") {
@@ -1525,15 +1525,17 @@ TEST_CASE("RequestDispatcher: prune handler covers parsing and execution branche
 
         REQUIRE(std::holds_alternative<PruneResponse>(resp));
         const auto& pruneResp = std::get<PruneResponse>(resp);
-        CHECK(pruneResp.filesDeleted == 2);
-        CHECK(pruneResp.filesFailed == 2);
-        CHECK(pruneResp.totalBytesFreed == 2048);
+        CHECK(pruneResp.filesDeleted == 0);
+        CHECK(pruneResp.filesFailed == 0);
+        CHECK(pruneResp.totalBytesFreed == (2048 + 3 * 1024 * 1024 + 64 + 4096));
         REQUIRE(pruneResp.categoryCounts.count("build-object") == 1);
-        REQUIRE(pruneResp.categoryCounts.count("none") == 1);
+        REQUIRE(pruneResp.categoryCounts.count("logs") == 1);
         REQUIRE(pruneResp.categoryCounts.count("temp") == 1);
         CHECK(pruneResp.categoryCounts.at("build-object") == 1);
-        CHECK(pruneResp.categoryCounts.at("none") == 2);
+        CHECK(pruneResp.categoryCounts.at("logs") == 1);
         CHECK(pruneResp.categoryCounts.at("temp") == 1);
+        CHECK_FALSE(pruneResp.statusMessage.empty());
+        REQUIRE(waitForCondition([&] { return repo->deleteCallCount() == 2; }));
         CHECK(repo->deleteCallCount() == 2);
         CHECK(repo->deletedIds() == std::vector<int64_t>{1});
         const auto removed = store->removedHashes();
@@ -1553,9 +1555,11 @@ TEST_CASE("RequestDispatcher: prune handler covers parsing and execution branche
 
         REQUIRE(std::holds_alternative<PruneResponse>(resp));
         const auto& pruneResp = std::get<PruneResponse>(resp);
-        CHECK(pruneResp.filesDeleted == 1);
+        CHECK(pruneResp.filesDeleted == 0);
         CHECK(pruneResp.filesFailed == 0);
         CHECK(pruneResp.totalBytesFreed == 2048);
+        CHECK_FALSE(pruneResp.statusMessage.empty());
+        REQUIRE(waitForCondition([&] { return repo->deleteCallCount() == 1; }));
         CHECK_FALSE(store->hasBlob(targetHash));
         CHECK(store->removedHashes() == std::vector<std::string>{targetHash});
         CHECK(repo->deletedIds() == std::vector<int64_t>{1});
@@ -1584,11 +1588,13 @@ TEST_CASE("RequestDispatcher: prune handler covers parsing and execution branche
 
         REQUIRE(std::holds_alternative<PruneResponse>(resp));
         const auto& pruneResp = std::get<PruneResponse>(resp);
-        CHECK(pruneResp.filesDeleted == 106);
+        CHECK(pruneResp.filesDeleted == 0);
         CHECK(pruneResp.filesFailed == 0);
         CHECK(pruneResp.totalBytesFreed == (4096 + 105 * 2048));
         REQUIRE(pruneResp.categoryCounts.count("temp") == 1);
         CHECK(pruneResp.categoryCounts.at("temp") == 106);
+        CHECK_FALSE(pruneResp.statusMessage.empty());
+        REQUIRE(waitForCondition([&] { return repo->deleteCallCount() == 106; }));
         CHECK(repo->deleteCallCount() == 106);
         CHECK(repo->deletedIds().size() == 106);
     }
@@ -1605,10 +1611,10 @@ TEST_CASE("RequestDispatcher: prune handler covers parsing and execution branche
         const auto& pruneResp = std::get<PruneResponse>(resp);
         CHECK(pruneResp.totalBytesFreed == (2048 + 3 * 1024 * 1024 + 64 + 4096));
         REQUIRE(pruneResp.categoryCounts.count("build-object") == 1);
-        REQUIRE(pruneResp.categoryCounts.count("none") == 1);
+        REQUIRE(pruneResp.categoryCounts.count("logs") == 1);
         REQUIRE(pruneResp.categoryCounts.count("temp") == 1);
         CHECK(pruneResp.categoryCounts.at("build-object") == 1);
-        CHECK(pruneResp.categoryCounts.at("none") == 2);
+        CHECK(pruneResp.categoryCounts.at("logs") == 1);
         CHECK(pruneResp.categoryCounts.at("temp") == 1);
     }
 }
@@ -4858,6 +4864,7 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         CHECK(fullResp.files.front().content.find("fallbackEntry") != std::string::npos);
         CHECK(fullResp.entrySymbols.size() == 1);
         CHECK(fullResp.entrySymbols.front().label == "fallbackEntry");
+        CHECK(fullResp.snippetsRendered == 1);
 
         GraphExploreRequest omittedReq;
         omittedReq.query = "fallbackEntry";
@@ -4869,6 +4876,8 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         REQUIRE(omittedResp.files.size() == 1);
         CHECK(omittedResp.files.front().mode == "omitted");
         CHECK(omittedResp.files.front().content.empty());
+        CHECK(omittedResp.snippetRenderMicros == 0);
+        CHECK(omittedResp.snippetsRendered == 0);
     }
 
     SECTION("graph query lists node types") {

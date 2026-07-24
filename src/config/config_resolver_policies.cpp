@@ -223,6 +223,9 @@ ConfigResolver::SimeonEncoderPolicy ConfigResolver::resolveSimeonEncoderPolicy()
         fs::path cfgPath = resolveDefaultConfigPath();
         if (!cfgPath.empty() && fs::exists(cfgPath)) {
             auto kv = parseSimpleTomlFlat(cfgPath);
+            if (auto it = kv.find("embeddings.simeon.encoder_profile");
+                it != kv.end() && !it->second.empty())
+                policy.encoderProfile = it->second;
             if (auto it = kv.find("embeddings.simeon.ngram_mode");
                 it != kv.end() && !it->second.empty())
                 policy.ngramMode = it->second;
@@ -349,6 +352,9 @@ ConfigResolver::SimeonBm25Policy ConfigResolver::resolveSimeonBm25Policy() {
             if (auto it = kv.find("embeddings.simeon.bm25.fragment_geometry.enabled");
                 it != kv.end())
                 policy.fragmentGeometryEnabled = parseTomlBool(it->second);
+            if (auto it = kv.find("embeddings.simeon.bm25.fragment_geometry.encoder_profile");
+                it != kv.end() && !it->second.empty())
+                policy.fragmentGeometryEncoderProfile = it->second;
             if (auto it = kv.find("embeddings.simeon.bm25.fragment_geometry.max_docs");
                 it != kv.end())
                 policy.fragmentGeometryMaxDocs = parseTomlSize(it->second);

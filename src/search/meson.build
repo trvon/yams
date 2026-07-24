@@ -67,7 +67,7 @@ yams_search = static_library('yams_search',
     include_directories('../../include'),
     include_directories('../../third_party/symspell/include'),
   ],
-  dependencies: [spdlog_dep, nlohmann_json_dep, boost_dep, yams_core, yams_metadata, yams_topology, yams_vector, symspell_dep] + search_tracy_deps,
+  dependencies: [spdlog_dep, nlohmann_json_dep, boost_dep, yams_core, yams_metadata, yams_topology, yams_vector, simeon_retrieval_dep, symspell_dep] + search_tracy_deps,
   cpp_args: search_tracy_args,
   install: true,
 )
@@ -80,13 +80,11 @@ pkg.generate(yams_search,
 )
 
 yams_search_dep = declare_dependency(
-#yams_search owns simeon_lexical_backend.cpp, so consumers also need the
-#vendored simeon archive that provides QueryRouter / recipe_name.
-  link_with: [yams_search, simeon_lib],
+  link_with: yams_search,
   include_directories: [
     include_directories('../../include'),
     include_directories('../../third_party/symspell/include'),
   ],
-  dependencies: [yams_core, yams_metadata, yams_topology, yams_vector, nlohmann_json_dep, spdlog_dep, boost_dep, symspell_dep],
+  dependencies: [yams_core, yams_metadata, yams_topology, yams_vector, simeon_retrieval_dep, nlohmann_json_dep, spdlog_dep, boost_dep, symspell_dep],
 )
 meson.override_dependency('yams_search', yams_search_dep)

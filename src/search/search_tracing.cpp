@@ -133,11 +133,62 @@ void recordIndexReadinessDebug(std::unordered_map<std::string, std::string>& deb
     setDebug(debug, metrics::kTopologyEpoch, std::to_string(freshness.topologyEpoch));
 }
 
+void recordTopologyRouteAdmissionDebug(SearchResponse& response,
+                                       const TopologyRoutingSessionResult& session) {
+    auto& debug = response.debugStats;
+    setDebugBool(debug, metrics::kTopologyRouteNarrowProposed,
+                 session.certificate.hasUsefulRoute());
+    setDebug(debug, metrics::kTopologyRouteAction,
+             std::string{topologyRouteActionToString(session.certificate.action())});
+    setDebug(debug, metrics::kTopologyRouteSelectedCoverCount,
+             std::to_string(session.certificate.selectedCoverIds.size()));
+    setDebug(debug, metrics::kTopologyRouteSelectedProtectedRelationFiberCount,
+             std::to_string(session.certificate.selectedProtectedRelationFiberIds.size()));
+    setDebugBool(debug, metrics::kTopologyRouteAdmissionEligible,
+                 session.certificate.action() == TopologyRouteAction::Narrow);
+    setDebug(debug, metrics::kTopologyRouteAdmissionDenialReason,
+             std::string{session.certificate.admission.denialReason()});
+    setDebug(debug, metrics::kTopologyRouteCoordinateSpaceIdentity,
+             session.certificate.coordinateSpaceIdentity);
+    setDebug(debug, metrics::kTopologyRouteCoordinateSpaceAlignmentStatus,
+             std::string{topologyProofObligationStatusToString(
+                 session.certificate.admission.coordinateSpaceAlignment)});
+    setDebug(debug, metrics::kTopologyRouteProtectedRelationCoverageStatus,
+             std::string{topologyProofObligationStatusToString(
+                 session.certificate.admission.protectedRelationCoverage)});
+    setDebug(debug, metrics::kTopologyRouteProtectedFibersRepresentedStatus,
+             std::string{topologyProofObligationStatusToString(
+                 session.certificate.admission.protectedFibersRepresented)});
+    setDebug(debug, metrics::kTopologyRouteCertificateSaturatesProtectedFibersStatus,
+             std::string{topologyProofObligationStatusToString(
+                 session.certificate.admission.certificateSaturatesProtectedFibers)});
+    setDebug(debug, metrics::kTopologyRouteRiskStatus,
+             std::string{
+                 topologyProofObligationStatusToString(session.certificate.admission.routeRisk)});
+    setDebug(
+        debug, metrics::kTopologyRouteWorkStatus,
+        std::string{topologyProofObligationStatusToString(session.certificate.admission.work)});
+    setDebugBool(debug, metrics::kTopologyRouteWorkObserved, session.certificate.work.observed);
+    setDebug(debug, metrics::kTopologyRouteWorkRowsVisitedActual,
+             std::to_string(session.certificate.work.rowsVisited));
+    setDebug(debug, metrics::kTopologyRouteWorkExactDistanceEvaluationsActual,
+             std::to_string(session.certificate.work.exactDistanceEvaluations));
+    setDebug(debug, metrics::kTopologyRouteWorkAnnCandidateBudgetActual,
+             std::to_string(session.certificate.work.annCandidateBudget));
+    setDebug(debug, metrics::kTopologyRouteCoverMaterializationStatus,
+             std::string{topologyProofObligationStatusToString(
+                 session.certificate.admission.coverMaterialization)});
+    setDebug(debug, metrics::kTopologyRouteSelectedCoverDocuments,
+             std::to_string(session.certificate.admission.selectedCoverDocuments));
+    setDebug(debug, metrics::kTopologyRouteMaterializedCoverDocuments,
+             std::to_string(session.certificate.admission.materializedCoverDocuments));
+}
+
 void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConfig& config,
                                 SearchEngineConfig::TopologyRoutingMode mode,
                                 const TopologyRoutingSessionResult& session,
                                 const std::string& skipReason, std::size_t totalCandidates,
-                                bool shadowEvaluation, bool includeDocumentIds) {
+                                TopologyRoutingDebugOptions options) {
     auto& debug = response.debugStats;
     setDebug(debug, metrics::kTopologyRoutingMode,
              SearchEngineConfig::topologyRoutingModeToString(mode));
@@ -151,9 +202,10 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
     setDebugBool(debug, metrics::kTopologyWeakQueryLoadAttempted, session.loadAttempted);
     setDebugBool(debug, metrics::kTopologyWeakQueryLoadSucceeded, session.loadSucceeded);
     setDebugBool(debug, metrics::kTopologyArtifactAdmitted, session.artifactAdmitted);
-    setDebugBool(debug, metrics::kTopologyWeakQueryApplied, session.applied && !shadowEvaluation);
-    setDebugBool(debug, metrics::kTopologyWeakQueryNarrowApplied,
-                 session.narrowApplied && !shadowEvaluation);
+    setDebugBool(debug, metrics::kTopologyWeakQueryApplied,
+                 session.applied && !options.shadowEvaluation);
+    // Actual backend application is recorded by SearchEngine after the vector leg completes.
+    setDebugBool(debug, metrics::kTopologyWeakQueryNarrowApplied, false);
     setDebug(debug, metrics::kTopologyWeakQuerySkipReason, skipReason);
     setDebug(debug, metrics::kTopologyWeakQueryRoutesRejected,
              std::to_string(session.routesRejected));
@@ -174,36 +226,101 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
              std::to_string(session.routeAnnDistanceEvaluations));
     setDebug(debug, metrics::kTopologyRouteExactRepresentativeDistanceEvaluations,
              std::to_string(session.routeExactRepresentativeDistanceEvaluations));
+    setDebug(debug, metrics::kTopologyRouteEvidenceCount,
+             std::to_string(session.routeEvidence.size()));
+    recordTopologyRouteAdmissionDebug(response, session);
+    if (options.includeDetailedTrace) {
+        json evidenceRows = json::array();
+        for (const auto& evidence : session.routeEvidence) {
+            json row;
+            row["cluster_id"] = evidence.clusterId;
+            row["semantic_cost"] =
+                evidence.semanticCost.has_value() ? json(*evidence.semanticCost) : json(nullptr);
+            row["sparse_cost"] =
+                evidence.sparseCost.has_value() ? json(*evidence.sparseCost) : json(nullptr);
+            // Graph and metadata signals do not yet have query-time producers.
+            row["graph_cost"] = nullptr;
+            row["metadata_cost"] = nullptr;
+            row["persistence_penalty"] = evidence.persistencePenalty;
+            row["cohesion_penalty"] = evidence.cohesionPenalty;
+            row["size_penalty"] = evidence.sizePenalty;
+            row["route_score"] = evidence.routeScore;
+            row["score_eligible"] = evidence.scoreEligible;
+            row["in_selected_prefix"] = evidence.inSelectedPrefix;
+            evidenceRows.push_back(std::move(row));
+        }
+        setDebug(debug, metrics::kTopologyRouteEvidenceRows, evidenceRows.dump());
+    }
     setDebug(debug, metrics::kTopologyWeakQueryRoutedDocs, std::to_string(session.routedDocs));
     setDebug(debug, metrics::kTopologyWeakQueryAddedCandidates,
-             std::to_string(shadowEvaluation ? 0 : session.addedCandidates));
+             std::to_string(options.shadowEvaluation ? 0 : session.addedCandidates));
     setDebug(debug, metrics::kTopologyWeakQueryDuplicateCandidates,
-             std::to_string(shadowEvaluation ? 0 : session.duplicateCandidates));
+             std::to_string(options.shadowEvaluation ? 0 : session.duplicateCandidates));
     setDebug(debug, metrics::kTopologyWeakQueryStaleCandidates,
              std::to_string(session.staleCandidates));
-    if (includeDocumentIds) {
+    if (options.includeDetailedTrace) {
         setDebug(debug, metrics::kTopologyWeakQueryAddedCandidateHashes,
-                 shadowEvaluation ? std::string{} : joinWithTab(session.addedCandidateHashes));
+                 options.shadowEvaluation ? std::string{}
+                                          : joinWithTab(session.addedCandidateHashes));
     }
     setDebug(debug, metrics::kTopologyWeakQueryTotalCandidates, std::to_string(totalCandidates));
-    const auto& allowedCandidateHashes = session.routeAllowedDocumentHashes.empty()
+    const auto& allowedCandidateHashes = session.certificate.allowedDocumentHashes.empty()
                                              ? session.routedCandidateHashes
-                                             : session.routeAllowedDocumentHashes;
-    const bool shadowEvaluated = shadowEvaluation && session.loadAttempted;
+                                             : session.certificate.allowedDocumentHashes;
+    const bool shadowEvaluated = options.shadowEvaluation && session.loadAttempted;
     const char* shadowAction = "global";
-    if (shadowEvaluated && session.narrowApplied && !allowedCandidateHashes.empty()) {
+    if (shadowEvaluated && session.certificate.hasUsefulRoute() &&
+        !allowedCandidateHashes.empty()) {
         shadowAction = "narrow";
     }
     setDebugBool(debug, metrics::kTopologyShadowEvaluated, shadowEvaluated);
     setDebug(debug, metrics::kTopologyShadowProposedAction, shadowAction);
     setDebug(debug, metrics::kTopologyWeakQueryAllowedCandidates,
              std::to_string(allowedCandidateHashes.size()));
-    if (includeDocumentIds) {
+    if (options.includeDetailedTrace) {
         std::vector<std::string> routedCandidateHashes(allowedCandidateHashes.begin(),
                                                        allowedCandidateHashes.end());
         std::sort(routedCandidateHashes.begin(), routedCandidateHashes.end());
         setDebug(debug, metrics::kTopologyWeakQueryAllowedCandidateHashes,
                  joinWithTab(routedCandidateHashes));
+        auto routedCandidateDocIds = session.routedCandidateDocIds;
+        std::sort(routedCandidateDocIds.begin(), routedCandidateDocIds.end());
+        routedCandidateDocIds.erase(
+            std::unique(routedCandidateDocIds.begin(), routedCandidateDocIds.end()),
+            routedCandidateDocIds.end());
+        setDebug(debug, metrics::kTopologyWeakQueryAllowedCandidateDocIds,
+                 joinWithTab(routedCandidateDocIds));
+
+        const auto& graphTrace = session.graphNeighborTrace;
+        setDebugBool(debug, metrics::kTopologyGraphTraceCollected, graphTrace.collected);
+        if (graphTrace.collected) {
+            setDebug(debug, metrics::kTopologyGraphEdgeFetchLimit,
+                     std::to_string(graphTrace.edgeFetchLimit));
+            setDebug(debug, metrics::kTopologyGraphFetchTruncatedSeedCount,
+                     std::to_string(graphTrace.fetchTruncatedSeedCount));
+            setDebug(debug, metrics::kTopologyGraphSeedDocIds,
+                     joinWithTab(graphTrace.seedDocumentIds));
+            setDebug(debug, metrics::kTopologyGraphSeedUnresolvedCount,
+                     std::to_string(graphTrace.seedUnresolvedCount));
+            setDebug(debug, metrics::kTopologyGraphRelationCandidateCount,
+                     std::to_string(graphTrace.relationCandidateCount));
+            setDebug(debug, metrics::kTopologyGraphRelationCandidateDocIds,
+                     joinWithTab(graphTrace.relationCandidateDocumentIds));
+            setDebug(debug, metrics::kTopologyGraphRelationUnresolvedCount,
+                     std::to_string(graphTrace.relationUnresolvedCount));
+            setDebug(debug, metrics::kTopologyGraphFetchedCandidateCount,
+                     std::to_string(graphTrace.fetchedCandidateCount));
+            setDebug(debug, metrics::kTopologyGraphFetchedCandidateDocIds,
+                     joinWithTab(graphTrace.fetchedCandidateDocumentIds));
+            setDebug(debug, metrics::kTopologyGraphFetchedUnresolvedCount,
+                     std::to_string(graphTrace.fetchedUnresolvedCount));
+            setDebug(debug, metrics::kTopologyGraphEligibleCandidateCount,
+                     std::to_string(graphTrace.eligibleCandidateCount));
+            setDebug(debug, metrics::kTopologyGraphEligibleCandidateDocIds,
+                     joinWithTab(graphTrace.eligibleCandidateDocumentIds));
+            setDebug(debug, metrics::kTopologyGraphEligibleUnresolvedCount,
+                     std::to_string(graphTrace.eligibleUnresolvedCount));
+        }
     }
     setDebugBool(debug, metrics::kTopologySnapshotCacheHit, session.snapshotCacheHit);
     float scaleAgreementSum = 0.0F;
@@ -248,7 +365,8 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
         setDebugBool(debug, metrics::kTopologyReady, true);
         setDebugBool(debug, metrics::kTopologyArtifactsFresh, session.artifactsFresh);
         setDebug(debug, metrics::kTopologyEpoch, std::to_string(session.topologyEpoch));
-        setDebug(debug, metrics::kTopologyConstructionFingerprint, session.constructionFingerprint);
+        setDebug(debug, metrics::kTopologyConstructionFingerprint,
+                 session.certificate.constructionFingerprint);
     }
     if (session.loadAttempted) {
         auto& timing = response.componentTimingMicros;

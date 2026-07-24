@@ -3,6 +3,7 @@
 #include <ostream>
 #include <string>
 #include <vector>
+#include <yams/core/types.h>
 
 namespace yams::cli {
 class YamsCLI;
@@ -25,7 +26,7 @@ public:
     };
 
     explicit PruneCommand(YamsCLI* cli, Config config);
-    void execute(std::ostream& os);
+    Result<void> execute(std::ostream& os);
 
 private:
     YamsCLI* cli_{nullptr};

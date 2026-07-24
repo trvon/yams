@@ -33,7 +33,8 @@ class IModelProvider;
  * - initializeOnce() uses atomic guard for single-attempt semantics
  * - All accessors are thread-safe
  *
- * Note: VectorIndexManager was removed - SearchEngine uses VectorDatabase directly.
+ * The daemon path uses VectorDatabase directly. VectorIndexManager remains an
+ * installed compatibility adapter for external index-lifecycle consumers.
  */
 class VectorSystemManager : public IComponent {
 public:

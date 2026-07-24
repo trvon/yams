@@ -2,10 +2,14 @@
 
 #include "tests/benchmarks/beir_loader.h"
 
+#include <yams/vector/vector_types.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <iosfwd>
 #include <map>
+#include <optional>
 #include <random>
 #include <set>
 #include <string>
@@ -14,6 +18,14 @@
 #include <nlohmann/json.hpp>
 
 namespace yams::bench {
+
+bool benchmarkSearchIndexReusable(yams::vector::VectorSearchEngine engine,
+                                  bool backendPersistedReusable);
+bool benchmarkSearchIndexQueryReady(yams::vector::VectorSearchEngine engine,
+                                    bool persistedIndexReusable, bool preparedThisRun);
+void writeTopologyDisabledEmbeddingSelection(std::ostream& out, bool topologyDisabled);
+
+std::optional<double> processPeakRssMb() noexcept;
 
 struct TestQuery {
     std::string query;

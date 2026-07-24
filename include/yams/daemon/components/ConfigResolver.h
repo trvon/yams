@@ -87,15 +87,28 @@ public:
         std::optional<float> adaptiveProbeScoreGap;
         std::optional<float> narrowMinBoundaryMargin;
         std::optional<std::size_t> maxDocs;
+        std::optional<std::size_t> expansionOutputLimit;
         std::optional<float> medoidBoost;
         std::optional<float> evidenceWeight;
         std::optional<std::string> routeScoring;
         std::optional<float> sparseDenseAlpha;
         std::optional<float> minRouteScore;
+        std::optional<std::string> routeCalibrationFingerprint;
+        std::optional<std::size_t> routeCalibrationQueries;
+        std::optional<std::size_t> routeCalibrationProtectedCandidates;
+        std::optional<std::size_t> routeCalibrationMissedProtectedCandidates;
+        std::optional<std::size_t> routeMinCalibrationQueries;
+        std::optional<std::size_t> routeMaxMissesPerThousand;
+        std::optional<float> routeCalibrationMinBoundaryMargin;
+        std::optional<std::size_t> routeCalibrationMinSeedHits;
+        std::optional<std::size_t> routeWorkMaxRowsVisited;
+        std::optional<std::size_t> routeWorkMaxExactDistanceEvaluations;
+        std::optional<std::size_t> routeWorkMaxAnnCandidates;
         // clusters | graph_neighbors
         std::optional<std::string> expansionSource;
         std::optional<float> graphNeighborMinScore;
         std::optional<bool> graphNeighborReciprocalOnly;
+        std::optional<bool> graphWeightedSeedRanking;
         /// GraphNeighbors seed ANN k; 0 disables (Tier-1 seeds only).
         std::optional<std::size_t> graphVectorSeedProbe;
         std::optional<float> rrfK;
@@ -108,6 +121,15 @@ public:
         std::optional<std::size_t> boundarySpillLimit;
         std::optional<double> boundarySpillDistanceRatio;
         std::optional<double> boundarySpillResidualPenalty;
+        std::optional<bool> featureEntityFusion;
+        std::optional<std::size_t> featureEntitySignatureK;
+        std::optional<float> featureEntityFusionAlpha;
+        std::optional<float> featureEntityMinConfidence;
+        std::optional<bool> featureMatryoshkaCoarseView;
+        std::optional<std::size_t> featureMatryoshkaTargetDim;
+        std::optional<bool> featureMinHashSketch;
+        std::optional<std::size_t> featureMinHashSketchDim;
+        std::optional<float> featureMinHashAlpha;
     };
 
     // Per-corpus adaptive tuner for the topology layer (Phase G). Disabled
@@ -145,6 +167,7 @@ public:
     };
 
     struct SimeonEncoderPolicy {
+        std::optional<std::string> encoderProfile;
         std::optional<std::string> ngramMode;
         std::optional<std::uint32_t> ngramMin;
         std::optional<std::uint32_t> ngramMax;
@@ -164,6 +187,7 @@ public:
         std::optional<std::size_t> buildDocChunkBytes;
         std::optional<std::size_t> buildDocMaxChunks;
         std::optional<bool> fragmentGeometryEnabled;
+        std::optional<std::string> fragmentGeometryEncoderProfile;
         std::optional<std::size_t> fragmentGeometryMaxDocs;
         std::optional<std::size_t> fragmentGeometryMaxCorpusBytes;
         std::optional<std::size_t> fragmentGeometryPmiSampleDocs;
@@ -439,7 +463,7 @@ public:
      * Config keys:
      * - search.topology.mode = disabled|weak_query_only|hybrid_assist
      * - search.topology.enable_weak_query_routing = true|false
-     * - search.topology.vector_policy = narrow|shadow
+     * - search.topology.vector_policy = augment|narrow|shadow
      * - search.topology.min_clusters = int
      * - search.topology.max_clusters = int
      * - search.topology.max_seed_documents = int
@@ -448,14 +472,27 @@ public:
      * - search.topology.adaptive_probe_score_gap = float
      * - search.topology.narrow_min_boundary_margin = float
      * - search.topology.max_docs = int
+     * - search.topology.expansion_output_limit = int (0 inherits global vector output)
      * - search.topology.medoid_boost = float
      * - search.topology.evidence_weight = float in [0,1]
      * - search.topology.route_scoring = current|size_weighted|seed_coverage
      * - search.topology.sparse_dense_alpha = float in [0,1]
      * - search.topology.min_route_score = float
+     * - search.topology.route_calibration_fingerprint = string
+     * - search.topology.route_calibration_queries = int
+     * - search.topology.route_calibration_protected_candidates = int
+     * - search.topology.route_calibration_missed_protected_candidates = int
+     * - search.topology.route_min_calibration_queries = int
+     * - search.topology.route_max_misses_per_thousand = int
+     * - search.topology.route_calibration_min_boundary_margin = float
+     * - search.topology.route_calibration_min_seed_hits = int
+     * - search.topology.route_work_max_rows_visited = int
+     * - search.topology.route_work_max_exact_distance_evaluations = int
+     * - search.topology.route_work_max_ann_candidates = int
      * - search.topology.expansion_source = clusters|graph_neighbors
      * - search.topology.graph_neighbor_min_score = float
      * - search.topology.graph_neighbor_reciprocal_only = true|false
+     * - search.topology.graph_weighted_seed_ranking = true|false
      * - search.topology.graph_vector_seed_probe = int
      * - search.topology.rrf_k = float
      */
@@ -475,6 +512,15 @@ public:
      * - topology.boundary_spill_limit = int
      * - topology.boundary_spill_distance_ratio = float
      * - topology.boundary_spill_residual_penalty = float
+     * - topology.features.entity_fusion = bool
+     * - topology.features.entity_signature_k = int
+     * - topology.features.entity_fusion_alpha = float
+     * - topology.features.entity_min_confidence = float
+     * - topology.features.matryoshka_coarse_view = bool
+     * - topology.features.matryoshka_target_dim = int
+     * - topology.features.minhash_sketch = bool
+     * - topology.features.minhash_sketch_dim = int
+     * - topology.features.minhash_alpha = float
      */
     static TopologyEnginePolicy resolveTopologyEnginePolicy();
 
@@ -497,6 +543,7 @@ public:
      *
      * Precedence: env var > TOML > default. Env vars map to legacy
      * YAMS_SIMEON_* names kept for test-only overrides. Canonical keys:
+     * - embeddings.simeon.encoder_profile = "configurable" | "fixed_hash_384"
      * - embeddings.simeon.ngram_mode     = "char" | "word" | "char_and_word"
      * - embeddings.simeon.ngram_min      = int
      * - embeddings.simeon.ngram_max      = int

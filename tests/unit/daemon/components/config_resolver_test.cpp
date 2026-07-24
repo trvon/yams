@@ -515,6 +515,17 @@ boundary_spill = true
 boundary_spill_limit = 1
 boundary_spill_distance_ratio = 1.2
 boundary_spill_residual_penalty = 1.5
+
+[topology.features]
+entity_fusion = true
+entity_signature_k = 12
+entity_fusion_alpha = 0.2
+entity_min_confidence = 0.5
+matryoshka_coarse_view = true
+matryoshka_target_dim = 256
+minhash_sketch = true
+minhash_sketch_dim = 24
+minhash_alpha = 0.15
 )TOML");
 
     EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
@@ -532,6 +543,15 @@ boundary_spill_residual_penalty = 1.5
     CHECK(*policy.boundarySpillDistanceRatio == Catch::Approx(1.2));
     REQUIRE(policy.boundarySpillResidualPenalty.has_value());
     CHECK(*policy.boundarySpillResidualPenalty == Catch::Approx(1.5));
+    CHECK(*policy.featureEntityFusion);
+    CHECK(*policy.featureEntitySignatureK == 12);
+    CHECK(*policy.featureEntityFusionAlpha == Catch::Approx(0.2F));
+    CHECK(*policy.featureEntityMinConfidence == Catch::Approx(0.5F));
+    CHECK(*policy.featureMatryoshkaCoarseView);
+    CHECK(*policy.featureMatryoshkaTargetDim == 256);
+    CHECK(*policy.featureMinHashSketch);
+    CHECK(*policy.featureMinHashSketchDim == 24);
+    CHECK(*policy.featureMinHashAlpha == Catch::Approx(0.15F));
 }
 
 TEST_CASE_METHOD(ConfigResolverFixture,
@@ -549,7 +569,20 @@ ann_candidate_limit = 16
 adaptive_probe_score_gap = 0.07
 narrow_min_boundary_margin = 0.03
 max_docs = 42
+expansion_output_limit = 96
+graph_weighted_seed_ranking = true
 medoid_boost = 0.2
+route_calibration_fingerprint = "atlas-123"
+route_calibration_queries = 100
+route_calibration_protected_candidates = 250
+route_calibration_missed_protected_candidates = 2
+route_min_calibration_queries = 75
+route_max_misses_per_thousand = 10
+route_calibration_min_boundary_margin = 0.2
+route_calibration_min_seed_hits = 2
+route_work_max_rows_visited = 64
+route_work_max_exact_distance_evaluations = 32
+route_work_max_ann_candidates = 48
 rrf_k = 33
 )TOML");
 
@@ -576,9 +609,24 @@ rrf_k = 33
     CHECK(*policy.narrowMinBoundaryMargin == Catch::Approx(0.03F));
     REQUIRE(policy.maxDocs.has_value());
     CHECK(*policy.maxDocs == 42U);
+    REQUIRE(policy.expansionOutputLimit.has_value());
+    CHECK(*policy.expansionOutputLimit == 96U);
+    REQUIRE(policy.graphWeightedSeedRanking.has_value());
+    CHECK(*policy.graphWeightedSeedRanking);
     REQUIRE(policy.medoidBoost.has_value());
     CHECK(*policy.medoidBoost > 0.19f);
     CHECK(*policy.medoidBoost < 0.21f);
+    CHECK(*policy.routeCalibrationFingerprint == "atlas-123");
+    CHECK(*policy.routeCalibrationQueries == 100U);
+    CHECK(*policy.routeCalibrationProtectedCandidates == 250U);
+    CHECK(*policy.routeCalibrationMissedProtectedCandidates == 2U);
+    CHECK(*policy.routeMinCalibrationQueries == 75U);
+    CHECK(*policy.routeMaxMissesPerThousand == 10U);
+    CHECK(*policy.routeCalibrationMinBoundaryMargin == Catch::Approx(0.2F));
+    CHECK(*policy.routeCalibrationMinSeedHits == 2U);
+    CHECK(*policy.routeWorkMaxRowsVisited == 64U);
+    CHECK(*policy.routeWorkMaxExactDistanceEvaluations == 32U);
+    CHECK(*policy.routeWorkMaxAnnCandidates == 48U);
     REQUIRE(policy.rrfK.has_value());
     CHECK(*policy.rrfK == 33.0f);
 }
@@ -592,6 +640,7 @@ TEST_CASE("Generated config keeps topology-assisted hybrid search as the product
     const auto& topology = topologyIt->second;
     CHECK(topology.at("mode") == "hybrid_assist");
     CHECK(topology.at("vector_policy") == "shadow");
+    CHECK(topology.at("graph_weighted_seed_ranking") == "false");
     CHECK_FALSE(topology.contains("enable_weak_query_routing"));
     CHECK_FALSE(topology.contains("routing_variant"));
 }
@@ -1164,6 +1213,30 @@ max_corpus_docs = 50000
         CHECK(*policy.subwordGamma == 7.5f);
         REQUIRE(policy.maxCorpusDocs.has_value());
         CHECK(*policy.maxCorpusDocs == 123456u);
+    }
+
+    SECTION("fragment geometry encoder profile is read from TOML") {
+        auto configPath = writeToml("bm25_fragment_encoder.toml", R"(
+[embeddings.simeon.bm25.fragment_geometry]
+encoder_profile = "fixed_hash_384"
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+
+        auto policy = ConfigResolver::resolveSimeonBm25Policy();
+        REQUIRE(policy.fragmentGeometryEncoderProfile.has_value());
+        CHECK(*policy.fragmentGeometryEncoderProfile == "fixed_hash_384");
+    }
+
+    SECTION("embedding encoder profile is read from TOML") {
+        auto configPath = writeToml("simeon_encoder_profile.toml", R"(
+[embeddings.simeon]
+encoder_profile = "fixed_hash_384"
+)");
+        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
+
+        auto policy = ConfigResolver::resolveSimeonEncoderPolicy();
+        REQUIRE(policy.encoderProfile.has_value());
+        CHECK(*policy.encoderProfile == "fixed_hash_384");
     }
 }
 

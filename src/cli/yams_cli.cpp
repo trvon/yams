@@ -304,6 +304,8 @@ YamsCLI::buildRunParsePlan(int argc, char* argv[],
     RunParsePlan plan;
     plan.argc = argc;
     static std::string repairStr = std::string("repair");
+    static std::string doctorStr = std::string("doctor");
+    static std::string pruneStr = std::string("prune");
     static std::string mimeFlag = std::string("--mime");
     static std::string queryFlag = std::string("--query");
     static std::string statusStr = std::string("status");
@@ -352,7 +354,17 @@ YamsCLI::buildRunParsePlan(int argc, char* argv[],
         return false;
     };
 
-    if (argc > 1 && std::string(argv[1]) == "repair-mime") {
+    if (argc > 1 && argv[1] && std::string_view(argv[1]) == "prune") {
+        plan.argv.reserve(argc + 1);
+        plan.argv.push_back(argv[0]);
+        plan.argv.push_back(const_cast<char*>(doctorStr.c_str()));
+        plan.argv.push_back(const_cast<char*>(pruneStr.c_str()));
+        for (int i = 2; i < argc; ++i)
+            plan.argv.push_back(argv[i]);
+        plan.argv.push_back(nullptr);
+        plan.argc = argc + 1;
+        plan.perfLabel = "prune_alias_rewrite";
+    } else if (argc > 1 && std::string(argv[1]) == "repair-mime") {
         plan.argv.reserve(argc + 1);
         plan.argv.push_back(argv[0]);
         plan.argv.push_back(const_cast<char*>(repairStr.c_str()));
@@ -630,7 +642,7 @@ int YamsCLI::run(int argc, char* argv[]) {
             bool known = std::find(kCommands.begin(), kCommands.end(), subcmd) != kCommands.end();
             if (known) {
 #ifdef YAMS_HAVE_GENERATED_CLI_HELP
-                printCmdVerbose(subcmd);
+                printCmdVerbose(subcmd == "prune" ? "doctor" : subcmd);
 #else
                 std::cout << "Verbose help not embedded for command '" << subcmd
                           << "'. See docs/user_guide/cli.md.\n";
@@ -639,13 +651,25 @@ int YamsCLI::run(int argc, char* argv[]) {
             }
         }
 
-        registerCommandsForRun(subcmd);
-
         auto parsePlan = buildRunParsePlan(argc, argv, kCommands);
         if (parsePlan.argv.empty()) {
             parsePlan.argc = argc;
             parsePlan.argv.assign(argv, argv + argc);
         }
+
+        const std::string_view routedSubcmd =
+            parsePlan.argc > 1 && !isFlag(parsePlan.argv[1]) ? parsePlan.argv[1] : "";
+        if (!routedSubcmd.empty() &&
+            !CommandRegistry::isRegisteredTopLevelCommand(routedSubcmd)) {
+            std::cerr << "[FAIL] Unknown command: " << routedSubcmd << "\n";
+            std::cerr << "Hint: Run `yams --help` to list commands.";
+            if (routedSubcmd == "prun") {
+                std::cerr << " Did you mean `yams prune`?";
+            }
+            std::cerr << "\n";
+            return 2;
+        }
+        registerCommandsForRun(routedSubcmd);
         parseRunPlan(parsePlan);
 
         // Disallow multiple top-level subcommands (e.g., "yams search graph"),
@@ -683,7 +707,7 @@ int YamsCLI::run(int argc, char* argv[]) {
 
         applyParsedLogLevel();
         applyParsedDataDirPrecedence();
-        runConfigMigrationPreflight(subcmd);
+        runConfigMigrationPreflight(routedSubcmd);
 
         // Storage initialization is performed lazily by commands via ensureStorageInitialized()
 

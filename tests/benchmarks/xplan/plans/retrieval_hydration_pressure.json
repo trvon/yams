@@ -1,0 +1,91 @@
+{
+  "name": "retrieval_hydration_pressure",
+  "description": "Measure search, grep, and graph hydration/render cost under concurrent read/write pressure against a paths-only search control.",
+  "build_dir": "build/release",
+  "artifact_root": "build/benchmarks",
+  "timeout_sec": 1200,
+  "continue_on_arm_failure": true,
+  "mode": "synthetic",
+  "repeats": 3,
+  "baseline": "hydrated",
+  "fixed": {
+    "env": {
+      "YAMS_TEST_SAFE_SINGLE_INSTANCE": "1",
+      "YAMS_SKIP_MODEL_LOADING": "1"
+    },
+    "params": {
+      "docs_per_client": 100,
+      "doc_size": 4096,
+      "warmup_docs": 32,
+      "search_ratio": 0.8,
+      "mixed_ops_per_client": 100,
+      "search_clients": 8,
+      "search_type": "hybrid",
+      "search_query": "architecture",
+      "search_limit": 20,
+      "snippet_hydration_timeout_ms": 5000,
+      "profile_hydration_surfaces": true
+    }
+  },
+  "arms": [
+    {
+      "name": "hydrated",
+      "factors": { "hydrate_snippets": true }
+    },
+    {
+      "name": "paths_only_control",
+      "factors": { "hydrate_snippets": false }
+    }
+  ],
+  "steps": [
+    {
+      "worker": "retrieval_load",
+      "metrics": [
+        "search_snippet_hydration_p50_ms",
+        "search_snippet_hydration_p95_ms",
+        "search_snippet_hydration_p99_ms",
+        "search_snippet_lookup_p95_ms",
+        "search_snippet_content_fetch_p95_ms",
+        "search_snippet_render_p95_ms",
+        "search_snippet_timeout_rate",
+        "grep_match_render_p95_ms",
+        "graph_snippet_render_p95_ms",
+        "search_p95_ms",
+        "search_p99_ms",
+        "qps",
+        "backlog_peak",
+        "write_queue_depth_peak"
+      ]
+    }
+  ],
+  "validate": {
+    "require_files": ["metrics.json"],
+    "require_metrics": [
+      "search_snippet_hydration_p95_ms",
+      "grep_match_render_p95_ms",
+      "graph_snippet_render_p95_ms",
+      "search_p95_ms",
+      "qps"
+    ],
+    "require_metric_status": ["ok"]
+  },
+  "summarize": {
+    "primary": [
+      "search_snippet_hydration_p50_ms",
+      "search_snippet_hydration_p95_ms",
+      "search_snippet_hydration_p99_ms",
+      "search_snippet_lookup_p95_ms",
+      "search_snippet_content_fetch_p95_ms",
+      "search_snippet_render_p95_ms",
+      "search_snippet_timeout_rate",
+      "grep_match_render_p95_ms",
+      "graph_snippet_render_p95_ms",
+      "search_p95_ms",
+      "search_p99_ms",
+      "qps",
+      "backlog_peak",
+      "write_queue_depth_peak"
+    ],
+    "group_by": ["hydrate_snippets"]
+  }
+}

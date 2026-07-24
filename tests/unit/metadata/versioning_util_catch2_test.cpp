@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -7,6 +8,7 @@
 #include <tuple>
 
 #include <yams/compat/unistd.h>
+#include <yams/integrity/repair_manager.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
@@ -322,4 +324,88 @@ TEST_CASE_METHOD(VersioningFixture, "Versioning respects YAMS_ENABLE_VERSIONING=
     auto verMeta = repo->getMetadata(docId, "version");
     REQUIRE(verMeta);
     CHECK(!verMeta.value().has_value());
+}
+
+TEST_CASE_METHOD(VersioningFixture, "Retention selects only superseded versions",
+                 "[versioning][metadata][catch2]") {
+    auto repo = makeRepo();
+    const std::string path = "/path/retained.txt";
+    std::vector<int64_t> ids;
+    for (int version = 1; version <= 3; ++version) {
+        auto doc = makeDocInfo(path, "retention_hash_" + std::to_string(version), "retained.txt");
+        auto inserted = repo->insertDocument(doc);
+        REQUIRE(inserted);
+        ids.push_back(inserted.value());
+        REQUIRE(repo->setMetadata(ids.back(), "series_key", MetadataValue(path)));
+        REQUIRE(
+            repo->setMetadata(ids.back(), "version", MetadataValue(static_cast<int64_t>(version))));
+        REQUIRE(repo->setMetadata(ids.back(), "is_latest", MetadataValue(version == 3)));
+    }
+
+    auto candidates = selectVersionRetentionCandidates(*repo, {.keepLatest = 2});
+    REQUIRE(candidates);
+    REQUIRE(candidates.value().size() == 1);
+    CHECK(candidates.value().front().document.id == ids.front());
+    CHECK(candidates.value().front().version == 1);
+}
+
+TEST_CASE_METHOD(VersioningFixture, "Retention never selects the marked latest version",
+                 "[versioning][metadata][catch2]") {
+    auto repo = makeRepo();
+    const std::string path = "/path/latest-protected.txt";
+    for (int version = 1; version <= 2; ++version) {
+        auto doc =
+            makeDocInfo(path, "protected_hash_" + std::to_string(version), "latest-protected.txt");
+        auto inserted = repo->insertDocument(doc);
+        REQUIRE(inserted);
+        REQUIRE(repo->setMetadata(inserted.value(), "series_key", MetadataValue(path)));
+        REQUIRE(repo->setMetadata(inserted.value(), "version",
+                                  MetadataValue(static_cast<int64_t>(version))));
+        // A stale version number must not cause a document explicitly marked
+        // latest to be pruned.
+        REQUIRE(repo->setMetadata(inserted.value(), "is_latest", MetadataValue(version == 1)));
+    }
+
+    auto candidates = selectVersionRetentionCandidates(*repo, {.keepLatest = 1});
+    REQUIRE(candidates);
+    REQUIRE(candidates.value().size() == 1);
+    CHECK(candidates.value().front().version == 2);
+}
+
+TEST_CASE_METHOD(VersioningFixture, "Prune candidates include stored native build artifacts",
+                 "[prune][metadata][catch2]") {
+    auto repo = makeRepo();
+    const auto insert = [&](const std::string& path, const std::string& hash) {
+        auto result = repo->insertDocument(
+            makeDocInfo(path, hash, std::filesystem::path(path).filename().string()));
+        REQUIRE(result);
+    };
+    insert("/workspace/x64/Release/tool.ilk", "build-ilk");
+    insert("/workspace/build/Debug/tool.dSYM/Contents/Resources/DWARF/tool", "build-dsym");
+    insert("/workspace/src/tool.cpp", "source-cpp");
+
+    integrity::PruneConfig config;
+    config.categories = {"build-artifacts"};
+    const auto candidates = integrity::RepairManager::queryCandidatesForPrune(*repo, config);
+
+    REQUIRE(candidates.size() == 2);
+    CHECK(std::ranges::any_of(
+        candidates, [](const auto& candidate) { return candidate.path.ends_with("tool.ilk"); }));
+    CHECK(std::ranges::any_of(
+        candidates, [](const auto& candidate) { return candidate.path.ends_with("/tool"); }));
+}
+
+TEST_CASE_METHOD(VersioningFixture, "Prune candidates match dotted metadata extensions",
+                 "[prune][metadata][catch2]") {
+    auto repo = makeRepo();
+    auto log = makeDocInfo("/workspace/logs/daemon.log", "dotted-log", "daemon.log");
+    log.fileExtension = ".log";
+    REQUIRE(repo->insertDocument(log));
+
+    integrity::PruneConfig config;
+    config.categories = {"all"};
+    const auto candidates = integrity::RepairManager::queryCandidatesForPrune(*repo, config);
+
+    REQUIRE(candidates.size() == 1);
+    CHECK(candidates.front().category == "logs");
 }

@@ -7,7 +7,10 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <iomanip>
+#include <limits>
 #include <numeric>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -18,6 +21,70 @@ namespace yams::topology {
 namespace {
 
 constexpr std::string_view kDocNodePrefix = "doc:";
+constexpr std::uint64_t kFnv1aOffset = 14695981039346656037ULL;
+constexpr std::uint64_t kFnv1aPrime = 1099511628211ULL;
+
+void appendFingerprintBytes(std::uint64_t& fingerprint, std::string_view bytes) {
+    for (const auto byte : bytes) {
+        fingerprint ^= static_cast<unsigned char>(byte);
+        fingerprint *= kFnv1aPrime;
+    }
+}
+
+bool hasFeatureComposition(const FeatureComposition& config) noexcept {
+    return config.enableEntityFusion || config.enableMatryoshkaCoarseView ||
+           config.enableMinHashSketch;
+}
+
+std::string featureProjectionFingerprint(const FeatureComposition& config,
+                                         const std::vector<float>& matryoshkaWeights,
+                                         const std::vector<std::string>& entityAxes) {
+    std::ostringstream descriptor;
+    descriptor << std::setprecision(std::numeric_limits<float>::max_digits10);
+    descriptor << "schema=v1"
+               << ";entity=" << config.enableEntityFusion << ";entity_k=" << config.entitySignatureK
+               << ";entity_alpha=" << config.entityFusionAlpha
+               << ";entity_min_confidence=" << config.entityMinConfidence
+               << ";matryoshka=" << config.enableMatryoshkaCoarseView
+               << ";matryoshka_dim=" << config.matryoshkaTargetDim
+               << ";minhash=" << config.enableMinHashSketch
+               << ";minhash_dim=" << config.minhashSketchDim
+               << ";minhash_alpha=" << config.minhashAlpha;
+    for (const auto weight : matryoshkaWeights) {
+        descriptor << ";w=" << weight;
+    }
+    for (const auto& axis : entityAxes) {
+        descriptor << ";entity_axis=" << axis.size() << ':' << axis;
+    }
+
+    std::uint64_t fingerprint = kFnv1aOffset;
+    appendFingerprintBytes(fingerprint, descriptor.str());
+    std::ostringstream out;
+    out << std::hex << std::setw(16) << std::setfill('0') << fingerprint;
+    return out.str();
+}
+
+std::string composedCoordinateSpaceIdentity(std::string_view rawIdentity,
+                                            const FeatureComposition& config,
+                                            std::size_t rawDimension, std::size_t composedDimension,
+                                            const std::vector<float>& matryoshkaWeights,
+                                            const std::vector<std::string>& entityAxes) {
+    if (rawIdentity.empty() || !hasFeatureComposition(config)) {
+        return std::string{rawIdentity};
+    }
+    std::ostringstream out;
+    out << std::setprecision(std::numeric_limits<float>::max_digits10);
+    out << "topology-coordinate:v1;raw=" << rawIdentity << ";raw_dim=" << rawDimension
+        << ";composed_dim=" << composedDimension << ";entity=" << config.enableEntityFusion
+        << ";entity_k=" << config.entitySignatureK << ";entity_alpha=" << config.entityFusionAlpha
+        << ";entity_min_confidence=" << config.entityMinConfidence
+        << ";matryoshka=" << config.enableMatryoshkaCoarseView
+        << ";matryoshka_dim=" << config.matryoshkaTargetDim
+        << ";minhash=" << config.enableMinHashSketch << ";minhash_dim=" << config.minhashSketchDim
+        << ";minhash_alpha=" << config.minhashAlpha << ";projection=fnv1a64:"
+        << featureProjectionFingerprint(config, matryoshkaWeights, entityAxes);
+    return out.str();
+}
 
 // Per Phase V design (and src/search/query_text_utils.cpp's filter list), drop
 // entity types that are uninformative for topical clustering. Match against the
@@ -496,6 +563,22 @@ TopologyInputExtractor::extract(const TopologyExtractionConfig& config,
     if (config.includeEmbeddings && vectorDb_) {
         docLevelVectors = vectorDb_->getDocumentLevelVectorsAll();
     }
+    std::optional<std::string> commonEmbeddingSpaceIdentity;
+    std::optional<std::size_t> commonRawEmbeddingDimension;
+    bool embeddingSpaceIdentityUnavailable = false;
+
+    const auto observeEmbeddingSpaceIdentity = [&](std::string_view identity) {
+        if (identity.empty()) {
+            embeddingSpaceIdentityUnavailable = true;
+            return;
+        }
+        if (!commonEmbeddingSpaceIdentity.has_value()) {
+            commonEmbeddingSpaceIdentity = identity;
+        } else if (*commonEmbeddingSpaceIdentity != identity) {
+            embeddingSpaceIdentityUnavailable = true;
+            localStats.mixedEmbeddingSpaces = true;
+        }
+    };
 
     // Phase V — feature composer prep:
     //   1. (V-A) build corpus top-K canonical entity-type histogram once
@@ -528,18 +611,40 @@ TopologyInputExtractor::extract(const TopologyExtractionConfig& config,
     extracted.reserve(documents.size());
     for (const auto& document : documents) {
         std::vector<float> embedding;
+        std::string embeddingSpaceIdentity;
         if (config.includeEmbeddings && vectorDb_) {
             auto it = docLevelVectors.find(document.sha256Hash);
             if (it != docLevelVectors.end() && !it->second.embedding.empty()) {
                 embedding = it->second.embedding;
+                embeddingSpaceIdentity = it->second.model_id;
             } else {
                 auto vectors = vectorDb_->getVectorsByDocument(document.sha256Hash);
                 embedding = aggregateEmbedding(vectors);
+                for (const auto& record : vectors) {
+                    if (record.embedding.empty()) {
+                        continue;
+                    }
+                    if (embeddingSpaceIdentity.empty()) {
+                        embeddingSpaceIdentity = record.model_id;
+                    } else if (embeddingSpaceIdentity != record.model_id) {
+                        embeddingSpaceIdentity.clear();
+                        localStats.mixedEmbeddingSpaces = true;
+                        break;
+                    }
+                }
             }
             if (embedding.empty()) {
                 ++localStats.documentsMissingEmbeddings;
                 if (config.requireEmbeddings) {
                     continue;
+                }
+            } else {
+                observeEmbeddingSpaceIdentity(embeddingSpaceIdentity);
+                if (!commonRawEmbeddingDimension.has_value()) {
+                    commonRawEmbeddingDimension = embedding.size();
+                } else if (*commonRawEmbeddingDimension != embedding.size()) {
+                    embeddingSpaceIdentityUnavailable = true;
+                    localStats.mixedEmbeddingSpaces = true;
                 }
             }
         }
@@ -627,6 +732,11 @@ TopologyInputExtractor::extract(const TopologyExtractionConfig& config,
     localStats.regionDocuments = extracted.size();
     if (!extracted.empty()) {
         localStats.composedFeatureDim = extracted.front().embedding.size();
+    }
+    if (!embeddingSpaceIdentityUnavailable && commonEmbeddingSpaceIdentity.has_value()) {
+        localStats.embeddingSpaceIdentity = composedCoordinateSpaceIdentity(
+            *commonEmbeddingSpaceIdentity, fc, commonRawEmbeddingDimension.value_or(0),
+            localStats.composedFeatureDim, matryoshkaWeights, entityIdx.topKTypes);
     }
     if (stats != nullptr) {
         *stats = localStats;

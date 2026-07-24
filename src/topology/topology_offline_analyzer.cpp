@@ -22,7 +22,11 @@ TopologyOfflineAnalyzer::analyze(const TopologyExtractionConfig& extractionConfi
         return extracted.error();
     }
 
-    auto artifacts = engine_->buildArtifacts(extracted.value(), buildConfig);
+    auto resolvedBuildConfig = buildConfig;
+    if (resolvedBuildConfig.embeddingSpaceIdentity.empty()) {
+        resolvedBuildConfig.embeddingSpaceIdentity = extractionStats.embeddingSpaceIdentity;
+    }
+    auto artifacts = engine_->buildArtifacts(extracted.value(), resolvedBuildConfig);
     if (!artifacts) {
         return artifacts.error();
     }

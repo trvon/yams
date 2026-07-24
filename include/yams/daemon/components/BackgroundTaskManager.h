@@ -156,6 +156,10 @@ private:
      */
     void launchGraphPruneTask();
 
+    /// Launches opt-in document version retention. Unlike graph pruning this
+    /// removes superseded documents and their storage references.
+    void launchDocumentRetentionTask();
+
     /**
      * @brief Launches the auto-repair periodic task.
      *

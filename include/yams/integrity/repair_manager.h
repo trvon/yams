@@ -16,6 +16,10 @@ namespace yams::metadata {
 class MetadataRepository;
 } // namespace yams::metadata
 
+namespace yams::api {
+class IContentStore;
+} // namespace yams::api
+
 namespace yams::integrity {
 
 enum class RepairStrategy { FromBackup, FromP2P, FromParity, FromManifest };
@@ -109,7 +113,8 @@ public:
 
     /// Query metadata for prune candidates (static, doesn't need storage engine)
     [[nodiscard]] static std::vector<PruneCandidate>
-    queryCandidatesForPrune(metadata::MetadataRepository& repo, const PruneConfig& config);
+    queryCandidatesForPrune(metadata::MetadataRepository& repo, const PruneConfig& config,
+                            const std::shared_ptr<api::IContentStore>& contentStore = nullptr);
 
     // Path tree repair operations
     /// Rebuild path tree entries for all documents missing from the path tree

@@ -88,10 +88,19 @@ def _rendered_content(document: dict[str, Any]) -> str:
 
 def _source_signature(root: Path) -> dict[str, Any]:
     paths = (root / "corpus.jsonl", root / "queries.jsonl", root / "qrels" / "test.tsv")
-    return {
-        str(path): {"size": path.stat().st_size, "mtime_ns": path.stat().st_mtime_ns}
-        for path in paths
-    }
+    signature: dict[str, Any] = {}
+    for path in paths:
+        stat = path.stat()
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                digest.update(chunk)
+        signature[str(path)] = {
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+            "sha256": digest.hexdigest(),
+        }
+    return signature
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -108,6 +117,9 @@ def materialize_mixed_beir_manifest(
     *,
     documents_per_dataset: int = 0,
     queries_per_dataset: int = 0,
+    query_offset_per_dataset: int = 0,
+    document_queries_per_dataset: int = 0,
+    document_query_offset_per_dataset: int = 0,
 ) -> PreparedMixedCorpus:
     """Merge BEIR datasets into one manifest while preserving source identity.
 
@@ -117,7 +129,13 @@ def materialize_mixed_beir_manifest(
     """
     if len(dataset_roots) < 2:
         raise ValueError("mixed corpus benchmarks require at least two datasets")
-    if documents_per_dataset < 0 or queries_per_dataset < 0:
+    if (
+        documents_per_dataset < 0
+        or queries_per_dataset < 0
+        or query_offset_per_dataset < 0
+        or document_queries_per_dataset < 0
+        or document_query_offset_per_dataset < 0
+    ):
         raise ValueError("mixed corpus document/query limits cannot be negative")
 
     normalized: dict[str, Path] = {}
@@ -133,9 +151,12 @@ def materialize_mixed_beir_manifest(
         original_names[source] = name
 
     spec = {
-        "version": 2,
+        "version": 8,
         "documents_per_dataset": documents_per_dataset,
         "queries_per_dataset": queries_per_dataset,
+        "query_offset_per_dataset": query_offset_per_dataset,
+        "document_queries_per_dataset": document_queries_per_dataset,
+        "document_query_offset_per_dataset": document_query_offset_per_dataset,
         "sources": [
             {
                 "name": source,
@@ -183,15 +204,24 @@ def materialize_mixed_beir_manifest(
             if query_id in queries and document_id in documents:
                 qrels_by_query[query_id].append((document_id, score))
 
-        selected_query_ids = sorted(
+        eligible_query_ids = sorted(
             query_id for query_id in queries if qrels_by_query.get(query_id)
         )
+        selected_query_ids = eligible_query_ids
+        if query_offset_per_dataset:
+            selected_query_ids = selected_query_ids[query_offset_per_dataset:]
         if queries_per_dataset:
             selected_query_ids = selected_query_ids[:queries_per_dataset]
 
+        document_query_ids = selected_query_ids
+        if document_queries_per_dataset or document_query_offset_per_dataset:
+            document_query_ids = eligible_query_ids[document_query_offset_per_dataset:]
+            if document_queries_per_dataset:
+                document_query_ids = document_query_ids[:document_queries_per_dataset]
+
         required_document_ids = {
             document_id
-            for query_id in selected_query_ids
+            for query_id in document_query_ids
             for document_id, _ in qrels_by_query[query_id]
         }
         selected_document_ids = set(required_document_ids)
@@ -204,10 +234,18 @@ def materialize_mixed_beir_manifest(
                 selected_document_ids.add(document_id)
 
         alias_to_canonical: dict[str, str] = {}
+        empty_documents_skipped = 0
         for document_id in sorted(selected_document_ids):
             document = documents[document_id]
             alias_id = _namespaced_id(source, document_id)
             content = _rendered_content(document)
+            if not content.strip():
+                if document_id in required_document_ids:
+                    raise ValueError(
+                        f"mixed corpus qrel references empty document: {source}/{document_id}"
+                    )
+                empty_documents_skipped += 1
+                continue
             content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
             canonical_id = canonical_by_content.get(content)
             if canonical_id is None:
@@ -241,7 +279,8 @@ def materialize_mixed_beir_manifest(
 
         source_counts[source] = {
             "input_documents": len(documents),
-            "selected_documents": len(selected_document_ids),
+            "selected_documents": len(selected_document_ids) - empty_documents_skipped,
+            "empty_documents_skipped": empty_documents_skipped,
             "selected_queries": len(selected_query_ids),
             "selected_qrels": sum(
                 1
@@ -271,6 +310,15 @@ def materialize_mixed_beir_manifest(
         "source_counts": source_counts,
         "query_order": query_order,
         "query_sources": query_sources,
+        "query_texts": {row["id"]: row["text"] for row in queries_out},
+        "query_qrels": {
+            query_id: {
+                document_id: score
+                for (qrel_query_id, document_id), score in sorted(qrels_by_pair.items())
+                if qrel_query_id == query_id
+            }
+            for query_id in query_order
+        },
         "document_sources": {
             document_id: sorted(sources)
             for document_id, sources in document_sources.items()
@@ -482,6 +530,25 @@ def analyze_mixed_cluster_overlap(
     }
 
 
+def _ndcg_at_k(
+    returned: list[str], relevance: dict[str, int], *, top_k: int
+) -> float:
+    limit = top_k if top_k > 0 else len(returned)
+    gains = [max(0, int(relevance.get(document_id, 0))) for document_id in returned[:limit]]
+    dcg = sum(
+        ((2.0**grade) - 1.0) / math.log2(rank + 1.0)
+        for rank, grade in enumerate(gains, start=1)
+        if grade > 0
+    )
+    ideal = sorted((max(0, int(score)) for score in relevance.values()), reverse=True)
+    idcg = sum(
+        ((2.0**grade) - 1.0) / math.log2(rank + 1.0)
+        for rank, grade in enumerate(ideal[:limit], start=1)
+        if grade > 0
+    )
+    return dcg / idcg if idcg > 0.0 else 0.0
+
+
 def analyze_mixed_corpus_debug(
     debug_path: Path, identity_path: Path, *, top_k: int
 ) -> dict[str, float]:
@@ -491,6 +558,7 @@ def analyze_mixed_corpus_debug(
     identity = json.loads(identity_path.read_text(encoding="utf-8"))
     query_order = list(identity.get("query_order") or [])
     query_sources = dict(identity.get("query_sources") or {})
+    query_qrels = dict(identity.get("query_qrels") or {})
     document_sources = dict(identity.get("document_sources") or {})
     document_hash_sources = dict(identity.get("document_hash_sources") or {})
     document_hashes = dict(identity.get("document_hashes") or {})
@@ -509,7 +577,7 @@ def analyze_mixed_corpus_debug(
             continue
         events_by_index[int(event["query_index"])] = event
 
-    samples: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
+    samples: dict[str, list[tuple[float, float, float, float]]] = defaultdict(list)
     oracle_samples: dict[str, list[tuple[float, ...]]] = defaultdict(list)
     cross_results = 0
     returned_results = 0
@@ -559,7 +627,11 @@ def analyze_mixed_corpus_debug(
             len(relevant.intersection(returned)) / len(relevant) if relevant else 0.0
         )
         hit = 1.0 if first_rank is not None else 0.0
-        samples[source].append((reciprocal_rank, recall, hit))
+        relevance = query_qrels.get(query_id)
+        if not isinstance(relevance, dict):
+            relevance = {document_id: 1 for document_id in relevant}
+        ndcg = _ndcg_at_k(returned, relevance, top_k=top_k)
+        samples[source].append((reciprocal_rank, recall, hit, ndcg))
 
         trace = event.get("relevant_decision_trace") or {}
         traced_relevant = trace.get("relevant_docs") if isinstance(trace, dict) else None
@@ -711,17 +783,21 @@ def analyze_mixed_corpus_debug(
     }
     source_mrr: list[float] = []
     source_recall: list[float] = []
+    source_ndcg: list[float] = []
     for source, source_samples in sorted(samples.items()):
         metric_source = _source_key(source)
         mrr = mean(sample[0] for sample in source_samples)
         recall = mean(sample[1] for sample in source_samples)
         hit_rate = mean(sample[2] for sample in source_samples)
+        ndcg = mean(sample[3] for sample in source_samples)
         source_mrr.append(mrr)
         source_recall.append(recall)
+        source_ndcg.append(ndcg)
         metrics[f"mixed_query_count_{metric_source}"] = float(len(source_samples))
         metrics[f"mixed_mrr_{metric_source}"] = mrr
         metrics[f"mixed_recall_at_k_{metric_source}"] = recall
         metrics[f"mixed_hit_rate_{metric_source}"] = hit_rate
+        metrics[f"mixed_ndcg_at_k_{metric_source}"] = ndcg
         source_oracles = oracle_samples[source]
         if source_oracles:
             for metric_name, column in (
@@ -759,4 +835,7 @@ def analyze_mixed_corpus_debug(
     if source_recall:
         metrics["mixed_source_macro_recall_at_k"] = mean(source_recall)
         metrics["mixed_source_min_recall_at_k"] = min(source_recall)
+    if source_ndcg:
+        metrics["mixed_source_macro_ndcg_at_k"] = mean(source_ndcg)
+        metrics["mixed_source_min_ndcg_at_k"] = min(source_ndcg)
     return metrics

@@ -433,6 +433,39 @@ int main(int argc, char* argv[]) {
                 }
             }
 
+            // [daemon.document_retention] section: opt-in stored document version retention.
+            if (tomlConfig.find("daemon.document_retention") != tomlConfig.end()) {
+                const auto& retentionSection = tomlConfig.at("daemon.document_retention");
+                if (auto it = retentionSection.find("enabled"); it != retentionSection.end()) {
+                    config.documentRetention.enabled = (it->second == "true");
+                }
+                try {
+                    if (auto it = retentionSection.find("keep_latest");
+                        it != retentionSection.end()) {
+                        config.documentRetention.keepLatest =
+                            static_cast<size_t>(std::stoul(it->second));
+                    }
+                    if (auto it = retentionSection.find("interval_minutes");
+                        it != retentionSection.end()) {
+                        config.documentRetention.interval =
+                            std::chrono::minutes{std::stol(it->second)};
+                    }
+                    if (auto it = retentionSection.find("initial_delay_minutes");
+                        it != retentionSection.end()) {
+                        config.documentRetention.initialDelay =
+                            std::chrono::minutes{std::stol(it->second)};
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::warn("Config: invalid daemon.document_retention value: {}", e.what());
+                }
+                if (config.documentRetention.keepLatest == 0 ||
+                    config.documentRetention.interval.count() <= 0 ||
+                    config.documentRetention.initialDelay.count() < 0) {
+                    spdlog::warn("Config: disabling invalid daemon.document_retention policy");
+                    config.documentRetention.enabled = false;
+                }
+            }
+
             // [plugins] section: trust list for ABI and external plugins
             if (tomlConfig.find("plugins") != tomlConfig.end()) {
                 const auto& pluginsSection = tomlConfig.at("plugins");

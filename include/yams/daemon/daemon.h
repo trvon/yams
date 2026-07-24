@@ -100,6 +100,16 @@ struct DaemonConfig {
         std::chrono::minutes initialDelay{10};
     } graphPrune;
 
+    /// Opt-in document-history retention. Newest versions are always retained;
+    /// older versions are removed through DocumentService and then reclaimed by
+    /// normal storage GC.
+    struct DocumentRetentionPolicy {
+        bool enabled{false};
+        std::size_t keepLatest{3};
+        std::chrono::minutes interval{24 * 60};
+        std::chrono::minutes initialDelay{10};
+    } documentRetention;
+
     // Forward decls for GTEST-only accessors are below guarded by YAMS_TESTING
     struct DownloadPolicy {
         bool enable{false};                               // feature gate

@@ -28,6 +28,9 @@
 //   YAMS_BENCH_SEARCH_QUERY       - Daemon search query for mixed-load phases
 //   YAMS_BENCH_SEARCH_TYPE        - Daemon search type: keyword|semantic|hybrid
 //   YAMS_BENCH_SEARCH_LIMIT       - Daemon search result limit
+//   YAMS_BENCH_SEARCH_PATHS_ONLY  - Skip result hydration and return paths only
+//   YAMS_BENCH_SNIPPET_HYDRATION_TIMEOUT_MS - Search snippet hydration budget
+//   YAMS_BENCH_PROFILE_HYDRATION_SURFACES - Add gated grep/graph render probes
 //   YAMS_BENCH_CLI_SEARCH_QUERY   - CLI search query for full subprocess probes
 //   YAMS_BENCH_CLI_SEARCH_TYPE    - CLI search type: keyword|semantic|hybrid
 //   YAMS_BENCH_CLI_SEARCH_LIMIT   - CLI search result limit
@@ -102,9 +105,11 @@ extern char** environ;
 #include <boost/asio/local/stream_protocol.hpp>
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/metric_keys.h>
 #include <yams/mcp/mcp_server.h>
+#include <yams/metadata/knowledge_graph_store.h>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -157,6 +162,15 @@ int parseEnvIntClamped(const char* name, int defaultValue, int minValue, int max
         return parsed < 0 ? minValue : maxValue;
     }
     return clampInt64ToInt(static_cast<std::int64_t>(parsed), minValue, maxValue);
+}
+
+bool parseEnvBool(const char* name, bool defaultValue = false) {
+    const char* raw = std::getenv(name);
+    if (raw == nullptr) {
+        return defaultValue;
+    }
+    const std::string value(raw);
+    return value == "1" || value == "true" || value == "yes" || value == "on";
 }
 
 std::size_t parseEnvSizeClamped(const char* name, std::size_t defaultValue, std::size_t minValue,
@@ -268,6 +282,9 @@ struct BenchConfig {
     std::string searchQuery{"architecture performance tuning daemon"};
     std::string searchType{"hybrid"};
     size_t searchLimit{5};
+    bool searchPathsOnly{false};
+    int snippetHydrationTimeoutMs{5000};
+    bool profileHydrationSurfaces{false};
     std::string cliSearchQuery{"architecture performance tuning daemon"};
     std::string cliSearchType{"hybrid"};
     size_t cliSearchLimit{5};
@@ -336,6 +353,11 @@ struct BenchConfig {
             cfg.searchType = v;
         cfg.searchLimit = parseEnvSizeClamped("YAMS_BENCH_SEARCH_LIMIT", cfg.searchLimit, 1,
                                               kMaxBenchSearchLimit);
+        cfg.searchPathsOnly = parseEnvBool("YAMS_BENCH_SEARCH_PATHS_ONLY");
+        cfg.snippetHydrationTimeoutMs =
+            parseEnvIntClamped("YAMS_BENCH_SNIPPET_HYDRATION_TIMEOUT_MS",
+                               cfg.snippetHydrationTimeoutMs, 0, kMaxBenchMilliseconds);
+        cfg.profileHydrationSurfaces = parseEnvBool("YAMS_BENCH_PROFILE_HYDRATION_SURFACES");
         if (auto* v = std::getenv("YAMS_BENCH_CLI_SEARCH_QUERY"))
             cfg.cliSearchQuery = v;
         if (auto* v = std::getenv("YAMS_BENCH_CLI_SEARCH_TYPE"))
@@ -658,6 +680,14 @@ struct ClientResult {
     double elapsedSeconds{0.0};
     double addThroughputDocsPerSec{0.0};
     std::vector<OpLatency> latencies;
+    std::vector<int64_t> snippetHydrationUs;
+    std::vector<int64_t> snippetLookupUs;
+    std::vector<int64_t> snippetContentFetchUs;
+    std::vector<int64_t> snippetRenderUs;
+    int64_t snippetTimeoutHits{0};
+    int64_t snippetHydrationCandidates{0};
+    int64_t snippetHydrationMissing{0};
+    int64_t snippetHydratedResults{0};
 };
 
 double safeRate(double numerator, double elapsedSeconds) {
@@ -1783,6 +1813,40 @@ std::optional<int64_t> parseInt64(std::string_view value) {
         return static_cast<int64_t>(std::stoll(std::string(value)));
     } catch (...) {
         return std::nullopt;
+    }
+}
+
+std::optional<int64_t> metricInt(const std::map<std::string, std::string>& stats,
+                                 std::string_view key) {
+    const auto it = stats.find(std::string(key));
+    if (it == stats.end()) {
+        return std::nullopt;
+    }
+    return parseInt64(it->second);
+}
+
+void collectSearchHydrationTelemetry(const SearchResponse& response, ClientResult& result) {
+    const auto appendTiming = [&](std::string_view key, std::vector<int64_t>& samples) {
+        if (auto value = metricInt(response.searchStats, key)) {
+            samples.push_back(*value);
+        }
+    };
+    const auto addCounter = [&](std::string_view key, int64_t& counter) {
+        if (auto value = metricInt(response.searchStats, key)) {
+            counter = checkedMetricAdd(counter, *value);
+        }
+    };
+
+    appendTiming("timing_snippet_hydration_us", result.snippetHydrationUs);
+    appendTiming("timing_snippet_lookup_us", result.snippetLookupUs);
+    appendTiming("timing_snippet_content_fetch_us", result.snippetContentFetchUs);
+    appendTiming("timing_snippet_render_us", result.snippetRenderUs);
+    addCounter("snippet_hydration_candidates", result.snippetHydrationCandidates);
+    addCounter("snippet_hydration_missing", result.snippetHydrationMissing);
+    addCounter("snippet_hydrated_results", result.snippetHydratedResults);
+    const auto timeout = response.searchStats.find("snippet_timeout_hit");
+    if (timeout != response.searchStats.end() && timeout->second == "true") {
+        ++result.snippetTimeoutHits;
     }
 }
 
@@ -3178,6 +3242,50 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
         std::this_thread::sleep_for(1s);
     }
 
+    constexpr std::string_view kHydrationGraphSymbol = "benchHydratedSymbol";
+    if (cfg.profileHydrationSurfaces) {
+        ClientConfig setupCfg;
+        setupCfg.socketPath = harness.socketPath();
+        setupCfg.autoStart = false;
+        setupCfg.requestTimeout = 30s;
+        setupCfg.singleUseConnections = true;
+        DaemonClient setupClient(setupCfg);
+
+        const auto sourcePath = harness.dataDir() / "bench_hydration_source.cpp";
+        const std::string source = "int benchHydratedSymbol() {\n    return 42;\n}\n";
+        {
+            std::ofstream out(sourcePath);
+            REQUIRE(out.good());
+            out << source;
+        }
+
+        AddDocumentRequest addReq;
+        addReq.name = sourcePath.string();
+        addReq.content = source;
+        addReq.tags = {"bench", "hydration"};
+        auto addResult = yams::cli::run_sync(setupClient.streamingAddDocument(addReq), 30s);
+        REQUIRE(addResult);
+
+        (void)waitForDrain(setupClient, 30s);
+
+        auto* serviceManager = harness.daemon()->getServiceManager();
+        REQUIRE(serviceManager != nullptr);
+        auto metadataRepo = serviceManager->getMetadataRepo();
+        REQUIRE(metadataRepo != nullptr);
+        auto kgStore = metadataRepo->getKnowledgeGraphStore();
+        REQUIRE(kgStore != nullptr);
+        yams::metadata::KGNode node;
+        node.nodeKey = "function:bench::benchHydratedSymbol@" + sourcePath.string();
+        node.label = std::string(kHydrationGraphSymbol);
+        node.type = "function";
+        node.properties = nlohmann::json{{"file_path", sourcePath.string()},
+                                         {"qualified_name", "bench::benchHydratedSymbol"},
+                                         {"start_line", 1},
+                                         {"end_line", 3}}
+                              .dump();
+        REQUIRE(kgStore->upsertNode(node));
+    }
+
     const auto resourceBaseline = DaemonSnapshot::capture(monitorClient, harness.dataDir());
     TimeSeriesSampler sampler;
     sampler.start(monitorClient, 500ms, harness.dataDir());
@@ -3187,11 +3295,15 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
     std::atomic<int> totalLists{0};
     std::atomic<int> totalFailures{0};
     std::vector<ClientResult> clientResults(cfg.numClients);
+    std::mutex hydrationSurfaceMutex;
+    std::vector<int64_t> grepMatchRenderUs;
+    std::vector<int64_t> graphSnippetRenderUs;
+    std::vector<int64_t> graphSnippetsRendered;
 
     auto globalStart = std::chrono::steady_clock::now();
 
     std::vector<std::thread> threads;
-    threads.reserve(cfg.numClients);
+    threads.reserve(cfg.numClients + (cfg.profileHydrationSurfaces ? 1 : 0));
 
     for (int c = 0; c < cfg.numClients; ++c) {
         threads.emplace_back([&, c]() {
@@ -3233,6 +3345,8 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
                     req.query = cfg.searchQuery;
                     req.searchType = cfg.searchType;
                     req.limit = cfg.searchLimit;
+                    req.pathsOnly = cfg.searchPathsOnly;
+                    req.snippetHydrationTimeoutMs = cfg.snippetHydrationTimeoutMs;
 
                     auto t0 = std::chrono::steady_clock::now();
                     auto res = yams::cli::run_sync(client.search(req), 10s);
@@ -3252,6 +3366,7 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
                     if (res) {
                         result.searchesExecuted++;
                         totalSearches.fetch_add(1);
+                        collectSearchHydrationTelemetry(res.value(), result);
                     } else {
                         result.failures++;
                         totalFailures.fetch_add(1);
@@ -3331,6 +3446,54 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
         });
     }
 
+    if (cfg.profileHydrationSurfaces) {
+        threads.emplace_back([&]() {
+            ClientConfig ccfg;
+            ccfg.socketPath = harness.socketPath();
+            ccfg.autoStart = false;
+            ccfg.requestTimeout = 30s;
+            ccfg.singleUseConnections = true;
+            DaemonClient client(ccfg);
+            const int probeOps = std::clamp(cfg.mixedOpsPerClient / 4, 4, 25);
+            const auto recordGrepRender = [&](const yams::Result<GrepResponse>& result) {
+                if (!result) {
+                    return;
+                }
+                const auto value = metricInt(result.value().searchStats, "match_render_us");
+                if (!value) {
+                    return;
+                }
+                std::lock_guard<std::mutex> lock(hydrationSurfaceMutex);
+                grepMatchRenderUs.push_back(*value);
+            };
+            const auto recordGraphRender = [&](const yams::Result<GraphExploreResponse>& result) {
+                if (!result) {
+                    return;
+                }
+                std::lock_guard<std::mutex> lock(hydrationSurfaceMutex);
+                graphSnippetRenderUs.push_back(
+                    static_cast<int64_t>(result.value().snippetRenderMicros));
+                graphSnippetsRendered.push_back(
+                    static_cast<int64_t>(result.value().snippetsRendered));
+            };
+
+            for (int i = 0; i < probeOps; ++i) {
+                GrepRequest grepReq;
+                grepReq.pattern = std::string(kHydrationGraphSymbol);
+                grepReq.literalText = true;
+                grepReq.maxMatches = 20;
+                auto grepResult = yams::cli::run_sync(client.grep(grepReq), 30s);
+                recordGrepRender(grepResult);
+
+                GraphExploreRequest graphReq;
+                graphReq.query = std::string(kHydrationGraphSymbol);
+                graphReq.maxFiles = 4;
+                auto graphResult = yams::cli::run_sync(client.call(graphReq), 30s);
+                recordGraphRender(graphResult);
+            }
+        });
+    }
+
     for (auto& t : threads)
         t.join();
 
@@ -3350,6 +3513,12 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
 
     // Compute per-op-type latency stats
     std::vector<int64_t> addLats, searchLats, listLats;
+    std::vector<int64_t> snippetHydrationUs, snippetLookupUs, snippetContentFetchUs,
+        snippetRenderUs;
+    int64_t snippetTimeoutHits = 0;
+    int64_t snippetHydrationCandidates = 0;
+    int64_t snippetHydrationMissing = 0;
+    int64_t snippetHydratedResults = 0;
     for (auto& cr : clientResults) {
         for (auto& op : cr.latencies) {
             if (!op.success)
@@ -3361,10 +3530,33 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
             else if (op.opType == "list")
                 listLats.push_back(op.latencyUs);
         }
+        snippetHydrationUs.insert(snippetHydrationUs.end(), cr.snippetHydrationUs.begin(),
+                                  cr.snippetHydrationUs.end());
+        snippetLookupUs.insert(snippetLookupUs.end(), cr.snippetLookupUs.begin(),
+                               cr.snippetLookupUs.end());
+        snippetContentFetchUs.insert(snippetContentFetchUs.end(), cr.snippetContentFetchUs.begin(),
+                                     cr.snippetContentFetchUs.end());
+        snippetRenderUs.insert(snippetRenderUs.end(), cr.snippetRenderUs.begin(),
+                               cr.snippetRenderUs.end());
+        snippetTimeoutHits = checkedMetricAdd(snippetTimeoutHits, cr.snippetTimeoutHits);
+        snippetHydrationCandidates =
+            checkedMetricAdd(snippetHydrationCandidates, cr.snippetHydrationCandidates);
+        snippetHydrationMissing =
+            checkedMetricAdd(snippetHydrationMissing, cr.snippetHydrationMissing);
+        snippetHydratedResults =
+            checkedMetricAdd(snippetHydratedResults, cr.snippetHydratedResults);
     }
     auto addStats = PercentileStats::compute(addLats);
     auto searchStats = PercentileStats::compute(searchLats);
     auto listStats = PercentileStats::compute(listLats);
+    auto snippetHydrationStats = PercentileStats::compute(snippetHydrationUs);
+    auto snippetLookupStats = PercentileStats::compute(snippetLookupUs);
+    auto snippetContentFetchStats = PercentileStats::compute(snippetContentFetchUs);
+    auto snippetRenderStats = PercentileStats::compute(snippetRenderUs);
+    auto grepMatchRenderStats = PercentileStats::compute(grepMatchRenderUs);
+    auto graphSnippetRenderStats = PercentileStats::compute(graphSnippetRenderUs);
+    const auto graphSnippetsRenderedTotal =
+        std::accumulate(graphSnippetsRendered.begin(), graphSnippetsRendered.end(), int64_t{0});
 
     std::cout << "\n=== Mixed Read/Write Workload (N=" << cfg.numClients
               << ", search_ratio=" << cfg.searchRatio << ") ===\n";
@@ -3383,6 +3575,11 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
         CHECK(totalAdds.load() > 0);
     }
     CHECK((totalAdds.load() + totalSearches.load() + totalLists.load()) > 0);
+    if (cfg.profileHydrationSurfaces) {
+        CHECK_FALSE(grepMatchRenderUs.empty());
+        CHECK_FALSE(graphSnippetRenderUs.empty());
+        CHECK(graphSnippetsRenderedTotal > 0);
+    }
     CHECK(drained);
     CHECK(recovery.ok());
 
@@ -3393,6 +3590,8 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
         {"docs_per_client", cfg.docsPerClient},
         {"mixed_ops_per_client", cfg.mixedOpsPerClient},
         {"search_ratio", cfg.searchRatio},
+        {"search_paths_only", cfg.searchPathsOnly},
+        {"snippet_hydration_timeout_ms", cfg.snippetHydrationTimeoutMs},
         {"warmup_docs", cfg.warmupDocs},
         {"total_adds", totalAdds.load()},
         {"total_searches", totalSearches.load()},
@@ -3402,6 +3601,19 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
         {"add_latency", addStats.toJson()},
         {"search_latency", searchStats.toJson()},
         {"list_latency", listStats.toJson()},
+        {"search_server",
+         {{"timing_snippet_hydration_us", snippetHydrationStats.toJson()},
+          {"timing_snippet_lookup_us", snippetLookupStats.toJson()},
+          {"timing_snippet_content_fetch_us", snippetContentFetchStats.toJson()},
+          {"timing_snippet_render_us", snippetRenderStats.toJson()},
+          {"snippet_timeout_hits", snippetTimeoutHits},
+          {"snippet_hydration_candidates", snippetHydrationCandidates},
+          {"snippet_hydration_missing", snippetHydrationMissing},
+          {"snippet_hydrated_results", snippetHydratedResults}}},
+        {"grep_server", {{"match_render_us", grepMatchRenderStats.toJson()}}},
+        {"graph_server",
+         {{"snippet_render_us", graphSnippetRenderStats.toJson()},
+          {"snippets_rendered", graphSnippetsRenderedTotal}}},
         {"daemon_snapshot_final", finalSnap.toJson()},
         {"drain_metrics", drainObservation.toJson()},
         {"idle_probe", idleProbe.toJson()},
@@ -5350,6 +5562,7 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     std::vector<int64_t> grepLinesScannedSamples;
     std::vector<int64_t> grepBytesScannedSamples;
     std::vector<int64_t> grepContentRetrievalMsSamples;
+    std::vector<int64_t> grepMatchRenderUsSamples;
     std::vector<int64_t> grepWorkerScanMsSamples;
     std::vector<int64_t> grepRegexSearchCallsSamples;
     std::vector<int64_t> grepBmhPrefilterSkipsSamples;
@@ -5851,6 +6064,9 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                     }
                     if (auto v = jsonGetInt64AnyKey(searchStats, {"content_retrieval_ms"})) {
                         grepContentRetrievalMsSamples.push_back(*v);
+                    }
+                    if (auto v = jsonGetInt64AnyKey(searchStats, {"match_render_us"})) {
+                        grepMatchRenderUsSamples.push_back(*v);
                     }
                     if (auto v = jsonGetInt64AnyKey(searchStats, {"phase_worker_scan_ms"})) {
                         grepWorkerScanMsSamples.push_back(*v);
@@ -6443,6 +6659,7 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     const json grepLinesScannedStats = summarizeSamples(grepLinesScannedSamples);
     const json grepBytesScannedStats = summarizeSamples(grepBytesScannedSamples);
     const json grepContentRetrievalStats = summarizeSamples(grepContentRetrievalMsSamples);
+    const json grepMatchRenderStats = summarizeSamples(grepMatchRenderUsSamples);
     const json grepWorkerScanStats = summarizeSamples(grepWorkerScanMsSamples);
     const json grepCandidateDiscoveryStats = summarizeSamples(grepCandidateDiscoveryMsSamples);
     const json grepPathFilteringStats = summarizeSamples(grepPathFilteringMsSamples);
@@ -6581,6 +6798,9 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
                   << grepContentRetrievalStats.value("mean", 0.0)
                   << " p95=" << grepContentRetrievalStats.value("p95", 0)
                   << " max=" << grepContentRetrievalStats.value("max", 0) << "\n";
+        std::cout << "    match_render_us: mean=" << grepMatchRenderStats.value("mean", 0.0)
+                  << " p95=" << grepMatchRenderStats.value("p95", 0)
+                  << " max=" << grepMatchRenderStats.value("max", 0) << "\n";
         std::cout << "    content_decode_ms_estimate: mean="
                   << grepContentDecodeEstimateStats.value("mean", 0.0)
                   << " p95=" << grepContentDecodeEstimateStats.value("p95", 0)
@@ -6923,6 +7143,7 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
               {"lines_scanned", grepLinesScannedStats},
               {"bytes_scanned", grepBytesScannedStats},
               {"content_retrieval_ms", grepContentRetrievalStats},
+              {"match_render_us", grepMatchRenderStats},
               {"content_decode_ms_estimate", grepContentDecodeEstimateStats},
               {"phase_worker_scan_ms", grepWorkerScanStats},
               {"regex_scan_ms", grepRegexScanStats},

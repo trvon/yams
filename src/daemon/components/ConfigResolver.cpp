@@ -839,6 +839,9 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (auto it = kv.find("search.topology.max_docs"); it != kv.end()) {
                 policy.maxDocs = parseSize(it->second);
             }
+            if (auto it = kv.find("search.topology.expansion_output_limit"); it != kv.end()) {
+                policy.expansionOutputLimit = parseSize(it->second);
+            }
             if (auto it = kv.find("search.topology.medoid_boost"); it != kv.end()) {
                 policy.medoidBoost = parseFloat(it->second);
             }
@@ -854,6 +857,48 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (auto it = kv.find("search.topology.min_route_score"); it != kv.end()) {
                 policy.minRouteScore = parseFloat(it->second);
             }
+            if (auto it = kv.find("search.topology.route_calibration_fingerprint");
+                it != kv.end()) {
+                policy.routeCalibrationFingerprint = std::string(trimView(it->second));
+            }
+            if (auto it = kv.find("search.topology.route_calibration_queries"); it != kv.end()) {
+                policy.routeCalibrationQueries = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.route_calibration_protected_candidates");
+                it != kv.end()) {
+                policy.routeCalibrationProtectedCandidates = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.route_calibration_missed_protected_candidates");
+                it != kv.end()) {
+                policy.routeCalibrationMissedProtectedCandidates = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.route_min_calibration_queries");
+                it != kv.end()) {
+                policy.routeMinCalibrationQueries = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.route_max_misses_per_thousand");
+                it != kv.end()) {
+                policy.routeMaxMissesPerThousand = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.route_calibration_min_boundary_margin");
+                it != kv.end()) {
+                policy.routeCalibrationMinBoundaryMargin = parseFloat(it->second);
+            }
+            if (auto it = kv.find("search.topology.route_calibration_min_seed_hits");
+                it != kv.end()) {
+                policy.routeCalibrationMinSeedHits = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.route_work_max_rows_visited"); it != kv.end()) {
+                policy.routeWorkMaxRowsVisited = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.route_work_max_exact_distance_evaluations");
+                it != kv.end()) {
+                policy.routeWorkMaxExactDistanceEvaluations = parseSize(it->second);
+            }
+            if (auto it = kv.find("search.topology.route_work_max_ann_candidates");
+                it != kv.end()) {
+                policy.routeWorkMaxAnnCandidates = parseSize(it->second);
+            }
             if (auto it = kv.find("search.topology.expansion_source"); it != kv.end()) {
                 policy.expansionSource = std::string(trimView(it->second));
             }
@@ -863,6 +908,9 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (auto it = kv.find("search.topology.graph_neighbor_reciprocal_only");
                 it != kv.end()) {
                 policy.graphNeighborReciprocalOnly = parseBoolValue(it->second);
+            }
+            if (auto it = kv.find("search.topology.graph_weighted_seed_ranking"); it != kv.end()) {
+                policy.graphWeightedSeedRanking = parseBoolValue(it->second);
             }
             if (auto it = kv.find("search.topology.graph_vector_seed_probe"); it != kv.end()) {
                 policy.graphVectorSeedProbe = parseSize(it->second);
@@ -950,11 +998,10 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
     try {
         namespace fs = std::filesystem;
         fs::path cfgPath = resolveDefaultConfigPath();
-        if (cfgPath.empty() || !fs::exists(cfgPath)) {
-            return policy;
+        std::map<std::string, std::string> kv;
+        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            kv = parseSimpleTomlFlat(cfgPath);
         }
-
-        auto kv = parseSimpleTomlFlat(cfgPath);
 
         if (auto it = kv.find("topology.engine"); it != kv.end()) {
             if (!it->second.empty()) {
@@ -976,9 +1023,67 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
         if (auto it = kv.find("topology.boundary_spill_residual_penalty"); it != kv.end()) {
             policy.boundarySpillResidualPenalty = parseDouble(it->second);
         }
+        if (auto it = kv.find("topology.features.entity_fusion"); it != kv.end()) {
+            policy.featureEntityFusion = parseBoolValue(it->second);
+        }
+        if (auto it = kv.find("topology.features.entity_signature_k"); it != kv.end()) {
+            policy.featureEntitySignatureK = parseSize(it->second);
+        }
+        if (auto it = kv.find("topology.features.entity_fusion_alpha"); it != kv.end()) {
+            if (auto value = parseDouble(it->second); value.has_value()) {
+                policy.featureEntityFusionAlpha = static_cast<float>(*value);
+            }
+        }
+        if (auto it = kv.find("topology.features.entity_min_confidence"); it != kv.end()) {
+            if (auto value = parseDouble(it->second); value.has_value()) {
+                policy.featureEntityMinConfidence = static_cast<float>(*value);
+            }
+        }
+        if (auto it = kv.find("topology.features.matryoshka_coarse_view"); it != kv.end()) {
+            policy.featureMatryoshkaCoarseView = parseBoolValue(it->second);
+        }
+        if (auto it = kv.find("topology.features.matryoshka_target_dim"); it != kv.end()) {
+            policy.featureMatryoshkaTargetDim = parseSize(it->second);
+        }
+        if (auto it = kv.find("topology.features.minhash_sketch"); it != kv.end()) {
+            policy.featureMinHashSketch = parseBoolValue(it->second);
+        }
+        if (auto it = kv.find("topology.features.minhash_sketch_dim"); it != kv.end()) {
+            policy.featureMinHashSketchDim = parseSize(it->second);
+        }
+        if (auto it = kv.find("topology.features.minhash_alpha"); it != kv.end()) {
+            if (auto value = parseDouble(it->second); value.has_value()) {
+                policy.featureMinHashAlpha = static_cast<float>(*value);
+            }
+        }
     } catch (const std::exception& e) {
         spdlog::debug("Error reading config for topology engine policy: {}", e.what());
     }
+
+    const auto applyBoolEnv = [](const char* name, std::optional<bool>& target) {
+        if (const auto value = parseBoolValue(getenvValue(name)); value.has_value()) {
+            target = value;
+        }
+    };
+    const auto applySizeEnv = [](const char* name, std::optional<std::size_t>& target) {
+        if (const auto value = parseSize(getenvValue(name)); value.has_value()) {
+            target = value;
+        }
+    };
+    const auto applyFloatEnv = [](const char* name, std::optional<float>& target) {
+        if (const auto value = parseDouble(getenvValue(name)); value.has_value()) {
+            target = static_cast<float>(*value);
+        }
+    };
+    applyBoolEnv("YAMS_TOPOLOGY_FEATURE_ENTITY_FUSION", policy.featureEntityFusion);
+    applySizeEnv("YAMS_TOPOLOGY_FEATURE_ENTITY_K", policy.featureEntitySignatureK);
+    applyFloatEnv("YAMS_TOPOLOGY_FEATURE_ENTITY_ALPHA", policy.featureEntityFusionAlpha);
+    applyFloatEnv("YAMS_TOPOLOGY_FEATURE_ENTITY_MIN_CONF", policy.featureEntityMinConfidence);
+    applyBoolEnv("YAMS_TOPOLOGY_FEATURE_MATRYOSHKA", policy.featureMatryoshkaCoarseView);
+    applySizeEnv("YAMS_TOPOLOGY_FEATURE_MATRYOSHKA_DIM", policy.featureMatryoshkaTargetDim);
+    applyBoolEnv("YAMS_TOPOLOGY_FEATURE_MINHASH", policy.featureMinHashSketch);
+    applySizeEnv("YAMS_TOPOLOGY_FEATURE_MINHASH_DIM", policy.featureMinHashSketchDim);
+    applyFloatEnv("YAMS_TOPOLOGY_FEATURE_MINHASH_ALPHA", policy.featureMinHashAlpha);
 
     return policy;
 }
