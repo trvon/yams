@@ -1,4 +1,5 @@
 #include <yams/compression/compression_header.h>
+#include <yams/api/content_store.h>
 #include <yams/core/magic_numbers.hpp>
 #include <yams/crypto/hasher.h>
 #include <yams/integrity/repair_manager.h>
@@ -18,14 +19,37 @@ namespace yams::integrity {
 
 namespace {
 
+constexpr std::size_t kPruneSignatureBytes = 4096;
+
+magic::PruneCategory classifyPruneCandidate(const metadata::DocumentInfo& doc,
+                                            const std::shared_ptr<api::IContentStore>& contentStore) {
+    auto category = magic::getPruneCategory(doc.filePath, doc.fileExtension, doc.mimeType);
+    const bool needsSignature =
+        doc.fileExtension.empty() &&
+        (doc.mimeType.empty() || doc.mimeType == "application/octet-stream");
+    if (category != magic::PruneCategory::None || !needsSignature || !contentStore ||
+        doc.sha256Hash.empty()) {
+        return category;
+    }
+
+    auto bytes = contentStore->retrieveBytesPrefix(doc.sha256Hash, kPruneSignatureBytes);
+    if (!bytes || bytes.value().empty()) {
+        return magic::PruneCategory::None;
+    }
+    const auto* data = reinterpret_cast<const uint8_t*>(bytes.value().data());
+    const auto detectedMime =
+        magic::detect_mime_type(std::span<const uint8_t>(data, bytes.value().size()));
+    return magic::getPruneCategory(doc.filePath, doc.fileExtension, detectedMime);
+}
+
 std::vector<PruneCandidate> buildPruneCandidates(std::span<const metadata::DocumentInfo> docs,
-                                                 const PruneConfig& config) {
+                                                 const PruneConfig& config,
+                                                 const std::shared_ptr<api::IContentStore>& contentStore) {
     std::vector<PruneCandidate> candidates;
 
-    auto matchesCategory = [&](const metadata::DocumentInfo& doc) -> bool {
+    auto matchesCategory = [&](magic::PruneCategory category) -> bool {
         if (config.categories.empty())
             return true;
-        auto category = magic::getPruneCategory(doc.filePath, doc.fileExtension);
         return std::ranges::any_of(config.categories, [category](const auto& cat) {
             return magic::matchesPruneGroup(category, cat);
         });
@@ -52,13 +76,14 @@ std::vector<PruneCandidate> buildPruneCandidates(std::span<const metadata::Docum
     };
 
     for (const auto& doc : docs) {
-        if (!matchesCategory(doc))
-            continue;
         if (!meetsAgeCriteria(doc))
             continue;
         if (!meetsSizeCriteria(doc))
             continue;
         if (!meetsExtensionCriteria(doc))
+            continue;
+        const auto category = classifyPruneCandidate(doc, contentStore);
+        if (!matchesCategory(category))
             continue;
 
         PruneCandidate candidate;
@@ -66,8 +91,7 @@ std::vector<PruneCandidate> buildPruneCandidates(std::span<const metadata::Docum
         candidate.path = doc.filePath;
         candidate.fileSize = doc.fileSize;
         candidate.modifiedTime = doc.modifiedTime;
-        candidate.category =
-            magic::getPruneCategoryName(magic::getPruneCategory(doc.filePath, doc.fileExtension));
+        candidate.category = magic::getPruneCategoryName(category);
 
         candidates.push_back(std::move(candidate));
     }
@@ -193,7 +217,8 @@ std::shared_ptr<RepairManager> makeRepairManager(storage::IStorageEngine& storag
 
 std::vector<PruneCandidate>
 RepairManager::queryCandidatesForPrune(metadata::MetadataRepository& repo,
-                                       const PruneConfig& config) {
+                                       const PruneConfig& config,
+                                       const std::shared_ptr<api::IContentStore>& contentStore) {
     // Query all documents
     auto docsResult = repo.queryDocuments(metadata::DocumentQueryOptions{});
     if (!docsResult) {
@@ -204,7 +229,7 @@ RepairManager::queryCandidatesForPrune(metadata::MetadataRepository& repo,
     auto& allDocs = docsResult.value();
     spdlog::debug("Prune query: scanning {} documents", allDocs.size());
 
-    auto candidates = buildPruneCandidates(allDocs, config);
+    auto candidates = buildPruneCandidates(allDocs, config, contentStore);
 
     spdlog::info("Prune query: found {} candidates", candidates.size());
     return candidates;
@@ -230,7 +255,7 @@ Result<PruneResult> RepairManager::pruneFiles(const PruneConfig& config,
     auto& allDocs = docsResult.value();
     spdlog::info("Prune: scanning {} documents", allDocs.size());
 
-    auto candidates = buildPruneCandidates(allDocs, config);
+    auto candidates = buildPruneCandidates(allDocs, config, nullptr);
     spdlog::info("Prune: found {} candidates (dry_run={})", candidates.size(), config.dryRun);
 
     PruneResult result;

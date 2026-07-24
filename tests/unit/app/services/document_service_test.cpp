@@ -1034,6 +1034,56 @@ TEST_CASE("DocumentService - Deletion", "[document][service][deletion]") {
     }
 }
 
+TEST_CASE("DocumentService - Version Retention", "[document][service][retention]") {
+    DocumentFixture fixture;
+    std::vector<std::string> hashes;
+    constexpr std::string_view kSeriesKey = "history.txt";
+
+    for (int version = 1; version <= 3; ++version) {
+        StoreDocumentRequest request;
+        request.name = std::string(kSeriesKey);
+        request.content = "revision " + std::to_string(version);
+        auto stored = fixture.documentService_->store(request);
+        REQUIRE(stored);
+        hashes.push_back(stored.value().hash);
+
+        auto document = fixture.metadataRepo_->getDocumentByHash(stored.value().hash);
+        REQUIRE(document);
+        REQUIRE(document.value().has_value());
+        REQUIRE(fixture.metadataRepo_->setMetadata(document.value()->id, "series_key",
+                                                   MetadataValue(std::string(kSeriesKey))));
+        REQUIRE(fixture.metadataRepo_->setMetadata(document.value()->id, "version",
+                                                   MetadataValue(static_cast<int64_t>(version))));
+        REQUIRE(fixture.metadataRepo_->setMetadata(document.value()->id, "is_latest",
+                                                   MetadataValue(version == 3)));
+    }
+
+    auto preview = fixture.documentService_->pruneVersions({.keepLatest = 1, .dryRun = true});
+    REQUIRE(preview);
+    CHECK(preview.value().dryRun);
+    REQUIRE(preview.value().deleted.size() == 2);
+    for (const auto& hash : hashes) {
+        auto document = fixture.metadataRepo_->getDocumentByHash(hash);
+        REQUIRE(document);
+        CHECK(document.value().has_value());
+    }
+
+    auto applied = fixture.documentService_->pruneVersions({.keepLatest = 1, .dryRun = false});
+    REQUIRE(applied);
+    CHECK_FALSE(applied.value().dryRun);
+    REQUIRE(applied.value().errors.empty());
+    REQUIRE(applied.value().deleted.size() == 2);
+
+    for (std::size_t index = 0; index < hashes.size() - 1; ++index) {
+        auto document = fixture.metadataRepo_->getDocumentByHash(hashes[index]);
+        REQUIRE(document);
+        CHECK_FALSE(document.value().has_value());
+    }
+    auto latest = fixture.metadataRepo_->getDocumentByHash(hashes.back());
+    REQUIRE(latest);
+    CHECK(latest.value().has_value());
+}
+
 TEST_CASE("DocumentService - Error Handling", "[document][service][errors]") {
     DocumentFixture fixture;
 

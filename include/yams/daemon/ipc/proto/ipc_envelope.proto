@@ -712,6 +712,7 @@ message PruneResponse {
   repeated string deleted_paths = 6;
   repeated string failed_paths = 7;
   string error_message = 8;
+  string status_message = 9;
 }
 
 // Collection and snapshot operations

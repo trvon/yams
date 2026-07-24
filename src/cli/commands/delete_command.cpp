@@ -29,6 +29,8 @@ private:
     std::string names_;
     std::string pattern_;
     std::string directory_;
+    std::string seriesKey_;
+    std::size_t keepVersions_ = 0;
     std::vector<std::string> targets_;
     bool force_ = false;
     bool dryRun_ = false;
@@ -70,6 +72,10 @@ public:
         cmd->add_flag("--keep-refs", keepRefs_, "Keep reference counts (don't decrement)");
         cmd->add_flag("-v,--verbose", verbose_, "Enable verbose output");
         cmd->add_flag("--recursive,-r", recursive_, "Delete directory contents recursively");
+        cmd->add_option("--keep-versions", keepVersions_,
+                        "Keep this many newest versions per document series and prune older ones");
+        cmd->add_option("--series", seriesKey_,
+                        "Only prune versions in this series (requires --keep-versions)");
         cmd->add_flag("--json", jsonOutput_, "Output results as JSON");
 
         cmd->callback([this]() { cli_->setPendingCommand(this); });
@@ -97,6 +103,17 @@ public:
 
     boost::asio::awaitable<Result<void>> executeAsync() override {
         try {
+            if (keepVersions_ > 0) {
+                if (!hash_.empty() || !name_.empty() || !names_.empty() || !pattern_.empty() ||
+                    !directory_.empty() || !targets_.empty()) {
+                    co_return Error{ErrorCode::InvalidArgument,
+                                    "--keep-versions cannot be combined with document selectors"};
+                }
+                co_return executeVersionPrune();
+            }
+            if (!seriesKey_.empty()) {
+                co_return Error{ErrorCode::InvalidArgument, "--series requires --keep-versions"};
+            }
             // Infer deletion mode from positional targets if no explicit selector is provided
             if (hash_.empty() && name_.empty() && names_.empty() && pattern_.empty() &&
                 directory_.empty() && !targets_.empty()) {
@@ -459,6 +476,51 @@ private:
                    ? Error{ErrorCode::InvalidOperation, "All deletions failed"}
                    : Result<void>();
     } // End of executeLocal()
+
+    Result<void> executeVersionPrune() {
+        auto ensured = cli_->ensureStorageInitialized();
+        if (!ensured) {
+            return ensured;
+        }
+        auto appContext = cli_->getAppContext();
+        if (!appContext) {
+            return Error{ErrorCode::NotInitialized, "Application context not initialized"};
+        }
+
+        auto documentService = app::services::makeDocumentService(*appContext);
+        app::services::PruneVersionsRequest request;
+        request.keepLatest = keepVersions_;
+        request.seriesKey =
+            seriesKey_.empty() ? std::nullopt : std::optional<std::string>(seriesKey_);
+        // Retention is preview-first. --force is an explicit acknowledgement
+        // that older, recoverable document versions should be removed.
+        request.dryRun = dryRun_ || !force_;
+        auto result = documentService->pruneVersions(request);
+        if (!result) {
+            return result.error();
+        }
+
+        const auto& response = result.value();
+        if (response.dryRun) {
+            std::cout << "[DRY RUN] Versions that would be pruned:\n";
+            for (const auto& item : response.deleted) {
+                std::cout << "  " << item.name << " (" << item.hash.substr(0, 12) << "...)\n";
+            }
+            std::cout << "\nTotal: " << response.count << " version(s)\n";
+            if (!dryRun_) {
+                std::cout << "Use --force to apply this retention policy.\n";
+            }
+            return Result<void>();
+        }
+
+        std::cout << "Pruned " << response.deleted.size() << " superseded version(s)\n";
+        if (!response.errors.empty()) {
+            return Error{ErrorCode::InvalidOperation, "Failed to prune " +
+                                                          std::to_string(response.errors.size()) +
+                                                          " version(s)"};
+        }
+        return Result<void>();
+    }
 }; // End of DeleteCommand class
 
 // Factory function

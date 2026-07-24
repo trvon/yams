@@ -87,6 +87,7 @@ public:
         std::optional<float> adaptiveProbeScoreGap;
         std::optional<float> narrowMinBoundaryMargin;
         std::optional<std::size_t> maxDocs;
+        std::optional<std::size_t> expansionOutputLimit;
         std::optional<float> medoidBoost;
         std::optional<float> evidenceWeight;
         std::optional<std::string> routeScoring;
@@ -107,6 +108,7 @@ public:
         std::optional<std::string> expansionSource;
         std::optional<float> graphNeighborMinScore;
         std::optional<bool> graphNeighborReciprocalOnly;
+        std::optional<bool> graphWeightedSeedRanking;
         /// GraphNeighbors seed ANN k; 0 disables (Tier-1 seeds only).
         std::optional<std::size_t> graphVectorSeedProbe;
         std::optional<float> rrfK;
@@ -119,6 +121,15 @@ public:
         std::optional<std::size_t> boundarySpillLimit;
         std::optional<double> boundarySpillDistanceRatio;
         std::optional<double> boundarySpillResidualPenalty;
+        std::optional<bool> featureEntityFusion;
+        std::optional<std::size_t> featureEntitySignatureK;
+        std::optional<float> featureEntityFusionAlpha;
+        std::optional<float> featureEntityMinConfidence;
+        std::optional<bool> featureMatryoshkaCoarseView;
+        std::optional<std::size_t> featureMatryoshkaTargetDim;
+        std::optional<bool> featureMinHashSketch;
+        std::optional<std::size_t> featureMinHashSketchDim;
+        std::optional<float> featureMinHashAlpha;
     };
 
     // Per-corpus adaptive tuner for the topology layer (Phase G). Disabled
@@ -461,6 +472,7 @@ public:
      * - search.topology.adaptive_probe_score_gap = float
      * - search.topology.narrow_min_boundary_margin = float
      * - search.topology.max_docs = int
+     * - search.topology.expansion_output_limit = int (0 inherits global vector output)
      * - search.topology.medoid_boost = float
      * - search.topology.evidence_weight = float in [0,1]
      * - search.topology.route_scoring = current|size_weighted|seed_coverage
@@ -480,6 +492,7 @@ public:
      * - search.topology.expansion_source = clusters|graph_neighbors
      * - search.topology.graph_neighbor_min_score = float
      * - search.topology.graph_neighbor_reciprocal_only = true|false
+     * - search.topology.graph_weighted_seed_ranking = true|false
      * - search.topology.graph_vector_seed_probe = int
      * - search.topology.rrf_k = float
      */
@@ -499,6 +512,15 @@ public:
      * - topology.boundary_spill_limit = int
      * - topology.boundary_spill_distance_ratio = float
      * - topology.boundary_spill_residual_penalty = float
+     * - topology.features.entity_fusion = bool
+     * - topology.features.entity_signature_k = int
+     * - topology.features.entity_fusion_alpha = float
+     * - topology.features.entity_min_confidence = float
+     * - topology.features.matryoshka_coarse_view = bool
+     * - topology.features.matryoshka_target_dim = int
+     * - topology.features.minhash_sketch = bool
+     * - topology.features.minhash_sketch_dim = int
+     * - topology.features.minhash_alpha = float
      */
     static TopologyEnginePolicy resolveTopologyEnginePolicy();
 

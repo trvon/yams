@@ -426,11 +426,24 @@ ConfigMigrator::getLatestConfigDefaults() {
               {"adaptive_probe_score_gap", "0.0"},
               {"narrow_min_boundary_margin", "0.20"},
               {"max_docs", "64"},
+              {"expansion_output_limit", "0"},
+              {"graph_weighted_seed_ranking", "false"},
               {"medoid_boost", "0.05"},
               {"evidence_weight", "0.02"},
               {"route_scoring", "current"},
               {"sparse_dense_alpha", "0.5"},
               {"min_route_score", "0.0"}}},
+
+            {"topology.features",
+             {{"entity_fusion", "false"},
+              {"entity_signature_k", "16"},
+              {"entity_fusion_alpha", "0.25"},
+              {"entity_min_confidence", "0.45"},
+              {"matryoshka_coarse_view", "false"},
+              {"matryoshka_target_dim", "1024"},
+              {"minhash_sketch", "false"},
+              {"minhash_sketch_dim", "16"},
+              {"minhash_alpha", "0.10"}}},
 
             {"indexing", {{"sync_threshold", "10"}}},
 
@@ -593,6 +606,12 @@ ConfigMigrator::getLatestConfigDefaults() {
               {"reconnect_backoff_base_ms", "100"},
               {"reconnect_backoff_max_ms", "5000"},
               {"reconnect_backoff_jitter_pct", "0.2"}}},
+
+            {"daemon.document_retention",
+             {{"enabled", "false"},
+              {"keep_latest", "3"},
+              {"interval_minutes", "1440"},
+              {"initial_delay_minutes", "10"}}},
 
             {"repair",
              {{"enable_online_repair", "false"},

@@ -515,6 +515,17 @@ boundary_spill = true
 boundary_spill_limit = 1
 boundary_spill_distance_ratio = 1.2
 boundary_spill_residual_penalty = 1.5
+
+[topology.features]
+entity_fusion = true
+entity_signature_k = 12
+entity_fusion_alpha = 0.2
+entity_min_confidence = 0.5
+matryoshka_coarse_view = true
+matryoshka_target_dim = 256
+minhash_sketch = true
+minhash_sketch_dim = 24
+minhash_alpha = 0.15
 )TOML");
 
     EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
@@ -532,6 +543,15 @@ boundary_spill_residual_penalty = 1.5
     CHECK(*policy.boundarySpillDistanceRatio == Catch::Approx(1.2));
     REQUIRE(policy.boundarySpillResidualPenalty.has_value());
     CHECK(*policy.boundarySpillResidualPenalty == Catch::Approx(1.5));
+    CHECK(*policy.featureEntityFusion);
+    CHECK(*policy.featureEntitySignatureK == 12);
+    CHECK(*policy.featureEntityFusionAlpha == Catch::Approx(0.2F));
+    CHECK(*policy.featureEntityMinConfidence == Catch::Approx(0.5F));
+    CHECK(*policy.featureMatryoshkaCoarseView);
+    CHECK(*policy.featureMatryoshkaTargetDim == 256);
+    CHECK(*policy.featureMinHashSketch);
+    CHECK(*policy.featureMinHashSketchDim == 24);
+    CHECK(*policy.featureMinHashAlpha == Catch::Approx(0.15F));
 }
 
 TEST_CASE_METHOD(ConfigResolverFixture,
@@ -549,6 +569,8 @@ ann_candidate_limit = 16
 adaptive_probe_score_gap = 0.07
 narrow_min_boundary_margin = 0.03
 max_docs = 42
+expansion_output_limit = 96
+graph_weighted_seed_ranking = true
 medoid_boost = 0.2
 route_calibration_fingerprint = "atlas-123"
 route_calibration_queries = 100
@@ -587,6 +609,10 @@ rrf_k = 33
     CHECK(*policy.narrowMinBoundaryMargin == Catch::Approx(0.03F));
     REQUIRE(policy.maxDocs.has_value());
     CHECK(*policy.maxDocs == 42U);
+    REQUIRE(policy.expansionOutputLimit.has_value());
+    CHECK(*policy.expansionOutputLimit == 96U);
+    REQUIRE(policy.graphWeightedSeedRanking.has_value());
+    CHECK(*policy.graphWeightedSeedRanking);
     REQUIRE(policy.medoidBoost.has_value());
     CHECK(*policy.medoidBoost > 0.19f);
     CHECK(*policy.medoidBoost < 0.21f);
@@ -614,6 +640,7 @@ TEST_CASE("Generated config keeps topology-assisted hybrid search as the product
     const auto& topology = topologyIt->second;
     CHECK(topology.at("mode") == "hybrid_assist");
     CHECK(topology.at("vector_policy") == "shadow");
+    CHECK(topology.at("graph_weighted_seed_ranking") == "false");
     CHECK_FALSE(topology.contains("enable_weak_query_routing"));
     CHECK_FALSE(topology.contains("routing_variant"));
 }

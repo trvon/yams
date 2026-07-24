@@ -839,6 +839,9 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (auto it = kv.find("search.topology.max_docs"); it != kv.end()) {
                 policy.maxDocs = parseSize(it->second);
             }
+            if (auto it = kv.find("search.topology.expansion_output_limit"); it != kv.end()) {
+                policy.expansionOutputLimit = parseSize(it->second);
+            }
             if (auto it = kv.find("search.topology.medoid_boost"); it != kv.end()) {
                 policy.medoidBoost = parseFloat(it->second);
             }
@@ -905,6 +908,9 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (auto it = kv.find("search.topology.graph_neighbor_reciprocal_only");
                 it != kv.end()) {
                 policy.graphNeighborReciprocalOnly = parseBoolValue(it->second);
+            }
+            if (auto it = kv.find("search.topology.graph_weighted_seed_ranking"); it != kv.end()) {
+                policy.graphWeightedSeedRanking = parseBoolValue(it->second);
             }
             if (auto it = kv.find("search.topology.graph_vector_seed_probe"); it != kv.end()) {
                 policy.graphVectorSeedProbe = parseSize(it->second);
@@ -1017,6 +1023,39 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
         }
         if (auto it = kv.find("topology.boundary_spill_residual_penalty"); it != kv.end()) {
             policy.boundarySpillResidualPenalty = parseDouble(it->second);
+        }
+        if (auto it = kv.find("topology.features.entity_fusion"); it != kv.end()) {
+            policy.featureEntityFusion = parseBoolValue(it->second);
+        }
+        if (auto it = kv.find("topology.features.entity_signature_k"); it != kv.end()) {
+            policy.featureEntitySignatureK = parseSize(it->second);
+        }
+        if (auto it = kv.find("topology.features.entity_fusion_alpha"); it != kv.end()) {
+            if (auto value = parseDouble(it->second); value.has_value()) {
+                policy.featureEntityFusionAlpha = static_cast<float>(*value);
+            }
+        }
+        if (auto it = kv.find("topology.features.entity_min_confidence"); it != kv.end()) {
+            if (auto value = parseDouble(it->second); value.has_value()) {
+                policy.featureEntityMinConfidence = static_cast<float>(*value);
+            }
+        }
+        if (auto it = kv.find("topology.features.matryoshka_coarse_view"); it != kv.end()) {
+            policy.featureMatryoshkaCoarseView = parseBoolValue(it->second);
+        }
+        if (auto it = kv.find("topology.features.matryoshka_target_dim"); it != kv.end()) {
+            policy.featureMatryoshkaTargetDim = parseSize(it->second);
+        }
+        if (auto it = kv.find("topology.features.minhash_sketch"); it != kv.end()) {
+            policy.featureMinHashSketch = parseBoolValue(it->second);
+        }
+        if (auto it = kv.find("topology.features.minhash_sketch_dim"); it != kv.end()) {
+            policy.featureMinHashSketchDim = parseSize(it->second);
+        }
+        if (auto it = kv.find("topology.features.minhash_alpha"); it != kv.end()) {
+            if (auto value = parseDouble(it->second); value.has_value()) {
+                policy.featureMinHashAlpha = static_cast<float>(*value);
+            }
         }
     } catch (const std::exception& e) {
         spdlog::debug("Error reading config for topology engine policy: {}", e.what());

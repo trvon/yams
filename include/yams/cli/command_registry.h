@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <string_view>
 #include <vector>
 #include <yams/cli/command.h>
 
@@ -24,6 +25,9 @@ public:
      * Returns true when the command name matched a supported fast path.
      */
     static bool registerMinimalCommandSet(YamsCLI* cli, std::string_view commandName);
+
+    /// Returns whether a top-level command or supported alias has a dispatcher.
+    static bool isRegisteredTopLevelCommand(std::string_view commandName);
 };
 
 } // namespace yams::cli

@@ -2523,6 +2523,7 @@ template <> struct ProtoBinding<PruneResponse> {
         set_string_list(r.deletedPaths, o->mutable_deleted_paths());
         set_string_list(r.failedPaths, o->mutable_failed_paths());
         o->set_error_message(r.errorMessage);
+        o->set_status_message(r.statusMessage);
     }
     static PruneResponse get(const Envelope& env) {
         const auto& i = env.prune_response();
@@ -2539,6 +2540,7 @@ template <> struct ProtoBinding<PruneResponse> {
         r.deletedPaths = get_string_list(i.deleted_paths());
         r.failedPaths = get_string_list(i.failed_paths());
         r.errorMessage = i.error_message();
+        r.statusMessage = i.status_message();
         return r;
     }
 };

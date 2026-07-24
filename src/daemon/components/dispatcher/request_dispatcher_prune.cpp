@@ -1,14 +1,17 @@
 // PBI-062: Prune request handler
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <boost/asio/cancellation_state.hpp>
 #include <cctype>
 #include <filesystem>
+#include <limits>
 #include <system_error>
 #include <yams/app/services/services.hpp>
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/daemon_lifecycle.h>
 #include <yams/integrity/repair_manager.h>
 
@@ -38,18 +41,25 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
             long long value = 0;
             char unit = 'd';
             if (std::sscanf(ageStr.c_str(), "%lld%c", &value, &unit) >= 1) {
+                const auto setMinimumAge = [&](long long hoursPerUnit) {
+                    if (value < 0 || value > std::numeric_limits<long long>::max() / hoursPerUnit) {
+                        spdlog::warn("Invalid older_than '{}', ignoring", ageStr);
+                        return;
+                    }
+                    config.minAge = std::chrono::hours(value * hoursPerUnit);
+                };
                 switch (unit) {
                     case 'd':
-                        config.minAge = std::chrono::hours(value * 24);
+                        setMinimumAge(24);
                         break;
                     case 'w':
-                        config.minAge = std::chrono::hours(value * 24 * 7);
+                        setMinimumAge(24 * 7);
                         break;
                     case 'm':
-                        config.minAge = std::chrono::hours(value * 24 * 30);
+                        setMinimumAge(24 * 30);
                         break;
                     case 'y':
-                        config.minAge = std::chrono::hours(value * 24 * 365);
+                        setMinimumAge(24 * 365);
                         break;
                     default:
                         spdlog::warn("Unknown age unit '{}', ignoring", unit);
@@ -100,7 +110,8 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
     response.totalBytesFreed = 0;
 
     try {
-        auto candidates = integrity::RepairManager::queryCandidatesForPrune(*metaRepo, config);
+        auto candidates = integrity::RepairManager::queryCandidatesForPrune(
+            *metaRepo, config, serviceManager_->getContentStore());
 
         // Aggregate by category for preview
         for (const auto& candidate : candidates) {
@@ -112,100 +123,98 @@ boost::asio::awaitable<Response> RequestDispatcher::handlePruneRequest(const Pru
         spdlog::info("Prune preview: {} candidates, {} bytes total", candidates.size(),
                      response.totalBytesFreed);
 
-        // If not dry-run and user wants to apply, execute prune synchronously
+        // Applying a large prune can require many storage and metadata transactions. Return after
+        // accepting it so the client connection is not held open until every candidate completes.
         if (!req.dryRun && !candidates.empty()) {
-            spdlog::info("Executing prune operation for {} candidates", candidates.size());
             auto documentService =
                 app::services::makeDocumentService(serviceManager_->getAppContext());
+            auto* lifecycle = lifecycle_;
+            auto* workCoordinator = serviceManager_->getWorkCoordinator();
+            if (!workCoordinator) {
+                co_return dispatch::makeErrorResponse(ErrorCode::InternalError,
+                                                      "Work coordinator unavailable");
+            }
+            const auto candidateCount = candidates.size();
+            workCoordinator->spawnDetached(
+                getWorkerExecutor(),
+                [metaRepo = std::move(metaRepo), documentService = std::move(documentService),
+                 lifecycle, candidates = std::move(candidates)]() -> boost::asio::awaitable<void> {
+                    uint64_t deleted = 0;
+                    uint64_t failed = 0;
+                    uint64_t bytesFreed = 0;
 
-            uint64_t deleted = 0;
-            uint64_t failed = 0;
-            uint64_t bytesFreed = 0;
+                    for (const auto& candidate : candidates) {
+                        const auto cancellationState =
+                            co_await boost::asio::this_coro::cancellation_state;
+                        if (cancellationState.cancelled() != boost::asio::cancellation_type::none) {
+                            spdlog::info("Prune cancelled after deleted={} failed={}", deleted,
+                                         failed);
+                            co_return;
+                        }
+                        try {
+                            auto docLookup = metaRepo->getDocumentByHash(candidate.hash);
+                            if (!docLookup) {
+                                spdlog::warn("Failed to prune {}: {}", candidate.path,
+                                             docLookup.error().message);
+                                ++failed;
+                                continue;
+                            }
+                            if (!docLookup.value().has_value()) {
+                                ++deleted;
+                                continue;
+                            }
 
-            for (size_t i = 0; i < candidates.size(); ++i) {
-                const auto& candidate = candidates[i];
+                            app::services::DeleteByNameRequest deleteReq;
+                            deleteReq.hash = candidate.hash;
+                            deleteReq.force = true;
+                            auto deleteResult = documentService->deleteByName(deleteReq);
+                            if (!deleteResult) {
+                                spdlog::warn("Failed to prune {}: {}", candidate.path,
+                                             deleteResult.error().message);
+                                ++failed;
+                                continue;
+                            }
 
-                if (i > 0 && i % 100 == 0) {
-                    co_await boost::asio::post(boost::asio::use_awaitable);
-                }
-                try {
-                    auto docLookup = metaRepo->getDocumentByHash(candidate.hash);
-                    if (!docLookup) {
-                        spdlog::warn("Failed to prune {}: {}", candidate.path,
-                                     docLookup.error().message);
-                        response.failedPaths.push_back(candidate.path);
-                        failed++;
-                        continue;
-                    }
-                    if (!docLookup.value().has_value()) {
-                        deleted++;
-                        response.deletedPaths.push_back(candidate.path);
-                        continue;
-                    }
+                            const auto& deleteResp = deleteResult.value();
+                            if (!deleteResp.errors.empty()) {
+                                spdlog::warn("Failed to prune {}: {}", candidate.path,
+                                             deleteResp.errors.front().error.value_or("delete failed"));
+                                ++failed;
+                                continue;
+                            }
 
-                    app::services::DeleteByNameRequest deleteReq;
-                    deleteReq.hash = candidate.hash;
-                    deleteReq.force = true;
-
-                    auto deleteResult = documentService->deleteByName(deleteReq);
-                    if (!deleteResult) {
-                        spdlog::warn("Failed to prune {}: {}", candidate.path,
-                                     deleteResult.error().message);
-                        response.failedPaths.push_back(candidate.path);
-                        failed++;
-                        continue;
-                    }
-
-                    const auto& deleteResp = deleteResult.value();
-                    if (!deleteResp.errors.empty()) {
-                        const auto& err = deleteResp.errors.front();
-                        spdlog::warn("Failed to prune {}: {}", candidate.path,
-                                     err.error.value_or("delete failed"));
-                        response.failedPaths.push_back(candidate.path);
-                        failed++;
-                        continue;
-                    }
-
-                    if (!deleteResp.deleted.empty()) {
-                        bool removed = false;
-                        bool contentRemoved = false;
-                        for (const auto& doc : deleteResp.deleted) {
-                            if (doc.deleted) {
-                                removed = true;
-                                contentRemoved = contentRemoved || doc.contentRemoved;
-                                if (lifecycle_ && !doc.hash.empty()) {
-                                    lifecycle_->onDocumentRemoved(doc.hash);
+                            bool removed = false;
+                            bool contentRemoved = false;
+                            for (const auto& doc : deleteResp.deleted) {
+                                if (doc.deleted) {
+                                    removed = true;
+                                    contentRemoved = contentRemoved || doc.contentRemoved;
+                                    if (lifecycle && !doc.hash.empty()) {
+                                        lifecycle->onDocumentRemoved(doc.hash);
+                                    }
                                 }
                             }
-                        }
-                        if (removed) {
-                            deleted++;
-                            if (contentRemoved) {
-                                bytesFreed += candidate.fileSize;
+                            if (removed || deleteResp.deleted.empty()) {
+                                ++deleted;
+                                if (contentRemoved) {
+                                    bytesFreed += candidate.fileSize;
+                                }
+                            } else {
+                                ++failed;
                             }
-                            response.deletedPaths.push_back(candidate.path);
-                        } else {
-                            response.failedPaths.push_back(candidate.path);
-                            failed++;
+                        } catch (const std::exception& e) {
+                            spdlog::error("Exception while pruning {}: {}", candidate.path, e.what());
+                            ++failed;
                         }
-                    } else {
-                        // Candidate disappeared between query and apply; treat as already pruned.
-                        deleted++;
-                        response.deletedPaths.push_back(candidate.path);
                     }
-                } catch (const std::exception& e) {
-                    spdlog::error("Exception while pruning {}: {}", candidate.path, e.what());
-                    response.failedPaths.push_back(candidate.path);
-                    failed++;
-                }
-            }
 
-            response.filesDeleted = deleted;
-            response.filesFailed = failed;
-            response.totalBytesFreed = bytesFreed;
-
-            spdlog::info("Prune complete: deleted={} failed={} bytes_freed={}", deleted, failed,
-                         bytesFreed);
+                    spdlog::info("Prune complete: deleted={} failed={} bytes_freed={}", deleted,
+                                 failed, bytesFreed);
+                    co_return;
+                });
+            response.statusMessage = fmt::format(
+                "Prune accepted: {} candidates are being removed in the background.",
+                candidateCount);
         }
 
     } catch (const std::exception& e) {
