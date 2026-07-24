@@ -18,6 +18,8 @@ constexpr std::string_view kCandidatePipelineFinalCandidates =
     "candidate_pipeline_final_candidates";
 constexpr std::string_view kCandidatePipelineTopologyAnnotatedCandidates =
     "candidate_pipeline_topology_annotated_candidates";
+constexpr std::string_view kCandidatePipelineTopologyFusionRescuedCandidates =
+    "candidate_pipeline_topology_fusion_rescued_candidates";
 
 constexpr std::string_view kSearchEngineReady = "search_engine_ready";
 constexpr std::string_view kVectorReady = "vector_ready";
@@ -160,6 +162,27 @@ constexpr std::string_view kTopologyCandidateRescueScoredCandidateDocIds =
     "topology_candidate_rescue_scored_candidate_doc_ids";
 constexpr std::string_view kTopologyCandidateRescueExactScoredCandidateDocIds =
     "topology_candidate_rescue_exact_scored_candidate_doc_ids";
+constexpr std::string_view kTopologyCandidateRescueExactScoredCandidateRows =
+    "topology_candidate_rescue_exact_scored_candidate_rows";
+constexpr std::string_view kTopologyCandidateRescueExactCandidateHashesRequested =
+    "topology_candidate_rescue_exact_candidate_hashes_requested";
+constexpr std::string_view kTopologyCandidateRescueExactRowsVisitedStatus =
+    "topology_candidate_rescue_exact_rows_visited_status";
+constexpr std::string_view kTopologyCandidateRescueExactRowsVisited =
+    "topology_candidate_rescue_exact_rows_visited";
+constexpr std::string_view kTopologyCandidateRescueExactDistanceEvaluationsStatus =
+    "topology_candidate_rescue_exact_distance_evaluations_status";
+constexpr std::string_view kTopologyCandidateRescueExactDistanceEvaluations =
+    "topology_candidate_rescue_exact_distance_evaluations";
+constexpr std::string_view kTopologyCandidateRescueExactReturnedRows =
+    "topology_candidate_rescue_exact_returned_rows";
+constexpr std::string_view kTopologyCandidateRescueExactMatchedDocuments =
+    "topology_candidate_rescue_exact_matched_documents";
+constexpr std::string_view kTopologyCandidateRescueExactMatchedDocumentHashes =
+    "topology_candidate_rescue_exact_matched_document_hashes";
+constexpr std::string_view kTopologyCandidateRescueExactMatchedDocumentDocIds =
+    "topology_candidate_rescue_exact_matched_document_doc_ids";
+constexpr std::string_view kTopologyExpansionOutputBudget = "topology_expansion_output_budget";
 constexpr std::string_view kTopologySnapshotCacheHit = "topology_snapshot_cache_hit";
 constexpr std::string_view kTopologyStructureCandidateCount = "topology_structure_candidate_count";
 constexpr std::string_view kTopologyStructureScaleAgreementMean =

@@ -28,4 +28,9 @@ struct ProtectedRelationCoverIndex {
 [[nodiscard]] Result<ProtectedRelationCoverIndex>
 buildProtectedRelationCoverIndex(const TopologyArtifactBatch& artifacts);
 
+/// Deterministic digest of the admitted semantic-neighbor construction observations.
+[[nodiscard]] std::string
+protectedRelationConstructionIdentity(std::span<const TopologyDocumentInput> documents,
+                                      const TopologyBuildConfig& config);
+
 } // namespace yams::topology

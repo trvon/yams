@@ -74,17 +74,121 @@
       }
     },
     {
+      "name": "graph_rescue_shadow_weighted_c32_plus16",
+      "factors": {
+        "topology_mode": "hybrid_assist",
+        "topology_vector_policy": "shadow",
+        "vector_result_budget": 32,
+        "route_result_budget": 16,
+        "graph_seed_ranking": "query_weighted"
+      },
+      "params": {
+        "topology_mode": "hybrid_assist",
+        "topology_vector_policy": "shadow",
+        "graph_weighted_seed_ranking": true
+      }
+    },
+    {
       "name": "graph_rescue_shadow_full_relation",
       "factors": {
         "topology_mode": "hybrid_assist",
         "topology_vector_policy": "shadow",
         "vector_result_budget": 32,
-        "route_result_budget": 2048
+        "relation_materialization_budget": 2048,
+        "expansion_output_budget": 32
       },
       "params": {
         "topology_mode": "hybrid_assist",
         "topology_vector_policy": "shadow",
         "max_docs": 2048
+      }
+    },
+    {
+      "name": "graph_rescue_shadow_full_relation_out128",
+      "factors": {
+        "topology_mode": "hybrid_assist",
+        "topology_vector_policy": "shadow",
+        "vector_result_budget": 32,
+        "relation_materialization_budget": 2048,
+        "expansion_output_budget": 128
+      },
+      "params": {
+        "topology_mode": "hybrid_assist",
+        "topology_vector_policy": "shadow",
+        "max_docs": 2048,
+        "expansion_output_limit": 128
+      }
+    },
+    {
+      "name": "graph_rescue_shadow_full_relation_out512",
+      "factors": {
+        "topology_mode": "hybrid_assist",
+        "topology_vector_policy": "shadow",
+        "vector_result_budget": 32,
+        "relation_materialization_budget": 2048,
+        "expansion_output_budget": 512
+      },
+      "params": {
+        "topology_mode": "hybrid_assist",
+        "topology_vector_policy": "shadow",
+        "max_docs": 2048,
+        "expansion_output_limit": 512
+      }
+    },
+    {
+      "name": "graph_rescue_shadow_full_relation_out1024",
+      "factors": {
+        "topology_mode": "hybrid_assist",
+        "topology_vector_policy": "shadow",
+        "vector_result_budget": 32,
+        "relation_materialization_budget": 2048,
+        "expansion_output_budget": 1024
+      },
+      "params": {
+        "topology_mode": "hybrid_assist",
+        "topology_vector_policy": "shadow",
+        "max_docs": 2048,
+        "expansion_output_limit": 1024
+      }
+    },
+    {
+      "name": "graph_rescue_augment_full_relation_doc1024",
+      "factors": {
+        "topology_mode": "hybrid_assist",
+        "topology_vector_policy": "augment",
+        "vector_result_budget": 32,
+        "relation_materialization_budget": 2048,
+        "expansion_output_budget": 1024,
+        "candidate_selection": "simeon_document_top_k"
+      },
+      "params": {
+        "topology_mode": "hybrid_assist",
+        "topology_vector_policy": "augment",
+        "max_docs": 2048,
+        "expansion_output_limit": 1024
+      }
+    },
+    {
+      "name": "graph_rescue_augment_full_relation_doc1024_windowrescue",
+      "factors": {
+        "topology_mode": "hybrid_assist",
+        "topology_vector_policy": "augment",
+        "vector_result_budget": 32,
+        "relation_materialization_budget": 2048,
+        "expansion_output_budget": 1024,
+        "candidate_selection": "simeon_document_top_k",
+        "fusion_window_rescue": true,
+        "final_window_rescue": true
+      },
+      "params": {
+        "topology_mode": "hybrid_assist",
+        "topology_vector_policy": "augment",
+        "max_docs": 2048,
+        "expansion_output_limit": 1024,
+        "topology_fusion_rescue_slots": 4,
+        "topology_fusion_rescue_min_score": 0.001,
+        "topology_final_rescue_slots": 2,
+        "topology_final_rescue_min_score": 0.001
       }
     },
     {
@@ -129,8 +233,18 @@
         "topology_candidate_rescue_missing_fetched_query_rate",
         "topology_candidate_rescue_missing_eligible_query_rate",
         "topology_candidate_rescue_missing_selected_query_rate",
+        "topology_candidate_rescue_missing_exact_matched_query_rate",
         "topology_candidate_rescue_missing_scored_query_rate",
         "topology_candidate_rescue_missing_exact_scored_query_rate",
+        "topology_candidate_rescue_missing_exact_rank_avg",
+        "topology_candidate_rescue_missing_exact_score_avg",
+        "topology_candidate_rescue_exact_hashes_requested_sum",
+        "topology_candidate_rescue_exact_rows_visited_sum",
+        "topology_candidate_rescue_exact_distance_evaluations_sum",
+        "topology_candidate_rescue_exact_returned_rows_sum",
+        "topology_candidate_rescue_exact_matched_documents_sum",
+        "topology_candidate_rescue_exact_document_materialization_rate",
+        "topology_expansion_output_budget_avg",
         "topology_candidate_rescue_post_fusion_survival_rate",
         "topology_candidate_rescue_returned_survival_rate",
         "topology_candidate_rescue_evidence_post_fusion_survival_rate",
@@ -173,8 +287,18 @@
       "topology_candidate_rescue_missing_fetched_query_rate",
       "topology_candidate_rescue_missing_eligible_query_rate",
       "topology_candidate_rescue_missing_selected_query_rate",
+      "topology_candidate_rescue_missing_exact_matched_query_rate",
       "topology_candidate_rescue_missing_scored_query_rate",
       "topology_candidate_rescue_missing_exact_scored_query_rate",
+      "topology_candidate_rescue_missing_exact_rank_avg",
+      "topology_candidate_rescue_missing_exact_score_avg",
+      "topology_candidate_rescue_exact_hashes_requested_sum",
+      "topology_candidate_rescue_exact_rows_visited_sum",
+      "topology_candidate_rescue_exact_distance_evaluations_sum",
+      "topology_candidate_rescue_exact_returned_rows_sum",
+      "topology_candidate_rescue_exact_matched_documents_sum",
+      "topology_candidate_rescue_exact_document_materialization_rate",
+      "topology_expansion_output_budget_avg",
       "topology_graph_trace_query_rate",
       "topology_path_seed_neighbors_rate",
       "topology_vector_seeds_nonzero_rate",
@@ -205,8 +329,18 @@
       "topology_candidate_rescue_missing_fetched_query_rate",
       "topology_candidate_rescue_missing_eligible_query_rate",
       "topology_candidate_rescue_missing_selected_query_rate",
+      "topology_candidate_rescue_missing_exact_matched_query_rate",
       "topology_candidate_rescue_missing_scored_query_rate",
       "topology_candidate_rescue_missing_exact_scored_query_rate",
+      "topology_candidate_rescue_missing_exact_rank_avg",
+      "topology_candidate_rescue_missing_exact_score_avg",
+      "topology_candidate_rescue_exact_hashes_requested_sum",
+      "topology_candidate_rescue_exact_rows_visited_sum",
+      "topology_candidate_rescue_exact_distance_evaluations_sum",
+      "topology_candidate_rescue_exact_returned_rows_sum",
+      "topology_candidate_rescue_exact_matched_documents_sum",
+      "topology_candidate_rescue_exact_document_materialization_rate",
+      "topology_expansion_output_budget_avg",
       "topology_candidate_rescue_post_fusion_survival_rate",
       "topology_candidate_rescue_returned_survival_rate",
       "topology_candidate_rescue_evidence_post_fusion_survival_rate",

@@ -6353,6 +6353,10 @@ struct BenchFixture {
                 std::getenv("YAMS_BENCH_TOPOLOGY_ROUTE_REPRESENTATIVE_LIMIT");
             const char* topologyAnnCandidateLimitEnv =
                 std::getenv("YAMS_BENCH_TOPOLOGY_ROUTE_ANN_CANDIDATE_LIMIT");
+            const char* topologyExpansionOutputLimitEnv =
+                std::getenv("YAMS_BENCH_TOPOLOGY_EXPANSION_OUTPUT_LIMIT");
+            const char* topologyGraphWeightedSeedRankingEnv =
+                std::getenv("YAMS_BENCH_TOPOLOGY_GRAPH_WEIGHTED_SEED_RANKING");
             const auto hasBenchmarkSetting = [](const char* name) {
                 const char* value = std::getenv(name);
                 return value && *value;
@@ -6384,6 +6388,8 @@ struct BenchFixture {
                 (std::getenv("YAMS_BENCH_TOPOLOGY_MAX_SEED_DOCUMENTS") != nullptr) ||
                 (topologyRepresentativeLimitEnv && *topologyRepresentativeLimitEnv) ||
                 (topologyAnnCandidateLimitEnv && *topologyAnnCandidateLimitEnv) ||
+                (topologyExpansionOutputLimitEnv && *topologyExpansionOutputLimitEnv) ||
+                (topologyGraphWeightedSeedRankingEnv && *topologyGraphWeightedSeedRankingEnv) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_ADAPTIVE_PROBE_SCORE_GAP") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_NARROW_MIN_BOUNDARY_MARGIN") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_EXPANSION") != nullptr) ||
@@ -6691,6 +6697,12 @@ struct BenchFixture {
                                   << parseSizeEnvOrFallback("YAMS_BENCH_TOPOLOGY_MAX_DOCS",
                                                             "YAMS_SEARCH_TOPOLOGY_MAX_DOCS", 64)
                                   << "\n";
+                        if (topologyExpansionOutputLimitEnv && *topologyExpansionOutputLimitEnv) {
+                            configOut << "expansion_output_limit = "
+                                      << parseSizeEnvOrDefault(
+                                             "YAMS_BENCH_TOPOLOGY_EXPANSION_OUTPUT_LIMIT", 0)
+                                      << "\n";
+                        }
                         configOut << "max_seed_documents = "
                                   << parseSizeEnvOrDefault("YAMS_BENCH_TOPOLOGY_MAX_SEED_DOCUMENTS",
                                                            32)
@@ -6790,6 +6802,13 @@ struct BenchFixture {
                             configOut << "graph_neighbor_min_score = "
                                       << parseFloatEnvOrDefault(
                                              "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE", 0.25F)
+                                      << "\n";
+                        }
+                        if (topologyGraphWeightedSeedRankingEnv &&
+                            *topologyGraphWeightedSeedRankingEnv) {
+                            configOut << "graph_weighted_seed_ranking = "
+                                      << (envTruthy(topologyGraphWeightedSeedRankingEnv) ? "true"
+                                                                                         : "false")
                                       << "\n";
                         }
                     }

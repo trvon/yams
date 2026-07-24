@@ -576,7 +576,10 @@ bool tryRunGraphNeighborExpansion(
     const auto routeStart = std::chrono::steady_clock::now();
     auto ranked = rankGraphNeighborCandidates(
         seedNeighbors, request.seedDocumentHashes, request.options.maxDocs,
-        request.options.graphNeighborMinScore, request.options.graphNeighborReciprocalOnly);
+        request.options.graphNeighborMinScore, request.options.graphNeighborReciprocalOnly,
+        request.options.graphWeightedSeedRanking
+            ? std::span<const yams::topology::WeightedDocumentSeed>{request.weightedSeedDocuments}
+            : std::span<const yams::topology::WeightedDocumentSeed>{});
     result.timings.routeMicros = microsSince(routeStart);
     result.routedDocs = ranked.size();
     result.routedClusters = 0;
@@ -838,7 +841,8 @@ void produceTopologyRouteAdmission(const std::vector<yams::topology::ClusterRout
                                    TopologyRoutingSessionResult& result) {
     using Status = TopologyProofObligationStatus;
 
-    bool relationEvidenceObserved = !selectedRoutes.empty();
+    bool relationEvidenceObserved =
+        !selectedRoutes.empty() && !snapshot.artifacts->protectedRelationIdentity.empty();
     bool relationCoverageViolated = false;
     for (const auto& route : selectedRoutes) {
         const auto clusterIt = snapshot.clustersById.find(route.clusterId);
@@ -1125,12 +1129,27 @@ std::vector<std::string> rankGraphNeighborCandidates(
     const std::unordered_map<std::string, std::vector<std::tuple<std::string, float, bool>>>&
         seedNeighbors,
     const std::vector<std::string>& seedDocumentHashes, std::size_t maxDocs, float minScore,
-    bool reciprocalOnly) {
+    bool reciprocalOnly,
+    std::span<const yams::topology::WeightedDocumentSeed> weightedSeedDocuments) {
     struct Cand {
         std::string hash;
         float score{0.0F};
         std::size_t seedHits{0};
+        double weightedSupport{0.0};
     };
+    std::unordered_map<std::string, float> seedWeights;
+    seedWeights.reserve(weightedSeedDocuments.size());
+    for (const auto& seed : weightedSeedDocuments) {
+        if (seed.documentHash.empty() || !std::isfinite(seed.weight) || seed.weight <= 0.0F) {
+            continue;
+        }
+        auto [it, inserted] = seedWeights.emplace(seed.documentHash, seed.weight);
+        if (!inserted) {
+            it->second = std::max(it->second, seed.weight);
+        }
+    }
+    const bool useWeightedSupport = !seedWeights.empty();
+
     std::unordered_map<std::string, Cand> byHash;
     byHash.reserve(seedDocumentHashes.size() * 8);
 
@@ -1149,6 +1168,10 @@ std::vector<std::string> rankGraphNeighborCandidates(
             }
             cand.score = std::max(cand.score, score);
             ++cand.seedHits;
+            if (const auto weightIt = seedWeights.find(seed); weightIt != seedWeights.end()) {
+                cand.weightedSupport +=
+                    static_cast<double>(weightIt->second) * static_cast<double>(score);
+            }
         }
     }
 
@@ -1160,7 +1183,10 @@ std::vector<std::string> rankGraphNeighborCandidates(
     ranked.reserve(byHash.size());
     std::ranges::transform(byHash, std::back_inserter(ranked),
                            [](auto& entry) { return std::move(entry.second); });
-    std::ranges::sort(ranked, [](const Cand& a, const Cand& b) {
+    std::ranges::sort(ranked, [useWeightedSupport](const Cand& a, const Cand& b) {
+        if (useWeightedSupport && a.weightedSupport != b.weightedSupport) {
+            return a.weightedSupport > b.weightedSupport;
+        }
         if (a.seedHits != b.seedHits) {
             return a.seedHits > b.seedHits;
         }
@@ -1201,6 +1227,7 @@ makeTopologyRoutingOptions(const SearchEngineConfig& config,
         .collectRouteMembership = collectRouteMembership,
         .graphNeighborMinScore = config.topologyGraphNeighborMinScore,
         .graphNeighborReciprocalOnly = config.topologyGraphNeighborReciprocalOnly,
+        .graphWeightedSeedRanking = config.topologyGraphWeightedSeedRanking,
     };
 }
 
@@ -1359,6 +1386,7 @@ topologyRoutingConstructionFingerprint(const yams::topology::TopologyArtifactBat
     fingerprintString(hash, batch.algorithm);
     fingerprintIntegral(hash, static_cast<std::uint8_t>(batch.inputKind));
     fingerprintString(hash, batch.embeddingSpaceIdentity);
+    fingerprintString(hash, batch.protectedRelationIdentity);
 
     std::vector<const yams::topology::ClusterArtifact*> clusters;
     clusters.reserve(batch.clusters.size());

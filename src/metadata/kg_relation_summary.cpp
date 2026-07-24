@@ -223,15 +223,16 @@ std::optional<KGRelationSummary> collectFileRelationSummary(KnowledgeGraphStore*
 std::string formatRelationSummary(const std::vector<std::pair<std::string, std::size_t>>& pairs,
                                   bool humanReadable) {
     std::string out;
-    for (std::size_t i = 0; i < pairs.size(); ++i) {
-        if (i > 0) {
-            out += humanReadable ? ", " : ",";
-        }
-        out += pairs[i].first;
+    const char* separator = "";
+    const char* delimiter = humanReadable ? ", " : ",";
+    for (const auto& [relation, count] : pairs) {
+        out += separator;
+        separator = delimiter;
+        out += relation;
         if (humanReadable) {
-            out += "(" + std::to_string(pairs[i].second) + ")";
+            out += "(" + std::to_string(count) + ")";
         } else {
-            out += ":" + std::to_string(pairs[i].second);
+            out += ":" + std::to_string(count);
         }
     }
     return out;

@@ -15,17 +15,24 @@ bool isLexicalTopologySeed(ComponentResult::Source source) noexcept {
            source == ComponentResult::Source::GraphText;
 }
 
-} // namespace
+bool isVectorTopologySeed(ComponentResult::Source source) noexcept {
+    return source == ComponentResult::Source::Vector ||
+           source == ComponentResult::Source::GraphVector ||
+           source == ComponentResult::Source::EntityVector;
+}
+
+using SeedSourcePredicate = bool (*)(ComponentResult::Source);
 
 std::vector<yams::topology::WeightedDocumentSeed>
-rankTopologySeedEvidence(const std::vector<ComponentResult>& components, std::size_t maxSeeds) {
+rankSeedEvidence(const std::vector<ComponentResult>& components, std::size_t maxSeeds,
+                 SeedSourcePredicate acceptsSource) {
     if (maxSeeds == 0) {
         return {};
     }
     std::unordered_map<std::string, float> bestWeight;
     bestWeight.reserve(std::min(maxSeeds * 2, components.size()));
     for (const auto& component : components) {
-        if (component.documentHash.empty() || !isLexicalTopologySeed(component.source) ||
+        if (component.documentHash.empty() || !acceptsSource(component.source) ||
             !std::isfinite(component.score) || component.score <= 0.0F) {
             continue;
         }
@@ -53,6 +60,19 @@ rankTopologySeedEvidence(const std::vector<ComponentResult>& components, std::si
         out.resize(maxSeeds);
     }
     return out;
+}
+
+} // namespace
+
+std::vector<yams::topology::WeightedDocumentSeed>
+rankTopologySeedEvidence(const std::vector<ComponentResult>& components, std::size_t maxSeeds) {
+    return rankSeedEvidence(components, maxSeeds, isLexicalTopologySeed);
+}
+
+std::vector<yams::topology::WeightedDocumentSeed>
+rankTopologyVectorSeedEvidence(const std::vector<ComponentResult>& components,
+                               std::size_t maxSeeds) {
+    return rankSeedEvidence(components, maxSeeds, isVectorTopologySeed);
 }
 
 std::vector<std::string> mergeTopologySeedHashes(const std::vector<std::string>& tier1Seeds,
@@ -146,6 +166,15 @@ TopologyAssistStageResult runTopologyAssistStage(const TopologyAssistStageReques
     sessionRequest.query = request.query;
     sessionRequest.seedDocumentHashes = out.enrichedSeedHashes;
     sessionRequest.weightedSeedDocuments = request.tier1SeedEvidence;
+    if (useVectorSeeds && !request.vectorSeedEvidence.empty()) {
+        const std::unordered_set<std::string> admittedSeeds(out.enrichedSeedHashes.begin(),
+                                                            out.enrichedSeedHashes.end());
+        for (const auto& seed : request.vectorSeedEvidence) {
+            if (admittedSeeds.contains(seed.documentHash)) {
+                sessionRequest.weightedSeedDocuments.push_back(seed);
+            }
+        }
+    }
     sessionRequest.existingCandidateHashes = request.existingCandidateHashes;
     sessionRequest.queryEmbedding = request.queryEmbedding;
     sessionRequest.queryEmbeddingSpaceIdentity = request.queryEmbeddingSpaceIdentity;

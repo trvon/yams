@@ -153,6 +153,31 @@ allocateBalancedRouteQuotas(const std::vector<std::unordered_set<std::string>>& 
     return quotas;
 }
 
+std::vector<std::string>
+resolveDocumentIdsForTrace(const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
+                           const std::vector<std::string>& documentHashes) {
+    if (!metadataRepo || documentHashes.empty()) {
+        return {};
+    }
+
+    auto documents = metadataRepo->batchGetDocumentsByHash(documentHashes);
+    if (!documents) {
+        return {};
+    }
+
+    std::vector<std::string> documentIds;
+    documentIds.reserve(documentHashes.size());
+    for (const auto& hash : documentHashes) {
+        const auto it = documents.value().find(hash);
+        if (it == documents.value().end()) {
+            continue;
+        }
+        documentIds.push_back(documentIdForTrace(it->second.filePath, hash));
+    }
+    std::ranges::sort(documentIds);
+    return documentIds;
+}
+
 std::optional<std::int64_t>
 resolveGraphCandidateDocumentId(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kgStore,
                                 std::string_view candidateId) {
@@ -492,6 +517,8 @@ struct SearchTopKLimitOutcome {
     std::vector<std::string> buriedSemanticRescueDisplacedDocIds;
     std::vector<std::string> evidenceRescuePromotedDocIds;
     std::vector<std::string> evidenceRescueDisplacedDocIds;
+    std::vector<std::string> topologyRescuePromotedDocIds;
+    std::vector<std::string> topologyRescueDisplacedDocIds;
 };
 
 template <typename ResultLess, typename IsSemanticCandidate, typename SemanticBetter,
@@ -674,6 +701,79 @@ applySearchTopKLimit(std::vector<SearchResult>& results, const SearchEngineConfi
             }
             if (!displacedId.empty()) {
                 outcome.evidenceRescueDisplacedDocIds.push_back(displacedId);
+            }
+
+            std::swap(results[victimIndex], results[bestTailIndex]);
+            rescuePresent++;
+        }
+
+        std::sort(results.begin(), results.begin() + static_cast<ptrdiff_t>(finalWindow),
+                  resultLess);
+    }
+
+    // Final-window topology rescue: mirrors the evidence-rescue swap above but is keyed
+    // exclusively on SearchResult::topologyScore, so this obligation stays independently
+    // measurable from generic lexical/vector/kg evidence rescue (see
+    // fusionEvidenceRescueSlots). Default 0 (disabled/product-unchanged).
+    if (config.topologyFinalRescueSlots > 0 && userLimit > 0) {
+        const size_t finalWindow = std::min(userLimit, results.size());
+        const size_t rescueTarget = std::min(config.topologyFinalRescueSlots, finalWindow);
+        const double minTopologyScore =
+            std::max(0.0, static_cast<double>(config.topologyFinalRescueMinScore));
+        const auto topologyScoreOf = [](const SearchResult& r) {
+            return r.topologyScore.value_or(0.0);
+        };
+        const auto isTopologyRescueCandidate = [&](const SearchResult& r) {
+            return topologyScoreOf(r) >= minTopologyScore;
+        };
+
+        size_t rescuePresent = 0;
+        for (size_t i = 0; i < finalWindow; ++i) {
+            if (isTopologyRescueCandidate(results[i])) {
+                rescuePresent++;
+            }
+        }
+
+        while (rescuePresent < rescueTarget) {
+            size_t bestTailIndex = results.size();
+            for (size_t i = finalWindow; i < results.size(); ++i) {
+                if (!isTopologyRescueCandidate(results[i])) {
+                    continue;
+                }
+                if (bestTailIndex >= results.size() ||
+                    topologyScoreOf(results[i]) > topologyScoreOf(results[bestTailIndex])) {
+                    bestTailIndex = i;
+                }
+            }
+            if (bestTailIndex >= results.size()) {
+                break;
+            }
+
+            size_t victimIndex = finalWindow;
+            double victimTopologyScore = std::numeric_limits<double>::max();
+            for (size_t i = 0; i < finalWindow; ++i) {
+                const double score = topologyScoreOf(results[i]);
+                if (score < victimTopologyScore) {
+                    victimTopologyScore = score;
+                    victimIndex = i;
+                }
+            }
+            if (victimIndex >= finalWindow) {
+                break;
+            }
+
+            const double bestTailTopologyScore = topologyScoreOf(results[bestTailIndex]);
+            if (bestTailTopologyScore <= victimTopologyScore) {
+                break;
+            }
+
+            const std::string promotedId = docIdForResult(results[bestTailIndex]);
+            const std::string displacedId = docIdForResult(results[victimIndex]);
+            if (!promotedId.empty()) {
+                outcome.topologyRescuePromotedDocIds.push_back(promotedId);
+            }
+            if (!displacedId.empty()) {
+                outcome.topologyRescueDisplacedDocIds.push_back(displacedId);
             }
 
             std::swap(results[victimIndex], results[bestTailIndex]);
@@ -1456,6 +1556,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             total.usedExactScan = total.usedExactScan || sample.usedExactScan;
             total.usedCandidateIndexCache =
                 total.usedCandidateIndexCache || sample.usedCandidateIndexCache;
+            total.collectVisitedDocumentHashes =
+                total.collectVisitedDocumentHashes || sample.collectVisitedDocumentHashes;
+            total.visitedDocumentHashes.insert(sample.visitedDocumentHashes.begin(),
+                                               sample.visitedDocumentHashes.end());
             total.rowsVisitedObserved = total.rowsVisitedObserved || sample.rowsVisitedObserved;
             total.exactDistanceEvaluationsObserved =
                 total.exactDistanceEvaluationsObserved || sample.exactDistanceEvaluationsObserved;
@@ -1479,6 +1583,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         };
         const auto runVectorQuery = [&](const SearchEngineConfig& config) {
             vector::VectorSearchDiagnostics sample;
+            sample.collectVisitedDocumentHashes =
+                diagnostics != nullptr && diagnostics->collectVisitedDocumentHashes;
             auto result = candidates != nullptr
                               ? queryVectorIndex(embedding, config, limit, *candidates,
                                                  candidateFilterMode, &sample)
@@ -1870,6 +1976,14 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     std::vector<std::string> topologyCandidateEvidenceRescueDocIds;
     std::vector<std::string> topologyCandidateRescueScoredDocIds;
     std::vector<std::string> topologyCandidateRescueExactScoredDocIds;
+    std::string topologyCandidateRescueExactScoredRows;
+    std::size_t topologyCandidateRescueExactCandidateHashesRequested = 0;
+    bool topologyCandidateRescueExactRowsVisitedObserved = false;
+    std::size_t topologyCandidateRescueExactRowsVisited = 0;
+    bool topologyCandidateRescueExactDistanceEvaluationsObserved = false;
+    std::size_t topologyCandidateRescueExactDistanceEvaluations = 0;
+    std::size_t topologyCandidateRescueExactReturnedRows = 0;
+    std::vector<std::string> topologyCandidateRescueExactMatchedDocumentHashes;
     allComponentResults.reserve(sourceGate.estimatedCandidateCapacity(workingConfig));
 
     detail::ComponentFanoutCollector fanoutCollector(
@@ -2035,6 +2149,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             // Optional GraphNeighbors seed ANN (config topologyGraphVectorSeedProbe).
             // Product default is 0; k>0 is opt-in / ablation only.
             std::vector<std::string> vectorSeedHashes;
+            std::vector<yams::topology::WeightedDocumentSeed> vectorSeedEvidence;
             const std::size_t graphVectorSeedProbe = workingConfig.topologyGraphVectorSeedProbe;
             const bool mayExpandTopology =
                 topologyRoutingMayExpand(topologyRoutingMode, weakTier1Query);
@@ -2047,11 +2162,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                                               queryEmbedding.value(), workingConfig,
                                                               graphVectorSeedProbe);
                 if (probe) {
-                    vectorSeedHashes.reserve(probe.value().size());
-                    for (const auto& hit : probe.value()) {
-                        if (!hit.documentHash.empty()) {
-                            vectorSeedHashes.push_back(hit.documentHash);
-                        }
+                    vectorSeedEvidence =
+                        rankTopologyVectorSeedEvidence(probe.value(), graphVectorSeedProbe);
+                    vectorSeedHashes.reserve(vectorSeedEvidence.size());
+                    for (const auto& seed : vectorSeedEvidence) {
+                        vectorSeedHashes.push_back(seed.documentHash);
                     }
                 }
             }
@@ -2068,12 +2183,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             }
             const bool vectorBackendSupportsAllowedSetAnn =
                 vectorDb_ &&
-                (vectorDb_->getConfig().search_engine == vector::VectorSearchEngine::Vec0L2 ||
-                 vectorDb_->getConfig().search_engine == vector::VectorSearchEngine::SimeonPqAdc);
+                vectorDb_->getConfig().search_engine == vector::VectorSearchEngine::SimeonPqAdc;
             const bool vectorBackendSupportsRoutedCandidates =
                 vectorBackendSupportsAllowedSetAnn ||
-                (vectorDb_ && vectorDb_->getConfig().search_engine ==
-                                  vector::VectorSearchEngine::ExactScan);
+                (vectorDb_ &&
+                 vectorDb_->getConfig().search_engine == vector::VectorSearchEngine::ExactScan);
             const bool deferTopologyMemberLimitToVectorRanker =
                 vectorBackendSupportsAllowedSetAnn &&
                 workingConfig.topologyVectorPolicy ==
@@ -2090,6 +2204,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             topologyAssistReq.snapshotCache = topologySnapshotCache_;
             topologyAssistReq.expectedTopologyEpoch = freshness.topologyEpoch;
             topologyAssistReq.vectorSeedHashes = std::move(vectorSeedHashes);
+            topologyAssistReq.vectorSeedEvidence = std::move(vectorSeedEvidence);
             topologyAssistReq.maxVectorSeeds = graphVectorSeedProbe;
             topologyAssistReq.collectGraphDiagnostics = stageTraceEnabled;
 
@@ -2117,7 +2232,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             const bool topologyVectorAllowedSetAnnEligible =
                 topologyVectorFilterEligible && vectorBackendSupportsAllowedSetAnn;
             const std::size_t topologyVectorResultLimit =
-                deferTopologyMemberLimitToVectorRanker && workingConfig.topologyMaxDocs > 0
+                topologyVectorShadow || topologyVectorAugment
+                    ? workingConfig.resolvedTopologyExpansionOutputLimit(effectiveVectorMaxResults)
+                : deferTopologyMemberLimitToVectorRanker && workingConfig.topologyMaxDocs > 0
                     ? std::min(effectiveVectorMaxResults, workingConfig.topologyMaxDocs)
                     : effectiveVectorMaxResults;
             topologyWeakQueryNarrowApplied = false;
@@ -2125,8 +2242,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             setDebug(response.debugStats, metrics::kTopologyVectorPolicy,
                      SearchEngineConfig::topologyVectorPolicyToString(
                          workingConfig.topologyVectorPolicy));
+            setDebug(response.debugStats, metrics::kTopologyExpansionOutputBudget,
+                     std::to_string(topologyVectorResultLimit));
             response.debugStats["topology_vector_seed_probe"] =
                 std::to_string(graphVectorSeedProbe);
+            response.debugStats["topology_graph_weighted_seed_ranking"] =
+                workingConfig.topologyGraphWeightedSeedRanking ? "1" : "0";
             if (topologyAssist.vectorSeedsAdded > 0) {
                 response.debugStats["topology_vector_seeds_added"] =
                     std::to_string(topologyAssist.vectorSeedsAdded);
@@ -2240,7 +2361,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                      topologyRouteAllowedDocumentGroups, topologyRouteQuotas,
                      topologyVectorFilterEligible, topologyVectorAllowedSetAnnEligible,
                      topologyVectorResultLimit, vectorBackendSupportsRoutedCandidates,
-                     topologyVectorShadow, topologyVectorAugment, &topologyVectorFilterApplied,
+                     vectorBackendSupportsAllowedSetAnn, topologyVectorShadow,
+                     topologyVectorAugment, &topologyVectorFilterApplied,
                      &topologyVectorFilterFallback, &topologyVectorFilterMatched,
                      &topologyVectorFilterRemoved, &topologyVectorAllowedSetAnnApplied,
                      &topologyVectorAllowedSetAnnFallback, stageTraceEnabled,
@@ -2254,6 +2376,14 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                      &topologyCandidateEvidenceRescueHashes, &topologyCandidateEvidenceRescueDocIds,
                      &topologyCandidateRescueScoredDocIds,
                      &topologyCandidateRescueExactScoredDocIds,
+                     &topologyCandidateRescueExactScoredRows,
+                     &topologyCandidateRescueExactCandidateHashesRequested,
+                     &topologyCandidateRescueExactRowsVisitedObserved,
+                     &topologyCandidateRescueExactRowsVisited,
+                     &topologyCandidateRescueExactDistanceEvaluationsObserved,
+                     &topologyCandidateRescueExactDistanceEvaluations,
+                     &topologyCandidateRescueExactReturnedRows,
+                     &topologyCandidateRescueExactMatchedDocumentHashes,
                      topologyRouteWorkBudget = workingConfig.topologyRouteWorkBudget]() {
                         YAMS_ZONE_SCOPED_N("component::vector");
                         const auto queryRoutedVectors =
@@ -2319,7 +2449,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                 if (!global) {
                                     return global;
                                 }
-                                auto expansion = queryRoutedVectors(vectorSearchDiagnostics);
+                                const auto candidateFilterMode =
+                                    vectorBackendSupportsAllowedSetAnn
+                                        ? vector::CandidateFilterMode::DocumentTopK
+                                        : vector::CandidateFilterMode::BackendDefault;
+                                auto expansion = queryRoutedVectors(vectorSearchDiagnostics,
+                                                                    candidateFilterMode);
                                 topologyCandidateRescueScoredDocIds =
                                     collectUniqueComponentDocIds(expansion);
                                 auto merged = detail::mergeVectorCandidateRescues(
@@ -2356,9 +2491,33 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                     collectUniqueComponentDocIds(shadowExpansion);
                                 if (stageTraceEnabled) {
                                     vector::VectorSearchDiagnostics exactDiagnostics;
+                                    exactDiagnostics.collectVisitedDocumentHashes = true;
+                                    auto exactExpansion = queryRoutedVectors(
+                                        exactDiagnostics,
+                                        vector::CandidateFilterMode::ExactDocumentComplete);
+                                    topologyCandidateRescueExactCandidateHashesRequested =
+                                        topologyRouteAllowedDocuments->size();
+                                    topologyCandidateRescueExactRowsVisitedObserved =
+                                        exactDiagnostics.rowsVisitedObserved;
+                                    topologyCandidateRescueExactRowsVisited =
+                                        exactDiagnostics.rowsVisited;
+                                    topologyCandidateRescueExactDistanceEvaluationsObserved =
+                                        exactDiagnostics.exactDistanceEvaluationsObserved;
+                                    topologyCandidateRescueExactDistanceEvaluations =
+                                        exactDiagnostics.exactDistanceEvaluations;
+                                    topologyCandidateRescueExactReturnedRows =
+                                        exactDiagnostics.returnedRows;
+                                    topologyCandidateRescueExactMatchedDocumentHashes.assign(
+                                        exactDiagnostics.visitedDocumentHashes.begin(),
+                                        exactDiagnostics.visitedDocumentHashes.end());
+                                    std::ranges::sort(
+                                        topologyCandidateRescueExactMatchedDocumentHashes);
                                     topologyCandidateRescueExactScoredDocIds =
-                                        collectUniqueComponentDocIds(queryRoutedVectors(
-                                            exactDiagnostics, vector::CandidateFilterMode::Exact));
+                                        collectUniqueComponentDocIds(exactExpansion);
+                                    topologyCandidateRescueExactScoredRows =
+                                        buildComponentHitSummaryJson(exactExpansion,
+                                                                     topologyVectorResultLimit)
+                                            .dump();
                                 }
                                 if (!shadowExpansion.empty()) {
                                     topologySession.certificate.work =
@@ -2563,6 +2722,38 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 setDebug(response.debugStats,
                          metrics::kTopologyCandidateRescueExactScoredCandidateDocIds,
                          joinWithTab(topologyCandidateRescueExactScoredDocIds));
+                setDebug(response.debugStats,
+                         metrics::kTopologyCandidateRescueExactScoredCandidateRows,
+                         topologyCandidateRescueExactScoredRows);
+                setDebug(response.debugStats,
+                         metrics::kTopologyCandidateRescueExactCandidateHashesRequested,
+                         std::to_string(topologyCandidateRescueExactCandidateHashesRequested));
+                setDebug(
+                    response.debugStats, metrics::kTopologyCandidateRescueExactRowsVisitedStatus,
+                    topologyCandidateRescueExactRowsVisitedObserved ? "observed" : "unavailable");
+                setDebug(response.debugStats, metrics::kTopologyCandidateRescueExactRowsVisited,
+                         std::to_string(topologyCandidateRescueExactRowsVisited));
+                setDebug(response.debugStats,
+                         metrics::kTopologyCandidateRescueExactDistanceEvaluationsStatus,
+                         topologyCandidateRescueExactDistanceEvaluationsObserved ? "observed"
+                                                                                 : "unavailable");
+                setDebug(response.debugStats,
+                         metrics::kTopologyCandidateRescueExactDistanceEvaluations,
+                         std::to_string(topologyCandidateRescueExactDistanceEvaluations));
+                setDebug(response.debugStats, metrics::kTopologyCandidateRescueExactReturnedRows,
+                         std::to_string(topologyCandidateRescueExactReturnedRows));
+                setDebug(response.debugStats,
+                         metrics::kTopologyCandidateRescueExactMatchedDocuments,
+                         std::to_string(topologyCandidateRescueExactMatchedDocumentHashes.size()));
+                setDebug(response.debugStats,
+                         metrics::kTopologyCandidateRescueExactMatchedDocumentHashes,
+                         joinWithTab(topologyCandidateRescueExactMatchedDocumentHashes));
+                const auto topologyCandidateRescueExactMatchedDocumentDocIds =
+                    resolveDocumentIdsForTrace(metadataRepo_,
+                                               topologyCandidateRescueExactMatchedDocumentHashes);
+                setDebug(response.debugStats,
+                         metrics::kTopologyCandidateRescueExactMatchedDocumentDocIds,
+                         joinWithTab(topologyCandidateRescueExactMatchedDocumentDocIds));
             }
             traceCollector.recordStageCounter("vector", "topology_filter_applied",
                                               topologyVectorFilterApplied ? 1 : 0);
@@ -3157,6 +3348,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                      std::to_string(trace.finalCandidates));
             setDebug(response.debugStats, metrics::kCandidatePipelineTopologyAnnotatedCandidates,
                      std::to_string(trace.topologyAnnotatedCandidates));
+            setDebug(response.debugStats,
+                     metrics::kCandidatePipelineTopologyFusionRescuedCandidates,
+                     std::to_string(trace.topologyFusionRescuedCandidates));
         }
         return std::move(evidenceResult.value().results);
     };
@@ -4005,6 +4199,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         topKOutcome.buriedSemanticRescueDisplacedDocIds;
     const auto& evidenceRescuePromotedDocIds = topKOutcome.evidenceRescuePromotedDocIds;
     const auto& evidenceRescueDisplacedDocIds = topKOutcome.evidenceRescueDisplacedDocIds;
+    const auto& topologyRescuePromotedDocIds = topKOutcome.topologyRescuePromotedDocIds;
+    const auto& topologyRescueDisplacedDocIds = topKOutcome.topologyRescueDisplacedDocIds;
 
     size_t semanticRescueFinalCount = 0;
     std::vector<std::string> semanticRescueFinalDocIds;
@@ -4051,6 +4247,16 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         joinWithTab(evidenceRescuePromotedDocIds);
     response.debugStats["evidence_rescue_displaced_doc_ids"] =
         joinWithTab(evidenceRescueDisplacedDocIds);
+    response.debugStats["topology_final_rescue_enabled"] =
+        workingConfig.topologyFinalRescueSlots > 0 ? "1" : "0";
+    response.debugStats["topology_final_rescue_slots"] =
+        std::to_string(workingConfig.topologyFinalRescueSlots);
+    response.debugStats["topology_final_rescue_min_score"] =
+        fmt::format("{:.4f}", workingConfig.topologyFinalRescueMinScore);
+    response.debugStats["topology_final_rescue_promoted_doc_ids"] =
+        joinWithTab(topologyRescuePromotedDocIds);
+    response.debugStats["topology_final_rescue_displaced_doc_ids"] =
+        joinWithTab(topologyRescueDisplacedDocIds);
     response.debugStats["semantic_rescue_rate"] = fmt::format("{:.3f}", semanticRescueRate);
     response.debugStats["multi_vector_generated_phrases"] =
         std::to_string(multiVectorGeneratedPhrases);

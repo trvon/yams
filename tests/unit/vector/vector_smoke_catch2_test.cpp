@@ -299,7 +299,8 @@ TEST_CASE_METHOD(VectorSmokeFixture,
     CHECK(constrained.value().front().relevance_score > 0.999F);
 }
 
-TEST_CASE_METHOD(VectorSmokeFixture, "VectorDatabase exact scan breaks score ties deterministically",
+TEST_CASE_METHOD(VectorSmokeFixture,
+                 "VectorDatabase exact scan breaks score ties deterministically",
                  "[vector][contract][exact-scan][catch2]") {
     skipIfNeeded();
 
@@ -394,6 +395,62 @@ TEST_CASE_METHOD(VectorSmokeFixture,
     CHECK(diagnostics.exactDistanceEvaluationsObserved);
     CHECK(diagnostics.rowsVisited == 2U);
     CHECK(diagnostics.exactDistanceEvaluations == 2U);
+    CHECK(diagnostics.returnedRows == 2U);
+}
+
+TEST_CASE_METHOD(VectorSmokeFixture,
+                 "VectorDatabase Simeon document mode applies candidate limit after deduplication",
+                 "[vector][contract][candidate-rescue][spq][catch2]") {
+    skipIfNeeded();
+
+    VectorDatabaseConfig config;
+    config.database_path = ":memory:";
+    config.embedding_dim = 4;
+    config.use_in_memory = true;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.simeon_pq_subquantizers = 2;
+    config.simeon_pq_centroids = 4;
+    config.simeon_pq_train_limit = 16;
+    config.simeon_pq_rerank_factor = 1;
+
+    VectorDatabase db(config);
+    REQUIRE(db.initializeChecked().has_value());
+
+    const auto insert = [&](std::string chunkId, std::string documentHash,
+                            std::vector<float> embedding) {
+        VectorRecord record;
+        record.chunk_id = std::move(chunkId);
+        record.document_hash = std::move(documentHash);
+        record.embedding = std::move(embedding);
+        return db.insertVectorChecked(record);
+    };
+
+    REQUIRE(insert("crowding_1", "crowding", {1.0F, 0.0F, 0.0F, 0.0F}).has_value());
+    REQUIRE(insert("crowding_2", "crowding", {0.99F, 0.01F, 0.0F, 0.0F}).has_value());
+    REQUIRE(insert("crowding_3", "crowding", {0.98F, 0.02F, 0.0F, 0.0F}).has_value());
+    REQUIRE(insert("rescued_1", "rescued", {0.6F, 0.8F, 0.0F, 0.0F}).has_value());
+    REQUIRE(insert("training_1", "training_1", {0.0F, 1.0F, 0.0F, 0.0F}).has_value());
+    REQUIRE(insert("training_2", "training_2", {0.0F, 0.0F, 1.0F, 0.0F}).has_value());
+    REQUIRE(db.buildIndexChecked().has_value());
+
+    VectorSearchDiagnostics diagnostics;
+    VectorSearchParams params;
+    params.k = 2;
+    params.similarity_threshold = -1.0F;
+    params.candidate_hashes = {"crowding", "rescued"};
+    params.candidate_filter_mode = CandidateFilterMode::DocumentTopK;
+    params.diagnostics = &diagnostics;
+
+    auto results = db.searchSimilarChecked({1.0F, 0.0F, 0.0F, 0.0F}, params);
+
+    REQUIRE(results.has_value());
+    REQUIRE(results.value().size() == 2U);
+    CHECK(results.value()[0].document_hash == "crowding");
+    CHECK(results.value()[1].document_hash == "rescued");
+    CHECK(diagnostics.usedAnn);
+    CHECK_FALSE(diagnostics.usedExactScan);
+    CHECK(diagnostics.rowsVisited == 4U);
+    CHECK(diagnostics.exactDistanceEvaluations == 4U);
     CHECK(diagnostics.returnedRows == 2U);
 }
 

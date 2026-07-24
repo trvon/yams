@@ -104,6 +104,18 @@ public:
                                  VectorSearchDiagnostics& diagnostics) = 0;
 };
 
+/// Optional backend-native document candidate scoring. This keeps document-budget semantics
+/// explicit without changing the vector-row contract of ordinary nearest-neighbor search.
+class IDocumentCandidateVectorStore {
+public:
+    virtual ~IDocumentCandidateVectorStore() = default;
+    virtual Result<std::vector<VectorRecord>>
+    searchDocumentCandidatesWithDiagnostics(const std::vector<float>& query_embedding, size_t k,
+                                            float similarity_threshold,
+                                            const std::unordered_set<std::string>& candidate_hashes,
+                                            VectorSearchDiagnostics& diagnostics) = 0;
+};
+
 /// Optional explicit exhaustive candidate-scoring seam. Keeping this separate from searchSimilar
 /// prevents filtered ANN backends from silently changing exact rerank/control semantics.
 class IExactCandidateVectorStore {
@@ -114,6 +126,15 @@ public:
                                          float similarity_threshold,
                                          const std::unordered_set<std::string>& candidate_hashes,
                                          VectorSearchDiagnostics& diagnostics) = 0;
+};
+
+class IAllExactCandidateVectorStore {
+public:
+    virtual ~IAllExactCandidateVectorStore() = default;
+    virtual Result<std::vector<VectorRecord>> searchAllExactCandidateRowsWithDiagnostics(
+        const std::vector<float>& query_embedding, float similarity_threshold,
+        const std::unordered_set<std::string>& candidate_hashes,
+        VectorSearchDiagnostics& diagnostics) = 0;
 };
 
 } // namespace yams::vector

@@ -165,6 +165,10 @@ struct TopologyArtifactBatch {
     std::string algorithm;
     TopologyInputKind inputKind{TopologyInputKind::Hybrid};
     std::string embeddingSpaceIdentity;
+    /// Deterministic identity of typed construction relations (kind, endpoints,
+    /// provenance/version, split, and score). Empty means relation-bound calibration is
+    /// unavailable.
+    std::string protectedRelationIdentity;
     uint64_t generatedAtUnixSeconds{0};
     // Monotonically increasing epoch stamped by the builder on every published batch.
     // Distinct from snapshotId (which is a timestamp) so query-side code can detect

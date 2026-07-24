@@ -208,7 +208,10 @@ queryVectorIndexImpl(const std::shared_ptr<yams::metadata::MetadataRepository>& 
     try {
         vector::VectorSearchParams params;
         params.k = vectorRawCandidateLimit(config, limit, candidates != nullptr);
-        params.similarity_threshold = config.similarityThreshold;
+        params.similarity_threshold =
+            candidateFilterMode == vector::CandidateFilterMode::ExactDocumentComplete
+                ? -1.0F
+                : config.similarityThreshold;
         params.diagnostics = diagnostics;
         if (candidates != nullptr) {
             params.candidate_hashes = *candidates;

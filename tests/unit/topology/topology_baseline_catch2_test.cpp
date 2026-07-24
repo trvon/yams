@@ -414,6 +414,34 @@ TEST_CASE("Topology baseline dirty regions contain seeds and respect rebuild bud
     CHECK(tightRegion.value().exceededRegionBudget);
 }
 
+TEST_CASE("Topology dirty regions include every protected overlap fiber",
+          "[unit][topology][update][overlap]") {
+    TopologyArtifactBatch existing;
+    existing.clusters = {
+        ClusterArtifact{.clusterId = "primary",
+                        .memberCount = 2,
+                        .memberDocumentHashes = {"anchor", "primary-peer"}},
+        ClusterArtifact{.clusterId = "secondary",
+                        .memberCount = 2,
+                        .memberDocumentHashes = {"anchor", "secondary-peer"}},
+    };
+    existing.memberships = {
+        DocumentClusterMembership{
+            .documentHash = "anchor", .clusterId = "primary", .overlapClusterIds = {"secondary"}},
+        DocumentClusterMembership{.documentHash = "primary-peer", .clusterId = "primary"},
+        DocumentClusterMembership{.documentHash = "secondary-peer", .clusterId = "secondary"},
+    };
+    const std::vector<TopologyDocumentInput> changed{
+        TopologyDocumentInput{.documentHash = "anchor"},
+    };
+
+    ConnectedComponentTopologyEngine engine;
+    auto region = engine.defineDirtyRegion(existing, changed, TopologyBuildConfig{});
+    REQUIRE(region.has_value());
+    CHECK(containsHash(region.value().expandedDocumentHashes, "primary-peer"));
+    CHECK(containsHash(region.value().expandedDocumentHashes, "secondary-peer"));
+}
+
 TEST_CASE("Sparse-guided topology routing uses persisted cluster centroids",
           "[unit][topology][baseline]") {
     ConnectedComponentTopologyEngine engine;
@@ -751,11 +779,14 @@ TEST_CASE("SOAR boundary spill chooses a complementary secondary residual",
     CHECK_FALSE(containsHash(artifacts.clusters[1].memberDocumentHashes, "x"));
     const auto routeIndex = SparseGuidedClusterRouter::buildRouteIndex(artifacts);
     REQUIRE(routeIndex.clustersByDocumentHash.contains("x"));
-    CHECK(routeIndex.clustersByDocumentHash.at("x").size() == 1);
+    CHECK(routeIndex.clustersByDocumentHash.at("x").size() == 2);
     const auto spilledRoutes = router.route(routeRequest, artifacts, routeIndex);
     REQUIRE(spilledRoutes);
     REQUIRE_FALSE(spilledRoutes.value().empty());
-    CHECK(spilledRoutes.value().front().clusterId == primaryRoutes.value().front().clusterId);
+    CHECK(std::ranges::any_of(spilledRoutes.value(),
+                              [](const auto& route) { return route.clusterId == "primary"; }));
+    CHECK(std::ranges::any_of(spilledRoutes.value(),
+                              [](const auto& route) { return route.clusterId == "orthogonal"; }));
 
     auto naive = artifacts;
     naive.clusters[2].memberDocumentHashes = {"orthogonal"};
@@ -947,6 +978,9 @@ TEST_CASE("Metadata KG topology store persists memberships and latest snapshot",
     CHECK(loadedBatchResult.value()->embeddingSpaceIdentity == "test-space-v1");
     CHECK((loadedBatchResult.value()->clusters.size() == batchResult.value().clusters.size()));
     REQUIRE_FALSE(loadedBatchResult.value()->clusters.empty());
+    CHECK_FALSE(batchResult.value().protectedRelationIdentity.empty());
+    CHECK(loadedBatchResult.value()->protectedRelationIdentity ==
+          batchResult.value().protectedRelationIdentity);
     CHECK(loadedBatchResult.value()->clusters.front().densityScore ==
           Catch::Approx(batchResult.value().clusters.front().densityScore));
     CHECK(loadedBatchResult.value()->clusters.front().protectedPairCount ==
@@ -1133,6 +1167,24 @@ TEST_CASE("Topology extractor and offline analyzer use real stores",
     CHECK(extractionStats.embeddingSpaceIdentity == "test-space-v1");
     CHECK_FALSE(extractionStats.mixedEmbeddingSpaces);
 
+    TopologyExtractionConfig composedConfig{.limit = 10,
+                                            .maxNeighborsPerDocument = 8,
+                                            .includeEmbeddings = true,
+                                            .includeMetadata = false,
+                                            .requireEmbeddings = true,
+                                            .requireGraphNode = true};
+    composedConfig.featureComposition.enableMatryoshkaCoarseView = true;
+    composedConfig.featureComposition.matryoshkaTargetDim = 2;
+    TopologyExtractionStats composedStats;
+    auto composed = extractor->extract(composedConfig, &composedStats);
+    REQUIRE(composed.has_value());
+    CHECK(composedStats.embeddingSpaceIdentity != "test-space-v1");
+    CHECK(composedStats.embeddingSpaceIdentity.starts_with("topology-coordinate:v1;"));
+    CHECK(composedStats.embeddingSpaceIdentity.find("raw=test-space-v1") != std::string::npos);
+    CHECK(composedStats.embeddingSpaceIdentity.find("raw_dim=4") != std::string::npos);
+    CHECK(composedStats.embeddingSpaceIdentity.find("composed_dim=2") != std::string::npos);
+    CHECK(composedStats.embeddingSpaceIdentity.find("projection=fnv1a64:") != std::string::npos);
+
     const auto aExtracted = std::find_if(
         extracted.value().begin(), extracted.value().end(),
         [](const TopologyDocumentInput& input) { return input.documentHash == "aaa"; });
@@ -1204,6 +1256,43 @@ TEST_CASE("Topology update replaces removed cluster memberships consistently",
     CHECK((aaaMembership == updated.value().memberships.end()));
     CHECK((updated.value().memberships.size() == 3));
     CHECK((stats.membershipsUpdated >= 3));
+}
+
+TEST_CASE("Topology update scrubs overlap references to removed secondary clusters",
+          "[unit][topology][update][overlap]") {
+    TopologyArtifactBatch existing;
+    existing.embeddingSpaceIdentity = "test-space-v1";
+    existing.clusters = {
+        ClusterArtifact{
+            .clusterId = "changed-primary", .memberCount = 1, .memberDocumentHashes = {"changed"}},
+        ClusterArtifact{.clusterId = "secondary",
+                        .memberCount = 2,
+                        .memberDocumentHashes = {"changed", "survivor"}},
+        ClusterArtifact{.clusterId = "survivor-primary",
+                        .memberCount = 1,
+                        .memberDocumentHashes = {"survivor"}},
+    };
+    existing.memberships = {
+        DocumentClusterMembership{.documentHash = "changed",
+                                  .clusterId = "changed-primary",
+                                  .overlapClusterIds = {"secondary"}},
+        DocumentClusterMembership{.documentHash = "survivor",
+                                  .clusterId = "survivor-primary",
+                                  .overlapClusterIds = {"secondary"}},
+    };
+    const std::vector<TopologyDocumentInput> changed{
+        TopologyDocumentInput{
+            .documentHash = "changed", .filePath = "/repo/changed.md", .embedding = {1.0F, 0.0F}},
+    };
+
+    ConnectedComponentTopologyEngine engine;
+    auto updated = engine.updateArtifacts(
+        existing, changed, TopologyBuildConfig{.embeddingSpaceIdentity = "test-space-v1"});
+    REQUIRE(updated.has_value());
+    const auto survivor = std::ranges::find(updated.value().memberships, "survivor",
+                                            &DocumentClusterMembership::documentHash);
+    REQUIRE(survivor != updated.value().memberships.end());
+    CHECK(survivor->overlapClusterIds.empty());
 }
 
 TEST_CASE("Partial topology updates preserve only a common embedding space identity",

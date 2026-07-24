@@ -250,6 +250,52 @@ class RetrievalQualityEnvironmentTests(unittest.TestCase):
         self.assertNotIn("seed_semantic_neighbors", params)
         self.assertNotIn("shared_warm_cache", params)
         self.assertEqual(params["graph_vector_seed_probe"], 16)
+        self.assertNotIn("expansion_output_limit", params)
+        weighted_arm = next(
+            arm
+            for arm in plan["arms"]
+            if arm["name"] == "graph_rescue_shadow_weighted_c32_plus16"
+        )
+        self.assertTrue(weighted_arm["params"]["graph_weighted_seed_ranking"])
+        self.assertEqual(weighted_arm["factors"]["graph_seed_ranking"], "query_weighted")
+        output_arms = {
+            arm["name"]: arm
+            for arm in plan["arms"]
+            if "full_relation_out" in arm["name"]
+        }
+        self.assertEqual(
+            {
+                name: arm["params"]["expansion_output_limit"]
+                for name, arm in output_arms.items()
+            },
+            {
+                "graph_rescue_shadow_full_relation_out128": 128,
+                "graph_rescue_shadow_full_relation_out512": 512,
+                "graph_rescue_shadow_full_relation_out1024": 1024,
+            },
+        )
+        self.assertTrue(
+            all(arm["params"]["max_docs"] == 2048 for arm in output_arms.values())
+        )
+        active_arm = next(
+            arm
+            for arm in plan["arms"]
+            if arm["name"] == "graph_rescue_augment_full_relation_doc1024"
+        )
+        self.assertEqual(active_arm["params"]["max_docs"], 2048)
+        self.assertEqual(active_arm["params"]["expansion_output_limit"], 1024)
+        self.assertEqual(
+            active_arm["factors"]["candidate_selection"],
+            "simeon_document_top_k",
+        )
+        self.assertIn(
+            "topology_expansion_output_budget_avg",
+            plan["validate"]["require_metrics"],
+        )
+        self.assertIn(
+            "topology_candidate_rescue_exact_document_materialization_rate",
+            plan["validate"]["require_metrics"],
+        )
         self.assertIn(
             "topology_vector_seeds_nonzero_rate",
             plan["validate"]["require_metrics"],
@@ -1893,6 +1939,22 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
                     "topology_candidate_rescue_evidence_rescue_doc_ids": "relevant",
                     "topology_candidate_rescue_scored_candidate_doc_ids": "irrelevant",
                     "topology_candidate_rescue_exact_scored_candidate_doc_ids": "relevant\tother",
+                    "topology_candidate_rescue_exact_scored_candidate_rows": json.dumps(
+                        {
+                            "vector": {
+                                "top_hits": [
+                                    {"doc_id": "relevant", "rank": 1, "score": 0.8},
+                                    {"doc_id": "other", "rank": 7, "score": 0.02},
+                                ]
+                            }
+                        }
+                    ),
+                    "topology_candidate_rescue_exact_candidate_hashes_requested": "2",
+                    "topology_candidate_rescue_exact_rows_visited": "3",
+                    "topology_candidate_rescue_exact_distance_evaluations": "3",
+                    "topology_candidate_rescue_exact_returned_rows": "3",
+                    "topology_candidate_rescue_exact_matched_documents": "2",
+                    "topology_candidate_rescue_exact_matched_document_doc_ids": "relevant\tother",
                     "topology_graph_relation_candidate_doc_ids": "relevant\tother",
                     "topology_graph_fetched_candidate_doc_ids": "relevant\tother",
                     "topology_graph_eligible_candidate_doc_ids": "relevant\tother",
@@ -1925,6 +1987,25 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
                     "topology_candidate_rescue_evidence_rescue_doc_ids": "",
                     "topology_candidate_rescue_scored_candidate_doc_ids": "shadow-relevant",
                     "topology_candidate_rescue_exact_scored_candidate_doc_ids": "shadow-relevant",
+                    "topology_candidate_rescue_exact_scored_candidate_rows": json.dumps(
+                        {
+                            "vector": {
+                                "top_hits": [
+                                    {
+                                        "doc_id": "shadow-relevant",
+                                        "rank": 13,
+                                        "score": -0.1,
+                                    }
+                                ]
+                            }
+                        }
+                    ),
+                    "topology_candidate_rescue_exact_candidate_hashes_requested": "1",
+                    "topology_candidate_rescue_exact_rows_visited": "1",
+                    "topology_candidate_rescue_exact_distance_evaluations": "1",
+                    "topology_candidate_rescue_exact_returned_rows": "1",
+                    "topology_candidate_rescue_exact_matched_documents": "1",
+                    "topology_candidate_rescue_exact_matched_document_doc_ids": "shadow-relevant",
                     "topology_graph_relation_candidate_doc_ids": "shadow-relevant",
                     "topology_graph_fetched_candidate_doc_ids": "shadow-relevant",
                     "topology_graph_eligible_candidate_doc_ids": "shadow-relevant",
@@ -1979,10 +2060,41 @@ src/metadata/metadata_repository.cpp:1251: cachedExtractedCount_ <= cachedDocume
             metrics["topology_candidate_rescue_missing_selected_query_rate"], 1.0
         )
         self.assertEqual(
+            metrics["topology_candidate_rescue_missing_exact_matched_query_rate"],
+            1.0,
+        )
+        self.assertEqual(
             metrics["topology_candidate_rescue_missing_scored_query_rate"], 0.5
         )
         self.assertEqual(
             metrics["topology_candidate_rescue_missing_exact_scored_query_rate"], 1.0
+        )
+        self.assertEqual(
+            metrics["topology_candidate_rescue_missing_exact_rank_avg"], 10.0
+        )
+        self.assertAlmostEqual(
+            metrics["topology_candidate_rescue_missing_exact_score_avg"], -0.04
+        )
+        self.assertEqual(
+            metrics["topology_candidate_rescue_exact_hashes_requested_sum"], 3.0
+        )
+        self.assertEqual(
+            metrics["topology_candidate_rescue_exact_rows_visited_sum"], 4.0
+        )
+        self.assertEqual(
+            metrics["topology_candidate_rescue_exact_distance_evaluations_sum"], 4.0
+        )
+        self.assertEqual(
+            metrics["topology_candidate_rescue_exact_returned_rows_sum"], 4.0
+        )
+        self.assertEqual(
+            metrics["topology_candidate_rescue_exact_matched_documents_sum"], 3.0
+        )
+        self.assertEqual(
+            metrics[
+                "topology_candidate_rescue_exact_document_materialization_rate"
+            ],
+            1.0,
         )
         self.assertEqual(
             metrics["topology_candidate_rescue_post_fusion_survival_rate"], 0.5

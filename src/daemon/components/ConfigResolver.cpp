@@ -998,11 +998,10 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
     try {
         namespace fs = std::filesystem;
         fs::path cfgPath = resolveDefaultConfigPath();
-        if (cfgPath.empty() || !fs::exists(cfgPath)) {
-            return policy;
+        std::map<std::string, std::string> kv;
+        if (!cfgPath.empty() && fs::exists(cfgPath)) {
+            kv = parseSimpleTomlFlat(cfgPath);
         }
-
-        auto kv = parseSimpleTomlFlat(cfgPath);
 
         if (auto it = kv.find("topology.engine"); it != kv.end()) {
             if (!it->second.empty()) {
@@ -1060,6 +1059,31 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
     } catch (const std::exception& e) {
         spdlog::debug("Error reading config for topology engine policy: {}", e.what());
     }
+
+    const auto applyBoolEnv = [](const char* name, std::optional<bool>& target) {
+        if (const auto value = parseBoolValue(getenvValue(name)); value.has_value()) {
+            target = value;
+        }
+    };
+    const auto applySizeEnv = [](const char* name, std::optional<std::size_t>& target) {
+        if (const auto value = parseSize(getenvValue(name)); value.has_value()) {
+            target = value;
+        }
+    };
+    const auto applyFloatEnv = [](const char* name, std::optional<float>& target) {
+        if (const auto value = parseDouble(getenvValue(name)); value.has_value()) {
+            target = static_cast<float>(*value);
+        }
+    };
+    applyBoolEnv("YAMS_TOPOLOGY_FEATURE_ENTITY_FUSION", policy.featureEntityFusion);
+    applySizeEnv("YAMS_TOPOLOGY_FEATURE_ENTITY_K", policy.featureEntitySignatureK);
+    applyFloatEnv("YAMS_TOPOLOGY_FEATURE_ENTITY_ALPHA", policy.featureEntityFusionAlpha);
+    applyFloatEnv("YAMS_TOPOLOGY_FEATURE_ENTITY_MIN_CONF", policy.featureEntityMinConfidence);
+    applyBoolEnv("YAMS_TOPOLOGY_FEATURE_MATRYOSHKA", policy.featureMatryoshkaCoarseView);
+    applySizeEnv("YAMS_TOPOLOGY_FEATURE_MATRYOSHKA_DIM", policy.featureMatryoshkaTargetDim);
+    applyBoolEnv("YAMS_TOPOLOGY_FEATURE_MINHASH", policy.featureMinHashSketch);
+    applySizeEnv("YAMS_TOPOLOGY_FEATURE_MINHASH_DIM", policy.featureMinHashSketchDim);
+    applyFloatEnv("YAMS_TOPOLOGY_FEATURE_MINHASH_ALPHA", policy.featureMinHashAlpha);
 
     return policy;
 }

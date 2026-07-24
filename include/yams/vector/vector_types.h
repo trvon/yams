@@ -207,6 +207,7 @@ struct VectorSearchDiagnostics {
     bool usedAnn = false;
     bool usedExactScan = false;
     bool usedCandidateIndexCache = false;
+    bool collectVisitedDocumentHashes = false;
     bool rowsVisitedObserved = false;
     bool exactDistanceEvaluationsObserved = false;
     bool annCandidateBudgetObserved = false;
@@ -217,6 +218,7 @@ struct VectorSearchDiagnostics {
     size_t candidateIndexPayloadBytes = 0;
     size_t materializedRows = 0;
     size_t returnedRows = 0;
+    std::unordered_set<std::string> visitedDocumentHashes;
     std::uint64_t candidateLookupNanoseconds = 0;
     std::uint64_t candidateProjectionNanoseconds = 0;
     std::uint64_t pqLutNanoseconds = 0;
@@ -227,11 +229,15 @@ struct VectorSearchDiagnostics {
 };
 
 /// Controls how an explicit candidate-document set is evaluated. BackendDefault lets the selected
-/// engine use its native filtered-search path; Exact is reserved for controls and rerank seams that
-/// require exhaustive scoring within the candidate set.
+/// engine use its native filtered-search path. Exact exhaustively scores the candidate set but
+/// retains only the requested number of vector rows. ExactDocumentComplete returns every valid row
+/// for exact controls that must aggregate and truncate at the document boundary. DocumentTopK asks
+/// a supporting backend to retain one best row per candidate document before applying k.
 enum class CandidateFilterMode {
     BackendDefault,
     Exact,
+    ExactDocumentComplete,
+    DocumentTopK,
 };
 
 struct VectorSearchParams {

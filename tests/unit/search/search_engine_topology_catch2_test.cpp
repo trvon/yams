@@ -1,3 +1,4 @@
+#include <nlohmann/json.hpp>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
@@ -773,8 +774,8 @@ TEST_CASE("SearchEngine topology augmentation materializes query-scored rescue c
           "[search][topology][candidate-rescue][catch2]") {
     yams::test::ScopedEnvVar stageTrace("YAMS_SEARCH_STAGE_TRACE", std::optional<std::string>("1"));
 
-    for (const auto searchEngine : {vector::VectorSearchEngine::SimeonPqAdc,
-                                    vector::VectorSearchEngine::ExactScan}) {
+    for (const auto searchEngine :
+         {vector::VectorSearchEngine::SimeonPqAdc, vector::VectorSearchEngine::ExactScan}) {
         CAPTURE(searchEngine);
         TopologySearchFixture fix{searchEngine};
         seedTopologyDocuments(fix);
@@ -789,7 +790,9 @@ TEST_CASE("SearchEngine topology augmentation materializes query-scored rescue c
         config.topologyNarrowMinBoundaryMargin = 0.0F;
         config.textMaxResults = 1;
         config.vectorMaxResults = 1;
+        config.enableWeakQueryFanoutBoost = false;
         config.topologyMaxDocs = 2;
+        config.topologyExpansionOutputLimit = 2;
         config.similarityThreshold = -1.0F;
 
         auto response = runTopologySearch(fix, generator, config, 4, "alpha one");
@@ -803,6 +806,8 @@ TEST_CASE("SearchEngine topology augmentation materializes query-scored rescue c
 
         const auto& debug = response.value().debugStats;
         CHECK(debug.at("topology_vector_policy") == "augment");
+        CHECK(debug.at("topology_expansion_output_budget") == "2");
+        CHECK(debug.at("vector_search_result_budget") == "1");
         CHECK(debug.at("topology_candidate_rescue_attempted") == "1");
         CHECK(debug.at("topology_candidate_rescue_applied") == "1");
         CHECK(debug.at("topology_candidate_rescue_added_candidates") == "2");
@@ -833,6 +838,7 @@ TEST_CASE("SearchEngine shadow policy measures candidate rescue without changing
     config.textMaxResults = 1;
     config.vectorMaxResults = 1;
     config.topologyMaxDocs = 2;
+    config.topologyExpansionOutputLimit = 2;
     config.similarityThreshold = -1.0F;
 
     auto response = runTopologySearch(fix, generator, config, 4, "alpha one");
@@ -856,6 +862,93 @@ TEST_CASE("SearchEngine shadow policy measures candidate rescue without changing
     CHECK(debug.at("topology_candidate_rescue_novel_candidate_doc_ids") == "x2");
     CHECK(debug.at("topology_candidate_rescue_evidence_rescue_doc_ids") == "x1");
     CHECK(debug.at("topology_candidate_rescue_exact_scored_candidate_doc_ids") == "x1\tx2");
+    const auto trace =
+        nlohmann::json::parse(debug.at("topology_candidate_rescue_exact_scored_candidate_rows"));
+    REQUIRE(trace.contains("vector"));
+    const auto& hits = trace.at("vector").at("top_hits");
+    REQUIRE(hits.size() == 2U);
+    CHECK(hits.at(0).at("doc_id") == "x2");
+    CHECK(hits.at(0).at("rank") == 1U);
+    CHECK(hits.at(0).at("score").get<double>() < 0.5);
+    CHECK(hits.at(1).at("doc_id") == "x1");
+    CHECK(debug.at("topology_candidate_rescue_exact_candidate_hashes_requested") == "2");
+    CHECK(debug.at("topology_candidate_rescue_exact_rows_visited_status") == "observed");
+    CHECK(debug.at("topology_candidate_rescue_exact_rows_visited") == "2");
+    CHECK(debug.at("topology_candidate_rescue_exact_distance_evaluations_status") == "observed");
+    CHECK(debug.at("topology_candidate_rescue_exact_distance_evaluations") == "2");
+    CHECK(debug.at("topology_candidate_rescue_exact_returned_rows") == "2");
+    CHECK(debug.at("topology_candidate_rescue_exact_matched_documents") == "2");
+    CHECK(debug.at("topology_candidate_rescue_exact_matched_document_hashes") == "x1\tx2");
+    CHECK(debug.at("topology_candidate_rescue_exact_matched_document_doc_ids") == "x1\tx2");
+}
+
+TEST_CASE("SearchEngine topology final-window rescue promotes a topology-scored candidate",
+          "[search][topology][candidate-rescue][final-rescue][catch2]") {
+    yams::test::ScopedEnvVar stageTrace("YAMS_SEARCH_STAGE_TRACE", std::optional<std::string>("1"));
+
+    TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
+    fix.addDocument("x1", "alpha one", {1.0F, 0.0F});
+    // x2 is topology-reachable from x1 (see seedTwoClusterTopology) but its real vector embedding
+    // is deliberately dissimilar to the query, mirroring the q0/q37 boundary: relation-reachable
+    // and document-scored, but losing on raw fused score alone.
+    fix.addDocument("x2", "alpha two", {0.1F, 0.9F});
+    // x3 is a strong organic match (like x1) but has no topology relation at all, so it competes
+    // for the same final-window slot as x2 without ever receiving topology evidence.
+    fix.addDocument("x3", "alpha one", {0.95F, 0.05F});
+    fix.addDocument("y1", "omega one", {0.0F, 1.0F});
+    fix.addDocument("y2", "omega two", {0.1F, 0.9F});
+    seedTwoClusterTopology(fix);
+    REQUIRE(fix.vectorDb->buildIndex());
+    auto generator = makeFixedGenerator({1.0F, 0.0F});
+
+    auto config = topologyRoutingTestConfig(true);
+    config.topologyRoutingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    config.topologyVectorPolicy = SearchEngineConfig::TopologyVectorPolicy::Augment;
+    config.topologySparseDenseAlpha = 1.0F;
+    config.topologyNarrowMinBoundaryMargin = 0.0F;
+    config.textMaxResults = 2;
+    config.vectorMaxResults = 2;
+    config.enableWeakQueryFanoutBoost = false;
+    config.topologyMaxDocs = 2;
+    config.topologyExpansionOutputLimit = 2;
+    config.similarityThreshold = -1.0F;
+
+    // Default: no final-window rescue. The window's 2 slots go to the strong organic matches
+    // (x1, x3); the weak, topology-only x2 is excluded even though it was admitted and scored as
+    // a candidate.
+    auto baseline = runTopologySearch(fix, generator, config, 2, "alpha one");
+    REQUIRE(baseline.has_value());
+    REQUIRE(baseline.value().results.size() == 2);
+    std::vector<std::string> baselineHashes;
+    for (const auto& r : baseline.value().results) {
+        baselineHashes.push_back(r.document.sha256Hash);
+    }
+    CHECK(std::ranges::find(baselineHashes, "x1") != baselineHashes.end());
+    CHECK(std::ranges::find(baselineHashes, "x3") != baselineHashes.end());
+    CHECK(std::ranges::find(baselineHashes, "x2") == baselineHashes.end());
+    CHECK(baseline.value().debugStats.at("topology_final_rescue_enabled") == "0");
+
+    // Enabling the topology final-window rescue seam and requiring both window slots to carry
+    // topology evidence promotes x2 (which has it) over x3 (which does not), independent of the
+    // generic evidence-rescue family (fusionEvidenceRescueSlots), which stays disabled here.
+    config.topologyFinalRescueSlots = 2;
+    config.topologyFinalRescueMinScore = 0.005F;
+    auto rescued = runTopologySearch(fix, generator, config, 2, "alpha one");
+    REQUIRE(rescued.has_value());
+    REQUIRE(rescued.value().results.size() == 2);
+    std::vector<std::string> rescuedHashes;
+    for (const auto& r : rescued.value().results) {
+        rescuedHashes.push_back(r.document.sha256Hash);
+    }
+    CHECK(std::ranges::find(rescuedHashes, "x1") != rescuedHashes.end());
+    CHECK(std::ranges::find(rescuedHashes, "x2") != rescuedHashes.end());
+    CHECK(std::ranges::find(rescuedHashes, "x3") == rescuedHashes.end());
+
+    const auto& debug = rescued.value().debugStats;
+    CHECK(debug.at("topology_final_rescue_enabled") == "1");
+    CHECK(debug.at("topology_final_rescue_slots") == "2");
+    CHECK(debug.at("topology_final_rescue_promoted_doc_ids") == "x2");
+    CHECK(debug.at("topology_final_rescue_displaced_doc_ids") == "x3");
 }
 
 TEST_CASE("Evidence pipeline receives no topology adjustments under a shadow policy",
@@ -1333,6 +1426,7 @@ TEST_CASE("Topology routing options preserve the typed product configuration",
     config.topologyRouteWorkBudget.maxRowsVisited = 23;
     config.topologyGraphNeighborMinScore = 0.31F;
     config.topologyGraphNeighborReciprocalOnly = false;
+    config.topologyGraphWeightedSeedRanking = true;
 
     const auto options =
         makeTopologyRoutingOptions(config, SearchEngineConfig::TopologyRoutingMode::WeakQueryOnly,
@@ -1356,6 +1450,7 @@ TEST_CASE("Topology routing options preserve the typed product configuration",
     CHECK(options.collectRouteMembership);
     CHECK(options.graphNeighborMinScore == Catch::Approx(0.31F));
     CHECK_FALSE(options.graphNeighborReciprocalOnly);
+    CHECK(options.graphWeightedSeedRanking);
 }
 
 TEST_CASE("Topology route admission requires the protected-relation proof obligations",
@@ -1662,6 +1757,10 @@ TEST_CASE("Topology construction fingerprint excludes publication and routing re
     CHECK(topologyRoutingConstructionFingerprint(experimental) != baselineIdentity);
     experimental.embeddingSpaceIdentity = baseline.embeddingSpaceIdentity;
 
+    experimental.protectedRelationIdentity = "rewired-relation";
+    CHECK(topologyRoutingConstructionFingerprint(experimental) != baselineIdentity);
+    experimental.protectedRelationIdentity = baseline.protectedRelationIdentity;
+
     experimental.clusters.front().memberDocumentHashes.push_back("new-member");
     CHECK(topologyRoutingConstructionFingerprint(experimental) != baselineIdentity);
 }
@@ -1749,7 +1848,7 @@ TEST_CASE("Topology snapshot cache admits a materialized boundary spill",
     CHECK(result.value()
               .snapshot->sparseRouteIndex.clustersByDocumentHash
               .at(batch.memberships.front().documentHash)
-              .size() == 1);
+              .size() == 2);
 }
 
 TEST_CASE("mergeTopologySeedHashes keeps Tier-1 first and caps vector seeds",
@@ -1803,6 +1902,30 @@ TEST_CASE("rankTopologySeedEvidence keeps ranked lexical evidence and caps fanou
     CHECK((evidence[1].documentHash == "early"));
     CHECK((evidence[2].documentHash == "late-high"));
     CHECK((evidence[0].weight > evidence[1].weight));
+}
+
+TEST_CASE("rankTopologyVectorSeedEvidence preserves vector score and rank",
+          "[unit][search][topology][weighted-seeds]") {
+    std::vector<ComponentResult> components{
+        ComponentResult{.documentHash = "near",
+                        .score = 0.90F,
+                        .source = ComponentResult::Source::Vector,
+                        .rank = 0},
+        ComponentResult{.documentHash = "far",
+                        .score = 0.95F,
+                        .source = ComponentResult::Source::Vector,
+                        .rank = 10},
+        ComponentResult{.documentHash = "near",
+                        .score = 0.80F,
+                        .source = ComponentResult::Source::Vector,
+                        .rank = 2},
+    };
+
+    const auto evidence = rankTopologyVectorSeedEvidence(components, 2);
+    REQUIRE(evidence.size() == 2);
+    CHECK(evidence[0].documentHash == "near");
+    CHECK(evidence[1].documentHash == "far");
+    CHECK(evidence[0].weight > evidence[1].weight);
 }
 
 TEST_CASE("selectTopologyRoutesForNarrowing adapts probes and abstains at an unsafe boundary",
@@ -1905,6 +2028,31 @@ TEST_CASE("rankGraphNeighborCandidates ranks multi-seed hits and filters score/r
     auto oneWayStrict =
         rankGraphNeighborCandidates(oneWay, {"s1"}, 5, 0.25F, /*reciprocalOnly=*/true);
     CHECK(oneWayStrict.empty());
+}
+
+TEST_CASE("rankGraphNeighborCandidates can weight support by query seed evidence",
+          "[unit][search][topology][graph_neighbors][weighted-seeds]") {
+    std::unordered_map<std::string, std::vector<std::tuple<std::string, float, bool>>> adjacency;
+    adjacency["low-1"] = {{"popular", 0.9F, true}};
+    adjacency["low-2"] = {{"popular", 0.9F, true}};
+    adjacency["high"] = {{"focused", 0.9F, true}};
+    const std::vector<std::string> hashes{"low-1", "low-2", "high"};
+    const std::vector<yams::topology::WeightedDocumentSeed> evidence{
+        {.documentHash = "low-1", .weight = 0.1F},
+        {.documentHash = "low-2", .weight = 0.1F},
+        {.documentHash = "high", .weight = 1.0F},
+    };
+
+    const auto unweighted = rankGraphNeighborCandidates(adjacency, hashes, /*maxDocs=*/2,
+                                                        /*minScore=*/0.0F, /*reciprocalOnly=*/true);
+    REQUIRE(unweighted.size() == 2);
+    CHECK(unweighted.front() == "popular");
+
+    const auto weighted =
+        rankGraphNeighborCandidates(adjacency, hashes, /*maxDocs=*/2, /*minScore=*/0.0F,
+                                    /*reciprocalOnly=*/true, evidence);
+    REQUIRE(weighted.size() == 2);
+    CHECK(weighted.front() == "focused");
 }
 
 TEST_CASE("Graph-neighbor trace separates stored relation from the selected cap",

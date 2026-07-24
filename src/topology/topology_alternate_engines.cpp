@@ -1,3 +1,4 @@
+#include <yams/topology/protected_relation_cover.h>
 #include <yams/topology/topology_alternate_engines.h>
 #include <yams/topology/topology_representatives.h>
 
@@ -146,6 +147,7 @@ TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentI
     batch.algorithm = std::move(algorithm);
     batch.inputKind = config.inputKind;
     batch.embeddingSpaceIdentity = config.embeddingSpaceIdentity;
+    batch.protectedRelationIdentity = protectedRelationConstructionIdentity(documents, config);
     batch.generatedAtUnixSeconds = ts.unixSeconds;
 
     if (documents.empty()) {

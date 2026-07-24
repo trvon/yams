@@ -211,6 +211,9 @@ struct SearchEngineConfig {
     /// than this margin. Mixed-corpus calibration favors 0.20; zero disables abstention.
     float topologyNarrowMinBoundaryMargin = 0.20f;
     size_t topologyMaxDocs = 64;
+    /// Maximum independently scored topology-expansion results returned to shadow/augment.
+    /// Zero inherits the global vector result limit for backward-compatible product behavior.
+    size_t topologyExpansionOutputLimit = 0;
     float topologyMedoidBoost = 0.05f;
     /// Maximum additive score evidence from an admitted topology membership.
     float topologyEvidenceWeight = 0.02f;
@@ -261,8 +264,17 @@ struct SearchEngineConfig {
     float topologyGraphNeighborMinScore = 0.25f;
     /// Prefer reciprocal semantic_neighbor edges when expanding graph neighbors.
     bool topologyGraphNeighborReciprocalOnly = true;
+    /// Rank graph candidates by query-weighted seed support instead of raw seed-hit count.
+    /// Default-off until the candidate-rescue ablation demonstrates transfer.
+    bool topologyGraphWeightedSeedRanking = false;
     /// GraphNeighbors seed ANN k. 0 = off (product default); opt-in for experiments.
     size_t topologyGraphVectorSeedProbe = 0;
+
+    [[nodiscard]] size_t
+    resolvedTopologyExpansionOutputLimit(size_t globalVectorResultLimit) const noexcept {
+        return topologyExpansionOutputLimit == 0 ? globalVectorResultLimit
+                                                 : topologyExpansionOutputLimit;
+    }
 
     bool bypassCorpusWarmingGate = false;
     float rrfK = 12.0f;
@@ -290,6 +302,22 @@ struct SearchEngineConfig {
     float semanticRescueMinVectorScore = 0.0f;
     size_t fusionEvidenceRescueSlots = 0;
     float fusionEvidenceRescueMinScore = 0.0f;
+
+    /// Guarantee up to this many topology-rescued candidates a slot in the fused candidate pool
+    /// beyond the ordinary fusion window (see EvidenceSearchPipeline::execute). Purely additive:
+    /// it never displaces a candidate already inside the window, so baseline-relevant candidates
+    /// are preserved by construction. Default 0 (disabled/product-unchanged).
+    size_t topologyFusionRescueSlots = 0;
+    /// Minimum SearchResult::topologyScore required for fusion-window rescue eligibility.
+    float topologyFusionRescueMinScore = 0.0f;
+
+    /// Guarantee up to this many topology-scored candidates a slot in the final top-k window,
+    /// promoted over the weakest-scored window occupant (mirrors fusionEvidenceRescueSlots but
+    /// keyed on SearchResult::topologyScore instead of generic lexical/vector/kg evidence, so the
+    /// two rescue obligations stay independently measurable). Default 0 (disabled).
+    size_t topologyFinalRescueSlots = 0;
+    /// Minimum SearchResult::topologyScore required for final-window rescue eligibility.
+    float topologyFinalRescueMinScore = 0.0f;
 
     bool enableMultiVectorQuery = false;
     size_t multiVectorMaxPhrases = 3;
@@ -491,6 +519,7 @@ struct SearchEngineConfig {
         topologyAdaptiveProbeScoreGap = source.topologyAdaptiveProbeScoreGap;
         topologyNarrowMinBoundaryMargin = source.topologyNarrowMinBoundaryMargin;
         topologyMaxDocs = source.topologyMaxDocs;
+        topologyExpansionOutputLimit = source.topologyExpansionOutputLimit;
         topologyMedoidBoost = source.topologyMedoidBoost;
         topologyEvidenceWeight = source.topologyEvidenceWeight;
         topologySparseDenseAlpha = source.topologySparseDenseAlpha;
@@ -500,7 +529,12 @@ struct SearchEngineConfig {
         topologyExpansionSource = source.topologyExpansionSource;
         topologyGraphNeighborMinScore = source.topologyGraphNeighborMinScore;
         topologyGraphNeighborReciprocalOnly = source.topologyGraphNeighborReciprocalOnly;
+        topologyGraphWeightedSeedRanking = source.topologyGraphWeightedSeedRanking;
         topologyGraphVectorSeedProbe = source.topologyGraphVectorSeedProbe;
+        topologyFusionRescueSlots = source.topologyFusionRescueSlots;
+        topologyFusionRescueMinScore = source.topologyFusionRescueMinScore;
+        topologyFinalRescueSlots = source.topologyFinalRescueSlots;
+        topologyFinalRescueMinScore = source.topologyFinalRescueMinScore;
     }
 
     /// Reapply operator-selected execution policies after a corpus tuner replaces relevance

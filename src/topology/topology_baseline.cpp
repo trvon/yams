@@ -1,3 +1,4 @@
+#include <yams/topology/protected_relation_cover.h>
 #include <yams/topology/topology_baseline.h>
 #include <yams/topology/topology_representatives.h>
 #include <yams/vector/static_cosine_ann_index.h>
@@ -308,6 +309,7 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
     batch.algorithm = "connected_components_v1";
     batch.inputKind = config.inputKind;
     batch.embeddingSpaceIdentity = config.embeddingSpaceIdentity;
+    batch.protectedRelationIdentity = protectedRelationConstructionIdentity(documents, config);
     batch.generatedAtUnixSeconds = static_cast<std::uint64_t>(nowSeconds);
 
     if (documents.empty()) {
@@ -406,18 +408,59 @@ Result<TopologyDirtyRegion> ConnectedComponentTopologyEngine::defineDirtyRegion(
     TopologyDirtyRegion region;
     region.seedDocumentHashes.reserve(changedDocuments.size());
     std::unordered_map<std::string, std::vector<std::string>> clusterMembersById;
-    std::unordered_map<std::string, std::string> clusterIdByDocument;
+    std::unordered_map<std::string, std::vector<std::string>> clusterIdsByDocument;
     clusterMembersById.reserve(existing.clusters.size());
     for (const auto& cluster : existing.clusters) {
         clusterMembersById.emplace(cluster.clusterId, cluster.memberDocumentHashes);
     }
-    clusterIdByDocument.reserve(existing.memberships.size());
+    clusterIdsByDocument.reserve(existing.memberships.size());
+    auto addDocumentCluster = [&](const std::string& documentHash, const std::string& clusterId) {
+        if (documentHash.empty() || clusterId.empty()) {
+            return;
+        }
+        auto& clusterIds = clusterIdsByDocument[documentHash];
+        if (std::ranges::find(clusterIds, clusterId) == clusterIds.end()) {
+            clusterIds.push_back(clusterId);
+        }
+    };
     for (const auto& membership : existing.memberships) {
-        clusterIdByDocument.emplace(membership.documentHash, membership.clusterId);
+        addDocumentCluster(membership.documentHash, membership.clusterId);
+        if (membership.parentClusterId.has_value()) {
+            addDocumentCluster(membership.documentHash, *membership.parentClusterId);
+        }
+        for (const auto& overlapClusterId : membership.overlapClusterIds) {
+            addDocumentCluster(membership.documentHash, overlapClusterId);
+        }
     }
 
     std::unordered_set<std::string> seen;
     seen.reserve(changedDocuments.size() * 2);
+    auto includePriorClusterMembers = [&](const std::string& documentHash) {
+        const auto clustersIt = clusterIdsByDocument.find(documentHash);
+        if (clustersIt == clusterIdsByDocument.end()) {
+            return;
+        }
+        region.includedPriorClusterMembers = true;
+        for (const auto& clusterId : clustersIt->second) {
+            const auto membersIt = clusterMembersById.find(clusterId);
+            if (membersIt == clusterMembersById.end()) {
+                continue;
+            }
+            for (const auto& memberHash : membersIt->second) {
+                if (memberHash.empty()) {
+                    continue;
+                }
+                if (seen.insert(memberHash).second) {
+                    region.expandedDocumentHashes.push_back(memberHash);
+                }
+                if (region.expandedDocumentHashes.size() >= config.maxDirtyRegionDocs) {
+                    region.exceededRegionBudget = true;
+                    region.requiresWiderRebuild = true;
+                    return;
+                }
+            }
+        }
+    };
 
     for (const auto& document : changedDocuments) {
         if (document.documentHash.empty()) {
@@ -433,26 +476,7 @@ Result<TopologyDirtyRegion> ConnectedComponentTopologyEngine::defineDirtyRegion(
         }
 
         if (config.dirtyRegionExpansion != DirtyRegionExpansionMode::NeighborsOnly) {
-            region.includedPriorClusterMembers = true;
-            if (auto clusterIt = clusterIdByDocument.find(document.documentHash);
-                clusterIt != clusterIdByDocument.end()) {
-                if (auto membersIt = clusterMembersById.find(clusterIt->second);
-                    membersIt != clusterMembersById.end()) {
-                    for (const auto& memberHash : membersIt->second) {
-                        if (memberHash.empty()) {
-                            continue;
-                        }
-                        if (seen.insert(memberHash).second) {
-                            region.expandedDocumentHashes.push_back(memberHash);
-                        }
-                        if (region.expandedDocumentHashes.size() >= config.maxDirtyRegionDocs) {
-                            region.exceededRegionBudget = true;
-                            region.requiresWiderRebuild = true;
-                            break;
-                        }
-                    }
-                }
-            }
+            includePriorClusterMembers(document.documentHash);
         }
         if (region.requiresWiderRebuild) {
             break;
@@ -500,28 +524,7 @@ Result<TopologyDirtyRegion> ConnectedComponentTopologyEngine::defineDirtyRegion(
             secondWave.push_back(hash);
         }
         for (const auto& hash : secondWave) {
-            auto clusterIt = clusterIdByDocument.find(hash);
-            if (clusterIt == clusterIdByDocument.end()) {
-                continue;
-            }
-            auto membersIt = clusterMembersById.find(clusterIt->second);
-            if (membersIt == clusterMembersById.end()) {
-                continue;
-            }
-            region.includedPriorClusterMembers = true;
-            for (const auto& memberHash : membersIt->second) {
-                if (memberHash.empty()) {
-                    continue;
-                }
-                if (seen.insert(memberHash).second) {
-                    region.expandedDocumentHashes.push_back(memberHash);
-                }
-                if (region.expandedDocumentHashes.size() >= config.maxDirtyRegionDocs) {
-                    region.exceededRegionBudget = true;
-                    region.requiresWiderRebuild = true;
-                    break;
-                }
-            }
+            includePriorClusterMembers(hash);
             if (region.requiresWiderRebuild) {
                 break;
             }
@@ -568,6 +571,9 @@ Result<TopologyArtifactBatch> ConnectedComponentTopologyEngine::updateArtifacts(
         existing.embeddingSpaceIdentity == rebuilt.value().embeddingSpaceIdentity
             ? existing.embeddingSpaceIdentity
             : std::string{};
+    // A partial update cannot reconstruct the full-corpus relation digest. Fail closed until a
+    // full rebuild provides relation-bound calibration evidence.
+    merged.protectedRelationIdentity.clear();
     merged.generatedAtUnixSeconds = rebuilt.value().generatedAtUnixSeconds;
     merged.topologyEpoch = existing.topologyEpoch + 1;
 
@@ -665,6 +671,28 @@ Result<TopologyArtifactBatch> ConnectedComponentTopologyEngine::updateArtifacts(
                            rebuilt.value().clusters.end());
     merged.memberships.insert(merged.memberships.end(), rebuilt.value().memberships.begin(),
                               rebuilt.value().memberships.end());
+
+    std::unordered_set<std::string> finalClusterIds;
+    finalClusterIds.reserve(merged.clusters.size());
+    std::unordered_map<std::string, std::unordered_set<std::string>> finalMembersByCluster;
+    finalMembersByCluster.reserve(merged.clusters.size());
+    for (const auto& cluster : merged.clusters) {
+        finalClusterIds.insert(cluster.clusterId);
+        finalMembersByCluster.emplace(
+            cluster.clusterId, std::unordered_set<std::string>{cluster.memberDocumentHashes.begin(),
+                                                               cluster.memberDocumentHashes.end()});
+    }
+    for (auto& cluster : merged.clusters) {
+        std::erase_if(cluster.overlapClusterIds,
+                      [&](const auto& overlapId) { return !finalClusterIds.contains(overlapId); });
+    }
+    for (auto& membership : merged.memberships) {
+        std::erase_if(membership.overlapClusterIds, [&](const auto& overlapId) {
+            const auto membersIt = finalMembersByCluster.find(overlapId);
+            return membersIt == finalMembersByCluster.end() ||
+                   !membersIt->second.contains(membership.documentHash);
+        });
+    }
 
     std::sort(merged.clusters.begin(), merged.clusters.end(),
               [](const ClusterArtifact& lhs, const ClusterArtifact& rhs) {
@@ -785,6 +813,9 @@ SparseRouteIndex SparseGuidedClusterRouter::buildRouteIndex(const TopologyArtifa
             addMembership(membership.documentHash, membership.clusterId);
             if (membership.parentClusterId.has_value()) {
                 addMembership(membership.documentHash, *membership.parentClusterId);
+            }
+            for (const auto& overlapClusterId : membership.overlapClusterIds) {
+                addMembership(membership.documentHash, overlapClusterId);
             }
         }
     } else {

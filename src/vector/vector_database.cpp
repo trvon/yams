@@ -616,43 +616,13 @@ public:
 
     std::vector<VectorRecord> searchSimilar(const std::vector<float>& query_embedding,
                                             const VectorSearchParams& params) const {
-        std::shared_lock<std::shared_mutex> lock(mutex_);
-
-        if (!initialized_) {
+        auto result = searchSimilarChecked(query_embedding, params);
+        if (!result) {
+            setError("Vector search failed: " + result.error().message);
             return {};
         }
-
-        if (query_embedding.size() != config_.embedding_dim) {
-            return {};
-        }
-
-        try {
-            Result<std::vector<VectorRecord>> result = [&]() {
-                if (params.diagnostics != nullptr) {
-                    if (auto* diagnosticStore =
-                            dynamic_cast<IDiagnosticVectorStore*>(backend_.get())) {
-                        return diagnosticStore->searchSimilarWithDiagnostics(
-                            query_embedding, params.k, params.similarity_threshold,
-                            params.document_hash, params.candidate_hashes, params.metadata_filters,
-                            *params.diagnostics);
-                    }
-                }
-                return backend_->searchSimilar(query_embedding, params.k,
-                                               params.similarity_threshold, params.document_hash,
-                                               params.candidate_hashes, params.metadata_filters);
-            }();
-            if (!result) {
-                setError("Vector search failed: " + result.error().message);
-                return {};
-            }
-
-            clearError();
-            return result.value();
-
-        } catch (const std::exception& e) {
-            setError("Vector search failed: " + std::string(e.what()));
-            return {};
-        }
+        clearError();
+        return result.value();
     }
 
     std::vector<std::vector<VectorRecord>>
@@ -682,7 +652,25 @@ public:
         }
 
         try {
-            if (params.candidate_filter_mode == CandidateFilterMode::Exact) {
+            if (params.candidate_filter_mode == CandidateFilterMode::DocumentTopK) {
+                if (params.candidate_hashes.empty()) {
+                    return Error{ErrorCode::InvalidArgument,
+                                 "Document candidate search requires candidate hashes"};
+                }
+                auto* documentStore = dynamic_cast<IDocumentCandidateVectorStore*>(backend_.get());
+                if (documentStore == nullptr) {
+                    return Error{ErrorCode::NotSupported,
+                                 "Vector backend does not support document candidate search"};
+                }
+                VectorSearchDiagnostics localDiagnostics;
+                auto& diagnostics =
+                    params.diagnostics != nullptr ? *params.diagnostics : localDiagnostics;
+                return documentStore->searchDocumentCandidatesWithDiagnostics(
+                    query_embedding, params.k, params.similarity_threshold, params.candidate_hashes,
+                    diagnostics);
+            }
+            if (params.candidate_filter_mode == CandidateFilterMode::Exact ||
+                params.candidate_filter_mode == CandidateFilterMode::ExactDocumentComplete) {
                 if (params.candidate_hashes.empty()) {
                     return Error{ErrorCode::InvalidArgument,
                                  "Exact candidate search requires candidate hashes"};
@@ -695,6 +683,17 @@ public:
                 VectorSearchDiagnostics localDiagnostics;
                 auto& diagnostics =
                     params.diagnostics != nullptr ? *params.diagnostics : localDiagnostics;
+                if (params.candidate_filter_mode == CandidateFilterMode::ExactDocumentComplete) {
+                    auto* allRowsStore =
+                        dynamic_cast<IAllExactCandidateVectorStore*>(backend_.get());
+                    if (allRowsStore == nullptr) {
+                        return Error{ErrorCode::NotSupported,
+                                     "Vector backend does not support exhaustive candidate search"};
+                    }
+                    return allRowsStore->searchAllExactCandidateRowsWithDiagnostics(
+                        query_embedding, params.similarity_threshold, params.candidate_hashes,
+                        diagnostics);
+                }
                 return exactStore->searchExactCandidatesWithDiagnostics(
                     query_embedding, params.k, params.similarity_threshold, params.candidate_hashes,
                     diagnostics);

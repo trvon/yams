@@ -36,6 +36,8 @@ struct TopologyAssistStageRequest {
     std::uint64_t expectedTopologyEpoch{0};
     /// Extra vector hits to mix into graph-neighbor seeds (already ranked preferred).
     std::vector<std::string> vectorSeedHashes;
+    /// Query-relative vector score/rank evidence aligned with vectorSeedHashes.
+    std::vector<yams::topology::WeightedDocumentSeed> vectorSeedEvidence;
     /// Cap on newly added vector seeds. 0 = add none (Tier-1 only).
     std::size_t maxVectorSeeds{0};
     /// Existing stage-trace switch; enables diagnostic reads without changing routing output.
@@ -59,6 +61,11 @@ mergeTopologySeedHashes(const std::vector<std::string>& tier1Seeds,
 /// unordered set. Vector/metadata legs are deliberately excluded.
 [[nodiscard]] std::vector<yams::topology::WeightedDocumentSeed>
 rankTopologySeedEvidence(const std::vector<ComponentResult>& components, std::size_t maxSeeds);
+
+/// Preserve query-relative vector score/rank evidence for graph seed expansion.
+[[nodiscard]] std::vector<yams::topology::WeightedDocumentSeed>
+rankTopologyVectorSeedEvidence(const std::vector<ComponentResult>& components,
+                               std::size_t maxSeeds);
 
 /// Fill skipReason when the session did not apply expansion (stable product diagnostics).
 void fillTopologySkipReason(std::string& skipReason, const TopologyRoutingOptions& options,

@@ -455,6 +455,7 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         "allowed_candidates": 0,
         "vector_candidate_budget": 0,
         "vector_result_budget": 0,
+        "topology_expansion_output_budget": 0,
         "vector_distance_evaluation_budget": 0,
         "vector_rows_visited_actual": 0,
         "vector_exact_distance_evaluations_actual": 0,
@@ -476,6 +477,11 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         "topology_candidate_rescue_novel": 0,
         "topology_candidate_evidence_rescues": 0,
         "topology_candidate_rescue_duplicates": 0,
+        "topology_candidate_rescue_exact_hashes_requested": 0,
+        "topology_candidate_rescue_exact_rows_visited": 0,
+        "topology_candidate_rescue_exact_distance_evaluations": 0,
+        "topology_candidate_rescue_exact_returned_rows": 0,
+        "topology_candidate_rescue_exact_matched_documents": 0,
         "topology_shadow_evaluated_queries": 0,
         "topology_shadow_narrow_proposed_queries": 0,
         "topology_shadow_retained_candidates": 0,
@@ -509,6 +515,7 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
     allowed_candidate_vals: list[int] = []
     vector_candidate_budget_vals: list[int] = []
     vector_result_budget_vals: list[int] = []
+    topology_expansion_output_budget_vals: list[int] = []
     vector_distance_evaluation_budget_vals: list[int] = []
     vector_rows_visited_actual_vals: list[int] = []
     vector_exact_distance_evaluations_actual_vals: list[int] = []
@@ -603,12 +610,15 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         "fetched": 0,
         "eligible": 0,
         "selected": 0,
+        "exact_matched": 0,
         "scored": 0,
         "exact_scored": 0,
     }
     candidate_rescue_missing_stage_documents = {
         stage: 0 for stage in candidate_rescue_missing_stage_queries
     }
+    candidate_rescue_missing_exact_ranks: list[float] = []
+    candidate_rescue_missing_exact_scores: list[float] = []
     graph_trace_queries = 0
     graph_fetch_truncated_seed_counts: list[int] = []
     graph_relation_candidate_counts: list[int] = []
@@ -641,6 +651,22 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         "allowed_candidates": "topology_weak_query_allowed_candidates",
         "vector_candidate_budget": "vector_search_candidate_budget",
         "vector_result_budget": "vector_search_result_budget",
+        "topology_expansion_output_budget": "topology_expansion_output_budget",
+        "topology_candidate_rescue_exact_hashes_requested": (
+            "topology_candidate_rescue_exact_candidate_hashes_requested"
+        ),
+        "topology_candidate_rescue_exact_rows_visited": (
+            "topology_candidate_rescue_exact_rows_visited"
+        ),
+        "topology_candidate_rescue_exact_distance_evaluations": (
+            "topology_candidate_rescue_exact_distance_evaluations"
+        ),
+        "topology_candidate_rescue_exact_returned_rows": (
+            "topology_candidate_rescue_exact_returned_rows"
+        ),
+        "topology_candidate_rescue_exact_matched_documents": (
+            "topology_candidate_rescue_exact_matched_documents"
+        ),
         "vector_distance_evaluation_budget": "vector_search_distance_evaluation_budget",
         "vector_rows_visited_actual": "vector_search_rows_visited_actual",
         "vector_exact_distance_evaluations_actual": (
@@ -877,6 +903,9 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
                     "topology_graph_eligible_candidate_doc_ids"
                 ),
                 "selected": reachable_docs,
+                "exact_matched": traced_doc_ids(
+                    "topology_candidate_rescue_exact_matched_document_doc_ids"
+                ),
                 "scored": traced_doc_ids(
                     "topology_candidate_rescue_scored_candidate_doc_ids"
                 ),
@@ -889,6 +918,32 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
                 if reached:
                     candidate_rescue_missing_stage_queries[stage] += 1
                     candidate_rescue_missing_stage_documents[stage] += len(reached)
+
+            try:
+                exact_rows = json.loads(
+                    str(
+                        stats.get(
+                            "topology_candidate_rescue_exact_scored_candidate_rows",
+                            "",
+                        )
+                        or ""
+                    )
+                )
+            except (json.JSONDecodeError, TypeError, ValueError):
+                exact_rows = {}
+            vector_rows = exact_rows.get("vector") if isinstance(exact_rows, dict) else None
+            top_hits = vector_rows.get("top_hits") if isinstance(vector_rows, dict) else None
+            if isinstance(top_hits, list):
+                for hit in top_hits:
+                    if not isinstance(hit, dict):
+                        continue
+                    if str(hit.get("doc_id") or "") not in missing_relevant_docs:
+                        continue
+                    try:
+                        candidate_rescue_missing_exact_ranks.append(float(hit["rank"]))
+                        candidate_rescue_missing_exact_scores.append(float(hit["score"]))
+                    except (KeyError, TypeError, ValueError):
+                        continue
         if _truthy(stats.get("topology_graph_trace_collected")):
             graph_trace_queries += 1
             graph_fetch_truncated_seed_counts.append(
@@ -1142,6 +1197,8 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
                 vector_candidate_budget_vals.append(v)
             elif dst == "vector_result_budget":
                 vector_result_budget_vals.append(v)
+            elif dst == "topology_expansion_output_budget":
+                topology_expansion_output_budget_vals.append(v)
             elif dst == "vector_distance_evaluation_budget":
                 vector_distance_evaluation_budget_vals.append(v)
             elif dst == "vector_rows_visited_actual":
@@ -1173,7 +1230,6 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
                 route_boundary_score_margin_vals.append(float(margin))
         except (TypeError, ValueError):
             pass
-
         for evidence_name, values in structure_evidence_vals.items():
             debug_name = f"topology_structure_{evidence_name}"
             if evidence_name != "candidate_count":
@@ -1337,6 +1393,24 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         ),
         "vector_candidate_budget_sum": float(counters["vector_candidate_budget"]),
         "vector_result_budget_sum": float(counters["vector_result_budget"]),
+        "topology_expansion_output_budget_sum": float(
+            counters["topology_expansion_output_budget"]
+        ),
+        "topology_candidate_rescue_exact_hashes_requested_sum": float(
+            counters["topology_candidate_rescue_exact_hashes_requested"]
+        ),
+        "topology_candidate_rescue_exact_rows_visited_sum": float(
+            counters["topology_candidate_rescue_exact_rows_visited"]
+        ),
+        "topology_candidate_rescue_exact_distance_evaluations_sum": float(
+            counters["topology_candidate_rescue_exact_distance_evaluations"]
+        ),
+        "topology_candidate_rescue_exact_returned_rows_sum": float(
+            counters["topology_candidate_rescue_exact_returned_rows"]
+        ),
+        "topology_candidate_rescue_exact_matched_documents_sum": float(
+            counters["topology_candidate_rescue_exact_matched_documents"]
+        ),
         "vector_distance_evaluation_budget_sum": float(
             counters["vector_distance_evaluation_budget"]
         ),
@@ -1449,6 +1523,10 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
     if vector_result_budget_vals:
         metrics["vector_result_budget_avg"] = float(
             statistics.mean(vector_result_budget_vals)
+        )
+    if topology_expansion_output_budget_vals:
+        metrics["topology_expansion_output_budget_avg"] = float(
+            statistics.mean(topology_expansion_output_budget_vals)
         )
     if vector_distance_evaluation_budget_vals:
         metrics["vector_distance_evaluation_budget_avg"] = float(
@@ -1721,11 +1799,30 @@ def parse_debug_jsonl(path: Path, *, top_k: int = 10) -> dict[str, Any]:
         if candidate_rescue_relevant_reachable
         else 0.0
     )
+    exact_hashes_requested = counters[
+        "topology_candidate_rescue_exact_hashes_requested"
+    ]
+    metrics["topology_candidate_rescue_exact_document_materialization_rate"] = (
+        float(counters["topology_candidate_rescue_exact_matched_documents"])
+        / float(exact_hashes_requested)
+        if exact_hashes_requested
+        else 0.0
+    )
     metrics["topology_candidate_rescue_baseline_miss_queries"] = float(
         candidate_rescue_baseline_miss_queries
     )
     metrics["topology_candidate_rescue_baseline_missing_documents"] = float(
         candidate_rescue_baseline_missing_documents
+    )
+    metrics["topology_candidate_rescue_missing_exact_rank_avg"] = (
+        float(statistics.mean(candidate_rescue_missing_exact_ranks))
+        if candidate_rescue_missing_exact_ranks
+        else 0.0
+    )
+    metrics["topology_candidate_rescue_missing_exact_score_avg"] = (
+        float(statistics.mean(candidate_rescue_missing_exact_scores))
+        if candidate_rescue_missing_exact_scores
+        else 0.0
     )
     for stage, query_count in candidate_rescue_missing_stage_queries.items():
         metrics[f"topology_candidate_rescue_missing_{stage}_queries"] = float(
@@ -2537,6 +2634,7 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         "min_route_score": "YAMS_BENCH_TOPOLOGY_MIN_ROUTE_SCORE",
         "min_clusters": "YAMS_BENCH_TOPOLOGY_MIN_CLUSTERS",
         "max_docs": "YAMS_BENCH_TOPOLOGY_MAX_DOCS",
+        "expansion_output_limit": "YAMS_BENCH_TOPOLOGY_EXPANSION_OUTPUT_LIMIT",
         "max_clusters": "YAMS_BENCH_TOPOLOGY_MAX_CLUSTERS",
         "max_seed_documents": "YAMS_BENCH_TOPOLOGY_MAX_SEED_DOCUMENTS",
         "adaptive_probe_score_gap": "YAMS_BENCH_TOPOLOGY_ADAPTIVE_PROBE_SCORE_GAP",
@@ -2590,7 +2688,14 @@ def run_retrieval_quality(ctx: WorkerContext) -> WorkerResult:
         "seed_semantic_threshold": "YAMS_BENCH_SEED_SEMANTIC_THRESHOLD",
         "graph_neighbor_min_score": "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE",
         "graph_neighbor_reciprocal_only": "YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_RECIPROCAL_ONLY",
+        "graph_weighted_seed_ranking": (
+            "YAMS_BENCH_TOPOLOGY_GRAPH_WEIGHTED_SEED_RANKING"
+        ),
         "graph_vector_seed_probe": "YAMS_SEARCH_TOPOLOGY_GRAPH_VECTOR_SEED_PROBE",
+        "topology_fusion_rescue_slots": "YAMS_SEARCH_TOPOLOGY_FUSION_RESCUE_SLOTS",
+        "topology_fusion_rescue_min_score": "YAMS_SEARCH_TOPOLOGY_FUSION_RESCUE_MIN_SCORE",
+        "topology_final_rescue_slots": "YAMS_SEARCH_TOPOLOGY_FINAL_RESCUE_SLOTS",
+        "topology_final_rescue_min_score": "YAMS_SEARCH_TOPOLOGY_FINAL_RESCUE_MIN_SCORE",
         "enable_reranking": "YAMS_SEARCH_ENABLE_RERANKING",
         "rerank_topk": "YAMS_SEARCH_RERANK_TOPK",
         "rerank_replace_scores": "YAMS_SEARCH_RERANK_REPLACE_SCORES",

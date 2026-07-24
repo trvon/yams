@@ -1,3 +1,4 @@
+#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include "src/search/search_vector_pipeline_internal.h"
@@ -57,6 +58,57 @@ TEST_CASE("Vector pipeline propagates exact routed work diagnostics",
     CHECK_FALSE(diagnostics.usedAnn);
     CHECK(diagnostics.rowsVisited == 2U);
     CHECK(diagnostics.exactDistanceEvaluations == 2U);
+}
+
+TEST_CASE("Vector pipeline scores every admitted document before exact-control truncation",
+          "[search][vector][topology][candidate-rescue][catch2]") {
+    yams::test::ScopedEnvVar enableVectors("YAMS_DISABLE_VECTORS", std::string("0"));
+    yams::test::ScopedEnvVar enableSqliteVecInit("YAMS_SQLITE_VEC_SKIP_INIT", std::string("0"));
+
+    yams::vector::VectorDatabaseConfig dbConfig;
+    dbConfig.database_path = ":memory:";
+    dbConfig.embedding_dim = 2;
+    dbConfig.use_in_memory = true;
+    auto vectorDb = std::make_shared<yams::vector::VectorDatabase>(dbConfig);
+    REQUIRE(vectorDb->initialize());
+
+    for (const auto& [chunkId, hash, embedding] :
+         std::vector<std::tuple<std::string, std::string, std::vector<float>>>{
+             {"crowding-1", "crowding", {1.0F, 0.0F}},
+             {"crowding-2", "crowding", {0.9F, 0.1F}},
+             {"rescued-1", "rescued", {0.6F, 0.8F}}}) {
+        yams::vector::VectorRecord record;
+        record.chunk_id = chunkId;
+        record.document_hash = hash;
+        record.embedding = embedding;
+        record.level = yams::vector::EmbeddingLevel::CHUNK;
+        REQUIRE(vectorDb->insertVector(record));
+    }
+
+    SearchEngineConfig cfg;
+    cfg.similarityThreshold = 0.7F;
+    cfg.chunkAggregation = SearchEngineConfig::ChunkAggregation::MAX;
+    const std::unordered_set<std::string> routed{"crowding", "rescued"};
+
+    const auto bounded = yams::search::detail::queryVectorIndexPipeline(
+        nullptr, vectorDb, {1.0F, 0.0F}, cfg, 2, routed, yams::vector::CandidateFilterMode::Exact);
+    REQUIRE(bounded.has_value());
+    REQUIRE(bounded.value().size() == 1U);
+    CHECK(bounded.value()[0].documentHash == "crowding");
+
+    yams::vector::VectorSearchDiagnostics diagnostics;
+    const auto documentComplete = yams::search::detail::queryVectorIndexPipeline(
+        nullptr, vectorDb, {1.0F, 0.0F}, cfg, 2, routed,
+        yams::vector::CandidateFilterMode::ExactDocumentComplete, &diagnostics);
+
+    REQUIRE(documentComplete.has_value());
+    REQUIRE(documentComplete.value().size() == 2U);
+    CHECK(documentComplete.value()[0].documentHash == "crowding");
+    CHECK(documentComplete.value()[1].documentHash == "rescued");
+    CHECK(documentComplete.value()[1].score == Catch::Approx(0.6F));
+    CHECK(diagnostics.rowsVisited == 3U);
+    CHECK(diagnostics.exactDistanceEvaluations == 3U);
+    CHECK(diagnostics.returnedRows == 3U);
 }
 
 TEST_CASE("Vector pipeline filters global hits by routed membership with zero-overlap fallback",

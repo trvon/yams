@@ -473,6 +473,9 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         if (tp.maxDocs) {
             opts.config.topologyMaxDocs = *tp.maxDocs;
         }
+        if (tp.expansionOutputLimit) {
+            opts.config.topologyExpansionOutputLimit = *tp.expansionOutputLimit;
+        }
         if (tp.medoidBoost) {
             opts.config.topologyMedoidBoost = std::max(0.0f, *tp.medoidBoost);
         }
@@ -551,6 +554,9 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         }
         if (tp.graphNeighborReciprocalOnly) {
             opts.config.topologyGraphNeighborReciprocalOnly = *tp.graphNeighborReciprocalOnly;
+        }
+        if (tp.graphWeightedSeedRanking) {
+            opts.config.topologyGraphWeightedSeedRanking = *tp.graphWeightedSeedRanking;
         }
         if (tp.graphVectorSeedProbe) {
             opts.config.topologyGraphVectorSeedProbe = *tp.graphVectorSeedProbe;

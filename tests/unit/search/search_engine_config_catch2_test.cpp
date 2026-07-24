@@ -327,6 +327,9 @@ TEST_CASE("SearchEngineConfig default values", "[search][config][catch2]") {
     CHECK(std::string_view(SearchEngineConfig::topologyVectorPolicyToString(
               SearchEngineConfig::TopologyVectorPolicy::Augment)) == "augment");
     CHECK(cfg.topologyMaxDocs == 64U);
+    CHECK(cfg.topologyExpansionOutputLimit == 0U);
+    CHECK(cfg.resolvedTopologyExpansionOutputLimit(32U) == 32U);
+    CHECK_FALSE(cfg.topologyGraphWeightedSeedRanking);
     CHECK(cfg.topologyEvidenceWeight == Approx(0.02F));
     CHECK(cfg.rrfK == Approx(12.0f));
     CHECK(cfg.bm25NormDivisor == Approx(25.0f));
@@ -350,6 +353,7 @@ TEST_CASE("SearchEngineConfig preserves typed execution policy across tuning",
     configured.topologyAdaptiveProbeScoreGap = 0.08F;
     configured.topologyNarrowMinBoundaryMargin = 0.12F;
     configured.topologyMaxDocs = 48;
+    configured.topologyExpansionOutputLimit = 96;
     configured.topologyMedoidBoost = 0.17F;
     configured.topologyRouteScoringMode =
         SearchEngineConfig::TopologyRouteScoringMode::SeedCoverage;
@@ -359,6 +363,7 @@ TEST_CASE("SearchEngineConfig preserves typed execution policy across tuning",
         SearchEngineConfig::TopologyExpansionSource::GraphNeighbors;
     configured.topologyGraphNeighborMinScore = 0.4F;
     configured.topologyGraphNeighborReciprocalOnly = false;
+    configured.topologyGraphWeightedSeedRanking = true;
     configured.topologyGraphVectorSeedProbe = 16;
     configured.topologyVectorPolicy = SearchEngineConfig::TopologyVectorPolicy::Narrow;
 
@@ -373,6 +378,8 @@ TEST_CASE("SearchEngineConfig preserves typed execution policy across tuning",
     CHECK(tuned.topologyAdaptiveProbeScoreGap == Approx(0.08F));
     CHECK(tuned.topologyNarrowMinBoundaryMargin == Approx(0.12F));
     CHECK(tuned.topologyMaxDocs == 48);
+    CHECK(tuned.topologyExpansionOutputLimit == 96);
+    CHECK(tuned.resolvedTopologyExpansionOutputLimit(32) == 96);
     CHECK(tuned.topologyMedoidBoost == Approx(0.17F));
     CHECK(tuned.topologyRouteScoringMode ==
           SearchEngineConfig::TopologyRouteScoringMode::SeedCoverage);
@@ -382,6 +389,7 @@ TEST_CASE("SearchEngineConfig preserves typed execution policy across tuning",
           SearchEngineConfig::TopologyExpansionSource::GraphNeighbors);
     CHECK(tuned.topologyGraphNeighborMinScore == Approx(0.4F));
     CHECK_FALSE(tuned.topologyGraphNeighborReciprocalOnly);
+    CHECK(tuned.topologyGraphWeightedSeedRanking);
     CHECK(tuned.topologyGraphVectorSeedProbe == 16);
     CHECK(tuned.topologyVectorPolicy == SearchEngineConfig::TopologyVectorPolicy::Narrow);
 }

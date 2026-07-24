@@ -1,10 +1,66 @@
 #include <yams/topology/protected_relation_cover.h>
 
 #include <algorithm>
+#include <iomanip>
+#include <limits>
+#include <map>
 #include <ranges>
+#include <sstream>
 #include <unordered_set>
 
 namespace yams::topology {
+
+std::string protectedRelationConstructionIdentity(std::span<const TopologyDocumentInput> documents,
+                                                  const TopologyBuildConfig& config) {
+    std::unordered_set<std::string> documentHashes;
+    documentHashes.reserve(documents.size());
+    for (const auto& document : documents) {
+        if (!document.documentHash.empty()) {
+            documentHashes.insert(document.documentHash);
+        }
+    }
+
+    std::map<std::pair<std::string, std::string>, float> observations;
+    for (const auto& document : documents) {
+        for (const auto& neighbor : document.neighbors) {
+            if (document.documentHash.empty() || neighbor.documentHash.empty() ||
+                document.documentHash == neighbor.documentHash ||
+                !documentHashes.contains(neighbor.documentHash) ||
+                (config.reciprocalOnly && !neighbor.reciprocal) ||
+                neighbor.score < static_cast<float>(config.minEdgeScore)) {
+                continue;
+            }
+            auto endpoints = std::minmax(document.documentHash, neighbor.documentHash);
+            auto [it, inserted] =
+                observations.emplace(std::pair{endpoints.first, endpoints.second}, neighbor.score);
+            if (!inserted) {
+                it->second = std::max(it->second, neighbor.score);
+            }
+        }
+    }
+
+    std::ostringstream descriptor;
+    descriptor << std::setprecision(std::numeric_limits<float>::max_digits10)
+               << "relation=semantic_neighbor;provenance=topology_input;version=1;"
+                  "split=construction";
+    for (const auto& [endpoints, score] : observations) {
+        descriptor << ";lhs=" << endpoints.first.size() << ':' << endpoints.first
+                   << ";rhs=" << endpoints.second.size() << ':' << endpoints.second
+                   << ";score=" << score;
+    }
+
+    constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
+    constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
+    std::uint64_t fingerprint = kFnvOffset;
+    for (const auto byte : descriptor.str()) {
+        fingerprint ^= static_cast<unsigned char>(byte);
+        fingerprint *= kFnvPrime;
+    }
+    std::ostringstream out;
+    out << "semantic_neighbor:v1:construction:fnv1a64:" << std::hex << std::setw(16)
+        << std::setfill('0') << fingerprint;
+    return out.str();
+}
 
 Result<ProtectedRelationCoverIndex>
 buildProtectedRelationCoverIndex(const TopologyArtifactBatch& artifacts) {

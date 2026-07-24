@@ -74,6 +74,57 @@ struct SimeonPqIndexState {
 
 namespace {
 
+enum class ExactRowSelection {
+    TopK,
+    AllMatching,
+};
+
+enum class SimeonResultSelection {
+    VectorTopK,
+    DocumentTopK,
+};
+
+std::vector<VectorRecord> retainBestRecordPerDocument(std::vector<VectorRecord> records,
+                                                      std::size_t limit) {
+    std::unordered_map<std::string, VectorRecord> bestByDocument;
+    bestByDocument.reserve(records.size());
+    for (auto& record : records) {
+        if (record.document_hash.empty()) {
+            continue;
+        }
+
+        const auto found = bestByDocument.find(record.document_hash);
+        if (found == bestByDocument.end()) {
+            bestByDocument.emplace(record.document_hash, std::move(record));
+            continue;
+        }
+        if (record.relevance_score > found->second.relevance_score ||
+            (record.relevance_score == found->second.relevance_score &&
+             record.chunk_id < found->second.chunk_id)) {
+            found->second = std::move(record);
+        }
+    }
+
+    records.clear();
+    records.reserve(bestByDocument.size());
+    for (auto& [_, record] : bestByDocument) {
+        records.push_back(std::move(record));
+    }
+    std::ranges::sort(records, [](const auto& lhs, const auto& rhs) {
+        if (lhs.relevance_score != rhs.relevance_score) {
+            return lhs.relevance_score > rhs.relevance_score;
+        }
+        if (lhs.document_hash != rhs.document_hash) {
+            return lhs.document_hash < rhs.document_hash;
+        }
+        return lhs.chunk_id < rhs.chunk_id;
+    });
+    if (records.size() > limit) {
+        records.resize(limit);
+    }
+    return records;
+}
+
 std::uint64_t stableEmbeddingSampleKey(std::span<const float> embedding) noexcept {
     std::uint64_t hash = 1469598103934665603ULL;
     for (const float value : embedding) {
@@ -1545,11 +1596,17 @@ public:
                   const std::optional<std::string>& document_hash,
                   const std::unordered_set<std::string>& candidate_hashes,
                   const std::map<std::string, std::string>& metadata_filters,
-                  VectorSearchDiagnostics* diagnostics = nullptr) {
+                  VectorSearchDiagnostics* diagnostics = nullptr,
+                  SimeonResultSelection resultSelection = SimeonResultSelection::VectorTopK) {
         std::shared_lock lock(mutex_);
 
         if (!db_) {
             return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        if (resultSelection == SimeonResultSelection::DocumentTopK && !usesSimeonPqSearchEngine()) {
+            return Error{ErrorCode::NotSupported,
+                         "Document-level candidate selection requires the Simeon PQ engine"};
         }
 
         if (usesExactSearchEngine()) {
@@ -1609,12 +1666,21 @@ public:
 
         if (usesSimeonPqSearchEngine()) {
             const size_t query_dim = query_embedding.size();
+            const auto exactFallback = [&]() -> Result<std::vector<VectorRecord>> {
+                const bool selectDocuments = resultSelection == SimeonResultSelection::DocumentTopK;
+                auto result = bruteForceSearchUnlocked(
+                    query_embedding, selectDocuments ? 0 : k, similarity_threshold, document_hash,
+                    candidate_hashes, metadata_filters, diagnostics,
+                    selectDocuments ? ExactRowSelection::AllMatching : ExactRowSelection::TopK);
+                if (!result || !selectDocuments) {
+                    return result;
+                }
+                return retainBestRecordPerDocument(std::move(result.value()), k);
+            };
 
             if (document_hash || !metadata_filters.empty()) {
                 spdlog::debug("[SPQ] filtered search falling back to exact cosine scan");
-                return bruteForceSearchUnlocked(query_embedding, k, similarity_threshold,
-                                                document_hash, candidate_hashes, metadata_filters,
-                                                diagnostics);
+                return exactFallback();
             }
 
             if (!hasReadyCurrentSimeonPqStateUnlocked(query_dim)) {
@@ -1632,14 +1698,13 @@ public:
             // compressed snapshot; instrumentation profiles that suppress rebuilding retain an
             // authoritative exact-search fallback.
             if (!hasReadyCurrentSimeonPqStateUnlocked(query_dim)) {
-                return bruteForceSearchUnlocked(query_embedding, k, similarity_threshold,
-                                                document_hash, candidate_hashes, metadata_filters,
-                                                diagnostics);
+                return exactFallback();
             }
 
-            auto result = simeonPqSearchUnlocked(
-                query_embedding, k, similarity_threshold,
-                candidate_hashes.empty() ? nullptr : &candidate_hashes, diagnostics);
+            auto result =
+                simeonPqSearchUnlocked(query_embedding, k, similarity_threshold,
+                                       candidate_hashes.empty() ? nullptr : &candidate_hashes,
+                                       diagnostics, resultSelection);
             if (!result) {
                 return result.error();
             }
@@ -1648,14 +1713,26 @@ public:
             // boundary so a search can be linearized before a concurrent commit, or discard the
             // mixed snapshot and recompute from the authoritative table.
             if (!hasReadyCurrentSimeonPqStateUnlocked(query_dim)) {
-                return bruteForceSearchUnlocked(query_embedding, k, similarity_threshold,
-                                                document_hash, candidate_hashes, metadata_filters,
-                                                diagnostics);
+                return exactFallback();
             }
             return result;
         }
 
         return Error{ErrorCode::InvalidOperation, "no search engine configured"};
+    }
+
+    Result<std::vector<VectorRecord>>
+    searchDocumentCandidates(const std::vector<float>& query_embedding, size_t k,
+                             float similarity_threshold,
+                             const std::unordered_set<std::string>& candidate_hashes,
+                             VectorSearchDiagnostics* diagnostics) {
+        if (candidate_hashes.empty()) {
+            return Error{ErrorCode::InvalidArgument,
+                         "Document candidate search requires candidate hashes"};
+        }
+        return searchSimilar(query_embedding, k, similarity_threshold, std::nullopt,
+                             candidate_hashes, {}, diagnostics,
+                             SimeonResultSelection::DocumentTopK);
     }
 
     Result<std::vector<VectorRecord>>
@@ -1673,6 +1750,24 @@ public:
         }
         return bruteForceSearchUnlocked(query_embedding, k, similarity_threshold, std::nullopt,
                                         candidate_hashes, {}, diagnostics);
+    }
+
+    Result<std::vector<VectorRecord>>
+    searchAllExactCandidateRows(const std::vector<float>& query_embedding,
+                                float similarity_threshold,
+                                const std::unordered_set<std::string>& candidate_hashes,
+                                VectorSearchDiagnostics* diagnostics) {
+        std::shared_lock lock(mutex_);
+        if (!db_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+        if (candidate_hashes.empty()) {
+            return Error{ErrorCode::InvalidArgument,
+                         "Exact candidate search requires candidate hashes"};
+        }
+        return bruteForceSearchUnlocked(query_embedding, 0, similarity_threshold, std::nullopt,
+                                        candidate_hashes, {}, diagnostics,
+                                        ExactRowSelection::AllMatching);
     }
 
     Result<std::vector<std::vector<VectorRecord>>>
@@ -4000,11 +4095,11 @@ private:
         return rebuildSimeonPqIndicesUnlocked(dim);
     }
 
-    Result<std::vector<VectorRecord>>
-    simeonPqSearchUnlocked(const std::vector<float>& query_embedding, size_t k,
-                           float similarity_threshold,
-                           const std::unordered_set<std::string>* candidateHashes = nullptr,
-                           VectorSearchDiagnostics* diagnostics = nullptr) {
+    Result<std::vector<VectorRecord>> simeonPqSearchUnlocked(
+        const std::vector<float>& query_embedding, size_t k, float similarity_threshold,
+        const std::unordered_set<std::string>* candidateHashes = nullptr,
+        VectorSearchDiagnostics* diagnostics = nullptr,
+        SimeonResultSelection resultSelection = SimeonResultSelection::VectorTopK) {
         if (!db_ || query_embedding.empty() || k == 0) {
             return std::vector<VectorRecord>{};
         }
@@ -4016,9 +4111,15 @@ private:
 
         if (it->second->exact_fallback) {
             static const std::unordered_set<std::string> kNoCandidateHashes;
-            return bruteForceSearchUnlocked(query_embedding, k, similarity_threshold, std::nullopt,
-                                            candidateHashes ? *candidateHashes : kNoCandidateHashes,
-                                            {}, diagnostics);
+            const bool selectDocuments = resultSelection == SimeonResultSelection::DocumentTopK;
+            auto result = bruteForceSearchUnlocked(
+                query_embedding, selectDocuments ? 0 : k, similarity_threshold, std::nullopt,
+                candidateHashes ? *candidateHashes : kNoCandidateHashes, {}, diagnostics,
+                selectDocuments ? ExactRowSelection::AllMatching : ExactRowSelection::TopK);
+            if (!result || !selectDocuments) {
+                return result;
+            }
+            return retainBestRecordPerDocument(std::move(result.value()), k);
         }
 
         std::vector<float> normalized_query = query_embedding;
@@ -4083,7 +4184,9 @@ private:
         const size_t rerankBudget = k > std::numeric_limits<size_t>::max() / rerankFactor
                                         ? std::numeric_limits<size_t>::max()
                                         : k * rerankFactor;
-        const size_t approxK = std::min(candidateCount, std::max(k, rerankBudget));
+        const size_t approxK = resultSelection == SimeonResultSelection::DocumentTopK
+                                   ? candidateCount
+                                   : std::min(candidateCount, std::max(k, rerankBudget));
         YAMS_ASSERT(it->second->tie_break_keys.size() == it->second->rowids.size(),
                     "Simeon PQ tie-break keys must align with indexed rowids");
 
@@ -4196,7 +4299,9 @@ private:
             }
             return a.chunk_id < b.chunk_id;
         });
-        if (records.size() > k) {
+        if (resultSelection == SimeonResultSelection::DocumentTopK) {
+            records = retainBestRecordPerDocument(std::move(records), k);
+        } else if (records.size() > k) {
             records.resize(k);
         }
         if (diagnostics != nullptr) {
@@ -4300,8 +4405,10 @@ private:
                              const std::optional<std::string>& document_hash,
                              const std::unordered_set<std::string>& candidate_hashes,
                              const std::map<std::string, std::string>& metadata_filters,
-                             VectorSearchDiagnostics* diagnostics = nullptr) {
-        if (!db_ || query_embedding.empty() || k == 0) {
+                             VectorSearchDiagnostics* diagnostics = nullptr,
+                             ExactRowSelection rowSelection = ExactRowSelection::TopK) {
+        if (!db_ || query_embedding.empty() ||
+            (rowSelection == ExactRowSelection::TopK && k == 0)) {
             return std::vector<VectorRecord>{};
         }
         if (!isFiniteEmbedding(query_embedding) || isZeroNormEmbedding(query_embedding)) {
@@ -4369,6 +4476,15 @@ WHERE embedding_dim = ?1
         for (const auto& hash : orderedCandidateHashes) {
             sqlite3_bind_text(stmt, candidateBindIndex++, hash.c_str(), -1, SQLITE_TRANSIENT);
         }
+        const auto collectVisitedDocumentHash = [diagnostics](sqlite3_stmt* row) {
+            if (diagnostics == nullptr || !diagnostics->collectVisitedDocumentHashes) {
+                return;
+            }
+            const auto* hashText = sqlite3_column_text(row, 2);
+            if (hashText != nullptr) {
+                diagnostics->visitedDocumentHashes.emplace(reinterpret_cast<const char*>(hashText));
+            }
+        };
 
         // Dequantizer for quantized-primary rows (when float blob is absent)
         std::unique_ptr<TurboQuantMSE> bf_tq;
@@ -4412,7 +4528,8 @@ WHERE embedding_dim = ?1
                 return a.record.chunk_id < b.record.chunk_id;
             };
             std::vector<ScoredRow> scored;
-            scored.reserve(k + 1);
+            scored.reserve(rowSelection == ExactRowSelection::AllMatching ? candidate_hashes.size()
+                                                                          : k + 1);
             std::vector<float> dequant_buffer;
             int scanRc = SQLITE_OK;
             while ((scanRc = sqlite3_step(stmt)) == SQLITE_ROW) {
@@ -4426,6 +4543,7 @@ WHERE embedding_dim = ?1
                         continue;
                     }
                 }
+                collectVisitedDocumentHash(stmt);
 
                 const void* blob = sqlite3_column_blob(stmt, 3);
                 const int bytes = sqlite3_column_bytes(stmt, 3);
@@ -4483,7 +4601,13 @@ WHERE embedding_dim = ?1
                 const auto* chunkIdText = sqlite3_column_text(stmt, 1);
                 const std::string_view chunkId =
                     chunkIdText ? reinterpret_cast<const char*>(chunkIdText) : "";
-                if (scored.size() < k) {
+                if (rowSelection == ExactRowSelection::AllMatching) {
+                    auto record = recordFromStatement(stmt);
+                    if (record.embedding.empty() && !embedding.empty()) {
+                        record.embedding.assign(embedding.begin(), embedding.end());
+                    }
+                    scored.push_back({similarity, std::move(record)});
+                } else if (scored.size() < k) {
                     auto record = recordFromStatement(stmt);
                     if (record.embedding.empty() && !embedding.empty()) {
                         record.embedding.assign(embedding.begin(), embedding.end());
@@ -4509,7 +4633,11 @@ WHERE embedding_dim = ?1
             }
             sqlite3_finalize(stmt);
 
-            std::sort_heap(scored.begin(), scored.end(), better);
+            if (rowSelection == ExactRowSelection::AllMatching) {
+                std::sort(scored.begin(), scored.end(), better);
+            } else {
+                std::sort_heap(scored.begin(), scored.end(), better);
+            }
 
             std::vector<VectorRecord> records;
             records.reserve(scored.size());
@@ -4536,6 +4664,7 @@ WHERE embedding_dim = ?1
                     continue;
                 }
             }
+            collectVisitedDocumentHash(stmt);
 
             auto record = recordFromStatement(stmt);
 
@@ -4594,7 +4723,9 @@ WHERE embedding_dim = ?1
             return a.second.chunk_id < b.second.chunk_id;
         });
 
-        size_t count = std::min(k, scored_results.size());
+        const size_t count = rowSelection == ExactRowSelection::AllMatching
+                                 ? scored_results.size()
+                                 : std::min(k, scored_results.size());
         std::vector<VectorRecord> records;
         records.reserve(count);
         for (size_t i = 0; i < count; ++i) {
@@ -4852,17 +4983,41 @@ Result<std::vector<VectorRecord>> SqliteVecBackend::searchSimilarWithDiagnostics
     const std::unordered_set<std::string>& candidate_hashes,
     const std::map<std::string, std::string>& metadata_filters,
     VectorSearchDiagnostics& diagnostics) {
+    const bool collectVisitedDocumentHashes = diagnostics.collectVisitedDocumentHashes;
     diagnostics = {};
+    diagnostics.collectVisitedDocumentHashes = collectVisitedDocumentHashes;
     return impl_->searchSimilar(query_embedding, k, similarity_threshold, document_hash,
                                 candidate_hashes, metadata_filters, &diagnostics);
+}
+
+Result<std::vector<VectorRecord>> SqliteVecBackend::searchDocumentCandidatesWithDiagnostics(
+    const std::vector<float>& query_embedding, size_t k, float similarity_threshold,
+    const std::unordered_set<std::string>& candidate_hashes, VectorSearchDiagnostics& diagnostics) {
+    const bool collectVisitedDocumentHashes = diagnostics.collectVisitedDocumentHashes;
+    diagnostics = {};
+    diagnostics.collectVisitedDocumentHashes = collectVisitedDocumentHashes;
+    return impl_->searchDocumentCandidates(query_embedding, k, similarity_threshold,
+                                           candidate_hashes, &diagnostics);
 }
 
 Result<std::vector<VectorRecord>> SqliteVecBackend::searchExactCandidatesWithDiagnostics(
     const std::vector<float>& query_embedding, size_t k, float similarity_threshold,
     const std::unordered_set<std::string>& candidate_hashes, VectorSearchDiagnostics& diagnostics) {
+    const bool collectVisitedDocumentHashes = diagnostics.collectVisitedDocumentHashes;
     diagnostics = {};
+    diagnostics.collectVisitedDocumentHashes = collectVisitedDocumentHashes;
     return impl_->searchExactCandidates(query_embedding, k, similarity_threshold, candidate_hashes,
                                         &diagnostics);
+}
+
+Result<std::vector<VectorRecord>> SqliteVecBackend::searchAllExactCandidateRowsWithDiagnostics(
+    const std::vector<float>& query_embedding, float similarity_threshold,
+    const std::unordered_set<std::string>& candidate_hashes, VectorSearchDiagnostics& diagnostics) {
+    const bool collectVisitedDocumentHashes = diagnostics.collectVisitedDocumentHashes;
+    diagnostics = {};
+    diagnostics.collectVisitedDocumentHashes = collectVisitedDocumentHashes;
+    return impl_->searchAllExactCandidateRows(query_embedding, similarity_threshold,
+                                              candidate_hashes, &diagnostics);
 }
 
 Result<std::vector<std::vector<VectorRecord>>>

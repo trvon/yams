@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -107,6 +108,7 @@ struct TopologyRoutingOptions {
     bool collectRouteMembership = false;
     float graphNeighborMinScore = 0.25F;
     bool graphNeighborReciprocalOnly = true;
+    bool graphWeightedSeedRanking = false;
     /// Collect a trace-only ledger of relation, fetch, filter, and selection boundaries.
     /// This may perform additional graph and metadata reads but must not alter routing output.
     bool collectGraphDiagnostics = false;
@@ -352,7 +354,8 @@ topologyRoutingConstructionFingerprint(const yams::topology::TopologyArtifactBat
     const std::unordered_map<std::string, std::vector<std::tuple<std::string, float, bool>>>&
         seedNeighbors,
     const std::vector<std::string>& seedDocumentHashes, std::size_t maxDocs, float minScore,
-    bool reciprocalOnly);
+    bool reciprocalOnly,
+    std::span<const yams::topology::WeightedDocumentSeed> weightedSeedDocuments = {});
 
 TopologyRoutingSessionResult
 runTopologyRoutingSession(const TopologyRoutingSessionRequest& request,

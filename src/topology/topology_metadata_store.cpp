@@ -224,6 +224,7 @@ json batchToJson(const TopologyArtifactBatch& batch) {
            {"algorithm", batch.algorithm},
            {"input_kind", inputKindToString(batch.inputKind)},
            {"embedding_space_identity", batch.embeddingSpaceIdentity},
+           {"protected_relation_identity", batch.protectedRelationIdentity},
            {"generated_at_unix_seconds", batch.generatedAtUnixSeconds},
            {"topology_epoch", batch.topologyEpoch}};
     j["clusters"] = json::array();
@@ -246,6 +247,7 @@ Result<TopologyArtifactBatch> batchFromJson(const json& j) {
     batch.algorithm = j.value("algorithm", "");
     batch.inputKind = inputKindFromString(j.value("input_kind", std::string{"hybrid"}));
     batch.embeddingSpaceIdentity = j.value("embedding_space_identity", "");
+    batch.protectedRelationIdentity = j.value("protected_relation_identity", "");
     batch.generatedAtUnixSeconds = j.value("generated_at_unix_seconds", uint64_t{0});
     batch.topologyEpoch = j.value("topology_epoch", uint64_t{0});
     if (j.contains("clusters") && j["clusters"].is_array()) {
