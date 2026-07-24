@@ -71,6 +71,10 @@ struct EvidencePipelineTrace {
     std::size_t fusedCandidates{0};
     std::size_t rerankedCandidates{0};
     std::size_t finalCandidates{0};
+    /// Candidates beyond the ordinary fusion window (effectiveLimit) that were additively kept
+    /// because SearchResult::topologyScore cleared config.topologyFusionRescueMinScore. Always 0
+    /// when config.topologyFusionRescueSlots is 0.
+    std::size_t topologyFusionRescuedCandidates{0};
 };
 
 struct EvidencePipelineResult {
