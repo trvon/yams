@@ -25,9 +25,11 @@ magic::PruneCategory classifyPruneCandidate(const metadata::DocumentInfo& doc,
                                             const std::shared_ptr<api::IContentStore>& contentStore) {
     auto category = magic::getPruneCategory(doc.filePath, doc.fileExtension, doc.mimeType);
     // MIME inference for short or malformed binaries may label an extensionless executable as
-    // text/plain. Restrict the bounded content read to extensionless candidates, but do not trust
+    // text/plain, while legacy metadata can retain a spurious extension. Restrict the bounded
+    // content read to extensionless candidates based on either representation, but do not trust
     // an otherwise non-prunable MIME classification over a definitive file signature.
-    const bool needsSignature = doc.fileExtension.empty();
+    const bool needsSignature =
+        doc.fileExtension.empty() || std::filesystem::path(doc.filePath).extension().empty();
     if (category != magic::PruneCategory::None || !needsSignature || !contentStore ||
         doc.sha256Hash.empty()) {
         return category;
