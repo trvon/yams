@@ -101,6 +101,22 @@ Bug-bounty: `target`, `scope`, `severity`, `repro`, `impact`.
 `git push`; deleting files (index in YAMS first); installing dependencies;
 potentially destructive verification steps.
 
+## Mobile Host Contract
+
+When the task concerns an app embedding `libyams_mobile`:
+
+- Preserve the boundary: YAMS owns local corpus lifecycle, storage, and
+  retrieval; the host owns product UI and any model/entitlement experience.
+- Prefer a narrow consumer workflow—explicit import, library, search, result
+  inspection, and confirmation-gated deletion—over exposing raw CLI/admin
+  operations as primary UI.
+- Keep a native-free lifecycle seam for deterministic tests, and separately
+  document physical smoke steps for each required artifact/architecture.
+- Never claim a device round trip without the artifact, ABI version, device/OS,
+  architecture, and observed start/list/search/cleanup result.
+- A paid feature may add value, but it must not gate access to an existing local
+  corpus or require cloud identity/sync by default.
+
 ## Session Recovery
 
 ```bash
