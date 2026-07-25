@@ -418,7 +418,7 @@ struct MetricsSnapshot {
 
 class SocketServer; // Forward declaration
 
-class DaemonMetrics {
+class DaemonMetrics : public std::enable_shared_from_this<DaemonMetrics> {
 public:
     DaemonMetrics(const DaemonLifecycleFsm* lifecycle, const StateComponent* state,
                   const ServiceManager* services, WorkCoordinator* coordinator,

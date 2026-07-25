@@ -2020,11 +2020,11 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     RepairService::Config cfg;
     cfg.enable = true;
     cfg.maxBatch = 16;
+    cfg.initialScanDeferTicks = 0;
     RepairService repair(sm.get(), &state_, []() -> size_t { return 0; }, cfg);
     repair.start();
 
-    // spawnInitialScan is deferred by minDeferTicks (50 ticks * 100ms = ~5s).
-    // Poll until the backlog counter is incremented or a generous timeout expires.
+    // The test disables the production startup delay and observes the scan result.
     const bool detected = waitForCondition(std::chrono::seconds(15), [&]() {
         return state_.stats.repairTotalBacklog.load(std::memory_order_relaxed) >= 1u;
     });

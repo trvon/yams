@@ -179,7 +179,9 @@ run_ci() {
 		default_test_args="--suite unit --suite integration --print-errorlogs --timeout-multiplier 3"
 		;;
 	tsan)
-		default_test_args="--suite unit --suite integration --print-errorlogs --timeout-multiplier 10"
+		# TSAN forces the daemon's global I/O context to one worker. Running several
+		# daemon-heavy binaries concurrently then starves their startup and teardown paths.
+		default_test_args="--suite unit --suite integration --print-errorlogs --timeout-multiplier 10 --num-processes 1"
 		;;
 	*)
 		default_test_args="--suite unit --suite integration --print-errorlogs --timeout-multiplier 2"

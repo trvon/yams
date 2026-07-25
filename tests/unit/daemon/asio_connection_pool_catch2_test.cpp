@@ -705,12 +705,19 @@ TEST_CASE("AsioConnectionPool retries a transient refused connection",
     opts.requestTimeout = 500ms;
 
     auto pool = AsioConnectionPool::get_or_create(opts);
+    std::promise<void> refused;
+    std::atomic_flag retryObserved = ATOMIC_FLAG_INIT;
+    pool->testing_setRetryHook([&] {
+        if (!retryObserved.test_and_set(std::memory_order_acq_rel)) {
+            refused.set_value();
+        }
+    });
     auto future = boost::asio::co_spawn(GlobalIOContext::global_executor(), pool->acquire(),
                                         boost::asio::use_future);
 
-    // A bound-but-not-listening socket refuses immediately. The pool should retain the acquire
-    // while the transient retry backoff runs instead of surfacing that first refusal.
-    REQUIRE(future.wait_for(20ms) == std::future_status::timeout);
+    // Start listening only after the pool observes the initial refusal, so the next retry must
+    // establish the connection.
+    REQUIRE(refused.get_future().wait_for(1s) == std::future_status::ready);
     REQUIRE(::listen(listener, 1) == 0);
 
     REQUIRE(future.wait_for(1s) == std::future_status::ready);

@@ -482,8 +482,8 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
 
     bool initialScanEnqueued = false;
     bool vectorCleanupDone = false;
-    int deferTicks = 0;
-    const int minDeferTicks = 50;
+    std::uint32_t deferTicks = 0;
+    const std::uint32_t minDeferTicks = shutdownState->config.initialScanDeferTicks;
 
     static auto pruneQueue =
         InternalEventBus::instance().get_or_create_channel<InternalEventBus::PruneJob>("prune_jobs",

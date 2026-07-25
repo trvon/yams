@@ -544,7 +544,8 @@ void DaemonMetrics::dispatchOffStrand(std::atomic<bool>& guard, const char* name
 }
 
 void DaemonMetrics::dispatchPhysicalWalk() const {
-    dispatchOffStrand(physicalWalkInFlight_, "physical walk", [this]() {
+    auto self = shared_from_this();
+    dispatchOffStrand(physicalWalkInFlight_, "physical walk", [self = std::move(self)]() {
         const auto walkStart = std::chrono::steady_clock::now();
         std::uint64_t total = 0;
         std::uint64_t casObjectsBytes = 0;
@@ -560,7 +561,8 @@ void DaemonMetrics::dispatchPhysicalWalk() const {
         namespace fs = std::filesystem;
         fs::path root;
         try {
-            root = services_ ? (services_->getResolvedDataDir() / "storage") : fs::path{};
+            root =
+                self->services_ ? (self->services_->getResolvedDataDir() / "storage") : fs::path{};
         } catch (...) {
             spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");
         }
@@ -602,7 +604,7 @@ void DaemonMetrics::dispatchPhysicalWalk() const {
             }
         }
         try {
-            auto dd = services_ ? services_->getResolvedDataDir() : fs::path{};
+            auto dd = self->services_ ? self->services_->getResolvedDataDir() : fs::path{};
             if (!dd.empty()) {
                 auto sizeOf = [&](const fs::path& p) -> std::uint64_t {
                     std::error_code e2;
@@ -640,16 +642,17 @@ void DaemonMetrics::dispatchPhysicalWalk() const {
         const auto walkDurationMs =
             std::chrono::duration_cast<std::chrono::milliseconds>(walkEnd - walkStart).count();
 
-        std::unique_lock lock(cacheMutex_);
-        lastPhysicalBytes_ = (totalComputed > 0) ? totalComputed : total;
-        lastPhysicalAt_ = walkEnd;
-        lastWalkDurationMs_ = static_cast<std::uint64_t>(std::max<std::int64_t>(0, walkDurationMs));
-        cached_.casPhysicalBytes = casObjectsBytes;
-        cached_.metadataPhysicalBytes = metaBytes;
-        cached_.indexPhysicalBytes = indexBytes;
-        cached_.vectorPhysicalBytes = vecBytes;
-        cached_.logsTmpPhysicalBytes = tmpBytes;
-        cached_.physicalTotalBytes = (totalComputed > 0) ? totalComputed : total;
+        std::unique_lock lock(self->cacheMutex_);
+        self->lastPhysicalBytes_ = (totalComputed > 0) ? totalComputed : total;
+        self->lastPhysicalAt_ = walkEnd;
+        self->lastWalkDurationMs_ =
+            static_cast<std::uint64_t>(std::max<std::int64_t>(0, walkDurationMs));
+        self->cached_.casPhysicalBytes = casObjectsBytes;
+        self->cached_.metadataPhysicalBytes = metaBytes;
+        self->cached_.indexPhysicalBytes = indexBytes;
+        self->cached_.vectorPhysicalBytes = vecBytes;
+        self->cached_.logsTmpPhysicalBytes = tmpBytes;
+        self->cached_.physicalTotalBytes = (totalComputed > 0) ? totalComputed : total;
     });
 }
 
@@ -657,33 +660,36 @@ void DaemonMetrics::dispatchStoreStatsRefresh() const {
     if (!services_) {
         return;
     }
-    dispatchOffStrand(storeStatsCollectInFlight_, "store stats refresh", [this]() {
-        auto cs = services_->getContentStore();
-        if (!cs)
-            return;
-        auto ss = cs->getStats();
-        CachedStoreStats cached;
-        cached.totalObjects = ss.totalObjects;
-        cached.totalBytes = ss.totalBytes;
-        cached.totalUncompressedBytes = ss.totalUncompressedBytes;
-        cached.deduplicatedBytes = ss.deduplicatedBytes;
-        cached.uniqueBlocks = ss.uniqueBlocks;
-        cached.compressionSaved = ss.compressionSaved();
-        cached.dedupRatio = ss.dedupRatio();
-        cached.populated = true;
-        std::unique_lock lock(cacheMutex_);
-        cachedStoreStats_ = cached;
-        lastStoreStatsAt_ = std::chrono::steady_clock::now();
-    });
+    auto self = shared_from_this();
+    dispatchOffStrand(storeStatsCollectInFlight_, "store stats refresh",
+                      [self = std::move(self)]() {
+                          auto cs = self->services_->getContentStore();
+                          if (!cs)
+                              return;
+                          auto ss = cs->getStats();
+                          CachedStoreStats cached;
+                          cached.totalObjects = ss.totalObjects;
+                          cached.totalBytes = ss.totalBytes;
+                          cached.totalUncompressedBytes = ss.totalUncompressedBytes;
+                          cached.deduplicatedBytes = ss.deduplicatedBytes;
+                          cached.uniqueBlocks = ss.uniqueBlocks;
+                          cached.compressionSaved = ss.compressionSaved();
+                          cached.dedupRatio = ss.dedupRatio();
+                          cached.populated = true;
+                          std::unique_lock lock(self->cacheMutex_);
+                          self->cachedStoreStats_ = cached;
+                          self->lastStoreStatsAt_ = std::chrono::steady_clock::now();
+                      });
 }
 
 void DaemonMetrics::dispatchDetailedCollect() const {
-    dispatchOffStrand(detailedCollectInFlight_, "detailed collect", [this]() {
-        auto detailedSnapshot = std::make_shared<MetricsSnapshot>(collectSnapshot(true));
+    auto self = shared_from_this();
+    dispatchOffStrand(detailedCollectInFlight_, "detailed collect", [self = std::move(self)]() {
+        auto detailedSnapshot = std::make_shared<MetricsSnapshot>(self->collectSnapshot(true));
         const auto publishedAt = std::chrono::steady_clock::now();
-        std::unique_lock lock(cacheMutex_);
-        cachedDetailedSnapshot_ = detailedSnapshot;
-        lastDetailedUpdate_ = publishedAt;
+        std::unique_lock lock(self->cacheMutex_);
+        self->cachedDetailedSnapshot_ = detailedSnapshot;
+        self->lastDetailedUpdate_ = publishedAt;
     });
 }
 

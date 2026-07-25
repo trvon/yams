@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -13,6 +14,7 @@
 #include <yams/core/types.h>
 #include <yams/daemon/client/asio_connection.h>
 #include <yams/daemon/client/transport_options.h>
+#include <yams/daemon/components/test_hooks.h>
 
 namespace yams::daemon {
 
@@ -53,6 +55,11 @@ public:
     }
 #endif
 
+#if YAMS_DAEMON_TEST_HOOKS_ENABLED
+    using TestingRetryHook = std::function<void()>;
+    YAMS_DAEMON_TEST_HOOK void testing_setRetryHook(TestingRetryHook hook);
+#endif
+
     AsioConnectionPool(const TransportOptions& opts, bool shared);
     ~AsioConnectionPool();
 
@@ -69,6 +76,9 @@ private:
     std::condition_variable pending_create_cv_;
     std::size_t pending_creates_{0};
     boost::asio::cancellation_signal shutdown_signal_; // Emitted on shutdown to cancel pending ops
+#if YAMS_DAEMON_TEST_HOOKS_ENABLED
+    TestingRetryHook testing_retry_hook_;
+#endif
 
     // Pool of available connections (not just one!)
     // Use weak_ptr to allow connections to be destroyed when not in use
