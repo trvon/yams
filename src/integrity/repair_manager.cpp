@@ -1,5 +1,5 @@
-#include <yams/compression/compression_header.h>
 #include <yams/api/content_store.h>
+#include <yams/compression/compression_header.h>
 #include <yams/core/magic_numbers.hpp>
 #include <yams/crypto/hasher.h>
 #include <yams/integrity/repair_manager.h>
@@ -21,33 +21,32 @@ namespace {
 
 constexpr std::size_t kPruneSignatureBytes = 4096;
 
-magic::PruneCategory classifyPruneCandidate(const metadata::DocumentInfo& doc,
-                                            const std::shared_ptr<api::IContentStore>& contentStore) {
+magic::PruneCategory
+classifyPruneCandidate(const metadata::DocumentInfo& doc,
+                       const std::shared_ptr<api::IContentStore>& contentStore) {
     auto category = magic::getPruneCategory(doc.filePath, doc.fileExtension, doc.mimeType);
-    // MIME inference for short or malformed binaries may label an extensionless executable as
-    // text/plain, while legacy metadata can retain a spurious extension. Restrict the bounded
-    // content read to extensionless candidates based on either representation, but do not trust
-    // an otherwise non-prunable MIME classification over a definitive file signature.
+    // For extensionless files, a definitive signature is more specific than a generic path rule
+    // such as a parent build directory.
     const bool needsSignature =
         doc.fileExtension.empty() || std::filesystem::path(doc.filePath).extension().empty();
-    if (category != magic::PruneCategory::None || !needsSignature || !contentStore ||
-        doc.sha256Hash.empty()) {
+    if (!needsSignature || !contentStore || doc.sha256Hash.empty()) {
         return category;
     }
 
     auto bytes = contentStore->retrieveBytesPrefix(doc.sha256Hash, kPruneSignatureBytes);
     if (!bytes || bytes.value().empty()) {
-        return magic::PruneCategory::None;
+        return category;
     }
     const auto* data = reinterpret_cast<const uint8_t*>(bytes.value().data());
     const auto detectedMime =
         magic::detect_mime_type(std::span<const uint8_t>(data, bytes.value().size()));
-    return magic::getPruneCategory(doc.filePath, doc.fileExtension, detectedMime);
+    const auto signatureCategory = magic::getPruneCategory({}, {}, detectedMime);
+    return signatureCategory != magic::PruneCategory::None ? signatureCategory : category;
 }
 
-std::vector<PruneCandidate> buildPruneCandidates(std::span<const metadata::DocumentInfo> docs,
-                                                 const PruneConfig& config,
-                                                 const std::shared_ptr<api::IContentStore>& contentStore) {
+std::vector<PruneCandidate>
+buildPruneCandidates(std::span<const metadata::DocumentInfo> docs, const PruneConfig& config,
+                     const std::shared_ptr<api::IContentStore>& contentStore) {
     std::vector<PruneCandidate> candidates;
 
     auto matchesCategory = [&](magic::PruneCategory category) -> bool {

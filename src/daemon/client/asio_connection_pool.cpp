@@ -1,4 +1,6 @@
+#define YAMS_DAEMON_TEST_HOOKS_IMPL 1
 #include <yams/daemon/client/asio_connection_pool.h>
+#undef YAMS_DAEMON_TEST_HOOKS_IMPL
 
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/client/ipc_wait_config.h>
@@ -551,6 +553,13 @@ AsioConnectionPool::RegistryStats AsioConnectionPool::registry_stats() {
     return stats;
 }
 
+#if YAMS_DAEMON_TEST_HOOKS_ENABLED
+void AsioConnectionPool::testing_setRetryHook(TestingRetryHook hook) {
+    std::lock_guard<std::mutex> lk(mutex_);
+    testing_retry_hook_ = std::move(hook);
+}
+#endif
+
 void AsioConnectionPool::cleanup_stale_connections() {
     std::erase_if(connection_pool_, [](const std::weak_ptr<AsioConnection>& weak) {
         auto conn = weak.lock();
@@ -780,6 +789,18 @@ awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::create_co
         const auto failureKind = parseIpcFailureKind(socket_res.error().message);
         const bool retryable = socketMissing() || failureKind == IpcFailureKind::Refused;
         if (retryable && attempt + 1 < kMaxRetries) {
+#if YAMS_DAEMON_TEST_HOOKS_ENABLED
+            if (failureKind == IpcFailureKind::Refused) {
+                TestingRetryHook retryHook;
+                {
+                    std::lock_guard<std::mutex> lk(mutex_);
+                    retryHook = testing_retry_hook_;
+                }
+                if (retryHook) {
+                    retryHook();
+                }
+            }
+#endif
             auto exec = co_await this_coro::executor;
             boost::asio::steady_timer timer(exec);
             timer.expires_after(backoff);
