@@ -8,6 +8,7 @@ from workers.base import WorkerContext, WorkerResult
 from workers.external_script import run_external_script
 from workers.ingestion_e2e import run_ingestion_e2e
 from workers.ops_timeline import run_ops_timeline
+from workers.output_efficiency import run_output_efficiency
 from workers.repair_ability import run_repair_ability
 from workers.retrieval_load import run_retrieval_load
 from workers.retrieval_quality import run_retrieval_quality
@@ -19,6 +20,7 @@ REGISTRY: dict[str, WorkerFn] = {
     "retrieval_load": run_retrieval_load,
     "repair_ability": run_repair_ability,
     "ops_timeline": run_ops_timeline,
+    "output_efficiency": run_output_efficiency,
     "retrieval_quality": run_retrieval_quality,
     "external_script": run_external_script,
 }

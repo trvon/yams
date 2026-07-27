@@ -366,6 +366,18 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_grep_result_window_exe = executable('catch2_grep_result_window',
+    files(
+      'unit/daemon/grep_result_window_catch2_test.cpp',
+      '../src/daemon/components/grep_result_window.cpp',
+    ),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_search_admission_controller_exe = executable('catch2_search_admission_controller',
     files('unit/daemon/search_admission_controller_catch2_test.cpp'),
     include_directories: incs,
@@ -2774,6 +2786,12 @@ if catch2_dep.found()
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
     is_parallel: false
+  )
+
+  test('grep_result_window', catch2_grep_result_window_exe,
+    suite: ['catch2', 'unit', 'daemon', 'grep'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
   )
 
   test('search_admission_controller', catch2_search_admission_controller_exe,

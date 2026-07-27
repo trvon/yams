@@ -27,6 +27,7 @@
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/dispatch_utils.hpp>
+#include <yams/daemon/components/grep_result_window.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -1660,38 +1661,33 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGrepRequest(const Grep
                 response.totalMatches = response.matches.size();
                 co_return response;
             }
-            const std::size_t defaultCap = 20;
-            const bool applyDefaultCap =
-                !(req.countOnly || req.filesOnly || req.filesWithoutMatch || req.pathsOnly) &&
-                req.maxMatches == 0;
+            constexpr std::size_t kDefaultResultWindow = 20;
+            const bool applyDefaultWindow =
+                !(req.countOnly || req.filesOnly || req.filesWithoutMatch || req.pathsOnly);
+            auto selection = grep_result_window::select(
+                serviceResp.results, applyDefaultWindow ? kDefaultResultWindow : 0);
             GrepResponse response;
             response.filesSearched = serviceResp.filesSearched;
-            std::size_t emitted = 0;
-            for (const auto& fileResult : serviceResp.results) {
-                for (const auto& match : fileResult.matches) {
-                    if (applyDefaultCap && emitted >= defaultCap)
-                        break;
-                    GrepMatch dm;
-                    dm.file = fileResult.file;
-                    dm.lineNumber = match.lineNumber;
-                    dm.line = match.line;
-                    dm.contextBefore = match.before;
-                    dm.contextAfter = match.after;
-                    dm.matchType = match.matchType.empty() ? "regex" : match.matchType;
-                    dm.confidence = match.confidence;
-                    response.matches.push_back(std::move(dm));
-                    emitted++;
-                }
-                if (applyDefaultCap && emitted >= defaultCap)
-                    break;
-            }
-            response.totalMatches = applyDefaultCap ? emitted : serviceResp.totalMatches;
+            response.matches = std::move(selection.matches);
+            response.totalMatches = serviceResp.totalMatches;
             response.regexMatches = static_cast<uint64_t>(serviceResp.regexMatches);
             response.semanticMatches = static_cast<uint64_t>(serviceResp.semanticMatches);
             response.executionTimeMs = serviceResp.executionTimeMs;
             response.queryInfo = serviceResp.queryInfo;
             response.searchStats.insert(serviceResp.searchStats.begin(),
                                         serviceResp.searchStats.end());
+            response.searchStats["result_window_input_matches"] =
+                std::to_string(selection.stats.inputMatches);
+            response.searchStats["result_window_unique_matches"] =
+                std::to_string(selection.stats.uniqueMatches);
+            response.searchStats["result_window_emitted_matches"] =
+                std::to_string(selection.stats.emittedMatches);
+            response.searchStats["result_window_duplicates_removed"] =
+                std::to_string(selection.stats.inputMatches - selection.stats.uniqueMatches);
+            response.searchStats["result_window_truncated"] =
+                std::to_string(selection.stats.uniqueMatches - selection.stats.emittedMatches);
+            response.searchStats["result_window_limit"] =
+                std::to_string(applyDefaultWindow ? kDefaultResultWindow : 0);
             response.filesWith = serviceResp.filesWith;
             response.filesWithout = serviceResp.filesWithout;
             response.pathsOnly = serviceResp.pathsOnly;

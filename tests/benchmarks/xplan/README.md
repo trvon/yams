@@ -71,6 +71,7 @@ tests/benchmarks/xplan/
 | `ingest_pipeline` | Ingest kg/vectors/gliner (synthetic — throughput, not ranking) |
 | `retrieval_load` / `repair_ability` / `ops_timeline` / `daemon_ops_core` | Daemon KPIs 2–5 |
 | `retrieval_hydration_pressure` | Search snippet lookup/content-fetch/render plus grep match-render and graph snippet-render p50/p95/p99 under concurrent writes; paths-only search control (repeats=3) |
+| `retrieval_output_efficiency_yams` | Read-only search/grep/graph usefulness per exact UTF-8 byte on the indexed YAMS checkout; human-vs-JSON output and scope-leak guard (repeats=3) |
 | `read_write_pressure` | Equal-budget write-heavy/balanced/read-heavy/read-only daemon load; per-op latency, DB pools, WriteCoordinator pressure, WAL growth, drain, and recovery (repeats=3) |
 | `topology_purity_validate` / `topology_routing_budget_ablation` | Topology construction purity and routed-vs-global ANN budget gate (repeats=3) |
 | `search_generalized_memory_topology_gate` | SciFact + NF-Corpus in one index; per-source quality, cross-source interference, and topology-vs-global cost (repeats=3) |
@@ -78,6 +79,23 @@ tests/benchmarks/xplan/
 | `plans/archive/*` | Superseded plans (historical only) |
 
 Agent measurement loop and plan selection: repo `AGENTS.md` (Benchmarks & Experiments).
+
+### Agent-memory output contract
+
+`retrieval_output_efficiency_yams` uses the `agent_memory_aggressive_v1` contract. A run remains
+valid when it measures a contract failure; promotion requires `efficiency_contract_pass=1` for
+both human and JSON arms. The contract requires:
+
+- every task returns expected evidence, and every task exposes it within 512 bytes;
+- overall and grep p95 output are at most 8 KiB; search p95 is at most 2 KiB;
+- overall duplicate-line fraction is at most 5%, grep at most 10%;
+- useful evidence density is at least 0.25 units per KiB;
+- graph p95 is at most 8 KiB; and
+- no absolute path reference escapes the checked-out YAMS corpus.
+
+Do not meet the contract by dropping expected evidence, hiding command failures, weakening the
+manifest, or excluding hard tasks. Optimize one measured waste category, preserve the identical
+task set, and compare three-repeat artifacts.
 
 ## Corpora
 
