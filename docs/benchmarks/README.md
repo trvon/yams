@@ -1,22 +1,15 @@
 # Benchmarks
 
-Daemon KPI measurements via **xplan**. Tables below are the latest snapshot of the
-**default system** (no experiment matrices). Per-run detail:
+The tables below are the latest recorded snapshot of the **default system**
+(no experiment matrices). They were produced with an xplan harness that is now
+kept as optional, gitignored local tooling. Per-run detail:
 `build/benchmarks/<plan>/<stamp>/` (`REPORT.md`, `ablation.md`, `metrics.csv`).
 
 | | |
 |--|--|
-| Harness | [`tests/benchmarks/xplan/`](../../tests/benchmarks/xplan/README.md) |
-| Plans | `tests/benchmarks/xplan/plans/*.json` |
+| Local harness | `tests/benchmarks/xplan/` (optional; not distributed) |
 | Artifacts | `build/benchmarks/<plan>/<stamp>/` (gitignored) |
 | Micro baselines (code) | `tests/benchmarks/baseline/*.json` |
-
-```bash
-python3 tests/benchmarks/xplan/runner.py list-plans
-python3 tests/benchmarks/xplan/runner.py download-beir          # scifact + nfcorpus
-python3 tests/benchmarks/xplan/runner.py run <plan> --build-dir build/release
-python3 tests/benchmarks/xplan/runner.py compare <dirA> <dirB>
-```
 
 **Corpora:** quality plans use **BEIR scifact** (`dataset=scifact`, 2000 docs × 50
 queries) by default. Cache: `~/.cache/yams/benchmarks/<name>` (auto-download).
@@ -98,7 +91,6 @@ Artifacts: `build/benchmarks/ops_timeline/kpi-20260709T003228Z-ops/`
 
 | Topic | Link |
 |-------|------|
-| xplan harness | [tests/benchmarks/xplan/README.md](../../tests/benchmarks/xplan/README.md) |
 | Extraction / repair | [docs/architecture/extraction-repair-pipeline.md](../architecture/extraction-repair-pipeline.md) |
 | System architecture | [docs/architecture/system_architecture.md](../architecture/system_architecture.md) |
 | Testing policy | [docs/developer/testing.md](../developer/testing.md) |
@@ -107,7 +99,7 @@ Artifacts: `build/benchmarks/ops_timeline/kpi-20260709T003228Z-ops/`
 
 ## Refresh
 
-1. `download-beir` (or let quality worker auto-fetch).
-2. Run the default plans under a common stamp.
+1. Prepare the relevant corpus.
+2. Run equivalent benchmark workloads under a common stamp.
 3. Replace tables above from each `summary.md` / `REPORT.md` (default arms only).
 4. Update the stamp line.

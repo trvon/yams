@@ -2,7 +2,7 @@
   repair_ability_bench.cpp - KPI 4 repair ability harness
 
   Injects documents that skip embeddings (fault surface), runs daemon
-  RepairRequest operations, and emits JSON metrics for xplan.
+  RepairRequest operations, and emits JSON metrics for benchmark tooling.
 
   Env:
     YAMS_TEST_SAFE_SINGLE_INSTANCE=1  required

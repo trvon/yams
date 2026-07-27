@@ -3375,20 +3375,6 @@ if catch2_dep.found()
     timeout: 30
   )
 
-  xplan_python = import('python').find_installation('python3', required: false)
-  if xplan_python.found()
-    test('xplan_contracts', xplan_python,
-      args: [meson.current_source_dir() / 'benchmarks/xplan/test_xplan_contracts.py'],
-      suite: ['unit', 'search', 'benchmark', 'xplan'],
-      timeout: 30
-    )
-    test('xplan_hydration_metrics', xplan_python,
-      args: [meson.current_source_dir() / 'benchmarks/xplan/test_hydration_metrics.py'],
-      suite: ['unit', 'search', 'benchmark', 'xplan', 'hydration'],
-      timeout: 30
-    )
-  endif
-
   test('relevance_label_store', catch2_relevance_label_store_exe,
     suite: ['catch2', 'unit', 'search', 'relevance'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },

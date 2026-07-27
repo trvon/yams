@@ -100,10 +100,16 @@ ci_logs/
 bench_results/
 build/benchmarks/
 audit_artifacts/
+/DIFFERENTIAL_REVIEW_REPORT.md
 tests/benchmarks/baseline/xplan_foundation_*.json
-tests/benchmarks/xplan/**/__pycache__/
-tests/benchmarks/xplan/**/.self_test_plan.json
-tests/benchmarks/xplan/plans/.plan_for_report.json
+/tests/benchmarks/xplan/
+# Local-only xplan compatibility wrappers.
+/tests/benchmarks/scripts/ingestion_pipeline_ablation.sh
+/tests/benchmarks/scripts/simeon_rerank_ab.sh
+/tests/benchmarks/scripts/topology_cluster_ablation.sh
+/tests/benchmarks/scripts/topology_expansion_fusion_ablation.sh
+/tests/benchmarks/scripts/topology_route_scoring_ablation.sh
+/tests/benchmarks/scripts/topology_source_ablation.sh
 
 # Internal benchmark harness scripts (not shipped)
 tests/benchmarks/*.py

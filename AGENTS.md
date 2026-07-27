@@ -116,11 +116,13 @@ Keep physical-device claims separate and reproducible.
 - DynamicCap sentinel: `UINT32_MAX` = unset (use it when resetting, not `0`).
 - See `docs/developer/testing.md` for the full suite-shaping policy.
 
-## Benchmarks & Experiments (xplan)
+## Benchmarks & Experiments (local xplan)
 
-Daemon KPI and **search-engine** quality/latency ablations use **xplan**. Use the
-harness; do not invent parallel multi-arm shell matrices. Organized default-system
-numbers: `docs/benchmarks/README.md`. Per-run detail (gitignored):
+The xplan harness is optional, gitignored local tooling and is not present in a
+clean clone. When it is available, daemon KPI and **search-engine**
+quality/latency ablations use it; do not invent parallel multi-arm shell
+matrices. Organized default-system numbers: `docs/benchmarks/README.md`.
+Per-run detail (gitignored):
 `build/benchmarks/<plan>/<stamp>/` (`REPORT.md`, `ablation.md`, `metrics.csv`).
 
 ### Entry points
