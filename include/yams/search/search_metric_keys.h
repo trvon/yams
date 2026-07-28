@@ -20,6 +20,21 @@ constexpr std::string_view kCandidatePipelineTopologyAnnotatedCandidates =
     "candidate_pipeline_topology_annotated_candidates";
 constexpr std::string_view kCandidatePipelineTopologyFusionRescuedCandidates =
     "candidate_pipeline_topology_fusion_rescued_candidates";
+constexpr std::string_view kCandidatePipelineTopologyFusionRescueIdentityMatchesInTail =
+    "candidate_pipeline_topology_fusion_rescue_identity_matches_in_tail";
+constexpr std::string_view kCandidatePipelineTopologyFusionRescueIdentityMatchesWithEvidenceInTail =
+    "candidate_pipeline_topology_fusion_rescue_identity_matches_with_evidence_in_tail";
+constexpr std::string_view kCandidatePipelineTopologyFusionRescueEligibleHashesInTail =
+    "candidate_pipeline_topology_fusion_rescue_eligible_hashes_in_tail";
+constexpr std::string_view kCandidatePipelineTopologyFusionRescueEligibleDocIdsInTail =
+    "candidate_pipeline_topology_fusion_rescue_eligible_doc_ids_in_tail";
+constexpr std::string_view kTopologyRescueSelector = "topology_rescue_selector";
+constexpr std::string_view kTopologyRescueSelectorStatus = "topology_rescue_selector_status";
+constexpr std::string_view kTopologyRescueSelectorScoredCandidates =
+    "topology_rescue_selector_scored_candidates";
+constexpr std::string_view kTopologyRescueSelectorRecipe = "topology_rescue_selector_recipe";
+constexpr std::string_view kTopologyRescueSelectorResolvedCandidates =
+    "topology_rescue_selector_resolved_candidates";
 
 constexpr std::string_view kSearchEngineReady = "search_engine_ready";
 constexpr std::string_view kVectorReady = "vector_ready";

@@ -934,6 +934,52 @@ SimeonLexicalBackend::scoreRouted(std::string_view query,
 }
 
 Result<SimeonLexicalBackend::RescoreDecision>
+SimeonLexicalBackend::scoreFragmentGeometry(std::string_view query,
+                                            std::span<const std::int64_t> candidate_doc_ids) const {
+    if (!ready_.load(std::memory_order_acquire) || !index_) {
+        return Error{ErrorCode::NotInitialized, "SimeonLexicalBackend: not ready"};
+    }
+    if (!fragmentGeometryReady()) {
+        return Error{ErrorCode::NotInitialized,
+                     "SimeonLexicalBackend: fragment geometry is not ready"};
+    }
+    ScoreTimingScope scoreTiming(*this);
+
+    // The topology selector must rank the complete eligible set. A smaller global BM25 pool would
+    // leave a route-rescued candidate at -inf before it can be considered, so this experimental
+    // path scores the complete built corpus before projecting to the caller's closed candidate set.
+    simeon::FragmentGeometryConfig geometryConfig;
+    geometryConfig.pool_size = static_cast<std::uint32_t>(doc_frags_.size());
+    geometryConfig.use_phss = true;
+    geometryConfig.phss_config.criterion = simeon::PhssConfig::Criterion::LargestGapApprox;
+    geometryConfig.top_fragments_per_doc =
+        std::max<std::uint32_t>(geometryConfig.top_fragments_per_doc, 8u);
+
+    auto full = simeon::score_fragment_geometry(query, *index_, *fragment_encoder_, doc_frags_,
+                                                geometryConfig);
+    std::vector<float> lexical(doc_count_, 0.0f);
+    index_->score(query, std::span<float>{lexical});
+    reconcileGeomWithBm25(full, lexical);
+
+    RescoreDecision decision;
+    decision.recipe_name = "FragmentRichCovPhssApprox";
+    decision.scores.reserve(candidate_doc_ids.size());
+    for (const auto id : candidate_doc_ids) {
+        const auto it = doc_id_to_index_.find(id);
+        if (it == doc_id_to_index_.end()) {
+            decision.scores.push_back(0.0f);
+            continue;
+        }
+        const auto documentIndex = it->second;
+        const float score = documentIndex < full.size() && std::isfinite(full[documentIndex])
+                                ? full[documentIndex]
+                                : 0.0f;
+        decision.scores.push_back(score);
+    }
+    return decision;
+}
+
+Result<SimeonLexicalBackend::RescoreDecision>
 SimeonLexicalBackend::scoreStrategyRouted(std::string_view query,
                                           std::span<const std::int64_t> candidate_doc_ids) const {
     if (!ready_.load(std::memory_order_acquire) || !index_) {

@@ -320,6 +320,32 @@ TEST_CASE("SimeonLexicalBackend fixed-hash fragments do not require a PMI vocabu
     CHECK(std::isfinite(scores.value().front()));
 }
 
+TEST_CASE("SimeonLexicalBackend explicit fragment geometry does not quality-route to BM25",
+          "[search][simeon][fragment-geometry][catch2]") {
+    auto corpus = makeCorpus({
+        {"hash_a", "alpha beta gamma delta. alpha beta."},
+        {"hash_b", "beta gamma epsilon zeta. beta epsilon."},
+        {"hash_c", "omega sigma tau upsilon. omega tau."},
+    });
+
+    SimeonLexicalBackend::Config cfg;
+    cfg.fragment_geometry_enabled = true;
+    cfg.fragment_geometry_min_corpus_docs = 1;
+    cfg.fragment_encoder_profile = SimeonLexicalBackend::FragmentEncoderProfile::FixedHash384;
+    SimeonLexicalBackend backend(cfg);
+
+    REQUIRE(backend.buildAsync(corpus.repo).has_value());
+    REQUIRE(waitReady(backend, std::chrono::seconds(10)));
+
+    auto decision = backend.scoreFragmentGeometry("alpha beta", corpus.docIds);
+    REQUIRE(decision.has_value());
+    CHECK(std::string(decision.value().recipe_name) == "FragmentRichCovPhssApprox");
+    REQUIRE(decision.value().scores.size() == corpus.docIds.size());
+    for (const float score : decision.value().scores) {
+        CHECK(std::isfinite(score));
+    }
+}
+
 TEST_CASE("SimeonLexicalBackend score returns 0 for unknown doc_ids", "[search][simeon][catch2]") {
     auto corpus = makeCorpus({
         {"hash_a", "alpha beta gamma"},

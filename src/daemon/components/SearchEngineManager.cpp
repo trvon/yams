@@ -561,6 +561,18 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         if (tp.graphVectorSeedProbe) {
             opts.config.topologyGraphVectorSeedProbe = *tp.graphVectorSeedProbe;
         }
+        if (tp.rescueSelector) {
+            if (*tp.rescueSelector == "identity_order") {
+                opts.config.topologyRescueSelector =
+                    yams::search::SearchEngineConfig::TopologyRescueSelector::IdentityOrder;
+            } else if (*tp.rescueSelector == "simeon_fragment_geometry") {
+                opts.config.topologyRescueSelector = yams::search::SearchEngineConfig::
+                    TopologyRescueSelector::SimeonFragmentGeometry;
+            } else {
+                spdlog::warn("Ignoring unknown search.topology.rescue_selector='{}'",
+                             *tp.rescueSelector);
+            }
+        }
         if (tp.rrfK) {
             opts.config.rrfK = std::clamp(*tp.rrfK, 1.0f, 10000.0f);
             spdlog::info("SearchEngine rrfK applied via config: {:.3f}", opts.config.rrfK);

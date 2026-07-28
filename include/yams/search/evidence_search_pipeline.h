@@ -13,6 +13,7 @@
 #include <span>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace yams::search {
@@ -44,6 +45,9 @@ struct TopologyCandidateEvidence {
 };
 
 using TopologyEvidenceByCandidate = std::unordered_map<std::string, TopologyCandidateEvidence>;
+/// Optional query-conditioned ordering for an already identity-eligible topology rescue set.
+/// Higher scores are preferred. An empty map preserves ordinary fused-score order.
+using TopologyRescuePriorityByIdentity = std::unordered_map<std::string, float>;
 
 /// Convert a routed membership snapshot into bounded evidence for candidates already produced by
 /// the ordinary retrieval legs. Abstained or empty routes produce no evidence.
@@ -72,9 +76,22 @@ struct EvidencePipelineTrace {
     std::size_t rerankedCandidates{0};
     std::size_t finalCandidates{0};
     /// Candidates beyond the ordinary fusion window (effectiveLimit) that were additively kept
-    /// because SearchResult::topologyScore cleared config.topologyFusionRescueMinScore. Always 0
-    /// when config.topologyFusionRescueSlots is 0.
+    /// because they were present in the caller-supplied topology-rescue-eligible identity set and
+    /// had received actual topology evidence. Always 0 when config.topologyFusionRescueSlots is 0.
     std::size_t topologyFusionRescuedCandidates{0};
+    /// Diagnostic: tail candidates (beyond effectiveLimit) present in the eligibility set,
+    /// regardless of whether they carried topology evidence. Compare against
+    /// topologyFusionRescuedCandidates to distinguish "nothing eligible in the tail" from
+    /// "eligible but never received topology evidence". This observes the complete tail and is not
+    /// bounded by topologyFusionRescueSlots.
+    std::size_t topologyFusionRescueIdentityMatchesInTail{0};
+    /// Diagnostic: of those identity matches, how many also carried actual topology evidence
+    /// (topologyScore.has_value()) and were therefore rescued.
+    std::size_t topologyFusionRescueIdentityMatchesWithEvidenceInTail{0};
+    /// Complete identity-eligible tail in effective rescue-selector order. This is fused-score
+    /// order for the identity baseline and query-score order when a typed priority map is present;
+    /// topologyFusionRescueSlots still bounds returned candidates.
+    std::vector<std::string> topologyFusionRescueEligibleIdentitiesInTail;
 };
 
 struct EvidencePipelineResult {
@@ -94,10 +111,19 @@ using EvidenceReranker =
 /// pools.
 class EvidenceSearchPipeline {
 public:
+    /// topologyRescueEligibleHashes: document/candidate identities (hash, or file path when hash
+    /// is empty -- matching CandidateEvidence::documentHash) permitted to additively rescue past
+    /// the fusion-window boundary. Built by the caller from
+    /// detail::CandidateRescueMergeResult::novelDocumentHashes; empty by default (mechanism
+    /// disabled unless the caller opts in). A candidate must also have actually received topology
+    /// evidence (SearchResult::topologyScore.has_value()) to be rescued.
     [[nodiscard]] Result<EvidencePipelineResult>
     execute(std::span<const ComponentResult> components,
             const TopologyEvidenceByCandidate& topologyEvidence, const SearchEngineConfig& config,
-            std::size_t limit, const EvidenceReranker& reranker = {}) const;
+            std::size_t limit,
+            const std::unordered_set<std::string>& topologyRescueEligibleHashes = {},
+            const TopologyRescuePriorityByIdentity& topologyRescuePriorities = {},
+            const EvidenceReranker& reranker = {}) const;
 };
 
 } // namespace yams::search

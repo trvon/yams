@@ -519,12 +519,15 @@ struct SearchTopKLimitOutcome {
     std::vector<std::string> evidenceRescueDisplacedDocIds;
     std::vector<std::string> topologyRescuePromotedDocIds;
     std::vector<std::string> topologyRescueDisplacedDocIds;
+    std::vector<std::string> topologyRescueEligibleWindowDocIds;
+    std::vector<std::string> topologyRescueEligibleTailDocIds;
 };
 
 template <typename ResultLess, typename IsSemanticCandidate, typename SemanticBetter,
           typename IsBuriedSemanticCandidate, typename BuriedSemanticBetter,
           typename IsEvidenceCandidate, typename EvidenceBetter, typename EvidenceScore,
-          typename DocIdForResult>
+          typename DocIdForResult, typename IsTopologyRescueCandidate,
+          typename TopologyRescuePriority>
 SearchTopKLimitOutcome
 applySearchTopKLimit(std::vector<SearchResult>& results, const SearchEngineConfig& config,
                      size_t userLimit, size_t buriedVectorRankThreshold, ResultLess resultLess,
@@ -532,7 +535,9 @@ applySearchTopKLimit(std::vector<SearchResult>& results, const SearchEngineConfi
                      IsBuriedSemanticCandidate isBuriedSemanticCandidate,
                      BuriedSemanticBetter buriedSemanticBetter,
                      IsEvidenceCandidate isEvidenceCandidate, EvidenceBetter evidenceBetter,
-                     EvidenceScore evidenceScore, DocIdForResult docIdForResult) {
+                     EvidenceScore evidenceScore, DocIdForResult docIdForResult,
+                     IsTopologyRescueCandidate isTopologyRescueCandidate,
+                     TopologyRescuePriority topologyRescuePriority) {
     SearchTopKLimitOutcome outcome;
 
     // Enforce user-visible limit after all post-fusion stages have had a chance to reorder/boost.
@@ -711,21 +716,52 @@ applySearchTopKLimit(std::vector<SearchResult>& results, const SearchEngineConfi
                   resultLess);
     }
 
-    // Final-window topology rescue: mirrors the evidence-rescue swap above but is keyed
-    // exclusively on SearchResult::topologyScore, so this obligation stays independently
-    // measurable from generic lexical/vector/kg evidence rescue (see
-    // fusionEvidenceRescueSlots). Default 0 (disabled/product-unchanged).
+    // Final-window topology rescue: mirrors the semantic-rescue swap above (positional victim
+    // scan, resultLess for tail-candidate ordering) but is gated on isTopologyRescueCandidate --
+    // the caller-supplied novel-rescue identity set -- rather than a SearchResult::topologyScore
+    // magnitude. Topology evidence is assigned to the whole route-admitted relation (often
+    // hundreds of candidates sharing one route-level confidence), so a raw score threshold cannot
+    // discriminate the actual baseline-miss candidate from ambient route membership; identity can.
+    // This obligation stays independently measurable/toggled from generic lexical/vector/kg
+    // evidence rescue (see fusionEvidenceRescueSlots). Default 0 (disabled/product-unchanged).
     if (config.topologyFinalRescueSlots > 0 && userLimit > 0) {
         const size_t finalWindow = std::min(userLimit, results.size());
         const size_t rescueTarget = std::min(config.topologyFinalRescueSlots, finalWindow);
-        const double minTopologyScore =
-            std::max(0.0, static_cast<double>(config.topologyFinalRescueMinScore));
-        const auto topologyScoreOf = [](const SearchResult& r) {
-            return r.topologyScore.value_or(0.0);
+
+        const auto topologyRescueBetter = [&](const SearchResult& lhs, const SearchResult& rhs) {
+            const auto lhsPriority = topologyRescuePriority(lhs);
+            const auto rhsPriority = topologyRescuePriority(rhs);
+            const bool lhsScored = lhsPriority.has_value() && std::isfinite(*lhsPriority);
+            const bool rhsScored = rhsPriority.has_value() && std::isfinite(*rhsPriority);
+            if (lhsScored != rhsScored) {
+                return lhsScored;
+            }
+            if (lhsScored && *lhsPriority != *rhsPriority) {
+                return *lhsPriority > *rhsPriority;
+            }
+            return resultLess(lhs, rhs);
         };
-        const auto isTopologyRescueCandidate = [&](const SearchResult& r) {
-            return topologyScoreOf(r) >= minTopologyScore;
-        };
+
+        for (size_t i = 0; i < finalWindow; ++i) {
+            if (isTopologyRescueCandidate(results[i])) {
+                outcome.topologyRescueEligibleWindowDocIds.push_back(docIdForResult(results[i]));
+            }
+        }
+
+        std::vector<size_t> eligibleTailIndices;
+        eligibleTailIndices.reserve(results.size() - finalWindow);
+        for (size_t i = finalWindow; i < results.size(); ++i) {
+            if (isTopologyRescueCandidate(results[i])) {
+                eligibleTailIndices.push_back(i);
+            }
+        }
+        std::ranges::sort(eligibleTailIndices, [&](size_t lhs, size_t rhs) {
+            return topologyRescueBetter(results[lhs], results[rhs]);
+        });
+        outcome.topologyRescueEligibleTailDocIds.reserve(eligibleTailIndices.size());
+        for (const size_t index : eligibleTailIndices) {
+            outcome.topologyRescueEligibleTailDocIds.push_back(docIdForResult(results[index]));
+        }
 
         size_t rescuePresent = 0;
         for (size_t i = 0; i < finalWindow; ++i) {
@@ -741,7 +777,7 @@ applySearchTopKLimit(std::vector<SearchResult>& results, const SearchEngineConfi
                     continue;
                 }
                 if (bestTailIndex >= results.size() ||
-                    topologyScoreOf(results[i]) > topologyScoreOf(results[bestTailIndex])) {
+                    topologyRescueBetter(results[i], results[bestTailIndex])) {
                     bestTailIndex = i;
                 }
             }
@@ -750,20 +786,14 @@ applySearchTopKLimit(std::vector<SearchResult>& results, const SearchEngineConfi
             }
 
             size_t victimIndex = finalWindow;
-            double victimTopologyScore = std::numeric_limits<double>::max();
-            for (size_t i = 0; i < finalWindow; ++i) {
-                const double score = topologyScoreOf(results[i]);
-                if (score < victimTopologyScore) {
-                    victimTopologyScore = score;
-                    victimIndex = i;
+            for (size_t i = finalWindow; i > 0; --i) {
+                const size_t idx = i - 1;
+                if (!isTopologyRescueCandidate(results[idx])) {
+                    victimIndex = idx;
+                    break;
                 }
             }
             if (victimIndex >= finalWindow) {
-                break;
-            }
-
-            const double bestTailTopologyScore = topologyScoreOf(results[bestTailIndex]);
-            if (bestTailTopologyScore <= victimTopologyScore) {
                 break;
             }
 
@@ -3327,12 +3357,98 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         }
     }
 
-    const auto fuseCandidatePool =
-        [&](const std::vector<ComponentResult>& components,
-            bool recordEvidenceTrace) -> Result<std::vector<yams::metadata::SearchResult>> {
+    // The specific baseline-miss identities a topology route rescued (novel documents absent from
+    // both baseline components and the pre-rescue tier-2 candidate set). This is the primary
+    // eligibility gate for both fusion-window and final-window topology rescue: topology evidence
+    // itself is assigned to the whole route-admitted relation and cannot discriminate the actual
+    // rescued candidate from ambient route membership (see topologyFusionRescueSlots doc comment).
+    const std::unordered_set<std::string> topologyRescueEligibleHashes(
+        topologyCandidateRescueNovelHashes.begin(), topologyCandidateRescueNovelHashes.end());
+    // Trace IDs are presentation-oriented (usually filename stems). Preserve their mapping for
+    // diagnostics only; backend scoring below resolves metadata primary IDs from the same hashes.
+    std::unordered_map<std::string, std::string> topologyRescueTraceDocIdByHash;
+    const auto topologyRescueTraceCount = std::min(topologyCandidateRescueNovelHashes.size(),
+                                                   topologyCandidateRescueNovelDocIds.size());
+    topologyRescueTraceDocIdByHash.reserve(topologyRescueTraceCount);
+    for (std::size_t i = 0; i < topologyRescueTraceCount; ++i) {
+        topologyRescueTraceDocIdByHash.emplace(topologyCandidateRescueNovelHashes[i],
+                                               topologyCandidateRescueNovelDocIds[i]);
+    }
+
+    TopologyRescuePriorityByIdentity topologyRescuePriorities;
+    std::string topologyRescueSelector = "identity_order";
+    std::string topologyRescueSelectorStatus = "baseline";
+    std::string topologyRescueSelectorRecipe;
+    std::size_t topologyRescueSelectorResolvedCandidates = 0;
+    if (workingConfig.topologyRescueSelector ==
+            SearchEngineConfig::TopologyRescueSelector::SimeonFragmentGeometry &&
+        (workingConfig.topologyFusionRescueSlots > 0 ||
+         workingConfig.topologyFinalRescueSlots > 0)) {
+        topologyRescueSelector = "simeon_fragment_geometry";
+        if (!simeonLexical_ || !simeonLexical_->fragmentGeometryReady()) {
+            topologyRescueSelectorStatus = "fragment_geometry_unavailable";
+        } else if (simeonLexical_->fragmentEmbeddingSpaceIdentity().empty()) {
+            // Construction-bound selection needs a stable space identity. Corpus-trained PMI
+            // geometry may be useful elsewhere, but cannot yet support this theorem experiment.
+            topologyRescueSelectorStatus = "fragment_space_identity_unavailable";
+        } else {
+            auto resolved = detail::resolveMetadataDocumentIdsByHash(
+                metadataRepo_, std::span<const std::string>{topologyCandidateRescueNovelHashes});
+            if (!resolved) {
+                topologyRescueSelectorStatus = "fragment_geometry_document_resolution_unavailable";
+            } else {
+                topologyRescueSelectorResolvedCandidates = resolved.value().size();
+                std::vector<std::int64_t> documentIds;
+                std::vector<std::string> identities;
+                documentIds.reserve(topologyRescueSelectorResolvedCandidates);
+                identities.reserve(topologyRescueSelectorResolvedCandidates);
+                for (const auto& [hash, documentId] : resolved.value()) {
+                    documentIds.push_back(documentId);
+                    identities.push_back(hash);
+                }
+
+                // A quality-routed lexical score can correctly choose its BM25-only arm. That is
+                // useful for ordinary retrieval, but it does not establish the selector premise:
+                // every topology-eligible candidate must receive a score from the aligned PHSS
+                // geometry.
+                auto decision = simeonLexical_->scoreFragmentGeometry(query, documentIds);
+                if (!decision || decision.value().scores.size() != identities.size()) {
+                    topologyRescueSelectorStatus = "fragment_geometry_score_unavailable";
+                } else {
+                    topologyRescueSelectorRecipe = decision.value().recipe_name;
+                    topologyRescuePriorities.reserve(identities.size());
+                    for (std::size_t i = 0; i < identities.size(); ++i) {
+                        const float score = decision.value().scores[i];
+                        if (std::isfinite(score)) {
+                            topologyRescuePriorities.emplace(identities[i], score);
+                        }
+                    }
+                    topologyRescueSelectorStatus = topologyRescuePriorities.empty()
+                                                       ? "fragment_geometry_no_finite_scores"
+                                                       : "fragment_geometry_scored";
+                }
+            }
+        }
+    }
+    setDebug(response.debugStats, metrics::kTopologyRescueSelector, topologyRescueSelector);
+    setDebug(response.debugStats, metrics::kTopologyRescueSelectorStatus,
+             topologyRescueSelectorStatus);
+    setDebug(response.debugStats, metrics::kTopologyRescueSelectorScoredCandidates,
+             std::to_string(topologyRescuePriorities.size()));
+    setDebug(response.debugStats, metrics::kTopologyRescueSelectorRecipe,
+             topologyRescueSelectorRecipe);
+    setDebug(response.debugStats, metrics::kTopologyRescueSelectorResolvedCandidates,
+             std::to_string(topologyRescueSelectorResolvedCandidates));
+
+    const auto fuseCandidatePool = [&](const std::vector<ComponentResult>& components,
+                                       bool recordEvidenceTrace,
+                                       const std::unordered_set<std::string>& rescueEligibleHashes,
+                                       const TopologyRescuePriorityByIdentity& rescuePriorities)
+        -> Result<std::vector<yams::metadata::SearchResult>> {
         EvidenceSearchPipeline evidencePipeline;
         auto evidenceResult = evidencePipeline.execute(components, topologyCandidateEvidence,
-                                                       workingConfig, workingConfig.maxResults);
+                                                       workingConfig, workingConfig.maxResults,
+                                                       rescueEligibleHashes, rescuePriorities);
         if (!evidenceResult) {
             return Error{evidenceResult.error().code, evidenceResult.error().message};
         }
@@ -3351,13 +3467,35 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             setDebug(response.debugStats,
                      metrics::kCandidatePipelineTopologyFusionRescuedCandidates,
                      std::to_string(trace.topologyFusionRescuedCandidates));
+            setDebug(response.debugStats,
+                     metrics::kCandidatePipelineTopologyFusionRescueIdentityMatchesInTail,
+                     std::to_string(trace.topologyFusionRescueIdentityMatchesInTail));
+            setDebug(
+                response.debugStats,
+                metrics::kCandidatePipelineTopologyFusionRescueIdentityMatchesWithEvidenceInTail,
+                std::to_string(trace.topologyFusionRescueIdentityMatchesWithEvidenceInTail));
+            setDebug(response.debugStats,
+                     metrics::kCandidatePipelineTopologyFusionRescueEligibleHashesInTail,
+                     joinWithTab(trace.topologyFusionRescueEligibleIdentitiesInTail));
+            std::vector<std::string> eligibleTailDocIds;
+            eligibleTailDocIds.reserve(trace.topologyFusionRescueEligibleIdentitiesInTail.size());
+            for (const auto& identity : trace.topologyFusionRescueEligibleIdentitiesInTail) {
+                if (const auto it = topologyRescueTraceDocIdByHash.find(identity);
+                    it != topologyRescueTraceDocIdByHash.end()) {
+                    eligibleTailDocIds.push_back(it->second);
+                }
+            }
+            setDebug(response.debugStats,
+                     metrics::kCandidatePipelineTopologyFusionRescueEligibleDocIdsInTail,
+                     joinWithTab(eligibleTailDocIds));
         }
         return std::move(evidenceResult.value().results);
     };
 
     {
         YAMS_ZONE_SCOPED_N("fusion::candidate_pipeline");
-        auto fused = fuseCandidatePool(allComponentResults, true);
+        auto fused = fuseCandidatePool(allComponentResults, true, topologyRescueEligibleHashes,
+                                       topologyRescuePriorities);
         if (!fused) {
             return Error{fused.error().code, fused.error().message};
         }
@@ -3401,7 +3539,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             graphlessComponentResults.push_back(comp);
         }
         if (graphlessComponentResults.size() != allComponentResults.size()) {
-            auto graphlessFused = fuseCandidatePool(graphlessComponentResults, false);
+            // Explicit empty set: this ablation pool measures the non-topology baseline and must
+            // never see topology rescue, additive or otherwise.
+            auto graphlessFused = fuseCandidatePool(graphlessComponentResults, false, {}, {});
             if (!graphlessFused) {
                 return Error{graphlessFused.error().code, graphlessFused.error().message};
             }
@@ -4153,6 +4293,29 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             return docIdForResult(a) < docIdForResult(b);
         };
 
+    const auto rawResultHash = [](const SearchResult& r) -> const std::string& {
+        return r.document.sha256Hash.empty() ? r.document.filePath : r.document.sha256Hash;
+    };
+    // Gate: membership in the specific novel-rescue identity set (see
+    // topologyRescueEligibleHashes above). Keyed on the raw document hash/path, not
+    // docIdForResult (a different trace-id space).
+    const auto isFinalTopologyRescueCandidate = [&topologyRescueEligibleHashes,
+                                                 rawResultHash](const SearchResult& result) {
+        if (!topologyRescueEligibleHashes.contains(rawResultHash(result))) {
+            return false;
+        }
+        // Identity membership is never a bypass for having actually received topology
+        // evidence; see the matching comment in evidence_search_pipeline.cpp.
+        return result.topologyScore.has_value();
+    };
+    const auto topologyRescuePriorityForResult =
+        [&topologyRescuePriorities,
+         rawResultHash](const SearchResult& result) -> std::optional<float> {
+        const auto it = topologyRescuePriorities.find(rawResultHash(result));
+        return it != topologyRescuePriorities.end() ? std::optional<float>{it->second}
+                                                    : std::nullopt;
+    };
+
     const auto finalLexicalAwareLess = [&lexicalAnchorScore, &docIdForResult, &workingConfig](
                                            const SearchResult& a, const SearchResult& b) {
         const double scoreDiff = static_cast<double>(a.score) - static_cast<double>(b.score);
@@ -4186,12 +4349,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         return docIdForResult(a) < docIdForResult(b);
     };
 
-    const SearchTopKLimitOutcome topKOutcome =
-        applySearchTopKLimit(response.results, workingConfig, userLimit, buriedVectorRankThreshold,
-                             finalLexicalAwareLess, isFinalSemanticRescueCandidate,
-                             finalSemanticRescueBetter, isBuriedFinalSemanticRescueCandidate,
-                             buriedSemanticRescueBetter, isFinalEvidenceRescueCandidate,
-                             finalEvidenceRescueBetter, evidenceRescueScore, docIdForResult);
+    const SearchTopKLimitOutcome topKOutcome = applySearchTopKLimit(
+        response.results, workingConfig, userLimit, buriedVectorRankThreshold,
+        finalLexicalAwareLess, isFinalSemanticRescueCandidate, finalSemanticRescueBetter,
+        isBuriedFinalSemanticRescueCandidate, buriedSemanticRescueBetter,
+        isFinalEvidenceRescueCandidate, finalEvidenceRescueBetter, evidenceRescueScore,
+        docIdForResult, isFinalTopologyRescueCandidate, topologyRescuePriorityForResult);
     const auto& semanticRescuePromotedDocIds = topKOutcome.semanticRescuePromotedDocIds;
     const auto& semanticRescueDisplacedDocIds = topKOutcome.semanticRescueDisplacedDocIds;
     const auto& buriedSemanticRescuePromotedDocIds = topKOutcome.buriedSemanticRescuePromotedDocIds;
@@ -4201,6 +4364,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     const auto& evidenceRescueDisplacedDocIds = topKOutcome.evidenceRescueDisplacedDocIds;
     const auto& topologyRescuePromotedDocIds = topKOutcome.topologyRescuePromotedDocIds;
     const auto& topologyRescueDisplacedDocIds = topKOutcome.topologyRescueDisplacedDocIds;
+    const auto& topologyRescueEligibleWindowDocIds = topKOutcome.topologyRescueEligibleWindowDocIds;
+    const auto& topologyRescueEligibleTailDocIds = topKOutcome.topologyRescueEligibleTailDocIds;
 
     size_t semanticRescueFinalCount = 0;
     std::vector<std::string> semanticRescueFinalDocIds;
@@ -4251,12 +4416,22 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         workingConfig.topologyFinalRescueSlots > 0 ? "1" : "0";
     response.debugStats["topology_final_rescue_slots"] =
         std::to_string(workingConfig.topologyFinalRescueSlots);
-    response.debugStats["topology_final_rescue_min_score"] =
-        fmt::format("{:.4f}", workingConfig.topologyFinalRescueMinScore);
     response.debugStats["topology_final_rescue_promoted_doc_ids"] =
         joinWithTab(topologyRescuePromotedDocIds);
     response.debugStats["topology_final_rescue_displaced_doc_ids"] =
         joinWithTab(topologyRescueDisplacedDocIds);
+    response.debugStats["topology_final_rescue_eligible_window_doc_ids"] =
+        joinWithTab(topologyRescueEligibleWindowDocIds);
+    response.debugStats["topology_final_rescue_eligible_tail_doc_ids"] =
+        joinWithTab(topologyRescueEligibleTailDocIds);
+    {
+        const std::size_t eligibleReturnedCount = static_cast<std::size_t>(std::count_if(
+            response.results.begin(), response.results.end(), [&](const auto& result) {
+                return topologyRescueEligibleHashes.contains(rawResultHash(result));
+            }));
+        response.debugStats["topology_final_rescue_eligible_returned_count"] =
+            std::to_string(eligibleReturnedCount);
+    }
     response.debugStats["semantic_rescue_rate"] = fmt::format("{:.3f}", semanticRescueRate);
     response.debugStats["multi_vector_generated_phrases"] =
         std::to_string(multiVectorGeneratedPhrases);

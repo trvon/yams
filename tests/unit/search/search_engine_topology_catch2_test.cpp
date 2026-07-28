@@ -27,6 +27,7 @@
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
 
+#include "src/search/search_vector_pipeline_internal.h"
 #include "tests/common/test_helpers_catch2.h"
 
 using namespace yams;
@@ -820,6 +821,30 @@ TEST_CASE("SearchEngine topology augmentation materializes query-scored rescue c
     }
 }
 
+TEST_CASE("Topology selector resolves candidate hashes to metadata IDs, not trace IDs",
+          "[search][topology][candidate-rescue][simeon][catch2]") {
+    TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
+    fix.addDocument("31715818", "alpha one", {1.0F, 0.0F});
+    fix.addDocument("30655442", "beta two", {0.0F, 1.0F});
+
+    const std::vector<std::string> hashes = {"30655442", "missing", "31715818"};
+    auto resolved = yams::search::detail::resolveMetadataDocumentIdsByHash(fix.repo, hashes);
+    REQUIRE(resolved.has_value());
+    REQUIRE(resolved.value().size() == 2U);
+
+    auto first = fix.repo->getDocumentByHash("30655442");
+    auto second = fix.repo->getDocumentByHash("31715818");
+    REQUIRE(first.has_value());
+    REQUIRE(first.value().has_value());
+    REQUIRE(second.has_value());
+    REQUIRE(second.value().has_value());
+
+    CHECK(resolved.value().at(0).first == "30655442");
+    CHECK(resolved.value().at(0).second == first.value()->id);
+    CHECK(resolved.value().at(1).first == "31715818");
+    CHECK(resolved.value().at(1).second == second.value()->id);
+}
+
 TEST_CASE("SearchEngine shadow policy measures candidate rescue without changing results",
           "[search][topology][candidate-rescue][shadow][catch2]") {
     yams::test::ScopedEnvVar stageTrace("YAMS_SEARCH_STAGE_TRACE", std::optional<std::string>("1"));
@@ -932,7 +957,6 @@ TEST_CASE("SearchEngine topology final-window rescue promotes a topology-scored 
     // topology evidence promotes x2 (which has it) over x3 (which does not), independent of the
     // generic evidence-rescue family (fusionEvidenceRescueSlots), which stays disabled here.
     config.topologyFinalRescueSlots = 2;
-    config.topologyFinalRescueMinScore = 0.005F;
     auto rescued = runTopologySearch(fix, generator, config, 2, "alpha one");
     REQUIRE(rescued.has_value());
     REQUIRE(rescued.value().results.size() == 2);
@@ -949,6 +973,19 @@ TEST_CASE("SearchEngine topology final-window rescue promotes a topology-scored 
     CHECK(debug.at("topology_final_rescue_slots") == "2");
     CHECK(debug.at("topology_final_rescue_promoted_doc_ids") == "x2");
     CHECK(debug.at("topology_final_rescue_displaced_doc_ids") == "x3");
+    CHECK(debug.at("topology_final_rescue_eligible_window_doc_ids").empty());
+    CHECK(debug.at("topology_final_rescue_eligible_tail_doc_ids") == "x2");
+
+    // x1 is organically found (not a novel rescue) but still shares the topology route with x2,
+    // so it also receives nonzero topologyScore -- a magnitude-only gate would have considered it
+    // just as eligible as x2. It must never appear as promoted/displaced: the eligibility set is
+    // scoped to novel candidates only, not every topology-touched one.
+    const auto x1Result = std::ranges::find_if(
+        rescued.value().results, [](const auto& r) { return r.document.sha256Hash == "x1"; });
+    REQUIRE(x1Result != rescued.value().results.end());
+    CHECK(x1Result->topologyScore.has_value());
+    CHECK(debug.at("topology_final_rescue_promoted_doc_ids").find("x1") == std::string::npos);
+    CHECK(debug.at("topology_final_rescue_displaced_doc_ids").find("x1") == std::string::npos);
 }
 
 TEST_CASE("Evidence pipeline receives no topology adjustments under a shadow policy",

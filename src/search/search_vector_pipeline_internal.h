@@ -5,10 +5,13 @@
 #include <yams/search/search_models.h>
 #include <yams/vector/vector_types.h>
 
+#include <cstdint>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace yams::metadata {
@@ -40,6 +43,14 @@ queryEntityVectorsPipeline(const std::shared_ptr<yams::metadata::MetadataReposit
                            const std::shared_ptr<vector::VectorDatabase>& vectorDb,
                            const std::vector<float>& embedding, const SearchEngineConfig& config,
                            size_t limit);
+
+/// Resolve raw document hashes to the metadata primary keys expected by backend-owned indexes.
+/// Trace IDs are deliberately excluded: a filename-derived ID is presentation data and need not
+/// equal the metadata row ID.
+[[nodiscard]] Result<std::vector<std::pair<std::string, std::int64_t>>>
+resolveMetadataDocumentIdsByHash(
+    const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
+    std::span<const std::string> documentHashes);
 
 struct RoutedVectorFilterResult {
     std::vector<ComponentResult> results;

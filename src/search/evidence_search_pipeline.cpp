@@ -134,6 +134,8 @@ Result<EvidencePipelineResult>
 EvidenceSearchPipeline::execute(std::span<const ComponentResult> components,
                                 const TopologyEvidenceByCandidate& topologyEvidence,
                                 const SearchEngineConfig& config, std::size_t limit,
+                                const std::unordered_set<std::string>& topologyRescueEligibleHashes,
+                                const TopologyRescuePriorityByIdentity& topologyRescuePriorities,
                                 const EvidenceReranker& reranker) const {
     EvidencePipelineResult output;
     output.trace.inputComponents = components.size();
@@ -249,13 +251,71 @@ EvidenceSearchPipeline::execute(std::span<const ComponentResult> components,
     if (output.results.size() > effectiveLimit) {
         std::size_t keep = effectiveLimit;
         if (config.topologyFusionRescueSlots > 0) {
-            const double minScore =
-                std::max(0.0, static_cast<double>(config.topologyFusionRescueMinScore));
-            for (std::size_t i = effectiveLimit;
-                 i < output.results.size() &&
-                 output.trace.topologyFusionRescuedCandidates < config.topologyFusionRescueSlots;
-                 ++i) {
-                if (output.results[i].topologyScore.value_or(0.0) < minScore) {
+            // Observe the complete eligible tail before applying the slot budget. A bounded scan
+            // can prove that the mechanism fired, but cannot measure the selector rank of a
+            // relevant rescue that lost to earlier eligible candidates.
+            std::vector<std::size_t> eligibleTailIndices;
+            for (std::size_t i = effectiveLimit; i < output.results.size(); ++i) {
+                const auto& candidate = output.results[i];
+                const auto& identity = candidateId(candidate);
+                if (!topologyRescueEligibleHashes.contains(identity)) {
+                    continue;
+                }
+                ++output.trace.topologyFusionRescueIdentityMatchesInTail;
+                eligibleTailIndices.push_back(i);
+                if (candidate.topologyScore.has_value()) {
+                    ++output.trace.topologyFusionRescueIdentityMatchesWithEvidenceInTail;
+                }
+            }
+
+            // Non-empty priorities define a query-conditioned ordering only inside the already
+            // identity-eligible set. Missing/invalid values sort after scored candidates and
+            // retain fused order, which makes a partial scorer observable without inventing a
+            // new rescue candidate.
+            if (!topologyRescuePriorities.empty()) {
+                std::ranges::stable_sort(
+                    eligibleTailIndices, [&](std::size_t lhs, std::size_t rhs) {
+                        const auto lhsIt =
+                            topologyRescuePriorities.find(candidateId(output.results[lhs]));
+                        const auto rhsIt =
+                            topologyRescuePriorities.find(candidateId(output.results[rhs]));
+                        const bool lhsScored =
+                            lhsIt != topologyRescuePriorities.end() && std::isfinite(lhsIt->second);
+                        const bool rhsScored =
+                            rhsIt != topologyRescuePriorities.end() && std::isfinite(rhsIt->second);
+                        if (lhsScored != rhsScored) {
+                            return lhsScored;
+                        }
+                        return lhsScored && lhsIt->second != rhsIt->second
+                                   ? lhsIt->second > rhsIt->second
+                                   : false;
+                    });
+            }
+
+            output.trace.topologyFusionRescueEligibleIdentitiesInTail.reserve(
+                eligibleTailIndices.size());
+            for (const std::size_t index : eligibleTailIndices) {
+                output.trace.topologyFusionRescueEligibleIdentitiesInTail.push_back(
+                    candidateId(output.results[index]));
+            }
+
+            for (const std::size_t i : eligibleTailIndices) {
+                if (output.trace.topologyFusionRescuedCandidates >=
+                    config.topologyFusionRescueSlots) {
+                    break;
+                }
+                // Gate: the candidate must be a specific rescue-eligible identity (the
+                // caller-supplied novel-document set), not merely topology-annotated -- topology
+                // evidence is assigned to the whole route-admitted relation (often hundreds of
+                // candidates sharing one route-level confidence), so a raw score cannot
+                // discriminate the actual baseline-miss candidate from ambient route membership.
+                if (!topologyRescueEligibleHashes.contains(candidateId(output.results[i]))) {
+                    continue;
+                }
+                // Identity membership is never a bypass for having actually received topology
+                // evidence: the eligibility set and the topology-evidence map are populated by
+                // independent producers, and could in principle diverge if wiring drifts.
+                if (!output.results[i].topologyScore.has_value()) {
                     continue;
                 }
                 // Additive only: swap the eligible candidate into the next open tail slot rather

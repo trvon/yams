@@ -17,6 +17,7 @@ using yams::search::SearchEngineConfig;
 using yams::search::TopologyCandidateEvidence;
 using yams::search::TopologyCandidateStructureEvidence;
 using yams::search::TopologyEvidenceByCandidate;
+using yams::search::TopologyRescuePriorityByIdentity;
 using yams::search::TopologyRoutingSessionResult;
 
 namespace {
@@ -189,7 +190,7 @@ TEST_CASE("EvidenceSearchPipeline reranker must preserve the fused candidate set
 
     EvidenceSearchPipeline pipeline;
     auto reranked =
-        pipeline.execute(components, {}, config, 10,
+        pipeline.execute(components, {}, config, 10, {}, {},
                          [](std::vector<yams::metadata::SearchResult>& results) -> Result<void> {
                              auto docB = std::ranges::find_if(results, [](const auto& result) {
                                  return result.document.sha256Hash == "doc-b";
@@ -205,7 +206,7 @@ TEST_CASE("EvidenceSearchPipeline reranker must preserve the fused candidate set
     CHECK(reranked.value().trace.rerankedCandidates == 2);
 
     auto invalid =
-        pipeline.execute(components, {}, config, 10,
+        pipeline.execute(components, {}, config, 10, {}, {},
                          [](std::vector<yams::metadata::SearchResult>& results) -> Result<void> {
                              yams::metadata::SearchResult invented;
                              invented.document.sha256Hash = "invented";
@@ -217,7 +218,7 @@ TEST_CASE("EvidenceSearchPipeline reranker must preserve the fused candidate set
     CHECK(invalid.error().code == ErrorCode::ValidationError);
 }
 
-TEST_CASE("EvidenceSearchPipeline additively rescues topology-scored candidates beyond the "
+TEST_CASE("EvidenceSearchPipeline additively rescues identity-eligible candidates beyond the "
           "fusion window",
           "[search][evidence_pipeline][topology][fusion-rescue][catch2]") {
     SearchEngineConfig config;
@@ -225,27 +226,40 @@ TEST_CASE("EvidenceSearchPipeline additively rescues topology-scored candidates 
     config.textWeight = 1.0F;
     config.rrfK = 1.0F;
 
-    // Five strong text-only candidates plus one weak topology-only candidate ("rescued") that
-    // ranks far below them on raw fused score. This mirrors the q0 boundary: relation-reachable,
-    // admitted, and document-scored, but cut before the fusion window on merged rank alone.
+    // Three strong text-only candidates plus two weak tail candidates that both rank far below
+    // them on raw fused score. This mirrors the q0 boundary: relation-reachable, admitted, and
+    // document-scored, but cut before the fusion window on merged rank alone.
+    //   - "rescued": in the eligibility set, has topology evidence -> must be rescued.
+    //   - "decoy": has the SAME topology evidence as "rescued" but is NOT in the eligibility set
+    //     -> must NOT be rescued, even though it received identical topology evidence. This is
+    //     the regression test for "topology evidence alone is not sufficient; identity is".
+    //   - "ghost": IS in the eligibility set but has no topology evidence at all -> must NOT be
+    //     rescued. Identity membership is never a bypass for lacking topology evidence, since the
+    //     eligibility set and the topology-evidence map are populated by independent producers.
     std::vector<ComponentResult> components{
         makeComponent("doc-a", 1.00F, ComponentResult::Source::Text, 0),
         makeComponent("doc-b", 0.90F, ComponentResult::Source::Text, 1),
         makeComponent("doc-c", 0.80F, ComponentResult::Source::Text, 2),
         makeComponent("rescued", 0.01F, ComponentResult::Source::Text, 500),
+        makeComponent("decoy", 0.02F, ComponentResult::Source::Text, 501),
+        makeComponent("ghost", 0.005F, ComponentResult::Source::Text, 502),
     };
 
     // Keep the topology score-adjustment small (as in production: topologyEvidenceWeight is a
-    // bounded nudge, not a rank override) so "rescued" stays last on ordinary fused score and the
-    // additive fusion-window rescue -- not the score bump itself -- is what saves it.
+    // bounded nudge, not a rank override) so "rescued"/"decoy" stay last on ordinary fused score.
     TopologyEvidenceByCandidate topology;
     topology.emplace("rescued", TopologyCandidateEvidence{.scoreAdjustment = 0.3F,
                                                           .confidence = 0.5F,
                                                           .localSupport = 1.0F});
+    topology.emplace("decoy", TopologyCandidateEvidence{.scoreAdjustment = 0.3F,
+                                                        .confidence = 0.5F,
+                                                        .localSupport = 1.0F});
+    // "ghost" deliberately gets no topology evidence entry.
 
     EvidenceSearchPipeline pipeline;
 
-    // Baseline: fusion window of 3 cuts "rescued" before it ever reaches response.results.
+    // Baseline: fusion window of 3 cuts all three tail candidates before they reach
+    // response.results.
     auto baseline = pipeline.execute(components, topology, config, 3);
     REQUIRE(baseline);
     CHECK(baseline.value().trace.finalCandidates == 3);
@@ -253,13 +267,19 @@ TEST_CASE("EvidenceSearchPipeline additively rescues topology-scored candidates 
     CHECK(resultIds(baseline.value().results) ==
           std::unordered_set<std::string>{"doc-a", "doc-b", "doc-c"});
 
-    // With rescue slots enabled, "rescued" is additively appended without displacing doc-a/b/c.
-    config.topologyFusionRescueSlots = 1;
-    config.topologyFusionRescueMinScore = 0.1;
-    auto rescued = pipeline.execute(components, topology, config, 3);
+    // Eligibility set includes "rescued" and "ghost" but deliberately excludes "decoy".
+    const std::unordered_set<std::string> eligibleHashes{"rescued", "ghost"};
+    config.topologyFusionRescueSlots = 2;
+    auto rescued = pipeline.execute(components, topology, config, 3, eligibleHashes);
     REQUIRE(rescued);
+    // Only "rescued" clears both gates (identity + evidence); "decoy" fails identity; "ghost"
+    // fails the has-topology-evidence check.
     CHECK(rescued.value().trace.finalCandidates == 4);
     CHECK(rescued.value().trace.topologyFusionRescuedCandidates == 1);
+    CHECK(rescued.value().trace.topologyFusionRescueIdentityMatchesInTail == 2);
+    CHECK(rescued.value().trace.topologyFusionRescueIdentityMatchesWithEvidenceInTail == 1);
+    CHECK(rescued.value().trace.topologyFusionRescueEligibleIdentitiesInTail ==
+          std::vector<std::string>{"rescued", "ghost"});
     REQUIRE(rescued.value().results.size() == 4);
     CHECK(resultIds(rescued.value().results) ==
           std::unordered_set<std::string>{"doc-a", "doc-b", "doc-c", "rescued"});
@@ -270,15 +290,43 @@ TEST_CASE("EvidenceSearchPipeline additively rescues topology-scored candidates 
     const auto rescuedResult = std::ranges::find_if(
         rescued.value().results, [](const auto& r) { return r.document.sha256Hash == "rescued"; });
     REQUIRE(rescuedResult != rescued.value().results.end());
-    REQUIRE(rescuedResult->topologyScore.has_value());
-    CHECK(*rescuedResult->topologyScore > 0.1);
+    CHECK(rescuedResult->topologyScore.has_value());
+}
 
-    // Below-threshold topology evidence must not be rescued.
-    config.topologyFusionRescueMinScore = 5.0;
-    auto belowThreshold = pipeline.execute(components, topology, config, 3);
-    REQUIRE(belowThreshold);
-    CHECK(belowThreshold.value().trace.finalCandidates == 3);
-    CHECK(belowThreshold.value().trace.topologyFusionRescuedCandidates == 0);
+TEST_CASE("EvidenceSearchPipeline uses query priority only within topology rescue eligibility",
+          "[search][evidence_pipeline][topology-rescue][catch2]") {
+    SearchEngineConfig config;
+    config.maxResults = 10;
+    config.textWeight = 1.0F;
+    config.rrfK = 1.0F;
+    config.topologyFusionRescueSlots = 1;
+
+    const std::vector<ComponentResult> components{
+        makeComponent("doc-a", 1.0F, ComponentResult::Source::Text, 0),
+        makeComponent("doc-b", 0.9F, ComponentResult::Source::Text, 1),
+        makeComponent("doc-c", 0.8F, ComponentResult::Source::Text, 2),
+        makeComponent("first", 0.02F, ComponentResult::Source::Text, 500),
+        makeComponent("second", 0.01F, ComponentResult::Source::Text, 501),
+    };
+    TopologyEvidenceByCandidate topology;
+    topology.emplace("first", TopologyCandidateEvidence{.scoreAdjustment = 0.3F,
+                                                        .confidence = 0.5F,
+                                                        .localSupport = 1.0F});
+    topology.emplace("second", TopologyCandidateEvidence{.scoreAdjustment = 0.3F,
+                                                         .confidence = 0.5F,
+                                                         .localSupport = 1.0F});
+
+    EvidenceSearchPipeline pipeline;
+    const std::unordered_set<std::string> eligible{"first", "second"};
+    const TopologyRescuePriorityByIdentity priorities{{"first", 0.1F}, {"second", 0.9F}};
+
+    auto result = pipeline.execute(components, topology, config, 3, eligible, priorities);
+    REQUIRE(result);
+    CHECK(result.value().trace.topologyFusionRescuedCandidates == 1);
+    CHECK(result.value().trace.topologyFusionRescueEligibleIdentitiesInTail ==
+          std::vector<std::string>{"second", "first"});
+    CHECK(resultIds(result.value().results) ==
+          std::unordered_set<std::string>{"doc-a", "doc-b", "doc-c", "second"});
 }
 
 TEST_CASE("EvidenceSearchPipeline removes candidates only at the final top-k boundary",

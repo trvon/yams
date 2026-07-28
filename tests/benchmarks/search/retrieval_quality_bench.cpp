@@ -6686,6 +6686,11 @@ struct BenchFixture {
                             policy && *policy) {
                             configOut << "vector_policy = \"" << policy << "\"\n";
                         }
+                        if (const char* selector =
+                                std::getenv("YAMS_BENCH_TOPOLOGY_RESCUE_SELECTOR");
+                            selector && *selector) {
+                            configOut << "rescue_selector = \"" << selector << "\"\n";
+                        }
                         configOut << "min_clusters = "
                                   << parseSizeEnvOrDefault("YAMS_BENCH_TOPOLOGY_MIN_CLUSTERS", 1)
                                   << "\n";

@@ -264,6 +264,43 @@ queryVectorIndexImpl(const std::shared_ptr<yams::metadata::MetadataRepository>& 
 
 } // namespace
 
+Result<std::vector<std::pair<std::string, std::int64_t>>> resolveMetadataDocumentIdsByHash(
+    const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
+    std::span<const std::string> documentHashes) {
+    if (!metadataRepo) {
+        return Error{ErrorCode::NotInitialized,
+                     "metadata repository is required to resolve document hashes"};
+    }
+
+    std::vector<std::string> hashes;
+    hashes.reserve(documentHashes.size());
+    std::unordered_set<std::string> seen;
+    seen.reserve(documentHashes.size());
+    for (const auto& hash : documentHashes) {
+        if (!hash.empty() && seen.insert(hash).second) {
+            hashes.push_back(hash);
+        }
+    }
+    if (hashes.empty()) {
+        return std::vector<std::pair<std::string, std::int64_t>>{};
+    }
+
+    auto documents = metadataRepo->batchGetDocumentsByHash(hashes);
+    if (!documents) {
+        return Error{documents.error().code, documents.error().message};
+    }
+
+    std::vector<std::pair<std::string, std::int64_t>> resolved;
+    resolved.reserve(documents.value().size());
+    for (const auto& hash : hashes) {
+        const auto it = documents.value().find(hash);
+        if (it != documents.value().end()) {
+            resolved.emplace_back(hash, it->second.id);
+        }
+    }
+    return resolved;
+}
+
 CandidateRescueMergeResult
 mergeVectorCandidateRescues(std::vector<ComponentResult> baseline,
                             std::vector<ComponentResult> expansion,

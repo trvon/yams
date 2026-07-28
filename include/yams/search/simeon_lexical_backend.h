@@ -225,6 +225,14 @@ public:
     Result<RescoreDecision> scoreRouted(std::string_view query,
                                         std::span<const std::int64_t> candidate_doc_ids) const;
 
+    // Explicit fixed-hash fragment-geometry score. Unlike scoreRouted(), this never delegates
+    // the query to the quality router's BM25-only arm: it evaluates the PHSS rich-coverage recipe
+    // over the complete built corpus, then projects the result to candidate_doc_ids. This is an
+    // experimental selector seam, not the default lexical retrieval path.
+    Result<RescoreDecision>
+    scoreFragmentGeometry(std::string_view query,
+                          std::span<const std::int64_t> candidate_doc_ids) const;
+
     // Strategy-router driven rescore (new retrieval_strategy.hpp framework).
     // When strategy_router_enabled is true, uses an EntropyRouter to choose
     // among BM25, Keyphrase, and LeadField strategies per query. Falls back

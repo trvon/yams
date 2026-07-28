@@ -111,6 +111,8 @@ public:
         std::optional<bool> graphWeightedSeedRanking;
         /// GraphNeighbors seed ANN k; 0 disables (Tier-1 seeds only).
         std::optional<std::size_t> graphVectorSeedProbe;
+        /// identity_order | simeon_fragment_geometry
+        std::optional<std::string> rescueSelector;
         std::optional<float> rrfK;
     };
 
@@ -494,6 +496,7 @@ public:
      * - search.topology.graph_neighbor_reciprocal_only = true|false
      * - search.topology.graph_weighted_seed_ranking = true|false
      * - search.topology.graph_vector_seed_probe = int
+     * - search.topology.rescue_selector = identity_order|simeon_fragment_geometry
      * - search.topology.rrf_k = float
      */
     static TopologyRoutingPolicy resolveTopologyRoutingPolicy();

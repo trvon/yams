@@ -915,6 +915,9 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (auto it = kv.find("search.topology.graph_vector_seed_probe"); it != kv.end()) {
                 policy.graphVectorSeedProbe = parseSize(it->second);
             }
+            if (auto it = kv.find("search.topology.rescue_selector"); it != kv.end()) {
+                policy.rescueSelector = std::string(trimView(it->second));
+            }
             if (auto it = kv.find("search.topology.rrf_k"); it != kv.end()) {
                 policy.rrfK = parseFloat(it->second);
             }
