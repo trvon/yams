@@ -106,7 +106,7 @@ done
 
 # Default check sets
 if (( HOOK )); then
-  SCOPE="git"; STRICT=1; MODE_FIX=1
+  SCOPE="git"; STRICT=1; MODE_FIX=0
   CHECKS=(format windows-hdr license opengrep)
 elif (( CI )); then
   SCOPE="all-files"; STRICT=1
@@ -135,7 +135,6 @@ resolve_paths() {
   case "$SCOPE" in
     git)
       git diff --cached --name-only --diff-filter=ACM -z 2>/dev/null \
-        | tr -d '\0' | tr '\n' '\0' \
         | while IFS= read -r -d '' f; do
             [[ -f "$f" && "$f" =~ $ext_re ]] && printf '%s\0' "$f"
           done
@@ -231,9 +230,13 @@ lint_cppcheck() {
 }
 
 lint_opengrep() {
-  section "opengrep (audit profile)"
+  local profile="audit"
+  if (( HOOK )); then
+    profile="default"
+  fi
+  section "opengrep ($profile profile)"
   local env_pfx=()
-  env_pfx+=("OPENGREP_PROFILE=audit")
+  env_pfx+=("OPENGREP_PROFILE=$profile")
   env_pfx+=("OPENGREP_OUT_DIR=.artifacts/opengrep")
   (( STRICT )) && env_pfx+=("OPENGREP_STRICT=1")
   [[ -n "$BASELINE" ]] && env_pfx+=("OPENGREP_BASELINE_COMMIT=$BASELINE")
@@ -247,7 +250,7 @@ lint_opengrep() {
   if [[ "$SCOPE" =~ ^(git|diff)$ && ${#target[@]} -eq 0 ]]; then
     ok "opengrep: no files in scope"; return 0
   fi
-  local json_out=".artifacts/opengrep/opengrep-yams-audit.json"
+  local json_out=".artifacts/opengrep/opengrep-yams-${profile//\//-}.json"
   if env "${env_pfx[@]}" "$REPO_ROOT/scripts/dev/run_opengrep.sh" "${target[@]}"; then
     local findings=0
     if [[ -f "$json_out" ]]; then
