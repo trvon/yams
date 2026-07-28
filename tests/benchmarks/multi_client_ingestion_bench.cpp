@@ -285,6 +285,7 @@ struct BenchConfig {
     bool searchPathsOnly{false};
     int snippetHydrationTimeoutMs{5000};
     bool profileHydrationSurfaces{false};
+    int resourceSampleMs{500};
     std::string cliSearchQuery{"architecture performance tuning daemon"};
     std::string cliSearchType{"hybrid"};
     size_t cliSearchLimit{5};
@@ -358,6 +359,8 @@ struct BenchConfig {
             parseEnvIntClamped("YAMS_BENCH_SNIPPET_HYDRATION_TIMEOUT_MS",
                                cfg.snippetHydrationTimeoutMs, 0, kMaxBenchMilliseconds);
         cfg.profileHydrationSurfaces = parseEnvBool("YAMS_BENCH_PROFILE_HYDRATION_SURFACES");
+        cfg.resourceSampleMs = parseEnvIntClamped("YAMS_BENCH_RESOURCE_SAMPLE_MS",
+                                                  cfg.resourceSampleMs, 10, kMaxBenchMilliseconds);
         if (auto* v = std::getenv("YAMS_BENCH_CLI_SEARCH_QUERY"))
             cfg.cliSearchQuery = v;
         if (auto* v = std::getenv("YAMS_BENCH_CLI_SEARCH_TYPE"))
@@ -444,6 +447,32 @@ struct BenchConfig {
         }
 
         return cfg;
+    }
+};
+
+struct OutputLivenessCounters {
+    std::atomic<int64_t> attempts{0};
+    std::atomic<int64_t> nonemptySuccesses{0};
+    std::atomic<int64_t> emptySuccesses{0};
+    std::atomic<int64_t> errors{0};
+
+    void recordSuccess(bool nonempty) {
+        attempts.fetch_add(1, std::memory_order_relaxed);
+        (nonempty ? nonemptySuccesses : emptySuccesses).fetch_add(1, std::memory_order_relaxed);
+    }
+
+    void recordError() {
+        attempts.fetch_add(1, std::memory_order_relaxed);
+        errors.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] json toJson() const {
+        return {
+            {"attempts", attempts.load(std::memory_order_relaxed)},
+            {"nonempty_successes", nonemptySuccesses.load(std::memory_order_relaxed)},
+            {"empty_successes", emptySuccesses.load(std::memory_order_relaxed)},
+            {"errors", errors.load(std::memory_order_relaxed)},
+        };
     }
 };
 
@@ -1239,6 +1268,11 @@ FdCategoryCounts countOpenFileDescriptorCategories() {
 #endif
 }
 
+constexpr uint64_t backgroundWorkerActive(uint64_t observedWorkerActive) {
+    // StatusRequest is itself tracked as an active worker before its snapshot is captured.
+    return observedWorkerActive > 0 ? observedWorkerActive - 1 : 0;
+}
+
 struct DaemonSnapshot {
     size_t activeConnections{0};
     size_t maxConnections{0};
@@ -1251,6 +1285,9 @@ struct DaemonSnapshot {
     uint64_t rssBytes{0};
     uint64_t postIngestQueued{0};
     uint64_t postIngestInflight{0};
+    uint64_t workerActive{0};
+    uint64_t workerQueued{0};
+    uint64_t deferredQueueDepth{0};
     int pressureLevel{0};
     uint64_t documentsTotal{0};
     uint64_t searchActive{0};
@@ -1379,6 +1416,9 @@ struct DaemonSnapshot {
 
         snap.postIngestQueued = getCount(metrics::kPostIngestQueued);
         snap.postIngestInflight = getCount(metrics::kPostIngestInflight);
+        snap.workerActive = backgroundWorkerActive(getCount(metrics::kWorkerActive));
+        snap.workerQueued = getCount(metrics::kWorkerQueued);
+        snap.deferredQueueDepth = getCount(metrics::kDeferredQueueDepth);
         snap.pressureLevel = static_cast<int>(getCount(metrics::kPressureLevel));
         snap.documentsTotal = getCount(metrics::kDocumentsTotal);
         snap.searchActive = getCount(metrics::kSearchActive);
@@ -1460,6 +1500,9 @@ struct DaemonSnapshot {
                     {"rss_bytes", rssBytes},
                     {"post_ingest_queued", postIngestQueued},
                     {"post_ingest_inflight", postIngestInflight},
+                    {"worker_active", workerActive},
+                    {"worker_queued", workerQueued},
+                    {"deferred_queue_depth", deferredQueueDepth},
                     {"pressure_level", pressureLevel},
                     {"documents_total", documentsTotal},
                     {"search_active", searchActive},
@@ -2405,8 +2448,19 @@ struct DrainObservation {
     uint64_t elapsedMs{0};
     int polls{0};
     int stablePolls{0};
+    uint64_t minimumDocuments{0};
+    uint64_t documentsBelowMinimumPolls{0};
+    uint64_t postIngestQueuedPolls{0};
+    uint64_t postIngestInflightPolls{0};
+    uint64_t workerActivePolls{0};
+    uint64_t workerQueuedPolls{0};
+    uint64_t deferredQueuePolls{0};
+    uint64_t coordinatedWritePolls{0};
     uint64_t peakPostIngestQueued{0};
     uint64_t peakPostIngestInflight{0};
+    uint64_t peakWorkerActive{0};
+    uint64_t peakWorkerQueued{0};
+    uint64_t peakDeferredQueueDepth{0};
     double peakCpuPercent{0.0};
     double peakMemoryMb{0.0};
     uint32_t maxPressureLevel{0};
@@ -2417,8 +2471,20 @@ struct DrainObservation {
                     {"elapsed_ms", elapsedMs},
                     {"polls", polls},
                     {"stable_polls", stablePolls},
+                    {"minimum_documents", minimumDocuments},
+                    {"blocker_polls",
+                     {{"documents_below_minimum", documentsBelowMinimumPolls},
+                      {"post_ingest_queued", postIngestQueuedPolls},
+                      {"post_ingest_inflight", postIngestInflightPolls},
+                      {"worker_active", workerActivePolls},
+                      {"worker_queued", workerQueuedPolls},
+                      {"deferred_queue", deferredQueuePolls},
+                      {"coordinated_write", coordinatedWritePolls}}},
                     {"peak_post_ingest_queued", peakPostIngestQueued},
                     {"peak_post_ingest_inflight", peakPostIngestInflight},
+                    {"peak_worker_active", peakWorkerActive},
+                    {"peak_worker_queued", peakWorkerQueued},
+                    {"peak_deferred_queue_depth", peakDeferredQueueDepth},
                     {"peak_cpu_pct", peakCpuPercent},
                     {"peak_memory_mb", peakMemoryMb},
                     {"max_pressure_level", maxPressureLevel},
@@ -2484,15 +2550,22 @@ struct IdleWakeProbeObservation {
     }
 };
 
-bool writePipelineDrained(const DaemonSnapshot& snapshot) {
+bool writePipelineDrained(const DaemonSnapshot& snapshot, uint64_t minimumDocuments = 0) {
     return snapshot.postIngestQueued == 0 && snapshot.postIngestInflight == 0 &&
-           snapshot.writeQueueDepth == 0 && snapshot.writeInFlight == 0;
+           snapshot.workerActive == 0 && snapshot.workerQueued == 0 &&
+           snapshot.deferredQueueDepth == 0 && snapshot.writeQueueDepth == 0 &&
+           snapshot.writeInFlight == 0 && snapshot.documentsTotal >= minimumDocuments;
 }
 
 TEST_CASE("Drain contract includes post-ingest and coordinated writes",
           "[benchmark-contract][drain]") {
+    CHECK(backgroundWorkerActive(0) == 0);
+    CHECK(backgroundWorkerActive(1) == 0);
+    CHECK(backgroundWorkerActive(3) == 2);
+
     DaemonSnapshot snapshot;
     CHECK(writePipelineDrained(snapshot));
+    CHECK(writePipelineDrained(snapshot, 0));
 
     snapshot.postIngestQueued = 1;
     CHECK_FALSE(writePipelineDrained(snapshot));
@@ -2508,11 +2581,31 @@ TEST_CASE("Drain contract includes post-ingest and coordinated writes",
 
     snapshot.writeInFlight = 1;
     CHECK_FALSE(writePipelineDrained(snapshot));
+    snapshot.writeInFlight = 0;
+
+    snapshot.workerActive = 1;
+    CHECK_FALSE(writePipelineDrained(snapshot));
+    snapshot.workerActive = 0;
+
+    snapshot.workerQueued = 1;
+    CHECK_FALSE(writePipelineDrained(snapshot));
+    snapshot.workerQueued = 0;
+
+    snapshot.deferredQueueDepth = 1;
+    CHECK_FALSE(writePipelineDrained(snapshot));
+    snapshot.deferredQueueDepth = 0;
+
+    snapshot.documentsTotal = 41;
+    CHECK_FALSE(writePipelineDrained(snapshot, 42));
+    snapshot.documentsTotal = 42;
+    CHECK(writePipelineDrained(snapshot, 42));
 }
 
 DrainObservation waitForDrainObservation(DaemonClient& client, std::chrono::milliseconds timeout,
-                                         std::chrono::milliseconds sampleInterval = 500ms) {
+                                         std::chrono::milliseconds sampleInterval = 500ms,
+                                         uint64_t minimumDocuments = 0) {
     DrainObservation observation;
+    observation.minimumDocuments = minimumDocuments;
     const auto start = std::chrono::steady_clock::now();
     const auto deadline = start + timeout;
     constexpr int stableRequired = 5;
@@ -2525,12 +2618,24 @@ DrainObservation waitForDrainObservation(DaemonClient& client, std::chrono::mill
             std::max(observation.peakPostIngestQueued, snap.postIngestQueued);
         observation.peakPostIngestInflight =
             std::max(observation.peakPostIngestInflight, snap.postIngestInflight);
+        observation.peakWorkerActive = std::max(observation.peakWorkerActive, snap.workerActive);
+        observation.peakWorkerQueued = std::max(observation.peakWorkerQueued, snap.workerQueued);
+        observation.peakDeferredQueueDepth =
+            std::max(observation.peakDeferredQueueDepth, snap.deferredQueueDepth);
         observation.peakCpuPercent = std::max(observation.peakCpuPercent, snap.cpuUsagePercent);
         observation.peakMemoryMb = std::max(observation.peakMemoryMb, snap.memoryUsageMb);
         observation.maxPressureLevel = std::max(
             observation.maxPressureLevel, static_cast<uint32_t>(std::max(0, snap.pressureLevel)));
+        observation.documentsBelowMinimumPolls += snap.documentsTotal < minimumDocuments ? 1u : 0u;
+        observation.postIngestQueuedPolls += snap.postIngestQueued > 0 ? 1u : 0u;
+        observation.postIngestInflightPolls += snap.postIngestInflight > 0 ? 1u : 0u;
+        observation.workerActivePolls += snap.workerActive > 0 ? 1u : 0u;
+        observation.workerQueuedPolls += snap.workerQueued > 0 ? 1u : 0u;
+        observation.deferredQueuePolls += snap.deferredQueueDepth > 0 ? 1u : 0u;
+        observation.coordinatedWritePolls +=
+            (snap.writeQueueDepth > 0 || snap.writeInFlight > 0) ? 1u : 0u;
 
-        const bool drained = writePipelineDrained(snap);
+        const bool drained = writePipelineDrained(snap, minimumDocuments);
         if (drained) {
             ++stableCount;
             if (stableCount >= stableRequired) {
@@ -2982,7 +3087,8 @@ TEST_CASE("Multi-client ingestion: concurrent pure ingest",
 
     // Start time-series sampler
     TimeSeriesSampler sampler;
-    sampler.start(monitorClient, 500ms, harness.dataDir());
+    sampler.start(monitorClient, std::chrono::milliseconds(cfg.resourceSampleMs),
+                  harness.dataDir());
 
     // Shared counters
     std::atomic<int> totalDocsIngested{0};
@@ -3288,15 +3394,21 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
 
     const auto resourceBaseline = DaemonSnapshot::capture(monitorClient, harness.dataDir());
     TimeSeriesSampler sampler;
-    sampler.start(monitorClient, 500ms, harness.dataDir());
+    sampler.start(monitorClient, std::chrono::milliseconds(cfg.resourceSampleMs),
+                  harness.dataDir());
 
     std::atomic<int> totalAdds{0};
     std::atomic<int> totalSearches{0};
     std::atomic<int> totalLists{0};
     std::atomic<int> totalFailures{0};
+    OutputLivenessCounters searchOutputLiveness;
+    OutputLivenessCounters grepOutputLiveness;
+    OutputLivenessCounters graphOutputLiveness;
     std::vector<ClientResult> clientResults(cfg.numClients);
     std::mutex hydrationSurfaceMutex;
+    std::vector<int64_t> grepContentRetrievalMs;
     std::vector<int64_t> grepMatchRenderUs;
+    std::vector<int64_t> grepWorkerCriticalTotalMs;
     std::vector<int64_t> graphSnippetRenderUs;
     std::vector<int64_t> graphSnippetsRendered;
 
@@ -3366,8 +3478,10 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
                     if (res) {
                         result.searchesExecuted++;
                         totalSearches.fetch_add(1);
+                        searchOutputLiveness.recordSuccess(!res.value().results.empty());
                         collectSearchHydrationTelemetry(res.value(), result);
                     } else {
+                        searchOutputLiveness.recordError();
                         result.failures++;
                         totalFailures.fetch_add(1);
                     }
@@ -3457,24 +3571,35 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
             const int probeOps = std::clamp(cfg.mixedOpsPerClient / 4, 4, 25);
             const auto recordGrepRender = [&](const yams::Result<GrepResponse>& result) {
                 if (!result) {
+                    grepOutputLiveness.recordError();
                     return;
                 }
-                const auto value = metricInt(result.value().searchStats, "match_render_us");
-                if (!value) {
-                    return;
-                }
+                grepOutputLiveness.recordSuccess(!result.value().matches.empty());
                 std::lock_guard<std::mutex> lock(hydrationSurfaceMutex);
-                grepMatchRenderUs.push_back(*value);
+                if (const auto value =
+                        metricInt(result.value().searchStats, "content_retrieval_ms")) {
+                    grepContentRetrievalMs.push_back(*value);
+                }
+                if (const auto value = metricInt(result.value().searchStats, "match_render_us")) {
+                    grepMatchRenderUs.push_back(*value);
+                }
+                if (const auto value =
+                        metricInt(result.value().searchStats, "worker_critical_total_ms")) {
+                    grepWorkerCriticalTotalMs.push_back(*value);
+                }
             };
             const auto recordGraphRender = [&](const yams::Result<GraphExploreResponse>& result) {
                 if (!result) {
+                    graphOutputLiveness.recordError();
                     return;
                 }
+                const auto& response = result.value();
+                graphOutputLiveness.recordSuccess(!response.entrySymbols.empty() ||
+                                                  !response.files.empty() ||
+                                                  !response.relationships.empty());
                 std::lock_guard<std::mutex> lock(hydrationSurfaceMutex);
-                graphSnippetRenderUs.push_back(
-                    static_cast<int64_t>(result.value().snippetRenderMicros));
-                graphSnippetsRendered.push_back(
-                    static_cast<int64_t>(result.value().snippetsRendered));
+                graphSnippetRenderUs.push_back(static_cast<int64_t>(response.snippetRenderMicros));
+                graphSnippetsRendered.push_back(static_cast<int64_t>(response.snippetsRendered));
             };
 
             for (int i = 0; i < probeOps; ++i) {
@@ -3497,15 +3622,15 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
     for (auto& t : threads)
         t.join();
 
-    sampler.stop();
-
-    const auto resourcePeaks = summarizeResourcePeaks(sampler.getSamples());
-
     auto globalEnd = std::chrono::steady_clock::now();
     double globalElapsed = std::chrono::duration<double>(globalEnd - globalStart).count();
 
-    const auto drainObservation =
-        waitForDrainObservation(monitorClient, std::chrono::seconds(cfg.drainTimeoutSecs));
+    const uint64_t minimumDocuments =
+        resourceBaseline.documentsTotal + static_cast<uint64_t>(totalAdds.load());
+    const auto drainObservation = waitForDrainObservation(
+        monitorClient, std::chrono::seconds(cfg.drainTimeoutSecs), 500ms, minimumDocuments);
+    sampler.stop();
+    const auto resourcePeaks = summarizeResourcePeaks(sampler.getSamples());
     const bool drained = drainObservation.drained;
     const auto idleProbe = runIdleWakeProbe(cfg, harness.socketPath(), monitorClient);
     auto finalSnap = DaemonSnapshot::capture(monitorClient, harness.dataDir());
@@ -3553,7 +3678,9 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
     auto snippetLookupStats = PercentileStats::compute(snippetLookupUs);
     auto snippetContentFetchStats = PercentileStats::compute(snippetContentFetchUs);
     auto snippetRenderStats = PercentileStats::compute(snippetRenderUs);
+    auto grepContentRetrievalStats = PercentileStats::compute(grepContentRetrievalMs);
     auto grepMatchRenderStats = PercentileStats::compute(grepMatchRenderUs);
+    auto grepWorkerCriticalTotalStats = PercentileStats::compute(grepWorkerCriticalTotalMs);
     auto graphSnippetRenderStats = PercentileStats::compute(graphSnippetRenderUs);
     const auto graphSnippetsRenderedTotal =
         std::accumulate(graphSnippetsRendered.begin(), graphSnippetsRendered.end(), int64_t{0});
@@ -3578,7 +3705,8 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
     if (cfg.profileHydrationSurfaces) {
         CHECK_FALSE(grepMatchRenderUs.empty());
         CHECK_FALSE(graphSnippetRenderUs.empty());
-        CHECK(graphSnippetsRenderedTotal > 0);
+        CHECK(grepOutputLiveness.attempts.load(std::memory_order_relaxed) > 0);
+        CHECK(graphOutputLiveness.attempts.load(std::memory_order_relaxed) > 0);
     }
     CHECK(drained);
     CHECK(recovery.ok());
@@ -3610,10 +3738,17 @@ TEST_CASE("Multi-client ingestion: mixed read/write workload",
           {"snippet_hydration_candidates", snippetHydrationCandidates},
           {"snippet_hydration_missing", snippetHydrationMissing},
           {"snippet_hydrated_results", snippetHydratedResults}}},
-        {"grep_server", {{"match_render_us", grepMatchRenderStats.toJson()}}},
+        {"grep_server",
+         {{"content_retrieval_ms", grepContentRetrievalStats.toJson()},
+          {"match_render_us", grepMatchRenderStats.toJson()},
+          {"worker_critical_total_ms", grepWorkerCriticalTotalStats.toJson()}}},
         {"graph_server",
          {{"snippet_render_us", graphSnippetRenderStats.toJson()},
           {"snippets_rendered", graphSnippetsRenderedTotal}}},
+        {"output_liveness",
+         {{"search", searchOutputLiveness.toJson()},
+          {"grep", grepOutputLiveness.toJson()},
+          {"graph", graphOutputLiveness.toJson()}}},
         {"daemon_snapshot_final", finalSnap.toJson()},
         {"drain_metrics", drainObservation.toJson()},
         {"idle_probe", idleProbe.toJson()},

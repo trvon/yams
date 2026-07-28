@@ -328,7 +328,11 @@ public:
 
     // Tuning configuration (no envs): getter/setter with live application where applicable.
     const TuningConfig& getTuningConfig() const { return tuningConfig_; }
+    uint32_t getIngestStoreBatchSize() const {
+        return ingestStoreBatchSize_.load(std::memory_order_relaxed);
+    }
     void setTuningConfig(const TuningConfig& cfg) {
+        ingestStoreBatchSize_.store(cfg.ingestStoreBatchSize, std::memory_order_relaxed);
         tuningConfig_ = cfg;
         auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
         if (piq) {
@@ -772,6 +776,8 @@ private:
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors_;
     std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> symbolExtractors_;
     TuningConfig tuningConfig_{};
+    // Independent advisory scalar; it does not publish or synchronize other tuning fields.
+    std::atomic<uint32_t> ingestStoreBatchSize_{64};
 
     std::atomic<bool> shutdownInvoked_{false};
     std::mutex maintenanceMutex_;

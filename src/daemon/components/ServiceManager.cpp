@@ -339,6 +339,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
       lifecycleFsm_(lifecycleFsm) {
     spdlog::debug("[ServiceManager] Constructor start");
     tuningConfig_ = config_.tuning;
+    ingestStoreBatchSize_.store(tuningConfig_.ingestStoreBatchSize, std::memory_order_relaxed);
 
     {
         auto enginePolicy = ConfigResolver::resolveTopologyEnginePolicy();

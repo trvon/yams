@@ -237,7 +237,7 @@ public:
      * Resolve and apply daemon runtime tuning from parsed TOML sections.
      *
      * This is the single startup/reload path for TuneAdvisor, controller,
-     * post-ingest, and gradient-limiter settings. Unspecified controller
+     * ingest, post-ingest, and gradient-limiter settings. Unspecified controller
      * values are preserved from @p base.
      */
     static TuningConfig applyRuntimeTuning(const ConfigSections& sections, TuningConfig base);

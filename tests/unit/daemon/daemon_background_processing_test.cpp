@@ -102,6 +102,29 @@ using yams::test::ScopedEnvVar;
 // Test Helpers
 // =============================================================================
 
+TEST_CASE("Ingest storage batching is independent from post-ingest transaction batching",
+          "[daemon][ingest][batching]") {
+    PostIngestBatchSizeGuard postIngestBatchGuard(16);
+
+    CHECK(IngestService::testing_resolveStoreBatchLimit(64, 20.0, true, true, false) == 64);
+    CHECK(TuneAdvisor::postIngestBatchSize() == 16);
+}
+
+TEST_CASE("Ingest storage batching never exceeds its configured maximum under pressure",
+          "[daemon][ingest][batching]") {
+    CHECK(IngestService::testing_resolveStoreBatchLimit(64, 81.0, true, true, false) == 8);
+    CHECK(IngestService::testing_resolveStoreBatchLimit(64, 61.0, true, true, false) == 10);
+    CHECK(IngestService::testing_resolveStoreBatchLimit(64, 41.0, true, true, false) == 12);
+    CHECK(IngestService::testing_resolveStoreBatchLimit(4, 81.0, true, true, false) == 4);
+    CHECK(IngestService::testing_resolveStoreBatchLimit(64, 20.0, false, true, false) == 32);
+    CHECK(IngestService::testing_resolveStoreBatchLimit(64, 20.0, false, false, false) == 4);
+    CHECK(IngestService::testing_resolveStoreBatchLimit(2, 20.0, false, true, false) == 2);
+    CHECK(IngestService::testing_resolveStoreBatchLimit(0, 20.0, true, true, false) == 1);
+    CHECK(IngestService::testing_resolveStoreBatchLimit(1024, 20.0, true, true, false) == 256);
+    CHECK(IngestService::testing_resolveStoreBatchLimit(32, 81.0, false, true, true) == 32);
+    CHECK(IngestService::testing_resolveStoreBatchLimit(4, 81.0, false, true, true) == 4);
+}
+
 class SpdlogCaptureGuard {
 public:
     explicit SpdlogCaptureGuard(spdlog::level::level_enum level)

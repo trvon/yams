@@ -1086,7 +1086,9 @@ public:
         if (ov != 0)
             return ov;
 
-        constexpr uint32_t kDefaultBatchSize = 16;
+        // Keeps foreground retrieval responsive under concurrent ingestion while reducing
+        // content-index transaction overhead. Contention feedback below still scales to 4/2/1.
+        constexpr uint32_t kDefaultBatchSize = 32;
         uint32_t baseBatchSize = kDefaultBatchSize;
         auto embedCap = static_cast<uint32_t>(getEmbedDocCap());
         if (embedCap == 0) {

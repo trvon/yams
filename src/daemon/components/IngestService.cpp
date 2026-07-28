@@ -149,6 +149,27 @@ void IngestService::stop() {
     }
 }
 
+std::uint32_t IngestService::resolveStoreBatchLimit(std::uint32_t configuredBatchSize,
+                                                    double cpuUsagePercent, bool canAdmitWork,
+                                                    bool correctnessMode, bool backlogHigh) {
+    const std::uint32_t configuredMaximum = std::clamp(configuredBatchSize, 1u, 256u);
+    std::uint32_t batchLimit = configuredMaximum;
+    if (cpuUsagePercent > 80.0) {
+        batchLimit = std::min(batchLimit, 8u);
+    } else if (cpuUsagePercent > 60.0) {
+        batchLimit = std::min(batchLimit, 10u);
+    } else if (cpuUsagePercent > 40.0) {
+        batchLimit = std::min(batchLimit, 12u);
+    }
+    if (!canAdmitWork) {
+        batchLimit = std::min(batchLimit, correctnessMode ? 32u : 4u);
+    }
+    if (correctnessMode && backlogHigh) {
+        batchLimit = std::min(configuredMaximum, 64u);
+    }
+    return batchLimit;
+}
+
 boost::asio::awaitable<void> IngestService::channelPoller() {
     YAMS_ZONE_SCOPED_N("IngestService::channelPoller");
     running_.store(true, std::memory_order_release);
@@ -187,34 +208,21 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
     };
 
     while (!stop_.load()) {
-        // Keep request admission independent from downstream post-ingest transaction sizing.
-        // Reuse the configured post-ingest bound so storage does not fragment a batch before the
-        // downstream queue applies the same transaction limit.
-        int batchLimit =
-            static_cast<int>(std::max<std::uint32_t>(1u, TuneAdvisor::postIngestBatchSize()));
-        bool underPressure = false;
+        double cpuUsagePercent = 0.0;
         try {
-            auto snap = ResourceGovernor::instance().getSnapshot();
-            if (snap.cpuUsagePercent > 80)
-                batchLimit = 8;
-            else if (snap.cpuUsagePercent > 60)
-                batchLimit = 10;
-            else if (snap.cpuUsagePercent > 40)
-                batchLimit = 12;
+            cpuUsagePercent = ResourceGovernor::instance().getSnapshot().cpuUsagePercent;
         } catch (...) {
         }
-        if (!ResourceGovernor::instance().canAdmitWork()) {
-            // Avoid full ingestion deadlock under pressure: keep draining slowly.
-            underPressure = true;
-            batchLimit = correctnessMode ? 32 : 4;
-        }
-
+        const bool canAdmitWork = ResourceGovernor::instance().canAdmitWork();
+        const bool underPressure = !canAdmitWork;
         const std::size_t queueDepth = channel->size_approx();
         const std::size_t queueCap = std::max<std::size_t>(1, channel->capacity());
-        const bool backlogHigh = (queueDepth * 100u / queueCap) >= 70u;
-        if (correctnessMode && backlogHigh) {
-            batchLimit = 64;
-        }
+        const std::size_t backlogThreshold =
+            (queueCap / 10u) * 7u + (((queueCap % 10u) * 7u + 9u) / 10u);
+        const bool backlogHigh = queueDepth >= backlogThreshold;
+        const auto configuredBatchSize = sm_ ? sm_->getIngestStoreBatchSize() : std::uint32_t{64};
+        const int batchLimit = static_cast<int>(resolveStoreBatchLimit(
+            configuredBatchSize, cpuUsagePercent, canAdmitWork, correctnessMode, backlogHigh));
 
         InternalEventBus::StoreDocumentTask task;
         int processed = 0;

@@ -271,10 +271,11 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager PostIngestQueue accessor
 
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager tuning config getter doesn't crash",
                  "[daemon][service_manager]") {
+    config_.tuning.ingestStoreBatchSize = 19;
     ServiceManager sm(config_, state_, lifecycleFsm_);
     const auto& tuning = sm.getTuningConfig();
-    (void)tuning;
-    SUCCEED();
+    CHECK(tuning.ingestStoreBatchSize == 19);
+    CHECK(sm.getIngestStoreBatchSize() == 19);
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager set tuning config doesn't crash",
@@ -285,8 +286,10 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager set tuning config doesn'
     tc.postIngestCapacity = 1000;
     tc.postIngestThreadsMin = 2;
     tc.postIngestThreadsMax = 4;
+    tc.ingestStoreBatchSize = 23;
 
     REQUIRE_NOTHROW(sm.setTuningConfig(tc));
+    CHECK(sm.getIngestStoreBatchSize() == 23);
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager getWorkerQueueDepth doesn't crash",

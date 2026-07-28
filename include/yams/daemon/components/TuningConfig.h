@@ -19,6 +19,10 @@ struct TuningConfig {
     std::size_t postIngestThreadsMax{8};
     std::uint32_t postIngestCoalesceMs{2};
 
+    // Maximum storage tasks committed together before they enter post-ingest processing.
+    // This is intentionally independent from the downstream post-ingest transaction batch.
+    std::uint32_t ingestStoreBatchSize{64};
+
     // Admission thresholds
     std::size_t admitWarnThreshold{1500};
     std::size_t admitStopThreshold{1900};

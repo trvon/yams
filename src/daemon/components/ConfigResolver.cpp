@@ -1494,6 +1494,17 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
     updateUint32("control_interval_ms", tuningConfig.controlIntervalMs);
     updateUint32("hold_ms", tuningConfig.holdMs);
 
+    const auto* ingest = findSection("tuning.ingest");
+    if (auto value = parseUnsigned(ingest, "tuning.ingest", "store_batch_size")) {
+        constexpr std::uint64_t kMaximumStoreBatchSize = 256;
+        if (*value >= 1 && *value <= kMaximumStoreBatchSize) {
+            tuningConfig.ingestStoreBatchSize = static_cast<std::uint32_t>(*value);
+        } else {
+            spdlog::warn("Config: tuning.ingest.store_batch_size outside range 1..{}",
+                         kMaximumStoreBatchSize);
+        }
+    }
+
     const auto* postIngest = findSection("tuning.post_ingest");
     if (auto value = parseUnsigned(postIngest, "tuning.post_ingest", "coalesce_ms")) {
         constexpr std::uint64_t kMaxCoalesceMs = 20;
