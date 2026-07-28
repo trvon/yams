@@ -13,7 +13,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cerrno>
 #include <charconv>
 #include <chrono>
 #include <cstdlib>
@@ -96,14 +95,17 @@ std::optional<bool> parseBoolValue(std::string raw) {
 
 std::optional<double> parseDouble(const std::string& raw) {
     auto view = trimView(raw);
+    if (!view.empty() && view.front() == '+') {
+        view.remove_prefix(1);
+    }
     if (view.empty()) {
         return std::nullopt;
     }
-    std::string value{view};
-    char* end = nullptr;
-    errno = 0;
-    double parsed = std::strtod(value.c_str(), &end);
-    if (errno != 0 || end == nullptr || end == value.c_str() || *end != '\0') {
+    double parsed{};
+    const char* const begin = view.data();
+    const char* const end = begin + view.size();
+    const auto [ptr, ec] = std::from_chars(begin, end, parsed, std::chars_format::general);
+    if (ec != std::errc{} || ptr != end) {
         return std::nullopt;
     }
     return parsed;
@@ -1145,40 +1147,6 @@ std::optional<std::string> readEnvString(const char* name) {
     return std::string(raw);
 }
 
-std::optional<std::uint32_t> readEnvU32(const char* name) {
-    const char* raw = std::getenv(name);
-    if (!raw || !*raw)
-        return std::nullopt;
-    return parseUnsignedIntegral<std::uint32_t>(raw);
-}
-
-std::optional<float> readEnvFloat(const char* name) {
-    const char* raw = std::getenv(name);
-    if (!raw || !*raw)
-        return std::nullopt;
-    auto parsed = parseDouble(raw);
-    if (!parsed) {
-        return std::nullopt;
-    }
-    return static_cast<float>(*parsed);
-}
-
-std::optional<std::uint32_t> parseTomlU32(const std::string& s) {
-    return parseUnsignedIntegral<std::uint32_t>(s);
-}
-
-std::optional<std::size_t> parseTomlSize(const std::string& s) {
-    return parseSize(s);
-}
-
-std::optional<float> parseTomlFloat(const std::string& s) {
-    auto parsed = parseDouble(s);
-    if (!parsed) {
-        return std::nullopt;
-    }
-    return static_cast<float>(*parsed);
-}
-
 std::optional<bool> parseTomlBool(std::string_view s) {
     std::string v(s);
     std::transform(v.begin(), v.end(), v.begin(),
@@ -1651,6 +1619,7 @@ ConfigResolver::WriteCoordinatorTuning ConfigResolver::resolveWriteCoordinatorTu
                     tuning.kgDedupMaxEdges = raw;
                 }
             } catch (const std::exception&) {
+                // Invalid user input leaves the typed default unchanged.
             }
         }
     } catch (const std::exception& e) {

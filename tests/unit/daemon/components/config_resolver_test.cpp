@@ -518,8 +518,8 @@ engine = "connected"
 routing_representatives = 4
 boundary_spill = true
 boundary_spill_limit = 1
-boundary_spill_distance_ratio = 1.2
-boundary_spill_residual_penalty = 1.5
+boundary_spill_distance_ratio = +1.2
+boundary_spill_residual_penalty = 1.5e0
 
 [topology.features]
 entity_fusion = true

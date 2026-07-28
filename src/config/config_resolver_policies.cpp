@@ -8,7 +8,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cerrno>
 #include <charconv>
 #include <cstdlib>
 #include <filesystem>
@@ -51,14 +50,17 @@ std::optional<std::size_t> parseSize(std::string_view raw) {
 
 std::optional<double> parseDouble(const std::string& raw) {
     auto view = trimView(raw);
+    if (!view.empty() && view.front() == '+') {
+        view.remove_prefix(1);
+    }
     if (view.empty()) {
         return std::nullopt;
     }
-    std::string value{view};
-    char* end = nullptr;
-    errno = 0;
-    double parsed = std::strtod(value.c_str(), &end);
-    if (errno != 0 || end == nullptr || end == value.c_str() || *end != '\0') {
+    double parsed{};
+    const char* const begin = view.data();
+    const char* const end = begin + view.size();
+    const auto [ptr, ec] = std::from_chars(begin, end, parsed, std::chars_format::general);
+    if (ec != std::errc{} || ptr != end) {
         return std::nullopt;
     }
     return parsed;

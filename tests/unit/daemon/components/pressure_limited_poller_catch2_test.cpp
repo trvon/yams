@@ -13,12 +13,14 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <boost/asio/io_context.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 
 #include <yams/daemon/components/InternalEventBus.h>
@@ -102,6 +104,13 @@ public:
 
     bool pushNormal(int value) { return channel_->try_push(value); }
 
+    void postNormalAfterAdmission(int admittedValue, std::vector<int> values) {
+        postAfterAdmissionValue_ = admittedValue;
+        postAfterAdmissionValues_ = std::move(values);
+    }
+
+    bool deferredPushSucceeded() const { return deferredPushSucceeded_; }
+
     bool pushHighPriority(int value) {
         if (!highPriorityChannel_) {
             highPriorityChannel_ = std::make_shared<SpscQueue<int>>(16);
@@ -156,7 +165,18 @@ private:
         cfg.wasActiveFlag = &wasActive_;
         cfg.inFlightCounter = &inFlight_;
         cfg.maxConcurrentFn = []() -> std::size_t { return 4; };
-        cfg.tryAcquireFn = [](GradientLimiter*, const std::string&, const std::string&) {
+        cfg.tryAcquireFn = [this](GradientLimiter*, const std::string& hash, const std::string&) {
+            if (postAfterAdmissionValue_ && hash == std::to_string(*postAfterAdmissionValue_)) {
+                postAfterAdmissionValue_.reset();
+                auto values = std::move(postAfterAdmissionValues_);
+                boost::asio::post(ioContext_, [this, values = std::move(values)]() {
+                    for (const int value : values) {
+                        deferredPushSucceeded_ =
+                            channel_->try_push(value) && deferredPushSucceeded_;
+                    }
+                    cancelWakeTimer();
+                });
+            }
             return true;
         };
         cfg.completeJobFn = [](const std::string&, bool) {};
@@ -199,6 +219,9 @@ private:
     std::shared_ptr<SpscQueue<int>> channel_;
     std::shared_ptr<SpscQueue<int>> highPriorityChannel_;
     std::vector<std::shared_ptr<boost::asio::steady_timer>> arrivals_;
+    std::optional<int> postAfterAdmissionValue_;
+    std::vector<int> postAfterAdmissionValues_;
+    bool deferredPushSucceeded_{true};
     std::chrono::steady_clock::time_point startedAt_{};
 };
 
@@ -208,12 +231,11 @@ TEST_CASE("PressureLimitedPoller coalesces normal-priority trickle into a bounde
           "[daemon][poller][batch][coalesce][catch2]") {
     BatchPollerHarness harness{10ms};
     REQUIRE(harness.pushNormal(1));
-    for (int value = 2; value <= 4; ++value) {
-        harness.scheduleNormal(value, value * 1ms);
-    }
+    harness.postNormalAfterAdmission(1, {2, 3, 4});
     harness.run();
 
     CHECK_FALSE(harness.timedOut);
+    CHECK(harness.deferredPushSucceeded());
     CHECK(harness.observed == std::vector<int>{1, 2, 3, 4});
 }
 

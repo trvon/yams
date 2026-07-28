@@ -131,8 +131,9 @@ applyCrossRerank(std::vector<SearchResult>& results, const std::string& query,
             originalRange > 0.0
                 ? std::clamp((originalScores[i] - origMin) / originalRange, 0.0, 1.0)
                 : 1.0;
-        const double finalScore =
-            config.rerankReplaceScores ? rerankNorm : blend * rerankNorm + (1.0 - blend) * originalNorm;
+        const double finalScore = config.rerankReplaceScores
+                                      ? rerankNorm
+                                      : blend * rerankNorm + (1.0 - blend) * originalNorm;
 
         outcome.docTraces.push_back(CrossRerankDocTrace{
             .filePath = results[i].document.filePath,
@@ -150,14 +151,15 @@ applyCrossRerank(std::vector<SearchResult>& results, const std::string& query,
             .score = static_cast<float>(rerankNorm),
             .source = ComponentResult::Source::Unknown,
             .rank = i,
-            .snippet = results[i].snippet.empty()
-                           ? std::nullopt
-                           : std::optional<std::string>(results[i].snippet),
+            .snippet = results[i].snippet.empty() ? std::nullopt
+                                                  : std::optional<std::string>(results[i].snippet),
+            .debugInfo = {},
         });
     }
 
-    std::stable_sort(results.begin(), results.begin() + static_cast<std::ptrdiff_t>(window),
-                     [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
+    std::stable_sort(
+        results.begin(), results.begin() + static_cast<std::ptrdiff_t>(window),
+        [](const SearchResult& a, const SearchResult& b) { return a.score > b.score; });
     outcome.status = CrossRerankOutcome::Status::Applied;
     return outcome;
 }

@@ -101,13 +101,6 @@ MCPDownloadJobResponse makeMcpDownloadJobResponse(const yams::daemon::DownloadRe
     return out;
 }
 
-json makeSnapshotJson(const yams::daemon::SnapshotInfo& snap) {
-    return json{{"id", snap.id},
-                {"label", snap.label},
-                {"created_at", snap.createdAt},
-                {"document_count", snap.documentCount}};
-}
-
 MCPUpdateMetadataResponse
 makeUpdateMetadataResponse(const yams::daemon::UpdateDocumentResponse& ur) {
     MCPUpdateMetadataResponse out;
@@ -130,111 +123,6 @@ makeMcpRetrievalOptions(const yams::daemon::ClientConfig& daemonClientConfig) {
     ropts.bodyTimeoutMs = 60000;
     return ropts;
 }
-
-std::string normalizedTokenString(std::string value) {
-    for (char& c : value) {
-        if (!std::isalnum(static_cast<unsigned char>(c))) {
-            c = ' ';
-        } else {
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        }
-    }
-
-    std::ostringstream out;
-    std::istringstream in(value);
-    std::string token;
-    bool first = true;
-    while (in >> token) {
-        if (!first) {
-            out << ' ';
-        }
-        out << token;
-        first = false;
-    }
-    return out.str();
-}
-
-bool containsNormalizedToken(std::string_view haystack, std::string_view needle) {
-    if (needle.empty()) {
-        return false;
-    }
-    if (haystack == needle) {
-        return true;
-    }
-    std::string paddedHaystack;
-    paddedHaystack.reserve(haystack.size() + 2);
-    paddedHaystack.push_back(' ');
-    paddedHaystack.append(haystack);
-    paddedHaystack.push_back(' ');
-
-    std::string paddedNeedle;
-    paddedNeedle.reserve(needle.size() + 2);
-    paddedNeedle.push_back(' ');
-    paddedNeedle.append(needle);
-    paddedNeedle.push_back(' ');
-    return paddedHaystack.find(paddedNeedle) != std::string::npos;
-}
-
-#if !defined(YAMS_WASI)
-struct SuggestContextSuppressionState {
-    std::unordered_set<std::string> snapshotIds;
-    std::unordered_set<std::string> resultIds;
-};
-
-SuggestContextSuppressionState
-loadSuggestContextSuppressionState(metadata::MetadataRepository& repo, std::string_view sessionName,
-                                   std::string_view normalizedQuery) {
-    SuggestContextSuppressionState state;
-    if (sessionName.empty() || normalizedQuery.empty()) {
-        return state;
-    }
-
-    auto recent = repo.getRecentFeedbackEvents(25);
-    if (!recent) {
-        return state;
-    }
-
-    for (const auto& event : recent.value()) {
-        if (event.eventType != "suggest_context_served") {
-            continue;
-        }
-
-        auto payload = nlohmann::json::parse(event.payloadJson, nullptr, false);
-        if (payload.is_discarded() || !payload.is_object()) {
-            continue;
-        }
-
-        if (payload.value("session_name", std::string{}) != sessionName) {
-            continue;
-        }
-
-        const auto payloadQuery = normalizedTokenString(
-            payload.value("normalized_query", payload.value("query", std::string{})));
-        if (payloadQuery != normalizedQuery) {
-            continue;
-        }
-
-        if (auto it = payload.find("snapshot_ids"); it != payload.end() && it->is_array()) {
-            for (const auto& snapshotId : *it) {
-                if (snapshotId.is_string()) {
-                    state.snapshotIds.insert(snapshotId.get<std::string>());
-                }
-            }
-        }
-        if (auto it = payload.find("served_result_ids"); it != payload.end() && it->is_array()) {
-            for (const auto& resultId : *it) {
-                if (resultId.is_string()) {
-                    state.resultIds.insert(resultId.get<std::string>());
-                }
-            }
-        }
-        break;
-    }
-
-    return state;
-}
-
-#endif
 
 static std::filesystem::path findGitRoot(const std::filesystem::path& start) {
     std::error_code ec;

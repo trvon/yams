@@ -85,266 +85,6 @@ inline int setenv(const char* name, const char* value, int overwrite) {
 
 namespace yams::mcp {
 
-
-namespace {
-MCPDownloadJobResponse makeMcpDownloadJobResponse(const yams::daemon::DownloadResponse& resp) {
-    MCPDownloadJobResponse out;
-    out.jobId = resp.jobId;
-    out.state = resp.state;
-    out.success = resp.success;
-    out.url = resp.url;
-    out.hash = resp.hash;
-    out.storedPath = resp.localPath;
-    out.sizeBytes = resp.size;
-    out.createdAtMs = resp.createdAtMs;
-    out.updatedAtMs = resp.updatedAtMs;
-    out.error = resp.error;
-    return out;
-}
-
-json makeSnapshotJson(const yams::daemon::SnapshotInfo& snap) {
-    return json{{"id", snap.id},
-                {"label", snap.label},
-                {"created_at", snap.createdAt},
-                {"document_count", snap.documentCount}};
-}
-
-MCPUpdateMetadataResponse
-makeUpdateMetadataResponse(const yams::daemon::UpdateDocumentResponse& ur) {
-    MCPUpdateMetadataResponse out;
-    out.success = ur.metadataUpdated || ur.tagsUpdated || ur.contentUpdated;
-    out.updated = out.success ? 1 : 0;
-    out.matched = 1;
-    if (!ur.hash.empty()) {
-        out.updatedHashes.push_back(ur.hash);
-    }
-    out.message = out.success ? "Update successful" : "No changes applied";
-    return out;
-}
-
-app::services::RetrievalOptions
-makeMcpRetrievalOptions(const yams::daemon::ClientConfig& daemonClientConfig) {
-    yams::app::services::RetrievalOptions ropts;
-    ropts.socketPath = daemonClientConfig.socketPath;
-    ropts.requestTimeoutMs = 15000;
-    ropts.headerTimeoutMs = 10000;
-    ropts.bodyTimeoutMs = 60000;
-    return ropts;
-}
-
-std::string normalizedTokenString(std::string value) {
-    for (char& c : value) {
-        if (!std::isalnum(static_cast<unsigned char>(c))) {
-            c = ' ';
-        } else {
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        }
-    }
-
-    std::ostringstream out;
-    std::istringstream in(value);
-    std::string token;
-    bool first = true;
-    while (in >> token) {
-        if (!first) {
-            out << ' ';
-        }
-        out << token;
-        first = false;
-    }
-    return out.str();
-}
-
-bool containsNormalizedToken(std::string_view haystack, std::string_view needle) {
-    if (needle.empty()) {
-        return false;
-    }
-    if (haystack == needle) {
-        return true;
-    }
-    std::string paddedHaystack;
-    paddedHaystack.reserve(haystack.size() + 2);
-    paddedHaystack.push_back(' ');
-    paddedHaystack.append(haystack);
-    paddedHaystack.push_back(' ');
-
-    std::string paddedNeedle;
-    paddedNeedle.reserve(needle.size() + 2);
-    paddedNeedle.push_back(' ');
-    paddedNeedle.append(needle);
-    paddedNeedle.push_back(' ');
-    return paddedHaystack.find(paddedNeedle) != std::string::npos;
-}
-
-#if !defined(YAMS_WASI)
-struct SuggestContextSuppressionState {
-    std::unordered_set<std::string> snapshotIds;
-    std::unordered_set<std::string> resultIds;
-};
-
-SuggestContextSuppressionState
-loadSuggestContextSuppressionState(metadata::MetadataRepository& repo, std::string_view sessionName,
-                                   std::string_view normalizedQuery) {
-    SuggestContextSuppressionState state;
-    if (sessionName.empty() || normalizedQuery.empty()) {
-        return state;
-    }
-
-    auto recent = repo.getRecentFeedbackEvents(25);
-    if (!recent) {
-        return state;
-    }
-
-    for (const auto& event : recent.value()) {
-        if (event.eventType != "suggest_context_served") {
-            continue;
-        }
-
-        auto payload = nlohmann::json::parse(event.payloadJson, nullptr, false);
-        if (payload.is_discarded() || !payload.is_object()) {
-            continue;
-        }
-
-        if (payload.value("session_name", std::string{}) != sessionName) {
-            continue;
-        }
-
-        const auto payloadQuery = normalizedTokenString(
-            payload.value("normalized_query", payload.value("query", std::string{})));
-        if (payloadQuery != normalizedQuery) {
-            continue;
-        }
-
-        if (auto it = payload.find("snapshot_ids"); it != payload.end() && it->is_array()) {
-            for (const auto& snapshotId : *it) {
-                if (snapshotId.is_string()) {
-                    state.snapshotIds.insert(snapshotId.get<std::string>());
-                }
-            }
-        }
-        if (auto it = payload.find("served_result_ids"); it != payload.end() && it->is_array()) {
-            for (const auto& resultId : *it) {
-                if (resultId.is_string()) {
-                    state.resultIds.insert(resultId.get<std::string>());
-                }
-            }
-        }
-        break;
-    }
-
-    return state;
-}
-
-#endif
-
-static std::filesystem::path findGitRoot(const std::filesystem::path& start) {
-    std::error_code ec;
-    std::filesystem::path cur = std::filesystem::absolute(start, ec);
-    if (ec)
-        cur = start;
-    while (!cur.empty()) {
-        auto candidate = cur / ".git";
-        if (std::filesystem::exists(candidate, ec)) {
-            return cur;
-        }
-        auto parent = cur.parent_path();
-        if (parent == cur)
-            break;
-        cur = parent;
-    }
-    return {};
-}
-
-static std::string sanitizeName(std::string s) {
-    if (s.empty())
-        return "project";
-    for (auto& c : s) {
-        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_')) {
-            c = '-';
-        } else {
-            c = static_cast<char>(std::tolower(c));
-        }
-    }
-    return s;
-}
-
-static std::unordered_map<int64_t, std::string>
-buildTraversalRelationHints(const yams::daemon::GraphQueryResponse& resp) {
-    std::unordered_map<int64_t, std::string> hints;
-    if (resp.connectedNodes.empty() || resp.edges.empty()) {
-        return hints;
-    }
-
-    std::unordered_set<int64_t> connectedIds;
-    connectedIds.reserve(resp.connectedNodes.size());
-
-    std::unordered_map<int64_t, int32_t> distanceByNode;
-    distanceByNode.reserve(resp.connectedNodes.size() + 1);
-    for (const auto& node : resp.connectedNodes) {
-        connectedIds.insert(node.nodeId);
-        distanceByNode[node.nodeId] = node.distance;
-    }
-    distanceByNode[resp.originNode.nodeId] = 0;
-
-    std::unordered_map<int64_t, std::unordered_map<std::string, std::size_t>> preferred;
-    std::unordered_map<int64_t, std::unordered_map<std::string, std::size_t>> fallback;
-
-    auto accumulate = [&](int64_t nodeId, int64_t otherNodeId, const std::string& relationLabel) {
-        if (connectedIds.find(nodeId) == connectedIds.end()) {
-            return;
-        }
-
-        fallback[nodeId][relationLabel] += 1;
-
-        auto distIt = distanceByNode.find(nodeId);
-        auto otherDistIt = distanceByNode.find(otherNodeId);
-        if (distIt == distanceByNode.end() || otherDistIt == distanceByNode.end()) {
-            return;
-        }
-        if (distIt->second > 0 && otherDistIt->second == distIt->second - 1) {
-            preferred[nodeId][relationLabel] += 1;
-        }
-    };
-
-    for (const auto& edge : resp.edges) {
-        static const std::string kDefaultEdge = "edge";
-        const std::string& relationLabel = edge.relation.empty() ? kDefaultEdge : edge.relation;
-        accumulate(edge.srcNodeId, edge.dstNodeId, relationLabel);
-        accumulate(edge.dstNodeId, edge.srcNodeId, relationLabel);
-    }
-
-    hints.reserve(resp.connectedNodes.size());
-    for (const auto& node : resp.connectedNodes) {
-        if (auto it = preferred.find(node.nodeId); it != preferred.end() && !it->second.empty()) {
-            hints[node.nodeId] = yams::cli::formatRelationCounts(it->second);
-            continue;
-        }
-        if (auto it = fallback.find(node.nodeId); it != fallback.end() && !it->second.empty()) {
-            hints[node.nodeId] = yams::cli::formatRelationCounts(it->second);
-            continue;
-        }
-        hints[node.nodeId] = "-";
-    }
-
-    return hints;
-}
-
-// Async variant to be used once MCP handlers become coroutine-based.
-
-// No-op async bridge here; MCP dispatch below uses a detached thread
-// to run yams::Task<> to completion off the io thread.
-
-} // namespace
-
-// In-band logging helper (level + message variant) - YAMS extension, not standard MCP
-static nlohmann::json createLogNotification(const std::string& level, const std::string& message) {
-    // NOTE: This is a YAMS-specific extension. Standard MCP only supports notifications/log from
-    // client->server Wrap simple textual message inside a data object for consistency with the
-    // (level,data,logger) overload
-    nlohmann::json params = {{"level", level}, {"data", nlohmann::json{{"message", message}}}};
-    return {{"jsonrpc", "2.0"}, {"method", "notifications/message"}, {"params", params}};
-}
-
 void MCPServer::initializeToolRegistry() {
     toolRegistry_ = std::make_unique<ToolRegistry>();
 
@@ -1215,145 +955,143 @@ void MCPServer::initializeToolRegistry() {
             "Knowledge Graph", addAnnotation);
     }
 
-            // ── Code Mode: composite tool surface ──
-            // Replace individual tools with 3 composite tools (query/execute/session).
-            // Individual tools remain in internalRegistry_ for dispatch by the composite handlers.
-            {
-                spdlog::info("MCP: registering composite query/execute/session tools");
+    // ── Code Mode: composite tool surface ──
+    // Replace individual tools with 3 composite tools (query/execute/session).
+    // Individual tools remain in internalRegistry_ for dispatch by the composite handlers.
+    {
+        spdlog::info("MCP: registering composite query/execute/session tools");
 
-                // Save a reference to the fully-populated registry for internal dispatch
-                auto fullRegistry = std::move(toolRegistry_);
-                toolRegistry_ = std::make_unique<ToolRegistry>();
+        // Save a reference to the fully-populated registry for internal dispatch
+        auto fullRegistry = std::move(toolRegistry_);
+        toolRegistry_ = std::make_unique<ToolRegistry>();
 
-                // Re-register mcp.echo (always available)
-                toolRegistry_->registerRawTool(
-                    "mcp.echo",
-                    [fullReg = fullRegistry.get()](
-                        const json& args) mutable -> boost::asio::awaitable<json> {
-                        co_return co_await fullReg->callTool("mcp.echo", args);
-                    },
-                    json{{"type", "object"}, {"properties", {{"text", json{{"type", "string"}}}}}},
-                    "Echo input for MCP protocol testing", "Echo", readOnlyAnnotation);
+        // Re-register mcp.echo (always available)
+        toolRegistry_->registerRawTool(
+            "mcp.echo",
+            [fullReg =
+                 fullRegistry.get()](const json& args) mutable -> boost::asio::awaitable<json> {
+                co_return co_await fullReg->callTool("mcp.echo", args);
+            },
+            json{{"type", "object"}, {"properties", {{"text", json{{"type", "string"}}}}}},
+            "Echo input for MCP protocol testing", "Echo", readOnlyAnnotation);
 
-                // Re-register doctor (always available in code mode)
-                toolRegistry_->registerRawTool(
-                    "doctor",
-                    [fullReg = fullRegistry.get()](
-                        const json& args) mutable -> boost::asio::awaitable<json> {
-                        co_return co_await fullReg->callTool("doctor", args);
-                    },
-                    json{{"type", "object"},
-                         {"properties",
-                          {{"verbose",
-                            {{"type", "boolean"},
-                             {"description", "Include detailed subsystem diagnostics"},
-                             {"default", true}}}}}},
-                    "Diagnose daemon IPC connectivity, socket path, and readiness", "Doctor",
-                    readOnlyAnnotation);
+        // Re-register doctor (always available in code mode)
+        toolRegistry_->registerRawTool(
+            "doctor",
+            [fullReg =
+                 fullRegistry.get()](const json& args) mutable -> boost::asio::awaitable<json> {
+                co_return co_await fullReg->callTool("doctor", args);
+            },
+            json{{"type", "object"},
+                 {"properties",
+                  {{"verbose",
+                    {{"type", "boolean"},
+                     {"description", "Include detailed subsystem diagnostics"},
+                     {"default", true}}}}}},
+            "Diagnose daemon IPC connectivity, socket path, and readiness", "Doctor",
+            readOnlyAnnotation);
 
-                // 1. query — read-only pipeline
-                toolRegistry_->registerRawTool(
-                    "query",
-                    [this](const json& args) mutable -> boost::asio::awaitable<json> {
-                        co_return co_await handlePipelineQuery(args);
-                    },
-                    json{{"type", "object"},
-                         {"properties",
-                          {{"steps",
-                            {{"type", "array"},
-                             {"description",
-                              "Ordered pipeline steps. Each step's result is available as $prev in "
-                              "subsequent steps."},
-                             {"items",
-                              {{"type", "object"},
-                               {"properties",
-                                {{"op",
-                                  {{"type", "string"},
-                                   {"enum", json::array({"search", "grep", "list",
-                                                         "list_collections", "list_snapshots",
-                                                         "graph", "get", "status", "describe"})}}},
-                                 {"params",
-                                  {{"type", "object"},
-                                   {"description",
-                                    "Operation-specific parameters. Use describe op to discover "
-                                    "schemas."}}}}},
-                               {"required", json::array({"op"})}}}}}}},
-                         {"required", json::array({"steps"})}},
-                    "Read-only operations: search, grep, list, list_collections, list_snapshots, "
-                    "graph, "
-                    "get, status. Supports multi-step pipelines where each step can reference "
-                    "$prev "
-                    "results. Use {\"op\":\"describe\"} to discover available operations and their "
-                    "parameter schemas.",
-                    "Query YAMS", readOnlyAnnotation);
+        // 1. query — read-only pipeline
+        toolRegistry_->registerRawTool(
+            "query",
+            [this](const json& args) mutable -> boost::asio::awaitable<json> {
+                co_return co_await handlePipelineQuery(args);
+            },
+            json{{"type", "object"},
+                 {"properties",
+                  {{"steps",
+                    {{"type", "array"},
+                     {"description",
+                      "Ordered pipeline steps. Each step's result is available as $prev in "
+                      "subsequent steps."},
+                     {"items",
+                      {{"type", "object"},
+                       {"properties",
+                        {{"op",
+                          {{"type", "string"},
+                           {"enum", json::array({"search", "grep", "list", "list_collections",
+                                                 "list_snapshots", "graph", "get", "status",
+                                                 "describe"})}}},
+                         {"params",
+                          {{"type", "object"},
+                           {"description",
+                            "Operation-specific parameters. Use describe op to discover "
+                            "schemas."}}}}},
+                       {"required", json::array({"op"})}}}}}}},
+                 {"required", json::array({"steps"})}},
+            "Read-only operations: search, grep, list, list_collections, list_snapshots, "
+            "graph, "
+            "get, status. Supports multi-step pipelines where each step can reference "
+            "$prev "
+            "results. Use {\"op\":\"describe\"} to discover available operations and their "
+            "parameter schemas.",
+            "Query YAMS", readOnlyAnnotation);
 
-                // 2. execute — write batch
-                toolRegistry_->registerRawTool(
-                    "execute",
-                    [this](const json& args) mutable -> boost::asio::awaitable<json> {
-                        co_return co_await handleBatchExecute(args);
-                    },
-                    json{
-                        {"type", "object"},
-                        {"properties",
-                         {{"operations",
-                           {{"type", "array"},
-                            {"description", "Ordered write operations. Executed sequentially; "
-                                            "stops on first error "
-                                            "unless continueOnError is true."},
-                            {"items",
-                             {{"type", "object"},
-                              {"properties",
-                               {{"op",
-                                 {{"type", "string"},
-                                  {"enum", json::array({"add", "update", "delete", "restore",
-                                                        "download"})}}},
-                                {"params",
-                                 {{"type", "object"},
-                                  {"description",
-                                   "Operation-specific parameters. Use query tool's describe op to "
-                                   "discover schemas."}}}}},
-                              {"required", json::array({"op", "params"})}}}}},
-                          {"continueOnError",
-                           {{"type", "boolean"},
-                            {"description",
-                             "If true, continue executing remaining operations after a failure."},
-                            {"default", false}}}}},
-                        {"required", json::array({"operations"})}},
-                    "Write operations: add, update, delete, restore, download. Supports batching "
-                    "multiple "
-                    "operations in a single call.",
-                    "Execute YAMS Operations",
-                    ToolAnnotation{.readOnlyHint = false,
-                                   .destructiveHint = true,
-                                   .idempotentHint = false,
-                                   .openWorldHint = false});
+        // 2. execute — write batch
+        toolRegistry_->registerRawTool(
+            "execute",
+            [this](const json& args) mutable -> boost::asio::awaitable<json> {
+                co_return co_await handleBatchExecute(args);
+            },
+            json{{"type", "object"},
+                 {"properties",
+                  {{"operations",
+                    {{"type", "array"},
+                     {"description", "Ordered write operations. Executed sequentially; "
+                                     "stops on first error "
+                                     "unless continueOnError is true."},
+                     {"items",
+                      {{"type", "object"},
+                       {"properties",
+                        {{"op",
+                          {{"type", "string"},
+                           {"enum",
+                            json::array({"add", "update", "delete", "restore", "download"})}}},
+                         {"params",
+                          {{"type", "object"},
+                           {"description",
+                            "Operation-specific parameters. Use query tool's describe op to "
+                            "discover schemas."}}}}},
+                       {"required", json::array({"op", "params"})}}}}},
+                   {"continueOnError",
+                    {{"type", "boolean"},
+                     {"description",
+                      "If true, continue executing remaining operations after a failure."},
+                     {"default", false}}}}},
+                 {"required", json::array({"operations"})}},
+            "Write operations: add, update, delete, restore, download. Supports batching "
+            "multiple "
+            "operations in a single call.",
+            "Execute YAMS Operations",
+            ToolAnnotation{.readOnlyHint = false,
+                           .destructiveHint = true,
+                           .idempotentHint = false,
+                           .openWorldHint = false});
 
-                // 3. session — session lifecycle
-                if (areYamsExtensionsEnabled()) {
-                    toolRegistry_->registerRawTool(
-                        "session",
-                        [this](const json& args) mutable -> boost::asio::awaitable<json> {
-                            co_return co_await handleSessionAction(args);
-                        },
-                        json{
-                            {"type", "object"},
-                            {"properties",
-                             {{"action",
-                               {{"type", "string"},
-                                {"enum", json::array({"start", "stop", "pin", "unpin", "watch"})}}},
-                              {"params",
-                               {{"type", "object"},
-                                {"description", "Action-specific parameters. Use query tool's "
-                                                "describe op to discover "
-                                                "schemas."}}}}},
-                            {"required", json::array({"action"})}},
-                        "Session lifecycle: start, stop, pin, unpin, watch.", "Manage Sessions",
-                        sessionAnnotation);
-                }
-
-                // Transfer ownership: keep fullRegistry alive as internalRegistry_ for dispatch
-                internalRegistry_ = std::move(fullRegistry);
-            }
+        // 3. session — session lifecycle
+        if (areYamsExtensionsEnabled()) {
+            toolRegistry_->registerRawTool(
+                "session",
+                [this](const json& args) mutable -> boost::asio::awaitable<json> {
+                    co_return co_await handleSessionAction(args);
+                },
+                json{{"type", "object"},
+                     {"properties",
+                      {{"action",
+                        {{"type", "string"},
+                         {"enum", json::array({"start", "stop", "pin", "unpin", "watch"})}}},
+                       {"params",
+                        {{"type", "object"},
+                         {"description", "Action-specific parameters. Use query tool's "
+                                         "describe op to discover "
+                                         "schemas."}}}}},
+                     {"required", json::array({"action"})}},
+                "Session lifecycle: start, stop, pin, unpin, watch.", "Manage Sessions",
+                sessionAnnotation);
         }
+
+        // Transfer ownership: keep fullRegistry alive as internalRegistry_ for dispatch
+        internalRegistry_ = std::move(fullRegistry);
+    }
+}
 } // namespace yams::mcp

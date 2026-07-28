@@ -391,7 +391,7 @@ private:
                 continue;
             auto [it, inserted] = indexByPath.emplace(key, groups.size());
             if (inserted) {
-                groups.push_back(GroupedSearchResults{.path = key});
+                groups.push_back(GroupedSearchResults{.path = key, .versions = {}});
             }
             groups[it->second].versions.push_back(std::move(item));
         }

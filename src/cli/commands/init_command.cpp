@@ -282,7 +282,11 @@ public:
             }
 
             // 7) Generate an initial API key
-            std::string apiKeyHex = generateApiKey(DEFAULT_API_KEY_BYTES);
+            auto apiKeyResult = generateApiKey(DEFAULT_API_KEY_BYTES);
+            if (!apiKeyResult) {
+                return apiKeyResult.error();
+            }
+            std::string apiKeyHex = std::move(apiKeyResult).value();
 
             // 8) Write config.toml (v3 format)
             auto migrator = std::make_unique<config::ConfigMigrator>();
@@ -921,13 +925,10 @@ private:
         return out;
     }
 
-    static std::string generateApiKey(size_t numBytes) {
+    static Result<std::string> generateApiKey(size_t numBytes) {
         std::vector<unsigned char> buf(numBytes);
         if (RAND_bytes(buf.data(), static_cast<int>(buf.size())) != 1) {
-            // Fallback to std::random_device if OpenSSL RNG fails
-            for (auto& b : buf) {
-                b = static_cast<unsigned char>(std::rand() & 0xFF);
-            }
+            return Error{ErrorCode::InternalError, "Failed to generate a secure API key"};
         }
         return toHex(buf.data(), buf.size());
     }

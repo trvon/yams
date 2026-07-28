@@ -35,6 +35,7 @@ template <typename... Args> inline void error(const char*, Args&&...) {}
 #include <map>
 #include <memory>
 #include <mutex>
+#include <random>
 #include <string>
 #include <thread>
 #include <utility>
@@ -610,7 +611,9 @@ public:
                     }
                 }
                 // Jitter and clamp
-                auto jitter = std::chrono::milliseconds{(std::rand() % 41)}; // 0-40ms
+                static thread_local std::mt19937 jitterGenerator{std::random_device{}()};
+                std::uniform_int_distribution<int> jitterDistribution{0, 40};
+                auto jitter = std::chrono::milliseconds{jitterDistribution(jitterGenerator)};
                 auto delay = std::min<std::chrono::milliseconds>(retry_delay + jitter,
                                                                  std::chrono::milliseconds{2000});
                 boost::asio::steady_timer timer(exec, delay);
