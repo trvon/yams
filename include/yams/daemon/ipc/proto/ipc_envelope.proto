@@ -603,7 +603,20 @@ message GetStatsResponse {
   uint64 vector_index_size = 5;
   double compression_ratio = 6;
 }
-message DeleteResponse { bool success = 1; uint64 count = 2; }
+message DeleteResult {
+  string name = 1;
+  string hash = 2;
+  bool success = 3;
+  string error = 4;
+  int32 error_code = 5;
+}
+message DeleteResponse {
+  bool success = 1;
+  uint64 count = 2;
+  bool dry_run = 3;
+  uint64 failure_count = 4;
+  repeated DeleteResult results = 5;
+}
 message PrepareSessionResponse { uint64 warmed_count = 1; string message = 2; }
 
 // File history (PBI-043)

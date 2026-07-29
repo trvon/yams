@@ -69,7 +69,8 @@ public:
         cmd->add_flag("--force,-f,--no-confirm", force_, "Skip confirmation prompt");
         cmd->add_flag("--dry-run", dryRun_,
                       "Preview what would be deleted without actually deleting");
-        cmd->add_flag("--keep-refs", keepRefs_, "Keep reference counts (don't decrement)");
+        cmd->add_flag("--keep-refs", keepRefs_,
+                      "Keep stored CAS content while removing corpus metadata");
         cmd->add_flag("-v,--verbose", verbose_, "Enable verbose output");
         cmd->add_flag("--recursive,-r", recursive_, "Delete directory contents recursively");
         cmd->add_option("--keep-versions", keepVersions_,
@@ -128,13 +129,11 @@ public:
 
                 if (targets_.size() == 1) {
                     const std::string& t = targets_.front();
-                    // If -r is set, treat single target as a directory
-                    if (recursive_) {
+                    // If -r is set or the target has a trailing slash, treat it as a directory.
+                    if (recursive_ || has_trailing_slash(t)) {
                         directory_ = t;
                     } else if (has_wildcard(t)) {
                         pattern_ = t;
-                    } else if (has_trailing_slash(t)) {
-                        directory_ = t;
                     } else {
                         name_ = t;
                     }
@@ -167,7 +166,7 @@ public:
 
             dreq.pattern = pattern_;
             dreq.directory = directory_;
-            dreq.purge = !keepRefs_;
+            dreq.purge = false;
             dreq.force = force_;
             dreq.dryRun = dryRun_;
             dreq.keepRefs = keepRefs_;
@@ -198,14 +197,75 @@ public:
                 }
                 auto leaseHandle = std::move(leaseRes.value());
                 auto& client = **leaseHandle;
-                auto result = co_await client.call(dreq);
-                if (result) {
-                    auto r = render(result.value());
-                    if (!r)
-                        co_return r.error();
-                    co_return Result<void>();
+                bool daemonPreviewUsable = true;
+                if (dryRun_ || verboseMode || !forceMode) {
+                    auto previewRequest = dreq;
+                    previewRequest.dryRun = true;
+                    auto previewResult = co_await client.call(previewRequest);
+                    if (!previewResult || (previewResult.value().results.empty() &&
+                                           previewResult.value().successCount > 0)) {
+                        daemonPreviewUsable = false;
+                    } else {
+                        const auto& preview = previewResult.value();
+                        if (preview.results.empty()) {
+                            if (jsonMode) {
+                                auto rendered = render(preview);
+                                if (!rendered) {
+                                    co_return rendered.error();
+                                }
+                            } else {
+                                std::cout << "No documents found matching the criteria.\n";
+                            }
+                            co_return Result<void>();
+                        }
+                        if (dryRun_) {
+                            auto rendered = render(preview);
+                            if (!rendered) {
+                                co_return rendered.error();
+                            }
+                            co_return Result<void>();
+                        }
+                        if (verboseMode) {
+                            printDeleteCandidates(preview);
+                        }
+                        if (!forceMode) {
+                            const auto count = preview.results.size();
+                            std::cout
+                                << (count == 1 ? "Delete 1 document"
+                                               : "Delete " + std::to_string(count) + " documents")
+                                << "? (y/N): ";
+                            std::string answer;
+                            std::getline(std::cin, answer);
+                            if (answer != "y" && answer != "Y") {
+                                std::cout << "Deletion cancelled.\n";
+                                co_return Result<void>();
+                            }
+                        }
+                    }
+                }
+
+                if (daemonPreviewUsable) {
+                    auto result = co_await client.call(dreq);
+                    if (result) {
+                        auto rendered = render(result.value());
+                        if (!rendered) {
+                            co_return rendered.error();
+                        }
+                        if (result.value().failureCount > 0 && result.value().successCount == 0) {
+                            co_return Error{ErrorCode::InvalidOperation, "All deletions failed"};
+                        }
+                        co_return Result<void>();
+                    }
+                }
+            } catch (const std::exception& e) {
+                if (verboseMode) {
+                    std::cerr << "Daemon deletion unavailable, using local path: " << e.what()
+                              << '\n';
                 }
             } catch (...) {
+                if (verboseMode) {
+                    std::cerr << "Daemon deletion unavailable, using local path\n";
+                }
             }
 
             // If daemon failed, try local execution
@@ -261,7 +321,8 @@ private:
             for (const auto& result : resp.results) {
                 if (!result.success && !result.error.empty()) {
                     std::cout << "  " << result.name << ": " << result.error << "\n";
-                    if (result.error.find("Corrupted data") != std::string::npos) {
+                    if (result.errorCode == ErrorCode::CorruptedData ||
+                        result.errorCode == ErrorCode::ManifestInvalid) {
                         hasCorrupted = true;
                     }
                 }
@@ -332,6 +393,7 @@ private:
             daemonResult.name = deleteResult.name;
             daemonResult.hash = deleteResult.hash;
             daemonResult.success = success;
+            daemonResult.errorCode = deleteResult.errorCode;
             daemonResult.error = deleteResult.error.value_or("");
             if (success) {
                 response.successCount++;

@@ -797,7 +797,7 @@ struct DeleteByNameRequest {
 
     bool dryRun{false};
     bool force{false};     // skip confirmation
-    bool keepRefs{false};  // keep reference counts (don't decrement)
+    bool keepRefs{false};  // retain CAS content while deleting corpus metadata/graph state
     bool recursive{false}; // delete directory contents recursively
     bool verbose{false};   // verbose output
 };
@@ -807,6 +807,7 @@ struct DeleteByNameResult {
     std::string hash;
     bool deleted{false};
     bool contentRemoved{false};
+    ErrorCode errorCode{ErrorCode::Success};
     std::optional<std::string> error;
 };
 

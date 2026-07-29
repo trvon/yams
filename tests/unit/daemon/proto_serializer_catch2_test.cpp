@@ -102,6 +102,44 @@ TEST_CASE("ProtoSerializer DeleteRequest roundtrip", "[proto][serializer][delete
     REQUIRE(decoded.has_value());
 }
 
+TEST_CASE("ProtoSerializer DeleteResponse preserves per-target outcomes",
+          "[proto][serializer][delete]") {
+    DeleteResponse response{};
+    response.dryRun = true;
+    response.successCount = 1;
+    response.failureCount = 1;
+    response.results.push_back(DeleteResponse::DeleteResult{
+        .name = "deleted.txt", .hash = "deleted-hash", .success = true, .error = ""});
+    response.results.push_back(DeleteResponse::DeleteResult{.name = "failed.txt",
+                                                            .hash = "failed-hash",
+                                                            .success = false,
+                                                            .errorCode = ErrorCode::CorruptedData,
+                                                            .error = "typed failure"});
+
+    Message msg{};
+    msg.requestId = 55;
+    msg.payload = Response{response};
+
+    auto encoded = ProtoSerializer::encode_payload(msg);
+    REQUIRE(encoded.has_value());
+    auto decoded = ProtoSerializer::decode_payload(std::span{encoded.value()});
+    REQUIRE(decoded.has_value());
+    REQUIRE(std::holds_alternative<Response>(decoded.value().payload));
+    const auto& decodedResponse = std::get<Response>(decoded.value().payload);
+    REQUIRE(std::holds_alternative<DeleteResponse>(decodedResponse));
+    const auto& value = std::get<DeleteResponse>(decodedResponse);
+    CHECK(value.dryRun);
+    CHECK((value.successCount == 1));
+    CHECK((value.failureCount == 1));
+    REQUIRE((value.results.size() == 2));
+    CHECK((value.results[0].name == "deleted.txt"));
+    CHECK(value.results[0].success);
+    CHECK((value.results[1].name == "failed.txt"));
+    CHECK_FALSE(value.results[1].success);
+    CHECK(value.results[1].errorCode == ErrorCode::CorruptedData);
+    CHECK((value.results[1].error == "typed failure"));
+}
+
 TEST_CASE("ProtoSerializer with session info", "[proto][serializer][session]") {
     SearchRequest req{};
     req.query = "session test";

@@ -800,19 +800,17 @@ public:
         // Begin transaction
         auto transaction = refCounter_->beginTransaction();
 
-        // Decrement references for all chunks
+        // Queue every decrement on the transaction so a failed commit cannot leak partial
+        // reference-count updates.
         for (const auto& chunk : manifest.value().chunks) {
-            auto decResult = refCounter_->decrement(chunk.hash);
-            if (!decResult) {
-                transaction->rollback();
-                return Result<bool>(decResult.error());
-            }
+            transaction->decrement(chunk.hash);
         }
 
         // Commit the decrement so subsequent ref-count probes observe the new counts.
         // Physical chunk eviction is the garbage collector's job for blocks at zero refs.
         auto commitResult = transaction->commit();
         if (!commitResult) {
+            transaction->rollback();
             return Result<bool>(commitResult.error());
         }
 

@@ -936,31 +936,38 @@ private:
             }
         }
 
-        auto metaResult = ctx_.metadataRepo->deleteDocument(doc.id);
-        if (!metaResult) {
-            r.error = "Failed to delete metadata: " + metaResult.error().message;
-            return false;
+        if (ctx_.kgStore) {
+            auto cleanupResult =
+                ctx_.kgStore->deleteDocumentGraphData({{.documentHash = doc.sha256Hash,
+                                                        .sourceFile = doc.filePath,
+                                                        .documentId = doc.id}});
+            if (!cleanupResult) {
+                r.errorCode = cleanupResult.error().code;
+                r.error =
+                    "Failed to delete metadata and graph data: " + cleanupResult.error().message;
+                return false;
+            }
+        } else {
+            auto metaResult = ctx_.metadataRepo->deleteDocument(doc.id);
+            if (!metaResult) {
+                r.errorCode = metaResult.error().code;
+                r.error = "Failed to delete metadata: " + metaResult.error().message;
+                return false;
+            }
         }
 
         auto lingering = ctx_.metadataRepo->getDocumentByHash(doc.sha256Hash);
         if (!lingering) {
+            r.errorCode = lingering.error().code;
             r.error = "Failed to verify metadata deletion: " + lingering.error().message;
             return false;
         }
         if (lingering.value().has_value()) {
             auto retryDelete = ctx_.metadataRepo->deleteDocument(lingering.value()->id);
             if (!retryDelete) {
+                r.errorCode = retryDelete.error().code;
                 r.error = "Failed to delete lingering metadata: " + retryDelete.error().message;
                 return false;
-            }
-        }
-
-        if (ctx_.kgStore) {
-            auto kgResult = ctx_.kgStore->deleteDocumentGraphData(
-                {{.documentHash = doc.sha256Hash, .sourceFile = doc.filePath}});
-            if (!kgResult) {
-                spdlog::warn("Failed to clean up document graph data for {}: {}", doc.sha256Hash,
-                             kgResult.error().message);
             }
         }
         return true;
@@ -986,12 +993,16 @@ private:
             // repair's missing-blob orphan cleanup reclaims. (Previously metadata+KG were deleted
             // first and a content-delete failure restored only the document row, not its KG
             // nodes/edges — leaving an inconsistent doc-without-graph.)
-            auto storeResult = ctx_.store->remove(target.hash);
+            Result<bool> storeResult = false;
+            if (!req.keepRefs) {
+                storeResult = ctx_.store->remove(target.hash);
+            }
             if (!storeResult) {
                 const bool canForceMetadataCleanup =
                     req.force && canForceCleanupAfterStorageError(storeResult.error());
                 if (!canForceMetadataCleanup) {
                     r.deleted = false;
+                    r.errorCode = storeResult.error().code;
                     r.error = storeResult.error().message;
                     resp.errors.push_back(r);
                     return;
@@ -1015,14 +1026,22 @@ private:
             return;
         }
 
+        if (req.keepRefs) {
+            r.errorCode = ErrorCode::InvalidArgument;
+            r.error = "--keep-refs requires a document with metadata";
+            resp.errors.push_back(r);
+            return;
+        }
         auto storeResult = ctx_.store->remove(target.hash);
         if (!storeResult) {
             r.deleted = false;
+            r.errorCode = storeResult.error().code;
             r.error = storeResult.error().message;
             resp.errors.push_back(r);
             return;
         }
         if (!storeResult.value()) {
+            r.errorCode = ErrorCode::NotFound;
             r.error = "Document not found in store";
             resp.errors.push_back(r);
             return;

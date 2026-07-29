@@ -1642,6 +1642,7 @@ struct DeleteResponse {
         std::string name;
         std::string hash;
         bool success = false;
+        ErrorCode errorCode = ErrorCode::Success;
         std::string error; // if failed
 
         template <typename Serializer>
@@ -4916,25 +4917,23 @@ struct RepairResponse {
 struct BatchResponse;
 
 // Variant type for all responses
-using Response =
-    std::variant<SearchResponse, AddResponse, GetResponse, GetInitResponse, GetChunkResponse,
-                 StatusResponse, SuccessResponse, ErrorResponse, PongResponse, EmbeddingResponse,
-                 BatchEmbeddingResponse, ModelLoadResponse, ModelStatusResponse, ListResponse,
-                 AddDocumentResponse, GrepResponse, UpdateDocumentResponse, GetStatsResponse,
-                 DownloadResponse, ListDownloadJobsResponse, DeleteResponse, PrepareSessionResponse,
-                 EmbedDocumentsResponse, PluginScanResponse, PluginLoadResponse,
-                 PluginTrustListResponse, CatResponse, ListSessionsResponse, ListTreeDiffResponse,
-                 FileHistoryResponse, PruneResponse, ListSnapshotsResponse,
-                 RestoreCollectionResponse, RestoreSnapshotResponse, GraphQueryResponse,
-                 GraphExploreResponse, GraphSymbolLookupResponse, GraphTraceResponse,
-                 GraphImpactResponse, GraphAffectedTestsResponse, GraphPathHistoryResponse,
-                 GraphRepairResponse, GraphValidateResponse, KgIngestResponse,
-                 MetadataValueCountsResponse,
-                 // Batch response (Track B)
-                 BatchResponse,
-                 // Streaming events (progress/heartbeats)
-                 EmbeddingEvent, ModelLoadEvent,
-                 // Repair service responses
-                 RepairResponse, RepairEvent>;
+using Response = std::variant<
+    SearchResponse, AddResponse, GetResponse, GetInitResponse, GetChunkResponse, StatusResponse,
+    SuccessResponse, ErrorResponse, PongResponse, EmbeddingResponse, BatchEmbeddingResponse,
+    ModelLoadResponse, ModelStatusResponse, ListResponse, AddDocumentResponse, GrepResponse,
+    UpdateDocumentResponse, GetStatsResponse, DownloadResponse, ListDownloadJobsResponse,
+    DeleteResponse, PrepareSessionResponse, EmbedDocumentsResponse, PluginScanResponse,
+    PluginLoadResponse, PluginTrustListResponse, CatResponse, ListSessionsResponse,
+    ListTreeDiffResponse, FileHistoryResponse, PruneResponse, ListSnapshotsResponse,
+    RestoreCollectionResponse, RestoreSnapshotResponse, GraphQueryResponse, GraphExploreResponse,
+    GraphSymbolLookupResponse, GraphTraceResponse, GraphImpactResponse, GraphAffectedTestsResponse,
+    GraphPathHistoryResponse, GraphRepairResponse, GraphValidateResponse, KgIngestResponse,
+    MetadataValueCountsResponse,
+    // Batch response (Track B)
+    BatchResponse,
+    // Streaming events (progress/heartbeats)
+    EmbeddingEvent, ModelLoadEvent,
+    // Repair service responses
+    RepairResponse, RepairEvent>;
 
 } // namespace yams::daemon

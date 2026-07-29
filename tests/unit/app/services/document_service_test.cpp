@@ -991,6 +991,41 @@ TEST_CASE("DocumentService - Deletion", "[document][service][deletion]") {
         CHECK_FALSE(after.value().has_value());
     }
 
+    SECTION("Delete with keepRefs removes metadata and graph but retains content") {
+        auto kgStoreRes = yams::metadata::makeSqliteKnowledgeGraphStore(*fixture.pool_);
+        REQUIRE(kgStoreRes);
+        std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore(kgStoreRes.value().release());
+
+        yams::metadata::KGNode node;
+        node.nodeKey = "doc:" + fixture.testHash2_;
+        node.type = "document";
+        REQUIRE(kgStore->upsertNode(node));
+
+        fixture.appContext_.kgStore = kgStore;
+        fixture.documentService_ = makeDocumentService(fixture.appContext_);
+
+        DeleteByNameRequest request;
+        request.name = (fixture.testDir_ / "test2.md").string();
+        request.keepRefs = true;
+
+        auto result = fixture.documentService_->deleteByName(request);
+
+        REQUIRE(result);
+        CHECK(result.value().errors.empty());
+        REQUIRE((result.value().deleted.size() == 1));
+        CHECK_FALSE(result.value().deleted.front().contentRemoved);
+
+        auto contentAfter = fixture.contentStore_->exists(fixture.testHash2_);
+        REQUIRE(contentAfter);
+        CHECK(contentAfter.value());
+        auto documentAfter = fixture.metadataRepo_->getDocumentByHash(fixture.testHash2_);
+        REQUIRE(documentAfter);
+        CHECK_FALSE(documentAfter.value().has_value());
+        auto graphAfter = kgStore->getNodeByKey("doc:" + fixture.testHash2_);
+        REQUIRE(graphAfter);
+        CHECK_FALSE(graphAfter.value().has_value());
+    }
+
     SECTION("Content removal failure leaves document, metadata, and KG fully intact") {
         auto kgStoreRes = yams::metadata::makeSqliteKnowledgeGraphStore(*fixture.pool_);
         REQUIRE(kgStoreRes);
@@ -1031,6 +1066,58 @@ TEST_CASE("DocumentService - Deletion", "[document][service][deletion]") {
         auto kgAfter = kgStore->getNodeByKey("doc:" + fixture.testHash2_);
         REQUIRE(kgAfter);
         CHECK(kgAfter.value().has_value());
+    }
+
+    SECTION("Graph cleanup failure is reported and recoverable after content removal") {
+        auto kgStoreRes = yams::metadata::makeSqliteKnowledgeGraphStore(*fixture.pool_);
+        REQUIRE(kgStoreRes);
+        std::shared_ptr<yams::metadata::KnowledgeGraphStore> kgStore(kgStoreRes.value().release());
+
+        yams::metadata::KGNode node;
+        node.nodeKey = "doc:" + fixture.testHash2_;
+        node.type = "document";
+        REQUIRE(kgStore->upsertNode(node));
+
+        const std::string triggerSql =
+            "CREATE TRIGGER fail_document_graph_delete BEFORE DELETE ON kg_nodes "
+            "WHEN OLD.node_key = 'doc:" +
+            fixture.testHash2_ +
+            "' BEGIN SELECT RAISE(ABORT, 'simulated graph cleanup failure'); END";
+        REQUIRE(fixture.database_->execute(triggerSql));
+
+        fixture.appContext_.kgStore = kgStore;
+        fixture.documentService_ = makeDocumentService(fixture.appContext_);
+
+        DeleteByNameRequest request;
+        request.hash = fixture.testHash2_;
+        auto firstAttempt = fixture.documentService_->deleteByName(request);
+
+        REQUIRE(firstAttempt);
+        CHECK(firstAttempt.value().deleted.empty());
+        CHECK((firstAttempt.value().errors.size() == 1));
+
+        auto documentAfterFailure = fixture.metadataRepo_->getDocumentByHash(fixture.testHash2_);
+        REQUIRE(documentAfterFailure);
+        CHECK(documentAfterFailure.value().has_value());
+        auto graphAfterFailure = kgStore->getNodeByKey("doc:" + fixture.testHash2_);
+        REQUIRE(graphAfterFailure);
+        CHECK(graphAfterFailure.value().has_value());
+
+        REQUIRE(fixture.database_->execute("DROP TRIGGER fail_document_graph_delete"));
+        auto retry = fixture.documentService_->deleteByName(request);
+
+        REQUIRE(retry);
+        CHECK(retry.value().errors.empty());
+        CHECK((retry.value().deleted.size() == 1));
+        if (!retry.value().deleted.empty()) {
+            CHECK(retry.value().deleted.front().deleted);
+        }
+        auto documentAfterRetry = fixture.metadataRepo_->getDocumentByHash(fixture.testHash2_);
+        REQUIRE(documentAfterRetry);
+        CHECK_FALSE(documentAfterRetry.value().has_value());
+        auto graphAfterRetry = kgStore->getNodeByKey("doc:" + fixture.testHash2_);
+        REQUIRE(graphAfterRetry);
+        CHECK_FALSE(graphAfterRetry.value().has_value());
     }
 
     SECTION("Successful content removal cascades to metadata and KG") {

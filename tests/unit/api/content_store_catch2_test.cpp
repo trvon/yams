@@ -29,6 +29,9 @@
 
 namespace yams::api::test {
 
+// Catch2 assertion decomposition intentionally resembles chained comparisons to clang-tidy.
+// NOLINTBEGIN(bugprone-chained-comparison)
+
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 
@@ -253,9 +256,14 @@ public:
     size_t commitCalls{0};
     size_t rollbackCalls{0};
     size_t queuedIncrements{0};
+    size_t queuedDecrements{0};
+    size_t immediateDecrements{0};
 
     Result<void> increment(std::string_view, size_t, size_t) override { return {}; }
-    Result<void> decrement(std::string_view) override { return {}; }
+    Result<void> decrement(std::string_view) override {
+        ++immediateDecrements;
+        return {};
+    }
     Result<uint64_t> getRefCount(std::string_view) const override { return uint64_t{0}; }
     Result<bool> hasReferences(std::string_view) const override { return false; }
 
@@ -277,7 +285,12 @@ private:
             ++parent_.queuedIncrements;
         }
 
-        void decrement(std::string_view) override {}
+        void decrement(std::string_view) override {
+            if (!active_) {
+                throw std::runtime_error("scripted transaction inactive");
+            }
+            ++parent_.queuedDecrements;
+        }
         void pruneReference(std::string_view) override {}
 
         Result<void> commit() override {
@@ -830,6 +843,87 @@ TEST_CASE("ContentStore: Batch store commits references once before publishing m
         auto metadata = store->getMetadata(result.value().contentHash);
         REQUIRE(metadata.has_value());
     }
+
+    std::error_code ec;
+    fs::remove_all(tempDir, ec);
+}
+
+TEST_CASE("ContentStore: Remove commits reference decrements through its transaction",
+          "[api][content-store][remove][transaction]") {
+    auto tempDir = makeTempDir("content_store_remove_transaction");
+    auto storage = std::make_shared<ScriptedStorageEngine>();
+    auto refCounter = std::make_shared<ScriptedReferenceCounter>();
+
+    ContentStoreBuilder builder;
+    auto built = builder.withConfig(readinessConfig(tempDir))
+                     .withStorageEngine(storage)
+                     .withReferenceCounter(refCounter)
+                     .build();
+    REQUIRE(built.has_value());
+    auto store = std::move(built).value();
+
+    const auto path = tempDir / "remove-transaction.txt";
+    std::ofstream(path, std::ios::binary) << "transactional decrement";
+    auto stored = store->store(path);
+    REQUIRE(stored.has_value());
+
+    refCounter->beginCalls = 0;
+    refCounter->commitCalls = 0;
+    refCounter->rollbackCalls = 0;
+    refCounter->queuedDecrements = 0;
+    refCounter->immediateDecrements = 0;
+
+    auto removed = store->remove(stored.value().contentHash);
+    REQUIRE(removed.has_value());
+    CHECK(removed.value());
+    CHECK(refCounter->beginCalls == 1);
+    CHECK(refCounter->commitCalls == 1);
+    CHECK(refCounter->rollbackCalls == 0);
+    CHECK(refCounter->immediateDecrements == 0);
+    CHECK(refCounter->queuedDecrements > 0);
+
+    std::error_code ec;
+    fs::remove_all(tempDir, ec);
+}
+
+TEST_CASE("ContentStore: Remove commit failure rolls back and keeps manifest",
+          "[api][content-store][remove][transaction][rollback]") {
+    auto tempDir = makeTempDir("content_store_remove_commit_failure");
+    auto storage = std::make_shared<ScriptedStorageEngine>();
+    auto refCounter = std::make_shared<ScriptedReferenceCounter>();
+
+    ContentStoreBuilder builder;
+    auto built = builder.withConfig(readinessConfig(tempDir))
+                     .withStorageEngine(storage)
+                     .withReferenceCounter(refCounter)
+                     .build();
+    REQUIRE(built.has_value());
+    auto store = std::move(built).value();
+
+    const auto path = tempDir / "remove-failure.txt";
+    std::ofstream(path, std::ios::binary) << "rollback decrement";
+    auto stored = store->store(path);
+    REQUIRE(stored.has_value());
+    const auto manifestKey = stored.value().contentHash + ".manifest";
+
+    refCounter->failCommit = true;
+    refCounter->beginCalls = 0;
+    refCounter->commitCalls = 0;
+    refCounter->rollbackCalls = 0;
+    refCounter->queuedDecrements = 0;
+    refCounter->immediateDecrements = 0;
+
+    auto removed = store->remove(stored.value().contentHash);
+    REQUIRE_FALSE(removed.has_value());
+    CHECK(removed.error().code == ErrorCode::TransactionFailed);
+    CHECK(refCounter->beginCalls == 1);
+    CHECK(refCounter->commitCalls == 1);
+    CHECK(refCounter->rollbackCalls == 1);
+    CHECK(refCounter->immediateDecrements == 0);
+    CHECK(refCounter->queuedDecrements > 0);
+    auto manifestExists = storage->exists(manifestKey);
+    REQUIRE(manifestExists.has_value());
+    CHECK(manifestExists.value());
 
     std::error_code ec;
     fs::remove_all(tempDir, ec);
@@ -1797,5 +1891,7 @@ TEST_CASE("ContentStore: Retrieve stream with progress callback", "[api][content
     REQUIRE(retrieveResult.has_value());
     CHECK(retrieveResult.value().found);
 }
+
+// NOLINTEND(bugprone-chained-comparison)
 
 } // namespace yams::api::test

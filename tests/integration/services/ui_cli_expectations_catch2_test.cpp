@@ -120,6 +120,21 @@ private:
     std::streambuf* old_{nullptr};
 };
 
+class ProvideStdin {
+public:
+    explicit ProvideStdin(const std::string& input) : input_(input), old_(std::cin.rdbuf()) {
+        std::cin.rdbuf(input_.rdbuf());
+    }
+    ~ProvideStdin() { std::cin.rdbuf(old_); }
+
+    ProvideStdin(const ProvideStdin&) = delete;
+    ProvideStdin& operator=(const ProvideStdin&) = delete;
+
+private:
+    std::istringstream input_;
+    std::streambuf* old_{nullptr};
+};
+
 int runCliCommand(const std::vector<std::string>& args,
                   const std::optional<std::filesystem::path>& socketPath = std::nullopt) {
     const char* yamsTestingEnv = std::getenv("YAMS_TESTING");
@@ -762,6 +777,42 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: update metadata then delete b
         }
     }
     CHECK(gone);
+}
+
+TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: rm confirmation happens before daemon delete",
+                 "[integration][services][ui-cli][delete]") {
+    start();
+
+    const auto sourcePath = root() / "ingest" / "rm-confirm.txt";
+    std::ofstream(sourcePath) << "confirmation guard";
+
+    yams::app::services::DocumentIngestionService ingestion;
+    yams::app::services::AddOptions addOptions;
+    addOptions.socketPath = socketPath();
+    addOptions.explicitDataDir = storageDir();
+    addOptions.path = sourcePath.string();
+    addOptions.noEmbeddings = true;
+    auto addResult = ingestion.addViaDaemon(addOptions);
+    REQUIRE(addResult);
+
+    ProvideStdin input{"n\n"};
+    CaptureStdout output;
+    const int rc = runCliCommand(
+        {"yams", "--data-dir", storageDir().string(), "rm", sourcePath.string()}, socketPath());
+
+    CHECK(rc == 0);
+    CHECK(output.str().find("Deletion cancelled") != std::string::npos);
+
+    yams::app::services::RetrievalService retrieval;
+    yams::app::services::RetrievalOptions retrievalOptions;
+    retrievalOptions.socketPath = socketPath();
+    retrievalOptions.explicitDataDir = storageDir();
+    yams::app::services::GetOptions getOptions;
+    getOptions.hash = addResult.value().hash;
+    getOptions.metadataOnly = true;
+    auto getResult = retrieval.get(getOptions, retrievalOptions);
+    REQUIRE(getResult);
+    CHECK((getResult.value().hash == addResult.value().hash));
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: fuzzy search paths-only",

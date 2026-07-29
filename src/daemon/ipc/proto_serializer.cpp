@@ -2242,13 +2242,33 @@ template <> struct ProtoBinding<DeleteResponse> {
         auto* o = env.mutable_delete_response();
         o->set_success(r.successCount > 0);
         o->set_count(static_cast<uint64_t>(r.successCount));
+        o->set_dry_run(r.dryRun);
+        o->set_failure_count(static_cast<uint64_t>(r.failureCount));
+        for (const auto& result : r.results) {
+            auto* item = o->add_results();
+            item->set_name(result.name);
+            item->set_hash(result.hash);
+            item->set_success(result.success);
+            item->set_error(result.error);
+            item->set_error_code(static_cast<std::int32_t>(result.errorCode));
+        }
     }
     static DeleteResponse get(const Envelope& env) {
         const auto& i = env.delete_response();
         DeleteResponse r{};
-        r.dryRun = false;
+        r.dryRun = i.dry_run();
         r.successCount = i.count();
-        r.failureCount = 0;
+        r.failureCount = i.failure_count();
+        r.results.reserve(static_cast<std::size_t>(i.results_size()));
+        for (const auto& item : i.results()) {
+            DeleteResponse::DeleteResult result;
+            result.name = item.name();
+            result.hash = item.hash();
+            result.success = item.success();
+            result.error = item.error();
+            result.errorCode = static_cast<ErrorCode>(item.error_code());
+            r.results.push_back(result);
+        }
         return r;
     }
 };

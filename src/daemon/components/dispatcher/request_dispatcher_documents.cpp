@@ -1379,7 +1379,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
             serviceReq.names = req.names;
             serviceReq.pattern = req.pattern;
             serviceReq.dryRun = req.dryRun;
-            serviceReq.force = req.force || req.purge;
+            serviceReq.force = req.force;
             serviceReq.keepRefs = req.keepRefs;
             serviceReq.recursive = req.recursive;
             serviceReq.verbose = req.verbose;
@@ -1413,6 +1413,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
                 daemonResult.name = deleteResult.name;
                 daemonResult.hash = deleteResult.hash;
                 daemonResult.success = deleteResult.deleted;
+                daemonResult.errorCode = deleteResult.errorCode;
                 daemonResult.error = deleteResult.error.value_or("");
                 if (daemonResult.success) {
                     response.successCount++;
@@ -1429,6 +1430,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
                 daemonResult.name = errorResult.name;
                 daemonResult.hash = errorResult.hash;
                 daemonResult.success = false;
+                daemonResult.errorCode = errorResult.errorCode;
                 daemonResult.error = errorResult.error.value_or("Unknown error");
                 response.failureCount++;
                 response.results.push_back(daemonResult);

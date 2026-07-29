@@ -2267,6 +2267,32 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         CHECK(err.message.find("No documents found matching criteria") != std::string::npos);
     }
 
+    SECTION("legacy delete purge does not imply force for ambiguous names") {
+        auto repo = std::make_shared<StubPruneMetadataRepository>();
+        auto store = std::make_shared<StubContentStore>();
+        auto firstDoc = makeDoc(19, "/tmp/delete/a/shared.txt", "delete-shared-a");
+        auto secondDoc = makeDoc(20, "/tmp/delete/b/shared.txt", "delete-shared-b");
+        repo->addDocument(firstDoc);
+        repo->addDocument(secondDoc);
+        store->setBlob(firstDoc.sha256Hash, "first");
+        store->setBlob(secondDoc.sha256Hash, "second");
+        svc.__test_setMetadataRepo(repo);
+        svc.__test_setContentStore(store);
+
+        DeleteRequest req;
+        req.name = "shared.txt";
+        req.purge = true;
+        req.force = false;
+
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InvalidOperation);
+        CHECK(err.message.find("use --force") != std::string::npos);
+        CHECK(store->removedHashes().empty());
+    }
+
     SECTION("delete reports mixed success and failure results") {
         auto repo = std::make_shared<StubPruneMetadataRepository>();
         auto store = std::make_shared<StubContentStore>();

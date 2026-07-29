@@ -624,10 +624,10 @@ struct DeleteRequest {
     std::string directory; // directory path
 
     // Flags
-    bool purge = false;     // backward compat (maps to force)
+    bool purge = false;     // deprecated legacy field; never implies confirmation bypass
     bool force = false;     // skip confirmation
     bool dryRun = false;    // preview without deleting
-    bool keepRefs = false;  // don't decrement references
+    bool keepRefs = false;  // retain CAS content while deleting corpus metadata/graph state
     bool recursive = false; // for directory deletion
     bool verbose = false;
 

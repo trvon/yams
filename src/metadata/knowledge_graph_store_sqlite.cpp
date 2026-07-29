@@ -3240,6 +3240,12 @@ public:
         }
         auto pathNodeStmt = std::exchange(pathNodeStmtResult.value(), Statement{});
 
+        auto documentStmtResult = db.prepare("DELETE FROM documents WHERE id = ?");
+        if (!documentStmtResult) {
+            return documentStmtResult.error();
+        }
+        auto documentStmt = std::exchange(documentStmtResult.value(), Statement{});
+
         const auto executeDelete = [&](Statement& stmt,
                                        const auto& bindValues) -> Result<std::int64_t> {
             if (auto bindResult = bindValues(stmt); !bindResult) {
@@ -3313,6 +3319,18 @@ public:
                     return deletedPathNodes.error();
                 }
                 if (auto added = accumulate(result.nodesDeleted, deletedPathNodes.value());
+                    !added) {
+                    return added.error();
+                }
+            }
+
+            if (target.documentId != 0) {
+                auto deletedDocument = executeDelete(
+                    documentStmt, [&](Statement& stmt) { return stmt.bind(1, target.documentId); });
+                if (!deletedDocument) {
+                    return deletedDocument.error();
+                }
+                if (auto added = accumulate(result.documentsDeleted, deletedDocument.value());
                     !added) {
                     return added.error();
                 }

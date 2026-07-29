@@ -188,9 +188,11 @@ struct KGEntityCountSnapshot {
 struct DocumentGraphCleanupTarget {
     std::string documentHash;
     std::string sourceFile;
+    std::int64_t documentId{0};
 };
 
 struct DocumentGraphCleanupResult {
+    std::int64_t documentsDeleted{0};
     std::int64_t nodesDeleted{0};
     std::int64_t edgesDeleted{0};
 };
@@ -458,6 +460,10 @@ public:
 
         DocumentGraphCleanupResult result;
         for (const auto& target : targets) {
+            if (target.documentId != 0) {
+                return Error{ErrorCode::NotImplemented,
+                             "Atomic document and graph cleanup is not implemented"};
+            }
             if (!target.sourceFile.empty()) {
                 auto edges = deleteEdgesForSourceFile(target.sourceFile);
                 if (!edges) {
