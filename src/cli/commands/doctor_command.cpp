@@ -1405,22 +1405,15 @@ void DoctorCommand::runVectorsFix() {
     }
 
     // Update config file using proper dimension+model config APIs (A3)
-    bool configUpdated = false;
     try {
-        auto dataPath = cli_ ? cli_->getDataPath() : yams::config::get_data_dir();
-
         // Write all three dimension keys consistently
         writeOrReplaceConfigDims(configPath, *dbDim);
 
         // Write model preference
-        if (!matchingModel.empty()) {
-            auto writeModel = writeConfigValue("embeddings.preferred_model", matchingModel);
-            if (!writeModel) {
-                throw std::runtime_error(writeModel.error().message);
-            }
+        auto writeModel = writeConfigValue("embeddings.preferred_model", matchingModel);
+        if (!writeModel) {
+            throw std::runtime_error(writeModel.error().message);
         }
-
-        configUpdated = true;
     } catch (const std::exception& e) {
         if (useJson) {
             std::cout << "{\"status\": \"error\", \"error\": \"Failed to update config: "
@@ -1432,24 +1425,21 @@ void DoctorCommand::runVectorsFix() {
         return;
     }
 
-    if (configUpdated) {
-        if (useJson) {
-            std::cout << "{\"status\": \"fixed\", \"db_dim\": " << *dbDim
-                      << ", \"previous_model\": \"" << modelName << "\"";
-            if (modelDim) {
-                std::cout << ", \"previous_model_dim\": " << *modelDim;
-            }
-            std::cout << ", \"new_model\": \"" << matchingModel
-                      << "\", \"new_model_dim\": " << *dbDim << ", \"config_path\": \""
-                      << configPath.string() << "\"}\n";
-        } else {
-            std::cout << "\n" << ui::status_ok("Config updated: " + configPath.string()) << "\n";
-            std::cout << "  embeddings.preferred_model = \"" << matchingModel << "\"\n";
-            std::cout << "  embeddings.embedding_dim = " << *dbDim << "\n";
-            std::cout << "  vector_database.embedding_dim = " << *dbDim << "\n";
-            std::cout << "  vector_index.dimension = " << *dbDim << "\n\n";
-            std::cout << "Restart daemon to apply: yams daemon restart\n";
+    if (useJson) {
+        std::cout << "{\"status\": \"fixed\", \"db_dim\": " << *dbDim << ", \"previous_model\": \""
+                  << modelName << "\"";
+        if (modelDim) {
+            std::cout << ", \"previous_model_dim\": " << *modelDim;
         }
+        std::cout << ", \"new_model\": \"" << matchingModel << "\", \"new_model_dim\": " << *dbDim
+                  << ", \"config_path\": \"" << configPath.string() << "\"}\n";
+    } else {
+        std::cout << "\n" << ui::status_ok("Config updated: " + configPath.string()) << "\n";
+        std::cout << "  embeddings.preferred_model = \"" << matchingModel << "\"\n";
+        std::cout << "  embeddings.embedding_dim = " << *dbDim << "\n";
+        std::cout << "  vector_database.embedding_dim = " << *dbDim << "\n";
+        std::cout << "  vector_index.dimension = " << *dbDim << "\n\n";
+        std::cout << "Restart daemon to apply: yams daemon restart\n";
     }
 }
 } // namespace yams::cli
