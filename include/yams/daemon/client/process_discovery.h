@@ -1,9 +1,14 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 
 namespace yams::daemon::client {
+
+// Best-effort process identity primitives shared by daemon lifecycle and client discovery.
+std::filesystem::path processExecutablePath(int pid);
+std::uint64_t processStartTimeNs(int pid);
 
 // Returns true only when the live process executable is yams-daemon.
 bool isLiveDaemonProcess(int pid);

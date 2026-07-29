@@ -16,6 +16,7 @@
 #include <yams/config/config_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/process_discovery.h>
+#include <yams/daemon/ipc/socket_utils.h>
 #include <yams/daemon/metric_keys.h>
 #include <yams/version.hpp>
 
@@ -548,7 +549,8 @@ private:
             bool processGone = (pid <= 0) || (kill(pid, 0) != 0);
             bool socketFilePresent = !socketPath.empty() && safe_exists(socketFsPath);
             bool proxySocketPresent =
-                !socketPath.empty() && safe_exists(deriveProxySocketPath(socketFsPath));
+                !socketPath.empty() &&
+                safe_exists(yams::daemon::socket_utils::derive_proxy_socket_path(socketFsPath));
             bool socketBoundProcessAlive = false;
 #ifndef _WIN32
             socketBoundProcessAlive = isDaemonProcessRunningForSocket(socketPath);
@@ -573,20 +575,6 @@ private:
 
         spdlog::debug("Timeout waiting for daemon to stop");
         return false;
-    }
-
-    std::filesystem::path deriveProxySocketPath(const std::filesystem::path& daemonSocket) {
-        if (daemonSocket.empty()) {
-            return {};
-        }
-        auto base = daemonSocket.stem().string();
-        if (base.empty()) {
-            base = daemonSocket.filename().string();
-        }
-        if (base.empty()) {
-            base = "yams-daemon";
-        }
-        return daemonSocket.parent_path() / (base + ".proxy.sock");
     }
 
     void cleanupDaemonFiles(const std::string& socketPath, const std::string& pidFilePath) {
@@ -621,7 +609,8 @@ private:
         // Remove socket file if it exists
         if (!socketPath.empty()) {
             removeWithRetry(std::filesystem::path{socketPath}, "socket");
-            removeWithRetry(deriveProxySocketPath(std::filesystem::path{socketPath}),
+            removeWithRetry(yams::daemon::socket_utils::derive_proxy_socket_path(
+                                std::filesystem::path{socketPath}),
                             "proxy socket");
         }
 

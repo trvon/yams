@@ -68,8 +68,6 @@ private:
     bool isPidFileLockedByOther() const;
     bool isProcessRunning(pid_t pid) const;
     PidIdentityStatus verifyPidIdentity(const PidFileInfo& info, std::string& detail) const;
-    std::uint64_t getProcessStartTimeNs(pid_t pid) const;
-    std::string getProcessExecutablePath(pid_t pid) const;
     static std::string generateInstanceToken();
     Result<void> terminateProcess(pid_t pid) const;
     static bool aggressiveModeEnabled();

@@ -127,6 +127,8 @@ bool isProcessAlive(int pid) {
 #endif
 }
 
+} // namespace
+
 std::filesystem::path processExecutablePath(int pid) {
 #ifdef _WIN32
     HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
@@ -208,6 +210,8 @@ std::uint64_t processStartTimeNs(int pid) {
     return static_cast<std::uint64_t>(seconds * 1'000'000'000.0);
 #endif
 }
+
+namespace {
 
 bool sameExecutable(const std::filesystem::path& recorded, const std::filesystem::path& live) {
     if (recorded.empty() || live.empty()) {

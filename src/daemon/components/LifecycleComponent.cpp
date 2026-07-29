@@ -17,6 +17,7 @@ using nlohmann::json;
 
 #include <yams/cli/cli_sync.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/client/process_discovery.h>
 #include <yams/daemon/components/LifecycleComponent.h>
 #include <yams/daemon/daemon.h>
 
@@ -33,13 +34,6 @@ using nlohmann::json;
 #include <sys/file.h>
 #include <sys/time.h>
 #include <sys/wait.h>
-#ifdef __APPLE__
-#include <TargetConditionals.h>
-#if TARGET_OS_OSX
-#include <libproc.h>
-#include <sys/sysctl.h>
-#endif
-#endif
 #endif
 
 namespace {
@@ -336,14 +330,14 @@ Result<void> LifecycleComponent::createPidFile() {
         instanceToken_ = generateInstanceToken();
     }
     if (startTimeNs_ == 0) {
-        startTimeNs_ = getProcessStartTimeNs(currentProcessId());
+        startTimeNs_ = client::processStartTimeNs(currentProcessId());
     }
     if (startTimeNs_ == 0) {
         auto now = std::chrono::system_clock::now().time_since_epoch();
         startTimeNs_ = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(now).count());
     }
-    auto exePath = getProcessExecutablePath(currentProcessId());
+    auto exePath = client::processExecutablePath(currentProcessId());
     if (!exePath.empty()) {
         std::error_code ec;
         exePath = std::filesystem::weakly_canonical(exePath, ec).string();
@@ -600,7 +594,7 @@ LifecycleComponent::verifyPidIdentity(const PidFileInfo& info, std::string& deta
         detail = "process not running";
         return PidIdentityStatus::Mismatch;
     }
-    std::uint64_t liveStart = getProcessStartTimeNs(info.pid);
+    std::uint64_t liveStart = client::processStartTimeNs(info.pid);
     if (info.startTimeNs && liveStart) {
         if (info.startTimeNs != liveStart) {
             detail = "start time mismatch";
@@ -611,7 +605,7 @@ LifecycleComponent::verifyPidIdentity(const PidFileInfo& info, std::string& deta
         return PidIdentityStatus::Unknown;
     }
 
-    auto liveExe = getProcessExecutablePath(info.pid);
+    auto liveExe = client::processExecutablePath(info.pid);
     if (!info.exePath.empty()) {
         if (!liveExe.empty()) {
             std::error_code ec;
@@ -633,7 +627,7 @@ LifecycleComponent::verifyPidIdentity(const PidFileInfo& info, std::string& deta
             return PidIdentityStatus::Unknown;
         }
     } else if (!liveExe.empty()) {
-        auto currentExe = getProcessExecutablePath(currentProcessId());
+        auto currentExe = client::processExecutablePath(currentProcessId());
         if (!currentExe.empty()) {
             std::error_code ec;
             auto canonicalLive = std::filesystem::weakly_canonical(liveExe, ec).string();
@@ -659,106 +653,6 @@ LifecycleComponent::verifyPidIdentity(const PidFileInfo& info, std::string& deta
 
     detail = "verified";
     return PidIdentityStatus::Verified;
-}
-
-std::uint64_t LifecycleComponent::getProcessStartTimeNs(pid_t pid) const {
-#ifdef _WIN32
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
-    if (!hProcess) {
-        return 0;
-    }
-    FILETIME createTime{}, exitTime{}, kernelTime{}, userTime{};
-    if (!GetProcessTimes(hProcess, &createTime, &exitTime, &kernelTime, &userTime)) {
-        CloseHandle(hProcess);
-        return 0;
-    }
-    CloseHandle(hProcess);
-    ULARGE_INTEGER uli;
-    uli.LowPart = createTime.dwLowDateTime;
-    uli.HighPart = createTime.dwHighDateTime;
-    // FILETIME is 100ns intervals since 1601
-    return static_cast<std::uint64_t>(uli.QuadPart) * 100ull;
-#elif defined(__APPLE__) && TARGET_OS_OSX
-    struct kinfo_proc kp;
-    std::memset(&kp, 0, sizeof(kp));
-    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid};
-    size_t len = sizeof(kp);
-    if (sysctl(mib, 4, &kp, &len, nullptr, 0) != 0 || len == 0) {
-        return 0;
-    }
-    auto tv = kp.kp_proc.p_starttime;
-    return static_cast<std::uint64_t>(tv.tv_sec) * 1000000000ull +
-           static_cast<std::uint64_t>(tv.tv_usec) * 1000ull;
-#elif defined(__APPLE__)
-    (void)pid;
-    return 0;
-#else
-    std::ifstream statFile("/proc/" + std::to_string(pid) + "/stat");
-    if (!statFile.is_open()) {
-        return 0;
-    }
-    std::string statLine;
-    std::getline(statFile, statLine);
-    if (statLine.empty()) {
-        return 0;
-    }
-    auto rparen = statLine.rfind(')');
-    if (rparen == std::string::npos) {
-        return 0;
-    }
-    std::istringstream iss(statLine.substr(rparen + 1));
-    std::string token;
-    for (int i = 0; i < 19; ++i) {
-        if (!(iss >> token)) {
-            return 0;
-        }
-    }
-    unsigned long long startTicks = 0;
-    if (!(iss >> startTicks)) {
-        return 0;
-    }
-    long ticks = sysconf(_SC_CLK_TCK);
-    if (ticks <= 0) {
-        return 0;
-    }
-    double seconds = static_cast<double>(startTicks) / static_cast<double>(ticks);
-    return static_cast<std::uint64_t>(seconds * 1000000000.0);
-#endif
-}
-
-std::string LifecycleComponent::getProcessExecutablePath(pid_t pid) const {
-#ifdef _WIN32
-    HANDLE hProcess = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, pid);
-    if (!hProcess) {
-        return {};
-    }
-    char buffer[MAX_PATH];
-    DWORD size = static_cast<DWORD>(sizeof(buffer));
-    if (!QueryFullProcessImageNameA(hProcess, 0, buffer, &size)) {
-        CloseHandle(hProcess);
-        return {};
-    }
-    CloseHandle(hProcess);
-    return std::string(buffer, size);
-#elif defined(__APPLE__) && TARGET_OS_OSX
-    char pathbuf[PROC_PIDPATHINFO_MAXSIZE] = {0};
-    int ret = proc_pidpath(pid, pathbuf, sizeof(pathbuf));
-    if (ret <= 0) {
-        return {};
-    }
-    return std::string(pathbuf);
-#elif defined(__APPLE__)
-    (void)pid;
-    return {};
-#else
-    std::error_code ec;
-    auto exePath = std::filesystem::read_symlink(
-        std::filesystem::path("/proc") / std::to_string(pid) / "exe", ec);
-    if (ec) {
-        return {};
-    }
-    return exePath.string();
-#endif
 }
 
 std::string LifecycleComponent::generateInstanceToken() {

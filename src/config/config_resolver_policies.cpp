@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <yams/config/config_helpers.h>
+#include <yams/config/detail/config_parse_utils.h>
 #include <yams/daemon/components/ConfigResolver.h>
 
 #include <spdlog/spdlog.h>
@@ -19,51 +20,12 @@
 namespace yams::daemon {
 namespace {
 
-std::string_view trimView(std::string_view raw) {
-    while (!raw.empty() && std::isspace(static_cast<unsigned char>(raw.front())) != 0) {
-        raw.remove_prefix(1);
-    }
-    while (!raw.empty() && std::isspace(static_cast<unsigned char>(raw.back())) != 0) {
-        raw.remove_suffix(1);
-    }
-    return raw;
-}
-
-template <typename T> std::optional<T> parseUnsignedIntegral(std::string_view raw) {
-    raw = trimView(raw);
-    if (raw.empty() || raw.front() == '-') {
-        return std::nullopt;
-    }
-    T value{};
-    const char* begin = raw.data();
-    const char* end = begin + raw.size();
-    auto [ptr, ec] = std::from_chars(begin, end, value);
-    if (ec != std::errc{} || ptr != end) {
-        return std::nullopt;
-    }
-    return value;
-}
+using yams::config::detail::parseDouble;
+using yams::config::detail::parseTomlBool;
+using yams::config::detail::parseUnsignedIntegral;
 
 std::optional<std::size_t> parseSize(std::string_view raw) {
     return parseUnsignedIntegral<std::size_t>(raw);
-}
-
-std::optional<double> parseDouble(const std::string& raw) {
-    auto view = trimView(raw);
-    if (!view.empty() && view.front() == '+') {
-        view.remove_prefix(1);
-    }
-    if (view.empty()) {
-        return std::nullopt;
-    }
-    double parsed{};
-    const char* const begin = view.data();
-    const char* const end = begin + view.size();
-    const auto [ptr, ec] = std::from_chars(begin, end, parsed, std::chars_format::general);
-    if (ec != std::errc{} || ptr != end) {
-        return std::nullopt;
-    }
-    return parsed;
 }
 
 std::string getenvValue(const char* name) {
@@ -110,17 +72,6 @@ std::optional<float> parseTomlFloat(const std::string& s) {
         return std::nullopt;
     }
     return static_cast<float>(*parsed);
-}
-
-std::optional<bool> parseTomlBool(std::string_view s) {
-    std::string v(s);
-    std::transform(v.begin(), v.end(), v.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (v == "true" || v == "1" || v == "yes" || v == "on")
-        return true;
-    if (v == "false" || v == "0" || v == "no" || v == "off")
-        return false;
-    return std::nullopt;
 }
 
 } // namespace
