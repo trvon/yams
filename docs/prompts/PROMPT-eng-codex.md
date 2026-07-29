@@ -35,13 +35,15 @@ can answer is a defect. Pick by question type:
 | Question | Tool (first hop) |
 |---|---|
 | Exact symbol / string / pattern | `yams grep "<pat>" --cwd .` |
-| Callers / callees / includes / blast radius / related tests | `yams graph --explore "<symbol-or-file>" --max-files 8` |
-| Concept / prior decision / task history | `yams search "<query>" --limit 10` |
+| Definition and bounded source context for a known symbol/file | `yams graph --explore "<symbol-or-file>" --max-files 8` |
+| Callers / blast radius for a known symbol | `yams graph --impact "<symbol>" --depth 1` |
+| Related tests for changed files | `yams graph --affected-tests <file> --depth 1` |
+| Precise callees/includes/edges | `yams graph --name <file> --depth 1 --limit 50`, `--node-key <key> -r <relation>` |
+| Concept / prior decision / task history | `yams search "<query>" --cwd --limit 10` |
 | Inspect a selected saved-memory artifact | run the emitted `yams cat --hash <hash>` hint |
 | Export a selected artifact | `yams get --hash <hash> -o <path>` |
 | Exact implementation detail in a file yams already named | local `Read` |
 | Unfamiliar subsystem entry point | `yams graph --topology-clusters`, then `--cluster <id>` |
-| Precise edges | `yams graph --name <file> --depth 1 --limit 50`, `--node-key <key> -r <relation>` |
 
 Rules:
 
@@ -49,11 +51,15 @@ Rules:
   decision, research item, or evidence item, hydrate the most relevant one to
   three hits with `yams cat --hash <hash>`. Do not claim recovered context from
   snippets alone.
-- Do not `cat` every code hit. Use `graph --explore` to narrow code context,
-  then locally read only the exact implementation detail that remains needed.
-- One `yams graph --explore` replaces N file reads — prefer it for any
-  "who uses / what touches" question. Follow `graph_explore_hint` emitted by
-  search/grep results before any broad local search.
+- Do not `cat` every code hit. Follow the exact-file `graph_explore_hint`
+  emitted by search/grep to hydrate bounded source context, then locally read
+  only the implementation detail that remains needed.
+- Do not send a prose concept query directly to graph traversal. Use scoped
+  search/grep to select a concrete symbol or file first, then choose
+  `--explore`, `--impact`, or `--affected-tests` by the relationship question.
+- Start graph traversal at depth 1 and widen only when the first-hop evidence
+  is insufficient. `--explore` hydrates a known source target; it is not a
+  substitute for `--impact` or `--affected-tests`.
 - Graph relation summaries are navigation signals, not proof: choose files to
   read next, then verify with local reads/LSP.
 - Allowed exceptions (state which one applies): user gave an exact path; file

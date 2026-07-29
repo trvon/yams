@@ -1341,7 +1341,7 @@ private:
     }
 
     boost::asio::awaitable<Result<void>> executeGraphAffectedTests() {
-        const auto depth = static_cast<uint64_t>(depth_ > 1 ? depth_ : 5);
+        const auto depth = static_cast<uint64_t>(depth_);
         const auto renderLocal = [&]() -> Result<void> {
             auto appCtx = cli_ ? cli_->getAppContext() : nullptr;
             if (appCtx == nullptr) {

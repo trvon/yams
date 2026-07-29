@@ -8,8 +8,8 @@
 
 #include <nlohmann/json.hpp>
 #include <algorithm>
-#include <chrono>
 #include <cctype>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -48,11 +48,56 @@ bool isWordChar(unsigned char c) {
     return std::isalnum(c) != 0 || c == '_' || c == ':' || c == '.' || c == '/' || c == '-';
 }
 
+bool isIdentifierChar(unsigned char c) {
+    return std::isalnum(c) != 0 || c == '_';
+}
+
+bool containsIdentifier(std::string_view line, std::string_view identifier) {
+    if (identifier.empty()) {
+        return false;
+    }
+    std::size_t offset = 0;
+    auto pos = line.find(identifier, offset);
+    while (pos != std::string_view::npos) {
+        const bool leftBoundary =
+            pos == 0 || !isIdentifierChar(static_cast<unsigned char>(line[pos - 1]));
+        const auto end = pos + identifier.size();
+        const bool rightBoundary =
+            end == line.size() || !isIdentifierChar(static_cast<unsigned char>(line[end]));
+        if (leftBoundary && rightBoundary) {
+            return true;
+        }
+        offset = pos + 1;
+        pos = line.find(identifier, offset);
+    }
+    return false;
+}
+
+std::optional<std::size_t> findNearestIdentifierLine(const std::vector<std::string>& lines,
+                                                     std::string_view identifier,
+                                                     std::size_t preferredLine) {
+    std::optional<std::size_t> bestLine;
+    std::size_t bestDistance = std::numeric_limits<std::size_t>::max();
+    for (std::size_t index = 0; index < lines.size(); ++index) {
+        if (!containsIdentifier(lines[index], identifier)) {
+            continue;
+        }
+        const auto line = index + 1;
+        const auto distance = line > preferredLine ? line - preferredLine : preferredLine - line;
+        if (!bestLine.has_value() || distance < bestDistance) {
+            bestLine = line;
+            bestDistance = distance;
+        }
+    }
+    return bestLine;
+}
+
 std::vector<std::string> extractQueryTerms(const std::string& query) {
     static const std::unordered_set<std::string> kStopWords = {
-        "the",   "and",    "for",  "with", "from", "this",    "that",  "what",   "where",
-        "when",  "why",    "how",  "does", "work", "works",   "code",  "symbol", "function",
-        "class", "method", "file", "find", "show", "explain", "trace", "call",   "calls"};
+        "the",    "and",  "for",  "with", "from",    "this",  "that",   "what",    "where",
+        "when",   "why",  "how",  "does", "work",    "works", "code",   "symbol",  "class",
+        "method", "file", "find", "show", "explain", "trace", "call",   "calls",   "add",
+        "get",    "set",  "make", "use",  "uses",    "using", "result", "results", "function"};
 
     std::vector<std::string> terms;
     std::unordered_set<std::string> seen;
@@ -490,10 +535,11 @@ public:
         const auto terms = extractQueryTerms(req.query);
         std::vector<GraphContextSymbol> symbols;
         std::unordered_set<std::string> seenKeys;
+        std::unordered_map<std::string, std::unordered_set<std::string>> matchedTermsByFile;
         const auto perTermLimit = std::max<std::size_t>(req.budget.maxSymbols, 16);
         const bool pathQuery = looksLikePathQuery(req.query);
         const auto addSymbols = [&](const std::vector<metadata::SymbolMetadata>& matches,
-                                    double filePathBoost) {
+                                    double filePathBoost, std::string_view matchedTerm = {}) {
             for (const auto& sym : matches) {
                 auto contextSymbol = makeContextSymbol(sym, req.query);
                 if (pathQuery && containsToken(sym.filePath, req.query)) {
@@ -502,6 +548,9 @@ public:
                 }
                 if (!req.includeTests && contextSymbol.testFile && !queryMentionsTests(req.query)) {
                     continue;
+                }
+                if (!matchedTerm.empty() && !contextSymbol.filePath.empty()) {
+                    matchedTermsByFile[contextSymbol.filePath].insert(std::string(matchedTerm));
                 }
                 if (seenKeys.insert(contextSymbol.nodeKey).second) {
                     symbols.push_back(std::move(contextSymbol));
@@ -525,7 +574,18 @@ public:
                 if (!symResult) {
                     return symResult.error();
                 }
-                addSymbols(symResult.value(), 0.0);
+                addSymbols(symResult.value(), 0.0, term);
+            }
+        }
+
+        if (!pathQuery && terms.size() > 1) {
+            static constexpr double kAdditionalTermCoverageBoost = 25.0;
+            for (auto& symbol : symbols) {
+                const auto it = matchedTermsByFile.find(symbol.filePath);
+                if (it != matchedTermsByFile.end() && it->second.size() > 1) {
+                    symbol.score +=
+                        static_cast<double>(it->second.size() - 1) * kAdditionalTermCoverageBoost;
+                }
             }
         }
 
@@ -844,26 +904,54 @@ public:
             return Error{ErrorCode::InvalidArgument, "affected tests requires changed files"};
         }
 
-        std::vector<std::int64_t> seedIds;
-        std::unordered_set<std::int64_t> seedSeen;
+        std::vector<std::string> seedNodeKeys;
+        const auto maxSeedSymbols = req.budget.maxSymbols;
         for (const auto& file : req.changedFiles) {
-            auto syms = kgStore_->querySymbolMetadata(file, std::nullopt, std::nullopt, 500, 0);
+            if (seedNodeKeys.size() >= maxSeedSymbols) {
+                response.truncated = true;
+                break;
+            }
+            const auto remaining = maxSeedSymbols - seedNodeKeys.size();
+            const auto queryLimit =
+                remaining == std::numeric_limits<std::size_t>::max() ? remaining : remaining + 1;
+            auto syms =
+                kgStore_->querySymbolMetadata(file, std::nullopt, std::nullopt, queryLimit, 0);
             if (!syms) {
                 return syms.error();
             }
+            if (syms.value().size() > remaining) {
+                response.truncated = true;
+                syms.value().resize(remaining);
+            }
             for (const auto& sym : syms.value()) {
-                auto contextSymbol = makeContextSymbol(sym, std::string{});
-                auto id = nodeIdForSymbol(contextSymbol);
-                if (!id) {
-                    return id.error();
-                }
-                if (id.value().has_value() && seedSeen.insert(*id.value()).second) {
-                    seedIds.push_back(*id.value());
-                }
-                if (auto r = collectCallTargetNodeIds(sym.symbolName, sym.qualifiedName, seedSeen,
-                                                      seedIds);
-                    !r) {
-                    return r.error();
+                seedNodeKeys.push_back(makeContextSymbol(sym, std::string{}).nodeKey);
+            }
+        }
+
+        auto seedNodes = kgStore_->getNodesByKeys(seedNodeKeys);
+        if (!seedNodes) {
+            return seedNodes.error();
+        }
+        std::vector<std::int64_t> seedIds;
+        std::unordered_set<std::int64_t> seedSeen;
+        seedIds.reserve(seedNodes.value().size());
+        for (const auto& node : seedNodes.value()) {
+            if (seedSeen.insert(node.id).second) {
+                seedIds.push_back(node.id);
+            }
+        }
+        if (!seedIds.empty()) {
+            auto reconciled =
+                kgStore_->getEdgesToBatch(seedIds, std::string_view("resolves_to"), 64);
+            if (!reconciled) {
+                return reconciled.error();
+            }
+            for (const auto& [definitionId, edges] : reconciled.value()) {
+                (void)definitionId;
+                for (const auto& edge : edges) {
+                    if (seedSeen.insert(edge.srcNodeId).second) {
+                        seedIds.push_back(edge.srcNodeId);
+                    }
                 }
             }
         }
@@ -1048,8 +1136,7 @@ private:
         std::size_t totalFilesConsidered = 0;
         const auto emitted = buildSnippets(symbols, req.budget, req.includeCode, response.files,
                                            response.warnings, truncated, totalFilesConsidered,
-                                           response.snippetRenderMicros,
-                                           response.snippetsRendered);
+                                           response.snippetRenderMicros, response.snippetsRendered);
         response.totalFilesConsidered = totalFilesConsidered;
         response.emittedChars = emitted;
         if (truncated) {
@@ -1124,13 +1211,47 @@ private:
 
             auto startLine = std::numeric_limits<std::size_t>::max();
             std::size_t endLine = 0;
+            std::size_t relocatedSymbols = 0;
             for (const auto& symbol : snippet.symbols) {
-                if (symbol.startLine.has_value()) {
-                    startLine = std::min(startLine, static_cast<std::size_t>(*symbol.startLine));
+                auto symbolStart = symbol.startLine.has_value() && *symbol.startLine > 0
+                                       ? static_cast<std::size_t>(*symbol.startLine)
+                                       : std::size_t{0};
+                auto symbolEnd = symbol.endLine.has_value() && *symbol.endLine > 0
+                                     ? static_cast<std::size_t>(*symbol.endLine)
+                                     : symbolStart;
+                bool locationContainsSymbol = false;
+                if (symbolStart >= 1 && symbolStart <= lines.size() && !symbol.label.empty()) {
+                    const auto checkedEnd =
+                        std::min(lines.size(), std::max(symbolStart, symbolEnd));
+                    for (auto line = symbolStart; line <= checkedEnd; ++line) {
+                        if (containsIdentifier(lines[line - 1], symbol.label)) {
+                            locationContainsSymbol = true;
+                            break;
+                        }
+                    }
                 }
-                if (symbol.endLine.has_value()) {
-                    endLine = std::max(endLine, static_cast<std::size_t>(*symbol.endLine));
+                if (!locationContainsSymbol && symbolStart >= 1 && symbolStart <= lines.size() &&
+                    !symbol.label.empty()) {
+                    const auto relocated =
+                        findNearestIdentifierLine(lines, symbol.label, symbolStart);
+                    if (relocated.has_value()) {
+                        const auto originalSpan =
+                            symbolEnd >= symbolStart ? symbolEnd - symbolStart : std::size_t{0};
+                        symbolStart = *relocated;
+                        symbolEnd = std::min(lines.size(), symbolStart + originalSpan);
+                        ++relocatedSymbols;
+                    }
                 }
+                if (symbolStart != 0) {
+                    startLine = std::min(startLine, symbolStart);
+                }
+                if (symbolEnd != 0) {
+                    endLine = std::max(endLine, symbolEnd);
+                }
+            }
+            if (relocatedSymbols != 0) {
+                warnings.push_back("Relocated " + std::to_string(relocatedSymbols) +
+                                   " stale symbol location(s) while hydrating: " + file);
             }
             if (startLine == std::numeric_limits<std::size_t>::max() || startLine == 0) {
                 startLine = 1;
