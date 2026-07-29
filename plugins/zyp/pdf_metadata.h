@@ -13,9 +13,21 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 namespace yams::zyp {
+
+namespace detail {
+
+/**
+ * Find the final occurrence of a byte sequence.
+ *
+ * Returns nullptr when either input is empty or the sequence is absent.
+ */
+[[nodiscard]] const uint8_t* findBackwards(std::span<const uint8_t> data, std::string_view needle);
+
+} // namespace detail
 
 /**
  * PDF document metadata.

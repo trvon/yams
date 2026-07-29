@@ -13,6 +13,21 @@ plugin_test_ld_library_path = ':'.join([
   '/opt/yams/usr/local/lib',
 ])
 
+zyp_pdf_metadata_test_exe = executable('yams_zyp_pdf_metadata_tests',
+  files(
+    'zyp/pdf_metadata_catch2_test.cpp',
+    '../../plugins/zyp/pdf_metadata.cpp',
+  ),
+  include_directories: incs,
+  dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+  install: false,
+)
+
+test('zyp_pdf_metadata', zyp_pdf_metadata_test_exe,
+  suite: ['plugins', 'zyp', 'catch2'],
+  timeout: 30,
+)
+
 # Dedicated symbol plugin shard to avoid ABI symbol conflicts.
 if get_option('plugin-symbols')
   symbol_plugin_tests = files(

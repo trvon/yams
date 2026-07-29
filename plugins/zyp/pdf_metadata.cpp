@@ -12,6 +12,27 @@
 
 namespace yams::zyp {
 
+namespace detail {
+
+const uint8_t* findBackwards(std::span<const uint8_t> data, std::string_view needle) {
+    if (needle.empty() || data.size() < needle.size()) {
+        return nullptr;
+    }
+
+    const auto* needleData = reinterpret_cast<const uint8_t*>(needle.data());
+    const size_t candidateCount = data.size() - needle.size() + 1;
+    for (size_t candidate = candidateCount; candidate > 0; --candidate) {
+        const size_t offset = candidate - 1;
+        const auto* match = data.data() + offset;
+        if (std::memcmp(match, needleData, needle.size()) == 0) {
+            return match;
+        }
+    }
+    return nullptr;
+}
+
+} // namespace detail
+
 namespace {
 
 const uint8_t* findBytes(const uint8_t* haystack, size_t haystackLen, const uint8_t* needle,
@@ -26,26 +47,6 @@ const uint8_t* findBytes(const uint8_t* haystack, size_t haystackLen, const uint
         return nullptr;
     }
     return it;
-}
-
-/**
- * Find a byte sequence in data, searching backwards from the end.
- */
-const uint8_t* findBackwards(std::span<const uint8_t> data, std::string_view needle) {
-    if (data.size() < needle.size()) {
-        return nullptr;
-    }
-
-    const auto* needleData = reinterpret_cast<const uint8_t*>(needle.data());
-    const auto* start = data.data();
-    const auto* end = data.data() + data.size() - needle.size();
-
-    for (const auto* p = end; p >= start; --p) {
-        if (std::memcmp(p, needleData, needle.size()) == 0) {
-            return p;
-        }
-    }
-    return nullptr;
 }
 
 /**
@@ -298,7 +299,7 @@ std::optional<PdfMetadata> extractMetadata(std::span<const uint8_t> data) {
     }
 
     // Find trailer
-    const auto* trailer = findBackwards(data, "trailer");
+    const auto* trailer = detail::findBackwards(data, "trailer");
     if (!trailer) {
         // Try startxref for linearized PDFs
         return std::nullopt;
