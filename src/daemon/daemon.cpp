@@ -492,8 +492,6 @@ Result<void> YamsDaemon::start() {
                 computed = 256ull;
             cap = computed;
         }
-        if (cap == 0)
-            cap = 1024;
         socketConfig.maxConnections = static_cast<std::size_t>(cap);
     }
 

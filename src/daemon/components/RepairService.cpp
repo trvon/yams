@@ -246,8 +246,6 @@ struct RepairThreadPool {
         return pool_->get_executor();
     }
 
-    ~RepairThreadPool() = default;
-
 private:
     RepairThreadPool() = default;
 };
