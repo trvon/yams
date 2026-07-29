@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <limits>
 #include <memory>
 #include <span>
 #include <thread>
@@ -299,23 +300,23 @@ TEST_CASE("DocumentService batches content before metadata publication",
     }
 
     auto results = fixture.documentService_->storeBatch(requests);
-    REQUIRE(results.size() == requests.size());
+    REQUIRE((results.size() == requests.size()));
     for (const auto& result : results) {
         REQUIRE(result.has_value());
-        REQUIRE(result.value().documentId > 0);
+        REQUIRE((result.value().documentId > 0));
         auto document = fixture.metadataRepo_->getDocumentByHash(result.value().hash);
         REQUIRE(document.has_value());
         REQUIRE(document.value().has_value());
     }
 
     const auto metrics = metadataWriter->metricsSnapshot();
-    CHECK(metrics.submittedItems == 2);
-    CHECK(metrics.completedItems == 2);
-    CHECK(metrics.batches == 1);
-    CHECK(metrics.maxBatchSize == 2);
+    CHECK((metrics.submittedItems == 2));
+    CHECK((metrics.completedItems == 2));
+    CHECK((metrics.batches == 1));
+    CHECK((metrics.maxBatchSize == 2));
     const auto timings = getDocumentStorePhaseTimingsSnapshot();
-    CHECK(timings.at("content_store").calls == 1);
-    CHECK(timings.at("store_total").calls == 1);
+    CHECK((timings.at("content_store").calls == 1));
+    CHECK((timings.at("store_total").calls == 1));
 }
 
 TEST_CASE("DocumentService batch reports metadata publication failures",
@@ -351,10 +352,10 @@ TEST_CASE("DocumentService batch reports metadata publication failures",
     }
 
     auto results = fixture.documentService_->storeBatch(requests);
-    REQUIRE(results.size() == requests.size());
+    REQUIRE((results.size() == requests.size()));
     for (const auto& result : results) {
         REQUIRE_FALSE(result.has_value());
-        CHECK(result.error().code == ErrorCode::DatabaseError);
+        CHECK((result.error().code == ErrorCode::DatabaseError));
         CHECK(
             (result.error().message.find("injected metadata insert failure") != std::string::npos));
     }
@@ -388,7 +389,7 @@ TEST_CASE("DocumentService batches fuzzy terms at the storage wave boundary",
     }
 
     auto results = fixture.documentService_->storeBatch(requests);
-    REQUIRE(results.size() == kDocumentCount);
+    REQUIRE((results.size() == kDocumentCount));
     for (const auto& result : results) {
         REQUIRE(result.has_value());
     }
@@ -404,9 +405,9 @@ TEST_CASE("DocumentService batches fuzzy terms at the storage wave boundary",
     const auto stats = coordinator.getStats();
     const auto source = std::ranges::find_if(
         stats.hotSources, [](const auto& hotspot) { return hotspot.source == "doc_svc/symspell"; });
-    REQUIRE(source != stats.hotSources.end());
-    CHECK(source->batches == 1);
-    CHECK(stats.symSpellTermsAdded == kDocumentCount * 2);
+    REQUIRE((source != stats.hotSources.end()));
+    CHECK((source->batches == 1));
+    CHECK((stats.symSpellTermsAdded == kDocumentCount * 2));
 
     fixture.appContext_.writeCoordinatorProvider = {};
     fixture.documentService_.reset();
@@ -440,7 +441,7 @@ TEST_CASE("DocumentService initializes fresh path series without follow-up write
     }
 
     auto results = fixture.documentService_->storeBatch(requests);
-    REQUIRE(results.size() == kDocumentCount);
+    REQUIRE((results.size() == kDocumentCount));
 
     coordinator.start();
     std::thread writerLoop([&io] { io.run(); });
@@ -465,17 +466,17 @@ TEST_CASE("DocumentService initializes fresh path series without follow-up write
         REQUIRE(seriesKey.value().has_value());
         REQUIRE(document.has_value());
         REQUIRE(document.value().has_value());
-        CHECK(version.value()->asInteger() == 1);
+        CHECK((version.value()->asInteger() == 1));
         CHECK(latest.value()->asBoolean());
-        CHECK(seriesKey.value()->asString() == document.value()->filePath);
+        CHECK((seriesKey.value()->asString() == document.value()->filePath));
     }
 
     const auto stats = coordinator.getStats();
-    CHECK(stats.metadataEntriesSet == 0);
+    CHECK((stats.metadataEntriesSet == 0));
     const auto versioning = std::ranges::find_if(stats.hotSources, [](const auto& hotspot) {
         return hotspot.source == "doc_svc/versioning";
     });
-    CHECK(versioning == stats.hotSources.end());
+    CHECK((versioning == stats.hotSources.end()));
 
     fixture.appContext_.writeCoordinatorProvider = {};
     fixture.documentService_.reset();
@@ -491,7 +492,7 @@ TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
         auto result = fixture.documentService_->list(request);
 
         REQUIRE(result);
-        CHECK(result.value().documents.size() >= 2);
+        CHECK((result.value().documents.size() >= 2));
     }
 
     SECTION("List with limit") {
@@ -501,7 +502,21 @@ TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
         auto result = fixture.documentService_->list(request);
 
         REQUIRE(result);
-        CHECK(result.value().documents.size() == 1);
+        CHECK((result.value().documents.size() == 1));
+    }
+
+    SECTION("List safely bounds extreme snippet lengths") {
+        ListDocumentsRequest request;
+        request.limit = 1;
+        request.showSnippets = true;
+        request.snippetLength = std::numeric_limits<int>::max();
+
+        auto result = fixture.documentService_->list(request);
+
+        REQUIRE(result);
+        REQUIRE((result.value().documents.size() == 1));
+        REQUIRE(result.value().documents.front().snippet.has_value());
+        CHECK((result.value().documents.front().snippet->size() <= 8192));
     }
 
     SECTION("List with offset") {
@@ -512,7 +527,29 @@ TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
         auto result = fixture.documentService_->list(request);
 
         REQUIRE(result);
-        CHECK(result.value().documents.size() >= 1);
+        CHECK((result.value().documents.size() >= 1));
+    }
+
+    SECTION("Fallback listing clamps negative offsets to zero") {
+        ListDocumentsRequest zeroOffsetRequest;
+        zeroOffsetRequest.pattern = "*test*md";
+        zeroOffsetRequest.limit = 100;
+        zeroOffsetRequest.offset = 0;
+        auto zeroOffsetResult = fixture.documentService_->list(zeroOffsetRequest);
+        REQUIRE(zeroOffsetResult);
+        REQUIRE_FALSE(zeroOffsetResult.value().documents.empty());
+
+        auto negativeOffsetRequest = zeroOffsetRequest;
+        negativeOffsetRequest.offset = -1;
+        auto negativeOffsetResult = fixture.documentService_->list(negativeOffsetRequest);
+
+        REQUIRE(negativeOffsetResult);
+        REQUIRE((negativeOffsetResult.value().documents.size() ==
+                 zeroOffsetResult.value().documents.size()));
+        for (std::size_t index = 0; index < zeroOffsetResult.value().documents.size(); ++index) {
+            CHECK((negativeOffsetResult.value().documents[index].hash ==
+                   zeroOffsetResult.value().documents[index].hash));
+        }
     }
 
     SECTION("List bare directory returns descendants") {
@@ -588,8 +625,8 @@ TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
         auto result = fixture.documentService_->list(request);
 
         REQUIRE(result);
-        REQUIRE(result.value().documents.size() == 1);
-        CHECK(result.value().documents.front().hash == fixture.testHash1_);
+        REQUIRE((result.value().documents.size() == 1));
+        CHECK((result.value().documents.front().hash == fixture.testHash1_));
     }
 
     SECTION("List with contradictory metadata filters") {
@@ -612,7 +649,7 @@ TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
         auto result = fixture.documentService_->list(request);
 
         REQUIRE(result);
-        REQUIRE(result.value().documents.size() == 2);
+        REQUIRE((result.value().documents.size() == 2));
         CHECK(std::ranges::any_of(result.value().documents,
                                   [&](const auto& doc) { return doc.hash == fixture.testHash1_; }));
         CHECK(std::ranges::any_of(result.value().documents,
@@ -629,8 +666,8 @@ TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
         auto result = fixture.documentService_->list(request);
 
         REQUIRE(result);
-        REQUIRE(result.value().documents.size() == 1);
-        CHECK(result.value().documents.front().hash == fixture.testHash1_);
+        REQUIRE((result.value().documents.size() == 1));
+        CHECK((result.value().documents.front().hash == fixture.testHash1_));
     }
 
     SECTION("List applies metadata filters before pagination") {
@@ -641,8 +678,8 @@ TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
         auto result = fixture.documentService_->list(request);
 
         REQUIRE(result);
-        REQUIRE(result.value().documents.size() == 1);
-        CHECK(result.value().documents.front().hash == fixture.testHash1_);
+        REQUIRE((result.value().documents.size() == 1));
+        CHECK((result.value().documents.front().hash == fixture.testHash1_));
     }
 
     SECTION("List with type filter") {
@@ -667,10 +704,10 @@ TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
 
         bool foundSharedObject = false;
         for (const auto& doc : result.value().documents) {
-            CHECK(doc.fileType == "executable");
+            CHECK((doc.fileType == "executable"));
             if (doc.fileName == "libsample.so") {
                 foundSharedObject = true;
-                CHECK(doc.mimeType == "application/x-sharedlib");
+                CHECK((doc.mimeType == "application/x-sharedlib"));
             }
         }
         CHECK(foundSharedObject);
@@ -684,7 +721,7 @@ TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
         auto result = fixture.documentService_->list(request);
 
         REQUIRE(result);
-        CHECK(result.value().documents.size() >= 2);
+        CHECK((result.value().documents.size() >= 2));
     }
 }
 
@@ -701,7 +738,7 @@ TEST_CASE("DocumentService - Retrieval", "[document][service][retrieval]") {
 
         REQUIRE(result);
         REQUIRE(result.value().document.has_value());
-        CHECK(result.value().document->hash == fixture.testHash1_);
+        CHECK((result.value().document->hash == fixture.testHash1_));
     }
 
     SECTION("Retrieve with compressed content and metadata") {
@@ -715,7 +752,7 @@ TEST_CASE("DocumentService - Retrieval", "[document][service][retrieval]") {
 
         REQUIRE(result);
         REQUIRE(result.value().document.has_value());
-        CHECK(result.value().document->hash == fixture.testHash1_);
+        CHECK((result.value().document->hash == fixture.testHash1_));
         CHECK(result.value().document->content.has_value());
     }
 
@@ -766,7 +803,7 @@ TEST_CASE("DocumentService - Name Resolution", "[document][service][resolve]") {
 
         REQUIRE(result);
         REQUIRE(result.value().document.has_value());
-        CHECK(result.value().document->hash == fixture.testHash1_);
+        CHECK((result.value().document->hash == fixture.testHash1_));
     }
 
     SECTION("Resolve path suffix") {
@@ -894,7 +931,7 @@ TEST_CASE("DocumentService - Deletion", "[document][service][deletion]") {
 
         REQUIRE(result);
         CHECK(result.value().errors.empty());
-        REQUIRE(result.value().deleted.size() == 1);
+        REQUIRE((result.value().deleted.size() == 1));
         CHECK(result.value().deleted.front().deleted);
 
         auto after = fixture.metadataRepo_->getDocumentByHash(fixture.testHash2_);
@@ -904,8 +941,7 @@ TEST_CASE("DocumentService - Deletion", "[document][service][deletion]") {
 
     SECTION("Delete document force-cleans metadata when store removal reports corruption") {
         auto failingStore = std::make_shared<RemoveFailingContentStore>(
-            fixture.contentStore_, fixture.testHash2_,
-            Error{ErrorCode::IOError, "Corrupted data while removing object"});
+            fixture.contentStore_, fixture.testHash2_, ErrorCode::CorruptedData);
         fixture.appContext_.store = failingStore;
         fixture.documentService_ = makeDocumentService(fixture.appContext_);
 
@@ -915,7 +951,7 @@ TEST_CASE("DocumentService - Deletion", "[document][service][deletion]") {
         auto failed = fixture.documentService_->deleteByName(request);
         REQUIRE(failed);
         CHECK(failed.value().deleted.empty());
-        REQUIRE(failed.value().errors.size() == 1);
+        REQUIRE((failed.value().errors.size() == 1));
 
         auto stillPresent = fixture.metadataRepo_->getDocumentByHash(fixture.testHash2_);
         REQUIRE(stillPresent);
@@ -925,8 +961,30 @@ TEST_CASE("DocumentService - Deletion", "[document][service][deletion]") {
         auto forced = fixture.documentService_->deleteByName(request);
         REQUIRE(forced);
         CHECK(forced.value().errors.empty());
-        REQUIRE(forced.value().deleted.size() == 1);
+        REQUIRE((forced.value().deleted.size() == 1));
         CHECK(forced.value().deleted.front().deleted);
+
+        auto after = fixture.metadataRepo_->getDocumentByHash(fixture.testHash2_);
+        REQUIRE(after);
+        CHECK_FALSE(after.value().has_value());
+    }
+
+    SECTION("Delete document force-cleans metadata for an invalid manifest") {
+        auto failingStore = std::make_shared<RemoveFailingContentStore>(
+            fixture.contentStore_, fixture.testHash2_, ErrorCode::ManifestInvalid);
+        fixture.appContext_.store = failingStore;
+        fixture.documentService_ = makeDocumentService(fixture.appContext_);
+
+        DeleteByNameRequest request;
+        request.name = (fixture.testDir_ / "test2.md").string();
+        request.force = true;
+
+        auto result = fixture.documentService_->deleteByName(request);
+
+        REQUIRE(result);
+        CHECK(result.value().errors.empty());
+        REQUIRE((result.value().deleted.size() == 1));
+        CHECK(result.value().deleted.front().deleted);
 
         auto after = fixture.metadataRepo_->getDocumentByHash(fixture.testHash2_);
         REQUIRE(after);
@@ -962,7 +1020,7 @@ TEST_CASE("DocumentService - Deletion", "[document][service][deletion]") {
         auto result = fixture.documentService_->deleteByName(request);
         REQUIRE(result);
         CHECK(result.value().deleted.empty());
-        REQUIRE(result.value().errors.size() == 1);
+        REQUIRE((result.value().errors.size() == 1));
 
         // Document row + metadata must survive the content-removal failure.
         auto docAfter = fixture.metadataRepo_->getDocumentByHash(fixture.testHash2_);
@@ -996,7 +1054,7 @@ TEST_CASE("DocumentService - Deletion", "[document][service][deletion]") {
         auto result = fixture.documentService_->deleteByName(request);
         REQUIRE(result);
         CHECK(result.value().errors.empty());
-        REQUIRE(result.value().deleted.size() == 1);
+        REQUIRE((result.value().deleted.size() == 1));
         CHECK(result.value().deleted.front().deleted);
 
         auto docAfter = fixture.metadataRepo_->getDocumentByHash(fixture.testHash2_);
@@ -1026,7 +1084,7 @@ TEST_CASE("DocumentService - Deletion", "[document][service][deletion]") {
 
         REQUIRE(result);
         CHECK(result.value().errors.empty());
-        REQUIRE(result.value().deleted.size() == 1);
+        REQUIRE((result.value().deleted.size() == 1));
         CHECK(result.value().deleted.front().deleted);
         auto removedAgain = fixture.contentStore_->remove(hash);
         REQUIRE(removedAgain);
@@ -1061,7 +1119,7 @@ TEST_CASE("DocumentService - Version Retention", "[document][service][retention]
     auto preview = fixture.documentService_->pruneVersions({.keepLatest = 1, .dryRun = true});
     REQUIRE(preview);
     CHECK(preview.value().dryRun);
-    REQUIRE(preview.value().deleted.size() == 2);
+    REQUIRE((preview.value().deleted.size() == 2));
     for (const auto& hash : hashes) {
         auto document = fixture.metadataRepo_->getDocumentByHash(hash);
         REQUIRE(document);
@@ -1072,7 +1130,7 @@ TEST_CASE("DocumentService - Version Retention", "[document][service][retention]
     REQUIRE(applied);
     CHECK_FALSE(applied.value().dryRun);
     REQUIRE(applied.value().errors.empty());
-    REQUIRE(applied.value().deleted.size() == 2);
+    REQUIRE((applied.value().deleted.size() == 2));
 
     for (std::size_t index = 0; index < hashes.size() - 1; ++index) {
         auto document = fixture.metadataRepo_->getDocumentByHash(hashes[index]);

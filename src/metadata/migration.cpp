@@ -374,7 +374,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             createMetadataCompositeIndexes(),
             createKgEdgesSemanticNeighborOrderIndex(),
             optimizeDocumentsPathFtsUpdateTrigger(),
-            createSymbolMetadataTrigramFts()};
+            createSymbolMetadataTrigramFts(),
+            createDocumentGraphCleanupIndexes()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -2845,6 +2846,55 @@ Migration YamsMetadataMigrations::createSymbolMetadataTrigramFts() {
         DROP TRIGGER IF EXISTS symbol_metadata_ad;
         DROP TRIGGER IF EXISTS symbol_metadata_ai;
         DROP TABLE IF EXISTS symbol_metadata_fts;
+    )";
+
+    return m;
+}
+
+Migration YamsMetadataMigrations::createDocumentGraphCleanupIndexes() {
+    Migration m;
+    m.version = 37;
+    m.name = "Index document graph cleanup properties";
+    m.created = std::chrono::system_clock::now();
+
+    // Graph properties historically accepted opaque plugin text. Guard json_extract so index
+    // creation and later writes remain valid for those rows while JSON rows stay indexed.
+    m.upSQL = R"(
+        CREATE INDEX IF NOT EXISTS idx_kg_nodes_document_hash
+            ON kg_nodes(
+                CASE WHEN json_valid(properties)
+                     THEN json_extract(properties, '$.document_hash') END
+            )
+            WHERE CASE WHEN json_valid(properties)
+                       THEN json_extract(properties, '$.document_hash') END IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_kg_nodes_file_path
+            ON kg_nodes(
+                CASE WHEN json_valid(properties)
+                     THEN json_extract(properties, '$.file_path') END
+            )
+            WHERE CASE WHEN json_valid(properties)
+                       THEN json_extract(properties, '$.file_path') END IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_kg_nodes_source_file
+            ON kg_nodes(
+                CASE WHEN json_valid(properties)
+                     THEN json_extract(properties, '$.source_file') END
+            )
+            WHERE CASE WHEN json_valid(properties)
+                       THEN json_extract(properties, '$.source_file') END IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_kg_edges_source_file
+            ON kg_edges(
+                CASE WHEN json_valid(properties)
+                     THEN json_extract(properties, '$.source_file') END
+            )
+            WHERE CASE WHEN json_valid(properties)
+                       THEN json_extract(properties, '$.source_file') END IS NOT NULL;
+    )";
+
+    m.downSQL = R"(
+        DROP INDEX IF EXISTS idx_kg_edges_source_file;
+        DROP INDEX IF EXISTS idx_kg_nodes_source_file;
+        DROP INDEX IF EXISTS idx_kg_nodes_file_path;
+        DROP INDEX IF EXISTS idx_kg_nodes_document_hash;
     )";
 
     return m;

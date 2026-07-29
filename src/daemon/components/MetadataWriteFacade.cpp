@@ -21,7 +21,7 @@ void MetadataWriteFacade::setMetadata(int64_t docId, const std::string& key,
                                       metadata::MetadataValue value) {
     YAMS_DCHECK(docId > 0, "metadata facade writes should target a persisted document id");
     if (wc_) {
-        coalescer_.addOp(SetMetadataBatchOp{{{docId, key, std::move(value)}}}, wc_);
+        coalescer_.addOp(SetMetadataBatchOp{{{docId, key, std::move(value)}}}, *wc_);
     } else {
         pendingMetadata_.emplace_back(docId, key, std::move(value));
     }
@@ -33,7 +33,7 @@ void MetadataWriteFacade::updateExtractionStatus(int64_t docId, bool contentExtr
     YAMS_DCHECK(docId > 0,
                 "metadata facade extraction updates should target a persisted document id");
     if (wc_) {
-        coalescer_.addOp(UpdateExtractionStatusOp{docId, contentExtracted, status, error}, wc_);
+        coalescer_.addOp(UpdateExtractionStatusOp{docId, contentExtracted, status, error}, *wc_);
     } else {
         pendingExtractionUpdates_.push_back(metadata::ExtractionStatusUpdate{
             .documentId = docId,
@@ -51,7 +51,7 @@ void MetadataWriteFacade::updateRepairStatus(const std::vector<std::string>& has
                     "metadata facade repair updates should target non-empty document hashes");
     }
     if (wc_) {
-        coalescer_.addOp(UpdateRepairStatusOp{hashes, status}, wc_);
+        coalescer_.addOp(UpdateRepairStatusOp{hashes, status}, *wc_);
         return;
     }
     if (hashes.empty()) {
@@ -67,7 +67,7 @@ void MetadataWriteFacade::updateRepairStatus(const std::vector<std::string>& has
 
 void MetadataWriteFacade::flush() {
     if (wc_) {
-        coalescer_.flush(wc_);
+        coalescer_.flush(*wc_);
         return;
     }
 

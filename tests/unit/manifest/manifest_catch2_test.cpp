@@ -8,11 +8,16 @@
 #include <yams/manifest/manifest_manager.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <random>
+#include <span>
+#include <string_view>
 #include <thread>
+#include <type_traits>
 
 using namespace yams;
 using namespace yams::manifest;
@@ -45,6 +50,52 @@ std::vector<std::byte> generateRandomBytes(std::size_t size) {
     return data;
 }
 
+template <typename T> void appendFixturePod(std::vector<std::byte>& output, T value) {
+    static_assert(std::is_trivially_copyable_v<T>);
+    const auto bytes = std::as_bytes(std::span<const T, 1>{&value, 1});
+    output.insert(output.end(), bytes.begin(), bytes.end());
+}
+
+void appendFixtureString(std::vector<std::byte>& output, std::string_view value) {
+    appendFixturePod(output, static_cast<std::uint32_t>(value.size()));
+    const auto bytes = std::as_bytes(std::span{value.data(), value.size()});
+    output.insert(output.end(), bytes.begin(), bytes.end());
+}
+
+std::vector<std::byte> makeBinaryManifestFixture(bool legacy64BitFlags,
+                                                 std::uint64_t firstChunkFlags = 1) {
+    const std::string kFileHash(64, 'f');
+    const std::string kFirstChunkHash(64, 'a');
+    const std::string kSecondChunkHash(64, 'b');
+    const std::string kThirdChunkHash(64, 'c');
+
+    std::vector<std::byte> output;
+    const std::array magic{std::byte{'Y'}, std::byte{'A'}, std::byte{'M'}, std::byte{'S'}};
+    output.insert(output.end(), magic.begin(), magic.end());
+    appendFixturePod(output, Manifest::CURRENT_VERSION);
+    appendFixtureString(output, kFileHash);
+    appendFixturePod(output, std::uint64_t{18});
+    appendFixtureString(output, "legacy.bin");
+    appendFixtureString(output, "application/octet-stream");
+    appendFixturePod(output, std::uint32_t{3});
+
+    const auto appendChunk = [&](std::string_view hash, std::uint64_t offset, std::uint32_t size,
+                                 std::uint64_t flags) {
+        appendFixtureString(output, hash);
+        appendFixturePod(output, offset);
+        appendFixturePod(output, size);
+        if (legacy64BitFlags) {
+            appendFixturePod(output, flags);
+        } else {
+            appendFixturePod(output, static_cast<std::uint32_t>(flags));
+        }
+    };
+    appendChunk(kFirstChunkHash, 0, 5, firstChunkFlags);
+    appendChunk(kSecondChunkHash, 5, 7, 2);
+    appendChunk(kThirdChunkHash, 12, 6, 3);
+    return output;
+}
+
 struct ManifestTestFixture {
     ManifestTestFixture() {
         testDir = make_temp_dir();
@@ -54,7 +105,7 @@ struct ManifestTestFixture {
                                        .enableCaching = true,
                                        .cacheSize = 100};
 
-        manager = std::make_unique<ManifestManager>(std::move(config));
+        manager = std::make_unique<ManifestManager>(config);
     }
 
     ~ManifestTestFixture() {
@@ -119,18 +170,18 @@ TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager create simple manifest",
     REQUIRE(result.has_value());
 
     const auto& manifest = result.value();
-    CHECK(manifest.version == Manifest::CURRENT_VERSION);
-    CHECK(manifest.fileHash == fileInfo.hash);
-    CHECK(manifest.fileSize == fileInfo.size);
-    CHECK(manifest.originalName == fileInfo.originalName);
-    CHECK(manifest.mimeType == fileInfo.mimeType);
-    CHECK(manifest.chunks.size() == chunks.size());
+    CHECK((manifest.version == Manifest::CURRENT_VERSION));
+    CHECK((manifest.fileHash == fileInfo.hash));
+    CHECK((manifest.fileSize == fileInfo.size));
+    CHECK((manifest.originalName == fileInfo.originalName));
+    CHECK((manifest.mimeType == fileInfo.mimeType));
+    CHECK((manifest.chunks.size() == chunks.size()));
 
     // Verify chunk mapping
     for (size_t i = 0; i < chunks.size(); ++i) {
-        CHECK(manifest.chunks[i].hash == chunks[i].hash);
-        CHECK(manifest.chunks[i].offset == chunks[i].offset);
-        CHECK(manifest.chunks[i].size == chunks[i].size);
+        CHECK((manifest.chunks[i].hash == chunks[i].hash));
+        CHECK((manifest.chunks[i].offset == chunks[i].offset));
+        CHECK((manifest.chunks[i].size == chunks[i].size));
     }
 
     CHECK(manifest.isValid());
@@ -147,7 +198,7 @@ TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager create empty manifest fai
 
     auto result = manager->createManifest(fileInfo, emptyChunks);
     REQUIRE_FALSE(result.has_value());
-    CHECK(result.error() == ErrorCode::InvalidArgument);
+    CHECK((result.error() == ErrorCode::InvalidArgument));
 }
 
 TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager create large manifest",
@@ -160,11 +211,11 @@ TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager create large manifest",
     REQUIRE(result.has_value());
 
     const auto& manifest = result.value();
-    CHECK(manifest.chunks.size() == 1000u);
+    CHECK((manifest.chunks.size() == 1000u));
     CHECK(manifest.isValid());
 
     // Verify total size calculation
-    CHECK(manifest.calculateTotalSize() == manifest.fileSize);
+    CHECK((manifest.calculateTotalSize() == manifest.fileSize));
 }
 
 TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager serialize deserialize roundtrip",
@@ -183,9 +234,9 @@ TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager serialize deserialize rou
     const auto& serializedData = serializeResult.value();
 
     // Verify serialized size is reasonable
-    CHECK(serializedData.size() > 100u); // Should have substantial content
-    CHECK(serializedData.size() <
-          originalManifest.fileSize); // Should be less than original file size
+    CHECK((serializedData.size() > 100u)); // Should have substantial content
+    CHECK((serializedData.size() <
+           originalManifest.fileSize)); // Should be less than original file size
 
     // Deserialize
     auto deserializeResult = manager->deserialize(serializedData);
@@ -193,19 +244,68 @@ TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager serialize deserialize rou
     const auto& deserializedManifest = deserializeResult.value();
 
     // Verify roundtrip accuracy
-    CHECK(deserializedManifest.version == originalManifest.version);
-    CHECK(deserializedManifest.fileHash == originalManifest.fileHash);
-    CHECK(deserializedManifest.fileSize == originalManifest.fileSize);
-    CHECK(deserializedManifest.originalName == originalManifest.originalName);
-    CHECK(deserializedManifest.mimeType == originalManifest.mimeType);
-    CHECK(deserializedManifest.chunks.size() == originalManifest.chunks.size());
+    CHECK((deserializedManifest.version == originalManifest.version));
+    CHECK((deserializedManifest.fileHash == originalManifest.fileHash));
+    CHECK((deserializedManifest.fileSize == originalManifest.fileSize));
+    CHECK((deserializedManifest.originalName == originalManifest.originalName));
+    CHECK((deserializedManifest.mimeType == originalManifest.mimeType));
+    CHECK((deserializedManifest.chunks.size() == originalManifest.chunks.size()));
 
     // Verify all chunks match
     for (size_t i = 0; i < originalManifest.chunks.size(); ++i) {
-        CHECK(deserializedManifest.chunks[i].hash == originalManifest.chunks[i].hash);
-        CHECK(deserializedManifest.chunks[i].offset == originalManifest.chunks[i].offset);
-        CHECK(deserializedManifest.chunks[i].size == originalManifest.chunks[i].size);
+        CHECK((deserializedManifest.chunks[i].hash == originalManifest.chunks[i].hash));
+        CHECK((deserializedManifest.chunks[i].offset == originalManifest.chunks[i].offset));
+        CHECK((deserializedManifest.chunks[i].size == originalManifest.chunks[i].size));
     }
+}
+
+TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager reads canonical 32-bit chunk flags",
+                 "[manifest][catch2][compatibility]") {
+    const auto bytes = makeBinaryManifestFixture(false);
+
+    auto result = manager->deserialize(bytes);
+
+    REQUIRE(result.has_value());
+    REQUIRE((result.value().chunks.size() == 3));
+    CHECK((result.value().chunks[0].flags == 1));
+    CHECK((result.value().chunks[1].flags == 2));
+    CHECK((result.value().chunks[2].flags == 3));
+}
+
+TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager reads legacy 64-bit chunk flags",
+                 "[manifest][catch2][compatibility]") {
+    const auto bytes = makeBinaryManifestFixture(true);
+
+    auto result = manager->deserialize(bytes);
+
+    REQUIRE(result.has_value());
+    REQUIRE((result.value().chunks.size() == 3));
+    CHECK((result.value().chunks[0].flags == 1));
+    CHECK((result.value().chunks[1].flags == 2));
+    CHECK((result.value().chunks[2].flags == 3));
+    CHECK((result.value().calculateTotalSize() == result.value().fileSize));
+}
+
+TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager rejects oversized legacy chunk flags",
+                 "[manifest][catch2][compatibility]") {
+    const auto bytes = makeBinaryManifestFixture(
+        true, static_cast<std::uint64_t>(std::numeric_limits<std::uint32_t>::max()) + 1);
+
+    auto result = manager->deserialize(bytes);
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK((result.error() == ErrorCode::CorruptedData));
+}
+
+TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager rejects trailing binary manifest bytes",
+                 "[manifest][catch2][compatibility]") {
+    auto bytes = makeBinaryManifestFixture(false);
+    appendFixturePod(bytes, std::uint32_t{0});
+
+    auto result = manager->deserialize(bytes);
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK((result.error() == ErrorCode::CorruptedData));
 }
 
 TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager deserialize corrupted data fails",
@@ -214,7 +314,7 @@ TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager deserialize corrupted dat
 
     auto result = manager->deserialize(corruptedData);
     REQUIRE_FALSE(result.has_value());
-    CHECK(result.error() == ErrorCode::CorruptedData);
+    CHECK((result.error() == ErrorCode::CorruptedData));
 }
 
 TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager validate manifest", "[manifest][catch2]") {
@@ -293,7 +393,7 @@ TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager file reconstruction", "[m
 
     // Verify reconstructed file
     REQUIRE(std::filesystem::exists(outputPath));
-    CHECK(std::filesystem::file_size(outputPath) == manifest.fileSize);
+    CHECK((std::filesystem::file_size(outputPath) == manifest.fileSize));
 
     // Verify file content matches original
     std::ifstream file(outputPath, std::ios::binary);
@@ -353,7 +453,7 @@ TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager file reconstruction missi
 
     auto result = manager->reconstructFile(manifest, outputPath, provider);
     REQUIRE_FALSE(result.has_value());
-    CHECK(result.error() == ErrorCode::ChunkNotFound);
+    CHECK((result.error() == ErrorCode::ChunkNotFound));
 }
 
 TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager async file reconstruction",
@@ -397,24 +497,24 @@ TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager async file reconstruction
 
     // Should complete within reasonable time
     auto status = future.wait_for(std::chrono::seconds(5));
-    REQUIRE(status == std::future_status::ready);
+    REQUIRE((status == std::future_status::ready));
 
     auto result = future.get();
     REQUIRE(result.has_value());
 
     // Verify file was created
     REQUIRE(std::filesystem::exists(outputPath));
-    CHECK(std::filesystem::file_size(outputPath) == manifest.fileSize);
+    CHECK((std::filesystem::file_size(outputPath) == manifest.fileSize));
 }
 
 TEST_CASE("ManifestManager mime type detection", "[manifest][catch2]") {
     // Test various file extensions
-    CHECK(ManifestManager::detectMimeType("test.txt") == "text/plain");
-    CHECK(ManifestManager::detectMimeType("config.json") == "application/json");
-    CHECK(ManifestManager::detectMimeType("image.jpg") == "image/jpeg");
-    CHECK(ManifestManager::detectMimeType("image.JPEG") == "image/jpeg"); // Case insensitive
-    CHECK(ManifestManager::detectMimeType("document.pdf") == "application/pdf");
-    CHECK(ManifestManager::detectMimeType("unknown.xyz") == "application/octet-stream");
+    CHECK((ManifestManager::detectMimeType("test.txt") == "text/plain"));
+    CHECK((ManifestManager::detectMimeType("config.json") == "application/json"));
+    CHECK((ManifestManager::detectMimeType("image.jpg") == "image/jpeg"));
+    CHECK((ManifestManager::detectMimeType("image.JPEG") == "image/jpeg")); // Case insensitive
+    CHECK((ManifestManager::detectMimeType("document.pdf") == "application/pdf"));
+    CHECK((ManifestManager::detectMimeType("unknown.xyz") == "application/octet-stream"));
 }
 
 TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager statistics", "[manifest][catch2]") {
@@ -434,9 +534,9 @@ TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager statistics", "[manifest][
     }
 
     auto stats = manager->getStats();
-    CHECK(stats.totalManifests >= 3u); // At least 3 manifests
-    CHECK(stats.avgSerializationTime.count() > 0);
-    CHECK(stats.avgDeserializationTime.count() > 0);
+    CHECK((stats.totalManifests >= 3u)); // At least 3 manifests
+    CHECK((stats.avgSerializationTime.count() > 0));
+    CHECK((stats.avgDeserializationTime.count() > 0));
 }
 
 TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager concurrent operations",
@@ -482,7 +582,7 @@ TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager concurrent operations",
         thread.join();
     }
 
-    CHECK(successCount.load() == numThreads * operationsPerThread);
+    CHECK((successCount.load() == numThreads * operationsPerThread));
 }
 
 TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager performance benchmark",
@@ -507,12 +607,12 @@ TEST_CASE_METHOD(ManifestTestFixture, "ManifestManager performance benchmark",
         std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count() / 10;
 
     // Should serialize 100KB file manifest in < 50ms
-    CHECK(avgSerializationTime < 50);
+    CHECK((avgSerializationTime < 50));
 
     // Verify manifest size is < 10% of file size
     auto serializeResult = manager->serialize(manifest);
     REQUIRE(serializeResult.has_value());
 
     double manifestRatio = static_cast<double>(serializeResult.value().size()) / manifest.fileSize;
-    CHECK(manifestRatio < 0.1); // < 10%
+    CHECK((manifestRatio < 0.1)); // < 10%
 }

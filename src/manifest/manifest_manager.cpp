@@ -11,7 +11,7 @@ namespace yamsfmt = fmt;
 #endif
 
 #include <algorithm>
-#include <cerrno>
+#include <charconv>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -21,6 +21,7 @@ namespace yamsfmt = fmt;
 #include <span>
 #include <thread>
 #include <type_traits>
+#include <utility>
 
 // Include generated protobuf headers
 #ifdef YAMS_USE_PROTOBUF
@@ -41,15 +42,15 @@ std::optional<std::string> getenvCopy(const char* name) {
 }
 
 std::optional<uint32_t> checkedU32(std::size_t value) {
-    if (value > std::numeric_limits<uint32_t>::max()) {
+    uint32_t narrowed = 0;
+    if (__builtin_add_overflow(std::size_t{0}, value, &narrowed)) {
         return std::nullopt;
     }
-    return static_cast<uint32_t>(value);
+    return narrowed;
 }
 
 template <typename T> void appendPod(std::vector<std::byte>& out, const T& value) {
-    static_assert(std::is_trivially_copyable_v<T>,
-                  "appendPod requires a trivially copyable type");
+    static_assert(std::is_trivially_copyable_v<T>, "appendPod requires a trivially copyable type");
     const auto bytes = std::as_bytes(std::span<const T, 1>{&value, 1});
     out.insert(out.end(), bytes.begin(), bytes.end());
 }
@@ -87,6 +88,89 @@ bool readString(std::span<const std::byte> data, std::size_t& offset, std::strin
     return true;
 }
 
+enum class BinaryManifestFlagWidth : uint8_t { Canonical32, Legacy64 };
+
+Result<Manifest> deserializeBinaryManifestUnchecked(std::span<const std::byte> data,
+                                                    std::size_t maxChunksPerManifest,
+                                                    BinaryManifestFlagWidth flagWidth) {
+    if (data.size() < 4 || std::memcmp(data.data(), "YAMS", 4) != 0) {
+        return ErrorCode::CorruptedData;
+    }
+
+    std::size_t offset = 4;
+    Manifest manifest;
+    uint32_t numChunks = 0;
+    if (!readPod(data, offset, manifest.version) || !readString(data, offset, manifest.fileHash) ||
+        !readPod(data, offset, manifest.fileSize) ||
+        !readString(data, offset, manifest.originalName) ||
+        !readString(data, offset, manifest.mimeType) || !readPod(data, offset, numChunks) ||
+        numChunks > maxChunksPerManifest) {
+        return ErrorCode::CorruptedData;
+    }
+
+    manifest.chunks.reserve(numChunks);
+    for (uint32_t i = 0; i < numChunks; ++i) {
+        ChunkRef chunk;
+        if (!readString(data, offset, chunk.hash) || !readPod(data, offset, chunk.offset) ||
+            !readPod(data, offset, chunk.size)) {
+            return ErrorCode::CorruptedData;
+        }
+
+        if (flagWidth == BinaryManifestFlagWidth::Canonical32) {
+            if (!readPod(data, offset, chunk.flags)) {
+                return ErrorCode::CorruptedData;
+            }
+        } else {
+            uint64_t legacyFlags = 0;
+            if (!readPod(data, offset, legacyFlags) ||
+                legacyFlags > std::numeric_limits<uint32_t>::max()) {
+                return ErrorCode::CorruptedData;
+            }
+            chunk.flags = static_cast<uint32_t>(legacyFlags);
+        }
+        manifest.chunks.emplace_back(std::exchange(chunk, ChunkRef{}));
+    }
+
+    if (offset != data.size()) {
+        return ErrorCode::CorruptedData;
+    }
+    if (!manifest.isValid()) {
+        return ErrorCode::ManifestInvalid;
+    }
+    return Result<Manifest>(std::exchange(manifest, Manifest{}));
+}
+
+Result<Manifest> tryDeserializeBinaryManifest(std::span<const std::byte> data,
+                                              std::size_t maxChunksPerManifest,
+                                              BinaryManifestFlagWidth flagWidth) {
+    try {
+        return deserializeBinaryManifestUnchecked(data, maxChunksPerManifest, flagWidth);
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::CorruptedData,
+                     std::string("Failed to parse binary manifest: ") + error.what()};
+    }
+}
+
+Result<Manifest> deserializeBinaryManifest(std::span<const std::byte> data,
+                                           std::size_t maxChunksPerManifest) {
+    auto canonical = tryDeserializeBinaryManifest(data, maxChunksPerManifest,
+                                                  BinaryManifestFlagWidth::Canonical32);
+    if (canonical) {
+        return canonical;
+    }
+
+    auto legacy =
+        tryDeserializeBinaryManifest(data, maxChunksPerManifest, BinaryManifestFlagWidth::Legacy64);
+    if (legacy) {
+        return legacy;
+    }
+    if (canonical.error() == ErrorCode::ManifestInvalid ||
+        legacy.error() == ErrorCode::ManifestInvalid) {
+        return ErrorCode::ManifestInvalid;
+    }
+    return ErrorCode::CorruptedData;
+}
+
 } // namespace
 
 // Internal implementation details
@@ -94,8 +178,8 @@ struct ManifestManager::Impl {
     Config config;
     mutable std::mutex statsMutex;
     mutable ManifestStats stats;
-    mutable size_t serCount = 0;
-    mutable size_t deserCount = 0;
+    mutable int64_t serCount = 0;
+    mutable int64_t deserCount = 0;
 
     // Simple LRU cache for manifests
     struct CacheEntry {
@@ -109,27 +193,43 @@ struct ManifestManager::Impl {
 
     explicit Impl(Config cfg) : config(std::move(cfg)) {}
 
+    static void updateAverage(std::chrono::milliseconds& average, int64_t& count,
+                              std::chrono::milliseconds sample) {
+        const int64_t sampleCount = sample.count();
+        int64_t nextCount = 0;
+        if (sampleCount <= 0 || __builtin_add_overflow(count, int64_t{1}, &nextCount) ||
+            nextCount <= 0) {
+            return;
+        }
+
+        const int64_t averageCount = average.count();
+        int64_t delta = 0;
+        int64_t nextAverage = averageCount;
+        if (sampleCount >= averageCount) {
+            if (__builtin_sub_overflow(sampleCount, averageCount, &delta) ||
+                __builtin_add_overflow(averageCount, delta / nextCount, &nextAverage)) {
+                return;
+            }
+        } else if (__builtin_sub_overflow(averageCount, sampleCount, &delta) ||
+                   __builtin_sub_overflow(averageCount, delta / nextCount, &nextAverage)) {
+            return;
+        }
+
+        count = nextCount;
+        average = std::chrono::milliseconds(nextAverage);
+    }
+
     void updateStats(std::chrono::milliseconds serTime, std::chrono::milliseconds deserTime) const {
         std::lock_guard lock(statsMutex);
-        stats.totalManifests++;
+        std::size_t nextTotal = 0;
+        if (!__builtin_add_overflow(stats.totalManifests, std::size_t{1}, &nextTotal)) {
+            stats.totalManifests = nextTotal;
+        }
         spdlog::trace("Updated stats: totalManifests={}, serTime={}ms, deserTime={}ms",
                       stats.totalManifests, serTime.count(), deserTime.count());
 
-        // Only update serialization time if non-zero
-        if (serTime.count() > 0) {
-            serCount++;
-            int64_t totalSerTime =
-                stats.avgSerializationTime.count() * (serCount - 1) + serTime.count();
-            stats.avgSerializationTime = std::chrono::milliseconds(totalSerTime / serCount);
-        }
-
-        // Only update deserialization time if non-zero
-        if (deserTime.count() > 0) {
-            deserCount++;
-            int64_t totalDeserTime =
-                stats.avgDeserializationTime.count() * (deserCount - 1) + deserTime.count();
-            stats.avgDeserializationTime = std::chrono::milliseconds(totalDeserTime / deserCount);
-        }
+        updateAverage(stats.avgSerializationTime, serCount, serTime);
+        updateAverage(stats.avgDeserializationTime, deserCount, deserTime);
     }
 
     void addToCache(const std::string& key, const Manifest& manifest) const {
@@ -345,7 +445,7 @@ Result<Manifest> ManifestManager::deserialize(std::span<const std::byte> data) c
         auto cacheKey = hasher->hash(data);
 
         if (auto cached = pImpl->getFromCache(cacheKey)) {
-            return Result<Manifest>(std::move(cached.value()));
+            return Result<Manifest>(std::exchange(cached.value(), Manifest{}));
         }
 
         // Try decompression if needed
@@ -353,164 +453,68 @@ Result<Manifest> ManifestManager::deserialize(std::span<const std::byte> data) c
         if (config_.enableCompression) {
             auto decompressed = decompressData(data);
             if (decompressed.has_value()) {
-                processedData = std::move(decompressed.value());
+                processedData.swap(decompressed.value());
             }
         }
 
+        const bool isBinaryManifest =
+            processedData.size() >= 4 && std::memcmp(processedData.data(), "YAMS", 4) == 0;
+        Result<Manifest> parsed = ErrorCode::CorruptedData;
+        if (isBinaryManifest) {
+            parsed = deserializeBinaryManifest(processedData, config_.maxChunksPerManifest);
+        } else {
 #ifdef YAMS_USE_PROTOBUF
-        // Parse protobuf
-        yams::manifest::FileManifest pb_manifest;
-        std::string str(reinterpret_cast<const char*>(processedData.data()), processedData.size());
-
-        if (!pb_manifest.ParseFromString(str)) {
-            return Result<Manifest>(ErrorCode::CorruptedData);
-        }
-
-        // Convert to internal format
-        Manifest manifest;
-        manifest.version = pb_manifest.version();
-        manifest.fileHash = pb_manifest.file_hash();
-        manifest.fileSize = pb_manifest.file_size();
-        manifest.originalName = pb_manifest.original_name();
-        manifest.mimeType = pb_manifest.mime_type();
-        manifest.createdAt = std::chrono::system_clock::from_time_t(pb_manifest.created_at());
-        manifest.modifiedAt = std::chrono::system_clock::from_time_t(pb_manifest.modified_at());
-        manifest.compression = pb_manifest.compression();
-        manifest.uncompressedSize = pb_manifest.uncompressed_size();
-        manifest.checksum = pb_manifest.checksum();
-
-        // Convert chunks
-        manifest.chunks.reserve(pb_manifest.chunks_size());
-        for (const auto& pb_chunk : pb_manifest.chunks()) {
-            manifest.chunks.emplace_back(ChunkRef{.hash = pb_chunk.hash(),
-                                                  .offset = pb_chunk.offset(),
-                                                  .size = pb_chunk.size(),
-                                                  .flags = pb_chunk.flags()});
-        }
-
-        // Convert metadata
-        for (const auto& [key, value] : pb_manifest.metadata()) {
-            manifest.metadata[key] = value;
-        }
-
-        // Validate manifest
-        if (!manifest.isValid()) {
-            return Result<Manifest>(ErrorCode::ManifestInvalid);
-        }
-
-        // Add to cache
-        pImpl->addToCache(cacheKey, manifest);
-
-        auto endTime = std::chrono::steady_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
-        // Ensure minimum 1ms for testing (operations might be too fast)
-        if (duration.count() == 0) {
-            duration = std::chrono::milliseconds(1);
-        }
-        pImpl->updateStats(std::chrono::milliseconds(0), duration);
-
-        spdlog::debug("Deserialized manifest with {} chunks in {} ms", manifest.chunks.size(),
-                      duration.count());
-
-        return Result<Manifest>(std::move(manifest));
-#else
-        // Fallback binary deserialization
-        if (processedData.size() < 4) {
-            return Result<Manifest>(ErrorCode::CorruptedData);
-        }
-
-        std::span<const std::byte> bytes(processedData.data(), processedData.size());
-        size_t offset = 0;
-
-        // Check magic header
-        if (processedData.size() - offset < 4 ||
-            std::memcmp(processedData.data(), "YAMS", 4) != 0) {
-            return Result<Manifest>(ErrorCode::CorruptedData);
-        }
-        offset += 4;
-
-        // Read version
-        uint32_t version = 0;
-        if (!readPod(bytes, offset, version)) {
-            return Result<Manifest>(ErrorCode::CorruptedData);
-        }
-
-        // Read file hash
-        std::string fileHash;
-        if (!readString(bytes, offset, fileHash)) {
-            return Result<Manifest>(ErrorCode::CorruptedData);
-        }
-
-        // Read file size
-        uint64_t fileSize = 0;
-        if (!readPod(bytes, offset, fileSize)) {
-            return Result<Manifest>(ErrorCode::CorruptedData);
-        }
-
-        // Read original name
-        std::string originalName;
-        if (!readString(bytes, offset, originalName)) {
-            return Result<Manifest>(ErrorCode::CorruptedData);
-        }
-
-        // Read MIME type
-        std::string mimeType;
-        if (!readString(bytes, offset, mimeType)) {
-            return Result<Manifest>(ErrorCode::CorruptedData);
-        }
-
-        // Read number of chunks
-        uint32_t numChunks = 0;
-        if (!readPod(bytes, offset, numChunks)) {
-            return Result<Manifest>(ErrorCode::CorruptedData);
-        }
-        if (numChunks > config_.maxChunksPerManifest) {
-            return Result<Manifest>(ErrorCode::CorruptedData);
-        }
-
-        // Create manifest
-        Manifest manifest;
-        manifest.version = version;
-        manifest.fileHash = fileHash;
-        manifest.fileSize = fileSize;
-        manifest.originalName = originalName;
-        manifest.mimeType = mimeType;
-        manifest.chunks.reserve(numChunks);
-
-        // Read chunks
-        for (uint32_t i = 0; i < numChunks; ++i) {
-            ChunkRef chunk;
-            if (!readString(bytes, offset, chunk.hash) || !readPod(bytes, offset, chunk.offset) ||
-                !readPod(bytes, offset, chunk.size) || !readPod(bytes, offset, chunk.flags)) {
-                return Result<Manifest>(ErrorCode::CorruptedData);
+            yams::manifest::FileManifest protobufManifest;
+            const std::string serialized(reinterpret_cast<const char*>(processedData.data()),
+                                         processedData.size());
+            if (!protobufManifest.ParseFromString(serialized)) {
+                return ErrorCode::CorruptedData;
             }
-            manifest.chunks.push_back(std::move(chunk));
+
+            Manifest manifest;
+            manifest.version = protobufManifest.version();
+            manifest.fileHash = protobufManifest.file_hash();
+            manifest.fileSize = protobufManifest.file_size();
+            manifest.originalName = protobufManifest.original_name();
+            manifest.mimeType = protobufManifest.mime_type();
+            manifest.createdAt =
+                std::chrono::system_clock::from_time_t(protobufManifest.created_at());
+            manifest.modifiedAt =
+                std::chrono::system_clock::from_time_t(protobufManifest.modified_at());
+            manifest.compression = protobufManifest.compression();
+            manifest.uncompressedSize = protobufManifest.uncompressed_size();
+            manifest.checksum = protobufManifest.checksum();
+            manifest.chunks.reserve(protobufManifest.chunks_size());
+            for (const auto& protobufChunk : protobufManifest.chunks()) {
+                manifest.chunks.emplace_back(ChunkRef{.hash = protobufChunk.hash(),
+                                                      .offset = protobufChunk.offset(),
+                                                      .size = protobufChunk.size(),
+                                                      .flags = protobufChunk.flags()});
+            }
+            for (const auto& [key, value] : protobufManifest.metadata()) {
+                manifest.metadata[key] = value;
+            }
+            parsed = manifest.isValid() ? Result<Manifest>(std::exchange(manifest, Manifest{}))
+                                        : Result<Manifest>(ErrorCode::ManifestInvalid);
+#endif
+        }
+        if (!parsed) {
+            return parsed.error();
         }
 
-        if (!manifest.isValid()) {
-            return Result<Manifest>(ErrorCode::ManifestInvalid);
-        }
-
-        // Add to cache
+        auto manifest = std::exchange(parsed.value(), Manifest{});
         pImpl->addToCache(cacheKey, manifest);
 
-        spdlog::debug("Deserialized manifest with {} chunks using fallback binary format",
-                      manifest.chunks.size());
-
-        // Update statistics for non-protobuf path
-        auto endTime = std::chrono::steady_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
-        // Ensure minimum 1ms for testing (operations might be too fast)
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - startTime);
         if (duration.count() == 0) {
             duration = std::chrono::milliseconds(1);
         }
         pImpl->updateStats(std::chrono::milliseconds(0), duration);
-
-        spdlog::debug("Deserialized manifest with {} chunks in {} ms (binary format)",
-                      manifest.chunks.size(), duration.count());
-
-        return Result<Manifest>(std::move(manifest));
-#endif
+        spdlog::debug("Deserialized {} manifest with {} chunks in {} ms",
+                      isBinaryManifest ? "binary" : "protobuf", manifest.chunks.size(),
+                      duration.count());
+        return Result<Manifest>(std::exchange(manifest, Manifest{}));
 
     } catch (const std::exception& e) {
         spdlog::error("Failed to deserialize manifest: {}", e.what());
@@ -537,7 +541,7 @@ Result<Manifest> ManifestManager::createManifest(const FileInfo& fileInfo,
         // Update statistics
         pImpl->updateStats(std::chrono::milliseconds(0), std::chrono::milliseconds(0));
 
-        return Result<Manifest>(std::move(manifest));
+        return Result<Manifest>(std::exchange(manifest, Manifest{}));
 
     } catch (const std::exception& e) {
         spdlog::error("Failed to create manifest for file {}: {}", fileInfo.originalName, e.what());
@@ -650,12 +654,13 @@ Result<void> ManifestManager::reconstructFile(const Manifest& manifest,
     const std::size_t totalChunks = manifest.chunks.size();
     // Prefetch window size: default to half the system cores; allow override via env
     std::size_t prefetch = std::max<std::size_t>(1, std::thread::hardware_concurrency() / 2);
-    if (auto s = getenvCopy("YAMS_RECONSTRUCT_PREFETCH")) {
-        char* end = nullptr;
-        errno = 0;
-        long v = std::strtol(s->c_str(), &end, 10);
-        if (errno == 0 && end != s->c_str() && end != nullptr && *end == '\0' && v > 0 && v <= 64) {
-            prefetch = static_cast<std::size_t>(v);
+    if (auto value = getenvCopy("YAMS_RECONSTRUCT_PREFETCH")) {
+        std::size_t parsed = 0;
+        const char* begin = value->data();
+        const char* end = begin + value->size();
+        const auto [parsedEnd, error] = std::from_chars(begin, end, parsed);
+        if (error == std::errc{} && parsedEnd == end && parsed > 0 && parsed <= 64) {
+            prefetch = parsed;
         }
     }
     // Clamp to a reasonable upper bound
@@ -716,7 +721,8 @@ Result<void> ManifestManager::reconstructFile(const Manifest& manifest,
         }
 
         // Write chunk to file
-        file.write(reinterpret_cast<const char*>(chunkData.data()), chunkData.size());
+        file.write(reinterpret_cast<const char*>(chunkData.data()),
+                   static_cast<std::streamsize>(in.ref.size));
         if (!file) {
             return Result<void>(
                 Error{ErrorCode::WriteError,

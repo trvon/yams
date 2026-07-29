@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <random>
@@ -74,7 +75,7 @@ constexpr auto kKgAliasUpsertSql = R"(
 
 std::string buildSqlPlaceholders(std::size_t count) {
     std::string placeholders;
-    placeholders.reserve(count * 3);
+    placeholders.reserve(count);
     const char* separator = "";
     for (std::size_t i = 0; i < count; ++i) {
         placeholders += separator;
@@ -82,6 +83,15 @@ std::string buildSqlPlaceholders(std::size_t count) {
         placeholders += "?";
     }
     return placeholders;
+}
+
+Result<void> accumulateDeletedRows(std::int64_t& total, std::int64_t count) {
+    std::int64_t nextTotal = 0;
+    if (count < 0 || __builtin_add_overflow(total, count, &nextTotal)) {
+        return Error{ErrorCode::DatabaseError, "Invalid accumulated SQLite deletion count"};
+    }
+    total = nextTotal;
+    return Result<void>();
 }
 
 Result<void> bindOptionalText(Statement& stmt, int index, const std::optional<std::string>& value) {
@@ -1630,11 +1640,15 @@ public:
             auto execR = docStmt.execute();
             if (!execR)
                 return execR.error();
-            totalDeleted += db.changes();
+            if (auto added = accumulateDeletedRows(totalDeleted, db.changes()); !added)
+                return added.error();
 
             // Delete symbol nodes that have this document_hash in their properties
-            auto symStmtR = db.prepare(
-                "DELETE FROM kg_nodes WHERE json_extract(properties, '$.document_hash') = ?");
+            auto symStmtR = db.prepare(R"(
+                DELETE FROM kg_nodes
+                WHERE CASE WHEN json_valid(properties)
+                           THEN json_extract(properties, '$.document_hash') END = ?
+            )");
             if (!symStmtR)
                 return symStmtR.error();
             auto symStmt = std::move(symStmtR).value();
@@ -1644,7 +1658,8 @@ public:
             execR = symStmt.execute();
             if (!execR)
                 return execR.error();
-            totalDeleted += db.changes();
+            if (auto added = accumulateDeletedRows(totalDeleted, db.changes()); !added)
+                return added.error();
 
             spdlog::debug("deleteNodesForDocumentHash: deleted {} nodes for hash {}", totalDeleted,
                           documentHash);
@@ -1652,14 +1667,35 @@ public:
         });
     }
 
+    Result<DocumentGraphCleanupResult>
+    deleteDocumentGraphData(const std::vector<DocumentGraphCleanupTarget>& targets) override {
+        auto batchResult = beginWriteBatch();
+        if (!batchResult) {
+            return batchResult.error();
+        }
+        auto batch = std::exchange(batchResult.value(), nullptr);
+        auto cleanupResult = batch->deleteDocumentGraphData(targets);
+        if (!cleanupResult) {
+            return cleanupResult.error();
+        }
+        if (auto commitResult = batch->commit(); !commitResult) {
+            return commitResult.error();
+        }
+        return cleanupResult.value();
+    }
+
     Result<std::int64_t> deleteNodesForSourceFile(std::string_view filePath) override {
         return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
             // Canonical symbol nodes (kind:qualName@file) carry file_path; unresolved
             // reference nodes carry source_file. Neither has a document_hash, so they are not
             // covered by deleteNodesForDocumentHash. Their edges cascade via FK once removed.
-            auto stmtR =
-                db.prepare("DELETE FROM kg_nodes WHERE json_extract(properties, '$.file_path') = ? "
-                           "OR json_extract(properties, '$.source_file') = ?");
+            auto stmtR = db.prepare(R"(
+                DELETE FROM kg_nodes
+                WHERE CASE WHEN json_valid(properties)
+                           THEN json_extract(properties, '$.file_path') END = ?
+                   OR CASE WHEN json_valid(properties)
+                           THEN json_extract(properties, '$.source_file') END = ?
+            )");
             if (!stmtR)
                 return stmtR.error();
             auto stmt = std::move(stmtR).value();
@@ -1686,14 +1722,20 @@ public:
                      (SELECT sha256_hash FROM documents WHERE sha256_hash IS NOT NULL))
                   OR (node_key LIKE 'blob:%' AND substr(node_key, 6) NOT IN
                      (SELECT sha256_hash FROM documents WHERE sha256_hash IS NOT NULL))
-                  OR (json_extract(properties, '$.document_hash') IS NOT NULL
-                      AND json_extract(properties, '$.document_hash') NOT IN
+                  OR (CASE WHEN json_valid(properties)
+                           THEN json_extract(properties, '$.document_hash') END IS NOT NULL
+                      AND CASE WHEN json_valid(properties)
+                               THEN json_extract(properties, '$.document_hash') END NOT IN
                          (SELECT sha256_hash FROM documents WHERE sha256_hash IS NOT NULL))
-                  OR (json_extract(properties, '$.file_path') IS NOT NULL
-                      AND json_extract(properties, '$.file_path') NOT IN
+                  OR (CASE WHEN json_valid(properties)
+                           THEN json_extract(properties, '$.file_path') END IS NOT NULL
+                      AND CASE WHEN json_valid(properties)
+                               THEN json_extract(properties, '$.file_path') END NOT IN
                          (SELECT file_path FROM documents WHERE file_path IS NOT NULL))
-                  OR (json_extract(properties, '$.source_file') IS NOT NULL
-                      AND json_extract(properties, '$.source_file') NOT IN
+                  OR (CASE WHEN json_valid(properties)
+                           THEN json_extract(properties, '$.source_file') END IS NOT NULL
+                      AND CASE WHEN json_valid(properties)
+                               THEN json_extract(properties, '$.source_file') END NOT IN
                          (SELECT file_path FROM documents WHERE file_path IS NOT NULL))
             )SQL";
             auto stmtR = db.prepare(kSql);
@@ -1710,8 +1752,11 @@ public:
 
     Result<std::int64_t> deleteEdgesForSourceFile(std::string_view filePath) override {
         return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
-            auto stmtR = db.prepare(
-                "DELETE FROM kg_edges WHERE json_extract(properties, '$.source_file') = ?");
+            auto stmtR = db.prepare(R"(
+                DELETE FROM kg_edges
+                WHERE CASE WHEN json_valid(properties)
+                           THEN json_extract(properties, '$.source_file') END = ?
+            )");
             if (!stmtR)
                 return stmtR.error();
             auto stmt = std::move(stmtR).value();
@@ -1776,7 +1821,8 @@ public:
             });
             if (!batchRes)
                 return batchRes.error();
-            totalDeleted += batchRes.value();
+            if (auto added = accumulateDeletedRows(totalDeleted, batchRes.value()); !added)
+                return added.error();
             if (batchRes.value() < kBatchSize)
                 break;
         }
@@ -1811,7 +1857,8 @@ public:
             });
             if (!batchRes)
                 return batchRes.error();
-            totalDeleted += batchRes.value();
+            if (auto added = accumulateDeletedRows(totalDeleted, batchRes.value()); !added)
+                return added.error();
             if (batchRes.value() < kBatchSize)
                 break;
         }
@@ -3120,10 +3167,14 @@ public:
         auto execR = docStmt.execute();
         if (!execR)
             return execR.error();
-        totalDeleted += db.changes();
+        if (auto added = accumulateDeletedRows(totalDeleted, db.changes()); !added)
+            return added.error();
 
-        auto symStmtR = db.prepare(
-            "DELETE FROM kg_nodes WHERE json_extract(properties, '$.document_hash') = ?");
+        auto symStmtR = db.prepare(R"(
+            DELETE FROM kg_nodes
+            WHERE CASE WHEN json_valid(properties)
+                       THEN json_extract(properties, '$.document_hash') END = ?
+        )");
         if (!symStmtR)
             return symStmtR.error();
         auto symStmt = std::move(symStmtR).value();
@@ -3133,11 +3184,141 @@ public:
         execR = symStmt.execute();
         if (!execR)
             return execR.error();
-        totalDeleted += db.changes();
+        if (auto added = accumulateDeletedRows(totalDeleted, db.changes()); !added)
+            return added.error();
 
         spdlog::debug("WriteBatch::deleteNodesForDocumentHash: deleted {} nodes for hash {}",
                       totalDeleted, documentHash);
         return totalDeleted;
+    }
+
+    Result<DocumentGraphCleanupResult>
+    deleteDocumentGraphData(const std::vector<DocumentGraphCleanupTarget>& targets) override {
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        if (targets.empty()) {
+            return DocumentGraphCleanupResult{};
+        }
+
+        Database& db = **conn_;
+        auto edgeStmtResult = db.prepare(R"(
+            DELETE FROM kg_edges
+            WHERE CASE WHEN json_valid(properties)
+                       THEN json_extract(properties, '$.source_file') END = ?
+        )");
+        if (!edgeStmtResult) {
+            return edgeStmtResult.error();
+        }
+        auto edgeStmt = std::exchange(edgeStmtResult.value(), Statement{});
+
+        auto docNodeStmtResult = db.prepare("DELETE FROM kg_nodes WHERE node_key = ?");
+        if (!docNodeStmtResult) {
+            return docNodeStmtResult.error();
+        }
+        auto docNodeStmt = std::exchange(docNodeStmtResult.value(), Statement{});
+
+        auto hashNodeStmtResult = db.prepare(R"(
+            DELETE FROM kg_nodes
+            WHERE CASE WHEN json_valid(properties)
+                       THEN json_extract(properties, '$.document_hash') END = ?
+        )");
+        if (!hashNodeStmtResult) {
+            return hashNodeStmtResult.error();
+        }
+        auto hashNodeStmt = std::exchange(hashNodeStmtResult.value(), Statement{});
+
+        auto pathNodeStmtResult = db.prepare(R"(
+            DELETE FROM kg_nodes
+            WHERE CASE WHEN json_valid(properties)
+                       THEN json_extract(properties, '$.file_path') END = ?
+               OR CASE WHEN json_valid(properties)
+                       THEN json_extract(properties, '$.source_file') END = ?
+        )");
+        if (!pathNodeStmtResult) {
+            return pathNodeStmtResult.error();
+        }
+        auto pathNodeStmt = std::exchange(pathNodeStmtResult.value(), Statement{});
+
+        const auto executeDelete = [&](Statement& stmt,
+                                       const auto& bindValues) -> Result<std::int64_t> {
+            if (auto bindResult = bindValues(stmt); !bindResult) {
+                return bindResult.error();
+            }
+            if (auto executeResult = stmt.execute(); !executeResult) {
+                return executeResult.error();
+            }
+            const auto deleted = static_cast<std::int64_t>(db.changes());
+            if (auto resetResult = stmt.reset(); !resetResult) {
+                return resetResult.error();
+            }
+            if (auto clearResult = stmt.clearBindings(); !clearResult) {
+                return clearResult.error();
+            }
+            return deleted;
+        };
+        const auto accumulate = [](std::int64_t& total, std::int64_t count) -> Result<void> {
+            if (count < 0 || total > std::numeric_limits<std::int64_t>::max() - count) {
+                return Error{ErrorCode::DatabaseError, "Invalid document graph cleanup count"};
+            }
+            total += count;
+            return Result<void>();
+        };
+
+        DocumentGraphCleanupResult result;
+        for (const auto& target : targets) {
+            if (!target.sourceFile.empty()) {
+                auto deletedEdges = executeDelete(
+                    edgeStmt, [&](Statement& stmt) { return stmt.bind(1, target.sourceFile); });
+                if (!deletedEdges) {
+                    return deletedEdges.error();
+                }
+                if (auto added = accumulate(result.edgesDeleted, deletedEdges.value()); !added) {
+                    return added.error();
+                }
+            }
+
+            if (!target.documentHash.empty()) {
+                const std::string docNodeKey = "doc:" + target.documentHash;
+                auto deletedDocNode = executeDelete(
+                    docNodeStmt, [&](Statement& stmt) { return stmt.bind(1, docNodeKey); });
+                if (!deletedDocNode) {
+                    return deletedDocNode.error();
+                }
+                if (auto added = accumulate(result.nodesDeleted, deletedDocNode.value()); !added) {
+                    return added.error();
+                }
+
+                auto deletedHashNodes = executeDelete(hashNodeStmt, [&](Statement& stmt) {
+                    return stmt.bind(1, target.documentHash);
+                });
+                if (!deletedHashNodes) {
+                    return deletedHashNodes.error();
+                }
+                if (auto added = accumulate(result.nodesDeleted, deletedHashNodes.value());
+                    !added) {
+                    return added.error();
+                }
+            }
+
+            if (!target.sourceFile.empty()) {
+                auto deletedPathNodes = executeDelete(pathNodeStmt, [&](Statement& stmt) {
+                    auto firstBind = stmt.bind(1, target.sourceFile);
+                    if (!firstBind) {
+                        return firstBind;
+                    }
+                    return stmt.bind(2, target.sourceFile);
+                });
+                if (!deletedPathNodes) {
+                    return deletedPathNodes.error();
+                }
+                if (auto added = accumulate(result.nodesDeleted, deletedPathNodes.value());
+                    !added) {
+                    return added.error();
+                }
+            }
+        }
+        return result;
     }
 
     Result<void> deleteDocEntitiesForDocument(std::int64_t documentId) override {
@@ -3173,8 +3354,11 @@ public:
         }
         Database& db = **conn_;
 
-        auto stmtR = db.prepareCached(
-            "DELETE FROM kg_edges WHERE json_extract(properties, '$.source_file') = ?");
+        auto stmtR = db.prepareCached(R"(
+            DELETE FROM kg_edges
+            WHERE CASE WHEN json_valid(properties)
+                       THEN json_extract(properties, '$.source_file') END = ?
+        )");
         if (!stmtR)
             return stmtR.error();
         auto& stmt = *stmtR.value();
@@ -3242,7 +3426,8 @@ public:
             if (!execR)
                 return execR.error();
             const auto deleted = static_cast<std::int64_t>(db.changes());
-            totalDeleted += deleted;
+            if (auto added = accumulateDeletedRows(totalDeleted, deleted); !added)
+                return added.error();
             if (deleted < kBatchSize)
                 break;
         }
@@ -3278,7 +3463,8 @@ public:
             if (!execR)
                 return execR.error();
             const auto deleted = static_cast<std::int64_t>(db.changes());
-            totalDeleted += deleted;
+            if (auto added = accumulateDeletedRows(totalDeleted, deleted); !added)
+                return added.error();
             if (deleted < kBatchSize)
                 break;
         }
@@ -3353,6 +3539,7 @@ public:
 
         thread_local std::mt19937 rng(std::random_device{}());
 
+        int baseDelayMs = kBaseDelayMs;
         for (int attempt = 1;; ++attempt) {
             auto result = (*conn_)->commit();
             if (result) {
@@ -3378,12 +3565,22 @@ public:
                 return result;
             }
 
-            // Exponential backoff with jitter (±25%), capped at kMaxDelayMs
-            int baseDelayMs = std::min(kBaseDelayMs * (1 << (attempt - 1)), kMaxDelayMs);
-            int jitter = static_cast<int>(baseDelayMs * 0.25);
+            // Exponential backoff with jitter (±25%), capped at kMaxDelayMs.
+            const int jitter = baseDelayMs / 4;
             std::uniform_int_distribution<int> dist(-jitter, jitter);
-            int delayMs = baseDelayMs + dist(rng);
+            int delayMs = baseDelayMs;
+            const int jittered = dist(rng);
+            if (__builtin_add_overflow(baseDelayMs, jittered, &delayMs)) {
+                delayMs = baseDelayMs;
+            }
             std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+
+            int doubledDelayMs = kMaxDelayMs;
+            if (!__builtin_mul_overflow(baseDelayMs, 2, &doubledDelayMs)) {
+                baseDelayMs = std::min(doubledDelayMs, kMaxDelayMs);
+            } else {
+                baseDelayMs = kMaxDelayMs;
+            }
         }
 
         return Error{ErrorCode::DatabaseError, "WriteBatch::commit: max retries exceeded"};

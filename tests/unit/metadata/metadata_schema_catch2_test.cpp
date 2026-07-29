@@ -145,6 +145,27 @@ Result<int64_t> querySingleInt64(Database& db, const std::string& sql, const Arg
     return stmt.getInt64(0);
 }
 
+Result<bool> queryPlanContains(Database& db, const std::string& sql, std::string_view needle) {
+    auto stmtResult = db.prepare("EXPLAIN QUERY PLAN " + sql);
+    if (!stmtResult) {
+        return stmtResult.error();
+    }
+
+    auto stmt = std::move(stmtResult).value();
+    while (true) {
+        auto stepResult = stmt.step();
+        if (!stepResult) {
+            return stepResult.error();
+        }
+        if (!stepResult.value()) {
+            return false;
+        }
+        if (stmt.getString(3).find(needle) != std::string::npos) {
+            return true;
+        }
+    }
+}
+
 template <typename... Args>
 Result<std::optional<std::string>> queryOptionalString(Database& db, const std::string& sql,
                                                        const Args&... args) {
@@ -624,7 +645,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Search history",
             entry.query = "query " + std::to_string(i);
             entry.queryTime =
                 std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
-            entry.resultsCount = i * 2;
+            entry.resultsCount = static_cast<std::int64_t>(i) * 2;
             entry.executionTimeMs = 10 + i;
 
             auto result = repo_->insertSearchHistory(entry);
@@ -1765,4 +1786,78 @@ TEST_CASE("Migration version 36 adds indexed trigram symbol lookup",
     auto removed = db.db.tableExists("symbol_metadata_fts");
     REQUIRE(removed.has_value());
     CHECK_FALSE(removed.value());
+}
+
+TEST_CASE("Migration version 37 indexes document graph cleanup predicates",
+          "[unit][metadata][schema][migration][kg]") {
+    StandaloneMigrationDb db{"migration_v37_kg_cleanup_indexes"};
+    REQUIRE(db.mm.migrateTo(36).has_value());
+    REQUIRE(db.db
+                .execute(R"(
+        INSERT INTO kg_nodes (node_key, label, type, properties)
+        VALUES ('opaque:before-migration', 'opaque', 'test', 'not-json');
+    )")
+                .has_value());
+    REQUIRE(db.mm.migrateTo(37).has_value());
+
+    const std::array expectedIndexes{
+        "idx_kg_nodes_document_hash",
+        "idx_kg_nodes_file_path",
+        "idx_kg_nodes_source_file",
+        "idx_kg_edges_source_file",
+    };
+    for (const auto* index : expectedIndexes) {
+        auto count = querySingleInt64(
+            db.db, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?", index);
+        REQUIRE(count.has_value());
+        CHECK((count.value() == 1));
+    }
+
+    // Graph properties predate the JSON convention and may contain opaque plugin text. The
+    // cleanup indexes must not make otherwise-valid node or edge writes fail.
+    REQUIRE(db.db
+                .execute(R"(
+        INSERT INTO kg_nodes (node_key, label, type, properties)
+        VALUES ('opaque:a', 'a', 'test', 'not-json'),
+               ('opaque:b', 'b', 'test', 'also-not-json');
+        INSERT INTO kg_edges (src_node_id, dst_node_id, relation, properties)
+        SELECT src.id, dst.id, 'opaque', 'edge-not-json'
+        FROM kg_nodes src, kg_nodes dst
+        WHERE src.node_key = 'opaque:a' AND dst.node_key = 'opaque:b';
+    )")
+                .has_value());
+
+    auto documentHashPlan =
+        queryPlanContains(db.db,
+                          "DELETE FROM kg_nodes WHERE CASE WHEN json_valid(properties) "
+                          "THEN json_extract(properties, '$.document_hash') END = 'hash'",
+                          "idx_kg_nodes_document_hash");
+    REQUIRE(documentHashPlan.has_value());
+    CHECK(documentHashPlan.value());
+
+    auto sourceNodePlan =
+        queryPlanContains(db.db,
+                          "DELETE FROM kg_nodes WHERE CASE WHEN json_valid(properties) "
+                          "THEN json_extract(properties, '$.file_path') END = '/tmp/a.cpp' "
+                          "OR CASE WHEN json_valid(properties) "
+                          "THEN json_extract(properties, '$.source_file') END = '/tmp/a.cpp'",
+                          "MULTI-INDEX OR");
+    REQUIRE(sourceNodePlan.has_value());
+    CHECK(sourceNodePlan.value());
+
+    auto sourceEdgePlan =
+        queryPlanContains(db.db,
+                          "DELETE FROM kg_edges WHERE CASE WHEN json_valid(properties) "
+                          "THEN json_extract(properties, '$.source_file') END = '/tmp/a.cpp'",
+                          "idx_kg_edges_source_file");
+    REQUIRE(sourceEdgePlan.has_value());
+    CHECK(sourceEdgePlan.value());
+
+    REQUIRE(db.mm.rollbackTo(36).has_value());
+    for (const auto* index : expectedIndexes) {
+        auto count = querySingleInt64(
+            db.db, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?", index);
+        REQUIRE(count.has_value());
+        CHECK((count.value() == 0));
+    }
 }

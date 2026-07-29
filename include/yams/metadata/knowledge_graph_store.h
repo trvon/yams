@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <string>
@@ -184,6 +185,16 @@ struct KGEntityCountSnapshot {
     std::int64_t aliasCount{0};
 };
 
+struct DocumentGraphCleanupTarget {
+    std::string documentHash;
+    std::string sourceFile;
+};
+
+struct DocumentGraphCleanupResult {
+    std::int64_t nodesDeleted{0};
+    std::int64_t edgesDeleted{0};
+};
+
 /**
  * KnowledgeGraphStore defines the abstract API for reading/writing the local-first KG.
  * Implementations must be thread-safe for concurrent read access; writes should be serialized.
@@ -201,6 +212,11 @@ public:
         virtual Result<void> addDocEntities(const std::vector<DocEntity>& entities) = 0;
         virtual Result<void> deleteNodeById(std::int64_t nodeId) = 0;
         virtual Result<std::int64_t> deleteNodesForDocumentHash(std::string_view documentHash) = 0;
+        virtual Result<DocumentGraphCleanupResult>
+        deleteDocumentGraphData(const std::vector<DocumentGraphCleanupTarget>& /*targets*/) {
+            return Error{ErrorCode::NotImplemented,
+                         "Transactional document graph cleanup is not implemented"};
+        }
         virtual Result<void> deleteDocEntitiesForDocument(std::int64_t documentId) = 0;
         virtual Result<std::int64_t> deleteEdgesForSourceFile(std::string_view filePath) = 0;
         virtual Result<std::int64_t> deleteEdgesByRelation(std::string_view relation) = 0;
@@ -426,6 +442,54 @@ public:
     // This deletes the doc:<hash> node and any symbol nodes with matching document_hash property.
     // Returns the count of nodes deleted.
     virtual Result<std::int64_t> deleteNodesForDocumentHash(std::string_view documentHash) = 0;
+
+    // Delete all graph data derived from the supplied documents. Implementations can override
+    // this to use one transaction/connection; the fallback preserves compatibility for stores
+    // that only implement the individual cleanup operations.
+    virtual Result<DocumentGraphCleanupResult>
+    deleteDocumentGraphData(const std::vector<DocumentGraphCleanupTarget>& targets) {
+        const auto accumulate = [](std::int64_t& total, std::int64_t count) -> Result<void> {
+            if (count < 0 || total > std::numeric_limits<std::int64_t>::max() - count) {
+                return Error{ErrorCode::DatabaseError, "Invalid document graph cleanup count"};
+            }
+            total += count;
+            return Result<void>();
+        };
+
+        DocumentGraphCleanupResult result;
+        for (const auto& target : targets) {
+            if (!target.sourceFile.empty()) {
+                auto edges = deleteEdgesForSourceFile(target.sourceFile);
+                if (!edges) {
+                    return edges.error();
+                }
+                if (auto added = accumulate(result.edgesDeleted, edges.value()); !added) {
+                    return added.error();
+                }
+            }
+
+            if (!target.documentHash.empty()) {
+                auto nodes = deleteNodesForDocumentHash(target.documentHash);
+                if (!nodes) {
+                    return nodes.error();
+                }
+                if (auto added = accumulate(result.nodesDeleted, nodes.value()); !added) {
+                    return added.error();
+                }
+            }
+
+            if (!target.sourceFile.empty()) {
+                auto nodes = deleteNodesForSourceFile(target.sourceFile);
+                if (!nodes) {
+                    return nodes.error();
+                }
+                if (auto added = accumulate(result.nodesDeleted, nodes.value()); !added) {
+                    return added.error();
+                }
+            }
+        }
+        return result;
+    }
 
     // Delete KG nodes whose properties.file_path or properties.source_file matches the given
     // path. Covers canonical symbol nodes and unresolved reference nodes that carry no

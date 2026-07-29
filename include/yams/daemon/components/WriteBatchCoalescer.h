@@ -1,5 +1,6 @@
 #pragma once
 
+#include <yams/core/assert.hpp>
 #include <yams/daemon/components/WriteCoordinator.h>
 
 #include <spdlog/spdlog.h>
@@ -18,6 +19,11 @@ public:
         : source_(std::move(source)), threshold_(threshold) {}
 
     void addOp(WriteOp op, WriteCoordinator* wc) {
+        YAMS_PRECONDITION(wc != nullptr, "write batch coalescer requires a coordinator");
+        addOp(std::move(op), *wc);
+    }
+
+    void addOp(WriteOp op, WriteCoordinator& wc) {
         std::unique_ptr<WriteBatch> toFlush;
         {
             std::lock_guard<std::mutex> lock(mtx_);
@@ -30,7 +36,7 @@ public:
                 toFlush = std::move(batch_);
             }
         }
-        if (toFlush && !wc->tryEnqueue(toFlush)) {
+        if (toFlush && !wc.tryEnqueue(toFlush)) {
             spdlog::warn("[WriteBatchCoalescer:{}] tryEnqueue rejected at "
                          "threshold; retaining batch",
                          source_);
@@ -40,12 +46,17 @@ public:
     }
 
     void flush(WriteCoordinator* wc) {
+        YAMS_PRECONDITION(wc != nullptr, "write batch coalescer requires a coordinator");
+        flush(*wc);
+    }
+
+    void flush(WriteCoordinator& wc) {
         std::unique_ptr<WriteBatch> b;
         {
             std::lock_guard<std::mutex> lock(mtx_);
             b = std::move(batch_);
         }
-        if (b && !b->ops.empty() && !wc->tryEnqueue(b)) {
+        if (b && !b->ops.empty() && !wc.tryEnqueue(b)) {
             spdlog::warn("[WriteBatchCoalescer:{}] flush rejected; "
                          "re-queuing batch for retry",
                          source_);

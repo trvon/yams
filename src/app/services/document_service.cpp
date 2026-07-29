@@ -43,6 +43,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <optional>
 #include <span>
 #include <sstream>
@@ -200,6 +201,11 @@ inline bool looksLikePartialHash(const std::string& s) {
     if (s.size() < 6 || s.size() >= 64)
         return false;
     return isHex(s);
+}
+
+bool canForceCleanupAfterStorageError(const Error& error) {
+    return error.code == ErrorCode::CorruptedData || error.code == ErrorCode::ManifestInvalid ||
+           error.code == ErrorCode::DataCorruption;
 }
 
 // ============================================================================
@@ -950,30 +956,11 @@ private:
         }
 
         if (ctx_.kgStore) {
-            auto kgResult = ctx_.kgStore->deleteNodesForDocumentHash(doc.sha256Hash);
+            auto kgResult = ctx_.kgStore->deleteDocumentGraphData(
+                {{.documentHash = doc.sha256Hash, .sourceFile = doc.filePath}});
             if (!kgResult) {
-                spdlog::warn("Failed to clean up KG nodes for document {}: {}", doc.sha256Hash,
+                spdlog::warn("Failed to clean up document graph data for {}: {}", doc.sha256Hash,
                              kgResult.error().message);
-            }
-            // doc/version nodes carry document_hash, but canonical symbol nodes and unresolved
-            // reference nodes are keyed by file path only — clean those (and their edges) too,
-            // otherwise delete leaves orphaned nodes/edges behind.
-            if (!doc.filePath.empty()) {
-                if (auto edgeResult = ctx_.kgStore->deleteEdgesForSourceFile(doc.filePath);
-                    !edgeResult) {
-                    spdlog::warn("Failed to clean up KG edges for {}: {}", doc.filePath,
-                                 edgeResult.error().message);
-                }
-                if (auto nodeResult = ctx_.kgStore->deleteNodesForSourceFile(doc.filePath);
-                    !nodeResult) {
-                    spdlog::warn("Failed to clean up KG path nodes for {}: {}", doc.filePath,
-                                 nodeResult.error().message);
-                }
-            }
-            if (auto symResult = ctx_.kgStore->deleteSymbolMetadataForDocument(doc.sha256Hash);
-                !symResult) {
-                spdlog::warn("Failed to clean up symbol metadata for {}: {}", doc.sha256Hash,
-                             symResult.error().message);
             }
         }
         return true;
@@ -1002,16 +989,16 @@ private:
             auto storeResult = ctx_.store->remove(target.hash);
             if (!storeResult) {
                 const bool canForceMetadataCleanup =
-                    req.force &&
-                    storeResult.error().message.find("Corrupted data") != std::string::npos;
+                    req.force && canForceCleanupAfterStorageError(storeResult.error());
                 if (!canForceMetadataCleanup) {
                     r.deleted = false;
                     r.error = storeResult.error().message;
                     resp.errors.push_back(r);
                     return;
                 }
-                spdlog::warn("Storage data is corrupted for {}. Metadata deletion was forced.",
-                             target.name);
+                spdlog::warn("Storage data is unreadable for {} ({}). Metadata deletion was "
+                             "forced.",
+                             target.name, storeResult.error().message);
             } else if (storeResult.value()) {
                 r.contentRemoved = true;
             } else {
@@ -1286,8 +1273,9 @@ private:
         if (req.recent && *req.recent > 0) {
             std::sort(docs.begin(), docs.end(),
                       [](const auto& a, const auto& b) { return a.indexedTime > b.indexedTime; });
-            if (static_cast<int>(docs.size()) > *req.recent) {
-                docs.resize(static_cast<size_t>(*req.recent));
+            const auto recentLimit = static_cast<std::size_t>(*req.recent);
+            if (docs.size() > recentLimit) {
+                docs.resize(recentLimit);
             }
         }
 
@@ -1316,7 +1304,11 @@ private:
         if (ids.empty()) {
             return {SnippetPreviewCache{}, false};
         }
-        const int previewChars = std::clamp(snippetLength * 8, 256, 8192);
+        int scaledSnippetLength = 0;
+        if (__builtin_mul_overflow(snippetLength, 8, &scaledSnippetLength)) {
+            scaledSnippetLength = snippetLength > 0 ? 8192 : 0;
+        }
+        const int previewChars = std::clamp(scaledSnippetLength, 256, 8192);
         auto previewRes = ctx_.metadataRepo->batchGetContentPreview(ids, previewChars, 0);
         if (previewRes) {
             return {std::move(previewRes.value()), false};
@@ -1609,7 +1601,11 @@ public:
         }
 
         std::vector<std::string> batchFuzzyTerms;
-        batchFuzzyTerms.reserve(pendingMetadata.size() * 2);
+        const auto fuzzyTermCapacity =
+            pendingMetadata.size() <= std::numeric_limits<std::size_t>::max() / 2
+                ? pendingMetadata.size() * 2
+                : pendingMetadata.size();
+        batchFuzzyTerms.reserve(fuzzyTermCapacity);
         for (auto& pending : pendingMetadata) {
             auto inserted = pending.future.get();
             recordDocumentStorePhase("metadata_insert", pending.insertStartedAt);
@@ -1721,7 +1717,7 @@ public:
                 if (prevLatestId.has_value()) {
                     vc.addOp(daemon::SetMetadataBatchOp{{{*prevLatestId, "is_latest",
                                                           metadata::MetadataValue(false)}}},
-                             writeCoord);
+                             *writeCoord);
 
                     metadata::DocumentRelationship rel;
                     rel.parentId = *prevLatestId;
@@ -1729,7 +1725,7 @@ public:
                     rel.relationshipType = metadata::RelationshipType::VersionOf;
                     rel.createdTime =
                         std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
-                    vc.addOp(daemon::InsertRelationshipOp{std::move(rel)}, writeCoord);
+                    vc.addOp(daemon::InsertRelationshipOp{std::move(rel)}, *writeCoord);
                 }
 
                 vc.addOp(
@@ -1737,7 +1733,7 @@ public:
                         {{docId, "version", metadata::MetadataValue(newVersion)},
                          {docId, "is_latest", metadata::MetadataValue(true)},
                          {docId, "series_key", metadata::MetadataValue(info.filePath)}}},
-                    writeCoord);
+                    *writeCoord);
             } else {
                 auto priorDoc = ctx_.metadataRepo->findDocumentByExactPath(info.filePath);
                 if (priorDoc && priorDoc.value().has_value()) {
@@ -1827,7 +1823,7 @@ public:
                     kc.addOp(daemon::UpsertNodesOp{{std::move(blobNode), std::move(docNode),
                                                     std::move(snapshotPathNode),
                                                     std::move(logicalPathNode)}},
-                             writeCoord);
+                             *writeCoord);
 
                     daemon::DeferredEdgeOp pathVerEdge;
                     pathVerEdge.srcNodeKey = logicalPathKey;
@@ -1842,7 +1838,7 @@ public:
 
                     kc.addOp(
                         daemon::AddDeferredEdgesOp{{std::move(pathVerEdge), std::move(hasVerEdge)}},
-                        writeCoord);
+                        *writeCoord);
                 } else {
                     auto blobNodeResult = ctx_.kgStore->ensureBlobNode(info.sha256Hash);
                     if (!blobNodeResult) {
@@ -2036,7 +2032,7 @@ public:
         if (foundDoc) {
             doc.path = foundDoc->filePath;
             doc.name = foundDoc->fileName;
-            doc.size = static_cast<uint64_t>(foundDoc->fileSize);
+            doc.size = foundDoc->fileSize > 0 ? static_cast<uint64_t>(foundDoc->fileSize) : 0;
             doc.mimeType = foundDoc->mimeType;
         } else {
             // Fallback: path unknown; mime default
@@ -2053,14 +2049,25 @@ public:
                              nodeRes.error().message);
             } else if (nodeRes.value()) {
                 const auto& node = *nodeRes.value();
-                if (node.centroidWeight > 0)
-                    doc.centroidWeight = static_cast<uint32_t>(node.centroidWeight);
+                if (node.centroidWeight > 0) {
+                    std::uint32_t weight = 0;
+                    if (__builtin_add_overflow(std::uint32_t{0}, node.centroidWeight, &weight)) {
+                        weight = std::numeric_limits<std::uint32_t>::max();
+                    }
+                    doc.centroidWeight = weight;
+                }
                 if (!node.centroid.empty()) {
-                    doc.centroidDims = static_cast<uint32_t>(node.centroid.size());
+                    if (node.centroid.size() >= std::numeric_limits<std::uint32_t>::max()) {
+                        doc.centroidDims = std::numeric_limits<std::uint32_t>::max();
+                    } else {
+                        doc.centroidDims = static_cast<std::uint32_t>(node.centroid.size());
+                    }
                     const std::size_t previewCount =
                         std::min<std::size_t>(node.centroid.size(), kCentroidPreviewLimit);
-                    doc.centroidPreview.assign(node.centroid.begin(),
-                                               node.centroid.begin() + previewCount);
+                    doc.centroidPreview.reserve(previewCount);
+                    for (std::size_t index = 0; index < previewCount; ++index) {
+                        doc.centroidPreview.push_back(node.centroid[index]);
+                    }
                     std::ostringstream oss;
                     oss.setf(std::ios::fixed);
                     oss << std::setprecision(4);
@@ -2562,15 +2569,22 @@ public:
         }
 
         // Pagination: offset, limit
-        int start = std::max(0, req.offset);
-        int lim = std::max(0, req.limit);
         std::vector<metadata::DocumentInfo> page;
         if (usedQuery) {
             page = std::move(docs);
-        } else if (start < static_cast<int>(docs.size())) {
-            auto itStart = docs.begin() + start;
-            auto itEnd = (lim > 0) ? std::min(docs.end(), itStart + lim) : docs.end();
-            page.assign(itStart, itEnd);
+        } else {
+            const auto startIndex = static_cast<std::size_t>(std::max(0, req.offset));
+            if (startIndex < docs.size()) {
+                const auto remaining = docs.size() - startIndex;
+                const auto pageSize =
+                    req.limit > 0
+                        ? std::min<std::size_t>(static_cast<std::size_t>(req.limit), remaining)
+                        : remaining;
+                page.reserve(pageSize);
+                for (std::size_t index = 0; index < pageSize; ++index) {
+                    page.push_back(std::move(docs[startIndex + index]));
+                }
+            }
         }
 
         ListDocumentsResponse out;

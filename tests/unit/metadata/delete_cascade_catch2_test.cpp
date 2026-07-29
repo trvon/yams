@@ -89,6 +89,12 @@ struct DeleteCascadeFixture {
         return id;
     }
 
+    void execute(const std::string& sql) {
+        auto result = pool->withConnection(
+            [&](Database& db) -> yams::Result<void> { return db.execute(sql); });
+        REQUIRE((result.has_value()));
+    }
+
     int64_t scalar(const std::string& sql) {
         int64_t out = -1;
         auto r = pool->withConnection([&](Database& db) -> yams::Result<void> {
@@ -244,20 +250,79 @@ TEST_CASE("delete-cascade: KG canonical/reference nodes and edges are cleaned by
     edge.properties = R"({"source_file":"/corpus/graph.cpp"})";
     REQUIRE((f.kgStore->addEdge(edge).has_value()));
 
-    REQUIRE((f.scalar("SELECT COUNT(*) FROM kg_nodes") == 4));
-    REQUIRE((f.scalar("SELECT COUNT(*) FROM kg_edges") == 1));
+    KGNode opaqueA;
+    opaqueA.nodeKey = "opaque:a";
+    opaqueA.type = "test";
+    opaqueA.properties = "not-json";
+    const auto opaqueAId = f.kgStore->upsertNode(opaqueA);
+    REQUIRE((opaqueAId.has_value()));
 
-    // The full cleanup the delete path performs: hash-based + path-based nodes + edges.
-    REQUIRE((f.kgStore->deleteNodesForDocumentHash(hash).has_value()));
-    REQUIRE((f.kgStore->deleteEdgesForSourceFile(path).has_value()));
-    auto pathDeleted = f.kgStore->deleteNodesForSourceFile(path);
-    REQUIRE((pathDeleted.has_value()));
-    CHECK((pathDeleted.value() == 2)); // canonical + reference
+    KGNode opaqueB;
+    opaqueB.nodeKey = "opaque:b";
+    opaqueB.type = "test";
+    opaqueB.properties = "also-not-json";
+    const auto opaqueBId = f.kgStore->upsertNode(opaqueB);
+    REQUIRE((opaqueBId.has_value()));
+
+    KGEdge opaqueEdge;
+    opaqueEdge.srcNodeId = opaqueAId.value();
+    opaqueEdge.dstNodeId = opaqueBId.value();
+    opaqueEdge.relation = "opaque";
+    opaqueEdge.properties = "edge-not-json";
+    REQUIRE((f.kgStore->addEdge(opaqueEdge).has_value()));
+
+    REQUIRE((f.scalar("SELECT COUNT(*) FROM kg_nodes") == 6));
+    REQUIRE((f.scalar("SELECT COUNT(*) FROM kg_edges") == 2));
+
+    // One cohesive cleanup owns the connection and transaction for all graph artifacts.
+    auto cleanup = f.kgStore->deleteDocumentGraphData({{hash, path}});
+    REQUIRE((cleanup.has_value()));
+    CHECK((cleanup.value().nodesDeleted == 4));
+    CHECK((cleanup.value().edgesDeleted == 1));
 
     CHECK((f.scalar("SELECT COUNT(*) FROM kg_nodes WHERE node_key = 'function:g@" + path + "'") ==
            0));
     CHECK((f.scalar("SELECT COUNT(*) FROM kg_nodes WHERE node_key = 'symbol_ref:helper'") == 0));
-    CHECK((f.scalar("SELECT COUNT(*) FROM kg_edges") == 0));
+    CHECK((f.scalar("SELECT COUNT(*) FROM kg_nodes") == 2));
+    CHECK((f.scalar("SELECT COUNT(*) FROM kg_edges") == 1));
+}
+
+TEST_CASE("delete-cascade: document graph cleanup rolls back as one unit",
+          "[metadata][delete][cascade][kg]") {
+    DeleteCascadeFixture f;
+    const std::string hash(64, 'r');
+    const std::string path = "/corpus/rollback.cpp";
+
+    KGNode docNode;
+    docNode.nodeKey = "doc:" + hash;
+    docNode.type = "document";
+    auto docId = f.kgStore->upsertNode(docNode);
+    REQUIRE((docId.has_value()));
+
+    KGNode version;
+    version.nodeKey = "function:rollback@" + path + "@snap:" + hash;
+    version.type = "function_version";
+    version.properties = std::string(R"({"document_hash":")") + hash + R"("})";
+    auto versionId = f.kgStore->upsertNode(version);
+    REQUIRE((versionId.has_value()));
+
+    KGEdge edge;
+    edge.srcNodeId = docId.value();
+    edge.dstNodeId = versionId.value();
+    edge.relation = "contains";
+    edge.properties = R"({"source_file":"/corpus/rollback.cpp"})";
+    REQUIRE((f.kgStore->addEdge(edge).has_value()));
+
+    f.execute("CREATE TRIGGER reject_graph_cleanup BEFORE DELETE ON kg_nodes "
+              "WHEN OLD.node_key = '" +
+              version.nodeKey +
+              "' BEGIN SELECT RAISE(ABORT, 'injected graph cleanup failure'); END");
+
+    auto cleanup = f.kgStore->deleteDocumentGraphData({{hash, path}});
+    REQUIRE_FALSE(cleanup.has_value());
+
+    CHECK((f.scalar("SELECT COUNT(*) FROM kg_nodes") == 2));
+    CHECK((f.scalar("SELECT COUNT(*) FROM kg_edges") == 1));
 }
 
 TEST_CASE("delete-cascade: kg_edges cascade when an endpoint node is deleted",

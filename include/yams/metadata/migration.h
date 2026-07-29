@@ -267,6 +267,9 @@ private:
 
     // Version 36: Add trigram FTS for substring symbol/path lookup.
     static Migration createSymbolMetadataTrigramFts();
+
+    // Version 37: Index JSON properties used by document graph cleanup.
+    static Migration createDocumentGraphCleanupIndexes();
 };
 
 /**
