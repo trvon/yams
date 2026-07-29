@@ -1183,9 +1183,11 @@ void ServiceManager::quiesceServicesBeforeWorkerShutdown(
         writeCoordinator_->shutdown();
         writeCoordinator_.reset();
     }
-    if (metadataInsertWriter_) {
-        metadataInsertWriter_->shutdown();
-        metadataInsertWriter_.reset();
+    auto metadataInsertWriter = std::atomic_exchange_explicit(
+        &metadataInsertWriter_, std::shared_ptr<metadata::MetadataInsertWriter>{},
+        std::memory_order_acq_rel);
+    if (metadataInsertWriter) {
+        metadataInsertWriter->shutdown();
     }
 }
 
@@ -2394,7 +2396,10 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     // concurrent document inserts into batched transactions. Shared via AppContext so per-task
     // DocumentService instances reuse the one writer.
     if (auto metaRepo = getMetadataRepo()) {
-        metadataInsertWriter_ = std::make_shared<metadata::MetadataInsertWriter>(metaRepo);
+        std::atomic_store_explicit(
+            &metadataInsertWriter_,
+            std::make_shared<metadata::MetadataInsertWriter>(std::move(metaRepo)),
+            std::memory_order_release);
         spdlog::info("[ServiceManager] Phase: MetadataInsertWriter Initialized.");
     }
 
@@ -3993,7 +3998,8 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
     ctx.store = getContentStore(); // Thread-safe via atomic_load
     auto metadataRepo = getMetadataRepo();
     ctx.metadataRepo = metadataRepo;
-    ctx.metadataInsertWriter = metadataInsertWriter_;
+    ctx.metadataInsertWriter =
+        std::atomic_load_explicit(&metadataInsertWriter_, std::memory_order_acquire);
     ctx.searchEngine = getSearchEngineSnapshot();
     ctx.vectorDatabase = getVectorDatabase();
     ctx.kgStore = getKgStore(); // PBI-043: tree diff KG integration

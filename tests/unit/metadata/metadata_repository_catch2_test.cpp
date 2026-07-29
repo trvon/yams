@@ -5007,4 +5007,47 @@ TEST_CASE("ContentIndexWriter commits content-index chunks from concurrent submi
     std::error_code ec;
     std::filesystem::remove(dbPath, ec);
 }
+
+TEST_CASE_METHOD(MetadataRepositoryFixture,
+                 "MetadataRepository publishes its knowledge graph store concurrently",
+                 "[metadata][repository][concurrency]") {
+    auto kgStoreResult = makeSqliteKnowledgeGraphStore(*pool_);
+    REQUIRE((kgStoreResult.has_value()));
+    std::shared_ptr<KnowledgeGraphStore> kgStore = std::move(kgStoreResult.value());
+
+    std::atomic<bool> start{false};
+    std::atomic<bool> stop{false};
+    std::atomic<bool> sawPublishedStore{false};
+    std::atomic<bool> sawInvalidStore{false};
+
+    std::thread reader([&]() {
+        while (!start.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        while (!stop.load(std::memory_order_acquire)) {
+            const auto snapshot = repository_->getKnowledgeGraphStore();
+            if (snapshot) {
+                if (snapshot != kgStore) {
+                    sawInvalidStore.store(true, std::memory_order_release);
+                }
+                sawPublishedStore.store(true, std::memory_order_release);
+            }
+        }
+    });
+
+    start.store(true, std::memory_order_release);
+    for (int i = 0; i < 1000; ++i) {
+        repository_->setKnowledgeGraphStore(kgStore);
+        repository_->setKnowledgeGraphStore(nullptr);
+    }
+    repository_->setKnowledgeGraphStore(kgStore);
+    while (!sawPublishedStore.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    stop.store(true, std::memory_order_release);
+    reader.join();
+
+    CHECK_FALSE(sawInvalidStore.load(std::memory_order_acquire));
+    CHECK((repository_->getKnowledgeGraphStore() == kgStore));
+}
 // NOLINTEND(bugprone-chained-comparison)

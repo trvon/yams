@@ -936,7 +936,7 @@ public:
     Result<std::vector<DocumentInfo>> findDocsMissingPathTree(int limit = 0);
 
     void setKnowledgeGraphStore(std::shared_ptr<KnowledgeGraphStore> kgStore) {
-        kgStore_ = std::move(kgStore);
+        std::atomic_store_explicit(&kgStore_, std::move(kgStore), std::memory_order_release);
     }
 
     using TreeDiffAppliedCallback =
@@ -948,7 +948,9 @@ public:
 
     void setGraphComponent(std::shared_ptr<yams::daemon::GraphComponent> graphComponent);
 
-    std::shared_ptr<KnowledgeGraphStore> getKnowledgeGraphStore() const { return kgStore_; }
+    std::shared_ptr<KnowledgeGraphStore> getKnowledgeGraphStore() const {
+        return std::atomic_load_explicit(&kgStore_, std::memory_order_acquire);
+    }
 
 private:
     ConnectionPool& pool_;
