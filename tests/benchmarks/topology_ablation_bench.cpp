@@ -3,7 +3,7 @@
 // role-score boost application independent of the full search engine,
 // daemon, or corpus.
 //
-// Paired with docs/benchmarks/topology_ablation_matrix.md. Sweeps:
+// Topology ablation sweeps:
 //   - Axis 1: router limit (topologyWeakQueryMaxClusters)
 //            × max docs (topologyWeakQueryMaxDocs)
 //   - Axis 2: medoid boost × bridge boost

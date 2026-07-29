@@ -365,7 +365,7 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
                     *bm25Policy.fragmentGeometryPmiSampleBytes;
             }
             // Router: default DISABLED. Simeon's own three-corpus BEIR
-            // eval (docs/research/benchmarks.md) shows SAB-smooth alone is
+            // Evaluation shows SAB-smooth alone is
             // within ≤1.8 nDCG@10 points of the dual-build router while
             // using ~half the steady-state BM25 memory. Explicit
             // routerEnabled=true still opts in; the only preset understood

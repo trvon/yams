@@ -1,5 +1,5 @@
 // MCP Code Mode tests: pipeline query, batch execute, session action, $prev resolution
-// Part of the Code Mode feature (docs/design/mcp-code-mode.md)
+// MCP Code Mode behavior tests.
 
 #include <catch2/catch_test_macros.hpp>
 

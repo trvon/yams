@@ -11,7 +11,6 @@
  * - Any executable with JSON-RPC 2.0 support
  *
  * @see RFC-EPH-001: RFC-external-plugin-host.md
- * @see docs/spec/external_plugin_jsonrpc_protocol.md
  */
 
 #pragma once

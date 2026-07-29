@@ -2,7 +2,7 @@
 # Dockerfile for AFL++ fuzzing environment
 FROM aflplusplus/aflplusplus:latest
 
-# Install system dependencies (per docs/BUILD-GCC.md)
+# Install system dependencies required by the build.
 RUN apt-get update && apt-get install -y \
     gcc-12 \
     g++-12 \

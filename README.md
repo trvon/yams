@@ -1,111 +1,50 @@
-<p align="center">
-<h1 align="center">YAMS — Yet Another Memory System</h1>
-<h6 align="center">Persistent memory for LLMs and apps. Content-addressed storage with dedupe, compression, full-text and vector search.</h6>
-</p>
-<p align="center">
-<img alt="license" src="https://img.shields.io/github/license/trvon/yams?style=flat-square">
-<img alt="language" src="https://img.shields.io/github/languages/top/trvon/yams?style=flat-square">
-<img alt="github builds" src="https://img.shields.io/github/actions/workflow/status/trvon/yams/release.yml">
-<img alt="last commit" src="https://img.shields.io/github/last-commit/trvon/yams?style=flat-square">
-</p>
+# YAMS — Yet Another Memory System
 
-> [!WARNING]
-> **Experimental — not production ready.** Expect bugs and breaking changes until 1.0.
+Persistent, searchable memory for code, documents, applications, and AI agents.
+YAMS stores content once, deduplicates it, and retrieves it through text, vector,
+graph, and grep surfaces.
 
-## Features
+> **Experimental:** YAMS is pre-1.0. Expect bugs and breaking changes.
 
-- SHA-256 content-addressed storage with block-level dedupe (Rabin chunking)
-- Full-text search (SQLite FTS5) + semantic vector search (embeddings)
-- Tree-sitter symbol extraction for 18 languages ([list](docs/user_guide/cli.md#symbol-extraction))
-- Snapshot management with Merkle tree diffs and rename detection
-- WAL-backed durability, high-throughput I/O, thread-safe
-- CLI, MCP server, and C-ABI plugins (ONNX/GLiNER/ColBERT, S3 storage, PDF via ZYP)
-- Interactive relevance tuning through CLI tuning and doctor workflows
+## What it provides
 
-## Documentation
-
-| Topic                | Link                                                                |
-|----------------------|---------------------------------------------------------------------|
-| Install              | [docs/user_guide/installation.md](docs/user_guide/installation.md)  |
-| CLI reference        | [docs/user_guide/cli.md](docs/user_guide/cli.md)                    |
-| MCP server           | [docs/user_guide/mcp.md](docs/user_guide/mcp.md)                    |
-| Embeddings           | [docs/user_guide/embeddings.md](docs/user_guide/embeddings.md)      |
-| Plugins              | [docs/PLUGINS.md](docs/PLUGINS.md)                                  |
-| Build from source    | [docs/BUILD.md](docs/BUILD.md)                                      |
-| Architecture         | [docs/architecture/](docs/architecture/)                            |
-| Benchmarks           | [docs/benchmarks/README.md](docs/benchmarks/README.md)              |
-| Changelog            | [docs/changelogs/](docs/changelogs/)                                |
-| Roadmap              | [docs/roadmap.md](docs/roadmap.md)                                  |
-
-## Links
-
-- SourceHut: https://sr.ht/~trvon/yams/
-- GitHub mirror: https://github.com/trvon/yams
-- Docs site: https://yamsmemory.ai
-- Discord: https://discord.gg/rTBmRHdTEc
-- License: GPL-3.0-or-later
-
-## Community and contributing
-
-Questions, bug reports, docs fixes, tests, and feature ideas are all welcome.
-
-If you'd like to contribute, start with:
-- `CONTRIBUTING.md` for workflow and expectations
-- `CODE_OF_CONDUCT.md` for community standards
-- `SECURITY.md` for responsible vulnerability reporting
-- `.github/ISSUE_TEMPLATE/` for issue templates
-
-If you're unsure whether something is worth opening, it usually is.
+- SHA-256 content-addressed storage with chunk-level deduplication and compression
+- SQLite FTS5, Simeon embeddings, hybrid search, and knowledge-graph retrieval
+- Tree-sitter symbol extraction and source-aware graph traversal
+- Snapshots, Merkle tree diffs, corruption detection, and repair tooling
+- A CLI, an MCP server over stdio, and a C ABI for plugins and mobile hosts
+- Local-first operation with no account or hosted service requirement
 
 ## Install
-
-Supported: Linux x86_64/ARM64, macOS x86_64/ARM64, Windows x86_64.
 
 ```bash
 # macOS
 brew install trvon/yams/yams
 
-# Docker
+# Container
 docker pull ghcr.io/trvon/yams:latest
-
-# Debian/Ubuntu, Fedora/RHEL, Windows: see installation guide
 ```
 
-Full install matrix and package repos: [docs/user_guide/installation.md](docs/user_guide/installation.md).
+Linux packages and Windows artifacts are published with releases. To build from
+source, see [docs/BUILD.md](docs/BUILD.md).
 
-### Build from source
+## Start
 
 ```bash
-./setup.sh Release          # Linux/macOS (auto-detects toolchain, runs Conan + Meson)
-meson compile -C build/release
-```
-
-```pwsh
-./setup.ps1 Release         # Windows
-meson compile -C build/release
-```
-
-Requires a C++20 toolchain (GCC 13+, Clang 16+, or MSVC 2022+ recommended), Meson, Ninja, CMake, pkg-config, and Conan. See [docs/BUILD.md](docs/BUILD.md).
-
-## Quick Start
-
-```bash
-yams init                                # interactive; use --auto for headless
+yams init
 yams add ./README.md --tags docs
 yams add src/ --recursive --include="*.cpp,*.h" --tags code
 
-yams search "config file" --limit 5
+yams search "daemon lifecycle" --limit 5
 yams grep "TODO" --include="*.cpp"
-
-yams list --limit 20
-yams get <hash> -o ./output.bin
+yams graph --explore "LifecycleComponent"
 ```
 
-Shell completions: `yams completion bash|zsh|fish|powershell`. Install instructions: [docs/user_guide/cli.md#cmd-completion](docs/user_guide/cli.md#cmd-completion).
+Run `yams --help` or `yams <command> --help` for the current command reference.
 
-## MCP Server
+## MCP
 
-YAMS ships an MCP server over stdio (JSON-RPC) for AI assistants.
+YAMS exposes its corpus to AI assistants through an MCP server:
 
 ```bash
 yams serve
@@ -114,59 +53,28 @@ yams serve
 ```json
 {
   "mcpServers": {
-    "yams": { "command": "yams", "args": ["serve"] }
+    "yams": {
+      "command": "yams",
+      "args": ["serve"]
+    }
   }
 }
 ```
 
-Tool reference and MCP client setup: [docs/user_guide/mcp.md](docs/user_guide/mcp.md).
+## Project pages
 
-## Plugins
+- [Build from source](docs/BUILD.md)
+- [Benchmarks](docs/benchmarks/README.md)
+- [Roadmap](docs/roadmap.md)
+- [Newsletter](docs/newsletter.md)
+- [Project site](https://yamsmemory.ai)
 
-```bash
-yams plugin list                                  # loaded plugins
-yams plugin trust add ~/.local/lib/yams/plugins   # trust a directory
-yams plugin health                                # status
-yams doctor plugin onnx                           # diagnose
-```
+## Project
 
-Plugin architecture, trust model, and bundled plugins (ONNX, S3, ZYP, GLiNER, symbol extractor): [docs/PLUGINS.md](docs/PLUGINS.md).
+- SourceHut: https://sr.ht/~trvon/yams/
+- GitHub mirror: https://github.com/trvon/yams
+- Discord: https://discord.gg/rTBmRHdTEc
+- License: GPL-3.0-or-later
 
-### GPU acceleration (ONNX)
-
-| Platform | Provider   | Hardware                                    |
-|----------|------------|---------------------------------------------|
-| macOS    | CoreML     | Apple Silicon Neural Engine + GPU           |
-| Linux    | CUDA       | NVIDIA GPUs                                 |
-| Linux    | MIGraphX   | AMD GPUs (ROCm)                             |
-| Windows  | DirectML   | Any DirectX 12 GPU (NVIDIA, AMD, Intel)     |
-
-Auto-detected at build. Override with `YAMS_ONNX_GPU=auto|cuda|coreml|directml|migraphx|none`. Details: [plugins/onnx/README.md](plugins/onnx/README.md).
-
-### Simeon backend
-
-YAMS uses `simeon` by default for both dense vector embeddings and lexical (BM25) search — no model download required. Set `embeddings.backend = "simeon"` in your TOML config (or leave it unset; simeon is the default). Fine-grained knobs live under `[embeddings.simeon]`.
-
-Full config reference and dim tradeoffs: [docs/user_guide/embeddings.md](docs/user_guide/embeddings.md).
-
-## Troubleshooting
-
-```bash
-yams doctor              # full diagnostics
-yams stats --verbose     # storage statistics
-yams repair --all        # repair common issues
-```
-
-Build issues: [docs/BUILD.md](docs/BUILD.md). Empty `yams plugin list`? Add a trust path: `yams plugin trust add ~/.local/lib/yams/plugins`.
-
-## Cite
-
-```bibtex
-@misc{yams,
-  author = {Trevon Williams},
-  title = {YAMS: Content-addressable storage with semantic search},
-  year = {2025},
-  publisher = {GitHub},
-  url = {https://github.com/trvon/yams}
-}
-```
+See `CONTRIBUTING.md` for contribution workflow and `SECURITY.md` for responsible
+vulnerability reporting.

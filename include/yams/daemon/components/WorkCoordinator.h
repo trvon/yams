@@ -79,7 +79,6 @@ namespace yams::daemon {
  * - `stop()`: Resets work guard, allowing io_context to drain naturally
  * - `join()`: Blocks until all workers complete (safe for destruction)
  *
- * @see docs/delivery/003/prd.md for full design documentation
  */
 class WorkCoordinator {
 private:

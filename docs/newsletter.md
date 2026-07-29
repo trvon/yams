@@ -2,6 +2,14 @@
 
 Product updates and occasional deep-dives.
 
+## Site update
+
+The YAMS site and documentation are being rebuilt around a smaller, maintained
+surface. Historical plans, duplicated guides, and speculative design pages are
+being removed. During the transition, use the README, command help, build guide,
+roadmap, benchmark ledger, and machine-readable schemas as the canonical
+references.
+
 ## Subscribe
 
 - SourceHut list: https://lists.sr.ht/~trvon/newsletter
@@ -63,4 +71,3 @@ The same benchmark now sweeps 100- and 1,000-document batches (`--benchmark_filt
 Links:
 - Simeon repo: https://github.com/trvon/simeon
 - Benchmarks and research notes: `third_party/simeon/docs/research/`
-

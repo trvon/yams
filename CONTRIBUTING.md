@@ -44,8 +44,7 @@ meson test -C build/debug
 ```
 
 Additional references:
-- GCC flow: `docs/BUILD.md`
-- build system details: `docs/developer/build_system.md`
+- build and toolchain flow: `docs/BUILD.md`
 
 If you're making a small docs-only or narrow change, you do not need to run the entire project test matrix. Please run the smallest relevant check you can.
 

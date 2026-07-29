@@ -593,7 +593,7 @@ if catch2_with_main_dep.found()
 
   # Topology ablation bench (Catch2-based, component-level)
   # Sweeps router limit and role-score boosts on a synthetic topology batch.
-  # See docs/benchmarks/topology_ablation_matrix.md.
+  # Topology ablation benchmark.
   topology_ablation_bench = executable('topology_ablation_bench',
     files('topology_ablation_bench.cpp'),
     include_directories: incs,

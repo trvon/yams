@@ -18,7 +18,7 @@ Environment:
   YAMS_SCALING_BUNDLES      Space-separated bundle names (default: "baseline tight default wide")
 
 Sweeps the cartesian product of (corpus N) x (frozen topology bundle).
-Companion to docs/benchmarks/topology_scaling_matrix.md.
+Writes local topology scaling results for comparison.
 EOF
 }
 

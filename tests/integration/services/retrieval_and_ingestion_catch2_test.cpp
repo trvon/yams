@@ -186,7 +186,7 @@ bool waitForSnapshotVisible(MetadataRepoT* repo, const std::string& snapshotId,
 
 // Windows daemon shutdown hangs during WorkCoordinator thread join.
 // The tests themselves work - IPC communication succeeds - but cleanup blocks indefinitely.
-// See: docs/developer/windows-daemon-ipc-plan.md for the underlying issue.
+// Windows daemon IPC does not yet support this path.
 // TODO: Remove this skip once Windows daemon shutdown is fixed.
 #ifdef _WIN32
 #define SKIP_ON_WINDOWS_DAEMON_SHUTDOWN()                                                          \

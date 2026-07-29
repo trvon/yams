@@ -25,7 +25,7 @@
 
 // Windows daemon IPC tests are currently unstable due to socket shutdown race conditions
 // The daemon's connection handler coroutines crash during cleanup when sockets are forcibly closed
-// See: docs/developer/windows-daemon-ipc-plan.md
+// Windows daemon IPC does not yet support this path.
 #ifdef _WIN32
 #define SKIP_DAEMON_TEST_ON_WINDOWS()                                                              \
     SKIP("Daemon IPC tests unstable on Windows - see windows-daemon-ipc-plan.md")

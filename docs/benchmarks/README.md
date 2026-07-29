@@ -87,16 +87,6 @@ Artifacts: `build/benchmarks/ops_timeline/kpi-20260709T003228Z-ops/`
 
 ---
 
-## Reference material
-
-| Topic | Link |
-|-------|------|
-| Extraction / repair | [docs/architecture/extraction-repair-pipeline.md](../architecture/extraction-repair-pipeline.md) |
-| System architecture | [docs/architecture/system_architecture.md](../architecture/system_architecture.md) |
-| Testing policy | [docs/developer/testing.md](../developer/testing.md) |
-
----
-
 ## Refresh
 
 1. Prepare the relevant corpus.

@@ -631,8 +631,7 @@ int YamsCLI::run(int argc, char* argv[]) {
 #ifdef YAMS_HAVE_GENERATED_CLI_HELP
             printFullVerbose();
 #else
-            std::cout
-                << "Verbose help not embedded. See docs/user_guide/cli.md or rebuild with docs.\n";
+            std::cout << "Verbose help not embedded. Run the command with --help.\n";
 #endif
             return 0;
         }
@@ -644,8 +643,8 @@ int YamsCLI::run(int argc, char* argv[]) {
 #ifdef YAMS_HAVE_GENERATED_CLI_HELP
                 printCmdVerbose(subcmd == "prune" ? "doctor" : subcmd);
 #else
-                std::cout << "Verbose help not embedded for command '" << subcmd
-                          << "'. See docs/user_guide/cli.md.\n";
+                std::cout << "Verbose help not embedded for command '" << subcmd << "'. Run 'yams "
+                          << subcmd << " --help'.\n";
 #endif
                 return 0;
             }
@@ -659,8 +658,7 @@ int YamsCLI::run(int argc, char* argv[]) {
 
         const std::string_view routedSubcmd =
             parsePlan.argc > 1 && !isFlag(parsePlan.argv[1]) ? parsePlan.argv[1] : "";
-        if (!routedSubcmd.empty() &&
-            !CommandRegistry::isRegisteredTopLevelCommand(routedSubcmd)) {
+        if (!routedSubcmd.empty() && !CommandRegistry::isRegisteredTopLevelCommand(routedSubcmd)) {
             std::cerr << "[FAIL] Unknown command: " << routedSubcmd << "\n";
             std::cerr << "Hint: Run `yams --help` to list commands.";
             if (routedSubcmd == "prun") {

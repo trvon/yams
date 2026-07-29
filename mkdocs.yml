@@ -7,42 +7,17 @@ docs_dir: docs
 site_dir: site
 use_directory_urls: true
 
-# Exclude internal planning/working docs from site build.
+# Runtime prompts and packaged skills are source assets, not site pages.
 exclude_docs: |
-  delivery/**
-  pbi/**
-  testing/CATCH2_PATTERNS.md
-  testing/embedding_dimension_robustness.md
-  hosting/p0-object-storage-s3-validation.md
-  design/monolith_refactor_program_codex_yams.md
+  prompts/**
+  skills/**
 
 nav:
   - Home: index.md
-  - Get Started:
-      - Installation: user_guide/installation.md
-      - Quick Start: user_guide/README.md
-      - CLI Reference: user_guide/cli.md
-      - MCP Server: user_guide/mcp.md
-  - Guides:
-      - Embeddings & Search: user_guide/embeddings.md
-      - Self-hosting: hosting/self_hosting.md
-      - Operations: admin/operations.md
-      - Plugins: PLUGINS.md
-      - Prompt Templates: PROMPT.md
-  - Reference:
-      - API Overview: api/README.md
-      - MCP Tools: api/mcp_tools.md
-      - System Architecture: architecture/system_architecture.md
-      - Benchmarks:
-          - Overview: benchmarks/README.md
-          - Performance Report: benchmarks/performance_report.md
-          - Storage Backends: benchmarks/storage_backends.md
-          - LongMemEval_S Baseline: benchmarks/longmemeval_s_baseline.md
-      - Developer:
-          - Setup: developer/setup.md
-          - Build System: developer/build_system.md
-          - Contributing: developer/contributing.md
-      - Roadmap: roadmap.md
+  - Build: BUILD.md
+  - Benchmarks: benchmarks/README.md
+  - Roadmap: roadmap.md
+  - Newsletter: newsletter.md
 
 theme:
   name: material

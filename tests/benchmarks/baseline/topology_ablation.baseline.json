@@ -1,7 +1,7 @@
 {
   "record_count": 2,
   "schema_version": "topology_ablation_v1",
-  "notes": "Defaults-row baseline only. Axes 1 and 2 are swept; axis 5 (KG rerank) is deferred. See docs/benchmarks/topology_ablation_matrix.md and tests/benchmarks/topology_ablation_bench.cpp. Numbers from 3 consecutive runs on darwin-arm64; regression thresholds wait for a second independent host run.",
+  "notes": "Defaults-row baseline only. Axes 1 and 2 are swept; axis 5 (KG rerank) is deferred. Numbers are from 3 consecutive runs on darwin-arm64; regression thresholds wait for a second independent host run.",
   "axis_1_routing_depth": {
     "defaults_c2_d64": {
       "route_latency_us_mean": {

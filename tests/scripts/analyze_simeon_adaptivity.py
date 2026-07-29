@@ -10,7 +10,7 @@ Reads JSONL cells produced by `run_simeon_adaptivity_matrix.sh` and emits:
 Usage (with uv):
   uv run tests/scripts/analyze_simeon_adaptivity.py \
       --matrix-dir bench_results/simeon_adaptivity/<run-id> \
-      --output docs/benchmarks/simeon_adaptivity_report.md
+      --output build/benchmarks/simeon_adaptivity_report.md
 """
 
 from __future__ import annotations

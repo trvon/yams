@@ -52,10 +52,10 @@ namespace yams::search {
 // When `Config::router_enabled` is true, the backend additionally builds
 // the Atire variant and exposes scoreRouted(), which picks between Atire
 // and SabSmooth per-query via simeon::QueryRouter using the passE preset
-// by default (see third_party/simeon/docs/router_design.md).
+// by default.
 //
 // Default is router_enabled=false. Rationale: simeon's own three-corpus
-// evaluation (docs/research/benchmarks.md, training_free_saturation.md)
+// evaluation.
 // shows SAB-smooth γ=5 alone is within ~1.8 nDCG@10 points of the
 // dual-build router on scifact, ties it on NFCorpus, and trails by 0.006
 // on FiQA — for roughly 2× the BM25 steady-state memory. The dual-build
@@ -75,7 +75,7 @@ public:
     struct RouterPreset {
         // passE_scq0_clar3 — the shippable router config from simeon's BEIR
         // bench. NFCorpus +0.009 nDCG@10 vs single-variant SAB; ties MiniLM.
-        // See third_party/simeon/docs/router_design.md and docs/benchmarks.md.
+        // Keep the product default aligned with recorded benchmark evidence.
         float oov_threshold = 0.0f;
         float high_idf_threshold = 3.0f;
         std::uint32_t cascade_min_terms = 4u;

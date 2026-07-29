@@ -114,7 +114,6 @@ Keep physical-device claims separate and reproducible.
 - RAII guards for global state (`ProfileGuard`, `EnvGuard`, `HwGuard`); reset
   atomics/overrides between cases.
 - DynamicCap sentinel: `UINT32_MAX` = unset (use it when resetting, not `0`).
-- See `docs/developer/testing.md` for the full suite-shaping policy.
 
 ## Benchmarks & Experiments (local xplan)
 

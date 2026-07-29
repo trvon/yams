@@ -26,7 +26,7 @@ namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 
 // Windows daemon shutdown hangs at WorkCoordinator thread join - skip until fixed
-// See: docs/developer/windows-daemon-ipc-plan.md
+// Windows daemon IPC does not yet support this path.
 #ifdef _WIN32
 #define SKIP_ON_WINDOWS_DAEMON_SHUTDOWN()                                                          \
     SKIP("Windows daemon shutdown hangs - see windows-daemon-ipc-plan.md")

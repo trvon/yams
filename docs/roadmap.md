@@ -1,186 +1,56 @@
-# YAMS Roadmap
+# Roadmap
 
-> Pre-1.0 releases (v0.x) are not stable. Expect breaking changes until v1.0 GA.
-
----
+YAMS is pre-1.0. The roadmap describes direction, not a compatibility promise.
 
 ## Principles
 
-| Principle | Description |
-|-----------|-------------|
-| **OSS-first** | CLI, storage engine, search, and MCP (stdio) are the open-source core |
-| **Data portability** | Export/import with full fidelity; no vendor lock-in |
-| **Deterministic builds** | Reproducible artifacts across platforms |
-| **Local-first** | Runs entirely offline on your own hardware or infrastructure |
+- Local-first: a corpus remains usable without an account or hosted service.
+- Portable: users can inspect, export, move, and delete their data.
+- Measured: retrieval and performance changes require reproducible evidence.
+- Small surface: command help, schemas, tests, and benchmarks are canonical.
+- Interoperable: CLI, MCP, mobile, and plugins share the same corpus semantics.
 
----
+## Current focus
 
-## Current Release: v0.16.x
+- Make daemon lifecycle and recovery predictable under load and crashes.
+- Improve search, graph, and grep retrieval quality per token returned.
+- Keep Simeon as the primary embedding and retrieval optimization backend.
+- Align candidate generation, fusion, and reranking with measured query classes.
+- Harden mobile corpus access through the stable local C ABI.
+- Reduce duplicated infrastructure, configuration, and documentation.
 
-### Storage Engine
+## Peer-to-peer corpus sharing
 
-- Content-addressed blobs (SHA-256), Rabin chunking, zstd/LZMA compression
-- WAL-backed SQLite metadata with FTS5 full-text index
-- Path tree indexing with `path_prefix`, `reverse_path`, `path_hash` indexes
-- Snapshot versioning with automatic git metadata detection (commit, branch, remote)
-- Tree-based diff with Merkle comparison and rename detection (≥99% accuracy)
-- Download manager with stop/start/resume controls via daemon
-- Storage health checks, integrity/corruption detection, WAL flush on shutdown, and DB salvaging
+The long-term goal is direct, selective sharing between YAMS corpora without a
+central service becoming the owner of either corpus.
 
-### Search
+The first usable slice should provide:
 
-- **Hybrid search engine**: FTS5 keyword + vector similarity + Knowledge Graph fusion
-  - Reciprocal Rank Fusion (RRF) with BM25 variant as default fusion strategy
-  - WEIGHTED_MAX fusion strategy for benchmark corpora
-  - Configurable weights: keyword, vector, KG, tag, metadata, symbol
-- **Vector backends**: FAISS HNSW, Simeon, and ONNX Runtime providers with ConfigResolver policy
-- **Relevance Feedback & Tuning**: RM3 pseudo-relevance feedback, research-tuned configurations, and Simeon bandit tuning
-- **Concept & Entity Mining**: Simeon concept mining, GLiNER concept extraction, and Knowledge Graph Named Entity Recognition (NER) awareness
-- **TurboQuant vector compression**: End-to-end packed-vector storage, reranking, and direct compressed ANN traversal with persisted per-coordinate calibration
-- **Hierarchical embeddings**: document-level → chunk-level two-stage refinement
-  - `twoStageVectorSearch` with configurable `doc_stage_limit`, `chunk_stage_limit`, `hierarchy_boost`
-- **Symbol-aware search**: tree-sitter code analysis (15+ languages including Solidity, Zig)
-  - `SymbolEnricher` extracts definitions, references, call graphs from KG
-  - Symbol metadata boosts ranking (`symbol_weight` default: 0.15)
-- **Query processing**: literal extraction, qualifier parsing (lines:, pages:, section:, name:, ext:, mime:)
-- **Parallel post-processing**: `ParallelPostProcessor` for result sets ≥100 items (3.4x speedup at 1000 results)
-- **Fuzzy search**: BK-tree index with intelligent document prioritization
+1. Content-addressed exchange so existing blobs are never transferred twice.
+2. Explicit peer identity and confirmation before any corpus is shared.
+3. Collection-, tag-, and path-scoped manifests with a dry-run preview.
+4. Authenticated and encrypted transport.
+5. Resumable synchronization with integrity verification.
+6. Conflict-preserving metadata and graph merge semantics.
+7. Revocation and local deletion that do not depend on a remote account.
 
-### Grep
+Peer discovery, transport, and conflict policy remain design work. Until those
+contracts are tested, YAMS will not claim cross-device synchronization.
 
-- **Literal extraction**: fast literal pre-filter from regex patterns with speed optimizations
-- **Boyer-Moore-Horspool**: optimized string search for patterns ≥3 characters
-- **SIMD newline scanning**: AVX2/SSE2/NEON with scalar fallback (4-8x speedup)
-- **Parallel candidate filtering**: chunk-based processing for large corpora (2-4x speedup)
-- **FTS-first optimization**: uses FTS5 index for literal patterns before full scan
+## Before 1.0
 
-### CLI & MCP
+- Define and test the stable corpus, plugin, and mobile ABI boundaries.
+- Establish multi-corpus retrieval quality gates and release baselines.
+- Complete export/import with tags, relationships, and provenance intact.
+- Separate fast correctness tests from explicit stress and soak lanes.
+- Ship reproducible artifacts for supported operating systems and architectures.
 
-- CLI-first design; MCP server via stdio only (no HTTP/WebSocket in OSS)
-- MCP code mode (composite tools: query, execute, session)
-- `yams graph --explore`: agent-oriented graph context (ranked symbols, relationships, source snippets)
-- `yams tune`: CLI corpus tuner with persistent query/learning parameters
-- `diff`: tree-based comparison with rename detection (default); `--flat-diff` for legacy
-- `session`: pinned paths with `pin`, `unpin`, `list`, `warm` commands
-- `doctor`: dedupe, prune (9 build systems, 10+ languages), embeddings repair, plugin diagnostics, storage blob integrity checks, and reference count validation
-- `graph`: read-only Knowledge Graph viewer with depth control
-- Streaming IPC with protobuf serialization, multiplexing, and backpressure
-- Consistent `--json` output across all commands
-- Sandbox detection for AI coding environments (Codex, etc.)
-- Autocomplete improvements with optimized corpus shell completion latency
+## Later
 
-### Daemon Architecture
+- Peer-to-peer corpus replication and selective team sharing
+- Cross-repository retrieval federation
+- Offline mobile corpus import, inspection, search, export, and deletion
+- User-controlled context exchange between agents and applications
 
-- **WorkCoordinator**: centralized thread pool with Boost.Asio strands
-  - Hardware-aware sizing (8-32 threads based on CPU cores)
-- **Gradient2 adaptive concurrency limiters** (Netflix-style)
-- **IOCoordinator**: dedicated read/write coordinator for socket server
-- **Tuning profiles**: efficient/balanced/aggressive via `TuningManager` and `ConfigResolver` TOML profiles
-- **Resource Governor**: adaptive resource caps and concurrency limits (DynamicCap) managed by `TuneAdvisor`
-- **Connection state machine**: tinyfsm-based `ConnectionFsm` with clean transitions
-- **Async-first**: C++20 coroutines (`asio::awaitable`), `as_tuple` error handling, and event-driven notifications
-- **ServiceManager**: optimized concurrency with reduced synchronization locks
-- **Streaming**: header-first chunked transfer, persistent sockets, TTFB metrics
-- **Multi-client stability**: tested up to 16 concurrent clients
-
-### Plugin System (ABI-stable C interface)
-
-- **ONNX Runtime provider**: all-MiniLM-L6-v2 (default), multi-qa-MiniLM-L6-cos-v1, nomic-embed-text-v1.5
-  - Dynamic tensor padding (~70-85x throughput for short inputs)
-  - Session reuse with 25x warm-cycle latency reduction
-  - Hardware-adaptive pool sizing
-  - GPU acceleration: CoreML (macOS), CUDA (Linux/Windows), DirectML (Windows), MIGraphX (ROCm)
-- **Tree-sitter symbol extractor**: auto-downloads grammars (v13-15), 15+ languages
-- **PDF extractor**: parallel PDF extraction and processing via `zyp` PDF plugin
-- Plugin discovery: `YAMS_PLUGIN_DIR`, standard directories, trust policies
-- Lifecycle: scan, load, unload; daemon autoload on startup
-
----
-
-### Packaging & Distribution
-
-- **Build**: Meson + Conan 2.x; Release/Debug/Profiling configurations
-- **Linux**: deb (APT repo at repo.yamsmemory.ai), rpm (YUM repo), Docker (amd64/arm64)
-- **macOS**: Homebrew tap (`trvon/yams/yams`), pkg, zip (Apple Silicon + Intel)
-- **Windows**: MSI installer (WiX v4), winget manifest
-- **Package signing**: signed releases via CI
-
----
-
-## Planned
-
-### Mobile App
-
-- [ ] Flutter-based mobile app with local corpus access
-- [ ] Memory picker and context injection UX
-- [ ] Conversation artifact write-back to YAMS
-- [ ] Local LLM hosting (Gemma) for on-device inference
-
-### P2P Corpus Sync
-
-- [ ] Peer-to-peer corpus synchronization protocol ([draft design](design/sync-protocol.md))
-- [ ] Cross-device corpus replication
-- [ ] Conflict resolution for concurrent edits
-- [ ] Selective sync (collection/tag-based filtering)
-
-### Mobile Bindings
-
-- [ ] Finalize C ABI contract for corpus access (`libyams_mobile`)
-- [ ] Backend parity: embedded and daemon behavior fully aligned
-- [ ] Ship `.xcframework` (iOS) and `.aar` (Android) packages
-- [ ] Flutter plugin consuming native corpus library
-
-### Search & Retrieval
-
-- [ ] Vector search tuning recommendations (documentation)
-- [ ] Custom embedding model support
-
-### Stability & Operations
-
-- [ ] Thread safety hardening (TSan enabled in CI)
-- [ ] Export/import snapshots preserving tags and edges
-- [x] Space reclamation and integrity verification CLI
-- [ ] Prometheus metrics endpoint
-- [ ] Structured logging with trace correlation
-
-### Documentation
-
-- [x] P2P sync protocol specification
-  - Design doc: [design/sync-protocol.md](../design/sync-protocol.md)
-  - Note: the sync protocol implementation (P2P corpus replication, conflict resolution, selective sync) remains under the "P2P Corpus Sync" feature section above and is not yet built.
-
-### Platform Expansion
-
-- [ ] Cross-repository search federation
-
----
-
-## Release History
-
-| Version | Date | Highlights | Changelog |
-|---------|------|------------|-----------|
-| **v0.16** | 2026-06-01 | Simeon bandit tuning, startup backend validation, Faiss compatibility, literal grep speedups, explore graph tool | (see `CHANGELOG.md`) |
-| **v0.15** | 2026-05-15 | FAISS HNSW vector backend, BM25 variant RRF, RM3 pseudo-relevance feedback, Simeon concept mining, parallel PDF extraction | (see `CHANGELOG.md`) |
-| **v0.14** | 2026-05-04 | Simeon default backend, PHSS vector search, topology/clustering, storage health checks/corruption detection | (see `CHANGELOG.md`) |
-| **v0.13** | 2026-04-17 | CLI corpus tuner, graph rebuilding/topology optimization, CLI autocomplete improvements, reduced ServiceManager locks | [v0.13](changelogs/v0.13.md) |
-| **v0.12** | 2026-04-02 | TurboQuant vector compression, download controls (stop/start/resume), ONNX ABI hardening, Catch2 migration | [v0.12](changelogs/v0.12.md) |
-| **v0.10** | 2026-02-28 | Sandbox detection, MCP refactoring, daemon communication optimizations, package signing, graph improvements | [v0.10](changelogs/v0.10.md) |
-| **v0.9** | 2026-02-24 | Gradient2 concurrency limiters, MCP code mode, IOCoordinator, multi-client stability (16 clients), embedding chunking | [v0.9](changelogs/v0.9.md) |
-| **v0.8** | 2026-01-24 | HNSW rewrite, KG-boosted search, ONNX dynamic padding (70-85x), session reuse, download streaming, Zig support | [v0.8](changelogs/v0.8.md) |
-| **v0.7** | | WorkCoordinator, hierarchical embeddings, tree-sitter symbols, grep SIMD, parallel post-processing | [v0.7](changelogs/v0.7.md) |
-| **v0.6** | | Protobuf IPC, connection FSM, tuning profiles, RRF fusion, post-ingest pipeline, plugin system v0.1 | [v0.6](changelogs/v0.6.md) |
-| **v0.5** | | Service architecture, HNSW index, daemon pooling, repair coordinator, PDF extraction | [v0.5](changelogs/v0.5.md) |
-| **v0.4** | | Daemon architecture, universal content handlers, snapshot versioning, tree diff | [v0.4](changelogs/v0.4.md) |
-| **v0.3** | | Hybrid search, vector database (sqlite-vec), MCP server, Apple Silicon optimizations | [v0.3](changelogs/v0.3.md) |
-| **v0.2** | | FTS5 search, content chunking, basic CLI | [v0.2](changelogs/v0.2.md) |
-| **v0.1** | | Initial storage engine, add/get/delete | [v0.1](changelogs/v0.1.md) |
-
----
-
-## Contributing
-
-1. **Open an issue** with a short proposal: problem, approach, scope, risks
-2. **For larger items**: include evaluation plan and acceptance criteria
-3. **Keep changes incremental** and testable
-
-See the repo `CONTRIBUTING.md` for development setup.
+Completed work belongs in release history, benchmarks, and source control—not
+as a growing archive of roadmap prose.
