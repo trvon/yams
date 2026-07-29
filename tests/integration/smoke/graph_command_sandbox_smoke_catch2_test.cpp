@@ -37,6 +37,24 @@ private:
     std::streambuf* old_{nullptr};
 };
 
+class ScopedCurrentPath {
+public:
+    explicit ScopedCurrentPath(const fs::path& target) : original_(fs::current_path()) {
+        fs::current_path(target);
+    }
+
+    ~ScopedCurrentPath() {
+        std::error_code error;
+        fs::current_path(original_, error);
+    }
+
+    ScopedCurrentPath(const ScopedCurrentPath&) = delete;
+    ScopedCurrentPath& operator=(const ScopedCurrentPath&) = delete;
+
+private:
+    fs::path original_;
+};
+
 int run_cli(const std::vector<std::string>& args, std::string* output = nullptr,
             std::optional<std::string> stdinData = std::nullopt) {
     std::vector<std::string> effectiveArgs = args;
@@ -203,16 +221,22 @@ void createGraphExploreFixture(const fs::path& root) {
     using namespace yams::metadata;
 
     const fs::path dataDir = root / "data";
-    const fs::path sourceDir = root / "src";
+    const fs::path sourceDir = root / "repo" / "src";
+    const fs::path foreignSourceDir = root / "foreign" / "src";
     fs::create_directories(dataDir);
     fs::create_directories(sourceDir);
+    fs::create_directories(foreignSourceDir);
     const fs::path sourcePath = sourceDir / "explore.cpp";
+    const fs::path foreignSourcePath = foreignSourceDir / "explore.cpp";
     yams::test::write_file(sourcePath, "int exploreTarget() {\n"
                                        "    return 7;\n"
                                        "}\n"
                                        "int exploreEntry() {\n"
                                        "    return exploreTarget();\n"
                                        "}\n");
+    yams::test::write_file(foreignSourcePath, "int exploreEntry() {\n"
+                                              "    return 99;\n"
+                                              "}\n");
 
     const fs::path dbPath = dataDir / "yams.db";
     ConnectionPoolConfig poolConfig;
@@ -229,11 +253,17 @@ void createGraphExploreFixture(const fs::path& root) {
 
     REQUIRE(repository->insertDocument(makeDocumentWithPath(sourcePath.string(), "explore-hash"))
                 .has_value());
+    REQUIRE(repository
+                ->insertDocument(
+                    makeDocumentWithPath(foreignSourcePath.string(), "foreign-explore-hash"))
+                .has_value());
 
     auto entry = makeSymbol(sourcePath, "explore-hash", "exploreEntry", "demo::exploreEntry", 4, 6);
     auto target =
         makeSymbol(sourcePath, "explore-hash", "exploreTarget", "demo::exploreTarget", 1, 3);
-    REQUIRE(kgStore->upsertSymbolMetadata({entry, target}).has_value());
+    auto foreignEntry = makeSymbol(foreignSourcePath, "foreign-explore-hash", "exploreEntry",
+                                   "foreign::exploreEntry", 1, 3);
+    REQUIRE(kgStore->upsertSymbolMetadata({entry, target, foreignEntry}).has_value());
 
     KGNode entryNode;
     entryNode.nodeKey = symbolNodeKey(entry);
@@ -326,6 +356,7 @@ TEST_CASE("IntegrationSmoke.GraphCommandRespectsForcedSocketMode", "[smoke][inte
 TEST_CASE("IntegrationSmoke.GraphExploreRendersAgentContext", "[smoke][integrationsmoke]") {
     const fs::path root = yams::test::make_temp_dir("yams_graph_explore_");
     createGraphExploreFixture(root);
+    ScopedCurrentPath cwdGuard(root / "repo");
 
     yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::nullopt);
     yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::nullopt);
@@ -344,6 +375,8 @@ TEST_CASE("IntegrationSmoke.GraphExploreRendersAgentContext", "[smoke][integrati
     CHECK((parsed["query"] == "exploreEntry"));
     REQUIRE_FALSE(parsed["entrySymbols"].empty());
     CHECK((parsed["entrySymbols"][0]["label"] == "exploreEntry"));
+    CHECK((parsed["entrySymbols"].size() == 1));
+    CHECK((parsed["entrySymbols"][0]["qualifiedName"] == "demo::exploreEntry"));
     REQUIRE_FALSE(parsed["files"].empty());
     CHECK((parsed["files"][0]["content"].get<std::string>().find("4\tint exploreEntry()") !=
            std::string::npos));
@@ -358,6 +391,14 @@ TEST_CASE("IntegrationSmoke.GraphExploreRendersAgentContext", "[smoke][integrati
     CHECK((humanOut.find("Graph Explore") != std::string::npos));
     CHECK((humanOut.find("exploreEntry --calls--> exploreTarget") != std::string::npos));
     CHECK((humanOut.find("4\tint exploreEntry()") != std::string::npos));
+
+    std::string globalOut;
+    const int globalRc =
+        run_cli({"yams", "graph", "--explore", "exploreEntry", "--global", "--json"}, &globalOut);
+    INFO(globalOut);
+    REQUIRE((globalRc == 0));
+    const auto global = nlohmann::json::parse(globalOut);
+    CHECK((global["entrySymbols"].size() == 2));
 }
 
 TEST_CASE("IntegrationSmoke.GraphTopologyModesReadStoredSnapshot", "[smoke][integrationsmoke]") {

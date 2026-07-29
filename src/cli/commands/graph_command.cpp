@@ -26,11 +26,13 @@
 #include <yams/cli/graph_topology_support.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
+#include <yams/common/fs_utils.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/node_key_utils.h>
 #include <yams/metadata/path_utils.h>
 #include <yams/topology/topology_metadata_store.h>
 
@@ -45,7 +47,7 @@ using json = nlohmann::json;
 namespace {
 
 std::string normalizeScopePath(std::string_view value) {
-    auto normalized = std::filesystem::path(value).lexically_normal().generic_string();
+    auto normalized = common::canonicalizePathForComparison(value);
 #ifdef _WIN32
     std::ranges::transform(normalized, normalized.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -69,6 +71,9 @@ bool graphPathWithinScope(std::string_view candidatePath, const std::filesystem:
 }
 
 bool graphNodeKeyWithinScope(std::string_view nodeKey, const std::filesystem::path& scopePath) {
+    if (const auto sourcePath = metadata::sourcePathFromNodeKey(nodeKey)) {
+        return graphPathWithinScope(*sourcePath, scopePath);
+    }
     std::string normalizedNodeKey(nodeKey);
 #ifdef _WIN32
     std::ranges::transform(normalizedNodeKey, normalizedNodeKey.begin(),
@@ -166,8 +171,14 @@ public:
         cmd->add_option("--prop-filter", propFilter_,
                         "Filter nodes by JSON property (e.g., 'decompiled:malloc')");
 
-        cmd->add_flag("--scope-cwd", scopeToCwd_,
-                      "Scope results under CWD (source paths for list/topology)");
+        auto* scopeCwd =
+            cmd->add_flag("--scope-cwd", scopeToCwd_,
+                          "Scope list/topology results under CWD; --explore is scoped by default");
+        auto* globalExplore =
+            cmd->add_flag("--global", globalExplore_,
+                          "Allow --explore results outside the current working directory");
+        scopeCwd->excludes(globalExplore);
+        globalExplore->excludes(scopeCwd);
 
         // yams-66h: List available node types with counts
         cmd->add_flag("--list-types", listTypes_, "List available node types with counts");
@@ -1053,6 +1064,7 @@ private:
     }
 
     boost::asio::awaitable<Result<void>> executeGraphExplore() {
+        const bool scopeToInvocationCwd = !globalExplore_;
         const auto renderLocal = [&]() -> Result<void> {
             auto appCtx = cli_ ? cli_->getAppContext() : nullptr;
             if (appCtx == nullptr) {
@@ -1065,7 +1077,7 @@ private:
             }
             app::services::GraphExploreRequest localReq;
             localReq.query = exploreQuery_;
-            if (scopeToCwd_) {
+            if (scopeToInvocationCwd) {
                 localReq.scopePathPrefix = invocationCwd_.lexically_normal().generic_string();
             }
             localReq.budget.maxFiles = exploreMaxFiles_;
@@ -1096,7 +1108,7 @@ private:
 
         daemon::GraphExploreRequest req;
         req.query = exploreQuery_;
-        if (scopeToCwd_) {
+        if (scopeToInvocationCwd) {
             req.scopePathPrefix = invocationCwd_.lexically_normal().generic_string();
         }
         req.maxFiles = static_cast<uint64_t>(exploreMaxFiles_);
@@ -1115,7 +1127,7 @@ private:
         }
 
         auto appResponse = yams::cli::mapGraphExploreResponseFromDaemon(result.value());
-        if (scopeToCwd_ && graphExploreEscapesScope(appResponse, invocationCwd_)) {
+        if (scopeToInvocationCwd && graphExploreEscapesScope(appResponse, invocationCwd_)) {
             spdlog::debug("graph explore daemon returned out-of-scope results; falling back to "
                           "local service");
             co_return renderLocal();
@@ -1494,6 +1506,7 @@ private:
     std::string topologyClusterId_;
     std::string topologySnapshotId_;
     bool scopeToCwd_{false};
+    bool globalExplore_{false};
     std::string lookupSymbol_;
     std::string lookupAtFile_;
     std::string impactSymbol_;

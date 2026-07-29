@@ -1,9 +1,11 @@
 #include <yams/app/services/graph_context_service.hpp>
 
+#include <yams/common/fs_utils.h>
 #include <yams/core/assert.hpp>
 #include <yams/metadata/kg_relation_summary.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/node_key_utils.h>
 #include <yams/profiling.h>
 
 #include <nlohmann/json.hpp>
@@ -52,8 +54,8 @@ bool pathWithinScope(std::string_view candidatePath, std::string_view scopePathP
         return false;
     }
 
-    auto candidate = std::filesystem::path(candidatePath).lexically_normal().generic_string();
-    auto scope = std::filesystem::path(scopePathPrefix).lexically_normal().generic_string();
+    auto candidate = common::canonicalizePathForComparison(candidatePath);
+    auto scope = common::canonicalizePathForComparison(scopePathPrefix);
 #ifdef _WIN32
     candidate = lowerAscii(candidate);
     scope = lowerAscii(scope);
@@ -71,8 +73,10 @@ bool relationEndpointWithinScope(std::string_view nodeKey, std::string_view scop
     if (scopePathPrefix.empty()) {
         return true;
     }
-    auto normalizedScope =
-        std::filesystem::path(scopePathPrefix).lexically_normal().generic_string();
+    if (const auto sourcePath = metadata::sourcePathFromNodeKey(nodeKey)) {
+        return pathWithinScope(*sourcePath, scopePathPrefix);
+    }
+    auto normalizedScope = common::canonicalizePathForComparison(scopePathPrefix);
     std::string normalizedNodeKey(nodeKey);
 #ifdef _WIN32
     normalizedScope = lowerAscii(normalizedScope);

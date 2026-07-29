@@ -69,6 +69,22 @@ requires std::constructible_from<std::string_view, T>
 }
 
 /**
+ * Canonicalize a filesystem path for identity and containment comparisons.
+ *
+ * Resolves existing symlinks when possible (for example /var -> /private/var on macOS) and
+ * otherwise falls back to lexical normalization.
+ */
+[[nodiscard]] inline std::string canonicalizePathForComparison(std::string_view path) {
+    std::filesystem::path normalized = std::filesystem::path(path).lexically_normal();
+    std::error_code error;
+    auto canonical = std::filesystem::weakly_canonical(normalized, error);
+    if (!error && !canonical.empty()) {
+        normalized = std::move(canonical);
+    }
+    return normalized.generic_string();
+}
+
+/**
  * Create a temporary directory with a unique name.
  *
  * @param prefix Prefix for the directory name (default: "yams_")

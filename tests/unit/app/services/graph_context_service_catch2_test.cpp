@@ -201,8 +201,18 @@ TEST_CASE("GraphContextService explore applies repository scope before symbol bu
     fixture.upsertSymbols(indexedSymbols);
 
     const auto localTarget = fixture.symbol(localPath, "dispatch", "local::dispatch", 1, 1);
+    const auto upsertVersionNode = [&](const SymbolMetadata& symbol, std::string_view snapshot) {
+        KGNode node;
+        node.nodeKey = symbol.kind + ":" + symbol.qualifiedName + "@" + symbol.filePath +
+                       "@snap:" + std::string(snapshot);
+        node.label = symbol.symbolName;
+        node.type = symbol.kind + "_version";
+        auto nodeId = fixture.kgStore->upsertNode(node);
+        REQUIRE((nodeId.has_value()));
+        return nodeId.value();
+    };
     const auto localId = fixture.upsertNodeFor(localSymbol);
-    const auto localTargetId = fixture.upsertNodeFor(localTarget);
+    const auto localTargetId = upsertVersionNode(localTarget, "local-target");
     const auto foreignId = fixture.upsertNodeFor(foreignSymbol);
     REQUIRE((fixture.kgStore
                  ->addEdge(KGEdge{.srcNodeId = localId,
