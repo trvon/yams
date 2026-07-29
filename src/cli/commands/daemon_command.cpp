@@ -26,6 +26,7 @@ using nlohmann::json;
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <csignal>
 #include <cstdio>
@@ -36,6 +37,7 @@ using nlohmann::json;
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <optional>
 #ifndef _WIN32
@@ -446,12 +448,29 @@ private:
         }
         if (content.front() == '{') {
             auto parsed = json::parse(content, nullptr, false);
-            if (!parsed.is_discarded() && parsed.is_object()) {
-                return static_cast<pid_t>(parsed.value("pid", -1));
+            if (parsed.is_discarded() || !parsed.is_object() || !parsed.contains("pid") ||
+                !parsed["pid"].is_number_integer()) {
+                return -1;
             }
+            try {
+                const auto pid = parsed["pid"].get<std::int64_t>();
+                if (pid > 0 && pid <= std::numeric_limits<pid_t>::max()) {
+                    return static_cast<pid_t>(pid);
+                }
+            } catch (const json::exception&) {
+                return -1;
+            }
+            return -1;
         }
 
-        return static_cast<pid_t>(std::atoi(content.c_str()));
+        std::int64_t pid = -1;
+        const auto [end, error] =
+            std::from_chars(content.data(), content.data() + content.size(), pid);
+        if (error != std::errc{} || end != content.data() + content.size() || pid <= 0 ||
+            pid > std::numeric_limits<pid_t>::max()) {
+            return -1;
+        }
+        return static_cast<pid_t>(pid);
     }
 
     bool killDaemonByPid(pid_t pid, bool force = false) {
@@ -466,6 +485,12 @@ private:
             }
             spdlog::error("Failed to query daemon PID {}: {}", pid, strerror(errno));
             return false; // Process doesn't exist or not permitted
+        }
+
+        if (!yams::daemon::client::isLiveDaemonProcess(pid)) {
+            spdlog::error("Refusing to signal PID {} because it is not identifiable as yams-daemon",
+                          pid);
+            return false;
         }
 
         // Send termination signal
@@ -513,6 +538,9 @@ private:
 
         while (std::chrono::steady_clock::now() - start < timeout) {
             pid_t pid = readPidFromFile(pidFilePath);
+            if (pid > 0 && !yams::daemon::client::pidFileIdentifiesLiveDaemon(pidFilePath, pid)) {
+                pid = -1;
+            }
             if (pid <= 0 && fallbackPid > 0) {
                 pid = fallbackPid;
             }
@@ -733,7 +761,7 @@ private:
                 continue;
             }
 
-            if (seen.insert(pid).second) {
+            if (yams::daemon::client::isLiveDaemonProcess(pid) && seen.insert(pid).second) {
                 pids.push_back(pid);
             }
         }
@@ -767,7 +795,7 @@ private:
                 continue;
             }
 
-            if (seen.insert(pid).second) {
+            if (yams::daemon::client::isLiveDaemonProcess(pid) && seen.insert(pid).second) {
                 pids.push_back(pid);
             }
         }
@@ -873,7 +901,8 @@ private:
                 std::string pidFilePath = YamsCLI::resolveConfiguredDaemonPidFilePath().string();
 
                 pid_t pid = readPidFromFile(pidFilePath);
-                if (pid > 0) {
+                if (pid > 0 &&
+                    yams::daemon::client::pidFileIdentifiesLiveDaemon(pidFilePath, pid)) {
                     // Try SIGTERM first
                     if (killDaemonByPid(pid, false)) {
                         stopped = true;
@@ -962,6 +991,9 @@ private:
             }
 
             pid_t pidBeforeStop = readPidFromFile(pidFile_);
+            if (!yams::daemon::client::pidFileIdentifiesLiveDaemon(pidFile_, pidBeforeStop)) {
+                pidBeforeStop = -1;
+            }
             stopDaemon();
 
             if (!waitForDaemonStop(effectiveSocket, pidFile_, std::chrono::seconds(5),
@@ -1101,10 +1133,8 @@ private:
         } else {
             // Start daemon in background
             daemon::ClientConfig config;
-            // Only set socketPath if explicitly provided by the user
-            if (!socketPath_.empty()) {
-                config.socketPath = socketPath_;
-            }
+            config.socketPath = effectiveSocket;
+            config.pidFile = pidFile_;
             // Prefer explicit start option; otherwise use global CLI data path
             if (!dataDir_.empty()) {
                 config.dataDir = dataDir_;
@@ -1123,10 +1153,9 @@ private:
                 setenv("YAMS_CONFIG", startConfigPath_.c_str(), 1);
             }
 
-            // Best-effort cleanup if no daemon appears to be running
-            if (!daemon::DaemonClient::isDaemonRunning(effectiveSocket)) {
-                cleanupDaemonFiles(effectiveSocket, pidFile_);
-            }
+            // The daemon owns stale lifecycle-artifact recovery while acquiring its
+            // process and data-directory locks. Removing files here can orphan a live
+            // daemon during a transient IPC failure.
             std::optional<yams::cli::ui::SpinnerRunner> spinner;
             if (yams::cli::ui::stdout_is_tty()) {
                 spinner.emplace();
@@ -1171,8 +1200,28 @@ private:
         };
 
         // Capture PID early in case the PID file disappears during shutdown
-        pid_t initialPid = readPidFromFile(pidFile_);
+        const pid_t recordedPid = readPidFromFile(pidFile_);
         const auto liveSocketPids = collectDaemonPidsForSocket(effectiveSocket);
+        const auto trustedPid = [&](pid_t pid) -> pid_t {
+            if (pid <= 0) {
+                return -1;
+            }
+            if (std::find(liveSocketPids.begin(), liveSocketPids.end(), pid) !=
+                liveSocketPids.end()) {
+                return pid;
+            }
+            if (yams::daemon::client::pidFileIdentifiesLiveDaemon(pidFile_, pid)) {
+                return pid;
+            }
+            return -1;
+        };
+        pid_t initialPid = trustedPid(recordedPid);
+        if (recordedPid > 0 && initialPid <= 0 && kill(recordedPid, 0) == 0) {
+            spdlog::warn(
+                "Ignoring stale or recycled PID {} from '{}' because daemon identity could not "
+                "be verified",
+                recordedPid, pidFile_);
+        }
 
         // Check if daemon is running
         const bool ipcResponsive = daemon::DaemonClient::isDaemonRunning(effectiveSocket);
@@ -1193,57 +1242,9 @@ private:
                 spdlog::warn("Found daemon process (PID {}) not responding on socket", pid);
                 daemonRunning = true;
             } else {
-                // PID file may be missing while data-dir lock still points to an alive daemon.
-                pid_t lockPid = -1;
-                std::filesystem::path lockFile;
-                try {
-                    std::filesystem::path dataDir;
-                    if (!dataDir_.empty()) {
-                        dataDir = std::filesystem::path(dataDir_);
-                    } else if (cli_) {
-                        auto cliData = cli_->getDataPath();
-                        if (!cliData.empty()) {
-                            dataDir = cliData;
-                        }
-                    }
-                    if (dataDir.empty()) {
-                        dataDir = yams::config::resolve_data_dir_from_config();
-                    }
-                    lockFile = dataDir / ".yams-lock";
-                    if (safe_exists(lockFile)) {
-                        std::ifstream in(lockFile);
-                        std::string content;
-                        std::getline(in, content, '\0');
-                        auto parsed = json::parse(content, nullptr, false);
-                        if (!parsed.is_discarded() && parsed.is_object()) {
-                            lockPid = static_cast<pid_t>(parsed.value("pid", -1));
-                        }
-                    }
-                } catch (...) {
-                }
-
-                if (lockPid > 0 && lockPid != getpid() && kill(lockPid, 0) == 0) {
-                    auto desc = describeProcess(lockPid);
-                    const bool looksLikeDaemon =
-                        !desc.empty() && desc.find("yams-daemon") != std::string::npos;
-                    if (looksLikeDaemon) {
-                        spdlog::debug("Found lock-holder daemon process (PID {}) with missing "
-                                      "socket/PID file; attempting termination",
-                                      lockPid);
-                        if (killDaemonByPid(lockPid, force_)) {
-                            cleanupDaemonFiles(effectiveSocket, pidFile_);
-                            stopSpinner();
-                            std::cout << "[OK] YAMS daemon stopped successfully\n";
-                            return;
-                        }
-                    } else {
-                        spdlog::warn(
-                            "Lock file {} references PID {} that does not look like yams-daemon; "
-                            "not terminating",
-                            lockFile.string(), lockPid);
-                    }
-                }
-
+                // Lock-file payloads are diagnostic only. Without a responsive socket,
+                // socket-scoped process match, or verified PID file, there is no authority
+                // to signal a process.
                 spdlog::info("YAMS daemon is not running");
                 cleanupDaemonFiles(effectiveSocket, pidFile_);
                 stopSpinner();
@@ -1262,7 +1263,7 @@ private:
                    message.find("ECONNRESET") != std::string::npos;
         };
         auto pidAlive = [&]() -> bool {
-            pid_t pid = readPidFromFile(pidFile_);
+            pid_t pid = trustedPid(readPidFromFile(pidFile_));
             if (pid <= 0) {
                 pid = initialPid;
             }
@@ -1308,7 +1309,7 @@ private:
 
         // If socket shutdown failed, try PID-based termination
         if (!stopped) {
-            pid_t pid = readPidFromFile(pidFile_);
+            pid_t pid = trustedPid(readPidFromFile(pidFile_));
             if (pid <= 0) {
                 pid = initialPid;
             }
@@ -1364,56 +1365,6 @@ private:
                 if (socketPidsStopped) {
                     stopped = true;
                 }
-            }
-#endif
-
-#ifndef _WIN32
-            // Unix: use pkill to find and kill yams-daemon processes with our socket
-            // Use SIGKILL (-9) when the daemon is unresponsive or --force is set.
-            std::string signal = shouldForceOrphanedStop ? "-9 " : "";
-            std::string pkillCmd = "pkill " + signal + "-f 'yams-daemon.*" + effectiveSocket + "'";
-            int pkillResult = std::system(pkillCmd.c_str());
-
-            if (pkillResult == 0) {
-                spdlog::info("Successfully killed orphaned daemon process");
-                // Wait a moment for process to die
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                if (!isDaemonProcessRunningForSocket(effectiveSocket)) {
-                    stopped = true;
-                } else {
-                    spdlog::debug("Daemon process still running after pkill (socket match)");
-                }
-            } else {
-                // Try a more general pkill if specific socket match fails
-                pkillCmd = "pkill " + signal + "-f 'yams-daemon'";
-                pkillResult = std::system(pkillCmd.c_str());
-                if (pkillResult == 0) {
-                    spdlog::info("Killed yams-daemon process(es)");
-                    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                    if (!isDaemonProcessRunningForSocket(effectiveSocket)) {
-                        stopped = true;
-                    } else {
-                        spdlog::debug("Daemon process still running after pkill");
-                    }
-                }
-            }
-#else
-            // Windows: fall back to taskkill to avoid pkill dependency
-            pid_t pid = readPidFromFile(pidFile_);
-            std::string taskkillCmd;
-            if (pid > 0) {
-                taskkillCmd = "taskkill /PID " + std::to_string(pid) + " /T /F";
-            } else {
-                taskkillCmd = "taskkill /IM yams-daemon.exe /T /F";
-            }
-
-            int tkResult = std::system(taskkillCmd.c_str());
-            if (tkResult == 0) {
-                spdlog::info("Killed daemon process via taskkill");
-                stopped = true;
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            } else {
-                spdlog::warn("taskkill failed (exit={}): command='{}'", tkResult, taskkillCmd);
             }
 #endif
         }
@@ -1737,7 +1688,7 @@ private:
             }
         }
 #ifndef _WIN32
-        if (pid > 0 && kill(pid, 0) == 0) {
+        if (pid > 0 && yams::daemon::client::pidFileIdentifiesLiveDaemon(pidFile_, pid)) {
             std::cout << "  PID " << pid << ": RUNNING\n";
         } else if (pid > 0) {
             std::cout << "  PID " << pid << ": STALE\n";
@@ -1753,7 +1704,8 @@ private:
         } else {
             // Try fallback path in /tmp
             if (!fallbackPidPath.empty() && fallbackPid > 0) {
-                if (kill(fallbackPid, 0) == 0) {
+                if (yams::daemon::client::pidFileIdentifiesLiveDaemon(fallbackPidPath,
+                                                                      fallbackPid)) {
                     std::cout << "  Fallback PID " << fallbackPid << ": RUNNING\n";
                 } else {
                     std::cout << "  Fallback PID " << fallbackPid << ": STALE\n";
@@ -1830,20 +1782,10 @@ private:
         // continue on to the actual StatusRequest rather than bailing out early.
         bool preflightUnavailable = !daemon::DaemonClient::isDaemonRunning(effectiveSocket);
         if (preflightUnavailable) {
-            bool daemonLikelyAlive = false;
-            // Try PID-based detection to distinguish "starting" vs "not running"
-            pid_t pid = readPidFromFile(pidFile_);
-#ifndef _WIN32
-            if (pid > 0 && kill(pid, 0) == 0) {
-                daemonLikelyAlive = true;
-            }
-            // Do not guess by scanning /proc — if socket is down and no PID file, report not
-            // running.
-#else
-            if (pid > 0) {
-                daemonLikelyAlive = true;
-            }
-#endif
+            // Try verified PID identity to distinguish "starting" from a recycled PID.
+            const pid_t pid = readPidFromFile(pidFile_);
+            const bool daemonLikelyAlive =
+                yams::daemon::client::pidFileIdentifiesLiveDaemon(pidFile_, pid);
             if (!daemonLikelyAlive) {
                 std::cout << "YAMS daemon is not running\n";
                 if (effectiveSocket != configuredSocket) {
@@ -3565,6 +3507,9 @@ private:
             resolveSocketPathForLiveDaemon(configuredSocket, pidFile_, socketPath_.empty());
 
         pid_t pidBeforeStop = readPidFromFile(pidFile_);
+        if (!yams::daemon::client::pidFileIdentifiesLiveDaemon(pidFile_, pidBeforeStop)) {
+            pidBeforeStop = -1;
+        }
         stopDaemon();
 
         if (!waitForDaemonStop(effectiveSocket, pidFile_, std::chrono::seconds(5), pidBeforeStop)) {

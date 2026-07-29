@@ -29,6 +29,7 @@ enum class ClientTransportMode {
 struct ClientConfig {
     std::filesystem::path socketPath;
     std::filesystem::path proxySocketPath;
+    std::filesystem::path pidFile;
     std::filesystem::path dataDir;
     std::chrono::milliseconds connectTimeout{1000};
     std::chrono::milliseconds headerTimeout{30000};

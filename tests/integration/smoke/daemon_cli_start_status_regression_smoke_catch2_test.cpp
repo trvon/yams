@@ -11,8 +11,8 @@
 #include <string>
 #include <thread>
 
-#include <yams/compat/unistd.h>
 #include "../../common/test_helpers_catch2.h"
+#include <yams/compat/unistd.h>
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -176,9 +176,8 @@ std::optional<pid_t> spawnLockHolder(const fs::path& lockFile, const fs::path& f
         (void)::lseek(fd, 0, SEEK_SET);
         (void)::write(fd, text.data(), text.size());
         ::fsync(fd);
-        std::this_thread::sleep_for(30s);
-        ::close(fd);
-        _exit(0);
+        ::execl("/bin/sleep", "yams-lock-holder", "30", nullptr);
+        _exit(4);
     }
     return pid;
 }
@@ -221,7 +220,7 @@ void cleanupChild(pid_t pid) {
         (void)::kill(pid, SIGKILL);
     }
     int status = 0;
-    (void)::waitpid(pid, &status, WNOHANG);
+    (void)::waitpid(pid, &status, 0);
 }
 #endif
 
@@ -327,20 +326,25 @@ TEST_CASE("DaemonCliStartStatusRegression.StopTimeoutPathDoesNotEmitWarnNoise",
     }
 
     const auto unique = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
-    const fs::path root = fs::temp_directory_path() / ("yams_cli_stop_timeout_" + unique);
+    // Keep AF_UNIX paths below macOS's sockaddr_un limit even when TMPDIR is long.
+    const fs::path root = fs::path("/tmp") / ("yams_stop_" + unique);
     const fs::path dataDir = root / "data";
     const fs::path runtimeDir = root / "runtime";
     const fs::path socketPath = runtimeDir / "yams-daemon.sock";
+    const fs::path pidFile = runtimeDir / "yams-daemon.pid";
     const fs::path configPath = root / "config.toml";
 
     fs::create_directories(dataDir);
     fs::create_directories(runtimeDir);
     {
         std::ofstream cfg(configPath);
+        cfg << "[version]\n";
+        cfg << "config_version = 3\n";
         cfg << "[storage]\n";
         cfg << "path = \"" << dataDir.string() << "\"\n";
         cfg << "[daemon]\n";
         cfg << "socket_path = \"" << socketPath.string() << "\"\n";
+        cfg << "pid_file = \"" << pidFile.string() << "\"\n";
     }
 
     ScopedEnvVar cfgEnv("YAMS_CONFIG", configPath.string());
@@ -383,11 +387,15 @@ TEST_CASE("DaemonCliStartStatusRegression.StopTimeoutPathDoesNotEmitWarnNoise",
 #endif
 
 #ifndef _WIN32
-TEST_CASE("DaemonCliStartStatusRegression.StartRecoversFromStaleDataDirLockHolder",
+TEST_CASE("DaemonCliStartStatusRegression.StartRefusesUnverifiedDataDirLockHolder",
           "[smoke][daemonclistartstatusregression]") {
     auto yamsBinary = findYamsBinary();
+    auto daemonBinary = findYamsDaemonBinary();
     if (!yamsBinary.has_value()) {
         SKIP("Skipping: build yams binary not found via MESON_BUILD_ROOT");
+    }
+    if (!daemonBinary.has_value()) {
+        SKIP("Skipping: build yams-daemon binary not found via MESON_BUILD_ROOT");
     }
 
     const auto unique = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
@@ -396,16 +404,21 @@ TEST_CASE("DaemonCliStartStatusRegression.StartRecoversFromStaleDataDirLockHolde
     const fs::path runtimeDir = root / "runtime";
     const fs::path configPath = root / "config.toml";
     const fs::path fakeSocket = runtimeDir / "missing.sock";
+    const fs::path socketPath = runtimeDir / "yams-daemon.sock";
+    const fs::path pidFile = runtimeDir / "yams-daemon.pid";
     const fs::path lockFile = dataDir / ".yams-lock";
 
     fs::create_directories(dataDir);
     fs::create_directories(runtimeDir);
     {
         std::ofstream cfg(configPath);
+        cfg << "[version]\n";
+        cfg << "config_version = 3\n";
         cfg << "[core]\n";
         cfg << "data_dir = \"" << dataDir.string() << "\"\n";
         cfg << "[daemon]\n";
-        cfg << "socket_path = \"" << (runtimeDir / "yams-daemon.sock").string() << "\"\n";
+        cfg << "socket_path = \"" << socketPath.string() << "\"\n";
+        cfg << "pid_file = \"" << pidFile.string() << "\"\n";
     }
 
     ScopedEnvVar cfgEnv("YAMS_CONFIG", configPath.string());
@@ -420,15 +433,18 @@ TEST_CASE("DaemonCliStartStatusRegression.StartRecoversFromStaleDataDirLockHolde
     REQUIRE(isPidAlive(*childPid));
 
     const std::string yams = shellQuote(yamsBinary->string());
-    auto startRes = runCommandCapture(yams + " daemon start");
-    INFO("daemon start failed:\n" << startRes.output);
-    CHECK(startRes.exitCode == 0);
+    auto startRes = runCommandCapture(
+        yams + " daemon start --foreground --socket " + shellQuote(socketPath.string()) +
+        " --pid-file " + shellQuote(pidFile.string()) + " --config " +
+        shellQuote(configPath.string()) + " --data-dir " + shellQuote(dataDir.string()) +
+        " --daemon-binary " + shellQuote(daemonBinary->string()));
+    INFO("daemon unexpectedly acquired the held data-directory lock:\n" << startRes.output);
+    CHECK(startRes.exitCode != 0);
+    CHECK_FALSE(fs::exists(socketPath));
+    CHECK_FALSE(fs::exists(pidFile));
 
-    INFO("stale lock holder PID still alive after daemon start recovery");
-    CHECK_FALSE(isPidAlive(*childPid));
-
-    auto stopRes = runCommandCapture(yams + " daemon stop --force");
-    (void)stopRes;
+    INFO("unverified data-dir lock holder was terminated");
+    CHECK(isPidAlive(*childPid));
 
     cleanupChild(*childPid);
     std::error_code ec;

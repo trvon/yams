@@ -82,13 +82,16 @@ std::filesystem::path resolve_socket_path_config_first() {
     // 2) config.toml if present
     try {
         fs::path cfgPath;
+        if (const char* configured = std::getenv("YAMS_CONFIG"); configured && *configured) {
+            cfgPath = configured;
+        }
 #ifdef _WIN32
         // Windows: APPDATA/yams/config.toml
-        if (const char* appData = std::getenv("APPDATA")) {
+        else if (const char* appData = std::getenv("APPDATA")) {
             cfgPath = fs::path(appData) / "yams" / "config.toml";
         }
 #else
-        if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
+        else if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
             cfgPath = fs::path(xdg) / "yams" / "config.toml";
         } else if (const char* home = std::getenv("HOME")) {
             cfgPath = fs::path(home) / ".config" / "yams" / "config.toml";

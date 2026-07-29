@@ -1,9 +1,13 @@
 #include <yams/daemon/client/process_discovery.h>
 
+#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <regex>
 #include <set>
@@ -11,18 +15,35 @@
 #include <string>
 #include <vector>
 
-#ifndef _WIN32
-#include <spawn.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <signal.h>
-#include <sys/wait.h>
+#include <spawn.h>
 #include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#if TARGET_OS_OSX
+#include <libproc.h>
+#include <sys/sysctl.h>
+#endif
+#endif
 extern char** environ;
 #endif
 
 namespace yams::daemon::client {
 namespace {
 
-std::optional<int> readPidFromFile(const std::filesystem::path& pidFilePath) {
+struct PidFileRecord {
+    int pid{-1};
+    std::uint64_t startTimeNs{0};
+    std::filesystem::path executable;
+    bool structured{false};
+};
+
+std::optional<PidFileRecord> readPidFileRecord(const std::filesystem::path& pidFilePath) {
     if (pidFilePath.empty()) {
         return std::nullopt;
     }
@@ -32,13 +53,180 @@ std::optional<int> readPidFromFile(const std::filesystem::path& pidFilePath) {
         return std::nullopt;
     }
 
-    int pid = -1;
-    input >> pid;
-    if (!input.good() || pid <= 0) {
+    std::string content;
+    std::getline(input, content, '\0');
+    const auto first = std::find_if_not(content.begin(), content.end(),
+                                        [](unsigned char ch) { return std::isspace(ch) != 0; });
+    const auto last = std::find_if_not(content.rbegin(), content.rend(), [](unsigned char ch) {
+                          return std::isspace(ch) != 0;
+                      }).base();
+    if (first >= last) {
         return std::nullopt;
     }
+    content = std::string(first, last);
 
-    return pid;
+    if (content.front() == '{') {
+        auto parsed = nlohmann::json::parse(content, nullptr, false);
+        if (parsed.is_discarded() || !parsed.is_object() || !parsed.contains("pid") ||
+            !parsed["pid"].is_number_integer()) {
+            return std::nullopt;
+        }
+        const auto pid = parsed["pid"].get<std::int64_t>();
+        if (pid <= 0 || pid > std::numeric_limits<int>::max()) {
+            return std::nullopt;
+        }
+        PidFileRecord record;
+        record.pid = static_cast<int>(pid);
+        if (parsed.contains("start_ns")) {
+            if (!parsed["start_ns"].is_number_unsigned()) {
+                return std::nullopt;
+            }
+            record.startTimeNs = parsed["start_ns"].get<std::uint64_t>();
+        }
+        if (parsed.contains("exe")) {
+            if (!parsed["exe"].is_string()) {
+                return std::nullopt;
+            }
+            record.executable = parsed["exe"].get<std::string>();
+        }
+        record.structured = true;
+        return record.pid > 0 ? std::optional<PidFileRecord>{std::move(record)} : std::nullopt;
+    }
+
+    std::istringstream parser(content);
+    PidFileRecord record;
+    parser >> record.pid;
+    parser >> std::ws;
+    return parser && parser.eof() && record.pid > 0
+               ? std::optional<PidFileRecord>{std::move(record)}
+               : std::nullopt;
+}
+
+std::optional<int> readPidFromFile(const std::filesystem::path& pidFilePath) {
+    auto record = readPidFileRecord(pidFilePath);
+    return record ? std::optional<int>{record->pid} : std::nullopt;
+}
+
+bool isProcessAlive(int pid) {
+    if (pid <= 0) {
+        return false;
+    }
+#ifdef _WIN32
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) {
+        return false;
+    }
+    DWORD exitCode = 0;
+    const bool alive = GetExitCodeProcess(process, &exitCode) && exitCode == STILL_ACTIVE;
+    CloseHandle(process);
+    return alive;
+#else
+    const bool querySucceeded =
+        kill(pid, 0) == 0; // nosemgrep: yams.cpp.kill-zero-one-shot -- identity snapshot
+    return querySucceeded || errno == EPERM;
+#endif
+}
+
+std::filesystem::path processExecutablePath(int pid) {
+#ifdef _WIN32
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) {
+        return {};
+    }
+    char buffer[MAX_PATH];
+    DWORD size = static_cast<DWORD>(sizeof(buffer));
+    const bool ok = QueryFullProcessImageNameA(process, 0, buffer, &size) != 0;
+    CloseHandle(process);
+    return ok ? std::filesystem::path(std::string(buffer, size)) : std::filesystem::path{};
+#elif defined(__APPLE__) && TARGET_OS_OSX
+    char buffer[PROC_PIDPATHINFO_MAXSIZE] = {};
+    const int size = proc_pidpath(pid, buffer, sizeof(buffer));
+    return size > 0 ? std::filesystem::path(std::string(buffer, static_cast<std::size_t>(size)))
+                    : std::filesystem::path{};
+#elif defined(__APPLE__)
+    (void)pid;
+    return {};
+#else
+    std::error_code ec;
+    auto path = std::filesystem::read_symlink(
+        std::filesystem::path("/proc") / std::to_string(pid) / "exe", ec);
+    return ec ? std::filesystem::path{} : path;
+#endif
+}
+
+std::uint64_t processStartTimeNs(int pid) {
+#ifdef _WIN32
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) {
+        return 0;
+    }
+    FILETIME createTime{}, exitTime{}, kernelTime{}, userTime{};
+    const bool ok = GetProcessTimes(process, &createTime, &exitTime, &kernelTime, &userTime) != 0;
+    CloseHandle(process);
+    if (!ok) {
+        return 0;
+    }
+    ULARGE_INTEGER value;
+    value.LowPart = createTime.dwLowDateTime;
+    value.HighPart = createTime.dwHighDateTime;
+    return static_cast<std::uint64_t>(value.QuadPart) * 100ull;
+#elif defined(__APPLE__) && TARGET_OS_OSX
+    struct kinfo_proc processInfo;
+    std::memset(&processInfo, 0, sizeof(processInfo));
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid};
+    std::size_t length = sizeof(processInfo);
+    if (sysctl(mib, 4, &processInfo, &length, nullptr, 0) != 0 || length == 0) {
+        return 0;
+    }
+    const auto start = processInfo.kp_proc.p_starttime;
+    return static_cast<std::uint64_t>(start.tv_sec) * 1'000'000'000ull +
+           static_cast<std::uint64_t>(start.tv_usec) * 1'000ull;
+#elif defined(__APPLE__)
+    (void)pid;
+    return 0;
+#else
+    std::ifstream statFile("/proc/" + std::to_string(pid) + "/stat");
+    std::string statLine;
+    std::getline(statFile, statLine);
+    const auto rightParen = statLine.rfind(')');
+    if (rightParen == std::string::npos) {
+        return 0;
+    }
+    std::istringstream fields(statLine.substr(rightParen + 1));
+    std::string ignored;
+    for (int field = 0; field < 19; ++field) {
+        if (!(fields >> ignored)) {
+            return 0;
+        }
+    }
+    unsigned long long startTicks = 0;
+    const long ticksPerSecond = sysconf(_SC_CLK_TCK);
+    if (!(fields >> startTicks) || ticksPerSecond <= 0) {
+        return 0;
+    }
+    const double seconds = static_cast<double>(startTicks) / static_cast<double>(ticksPerSecond);
+    return static_cast<std::uint64_t>(seconds * 1'000'000'000.0);
+#endif
+}
+
+bool sameExecutable(const std::filesystem::path& recorded, const std::filesystem::path& live) {
+    if (recorded.empty() || live.empty()) {
+        return false;
+    }
+    std::error_code recordedError;
+    const auto canonicalRecorded = std::filesystem::weakly_canonical(recorded, recordedError);
+    std::error_code liveError;
+    const auto canonicalLive = std::filesystem::weakly_canonical(live, liveError);
+    return !recordedError && !liveError && canonicalRecorded == canonicalLive;
+}
+
+bool executableLooksLikeDaemon(const std::filesystem::path& executable) {
+    auto name = executable.filename().string();
+#ifdef _WIN32
+    std::transform(name.begin(), name.end(), name.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+#endif
+    return name == "yams-daemon" || name == "yams-daemon.exe";
 }
 
 #ifndef _WIN32
@@ -269,6 +457,35 @@ std::vector<int> collectDaemonPidsForPattern(const std::string& pattern) {
 
 } // namespace
 
+bool isLiveDaemonProcess(int pid) {
+    return isProcessAlive(pid) && executableLooksLikeDaemon(processExecutablePath(pid));
+}
+
+bool pidFileIdentifiesLiveDaemon(const std::filesystem::path& pidFilePath, int expectedPid) {
+    const auto record = readPidFileRecord(pidFilePath);
+    if (!record || record->pid != expectedPid || !isLiveDaemonProcess(expectedPid)) {
+        return false;
+    }
+
+    const auto liveExecutable = processExecutablePath(expectedPid);
+    if (!record->structured) {
+        return true;
+    }
+    if (record->startTimeNs == 0 && record->executable.empty()) {
+        return false;
+    }
+    if (record->startTimeNs != 0) {
+        const auto liveStartTime = processStartTimeNs(expectedPid);
+        if (liveStartTime == 0 || liveStartTime != record->startTimeNs) {
+            return false;
+        }
+    }
+    if (!record->executable.empty() && !sameExecutable(record->executable, liveExecutable)) {
+        return false;
+    }
+    return true;
+}
+
 std::optional<std::filesystem::path>
 discoverLiveDaemonSocket(const std::filesystem::path& preferredSocket,
                          const std::filesystem::path& pidFilePath, bool allowAnyDaemonFallback) {
@@ -282,9 +499,7 @@ discoverLiveDaemonSocket(const std::filesystem::path& preferredSocket,
     std::set<int> seen;
 
     if (auto pidFromFile = readPidFromFile(pidFilePath);
-        pidFromFile && kill(*pidFromFile, 0) ==
-                           0) { // nosemgrep: yams.cpp.kill-zero-one-shot -- snapshot candidate
-                                // filter; callers perform bounded connection attempts.
+        pidFromFile && pidFileIdentifiesLiveDaemon(pidFilePath, *pidFromFile)) {
         candidatePids.push_back(*pidFromFile);
         seen.insert(*pidFromFile);
     }
@@ -308,6 +523,9 @@ discoverLiveDaemonSocket(const std::filesystem::path& preferredSocket,
 
     std::optional<std::filesystem::path> fallbackSocket;
     for (auto pid : candidatePids) {
+        if (!isLiveDaemonProcess(pid)) {
+            continue;
+        }
         const auto desc = describeProcess(pid);
         if (auto parsed = extractSocketPathFromProcessDescription(desc);
             parsed && !parsed->empty()) {

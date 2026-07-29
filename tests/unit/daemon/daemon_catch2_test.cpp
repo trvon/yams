@@ -34,7 +34,9 @@ using nlohmann::json;
 #include <share.h>
 using pid_t = int;
 #else
+#include <fcntl.h>
 #include <signal.h>
+#include <sys/file.h>
 #include <sys/wait.h>
 #endif
 
@@ -608,6 +610,59 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon refuses pid file pointing to unrelated r
 #endif
 }
 
+TEST_CASE_METHOD(DaemonFixture, "Daemon does not terminate unverified data-dir lock holder",
+                 "[daemon][lifecycle]") {
+    SKIP_ON_WINDOWS();
+
+#ifndef _WIN32
+    int readyPipe[2] = {-1, -1};
+    REQUIRE(::pipe(readyPipe) == 0);
+    const pid_t child = ::fork();
+    REQUIRE(child >= 0);
+    if (child == 0) {
+        ::close(readyPipe[0]);
+        const auto lockPath = config_.dataDir / ".yams-lock";
+        const int lockFd = ::open(lockPath.c_str(), O_CREAT | O_RDWR, 0644);
+        if (lockFd < 0 || ::flock(lockFd, LOCK_EX) != 0) {
+            _exit(2);
+        }
+        const auto payload = json{{"pid", ::getpid()}, {"socket", "/tmp/not-a-daemon.sock"}}.dump();
+        (void)::ftruncate(lockFd, 0);
+        (void)::write(lockFd, payload.data(), payload.size());
+        const char ready = '1';
+        (void)::write(readyPipe[1], &ready, 1);
+        for (;;) {
+            ::pause();
+        }
+    }
+
+    ::close(readyPipe[1]);
+    struct ChildGuard {
+        pid_t pid;
+        int readyFd;
+        ~ChildGuard() {
+            ::close(readyFd);
+            (void)::kill(pid, SIGKILL);
+            int status = 0;
+            (void)::waitpid(pid, &status, 0);
+        }
+    } childGuard{child, readyPipe[0]};
+
+    char ready = 0;
+    REQUIRE(::read(readyPipe[0], &ready, 1) == 1);
+    REQUIRE(ready == '1');
+
+    daemon_ = std::make_unique<YamsDaemon>(config_);
+    const auto result = daemon_->start();
+
+    REQUIRE_FALSE(result);
+    CHECK(result.error().code == ErrorCode::InvalidState);
+    CHECK(::kill(child, 0) == 0);
+#else
+    SKIP("POSIX process APIs not available on Windows");
+#endif
+}
+
 TEST_CASE_METHOD(DaemonFixture, "Daemon restart", "[daemon][lifecycle]") {
     SKIP_ON_WINDOWS();
 
@@ -947,7 +1002,6 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon PID file cannot be created below a file 
     if (!result) {
         REQUIRE_FALSE(result.error().message.empty());
     }
-
 }
 
 TEST_CASE_METHOD(DaemonFixture, "Daemon PID file cleaned up on start failure", "[daemon][errors]") {

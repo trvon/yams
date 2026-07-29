@@ -959,101 +959,23 @@ Result<void> LifecycleComponent::acquireDataDirLock() {
 #endif
 
     if (!lockAcquired) {
-        // Lock held by another daemon - read its info and request shutdown
+        // A held OS lock is authoritative. Its JSON payload is diagnostic only and must
+        // never authorize signaling a PID: the payload can be stale or malformed even
+        // while an unrelated process holds the file descriptor.
         auto existingInfo = readDataDirLockInfo();
-        if (existingInfo.pid > 0 && !existingInfo.socket.empty()) {
-            spdlog::info(
-                "Another daemon (PID {}) is using data-dir '{}', requesting shutdown via {}",
-                existingInfo.pid, dataDirLockFile_.parent_path().string(), existingInfo.socket);
-
-            // Send shutdown request via the existing daemon's socket
-            ClientConfig cfg;
-            cfg.socketPath = existingInfo.socket;
-            cfg.autoStart = false;
-            cfg.connectTimeout = std::chrono::milliseconds(2000);
-            cfg.requestTimeout = std::chrono::milliseconds(5000);
-            cfg.maxRetries = 1;
-
-            auto result = sendShutdownRequest(cfg, std::chrono::milliseconds(10000));
-            if (!result) {
-                spdlog::warn("Shutdown request to existing daemon failed: {}",
-                             result.error().message);
-                if (aggressiveModeEnabled() && existingInfo.pid > 0 &&
-                    existingInfo.pid != currentProcessId() && isProcessRunning(existingInfo.pid)) {
-                    spdlog::warn("Attempting forced termination for stale daemon PID {}",
-                                 existingInfo.pid);
-                    if (auto term = terminateProcess(existingInfo.pid); !term) {
-                        spdlog::warn("Failed to terminate stale daemon PID {}: {}",
-                                     existingInfo.pid, term.error().message);
-                    }
-                }
-            }
-
-            // Wait for lock to be released (up to 15 seconds)
-            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
-            while (std::chrono::steady_clock::now() < deadline) {
 #ifdef _WIN32
-                if (hFile != INVALID_HANDLE_VALUE) {
-                    OVERLAPPED overlapped = {0};
-                    if (LockFileEx(hFile, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1,
-                                   0, &overlapped)) {
-                        lockAcquired = true;
-                        break;
-                    }
-                }
+        _close(dataDirLockFd_);
 #else
-                if (flock(dataDirLockFd_, LOCK_EX | LOCK_NB) == 0) {
-                    lockAcquired = true;
-                    break;
-                }
+        close(dataDirLockFd_);
 #endif
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
-
-            if (!lockAcquired && aggressiveModeEnabled() && existingInfo.pid > 0 &&
-                existingInfo.pid != currentProcessId() && isProcessRunning(existingInfo.pid)) {
-                spdlog::warn("Data-dir lock still held by PID {}, forcing termination",
-                             existingInfo.pid);
-                if (auto term = terminateProcess(existingInfo.pid); !term) {
-                    spdlog::warn("Forced termination failed for PID {}: {}", existingInfo.pid,
-                                 term.error().message);
-                } else {
-                    auto retryDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-                    while (std::chrono::steady_clock::now() < retryDeadline) {
-#ifdef _WIN32
-                        if (hFile != INVALID_HANDLE_VALUE) {
-                            OVERLAPPED overlapped = {0};
-                            if (LockFileEx(hFile,
-                                           LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0,
-                                           1, 0, &overlapped)) {
-                                lockAcquired = true;
-                                break;
-                            }
-                        }
-#else
-                        if (flock(dataDirLockFd_, LOCK_EX | LOCK_NB) == 0) {
-                            lockAcquired = true;
-                            break;
-                        }
-#endif
-                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-                    }
-                }
-            }
+        dataDirLockFd_ = -1;
+        std::string ownerDetail;
+        if (existingInfo.pid > 0) {
+            ownerDetail = " (recorded PID " + std::to_string(existingInfo.pid) + ")";
         }
-
-        if (!lockAcquired) {
-#ifdef _WIN32
-            _close(dataDirLockFd_);
-#else
-            close(dataDirLockFd_);
-#endif
-            dataDirLockFd_ = -1;
-            return Error{ErrorCode::InvalidState,
-                         "Failed to acquire data-dir lock after shutdown request. "
-                         "Another daemon may still be using: " +
-                             dataDirLockFile_.parent_path().string()};
-        }
+        return Error{ErrorCode::InvalidState, "Data directory is locked by another process" +
+                                                  ownerDetail + ": " +
+                                                  dataDirLockFile_.parent_path().string()};
     }
 
     // Write our lock info

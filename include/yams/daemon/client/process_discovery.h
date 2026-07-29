@@ -5,6 +5,14 @@
 
 namespace yams::daemon::client {
 
+// Returns true only when the live process executable is yams-daemon.
+bool isLiveDaemonProcess(int pid);
+
+// Returns true only when the PID file identifies the same live yams-daemon process.
+// Structured PID files are checked against their recorded start time and executable;
+// legacy integer-only files require the live process command to identify yams-daemon.
+bool pidFileIdentifiesLiveDaemon(const std::filesystem::path& pidFilePath, int expectedPid);
+
 // Best-effort discovery of a live daemon socket by inspecting running yams-daemon processes.
 // This is used when the configured/default socket path is not healthy, such as when a packaged
 // system service is running on a different socket than the per-user default.

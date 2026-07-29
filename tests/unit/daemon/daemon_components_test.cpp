@@ -371,9 +371,24 @@ TEST_CASE("Socket path resolution: Config file reading", "[daemon][components][s
     auto configFile = configDir / "config.toml";
 
     ScopedEnvVar xdgConfigGuard("XDG_CONFIG_HOME");
+    ScopedEnvVar yamsConfigGuard("YAMS_CONFIG");
     ScopedEnvVar yamsSockGuard("YAMS_DAEMON_SOCKET");
 
 #ifndef _WIN32
+    SECTION("Explicit YAMS_CONFIG socket_path is used") {
+        const auto explicitConfig = tempDir / "explicit.toml";
+        std::ofstream out(explicitConfig);
+        out << "[daemon]\n";
+        out << "socket_path = \"/opt/yams/explicit.sock\"\n";
+        out.close();
+
+        setenv("YAMS_CONFIG", explicitConfig.string().c_str(), 1);
+        unsetenv("YAMS_DAEMON_SOCKET");
+
+        auto result = socket_utils::resolve_socket_path_config_first();
+        REQUIRE(result.string() == "/opt/yams/explicit.sock");
+    }
+
     SECTION("Config file socket_path is used") {
         std::ofstream out(configFile);
         out << "[daemon]\n";

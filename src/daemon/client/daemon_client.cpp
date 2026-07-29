@@ -2357,6 +2357,9 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
     // Build command line
     std::wstring cmdLine = L"\"" + exePath.wstring() + L"\"";
     cmdLine += L" --socket \"" + socketPath.wstring() + L"\"";
+    if (!config.pidFile.empty()) {
+        cmdLine += L" --pid-file \"" + config.pidFile.wstring() + L"\"";
+    }
 
     if (!configPath.empty() && std::filesystem::exists(configPath)) {
         cmdLine += L" --config \"" + std::filesystem::path(configPath).wstring() + L"\"";
@@ -2505,6 +2508,10 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
         args.push_back(exePath.c_str());
         args.push_back("--socket");
         args.push_back(socketPath.c_str());
+        if (!config.pidFile.empty()) {
+            args.push_back("--pid-file");
+            args.push_back(config.pidFile.c_str());
+        }
 
         bool haveCfg = !configPath.empty() && std::filesystem::exists(configPath);
         if (haveCfg) {

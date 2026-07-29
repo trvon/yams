@@ -9,8 +9,8 @@ namespace yams::daemon::socket_utils {
 std::filesystem::path resolve_socket_path();
 
 // Resolve with config-first semantics: try YAMS_DAEMON_SOCKET, then read
-// $XDG_CONFIG_HOME/yams/config.toml or $HOME/.config/yams/config.toml for
-// daemon.socket_path. If not found, fall back to resolve_socket_path().
+// YAMS_CONFIG when set, otherwise the platform config.toml, for daemon.socket_path.
+// If not found, fall back to resolve_socket_path().
 std::filesystem::path resolve_socket_path_config_first();
 
 // Derive the proxy/control socket path from the main daemon socket path.

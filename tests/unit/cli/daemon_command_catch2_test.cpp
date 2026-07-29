@@ -5,20 +5,31 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <nlohmann/json.hpp>
 #include <CLI/CLI.hpp>
 
 #include <yams/cli/command.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/daemon/client/process_discovery.h>
 
+#include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "../../common/test_helpers_catch2.h"
+
+#ifndef _WIN32
+#include <csignal>
+#include <unistd.h>
+#include <sys/wait.h>
+#endif
 
 // Factory is declared in command registry translation unit
 namespace yams::cli {
@@ -48,6 +59,8 @@ struct CliTestHelper {
 
         {
             std::ofstream cfg(tempDir / "config.toml");
+            cfg << "[version]\n";
+            cfg << "config_version = 3\n";
             cfg << "[daemon]\n";
             cfg << "socket_path = \"" << socketPath.string() << "\"\n";
             cfg << "pid_file = \"" << pidFile.string() << "\"\n";
@@ -98,6 +111,90 @@ private:
 };
 
 } // namespace
+
+#ifndef _WIN32
+struct ChildGuard {
+    pid_t pid{-1};
+
+    ~ChildGuard() {
+        if (pid <= 0) {
+            return;
+        }
+        (void)::kill(pid, SIGKILL);
+        int status = 0;
+        (void)::waitpid(pid, &status, 0);
+    }
+};
+
+TEST_CASE("DaemonCommand - stale pid identity does not authorize termination",
+          "[cli][daemon][lifecycle][catch2]") {
+    CliTestHelper helper;
+    const pid_t child = ::fork();
+    REQUIRE(child >= 0);
+    if (child == 0) {
+        for (;;) {
+            ::pause();
+        }
+    }
+
+    ChildGuard childGuard{child};
+
+    nlohmann::json staleIdentity = {
+        {"v", 1},
+        {"pid", child},
+        {"start_ns", std::uint64_t{1}},
+        {"token", "stale"},
+        {"exe", "/definitely/not/the/live/process"},
+    };
+    std::ofstream(helper.pidFile) << staleIdentity.dump();
+
+    CHECK_FALSE(yams::daemon::client::pidFileIdentifiesLiveDaemon(helper.pidFile, child));
+    CHECK(helper.runCommand({"yams", "daemon", "stop", "--force", "--socket",
+                             helper.socketPath.string(), "--pid-file", helper.pidFile.string()}) ==
+          0);
+    CHECK(::kill(child, 0) == 0);
+
+    std::ofstream(helper.pidFile) << child;
+    CHECK_FALSE(yams::daemon::client::pidFileIdentifiesLiveDaemon(helper.pidFile, child));
+
+    std::ofstream(helper.pidFile) << R"({"pid":18446744073709551615})";
+    CHECK(helper.runCommand({"yams", "daemon", "stop", "--force", "--socket",
+                             helper.socketPath.string(), "--pid-file", helper.pidFile.string()}) ==
+          0);
+
+    std::ofstream(helper.pidFile) << "123 trailing";
+    CHECK(helper.runCommand({"yams", "daemon", "stop", "--force", "--socket",
+                             helper.socketPath.string(), "--pid-file", helper.pidFile.string()}) ==
+          0);
+}
+
+TEST_CASE("DaemonCommand - data lock metadata does not authorize termination",
+          "[cli][daemon][lifecycle][catch2]") {
+    CliTestHelper helper;
+    const pid_t child = ::fork();
+    REQUIRE(child >= 0);
+    if (child == 0) {
+        ::execl("/bin/sleep", "yams-daemon", "30", nullptr);
+        _exit(127);
+    }
+    ChildGuard childGuard{child};
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    REQUIRE(::kill(child, 0) == 0);
+    CHECK_FALSE(yams::daemon::client::isLiveDaemonProcess(child));
+
+    nlohmann::json staleLock = {
+        {"pid", child},
+        {"socket", helper.socketPath.string()},
+        {"timestamp", 0},
+    };
+    std::ofstream(helper.tempDir / "data" / ".yams-lock") << staleLock.dump();
+
+    CHECK(helper.runCommand({"yams", "daemon", "stop", "--force", "--socket",
+                             helper.socketPath.string(), "--pid-file", helper.pidFile.string()}) ==
+          0);
+    CHECK(::kill(child, 0) == 0);
+}
+#endif
 
 TEST_CASE("DaemonCommand - parses unordered flags with help without executing",
           "[cli][daemon][catch2]") {
