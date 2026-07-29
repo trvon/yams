@@ -350,6 +350,7 @@ RequestDispatcher::handleGraphExploreRequest(const GraphExploreRequest& req) {
 
     app::services::GraphExploreRequest serviceReq;
     serviceReq.query = req.query;
+    serviceReq.scopePathPrefix = req.scopePathPrefix;
     serviceReq.budget.maxFiles = static_cast<std::size_t>(req.maxFiles);
     serviceReq.budget.maxSymbols = static_cast<std::size_t>(req.maxSymbols);
     serviceReq.budget.maxTotalChars = static_cast<std::size_t>(req.maxTotalChars);

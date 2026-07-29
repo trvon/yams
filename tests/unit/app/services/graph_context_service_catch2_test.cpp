@@ -179,6 +179,63 @@ TEST_CASE("GraphContextService explore ranks source symbols before tests by defa
     CHECK((response.files.front().content.find("5\t}") != std::string::npos));
 }
 
+TEST_CASE("GraphContextService explore applies repository scope before symbol budgets",
+          "[services][graph][context][scope]") {
+    GraphContextServiceFixture fixture;
+    const auto localPath =
+        fixture.writeSource("repo-z/src/request_handler.cpp", {"void RequestHandler() {}"});
+    const auto localSymbol =
+        fixture.symbol(localPath, "RequestHandler", "local::RequestHandler", 1, 1);
+
+    std::vector<SymbolMetadata> indexedSymbols;
+    indexedSymbols.push_back(localSymbol);
+    for (std::size_t index = 0; index < 20; ++index) {
+        const auto foreignPath = fixture.writeSource("repo-z-copy/copy_" + std::to_string(index) +
+                                                         "/src/request_handler.cpp",
+                                                     {"void RequestHandler() {}"});
+        indexedSymbols.push_back(fixture.symbol(foreignPath, "RequestHandler",
+                                                "foreign::RequestHandler" + std::to_string(index),
+                                                1, 1));
+    }
+    const auto foreignSymbol = indexedSymbols[1];
+    fixture.upsertSymbols(indexedSymbols);
+
+    const auto localTarget = fixture.symbol(localPath, "dispatch", "local::dispatch", 1, 1);
+    const auto localId = fixture.upsertNodeFor(localSymbol);
+    const auto localTargetId = fixture.upsertNodeFor(localTarget);
+    const auto foreignId = fixture.upsertNodeFor(foreignSymbol);
+    REQUIRE((fixture.kgStore
+                 ->addEdge(KGEdge{.srcNodeId = localId,
+                                  .dstNodeId = localTargetId,
+                                  .relation = "calls",
+                                  .weight = 1.0F})
+                 .has_value()));
+    REQUIRE(
+        (fixture.kgStore
+             ->addEdge(KGEdge{
+                 .srcNodeId = localId, .dstNodeId = foreignId, .relation = "calls", .weight = 1.0F})
+             .has_value()));
+
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+
+    GraphExploreRequest req;
+    req.query = "request_handler.cpp";
+    req.scopePathPrefix = localPath.parent_path().parent_path().string();
+    req.budget.maxFiles = 1;
+    req.budget.maxSymbols = 1;
+
+    auto result = service->explore(req);
+
+    REQUIRE((result.has_value()));
+    REQUIRE((result.value().entrySymbols.size() == 1));
+    CHECK((result.value().entrySymbols.front().qualifiedName == "local::RequestHandler"));
+    REQUIRE((result.value().files.size() == 1));
+    CHECK((result.value().files.front().filePath == localPath.string()));
+    REQUIRE((result.value().relationships.size() == 1));
+    CHECK((result.value().relationships.front().targetLabel == "dispatch"));
+}
+
 TEST_CASE("GraphContextService explore resolves C++ qualified symbol queries",
           "[services][graph][context]") {
     GraphContextServiceFixture fixture;

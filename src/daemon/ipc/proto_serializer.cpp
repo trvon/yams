@@ -2806,6 +2806,7 @@ template <> struct ProtoBinding<GraphExploreRequest> {
         o->set_include_relationships(r.includeRelationships);
         o->set_include_code(r.includeCode);
         o->set_include_tests(r.includeTests);
+        o->set_scope_path_prefix(r.scopePathPrefix);
     }
     static GraphExploreRequest get(const Envelope& env) {
         const auto& i = env.graph_explore_request();
@@ -2820,6 +2821,7 @@ template <> struct ProtoBinding<GraphExploreRequest> {
         r.includeRelationships = i.include_relationships();
         r.includeCode = i.include_code();
         r.includeTests = i.include_tests();
+        r.scopePathPrefix = i.scope_path_prefix();
         return r;
     }
 };

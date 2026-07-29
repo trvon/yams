@@ -2418,6 +2418,7 @@ struct GraphQueryRequest {
 
 struct GraphExploreRequest {
     std::string query;
+    std::string scopePathPrefix;
     uint64_t maxFiles{8};
     uint64_t maxSymbols{32};
     uint64_t maxTotalChars{24000};
@@ -2433,7 +2434,7 @@ struct GraphExploreRequest {
     void serialize(Serializer& ser) const {
         ser << query << maxFiles << maxSymbols << maxTotalChars << maxCharsPerFile
             << maxSnippetLines << includeLineNumbers << includeRelationships << includeCode
-            << includeTests;
+            << includeTests << scopePathPrefix;
     }
 
     template <typename Deserializer>
@@ -2480,6 +2481,9 @@ struct GraphExploreRequest {
             req.includeTests = r.value();
         else
             return r.error();
+        // Appended for backward compatibility with the original request layout.
+        if (auto r = deser.readString(); r)
+            req.scopePathPrefix = std::move(r.value());
         return req;
     }
 };

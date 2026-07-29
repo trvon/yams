@@ -960,6 +960,7 @@ message GraphExploreRequest {
   bool include_relationships = 8;
   bool include_code = 11;
   bool include_tests = 12;
+  string scope_path_prefix = 14;
 }
 
 message GraphExploreSymbol {

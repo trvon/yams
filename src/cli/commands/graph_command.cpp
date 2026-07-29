@@ -1,6 +1,7 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <iostream>
@@ -40,6 +41,70 @@
 namespace yams::cli {
 
 using json = nlohmann::json;
+
+namespace {
+
+std::string normalizeScopePath(std::string_view value) {
+    auto normalized = std::filesystem::path(value).lexically_normal().generic_string();
+#ifdef _WIN32
+    std::ranges::transform(normalized, normalized.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+#endif
+    return normalized;
+}
+
+bool graphPathWithinScope(std::string_view candidatePath, const std::filesystem::path& scopePath) {
+    if (candidatePath.empty()) {
+        return false;
+    }
+    const auto candidate = normalizeScopePath(candidatePath);
+    auto scope = normalizeScopePath(scopePath.generic_string());
+    if (candidate == scope) {
+        return true;
+    }
+    if (!scope.empty() && scope.back() != '/') {
+        scope.push_back('/');
+    }
+    return candidate.starts_with(scope);
+}
+
+bool graphNodeKeyWithinScope(std::string_view nodeKey, const std::filesystem::path& scopePath) {
+    std::string normalizedNodeKey(nodeKey);
+#ifdef _WIN32
+    std::ranges::transform(normalizedNodeKey, normalizedNodeKey.begin(),
+                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+#endif
+    const auto scope = normalizeScopePath(scopePath.generic_string());
+    const auto offset = normalizedNodeKey.find(scope);
+    if (offset == std::string::npos) {
+        return false;
+    }
+    if (offset != 0 && normalizedNodeKey[offset - 1] != '@' &&
+        normalizedNodeKey[offset - 1] != '/' && normalizedNodeKey[offset - 1] != ':') {
+        return false;
+    }
+    const auto end = offset + scope.size();
+    return end == normalizedNodeKey.size() || normalizedNodeKey[end] == '/' ||
+           normalizedNodeKey[end] == '@';
+}
+
+bool graphExploreEscapesScope(const app::services::GraphExploreResponse& response,
+                              const std::filesystem::path& scopePath) {
+    const auto symbolEscapes = std::ranges::any_of(response.entrySymbols, [&](const auto& symbol) {
+        return !graphPathWithinScope(symbol.filePath, scopePath);
+    });
+    const auto fileEscapes = std::ranges::any_of(response.files, [&](const auto& file) {
+        return !graphPathWithinScope(file.filePath, scopePath);
+    });
+    const auto relationEscapes =
+        std::ranges::any_of(response.relationships, [&](const auto& relation) {
+            return !graphNodeKeyWithinScope(relation.sourceNodeKey, scopePath) ||
+                   !graphNodeKeyWithinScope(relation.targetNodeKey, scopePath);
+        });
+    return symbolEscapes || fileEscapes || relationEscapes;
+}
+
+} // namespace
 
 class GraphCommand : public ICommand {
 public:
@@ -102,7 +167,7 @@ public:
                         "Filter nodes by JSON property (e.g., 'decompiled:malloc')");
 
         cmd->add_flag("--scope-cwd", scopeToCwd_,
-                      "Scope list results to src/** and include/** under CWD");
+                      "Scope results under CWD (source paths for list/topology)");
 
         // yams-66h: List available node types with counts
         cmd->add_flag("--list-types", listTypes_, "List available node types with counts");
@@ -1000,6 +1065,9 @@ private:
             }
             app::services::GraphExploreRequest localReq;
             localReq.query = exploreQuery_;
+            if (scopeToCwd_) {
+                localReq.scopePathPrefix = invocationCwd_.lexically_normal().generic_string();
+            }
             localReq.budget.maxFiles = exploreMaxFiles_;
             auto localResult = service->explore(localReq);
             if (!localResult) {
@@ -1028,6 +1096,9 @@ private:
 
         daemon::GraphExploreRequest req;
         req.query = exploreQuery_;
+        if (scopeToCwd_) {
+            req.scopePathPrefix = invocationCwd_.lexically_normal().generic_string();
+        }
         req.maxFiles = static_cast<uint64_t>(exploreMaxFiles_);
 
         auto result = co_await client.call(req);
@@ -1044,6 +1115,11 @@ private:
         }
 
         auto appResponse = yams::cli::mapGraphExploreResponseFromDaemon(result.value());
+        if (scopeToCwd_ && graphExploreEscapesScope(appResponse, invocationCwd_)) {
+            spdlog::debug("graph explore daemon returned out-of-scope results; falling back to "
+                          "local service");
+            co_return renderLocal();
+        }
         if (wantsJsonOutput()) {
             std::cout << yams::cli::makeGraphExploreJson(appResponse).dump(2) << "\n";
         } else {

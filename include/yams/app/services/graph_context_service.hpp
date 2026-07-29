@@ -78,6 +78,7 @@ struct GraphContextSnippet {
 
 struct GraphExploreRequest {
     std::string query;
+    std::string scopePathPrefix;
     GraphContextBudget budget{};
     bool includeCode{true};
     bool includeTests{false};

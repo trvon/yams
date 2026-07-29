@@ -3,11 +3,13 @@
 // Consolidated protocol tests (6 → 1): message framing, serialization, type mappings, roundtrip
 // Covers: MessageFramer, ProtoSerializer, response_of.hpp, getMessageType, getRequestName
 
+#include <array>
 #include <atomic>
 #include <csignal>
 #include <filesystem>
 #include <random>
 #include <thread>
+#include <type_traits>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <yams/common/utf8_utils.h>
@@ -26,6 +28,64 @@ using namespace yams;
 using namespace yams::daemon;
 
 namespace {
+
+struct RecordingRequestSerializer {
+    RecordingRequestSerializer& operator<<(const std::string& value) {
+        fieldOrder.push_back('s');
+        strings.push_back(value);
+        return *this;
+    }
+
+    template <typename T>
+    requires std::is_integral_v<T>
+    RecordingRequestSerializer& operator<<(T value) {
+        fieldOrder.push_back(std::is_same_v<T, bool> ? 'b' : 'u');
+        if constexpr (std::is_same_v<T, bool>) {
+            bools.push_back(value);
+        } else {
+            integers.push_back(static_cast<std::uint64_t>(value));
+        }
+        return *this;
+    }
+
+    std::string fieldOrder;
+    std::vector<std::string> strings;
+    std::vector<std::uint64_t> integers;
+    std::vector<bool> bools;
+};
+
+struct LegacyGraphExploreDeserializer {
+    Result<std::string> readString() {
+        if (!queryRead) {
+            queryRead = true;
+            return std::string{"legacy-query"};
+        }
+        return ErrorCode::InvalidData;
+    }
+
+    template <typename T> Result<T> read() {
+        if constexpr (std::is_same_v<T, std::uint64_t>) {
+            if (integerIndex >= integers.size()) {
+                return ErrorCode::InvalidData;
+            }
+            return integers[integerIndex++];
+        } else if constexpr (std::is_same_v<T, bool>) {
+            if (boolIndex >= bools.size()) {
+                return ErrorCode::InvalidData;
+            }
+            return bools[boolIndex++];
+        } else {
+            return ErrorCode::InvalidData;
+        }
+    }
+
+    std::array<std::uint64_t, 5> integers{4, 12, 8000, 2000, 80};
+    std::array<bool, 4> bools{true, false, true, false};
+    std::size_t integerIndex{0};
+    std::size_t boolIndex{0};
+    bool queryRead{false};
+};
+
 #ifndef _WIN32
 struct SigpipeIgnoreGuard {
     SigpipeIgnoreGuard() : previous_(std::signal(SIGPIPE, SIG_IGN)) {}
@@ -738,6 +798,37 @@ TEST_CASE("DownloadProtocol: Response serialization", "[daemon][protocol][downlo
 // ProtoSerializer Roundtrip Tests
 // =============================================================================
 
+TEST_CASE("GraphExploreRequest appends optional binary fields",
+          "[daemon][protocol][serialization][compatibility]") {
+    GraphExploreRequest request;
+    request.query = "query";
+    request.scopePathPrefix = "/workspace/yams";
+
+    RecordingRequestSerializer serializer;
+    request.serialize(serializer);
+
+    CHECK((serializer.fieldOrder == "suuuuubbbbs"));
+    REQUIRE((serializer.strings.size() == 2));
+    CHECK((serializer.strings.front() == "query"));
+    CHECK((serializer.strings.back() == "/workspace/yams"));
+
+    LegacyGraphExploreDeserializer legacy;
+    auto decoded = GraphExploreRequest::deserialize(legacy);
+
+    REQUIRE(decoded.has_value());
+    CHECK((decoded.value().query == "legacy-query"));
+    CHECK(decoded.value().scopePathPrefix.empty());
+    CHECK((decoded.value().maxFiles == 4));
+    CHECK((decoded.value().maxSymbols == 12));
+    CHECK((decoded.value().maxTotalChars == 8000));
+    CHECK((decoded.value().maxCharsPerFile == 2000));
+    CHECK((decoded.value().maxSnippetLines == 80));
+    CHECK(decoded.value().includeLineNumbers);
+    CHECK_FALSE(decoded.value().includeRelationships);
+    CHECK(decoded.value().includeCode);
+    CHECK_FALSE(decoded.value().includeTests);
+}
+
 TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serialization]") {
     SECTION("CatRequest") {
         CatRequest cr;
@@ -1119,6 +1210,7 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         req.includeRelationships = false;
         req.includeCode = false;
         req.includeTests = true;
+        req.scopePathPrefix = "/workspace/yams";
 
         auto enc = ProtoSerializer::encode_payload(makeMessageWith(Request{req}, 24));
         REQUIRE(enc);
@@ -1139,6 +1231,7 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         CHECK_FALSE(got->includeRelationships);
         CHECK_FALSE(got->includeCode);
         CHECK(got->includeTests);
+        CHECK(got->scopePathPrefix == "/workspace/yams");
     }
 }
 

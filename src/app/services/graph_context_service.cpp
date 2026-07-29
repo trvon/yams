@@ -44,6 +44,53 @@ bool containsToken(std::string_view haystack, std::string_view needle) {
     return h.find(n) != std::string::npos;
 }
 
+bool pathWithinScope(std::string_view candidatePath, std::string_view scopePathPrefix) {
+    if (scopePathPrefix.empty()) {
+        return true;
+    }
+    if (candidatePath.empty()) {
+        return false;
+    }
+
+    auto candidate = std::filesystem::path(candidatePath).lexically_normal().generic_string();
+    auto scope = std::filesystem::path(scopePathPrefix).lexically_normal().generic_string();
+#ifdef _WIN32
+    candidate = lowerAscii(candidate);
+    scope = lowerAscii(scope);
+#endif
+    if (candidate == scope) {
+        return true;
+    }
+    if (!scope.empty() && scope.back() != '/') {
+        scope.push_back('/');
+    }
+    return candidate.starts_with(scope);
+}
+
+bool relationEndpointWithinScope(std::string_view nodeKey, std::string_view scopePathPrefix) {
+    if (scopePathPrefix.empty()) {
+        return true;
+    }
+    auto normalizedScope =
+        std::filesystem::path(scopePathPrefix).lexically_normal().generic_string();
+    std::string normalizedNodeKey(nodeKey);
+#ifdef _WIN32
+    normalizedScope = lowerAscii(normalizedScope);
+    normalizedNodeKey = lowerAscii(normalizedNodeKey);
+#endif
+    const auto offset = normalizedNodeKey.find(normalizedScope);
+    if (offset == std::string_view::npos) {
+        return false;
+    }
+    if (offset != 0 && normalizedNodeKey[offset - 1] != '@' &&
+        normalizedNodeKey[offset - 1] != '/' && normalizedNodeKey[offset - 1] != ':') {
+        return false;
+    }
+    const auto end = offset + normalizedScope.size();
+    return end == normalizedNodeKey.size() || normalizedNodeKey[end] == '/' ||
+           normalizedNodeKey[end] == '@';
+}
+
 bool isWordChar(unsigned char c) {
     return std::isalnum(c) != 0 || c == '_' || c == ':' || c == '.' || c == '/' || c == '-';
 }
@@ -538,9 +585,48 @@ public:
         std::unordered_map<std::string, std::unordered_set<std::string>> matchedTermsByFile;
         const auto perTermLimit = std::max<std::size_t>(req.budget.maxSymbols, 16);
         const bool pathQuery = looksLikePathQuery(req.query);
+        const bool hasScope = !req.scopePathPrefix.empty();
+        const auto queryScopedSymbols = [&](std::optional<std::string_view> filePath,
+                                            std::optional<std::string_view> namePattern)
+            -> Result<std::vector<metadata::SymbolMetadata>> {
+            if (!hasScope) {
+                return kgStore_->querySymbolMetadata(filePath, std::nullopt, namePattern,
+                                                     perTermLimit, 0);
+            }
+
+            constexpr std::size_t kScopedQueryPageSize = 64;
+            std::vector<metadata::SymbolMetadata> scoped;
+            std::size_t offset = 0;
+            while (scoped.size() < perTermLimit) {
+                auto page = kgStore_->querySymbolMetadata(filePath, std::nullopt, namePattern,
+                                                          kScopedQueryPageSize, offset);
+                if (!page) {
+                    return page.error();
+                }
+                for (auto& symbol : page.value()) {
+                    if (pathWithinScope(symbol.filePath, req.scopePathPrefix)) {
+                        scoped.push_back(symbol);
+                        if (scoped.size() == perTermLimit) {
+                            break;
+                        }
+                    }
+                }
+                if (page.value().size() < kScopedQueryPageSize) {
+                    break;
+                }
+                if (offset > std::numeric_limits<std::size_t>::max() - page.value().size()) {
+                    return Error{ErrorCode::InvalidData, "Symbol query pagination overflow"};
+                }
+                offset += page.value().size();
+            }
+            return scoped;
+        };
         const auto addSymbols = [&](const std::vector<metadata::SymbolMetadata>& matches,
                                     double filePathBoost, std::string_view matchedTerm = {}) {
             for (const auto& sym : matches) {
+                if (!pathWithinScope(sym.filePath, req.scopePathPrefix)) {
+                    continue;
+                }
                 auto contextSymbol = makeContextSymbol(sym, req.query);
                 if (pathQuery && containsToken(sym.filePath, req.query)) {
                     contextSymbol.score += filePathBoost;
@@ -559,8 +645,7 @@ public:
         };
 
         if (pathQuery) {
-            auto filePathResult = kgStore_->querySymbolMetadata(req.query, std::nullopt,
-                                                                std::nullopt, perTermLimit, 0);
+            auto filePathResult = queryScopedSymbols(req.query, std::nullopt);
             if (!filePathResult) {
                 return filePathResult.error();
             }
@@ -569,8 +654,7 @@ public:
 
         if (!pathQuery || symbols.empty()) {
             for (const auto& term : terms) {
-                auto symResult = kgStore_->querySymbolMetadata(std::nullopt, std::nullopt, term,
-                                                               perTermLimit, 0);
+                auto symResult = queryScopedSymbols(std::nullopt, term);
                 if (!symResult) {
                     return symResult.error();
                 }
@@ -617,6 +701,14 @@ public:
             response.warnings.push_back(
                 "Symbol metadata missing or stale; falling back to graph node labels and aliases");
             symbols = std::move(fallbackSymbols.value());
+            std::erase_if(symbols, [&](const auto& symbol) {
+                return !pathWithinScope(symbol.filePath, req.scopePathPrefix);
+            });
+            if (symbols.empty()) {
+                response.warnings.push_back(
+                    "No fallback graph symbols matched the requested scope");
+                return response;
+            }
             response.totalSymbolsConsidered = symbols.size();
         }
         if (symbols.size() > req.budget.maxSymbols) {
@@ -628,6 +720,12 @@ public:
                     "graph explore entry symbols must respect maxSymbols budget");
 
         addRelationships(symbols, response, req.budget);
+        if (!req.scopePathPrefix.empty()) {
+            std::erase_if(response.relationships, [&](const auto& relation) {
+                return !relationEndpointWithinScope(relation.sourceNodeKey, req.scopePathPrefix) ||
+                       !relationEndpointWithinScope(relation.targetNodeKey, req.scopePathPrefix);
+            });
+        }
         addSnippets(symbols, response, req);
         YAMS_DCHECK(response.emittedChars <= req.budget.maxTotalChars,
                     "graph explore emitted chars must respect maxTotalChars budget");
