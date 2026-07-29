@@ -11,9 +11,9 @@
 #include <yams/daemon/components/admission_control.h>
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/dispatch_utils.hpp>
-#include <yams/daemon/components/search_request_mapper.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ResourceGovernor.h>
+#include <yams/daemon/components/search_request_mapper.hpp>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/profiling.h>
@@ -73,7 +73,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
         serviceReq.useSession = req.useSession;
         serviceReq.sessionName = req.sessionName;
         serviceReq.globalSearch = req.globalSearch;
-        dispatch::mapSearchStageTimeouts(req, serviceReq);
+        dispatch::mapSearchServiceOptions(req, serviceReq);
         if (!req.collection.empty()) {
             serviceReq.metadataFilters.emplace_back("collection", req.collection);
         }

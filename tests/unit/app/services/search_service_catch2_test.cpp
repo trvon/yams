@@ -583,14 +583,21 @@ TEST_CASE("SearchService: semantic search", "[unit][services][search]") {
 
 TEST_CASE("SearchService: hybrid search", "[unit][services][search]") {
     SearchServiceFixture f;
-    if (!f.appContext.searchEngine) {
-        SKIP("Search engine not available in this configuration");
-    }
+    auto engine = search::createSearchEngine(f.metadataRepo, nullptr, nullptr, f.kgStore, {});
+    REQUIRE(engine);
+    f.searchEngine = std::shared_ptr<search::SearchEngine>(std::move(engine));
+    f.appContext.searchEngine = f.searchEngine;
+    f.searchService = makeSearchService(f.appContext);
+
     auto request = f.createBasicSearchRequest("python programming");
     request.type = "hybrid";
+    request.symbolRank = false;
     auto result = runAwait(f.searchService->search(request));
     REQUIRE(result);
     CHECK(result.value().total >= kZeroTotal);
+    CHECK((result.value().searchStats.at("symbol_rank_requested") == "false"));
+    CHECK((result.value().searchStats.at("symbol_rank_available") == "true"));
+    CHECK((result.value().searchStats.at("symbol_rank_boosted_results") == "0"));
     for (const auto& doc : result.value().results) {
         CHECK(doc.score > 0.0);
     }
@@ -783,6 +790,44 @@ TEST_CASE("SearchService: snippet hydration exports bounded stage telemetry",
     CHECK(std::stoll(stats.at("timing_snippet_hydration_us")) >=
           std::stoll(stats.at("timing_snippet_content_fetch_us")));
     CHECK(stats.at("snippet_timeout_hit") == "true");
+}
+
+TEST_CASE("SearchService: snippet hydration centers query matches beyond file prefixes",
+          "[unit][services][search][hydration]") {
+    SearchServiceFixture f;
+    const std::string query = "graph affected tests traversal implementation";
+    const std::string content = std::string(12'000, 'x') +
+                                "\n// graph affected tests traversal implementation\n"
+                                "int affectedTests() { return traverseGraph(); }\n";
+    auto fixture =
+        f.fixtureManager->createTextFixture("graph_context_service.cpp", content, {"search"});
+    auto documentService = makeDocumentService(f.appContext);
+    StoreDocumentRequest storeRequest;
+    storeRequest.path = fixture.path.string();
+    auto stored = documentService->store(storeRequest);
+    REQUIRE(stored);
+    f.indexDocumentContent(stored.value().hash, "graph_context_service.cpp", content);
+
+    auto missingSnippetRepo =
+        std::make_shared<SlowSnippetMetadataRepository>(*f.pool, std::chrono::milliseconds{0});
+    missingSnippetRepo->setKnowledgeGraphStore(f.kgStore);
+    f.metadataRepo = missingSnippetRepo;
+    f.appContext.metadataRepo = missingSnippetRepo;
+    f.searchService = makeSearchService(f.appContext);
+
+    auto request = f.createBasicSearchRequest(query);
+    request.type = "keyword";
+    auto result = runAwait(f.searchService->search(request));
+    REQUIRE(result);
+    const auto match = std::find_if(
+        result.value().results.begin(), result.value().results.end(), [](const SearchItem& item) {
+            return item.path.find("graph_context_service.cpp") != std::string::npos;
+        });
+    REQUIRE((match != result.value().results.end()));
+    CHECK((match->snippet.find("affectedTests") != std::string::npos));
+    CHECK((match->snippet.find(std::string(80, 'x')) == std::string::npos));
+    CHECK((result.value().searchStats.at("snippet_query_centered_results") == "1"));
+    CHECK((result.value().searchStats.at("snippet_query_fallback_results") == "0"));
 }
 
 TEST_CASE("SearchService: lightIndex retries transient metadata errors",

@@ -8,6 +8,9 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <unordered_set>
+#include <vector>
 
 #include <yams/common/string_utils.h>
 #include <yams/detection/file_type_detector.h>
@@ -39,6 +42,45 @@ std::int64_t nowEpochSeconds() {
 bool allDigits(const std::string& value) {
     return !value.empty() && std::all_of(value.begin(), value.end(),
                                          [](unsigned char c) { return std::isdigit(c) != 0; });
+}
+
+std::vector<std::string> querySnippetTerms(std::string_view query) {
+    static const std::unordered_set<std::string> kStopWords = {
+        "and", "does", "for", "from", "how", "the", "this", "what", "when", "where", "with"};
+    constexpr std::size_t kMaxTerms = 16;
+    std::vector<std::string> terms;
+    std::unordered_set<std::string> seen;
+    std::string current;
+    const auto flush = [&]() {
+        if (current.size() >= 2 && !kStopWords.contains(current) && seen.insert(current).second) {
+            terms.push_back(current);
+        }
+        current.clear();
+    };
+    for (const unsigned char c : query) {
+        if (std::isalnum(c) != 0 || c == '_') {
+            current.push_back(static_cast<char>(std::tolower(c)));
+        } else {
+            flush();
+            if (terms.size() >= kMaxTerms) {
+                return terms;
+            }
+        }
+    }
+    flush();
+    if (terms.size() > kMaxTerms) {
+        terms.resize(kMaxTerms);
+    }
+    return terms;
+}
+
+std::string lowerAsciiPrefix(std::string_view content, std::size_t limit) {
+    std::string lower;
+    lower.reserve(limit);
+    for (std::size_t i = 0; i < limit; ++i) {
+        lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(content[i]))));
+    }
+    return lower;
 }
 
 Result<std::int64_t> parseIso8601ish(std::string value) {
@@ -282,6 +324,78 @@ std::string createSnippet(const std::string& content, size_t maxLength, bool pre
         out.pop_back();
     out.append("...");
     return out;
+}
+
+QuerySnippetResult createQuerySnippet(const std::string& content, const std::string& query,
+                                      size_t maxLength, bool preserveWordBoundary) {
+    if (content.empty() || maxLength == 0) {
+        return {};
+    }
+    const auto terms = querySnippetTerms(query);
+    if (terms.empty()) {
+        return {.text = createSnippet(content, maxLength, preserveWordBoundary)};
+    }
+
+    constexpr std::size_t kMaxScanBytes = 128 * 1024;
+    constexpr std::size_t kMaxOccurrencesPerTerm = 32;
+    const auto scanBytes = std::min(content.size(), kMaxScanBytes);
+    const auto lowerContent = lowerAsciiPrefix(content, scanBytes);
+    const auto scaledCoverage = maxLength >= kMaxScanBytes / 3 ? kMaxScanBytes : maxLength * 3;
+    const auto coverageWindow = std::max<std::size_t>(256, scaledCoverage);
+
+    std::optional<std::size_t> bestPosition;
+    std::size_t bestCoverage = 0;
+    std::size_t bestMatchedChars = 0;
+    for (const auto& anchorTerm : terms) {
+        std::size_t offset = 0;
+        for (std::size_t occurrence = 0; occurrence < kMaxOccurrencesPerTerm; ++occurrence) {
+            const auto position = lowerContent.find(anchorTerm, offset);
+            if (position == std::string::npos) {
+                break;
+            }
+            const auto windowStart =
+                position > coverageWindow / 4 ? position - coverageWindow / 4 : 0;
+            const auto windowEnd = std::min(scanBytes, windowStart + coverageWindow);
+            std::size_t coverage = 0;
+            std::size_t matchedChars = 0;
+            std::size_t firstMatch = windowEnd;
+            for (const auto& term : terms) {
+                const auto match = lowerContent.find(term, windowStart);
+                if (match != std::string::npos && match < windowEnd) {
+                    ++coverage;
+                    matchedChars += term.size();
+                    firstMatch = std::min(firstMatch, match);
+                }
+            }
+            if (!bestPosition.has_value() || coverage > bestCoverage ||
+                (coverage == bestCoverage && matchedChars > bestMatchedChars)) {
+                bestPosition = firstMatch;
+                bestCoverage = coverage;
+                bestMatchedChars = matchedChars;
+            }
+            offset = position + 1;
+        }
+    }
+    if (!bestPosition.has_value()) {
+        return {.text = createSnippet(content, maxLength, preserveWordBoundary)};
+    }
+
+    auto snippetStart = *bestPosition > maxLength / 4 ? *bestPosition - maxLength / 4 : 0;
+    if (const auto lineBreak = content.rfind('\n', *bestPosition);
+        lineBreak != std::string::npos && *bestPosition - lineBreak <= maxLength / 3) {
+        snippetStart = lineBreak + 1;
+    }
+    const auto scaledSlice = maxLength >= kMaxScanBytes / 2 ? kMaxScanBytes : maxLength * 2;
+    const auto sliceLength = std::min(content.size() - snippetStart, scaledSlice);
+    auto snippet =
+        createSnippet(content.substr(snippetStart, sliceLength), maxLength, preserveWordBoundary);
+    if (snippetStart != 0 && !snippet.empty()) {
+        snippet.insert(0, "... ");
+    }
+    return {.text = std::move(snippet),
+            .sourceOffset = snippetStart,
+            .matchedTerms = bestCoverage,
+            .queryMatched = true};
 }
 
 NormalizedLookupPath normalizeLookupPath(const std::string& path) {

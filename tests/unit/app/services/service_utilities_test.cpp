@@ -157,6 +157,30 @@ TEST_CASE("Service Utils - Path Normalization", "[utils][service][paths]") {
     }
 }
 
+TEST_CASE("Service Utils - Query snippets center matched code", "[utils][service][snippet]") {
+    const std::string prefix(400, 'x');
+    const std::string content =
+        prefix + "\nint affectedTests() {\n    return traverseGraph();\n}\n";
+
+    const auto result =
+        utils::createQuerySnippet(content, "graph affected tests traversal", 120, true);
+
+    CHECK(result.queryMatched);
+    CHECK((result.matchedTerms >= 2));
+    CHECK((result.sourceOffset > 0));
+    CHECK((result.text.find("affectedTests") != std::string::npos));
+    CHECK((result.text.find("traverseGraph") != std::string::npos));
+    CHECK((result.text.find(std::string(80, 'x')) == std::string::npos));
+}
+
+TEST_CASE("Service Utils - Query snippets retain prefix fallback", "[utils][service][snippet]") {
+    const std::string content = "alpha beta gamma delta";
+
+    const auto result = utils::createQuerySnippet(content, "missing terms", 10, true);
+    CHECK_FALSE(result.queryMatched);
+    CHECK((result.text == utils::createSnippet(content, 10, true)));
+}
+
 TEST_CASE("Path projection gives paths-only responses one shared contract",
           "[utils][service][paths-only]") {
     SearchResponse resp;

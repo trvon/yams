@@ -2,8 +2,10 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <sstream>
 #include <string>
 
+#include <yams/common/gitignore.h>
 #include <yams/common/pattern_utils.h>
 
 using yams::common::brace_expand;
@@ -11,7 +13,9 @@ using yams::common::glob_match_path;
 using yams::common::glob_to_sql_like;
 using yams::common::has_wildcards;
 using yams::common::match_segment;
+using yams::common::matchesGitignore;
 using yams::common::normalize_path;
+using yams::common::parseGitignorePatterns;
 using yams::common::split_patterns;
 using yams::common::wildcard_match;
 
@@ -152,4 +156,25 @@ TEST_CASE("common::has_wildcards reports wildcard metacharacters",
     CHECK_FALSE(has_wildcards("abc"));
     CHECK(has_wildcards("a*c"));
     CHECK(has_wildcards("a?c"));
+}
+
+TEST_CASE("common::gitignore patterns prune ignored working-tree paths",
+          "[common][pattern][gitignore][catch2]") {
+    std::istringstream input{"# transient agent state\n"
+                             ".claude/\n"
+                             "*.tmp\n"
+                             "/root-only.txt\n"
+                             "config/generated/\n"
+                             "!keep.tmp\n"};
+
+    const auto patterns = parseGitignorePatterns(input);
+
+    CHECK(matchesGitignore(".claude", patterns));
+    CHECK(matchesGitignore(".claude/worktrees/copy/src/search.cpp", patterns));
+    CHECK(matchesGitignore("build/output.tmp", patterns));
+    CHECK(matchesGitignore("root-only.txt", patterns));
+    CHECK_FALSE(matchesGitignore("nested/root-only.txt", patterns));
+    CHECK(matchesGitignore("config/generated/cache.bin", patterns));
+    CHECK_FALSE(matchesGitignore("nested/config/generated/cache.bin", patterns));
+    CHECK_FALSE(matchesGitignore("src/search.cpp", patterns));
 }

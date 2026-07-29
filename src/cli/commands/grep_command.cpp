@@ -47,6 +47,7 @@
 // Retrieval facade for daemon-first grep
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
+#include <yams/common/gitignore.h>
 
 namespace yams::cli {
 
@@ -1626,9 +1627,16 @@ private:
         live.filesSearched = 0;
         constexpr std::size_t kMaxFiles = 50000;
         constexpr std::size_t kMaxMatches = 200;
+        const auto gitignorePatterns = yams::common::loadGitignorePatterns(root);
+        const auto isIgnored = [&](const std::filesystem::path& path) {
+            const auto relative = path.lexically_relative(root);
+            return !relative.empty() &&
+                   yams::common::matchesGitignore(relative.generic_string(), gitignorePatterns);
+        };
 
         auto scanFile = [&](const std::filesystem::path& file) {
-            if (live.matches.size() >= kMaxMatches || !pathMatchesLiveFilters(file)) {
+            if (live.matches.size() >= kMaxMatches || isIgnored(file) ||
+                !pathMatchesLiveFilters(file)) {
                 return;
             }
             std::ifstream in(file);
@@ -1672,8 +1680,8 @@ private:
                  it.increment(ec)) {
                 if (it->is_directory(ec)) {
                     const auto name = it->path().filename().string();
-                    if (name == ".git" || name == "build" || name == "node_modules" ||
-                        name == ".cache") {
+                    if (isIgnored(it->path()) || name == ".git" || name == "build" ||
+                        name == "node_modules" || name == ".cache") {
                         it.disable_recursion_pending();
                     }
                     continue;

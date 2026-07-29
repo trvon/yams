@@ -637,6 +637,22 @@ TEST_CASE("IndexingService - Recursion and Directory Traversal", "[indexing][ser
         CHECK(result.value().filesIndexed == 2);
     }
 
+    SECTION("Recursive indexing honors root gitignore") {
+        fixture.createFile(".gitignore", "ignored/\n");
+        fixture.createFile("ignored/duplicate.cpp", "ignored");
+        fixture.createFile("src/visible.cpp", "visible");
+
+        AddDirectoryRequest request;
+        request.directoryPath = fixture.testDir_.string();
+        request.recursive = true;
+        request.includePatterns = {"*.cpp"};
+
+        auto result = fixture.indexingService_->addDirectory(request);
+
+        REQUIRE(result);
+        CHECK(result.value().filesIndexed == 1);
+    }
+
     SECTION("Directory with only subdirectories") {
         std::filesystem::create_directories(fixture.testDir_ / "sub1");
         std::filesystem::create_directories(fixture.testDir_ / "sub2");

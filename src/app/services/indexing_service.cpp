@@ -7,6 +7,7 @@
 #include <span>
 #include <sstream>
 #include <yams/app/services/services.hpp>
+#include <yams/common/gitignore.h>
 #include <yams/common/pattern_utils.h>
 #include <yams/core/magic_numbers.hpp>
 #include <yams/core/uuid.h>
@@ -16,88 +17,6 @@
 #include <yams/metadata/tree_builder.h>
 
 namespace yams::app::services {
-
-/**
- * Load .gitignore patterns from a directory.
- * Returns a vector of patterns. Each pattern is normalized for glob matching.
- * Handles:
- *  - Lines starting with # (comments)
- *  - Empty lines (skipped)
- *  - Lines starting with ! (negation - not fully supported, just skipped for now)
- *  - Trailing whitespace removal
- */
-static std::vector<std::string> loadGitignorePatterns(const std::filesystem::path& dir) {
-    std::vector<std::string> patterns;
-    auto gitignorePath = dir / ".gitignore";
-
-    std::error_code ec;
-    if (!std::filesystem::exists(gitignorePath, ec) || ec) {
-        return patterns;
-    }
-
-    std::ifstream file(gitignorePath);
-    if (!file.is_open()) {
-        return patterns;
-    }
-
-    std::string line;
-    while (std::getline(file, line)) {
-        // Trim trailing whitespace (but not escaped trailing space)
-        while (!line.empty() && (line.back() == ' ' || line.back() == '\t' || line.back() == '\r' ||
-                                 line.back() == '\n')) {
-            line.pop_back();
-        }
-
-        // Skip empty lines
-        if (line.empty()) {
-            continue;
-        }
-
-        // Skip comments
-        if (line[0] == '#') {
-            continue;
-        }
-
-        // Skip negation patterns for now (complex to handle)
-        if (line[0] == '!') {
-            continue;
-        }
-
-        // Convert gitignore pattern to glob pattern
-        // Gitignore patterns:
-        //  - foo.txt matches foo.txt anywhere
-        //  - /foo.txt matches foo.txt only in root
-        //  - dir/ matches directory
-        //  - *.txt matches any .txt file
-        //  - **/logs matches logs anywhere
-
-        std::string pattern = line;
-
-        // If pattern starts with /, it's anchored to the root
-        // We remove the leading / and will match against relative paths
-        if (!pattern.empty() && pattern[0] == '/') {
-            pattern = pattern.substr(1);
-        }
-
-        // If pattern ends with /, it matches directories (we include all contents)
-        if (!pattern.empty() && pattern.back() == '/') {
-            pattern.pop_back();
-            // Add pattern to match the directory itself and all its contents
-            patterns.push_back(pattern);
-            patterns.push_back(pattern + "/**");
-        } else {
-            // Standard pattern - match anywhere in path if it doesn't contain /
-            if (pattern.find('/') == std::string::npos && pattern.find('\\') == std::string::npos) {
-                // Pattern without / matches anywhere - prepend **/
-                patterns.push_back("**/" + pattern);
-            } else {
-                patterns.push_back(pattern);
-            }
-        }
-    }
-
-    return patterns;
-}
 
 class IndexingServiceImpl : public IIndexingService {
 public:
@@ -125,7 +44,7 @@ public:
             // Load .gitignore patterns unless noGitignore is set
             std::vector<std::string> gitignorePatterns;
             if (!req.noGitignore) {
-                gitignorePatterns = loadGitignorePatterns(dirPath);
+                gitignorePatterns = yams::common::loadGitignorePatterns(dirPath);
                 if (!gitignorePatterns.empty()) {
                     spdlog::info("[IndexingService] Loaded {} .gitignore patterns from '{}'",
                                  gitignorePatterns.size(), dirPath.string());

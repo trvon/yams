@@ -5,11 +5,12 @@
 
 namespace yams::daemon::dispatch {
 
-inline void mapSearchStageTimeouts(const SearchRequest& source,
-                                   app::services::SearchRequest& destination) noexcept {
+inline void mapSearchServiceOptions(const SearchRequest& source,
+                                    app::services::SearchRequest& destination) noexcept {
     destination.vectorStageTimeoutMs = source.vectorStageTimeoutMs;
     destination.keywordStageTimeoutMs = source.keywordStageTimeoutMs;
     destination.snippetHydrationTimeoutMs = source.snippetHydrationTimeoutMs;
+    destination.symbolRank = source.symbolRank;
 }
 
 } // namespace yams::daemon::dispatch

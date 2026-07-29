@@ -49,11 +49,6 @@
 
 #include "yams/profiling.h"
 
-// Forward util for snippet creation
-namespace yams::app::services::utils {
-std::string createSnippet(const std::string& content, size_t maxLength, bool preserveWordBoundary);
-}
-
 namespace yams::app::services {
 
 namespace {
@@ -1331,6 +1326,8 @@ private:
         constexpr size_t kMaxSnippetHydration = 200;
         const size_t hydrateCount = std::min(resp.results.size(), kMaxSnippetHydration);
         resp.searchStats["snippet_hydration_candidates"] = std::to_string(hydrateCount);
+        resp.searchStats["snippet_query_centered_results"] = "0";
+        resp.searchStats["snippet_query_fallback_results"] = "0";
         if (hydrateCount == 0) {
             resp.searchStats["snippet_hydration_missing"] = "0";
             resp.searchStats["snippet_hydrated_results"] = "0";
@@ -1466,23 +1463,27 @@ private:
                 YAMS_PLOT("search_service::snippet_content_rows",
                           static_cast<double>(contentMap.size()));
 
-                // Hydrate snippets from in-memory maps (no DB queries!)
-                // Limit content text to first 10KB for faster snippet generation
-                constexpr size_t kMaxContentForSnippet = 10240;
+                // Hydrate snippets from in-memory maps (no DB queries!).
+                // Query-centered rendering owns its scan bound so matches beyond the file prefix
+                // can still produce useful navigation context.
                 const auto renderStart = std::chrono::steady_clock::now();
                 size_t hydratedResults = 0;
+                size_t queryCenteredResults = 0;
+                size_t queryFallbackResults = 0;
                 for (const auto& [docId, content] : contentMap) {
                     if (budgetExceeded())
                         break;
                     if (!content.contentText.empty()) {
-                        std::string_view contentView = content.contentText;
-                        if (contentView.size() > kMaxContentForSnippet) {
-                            contentView = contentView.substr(0, kMaxContentForSnippet);
-                        }
-                        auto snippet = utils::createSnippet(std::string(contentView), 200, true);
+                        auto rendered =
+                            utils::createQuerySnippet(content.contentText, req.query, 200, true);
                         if (auto it = docIdToIndices.find(docId); it != docIdToIndices.end()) {
+                            if (rendered.queryMatched) {
+                                queryCenteredResults += it->second.size();
+                            } else {
+                                queryFallbackResults += it->second.size();
+                            }
                             for (size_t idx : it->second) {
-                                resp.results[idx].snippet = snippet;
+                                resp.results[idx].snippet = rendered.text;
                                 ++hydratedResults;
                             }
                         }
@@ -1493,6 +1494,10 @@ private:
                                                .count();
                 resp.componentTimingMicros["snippet_render"] = renderElapsed;
                 resp.searchStats["snippet_hydrated_results"] = std::to_string(hydratedResults);
+                resp.searchStats["snippet_query_centered_results"] =
+                    std::to_string(queryCenteredResults);
+                resp.searchStats["snippet_query_fallback_results"] =
+                    std::to_string(queryFallbackResults);
                 YAMS_PLOT("search_service::snippet_render_us", static_cast<double>(renderElapsed));
 
                 if (budgetExceeded()) {
@@ -2038,6 +2043,10 @@ private:
         for (const auto& [key, value] : engineResponse.debugStats) {
             resp.searchStats[key] = value;
         }
+        resp.searchStats["symbol_rank_requested"] = req.symbolRank ? "true" : "false";
+        resp.searchStats["symbol_rank_available"] =
+            symbolEnricher_ && symbolWeight_ > 0.0f ? "true" : "false";
+        resp.searchStats["symbol_rank_boosted_results"] = "0";
 
         if (resp.isDegraded) {
             spdlog::info(
@@ -2121,7 +2130,8 @@ private:
 
             // PBI-074: Apply symbol enrichment to TOP-K results only (post-processing)
             // This avoids the N+1 query problem by only enriching a small subset
-            if (symbolEnricher_ && symbolWeight_ > 0.0f && !resp.results.empty()) {
+            if (req.symbolRank && symbolEnricher_ && symbolWeight_ > 0.0f &&
+                !resp.results.empty()) {
                 YAMS_ZONE_SCOPED_N("search_service::symbol_enrichment_topk");
                 constexpr size_t kSymbolEnrichLimit = 25;
                 const size_t enrichCount = std::min(resp.results.size(), kSymbolEnrichLimit);
@@ -2130,6 +2140,7 @@ private:
                 std::transform(queryLower.begin(), queryLower.end(), queryLower.begin(),
                                [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
                 bool boosted = false;
+                size_t boostedResults = 0;
 
                 for (size_t i = 0; i < enrichCount; ++i) {
                     auto& it = resp.results[i];
@@ -2179,9 +2190,11 @@ private:
                             boost = std::clamp(boost, 1.0f, 1.35f);
                             it.score *= boost;
                             boosted = boosted || (boost != 1.0f);
+                            boostedResults += boost != 1.0f ? 1 : 0;
                         }
                     }
                 }
+                resp.searchStats["symbol_rank_boosted_results"] = std::to_string(boostedResults);
 
                 // Re-sort after symbol boost applied
                 if (boosted) {
@@ -2486,7 +2499,9 @@ private:
                         const auto& content = *contentResult.value();
                         matched = fieldMatches(content.contentText);
                         if (matched) {
-                            snippet = utils::createSnippet(content.contentText, 180, true);
+                            snippet = utils::createQuerySnippet(content.contentText,
+                                                                searchReq.query, 180, true)
+                                          .text;
                         }
                     }
                 }

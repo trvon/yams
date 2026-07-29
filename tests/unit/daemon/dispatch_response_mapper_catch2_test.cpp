@@ -12,18 +12,20 @@
 
 using namespace yams::app::services;
 
-TEST_CASE("Search request mapper preserves stage timeout budgets", "[unit][daemon][mapper]") {
+TEST_CASE("Search request mapper preserves service-owned options", "[unit][daemon][mapper]") {
     yams::daemon::SearchRequest source;
     source.vectorStageTimeoutMs = 11;
     source.keywordStageTimeoutMs = 22;
     source.snippetHydrationTimeoutMs = 33;
+    source.symbolRank = false;
     SearchRequest destination;
 
-    yams::daemon::dispatch::mapSearchStageTimeouts(source, destination);
+    yams::daemon::dispatch::mapSearchServiceOptions(source, destination);
 
     CHECK(destination.vectorStageTimeoutMs == 11);
     CHECK(destination.keywordStageTimeoutMs == 22);
     CHECK(destination.snippetHydrationTimeoutMs == 33);
+    CHECK_FALSE(destination.symbolRank);
 }
 
 TEST_CASE("SearchResultMapper preserves service metadata", "[unit][daemon][mapper]") {

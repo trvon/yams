@@ -65,6 +65,18 @@ std::string classifyFileType(const std::string& mimeType, const std::string& ext
 std::string createSnippet(const std::string& content, size_t maxLength,
                           bool preserveWordBoundary = true);
 
+struct QuerySnippetResult {
+    std::string text;
+    std::size_t sourceOffset{0};
+    std::size_t matchedTerms{0};
+    bool queryMatched{false};
+};
+
+/// Create a bounded snippet centered on the region covering the most query terms.
+/// Falls back to createSnippet when no query term occurs in the scan budget.
+QuerySnippetResult createQuerySnippet(const std::string& content, const std::string& query,
+                                      size_t maxLength, bool preserveWordBoundary = true);
+
 /// Format output as structured JSON for LLM consumption
 template <typename T> std::string formatAsJson(const T& data, bool pretty = false);
 
@@ -244,6 +256,7 @@ struct SearchRequest {
     int vectorStageTimeoutMs{0};
     int keywordStageTimeoutMs{0};
     int snippetHydrationTimeoutMs{0};
+    bool symbolRank{true};
 };
 
 struct SearchMatchContext {
