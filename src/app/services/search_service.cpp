@@ -1265,11 +1265,11 @@ public:
 private:
     AppContext ctx_;
     bool degraded_{false};
-    std::string repairDetails_{};
+    std::string repairDetails_;
     EnhancedConfig enhancedCfg_{}; // off by default
-    EnhancedSearchExecutor enhanced_{};
-    std::shared_ptr<yams::search::HotzoneManager> hotzones_{};
-    std::shared_ptr<yams::search::SymbolEnricher> symbolEnricher_{};
+    EnhancedSearchExecutor enhanced_;
+    std::shared_ptr<yams::search::HotzoneManager> hotzones_;
+    std::shared_ptr<yams::search::SymbolEnricher> symbolEnricher_;
     float symbolWeight_{0.15f};
 
     std::string resolveSearchType(const SearchRequest& req,

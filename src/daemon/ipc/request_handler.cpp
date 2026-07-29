@@ -545,7 +545,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
 
             // Drive FSM readable event only if the FSM is still alive
             if (fsm.alive()) {
-                fsm.on_readable(static_cast<size_t>(bytes_read));
+                fsm.on_readable(bytes_read);
             } else {
                 spdlog::debug("Closing connection: FSM not alive during read");
                 if (sock->is_open()) {
@@ -2678,7 +2678,6 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                     "Streaming chunk timed out after " + std::to_string(timeout_ms) + " ms");
                 chunk_result = RequestProcessor::ResponseChunk{.data = Response{std::move(err)},
                                                                .is_last_chunk = true};
-                last_chunk_received = true;
                 spdlog::warn("stream_chunks: next_chunk() timed out after {} ms (request_id={})",
                              timeout_ms, request_id);
             } else {

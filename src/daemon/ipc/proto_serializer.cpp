@@ -1700,7 +1700,7 @@ template <> struct ProtoBinding<StatusResponse> {
             p.ready = po.ready();
             p.degraded = po.degraded();
             p.error = po.error();
-            p.modelsLoaded = static_cast<uint32_t>(po.models_loaded());
+            p.modelsLoaded = po.models_loaded();
             p.isProvider = po.is_provider();
             for (const auto& iface : po.interfaces()) {
                 p.interfaces.push_back(iface);

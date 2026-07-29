@@ -202,7 +202,6 @@ std::optional<size_t> ConfigResolver::readVectorSentinelDim(const std::filesyste
 void ConfigResolver::writeVectorSentinel(const std::filesystem::path& dataDir, size_t dim,
                                          const std::string& /*tableName*/, int schemaVersion) {
     try {
-        namespace fs = std::filesystem;
         yams::common::ensureDirectories(dataDir);
         nlohmann::json j;
         j["embedding_dim"] = dim;
@@ -515,7 +514,7 @@ ConfigResolver::EmbeddingDispatchPolicy ConfigResolver::resolveEmbeddingDispatch
         std::optional<EmbeddingDispatchPolicy> value;
         std::string envSignature;
         std::string configSignature;
-        std::chrono::steady_clock::time_point nextCheck{};
+        std::chrono::steady_clock::time_point nextCheck;
     };
 
     static CacheState cache;

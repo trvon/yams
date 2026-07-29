@@ -22,8 +22,6 @@
 
 #include <spdlog/spdlog.h>
 
-#include <nlohmann/json.hpp>
-using nlohmann::json;
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
@@ -126,6 +124,8 @@ inline int setenv(const char* name, const char* value, int overwrite) {
     return _putenv_s(name, value);
 }
 #endif
+
+using nlohmann::json;
 
 namespace {
 // Helper to safely check if a file/socket exists on Windows
@@ -2190,7 +2190,7 @@ private:
                 findCompactCount("repair_current_operation_elapsed_ms");
             Severity repairSev = !repairRunning          ? Severity::Warn
                                  : (repairFailed > 0)    ? Severity::Warn
-                                 : (repairInProgress)    ? Severity::Warn
+                                 : repairInProgress      ? Severity::Warn
                                  : (repairCurrentOp > 0) ? Severity::Warn
                                  : (repairQueue > 0)     ? Severity::Warn
                                                          : Severity::Good;
@@ -2592,10 +2592,9 @@ private:
                         onnxBreak << "gliner " << status.onnxGlinerUsed << " · embed "
                                   << status.onnxEmbedUsed << " · rerank "
                                   << status.onnxRerankerUsed;
-                        Severity onnxSev =
-                            (status.onnxUsedSlots >= status.onnxTotalSlots)      ? Severity::Warn
-                            : (status.onnxUsedSlots > status.onnxTotalSlots / 2) ? Severity::Good
-                                                                                 : Severity::Good;
+                        Severity onnxSev = status.onnxUsedSlots >= status.onnxTotalSlots
+                                               ? Severity::Warn
+                                               : Severity::Good;
                         governor.push_back({"ONNX Concurrency",
                                             paintStatus(onnxSev, onnxInfo.str()), onnxBreak.str()});
                     }

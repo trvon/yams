@@ -871,7 +871,7 @@ private:
 
     Result<std::vector<DeleteTarget>> resolveDeleteTargets(const DeleteByNameRequest& req) {
         DocumentResolver<metadata::IMetadataRepository> resolver(*ctx_.metadataRepo);
-        typename DocumentResolver<metadata::IMetadataRepository>::ResolveOptions resolveOpts;
+        DocumentResolver<metadata::IMetadataRepository>::ResolveOptions resolveOpts;
         resolveOpts.tryHashPrefix = true;
 
         std::vector<DeleteTarget> targets;
@@ -2957,7 +2957,7 @@ public:
         }
 
         DocumentResolver<metadata::IMetadataRepository> resolver(*ctx_.metadataRepo);
-        typename DocumentResolver<metadata::IMetadataRepository>::ResolveOptions opts;
+        DocumentResolver<metadata::IMetadataRepository>::ResolveOptions opts;
         opts.oldest = oldest;
         opts.tryHashPrefix = false; // Name resolution shouldn't try hash prefix
 

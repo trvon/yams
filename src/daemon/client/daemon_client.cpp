@@ -92,11 +92,8 @@ TimeoutCategory getTimeoutCategory(const Request& req) {
             using T = std::decay_t<decltype(r)>;
             // Fast operations (5s) - simple round-trips
             if constexpr (std::is_same_v<T, PingRequest> || std::is_same_v<T, StatusRequest> ||
-                          std::is_same_v<T, ShutdownRequest>) {
-                return TimeoutCategory::Fast;
-            }
-            // Fast operations - AddDocument just pushes to queue and returns immediately
-            else if constexpr (std::is_same_v<T, AddDocumentRequest>) {
+                          std::is_same_v<T, ShutdownRequest> ||
+                          std::is_same_v<T, AddDocumentRequest>) {
                 return TimeoutCategory::Fast;
             }
             // Slow operations (120s) - heavy or maintenance work
@@ -634,7 +631,7 @@ static bool isProxySocketPath(const std::filesystem::path& socketPath) {
 
 struct SocketHealthCacheEntry {
     bool reachable{false};
-    std::chrono::steady_clock::time_point checkedAt{};
+    std::chrono::steady_clock::time_point checkedAt;
 };
 
 static std::mutex& socketHealthCacheMutex() {
@@ -2579,9 +2576,8 @@ void CircuitBreaker::recordFailure() {
     consecutiveFailures_++;
     consecutiveSuccesses_ = 0;
 
-    if (state_ == State::Closed && consecutiveFailures_ >= config_.failureThreshold) {
-        transitionTo(State::Open);
-    } else if (state_ == State::HalfOpen) {
+    if (state_ == State::HalfOpen ||
+        (state_ == State::Closed && consecutiveFailures_ >= config_.failureThreshold)) {
         transitionTo(State::Open);
     }
 }

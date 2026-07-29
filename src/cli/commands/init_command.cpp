@@ -2229,7 +2229,6 @@ private:
             }
 #elif defined(__APPLE__)
             std::string libName = "libtree-sitter-" + language + ".dylib";
-            std::string compiler = "clang++";
 #else
             std::string libName = "libtree-sitter-" + language + ".so";
             std::string compiler = "g++";
@@ -2472,14 +2471,14 @@ private:
      */
     void installAgentSkill(bool installClaude, bool installOpenCode) {
         const char* home = std::getenv("HOME");
-        if (!home) {
 #ifdef _WIN32
+        if (!home) {
             home = std::getenv("USERPROFILE");
+        }
 #endif
-            if (!home) {
-                spdlog::warn("Could not determine home directory for skill installation");
-                return;
-            }
+        if (!home) {
+            spdlog::warn("Could not determine home directory for skill installation");
+            return;
         }
 
         fs::path homeDir(home);

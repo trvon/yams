@@ -216,13 +216,13 @@ YamsCLI::~YamsCLI() {
         std::fprintf(stderr,
                      "[YamsCLI::~YamsCLI] appContext=%ld contentStore=%ld connectionPool=%ld "
                      "database=%ld metadataRepo=%ld kgStore=%ld vectorDatabase=%ld\n",
-                     appContext_ ? static_cast<long>(appContext_.use_count()) : 0L,
-                     contentStore_ ? static_cast<long>(contentStore_.use_count()) : 0L,
-                     connectionPool_ ? static_cast<long>(connectionPool_.use_count()) : 0L,
-                     database_ ? static_cast<long>(database_.use_count()) : 0L,
-                     metadataRepo_ ? static_cast<long>(metadataRepo_.use_count()) : 0L,
-                     kgStore_ ? static_cast<long>(kgStore_.use_count()) : 0L,
-                     vectorDatabase_ ? static_cast<long>(vectorDatabase_.use_count()) : 0L);
+                     appContext_ ? appContext_.use_count() : 0L,
+                     contentStore_ ? contentStore_.use_count() : 0L,
+                     connectionPool_ ? connectionPool_.use_count() : 0L,
+                     database_ ? database_.use_count() : 0L,
+                     metadataRepo_ ? metadataRepo_.use_count() : 0L,
+                     kgStore_ ? kgStore_.use_count() : 0L,
+                     vectorDatabase_ ? vectorDatabase_.use_count() : 0L);
         std::fflush(stderr);
     }
     commands_.clear();

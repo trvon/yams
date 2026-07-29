@@ -2008,11 +2008,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     response.debugStats["topology_routing_freshness_gate"] =
         topologyFreshnessGatePassed ? "1" : "0";
     std::unordered_set<std::string> topologyMedoidHashes;
-    bool topologyWeakQueryRoutingApplied = false;
     bool topologyWeakQueryNarrowApplied = false;
-    bool topologyLoadSucceeded = false;
     std::string topologySkipReason;
-    size_t topologyWeakQueryRoutedClusters = 0;
     std::vector<std::string> topologyWeakQueryAddedCandidateHashes;
     bool topologyCandidateRescueAttempted = false;
     bool topologyCandidateRescueApplied = false;
@@ -2281,10 +2278,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
 
             auto topologyAssist = runTopologyAssistStage(topologyAssistReq);
             auto& topologySession = topologyAssist.session;
-            topologyLoadSucceeded = topologySession.loadSucceeded;
             topologySkipReason =
                 topologyFreshnessGatePassed ? topologyAssist.skipReason : "artifacts_not_fresh";
-            topologyWeakQueryRoutedClusters = topologySession.routedClusters;
             topologyWeakQueryAddedCandidateHashes = topologySession.addedCandidateHashes;
             const bool topologyVectorShadow = workingConfig.topologyVectorPolicy ==
                                               SearchEngineConfig::TopologyVectorPolicy::Shadow;
@@ -2309,7 +2304,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     ? std::min(effectiveVectorMaxResults, workingConfig.topologyMaxDocs)
                     : effectiveVectorMaxResults;
             topologyWeakQueryNarrowApplied = false;
-            topologyWeakQueryRoutingApplied = topologySession.applied && !topologyVectorShadow;
             setDebug(response.debugStats, metrics::kTopologyVectorPolicy,
                      SearchEngineConfig::topologyVectorPolicyToString(
                          workingConfig.topologyVectorPolicy));

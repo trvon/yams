@@ -62,10 +62,7 @@ std::chrono::milliseconds responsePollDelay(std::chrono::steady_clock::duration 
 
 } // namespace
 
-using boost::asio::as_tuple;
 using boost::asio::awaitable;
-using boost::asio::co_spawn;
-using boost::asio::detached;
 using boost::asio::use_awaitable;
 namespace this_coro = boost::asio::this_coro;
 

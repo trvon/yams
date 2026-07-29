@@ -175,9 +175,7 @@ std::string collapseDoubleStarDir(const std::string& pattern) {
         out.replace(pos, 4, "\\");
         pos += 1;
     }
-    if (out.rfind("**/", 0) == 0) {
-        out.erase(0, 3);
-    } else if (out.rfind("**\\", 0) == 0) {
+    if (out.rfind("**/", 0) == 0 || out.rfind("**\\", 0) == 0) {
         out.erase(0, 3);
     }
     return out;
