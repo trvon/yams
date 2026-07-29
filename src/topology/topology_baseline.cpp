@@ -3,6 +3,8 @@
 #include <yams/topology/topology_representatives.h>
 #include <yams/vector/static_cosine_ann_index.h>
 
+#include "topology_build_utils.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -19,21 +21,7 @@ namespace yams::topology {
 
 namespace {
 
-using PairKey = std::pair<std::size_t, std::size_t>;
 using Adjacency = std::vector<std::vector<std::pair<std::size_t, float>>>;
-
-struct PairKeyHash {
-    std::size_t operator()(const PairKey& k) const noexcept {
-        // Mix via splitmix-style combine; both halves fit in 64 bits on 64-bit.
-        const std::uint64_t a = static_cast<std::uint64_t>(k.first);
-        const std::uint64_t b = static_cast<std::uint64_t>(k.second);
-        std::uint64_t x = a * 0x9E3779B97F4A7C15ULL + b;
-        x ^= x >> 33;
-        x *= 0xFF51AFD7ED558CCDULL;
-        x ^= x >> 33;
-        return static_cast<std::size_t>(x);
-    }
-};
 
 std::string makeSnapshotId(std::uint64_t unixSeconds) {
     return "topology-" + std::to_string(unixSeconds);
@@ -41,34 +29,6 @@ std::string makeSnapshotId(std::uint64_t unixSeconds) {
 
 std::string makeClusterId(const std::string& anchorHash) {
     return "topology.cluster." + anchorHash;
-}
-
-std::vector<float> meanEmbedding(std::span<const TopologyDocumentInput> documents,
-                                 const std::vector<std::size_t>& members) {
-    std::vector<float> centroid;
-    std::size_t count = 0;
-    for (std::size_t idx : members) {
-        if (idx >= documents.size() || documents[idx].embedding.empty()) {
-            continue;
-        }
-        const auto& emb = documents[idx].embedding;
-        if (centroid.empty()) {
-            centroid.assign(emb.size(), 0.0F);
-        } else if (centroid.size() != emb.size()) {
-            continue;
-        }
-        for (std::size_t i = 0; i < emb.size(); ++i) {
-            centroid[i] += emb[i];
-        }
-        ++count;
-    }
-    if (count == 0) {
-        return {};
-    }
-    for (auto& v : centroid) {
-        v /= static_cast<float>(count);
-    }
-    return centroid;
 }
 
 void sortComponentByHash(std::vector<std::size_t>& component,
@@ -239,7 +199,7 @@ void emitComponent(TopologyArtifactBatch& batch, const std::vector<std::size_t>&
                                            .documentHash = documents[medoidIdx].documentHash,
                                            .filePath = documents[medoidIdx].filePath,
                                            .representativeScore = std::max(0.0, medoidScore)};
-    cluster.centroidEmbedding = meanEmbedding(documents, component);
+    cluster.centroidEmbedding = detail::meanEmbedding(documents, component);
     cluster.routingRepresentatives = selectDiverseRoutingRepresentatives(
         documents, component, cluster.centroidEmbedding, routingRepresentativeCount);
     cluster.memberDocumentHashes.reserve(component.size());
@@ -302,7 +262,7 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
         }
     }
 
-    std::unordered_map<PairKey, float, PairKeyHash> pairWeights;
+    std::unordered_map<detail::PairKey, float, detail::PairKeyHash> pairWeights;
     for (std::size_t i = 0; i < documents.size(); ++i) {
         for (const auto& neighbor : documents[i].neighbors) {
             if (neighbor.documentHash.empty()) {
@@ -322,7 +282,7 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
             if (neighbor.score < static_cast<float>(config.minEdgeScore)) {
                 continue;
             }
-            const PairKey key{std::min(i, j), std::max(i, j)};
+            const detail::PairKey key{std::min(i, j), std::max(i, j)};
             auto wt = pairWeights.find(key);
             if (wt == pairWeights.end()) {
                 pairWeights.emplace(key, neighbor.score);

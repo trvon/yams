@@ -8,6 +8,7 @@
 
 using yams::common::ensureValidUtf8;
 using yams::common::sanitizeUtf8;
+using yams::common::sanitizeUtf8Strict;
 
 TEST_CASE("common::sanitizeUtf8 preserves ASCII", "[common][utf8][catch2]") {
     CHECK(sanitizeUtf8("hello") == "hello");
@@ -36,6 +37,25 @@ TEST_CASE("common::sanitizeUtf8 replaces invalid sequences with '?'", "[common][
 
     // Overlong starter (0xC0) is not treated as a valid lead
     CHECK(sanitizeUtf8(std::string("\xC0\x80")) == "??");
+}
+
+TEST_CASE("common::sanitizeUtf8Strict preserves valid UTF-8", "[common][utf8][strict]") {
+    const std::string valid = "ASCII \xC2\xA2 \xE2\x82\xAC \xF0\x9F\x98\x80";
+    CHECK(sanitizeUtf8Strict(valid) == valid);
+}
+
+TEST_CASE("common::sanitizeUtf8Strict replaces each invalid byte with U+FFFD",
+          "[common][utf8][strict]") {
+    const std::string replacement = "\xEF\xBF\xBD";
+
+    CHECK(sanitizeUtf8Strict(std::string("\x80")) == replacement);
+    CHECK(sanitizeUtf8Strict(std::string("\xE0\x80\x80")) ==
+          replacement + replacement + replacement);
+    CHECK(sanitizeUtf8Strict(std::string("\xED\xA0\x80")) ==
+          replacement + replacement + replacement);
+    CHECK(sanitizeUtf8Strict(std::string("\xF4\x90\x80\x80")) ==
+          replacement + replacement + replacement + replacement);
+    CHECK(sanitizeUtf8Strict(std::string("\xE2\x82")) == replacement + replacement);
 }
 
 // --- ensureValidUtf8 tests ---

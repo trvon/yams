@@ -5,6 +5,8 @@
 #include <yams/mcp/mcp_server.h>
 
 #if !defined(YAMS_WASI)
+#include "mcp_retrieval_options.h"
+
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
@@ -113,16 +115,6 @@ makeUpdateMetadataResponse(const yams::daemon::UpdateDocumentResponse& ur) {
     }
     out.message = out.success ? "Update successful" : "No changes applied";
     return out;
-}
-
-app::services::RetrievalOptions
-makeMcpRetrievalOptions(const yams::daemon::ClientConfig& daemonClientConfig) {
-    yams::app::services::RetrievalOptions ropts;
-    ropts.socketPath = daemonClientConfig.socketPath;
-    ropts.requestTimeoutMs = 15000;
-    ropts.headerTimeoutMs = 10000;
-    ropts.bodyTimeoutMs = 60000;
-    return ropts;
 }
 
 static std::unordered_map<int64_t, std::string>
@@ -2314,7 +2306,7 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
         if (!clientRes)
             co_return clientRes.error();
         auto& rsvc = *retrieval_svc_;
-        auto ropts = makeMcpRetrievalOptions(daemon_client_config_);
+        auto ropts = detail::makeMcpRetrievalOptions(daemon_client_config_);
         auto docService = documentService_;
         if (!docService) {
             docService = app::services::makeDocumentService(appContext_);

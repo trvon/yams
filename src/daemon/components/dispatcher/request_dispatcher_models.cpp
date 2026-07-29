@@ -1,6 +1,7 @@
 // Split from RequestDispatcher.cpp: model-related handlers
 #include <spdlog/spdlog.h>
 #include <cstdlib>
+#include <yams/common/utf8_utils.h>
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
@@ -8,61 +9,8 @@
 
 namespace yams::daemon {
 
-// Ensure error messages are valid UTF-8 for protobuf transport
-static inline std::string sanitizeUtf8(const std::string& s) {
-    std::string out;
-    out.reserve(s.size());
-    const unsigned char* p = reinterpret_cast<const unsigned char*>(s.data());
-    size_t i = 0, n = s.size();
-    auto append_replacement = [&]() { out += "\xEF\xBF\xBD"; };
-    while (i < n) {
-        unsigned char c = p[i];
-        if (c < 0x80) {
-            out.push_back(static_cast<char>(c));
-            i++;
-            continue;
-        }
-        if ((c & 0xE0) == 0xC0 && i + 1 < n) {
-            unsigned char c1 = p[i + 1];
-            if ((c1 & 0xC0) == 0x80 && (c >= 0xC2)) {
-                out.push_back(static_cast<char>(c));
-                out.push_back(static_cast<char>(c1));
-                i += 2;
-                continue;
-            }
-        }
-        if ((c & 0xF0) == 0xE0 && i + 2 < n) {
-            unsigned char c1 = p[i + 1], c2 = p[i + 2];
-            if ((c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80) {
-                if (!(c == 0xE0 && c1 < 0xA0) && !(c == 0xED && c1 >= 0xA0)) {
-                    out.push_back(static_cast<char>(c));
-                    out.push_back(static_cast<char>(c1));
-                    out.push_back(static_cast<char>(c2));
-                    i += 3;
-                    continue;
-                }
-            }
-        }
-        if ((c & 0xF8) == 0xF0 && i + 3 < n) {
-            unsigned char c1 = p[i + 1], c2 = p[i + 2], c3 = p[i + 3];
-            if ((c1 & 0xC0) == 0x80 && (c2 & 0xC0) == 0x80 && (c3 & 0xC0) == 0x80) {
-                if (!(c == 0xF0 && c1 < 0x90) && !(c == 0xF4 && c1 >= 0x90) && c <= 0xF4) {
-                    out.push_back(static_cast<char>(c));
-                    out.push_back(static_cast<char>(c1));
-                    out.push_back(static_cast<char>(c2));
-                    out.push_back(static_cast<char>(c3));
-                    i += 4;
-                    continue;
-                }
-            }
-        }
-        append_replacement();
-        i++;
-    }
-    return out;
-}
 static inline ErrorResponse makeError(ErrorCode code, const std::string& msg) {
-    return yams::daemon::dispatch::makeErrorResponse(code, sanitizeUtf8(msg));
+    return yams::daemon::dispatch::makeErrorResponse(code, common::sanitizeUtf8Strict(msg));
 }
 
 boost::asio::awaitable<Response>

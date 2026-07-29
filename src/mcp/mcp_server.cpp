@@ -4,6 +4,8 @@
 #include <yams/mcp/mcp_server.h>
 
 #if !defined(YAMS_WASI)
+#include "mcp_retrieval_options.h"
+
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
@@ -91,16 +93,6 @@ json makeSnapshotJson(const yams::daemon::SnapshotInfo& snap) {
                 {"label", snap.label},
                 {"created_at", snap.createdAt},
                 {"document_count", snap.documentCount}};
-}
-
-app::services::RetrievalOptions
-makeMcpRetrievalOptions(const yams::daemon::ClientConfig& daemonClientConfig) {
-    yams::app::services::RetrievalOptions ropts;
-    ropts.socketPath = daemonClientConfig.socketPath;
-    ropts.requestTimeoutMs = 15000;
-    ropts.headerTimeoutMs = 10000;
-    ropts.bodyTimeoutMs = 60000;
-    return ropts;
 }
 
 std::string normalizedTokenString(std::string value) {
@@ -490,7 +482,7 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
     if (!clientRes)
         co_return clientRes.error();
     auto& rsvc = *retrieval_svc_;
-    auto ropts = makeMcpRetrievalOptions(daemon_client_config_);
+    auto ropts = detail::makeMcpRetrievalOptions(daemon_client_config_);
     auto docService = documentService_;
     if (!docService) {
         docService = app::services::makeDocumentService(appContext_);
@@ -643,7 +635,7 @@ yams::mcp::MCPServer::handleCatDocument(const yams::mcp::MCPCatDocumentRequest& 
     auto clientRes = requireDaemonClient();
     if (!clientRes)
         co_return clientRes.error();
-    auto ropts = makeMcpRetrievalOptions(daemon_client_config_);
+    auto ropts = detail::makeMcpRetrievalOptions(daemon_client_config_);
 
     yams::app::services::GetOptions dreq;
     dreq.hash = req.hash;

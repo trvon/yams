@@ -2,6 +2,8 @@
 #include <yams/topology/topology_alternate_engines.h>
 #include <yams/topology/topology_representatives.h>
 
+#include "topology_build_utils.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -19,21 +21,7 @@ namespace yams::topology {
 
 namespace {
 
-using PairKey = std::pair<std::size_t, std::size_t>;
-
-struct PairKeyHash {
-    std::size_t operator()(const PairKey& k) const noexcept {
-        const std::uint64_t a = static_cast<std::uint64_t>(k.first);
-        const std::uint64_t b = static_cast<std::uint64_t>(k.second);
-        std::uint64_t x = a * 0x9E3779B97F4A7C15ULL + b;
-        x ^= x >> 33;
-        x *= 0xFF51AFD7ED558CCDULL;
-        x ^= x >> 33;
-        return static_cast<std::size_t>(x);
-    }
-};
-
-using PairWeightMap = std::unordered_map<PairKey, float, PairKeyHash>;
+using PairWeightMap = std::unordered_map<detail::PairKey, float, detail::PairKeyHash>;
 
 std::string makeSnapshotId(std::uint64_t unixMillis) {
     return "topology-" + std::to_string(unixMillis);
@@ -41,34 +29,6 @@ std::string makeSnapshotId(std::uint64_t unixMillis) {
 
 std::string makeClusterId(const std::string& anchorHash) {
     return "topology.cluster." + anchorHash;
-}
-
-std::vector<float> meanEmbedding(std::span<const TopologyDocumentInput> documents,
-                                 const std::vector<std::size_t>& members) {
-    std::vector<float> centroid;
-    std::size_t count = 0;
-    for (std::size_t idx : members) {
-        if (idx >= documents.size() || documents[idx].embedding.empty()) {
-            continue;
-        }
-        const auto& emb = documents[idx].embedding;
-        if (centroid.empty()) {
-            centroid.assign(emb.size(), 0.0F);
-        } else if (centroid.size() != emb.size()) {
-            continue;
-        }
-        for (std::size_t i = 0; i < emb.size(); ++i) {
-            centroid[i] += emb[i];
-        }
-        ++count;
-    }
-    if (count == 0) {
-        return {};
-    }
-    for (auto& v : centroid) {
-        v /= static_cast<float>(count);
-    }
-    return centroid;
 }
 
 struct TimeStamps {
@@ -109,7 +69,7 @@ PairWeightMap buildPairWeights(std::span<const TopologyDocumentInput> documents,
             if (neighbor.score < static_cast<float>(config.minEdgeScore)) {
                 continue;
             }
-            const PairKey key{std::min(i, j), std::max(i, j)};
+            const detail::PairKey key{std::min(i, j), std::max(i, j)};
             auto wt = pairWeights.find(key);
             if (wt == pairWeights.end()) {
                 pairWeights.emplace(key, neighbor.score);
@@ -255,7 +215,7 @@ TopologyArtifactBatch buildBatchFromAssignment(std::span<const TopologyDocumentI
                                                .documentHash = documents[medoidIdx].documentHash,
                                                .filePath = documents[medoidIdx].filePath,
                                                .representativeScore = std::max(0.0, medoidScore)};
-        cluster.centroidEmbedding = meanEmbedding(documents, members);
+        cluster.centroidEmbedding = detail::meanEmbedding(documents, members);
         cluster.routingRepresentatives = selectDiverseRoutingRepresentatives(
             documents, members, cluster.centroidEmbedding, config.routingRepresentativeCount);
         cluster.memberDocumentHashes.reserve(members.size());
@@ -446,7 +406,7 @@ std::vector<std::int64_t> runKMeans(std::span<const TopologyDocumentInput> docum
         for (std::size_t u : memberUsable) {
             docIdx.push_back(usable[u]);
         }
-        return normalized(meanEmbedding(documents, docIdx));
+        return normalized(detail::meanEmbedding(documents, docIdx));
     };
 
     std::vector<std::size_t> membership(usable.size(), 0);
