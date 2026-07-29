@@ -35,6 +35,7 @@ TEST_CASE("ProtoSerializer SearchRequest roundtrip", "[proto][serializer][search
     req.limit = 10;
     req.fuzzy = true;
     req.similarity = 0.85;
+    req.cancellationSignal = std::make_shared<std::atomic<bool>>(true);
 
     Message msg{};
     msg.requestId = 2;
@@ -46,6 +47,10 @@ TEST_CASE("ProtoSerializer SearchRequest roundtrip", "[proto][serializer][search
     auto decoded = ProtoSerializer::decode_payload(std::span{encoded.value()});
     REQUIRE(decoded.has_value());
     REQUIRE(decoded.value().requestId == 2);
+    const auto* decodedRequest =
+        std::get_if<SearchRequest>(&std::get<Request>(decoded.value().payload));
+    REQUIRE(decodedRequest != nullptr);
+    CHECK_FALSE(decodedRequest->cancellationSignal);
 }
 
 TEST_CASE("ProtoSerializer StatusRequest roundtrip", "[proto][serializer][status]") {

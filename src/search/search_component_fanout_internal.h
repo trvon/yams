@@ -36,7 +36,7 @@ auto postWork(Work work, const std::optional<boost::asio::any_io_executor>& exec
     return future;
 }
 
-enum class ComponentStatus : std::uint8_t { Success, Failed, TimedOut };
+enum class ComponentStatus : std::uint8_t { Success, Failed, TimedOut, Canceled };
 
 struct SearchCandidateFanout {
     using Future = std::future<Result<std::vector<ComponentResult>>>;
@@ -74,8 +74,10 @@ public:
     using Future = SearchCandidateFanout::Future;
 
     ComponentFanoutCollector(const SearchEngineConfig& config, SearchTraceCollector& trace,
-                             ComponentFanoutSinks sinks)
-        : config_(config), trace_(trace), sinks_(sinks) {}
+                             ComponentFanoutSinks sinks,
+                             std::shared_ptr<const std::atomic<bool>> cancellationSignal = {})
+        : config_(config), trace_(trace), sinks_(sinks),
+          cancellationSignal_(std::move(cancellationSignal)) {}
 
     ComponentStatus collect(Future& future, const char* name, std::atomic<uint64_t>& queryCount,
                             std::atomic<uint64_t>& avgTime);
@@ -87,6 +89,7 @@ private:
     const SearchEngineConfig& config_;
     SearchTraceCollector& trace_;
     ComponentFanoutSinks sinks_;
+    std::shared_ptr<const std::atomic<bool>> cancellationSignal_;
 };
 
 } // namespace yams::search::detail

@@ -273,6 +273,7 @@ search::SearchExecutionContext buildSearchExecutionContext(const AppContext& ctx
     if (ctx.workerExecutor) {
         context.workerExecutor = ctx.workerExecutor;
     }
+    context.cancellationSignal = req.cancellationSignal;
 
     const search::QueryRouter router;
     const auto intent = router.classifyIntent(normalizedQuery).label;
@@ -793,6 +794,10 @@ public:
         using namespace std::chrono;
         const auto t0 = steady_clock::now();
         MetadataTelemetry metadataTelemetry;
+
+        if (req.cancellationSignal && req.cancellationSignal->load(std::memory_order_acquire)) {
+            co_return Error{ErrorCode::OperationCancelled, "Search request canceled"};
+        }
 
         // Validate dependencies
         if (!ctx_.metadataRepo) {
@@ -1881,6 +1886,9 @@ private:
         // in fusion for boosting, not for query expansion.
         auto searchRes = ctx_.searchEngine->searchWithResponse(req.query, params);
         if (!searchRes) {
+            if (searchRes.error().code == ErrorCode::OperationCancelled) {
+                return searchRes.error();
+            }
             spdlog::warn("Search failed ({}), falling back to keyword-only search",
                          searchRes.error().message);
             return metadataSearch(req, telemetry);

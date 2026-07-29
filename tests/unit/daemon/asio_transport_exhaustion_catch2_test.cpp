@@ -6,6 +6,7 @@
 #include <boost/asio/local/stream_protocol.hpp>
 #include <boost/asio/use_future.hpp>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -48,6 +49,67 @@ std::string randomSuffix() {
 }
 
 } // namespace
+
+TEST_CASE("AsioTransportAdapter retires a timed-out single-use connection",
+          "[daemon][transport][unit][timeout][single-use]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    auto runtimeDir = makeTempRuntimeDir("single-use-timeout-" + randomSuffix());
+    auto socketPath = runtimeDir / "ipc.sock";
+    std::error_code ec;
+    fs::remove(socketPath, ec);
+
+    boost::asio::io_context serverIo;
+    boost::asio::local::stream_protocol::acceptor acceptor(
+        serverIo, boost::asio::local::stream_protocol::endpoint(socketPath.string()));
+
+    std::promise<void> accepted;
+    auto acceptedFuture = accepted.get_future();
+    std::promise<void> disconnected;
+    auto disconnectedFuture = disconnected.get_future();
+    std::thread serverThread([&] {
+        boost::system::error_code socketError;
+        boost::asio::local::stream_protocol::socket socket(serverIo);
+        acceptor.accept(socket, socketError);
+        if (socketError) {
+            accepted.set_exception(std::make_exception_ptr(
+                std::runtime_error("accept failed: " + socketError.message())));
+            return;
+        }
+        accepted.set_value();
+
+        std::array<char, 4096> buffer{};
+        while (socket.read_some(boost::asio::buffer(buffer), socketError) > 0) {
+        }
+        disconnected.set_value();
+    });
+
+    TransportOptions opts;
+    opts.socketPath = socketPath;
+    opts.poolEnabled = false;
+    opts.requestTimeout = 50ms;
+    opts.headerTimeout = 1s;
+    opts.bodyTimeout = 1s;
+
+    AsioTransportAdapter adapter(opts);
+    auto resultFuture = boost::asio::co_spawn(GlobalIOContext::global_executor(),
+                                              adapter.send_request(Request{StatusRequest{}}),
+                                              boost::asio::use_future);
+
+    REQUIRE(acceptedFuture.wait_for(2s) == std::future_status::ready);
+    REQUIRE_NOTHROW(acceptedFuture.get());
+    REQUIRE(resultFuture.wait_for(2s) == std::future_status::ready);
+    auto result = resultFuture.get();
+    REQUIRE_FALSE(result);
+    CHECK(result.error().code == ErrorCode::Timeout);
+    CHECK(disconnectedFuture.wait_for(1s) == std::future_status::ready);
+
+    serverThread.join();
+    fs::remove(socketPath, ec);
+    AsioConnectionPool::shutdown_all(100ms);
+}
 
 TEST_CASE("AsioTransportAdapter returns ResourceExhausted when maxInflight exceeded",
           "[daemon][transport][unit]") {

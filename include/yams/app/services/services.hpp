@@ -18,6 +18,7 @@
 // Required for yams::extraction::IContentExtractor
 #include <yams/extraction/content_extractor.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -257,6 +258,9 @@ struct SearchRequest {
     int keywordStageTimeoutMs{0};
     int snippetHydrationTimeoutMs{0};
     bool symbolRank{true};
+
+    // Host-provided request cancellation. This is runtime state, not user configuration.
+    std::shared_ptr<const std::atomic<bool>> cancellationSignal;
 };
 
 struct SearchMatchContext {

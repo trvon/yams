@@ -1,6 +1,10 @@
 #pragma once
 
+#include <yams/core/assert.hpp>
 #include <yams/daemon/ipc/ipc_protocol_common.h>
+
+#include <atomic>
+#include <memory>
 
 namespace yams::daemon {
 
@@ -58,6 +62,9 @@ struct SearchRequest {
     bool symbolRank = true;      // Enable automatic symbol ranking boost for code-like queries
     std::string instanceId = {}; // Instance-level isolation (UUID of MCP connection)
     std::string collection = {}; // Scope to a named corpus (collection metadata key)
+
+    // Daemon-local runtime state. Deliberately excluded from serialization.
+    std::shared_ptr<const std::atomic<bool>> cancellationSignal;
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -2896,17 +2903,17 @@ struct KgIngestRequest {
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
         // Nodes
-        ser << static_cast<uint32_t>(nodes.size());
+        ser << serializedCount(nodes, "KG ingest node count exceeds the wire-format limit");
         for (const auto& node : nodes) {
             node.serialize(ser);
         }
         // Edges
-        ser << static_cast<uint32_t>(edges.size());
+        ser << serializedCount(edges, "KG ingest edge count exceeds the wire-format limit");
         for (const auto& edge : edges) {
             edge.serialize(ser);
         }
         // Aliases
-        ser << static_cast<uint32_t>(aliases.size());
+        ser << serializedCount(aliases, "KG ingest alias count exceeds the wire-format limit");
         for (const auto& alias : aliases) {
             alias.serialize(ser);
         }
@@ -2970,6 +2977,15 @@ struct KgIngestRequest {
             return r.error();
 
         return req;
+    }
+
+private:
+    template <typename Collection>
+    static uint32_t serializedCount(const Collection& collection, std::string_view message) {
+        uint32_t count = 0;
+        const bool overflowed = __builtin_add_overflow(std::size_t{0}, collection.size(), &count);
+        YAMS_PRECONDITION(!overflowed, message);
+        return count;
     }
 };
 

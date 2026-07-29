@@ -364,6 +364,7 @@ private:
 
     std::shared_ptr<RequestContext> find_request_context(uint64_t request_id);
     bool is_request_canceled(uint64_t request_id);
+    void cancelOutstandingRequests() noexcept;
     void set_activity_callback(std::function<void()> on_activity);
     void notify_write_activity();
 

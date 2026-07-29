@@ -4,6 +4,7 @@
 #include "search_component_fanout_internal.h"
 
 #include <spdlog/spdlog.h>
+#include <algorithm>
 
 namespace yams::search::detail {
 
@@ -17,12 +18,33 @@ ComponentStatus ComponentFanoutCollector::collect(Future& future, const char* na
 
     auto waitStart = std::chrono::steady_clock::now();
 
-    std::future_status status;
-    if (config_.componentTimeout.count() == 0) {
-        future.wait();
-        status = std::future_status::ready;
+    std::future_status status = std::future_status::deferred;
+    if (!cancellationSignal_) {
+        if (config_.componentTimeout.count() == 0) {
+            future.wait();
+            status = std::future_status::ready;
+        } else {
+            status = future.wait_for(config_.componentTimeout);
+        }
     } else {
-        status = future.wait_for(config_.componentTimeout);
+        constexpr auto kCancellationPollInterval = std::chrono::milliseconds(5);
+        const auto deadline = config_.componentTimeout.count() > 0
+                                  ? waitStart + config_.componentTimeout
+                                  : std::chrono::steady_clock::time_point::max();
+        while (status != std::future_status::ready) {
+            if (cancellationSignal_->load(std::memory_order_acquire)) {
+                spdlog::debug("Parallel {} query abandoned after request cancellation", name);
+                return ComponentStatus::Canceled;
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                status = std::future_status::timeout;
+                break;
+            }
+            const auto remaining =
+                std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+            status = future.wait_for(std::min(kCancellationPollInterval, remaining));
+        }
     }
 
     if (status == std::future_status::ready) {
@@ -65,7 +87,8 @@ ComponentStatus ComponentFanoutCollector::collect(Future& future, const char* na
         sinks_.timedOutQueries.fetch_add(1, std::memory_order_relaxed);
         auto waitEnd = std::chrono::steady_clock::now();
         trace_.markStageTimeout(
-            name, std::chrono::duration_cast<std::chrono::microseconds>(waitEnd - waitStart).count());
+            name,
+            std::chrono::duration_cast<std::chrono::microseconds>(waitEnd - waitStart).count());
         return ComponentStatus::TimedOut;
     }
 }

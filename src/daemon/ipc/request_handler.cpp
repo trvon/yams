@@ -166,6 +166,16 @@ bool RequestHandler::is_request_canceled(uint64_t request_id) {
     return context && context->canceled.load(std::memory_order_relaxed);
 }
 
+void RequestHandler::cancelOutstandingRequests() noexcept {
+    std::lock_guard<std::mutex> lock(ctx_mtx_);
+    for (const auto& contextEntry : contexts_) {
+        const auto& context = contextEntry.second;
+        if (context) {
+            context->canceled.store(true, std::memory_order_release);
+        }
+    }
+}
+
 void RequestHandler::set_activity_callback(std::function<void()> on_activity) {
     std::lock_guard<std::mutex> lk(activity_mutex_);
     activity_callback_ = std::move(on_activity);
@@ -697,18 +707,24 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
                         } else {
                             inflight_.fetch_add(1, std::memory_order_relaxed);
                             // Create per-request context
+                            std::shared_ptr<RequestContext> requestContext;
                             {
                                 std::lock_guard<std::mutex> lk(ctx_mtx_);
-                                auto ctx = std::make_shared<RequestContext>();
-                                ctx->start = std::chrono::steady_clock::now();
-                                contexts_[message.requestId] = ctx;
+                                requestContext = std::make_shared<RequestContext>();
+                                requestContext->start = std::chrono::steady_clock::now();
+                                contexts_[message.requestId] = requestContext;
                                 RequestContextRegistry::instance().register_context(
-                                    message.requestId, ctx);
+                                    message.requestId, requestContext);
                             }
                             MuxMetricsRegistry::instance().incrementActiveHandlers(1);
                             auto request_id = message.requestId;
                             auto expects_streaming = message.expectsStreamingResponse;
                             auto routed_request = std::move(*request_ptr);
+                            if (auto* searchRequest = std::get_if<SearchRequest>(&routed_request)) {
+                                searchRequest->cancellationSignal =
+                                    std::shared_ptr<const std::atomic<bool>>(
+                                        requestContext, &requestContext->canceled);
+                            }
                             const bool long_running_stream =
                                 std::holds_alternative<RepairRequest>(routed_request) ||
                                 std::holds_alternative<EmbedDocumentsRequest>(routed_request);
@@ -873,6 +889,7 @@ boost::asio::awaitable<void> RequestHandler::handle_connection(
         }
         log_request_handler_error("RequestHandler::handle_connection unhandled unknown exception");
     }
+    cancelOutstandingRequests();
 }
 
 boost::asio::awaitable<Result<void>>
@@ -2205,10 +2222,10 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                 if (sm) {
                     if (auto coord = sm->getVectorIndexCoordinator()) {
                         beginBulkIngest = [coord]() -> yams::repair::BulkIngestLease {
-                            auto scope = std::make_shared<
-                                yams::daemon::VectorIndexCoordinator::BulkScope>(
-                                coord->beginBulkIngest(
-                                    yams::daemon::RebuildReason::EmbeddingBatch));
+                            auto scope =
+                                std::make_shared<yams::daemon::VectorIndexCoordinator::BulkScope>(
+                                    coord->beginBulkIngest(
+                                        yams::daemon::RebuildReason::EmbeddingBatch));
                             return yams::repair::BulkIngestLease{
                                 [scope = std::move(scope)]() mutable { scope.reset(); }};
                         };

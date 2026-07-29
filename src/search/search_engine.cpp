@@ -1407,6 +1407,12 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     // topologyEpoch (previous version loaded twice and could observe a
     // torn read under concurrent topology rebuilds).
     const SearchExecutionContext searchExecutionContext = currentSearchExecutionContext();
+    const auto cancellationRequested = [&searchExecutionContext]() noexcept {
+        return searchExecutionContext.cancellationRequested();
+    };
+    if (cancellationRequested()) {
+        return Error{ErrorCode::OperationCancelled, "Search request canceled"};
+    }
 
     // Capture the request context once for diagnostics.
     TuningContext tuningCtx;
@@ -1719,12 +1725,28 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             executor_);
     }
 
+    auto waitForBackgroundPreparation = [&]() {
+        if (embeddingFuture.valid()) {
+            embeddingFuture.wait();
+        }
+        if (conceptFuture.valid()) {
+            conceptFuture.wait();
+        }
+    };
+
     // Helper to await embedding result when needed (called before vector search)
     auto awaitEmbedding = [&]() {
         launchEmbeddingIfNeeded();
         if (embeddingFuture.valid() && !queryEmbedding.has_value()) {
             embeddingAwaited = true;
             try {
+                while (embeddingFuture.wait_for(std::chrono::milliseconds(5)) !=
+                       std::future_status::ready) {
+                    if (cancellationRequested()) {
+                        embeddingStatus = "canceled";
+                        return;
+                    }
+                }
                 auto embResult = embeddingFuture.get();
                 if (!embResult.empty()) {
                     queryEmbedding = std::move(embResult);
@@ -2019,7 +2041,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
     detail::ComponentFanoutCollector fanoutCollector(
         workingConfig, traceCollector,
         detail::ComponentFanoutSinks{allComponentResults, componentTiming, contributing, failed,
-                                     timedOut, stats_.timedOutQueries});
+                                     timedOut, stats_.timedOutQueries},
+        searchExecutionContext.cancellationSignal);
 
     if (workingConfig.enableParallelExecution) [[likely]] {
         YAMS_ZONE_SCOPED_N("search_engine::fanout_parallel");
@@ -2036,6 +2059,14 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                              const char* name, std::atomic<uint64_t>& queryCount,
                              std::atomic<uint64_t>& avgTime) {
             fanoutCollector.collectAndRecord(future, name, queryCount, avgTime);
+        };
+        auto waitForFanout = [&]() {
+            for (auto* future : {&fanout.text, &fanout.path, &fanout.tag, &fanout.metadata,
+                                 &fanout.vector, &fanout.entityVector, &fanout.kg}) {
+                if (future->valid()) {
+                    future->wait();
+                }
+            }
         };
 
         {
@@ -2085,6 +2116,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             collectIf(fanout.tag, "tag", stats_.tagQueries, stats_.avgTagTimeMicros);
             collectIf(fanout.metadata, "metadata", stats_.metadataQueries,
                       stats_.avgMetadataTimeMicros);
+            if (cancellationRequested()) {
+                waitForFanout();
+                waitForBackgroundPreparation();
+                return Error{ErrorCode::OperationCancelled, "Search request canceled"};
+            }
 
             const bool needTier1Candidates =
                 workingConfig.tieredNarrowVectorSearch ||
@@ -2175,6 +2211,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             // Always materialize the query embedding when semantic search is configured so later
             // post-fusion steps are not blocked by adaptive lexical skipping.
             awaitEmbedding();
+            if (cancellationRequested()) {
+                waitForFanout();
+                waitForBackgroundPreparation();
+                return Error{ErrorCode::OperationCancelled, "Search request canceled"};
+            }
 
             // Optional GraphNeighbors seed ANN (config topologyGraphVectorSeedProbe).
             // Product default is 0; k>0 is opt-in / ablation only.
@@ -2695,6 +2736,11 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             collectIf(fanout.entityVector, "entity_vector", stats_.entityVectorQueries,
                       stats_.avgEntityVectorTimeMicros);
             collectIf(fanout.kg, "kg", stats_.kgQueries, stats_.avgKgTimeMicros);
+            if (cancellationRequested()) {
+                waitForFanout();
+                waitForBackgroundPreparation();
+                return Error{ErrorCode::OperationCancelled, "Search request canceled"};
+            }
             topologyWeakQueryNarrowApplied = topologyVectorFilterApplied;
             recordTopologyRouteAdmissionDebug(response, topologySession);
             setDebugBool(response.debugStats, metrics::kTopologyWeakQueryNarrowApplied,

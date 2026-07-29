@@ -36,12 +36,14 @@ struct FanoutFixture {
     std::atomic<uint64_t> timedOutQueries{0};
     std::atomic<uint64_t> queryCount{0};
     std::atomic<uint64_t> avgTime{0};
+    std::shared_ptr<std::atomic<bool>> cancellationSignal;
 
     ComponentFanoutCollector makeCollector() {
         return ComponentFanoutCollector(config, trace,
                                         ComponentFanoutSinks{allComponentResults, componentTiming,
                                                              contributing, failed, timedOut,
-                                                             timedOutQueries});
+                                                             timedOutQueries},
+                                        cancellationSignal);
     }
 };
 
@@ -61,9 +63,10 @@ TEST_CASE("fanout collector appends results and marks contributing on success",
     FanoutFixture fixture;
     auto collector = fixture.makeCollector();
 
-    auto future = scheduleComponent(1.0f, std::nullopt, []() -> Result<std::vector<ComponentResult>> {
-        return std::vector<ComponentResult>{makeComponent("doc-a", 0.9f)};
-    });
+    auto future =
+        scheduleComponent(1.0f, std::nullopt, []() -> Result<std::vector<ComponentResult>> {
+            return std::vector<ComponentResult>{makeComponent("doc-a", 0.9f)};
+        });
 
     collector.collectAndRecord(future, "text", fixture.queryCount, fixture.avgTime);
 
@@ -76,14 +79,14 @@ TEST_CASE("fanout collector appends results and marks contributing on success",
     CHECK(fixture.queryCount.load() == 1);
 }
 
-TEST_CASE("fanout collector treats empty success as non-contributing",
-          "[search][fanout][catch2]") {
+TEST_CASE("fanout collector treats empty success as non-contributing", "[search][fanout][catch2]") {
     FanoutFixture fixture;
     auto collector = fixture.makeCollector();
 
-    auto future = scheduleComponent(
-        1.0f, std::nullopt,
-        []() -> Result<std::vector<ComponentResult>> { return std::vector<ComponentResult>{}; });
+    auto future =
+        scheduleComponent(1.0f, std::nullopt, []() -> Result<std::vector<ComponentResult>> {
+            return std::vector<ComponentResult>{};
+        });
 
     collector.collectAndRecord(future, "tag", fixture.queryCount, fixture.avgTime);
 
@@ -98,10 +101,10 @@ TEST_CASE("fanout collector records failure without appending results",
     FanoutFixture fixture;
     auto collector = fixture.makeCollector();
 
-    auto future = scheduleComponent(1.0f, std::nullopt,
-                                    []() -> Result<std::vector<ComponentResult>> {
-                                        return Error{ErrorCode::InternalError, "boom"};
-                                    });
+    auto future =
+        scheduleComponent(1.0f, std::nullopt, []() -> Result<std::vector<ComponentResult>> {
+            return Error{ErrorCode::InternalError, "boom"};
+        });
 
     collector.collectAndRecord(future, "kg", fixture.queryCount, fixture.avgTime);
 
@@ -123,11 +126,10 @@ TEST_CASE("fanout collector records timeout and increments timed-out counter",
     std::thread runner([&io]() { io.run(); });
     std::optional<boost::asio::any_io_executor> executor{io.get_executor()};
 
-    auto future =
-        scheduleComponent(1.0f, executor, []() -> Result<std::vector<ComponentResult>> {
-            std::this_thread::sleep_for(std::chrono::milliseconds(150));
-            return std::vector<ComponentResult>{};
-        });
+    auto future = scheduleComponent(1.0f, executor, []() -> Result<std::vector<ComponentResult>> {
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        return std::vector<ComponentResult>{};
+    });
 
     collector.collectAndRecord(future, "vector", fixture.queryCount, fixture.avgTime);
 
@@ -141,15 +143,54 @@ TEST_CASE("fanout collector records timeout and increments timed-out counter",
     runner.join();
 }
 
+TEST_CASE("fanout collector stops waiting when its request is canceled",
+          "[search][fanout][cancel][catch2]") {
+    FanoutFixture fixture;
+    fixture.config.componentTimeout = std::chrono::seconds(1);
+    fixture.cancellationSignal = std::make_shared<std::atomic<bool>>(false);
+    auto collector = fixture.makeCollector();
+
+    boost::asio::io_context io;
+    auto guard = boost::asio::make_work_guard(io);
+    std::thread runner([&io]() { io.run(); });
+    std::optional<boost::asio::any_io_executor> executor{io.get_executor()};
+
+    auto future = scheduleComponent(1.0f, executor, []() -> Result<std::vector<ComponentResult>> {
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        return std::vector<ComponentResult>{};
+    });
+    std::thread canceler([signal = fixture.cancellationSignal]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        signal->store(true, std::memory_order_release);
+    });
+
+    const auto start = std::chrono::steady_clock::now();
+    const auto status = collector.collect(future, "vector", fixture.queryCount, fixture.avgTime);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
+    CHECK(status == ComponentStatus::Canceled);
+    CHECK(elapsed < std::chrono::milliseconds(100));
+    CHECK(fixture.failed.empty());
+    CHECK(fixture.timedOut.empty());
+    CHECK(fixture.timedOutQueries.load() == 0);
+
+    canceler.join();
+    future.wait();
+    guard.reset();
+    io.stop();
+    runner.join();
+}
+
 TEST_CASE("scheduleComponent returns invalid future for zero weight and collect treats it as "
           "success",
           "[search][fanout][catch2]") {
     FanoutFixture fixture;
     auto collector = fixture.makeCollector();
 
-    auto future = scheduleComponent(
-        0.0f, std::nullopt,
-        []() -> Result<std::vector<ComponentResult>> { return std::vector<ComponentResult>{}; });
+    auto future =
+        scheduleComponent(0.0f, std::nullopt, []() -> Result<std::vector<ComponentResult>> {
+            return std::vector<ComponentResult>{};
+        });
 
     CHECK_FALSE(future.valid());
     const auto status = collector.collect(future, "path", fixture.queryCount, fixture.avgTime);
@@ -166,12 +207,11 @@ TEST_CASE("fanout collector runs synchronously without executor and waits indefi
     auto collector = fixture.makeCollector();
 
     bool ran = false;
-    auto future = scheduleComponent(1.0f, std::nullopt,
-                                    [&ran]() -> Result<std::vector<ComponentResult>> {
-                                        ran = true;
-                                        return std::vector<ComponentResult>{
-                                            makeComponent("doc-sync", 0.5f)};
-                                    });
+    auto future =
+        scheduleComponent(1.0f, std::nullopt, [&ran]() -> Result<std::vector<ComponentResult>> {
+            ran = true;
+            return std::vector<ComponentResult>{makeComponent("doc-sync", 0.5f)};
+        });
 
     CHECK(ran);
     const auto status = collector.collect(future, "metadata", fixture.queryCount, fixture.avgTime);

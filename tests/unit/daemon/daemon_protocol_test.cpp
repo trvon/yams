@@ -77,16 +77,17 @@ uint32_t crc32Reference(const std::vector<uint8_t>& data) {
 }
 
 std::vector<uint8_t> makeRawFrame(const std::vector<uint8_t>& payload, uint32_t flags = 0) {
+    constexpr std::size_t kHeaderSize = sizeof(MessageFramer::FrameHeader);
     MessageFramer::FrameHeader header;
     header.payload_size = static_cast<uint32_t>(payload.size());
     header.checksum = crc32Reference(payload);
     header.flags = flags;
     header.to_network();
 
-    std::vector<uint8_t> frame(sizeof(header) + payload.size());
+    std::vector<uint8_t> frame(kHeaderSize + payload.size());
     std::memcpy(frame.data(), &header, sizeof(header));
     if (!payload.empty()) {
-        std::memcpy(frame.data() + sizeof(header), payload.data(), payload.size());
+        std::memcpy(frame.data() + kHeaderSize, payload.data(), payload.size());
     }
     return frame;
 }
@@ -462,7 +463,7 @@ TEST_CASE("MessageFramer: All message types", "[daemon][protocol][framing][types
         {"StatusRequest", std::variant<Request, Response>{StatusRequest{true}}},
         {"ShutdownRequest", std::variant<Request, Response>{ShutdownRequest{false}}},
         {"SearchRequest", std::variant<Request, Response>{SearchRequest{
-                              "test", 10, false, false, 0.7, {}, "keyword"}}},
+                              .query = "test", .limit = 10, .searchType = "keyword"}}},
         {"GenerateEmbeddingRequest",
          std::variant<Request, Response>{GenerateEmbeddingRequest{"text", "model"}}},
         {"LoadModelRequest", std::variant<Request, Response>{LoadModelRequest{"test-model"}}},
@@ -1524,8 +1525,7 @@ TEST_CASE("ResponseOf: Compile-time request→response mappings", "[daemon][prot
 }
 
 TEST_CASE("ResponseOf: Runtime usage with actual instances", "[daemon][protocol][types]") {
-    SearchRequest searchReq{"test query", 10,    false, false, 0.7, {}, "keyword", false,
-                            false,        false, false, false, 0,   0,  0,         ""};
+    SearchRequest searchReq{.query = "test query", .limit = 10, .searchType = "keyword"};
     using SearchResType = ResponseOfT<decltype(searchReq)>;
     static_assert(std::is_same_v<SearchResType, SearchResponse>);
 

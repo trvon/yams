@@ -49,6 +49,51 @@ public:
     }
 };
 
+class BlockingSearchProcessor final : public RequestProcessor {
+public:
+    boost::asio::awaitable<Response> process(const Request& request) override {
+        const auto* searchRequest = std::get_if<SearchRequest>(&request);
+        REQUIRE(searchRequest != nullptr);
+        REQUIRE(searchRequest->cancellationSignal);
+        entered_.store(true, std::memory_order_release);
+
+        boost::asio::steady_timer timer(co_await boost::asio::this_coro::executor);
+        while (!released_.load(std::memory_order_acquire)) {
+            if (searchRequest->cancellationSignal->load(std::memory_order_acquire)) {
+                cancellationObserved_.store(true, std::memory_order_release);
+                break;
+            }
+            timer.expires_after(5ms);
+            co_await timer.async_wait(boost::asio::use_awaitable);
+        }
+
+        SearchResponse response{};
+        co_return Response{std::in_place_type<SearchResponse>, std::move(response)};
+    }
+
+    [[nodiscard]] bool entered() const { return entered_.load(std::memory_order_acquire); }
+    [[nodiscard]] bool cancellationObserved() const {
+        return cancellationObserved_.load(std::memory_order_acquire);
+    }
+    void release() { released_.store(true, std::memory_order_release); }
+
+private:
+    std::atomic<bool> entered_{false};
+    std::atomic<bool> released_{false};
+    std::atomic<bool> cancellationObserved_{false};
+};
+
+bool waitFor(std::chrono::milliseconds timeout, const std::function<bool()>& predicate) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) {
+            return true;
+        }
+        std::this_thread::sleep_for(5ms);
+    }
+    return predicate();
+}
+
 uint32_t test_crc32(const std::vector<uint8_t>& data) {
     uint32_t crc = 0xFFFFFFFF;
     for (auto byte : data) {
@@ -61,16 +106,17 @@ uint32_t test_crc32(const std::vector<uint8_t>& data) {
 }
 
 std::vector<uint8_t> make_raw_frame(const std::vector<uint8_t>& payload, uint32_t flags = 0) {
+    constexpr std::size_t kHeaderSize = sizeof(MessageFramer::FrameHeader);
     MessageFramer::FrameHeader header;
     header.payload_size = static_cast<uint32_t>(payload.size());
     header.checksum = test_crc32(payload);
     header.flags = flags;
     header.to_network();
 
-    std::vector<uint8_t> frame(sizeof(header) + payload.size());
+    std::vector<uint8_t> frame(kHeaderSize + payload.size());
     std::memcpy(frame.data(), &header, sizeof(header));
     if (!payload.empty()) {
-        std::memcpy(frame.data() + sizeof(header), payload.data(), payload.size());
+        std::memcpy(frame.data() + kHeaderSize, payload.data(), payload.size());
     }
     return frame;
 }
@@ -116,6 +162,69 @@ void write_in_chunks(boost::asio::local::stream_protocol::socket& socket,
 }
 
 } // namespace
+
+TEST_CASE("RequestHandlerIoEdge: disconnect cancels an in-flight search",
+          "[daemon][ipc][io-edge][cancel][disconnect]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    boost::asio::io_context io;
+
+    boost::asio::local::stream_protocol::socket client_sock(io);
+    boost::asio::local::stream_protocol::socket server_sock(io);
+    boost::asio::local::connect_pair(client_sock, server_sock);
+
+    RequestHandler::Config cfg;
+    cfg.enable_multiplexing = true;
+    cfg.enable_streaming = false;
+
+    auto processor = std::make_shared<BlockingSearchProcessor>();
+    auto handler = std::make_shared<RequestHandler>(processor, cfg);
+
+    yams::compat::stop_source stop_source;
+    auto server_sock_ptr =
+        std::make_shared<boost::asio::local::stream_protocol::socket>(std::move(server_sock));
+    std::promise<void> handler_finished;
+    auto handler_future = handler_finished.get_future();
+
+    auto work = boost::asio::make_work_guard(io);
+    boost::asio::co_spawn(
+        io,
+        [handler, server_sock_ptr, token = stop_source.get_token(),
+         finished = std::move(handler_finished)]() mutable -> boost::asio::awaitable<void> {
+            co_await handler->handle_connection(server_sock_ptr, token, 1);
+            finished.set_value();
+        },
+        boost::asio::detached);
+
+    std::thread io_thread([&io]() { io.run(); });
+
+    constexpr uint64_t kRequestId = 31337;
+    MessageFramer framer;
+    Message message;
+    message.version = 1;
+    message.requestId = kRequestId;
+    message.payload = Request{std::in_place_type<SearchRequest>,
+                              SearchRequest{.query = "disconnect cancellation"}};
+    std::vector<uint8_t> frame;
+    REQUIRE(framer.frame_message_into(message, frame));
+    boost::asio::write(client_sock, boost::asio::buffer(frame));
+
+    REQUIRE(waitFor(2s, [&] { return processor->entered(); }));
+
+    boost::system::error_code ec;
+    client_sock.close(ec);
+    REQUIRE(handler_future.wait_for(2s) == std::future_status::ready);
+
+    CHECK(waitFor(2s, [&] { return processor->cancellationObserved(); }));
+
+    processor->release();
+
+    [[maybe_unused]] const bool stop_requested = stop_source.request_stop();
+    work.reset();
+    io_thread.join();
+}
 
 TEST_CASE("RequestHandlerIoEdge: malformed frame returns shaped parse error",
           "[daemon][ipc][io-edge][malformed-frame]") {

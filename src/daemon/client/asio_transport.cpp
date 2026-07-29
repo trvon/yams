@@ -519,6 +519,9 @@ boost::asio::awaitable<Result<Response>> AsioTransportAdapter::send_request(Requ
         conn->timed_out_requests.clear();
     }
     conn->in_use.store(false, std::memory_order_release);
+    if (!opts_.poolEnabled) {
+        retire_connection(conn, "single-use request timeout");
+    }
     if (ipc_wait_trace_enabled()) {
         const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                     std::chrono::steady_clock::now() - wait_start)

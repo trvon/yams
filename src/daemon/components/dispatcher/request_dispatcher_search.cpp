@@ -73,6 +73,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
         serviceReq.useSession = req.useSession;
         serviceReq.sessionName = req.sessionName;
         serviceReq.globalSearch = req.globalSearch;
+        serviceReq.cancellationSignal = req.cancellationSignal;
         dispatch::mapSearchServiceOptions(req, serviceReq);
         if (!req.collection.empty()) {
             serviceReq.metadataFilters.emplace_back("collection", req.collection);

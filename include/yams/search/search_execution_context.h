@@ -2,7 +2,9 @@
 
 #include <boost/asio/any_io_executor.hpp>
 
+#include <atomic>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -63,6 +65,11 @@ struct SearchExecutionContext {
     IndexFreshnessSnapshot freshness{};
     std::vector<std::string> topologyOverlayHashes;
     std::optional<boost::asio::any_io_executor> workerExecutor;
+    std::shared_ptr<const std::atomic<bool>> cancellationSignal;
+
+    [[nodiscard]] bool cancellationRequested() const noexcept {
+        return cancellationSignal && cancellationSignal->load(std::memory_order_acquire);
+    }
 };
 
 [[nodiscard]] SearchExecutionContext defaultSearchExecutionContext() noexcept;
