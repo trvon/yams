@@ -3,6 +3,8 @@
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/common/fs_utils.h>
+#include <yams/common/string_utils.h>
 #include <yams/core/uuid.h>
 #include <yams/daemon/client/daemon_client.h>
 
@@ -10,7 +12,6 @@
 #include <CLI/CLI.hpp>
 
 #include <algorithm>
-#include <cctype>
 #include <chrono>
 #include <filesystem>
 #include <optional>
@@ -21,40 +22,6 @@
 namespace yams::cli {
 
 namespace fs = std::filesystem;
-
-namespace {
-static fs::path findGitRoot(const fs::path& start) {
-    std::error_code ec;
-    fs::path cur = fs::absolute(start, ec);
-    if (ec)
-        cur = start;
-    while (!cur.empty()) {
-        auto candidate = cur / ".git";
-        if (fs::exists(candidate, ec)) {
-            return cur;
-        }
-        auto parent = cur.parent_path();
-        if (parent == cur)
-            break;
-        cur = parent;
-    }
-    return {};
-}
-
-static std::string sanitizeName(std::string s) {
-    if (s.empty())
-        return "project";
-    for (auto& c : s) {
-        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_')) {
-            c = '-';
-        } else {
-            c = static_cast<char>(std::tolower(c));
-        }
-    }
-    return s;
-}
-
-} // namespace
 
 class WatchCommand final : public ICommand {
 public:
@@ -109,7 +76,7 @@ public:
         if (!rootPath_.empty()) {
             root = fs::path(rootPath_);
         } else {
-            root = findGitRoot(cwd);
+            root = yams::common::findGitRoot(cwd);
             if (root.empty())
                 root = cwd;
         }
@@ -128,7 +95,8 @@ public:
             std::string base = root.filename().string();
             if (base.empty())
                 base = "project";
-            targetSession = "proj-" + sanitizeName(base) + "-" + yams::core::shortHash(rootStr);
+            targetSession = "proj-" + yams::common::sanitizeProjectName(base) + "-" +
+                            yams::core::shortHash(rootStr);
         }
 
         if (!svc->exists(targetSession)) {

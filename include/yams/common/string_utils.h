@@ -25,6 +25,21 @@ namespace yams::common {
     return asciiToLowerCopy(std::string_view(value ? value : ""));
 }
 
+[[nodiscard]] inline std::string sanitizeProjectName(std::string value) {
+    if (value.empty()) {
+        return "project";
+    }
+    for (auto& character : value) {
+        const auto byte = static_cast<unsigned char>(character);
+        if (!(std::isalnum(byte) || character == '-' || character == '_')) {
+            character = '-';
+        } else {
+            character = asciiToLower(byte);
+        }
+    }
+    return value;
+}
+
 [[nodiscard]] inline std::string sanitizeForTerminal(std::string_view input) {
     std::string output;
     output.reserve(input.size());

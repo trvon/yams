@@ -85,19 +85,6 @@ static Error makeCurlError(CURLcode code, std::string_view where) {
     return err;
 }
 
-// Case-insensitive starts_with
-[[maybe_unused]] static bool istarts_with(std::string_view s, std::string_view prefix) {
-    if (s.size() < prefix.size())
-        return false;
-    for (size_t i = 0; i < prefix.size(); ++i) {
-        if (std::tolower(static_cast<unsigned char>(s[i])) !=
-            std::tolower(static_cast<unsigned char>(prefix[i]))) {
-            return false;
-        }
-    }
-    return true;
-}
-
 // Header parser context
 struct HeaderParseContext {
     bool acceptRangesBytes{false};

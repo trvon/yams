@@ -1,7 +1,8 @@
 #include <spdlog/spdlog.h>
 #include <yams/chunking/chunker.h>
-#include <yams/core/assert.hpp>
 #include <yams/crypto/hasher.h>
+
+#include "rabin_fingerprint_table.h"
 #if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
 #include <format>
 namespace yamsfmt = std;
@@ -17,101 +18,21 @@ namespace yamsfmt = fmt;
 
 namespace yams::chunking {
 
-namespace {
-constexpr uint64_t kDefaultRabinPolynomial = 0x3DA3358B4DC173ULL;
-
-uint64_t addMod(uint64_t lhs, uint64_t rhs, uint64_t mod) noexcept {
-    if (mod == 0) {
-        return 0;
-    }
-    lhs %= mod;
-    rhs %= mod;
-    return lhs >= mod - rhs ? lhs - (mod - rhs) : lhs + rhs;
-}
-
-uint64_t multiplyMod(uint64_t lhs, uint64_t rhs, uint64_t mod) noexcept {
-    if (mod == 0) {
-        return 0;
-    }
-    uint64_t result = 0;
-    lhs %= mod;
-    while (rhs != 0) {
-        if ((rhs & 1U) != 0) {
-            result = addMod(result, lhs, mod);
-        }
-        rhs >>= 1U;
-        if (rhs != 0) {
-            lhs = addMod(lhs, lhs, mod);
-        }
-    }
-    return result;
-}
-} // namespace
-
-// Precomputed polynomial powers for Rabin fingerprinting
-struct RabinTables {
-    std::array<uint64_t, 256> outTable{};
-    std::array<std::array<uint64_t, 256>, 64> modTable{};
-
-    explicit RabinTables(uint64_t polynomial) {
-        YAMS_PRECONDITION(polynomial != 0, "Rabin fingerprint polynomial must be non-zero");
-        // Initialize output table
-        for (int i = 0; i < 256; ++i) {
-            uint64_t hash = 0;
-            for (int j = 0; j < 8; ++j) {
-                if (i & (1 << j)) {
-                    hash ^= polynomial << j;
-                }
-            }
-            outTable[i] = hash;
-        }
-
-        // Initialize modulus tables
-        for (int i = 0; i < 64; ++i) {
-            for (int j = 0; j < 256; ++j) {
-                modTable[i][j] = modPow(j, ExpTag{static_cast<size_t>(i)}, PolyTag{polynomial});
-            }
-        }
-    }
-
-private:
-    struct ExpTag {
-        size_t v;
-    };
-    struct PolyTag {
-        uint64_t v;
-    };
-    static uint64_t modPow(uint64_t base, ExpTag exp, PolyTag poly) {
-        if (poly.v == 0) {
-            return 0;
-        }
-        uint64_t result = 1;
-        base %= poly.v;
-        while (exp.v > 0) {
-            if (exp.v & 1) {
-                result = multiplyMod(result, base, poly.v);
-            }
-            exp.v >>= 1;
-            base = multiplyMod(base, base, poly.v);
-        }
-        return result;
-    }
-};
-
 struct RabinChunker::Impl {
-    std::unique_ptr<RabinTables> tables;
+    std::unique_ptr<detail::RabinFingerprintTable> tables;
     ProgressCallback progressCallback;
 
-    explicit Impl(uint64_t polynomial) : tables(std::make_unique<RabinTables>(polynomial)) {}
+    explicit Impl(uint64_t polynomial)
+        : tables(std::make_unique<detail::RabinFingerprintTable>(polynomial)) {}
 };
 
 RabinChunker::RabinChunker(ChunkingConfig config)
     : pImpl(std::make_unique<Impl>(config.polynomial != 0 ? config.polynomial
-                                                          : kDefaultRabinPolynomial)),
+                                                          : detail::kDefaultRabinPolynomial)),
       config_(std::move(config)) {
     if (config_.polynomial == 0) {
         spdlog::warn("RabinChunker polynomial was zero; using default polynomial");
-        config_.polynomial = kDefaultRabinPolynomial;
+        config_.polynomial = detail::kDefaultRabinPolynomial;
     }
     spdlog::debug("Created RabinChunker with target chunk size: {}", config_.targetChunkSize);
 }

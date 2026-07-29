@@ -71,28 +71,6 @@ std::vector<float> meanEmbedding(std::span<const TopologyDocumentInput> document
     return centroid;
 }
 
-std::optional<double> normalizedCosine(std::span<const float> lhs, std::span<const float> rhs) {
-    if (lhs.empty() || lhs.size() != rhs.size()) {
-        return std::nullopt;
-    }
-    double dot = 0.0;
-    double lhsSquaredNorm = 0.0;
-    double rhsSquaredNorm = 0.0;
-    for (std::size_t index = 0; index < lhs.size(); ++index) {
-        dot += static_cast<double>(lhs[index]) * static_cast<double>(rhs[index]);
-        lhsSquaredNorm += static_cast<double>(lhs[index]) * static_cast<double>(lhs[index]);
-        rhsSquaredNorm += static_cast<double>(rhs[index]) * static_cast<double>(rhs[index]);
-    }
-    if (lhsSquaredNorm <= 0.0 || rhsSquaredNorm <= 0.0) {
-        return std::nullopt;
-    }
-    const auto cosine = dot / std::sqrt(lhsSquaredNorm * rhsSquaredNorm);
-    if (!std::isfinite(cosine)) {
-        return std::nullopt;
-    }
-    return std::clamp(cosine, 0.0, 1.0);
-}
-
 void sortComponentByHash(std::vector<std::size_t>& component,
                          std::span<const TopologyDocumentInput> documents) {
     std::ranges::sort(component, [&](std::size_t lhs, std::size_t rhs) {

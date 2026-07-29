@@ -114,4 +114,29 @@ requires std::constructible_from<std::string_view, T>
     return std::filesystem::exists(path, ec) && !ec;
 }
 
+/**
+ * Find the nearest ancestor containing a .git directory or worktree marker.
+ *
+ * @return The repository root, or an empty path when no marker is found.
+ */
+[[nodiscard]] inline std::filesystem::path findGitRoot(const std::filesystem::path& start) {
+    std::error_code error;
+    auto current = std::filesystem::absolute(start, error);
+    if (error) {
+        current = start;
+    }
+
+    while (!current.empty()) {
+        if (std::filesystem::exists(current / ".git", error)) {
+            return current;
+        }
+        const auto parent = current.parent_path();
+        if (parent == current) {
+            break;
+        }
+        current = parent;
+    }
+    return {};
+}
+
 } // namespace yams::common

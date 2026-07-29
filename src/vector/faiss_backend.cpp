@@ -6,7 +6,6 @@
 
 #include <faiss/Index.h>
 #include <faiss/index_io.h>
-#include <faiss/IndexFlat.h>
 #include <faiss/IndexHNSW.h>
 #include <faiss/IndexIDMap.h>
 
@@ -417,16 +416,18 @@ Result<void> FaissBackend::loadOrCreateIndex() {
     }
 
     // Create fresh HNSW index wrapped for custom IDs
-    index_ = std::make_unique<FaissIndex>();
-    auto* flat = new faiss::IndexFlatL2(static_cast<int>(config_.embeddingDim));
-    auto* hnsw = new faiss::IndexHNSWFlat(static_cast<int>(config_.embeddingDim),
-                                          static_cast<int>(config_.hnswM));
+    auto hnsw = std::make_unique<faiss::IndexHNSWFlat>(static_cast<int>(config_.embeddingDim),
+                                                       static_cast<int>(config_.hnswM));
     hnsw->hnsw.efConstruction = static_cast<int>(config_.hnswEfConstruction);
     hnsw->hnsw.efSearch = static_cast<int>(config_.hnswEfSearch);
-    delete hnsw->storage;
-    hnsw->storage = flat;
-    auto* idMap = new faiss::IndexIDMap(hnsw);
-    index_->index.reset(idMap);
+
+    auto freshIndex = std::make_unique<FaissIndex>();
+    auto idMap = std::make_unique<faiss::IndexIDMap>(hnsw.get());
+    idMap->own_fields = true;
+    hnsw.release();
+    freshIndex->index = std::move(idMap);
+
+    index_ = std::move(freshIndex);
 
     spdlog::info("FaissBackend: created new HNSW index (dim={}, M={}, efConstruction={})",
                  config_.embeddingDim, config_.hnswM, config_.hnswEfConstruction);

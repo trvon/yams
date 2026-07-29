@@ -2,9 +2,12 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <cstdlib>
+#include <filesystem>
 
 #include "env_compat.h"
+#include "test_helpers_catch2.h"
 
+#include <yams/common/fs_utils.h>
 #include <yams/common/metric_helpers.h>
 #include <yams/common/string_utils.h>
 #include <yams/common/test_utils.h>
@@ -18,6 +21,24 @@ TEST_CASE("common asciiToLowerCopy normalizes ASCII strings", "[common][string][
     CHECK(yams::common::asciiToLowerCopy("TRUE-On_123") == "true-on_123");
     CHECK(yams::common::asciiToLowerCopy(std::string{"MiXeD.Path"}) == "mixed.path");
     CHECK(yams::common::asciiToLowerCopy("") == "");
+}
+
+TEST_CASE("common project names use stable session-safe characters",
+          "[common][string][project][catch2]") {
+    CHECK(yams::common::sanitizeProjectName("") == "project");
+    CHECK(yams::common::sanitizeProjectName("My Repo_2") == "my-repo_2");
+    CHECK(yams::common::sanitizeProjectName("Already-Safe") == "already-safe");
+}
+
+TEST_CASE("common findGitRoot returns the nearest repository marker",
+          "[common][filesystem][git][catch2]") {
+    yams::test::TempDirGuard tempDir{"yams_git_root_"};
+    const auto repository = tempDir.path() / "repository";
+    const auto nested = repository / "src" / "nested";
+    REQUIRE(std::filesystem::create_directories(repository / ".git"));
+    REQUIRE(std::filesystem::create_directories(nested));
+
+    CHECK(yams::common::findGitRoot(nested) == repository);
 }
 
 TEST_CASE("common sanitizeForTerminal preserves printable text controls and masks bytes",

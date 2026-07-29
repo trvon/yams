@@ -40,15 +40,6 @@ template <typename T> T readPod(const std::byte*& ptr, const std::byte* end) {
     return value;
 }
 
-[[maybe_unused]] void writeString(std::vector<std::byte>& buffer, const std::string& str) {
-    uint32_t len = static_cast<uint32_t>(str.size());
-    const auto lenBytes = std::as_bytes(std::span{&len, static_cast<size_t>(1)});
-    buffer.insert(buffer.end(), lenBytes.begin(), lenBytes.end());
-
-    const auto stringBytes = std::as_bytes(std::span{str.data(), str.size()});
-    buffer.insert(buffer.end(), stringBytes.begin(), stringBytes.end());
-}
-
 std::string readString(const std::byte*& ptr, const std::byte* end) {
     uint32_t len = readPod<uint32_t>(ptr, end);
 
@@ -59,14 +50,6 @@ std::string readString(const std::byte*& ptr, const std::byte* end) {
     std::string result(reinterpret_cast<const char*>(ptr), len);
     ptr = std::next(ptr, static_cast<std::ptrdiff_t>(len));
     return result;
-}
-
-[[maybe_unused]] void writeTimestamp(std::vector<std::byte>& buffer,
-                                     const std::chrono::system_clock::time_point& tp) {
-    auto duration = tp.time_since_epoch();
-    auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
-    const auto millisBytes = std::as_bytes(std::span{&millis, static_cast<size_t>(1)});
-    buffer.insert(buffer.end(), millisBytes.begin(), millisBytes.end());
 }
 
 std::chrono::system_clock::time_point readTimestamp(const std::byte*& ptr, const std::byte* end) {

@@ -1518,6 +1518,11 @@ if catch2_dep.found()
 #Migrated from GTest as part of yams - 3s4 / yams - 1d4
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
   if get_option('enable-vector-tests')
+    vector_test_cpp_args = test_cpp_noerror_args + ['-DYAMS_TESTING=1']
+    if faiss_dep.found()
+      vector_test_cpp_args += ['-DYAMS_TEST_HAS_FAISS=1']
+    endif
+
     catch2_vector_submodule_exe = executable('catch2_vector_submodule',
       files(
         'unit/vector/document_chunker_catch2_test.cpp',
@@ -1540,7 +1545,7 @@ if catch2_dep.found()
       ),
       include_directories: incs,
       dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-      cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+      cpp_args: vector_test_cpp_args,
       build_rpath: ':'.join(_test_rpaths),
       install: false,
     )

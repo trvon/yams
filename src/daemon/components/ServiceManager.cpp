@@ -156,10 +156,6 @@ bool envTruthyCopy(std::string_view name) {
     return !env.empty() && yams::daemon::ConfigResolver::envTruthy(env.c_str());
 }
 
-bool envPresentCopy(std::string_view name) {
-    return !getenvCopy(name).empty();
-}
-
 std::atomic<bool>& onnxShutdownMarker() {
     static std::atomic<bool> marker{false};
     return marker;

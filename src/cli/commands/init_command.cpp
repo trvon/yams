@@ -6,6 +6,7 @@
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/common/fs_utils.h>
+#include <yams/common/string_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
 #include <yams/core/uuid.h>
@@ -459,37 +460,6 @@ private:
         }
     }
 
-    static fs::path findGitRoot(const fs::path& start) {
-        std::error_code ec;
-        fs::path cur = fs::absolute(start, ec);
-        if (ec)
-            cur = start;
-        while (!cur.empty()) {
-            auto candidate = cur / ".git";
-            if (fs::exists(candidate, ec)) {
-                return cur;
-            }
-            auto parent = cur.parent_path();
-            if (parent == cur)
-                break;
-            cur = parent;
-        }
-        return {};
-    }
-
-    static std::string sanitizeName(std::string s) {
-        if (s.empty())
-            return "project";
-        for (auto& c : s) {
-            if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_')) {
-                c = '-';
-            } else {
-                c = static_cast<char>(std::tolower(c));
-            }
-        }
-        return s;
-    }
-
     std::string promptForTuningProfile() {
         std::vector<ChoiceItem> items = {
             {"balanced", "Balanced (Recommended)",
@@ -511,7 +481,7 @@ private:
         if (ec)
             return;
 
-        auto root = findGitRoot(cwd);
+        auto root = yams::common::findGitRoot(cwd);
         if (root.empty())
             root = cwd;
         auto absRoot = fs::absolute(root, ec);
@@ -521,8 +491,8 @@ private:
         std::string base = root.filename().string();
         if (base.empty())
             base = "project";
-        std::string sessionName =
-            "proj-" + sanitizeName(base) + "-" + yams::core::shortHash(root.string());
+        std::string sessionName = "proj-" + yams::common::sanitizeProjectName(base) + "-" +
+                                  yams::core::shortHash(root.string());
 
         auto svc = app::services::makeSessionService(nullptr);
         if (!svc)

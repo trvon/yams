@@ -355,14 +355,6 @@ static std::string makeSessionId(std::string_view url) {
     return "sess-" + std::to_string(hasher(url));
 }
 
-// ---- Utility: bytes to size_t guard ----
-[[maybe_unused]] static std::size_t to_size_t_checked(std::uint64_t v) {
-    if (v > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
-        return static_cast<std::size_t>(std::numeric_limits<std::size_t>::max());
-    }
-    return static_cast<std::size_t>(v);
-}
-
 // ---- DownloadManager implementation ----
 class DownloadManager final : public IDownloadManager {
 public:

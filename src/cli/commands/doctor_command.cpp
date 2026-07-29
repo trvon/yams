@@ -107,8 +107,6 @@ static int unsetenv(const char* name) {
 #include <dlfcn.h>
 #include <unistd.h>
 #endif
-#include <atomic>
-#include <csignal>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -118,9 +116,6 @@ static int unsetenv(const char* name) {
 #include <optional>
 #include <regex>
 #include <set>
-#ifndef _WIN32
-#include <signal.h>
-#endif
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -134,69 +129,6 @@ static int unsetenv(const char* name) {
 #include <vector>
 #include <CLI/CLI.hpp>
 #include <yams/plugins/model_provider_v1.h>
-
-namespace {
-std::atomic<bool> g_doctor_cancel_requested{false};
-volatile std::sig_atomic_t g_doctor_sigint_seen = 0;
-
-struct DoctorSignalGuard {
-    DoctorSignalGuard() {
-        g_doctor_cancel_requested.store(false, std::memory_order_relaxed);
-        g_doctor_sigint_seen = 0;
-
-#ifdef _WIN32
-        prevInt_ = std::signal(SIGINT, &DoctorSignalGuard::handler);
-        prevTerm_ = std::signal(SIGTERM, &DoctorSignalGuard::handler);
-#else
-        struct sigaction sa = {};
-        sa.sa_handler = &DoctorSignalGuard::handler;
-        sigemptyset(&sa.sa_mask);
-        sa.sa_flags = 0;
-        haveInt_ = (sigaction(SIGINT, &sa, &oldInt_) == 0);
-        haveTerm_ = (sigaction(SIGTERM, &sa, &oldTerm_) == 0);
-#endif
-    }
-
-    ~DoctorSignalGuard() {
-#ifdef _WIN32
-        if (prevInt_ != SIG_ERR)
-            std::signal(SIGINT, prevInt_);
-        if (prevTerm_ != SIG_ERR)
-            std::signal(SIGTERM, prevTerm_);
-#else
-        if (haveInt_)
-            (void)sigaction(SIGINT, &oldInt_, nullptr);
-        if (haveTerm_)
-            (void)sigaction(SIGTERM, &oldTerm_, nullptr);
-#endif
-    }
-
-    DoctorSignalGuard(const DoctorSignalGuard&) = delete;
-    DoctorSignalGuard& operator=(const DoctorSignalGuard&) = delete;
-
-    static void handler(int /*sig*/) {
-        g_doctor_cancel_requested.store(true, std::memory_order_relaxed);
-        // Second Ctrl-C should terminate immediately even if we're blocked in RPC.
-        if (g_doctor_sigint_seen) {
-            std::_Exit(130);
-        }
-        g_doctor_sigint_seen = 1;
-    }
-
-private:
-#ifdef _WIN32
-    using SigFn = void (*)(int);
-    SigFn prevInt_{SIG_ERR};
-    SigFn prevTerm_{SIG_ERR};
-#else
-    bool haveInt_{false};
-    bool haveTerm_{false};
-    struct sigaction oldInt_{};
-    struct sigaction oldTerm_{};
-#endif
-};
-
-} // namespace
 
 namespace yams::cli {
 

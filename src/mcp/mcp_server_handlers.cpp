@@ -1,4 +1,5 @@
 #include <yams/common/fs_utils.h>
+#include <yams/common/string_utils.h>
 #include <yams/core/uuid.h>
 #include <yams/mcp/error_handling.h>
 #include <yams/mcp/mcp_server.h>
@@ -122,37 +123,6 @@ makeMcpRetrievalOptions(const yams::daemon::ClientConfig& daemonClientConfig) {
     ropts.headerTimeoutMs = 10000;
     ropts.bodyTimeoutMs = 60000;
     return ropts;
-}
-
-static std::filesystem::path findGitRoot(const std::filesystem::path& start) {
-    std::error_code ec;
-    std::filesystem::path cur = std::filesystem::absolute(start, ec);
-    if (ec)
-        cur = start;
-    while (!cur.empty()) {
-        auto candidate = cur / ".git";
-        if (std::filesystem::exists(candidate, ec)) {
-            return cur;
-        }
-        auto parent = cur.parent_path();
-        if (parent == cur)
-            break;
-        cur = parent;
-    }
-    return {};
-}
-
-static std::string sanitizeName(std::string s) {
-    if (s.empty())
-        return "project";
-    for (auto& c : s) {
-        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_')) {
-            c = '-';
-        } else {
-            c = static_cast<char>(std::tolower(c));
-        }
-    }
-    return s;
 }
 
 static std::unordered_map<int64_t, std::string>
@@ -2777,7 +2747,7 @@ MCPServer::handleSessionWatch(const MCPSessionWatchRequest& req) {
     if (!req.root.empty()) {
         root = std::filesystem::path(req.root);
     } else {
-        root = findGitRoot(cwd);
+        root = yams::common::findGitRoot(cwd);
         if (root.empty())
             root = std::move(cwd);
     }
@@ -2795,7 +2765,8 @@ MCPServer::handleSessionWatch(const MCPSessionWatchRequest& req) {
         std::string base = root.filename().string();
         if (base.empty())
             base = "project";
-        targetSession = "proj-" + sanitizeName(base) + "-" + yams::core::shortHash(rootStr);
+        targetSession = "proj-" + yams::common::sanitizeProjectName(base) + "-" +
+                        yams::core::shortHash(rootStr);
     }
 
     bool created = false;

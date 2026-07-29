@@ -28,26 +28,6 @@ const char* severityToString(ErrorSeverity severity) noexcept {
 }
 
 /**
- * @brief Get string representation of recovery strategy
- */
-[[maybe_unused]] const char* strategyToString(RecoveryStrategy strategy) noexcept {
-    switch (strategy) {
-        case RecoveryStrategy::None:
-            return "None";
-        case RecoveryStrategy::Retry:
-            return "Retry";
-        case RecoveryStrategy::Fallback:
-            return "Fallback";
-        case RecoveryStrategy::Uncompressed:
-            return "Uncompressed";
-        case RecoveryStrategy::Alternative:
-            return "Alternative";
-        default:
-            return "Unknown";
-    }
-}
-
-/**
  * @brief Get algorithm name as string
  */
 const char* algorithmToString(CompressionAlgorithm algorithm) noexcept {
