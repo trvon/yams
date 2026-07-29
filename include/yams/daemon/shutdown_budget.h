@@ -8,6 +8,7 @@ namespace yams::daemon::shutdown_budget {
 inline constexpr auto kWorkCoordinatorJoinTimeout = std::chrono::seconds(5);
 inline constexpr auto kWorkCoordinatorExtendedJoinTimeout = std::chrono::seconds(30);
 inline constexpr auto kGracefulShutdownLifecycleHeadroom = std::chrono::seconds(5);
+inline constexpr auto kDefaultGracefulShutdownWaitTimeout = std::chrono::seconds(120);
 inline constexpr auto kMinGracefulShutdownWaitTimeout = kWorkCoordinatorJoinTimeout +
                                                         kWorkCoordinatorExtendedJoinTimeout +
                                                         kGracefulShutdownLifecycleHeadroom;

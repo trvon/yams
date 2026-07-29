@@ -116,6 +116,72 @@ bool walSidecarStillMatchesPayload(const fs::path& dbPath, const std::string& pa
     return in.good() && actual == payload;
 }
 
+class SessionWatchIndexingService final : public app::services::IIndexingService {
+public:
+    Result<app::services::AddDirectoryResponse>
+    addDirectory(const app::services::AddDirectoryRequest& request) override {
+        requests.push_back(request);
+        if (failuresRemaining > 0) {
+            --failuresRemaining;
+            return Error{ErrorCode::IOError, "simulated indexing failure"};
+        }
+        app::services::AddDirectoryResponse response;
+        response.filesProcessed = request.includePatterns.size();
+        response.filesIndexed = request.includePatterns.size();
+        return response;
+    }
+
+    std::size_t failuresRemaining{0};
+    std::vector<app::services::AddDirectoryRequest> requests;
+};
+
+class SessionWatchDocumentService final : public app::services::IDocumentService {
+public:
+    Result<app::services::StoreDocumentResponse>
+    store(const app::services::StoreDocumentRequest&) override {
+        return ErrorCode::NotImplemented;
+    }
+    Result<app::services::RetrieveDocumentResponse>
+    retrieve(const app::services::RetrieveDocumentRequest&) override {
+        return ErrorCode::NotImplemented;
+    }
+    Result<app::services::CatDocumentResponse>
+    cat(const app::services::CatDocumentRequest&) override {
+        return ErrorCode::NotImplemented;
+    }
+    Result<app::services::ListDocumentsResponse>
+    list(const app::services::ListDocumentsRequest&) override {
+        return ErrorCode::NotImplemented;
+    }
+    Result<app::services::UpdateMetadataResponse>
+    updateMetadata(const app::services::UpdateMetadataRequest&) override {
+        return ErrorCode::NotImplemented;
+    }
+    Result<std::string> resolveNameToHash(const std::string&, bool) override {
+        return ErrorCode::NotImplemented;
+    }
+    Result<app::services::DeleteByNameResponse>
+    deleteByName(const app::services::DeleteByNameRequest& request) override {
+        deleteRequests.push_back(request);
+        if (failuresRemaining > 0) {
+            --failuresRemaining;
+            return Error{ErrorCode::IOError, "simulated deletion failure"};
+        }
+        app::services::DeleteByNameResponse response;
+        response.count = 1;
+        response.deleted.push_back(
+            {.name = request.name, .deleted = true, .errorCode = ErrorCode::Success});
+        return response;
+    }
+    Result<app::services::DeleteByNameResponse>
+    pruneVersions(const app::services::PruneVersionsRequest&) override {
+        return ErrorCode::NotImplemented;
+    }
+
+    std::size_t failuresRemaining{0};
+    std::vector<app::services::DeleteByNameRequest> deleteRequests;
+};
+
 void requireReadyDatabaseState(const StateComponent& state) {
     CHECK(state.readiness.databaseReady.load());
     std::lock_guard<std::mutex> lk(state.readiness.recoveryMutex);
@@ -222,6 +288,80 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager getConfig returns config
     const auto& cfg = sm.getConfig();
     REQUIRE((cfg.dataDir == config_.dataDir));
     REQUIRE((cfg.socketPath == config_.socketPath));
+}
+
+TEST_CASE("ServiceManager session watcher honors only the test disable gate",
+          "[daemon][service_manager][session_watch]") {
+    CHECK(ServiceManager::__test_shouldStartSessionWatcher(""));
+    CHECK(ServiceManager::__test_shouldStartSessionWatcher("0"));
+    CHECK_FALSE(ServiceManager::__test_shouldStartSessionWatcher("true"));
+}
+
+TEST_CASE("ServiceManager session watcher uses configured intervals without busy polling",
+          "[daemon][service_manager][session_watch]") {
+    using namespace std::chrono_literals;
+
+    CHECK(ServiceManager::__test_sessionWatcherDelay(false, 0) == 2s);
+    CHECK(ServiceManager::__test_sessionWatcherDelay(true, 250) == 250ms);
+    CHECK(ServiceManager::__test_sessionWatcherDelay(true, 20) == 100ms);
+}
+
+TEST_CASE("ServiceManager session watcher refreshes every retrieval index",
+          "[daemon][service_manager][session_watch]") {
+    auto request = ServiceManager::__test_makeSessionWatchRequest("coding", "/workspace/yams",
+                                                                  {"src/search/search_engine.cpp"});
+
+    CHECK(request.directoryPath == "/workspace/yams");
+    CHECK(request.includePatterns == std::vector<std::string>{"src/search/search_engine.cpp"});
+    CHECK(request.recursive);
+    CHECK(request.sessionId == "coding");
+    CHECK_FALSE(request.noEmbeddings);
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager session watcher retries failed indexing and deletion",
+                 "[daemon][service_manager][session_watch]") {
+    ServiceManager serviceManager(config_, state_, lifecycleFsm_);
+    SessionWatchIndexingService indexingService;
+    SessionWatchDocumentService documentService;
+    const auto watchedDirectory = testDir_ / "watched";
+    const auto watchedFile = watchedDirectory / "changed.cpp";
+    fs::create_directories(watchedDirectory);
+    {
+        std::ofstream output(watchedFile);
+        REQUIRE(output.good());
+        output << "int changed = 1;\n";
+    }
+
+    indexingService.failuresRemaining = 1;
+    CHECK_FALSE(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
+                                                                "coding", watchedDirectory));
+    REQUIRE(indexingService.requests.size() == 1);
+    CHECK(indexingService.requests.front().includePatterns ==
+          std::vector<std::string>{"changed.cpp"});
+
+    CHECK(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
+                                                          "coding", watchedDirectory));
+    CHECK(indexingService.requests.size() == 2);
+
+    CHECK(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
+                                                          "coding", watchedDirectory));
+    CHECK(indexingService.requests.size() == 2);
+
+    REQUIRE(fs::remove(watchedFile));
+    documentService.failuresRemaining = 1;
+    CHECK_FALSE(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
+                                                                "coding", watchedDirectory));
+    REQUIRE(documentService.deleteRequests.size() == 1);
+    CHECK(documentService.deleteRequests.front().name == watchedFile.string());
+
+    CHECK(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
+                                                          "coding", watchedDirectory));
+    CHECK(documentService.deleteRequests.size() == 2);
+
+    CHECK(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
+                                                          "coding", watchedDirectory));
+    CHECK(documentService.deleteRequests.size() == 2);
 }
 
 TEST_CASE("ServiceManager topology readiness follows artifact freshness",

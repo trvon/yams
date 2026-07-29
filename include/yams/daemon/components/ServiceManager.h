@@ -381,6 +381,24 @@ public:
     void __test_setWriteCoordinator(std::unique_ptr<WriteCoordinator> coordinator) {
         writeCoordinator_ = std::move(coordinator);
     }
+    static bool __test_shouldStartSessionWatcher(std::string_view disableValue) {
+        return shouldStartSessionWatcher(disableValue);
+    }
+    static std::chrono::milliseconds __test_sessionWatcherDelay(bool watchEnabled,
+                                                                std::uint32_t intervalMs) {
+        return sessionWatcherDelay(watchEnabled, intervalMs);
+    }
+    static app::services::AddDirectoryRequest
+    __test_makeSessionWatchRequest(std::string_view session, const std::filesystem::path& directory,
+                                   std::vector<std::string> changed) {
+        return makeSessionWatchRequest(session, directory, std::move(changed));
+    }
+    bool __test_scanSessionWatchDirectory(app::services::IIndexingService& indexingService,
+                                          app::services::IDocumentService* documentService,
+                                          std::string_view session,
+                                          const std::filesystem::path& directory) {
+        return scanSessionWatchDirectory(indexingService, documentService, session, directory);
+    }
     static bool __test_shouldAutoVacuum(std::uint64_t databaseBytes, std::uint64_t pageCount,
                                         std::uint64_t freePageCount, std::uint64_t pageSize) {
         return shouldAutoVacuum(databaseBytes, pageCount, freePageCount, pageSize);
@@ -685,6 +703,17 @@ private:
     void wireSearchEngineRuntimeAdapters(const std::shared_ptr<search::SearchEngine>& engine,
                                          const char* contextLabel);
 
+    static bool shouldStartSessionWatcher(std::string_view disableValue);
+    static std::chrono::milliseconds sessionWatcherDelay(bool watchEnabled,
+                                                         std::uint32_t intervalMs);
+    static app::services::AddDirectoryRequest
+    makeSessionWatchRequest(std::string_view session, const std::filesystem::path& directory,
+                            std::vector<std::string> changed);
+    bool scanSessionWatchDirectory(app::services::IIndexingService& indexingService,
+                                   app::services::IDocumentService* documentService,
+                                   std::string_view session,
+                                   const std::filesystem::path& directory);
+    std::chrono::milliseconds runSessionWatcherIteration();
     boost::asio::awaitable<void> co_runSessionWatcher(const yams::compat::stop_token& token);
 
     Result<std::filesystem::path> initializeDataDirAndContentStore();

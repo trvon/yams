@@ -2152,23 +2152,11 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         spdlog::debug("[ServiceManager] VectorsInitializedEvent dispatch failed");
     }
 
-    // Executors and sessions
-    // Lightweight session directory watcher (polling), reacts to SessionService config.
-    auto isTruthy = [](const char* s) {
-        if (!s)
-            return false;
-        std::string v(s);
-        std::transform(v.begin(), v.end(), v.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        return v == "1" || v == "true" || v == "yes" || v == "on";
-    };
-    // Session watcher is opt-in: it should not run by default in daemon mode.
-    // Enable explicitly via `YAMS_ENABLE_SESSION_WATCHER=1`.
-    // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only startup config snapshot.
-    const bool enableSessionWatcher = isTruthy(getenvCopy("YAMS_ENABLE_SESSION_WATCHER").c_str());
-    if (!enableSessionWatcher) {
-        spdlog::info("[ServiceManager] Session watcher disabled (default); set "
-                     "YAMS_ENABLE_SESSION_WATCHER=1 to enable");
+    // Lightweight session directory watcher (polling), idle until SessionService enables it.
+    const bool startSessionWatcher =
+        shouldStartSessionWatcher(getenvCopy("YAMS_DISABLE_SESSION_WATCHER"));
+    if (!startSessionWatcher) {
+        spdlog::info("[ServiceManager] Session watcher disabled by test override");
     } else {
         try {
             auto exec = getWorkerExecutor();
@@ -2999,85 +2987,175 @@ void ServiceManager::startDeferredMetadataWarmup() {
     });
 }
 
+bool ServiceManager::shouldStartSessionWatcher(std::string_view disableValue) {
+    const std::string value(disableValue);
+    return !ConfigResolver::envTruthy(value.c_str());
+}
+
+std::chrono::milliseconds ServiceManager::sessionWatcherDelay(bool watchEnabled,
+                                                              std::uint32_t intervalMs) {
+    constexpr auto kIdleDelay = std::chrono::milliseconds(2000);
+    constexpr std::uint32_t kMinimumIntervalMs = 100;
+    if (!watchEnabled) {
+        return kIdleDelay;
+    }
+    return std::chrono::milliseconds(std::max(kMinimumIntervalMs, intervalMs));
+}
+
+app::services::AddDirectoryRequest
+ServiceManager::makeSessionWatchRequest(std::string_view session,
+                                        const std::filesystem::path& directory,
+                                        std::vector<std::string> changed) {
+    app::services::AddDirectoryRequest request;
+    request.directoryPath = directory.string();
+    request.includePatterns = std::move(changed);
+    request.recursive = true;
+    request.sessionId = std::string(session);
+    request.noGitignore = false;
+    return request;
+}
+
+bool ServiceManager::scanSessionWatchDirectory(app::services::IIndexingService& indexingService,
+                                               app::services::IDocumentService* documentService,
+                                               std::string_view session,
+                                               const std::filesystem::path& directory) {
+    std::error_code error;
+    if (directory.empty() || !std::filesystem::is_directory(directory, error)) {
+        return false;
+    }
+
+    auto& previousFiles = sessionWatch_.dirFiles[directory.string()];
+    std::unordered_map<std::string, std::pair<std::uint64_t, std::uint64_t>> currentFiles;
+    std::vector<std::string> changed;
+    auto it = std::filesystem::recursive_directory_iterator(directory, error);
+    const auto end = std::filesystem::recursive_directory_iterator();
+    for (; !error && it != end; it.increment(error)) {
+        std::error_code metadataError;
+        if (!it->is_regular_file(metadataError)) {
+            if (metadataError) {
+                error = metadataError;
+            }
+            continue;
+        }
+
+        const auto filePath = it->path().string();
+        const auto fileSize = static_cast<std::uint64_t>(it->file_size(metadataError));
+        if (metadataError) {
+            error = metadataError;
+            break;
+        }
+        const auto modifiedTime = it->last_write_time(metadataError);
+        if (metadataError) {
+            error = metadataError;
+            break;
+        }
+        const auto modifiedAt = static_cast<std::uint64_t>(modifiedTime.time_since_epoch().count());
+        currentFiles[filePath] = {modifiedAt, fileSize};
+        const auto previous = previousFiles.find(filePath);
+        if (previous == previousFiles.end() || previous->second != currentFiles[filePath]) {
+            std::error_code relativeError;
+            const auto relativePath =
+                std::filesystem::relative(it->path(), directory, relativeError);
+            auto relative =
+                relativeError ? it->path().filename().string() : relativePath.generic_string();
+            if (!relative.empty()) {
+                changed.emplace_back(std::move(relative));
+            }
+        }
+    }
+    if (error) {
+        spdlog::warn("[ServiceManager] session watcher scan failed for '{}': {}",
+                     directory.string(), error.message());
+        return false;
+    }
+
+    std::vector<std::string> removed;
+    removed.reserve(previousFiles.size());
+    for (const auto& [filePath, fingerprint] : previousFiles) {
+        (void)fingerprint;
+        if (!currentFiles.contains(filePath)) {
+            removed.push_back(filePath);
+        }
+    }
+
+    if (!changed.empty()) {
+        auto request = makeSessionWatchRequest(session, directory, std::move(changed));
+        auto indexed = indexingService.addDirectory(request);
+        if (!indexed || indexed.value().filesFailed != 0) {
+            const auto detail =
+                indexed ? std::to_string(indexed.value().filesFailed) + " changed file(s) failed"
+                        : indexed.error().message;
+            spdlog::warn("[ServiceManager] session watcher indexing failed for '{}': {}",
+                         directory.string(), detail);
+            return false;
+        }
+    }
+
+    if (!removed.empty() && documentService == nullptr) {
+        spdlog::warn("[ServiceManager] session watcher cannot remove {} stale path(s) for '{}': "
+                     "document service unavailable",
+                     removed.size(), directory.string());
+        return false;
+    }
+    for (const auto& filePath : removed) {
+        app::services::DeleteByNameRequest request;
+        request.name = filePath;
+        request.force = false;
+        auto deleted = documentService->deleteByName(request);
+        if (!deleted) {
+            if (deleted.error().code == ErrorCode::NotFound) {
+                continue;
+            }
+            spdlog::warn("[ServiceManager] session watcher removal failed for '{}': {}", filePath,
+                         deleted.error().message);
+            return false;
+        }
+        if (!deleted.value().errors.empty()) {
+            spdlog::warn("[ServiceManager] session watcher removal failed for '{}': {}", filePath,
+                         deleted.value().errors.front().error.value_or("unknown error"));
+            return false;
+        }
+    }
+
+    previousFiles.swap(currentFiles);
+    return true;
+}
+
+std::chrono::milliseconds ServiceManager::runSessionWatcherIteration() {
+    yams::app::services::AppContext appCtx = getAppContext();
+    auto sessionService = yams::app::services::makeSessionService(&appCtx);
+    const auto current = sessionService->current();
+    if (!current) {
+        return sessionWatcherDelay(false, 0);
+    }
+
+    const bool watchEnabled = sessionService->watchEnabled(*current);
+    const auto delay = sessionWatcherDelay(watchEnabled, sessionService->watchIntervalMs(*current));
+    if (!watchEnabled) {
+        return delay;
+    }
+
+    auto indexingService = yams::app::services::makeIndexingService(appCtx);
+    if (!indexingService) {
+        return delay;
+    }
+    auto documentService = yams::app::services::makeDocumentService(appCtx);
+
+    for (const auto& pattern : sessionService->getPinnedPatterns(*current)) {
+        scanSessionWatchDirectory(*indexingService, documentService.get(), *current, pattern);
+    }
+    return delay;
+}
+
 boost::asio::awaitable<void>
 ServiceManager::co_runSessionWatcher(const yams::compat::stop_token& token) {
     auto executor = co_await boost::asio::this_coro::executor;
-
-    auto read_ms = [](const char* env, int def) {
-        try {
-            if (const std::string value = getenvCopy(env); !value.empty())
-                return std::max(100, std::stoi(value));
-        } catch (const std::exception& e) {
-            spdlog::debug("[ServiceManager] invalid session watcher env {}: {}", env, e.what());
-        } catch (...) {
-            spdlog::debug("[ServiceManager] invalid session watcher env {}", env);
-        }
-        return def;
-    };
-
-    const int interval_ms = read_ms("YAMS_SESSION_WATCH_INTERVAL_MS", 2000);
-    auto wait_duration = std::chrono::milliseconds(interval_ms);
     boost::asio::steady_timer timer(executor);
 
     while (!token.stop_requested()) {
+        auto waitDuration = sessionWatcherDelay(false, 0);
         try {
-            yams::app::services::AppContext appCtx = getAppContext();
-            auto sess = yams::app::services::makeSessionService(&appCtx);
-            auto current = sess->current();
-            if (current) {
-                const auto currentSession = *current;
-                if (!sess->watchEnabled(currentSession)) {
-                    continue;
-                }
-                auto indexingService = yams::app::services::makeIndexingService(appCtx);
-                if (!indexingService) {
-                    continue;
-                }
-                auto patterns = sess->getPinnedPatterns(currentSession);
-                for (const auto& pat : patterns) {
-                    std::error_code ec;
-                    std::filesystem::path p(pat);
-                    if (!p.empty() && std::filesystem::is_directory(p, ec)) {
-                        auto& dirMap = sessionWatch_.dirFiles[p.string()];
-                        std::unordered_map<std::string, std::pair<std::uint64_t, std::uint64_t>>
-                            cur;
-                        std::vector<std::string> changed;
-                        for (auto it = std::filesystem::recursive_directory_iterator(p, ec);
-                             !ec && it != std::filesystem::recursive_directory_iterator(); ++it) {
-                            if (!it->is_regular_file())
-                                continue;
-                            auto fp = it->path().string();
-                            auto fsz = static_cast<std::uint64_t>(it->file_size(ec));
-                            auto fmt = static_cast<std::uint64_t>(
-                                std::chrono::duration_cast<std::chrono::seconds>(
-                                    it->last_write_time().time_since_epoch())
-                                    .count());
-                            cur[fp] = {fmt, fsz};
-                            auto old = dirMap.find(fp);
-                            if (old == dirMap.end() || old->second != cur[fp]) {
-                                std::error_code rel_ec;
-                                auto relPath = std::filesystem::relative(it->path(), p, rel_ec);
-                                std::string relStr = rel_ec ? it->path().filename().string()
-                                                            : relPath.generic_string();
-                                if (!relStr.empty()) {
-                                    changed.emplace_back(std::move(relStr));
-                                }
-                            }
-                        }
-                        dirMap.swap(cur);
-                        if (!changed.empty()) {
-                            yams::app::services::AddDirectoryRequest req;
-                            req.directoryPath = p.string();
-                            req.includePatterns = std::move(changed);
-                            req.recursive = true;
-                            req.sessionId = currentSession;
-                            req.noEmbeddings = true;
-                            req.noGitignore = false;
-                            (void)indexingService->addDirectory(req);
-                        }
-                    }
-                }
-            }
+            waitDuration = runSessionWatcherIteration();
         } catch (const std::exception& e) {
             spdlog::debug("[ServiceManager] session watcher iteration failed: {}", e.what());
         } catch (...) {
@@ -3097,7 +3175,7 @@ ServiceManager::co_runSessionWatcher(const yams::compat::stop_token& token) {
         }
 
         boost::system::error_code ec;
-        timer.expires_after(wait_duration);
+        timer.expires_after(waitDuration);
         co_await timer.async_wait(boost::asio::redirect_error(boost::asio::use_awaitable, ec));
         if (token.stop_requested() || ec == boost::asio::error::operation_aborted)
             break;

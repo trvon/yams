@@ -70,7 +70,9 @@ void DaemonLifecycleAdapter::requestShutdown(bool graceful, bool inTestMode) {
         std::mutex watchdogMutex;
         std::condition_variable watchdogCv;
         std::thread watchdog;
-        int timeoutMs = 120000; // 2 minutes — accommodates slow WorkCoordinator shutdown
+        int timeoutMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                             shutdown_budget::kDefaultGracefulShutdownWaitTimeout)
+                                             .count());
         auto finalizeWatchdog = [&]() {
             shutdownComplete.store(true, std::memory_order_release);
             {

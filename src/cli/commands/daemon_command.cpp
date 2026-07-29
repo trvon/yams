@@ -18,6 +18,7 @@
 #include <yams/daemon/client/process_discovery.h>
 #include <yams/daemon/ipc/socket_utils.h>
 #include <yams/daemon/metric_keys.h>
+#include <yams/daemon/shutdown_budget.h>
 #include <yams/version.hpp>
 
 #include <spdlog/spdlog.h>
@@ -206,7 +207,11 @@ public:
         stop->add_option("--socket", socketPath_, "Socket path for daemon communication");
         stop->add_flag("--force", force_, "Force stop (kill -9)");
 
-        stop->callback([this]() { stopDaemon(); });
+        stop->callback([this]() {
+            if (!stopDaemon()) {
+                std::exit(1);
+            }
+        });
 
         // Status command
         auto* status = daemon->add_subcommand("status", "Check daemon status");
@@ -983,12 +988,15 @@ private:
             if (!yams::daemon::client::pidFileIdentifiesLiveDaemon(pidFile_, pidBeforeStop)) {
                 pidBeforeStop = -1;
             }
-            stopDaemon();
+            if (!stopDaemon()) {
+                std::cerr << "Failed to stop running daemon; not starting a new one.\n";
+                std::exit(1);
+            }
 
             if (!waitForDaemonStop(effectiveSocket, pidFile_, std::chrono::seconds(5),
                                    pidBeforeStop)) {
                 std::cerr << "Failed to stop running daemon; not starting a new one.\n";
-                return;
+                std::exit(1);
             }
         }
 
@@ -1170,7 +1178,7 @@ private:
         }
     }
 
-    void stopDaemon() {
+    bool stopDaemon() {
         pidFile_ = resolveConfiguredPidFilePath();
         // Resolve paths if not explicitly provided (do not persist into socketPath_)
         const std::string configuredSocket = resolveConfiguredSocketPath();
@@ -1237,7 +1245,7 @@ private:
                 spdlog::info("YAMS daemon is not running");
                 cleanupDaemonFiles(effectiveSocket, pidFile_);
                 stopSpinner();
-                return;
+                return true;
             }
         }
 
@@ -1271,8 +1279,10 @@ private:
                 std::chrono::seconds(10));
             if (shutdownResult) {
                 spdlog::info("Sent shutdown request to daemon");
-                stopped = waitForDaemonStop(effectiveSocket, pidFile_, std::chrono::seconds(8),
-                                            initialPid);
+                const auto waitTimeout =
+                    force_ ? std::chrono::seconds(8)
+                           : yams::daemon::shutdown_budget::kDefaultGracefulShutdownWaitTimeout;
+                stopped = waitForDaemonStop(effectiveSocket, pidFile_, waitTimeout, initialPid);
                 if (stopped) {
                     spdlog::info("Daemon stopped successfully after graceful shutdown request");
                 } else {
@@ -1288,8 +1298,10 @@ private:
                 } else {
                     spdlog::debug("Socket shutdown encountered: {}", shutdownMessage);
                 }
-                stopped = waitForDaemonStop(effectiveSocket, pidFile_, std::chrono::seconds(8),
-                                            initialPid);
+                const auto waitTimeout =
+                    force_ ? std::chrono::seconds(8)
+                           : yams::daemon::shutdown_budget::kDefaultGracefulShutdownWaitTimeout;
+                stopped = waitForDaemonStop(effectiveSocket, pidFile_, waitTimeout, initialPid);
                 if (stopped) {
                     spdlog::info("Daemon stopped successfully after shutdown disconnect");
                 }
@@ -1393,6 +1405,7 @@ private:
             cleanupDaemonFiles(effectiveSocket, pidFile_);
             stopSpinner();
             std::cout << "[OK] YAMS daemon stopped successfully\n";
+            return true;
         } else {
             stopSpinner();
             spdlog::error("Failed to stop YAMS daemon");
@@ -1411,7 +1424,7 @@ private:
 #else
             std::cerr << "  📋 Or manually (Windows): taskkill /IM yams-daemon.exe /T /F\n";
 #endif
-            std::exit(1);
+            return false;
         }
     }
 
@@ -3498,7 +3511,10 @@ private:
         if (!yams::daemon::client::pidFileIdentifiesLiveDaemon(pidFile_, pidBeforeStop)) {
             pidBeforeStop = -1;
         }
-        stopDaemon();
+        if (!stopDaemon()) {
+            spdlog::error("Failed to stop daemon for restart");
+            std::exit(1);
+        }
 
         if (!waitForDaemonStop(effectiveSocket, pidFile_, std::chrono::seconds(5), pidBeforeStop)) {
             spdlog::error("Failed to stop daemon for restart");
