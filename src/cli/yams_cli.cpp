@@ -290,6 +290,7 @@ void YamsCLI::registerCommandsForRun(std::string_view subcmd) {
 YamsCLI::RunParsePlan
 YamsCLI::buildRunParsePlan(int argc, char* argv[],
                            const std::vector<std::string>& topLevelCommands) const {
+    const auto argCount = static_cast<std::size_t>(argc);
     auto isFlag = [](const char* s) -> bool { return s && s[0] == '-'; };
     auto hasArg = [&](std::string_view needle) {
         for (int i = 1; i < argc; ++i) {
@@ -355,17 +356,17 @@ YamsCLI::buildRunParsePlan(int argc, char* argv[],
     };
 
     if (argc > 1 && argv[1] && std::string_view(argv[1]) == "prune") {
-        plan.argv.reserve(argc + 1);
+        plan.argv.reserve(argCount + 1);
         plan.argv.push_back(argv[0]);
         plan.argv.push_back(const_cast<char*>(doctorStr.c_str()));
         plan.argv.push_back(const_cast<char*>(pruneStr.c_str()));
         for (int i = 2; i < argc; ++i)
             plan.argv.push_back(argv[i]);
         plan.argv.push_back(nullptr);
-        plan.argc = argc + 1;
+        plan.argc = static_cast<int>(plan.argv.size() - 1);
         plan.perfLabel = "prune_alias_rewrite";
     } else if (argc > 1 && std::string(argv[1]) == "repair-mime") {
-        plan.argv.reserve(argc + 1);
+        plan.argv.reserve(argCount + 1);
         plan.argv.push_back(argv[0]);
         plan.argv.push_back(const_cast<char*>(repairStr.c_str()));
         plan.argv.push_back(const_cast<char*>(mimeFlag.c_str()));
@@ -378,7 +379,7 @@ YamsCLI::buildRunParsePlan(int argc, char* argv[],
                !isFlag(argv[2]) && isRepairAlias(argv[2])) {
         static std::vector<std::string> repairAliasFlagStorage;
         repairAliasFlagStorage.emplace_back(std::string("--") + argv[2]);
-        plan.argv.reserve(argc + 1);
+        plan.argv.reserve(argCount + 1);
         plan.argv.push_back(argv[0]);
         plan.argv.push_back(const_cast<char*>(repairStr.c_str()));
         plan.argv.push_back(const_cast<char*>(repairAliasFlagStorage.back().c_str()));
@@ -388,15 +389,15 @@ YamsCLI::buildRunParsePlan(int argc, char* argv[],
         plan.argc = static_cast<int>(plan.argv.size() - 1);
         plan.perfLabel = "alias_rewrite";
     } else if (injectDaemonStatus) {
-        plan.argv.reserve(argc + 1);
+        plan.argv.reserve(argCount + 1);
         for (int i = 0; i < argc; ++i)
             plan.argv.push_back(argv[i]);
         plan.argv.push_back(const_cast<char*>(statusStr.c_str()));
         plan.argv.push_back(nullptr);
-        plan.argc = argc + 1;
+        plan.argc = static_cast<int>(plan.argv.size() - 1);
         plan.perfLabel = "daemon_status_injected";
     } else if (needsSearchQueryRewrite && searchQueryIndex > 0) {
-        plan.argv.reserve(argc + 2);
+        plan.argv.reserve(argCount + 2);
         for (int i = 0; i < searchQueryIndex; ++i)
             plan.argv.push_back(argv[i]);
         plan.argv.push_back(const_cast<char*>(queryFlag.c_str()));
@@ -406,7 +407,7 @@ YamsCLI::buildRunParsePlan(int argc, char* argv[],
         plan.argc = static_cast<int>(plan.argv.size() - 1);
         plan.perfLabel = "search_query_rewrite";
     } else {
-        plan.argv.reserve(argc + 1);
+        plan.argv.reserve(argCount + 1);
         for (int i = 0; i < argc; ++i)
             plan.argv.push_back(argv[i]);
         plan.argv.push_back(nullptr);
