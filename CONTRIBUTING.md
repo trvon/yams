@@ -16,6 +16,7 @@ Bug reports, docs fixes, tests, small cleanups, design feedback, and larger feat
 We use the GitHub issue templates in `.github/ISSUE_TEMPLATE/` for this repository.
 
 Helpful details include:
+
 - `yams --version`
 - platform details
 - exact commands or steps
@@ -28,6 +29,7 @@ For feature requests, lead with the problem you're trying to solve. A strong pro
 ## Development workflow
 
 The supported local development workflow is:
+
 - **Meson + Conan 2**
 - **Ninja**
 - **C++20**
@@ -44,6 +46,7 @@ meson test -C build/debug
 ```
 
 Additional references:
+
 - build and toolchain flow: `docs/BUILD.md`
 
 If you're making a small docs-only or narrow change, you do not need to run the entire project test matrix. Please run the smallest relevant check you can.
@@ -69,38 +72,33 @@ The pre-commit hook formats staged C/C++ files and can run extra lint checks.
 ## Pull requests
 
 Please aim for changes that are:
+
 - focused
 - well-described
 - tested at the smallest sensible scope
 
 A helpful PR usually explains:
+
 - what changed
 - why it changed
 - how it was tested
 - any follow-up work or tradeoffs
 
-## AI usage policy
+## AI-assisted contributions
 
-AI tools may be used in an **assistive** role, but we do not want pull requests that are fully or predominantly AI-generated.
+AI tools are welcome in YAMS development. Use them to explore the codebase,
+prototype an approach, draft documentation, or help with repetitive work.
 
-If you use AI for any part of a contribution:
-- disclose that AI was used and how it was used
-- manually review the entire change before opening the PR
-- be prepared to explain every part of the submitted change
-- make sure the final technical judgment is your own
+The contributor still owns the result. Before opening a pull request:
 
-Examples of acceptable use:
-- brainstorming approaches
-- drafting small refactors you fully review and revise
-- generating repetitive boilerplate from a design you already understand
-- improving wording or structure in docs that you then verify
+- review the full change
+- run the smallest relevant checks
+- understand the behavior and tradeoffs well enough to discuss them
+- describe material AI assistance in the PR when it helps reviewers understand the work
 
-Examples of unacceptable use:
-- submitting large, mostly AI-authored patches you do not fully understand
-- using AI to answer maintainers or contributors in your place
-- using AI to generate bug reports, feature requests, or PR discussion as if it were your own firsthand reasoning
-
-When in doubt, favor smaller PRs, more disclosure, and more human review.
+Do not submit changes you have not reviewed or cannot explain. Keep bug reports,
+feature requests, and review discussions grounded in your own observation,
+testing, and judgment.
 
 ## Commit messages
 
