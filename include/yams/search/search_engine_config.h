@@ -508,18 +508,6 @@ struct SearchEngineConfig {
     // from qrel-free proxy rewards. Empty = use existing scoring path.
     std::string simeonBanditArm;
 
-    /// When true, scale per-component result caps (textMaxResults,
-    /// vectorMaxResults, etc.) per query based on signal strength.
-    /// Narrow queries (1-2 terms) get reduced vector/graph budget;
-    /// complex queries (4+ terms) get expanded fusion budget.
-    bool enableAdaptiveBudgeting = false;
-
-    /// Scaling factors for adaptive per-query budgets.
-    float narrowQueryVectorReduction = 0.5f;    // multiply vector caps for ≤ threshold
-    float complexQueryFusionExpansion = 1.5f;   // multiply fusion caps for ≥ threshold
-    std::size_t narrowQueryTokenThreshold = 2;  // ≤ this = narrow
-    std::size_t complexQueryTokenThreshold = 4; // ≥ this = complex
-
     /// Reapply the operator-selected topology policy after corpus tuning.
     /// Topology routing is an execution policy, not a corpus-derived relevance
     /// weight, so tuning must not silently change the product default or an

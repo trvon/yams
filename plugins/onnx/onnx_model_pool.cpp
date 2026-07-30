@@ -2265,9 +2265,6 @@ Result<void> OnnxModelPool::initialize() {
         return Result<void>();
     }
 
-    // Mark as startup mode - reduces pool sizes during initial loading
-    TuneAdvisor::setOnnxStartupMode(true);
-
     spdlog::info("Initializing ONNX model pool with max {} models", config_.maxLoadedModels);
 
     const auto& runtimeInfo = yams::onnx_util::OrtRuntimeLoader::instance().ensureLoaded();
@@ -2317,16 +2314,10 @@ Result<void> OnnxModelPool::initialize() {
                         }
                     }
                 }
-                // Clear startup mode - normal pool sizing now applies to new models
-                TuneAdvisor::setOnnxStartupMode(false);
                 spdlog::info("Background model preloading completed");
             } catch (const std::exception& e) {
                 try {
                     spdlog::error("[ONNX] Background preload crashed: {}", e.what());
-                } catch (...) {
-                }
-                try {
-                    TuneAdvisor::setOnnxStartupMode(false);
                 } catch (...) {
                 }
             } catch (...) {
@@ -2334,15 +2325,8 @@ Result<void> OnnxModelPool::initialize() {
                     spdlog::error("[ONNX] Background preload crashed with unknown exception");
                 } catch (...) {
                 }
-                try {
-                    TuneAdvisor::setOnnxStartupMode(false);
-                } catch (...) {
-                }
             }
         });
-    } else {
-        // No preload configured - clear startup mode immediately
-        TuneAdvisor::setOnnxStartupMode(false);
     }
 
     initialized_.store(true, std::memory_order_release);

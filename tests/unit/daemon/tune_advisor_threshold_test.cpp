@@ -504,51 +504,41 @@ TEST_CASE("Worker poll cadence overrides", "[daemon][tune][advisor][catch2]") {
     }
 }
 
-// =============================================================================
-// GPU-Aware Batch Size Tests
-// =============================================================================
+TEST_CASE("Model maintenance thresholds use bounded environment overrides",
+          "[daemon][tune][advisor][catch2]") {
+    ProfileGuard profile(TuneAdvisor::Profile::Balanced);
+    ScopedEnvVar connectionThreshold("YAMS_MODEL_MAINT_CONN_THRESHOLD", "17");
+    ScopedEnvVar searchThreshold("YAMS_MODEL_MAINT_SEARCH_THRESHOLD", "19");
+    ScopedEnvVar queueThreshold("YAMS_MODEL_MAINT_QUEUE_THRESHOLD", "23");
 
-TEST_CASE("gpuAwareBatchSize returns sensible values", "[daemon][tune][advisor][catch2]") {
-    SECTION("CPU fallback (0 VRAM) returns 32") {
-        CHECK(TuneAdvisor::gpuAwareBatchSize(0, 768) == 32);
-        CHECK(TuneAdvisor::gpuAwareBatchSize(0, 384) == 32);
-    }
+    CHECK(TuneAdvisor::modelMaintenanceConnThreshold() == 17);
+    CHECK(TuneAdvisor::modelMaintenanceSearchThreshold() == 19);
+    CHECK(TuneAdvisor::modelMaintenanceQueueThreshold() == 23);
 
-    SECTION("Small VRAM (4 GB) with typical embedding dim") {
-        auto batch = TuneAdvisor::gpuAwareBatchSize(4ULL * 1024 * 1024 * 1024, 768);
-        CHECK(batch >= 8);
-        CHECK(batch <= 256);
-    }
+    connectionThreshold.set("101");
+    searchThreshold.set("101");
+    queueThreshold.set("10001");
+    CHECK(TuneAdvisor::modelMaintenanceConnThreshold() == 1);
+    CHECK(TuneAdvisor::modelMaintenanceSearchThreshold() == 1);
+    CHECK(TuneAdvisor::modelMaintenanceQueueThreshold() == 10);
+}
 
-    SECTION("Medium VRAM (8 GB) with small embedding dim") {
-        auto batch = TuneAdvisor::gpuAwareBatchSize(8ULL * 1024 * 1024 * 1024, 384);
-        CHECK(batch >= 8);
-        CHECK(batch <= 256);
-    }
+TEST_CASE("Default-enabled tuning flags use explicit boolean overrides",
+          "[daemon][tune][advisor][catch2]") {
+    ScopedEnvVar proactiveEviction("YAMS_PROACTIVE_EVICTION", "off");
+    ScopedEnvVar semanticBackfill("YAMS_ENABLE_SEMANTIC_NEIGHBOR_BACKFILL", "no");
+    ScopedEnvVar gradientLimiters("YAMS_ENABLE_GRADIENT_LIMITERS", "false");
 
-    SECTION("Large VRAM (24 GB) with typical embedding dim") {
-        auto batch = TuneAdvisor::gpuAwareBatchSize(24ULL * 1024 * 1024 * 1024, 768);
-        CHECK(batch >= 8);
-        CHECK(batch <= 256);
-    }
+    CHECK_FALSE(TuneAdvisor::enableProactiveEviction());
+    CHECK_FALSE(TuneAdvisor::enableSemanticNeighborBackfill());
+    CHECK_FALSE(TuneAdvisor::enableGradientLimiters());
 
-    SECTION("More VRAM produces equal or larger batch for same dim") {
-        auto batchSmall = TuneAdvisor::gpuAwareBatchSize(4ULL * 1024 * 1024 * 1024, 768);
-        auto batchLarge = TuneAdvisor::gpuAwareBatchSize(24ULL * 1024 * 1024 * 1024, 768);
-        CHECK(batchLarge >= batchSmall);
-    }
-
-    SECTION("Larger embedding dim produces equal or smaller batch for same VRAM") {
-        auto batchSmallDim = TuneAdvisor::gpuAwareBatchSize(8ULL * 1024 * 1024 * 1024, 384);
-        auto batchLargeDim = TuneAdvisor::gpuAwareBatchSize(8ULL * 1024 * 1024 * 1024, 1536);
-        CHECK(batchSmallDim >= batchLargeDim);
-    }
-
-    SECTION("Env override YAMS_GPU_BATCH_SIZE takes precedence") {
-        ScopedEnvVar envGuard("YAMS_GPU_BATCH_SIZE", "42");
-        CHECK(TuneAdvisor::gpuAwareBatchSize(8ULL * 1024 * 1024 * 1024, 768) == 42);
-        CHECK(TuneAdvisor::gpuAwareBatchSize(0, 768) == 42);
-    }
+    proactiveEviction.set("invalid");
+    semanticBackfill.set("invalid");
+    gradientLimiters.set("invalid");
+    CHECK(TuneAdvisor::enableProactiveEviction());
+    CHECK(TuneAdvisor::enableSemanticNeighborBackfill());
+    CHECK(TuneAdvisor::enableGradientLimiters());
 }
 
 // =============================================================================
@@ -841,7 +831,7 @@ TEST_CASE("Auto memory budget is profile-aware", "[daemon][governance][catch2]")
     CHECK(aggBudget == (kSystemMem * 75ull) / 100ull);
 }
 
-TEST_CASE("WorkCoordinator and CLI pool defaults are io-biased", "[daemon][governance][catch2]") {
+TEST_CASE("WorkCoordinator defaults are io-biased", "[daemon][governance][catch2]") {
     ScopedEnvVar workThreadsGuard("YAMS_WORK_COORDINATOR_THREADS", "0");
     HardwareGuard hwGuard(16);
 
@@ -876,23 +866,6 @@ TEST_CASE("WorkCoordinator and CLI pool defaults are io-biased", "[daemon][gover
     CHECK(aggressiveWorkers == aggressiveExpectedWorkers);
     CHECK(efficientWorkers <= balancedWorkers);
     CHECK(balancedWorkers <= aggressiveWorkers);
-
-    const auto efficientCliPool = [&]() {
-        ProfileGuard guard(TuneAdvisor::Profile::Efficient);
-        return TuneAdvisor::cliRequestPoolThreads();
-    }();
-    const auto balancedCliPool = [&]() {
-        ProfileGuard guard(TuneAdvisor::Profile::Balanced);
-        return TuneAdvisor::cliRequestPoolThreads();
-    }();
-    const auto aggressiveCliPool = [&]() {
-        ProfileGuard guard(TuneAdvisor::Profile::Aggressive);
-        return TuneAdvisor::cliRequestPoolThreads();
-    }();
-
-    CHECK(efficientCliPool == std::clamp<uint32_t>(efficientWorkers / 2, 2u, 5u));
-    CHECK(balancedCliPool == std::clamp<uint32_t>(balancedWorkers / 2, 2u, 5u));
-    CHECK(aggressiveCliPool == std::clamp<uint32_t>(aggressiveWorkers / 2, 2u, 5u));
 }
 
 TEST_CASE("Search concurrency limit has a balanced floor", "[daemon][governance][catch2]") {

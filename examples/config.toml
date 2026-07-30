@@ -330,8 +330,6 @@ initial_delay_minutes = 10
 [tuning]
 # Default tuning preset applied by the daemon. Options: "efficient", "balanced", "aggressive".
 profile = "balanced"
-# CLI <-> daemon client-pool worker threads
-cli_pool_threads = 2
 # Max concurrent in-flight list requests admitted to the daemon
 list_inflight_limit = 8
 # How long list requests wait for admission before erroring (ms)
@@ -345,7 +343,6 @@ grep_admission_wait_ms = 20000
 # idle_cpu_pct = 10.0
 # idle_mux_low_bytes = 4194304
 # idle_shrink_hold_ms = 5000
-# aggressive_idle_shrink = false
 # pool_cooldown_ms = 500
 # pool_scale_step = 1
 # pool_ipc_min = 1

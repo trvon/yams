@@ -84,6 +84,42 @@ uint32_t sumAllStages() {
 
 } // namespace
 
+TEST_CASE("ONNX slot budget preserves shared capacity",
+          "[daemon][tune][onnx][reconciliation][catch2]") {
+    SECTION("Normal operation expands the pool for all requested reservations") {
+        const auto budget = computeOnnxSlotBudget(
+            /*desiredMax=*/4, /*glinerReserved=*/2, /*embedReserved=*/3,
+            /*rerankerReserved=*/1, /*pressureCap=*/2, /*underPressure=*/false);
+
+        CHECK(budget.maxSlots == 7);
+        CHECK(budget.glinerReserved == 2);
+        CHECK(budget.embedReserved == 3);
+        CHECK(budget.rerankerReserved == 1);
+    }
+
+    SECTION("Pressure keeps one shared slot and trims reservations in priority order") {
+        const auto budget = computeOnnxSlotBudget(
+            /*desiredMax=*/12, /*glinerReserved=*/2, /*embedReserved=*/4,
+            /*rerankerReserved=*/3, /*pressureCap=*/5, /*underPressure=*/true);
+
+        CHECK(budget.maxSlots == 5);
+        CHECK(budget.glinerReserved == 2);
+        CHECK(budget.embedReserved == 2);
+        CHECK(budget.rerankerReserved == 0);
+    }
+
+    SECTION("Registry bounds hold for extreme inputs") {
+        const auto budget = computeOnnxSlotBudget(
+            /*desiredMax=*/100, /*glinerReserved=*/100, /*embedReserved=*/100,
+            /*rerankerReserved=*/100, /*pressureCap=*/1, /*underPressure=*/true);
+
+        CHECK(budget.maxSlots == 2);
+        CHECK(budget.glinerReserved == 1);
+        CHECK(budget.embedReserved == 0);
+        CHECK(budget.rerankerReserved == 0);
+    }
+}
+
 // =============================================================================
 // Group A: Post-ingest budget reconciliation and distribution correctness
 // =============================================================================

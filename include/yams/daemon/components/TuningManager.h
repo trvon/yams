@@ -30,6 +30,23 @@ RepairHoldHints computeRepairHoldHints(ResourcePressureLevel level, std::uint64_
                                        uint32_t baseDegradeMs = 750,
                                        uint32_t baseReadyMs = 1500) noexcept;
 
+struct OnnxSlotBudget {
+    uint32_t maxSlots{0};
+    uint32_t glinerReserved{0};
+    uint32_t embedReserved{0};
+    uint32_t rerankerReserved{0};
+};
+
+/**
+ * Reconcile requested ONNX lane reservations with registry and pressure limits.
+ *
+ * One slot remains shared. Under pressure, reservations are retained in
+ * GLiNER/embedding/reranker priority order.
+ */
+OnnxSlotBudget computeOnnxSlotBudget(uint32_t desiredMax, uint32_t glinerReserved,
+                                     uint32_t embedReserved, uint32_t rerankerReserved,
+                                     uint32_t pressureCap, bool underPressure) noexcept;
+
 // Centralized tuning controller owned by ServiceManager.
 // Periodically reads metrics and TuneAdvisor policies and coordinates
 // resource allocation across daemon subsystems (IPC CPU/IO pools, writer budgets, etc.).
@@ -124,6 +141,8 @@ private:
     // ONNX concurrency registry configuration tracking
     std::atomic<bool> onnxRegistryConfigured_{false};
     void configureOnnxConcurrencyRegistry();
+    void reconcileOnnxSlotBudget(ResourceGovernor& governor,
+                                 const ResourceSnapshot& snapshot) noexcept;
 
     // Issue 3 fix: hysteresis counters as members instead of static locals
     // so they reset across start/stop cycles and pressure transitions.
