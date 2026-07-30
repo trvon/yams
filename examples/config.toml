@@ -151,12 +151,6 @@ database_path = "vectors.db"
 table_name = "document_embeddings"
 # Embedding dimension (new installs default to simeon-default / 1024; existing DBs keep their stored dim)
 embedding_dim = 1024
-# Index type: "FLAT", "IVF_PQ", "HNSW"
-index_type = "IVF_PQ"
-# Number of partitions for IVF index
-num_partitions = 256
-# Number of sub-quantizers for PQ
-num_sub_quantizers = 96
 # Enable periodic checkpoints
 enable_checkpoints = true
 # Operations between checkpoints
@@ -475,7 +469,7 @@ final_top_k = 10
 fusion_strategy = "LINEAR_COMBINATION"
 # RRF constant (for RECIPROCAL_RANK)
 rrf_k = 60.0
-# Enable post-fusion rerank-style passes (TurboQuant / score replacement)
+# Enable post-fusion rerank-style score replacement
 enable_reranking = true
 # Number of top fused results eligible for rerank-style passes
 rerank_top_k = 20

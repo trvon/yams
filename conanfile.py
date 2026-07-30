@@ -58,7 +58,6 @@ class YamsConan(ConanFile):
         "build_benchmarks": [True, False],
         "enable_profiling": [True, False],
         "enable_onnx": [True, False],
-        "enable_faiss": [False, True],
         "enable_symbol_extraction": [True, False],
         "enable_re2": [True, False],
     }
@@ -137,9 +136,6 @@ class YamsConan(ConanFile):
         if self.options.enable_re2:  # type: ignore
             self.requires("re2/20251105")
 
-        if self.options.enable_faiss:  # type: ignore
-            self.requires("faiss/1.12.0")
-
     def build_requirements(self):
         self.tool_requires("pkgconf/2.1.0")
         if _tool_on_path_satisfies("meson", (1, 2, 2)):
@@ -161,56 +157,7 @@ class YamsConan(ConanFile):
         if self.options.enable_profiling:  # type: ignore
             self.requires("tracy/0.13.1")
 
-    def _has_openmp(self):
-        """Check whether the current compiler can compile OpenMP code.
-
-        GCC and MSVC have built-in OpenMP.  Linux clang needs libomp-dev;
-        the faiss recipe itself rejects apple-clang entirely so that case
-        is handled separately in configure().
-        """
-        import os
-        compiler = str(self.settings.compiler)
-        if compiler in ("gcc", "msvc"):
-            return True
-        if compiler == "clang":
-            # Probe common libomp-dev install locations on Linux
-            paths = (
-                "/usr/lib/llvm-18/lib/libomp.so",
-                "/usr/lib/llvm-18/lib/libomp.a",
-                "/usr/lib/llvm-19/lib/libomp.so",
-                "/usr/lib/x86_64-linux-gnu/libomp.so",
-                "/usr/lib/aarch64-linux-gnu/libomp.so",
-            )
-            for p in paths:
-                if os.path.isfile(p):
-                    return True
-            return False
-        return False
-
     def configure(self):
-        # Allow explicit disable via env (e.g. Docker ARM64 openblas compat).
-        import os
-        if os.environ.get("YAMS_DISABLE_FAISS", "") != "1":
-            # Enable faiss unless OpenMP is unavailable for the current compiler.
-            # Apple Clang is always rejected by the faiss recipe regardless of
-            # libomp availability; all other compilers need a working OpenMP.
-            enable_faiss = True
-            compiler = str(self.settings.compiler)
-            if compiler == "apple-clang":  # type: ignore
-                enable_faiss = False
-                self.output.info(
-                    "faiss recipe rejects Apple Clang; disabling faiss on macOS"
-                )
-            elif not self._has_openmp():
-                enable_faiss = False
-                self.output.info(
-                    "OpenMP not found for compiler=" + compiler +
-                    "; disabling faiss. Install libomp-dev (Linux) or brew libomp (macOS)."
-                )
-            self.options.enable_faiss = enable_faiss  # type: ignore
-        else:
-            self.options.enable_faiss = False  # type: ignore
-
         # Force new C++11 ABI on Linux (Ubuntu 24.04+ compatibility)
         if self.settings.os == "Linux":  # type: ignore
             if self.settings.compiler in ["gcc", "clang"]:  # type: ignore

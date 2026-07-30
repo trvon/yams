@@ -9,9 +9,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <csignal>
 #include <cstdlib>
 #include <filesystem>
-#include <csignal>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -189,99 +189,6 @@ TEST_CASE("YAMS_ASSERT fires when batch PressureLimitedPoller has null batchProc
         runPollerConfigUntilAssertion(ch, cfg);
     });
     CHECK(fired);
-#endif
-}
-
-// ==========================================================================
-// TurboQuant — YAMS_PRECONDITION / YAMS_ASSERT violations
-// ==========================================================================
-
-#include <yams/vector/turboquant.h>
-
-namespace {
-
-void trigger_turboquant_precondition_zero_dimension() {
-    yams::vector::TurboQuantConfig config;
-    config.dimension = 0;
-    [[maybe_unused]] yams::vector::TurboQuantMSE tq(config);
-}
-
-void trigger_turboquant_precondition_bits_out_of_range() {
-    yams::vector::TurboQuantConfig config;
-    config.bits_per_channel = 9;
-    [[maybe_unused]] yams::vector::TurboQuantMSE tq(config);
-}
-
-void trigger_turboquant_precondition_codec_encode_wrong_dimension() {
-    yams::vector::TurboQuantConfig config;
-    config.dimension = 128;
-    config.bits_per_channel = 4;
-    yams::vector::TurboQuantMSE tq(config);
-    std::vector<float> wrongDim(64);
-    tq.encode(wrongDim);
-}
-
-void trigger_turboquant_assert_empty_centroids() {
-    yams::vector::TurboQuantConfig config;
-    config.dimension = 128;
-    config.bits_per_channel = 4;
-    yams::vector::TurboQuantMSE tq(config);
-    // scoreFromPacked asserts !centroids_.empty() before scoring.
-    // We provide a valid query but no training → assertion fires.
-    std::vector<float> query(128, 0.0f);
-    query[0] = 1.0f;
-    std::vector<uint8_t> emptyCodes;
-    tq.scoreFromPacked(query, emptyCodes);
-}
-
-void trigger_turboquant_precondition_centroid_idx_out_of_bounds() {
-    yams::vector::TurboQuantConfig config;
-    config.dimension = 128;
-    config.bits_per_channel = 4; // 16 centroids; index 255 is invalid.
-    yams::vector::TurboQuantMSE tq(config);
-    std::vector<uint8_t> badIndices(128, 255);
-    tq.decode(badIndices);
-}
-
-} // namespace
-
-TEST_CASE("YAMS_PRECONDITION fires on zero dimension", "[assert][turboquant]") {
-#ifdef _WIN32
-    SKIP("fork() not available on Windows");
-#else
-    CHECK(assertionFires([]() { trigger_turboquant_precondition_zero_dimension(); }));
-#endif
-}
-
-TEST_CASE("YAMS_PRECONDITION fires on bits-per-channel out of range", "[assert][turboquant]") {
-#ifdef _WIN32
-    SKIP("fork() not available on Windows");
-#else
-    CHECK(assertionFires([]() { trigger_turboquant_precondition_bits_out_of_range(); }));
-#endif
-}
-
-TEST_CASE("YAMS_PRECONDITION fires on centroid index out of bounds", "[assert][turboquant]") {
-#ifdef _WIN32
-    SKIP("fork() not available on Windows");
-#else
-    CHECK(assertionFires([]() { trigger_turboquant_precondition_centroid_idx_out_of_bounds(); }));
-#endif
-}
-
-TEST_CASE("YAMS_ASSERT fires on empty centroids", "[assert][turboquant]") {
-#ifdef _WIN32
-    SKIP("fork() not available on Windows");
-#else
-    CHECK(assertionFires([]() { trigger_turboquant_assert_empty_centroids(); }));
-#endif
-}
-
-TEST_CASE("YAMS_PRECONDITION fires on encode with wrong vector dimension", "[assert][turboquant]") {
-#ifdef _WIN32
-    SKIP("fork() not available on Windows");
-#else
-    CHECK(assertionFires([]() { trigger_turboquant_precondition_codec_encode_wrong_dimension(); }));
 #endif
 }
 

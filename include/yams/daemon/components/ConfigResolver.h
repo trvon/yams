@@ -203,10 +203,6 @@ public:
         std::optional<bool> strategyRouterEnabled;
     };
 
-    struct VectorBackendPolicy {
-        std::optional<std::string> backend; // "sqlite_vec" (default) | "faiss"
-    };
-
     struct RerankerBackendPolicy {
         std::optional<std::string> backend;
     };
@@ -558,8 +554,6 @@ public:
      * - embeddings.simeon.pq_bytes       = int (0 = off; reserved for
      *                                          post-encode PQ in storage layer)
      */
-    static VectorBackendPolicy resolveVectorBackendPolicy();
-
     /**
      * @brief Resolve Simeon encoder config from env + config file.
      *

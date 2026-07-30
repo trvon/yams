@@ -301,8 +301,6 @@ public:
         hasEmbeddings_ = false;
     }
 
-    bool hasEmbeddings() const { return hasEmbeddings_; }
-
     daemon::SearchResponse runSearch(const std::string& query, const std::string& searchType,
                                      int limit = 10) {
         auto client = createClient(harness_->socketPath());

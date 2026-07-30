@@ -1519,15 +1519,11 @@ if catch2_dep.found()
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
   if get_option('enable-vector-tests')
     vector_test_cpp_args = test_cpp_noerror_args + ['-DYAMS_TESTING=1']
-    if faiss_dep.found()
-      vector_test_cpp_args += ['-DYAMS_TEST_HAS_FAISS=1']
-    endif
 
     catch2_vector_submodule_exe = executable('catch2_vector_submodule',
       files(
         'unit/vector/document_chunker_catch2_test.cpp',
         'unit/vector/dim_resolver_catch2_test.cpp',
-        'unit/vector/model_infrastructure_catch2_test.cpp',
         'unit/vector/embedding_service_synthetic_catch2_test.cpp',
         'unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp',
         'unit/vector/sqlite_vec_backend_persistence_catch2_test.cpp',
@@ -1536,11 +1532,6 @@ if catch2_dep.found()
         'unit/vector/vector_schema_migration_vec0_catch2_test.cpp',
         'unit/vector/vector_dimension_validation_catch2_test.cpp',
         'unit/vector/vector_smoke_catch2_test.cpp',
-        'unit/vector/turboquant_mse_catch2_test.cpp',
-        'unit/vector/turboquant_math_test.cpp',
-        'unit/vector/turboquant_asymmetric_score_catch2_test.cpp',
-        'unit/vector/turboquant_integration_catch2_test.cpp',
-        'unit/vector/turboquant_storage_catch2_test.cpp',
         'unit/vector/simeon_backend_catch2_test.cpp',
       ),
       include_directories: incs,

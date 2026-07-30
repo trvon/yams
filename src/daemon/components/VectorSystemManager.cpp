@@ -153,12 +153,6 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
     vector::VectorDatabaseConfig cfg;
     cfg.database_path = (dataDir / "vectors.db").string();
 
-    // Resolve vector backend selection via ConfigResolver (TOML + env).
-    auto backendPolicy = ConfigResolver::resolveVectorBackendPolicy();
-    if (backendPolicy.backend && *backendPolicy.backend == "faiss") {
-        cfg.backend_type = vector::VectorBackendType::Faiss;
-        spdlog::info("[VectorInit] backend=faiss via ConfigResolver");
-    }
     bool exists = fs::exists(cfg.database_path);
     cfg.create_if_missing = true;
 
@@ -337,31 +331,6 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
     if (cfg.suppress_search_index_builds) {
         spdlog::warn("[VectorInit] search index build/load suppressed by memory instrumentation "
                      "profile");
-    }
-
-    if (auto env = getenvCopy("YAMS_VECTOR_ENABLE_TURBOQUANT_STORAGE"); env) {
-        cfg.enable_turboquant_storage = isTruthyValue(*env);
-        spdlog::info("[VectorInit] turboquant storage overridden to {} via env",
-                     cfg.enable_turboquant_storage);
-    }
-    if (auto env = getenvCopy("YAMS_VECTOR_QUANTIZED_PRIMARY_STORAGE"); env) {
-        cfg.quantized_primary_storage = isTruthyValue(*env);
-        spdlog::info("[VectorInit] quantized primary storage overridden to {} via env",
-                     cfg.quantized_primary_storage);
-    }
-    if (auto env = getenvCopy("YAMS_VECTOR_TURBOQUANT_BITS"); env) {
-        if (auto bits = parseInt(*env)) {
-            cfg.turboquant_bits = static_cast<uint8_t>(std::clamp(*bits, 1, 8));
-            spdlog::info("[VectorInit] turboquant bits overridden to {} via env",
-                         static_cast<int>(cfg.turboquant_bits));
-        }
-    }
-    if (auto env = getenvCopy("YAMS_VECTOR_TURBOQUANT_SEED"); env) {
-        if (auto seed = parseUnsigned<uint64_t>(*env)) {
-            cfg.turboquant_seed = seed.value();
-            spdlog::info("[VectorInit] turboquant seed overridden to {} via env",
-                         cfg.turboquant_seed);
-        }
     }
 
     auto cfgPath = ConfigResolver::resolveDefaultConfigPath();

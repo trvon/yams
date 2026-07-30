@@ -55,9 +55,6 @@ option('enable-asan', type: 'boolean', value: false, description: 'Enable Addres
 
 # Undefined behavior sanitizer (for detecting UB in debug builds)
 
-# FAISS backend for online vector index updates (optional)
-option('enable-faiss', type: 'boolean', value: true,
-       description: 'Build with FAISS HNSW vector backend (for online/incremental index updates)')
 option('enable-ubsan', type: 'boolean', value: false, description: 'Enable UndefinedBehaviorSanitizer (debug builds only; significant performance impact)')
 
 option('enable-re2', type: 'feature', value: 'auto', description: 'Use Google RE2 regex engine for grep (10-50x faster than std::regex; auto-detect)')

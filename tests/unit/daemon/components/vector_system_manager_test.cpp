@@ -13,32 +13,19 @@
 #include <yams/daemon/components/VectorSystemManager.h>
 #include <yams/vector/vector_database.h>
 
-#include <sqlite3.h>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
 
 #ifndef _WIN32
 #include <fcntl.h>
-#include <sys/wait.h>
 #include <unistd.h>
+#include <sys/wait.h>
 #endif
 
 using namespace yams::daemon;
 
 namespace {
-
-bool tableExists(sqlite3* db, const std::string& tableName) {
-    sqlite3_stmt* stmt = nullptr;
-    REQUIRE(sqlite3_prepare_v2(db,
-                               "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
-                               -1, &stmt, nullptr) == SQLITE_OK);
-    sqlite3_bind_text(stmt, 1, tableName.c_str(), -1, SQLITE_TRANSIENT);
-    REQUIRE(sqlite3_step(stmt) == SQLITE_ROW);
-    bool exists = sqlite3_column_int64(stmt, 0) > 0;
-    sqlite3_finalize(stmt);
-    return exists;
-}
 
 struct VectorSystemManagerFixture {
     std::filesystem::path tempDir;
@@ -335,11 +322,10 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
                                                      std::optional<std::string>("0"));
         yams::test::ScopedEnvVar disableInMemory("YAMS_VDB_IN_MEMORY", std::nullopt);
         yams::test::ScopedEnvVar searchEngineEnv("YAMS_VECTOR_SEARCH_ENGINE", std::nullopt);
-        const auto configPath = yams::test::write_file(
-            tempDir / "config.toml",
-            "[vector_database]\n"
-            "search_engine = \"simeon_pq_adc\"\n"
-            "simeon_pq_rerank_factor = 7\n");
+        const auto configPath =
+            yams::test::write_file(tempDir / "config.toml", "[vector_database]\n"
+                                                            "search_engine = \"simeon_pq_adc\"\n"
+                                                            "simeon_pq_rerank_factor = 7\n");
         yams::test::ScopedEnvVar configPathEnv("YAMS_CONFIG_PATH", configPath.string());
 
         auto configuredDeps = makeDeps();

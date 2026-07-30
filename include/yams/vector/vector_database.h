@@ -155,9 +155,6 @@ public:
     static bool isValidEmbedding(const std::vector<float>& embedding, size_t expected_dim);
     static double computeCosineSimilarity(const std::vector<float>& a, const std::vector<float>& b);
 
-    Result<size_t>
-    fitAndPersistPerCoordScales(const std::vector<std::vector<float>>& training_vectors);
-
 private:
     class Impl;
     std::unique_ptr<Impl> pImpl;

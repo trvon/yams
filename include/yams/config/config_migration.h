@@ -245,9 +245,6 @@ struct ConfigLatest {
         std::string table_name = "document_embeddings";
         size_t embedding_dim = 384;
         std::string search_engine = "hnsw_cosine";
-        std::string index_type = "IVF_PQ";
-        size_t num_partitions = 256;
-        size_t num_sub_quantizers = 96;
         bool enable_checkpoints = true;
         size_t checkpoint_frequency = 1000;
         size_t max_batch_size = 1000;

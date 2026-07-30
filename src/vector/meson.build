@@ -11,46 +11,6 @@ tl_expected_dep = dependency('tl-expected', required: true)
 fs = import('fs')
 cpp_comp = meson.get_compiler('cpp')
 
-# FAISS HNSW backend (optional, for online/incremental vector index updates)
-faiss_dep = disabler()
-if get_option('enable-faiss')
-  faiss_dep = dependency('faiss', required: false, method: 'cmake')
-  if faiss_dep.found()
-    # system faiss may be compiled with OpenMP; ensure we link it
-    faiss_dep = declare_dependency(
-      dependencies: [faiss_dep, dependency('openmp', required: true)],
-    )
-  else
-    cpp = meson.get_compiler('cpp')
-    faiss_lib = cpp.find_library('faiss', required: false)
-    if faiss_lib.found()
-      faiss_dep = declare_dependency(
-        dependencies: [faiss_lib, cpp_comp.find_library('openblas', required: true),
-                       cpp_comp.find_library('omp', required: true)],
-      )
-    endif
-  endif
-  if faiss_dep.found()
-    faiss_probe_args = []
-    if host_machine.system() == 'darwin'
-      faiss_probe_args += ['-I/opt/homebrew/include']
-    endif
-    faiss_headers_usable = cpp_comp.compiles('''
-#include <faiss/IndexHNSW.h>
-int main() { return 0; }
-''',
-      dependencies: [faiss_dep],
-      args: faiss_probe_args,
-      name: 'FAISS HNSW headers usable')
-    if not faiss_headers_usable
-      warning('FAISS found but HNSW headers are unusable; building without optional FAISS backend. Reconfigure with -Denable-faiss=false to silence this warning.')
-      faiss_dep = disabler()
-    endif
-  endif
-endif
-faiss_config = configuration_data()
-faiss_config.set10('YAMS_HAS_FAISS', faiss_dep.found())
-
 # Optional include dirs for third-party headers
 # Note: HNSW implementation now uses sqlite-vec-cpp, hnswlib no longer needed
 
@@ -147,28 +107,19 @@ endif
 
 srcs = [
   'vector_database.cpp',
-  'vector_index_manager.cpp',
   'embedding_generator.cpp',
   'embedding_service.cpp',
   'batch_metrics.cpp',
   'document_chunker.cpp',
   'vector_utils.cpp',
   'static_cosine_ann_index.cpp',
-  'model_registry.cpp',
-  'model_cache.cpp',
-  'model_loader.cpp',
   'vector_schema_migration.cpp',
   'mock_embedding_provider.cpp',
   'embedding_provider_registry.cpp',
   'dim_resolver.cpp',
   'tokenizer.cpp',
-  'turboquant.cpp',
 ]
 srcs += yams_embedding_simeon_srcs
-
-if faiss_dep.found()
-  srcs += ['faiss_backend.cpp']
-endif
 
 # Isolate SIMD-heavy sqlite-vec-cpp sources into their own static library so
 # -mavx / -mavx2 / -mfma / -march=armv8.2-a+dotprod do not leak into the rest
@@ -303,29 +254,9 @@ yams_daemon_client = dependency('yams_daemon_client', required: true)
 
 deps_vec = [spdlog_dep, sqlite_dep, json_dep, fmt_dep, boost_dep, yams_core, yams_metadata, tl_expected_dep, yams_daemon_client]
 
-if faiss_dep.found()
-  deps_vec += [faiss_dep]
-  vector_cppargs += ['-DYAMS_HAS_FAISS=1']
-endif
-
 vector_platform_deps = []
 if host_machine.system() == 'windows'
   vector_platform_deps += [cpp_comp.find_library('dxgi', required: true)]
-endif
-
-# FAISS may need supplemental include dirs on macOS Homebrew (OpenMP transitively).
-# Probe both Homebrew prefixes (Apple Silicon + Intel) guarded by fs.exists()
-# so the build doesn't break on systems without Homebrew.
-faiss_extra_inc = []
-if faiss_dep.found()
-  foreach brew_prefix : ['/opt/homebrew', '/usr/local']
-    if fs.exists(brew_prefix / 'include')
-      faiss_extra_inc += [include_directories(brew_prefix / 'include', is_system: true)]
-    endif
-    if fs.exists(brew_prefix / 'opt' / 'libomp' / 'include')
-      faiss_extra_inc += [include_directories(brew_prefix / 'opt' / 'libomp' / 'include', is_system: true)]
-    endif
-  endforeach
 endif
 
 sqlite_vec_backend_lib = static_library('yams_sqlite_vec_backend',
@@ -338,7 +269,7 @@ sqlite_vec_backend_lib = static_library('yams_sqlite_vec_backend',
 
 yams_vector = static_library('yams_vector',
   srcs,
-  include_directories: [include_directories('../../include'), include_directories('.'), sqlite_vec_cpp_inc, simeon_inc] + faiss_extra_inc,
+  include_directories: [include_directories('../../include'), include_directories('.'), sqlite_vec_cpp_inc, simeon_inc],
   dependencies: deps_vec + vector_platform_deps,
   link_with: [simeon_vector_lib, simeon_common_lib, sqlite_vec_backend_lib] + simeon_extra_libs + sqlite_vec_cpp_lib,
   cpp_args: vector_cppargs + simeon_simd_defines,
