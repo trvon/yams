@@ -1527,7 +1527,7 @@ std::filesystem::path YamsCLI::findMagicNumbersFile() {
     try {
 // Get the path to the current executable
 #ifdef __linux__
-        char result[PATH_MAX];
+        char result[PATH_MAX]{};
         ssize_t count = readlink("/proc/self/exe", result, PATH_MAX);
         if (count != -1) {
             fs::path exePath(std::string(result, count));
@@ -1536,7 +1536,7 @@ std::filesystem::path YamsCLI::findMagicNumbersFile() {
                                   "magic_numbers.json");
         }
 #elif defined(__APPLE__)
-        char path[1024];
+        char path[1024]{};
         uint32_t size = sizeof(path);
         if (_NSGetExecutablePath(path, &size) == 0) {
             fs::path exePath(path);

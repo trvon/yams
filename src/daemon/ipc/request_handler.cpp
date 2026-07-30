@@ -1853,11 +1853,11 @@ RequestHandler::writer_drain(boost::asio::local::stream_protocol::socket& socket
     }
 
     while (true) {
-        uint64_t rid;
+        uint64_t rid = 0;
         std::vector<FrameItem> frames_to_write;
         frames_to_write.reserve(
             std::min<std::size_t>(config_.per_request_queue_cap, std::size_t{32}));
-        size_t budget;
+        size_t budget = 0;
 
         // Extract work under lock
         {

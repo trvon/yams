@@ -542,7 +542,7 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
         }
 
         // Deferred initial scan
-        bool queueEmpty;
+        bool queueEmpty = false;
         {
             std::lock_guard<std::mutex> lk(queueMutex_);
             queueEmpty = pendingDocuments_.empty();
@@ -2461,7 +2461,7 @@ RepairOperationResult RepairService::cleanOrphanedChunks(bool dryRun, bool verbo
 
     // Get referenced hashes
     std::set<std::string> referencedHashes;
-    sqlite3_stmt* stmt;
+    sqlite3_stmt* stmt = nullptr;
     const char* sql = "SELECT block_hash FROM block_references WHERE ref_count > 0";
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
         while (sqlite3_step(stmt) == SQLITE_ROW) {

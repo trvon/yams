@@ -551,7 +551,7 @@ private:
             // This is a simple string replacement approach
             // In production, we'd use a proper TOML parser
 
-            size_t pos;
+            std::size_t pos = std::string::npos;
 
             // Update data_dir
             pos = content.find("data_dir = ");

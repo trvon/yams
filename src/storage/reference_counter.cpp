@@ -175,7 +175,7 @@ static std::filesystem::path findReferenceSchemaSql() {
     // 2. Check relative to executable location (for installed binaries)
     try {
 #ifdef __linux__
-        char result[PATH_MAX];
+        char result[PATH_MAX]{};
         ssize_t count = readlink("/proc/self/exe", result, PATH_MAX);
         if (count != -1) {
             fs::path exePath(std::string(result, count));
@@ -184,7 +184,7 @@ static std::filesystem::path findReferenceSchemaSql() {
                                   "reference_schema.sql");
         }
 #elif defined(__APPLE__)
-        char path[1024];
+        char path[1024]{};
         uint32_t size = sizeof(path);
         if (_NSGetExecutablePath(path, &size) == 0) {
             fs::path exePath(path);

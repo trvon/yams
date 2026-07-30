@@ -2465,7 +2465,7 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
             // Try to auto-detect relative to this process path
             // On Linux, read /proc/self/exe
             std::filesystem::path selfExe;
-            char buf[4096];
+            char buf[4096]{};
             ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
             if (n > 0) {
                 buf[n] = '\0';

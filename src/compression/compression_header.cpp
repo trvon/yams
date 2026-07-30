@@ -234,7 +234,7 @@ bool CompressedBlock::isCompressedBlock(std::span<const std::byte> data) {
     }
 
     // Check magic number at the beginning
-    uint32_t magic;
+    uint32_t magic{};
     std::memcpy(&magic, data.data(), sizeof(magic));
 
     return magic == CompressionHeader::MAGIC;

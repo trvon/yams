@@ -101,7 +101,7 @@ bool testing_isTransientIntegrityCheckMessage(std::string_view message) {
 
 // Statement implementation
 Statement::Statement(sqlite3* db, const std::string& sql) {
-    const char* tail;
+    const char* tail = nullptr;
     int rc = sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt_, &tail);
     if (rc != SQLITE_OK) {
         throw std::runtime_error("Failed to prepare statement: " + std::string(sqlite3_errmsg(db)));

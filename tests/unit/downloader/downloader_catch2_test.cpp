@@ -908,7 +908,7 @@ TEST_CASE("TestHttpAdapter: Behavior verification", "[downloader][adapter]") {
         TestHttpAdapter adapter;
         adapter.contentLength = 1000;
 
-        bool resumeSupported;
+        bool resumeSupported = false;
         std::optional<std::uint64_t> contentLength;
         std::optional<std::string> etag, lastModified, contentType, filename;
 
@@ -1142,7 +1142,7 @@ TEST_CASE("FakeDiskWriter: Operations", "[downloader][disk]") {
 
     SECTION("Handles initial data") {
         writer.setInitialData(to_bytes("PREFIX"));
-        std::uint64_t currentSize;
+        std::uint64_t currentSize = 0;
         auto result =
             writer.createOrOpenStagingFile(storage, "session-789", ".part", 100, currentSize);
         REQUIRE(result.ok());
