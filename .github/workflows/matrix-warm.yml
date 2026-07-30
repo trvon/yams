@@ -77,7 +77,6 @@ jobs:
     runs-on: ${{ matrix.runs_on }}
     timeout-minutes: ${{ matrix.timeout || 30 }}
     env:
-      YAMS_DISABLE_FAISS: 1
       YAMS_CONAN_COMPILER_VERSION: ${{ matrix.conan_compiler_version || '' }}
       YAMS_MSBUILD_VS_VERSION: ${{ matrix.msbuild_vs_version || '' }}
     steps:

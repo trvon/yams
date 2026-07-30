@@ -101,7 +101,6 @@ RUN --mount=type=cache,target=/root/.conan2 \
   export YAMS_COMPILER=gcc; \
   export YAMS_CPPSTD=${YAMS_CPPSTD}; \
   export YAMS_EXTRA_MESON_FLAGS="-Drequire-sqlite-vec=false"; \
-  export YAMS_DISABLE_FAISS=1; \
   sed -i 's/\r$//' setup.sh && chmod +x setup.sh && \
   for attempt in 1 2 3; do \
   echo "=== Build attempt $attempt ==="; \
