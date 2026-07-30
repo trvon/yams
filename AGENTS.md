@@ -120,7 +120,7 @@ Keep physical-device claims separate and reproducible.
 The xplan harness is optional, gitignored local tooling and is not present in a
 clean clone. When it is available, daemon KPI and **search-engine**
 quality/latency ablations use it; do not invent parallel multi-arm shell
-matrices. Organized default-system numbers: `docs/benchmarks/README.md`.
+matrices. Organized default-system numbers: `docs/benchmarks/index.md`.
 Per-run detail (gitignored):
 `build/benchmarks/<plan>/<stamp>/` (`REPORT.md`, `ablation.md`, `metrics.csv`).
 
@@ -137,7 +137,7 @@ python3 tests/benchmarks/xplan/runner.py compare <dirA> <dirB>
 
 | Surface | Path |
 |---------|------|
-| Default-system numbers | `docs/benchmarks/README.md` |
+| Default-system numbers | `docs/benchmarks/index.md` |
 | Harness (how it works) | `tests/benchmarks/xplan/README.md` |
 | Plans / workers | `tests/benchmarks/xplan/plans/`, `…/workers/` |
 | Artifacts | `build/benchmarks/**` (gitignored) |
