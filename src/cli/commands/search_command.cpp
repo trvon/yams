@@ -7,14 +7,11 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <iterator>
 #include <optional>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-#include <yams/app/services/factory.hpp>
-#include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
 #include <yams/cli/cli_perf_trace.h>
 #include <yams/cli/command.h>
@@ -28,7 +25,6 @@
 #include <yams/metadata/kg_relation_summary.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/profiling.h>
-#include <yams/search/search_engine_builder.h>
 // Daemon client API for daemon-first search
 #include <yams/cli/daemon_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -113,7 +109,6 @@ private:
     std::string queryFile_;
     std::vector<std::string> extraArgs_;
     std::string pathFilter_;
-    std::optional<std::string> resolvedLocalFilePath_;
     size_t limit_ = 20;
     std::string searchType_ = "hybrid";
     bool fuzzySearch_ = false;
@@ -218,31 +213,6 @@ private:
             return item;
         }
 
-        // Convert from local SearchItem
-        static UnifiedItem fromLocal(const yams::app::services::SearchItem& r) {
-            UnifiedItem item;
-            item.id = std::to_string(r.id);
-            item.path = r.path;
-            item.title = r.title;
-            item.snippet = r.snippet;
-            item.hash = r.hash;
-            item.mimeType = r.mimeType;
-            item.fileType = r.fileType;
-            item.score = r.score;
-            item.vectorScore = r.vectorScore;
-            item.keywordScore = r.keywordScore;
-            item.kgEntityScore = r.kgEntityScore;
-            item.structuralScore = r.structuralScore;
-            if (auto it = r.metadata.find("relation_count"); it != r.metadata.end())
-                item.relationCount = parseRelationCount(it->second);
-            if (auto it = r.metadata.find("relation_summary"); it != r.metadata.end()) {
-                item.relationSummary = it->second;
-            } else if (auto it = r.metadata.find("relation_types"); it != r.metadata.end()) {
-                item.relationSummary = relationTypesToHuman(it->second);
-            }
-            return item;
-        }
-
         std::string getDisplayPath() const {
             if (!path.empty())
                 return path;
@@ -281,19 +251,6 @@ private:
         return items;
     }
 
-    std::vector<UnifiedItem>
-    makeLocalUnifiedItems(const yams::app::services::SearchResponse& resp,
-                          const std::vector<std::string>& includeGlobs = {}) const {
-        std::vector<UnifiedItem> items;
-        items.reserve(resp.results.size());
-        for (const auto& r : resp.results) {
-            if (!includeGlobs.empty() && !matchAnyGlob(r.path, includeGlobs))
-                continue;
-            items.push_back(UnifiedItem::fromLocal(r));
-        }
-        return items;
-    }
-
     RenderContext makeDaemonRenderContext(const yams::daemon::SearchResponse& resp) const {
         RenderContext ctx;
         ctx.query = query_;
@@ -301,15 +258,6 @@ private:
         ctx.elapsedMs = resp.elapsed.count();
         ctx.method = "daemon";
         ctx.traceId = resp.traceId;
-        return ctx;
-    }
-
-    RenderContext makeLocalRenderContext(const yams::app::services::SearchResponse& resp) const {
-        RenderContext ctx;
-        ctx.query = query_;
-        ctx.totalCount = resp.total;
-        ctx.elapsedMs = resp.executionTimeMs;
-        ctx.method = resp.type;
         return ctx;
     }
 
@@ -943,54 +891,6 @@ private:
         return dreq;
     }
 
-    yams::app::services::SearchRequest makeAppSearchRequest() const {
-        yams::app::services::SearchRequest sreq;
-        sreq.query = query_;
-        sreq.limit = limit_;
-        sreq.fuzzy = fuzzySearch_;
-        sreq.similarity = minSimilarity_;
-        sreq.hash = hashQuery_;
-        sreq.type = searchType_;
-        sreq.verbose = verbose_;
-        sreq.literalText = literalText_;
-        sreq.showHash = showHash_;
-        sreq.pathsOnly = pathsOnly_;
-        sreq.showLineNumbers = showLineNumbers_;
-        sreq.beforeContext = static_cast<int>(beforeContext_);
-        sreq.afterContext = static_cast<int>(afterContext_);
-        sreq.context = static_cast<int>(context_);
-        if (!pathFilter_.empty() && pathFilter_.find('*') == std::string::npos &&
-            pathFilter_.find('?') == std::string::npos) {
-            sreq.pathPattern = "*" + pathFilter_ + "*";
-        } else {
-            sreq.pathPattern = pathFilter_;
-        }
-        sreq.extension = extension_;
-        sreq.mimeType = mimeType_;
-        sreq.fileType = fileType_;
-        sreq.textOnly = textOnly_;
-        sreq.binaryOnly = binaryOnly_;
-        sreq.createdAfter = createdAfter_;
-        sreq.createdBefore = createdBefore_;
-        sreq.modifiedAfter = modifiedAfter_;
-        sreq.modifiedBefore = modifiedBefore_;
-        sreq.indexedAfter = indexedAfter_;
-        sreq.indexedBefore = indexedBefore_;
-        sreq.tags = parsedFilterTags();
-        if (!sreq.tags.empty()) {
-            sreq.matchAllTags = matchAllTags_;
-        }
-        if (!collection_.empty()) {
-            sreq.metadataFilters.emplace_back("collection", collection_);
-        }
-        sreq.useSession = shouldUseSessionScope();
-        sreq.globalSearch = !shouldUseSessionScope();
-        if (shouldUseSessionScope()) {
-            sreq.sessionName = *sessionOverride_;
-        }
-        return sreq;
-    }
-
     static bool matchAnyGlob(const std::string& path, const std::vector<std::string>& globs) {
         if (globs.empty())
             return true;
@@ -1000,112 +900,6 @@ private:
                 return true;
         }
         return false;
-    }
-
-    Result<void> printDiffForSearchResult(const yams::app::services::SearchResponse& resp) {
-        if (!resolvedLocalFilePath_.has_value() || pathsOnly_ || cli_->getJsonOutput())
-            return Result<void>();
-
-        namespace fs = std::filesystem;
-        fs::path abs{*resolvedLocalFilePath_};
-        std::error_code ec;
-        if (!fs::exists(abs, ec) || !fs::is_regular_file(abs, ec))
-            return Result<void>();
-
-        const yams::app::services::SearchItem* matched = nullptr;
-        for (const auto& item : resp.results) {
-            if (item.path == abs.string()) {
-                matched = &item;
-                break;
-            }
-        }
-        std::string resolvedHash = matched ? matched->hash : std::string{};
-        if (resolvedHash.empty()) {
-            auto appContext = cli_->getAppContext();
-            if (appContext) {
-                auto documentService = yams::app::services::makeDocumentService(*appContext);
-                if (documentService) {
-                    auto hres = documentService->resolveNameToHash(abs.string());
-                    if (hres)
-                        resolvedHash = hres.value();
-                }
-            }
-        }
-        if (resolvedHash.empty())
-            return Result<void>();
-
-        yams::app::services::RetrievalService rsvc;
-        yams::app::services::RetrievalOptions ropts;
-        yams::daemon::ClientConfig daemonCfg;
-        if (cli_->hasExplicitDataDir()) {
-            daemonCfg.dataDir = cli_->getDataPath();
-        }
-        auto daemonPlanRes = yams::cli::prepare_cli_daemon_client_plan(
-            daemonCfg, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback);
-        if (!daemonPlanRes) {
-            return Result<void>();
-        }
-        yams::cli::apply_cli_daemon_plan_to_retrieval_options(daemonPlanRes.value(), ropts);
-
-        yams::app::services::GetOptions greq;
-        greq.hash = resolvedHash;
-        greq.metadataOnly = false;
-        auto gr = rsvc.get(greq, ropts);
-        if (!gr)
-            return Result<void>();
-
-        const auto& indexed = gr.value();
-        std::ifstream ifs(abs);
-        if (!ifs)
-            return Result<void>();
-        std::string local((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
-        if (local == indexed.content) {
-            std::cout << "\nNo differences: local file matches indexed content (" << abs.string()
-                      << ")\n";
-            return Result<void>();
-        }
-
-        auto toLines = [](const std::string& s) {
-            std::vector<std::string> lines;
-            std::stringstream ss(s);
-            std::string line;
-            while (std::getline(ss, line))
-                lines.push_back(line);
-            return lines;
-        };
-
-        auto localLines = toLines(local);
-        auto indexedLines = toLines(indexed.content);
-        size_t i = 0, j = 0;
-        size_t shown = 0;
-        constexpr size_t kMaxLines = 200;
-
-        std::cout << "\n=== Diff (local vs indexed) for: " << abs.string() << " ===\n";
-        while ((i < localLines.size() || j < indexedLines.size()) && shown < kMaxLines) {
-            const std::string* la = (i < localLines.size()) ? &localLines[i] : nullptr;
-            const std::string* lb = (j < indexedLines.size()) ? &indexedLines[j] : nullptr;
-            if (la && lb && *la == *lb) {
-                ++i;
-                ++j;
-                continue;
-            }
-            if (la) {
-                std::cout << "- " << *la << "\n";
-                ++shown;
-                ++i;
-            }
-            if (lb && shown < kMaxLines) {
-                std::cout << "+ " << *lb << "\n";
-                ++shown;
-                ++j;
-            }
-        }
-
-        if (i < localLines.size() || j < indexedLines.size()) {
-            std::cout << "... diff truncated after " << kMaxLines << " lines ...\n";
-        }
-
-        return Result<void>();
     }
 
 public:
@@ -1368,19 +1162,10 @@ public:
                 }
             }
 
-            resolvedLocalFilePath_.reset();
             if (!pathFilter_.empty()) {
                 auto normalized = normalizeLookupPath(pathFilter_);
                 if (normalized.changed) {
                     pathFilter_ = normalized.normalized;
-                }
-                if (!normalized.hasWildcards) {
-                    namespace fs = std::filesystem;
-                    std::error_code ec;
-                    fs::path candidate{pathFilter_};
-                    if (fs::exists(candidate, ec) && fs::is_regular_file(candidate, ec)) {
-                        resolvedLocalFilePath_ = candidate.string();
-                    }
                 }
             }
             // Normalize include globs (split commas)
@@ -1433,10 +1218,9 @@ public:
                 ::setenv("YAMS_DATA_DIR", clientConfig.dataDir.string().c_str(), 1);
 #endif
             }
-            yams::cli::CliDaemonClientPlan daemonPlan;
             auto daemonLeaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
                 clientConfig, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback, 1, 12,
-                std::chrono::milliseconds{-1}, &daemonPlan);
+                std::chrono::milliseconds{-1});
             std::shared_ptr<yams::cli::DaemonClientPool::Lease> daemonLease;
             if (daemonLeaseRes) {
                 daemonLease = std::move(daemonLeaseRes.value());
@@ -1463,112 +1247,8 @@ public:
                 auto ctx = makeDaemonRenderContext(resp);
                 return renderResults(items, ctx);
             };
-            auto fallback = [&]() -> Result<void> {
-                stopSpinner();
-                // Use app services for local fallback
-                auto appContext = cli_->getAppContext();
-                if (!appContext) {
-                    return Error{ErrorCode::NotInitialized, "Failed to initialize app context"};
-                }
-
-                auto searchService = app::services::makeSearchService(*appContext);
-                if (!searchService) {
-                    return Error{ErrorCode::NotInitialized, "Failed to create search service"};
-                }
-
-                auto sreq = makeAppSearchRequest();
-
-                std::promise<Result<app::services::SearchResponse>> prom;
-                std::promise<void> localDone;
-                auto fut = prom.get_future();
-                auto localDoneFut = localDone.get_future();
-                boost::asio::co_spawn(
-                    getExecutor(),
-                    [searchService, sreq, prom = std::move(prom),
-                     localDone = std::move(localDone)]() mutable -> boost::asio::awaitable<void> {
-                        try {
-                            auto r = co_await searchService->search(sreq);
-                            prom.set_value(std::move(r));
-                        } catch (const std::exception& e) {
-                            prom.set_value(Error{
-                                ErrorCode::InternalError,
-                                std::string("Local search failed with exception: ") + e.what()});
-                        } catch (...) {
-                            prom.set_value(Error{ErrorCode::InternalError,
-                                                 "Local search failed with unknown exception"});
-                        }
-                        localDone.set_value();
-                        co_return;
-                    },
-                    boost::asio::detached);
-                if (fut.wait_for(std::chrono::seconds(30)) != std::future_status::ready) {
-                    localDoneFut.wait();
-                    return Error{ErrorCode::Timeout, "Local search timed out"};
-                }
-                auto rlocal = fut.get();
-                localDoneFut.wait();
-                if (!rlocal) {
-                    return rlocal.error();
-                }
-                auto resp = rlocal.value();
-
-                // Apply client-side include filtering if needed
-                if (!includeGlobsExpanded.empty()) {
-                    if (pathsOnly_) {
-                        std::vector<std::string> filtered;
-                        for (const auto& p : resp.paths) {
-                            if (matchAnyGlob(p, includeGlobsExpanded))
-                                filtered.push_back(p);
-                        }
-                        resp.paths.swap(filtered);
-                    } else {
-                        std::vector<app::services::SearchItem> filtered;
-                        for (const auto& it : resp.results) {
-                            if (matchAnyGlob(it.path, includeGlobsExpanded))
-                                filtered.push_back(it);
-                        }
-                        resp.results.swap(filtered);
-                    }
-                }
-
-                // Handle paths-only output (special case - uses resp.paths)
-                if (pathsOnly_) {
-                    std::unordered_set<std::string> seen;
-                    for (const auto& path : resp.paths) {
-                        if (seen.count(path))
-                            continue;
-                        seen.insert(path);
-                        std::cout << path << std::endl;
-                    }
-                    return Result<void>();
-                }
-
-                // Convert to unified items and render
-                auto items = makeLocalUnifiedItems(resp);
-                auto ctx = makeLocalRenderContext(resp);
-                auto renderResult = renderResults(items, ctx);
-                (void)printDiffForSearchResult(resp);
-                return renderResult;
-            };
-            if (daemonLease &&
-                daemonPlan.resolvedMode == yams::daemon::ClientTransportMode::InProcess) {
-                spdlog::info("search: socket-only client cannot service in-process plan; using "
-                             "local services");
-                auto fb = fallback();
-                if (!fb)
-                    return fb.error();
-                return Result<void>();
-            }
             if (!daemonLease) {
-                if (yams::cli::is_transport_failure(daemonLeaseRes.error())) {
-                    return daemonLeaseRes.error();
-                }
-                spdlog::warn("search: unable to acquire daemon client: {}",
-                             daemonLeaseRes.error().message);
-                auto fb = fallback();
-                if (!fb)
-                    return fb.error();
-                return Result<void>();
+                return daemonLeaseRes.error();
             }
 
             // Fully async daemon path with a single co_spawn and promise completion
@@ -1688,18 +1368,7 @@ public:
             }
             auto rv = fut.get();
             coroFut.get();
-            if (rv)
-                return Result<void>();
-            if (yams::cli::is_transport_failure(rv.error())) {
-                return rv.error();
-            }
-            // Fallback to local only for non-transport failures.
-            {
-                auto fb = fallback();
-                if (!fb)
-                    return fb.error();
-                return Result<void>();
-            }
+            return rv;
 
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string("Unexpected error: ") + e.what()};
@@ -1793,42 +1462,6 @@ public:
             }
         };
 
-        auto localFallback = [&]() -> boost::asio::awaitable<Result<void>> {
-            if (auto appContext = cli_->getAppContext()) {
-                auto searchService = app::services::makeSearchService(*appContext);
-                if (searchService) {
-                    auto sreq = makeAppSearchRequest();
-                    auto local = co_await searchService->search(sreq);
-                    stopSpinner();
-                    if (!local)
-                        co_return local.error();
-                    auto resp = local.value();
-
-                    // Handle paths-only output (special case - uses resp.paths)
-                    if (pathsOnly_) {
-                        std::unordered_set<std::string> seen;
-                        for (const auto& p : resp.paths) {
-                            if (!includeGlobsExpanded.empty() &&
-                                !matchAnyGlob(p, includeGlobsExpanded))
-                                continue;
-                            if (seen.count(p))
-                                continue;
-                            seen.insert(p);
-                            std::cout << p << std::endl;
-                        }
-                        co_return Result<void>();
-                    }
-
-                    // Convert to unified items and render
-                    auto localItems = makeLocalUnifiedItems(resp, includeGlobsExpanded);
-                    auto localCtx = makeLocalRenderContext(resp);
-                    co_return renderResults(localItems, localCtx);
-                }
-            }
-            stopSpinner();
-            co_return Error{ErrorCode::Unknown, "Failed to initialize local search services"};
-        };
-
         // Daemon client config
         yams::daemon::DaemonClient::setTimeoutEnvVars(std::chrono::milliseconds(headerTimeoutMs_),
                                                       std::chrono::milliseconds(bodyTimeoutMs_));
@@ -1871,11 +1504,6 @@ public:
             }
 
             auto plan = std::move(planRes.value());
-            if (plan.resolvedMode == yams::daemon::ClientTransportMode::InProcess) {
-                spdlog::info("search: socket-only client cannot service in-process plan; using "
-                             "local services");
-                co_return co_await localFallback();
-            }
             yams::daemon::DaemonClient directClient(plan.config);
             directClient.setStreamingEnabled(false);
             const auto daemonCallStart = std::chrono::steady_clock::now();
@@ -1894,18 +1522,11 @@ public:
             co_return render(directRes.value());
         }
 
-        yams::cli::CliDaemonClientPlan daemonPlan;
         auto leaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
-            clientConfig, daemonOpts.accessPolicy, 1, 12, std::chrono::milliseconds{-1},
-            &daemonPlan);
+            clientConfig, daemonOpts.accessPolicy, 1, 12, std::chrono::milliseconds{-1});
         if (!leaseRes) {
-            co_return co_await yams::cli::detail::daemon_error_or_local_fallback_async(
-                leaseRes.error(), "search", localFallback);
-        }
-        if (daemonPlan.resolvedMode == yams::daemon::ClientTransportMode::InProcess) {
-            spdlog::info(
-                "search: socket-only client cannot service in-process plan; using local services");
-            co_return co_await localFallback();
+            stopSpinner();
+            co_return leaseRes.error();
         }
         auto leaseHandle = std::move(leaseRes.value());
         struct LeaseScopeExit {
@@ -1965,33 +1586,8 @@ public:
                 auto ur = co_await unaryCallWithFreshLease();
                 if (ur)
                     co_return render(ur.value());
-                // If unary retry also failed, fallback to local
-                if (!ur) {
-                    if (yams::cli::is_transport_failure(ur.error())) {
-                        co_return ur.error();
-                    }
-                    if (auto appContext = cli_->getAppContext()) {
-                        auto searchService = app::services::makeSearchService(*appContext);
-                        if (searchService) {
-                            auto sreq = makeAppSearchRequest();
-                            auto local = co_await searchService->search(sreq);
-                            if (local) {
-                                yams::daemon::SearchResponse out;
-                                for (const auto& it : local.value().results) {
-                                    yams::daemon::SearchResult sr;
-                                    sr.id = std::to_string(it.id);
-                                    sr.title = it.title;
-                                    sr.path = it.path;
-                                    sr.score = it.score;
-                                    sr.snippet = it.snippet;
-                                    out.results.push_back(std::move(sr));
-                                }
-                                out.totalCount = out.results.size();
-                                co_return render(out);
-                            }
-                        }
-                    }
-                }
+                stopSpinner();
+                co_return ur.error();
             }
         }
         if (r) {
@@ -2023,12 +1619,8 @@ public:
                 co_return render(rr.value());
         }
 
-        if (yams::cli::is_transport_failure(derr)) {
-            co_return derr;
-        }
-
-        // Fallback to local services via co_await
-        co_return co_await localFallback();
+        stopSpinner();
+        co_return derr;
     }
 };
 

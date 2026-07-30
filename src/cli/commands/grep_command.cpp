@@ -5,7 +5,6 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <iomanip>
 #include <iostream>
 #include <map>
 #include <optional>
@@ -17,7 +16,6 @@
 #ifndef _WIN32
 #include <unistd.h>
 #endif
-#include <unordered_set>
 #include <vector>
 #include <yams/cli/command.h>
 #include <yams/cli/graph_helpers.h>
@@ -25,13 +23,8 @@
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
-#include <yams/daemon/components/ConfigResolver.h>
-#include <yams/metadata/document_metadata.h>
 #include <yams/metadata/kg_relation_summary.h>
 #include <yams/metadata/metadata_repository.h>
-#include <yams/metadata/query_helpers.h>
-#include <yams/search/search_engine.h>
-#include <yams/search/search_engine_builder.h>
 // Daemon client API for daemon-first grep
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -82,27 +75,6 @@ std::string sanitizeForDisplay(std::string_view input) {
     return sanitized;
 }
 
-void applySimeonLexicalDefaults(yams::search::SearchEngineBuilder::BuildOptions& opts) {
-    const auto backend = yams::daemon::ConfigResolver::resolveEmbeddingBackend();
-    const auto bm25Policy = yams::daemon::ConfigResolver::resolveSimeonBm25Policy();
-    if (backend != "simeon" || !bm25Policy.enabled.value_or(true)) {
-        opts.simeonLexicalConfig.reset();
-        return;
-    }
-
-    yams::search::SimeonLexicalBackend::Config lexicalCfg;
-    if (bm25Policy.variant && *bm25Policy.variant == "atire") {
-        lexicalCfg.variant = yams::search::SimeonLexicalBackend::Variant::Atire;
-    }
-    if (bm25Policy.subwordGamma) {
-        lexicalCfg.subword_gamma = *bm25Policy.subwordGamma;
-    }
-    if (bm25Policy.maxCorpusDocs) {
-        lexicalCfg.max_corpus_docs = *bm25Policy.maxCorpusDocs;
-    }
-    opts.simeonLexicalConfig = lexicalCfg;
-}
-
 } // namespace
 
 class GrepCommand : public ICommand {
@@ -147,7 +119,7 @@ private:
     std::string cwdOverride_;
     std::string extension_;
     std::string language_;
-    bool liveFallback_{true};
+    bool liveFallback_{false};
 
     using RelationSummaryMap = std::unordered_map<std::string, std::string>;
     using SemanticScoreMap = std::map<std::string, double>;
@@ -165,8 +137,6 @@ private:
         SemanticScoreMap semanticOnlyScores;
         std::map<std::string, size_t> regexCounts;
     };
-
-    struct Match;
 
     struct RichRenderedMatch {
         size_t lineNumber{0};
@@ -186,32 +156,6 @@ private:
         std::vector<RichRenderedMatch> matches;
     };
 
-    struct SemanticDisplayResult {
-        FilePresentation file;
-        double score{0.0};
-        std::optional<std::string> snippet;
-    };
-
-    struct LocalHybridRenderPlan {
-        std::vector<RichFileMatches> regexGroups;
-        std::vector<SemanticDisplayResult> semanticOnlyResults;
-        size_t totalRegexMatches{0};
-        size_t totalRegexFiles{0};
-        size_t semanticSummaryCount{0};
-    };
-
-    static bool matchAnyGlob(const std::string& path, const std::vector<std::string>& globs) {
-        if (globs.empty()) {
-            return true;
-        }
-        for (const auto& glob : globs) {
-            if (yams::app::services::utils::matchGlob(path, glob)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     bool shouldApplySessionPatterns(const std::vector<std::string>& sessionPatterns) const {
         return sessionOverride_.has_value() && !sessionPatterns.empty();
     }
@@ -220,13 +164,6 @@ private:
         bool jsonMode = jsonOutput_ || (cli_ && cli_->getJsonOutput());
         return !jsonMode && !pathsOnly_ && !filesOnly_ && !countOnly_;
     }
-
-    // Helpers for configuration discovery (delegating to shared utilities)
-    std::map<std::string, std::string> parseSimpleToml(const std::filesystem::path& path) const {
-        return yams::config::parse_simple_toml(path);
-    }
-
-    std::filesystem::path resolveConfigPath() const { return yams::config::get_config_path(); }
 
 public:
     std::string getName() const override { return "grep"; }
@@ -239,7 +176,6 @@ public:
         cli_ = cli;
 
         auto* cmd = app.add_subcommand("grep", getDescription());
-        cmd->allow_extras();
 
         // Positional pattern: make optional and provide friendly alternatives (-e/--pattern or --)
         cmd->add_option("pattern", pattern_,
@@ -345,18 +281,6 @@ public:
             "Disable live working-tree fallback for indexed no-hit results");
 
         cmd->callback([this, cmd]() {
-            if (cmd->count("--no-live") == 0) {
-                liveFallback_ = true;
-            }
-            auto extras = cmd->remaining();
-            if (!extras.empty()) {
-                if (pattern_.empty() && paths_.empty()) {
-                    pattern_ = extras.front();
-                    extras.erase(extras.begin());
-                }
-                paths_.insert(paths_.end(), extras.begin(), extras.end());
-            }
-
             if (pattern_.empty() && !paths_.empty()) {
                 pattern_ = paths_.front();
                 paths_.erase(paths_.begin());
@@ -678,12 +602,6 @@ public:
                         "grep: socket transport unavailable; using in-process transport: {}",
                         prepared.plan.fallbackReason);
                 }
-                if (prepared.plan.resolvedMode == yams::daemon::ClientTransportMode::InProcess) {
-                    spdlog::info("grep: socket-only client cannot service in-process plan; using "
-                                 "local services");
-                    return executeLocal();
-                }
-
                 // Use RetrievalService facade with helper-resolved transport plan.
                 yams::app::services::RetrievalService rsvc;
                 // Show spinner during search
@@ -719,8 +637,7 @@ public:
                 return Result<void>();
             }
 
-            // Fall back to local execution if daemon failed
-            return executeLocal();
+            return Error{ErrorCode::InvalidState, "Grep request was not dispatched"};
 
         } catch (const std::exception& e) {
             return Error{ErrorCode::Unknown, std::string("Unexpected error: ") + e.what()};
@@ -826,7 +743,7 @@ private:
                 std::cerr << "  No indexed files matched the requested scope/filters.\n";
             }
         } else {
-            std::cerr << "  indexed_files_searched=unknown (local fallback path)\n";
+            std::cerr << "  indexed_files_searched=unknown (daemon did not report the count)\n";
         }
         std::cerr << "  If you expected current-worktree hits, the YAMS index may be stale or the "
                      "scope may be too narrow.\n"
@@ -986,31 +903,6 @@ private:
         return aggregates;
     }
 
-    FileMatchAggregates collectLocalFileAggregates(
-        const std::vector<std::string>& matchingFiles,
-        const std::map<std::string, std::vector<Match>>& allRegexMatches,
-        const std::vector<yams::metadata::SearchResult>& semanticResults) const {
-        FileMatchAggregates aggregates;
-        aggregates.files.insert(matchingFiles.begin(), matchingFiles.end());
-
-        for (const auto& [filePath, matches] : allRegexMatches) {
-            aggregates.regexCounts[filePath] = matches.size();
-        }
-
-        for (const auto& result : semanticResults) {
-            const std::string& path = result.document.filePath;
-            if (aggregates.files.find(path) == aggregates.files.end()) {
-                auto it = aggregates.semanticOnlyScores.find(path);
-                if (it == aggregates.semanticOnlyScores.end() || result.score > it->second) {
-                    aggregates.semanticOnlyScores[path] = result.score;
-                }
-                aggregates.files.insert(path);
-            }
-        }
-
-        return aggregates;
-    }
-
     void renderPathResults(const std::set<std::string>& files, const SemanticScoreMap& semOnlyConf,
                            const RelationSummaryMap& relationSummaries,
                            std::optional<uint64_t> filesSearched = std::nullopt) const {
@@ -1098,25 +990,6 @@ private:
         }
     }
 
-    void renderSemanticResult(const FilePresentation& file, double score,
-                              const std::string* snippet = nullptr) const {
-        std::cout << ui::colorize(file.displayPath, ui::Ansi::MAGENTA) << " "
-                  << ui::colorize(formatSemanticScore(score), scoreColor(score));
-        if (!file.relationSummary.empty()) {
-            std::cout << " " << ui::colorize("[rel: " + file.relationSummary + "]", ui::Ansi::DIM);
-        }
-        std::cout << std::endl;
-        if (snippet != nullptr && !snippet->empty()) {
-            std::cout << ui::colorize("  1:", ui::Ansi::CYAN) << " " << *snippet << std::endl;
-        }
-        std::cout << std::endl;
-    }
-
-    void renderSectionHeader(std::string_view title) const {
-        std::cout << ui::colorize(std::string(title), ui::Ansi::DIM) << std::endl;
-        std::cout << std::endl;
-    }
-
     void renderRichFileMatches(const RichFileMatches& group) const {
         std::string countInfo = " (" + std::to_string(group.totalMatches) + " match" +
                                 (group.totalMatches != 1 ? "es" : "");
@@ -1150,83 +1023,6 @@ private:
             }
         }
         std::cout << std::endl;
-    }
-
-    std::string highlightLocalMatchLine(const std::string& lineText, const Match& match) const {
-        if (invertMatch_ || match.columnStart >= lineText.size()) {
-            return invertMatch_ ? ui::colorize(lineText, ui::Ansi::DIM) : lineText;
-        }
-
-        std::ostringstream out;
-        out << lineText.substr(0, match.columnStart);
-        if (ui::colors_enabled()) {
-            out << ui::Ansi::RED;
-        }
-        const size_t matchLen =
-            (match.columnEnd > match.columnStart) ? match.columnEnd - match.columnStart : 0;
-        out << lineText.substr(match.columnStart, matchLen);
-        if (ui::colors_enabled()) {
-            out << ui::Ansi::RESET;
-        }
-        if (match.columnEnd < lineText.size()) {
-            out << lineText.substr(match.columnEnd);
-        }
-        return out.str();
-    }
-
-    RichFileMatches buildLocalRichFileMatches(const FilePresentation& file,
-                                              const std::string& content,
-                                              const std::vector<Match>& matches) const {
-        RichFileMatches group;
-        group.file = file;
-        group.totalMatches = matches.size();
-        group.regexMatches = matches.size();
-
-        std::vector<std::string> lines;
-        std::istringstream stream(content);
-        std::string line;
-        while (std::getline(stream, line)) {
-            lines.push_back(line);
-        }
-
-        std::set<size_t> printedLines;
-        for (const auto& match : matches) {
-            RichRenderedMatch rendered;
-            rendered.lineNumber = match.lineNumber;
-
-            const size_t startLine =
-                (match.lineNumber > beforeContext_) ? match.lineNumber - beforeContext_ : 1;
-            const size_t endLine = std::min(match.lineNumber + afterContext_, lines.size());
-            rendered.leadingGapSeparator =
-                !printedLines.empty() && startLine > *printedLines.rbegin() + 1;
-
-            for (size_t i = startLine; i <= endLine; ++i) {
-                if (printedLines.count(i) > 0) {
-                    continue;
-                }
-                printedLines.insert(i);
-
-                if (i == 0 || i - 1 >= lines.size()) {
-                    continue;
-                }
-
-                if (i == match.lineNumber) {
-                    rendered.lineText = highlightLocalMatchLine(lines[i - 1], match);
-                } else if (i < match.lineNumber) {
-                    rendered.contextBefore.push_back(lines[i - 1]);
-                } else {
-                    rendered.contextAfter.push_back(lines[i - 1]);
-                }
-            }
-
-            if (rendered.lineText.empty() && match.lineNumber > 0 &&
-                match.lineNumber <= lines.size()) {
-                rendered.lineText = highlightLocalMatchLine(lines[match.lineNumber - 1], match);
-            }
-            group.matches.push_back(std::move(rendered));
-        }
-
-        return group;
     }
 
     std::vector<RichFileMatches>
@@ -1282,105 +1078,6 @@ private:
         }
 
         return groups;
-    }
-
-    LocalHybridRenderPlan
-    buildLocalHybridRenderPlan(const std::vector<metadata::DocumentInfo>& documents,
-                               const std::shared_ptr<api::IContentStore>& store,
-                               const std::map<std::string, std::vector<Match>>& allRegexMatches,
-                               const std::vector<yams::metadata::SearchResult>& semanticResults,
-                               const RelationSummaryMap& relationSummaries) const {
-        LocalHybridRenderPlan plan;
-        plan.totalRegexFiles = allRegexMatches.size();
-        plan.semanticSummaryCount = semanticResults.size();
-
-        const bool hasSemanticResults = !semanticResults.empty() && !regexOnly_;
-        size_t fileCount = 0;
-        for (const auto& [filePath, matches] : allRegexMatches) {
-            plan.totalRegexMatches += matches.size();
-            if (fileCount >= 3 && hasSemanticResults) {
-                ++fileCount;
-                continue;
-            }
-
-            auto doc = std::find_if(documents.begin(), documents.end(),
-                                    [&filePath](const auto& d) { return d.filePath == filePath; });
-            if (doc != documents.end()) {
-                auto contentResult = store->retrieveBytes(doc->sha256Hash);
-                if (contentResult) {
-                    std::string content(reinterpret_cast<const char*>(contentResult.value().data()),
-                                        contentResult.value().size());
-
-                    auto limitedMatches = matches;
-                    if (maxCount_ > 0 && limitedMatches.size() > static_cast<size_t>(maxCount_)) {
-                        limitedMatches.resize(maxCount_);
-                    }
-
-                    plan.regexGroups.push_back(buildLocalRichFileMatches(
-                        describeFile(relationSummaries, filePath), content, limitedMatches));
-                }
-            }
-            ++fileCount;
-        }
-
-        size_t shown = 0;
-        for (size_t i = 0; i < semanticResults.size() && shown < semanticLimit_; i++) {
-            const auto& result = semanticResults[i];
-            const std::string& path = result.document.filePath;
-            if (allRegexMatches.find(path) != allRegexMatches.end()) {
-                continue;
-            }
-
-            SemanticDisplayResult display;
-            display.file = describeFile(relationSummaries, path);
-            display.score = result.score;
-            if (!result.snippet.empty()) {
-                display.snippet = truncateSnippet(result.snippet, 200);
-            }
-            plan.semanticOnlyResults.push_back(std::move(display));
-            shown++;
-        }
-
-        return plan;
-    }
-
-    void renderLocalHybridResults(const LocalHybridRenderPlan& plan) const {
-        const bool hasRegexMatches = !plan.regexGroups.empty();
-        const bool hasSemanticResults = !plan.semanticOnlyResults.empty();
-
-        if (hasRegexMatches) {
-            if (hasSemanticResults) {
-                renderSectionHeader("=== Text Matches ===");
-            }
-            for (const auto& group : plan.regexGroups) {
-                renderRichFileMatches(group);
-            }
-        }
-
-        if (hasSemanticResults) {
-            if (hasRegexMatches) {
-                std::cout << std::endl;
-            }
-            renderSectionHeader("=== Semantic Matches ===");
-            for (const auto& result : plan.semanticOnlyResults) {
-                renderSemanticResult(result.file, result.score,
-                                     result.snippet ? &*result.snippet : nullptr);
-            }
-        }
-
-        if (!hasRegexMatches && !hasSemanticResults) {
-            renderNoResults();
-            return;
-        }
-
-        std::string summary = std::to_string(plan.totalRegexMatches) + " match" +
-                              (plan.totalRegexMatches != 1 ? "es" : "") + " in " +
-                              std::to_string(plan.totalRegexFiles) + " file" +
-                              (plan.totalRegexFiles != 1 ? "s" : "");
-        if (plan.semanticSummaryCount > 0) {
-            summary += " + " + std::to_string(plan.semanticSummaryCount) + " semantic";
-        }
-        renderSummaryLine(summary, hasRegexMatches || hasSemanticResults);
     }
 
     void renderDaemonMinimalMatches(const std::vector<daemon::GrepMatch>& matches,
@@ -1710,515 +1407,6 @@ private:
             live.pathsOnly.assign(unique.begin(), unique.end());
         }
         return live;
-    }
-
-    Result<void> executeLocal() {
-        auto ensured = cli_->ensureStorageInitialized();
-        if (!ensured) {
-            return ensured;
-        }
-
-        auto metadataRepo = cli_->getMetadataRepository();
-        if (!metadataRepo) {
-            return Error{ErrorCode::NotInitialized, "Metadata repository not initialized"};
-        }
-
-        auto store = cli_->getContentStore();
-        if (!store) {
-            return Error{ErrorCode::NotInitialized, "Content store not initialized"};
-        }
-
-        // Handle context options
-        if (context_ > 0) {
-            beforeContext_ = afterContext_ = context_;
-        }
-
-        // Determine if we should show filenames
-        bool multipleFiles = paths_.size() != 1;
-        if (!noFilename_ && (showFilename_ || multipleFiles)) {
-            showFilename_ = true;
-        }
-
-        // Build regex pattern for local grep matching
-        std::regex_constants::syntax_option_type flags = std::regex_constants::ECMAScript;
-        if (ignoreCase_) {
-            flags |= std::regex_constants::icase;
-        }
-
-        std::string regexPattern = pattern_;
-
-        // For local regex matching, we still need to escape for grep functionality
-        // But for search engine queries, we'll pass literalText_ flag separately
-        if (literalText_) {
-            std::string escaped;
-            for (char c : pattern_) {
-                if (c == '.' || c == '*' || c == '?' || c == '+' || c == '[' || c == ']' ||
-                    c == '(' || c == ')' || c == '{' || c == '}' || c == '^' || c == '$' ||
-                    c == '|' || c == '\\') {
-                    escaped += "\\";
-                }
-                escaped += c;
-            }
-            regexPattern = escaped;
-        }
-
-        if (wholeWord_) {
-            regexPattern = "\\b" + regexPattern + "\\b";
-        }
-
-        std::regex regex;
-        try {
-            regex = std::regex(regexPattern, flags);
-        } catch (const std::regex_error& e) {
-            std::string suggestion;
-            if (!literalText_ && (pattern_.find('(') != std::string::npos ||
-                                  pattern_.find('[') != std::string::npos ||
-                                  pattern_.find('{') != std::string::npos)) {
-                suggestion = "\nHint: If searching for literal text (not regex), use:\n"
-                             "  yams grep --literal-text \"" +
-                             pattern_ + "\"";
-                if (!includePatterns_.empty()) {
-                    suggestion += " --include=\"" + includePatterns_ + "\"";
-                }
-            }
-            return Error{ErrorCode::InvalidArgument,
-                         "Invalid regex: " + std::string(e.what()) + suggestion};
-        }
-
-        // Get documents to search
-        std::vector<metadata::DocumentInfo> documents;
-        std::unordered_set<int64_t> seenDocIds;
-
-        auto addDocs = [&](const std::vector<metadata::DocumentInfo>& newDocs) {
-            for (const auto& d : newDocs) {
-                if (seenDocIds.insert(d.id).second) {
-                    documents.push_back(d);
-                }
-            }
-        };
-
-        std::vector<std::string> queryPatterns;
-        if (!paths_.empty()) {
-            queryPatterns.insert(queryPatterns.end(), paths_.begin(), paths_.end());
-        }
-        auto includePatterns = explicitIncludePatterns();
-        if (!includePatterns.empty()) {
-            queryPatterns.insert(queryPatterns.end(), includePatterns.begin(),
-                                 includePatterns.end());
-        }
-        if (!extension_.empty()) {
-            std::string ext = extension_;
-            if (ext.front() != '.')
-                ext.insert(ext.begin(), '.');
-            queryPatterns.push_back(std::string("**/*") + ext);
-        }
-        if (scopeToCwd_ || !cwdOverride_.empty()) {
-            const auto cwdDir = resolvedCwdScopeRoot().lexically_normal().generic_string();
-            auto cwdPats = yams::app::services::utils::buildCwdScopePatterns(cwdDir);
-            queryPatterns.insert(queryPatterns.end(), cwdPats.begin(), cwdPats.end());
-        }
-
-        if (queryPatterns.empty()) {
-            // No path/include filters, so check for tags or get all
-            if (!filterTags_.empty()) {
-                std::vector<std::string> tags = parseCommaSeparated(filterTags_);
-                if (!tags.empty()) {
-                    auto docsResult = metadataRepo->findDocumentsByTags(tags, matchAllTags_);
-                    if (!docsResult) {
-                        return Error{ErrorCode::DatabaseError,
-                                     "Failed to query documents by tags: " +
-                                         docsResult.error().message};
-                    }
-                    documents = docsResult.value();
-                }
-            } else {
-                // Search all indexed files
-                auto docsResult = metadata::queryDocumentsByPattern(*metadataRepo, "%");
-                if (!docsResult) {
-                    return Error{ErrorCode::DatabaseError,
-                                 "Failed to query documents: " + docsResult.error().message};
-                }
-                documents = docsResult.value();
-            }
-        } else {
-            // Use path/include patterns for candidate discovery.
-            // Normalize common glob forms to indexed queries (v13 path_prefix + extension):
-            //   - "**/*.ext"           -> extension filter only
-            //   - "dir/**/*.ext"       -> pathPrefix=dir + extension filter
-            //   - "*.ext"             -> extension filter only
-            // Patterns that do not match these forms fall back to LIKE.
-
-            auto trimCopy = [](std::string s) {
-                yams::config::trim(s);
-                return s;
-            };
-            auto strip_leading_slash = [](std::string s) {
-                while (!s.empty() &&
-                       (s.front() == '/' || (s.size() > 1 && s[0] == '.' && s[1] == '/'))) {
-                    if (s.front() == '/')
-                        s.erase(s.begin());
-                    else
-                        s.erase(s.begin(), s.begin() + 2);
-                }
-                return s;
-            };
-
-            auto collect_by_ext_and_prefix = [&](const std::string& maybePrefix,
-                                                 const std::string& ext) {
-                if (maybePrefix.empty()) {
-                    auto r = metadataRepo->findDocumentsByExtension(ext);
-                    if (r)
-                        addDocs(r.value());
-                    return;
-                }
-                metadata::DocumentQueryOptions q;
-                q.pathPrefix = strip_leading_slash(maybePrefix);
-                q.extension = ext;
-                q.orderByNameAsc = true;
-                auto r = metadataRepo->queryDocuments(q);
-                if (r)
-                    addDocs(r.value());
-            };
-
-            for (const auto& raw : queryPatterns) {
-                std::string p = trimCopy(raw);
-                if (p.empty())
-                    continue;
-
-                // Case 1: "**/*.ext" (anywhere) or "*.ext"
-                if ((p.rfind("**/*.", 0) == 0 && p.size() > 5) ||
-                    (p.rfind("*.", 0) == 0 && p.size() > 2)) {
-                    const char* start = (p[0] == '*' && p.size() > 1 && p[1] == '.')
-                                            ? p.c_str() + 2
-                                            : (p.size() > 4 ? p.c_str() + 5 : p.c_str());
-                    std::string ext(start);
-                    if (!ext.empty()) {
-                        collect_by_ext_and_prefix("", ext);
-                        continue;
-                    }
-                }
-
-                // Case 2: "dir/**/*.ext" -> prefix + ext
-                // Find marker "/**/" and ensure pattern ends with "*.ext"
-                std::size_t starDot = p.rfind("*.");
-                std::size_t marker = p.find("/**/");
-                if (marker != std::string::npos && starDot != std::string::npos &&
-                    starDot > marker) {
-                    std::string ext = p.substr(starDot + 2);
-                    if (!ext.empty()) {
-                        std::string prefix = p.substr(0, marker);
-                        collect_by_ext_and_prefix(prefix, ext);
-                        continue;
-                    }
-                }
-
-                // Fallback: LIKE pattern from glob
-                std::string likePattern = p;
-                std::replace(likePattern.begin(), likePattern.end(), '*', '%');
-                auto docsResult = metadata::queryDocumentsByPattern(*metadataRepo, likePattern);
-                if (docsResult)
-                    addDocs(docsResult.value());
-            }
-        }
-
-        // Optional FTS prefilter: when literal/word-style queries, use the SQLite FTS index
-        // to narrow the candidate document set before content scanning.
-        if (!documents.empty() && (literalText_ || wholeWord_)) {
-            try {
-                auto sRes = metadataRepo->search(pattern_, /*limit*/ 2000, /*offset*/ 0);
-                if (sRes && sRes.value().isSuccess() && !sRes.value().results.empty()) {
-                    std::unordered_set<int64_t> allow;
-                    allow.reserve(sRes.value().results.size());
-                    for (const auto& r : sRes.value().results)
-                        allow.insert(r.document.id);
-                    std::vector<metadata::DocumentInfo> filtered;
-                    filtered.reserve(documents.size());
-                    for (auto& d : documents) {
-                        if (allow.find(d.id) != allow.end())
-                            filtered.push_back(std::move(d));
-                    }
-                    if (!filtered.empty())
-                        documents.swap(filtered);
-                }
-            } catch (const std::exception& e) {
-                spdlog::trace("grep candidate optimization failed: {}", e.what());
-            } catch (...) {
-                spdlog::trace("grep candidate optimization failed");
-            }
-        }
-
-        if (documents.empty()) {
-            renderNoResults(0);
-            return Result<void>();
-        }
-
-        // Process each document for regex matches
-        // size_t totalMatches = 0;  // Currently only incremented but not used
-        std::vector<std::string> matchingFiles;
-        std::vector<std::string> nonMatchingFiles;
-        std::map<std::string, std::vector<Match>> allRegexMatches;
-
-        for (const auto& doc : documents) {
-            // Retrieve document content
-            auto contentResult = store->retrieveBytes(doc.sha256Hash);
-            if (!contentResult) {
-                continue; // Skip if can't retrieve
-            }
-
-            std::string content(reinterpret_cast<const char*>(contentResult.value().data()),
-                                contentResult.value().size());
-
-            // Process the file for regex matches
-            auto matches = processFile(doc.filePath, content, regex);
-
-            if (!matches.empty()) {
-                allRegexMatches[doc.filePath] = matches;
-                matchingFiles.push_back(doc.filePath);
-            } else {
-                nonMatchingFiles.push_back(doc.filePath);
-            }
-        }
-
-        // If not regex-only mode, also perform semantic search (even in files-only/paths-only/count
-        // modes)
-        std::vector<yams::metadata::SearchResult> semanticResults;
-        if (!regexOnly_) {
-            try {
-                // Build SearchEngine for semantic search
-                yams::search::SearchEngineBuilder builder;
-                builder.withMetadataRepo(metadataRepo).withKGStore(cli_->getKnowledgeGraphStore());
-
-                // Add VectorDatabase if available
-                if (auto vecDb = cli_->getVectorDatabase()) {
-                    builder.withVectorDatabase(vecDb);
-                }
-
-                auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
-                applySimeonLexicalDefaults(opts);
-                // Prefer fast, exact FTS5 keyword results over vector similarity for grep-like use
-                opts.config.maxResults = semanticLimit_ * 3; // Get more results to filter
-                opts.config.vectorWeight = 0.40f;
-                opts.config.textWeight = 0.60f; // Prefer fast, exact text search for grep
-                opts.config.kgWeight = 0.0f;    // Disable KG for grep scenarios
-
-                auto engRes = builder.buildEmbedded(opts);
-                if (engRes) {
-                    const auto& eng = engRes.value();
-                    yams::search::SearchParams params;
-                    params.limit = static_cast<int>(semanticLimit_ * 3);
-                    auto searchRes = eng->search(pattern_, params);
-                    if (searchRes) {
-                        // Filter semantic results to only include files from searched paths
-                        if (!paths_.empty()) {
-                            std::vector<yams::metadata::SearchResult> filteredResults;
-                            for (const auto& result : searchRes.value()) {
-                                const std::string& resultPath = result.document.filePath;
-                                // Check if this result is within any of the specified paths
-                                bool inSearchPath = false;
-                                for (const auto& searchPath : paths_) {
-                                    if (resultPath.find(searchPath) != std::string::npos) {
-                                        inSearchPath = true;
-                                        break;
-                                    }
-                                }
-                                if (inSearchPath) {
-                                    filteredResults.push_back(result);
-                                    if (filteredResults.size() >= semanticLimit_) {
-                                        break;
-                                    }
-                                }
-                            }
-                            semanticResults = filteredResults;
-                        } else {
-                            // No path filter, take top results
-                            semanticResults = searchRes.value();
-                            if (semanticResults.size() > semanticLimit_) {
-                                semanticResults.resize(semanticLimit_);
-                            }
-                        }
-                    }
-                }
-            } catch (const std::exception& e) {
-                spdlog::debug("Semantic search failed (falling back to regex only): {}", e.what());
-            }
-        }
-
-        // Output results based on mode
-        std::set<std::string> relationFiles;
-        for (const auto& [filePath, _] : allRegexMatches) {
-            relationFiles.insert(filePath);
-        }
-        for (const auto& result : semanticResults) {
-            if (!result.document.filePath.empty()) {
-                relationFiles.insert(result.document.filePath);
-            }
-        }
-        auto relationSummaries = buildRelationSummaryMap(relationFiles);
-
-        if (filesOnly_ || pathsOnly_) {
-            const auto aggregates =
-                collectLocalFileAggregates(matchingFiles, allRegexMatches, semanticResults);
-            renderPathResults(aggregates.files, aggregates.semanticOnlyScores, relationSummaries);
-        } else if (countOnly_) {
-            const auto aggregates =
-                collectLocalFileAggregates(matchingFiles, allRegexMatches, semanticResults);
-            renderCountResults(aggregates.regexCounts, {}, relationSummaries);
-        } else if (filesWithoutMatch_) {
-            // Handle files-without-match option
-            for (const auto& file : nonMatchingFiles) {
-                std::cout << ui::colorize(describeFile({}, file).displayPath, ui::Ansi::MAGENTA)
-                          << std::endl;
-            }
-        } else {
-            const auto plan = buildLocalHybridRenderPlan(documents, store, allRegexMatches,
-                                                         semanticResults, relationSummaries);
-            renderLocalHybridResults(plan);
-            return Result<void>();
-        }
-        return Result<void>();
-    }
-
-    struct Match {
-        size_t lineNumber;
-        size_t columnStart;
-        size_t columnEnd;
-        std::string line;
-    };
-
-    std::vector<Match> processFile(const std::string& /*filename*/, const std::string& content,
-                                   const std::regex& regex) {
-        std::vector<Match> matches;
-        std::istringstream stream(content);
-        std::string line;
-        size_t lineNumber = 1;
-
-        while (std::getline(stream, line)) {
-            bool hasMatch = false;
-            std::smatch match;
-            std::string searchLine = line;
-            size_t columnOffset = 0;
-
-            while (std::regex_search(searchLine, match, regex)) {
-                if (!invertMatch_) {
-                    Match m;
-                    m.lineNumber = lineNumber;
-                    m.columnStart = columnOffset + match.position();
-                    m.columnEnd = m.columnStart + match.length();
-                    m.line = line;
-                    matches.push_back(m);
-                    hasMatch = true;
-                }
-
-                columnOffset += match.position() + match.length();
-                searchLine = match.suffix();
-
-                // For count/files only modes, one match per line is enough
-                if (countOnly_ || filesOnly_ || filesWithoutMatch_) {
-                    break;
-                }
-            }
-
-            // Handle inverted match
-            if (invertMatch_ && !hasMatch) {
-                Match m;
-                m.lineNumber = lineNumber;
-                m.columnStart = 0;
-                m.columnEnd = 0;
-                m.line = line;
-                matches.push_back(m);
-            }
-
-            lineNumber++;
-        }
-
-        return matches;
-    }
-
-    std::vector<std::string> splitPatterns(const std::vector<std::string>& patterns) {
-        std::vector<std::string> result;
-        for (const auto& pattern : patterns) {
-            std::stringstream ss(pattern);
-            std::string item;
-            while (std::getline(ss, item, ',')) {
-                yams::config::trim(item);
-                if (!item.empty()) {
-                    result.push_back(item);
-                }
-            }
-        }
-        return result;
-    }
-
-    // Helper function to truncate snippet to a maximum length at word boundary
-    std::string truncateSnippet(const std::string& snippet, size_t maxLength) const {
-        // Remove newlines and multiple spaces
-        std::string cleaned;
-        bool lastWasSpace = false;
-        for (char c : snippet) {
-            if (c == '\n' || c == '\r' || c == '\t') {
-                if (!lastWasSpace) {
-                    cleaned += ' ';
-                    lastWasSpace = true;
-                }
-            } else if (c == ' ') {
-                if (!lastWasSpace) {
-                    cleaned += c;
-                    lastWasSpace = true;
-                }
-            } else {
-                cleaned += c;
-                lastWasSpace = false;
-            }
-        }
-
-        // Trim to max length at word boundary
-        if (cleaned.length() <= maxLength) {
-            return cleaned;
-        }
-
-        // Find last space before maxLength
-        size_t lastSpace = cleaned.rfind(' ', maxLength);
-        if (lastSpace != std::string::npos && lastSpace > maxLength * 0.7) {
-            return cleaned.substr(0, lastSpace) + "...";
-        }
-
-        // No good word boundary, just truncate
-        return cleaned.substr(0, maxLength) + "...";
-    }
-
-    bool matchesPattern(const std::string& text, const std::string& pattern) {
-        // Simple wildcard matching (* and ?) with unanchored search semantics for path patterns.
-        std::string regexString = pattern;
-
-        // Escape regex special characters except * and ?
-        std::string escaped;
-        for (char c : regexString) {
-            if (c == '*') {
-                escaped += ".*";
-            } else if (c == '?') {
-                escaped += ".";
-            } else if (c == '.' || c == '[' || c == ']' || c == '(' || c == ')' || c == '{' ||
-                       c == '}' || c == '+' || c == '^' || c == '$' || c == '|' || c == '\\') {
-                escaped += "\\";
-                escaped += c;
-            } else {
-                escaped += c;
-            }
-        }
-
-        try {
-            std::regex regexPattern(escaped, std::regex_constants::icase);
-            // If pattern contains a path separator, treat it as a substring match over full path.
-            // This makes patterns like "packages/cli/**/*.js" match absolute stored paths too.
-            if (pattern.find('/') != std::string::npos) {
-                return std::regex_search(text, regexPattern);
-            }
-            // Otherwise (basename patterns like "*.js"), exact-match against the provided text.
-            return std::regex_match(text, regexPattern);
-        } catch (const std::regex_error&) {
-            // If regex fails, fall back to simple string comparison
-            return text == pattern;
-        }
     }
 };
 

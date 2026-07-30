@@ -342,6 +342,41 @@ TEST_CASE("IntegrationSmoke.GrepHumanOutputUsesRelativePathsAndGraphHints",
           std::string::npos);
 }
 
+TEST_CASE("IntegrationSmoke.GrepLiveWorkingTreeInspectionIsOptIn", "[smoke][integrationsmoke]") {
+    if (std::getenv("TSAN_OPTIONS") != nullptr) {
+        SKIP("Embedded daemon teardown has a known TSAN-only hang after grep requests");
+    }
+
+    SearchGraphUxFixture fixture;
+
+    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::string("1"));
+    yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::nullopt);
+    yams::test::ScopedEnvVar dataEnv("YAMS_DATA_DIR", fixture.dataDir.string());
+    yams::test::ScopedEnvVar storageEnv("YAMS_STORAGE", fixture.dataDir.string());
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", std::string("1"));
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING", std::string("1"));
+    yams::test::ScopedEnvVar disableWatcher("YAMS_DISABLE_SESSION_WATCHER", std::string("1"));
+
+    ScopedCurrentPath cwdGuard(fixture.worktree);
+
+    const std::string liveOnlyToken{"liveonlyworkingtreetoken"};
+    yams::test::write_file(fixture.worktree / "src" / "unindexed.cpp",
+                           "const char* token = \"" + liveOnlyToken + "\";\n");
+
+    std::string out;
+    int rc = run_cli({"yams", "grep", liveOnlyToken, "--cwd"}, &out);
+    INFO(out);
+    REQUIRE((rc == 0));
+    CHECK((out.find(liveOnlyToken) == std::string::npos));
+
+    out.clear();
+    rc = run_cli({"yams", "grep", liveOnlyToken, "--cwd", "--live"}, &out);
+    INFO(out);
+    REQUIRE((rc == 0));
+    CHECK((out.find(liveOnlyToken) != std::string::npos));
+    CHECK((out.find("src/unindexed.cpp") != std::string::npos));
+}
+
 TEST_CASE("IntegrationSmoke.GrepIgnoresUnrelatedActiveSessionSelectors",
           "[smoke][integrationsmoke]") {
     SearchGraphUxFixture fixture;

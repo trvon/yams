@@ -18,7 +18,6 @@
 #include <yams/config/config_migration.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
-#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/metadata/database.h>
@@ -26,7 +25,6 @@
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
 #include <yams/plugins/model_provider_v1.h>
-#include <yams/search/search_engine_builder.h>
 #include <yams/storage/storage_runtime_resolver.h>
 #include <yams/vector/dim_resolver.h>
 #include <yams/vector/embedding_generator.h>
@@ -101,31 +99,6 @@ namespace fs = std::filesystem;
 
 namespace yams::cli {
 // NOTE: KG store is now managed as an instance member on YamsCLI (kgStore_)
-
-namespace {
-
-void applySimeonLexicalDefaults(yams::search::SearchEngineBuilder::BuildOptions& opts) {
-    const auto backend = yams::daemon::ConfigResolver::resolveEmbeddingBackend();
-    const auto bm25Policy = yams::daemon::ConfigResolver::resolveSimeonBm25Policy();
-    if (backend != "simeon" || !bm25Policy.enabled.value_or(true)) {
-        opts.simeonLexicalConfig.reset();
-        return;
-    }
-
-    yams::search::SimeonLexicalBackend::Config lexicalCfg;
-    if (bm25Policy.variant && *bm25Policy.variant == "atire") {
-        lexicalCfg.variant = yams::search::SimeonLexicalBackend::Variant::Atire;
-    }
-    if (bm25Policy.subwordGamma) {
-        lexicalCfg.subword_gamma = *bm25Policy.subwordGamma;
-    }
-    if (bm25Policy.maxCorpusDocs) {
-        lexicalCfg.max_corpus_docs = *bm25Policy.maxCorpusDocs;
-    }
-    opts.simeonLexicalConfig = lexicalCfg;
-}
-
-} // namespace
 
 void YamsCLI::setPendingCommand(ICommand* cmd) {
     pendingCommand_ = cmd;
@@ -927,39 +900,9 @@ std::shared_ptr<app::services::AppContext> YamsCLI::getAppContext() {
         appContext_->kgStore = getKnowledgeGraphStore(); // PBI-043: tree diff KG integration
         appContext_->workerExecutor = executor_;         // 066-59: Thread executor through services
 
-        // Initialize SearchEngine so SearchService can use hybrid search by default
-        try {
-            auto vecDb = getVectorDatabase();
-            auto repo = getMetadataRepository();
-
-            if (repo) {
-                yams::search::SearchEngineBuilder builder;
-                builder.withVectorDatabase(vecDb).withMetadataRepo(repo).withKGStore(
-                    getKnowledgeGraphStore());
-
-                // Reuse a shared embedding generator if available
-                if (auto emb = getEmbeddingGenerator()) {
-                    builder.withEmbeddingGenerator(emb);
-                }
-
-                auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
-                applySimeonLexicalDefaults(opts);
-                auto engRes = builder.buildEmbedded(opts);
-                if (engRes) {
-                    appContext_->searchEngine = engRes.value();
-                    appContext_->vectorDatabase = vecDb;
-                    spdlog::info("SearchEngine initialized for AppContext");
-                } else {
-                    spdlog::warn("SearchEngine initialization failed: {}", engRes.error().message);
-                    appContext_->searchEngine = nullptr;
-                }
-            } else {
-                appContext_->searchEngine = nullptr;
-            }
-        } catch (const std::exception& e) {
-            spdlog::warn("SearchEngine bring-up error (ignored): {}", e.what());
-            appContext_->searchEngine = nullptr;
-        }
+        // CLI retrieval is always dispatched through daemon request handlers. Embedded/mobile
+        // consumers compose their local SDK context separately.
+        appContext_->searchEngine = nullptr;
 
         spdlog::debug("Created AppContext for services");
     }

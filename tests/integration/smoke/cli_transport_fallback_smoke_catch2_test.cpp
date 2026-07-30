@@ -130,6 +130,7 @@ TEST_CASE("IntegrationSmoke.CliCommandsPreferInProcessFallbackOverLocalServices"
     CHECK(rc == 0);
     INFO(out);
     CHECK(out.find("falling back to local") == std::string::npos);
+    CHECK(out.find("transport fallback smoke") != std::string::npos);
 
     out.clear();
     rc = run_cli({"yams", "grep", "transport", "--max-matches", "10"}, &out);
@@ -137,6 +138,7 @@ TEST_CASE("IntegrationSmoke.CliCommandsPreferInProcessFallbackOverLocalServices"
     CHECK(rc == 0);
     INFO(out);
     CHECK(out.find("falling back to local") == std::string::npos);
+    CHECK(out.find("transport fallback smoke") != std::string::npos);
 
     out.clear();
     rc = run_cli({"yams", "get", "--name", "transport-smoke.txt", "--raw"}, &out);
