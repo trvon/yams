@@ -21,6 +21,8 @@
 
 namespace {
 
+static void free_result_abi(void* self, yams_symbol_extraction_result_v1* res);
+
 bool symbolExtractorDebugEnabled() {
     static const bool enabled = [] {
         const char* raw = std::getenv("YAMS_SYMBOL_EXTRACTOR_DEBUG");
@@ -180,8 +182,12 @@ static int extract_symbols_abi(void* /*self*/, const char* content, size_t conte
 
     const auto& ok = *res;
     if (!ok.symbols.empty()) {
-        r->symbol_count = ok.symbols.size();
         r->symbols = (yams_symbol_v1*)std::calloc(ok.symbols.size(), sizeof(yams_symbol_v1));
+        if (!r->symbols) {
+            free_result_abi(nullptr, r);
+            return YAMS_PLUGIN_ERR_INVALID;
+        }
+        r->symbol_count = ok.symbols.size();
         for (size_t i = 0; i < ok.symbols.size(); ++i) {
             const auto& s = ok.symbols[i];
             yams_symbol_v1& dst = r->symbols[i];
@@ -201,9 +207,13 @@ static int extract_symbols_abi(void* /*self*/, const char* content, size_t conte
     }
 
     if (!ok.relations.empty()) {
-        r->relation_count = ok.relations.size();
         r->relations = (yams_symbol_relation_v1*)std::calloc(ok.relations.size(),
                                                              sizeof(yams_symbol_relation_v1));
+        if (!r->relations) {
+            free_result_abi(nullptr, r);
+            return YAMS_PLUGIN_ERR_INVALID;
+        }
+        r->relation_count = ok.relations.size();
         for (size_t i = 0; i < ok.relations.size(); ++i) {
             const auto& rel = ok.relations[i];
             yams_symbol_relation_v1& dst = r->relations[i];

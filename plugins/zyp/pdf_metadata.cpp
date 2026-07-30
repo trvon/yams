@@ -223,9 +223,12 @@ int parseIndirectRef(const uint8_t*& p, const uint8_t* end) {
  * Returns pointer to start of object content (after "obj" keyword).
  */
 const uint8_t* findObject(std::span<const uint8_t> data, int objNum) {
-    char pattern[32];
-    int len = std::snprintf(pattern, sizeof(pattern), "%d 0 obj", objNum);
-    std::string_view needle(pattern, len);
+    char pattern[32]{};
+    const int len = std::snprintf(pattern, sizeof(pattern), "%d 0 obj", objNum);
+    if (len <= 0 || static_cast<std::size_t>(len) >= sizeof(pattern)) {
+        return nullptr;
+    }
+    const std::string_view needle(pattern, static_cast<std::size_t>(len));
 
     // Search forward (objects are typically near the start)
     auto it = std::search(data.begin(), data.end(), needle.begin(), needle.end());

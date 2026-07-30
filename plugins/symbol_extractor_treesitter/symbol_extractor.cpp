@@ -135,7 +135,7 @@ static std::string compute_cpp_scope(std::string_view content, TSNode node) {
 
 // Helper to create lists at compile time
 template <size_t N, typename... Args> constexpr auto makeList(Args... args) -> ConstList<N> {
-    ConstList<N> result;
+    ConstList<N> result{};
     result.count = sizeof...(args);
     result.items = {args...};
     return result;

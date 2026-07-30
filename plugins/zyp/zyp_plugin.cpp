@@ -17,6 +17,8 @@
 
 namespace {
 
+void free_result(yams_extraction_result_t* result);
+
 /**
  * Duplicate a C++ string to a malloc'd C string.
  */
@@ -89,31 +91,45 @@ int extract(const uint8_t* content, size_t content_len, yams_extraction_result_t
     if (text && !text.empty()) {
         auto textView = text.text();
         (*result)->text = static_cast<char*>(std::malloc(textView.size() + 1));
-        if ((*result)->text) {
-            std::memcpy((*result)->text, textView.data(), textView.size());
-            (*result)->text[textView.size()] = '\0';
+        if (!(*result)->text) {
+            free_result(*result);
+            *result = nullptr;
+            return YAMS_PLUGIN_ERR_INVALID;
         }
+        std::memcpy((*result)->text, textView.data(), textView.size());
+        (*result)->text[textView.size()] = '\0';
     } else {
         // Empty text
         (*result)->text = static_cast<char*>(std::malloc(1));
-        if ((*result)->text) {
-            (*result)->text[0] = '\0';
+        if (!(*result)->text) {
+            free_result(*result);
+            *result = nullptr;
+            return YAMS_PLUGIN_ERR_INVALID;
         }
+        (*result)->text[0] = '\0';
     }
 
     // Populate metadata
     if (!metaMap.empty()) {
-        (*result)->metadata.count = metaMap.size();
         (*result)->metadata.pairs = static_cast<yams_key_value_pair_t*>(
-            std::malloc(sizeof(yams_key_value_pair_t) * metaMap.size()));
-
-        if ((*result)->metadata.pairs) {
-            size_t i = 0;
-            for (const auto& [key, value] : metaMap) {
-                (*result)->metadata.pairs[i].key = dupString(key);
-                (*result)->metadata.pairs[i].value = dupString(value);
-                ++i;
+            std::calloc(metaMap.size(), sizeof(yams_key_value_pair_t)));
+        if (!(*result)->metadata.pairs) {
+            free_result(*result);
+            *result = nullptr;
+            return YAMS_PLUGIN_ERR_INVALID;
+        }
+        (*result)->metadata.count = metaMap.size();
+        size_t i = 0;
+        for (const auto& [key, value] : metaMap) {
+            (*result)->metadata.pairs[i].key = dupString(key);
+            (*result)->metadata.pairs[i].value = dupString(value);
+            if ((!key.empty() && !(*result)->metadata.pairs[i].key) ||
+                (!value.empty() && !(*result)->metadata.pairs[i].value)) {
+                free_result(*result);
+                *result = nullptr;
+                return YAMS_PLUGIN_ERR_INVALID;
             }
+            ++i;
         }
     }
 
