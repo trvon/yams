@@ -40,6 +40,7 @@ struct RetrievalOptions {
         false}; // Default to false for text output; set true for binary efficiency
     std::optional<yams::daemon::ClientTransportMode> transportMode;
     std::optional<bool> autoStart;
+    std::shared_ptr<yams::daemon::IClientTransport> transport;
 };
 
 struct GetOptions {

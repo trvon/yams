@@ -44,6 +44,7 @@ static yams::daemon::ClientConfig makeClientConfig(const RetrievalOptions& opts)
         cfg.autoStart = *opts.autoStart;
     }
     cfg.executor = opts.executor;
+    cfg.transport = opts.transport;
     return cfg;
 }
 

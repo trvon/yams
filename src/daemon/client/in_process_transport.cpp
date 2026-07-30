@@ -87,6 +87,18 @@ bool is_control_request(const Request& request) {
 
 } // namespace
 
+Result<std::shared_ptr<IClientTransport>>
+makeInProcessTransport(const std::filesystem::path& dataDir) {
+    EmbeddedServiceHost::Options options;
+    options.dataDir = dataDir;
+    auto host = EmbeddedServiceHost::getOrCreate(options);
+    if (!host) {
+        return host.error();
+    }
+    return std::static_pointer_cast<IClientTransport>(
+        std::make_shared<InProcessTransport>(std::move(host.value())));
+}
+
 boost::asio::awaitable<Result<Response>> InProcessTransport::send_request(Request request) {
     Request ownedReq = std::move(request);
 

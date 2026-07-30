@@ -227,6 +227,7 @@ public:
     bool isShuttingDown() const { return shutting_down_.load(std::memory_order_acquire); }
 
     ClientConfig config_;
+    std::shared_ptr<IClientTransport> transport_;
     ClientTransportMode resolvedTransportMode_{ClientTransportMode::Socket};
     CircuitBreaker breaker_;
     std::chrono::milliseconds headerTimeout_{30000}; // 30s default
@@ -237,6 +238,10 @@ public:
     std::atomic<bool> shutting_down_{false}; // Set when DaemonClient is being destroyed
 
     void refresh_transport() {
+        if (transport_) {
+            pool_.reset();
+            return;
+        }
         transportOptions_.socketPath = config_.socketPath;
         transportOptions_.headerTimeout = headerTimeout_;
         transportOptions_.bodyTimeout = bodyTimeout_;
@@ -452,10 +457,11 @@ static std::filesystem::path deriveMainSocketFromProxy(const std::filesystem::pa
 
 // DaemonClient implementation
 DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_shared<Impl>(config)) {
+    pImpl->transport_ = config.transport;
     pImpl->resolvedTransportMode_ = resolve_transport_mode(pImpl->config_);
     pImpl->config_.transportMode = pImpl->resolvedTransportMode_;
 
-    if (pImpl->resolvedTransportMode_ == ClientTransportMode::InProcess) {
+    if (pImpl->resolvedTransportMode_ == ClientTransportMode::InProcess && !pImpl->transport_) {
         spdlog::warn(
             "In-process daemon transport is not available in the socket-only daemon client; "
             "falling back to socket transport");
@@ -733,6 +739,10 @@ static bool shouldRetryViaMainSocket(const Error& err) {
 boost::asio::awaitable<Result<void>> DaemonClient::connect() {
     // Capture shared_ptr to extend Impl lifetime across co_await suspension points
     auto impl = pImpl;
+    if (impl->transport_) {
+        impl->explicitly_disconnected_ = false;
+        co_return Result<void>();
+    }
     // Async variant using adapter's connect helper and timers; avoids blocking sleeps
     // If daemon is not reachable and autoStart is disabled, surface a failure.
     const auto socketPath = impl->config_.socketPath.empty()
@@ -898,6 +908,9 @@ bool DaemonClient::isConnected() const {
     // If explicitly disconnected, return false until reconnect
     if (pImpl->explicitly_disconnected_) {
         return false;
+    }
+    if (pImpl->transport_) {
+        return true;
     }
     // Treat connectivity as liveness of the daemon (socket + ping), not a persistent socket
     constexpr auto kHealthyTtl = std::chrono::seconds(2);
@@ -1085,6 +1098,9 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(const Request
     if (!impl || impl->isShuttingDown()) {
         co_return Error{ErrorCode::InvalidState, "DaemonClient is shutting down"};
     }
+    if (impl->transport_) {
+        co_return co_await impl->transport_->send_request(Request{req});
+    }
     const auto selectedSocket = selectSocketPathForRequest(impl->config_, ownedReq);
     spdlog::debug("DaemonClient::sendRequest: [{}] streaming={} sock='{}'",
                   getRequestName(ownedReq), false, selectedSocket.string());
@@ -1133,6 +1149,9 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(Request&& req
     auto impl = pImpl;
     if (!impl || impl->isShuttingDown()) {
         co_return Error{ErrorCode::InvalidState, "DaemonClient is shutting down"};
+    }
+    if (impl->transport_) {
+        co_return co_await impl->transport_->send_request(std::move(req));
     }
     const auto type = getRequestName(req);
     const auto selectedSocket = selectSocketPathForRequest(impl->config_, req);
@@ -1650,6 +1669,11 @@ DaemonClient::sendRequestStreaming(const Request& req,
     };
     auto onError = [handler](const Error& e) { handler->onError(e); };
     auto onComplete = [handler]() { handler->onComplete(); };
+
+    if (impl->transport_) {
+        co_return co_await impl->transport_->send_request_streaming(std::move(ownedReq), onHeader,
+                                                                    onChunk, onError, onComplete);
+    }
 
     // Use request-type-aware timeout without shortening configured limits
     auto opts = impl->transportOptions_;

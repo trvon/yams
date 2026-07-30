@@ -53,6 +53,7 @@ template <typename... Args> inline void error(const char*, Args&&...) {}
 #include <yams/core/types.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
+#include <yams/daemon/client/in_process_transport.h>
 #include <yams/daemon/client/ipc_failure.h>
 #include <yams/daemon/client/sandbox_detection.h>
 #include <yams/daemon/ipc/response_of.hpp>
@@ -703,7 +704,7 @@ inline bool operator==(const yams::daemon::ClientConfig& lhs,
            lhs.singleUseConnections == rhs.singleUseConnections &&
            lhs.disableStreamingForLargeQueries == rhs.disableStreamingForLargeQueries &&
            lhs.acceptCompressed == rhs.acceptCompressed && lhs.transportMode == rhs.transportMode &&
-           executorsEqual;
+           lhs.transport == rhs.transport && executorsEqual;
 }
 
 inline bool operator!=(const yams::daemon::ClientConfig& lhs,
@@ -1078,6 +1079,15 @@ inline Result<CliDaemonClientPlan> prepare_cli_daemon_client_plan(
         }
     }
 
+    if (plan.resolvedMode == yams::daemon::ClientTransportMode::InProcess &&
+        !plan.config.transport) {
+        auto transport = yams::daemon::makeInProcessTransport(plan.config.dataDir);
+        if (!transport) {
+            return transport.error();
+        }
+        plan.config.transport = std::move(transport.value());
+    }
+
     detail::cli_perf_trace("daemon_plan.ready",
                            std::chrono::duration_cast<std::chrono::microseconds>(
                                std::chrono::steady_clock::now() - start),
@@ -1092,6 +1102,7 @@ apply_cli_daemon_plan_to_retrieval_options(const CliDaemonClientPlan& plan,
     opts.transportMode = plan.resolvedMode;
     opts.autoStart = plan.config.autoStart;
     opts.executor = plan.config.executor;
+    opts.transport = plan.config.transport;
     if (!plan.config.socketPath.empty()) {
         opts.socketPath = plan.config.socketPath;
     }
