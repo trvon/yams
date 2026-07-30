@@ -571,12 +571,6 @@ ConfigMigrator::getLatestConfigDefaults() {
               {"idle_timeout_s", "300"},
               {"validate_on_acquire", "true"}}},
 
-            {"daemon.client",
-             {{"use_daemon", "true"},
-              {"fallback_to_local", "true"},
-              {"max_retries", "3"},
-              {"batch_size", "32"}}},
-
             {"daemon.graph_prune",
              {{"enabled", "false"},
               {"keep_latest", "3"},
@@ -777,7 +771,6 @@ Result<void> ConfigMigrator::writeTomlConfig(
                                              "daemon.instrumentation",
                                              "daemon.models",
                                              "daemon.resource_pool",
-                                             "daemon.client",
                                              "daemon.graph_prune",
                                              "cli.streaming",
                                              "cli.pool",

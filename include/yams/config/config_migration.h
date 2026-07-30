@@ -422,13 +422,6 @@ struct ConfigLatest {
             bool validate_on_acquire = true; // Validate session health
         } resource_pool;
 
-        // Embedding client behavior
-        struct Client {
-            bool use_daemon = true;        // Try daemon first
-            bool fallback_to_local = true; // Fallback if daemon fails
-            size_t max_retries = 3;
-            int batch_size = 32; // Batch embedding requests
-        } client;
     } daemon;
 
     // Experimental features
