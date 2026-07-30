@@ -10,7 +10,7 @@ maintained_plugins:
     license: GPL-3.0-or-later
 
   - name: yams-ghidra-plugin
-    repo: https://github.com/trvon/yams (plugins/yams-ghidra-plugin)
+    repo: https://github.com/trvon/yams-ghidra-plugin
     transport: external
     interfaces: [ghidra_analysis_v1]
     status: prototype

@@ -1,6 +1,3 @@
-[submodule "plugins/yams-ghidra-plugin"]
-	path = plugins/yams-ghidra-plugin
-	url = https://github.com/trvon/yams-ghidra-plugin.git
 [submodule "homebrew-yams"]
 	path = homebrew-yams
   	url = https://github.com/trvon/homebrew-yams.git
@@ -10,9 +7,6 @@
 [submodule "external/yams-repo"]
 	path = external/yams-repo
 	url = https://github.com/trvon/yams-repo.git
-[submodule "external/yams-sdk"]
-	path = external/yams-sdk
- 	url = https://git.sr.ht/~trvon/yams-sdk
 [submodule "plugins/zyp/zpdf"]
 	path = plugins/zyp/zpdf
 	url = https://github.com/trvon/zpdf

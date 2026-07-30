@@ -8,7 +8,6 @@ compile_commands.json
 # Vendored/generated/heavy surfaces
 third_party/
 external/
-plugins/yams-ghidra-plugin/
 .artifacts/
 .wrangler/
 .claude/
