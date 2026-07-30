@@ -476,6 +476,7 @@ RequestDispatcher::handleGraphImpactRequest(const GraphImpactRequest& req) {
     }
     app::services::GraphImpactRequest serviceReq;
     serviceReq.symbol = req.symbol;
+    serviceReq.scopePathPrefix = req.scopePathPrefix;
     serviceReq.depth = static_cast<std::size_t>(req.depth);
     serviceReq.budget.maxSymbols = static_cast<std::size_t>(req.maxSymbols);
 

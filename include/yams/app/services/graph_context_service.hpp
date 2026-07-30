@@ -140,6 +140,7 @@ struct GraphTraceResponse {
 
 struct GraphImpactRequest {
     std::string symbol;
+    std::string scopePathPrefix;
     std::size_t depth{2};
     GraphContextBudget budget{};
 };

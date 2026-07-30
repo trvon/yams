@@ -2630,13 +2630,14 @@ struct GraphTraceRequest {
 
 struct GraphImpactRequest {
     std::string symbol;
+    std::string scopePathPrefix;
     uint64_t depth{2};
     uint64_t maxSymbols{32};
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
-        ser << symbol << depth << maxSymbols;
+        ser << symbol << depth << maxSymbols << scopePathPrefix;
     }
 
     template <typename Deserializer>
@@ -2653,6 +2654,10 @@ struct GraphImpactRequest {
             return r.error();
         if (auto r = deser.template read<uint64_t>(); r)
             req.maxSymbols = r.value();
+        else
+            return r.error();
+        if (auto r = deser.readString(); r)
+            req.scopePathPrefix = std::move(r.value());
         else
             return r.error();
         return req;

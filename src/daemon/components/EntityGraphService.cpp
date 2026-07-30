@@ -910,7 +910,11 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
         };
 
         auto makeUnresolvedSymbolNodeKey = [&](const std::string& symbolText) {
-            return std::string("symbol_ref:") + normalizeSymbolRefKey(symbolText);
+            std::string nodeKey = "symbol_ref:" + normalizeSymbolRefKey(symbolText);
+            if (!batch->sourceFile.empty()) {
+                nodeKey += "@" + batch->sourceFile;
+            }
+            return nodeKey;
         };
 
         for (size_t i = 0; i < result->relation_count; ++i) {

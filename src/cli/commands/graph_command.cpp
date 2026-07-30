@@ -176,7 +176,7 @@ public:
                           "Scope list/topology results under CWD; --explore is scoped by default");
         auto* globalExplore =
             cmd->add_flag("--global", globalExplore_,
-                          "Allow --explore results outside the current working directory");
+                          "Allow --explore/--impact results outside the current working directory");
         scopeCwd->excludes(globalExplore);
         globalExplore->excludes(scopeCwd);
 
@@ -1335,6 +1335,9 @@ private:
             }
             app::services::GraphImpactRequest req;
             req.symbol = impactSymbol_;
+            if (!globalExplore_) {
+                req.scopePathPrefix = invocationCwd_.lexically_normal().generic_string();
+            }
             req.depth = static_cast<std::size_t>(depth_);
             auto result = service->impact(req);
             if (!result) {
@@ -1357,6 +1360,9 @@ private:
 
         daemon::GraphImpactRequest req;
         req.symbol = impactSymbol_;
+        if (!globalExplore_) {
+            req.scopePathPrefix = invocationCwd_.lexically_normal().generic_string();
+        }
         req.depth = static_cast<uint64_t>(depth_);
         auto result = co_await client.call(req);
         if (!result) {

@@ -742,6 +742,57 @@ TEST_CASE("GraphContextService impact finds reverse dependents", "[services][gra
     CHECK_FALSE(result.value().relationships.empty());
 }
 
+TEST_CASE("GraphContextService impact scopes seeds and traversal before result budgets",
+          "[services][graph][context][scope]") {
+    GraphContextServiceFixture fixture;
+    const auto localCalleePath =
+        fixture.writeSource("repo/src/callee.cpp", {"int callee() { return 1; }"});
+    const auto localCallerPath =
+        fixture.writeSource("repo/src/caller.cpp", {"int caller() { return callee(); }"});
+    const auto foreignCalleePath =
+        fixture.writeSource("other/src/callee.cpp", {"int callee() { return 2; }"});
+    const auto foreignCallerPath =
+        fixture.writeSource("other/src/caller.cpp", {"int caller() { return callee(); }"});
+
+    const auto localCallee = fixture.symbol(localCalleePath, "callee", "local::callee", 1, 1);
+    const auto localCaller = fixture.symbol(localCallerPath, "caller", "local::caller", 1, 1);
+    const auto foreignCallee = fixture.symbol(foreignCalleePath, "callee", "foreign::callee", 1, 1);
+    const auto foreignCaller = fixture.symbol(foreignCallerPath, "caller", "foreign::caller", 1, 1);
+    fixture.upsertSymbols({localCallee, localCaller, foreignCallee, foreignCaller});
+
+    const auto localCalleeId = fixture.upsertNodeFor(localCallee);
+    const auto localCallerId = fixture.upsertNodeFor(localCaller);
+    const auto foreignCalleeId = fixture.upsertNodeFor(foreignCallee);
+    const auto foreignCallerId = fixture.upsertNodeFor(foreignCaller);
+
+    KGEdge localEdge;
+    localEdge.srcNodeId = localCallerId;
+    localEdge.dstNodeId = localCalleeId;
+    localEdge.relation = "calls";
+    REQUIRE((fixture.kgStore->addEdge(localEdge).has_value()));
+
+    KGEdge foreignEdge;
+    foreignEdge.srcNodeId = foreignCallerId;
+    foreignEdge.dstNodeId = foreignCalleeId;
+    foreignEdge.relation = "calls";
+    REQUIRE((fixture.kgStore->addEdge(foreignEdge).has_value()));
+
+    auto service = makeGraphContextService(fixture.kgStore, fixture.metadataRepo);
+    REQUIRE((service != nullptr));
+
+    GraphImpactRequest req;
+    req.symbol = "callee";
+    req.scopePathPrefix = localCalleePath.parent_path().parent_path().string();
+    req.budget.maxSymbols = 1;
+    auto result = service->impact(req);
+    REQUIRE((result.has_value()));
+    REQUIRE((result.value().affectedSymbols.size() == 1));
+    CHECK((result.value().affectedSymbols.front().filePath == localCallerPath.string()));
+    REQUIRE((result.value().relationships.size() == 1));
+    CHECK((result.value().relationships.front().sourceNodeKey.find(localCallerPath.string()) !=
+           std::string::npos));
+}
+
 TEST_CASE("GraphContextService impact finds callers through symbol_reference placeholders",
           "[services][graph][context]") {
     // Mirrors the real KG topology: cross-file callers emit

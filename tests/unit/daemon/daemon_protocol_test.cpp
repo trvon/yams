@@ -829,6 +829,20 @@ TEST_CASE("GraphExploreRequest appends optional binary fields",
     CHECK_FALSE(decoded.value().includeTests);
 }
 
+TEST_CASE("GraphImpactRequest encodes repository scope", "[daemon][protocol][serialization]") {
+    GraphImpactRequest request;
+    request.symbol = "RequestHandler";
+    request.scopePathPrefix = "/workspace/yams";
+
+    RecordingRequestSerializer serializer;
+    request.serialize(serializer);
+
+    CHECK((serializer.fieldOrder == "suus"));
+    REQUIRE((serializer.strings.size() == 2));
+    CHECK((serializer.strings.front() == "RequestHandler"));
+    CHECK((serializer.strings.back() == "/workspace/yams"));
+}
+
 TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serialization]") {
     SECTION("CatRequest") {
         CatRequest cr;
@@ -1231,6 +1245,28 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         CHECK_FALSE(got->includeRelationships);
         CHECK_FALSE(got->includeCode);
         CHECK(got->includeTests);
+        CHECK(got->scopePathPrefix == "/workspace/yams");
+    }
+
+    SECTION("GraphImpactRequest roundtrips repository scope") {
+        GraphImpactRequest req;
+        req.symbol = "RequestHandler";
+        req.depth = 3;
+        req.maxSymbols = 17;
+        req.scopePathPrefix = "/workspace/yams";
+
+        auto enc = ProtoSerializer::encode_payload(makeMessageWith(Request{req}, 25));
+        REQUIRE(enc);
+
+        auto dec = ProtoSerializer::decode_payload(enc.value());
+        REQUIRE(dec);
+        REQUIRE(std::holds_alternative<Request>(dec.value().payload));
+
+        auto* got = std::get_if<GraphImpactRequest>(&std::get<Request>(dec.value().payload));
+        REQUIRE(got != nullptr);
+        CHECK(got->symbol == req.symbol);
+        CHECK(got->depth == 3);
+        CHECK(got->maxSymbols == 17);
         CHECK(got->scopePathPrefix == "/workspace/yams");
     }
 }

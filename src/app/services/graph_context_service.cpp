@@ -295,6 +295,22 @@ std::optional<std::int32_t> tryExtractIntProperty(const metadata::KGNode& node,
     }
 }
 
+bool nodeWithinScope(const metadata::KGNode& node, std::string_view scopePathPrefix) {
+    if (scopePathPrefix.empty()) {
+        return true;
+    }
+    if (const auto filePath = tryExtractStringProperty(node, "file_path")) {
+        return pathWithinScope(*filePath, scopePathPrefix);
+    }
+    if (const auto sourceFile = tryExtractStringProperty(node, "source_file")) {
+        return pathWithinScope(*sourceFile, scopePathPrefix);
+    }
+    if (const auto sourcePath = metadata::sourcePathFromNodeKey(node.nodeKey)) {
+        return pathWithinScope(*sourcePath, scopePathPrefix);
+    }
+    return false;
+}
+
 std::optional<std::string> filePathFromNodeKey(std::string_view nodeKey) {
     auto at = nodeKey.rfind('@');
     if (at == std::string_view::npos || at + 1 >= nodeKey.size()) {
@@ -341,6 +357,9 @@ GraphContextSymbol makeContextSymbol(const metadata::KGNode& node, const std::st
     out.qualifiedName = qualifiedName.value_or(out.label);
 
     auto filePath = tryExtractStringProperty(node, "file_path");
+    if (!filePath.has_value()) {
+        filePath = tryExtractStringProperty(node, "source_file");
+    }
     if (!filePath.has_value()) {
         filePath = filePathFromNodeKey(node.nodeKey);
     }
@@ -934,8 +953,8 @@ public:
             return Error{ErrorCode::InvalidArgument, "graph impact requires a symbol"};
         }
 
-        auto entry =
-            resolveEntrySymbols(req.symbol, std::nullopt, std::nullopt, req.budget.maxSymbols);
+        auto entry = resolveEntrySymbols(req.symbol, std::nullopt, std::nullopt,
+                                         req.budget.maxSymbols, req.scopePathPrefix);
         if (!entry) {
             return entry.error();
         }
@@ -944,8 +963,8 @@ public:
         std::unordered_set<std::int64_t> seedSeen;
         // Seed from the literal query name first: callers reference the call-site surface form
         // (`symbol_ref:<name>`), which does not always match the substring-resolved definition.
-        if (auto r =
-                collectCallTargetNodeIds(simpleNameOf(req.symbol), req.symbol, seedSeen, seedIds);
+        if (auto r = collectCallTargetNodeIds(simpleNameOf(req.symbol), req.symbol, seedSeen,
+                                              seedIds, req.scopePathPrefix);
             !r) {
             return r.error();
         }
@@ -957,7 +976,8 @@ public:
             if (id.value().has_value() && seedSeen.insert(*id.value()).second) {
                 seedIds.push_back(*id.value());
             }
-            if (auto r = collectCallTargetNodeIds(sym.label, sym.qualifiedName, seedSeen, seedIds);
+            if (auto r = collectCallTargetNodeIds(sym.label, sym.qualifiedName, seedSeen, seedIds,
+                                                  req.scopePathPrefix);
                 !r) {
                 return r.error();
             }
@@ -971,7 +991,7 @@ public:
         std::vector<metadata::KGNode> affected;
         const auto depth = std::clamp<std::size_t>(req.depth == 0 ? 2 : req.depth, 1, 5);
         if (auto r = collectReverseDependents(seedIds, depth, req.budget.maxSymbols, affected,
-                                              response.relationships);
+                                              response.relationships, req.scopePathPrefix);
             !r) {
             return r.error();
         }
@@ -1427,7 +1447,8 @@ private:
 
     Result<std::vector<GraphContextSymbol>>
     resolveEntrySymbols(const std::string& name, const std::optional<std::string>& file,
-                        std::optional<std::int32_t> line, std::size_t limit) {
+                        std::optional<std::int32_t> line, std::size_t limit,
+                        std::string_view scopePathPrefix = {}) {
         YAMS_ZONE_SCOPED_N("graph_context::resolveEntrySymbols");
         std::vector<GraphContextSymbol> out;
         std::unordered_set<std::string> seen;
@@ -1437,6 +1458,9 @@ private:
             return byName.error();
         }
         for (const auto& sym : byName.value()) {
+            if (!pathWithinScope(sym.filePath, scopePathPrefix)) {
+                continue;
+            }
             if (file.has_value() && sym.filePath.find(*file) == std::string::npos) {
                 continue;
             }
@@ -1456,6 +1480,9 @@ private:
                 return fallback.error();
             }
             out = std::move(fallback.value());
+            std::erase_if(out, [&](const auto& symbol) {
+                return !pathWithinScope(symbol.filePath, scopePathPrefix);
+            });
         }
         std::stable_sort(out.begin(), out.end(), [](const auto& lhs, const auto& rhs) {
             if (lhs.score != rhs.score) {
@@ -1495,7 +1522,8 @@ private:
     Result<void> collectCallTargetNodeIds(const std::string& simpleName,
                                           const std::string& qualifiedName,
                                           std::unordered_set<std::int64_t>& seedSet,
-                                          std::vector<std::int64_t>& seedIds) {
+                                          std::vector<std::int64_t>& seedIds,
+                                          std::string_view scopePathPrefix = {}) {
         if (simpleName.empty()) {
             return Result<void>();
         }
@@ -1507,6 +1535,9 @@ private:
         const auto lowerQualified = lowerAscii(qualifiedName);
         const auto suffix = "::" + lowerSimple;
         for (const auto& node : matches.value()) {
+            if (!nodeWithinScope(node, scopePathPrefix)) {
+                continue;
+            }
             const auto& type = node.type;
             const bool callTargetType = type == "symbol_reference" || type == "function" ||
                                         type == "method" || type == "function_version" ||
@@ -1534,6 +1565,14 @@ private:
                     kgStore_->getEdgesTo(node.id, std::string_view("resolves_to"), 64, 0);
                 if (resolved) {
                     for (const auto& edge : resolved.value()) {
+                        auto placeholder = kgStore_->getNodeById(edge.srcNodeId);
+                        if (!placeholder) {
+                            return placeholder.error();
+                        }
+                        if (!placeholder.value().has_value() ||
+                            !nodeWithinScope(*placeholder.value(), scopePathPrefix)) {
+                            continue;
+                        }
                         if (seedSet.insert(edge.srcNodeId).second) {
                             seedIds.push_back(edge.srcNodeId);
                         }
@@ -1547,7 +1586,8 @@ private:
     Result<void> collectReverseDependents(const std::vector<std::int64_t>& seedIds,
                                           std::size_t depth, std::size_t maxNodes,
                                           std::vector<metadata::KGNode>& affectedNodes,
-                                          std::vector<GraphContextRelation>& relationships) {
+                                          std::vector<GraphContextRelation>& relationships,
+                                          std::string_view scopePathPrefix = {}) {
         YAMS_ZONE_SCOPED_N("graph_context::collectReverseDependents");
         if (seedIds.empty() || depth == 0 || maxNodes == 0) {
             return Result<void>();
@@ -1575,6 +1615,14 @@ private:
                     if (!relations.contains(metadata::normalizeRelationName(edge.relation))) {
                         continue;
                     }
+                    auto sourceNode = kgStore_->getNodeById(edge.srcNodeId);
+                    if (!sourceNode) {
+                        return sourceNode.error();
+                    }
+                    if (!sourceNode.value().has_value() ||
+                        !nodeWithinScope(*sourceNode.value(), scopePathPrefix)) {
+                        continue;
+                    }
                     keptEdges.push_back(edge);
                     const auto srcId = edge.srcNodeId;
                     if (!visited.contains(srcId) && discovered.size() < maxNodes) {
@@ -1597,8 +1645,8 @@ private:
                     const auto simple = node.label.value_or(std::string{});
                     const auto qualified =
                         tryExtractStringProperty(node, "qualified_name").value_or(simple);
-                    if (auto r =
-                            collectCallTargetNodeIds(simple, qualified, bridgeSeen, nextFrontier);
+                    if (auto r = collectCallTargetNodeIds(simple, qualified, bridgeSeen,
+                                                          nextFrontier, scopePathPrefix);
                         !r) {
                         return r.error();
                     }

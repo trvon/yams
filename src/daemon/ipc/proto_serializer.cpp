@@ -3238,6 +3238,7 @@ template <> struct ProtoBinding<GraphImpactRequest> {
         o->set_symbol(r.symbol);
         o->set_depth(r.depth);
         o->set_max_symbols(r.maxSymbols);
+        o->set_scope_path_prefix(r.scopePathPrefix);
     }
     static GraphImpactRequest get(const Envelope& env) {
         const auto& i = env.graph_impact_request();
@@ -3245,6 +3246,7 @@ template <> struct ProtoBinding<GraphImpactRequest> {
         r.symbol = i.symbol();
         r.depth = i.depth();
         r.maxSymbols = i.max_symbols();
+        r.scopePathPrefix = i.scope_path_prefix();
         return r;
     }
 };

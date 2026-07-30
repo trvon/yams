@@ -1087,6 +1087,7 @@ message GraphImpactRequest {
   string symbol = 1;
   uint64 depth = 2;
   uint64 max_symbols = 3;
+  string scope_path_prefix = 4;
 }
 
 message GraphImpactResponse {

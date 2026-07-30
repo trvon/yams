@@ -234,8 +234,11 @@ void createGraphExploreFixture(const fs::path& root) {
                                        "int exploreEntry() {\n"
                                        "    return exploreTarget();\n"
                                        "}\n");
-    yams::test::write_file(foreignSourcePath, "int exploreEntry() {\n"
+    yams::test::write_file(foreignSourcePath, "int exploreTarget() {\n"
                                               "    return 99;\n"
+                                              "}\n"
+                                              "int exploreEntry() {\n"
+                                              "    return exploreTarget();\n"
                                               "}\n");
 
     const fs::path dbPath = dataDir / "yams.db";
@@ -261,9 +264,12 @@ void createGraphExploreFixture(const fs::path& root) {
     auto entry = makeSymbol(sourcePath, "explore-hash", "exploreEntry", "demo::exploreEntry", 4, 6);
     auto target =
         makeSymbol(sourcePath, "explore-hash", "exploreTarget", "demo::exploreTarget", 1, 3);
+    auto foreignTarget = makeSymbol(foreignSourcePath, "foreign-explore-hash", "exploreTarget",
+                                    "foreign::exploreTarget", 1, 3);
     auto foreignEntry = makeSymbol(foreignSourcePath, "foreign-explore-hash", "exploreEntry",
-                                   "foreign::exploreEntry", 1, 3);
-    REQUIRE(kgStore->upsertSymbolMetadata({entry, target, foreignEntry}).has_value());
+                                   "foreign::exploreEntry", 4, 6);
+    REQUIRE(
+        kgStore->upsertSymbolMetadata({entry, target, foreignEntry, foreignTarget}).has_value());
 
     KGNode entryNode;
     entryNode.nodeKey = symbolNodeKey(entry);
@@ -285,6 +291,27 @@ void createGraphExploreFixture(const fs::path& root) {
     edge.relation = "call";
     edge.weight = 1.0F;
     REQUIRE(kgStore->addEdge(edge).has_value());
+
+    KGNode foreignEntryNode;
+    foreignEntryNode.nodeKey = symbolNodeKey(foreignEntry);
+    foreignEntryNode.label = foreignEntry.symbolName;
+    foreignEntryNode.type = foreignEntry.kind;
+    const auto foreignEntryId = kgStore->upsertNode(foreignEntryNode);
+    REQUIRE(foreignEntryId.has_value());
+
+    KGNode foreignTargetNode;
+    foreignTargetNode.nodeKey = symbolNodeKey(foreignTarget);
+    foreignTargetNode.label = foreignTarget.symbolName;
+    foreignTargetNode.type = foreignTarget.kind;
+    const auto foreignTargetId = kgStore->upsertNode(foreignTargetNode);
+    REQUIRE(foreignTargetId.has_value());
+
+    KGEdge foreignEdge;
+    foreignEdge.srcNodeId = foreignEntryId.value();
+    foreignEdge.dstNodeId = foreignTargetId.value();
+    foreignEdge.relation = "call";
+    foreignEdge.weight = 1.0F;
+    REQUIRE(kgStore->addEdge(foreignEdge).has_value());
 
     kgStore.reset();
     repository.reset();
@@ -399,6 +426,24 @@ TEST_CASE("IntegrationSmoke.GraphExploreRendersAgentContext", "[smoke][integrati
     REQUIRE((globalRc == 0));
     const auto global = nlohmann::json::parse(globalOut);
     CHECK((global["entrySymbols"].size() == 2));
+
+    std::string impactOut;
+    const int impactRc =
+        run_cli({"yams", "graph", "--impact", "exploreTarget", "--json"}, &impactOut);
+    INFO(impactOut);
+    REQUIRE((impactRc == 0));
+    const auto impact = nlohmann::json::parse(impactOut);
+    REQUIRE((impact["affectedSymbols"].size() == 1));
+    CHECK((impact["affectedSymbols"][0]["filePath"] ==
+           (root / "repo" / "src" / "explore.cpp").string()));
+
+    std::string globalImpactOut;
+    const int globalImpactRc = run_cli(
+        {"yams", "graph", "--impact", "exploreTarget", "--global", "--json"}, &globalImpactOut);
+    INFO(globalImpactOut);
+    REQUIRE((globalImpactRc == 0));
+    const auto globalImpact = nlohmann::json::parse(globalImpactOut);
+    CHECK((globalImpact["affectedSymbols"].size() == 2));
 }
 
 TEST_CASE("IntegrationSmoke.GraphTopologyModesReadStoredSnapshot", "[smoke][integrationsmoke]") {
