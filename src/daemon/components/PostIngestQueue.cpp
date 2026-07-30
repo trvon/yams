@@ -963,7 +963,7 @@ PressureLimitedPollerConfig<Job> PostIngestQueue::makePollerConfig(
     std::function<std::string(const Job&)> getHash,
     std::shared_ptr<boost::asio::steady_timer> wakeTimer) {
     const auto index = static_cast<std::size_t>(stage);
-    PressureLimitedPollerConfig<Job> cfg;
+    PressureLimitedPollerConfig<Job> cfg{};
     cfg.stageName = std::move(stageName);
     cfg.stopFlag = &stop_;
     cfg.startedFlag = &stageStarted_[index];
@@ -1714,15 +1714,7 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
     job.contentBytes = std::move(contentBytes);
     job.enqueuedAt = std::chrono::steady_clock::now();
 
-    // Prefer non-blocking fast-path to avoid stalling extraction under load.
-    if (channel->try_push(std::move(job))) {
-        InternalEventBus::instance().incKgQueued();
-        TuningManager::notifyWakeup();
-        signalWakeTimer(Stage::KnowledgeGraph);
-        return;
-    }
-
-    // If the channel is briefly full during bulk ingest, wait only a short time.
+    // push_wait attempts an immediate non-blocking push before applying bounded backoff.
     static constexpr auto kEnqueueTimeout = std::chrono::milliseconds(10);
     if (!channel->push_wait(std::move(job), kEnqueueTimeout)) {
         const auto n = InternalEventBus::instance().kgDropped();

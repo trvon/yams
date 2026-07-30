@@ -144,6 +144,22 @@ TEST_CASE("PostIngestQueue Stage enum values", "[daemon][post-ingest][catch2]") 
     CHECK(static_cast<uint8_t>(PostIngestQueue::Stage::Title) == 4);
 }
 
+TEST_CASE("SpscQueue failed rvalue push preserves the value for retry",
+          "[daemon][post-ingest][queue][catch2]") {
+    SpscQueue<std::string> queue(2);
+    REQUIRE(queue.try_push(std::string{"occupied"}));
+
+    std::string retry = "preserved";
+    CHECK_FALSE(queue.try_push(std::move(retry)));
+    CHECK(retry == "preserved");
+
+    std::string popped;
+    REQUIRE(queue.try_pop(popped));
+    REQUIRE(queue.push_wait(std::move(retry), 1ms));
+    REQUIRE(queue.try_pop(popped));
+    CHECK(popped == "preserved");
+}
+
 // ============================================================================
 // LruCache with integer keys
 // ============================================================================
