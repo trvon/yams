@@ -24,32 +24,32 @@ namespace yams::storage {
 
 namespace {
 
-std::string trim(std::string value) {
+std::string trim(std::string_view value) {
     const auto first = value.find_first_not_of(" \t\r\n");
     if (first == std::string::npos) {
         return {};
     }
     const auto last = value.find_last_not_of(" \t\r\n");
-    return value.substr(first, last - first + 1);
+    return std::string(value.substr(first, last - first + 1));
 }
 
 std::string toLower(std::string value) {
     return yams::common::asciiToLowerCopy(std::move(value));
 }
 
-std::string expandTilde(std::string value) {
+std::string expandTilde(std::string_view value) {
     if (value.empty() || value.front() != '~') {
-        return value;
+        return std::string(value);
     }
     const char* home = std::getenv("HOME");
     if (!home || !*home) {
-        return value;
+        return std::string(value);
     }
-    return std::string(home) + value.substr(1);
+    return std::string(home) + std::string(value.substr(1));
 }
 
 std::string normalizeS3Endpoint(std::string endpoint) {
-    endpoint = trim(std::move(endpoint));
+    endpoint = trim(endpoint);
     if (endpoint.empty()) {
         return endpoint;
     }
@@ -97,7 +97,7 @@ std::optional<std::string> parseS3BucketFromUrl(std::string_view url) {
     }
     const auto slash = rest.find('/');
     std::string bucket = (slash == std::string::npos) ? rest : rest.substr(0, slash);
-    bucket = trim(std::move(bucket));
+    bucket = trim(bucket);
     if (bucket.empty()) {
         return std::nullopt;
     }
@@ -105,7 +105,7 @@ std::optional<std::string> parseS3BucketFromUrl(std::string_view url) {
 }
 
 std::string stripBearerPrefix(std::string value) {
-    value = trim(std::move(value));
+    value = trim(value);
     if (value.size() >= 7) {
         std::string prefix = toLower(value.substr(0, 7));
         if (prefix == "bearer ") {
@@ -309,7 +309,7 @@ requestR2TemporaryCredentials(const std::string& accountId, const std::string& b
 }
 
 bool parseBool(std::string raw) {
-    raw = toLower(trim(std::move(raw)));
+    raw = toLower(trim(raw));
     return raw == "1" || raw == "true" || raw == "yes" || raw == "on";
 }
 
@@ -323,7 +323,7 @@ std::map<std::string, std::string> parseSimpleToml(const std::filesystem::path& 
     std::string line;
     std::string currentSection;
     while (std::getline(file, line)) {
-        line = trim(std::move(line));
+        line = trim(line);
         if (line.empty() || line[0] == '#') {
             continue;
         }
@@ -408,7 +408,7 @@ Result<std::string> loadCloudflareApiTokenFromKeychain(std::string_view accountI
         SecKeychainItemFreeContent(nullptr, passwordData);
     }
 
-    token = trim(std::move(token));
+    token = trim(token);
     if (token.empty()) {
         return Error{ErrorCode::InvalidData,
                      "Keychain token entry is empty for account id " + accountId};
@@ -524,7 +524,7 @@ bool isCloudflareR2EndpointHost(std::string_view endpointHost) {
 }
 
 std::optional<RemoteFallbackPolicy> parseRemoteFallbackPolicy(std::string value) {
-    value = toLower(trim(std::move(value)));
+    value = toLower(trim(value));
     if (value.empty() || value == "strict") {
         return RemoteFallbackPolicy::Strict;
     }
@@ -567,7 +567,7 @@ resolveStorageBootstrapDecision(const std::filesystem::path& configPath,
     decision.fallbackPolicy = *fallbackPolicy;
 
     std::string fallbackRaw = getOrDefault(cfg, "storage.s3.fallback_local_data_dir", "");
-    fallbackRaw = expandTilde(std::move(fallbackRaw));
+    fallbackRaw = expandTilde(fallbackRaw);
     if (!fallbackRaw.empty()) {
         decision.fallbackLocalDataDir = std::filesystem::path(fallbackRaw);
     }
@@ -648,7 +648,7 @@ resolveStorageBootstrapDecision(const std::filesystem::path& configPath,
 
         std::string accountId = getOrDefault(cfg, "storage.s3.r2.account_id",
                                              getOrDefault(cfg, "storage.s3.r2_account_id", ""));
-        accountId = trim(std::move(accountId));
+        accountId = trim(accountId);
         const std::string endpointAccountId = extractCloudflareR2AccountId(endpointHost);
         if (!accountId.empty() && !endpointAccountId.empty() && accountId != endpointAccountId) {
             return failWithOrFallback(
@@ -687,7 +687,7 @@ resolveStorageBootstrapDecision(const std::filesystem::path& configPath,
                                           keychainToken.error().message);
             }
         }
-        apiToken = trim(std::move(apiToken));
+        apiToken = trim(apiToken);
         if (apiToken.empty()) {
             return failWithOrFallback(
                 "storage.s3.r2.auth_mode is 'temp_credentials' but no API token is configured "
@@ -698,7 +698,7 @@ resolveStorageBootstrapDecision(const std::filesystem::path& configPath,
         std::string parentAccessKeyId =
             getOrDefault(cfg, "storage.s3.r2.parent_access_key_id",
                          getOrDefault(cfg, "storage.s3.r2_parent_access_key_id", ""));
-        parentAccessKeyId = trim(std::move(parentAccessKeyId));
+        parentAccessKeyId = trim(parentAccessKeyId);
         if (parentAccessKeyId.empty()) {
             auto parentId = resolveCloudflareTokenId(accountId, apiToken);
             if (!parentId) {
@@ -723,7 +723,7 @@ resolveStorageBootstrapDecision(const std::filesystem::path& configPath,
 
         std::string ttlRaw = getOrDefault(cfg, "storage.s3.r2.ttl_seconds",
                                           getOrDefault(cfg, "storage.s3.r2_ttl_seconds", "3600"));
-        ttlRaw = trim(std::move(ttlRaw));
+        ttlRaw = trim(ttlRaw);
         if (ttlRaw.empty()) {
             ttlRaw = "3600";
         }
