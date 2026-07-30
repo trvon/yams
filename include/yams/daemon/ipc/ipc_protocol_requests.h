@@ -2273,6 +2273,7 @@ struct GraphQueryRequest {
     bool includeEdgeProperties{false};
     bool includeNodeProperties{false};
     bool hydrateFully{true};
+    std::string scopePathPrefix;
 
     template <typename Serializer>
     requires IsSerializer<Serializer>
@@ -2281,7 +2282,7 @@ struct GraphQueryRequest {
             << nodeKey << listTypes << listRelations << searchMode << searchPattern
             << relationFilters << maxDepth << maxResults << maxResultsPerDepth << reverseTraversal
             << isolatedMode << isolatedRelation << scopeToSnapshot << offset << limit
-            << includeEdgeProperties << includeNodeProperties << hydrateFully;
+            << includeEdgeProperties << includeNodeProperties << hydrateFully << scopePathPrefix;
     }
 
     template <typename Deserializer>
@@ -2411,6 +2412,10 @@ struct GraphQueryRequest {
             req.hydrateFully = r.value();
         else
             return r.error();
+
+        // Appended for compatibility with clients predating daemon-owned list scoping.
+        if (auto r = deser.readString(); r)
+            req.scopePathPrefix = std::move(r.value());
 
         return req;
     }

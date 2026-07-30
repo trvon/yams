@@ -36,6 +36,7 @@ struct GraphListByTypeQueryOptions {
     std::size_t limit{100};
     std::size_t offset{0};
     bool verbose{false};
+    std::string scopePathPrefix;
 };
 
 struct DocumentGraphLookupOptions {

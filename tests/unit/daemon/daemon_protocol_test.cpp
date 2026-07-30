@@ -1269,6 +1269,26 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         CHECK(got->maxSymbols == 17);
         CHECK(got->scopePathPrefix == "/workspace/yams");
     }
+
+    SECTION("GraphQueryRequest roundtrips list scope") {
+        GraphQueryRequest req;
+        req.listByType = true;
+        req.nodeType = "function";
+        req.scopePathPrefix = "/workspace/yams";
+
+        auto enc = ProtoSerializer::encode_payload(makeMessageWith(Request{req}, 26));
+        REQUIRE(enc);
+
+        auto dec = ProtoSerializer::decode_payload(enc.value());
+        REQUIRE(dec);
+        REQUIRE(std::holds_alternative<Request>(dec.value().payload));
+
+        auto* got = std::get_if<GraphQueryRequest>(&std::get<Request>(dec.value().payload));
+        REQUIRE(got != nullptr);
+        CHECK(got->listByType);
+        CHECK(got->nodeType == "function");
+        CHECK(got->scopePathPrefix == "/workspace/yams");
+    }
 }
 
 TEST_CASE("ProtoSerializer: Response roundtrip", "[daemon][protocol][serialization]") {

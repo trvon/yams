@@ -2662,6 +2662,7 @@ template <> struct ProtoBinding<GraphQueryRequest> {
         o->set_include_edge_properties(r.includeEdgeProperties);
         o->set_include_node_properties(r.includeNodeProperties);
         o->set_hydrate_fully(r.hydrateFully);
+        o->set_scope_path_prefix(r.scopePathPrefix);
     }
     static GraphQueryRequest get(const Envelope& env) {
         const auto& i = env.graph_query_request();
@@ -2690,6 +2691,7 @@ template <> struct ProtoBinding<GraphQueryRequest> {
         r.includeEdgeProperties = i.include_edge_properties();
         r.includeNodeProperties = i.include_node_properties();
         r.hydrateFully = i.hydrate_fully();
+        r.scopePathPrefix = i.scope_path_prefix();
         return r;
     }
 };

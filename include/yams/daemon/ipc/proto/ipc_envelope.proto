@@ -922,6 +922,7 @@ message GraphQueryRequest {
   bool include_edge_properties = 15;
   bool include_node_properties = 16;
   bool hydrate_fully = 17;
+  string scope_path_prefix = 25;
   string session_id = 99;
 }
 
