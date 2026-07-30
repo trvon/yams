@@ -49,12 +49,8 @@ public:
                            const CompleteCallback& onComplete) override;
 
 public:
-    // Toggle FSM metrics and snapshot logging for transport observability
+    // Toggle FSM metrics for transport observability.
     void enableFsmMetrics(bool on) noexcept { fsm_.enable_metrics(on); }
-    void enableFsmSnapshots(bool on) noexcept { fsm_.enable_snapshots(on); }
-    void debugDumpFsmSnapshots(std::size_t maxEntries = 10) const noexcept {
-        fsm_.debug_dump_snapshots(maxEntries);
-    }
 
 private:
     // Multiplexing: per-socket connection shared across requests
