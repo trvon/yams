@@ -70,6 +70,8 @@ struct ServiceManagerFixture {
         config_.socketPath = testDir_ / "daemon.sock";
         config_.pidFile = testDir_ / "daemon.pid";
         config_.logFile = testDir_ / "daemon.log";
+        config_.autoLoadPlugins = false;
+        config_.enableAutoRepair = false;
         fs::create_directories(config_.dataDir);
     }
 
@@ -108,6 +110,12 @@ bool waitForCondition(std::chrono::milliseconds timeout, const std::function<boo
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
     return predicate();
+}
+
+bool waitForCoreServices(ServiceManager& services,
+                         std::chrono::seconds timeout = std::chrono::seconds(30)) {
+    return services.waitForServiceManagerTerminalState(static_cast<int>(timeout.count())).state ==
+           ServiceManagerState::Ready;
 }
 
 template <typename VectorDbPtr>
@@ -301,29 +309,20 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
-    // Wait for async initialization to settle before reading optional subsystem pointers.
-    auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE((smSnap.state == ServiceManagerState::Ready));
+    REQUIRE(waitForCoreServices(*sm));
 
-    // Async init can race this test; wait briefly for repo availability.
+    REQUIRE(waitForCondition(std::chrono::seconds(30),
+                             [&] { return sm->getMetadataRepo() != nullptr; }));
     auto meta = sm->getMetadataRepo();
-    for (int i = 0; i < 100 && meta == nullptr; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        meta = sm->getMetadataRepo();
-    }
     REQUIRE((meta != nullptr));
 
     // PostIngestQueue is started asynchronously and can consume tasks quickly.
     // Pause it to make channel assertions deterministic.
+    REQUIRE(waitForCondition(std::chrono::seconds(30),
+                             [&] { return sm->getPostIngestQueue() != nullptr; }));
     auto piq = sm->getPostIngestQueue();
-    for (int i = 0; i < 200 && piq == nullptr; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        piq = sm->getPostIngestQueue();
-    }
     REQUIRE((piq != nullptr));
-    for (int i = 0; i < 200 && !piq->started(); ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    REQUIRE(waitForCondition(std::chrono::seconds(30), [&] { return piq->started(); }));
     REQUIRE((piq->started()));
     piq->pauseAll();
 
@@ -400,14 +399,11 @@ TEST_CASE_METHOD(
     REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
-    auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE((smSnap.state == ServiceManagerState::Ready));
+    REQUIRE(waitForCoreServices(*sm));
 
+    REQUIRE(waitForCondition(std::chrono::seconds(30),
+                             [&] { return sm->getMetadataRepo() != nullptr; }));
     auto meta = sm->getMetadataRepo();
-    for (int i = 0; i < 100 && meta == nullptr; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        meta = sm->getMetadataRepo();
-    }
     REQUIRE((meta != nullptr));
 
     metadata::DocumentInfo canonical{};
@@ -493,25 +489,9 @@ TEST_CASE_METHOD(
 
 TEST_CASE_METHOD(ServiceManagerFixture, "RepairService: stop waits for in-flight executeRepair",
                  "[daemon][repair][shutdown][regression]") {
-    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",
-                                            std::optional<std::string>{"1"});
-    yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB",
-                                             std::optional<std::string>{"1"});
-    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING",
-                                              std::optional<std::string>{"1"});
-    yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
-                                                std::optional<std::string>{"1"});
-
-    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
-    REQUIRE((sm->initialize()));
-    sm->startAsyncInit();
-
-    auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE((smSnap.state == ServiceManagerState::Ready));
-
     RepairService::Config cfg;
     cfg.enable = true;
-    RepairService repair(sm.get(), &state_, []() -> size_t { return 0; }, cfg);
+    RepairService repair(RepairServiceContext{}, &state_, []() -> size_t { return 0; }, cfg);
     repair.start();
 
     std::mutex progressMutex;
@@ -566,8 +546,6 @@ TEST_CASE_METHOD(ServiceManagerFixture, "RepairService: stop waits for in-flight
 
     CHECK(stopReturned.load(std::memory_order_acquire));
     CHECK(repairCompleted.load(std::memory_order_acquire));
-
-    sm->shutdown();
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture,
@@ -829,21 +807,18 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
-    auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE((smSnap.state == ServiceManagerState::Ready));
+    REQUIRE(waitForCoreServices(*sm));
 
+    REQUIRE(waitForCondition(std::chrono::seconds(30),
+                             [&] { return sm->getMetadataRepo() != nullptr; }));
     auto meta = sm->getMetadataRepo();
     REQUIRE((meta != nullptr));
 
+    REQUIRE(waitForCondition(std::chrono::seconds(30),
+                             [&] { return sm->getPostIngestQueue() != nullptr; }));
     auto piq = sm->getPostIngestQueue();
-    for (int i = 0; i < 200 && piq == nullptr; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        piq = sm->getPostIngestQueue();
-    }
     REQUIRE((piq != nullptr));
-    for (int i = 0; i < 200 && !piq->started(); ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    REQUIRE(waitForCondition(std::chrono::seconds(30), [&] { return piq->started(); }));
     REQUIRE((piq->started()));
     piq->pauseAll();
 
@@ -977,21 +952,18 @@ TEST_CASE_METHOD(
     REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
-    auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE((smSnap.state == ServiceManagerState::Ready));
+    REQUIRE(waitForCoreServices(*sm));
 
+    REQUIRE(waitForCondition(std::chrono::seconds(30),
+                             [&] { return sm->getMetadataRepo() != nullptr; }));
     auto meta = sm->getMetadataRepo();
     REQUIRE((meta != nullptr));
 
+    REQUIRE(waitForCondition(std::chrono::seconds(30),
+                             [&] { return sm->getPostIngestQueue() != nullptr; }));
     auto piq = sm->getPostIngestQueue();
-    for (int i = 0; i < 200 && piq == nullptr; ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-        piq = sm->getPostIngestQueue();
-    }
     REQUIRE((piq != nullptr));
-    for (int i = 0; i < 200 && !piq->started(); ++i) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
+    REQUIRE(waitForCondition(std::chrono::seconds(30), [&] { return piq->started(); }));
     REQUIRE((piq->started()));
     piq->pauseAll();
 
@@ -1101,8 +1073,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
-    auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE((smSnap.state == ServiceManagerState::Ready));
+    REQUIRE(waitForCoreServices(*sm));
 
     auto meta = sm->getMetadataRepo();
     auto vectorDb = sm->getVectorDatabase();
@@ -1223,8 +1194,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
-    auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE((smSnap.state == ServiceManagerState::Ready));
+    REQUIRE(waitForCoreServices(*sm));
 
     auto meta = sm->getMetadataRepo();
     auto vectorDb = sm->getVectorDatabase();
@@ -1318,8 +1288,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
-    auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE((smSnap.state == ServiceManagerState::Ready));
+    REQUIRE(waitForCoreServices(*sm));
 
     auto meta = sm->getMetadataRepo();
     auto vectorDb = sm->getVectorDatabase();
@@ -1470,8 +1439,9 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
-    auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE((smSnap.state == ServiceManagerState::Ready));
+    REQUIRE(waitForCoreServices(*sm));
+    REQUIRE(
+        waitForCondition(std::chrono::seconds(30), [&] { return sm->getKgStore() != nullptr; }));
 
     auto meta = sm->getMetadataRepo();
     auto kgStore = sm->getKgStore();
@@ -1636,8 +1606,9 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
-    auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE((smSnap.state == ServiceManagerState::Ready));
+    REQUIRE(waitForCoreServices(*sm));
+    REQUIRE(
+        waitForCondition(std::chrono::seconds(30), [&] { return sm->getKgStore() != nullptr; }));
 
     auto meta = sm->getMetadataRepo();
     auto kgStore = sm->getKgStore();
@@ -1751,8 +1722,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
-    auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE((smSnap.state == ServiceManagerState::Ready));
+    REQUIRE(waitForCoreServices(*sm));
 
     auto meta = sm->getMetadataRepo();
     REQUIRE((meta != nullptr));
@@ -1812,8 +1782,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
-    auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE((smSnap.state == ServiceManagerState::Ready));
+    REQUIRE(waitForCoreServices(*sm));
 
     auto meta = sm->getMetadataRepo();
     REQUIRE((meta != nullptr));
@@ -1884,8 +1853,7 @@ TEST_CASE_METHOD(
     REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
-    auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE((smSnap.state == ServiceManagerState::Ready));
+    REQUIRE(waitForCoreServices(*sm));
 
     auto meta = sm->getMetadataRepo();
     auto store = sm->getContentStore();
@@ -1975,8 +1943,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
-    auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE((smSnap.state == ServiceManagerState::Ready));
+    REQUIRE(waitForCoreServices(*sm));
 
     auto meta = sm->getMetadataRepo();
     REQUIRE((meta != nullptr));
@@ -2052,8 +2019,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     REQUIRE((sm->initialize()));
     sm->startAsyncInit();
 
-    auto smSnap = sm->waitForServiceManagerTerminalState(30);
-    REQUIRE((smSnap.state == ServiceManagerState::Ready));
+    REQUIRE(waitForCoreServices(*sm));
 
     auto meta = sm->getMetadataRepo();
     auto store = sm->getContentStore();

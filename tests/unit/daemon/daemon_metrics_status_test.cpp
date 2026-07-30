@@ -5925,39 +5925,41 @@ TEST_CASE("RequestDispatcher: collection handlers report missing dependencies an
         std::string relativePath;
     };
 
+    struct ReadyCollectionService {
+        std::shared_ptr<metadata::ConnectionPool> pool;
+        std::shared_ptr<metadata::MetadataRepository> metadata;
+        std::shared_ptr<StubContentStore> content;
+        std::shared_ptr<ServiceManager> manager;
+    };
+
     auto makeReadyService = [&](StateComponent& readyState, DaemonLifecycleFsm& readyLifecycleFsm,
                                 const std::string& prefix) {
-        ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS", "1");
-        ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB", "1");
-        ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING", "1");
-        ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE", "1");
-
         DaemonConfig readyCfg = cfg;
         readyCfg.dataDir = makeTempDir(prefix);
 
-        auto readySvc = std::make_shared<ServiceManager>(readyCfg, readyState, readyLifecycleFsm);
-        auto initResult = readySvc->initialize();
-        REQUIRE(initResult.has_value());
+        metadata::ConnectionPoolConfig poolConfig{};
+        auto pool = std::make_shared<metadata::ConnectionPool>(
+            makeTempMetadataDbPath(prefix + "db_").string(), poolConfig);
+        REQUIRE(pool->initialize().has_value());
 
-        readySvc->startAsyncInit();
-        auto serviceSnap = readySvc->waitForServiceManagerTerminalState(30);
-        REQUIRE(serviceSnap.state == ServiceManagerState::Ready);
-        REQUIRE(readySvc->getMetadataRepo() != nullptr);
-        REQUIRE(readySvc->getContentStore() != nullptr);
-
-        return readySvc;
+        ReadyCollectionService ready{
+            .pool = pool,
+            .metadata = makeReadyMetadataRepo(pool),
+            .content = std::make_shared<StubContentStore>(),
+            .manager = std::make_shared<ServiceManager>(readyCfg, readyState, readyLifecycleFsm),
+        };
+        ready.manager->__test_setMetadataRepo(ready.metadata);
+        ready.manager->__test_setContentStore(ready.content);
+        readyState.readiness.metadataRepoReady.store(true, std::memory_order_relaxed);
+        readyState.readiness.contentStoreReady.store(true, std::memory_order_relaxed);
+        return ready;
     };
 
-    auto seedDocument = [&](const std::shared_ptr<ServiceManager>& readySvc,
-                            const std::string& relativePath, const std::string& text,
-                            const std::string& collectionName, const std::string& snapshotId) {
-        auto meta = readySvc->getMetadataRepo();
-        auto store = readySvc->getContentStore();
-        REQUIRE(meta != nullptr);
-        REQUIRE(store != nullptr);
-
+    auto seedDocument = [&](const ReadyCollectionService& ready, const std::string& relativePath,
+                            const std::string& text, const std::string& collectionName,
+                            const std::string& snapshotId) {
         const auto textBytes = std::as_bytes(std::span<const char>(text.data(), text.size()));
-        auto storeRes = store->storeBytes(textBytes);
+        auto storeRes = ready.content->storeBytes(textBytes, {});
         REQUIRE(storeRes.has_value());
 
         std::filesystem::path relativeDocPath(relativePath);
@@ -5979,12 +5981,14 @@ TEST_CASE("RequestDispatcher: collection handlers report missing dependencies an
         doc.modifiedTime = now;
         doc.indexedTime = now;
 
-        auto idRes = meta->insertDocument(doc);
+        auto idRes = ready.metadata->insertDocument(doc);
         REQUIRE(idRes.has_value());
         REQUIRE(
-            meta->setMetadata(idRes.value(), "collection", metadata::MetadataValue(collectionName))
+            ready.metadata
+                ->setMetadata(idRes.value(), "collection", metadata::MetadataValue(collectionName))
                 .has_value());
-        REQUIRE(meta->setMetadata(idRes.value(), "snapshot_id", metadata::MetadataValue(snapshotId))
+        REQUIRE(ready.metadata
+                    ->setMetadata(idRes.value(), "snapshot_id", metadata::MetadataValue(snapshotId))
                     .has_value());
 
         return SeededDocument{idRes.value(), storeRes.value().contentHash, relativePath};
@@ -6160,13 +6164,13 @@ TEST_CASE("RequestDispatcher: collection handlers report missing dependencies an
         StubLifecycle readyLifecycle;
         StateComponent readyState;
         DaemonLifecycleFsm readyLifecycleFsm;
-        auto readySvc =
+        auto ready =
             makeReadyService(readyState, readyLifecycleFsm, "yams_collections_live_dispatcher_");
-        RequestDispatcher readyDispatcher(&readyLifecycle, readySvc.get(), &readyState);
+        RequestDispatcher readyDispatcher(&readyLifecycle, ready.manager.get(), &readyState);
 
         const std::string collectionName = "dispatcher-live-collection";
         const std::string snapshotId = "dispatcher-live-snapshot";
-        const auto seeded = seedDocument(readySvc, "nested/alpha.txt", "alpha collection text\n",
+        const auto seeded = seedDocument(ready, "nested/alpha.txt", "alpha collection text\n",
                                          collectionName, snapshotId);
 
         auto includeOut = makeTempDir("yams_collection_include_");
@@ -6312,21 +6316,19 @@ TEST_CASE("RequestDispatcher: collection handlers report missing dependencies an
         CHECK(writeFailed.filesRestored == 0);
         CHECK(writeFailed.files.front().skipped);
         CHECK(writeFailed.files.front().skipReason == "Failed to write file content");
-
-        readySvc->shutdown();
     }
 
     SECTION("restore snapshot exercises regex, layout, and io branches") {
         StubLifecycle readyLifecycle;
         StateComponent readyState;
         DaemonLifecycleFsm readyLifecycleFsm;
-        auto readySvc =
+        auto ready =
             makeReadyService(readyState, readyLifecycleFsm, "yams_snapshots_live_dispatcher_");
-        RequestDispatcher readyDispatcher(&readyLifecycle, readySvc.get(), &readyState);
+        RequestDispatcher readyDispatcher(&readyLifecycle, ready.manager.get(), &readyState);
 
         const std::string collectionName = "dispatcher-live-collection";
         const std::string snapshotId = "dispatcher-live-snapshot";
-        const auto seeded = seedDocument(readySvc, "nested/alpha.txt", "alpha snapshot text\n",
+        const auto seeded = seedDocument(ready, "nested/alpha.txt", "alpha snapshot text\n",
                                          collectionName, snapshotId);
 
         auto defaultOut = makeTempDir("yams_snapshot_default_");
@@ -6459,8 +6461,6 @@ TEST_CASE("RequestDispatcher: collection handlers report missing dependencies an
         CHECK(writeFailed.filesRestored == 0);
         CHECK(writeFailed.files.front().skipped);
         CHECK(writeFailed.files.front().skipReason == "Failed to write file content");
-
-        readySvc->shutdown();
     }
 }
 

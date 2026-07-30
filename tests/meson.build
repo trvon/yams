@@ -2844,6 +2844,7 @@ if catch2_dep.found()
       'YAMS_SQLITE_VEC_SKIP_INIT': '1',
       'YAMS_DISABLE_VECTORS': '1',
       'YAMS_DISABLE_VECTOR_DB': '1',
+      'YAMS_DISABLE_SESSION_WATCHER': '1',
       'YAMS_SKIP_MODEL_LOADING': '1',
       'YAMS_TESTING': '1',
     },
