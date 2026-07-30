@@ -185,27 +185,6 @@ bool waitForSearchEngineReady(std::chrono::milliseconds timeout) {
     return false;
 }
 
-bool waitForVectorDbReady(std::chrono::milliseconds timeout) {
-    auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        auto status = cli::run_sync(g_client->status(), std::chrono::seconds(5));
-        if (status) {
-            const auto& st = status.value();
-            // Prefer readinessStates["vector_db"] (canonical) but keep compatibility with
-            // vectorDbReady field.
-            bool ready = st.vectorDbReady;
-            if (auto it = st.readinessStates.find("vector_db"); it != st.readinessStates.end()) {
-                ready = it->second;
-            }
-            if (ready) {
-                return true;
-            }
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    }
-    return false;
-}
-
 bool waitForVectorDbInitialized(std::chrono::milliseconds timeout) {
     auto deadline = std::chrono::steady_clock::now() + timeout;
     auto nextLog = std::chrono::steady_clock::now();

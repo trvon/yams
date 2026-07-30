@@ -15,9 +15,9 @@
 #include <memory>
 #include <random>
 #include <thread>
+#include "../../common/test_helpers_catch2.h"
 #include "test_async_helpers.h"
 #include "test_daemon_harness.h"
-#include "../../common/test_helpers_catch2.h"
 #include <catch2/catch_session.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <yams/compat/unistd.h>
@@ -200,8 +200,6 @@ public:
     }
 
     const std::filesystem::path& socketPath() const { return sock_; }
-    const std::filesystem::path& dataDir() const { return sharedDataDir_; }
-    const std::string& startError() const { return startError_; }
     YamsDaemon* daemon() const { return daemon_.get(); }
 
 private:

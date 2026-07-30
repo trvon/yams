@@ -329,10 +329,9 @@ Copyright (c) 2025
     }
 
     void populateStageTimingCorpus(std::size_t docCount) {
-        static constexpr const char* kCodeTerms[] = {"parser",   "tokenizer", "scheduler",
-                                                     "allocator", "mutex",    "buffer",
-                                                     "hashmap",  "iterator",  "callback",
-                                                     "socket"};
+        static constexpr const char* kCodeTerms[] = {
+            "parser", "tokenizer", "scheduler", "allocator", "mutex",
+            "buffer", "hashmap",   "iterator",  "callback",  "socket"};
         static constexpr const char* kProseTerms[] = {
             "installation",    "configuration", "indexing",  "retrieval",   "permissions",
             "troubleshooting", "deployment",    "migration", "performance", "tutorial"};
@@ -343,31 +342,29 @@ Copyright (c) 2025
                 const std::string b = kCodeTerms[(idx + 3) % 10];
                 const std::string suffix = std::to_string(i);
                 std::string path = "src/" + a + "/" + b + "_" + suffix + ".cpp";
-                std::string content = "#include <memory>\n#include \"" + a +
-                                      ".hpp\"\n\nclass " + a + "_" + suffix +
-                                      " {\npublic:\n    Result<" + b + "> process_" + b +
-                                      "(const std::string& input);\n    void reset_" + a +
-                                      "();\nprivate:\n    std::shared_ptr<" + b + "> " + b +
-                                      "_;\n    std::mutex " + a + "_mutex_;\n};\n\nResult<" + b +
-                                      "> " + a + "_" + suffix + "::process_" + b +
-                                      "(const std::string& input) {\n    auto handle = acquire_" +
-                                      a + "(input);\n    return dispatch(handle, " + b +
-                                      "_);\n}\n";
+                std::string content =
+                    "#include <memory>\n#include \"" + a + ".hpp\"\n\nclass " + a + "_" + suffix +
+                    " {\npublic:\n    Result<" + b + "> process_" + b +
+                    "(const std::string& input);\n    void reset_" + a +
+                    "();\nprivate:\n    std::shared_ptr<" + b + "> " + b + "_;\n    std::mutex " +
+                    a + "_mutex_;\n};\n\nResult<" + b + "> " + a + "_" + suffix + "::process_" + b +
+                    "(const std::string& input) {\n    auto handle = acquire_" + a +
+                    "(input);\n    return dispatch(handle, " + b + "_);\n}\n";
                 createCodeDocument(path, content, {"cpp", "source", a});
             } else {
                 const std::string a = kProseTerms[idx % 10];
                 const std::string b = kProseTerms[(idx + 7) % 10];
                 const std::string suffix = std::to_string(i);
                 std::string path = "docs/" + a + "/" + b + "_" + suffix + ".md";
-                std::string content =
-                    "# " + a + " guide " + suffix + "\n\nThis section covers " + a +
-                    " and how it interacts with " + b + ".\n\n## Overview\n\nThe " + a +
-                    " workflow requires careful " + b +
-                    " before rollout. Operators should review the " + a +
-                    " checklist and validate " + b +
-                    " settings.\n\n## Steps\n\n1. Prepare the environment for " + a +
-                    ".\n2. Verify " + b + " prerequisites.\n3. Run the " + a +
-                    " procedure and record results.\n";
+                std::string content = "# " + a + " guide " + suffix + "\n\nThis section covers " +
+                                      a + " and how it interacts with " + b +
+                                      ".\n\n## Overview\n\nThe " + a +
+                                      " workflow requires careful " + b +
+                                      " before rollout. Operators should review the " + a +
+                                      " checklist and validate " + b +
+                                      " settings.\n\n## Steps\n\n1. Prepare the environment for " +
+                                      a + ".\n2. Verify " + b + " prerequisites.\n3. Run the " + a +
+                                      " procedure and record results.\n";
                 createDocument(path, content, {"docs", a});
             }
         }
@@ -375,9 +372,6 @@ Copyright (c) 2025
 
     // Access to repository for direct stats queries
     std::shared_ptr<MetadataRepository> metadataRepo() const { return metadataRepo_; }
-
-    // Access to document service
-    std::shared_ptr<IDocumentService> docService() const { return docService_; }
 
 private:
     void setupTestEnvironment() {
@@ -894,8 +888,8 @@ TEST_CASE("search stage latency decomposition", "[.][stage-timing]") {
     }
     const double wallMean = mean(wallMicros);
     out << "\nwall mean (us): " << wallMean << ", wall p95 (us): " << p95(wallMicros)
-        << ", attributed share of wall: "
-        << (wallMean > 0.0 ? 100.0 * meanSum / wallMean : 0.0) << "%\n";
+        << ", attributed share of wall: " << (wallMean > 0.0 ? 100.0 * meanSum / wallMean : 0.0)
+        << "%\n";
     std::cout << out.str() << std::endl;
 }
 
