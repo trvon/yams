@@ -261,7 +261,7 @@ RequestDispatcher::handleGraphQueryRequest(const GraphQueryRequest& req) {
 
     // PBI-093: Handle listByType mode - list nodes by type without traversal
     if (req.listByType) {
-        co_return co_await handleGraphQueryListByType(req, kgStore.get(), metaRepo.get());
+        co_return co_await handleGraphQueryListByType(req, kgStore.get());
     }
 
     // Handle isolated mode - find nodes with no incoming edges (optimized single query)
@@ -524,8 +524,7 @@ RequestDispatcher::handleGraphAffectedTestsRequest(const GraphAffectedTestsReque
 // PBI-093: Helper for listByType mode - list KG nodes by type without traversal
 boost::asio::awaitable<Response>
 RequestDispatcher::handleGraphQueryListByType(const GraphQueryRequest& req,
-                                              KnowledgeGraphStore* kgStore,
-                                              metadata::MetadataRepository* metadataRepo) {
+                                              KnowledgeGraphStore* kgStore) {
     spdlog::debug("GraphQuery listByType: type='{}', limit={}, offset={}", req.nodeType, req.limit,
                   req.offset);
 
@@ -536,7 +535,13 @@ RequestDispatcher::handleGraphQueryListByType(const GraphQueryRequest& req,
 
     GraphQueryResponse resp;
     resp.kgAvailable = true;
-    auto totalCount = kgStore->countNodesByType(req.nodeType);
+    const auto scopedRanges = req.scopePathPrefix.empty()
+                                  ? std::vector<metadata::KGPathRange>{}
+                                  : app::services::buildGraphCodeScopePathRanges(
+                                        std::filesystem::path(req.scopePathPrefix));
+    auto totalCount = scopedRanges.empty()
+                          ? kgStore->countNodesByType(req.nodeType)
+                          : kgStore->countNodesByTypeInPathRanges(req.nodeType, scopedRanges);
     if (!totalCount) {
         co_return dispatch::makeErrorResponse(totalCount.error().code, totalCount.error().message);
     }
@@ -548,7 +553,7 @@ RequestDispatcher::handleGraphQueryListByType(const GraphQueryRequest& req,
     }
     const auto totalNodeCount = static_cast<std::size_t>(totalCount.value());
     std::vector<metadata::KGNode> nodes;
-    if (req.scopePathPrefix.empty()) {
+    if (scopedRanges.empty()) {
         auto nodesResult = kgStore->findNodesByType(req.nodeType, req.limit, req.offset);
         if (!nodesResult) {
             co_return dispatch::makeErrorResponse(nodesResult.error().code,
@@ -559,29 +564,16 @@ RequestDispatcher::handleGraphQueryListByType(const GraphQueryRequest& req,
         const auto returnedThrough = static_cast<std::uint64_t>(req.offset) + nodes.size();
         resp.truncated = returnedThrough < resp.totalNodesFound;
     } else {
-        auto allNodesResult = kgStore->findNodesByType(req.nodeType, totalNodeCount, 0);
-        if (!allNodesResult) {
-            co_return dispatch::makeErrorResponse(allNodesResult.error().code,
-                                                  allNodesResult.error().message);
+        auto nodesResult =
+            kgStore->findNodesByTypeInPathRanges(req.nodeType, scopedRanges, req.limit, req.offset);
+        if (!nodesResult) {
+            co_return dispatch::makeErrorResponse(nodesResult.error().code,
+                                                  nodesResult.error().message);
         }
-        auto scopedPaths = app::services::buildGraphCodeScopePathSet(
-            std::filesystem::path(req.scopePathPrefix), *metadataRepo);
-        if (!scopedPaths) {
-            co_return dispatch::makeErrorResponse(scopedPaths.error().code,
-                                                  scopedPaths.error().message);
-        }
-        auto scopedNodes = app::services::filterGraphNodesToPathSet(
-            std::move(allNodesResult.value()), scopedPaths.value(), req.scopePathPrefix);
-        resp.totalNodesFound = static_cast<std::uint64_t>(scopedNodes.size());
-
-        const auto begin = std::min<std::size_t>(req.offset, scopedNodes.size());
-        const auto count = std::min<std::size_t>(req.limit, scopedNodes.size() - begin);
-        const auto end = begin + count;
-        nodes.reserve(count);
-        std::move(scopedNodes.begin() + static_cast<std::ptrdiff_t>(begin),
-                  scopedNodes.begin() + static_cast<std::ptrdiff_t>(end),
-                  std::back_inserter(nodes));
-        resp.truncated = end < scopedNodes.size();
+        nodes = std::move(nodesResult.value());
+        resp.totalNodesFound = static_cast<uint64_t>(totalNodeCount);
+        const auto returnedThrough = static_cast<std::uint64_t>(req.offset) + nodes.size();
+        resp.truncated = returnedThrough < resp.totalNodesFound;
     }
     resp.maxDepthReached = 0;
 

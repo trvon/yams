@@ -2,56 +2,21 @@
 
 #include <yams/core/magic_numbers.hpp>
 #include <yams/metadata/metadata_repository.h>
-#include <yams/metadata/node_key_utils.h>
 #include <yams/metadata/path_utils.h>
 
-#include <nlohmann/json.hpp>
-
-#include <optional>
-#include <string_view>
+#include <algorithm>
 
 namespace yams::app::services {
 
 namespace {
 
-std::optional<std::filesystem::path> extractGraphNodePath(const metadata::KGNode& node) {
-    constexpr std::pair<std::string_view, std::size_t> kPathPrefixes[] = {
-        {"path:file:", 10},
-        {"path:dir:", 9},
-        {"path:logical:", 13},
-    };
-    for (const auto& [prefix, offset] : kPathPrefixes) {
-        if (node.nodeKey.starts_with(prefix)) {
-            return std::filesystem::path(node.nodeKey.substr(offset));
-        }
+metadata::KGPathRange directoryRange(std::string path) {
+    if (!path.ends_with('/')) {
+        path.push_back('/');
     }
-    if (node.nodeKey.starts_with("path:")) {
-        if (const auto timestampEnd = node.nodeKey.find("Z:", 5);
-            timestampEnd != std::string::npos && timestampEnd + 2 < node.nodeKey.size()) {
-            return std::filesystem::path(node.nodeKey.substr(timestampEnd + 2));
-        }
-        if (const auto separator = node.nodeKey.find(':', 5);
-            separator != std::string::npos && separator + 1 < node.nodeKey.size()) {
-            return std::filesystem::path(node.nodeKey.substr(separator + 1));
-        }
-    }
-    if (const auto sourcePath = metadata::sourcePathFromNodeKey(node.nodeKey)) {
-        return std::filesystem::path(*sourcePath);
-    }
-    if (!node.properties.has_value()) {
-        return std::nullopt;
-    }
-    try {
-        const auto properties = nlohmann::json::parse(*node.properties);
-        for (const char* key : {"file_path", "path", "document_path"}) {
-            if (const auto it = properties.find(key); it != properties.end() && it->is_string()) {
-                return std::filesystem::path(it->get<std::string>());
-            }
-        }
-    } catch (...) {
-        return std::nullopt;
-    }
-    return std::nullopt;
+    auto upper = path;
+    ++upper.back();
+    return {.lower = std::move(path), .upper = std::move(upper)};
 }
 
 bool shouldPruneGraphPath(std::string_view path) {
@@ -78,6 +43,26 @@ std::string normalizeGraphScopePath(const std::filesystem::path& path,
         .normalizedPath;
 }
 
+std::vector<metadata::KGPathRange>
+buildGraphCodeScopePathRanges(const std::filesystem::path& scopeRoot) {
+    std::vector<metadata::KGPathRange> ranges;
+    ranges.reserve(4);
+    for (const auto* directory : {"src", "include"}) {
+        const auto lexicalPath = (scopeRoot / directory).lexically_normal().generic_string();
+        const auto canonicalPath = normalizeGraphScopePath(scopeRoot / directory, scopeRoot);
+        for (const auto& path : {lexicalPath, canonicalPath}) {
+            auto range = directoryRange(path);
+            const auto duplicate = std::ranges::any_of(ranges, [&](const auto& existing) {
+                return existing.lower == range.lower && existing.upper == range.upper;
+            });
+            if (!duplicate) {
+                ranges.push_back(std::move(range));
+            }
+        }
+    }
+    return ranges;
+}
+
 Result<std::unordered_set<std::string>>
 buildGraphCodeScopePathSet(const std::filesystem::path& scopeRoot,
                            metadata::IMetadataRepository& repo) {
@@ -101,24 +86,6 @@ buildGraphCodeScopePathSet(const std::filesystem::path& scopeRoot,
         }
     }
     return paths;
-}
-
-std::vector<metadata::KGNode>
-filterGraphNodesToPathSet(std::vector<metadata::KGNode> nodes,
-                          const std::unordered_set<std::string>& scopedPaths,
-                          const std::filesystem::path& scopeRoot) {
-    std::vector<metadata::KGNode> filtered;
-    filtered.reserve(nodes.size());
-    for (auto& node : nodes) {
-        const auto path = extractGraphNodePath(node);
-        if (!path.has_value()) {
-            continue;
-        }
-        if (scopedPaths.contains(normalizeGraphScopePath(*path, scopeRoot))) {
-            filtered.push_back(std::move(node));
-        }
-    }
-    return filtered;
 }
 
 } // namespace yams::app::services

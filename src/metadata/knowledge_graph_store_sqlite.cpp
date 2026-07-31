@@ -165,6 +165,50 @@ KGNode hydrateKgNodeRow(const Statement& stmt) {
     return node;
 }
 
+std::string buildKgPathRangePredicate(std::size_t rangeCount) {
+    constexpr auto kFilePath = "CASE WHEN properties IS NOT NULL AND json_valid(properties) "
+                               "THEN json_extract(properties, '$.file_path') END";
+    constexpr auto kSourceFile = "CASE WHEN properties IS NOT NULL AND json_valid(properties) "
+                                 "THEN json_extract(properties, '$.source_file') END";
+
+    std::string predicate{"("};
+    const char* separator = "";
+    for (std::size_t i = 0; i < rangeCount; ++i) {
+        predicate += separator;
+        separator = " OR ";
+        predicate += "(";
+        predicate += kFilePath;
+        predicate += " >= ? AND ";
+        predicate += kFilePath;
+        predicate += " < ?) OR (";
+        predicate += kSourceFile;
+        predicate += " >= ? AND ";
+        predicate += kSourceFile;
+        predicate += " < ?) OR (node_key >= ? AND node_key < ?) OR "
+                     "(node_key >= ? AND node_key < ?) OR (node_key >= ? AND node_key < ?) OR "
+                     "(instr(node_key, '@' || ?) > 0)";
+    }
+    predicate += ")";
+    return predicate;
+}
+
+Result<int> bindKgPathRanges(Statement& stmt, int firstIndex,
+                             const std::vector<KGPathRange>& ranges) {
+    auto index = firstIndex;
+    for (const auto& range : ranges) {
+        for (const auto& value :
+             {range.lower, range.upper, range.lower, range.upper, "path:file:" + range.lower,
+              "path:file:" + range.upper, "path:dir:" + range.lower, "path:dir:" + range.upper,
+              "path:logical:" + range.lower, "path:logical:" + range.upper, range.lower}) {
+            auto bindResult = stmt.bind(index++, value);
+            if (!bindResult) {
+                return bindResult.error();
+            }
+        }
+    }
+    return index;
+}
+
 Result<std::int64_t> selectKgNodeIdByKey(Database& db, std::string_view nodeKey) {
     auto stmtResult = db.prepare("SELECT id FROM kg_nodes WHERE node_key = ? LIMIT 1");
     if (!stmtResult) {
@@ -499,6 +543,95 @@ public:
             if (!step.value())
                 return static_cast<std::size_t>(0);
             return static_cast<std::size_t>(stmt.getInt64(0));
+        });
+    }
+
+    Result<std::vector<KGNode>> findNodesByTypeInPathRanges(std::string_view type,
+                                                            const std::vector<KGPathRange>& ranges,
+                                                            std::size_t limit,
+                                                            std::size_t offset) override {
+        if (ranges.empty()) {
+            return std::vector<KGNode>{};
+        }
+        return readPool()->withConnection([&](Database& db) -> Result<std::vector<KGNode>> {
+            std::string sql = "SELECT ";
+            sql += kKgNodeSelectProjection;
+            sql += " FROM kg_nodes WHERE type = ? AND ";
+            sql += buildKgPathRangePredicate(ranges.size());
+            sql += " ORDER BY id LIMIT ? OFFSET ?";
+            auto stmtResult = db.prepare(sql);
+            if (!stmtResult) {
+                return stmtResult.error();
+            }
+            auto stmt = std::move(stmtResult).value();
+            auto bindResult = stmt.bind(1, type);
+            if (!bindResult) {
+                return bindResult.error();
+            }
+            auto nextIndex = bindKgPathRanges(stmt, 2, ranges);
+            if (!nextIndex) {
+                return nextIndex.error();
+            }
+            bindResult = stmt.bind(nextIndex.value(), static_cast<std::int64_t>(limit));
+            if (!bindResult) {
+                return bindResult.error();
+            }
+            bindResult = stmt.bind(nextIndex.value() + 1, static_cast<std::int64_t>(offset));
+            if (!bindResult) {
+                return bindResult.error();
+            }
+
+            std::vector<KGNode> nodes;
+            while (true) {
+                auto stepResult = stmt.step();
+                if (!stepResult) {
+                    return stepResult.error();
+                }
+                if (!stepResult.value()) {
+                    break;
+                }
+                nodes.push_back(hydrateKgNodeRow(stmt));
+            }
+            return nodes;
+        });
+    }
+
+    Result<std::size_t>
+    countNodesByTypeInPathRanges(std::string_view type,
+                                 const std::vector<KGPathRange>& ranges) override {
+        if (ranges.empty()) {
+            return std::size_t{0};
+        }
+        return readPool()->withConnection([&](Database& db) -> Result<std::size_t> {
+            std::string sql = "SELECT COUNT(*) FROM kg_nodes WHERE type = ? AND ";
+            sql += buildKgPathRangePredicate(ranges.size());
+            auto stmtResult = db.prepare(sql);
+            if (!stmtResult) {
+                return stmtResult.error();
+            }
+            auto stmt = std::move(stmtResult).value();
+            auto bindResult = stmt.bind(1, type);
+            if (!bindResult) {
+                return bindResult.error();
+            }
+            auto nextIndex = bindKgPathRanges(stmt, 2, ranges);
+            if (!nextIndex) {
+                return nextIndex.error();
+            }
+            auto stepResult = stmt.step();
+            if (!stepResult) {
+                return stepResult.error();
+            }
+            if (!stepResult.value()) {
+                return Error{ErrorCode::DatabaseError, "Scoped graph node count returned no row"};
+            }
+            const auto count = stmt.getInt64(0);
+            if (count < 0 ||
+                static_cast<std::uint64_t>(count) >
+                    static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+                return Error{ErrorCode::InvalidData, "Invalid scoped graph node count"};
+            }
+            return static_cast<std::size_t>(count);
         });
     }
 

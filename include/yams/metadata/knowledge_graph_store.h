@@ -197,6 +197,11 @@ struct DocumentGraphCleanupResult {
     std::int64_t edgesDeleted{0};
 };
 
+struct KGPathRange {
+    std::string lower;
+    std::string upper;
+};
+
 /**
  * KnowledgeGraphStore defines the abstract API for reading/writing the local-first KG.
  * Implementations must be thread-safe for concurrent read access; writes should be serialized.
@@ -277,6 +282,11 @@ public:
     virtual Result<std::vector<KGNode>>
     findNodesByType(std::string_view type, std::size_t limit = 100, std::size_t offset = 0) = 0;
     virtual Result<std::size_t> countNodesByType(std::string_view type) = 0;
+    virtual Result<std::vector<KGNode>>
+    findNodesByTypeInPathRanges(std::string_view type, const std::vector<KGPathRange>& ranges,
+                                std::size_t limit = 100, std::size_t offset = 0) = 0;
+    virtual Result<std::size_t>
+    countNodesByTypeInPathRanges(std::string_view type, const std::vector<KGPathRange>& ranges) = 0;
 
     // Delete node (cascades to aliases/edges/embeddings/doc_entities as per schema)
     virtual Result<void> deleteNodeById(std::int64_t nodeId) = 0;

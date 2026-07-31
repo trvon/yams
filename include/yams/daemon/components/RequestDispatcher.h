@@ -235,8 +235,7 @@ private:
     // PBI-093: Helper for listByType mode
     boost::asio::awaitable<Response>
     handleGraphQueryListByType(const GraphQueryRequest& req,
-                               yams::metadata::KnowledgeGraphStore* kgStore,
-                               yams::metadata::MetadataRepository* metadataRepo);
+                               yams::metadata::KnowledgeGraphStore* kgStore);
     boost::asio::awaitable<Response>
     handleGraphQueryIsolatedMode(const GraphQueryRequest& req,
                                  yams::metadata::KnowledgeGraphStore* kgStore);
