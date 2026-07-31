@@ -11,7 +11,7 @@
 #include <spdlog/spdlog.h>
 
 #include <yams/core/types.h>
-#include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/metadata/db_lock_telemetry.h>
 #include <yams/storage/sqlite_retry.h>
 
 namespace yams::vector {
@@ -61,7 +61,7 @@ Result<void> executeSQL(sqlite3* db, const char* sql) {
         return Error{ErrorCode::DatabaseError, std::move(err)};
     }
 
-    daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
+    metadata::reportDbLockError(); // Signal contention for adaptive scaling
     return Error{ErrorCode::DatabaseError, "Max retries exceeded"};
 }
 

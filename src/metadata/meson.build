@@ -9,6 +9,7 @@ yams_metadata = static_library('yams_metadata',
   [
     'database.cpp',
     'connection_pool.cpp',
+    'db_lock_telemetry.cpp',
     'migration.cpp',
     'metadata_repository.cpp',
     'metadata_insert_writer.cpp',

@@ -28,6 +28,7 @@
 #include <thread>
 #include <yams/daemon/components/RepairTuning.h>
 #include <yams/daemon/components/TuningSnapshot.h>
+#include <yams/metadata/db_lock_telemetry.h>
 
 // Platform-specific includes for memory detection (used by detectSystemMemory)
 // Note: These are only used in the implementation of detectSystemMemory()
@@ -1095,7 +1096,7 @@ public:
             baseBatchSize = *envValue;
 
         // Adaptive scaling: reduce batch size when lock contention is high
-        uint64_t recentErrors = dbLockErrorCount_.load(std::memory_order_relaxed);
+        uint64_t recentErrors = metadata::dbLockErrorCount();
         if (recentErrors > 10) {
             return 1; // Maximum contention: single-document transactions
         } else if (recentErrors > 5) {
@@ -1947,12 +1948,10 @@ public:
         return 5;
     }
     /// Increment DB lock error counter (call this when "database is locked" error occurs)
-    static void reportDbLockError() { dbLockErrorCount_.fetch_add(1, std::memory_order_relaxed); }
+    static void reportDbLockError() { metadata::reportDbLockError(); }
 
     /// Get and reset DB lock error window count (called by TuningManager per tick)
-    static uint64_t getAndResetDbLockErrors() {
-        return dbLockErrorCount_.exchange(0, std::memory_order_relaxed);
-    }
+    static uint64_t getAndResetDbLockErrors() { return metadata::getAndResetDbLockErrors(); }
 
     /// Bulk result struct for postIngestBudgetAll() — avoids 6x redundant computation.
     struct PostIngestBudget {
@@ -2362,9 +2361,6 @@ private:
 
     // ONNX Model Pool overrides
     static inline std::atomic<uint32_t> onnxSessionsPerModelOverride_{0};
-    // DB lock error tracking (rolling window counter)
-    static inline std::atomic<uint64_t> dbLockErrorCount_{0};
-
     // =========================================================================
     // Resource Governor Configuration (Memory Pressure Management)
     // =========================================================================

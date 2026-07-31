@@ -5,7 +5,7 @@
 #include <yams/vector/vector_utils.h>
 
 #include <yams/common/time_utils.h>
-#include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/metadata/db_lock_telemetry.h>
 #include <yams/storage/sqlite_retry.h>
 
 #include "simeon_pq_persistence.h"
@@ -267,7 +267,7 @@ inline bool beginTransactionWithRetry(sqlite3* db) {
                      attempt + 1, retryPolicy.maxRetries);
         break;
     }
-    daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
+    metadata::reportDbLockError(); // Signal contention for adaptive scaling
     return false;
 }
 
@@ -289,7 +289,7 @@ inline bool execWithRetry(sqlite3* db, const char* sql) {
                      attempt + 1, retryPolicy.maxRetries);
         break;
     }
-    daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
+    metadata::reportDbLockError(); // Signal contention for adaptive scaling
     return false;
 }
 
@@ -310,7 +310,7 @@ inline int stepWithRetry(sqlite3_stmt* stmt) {
         }
         return rc; // Non-retryable error
     }
-    daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
+    metadata::reportDbLockError(); // Signal contention for adaptive scaling
     return SQLITE_BUSY;                       // Max retries exceeded
 }
 
@@ -3805,6 +3805,10 @@ private:
             return Result<void>{};
         }
         if (it->second->exact_fallback) {
+            return Result<void>{};
+        }
+        if (it->second->persisted_snapshot &&
+            persistedBackingStoreUnchangedUnlocked(*it->second)) {
             return Result<void>{};
         }
         std::string errorMessage;

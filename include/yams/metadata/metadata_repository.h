@@ -16,9 +16,9 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
+#include <yams/metadata/db_lock_telemetry.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_concepts.h>
 #include <yams/profiling.h>
@@ -1287,7 +1287,7 @@ private:
             if (!isRetryable || attempt == retryPolicy.maxRetries - 1) {
                 // Non-retryable error or final attempt - report and return error
                 if (isLockError) {
-                    daemon::TuneAdvisor::reportDbLockError();
+                    reportDbLockError();
                 }
                 // Always log operation context for constraint errors (helps debugging)
                 auto op = current_metadata_op();
