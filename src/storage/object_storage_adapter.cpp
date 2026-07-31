@@ -256,11 +256,6 @@ static int c_list(void* backend, const char* prefix, char** out_list_json, const
 
 } // namespace
 
-std::shared_ptr<IObjectStorageBackend> wrap_c_abi(yams_object_storage_v1* /*v1_iface*/) {
-    // Not implemented in this slice (out of scope); can be added on demand.
-    return nullptr;
-}
-
 std::pair<yams_object_storage_v1*, void*>
 expose_as_c_abi_with_state(std::shared_ptr<IObjectStorageBackend> impl) {
     if (!impl)
