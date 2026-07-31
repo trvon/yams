@@ -591,16 +591,12 @@ private:
                                                       compression::CompressionHeader::SIZE,
                                                   static_cast<size_t>(header.compressedSize)};
 
-        // Optional compressed CRC check (can be disabled with YAMS_SKIP_DECOMPRESS_CRC)
-        uint32_t actualCRC = 0;
-        if (std::getenv("YAMS_SKIP_DECOMPRESS_CRC") == nullptr) {
-            actualCRC = calculateCRC32(compressedData);
-            if (actualCRC != header.compressedCRC32) {
-                updateStats([](compression::CompressionStats& stats) {
-                    stats.cacheEvictions++; // Using as error counter
-                });
-                return Error(ErrorCode::HashMismatch, "Compressed data CRC mismatch");
-            }
+        const auto compressedCRC = calculateCRC32(compressedData);
+        if (compressedCRC != header.compressedCRC32) {
+            updateStats([](compression::CompressionStats& stats) {
+                stats.cacheEvictions++; // Using as error counter
+            });
+            return Error(ErrorCode::HashMismatch, "Compressed data CRC mismatch");
         }
 
         // Get decompressor
@@ -625,12 +621,9 @@ private:
             return result.error();
         }
 
-        // Optional uncompressed CRC verification (can be disabled with YAMS_SKIP_DECOMPRESS_CRC)
-        if (std::getenv("YAMS_SKIP_DECOMPRESS_CRC") == nullptr) {
-            actualCRC = calculateCRC32(std::span<const std::byte>(result.value()));
-            if (actualCRC != header.uncompressedCRC32) {
-                return Error(ErrorCode::HashMismatch, "Decompressed data CRC mismatch");
-            }
+        const auto uncompressedCRC = calculateCRC32(std::span<const std::byte>(result.value()));
+        if (uncompressedCRC != header.uncompressedCRC32) {
+            return Error(ErrorCode::HashMismatch, "Decompressed data CRC mismatch");
         }
 
         // Update statistics
