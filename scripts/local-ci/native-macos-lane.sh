@@ -162,9 +162,11 @@ run_ci() {
 
 	if [ -n "${YAMS_MACOS_COMPILE_TARGETS:-}" ]; then
 		# shellcheck disable=SC2086
-		meson compile -C "${YAMS_BUILD_DIR}" ${YAMS_MACOS_COMPILE_TARGETS}
+		# Cap ninja jobs at 4 by default (override with YAMS_MACOS_NINJA_JOBS) so
+		# the pre-push sanitizer lanes do not saturate every host core.
+		meson compile -C "${YAMS_BUILD_DIR}" -j "${YAMS_MACOS_NINJA_JOBS:-4}" ${YAMS_MACOS_COMPILE_TARGETS}
 	else
-		meson compile -C "${YAMS_BUILD_DIR}"
+		meson compile -C "${YAMS_BUILD_DIR}" -j "${YAMS_MACOS_NINJA_JOBS:-4}"
 	fi
 
 	export YAMS_TEST_SAFE_SINGLE_INSTANCE=1

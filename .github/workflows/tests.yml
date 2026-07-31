@@ -571,7 +571,9 @@ jobs:
           export YAMS_CONAN_ARCH="${{ matrix.conan_arch }}"
           export YAMS_EXTRA_MESON_FLAGS="${{ matrix.extra_meson_flags }}"
           export YAMS_ENABLE_MOBILE_BINDINGS=false
-          MESON_COMPILE_JOBS=""
+          # Cap ninja jobs at 4 by default so push-triggered builds do not saturate
+          # every runner core; larger/self-hosted runners stay bounded.
+          MESON_COMPILE_JOBS=4
           if [ "${{ matrix.suffix }}" = "linux-arm64" ]; then
             # Hosted arm64 runners are more memory-sensitive; unbounded Conan/Ninja
             # parallelism can starve the runner until GitHub loses communication.
