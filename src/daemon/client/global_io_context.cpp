@@ -50,7 +50,8 @@ constexpr bool kTsanBuild = false;
 
 unsigned int sanitize_thread_count_for_tsan(unsigned int thread_count) {
     if constexpr (kTsanBuild) {
-        return 1;
+        // Synchronous bridges need one worker to wait while another advances the coroutine.
+        return 2u;
     }
     return thread_count;
 }
