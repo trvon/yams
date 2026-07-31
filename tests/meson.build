@@ -1,6 +1,6 @@
 #!Meson configure - time test discovery without fs.glob / subdir_glob
 
-# GTest/GMock migration complete (PBI-068): all tests now use Catch2.
+#GTest / GMock migration complete(PBI - 068) : all tests now use Catch2.
 
 #Catch2 dependency for modern test framework(PBI - 050)
 #Prefer system installs, but fall back to Meson wrap subproject when available.
@@ -158,7 +158,6 @@ incs = [
   include_directories('.'),              # tests/
   include_directories('common'),         # shared helpers
   include_directories('../include'),     # headers
-  include_directories('../tools/yams-tools/include'),
   generated_inc,                         # builddir/version_generated.h
 ] + catch2_incs
 
@@ -188,9 +187,9 @@ if catch2_dep.found()
   )
 endif
 
-# Meson-native test registration via structured subdirs (no shell globs).
-# Unit tests are now individual Catch2 executables; tests/unit keeps only a
-# compatibility stub for older yams_unit_objs references.
+#Meson - native test registration via structured subdirs(no shell globs).
+#Unit tests are now individual Catch2 executables; tests / unit keeps only a
+#compatibility stub for older yams_unit_objs references.
 subdir('unit')
 
 if get_option('build-plugins') and catch2_dep.found()
@@ -231,8 +230,8 @@ endif
 _test_rpaths = [meson.project_build_root()]
 _test_ld_library_path = [meson.project_build_root()]
 if host_machine.system() == 'linux'
-  # Docker test stages install Conan-provided runtimes under /opt/yams/usr/local/lib
-  # before invoking meson test, so include that path in the test environment.
+#Docker test stages install Conan - provided runtimes under / opt / yams / usr / local / lib
+#before invoking meson test, so include that path in the test environment.
   _test_ld_library_path += ['/opt/yams/usr/local/lib']
 endif
 foreach d : [onnx_dep, tbb_dep]
@@ -248,7 +247,7 @@ endforeach
 #Prepare LD_LIBRARY_PATH for test environment(needed for transitive TBB dependencies)
 _test_env_ld_library_path = ':'.join(_test_ld_library_path)
 
-# Bench timeout is referenced by standalone Catch2 benchmark targets below.
+#Bench timeout is referenced by standalone Catch2 benchmark targets below.
 bench_timeout = get_option('bench-timeout')
 
 
@@ -512,7 +511,7 @@ if catch2_dep.found()
     install: false,
   )
 
-#PressureLimitedPoller shutdown unit tests (capability-sleep / stop paths)
+#PressureLimitedPoller shutdown unit tests(capability - sleep / stop paths)
   catch2_pressure_limited_poller_exe = executable('catch2_pressure_limited_poller',
     files('unit/daemon/components/pressure_limited_poller_catch2_test.cpp'),
     include_directories: incs,
@@ -522,7 +521,7 @@ if catch2_dep.found()
     install: false,
   )
 
-#Assertion validation tests (fork-based death tests for YAMS_ASSERT / YAMS_PRECONDITION)
+#Assertion validation tests(fork - based death tests for YAMS_ASSERT / YAMS_PRECONDITION)
   catch2_assert_val_exe = executable('catch2_assert_val',
     files('unit/core/assert_catch2_test.cpp'),
     include_directories: incs,
@@ -1253,7 +1252,7 @@ if catch2_dep.found()
     install: false,
   )
 
-#SearchTuner tests(Phase 2 of Epic yams - 7ez4 : Adaptive Search Engine Tuning via Corpus-Aware FSM)
+# SearchTuner tests: adaptive search engine tuning via corpus-aware FSM.
 #Tests FSM state transitions, TunedParams matrix, and SearchEngineConfig generation
   catch2_search_tuner_exe = executable('catch2_search_tuner',
     files('unit/search/search_tuner_catch2_test.cpp'),
@@ -1314,12 +1313,12 @@ if catch2_dep.found()
     install: false,
   )
 
-#Compression submodule tests(CompressionPolicy, CompressionMonitor, Zstandard, LZMA, ErrorHandler, etc.)
+# Compression submodule tests.
 #Migrated from GTest as part of yams - 3s4 / yams - pmf
   catch2_compression_submodule_exe = executable('catch2_compression_submodule',
     files(
 #basic_error_handler_catch2_test.cpp removed : fully covered by error_handler_catch2_test.cpp
-#basic_integrity_validator_catch2_test.cpp removed : fully covered by integrity_validator_catch2_test.cpp
+# basic_integrity_validator_catch2_test.cpp removed: covered by the comprehensive test.
       'unit/compression/compression_comprehensive_catch2_test.cpp',
       'unit/compression/compression_monitor_catch2_test.cpp',
       'unit/compression/compression_policy_catch2_test.cpp',
@@ -1713,7 +1712,7 @@ if catch2_dep.found()
     install: false,
   )
 
-  # KG Write Buffer Tests (Catch2) - in-memory edge/entity coalescing
+#KG Write Buffer Tests(Catch2) - in - memory edge / entity coalescing
   catch2_kg_write_buffer_exe = executable('catch2_kg_write_buffer',
     files('unit/metadata/kg_write_buffer_catch2_test.cpp'),
     include_directories: incs,
