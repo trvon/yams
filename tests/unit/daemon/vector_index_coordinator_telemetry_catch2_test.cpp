@@ -11,11 +11,50 @@
 #include <boost/asio/use_future.hpp>
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <future>
+#include <mutex>
 #include <thread>
 #include <vector>
 
 using namespace yams::daemon;
+using namespace std::chrono_literals;
+
+TEST_CASE("requestCheckpoint: stalled strand does not block the caller forever",
+          "[coordinator][checkpoint]") {
+    boost::asio::io_context io;
+    VectorIndexCoordinator coord(io.get_executor(), nullptr, nullptr);
+    coord.testing_setCheckpointWaitTimeout(20ms);
+
+    std::mutex mutex;
+    std::condition_variable completedCv;
+    bool completed = false;
+    bool result = true;
+    std::thread checkpointThread([&] {
+        result = coord.requestCheckpoint();
+        {
+            std::lock_guard lock(mutex);
+            completed = true;
+        }
+        completedCv.notify_one();
+    });
+
+    bool completedBeforeExecutorRan = false;
+    {
+        std::unique_lock lock(mutex);
+        completedBeforeExecutorRan = completedCv.wait_for(lock, 250ms, [&] { return completed; });
+    }
+
+    // Let the old unbounded implementation finish so a red test cannot hang its process.
+    if (!completedBeforeExecutorRan) {
+        io.run();
+    }
+    checkpointThread.join();
+
+    REQUIRE(completedBeforeExecutorRan);
+    CHECK_FALSE(result);
+}
 
 TEST_CASE("snapshot: concurrent reads return consistent telemetry during rebuild",
           "[coordinator][telemetry]") {

@@ -3,6 +3,7 @@
 #include <yams/core/types.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -165,6 +166,9 @@ public:
     }
 
 #ifdef YAMS_TESTING
+    void testing_setCheckpointWaitTimeout(std::chrono::milliseconds timeout) noexcept {
+        checkpointWaitTimeout_ = timeout;
+    }
     uint32_t testing_pendingReasons() const noexcept {
         return pendingReasons_.load(std::memory_order_relaxed);
     }
@@ -216,6 +220,7 @@ private:
     std::atomic<bool> rebuildInFlight_{false};
     std::atomic<uint64_t> rebuildEpoch_{0};
     std::atomic<bool> buildsSuppressed_{false};
+    std::chrono::milliseconds checkpointWaitTimeout_{std::chrono::seconds(30)};
 
     // Waiters registered by requestRebuild; drained when epoch advances.
     using RebuildCompletion = std::function<void(Result<void>)>;
