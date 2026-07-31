@@ -329,11 +329,13 @@ PluginManager::autoloadPlugins(const boost::asio::any_io_executor& executor) {
             pluginHostFsm_.dispatch(AllPluginsLoadedEvent{0});
             co_return Result<size_t>(0);
         }
+#if defined(YAMS_TESTING) || defined(YAMS_TEST_PROVIDER_CONTROLS)
         if (ConfigResolver::envTruthy(std::getenv("YAMS_USE_MOCK_PROVIDER"))) {
             spdlog::info("[PluginManager] autoload skipped (mock provider via env)");
             pluginHostFsm_.dispatch(AllPluginsLoadedEvent{0});
             co_return Result<size_t>(0);
         }
+#endif
         if (const char* d = std::getenv("YAMS_DISABLE_ABI_PLUGINS"); d && *d) {
             spdlog::info("[PluginManager] autoload disabled by YAMS_DISABLE_ABI_PLUGINS");
             pluginHostFsm_.dispatch(AllPluginsLoadedEvent{0});

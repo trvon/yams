@@ -125,16 +125,14 @@ void GlobalIOContext::reset() {
         return;
     }
 
-    static constexpr std::array<const char*, 2> kSkipKeys = {
-        "YAMS_TESTING",
-        "YAMS_TEST_SAFE_SINGLE_INSTANCE",
-    };
-
-    for (const char* key : kSkipKeys) {
-        if (env_truthy(std::getenv(key))) {
-            return;
-        }
+    if (env_truthy(std::getenv("YAMS_TESTING"))) {
+        return;
     }
+#if defined(YAMS_TESTING) || defined(YAMS_TEST_LIFECYCLE_CONTROLS)
+    if (env_truthy(std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE"))) {
+        return;
+    }
+#endif
 
     auto& ctx = instance();
     std::unique_lock<std::shared_mutex> op_lock(ctx.operation_mutex_);

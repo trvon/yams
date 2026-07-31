@@ -702,7 +702,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture,
-                 "ServiceManager shutdown interrupts blocked auto-repair graph health probe",
+                 "ServiceManager shutdown remains bounded during auto-repair graph health probe",
                  "[daemon][service_manager][shutdown][auto_repair][regression]") {
     config_.enableModelProvider = false;
     config_.useMockModelProvider = false;
@@ -739,7 +739,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     boost::asio::post(sm->getWorkerExecutor(), [sm, &probeStarted, &probeFinished]() {
         probeStarted.store(true, std::memory_order_release);
         repair::RepairHealthProbe probe(sm->getMetadataRepo(), sm->getVectorDatabase(),
-                                        sm->getGraphComponent(), sm->getKgStore());
+                                        sm->getKgStore());
         repair::RepairHealthOptions opts;
         opts.checkFts5 = false;
         opts.checkEmbeddings = false;

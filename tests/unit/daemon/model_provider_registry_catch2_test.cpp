@@ -12,6 +12,8 @@
 #include <string>
 #include <vector>
 
+#include "common/test_helpers_catch2.h"
+
 #ifdef _WIN32
 static int setenv(const char* name, const char* value, int /*overwrite*/) {
     return _putenv_s(name, value);
@@ -162,4 +164,24 @@ TEST_CASE("createModelProvider with unknown name falls back to a provider",
     REQUIRE(provider != nullptr);
     auto* tagged = dynamic_cast<TaggedMockProvider*>(provider.get());
     REQUIRE(tagged == nullptr);
+}
+
+TEST_CASE("createModelProvider honors test-only mock environment controls",
+          "[daemon][model_provider][registry][testing]") {
+    ScopedEmbedBackendAuto backend;
+    yams::test::ScopedEnvVar mockProvider{"YAMS_USE_MOCK_PROVIDER", std::string{"1"}};
+    yams::test::ScopedEnvVar fakeOnnx{"YAMS_USE_ONNX", std::nullopt};
+    yams::test::ScopedEnvVar disableOnnx{"YAMS_DISABLE_ONNX", std::nullopt};
+
+    ModelPoolConfig cfg;
+    auto provider = yams::daemon::createModelProvider(cfg, "unregistered-provider",
+                                                      /*forceMockProvider=*/false);
+    REQUIRE(provider != nullptr);
+    CHECK(provider->getProviderName() == "MockProvider");
+
+    mockProvider.unset();
+    fakeOnnx.set("1");
+    provider = yams::daemon::createModelProvider(cfg, "ONNX", /*forceMockProvider=*/false);
+    REQUIRE(provider != nullptr);
+    CHECK(provider->getProviderName() == "ONNX");
 }

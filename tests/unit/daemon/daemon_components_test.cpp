@@ -21,6 +21,7 @@
 #include <yams/compat/unistd.h>
 
 #include <yams/daemon/components/IOCoordinator.h>
+#include <yams/daemon/components/LifecycleComponent.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/SearchEngineManager.h>
 #include <yams/daemon/components/SocketServer.h>
@@ -71,6 +72,19 @@ fs::path makeTempRuntimeDir(const std::string& name) {
     std::error_code ec;
     fs::create_directories(dir, ec);
     return dir;
+}
+
+TEST_CASE("LifecycleComponent test safe-instance guard overrides production aggressive mode",
+          "[daemon][lifecycle][single-instance]") {
+    yams::test::ScopedEnvVar safeGuard{"YAMS_TEST_SAFE_SINGLE_INSTANCE", std::string{"1"}};
+    yams::test::ScopedEnvVar killOthers{"YAMS_DAEMON_KILL_OTHERS", std::string{"1"}};
+    CHECK_FALSE(LifecycleComponent::testingAggressiveModeEnabled());
+
+    safeGuard.unset();
+    CHECK(LifecycleComponent::testingAggressiveModeEnabled());
+
+    killOthers.set("0");
+    CHECK_FALSE(LifecycleComponent::testingAggressiveModeEnabled());
 }
 
 TEST_CASE("SearchEngineManager runtime executor is isolated from unavailable shared workers",

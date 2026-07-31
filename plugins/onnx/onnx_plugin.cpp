@@ -74,6 +74,7 @@ YAMS_PLUGIN_API int yams_plugin_init(const char* config_json, const void* /*host
         g_plugin_disabled = true;
         spdlog::warn("[ONNX Plugin] disabled by YAMS_DISABLE_VECTORS");
     }
+#if defined(YAMS_TESTING) || defined(YAMS_TEST_PROVIDER_CONTROLS)
     if (const char* d = std::getenv("YAMS_USE_MOCK_PROVIDER"); envTruthy(d)) {
         g_plugin_disabled = true;
         spdlog::warn("[ONNX Plugin] disabled by YAMS_USE_MOCK_PROVIDER");
@@ -82,6 +83,7 @@ YAMS_PLUGIN_API int yams_plugin_init(const char* config_json, const void* /*host
         g_plugin_disabled = true;
         spdlog::warn("[ONNX Plugin] disabled by YAMS_SKIP_MODEL_LOADING");
     }
+#endif
     return YAMS_PLUGIN_OK;
 }
 
