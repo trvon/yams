@@ -1,4 +1,5 @@
 #include "repository/search_query_helpers.hpp"
+#include <yams/core/checked_arithmetic.h>
 #include <yams/core/types.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
@@ -87,7 +88,7 @@ std::string buildSqlPlaceholders(std::size_t count) {
 
 Result<void> accumulateDeletedRows(std::int64_t& total, std::int64_t count) {
     std::int64_t nextTotal = 0;
-    if (count < 0 || __builtin_add_overflow(total, count, &nextTotal)) {
+    if (count < 0 || core::addOverflow(total, count, nextTotal)) {
         return Error{ErrorCode::DatabaseError, "Invalid accumulated SQLite deletion count"};
     }
     total = nextTotal;
@@ -3721,13 +3722,13 @@ public:
             std::uniform_int_distribution<int> dist(-jitter, jitter);
             int delayMs = baseDelayMs;
             const int jittered = dist(rng);
-            if (__builtin_add_overflow(baseDelayMs, jittered, &delayMs)) {
+            if (core::addOverflow(baseDelayMs, jittered, delayMs)) {
                 delayMs = baseDelayMs;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
 
             int doubledDelayMs = kMaxDelayMs;
-            if (!__builtin_mul_overflow(baseDelayMs, 2, &doubledDelayMs)) {
+            if (!core::mulOverflow(baseDelayMs, 2, doubledDelayMs)) {
                 baseDelayMs = std::min(doubledDelayMs, kMaxDelayMs);
             } else {
                 baseDelayMs = kMaxDelayMs;

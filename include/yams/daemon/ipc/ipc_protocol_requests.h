@@ -1,6 +1,7 @@
 #pragma once
 
 #include <yams/core/assert.hpp>
+#include <yams/core/checked_arithmetic.h>
 #include <yams/daemon/ipc/ipc_protocol_common.h>
 
 #include <atomic>
@@ -3006,7 +3007,7 @@ private:
     template <typename Collection>
     static uint32_t serializedCount(const Collection& collection, std::string_view message) {
         uint32_t count = 0;
-        const bool overflowed = __builtin_add_overflow(std::size_t{0}, collection.size(), &count);
+        const bool overflowed = core::narrowOverflow(collection.size(), count);
         YAMS_PRECONDITION(!overflowed, message);
         return count;
     }
