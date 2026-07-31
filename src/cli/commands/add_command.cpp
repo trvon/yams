@@ -473,14 +473,6 @@ public:
                     }
                 }
 
-                // Socket-only CLI builds cannot service an InProcess daemon plan. If the
-                // socket probe selected in-process fallback, preserve add usability by using
-                // repo-local services instead of retrying an unreachable socket path.
-                if (daemonPlan.resolvedMode == yams::daemon::ClientTransportMode::InProcess) {
-                    daemonSpinner.pause();
-                    co_return executeWithServices();
-                }
-
                 auto sanitizedTagsRes = sanitizeStringList(tags_, "Tag", kMaxTagLength);
                 if (!sanitizedTagsRes)
                     co_return sanitizedTagsRes.error();
