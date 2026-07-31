@@ -13,6 +13,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <optional>
 #include <string>
@@ -173,6 +174,30 @@ TEST_CASE("Hash edge cases: pathPatterns filter is honored", "[unit][services][s
     CHECK(r.value().type == "hash");
     CHECK(r.value().total == 0);
     CHECK(r.value().results.empty());
+}
+
+TEST_CASE("Hash edge cases: workspace scope rejects generated artifacts",
+          "[unit][services][search][hash][scope]") {
+    SearchHashFixture f;
+    const auto generatedPath = f.root / "build" / "fold" / "findings.sarif";
+    std::filesystem::create_directories(generatedPath.parent_path());
+    std::ofstream{generatedPath} << "generated search evidence\n";
+
+    auto documentService = makeDocumentService(f.ctx);
+    StoreDocumentRequest storeRequest;
+    storeRequest.path = generatedPath.string();
+    auto stored = documentService->store(storeRequest);
+    REQUIRE(stored);
+
+    SearchRequest request;
+    request.query = stored.value().hash.substr(0, 8);
+    request.scopePathPrefix = f.root.string();
+    request.limit = 10;
+
+    auto result = runAwait(f.search->search(request));
+    REQUIRE(result);
+    CHECK(result.value().type == "hash");
+    CHECK(result.value().results.empty());
 }
 
 TEST_CASE("Hash edge cases: too-short prefix falls back", "[unit][services][search][hash]") {

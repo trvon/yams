@@ -387,17 +387,16 @@ public:
             invocationCwd_ = std::filesystem::current_path();
             // Attempt daemon-first grep with complete protocol mapping
             {
-                std::vector<std::string> cwdPatterns;
+                std::string cwdScope;
                 if (scopeToCwd_ || !cwdOverride_.empty()) {
-                    const auto cwdDir = resolvedCwdScopeRoot().lexically_normal().generic_string();
-                    cwdPatterns = yams::app::services::utils::buildCwdScopePatterns(cwdDir);
-                    spdlog::debug("[CLI] Scoping grep to CWD: {} ({} patterns)", cwdDir,
-                                  cwdPatterns.size());
+                    cwdScope = resolvedCwdScopeRoot().lexically_normal().generic_string();
+                    spdlog::debug("[CLI] Scoping grep to workspace: {}", cwdScope);
                 }
 
                 yams::app::services::GrepOptions dreq;
                 dreq.pattern = pattern_;
                 dreq.paths = paths_; // Use new paths field for multiple paths
+                dreq.scopePathPrefix = std::move(cwdScope);
                 // Expand concrete paths/basenames into suffix-matching globs for subpath use-cases
                 if (!dreq.paths.empty()) {
                     std::vector<std::string> extra;
@@ -448,10 +447,6 @@ public:
                 if (!sessionPatterns_.empty()) {
                     dreq.includePatterns.insert(dreq.includePatterns.end(),
                                                 sessionPatterns_.begin(), sessionPatterns_.end());
-                }
-                if (!cwdPatterns.empty()) {
-                    dreq.includePatterns.insert(dreq.includePatterns.end(), cwdPatterns.begin(),
-                                                cwdPatterns.end());
                 }
                 dreq.recursive = true; // Default to recursive
                 dreq.wholeWord = wholeWord_;

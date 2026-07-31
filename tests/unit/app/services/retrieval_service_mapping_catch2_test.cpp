@@ -103,6 +103,7 @@ TEST_CASE("RetrievalService testing helpers map Grep options", "[retrieval][serv
     GrepOptions in;
     in.pattern = "needle";
     in.paths = {"a.txt", "b.txt"};
+    in.scopePathPrefix = "/repo";
     in.caseInsensitive = true;
     in.invertMatch = true;
     in.contextLines = 2;
@@ -133,6 +134,7 @@ TEST_CASE("RetrievalService testing helpers map Grep options", "[retrieval][serv
 
     CHECK(out.pattern == in.pattern);
     CHECK(out.paths == in.paths);
+    CHECK(out.scopePathPrefix == in.scopePathPrefix);
     CHECK(out.caseInsensitive == in.caseInsensitive);
     CHECK(out.invertMatch == in.invertMatch);
     CHECK(out.contextLines == in.contextLines);
@@ -277,6 +279,7 @@ TEST_CASE("RetrievalService testing helpers map GetInit and Search options",
     search.hashQuery = "abc123";
     search.pathPattern = "src/%";
     search.pathPatterns = {"src/%", "include/%"};
+    search.scopePathPrefix = "/repo";
     search.tags = {"tag"};
     search.matchAllTags = true;
     search.extension = ".cpp";
@@ -316,6 +319,7 @@ TEST_CASE("RetrievalService testing helpers map GetInit and Search options",
     CHECK(out.hashQuery == search.hashQuery);
     CHECK(out.pathPattern == search.pathPattern);
     CHECK(out.pathPatterns == search.pathPatterns);
+    CHECK(out.scopePathPrefix == search.scopePathPrefix);
     CHECK(out.tags == search.tags);
     CHECK(out.matchAllTags == search.matchAllTags);
     CHECK(out.extension == search.extension);

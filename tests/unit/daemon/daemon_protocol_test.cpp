@@ -391,6 +391,7 @@ TEST_CASE("MessageFramer: SearchRequest sanitizes invalid UTF-8 for protobuf",
     req.searchType = "keyword";
     req.hashQuery = std::string("\xFEhash", 5);
     req.pathPattern = std::string("\xFF*.md", 5);
+    req.scopePathPrefix = std::string("\xFF/repo", 6);
 
     Message msg;
     msg.version = PROTOCOL_VERSION;
@@ -408,6 +409,7 @@ TEST_CASE("MessageFramer: SearchRequest sanitizes invalid UTF-8 for protobuf",
     REQUIRE(parsedReq->query == yams::common::sanitizeUtf8(req.query));
     REQUIRE(parsedReq->hashQuery == yams::common::sanitizeUtf8(req.hashQuery));
     REQUIRE(parsedReq->pathPattern == yams::common::sanitizeUtf8(req.pathPattern));
+    REQUIRE(parsedReq->scopePathPrefix == yams::common::sanitizeUtf8(req.scopePathPrefix));
     REQUIRE(parsedReq->searchType == "keyword");
 }
 
@@ -1143,6 +1145,7 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         req.useSession = true;
         req.sessionName = invalidUtf8("session-grep");
         req.instanceId = invalidUtf8("instance-grep");
+        req.scopePathPrefix = invalidUtf8("/repo");
 
         auto enc = ProtoSerializer::encode_payload(makeMessageWith(Request{req}, 18));
         REQUIRE(enc);
@@ -1162,6 +1165,8 @@ TEST_CASE("ProtoSerializer: Request roundtrip", "[daemon][protocol][serializatio
         checkSanitizedField("GrepRequest.colorMode", got->colorMode, req.colorMode);
         checkSanitizedField("GrepRequest.sessionName", got->sessionName, req.sessionName);
         checkSanitizedField("GrepRequest.instanceId", got->instanceId, req.instanceId);
+        checkSanitizedField("GrepRequest.scopePathPrefix", got->scopePathPrefix,
+                            req.scopePathPrefix);
     }
 
     SECTION("DownloadRequest sanitizes invalid UTF-8 text fields") {

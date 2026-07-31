@@ -1169,6 +1169,34 @@ TEST_CASE("Filter - By path", "[search][filter][path]") {
     }
 }
 
+TEST_CASE("Filter - Engine path predicate runs before final top-k",
+          "[search][filter][path][engine]") {
+    SKIP_HYBRID_ON_WINDOWS();
+    SearchServiceFixture fixture;
+
+    auto engine = fixture.searchEngine();
+    if (!engine) {
+        SUCCEED("SearchEngine not available; skipping engine path predicate test.");
+        return;
+    }
+
+    fixture.createDocument("build/generated_scope.txt",
+                           "scopewindow scopewindow scopewindow scopewindow");
+    fixture.createDocument("src/authored_scope.txt", "scopewindow");
+
+    SearchParams params;
+    params.limit = 1;
+    params.pathPredicate = [](std::string_view path) {
+        return path.find("/src/") != std::string_view::npos;
+    };
+
+    auto result = engine->search("scopewindow", params);
+    REQUIRE(result);
+    REQUIRE(result.value().size() == 1);
+    CHECK(result.value().front().document.filePath.find("/src/authored_scope.txt") !=
+          std::string::npos);
+}
+
 TEST_CASE("Filter - By tags", "[search][filter][tags]") {
     SKIP_HYBRID_ON_WINDOWS();
     SearchServiceFixture fixture;

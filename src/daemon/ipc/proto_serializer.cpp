@@ -256,6 +256,7 @@ template <> struct ProtoBinding<SearchRequest> {
         o->set_hash_query(yams::common::sanitizeUtf8(r.hashQuery));
         o->set_path_pattern(yams::common::sanitizeUtf8(r.pathPattern));
         set_string_list(r.pathPatterns, o->mutable_path_patterns());
+        o->set_scope_path_prefix(yams::common::sanitizeUtf8(r.scopePathPrefix));
         set_string_list(r.tags, o->mutable_tags());
         o->set_match_all_tags(r.matchAllTags);
         o->set_extension(yams::common::sanitizeUtf8(r.extension));
@@ -303,6 +304,7 @@ template <> struct ProtoBinding<SearchRequest> {
         r.hashQuery = i.hash_query();
         r.pathPattern = i.path_pattern();
         r.pathPatterns = get_string_list(i.path_patterns());
+        r.scopePathPrefix = i.scope_path_prefix();
         r.tags = get_string_list(i.tags());
         r.matchAllTags = i.match_all_tags();
         r.extension = i.extension();
@@ -810,6 +812,7 @@ template <> struct ProtoBinding<GrepRequest> {
         o->set_before_context(r.beforeContext);
         o->set_after_context(r.afterContext);
         o->set_show_diff(r.showDiff);
+        o->set_scope_path_prefix(yams::common::sanitizeUtf8(r.scopePathPrefix));
         if (r.useSession && !r.sessionName.empty()) {
             o->set_session_id(yams::common::sanitizeUtf8(r.sessionName));
         }
@@ -846,6 +849,7 @@ template <> struct ProtoBinding<GrepRequest> {
         r.beforeContext = i.before_context();
         r.afterContext = i.after_context();
         r.showDiff = i.show_diff();
+        r.scopePathPrefix = i.scope_path_prefix();
         if (!i.session_id().empty()) {
             r.useSession = true;
             r.sessionName = i.session_id();

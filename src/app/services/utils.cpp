@@ -1,3 +1,4 @@
+#include <yams/app/services/retrieval_path_policy.hpp>
 #include <yams/app/services/services.hpp>
 
 #include <algorithm>
@@ -12,7 +13,9 @@
 #include <unordered_set>
 #include <vector>
 
+#include <yams/common/fs_utils.h>
 #include <yams/common/string_utils.h>
+#include <yams/core/magic_numbers.hpp>
 #include <yams/detection/file_type_detector.h>
 
 namespace yams::app::services::utils {
@@ -556,6 +559,62 @@ std::vector<std::string> buildCwdScopePatterns(const std::string& directory) {
     }
 
     return patterns;
+}
+
+bool isGeneratedWorkspacePath(std::string_view path) {
+    const auto category = yams::magic::getPruneCategory(path);
+    if (category == yams::magic::PruneCategory::GitArtifacts ||
+        category == yams::magic::PruneCategory::Logs ||
+        category == yams::magic::PruneCategory::Cache ||
+        category == yams::magic::PruneCategory::Temp ||
+        category == yams::magic::PruneCategory::Coverage ||
+        yams::magic::matchesPruneGroup(category, "packages") ||
+        yams::magic::matchesPruneGroup(category, "ide-all")) {
+        return true;
+    }
+
+    std::string normalized{path};
+    std::replace(normalized.begin(), normalized.end(), '\\', '/');
+    std::transform(
+        normalized.begin(), normalized.end(), normalized.begin(),
+        [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+    const auto hasDirectory = [&](std::string_view directory) {
+        const std::string needle = "/" + std::string(directory) + "/";
+        return normalized.find(needle) != std::string::npos ||
+               normalized.starts_with(std::string(directory) + "/");
+    };
+    const auto leafCategory = yams::magic::getPruneCategory(
+        std::filesystem::path(normalized).filename().generic_string());
+    const bool generatedBuildArtifact =
+        yams::magic::matchesPruneGroup(leafCategory, "build-artifacts") || hasDirectory("build") ||
+        hasDirectory("builddir") || hasDirectory("_build") || hasDirectory(".build") ||
+        hasDirectory("deriveddata") || hasDirectory("target") ||
+        hasDirectory("cmake-build-debug") || hasDirectory("cmake-build-release");
+    return generatedBuildArtifact || hasDirectory(".pi") || hasDirectory(".agents") ||
+           hasDirectory(".codex") || hasDirectory("audit_artifacts");
+}
+
+bool isPathWithinScope(std::string_view path, std::string_view scopeRoot) {
+    if (path.empty() || scopeRoot.empty()) {
+        return false;
+    }
+
+    auto normalizedPath = yams::common::canonicalizePathForComparison(path);
+    auto normalizedRoot = yams::common::canonicalizePathForComparison(scopeRoot);
+#ifdef _WIN32
+    const auto lower = [](unsigned char character) {
+        return static_cast<char>(std::tolower(character));
+    };
+    std::transform(normalizedPath.begin(), normalizedPath.end(), normalizedPath.begin(), lower);
+    std::transform(normalizedRoot.begin(), normalizedRoot.end(), normalizedRoot.begin(), lower);
+#endif
+    if (normalizedPath == normalizedRoot) {
+        return true;
+    }
+    if (!normalizedRoot.ends_with('/')) {
+        normalizedRoot.push_back('/');
+    }
+    return normalizedPath.starts_with(normalizedRoot);
 }
 
 } // namespace yams::app::services::utils

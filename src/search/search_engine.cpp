@@ -4389,6 +4389,15 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         return docIdForResult(a) < docIdForResult(b);
     };
 
+    if (params.pathPredicate) {
+        const auto beforeScopeFilter = response.results.size();
+        std::erase_if(response.results, [&](const auto& result) {
+            return !params.pathPredicate(result.document.filePath);
+        });
+        response.debugStats["path_predicate_rejected"] =
+            std::to_string(beforeScopeFilter - response.results.size());
+    }
+
     const SearchTopKLimitOutcome topKOutcome = applySearchTopKLimit(
         response.results, workingConfig, userLimit, buriedVectorRankThreshold,
         finalLexicalAwareLess, isFinalSemanticRescueCandidate, finalSemanticRescueBetter,

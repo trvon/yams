@@ -1,4 +1,5 @@
 #include <yams/app/services/graph_context_service.hpp>
+#include <yams/app/services/retrieval_path_policy.hpp>
 
 #include <yams/common/fs_utils.h>
 #include <yams/core/assert.hpp>
@@ -50,23 +51,7 @@ bool pathWithinScope(std::string_view candidatePath, std::string_view scopePathP
     if (scopePathPrefix.empty()) {
         return true;
     }
-    if (candidatePath.empty()) {
-        return false;
-    }
-
-    auto candidate = common::canonicalizePathForComparison(candidatePath);
-    auto scope = common::canonicalizePathForComparison(scopePathPrefix);
-#ifdef _WIN32
-    candidate = lowerAscii(candidate);
-    scope = lowerAscii(scope);
-#endif
-    if (candidate == scope) {
-        return true;
-    }
-    if (!scope.empty() && scope.back() != '/') {
-        scope.push_back('/');
-    }
-    return candidate.starts_with(scope);
+    return utils::isPathWithinScope(candidatePath, scopePathPrefix);
 }
 
 bool relationEndpointWithinScope(std::string_view nodeKey, std::string_view scopePathPrefix) {

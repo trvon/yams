@@ -4,8 +4,10 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -22,6 +24,7 @@ struct SearchParams {
     std::optional<std::string> extension;
     std::optional<int64_t> modifiedAfter;
     std::optional<int64_t> modifiedBefore;
+    std::function<bool(std::string_view)> pathPredicate;
 };
 
 struct SearchEngineConfig {

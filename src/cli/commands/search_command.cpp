@@ -33,7 +33,7 @@
 // Async helpers (interim bridge-free execution)
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
+#include <boost/asio/use_future.hpp>
 // Timers and coroutine executor helpers for guard race
 #include <boost/asio/redirect_error.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -1181,15 +1181,14 @@ public:
                 includeGlobsExpanded.push_back(pathFilter_);
             }
 
-            // CWD scoping: add current directory as a path prefix filter
+            std::string cwdScope;
             if (scopeToCwd_) {
                 std::error_code ec;
-                auto cwdDir = std::filesystem::current_path(ec).string();
+                cwdScope = std::filesystem::current_path(ec).string();
                 if (!ec) {
-                    auto cwdPats = yams::app::services::utils::buildCwdScopePatterns(cwdDir);
-                    includeGlobsExpanded.insert(includeGlobsExpanded.end(), cwdPats.begin(),
-                                                cwdPats.end());
-                    spdlog::debug("[CLI] Scoping search to CWD: {}", cwdDir);
+                    spdlog::debug("[CLI] Scoping search to workspace: {}", cwdScope);
+                } else {
+                    cwdScope.clear();
                 }
             }
 
@@ -1229,6 +1228,7 @@ public:
             }
 
             auto dreq = makeDaemonSearchRequest(includeGlobsExpanded);
+            dreq.scopePathPrefix = std::move(cwdScope);
 
             std::shared_ptr<ui::SpinnerRunner> spinner =
                 shouldShowSpinner() ? std::make_shared<ui::SpinnerRunner>() : nullptr;

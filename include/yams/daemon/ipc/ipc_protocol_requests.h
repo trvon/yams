@@ -36,6 +36,7 @@ struct SearchRequest {
     std::string pathPattern = {}; // Glob-like filename/path filter (legacy, single pattern)
     std::vector<std::string> pathPatterns =
         {};                             // Multiple glob patterns (preferred over pathPattern)
+    std::string scopePathPrefix = {};   // Workspace root for daemon-owned cwd scoping
     std::vector<std::string> tags = {}; // Filter by tags (presence-based)
     bool matchAllTags = false;          // Require all specified tags
     std::string extension = {};         // File extension filter
@@ -80,6 +81,7 @@ struct SearchRequest {
             << static_cast<int32_t>(keywordStageTimeoutMs)
             << static_cast<int32_t>(snippetHydrationTimeoutMs) << useSession << sessionName
             << globalSearch << symbolRank << instanceId << collection;
+        ser << scopePathPrefix;
     }
 
     template <typename Deserializer>
@@ -280,6 +282,9 @@ struct SearchRequest {
         }
         if (auto col = deser.readString(); col) {
             req.collection = std::move(col.value());
+        }
+        if (auto scope = deser.readString(); scope) {
+            req.scopePathPrefix = std::move(scope.value());
         }
 
         return req;
@@ -1430,6 +1435,7 @@ struct GrepRequest {
     std::string pattern;            // Regex pattern
     std::string path;               // Optional path filter (deprecated - use paths)
     std::vector<std::string> paths; // Multiple paths to search (NEW)
+    std::string scopePathPrefix;     // Workspace root for daemon-owned cwd scoping
     bool caseInsensitive = false;
     bool invertMatch = false;
     int contextLines = 0;  // Combined context (overrides before/after if > 0)
@@ -1471,7 +1477,7 @@ struct GrepRequest {
             << regexOnly << static_cast<uint64_t>(semanticLimit) << filterTags << matchAllTags
             << colorMode << static_cast<int32_t>(beforeContext)
             << static_cast<int32_t>(afterContext) << showDiff << useSession << sessionName
-            << instanceId;
+            << instanceId << scopePathPrefix;
     }
 
     template <typename Deserializer>
@@ -1602,6 +1608,9 @@ struct GrepRequest {
         }
         if (auto ii = deser.readString(); ii) {
             req.instanceId = std::move(ii.value());
+        }
+        if (auto scope = deser.readString(); scope) {
+            req.scopePathPrefix = std::move(scope.value());
         }
 
         return req;

@@ -32,6 +32,7 @@ message SearchRequest {
   // Engine-level filtering parity with CLI/local service
   string path_pattern = 17;
   repeated string path_patterns = 34;  // Multiple glob patterns for server-side filtering
+  string scope_path_prefix = 35;       // Workspace root for daemon-owned cwd scoping
   repeated string tags = 18;
   bool match_all_tags = 19;
   string extension = 20;
@@ -248,6 +249,7 @@ message GrepRequest {
   int32 before_context = 24;
   int32 after_context = 25;
   bool show_diff = 26;
+  string scope_path_prefix = 27; // Workspace root for daemon-owned cwd scoping
   string session_id = 99;
   string instance_id = 100;
 }
