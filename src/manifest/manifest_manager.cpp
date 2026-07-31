@@ -23,11 +23,6 @@ namespace yamsfmt = fmt;
 #include <type_traits>
 #include <utility>
 
-// Include generated protobuf headers
-#ifdef YAMS_USE_PROTOBUF
-#include "manifest.pb.h"
-#endif
-
 namespace yams::manifest {
 
 namespace {
@@ -285,78 +280,7 @@ Result<std::vector<std::byte>> ManifestManager::serialize(const Manifest& manife
     auto startTime = std::chrono::steady_clock::now();
 
     try {
-#ifdef YAMS_USE_PROTOBUF
-        // Create protobuf message
-        yams::manifest::FileManifest pb_manifest;
-
-        // Set basic fields
-        pb_manifest.set_version(manifest.version);
-        pb_manifest.set_file_hash(manifest.fileHash);
-        pb_manifest.set_file_size(manifest.fileSize);
-        pb_manifest.set_original_name(manifest.originalName);
-        pb_manifest.set_mime_type(manifest.mimeType);
-        pb_manifest.set_created_at(
-            std::chrono::duration_cast<std::chrono::seconds>(manifest.createdAt.time_since_epoch())
-                .count());
-        pb_manifest.set_modified_at(
-            std::chrono::duration_cast<std::chrono::seconds>(manifest.modifiedAt.time_since_epoch())
-                .count());
-        pb_manifest.set_compression(manifest.compression);
-        pb_manifest.set_uncompressed_size(manifest.uncompressedSize);
-
-        // Add chunks
-        for (const auto& chunk : manifest.chunks) {
-            auto* pb_chunk = pb_manifest.add_chunks();
-            pb_chunk->set_hash(chunk.hash);
-            pb_chunk->set_offset(chunk.offset);
-            pb_chunk->set_size(chunk.size);
-            pb_chunk->set_flags(chunk.flags);
-        }
-
-        // Add metadata
-        for (const auto& [key, value] : manifest.metadata) {
-            (*pb_manifest.mutable_metadata())[key] = value;
-        }
-
-        // Calculate checksum (excluding the checksum field itself)
-        if (config_.enableChecksums) {
-            pb_manifest.set_checksum(manifest.checksum);
-        }
-
-        // Serialize to bytes
-        std::string serialized;
-        if (!pb_manifest.SerializeToString(&serialized)) {
-            return Result<std::vector<std::byte>>(ErrorCode::Unknown);
-        }
-
-        // Convert to byte vector
-        std::vector<std::byte> result;
-        result.reserve(serialized.size());
-        std::ranges::transform(serialized, std::back_inserter(result),
-                               [](char c) { return static_cast<std::byte>(c); });
-
-        // Apply compression if enabled
-        if (config_.enableCompression && serialized.size() > 256) {
-            auto compressed = compressData(result);
-            if (compressed.has_value()) {
-                result = std::move(compressed.value());
-            }
-        }
-
-        auto endTime = std::chrono::steady_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
-        // Ensure minimum 1ms for testing (operations might be too fast)
-        if (duration.count() == 0) {
-            duration = std::chrono::milliseconds(1);
-        }
-        pImpl->updateStats(duration, std::chrono::milliseconds(0));
-
-        spdlog::debug("Serialized manifest with {} chunks in {} ms", manifest.chunks.size(),
-                      duration.count());
-
-        return Result<std::vector<std::byte>>(std::move(result));
-#else
-        // Simple binary serialization fallback (when Protocol Buffers is not available)
+        // Manifest serialization has always used this built-in binary format in production.
         std::vector<std::byte> result;
 
         // Magic header: "YAMS" + version
@@ -415,7 +339,6 @@ Result<std::vector<std::byte>> ManifestManager::serialize(const Manifest& manife
         spdlog::debug("Serialized manifest with {} chunks using fallback binary format",
                       manifest.chunks.size());
 
-        // Update statistics for non-protobuf path
         auto endTime = std::chrono::steady_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime);
         // Ensure minimum 1ms for testing (operations might be too fast)
@@ -428,8 +351,6 @@ Result<std::vector<std::byte>> ManifestManager::serialize(const Manifest& manife
                       manifest.chunks.size(), duration.count());
 
         return Result<std::vector<std::byte>>(std::move(result));
-#endif
-
     } catch (const std::exception& e) {
         spdlog::error("Failed to serialize manifest: {}", e.what());
         return Result<std::vector<std::byte>>(ErrorCode::Unknown);
@@ -462,41 +383,6 @@ Result<Manifest> ManifestManager::deserialize(std::span<const std::byte> data) c
         Result<Manifest> parsed = ErrorCode::CorruptedData;
         if (isBinaryManifest) {
             parsed = deserializeBinaryManifest(processedData, config_.maxChunksPerManifest);
-        } else {
-#ifdef YAMS_USE_PROTOBUF
-            yams::manifest::FileManifest protobufManifest;
-            const std::string serialized(reinterpret_cast<const char*>(processedData.data()),
-                                         processedData.size());
-            if (!protobufManifest.ParseFromString(serialized)) {
-                return ErrorCode::CorruptedData;
-            }
-
-            Manifest manifest;
-            manifest.version = protobufManifest.version();
-            manifest.fileHash = protobufManifest.file_hash();
-            manifest.fileSize = protobufManifest.file_size();
-            manifest.originalName = protobufManifest.original_name();
-            manifest.mimeType = protobufManifest.mime_type();
-            manifest.createdAt =
-                std::chrono::system_clock::from_time_t(protobufManifest.created_at());
-            manifest.modifiedAt =
-                std::chrono::system_clock::from_time_t(protobufManifest.modified_at());
-            manifest.compression = protobufManifest.compression();
-            manifest.uncompressedSize = protobufManifest.uncompressed_size();
-            manifest.checksum = protobufManifest.checksum();
-            manifest.chunks.reserve(protobufManifest.chunks_size());
-            for (const auto& protobufChunk : protobufManifest.chunks()) {
-                manifest.chunks.emplace_back(ChunkRef{.hash = protobufChunk.hash(),
-                                                      .offset = protobufChunk.offset(),
-                                                      .size = protobufChunk.size(),
-                                                      .flags = protobufChunk.flags()});
-            }
-            for (const auto& [key, value] : protobufManifest.metadata()) {
-                manifest.metadata[key] = value;
-            }
-            parsed = manifest.isValid() ? Result<Manifest>(std::exchange(manifest, Manifest{}))
-                                        : Result<Manifest>(ErrorCode::ManifestInvalid);
-#endif
         }
         if (!parsed) {
             return parsed.error();

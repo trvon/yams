@@ -490,17 +490,6 @@ public:
     explicit PooledRequestManager(DaemonClientPool::Config pool_cfg = DaemonClientPool::Config{})
         : pool_(std::make_unique<DaemonClientPool>(std::move(pool_cfg))) {}
 
-    // Synchronous execute method - DEPRECATED and only for test compatibility
-    // This will return NotImplemented in production code
-    Result<void> execute(const TRequest& /*req*/, std::function<Result<void>()> fallback,
-                         RenderFunc /*render*/) {
-        // Synchronous bridge has been removed; prefer execute_async.
-        // Use fallback if provided; otherwise signal not implemented.
-        if (fallback)
-            return fallback();
-        return Error{ErrorCode::NotImplemented, "Synchronous execute() is not available"};
-    }
-
     // Async (coroutine) execution path using pooled DaemonClient::call<TRequest>()
     // Mirrors the sync logic but avoids blocking during the daemon roundtrip.
     [[nodiscard]] boost::asio::awaitable<Result<void>>
