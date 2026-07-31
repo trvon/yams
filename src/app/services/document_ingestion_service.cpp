@@ -4,21 +4,17 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
 #include <filesystem>
-#include <future>
 #include <memory>
 #include <mutex>
-#include <thread>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
 #include <boost/asio/use_awaitable.hpp>
-#include <boost/asio/use_future.hpp>
 #include <yams/core/assert.hpp>
 #include <yams/crypto/hasher.h>
+#include <yams/daemon/client/await_result_sync.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 
@@ -170,8 +166,10 @@ yams::daemon::AddDocumentRequest DocumentIngestionService::buildRequest(const Ad
     return dreq;
 }
 
+namespace {
+
 boost::asio::awaitable<Result<yams::daemon::AddDocumentResponse>>
-DocumentIngestionService::addViaDaemonAsync(const AddOptions& opts) const {
+addViaDaemonWithClient(std::shared_ptr<yams::daemon::DaemonClient> client, AddOptions opts) {
     if (opts.path.empty() && opts.content.empty()) {
         co_return Error{ErrorCode::InvalidArgument,
                         "Provide a file path or inline content for add operation"};
@@ -185,9 +183,7 @@ DocumentIngestionService::addViaDaemonAsync(const AddOptions& opts) const {
                         "Inline content requires a non-empty document name"};
     }
 
-    auto dreq = buildRequest(opts);
-    auto client = getOrCreateClient(opts);
-
+    auto dreq = DocumentIngestionService::buildRequest(opts);
     // Retriable daemon call with backoff
     std::string lastError;
     auto exec = co_await boost::asio::this_coro::executor;
@@ -259,27 +255,26 @@ DocumentIngestionService::addViaDaemonAsync(const AddOptions& opts) const {
                     lastError.empty() ? std::string("daemon add failed") : lastError};
 }
 
+} // namespace
+
+boost::asio::awaitable<Result<yams::daemon::AddDocumentResponse>>
+DocumentIngestionService::addViaDaemonAsync(const AddOptions& opts) const {
+    return addViaDaemonWithClient(getOrCreateClient(opts), opts);
+}
+
 Result<yams::daemon::AddDocumentResponse>
 DocumentIngestionService::addViaDaemon(const AddOptions& opts) const {
-    // Sync wrapper: spawn the async coroutine and block on the result
-    std::promise<Result<yams::daemon::AddDocumentResponse>> p;
-    auto f = p.get_future();
-
-    boost::asio::co_spawn(
-        yams::daemon::GlobalIOContext::global_executor(),
-        [this, &opts, p = std::move(p)]() mutable -> boost::asio::awaitable<void> {
-            auto r = co_await addViaDaemonAsync(opts);
-            p.set_value(std::move(r));
-            co_return;
-        },
-        boost::asio::detached);
-
     // Wait with timeout: sum of per-attempt timeouts + backoff
-    int totalMs = (opts.retries + 1) * opts.timeoutMs + opts.retries * opts.backoffMs * 4;
-    if (f.wait_for(std::chrono::milliseconds(std::max(1, totalMs))) == std::future_status::ready) {
-        return f.get();
-    }
-    return Error{ErrorCode::Timeout, "AddDocument timed out"};
+    const int retries = std::max(0, opts.retries);
+    const auto totalMs = static_cast<std::int64_t>(retries + 1) * std::max(1, opts.timeoutMs) +
+                         static_cast<std::int64_t>(retries) * std::max(0, opts.backoffMs) * 4;
+    auto client = getOrCreateClient(opts);
+    return yams::daemon::detail::awaitResultSync<yams::daemon::AddDocumentResponse>(
+        yams::daemon::GlobalIOContext::global_executor(),
+        [client = std::move(client), opts]() mutable {
+            return addViaDaemonWithClient(std::move(client), std::move(opts));
+        },
+        std::chrono::milliseconds(std::max<std::int64_t>(1, totalMs)), "add");
 }
 
 boost::asio::awaitable<BatchAddResult>
@@ -363,34 +358,10 @@ DocumentIngestionService::deleteDocument(const DeleteOptions& opts) const {
     }
 
     auto client = getOrCreateClient(opts);
-    std::promise<Result<yams::daemon::DeleteResponse>> p;
-    std::promise<void> done;
-    auto f = p.get_future();
-    auto done_f = done.get_future();
-    boost::asio::co_spawn(
+    return yams::daemon::detail::awaitResultSync<yams::daemon::DeleteResponse>(
         yams::daemon::GlobalIOContext::global_executor(),
-        [client, dreq, p = std::move(p),
-         d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
-            auto r = co_await client->remove(dreq);
-            p.set_value(std::move(r));
-            d.set_value();
-            co_return;
-        },
-        boost::asio::detached);
-
-    try {
-        if (f.wait_for(std::chrono::milliseconds(opts.timeoutMs)) == std::future_status::ready) {
-            auto result = f.get();
-            done_f.wait();
-            return result;
-        }
-    } catch (const std::exception& e) {
-        done_f.wait();
-        return Error{ErrorCode::InternalError,
-                     std::string("delete failed with exception: ") + e.what()};
-    }
-    done_f.wait();
-    return Error{ErrorCode::Timeout, "delete timed out"};
+        [client = std::move(client), dreq = std::move(dreq)]() { return client->remove(dreq); },
+        std::chrono::milliseconds(std::max(1, opts.timeoutMs)), "delete");
 }
 
 Result<yams::daemon::UpdateDocumentResponse>
@@ -403,34 +374,12 @@ DocumentIngestionService::updateDocument(const UpdateOptions& opts) const {
     dreq.metadata = opts.setMetadata;
 
     auto client = getOrCreateClient(opts);
-    std::promise<Result<yams::daemon::UpdateDocumentResponse>> p;
-    std::promise<void> done;
-    auto f = p.get_future();
-    auto done_f = done.get_future();
-    boost::asio::co_spawn(
+    return yams::daemon::detail::awaitResultSync<yams::daemon::UpdateDocumentResponse>(
         yams::daemon::GlobalIOContext::global_executor(),
-        [client, dreq, p = std::move(p),
-         d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
-            auto r = co_await client->updateDocument(dreq);
-            p.set_value(std::move(r));
-            d.set_value();
-            co_return;
+        [client = std::move(client), dreq = std::move(dreq)]() {
+            return client->updateDocument(dreq);
         },
-        boost::asio::detached);
-
-    try {
-        if (f.wait_for(std::chrono::milliseconds(opts.timeoutMs)) == std::future_status::ready) {
-            auto result = f.get();
-            done_f.wait();
-            return result;
-        }
-    } catch (const std::exception& e) {
-        done_f.wait();
-        return Error{ErrorCode::InternalError,
-                     std::string("update failed with exception: ") + e.what()};
-    }
-    done_f.wait();
-    return Error{ErrorCode::Timeout, "update timed out"};
+        std::chrono::milliseconds(std::max(1, opts.timeoutMs)), "update");
 }
 
 } // namespace yams::app::services

@@ -2280,6 +2280,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  service_deadline_exe = executable('service_deadline',
+    files('unit/app/services/service_deadline_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   simd_memmem_exe = executable('simd_memmem',
     files('unit/app/services/simd_memmem_test.cpp'),
     include_directories: incs,
@@ -2684,6 +2693,12 @@ if catch2_dep.found()
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
     is_parallel: false
+  )
+
+  test('service_deadline', service_deadline_exe,
+    suite: ['catch2', 'unit', 'services', 'deadline'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
   )
 
   test('simd_memmem', simd_memmem_exe,

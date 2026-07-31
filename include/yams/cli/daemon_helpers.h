@@ -42,15 +42,13 @@ template <typename... Args> inline void error(const char*, Args&&...) {}
 #include <vector>
 
 #include <boost/asio/awaitable.hpp>
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/this_coro.hpp>
-#include <boost/asio/use_future.hpp>
 #include <yams/app/services/retrieval_service.h>
 #include <yams/cli/cli_perf_trace.h>
 #include <yams/common/string_utils.h>
 #include <yams/core/types.h>
+#include <yams/daemon/client/await_result_sync.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/client/in_process_transport.h>
@@ -1260,39 +1258,11 @@ inline Result<T> run_result(boost::asio::awaitable<Result<T>> aw,
     if (!executor) {
         executor = yams::daemon::GlobalIOContext::instance().get_io_context().get_executor();
     }
-    // Use shared_ptr to ensure the promise outlives the coroutine even if we timeout and return
-    // early. The coroutine captures a copy of the shared_ptr, preventing use-after-free.
-    auto prom = std::make_shared<std::promise<Result<T>>>();
-    auto fut = prom->get_future();
-    boost::asio::co_spawn(
-        executor,
-        [a = std::move(aw), prom]() mutable -> boost::asio::awaitable<void> {
-            try {
-                auto r = co_await std::move(a);
-                prom->set_value(std::move(r));
-            } catch (const std::exception& e) {
-                prom->set_value(
-                    Error{ErrorCode::InternalError, std::string("Awaitable threw: ") + e.what()});
-            } catch (...) {
-                prom->set_value(
-                    Error{ErrorCode::InternalError, "Awaitable threw unknown exception"});
-            }
-            co_return;
-        },
-        boost::asio::detached);
-
-    if (timeout.count() > 0) {
-        if (fut.wait_for(timeout) != std::future_status::ready) {
-            detail::cli_perf_trace("run_result.timeout",
-                                   std::chrono::duration_cast<std::chrono::microseconds>(
-                                       std::chrono::steady_clock::now() - start));
-            return Error{ErrorCode::Timeout, "Awaitable timed out"};
-        }
-    } else {
-        fut.wait();
-    }
-    auto result = fut.get();
-    detail::cli_perf_trace("run_result.complete",
+    auto result =
+        yams::daemon::detail::awaitResultSync<T>(std::move(executor), std::move(aw), timeout);
+    detail::cli_perf_trace(result || result.error().code != ErrorCode::Timeout
+                               ? "run_result.complete"
+                               : "run_result.timeout",
                            std::chrono::duration_cast<std::chrono::microseconds>(
                                std::chrono::steady_clock::now() - start));
     return result;

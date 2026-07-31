@@ -75,6 +75,7 @@ struct GetOptions {
 struct GrepOptions {
     std::string pattern;
     std::vector<std::string> paths;
+    std::string scopePathPrefix;
     bool caseInsensitive = false;
     bool invertMatch = false;
     int contextLines = 0;
@@ -172,6 +173,7 @@ struct SearchOptions {
     std::string hashQuery;
     std::string pathPattern;
     std::vector<std::string> pathPatterns;
+    std::string scopePathPrefix;
     std::vector<std::string> tags;
     bool matchAllTags = false;
     std::string extension;
