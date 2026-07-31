@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -52,6 +53,12 @@ struct AddOptions {
     bool waitForProcessing{false}; // Wait for text extraction to complete before returning
     int waitTimeoutSeconds{30};    // Max seconds to wait for extraction (0 = no timeout)
 };
+
+namespace detail {
+
+std::chrono::milliseconds calculateAddTimeout(const AddOptions& options);
+
+} // namespace detail
 
 struct DeleteOptions {
     std::optional<std::filesystem::path> socketPath;

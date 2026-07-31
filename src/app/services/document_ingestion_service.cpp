@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -53,7 +54,34 @@ std::size_t resolveBatchConcurrency(std::size_t batchSize, int maxConcurrent) {
     return result;
 }
 
+using MillisecondsRep = std::chrono::milliseconds::rep;
+using TimeoutBudget = std::uint64_t;
+
+TimeoutBudget saturatingMultiply(TimeoutBudget lhs, TimeoutBudget rhs) {
+    constexpr auto kMax = static_cast<TimeoutBudget>(std::chrono::milliseconds::max().count());
+    if (lhs == 0 || rhs == 0) {
+        return 0;
+    }
+    return lhs > kMax / rhs ? kMax : lhs * rhs;
+}
+
+TimeoutBudget saturatingAdd(TimeoutBudget lhs, TimeoutBudget rhs) {
+    constexpr auto kMax = static_cast<TimeoutBudget>(std::chrono::milliseconds::max().count());
+    return lhs > kMax - rhs ? kMax : lhs + rhs;
+}
+
 } // namespace
+
+std::chrono::milliseconds detail::calculateAddTimeout(const AddOptions& options) {
+    const auto retries = static_cast<TimeoutBudget>(std::max(0, options.retries));
+    const auto timeoutMs = static_cast<TimeoutBudget>(std::max(1, options.timeoutMs));
+    const auto backoffMs = static_cast<TimeoutBudget>(std::max(0, options.backoffMs));
+
+    const auto attemptBudget = saturatingMultiply(retries + 1, timeoutMs);
+    const auto backoffBudget = saturatingMultiply(saturatingMultiply(retries, backoffMs), 4);
+    return std::chrono::milliseconds{
+        static_cast<MillisecondsRep>(saturatingAdd(attemptBudget, backoffBudget))};
+}
 
 DocumentIngestionService::DocumentIngestionService(
     std::shared_ptr<yams::daemon::DaemonClient> client)
@@ -265,16 +293,13 @@ DocumentIngestionService::addViaDaemonAsync(const AddOptions& opts) const {
 Result<yams::daemon::AddDocumentResponse>
 DocumentIngestionService::addViaDaemon(const AddOptions& opts) const {
     // Wait with timeout: sum of per-attempt timeouts + backoff
-    const int retries = std::max(0, opts.retries);
-    const auto totalMs = static_cast<std::int64_t>(retries + 1) * std::max(1, opts.timeoutMs) +
-                         static_cast<std::int64_t>(retries) * std::max(0, opts.backoffMs) * 4;
     auto client = getOrCreateClient(opts);
     return yams::daemon::detail::awaitResultSync<yams::daemon::AddDocumentResponse>(
         yams::daemon::GlobalIOContext::global_executor(),
         [client = std::move(client), opts]() mutable {
             return addViaDaemonWithClient(std::move(client), std::move(opts));
         },
-        std::chrono::milliseconds(std::max<std::int64_t>(1, totalMs)), "add");
+        detail::calculateAddTimeout(opts), "add");
 }
 
 boost::asio::awaitable<BatchAddResult>

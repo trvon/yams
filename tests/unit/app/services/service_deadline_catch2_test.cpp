@@ -2,7 +2,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <future>
+#include <limits>
 #include <memory>
 #include <thread>
 
@@ -38,11 +40,15 @@ public:
     }
 
     boost::asio::awaitable<yams::Result<void>, boost::asio::any_io_executor>
-    send_request_streaming(yams::daemon::Request, const HeaderCallback&, const ChunkCallback&,
-                           const ErrorCallback&, const CompleteCallback& onComplete) override {
+    send_request_streaming(yams::daemon::Request request, const HeaderCallback& onHeader,
+                           const ChunkCallback&, const ErrorCallback&,
+                           const CompleteCallback& onComplete) override {
         auto executor = co_await boost::asio::this_coro::executor;
         boost::asio::steady_timer timer(executor, delay_);
         co_await timer.async_wait(boost::asio::use_awaitable);
+        if (onHeader && std::holds_alternative<yams::daemon::AddDocumentRequest>(request)) {
+            onHeader(yams::daemon::AddDocumentResponse{});
+        }
         if (onComplete) {
             onComplete();
         }
@@ -129,4 +135,51 @@ TEST_CASE("DocumentIngestionService delete returns at its request deadline",
     CHECK(result.error().code == yams::ErrorCode::Timeout);
     CHECK(elapsed < 150ms);
     REQUIRE(transport->completedFuture().wait_for(1s) == std::future_status::ready);
+}
+
+TEST_CASE("DocumentIngestionService add deadline does not wrap for maximum retries",
+          "[app][service][deadline]") {
+    IoRunner runner;
+    auto transport = std::make_shared<DelayedTransport>(20ms);
+
+    yams::daemon::ClientConfig config;
+    config.executor = runner.io_.get_executor();
+    config.transport = transport;
+    config.transportMode = yams::daemon::ClientTransportMode::InProcess;
+    config.autoStart = false;
+    auto client = std::make_shared<yams::daemon::DaemonClient>(config);
+
+    yams::app::services::AddOptions options;
+    options.content = "deadline-test";
+    options.name = "deadline-test.txt";
+    options.timeoutMs = 1;
+    options.retries = std::numeric_limits<int>::max();
+    options.backoffMs = 0;
+
+    yams::app::services::DocumentIngestionService service(std::move(client));
+    const auto result = service.addViaDaemon(options);
+
+    REQUIRE(result);
+    REQUIRE(transport->completedFuture().wait_for(1s) == std::future_status::ready);
+}
+
+TEST_CASE("DocumentIngestionService add deadline saturates without overflow",
+          "[app][service][deadline]") {
+    yams::app::services::AddOptions options;
+    options.timeoutMs = 1;
+    options.retries = std::numeric_limits<int>::max();
+    options.backoffMs = 0;
+
+    CHECK(yams::app::services::detail::calculateAddTimeout(options) ==
+          std::chrono::milliseconds{static_cast<std::int64_t>(options.retries) + 1});
+
+    options.timeoutMs = std::numeric_limits<int>::max();
+    options.backoffMs = std::numeric_limits<int>::max();
+    CHECK(yams::app::services::detail::calculateAddTimeout(options) ==
+          std::chrono::milliseconds::max());
+
+    options.timeoutMs = -1;
+    options.retries = -1;
+    options.backoffMs = -1;
+    CHECK(yams::app::services::detail::calculateAddTimeout(options) == 1ms);
 }
