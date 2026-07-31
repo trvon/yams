@@ -2,6 +2,7 @@
 #include <yams/common/fs_utils.h>
 #include <yams/common/time_utils.h>
 #include <yams/core/assert.hpp>
+#include <yams/core/checked_arithmetic.h>
 #include <yams/core/uuid.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/WriteBatchCoalescer.h>
@@ -1324,7 +1325,7 @@ private:
             return {SnippetPreviewCache{}, false};
         }
         int scaledSnippetLength = 0;
-        if (__builtin_mul_overflow(snippetLength, 8, &scaledSnippetLength)) {
+        if (core::mulOverflow(snippetLength, 8, scaledSnippetLength)) {
             scaledSnippetLength = snippetLength > 0 ? 8192 : 0;
         }
         const int previewChars = std::clamp(scaledSnippetLength, 256, 8192);
@@ -2070,7 +2071,7 @@ public:
                 const auto& node = *nodeRes.value();
                 if (node.centroidWeight > 0) {
                     std::uint32_t weight = 0;
-                    if (__builtin_add_overflow(std::uint32_t{0}, node.centroidWeight, &weight)) {
+                    if (core::narrowOverflow(node.centroidWeight, weight)) {
                         weight = std::numeric_limits<std::uint32_t>::max();
                     }
                     doc.centroidWeight = weight;

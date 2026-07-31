@@ -1,5 +1,6 @@
 #include <spdlog/spdlog.h>
 #include <yams/common/fs_utils.h>
+#include <yams/core/checked_arithmetic.h>
 #include <yams/crypto/hasher.h>
 #include <yams/manifest/manifest_manager.h>
 #if defined(YAMS_HAS_STD_FORMAT) && YAMS_HAS_STD_FORMAT
@@ -38,7 +39,7 @@ std::optional<std::string> getenvCopy(const char* name) {
 
 std::optional<uint32_t> checkedU32(std::size_t value) {
     uint32_t narrowed = 0;
-    if (__builtin_add_overflow(std::size_t{0}, value, &narrowed)) {
+    if (core::narrowOverflow(value, narrowed)) {
         return std::nullopt;
     }
     return narrowed;
@@ -192,8 +193,7 @@ struct ManifestManager::Impl {
                               std::chrono::milliseconds sample) {
         const int64_t sampleCount = sample.count();
         int64_t nextCount = 0;
-        if (sampleCount <= 0 || __builtin_add_overflow(count, int64_t{1}, &nextCount) ||
-            nextCount <= 0) {
+        if (sampleCount <= 0 || core::addOverflow(count, int64_t{1}, nextCount) || nextCount <= 0) {
             return;
         }
 
@@ -201,12 +201,12 @@ struct ManifestManager::Impl {
         int64_t delta = 0;
         int64_t nextAverage = averageCount;
         if (sampleCount >= averageCount) {
-            if (__builtin_sub_overflow(sampleCount, averageCount, &delta) ||
-                __builtin_add_overflow(averageCount, delta / nextCount, &nextAverage)) {
+            if (core::subOverflow(sampleCount, averageCount, delta) ||
+                core::addOverflow(averageCount, delta / nextCount, nextAverage)) {
                 return;
             }
-        } else if (__builtin_sub_overflow(averageCount, sampleCount, &delta) ||
-                   __builtin_sub_overflow(averageCount, delta / nextCount, &nextAverage)) {
+        } else if (core::subOverflow(averageCount, sampleCount, delta) ||
+                   core::subOverflow(averageCount, delta / nextCount, nextAverage)) {
             return;
         }
 
@@ -217,7 +217,7 @@ struct ManifestManager::Impl {
     void updateStats(std::chrono::milliseconds serTime, std::chrono::milliseconds deserTime) const {
         std::lock_guard lock(statsMutex);
         std::size_t nextTotal = 0;
-        if (!__builtin_add_overflow(stats.totalManifests, std::size_t{1}, &nextTotal)) {
+        if (!core::addOverflow(stats.totalManifests, std::size_t{1}, nextTotal)) {
             stats.totalManifests = nextTotal;
         }
         spdlog::trace("Updated stats: totalManifests={}, serTime={}ms, deserTime={}ms",

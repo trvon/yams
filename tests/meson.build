@@ -2010,6 +2010,24 @@ if catch2_dep.found()
     install: false,
   )
 
+  core_checked_arithmetic_exe = executable('core_checked_arithmetic',
+    files('unit/core/checked_arithmetic_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + core_test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  config_parse_utils_exe = executable('config_parse_utils',
+    files('unit/config/config_parse_utils_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep],
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   detection_exe = executable('detection',
     files(
       'unit/detection/command_integration_test.cpp',
@@ -2556,6 +2574,18 @@ if catch2_dep.found()
 
   test('core_uuid', core_uuid_exe,
     suite: ['catch2', 'unit', 'core', 'uuid'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('core_checked_arithmetic', core_checked_arithmetic_exe,
+    suite: ['catch2', 'unit', 'core', 'arithmetic'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('config_parse_utils', config_parse_utils_exe,
+    suite: ['catch2', 'unit', 'config', 'parse'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
