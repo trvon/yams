@@ -3390,6 +3390,9 @@ if catch2_dep.found()
     'TSAN_OPTIONS': _test_tsan_options,
     'YAMS_SOURCE_DIR': meson.project_source_root(),
     'MESON_BUILD_ROOT': meson.project_build_root(),
+    'YAMS_DAEMON_SOCKET': meson.project_build_root() / 'cli-tests-no-daemon.sock',
+    'YAMS_DAEMON_SOCKET_PATH': meson.project_build_root() / 'cli-tests-no-daemon.sock',
+    'YAMS_CLI_DISABLE_DAEMON_AUTOSTART': '1',
   }
 
   test('cli_common', catch2_cli_common_exe,
