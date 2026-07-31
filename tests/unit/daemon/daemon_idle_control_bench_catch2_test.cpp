@@ -55,7 +55,6 @@ TEST_CASE("DaemonBench: idle control wakeup remains responsive", "[daemon][.benc
     cfg.socketPath = runtimeRoot / "sock";
     cfg.pidFile = runtimeRoot / "daemon.pid";
     cfg.logFile = runtimeRoot / "daemon.log";
-    cfg.maxMemoryGb = 1;
     cfg.enableModelProvider = false;
     cfg.autoLoadPlugins = false;
 

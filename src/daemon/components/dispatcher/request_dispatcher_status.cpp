@@ -204,13 +204,11 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
                     state && state->readiness.modelProviderReady.load(std::memory_order_relaxed);
                 const bool embeddingOperational =
                     (es.state == EmbeddingProviderState::ModelReady) ||
-                    ((snap.embeddingAvailable || providerReady) &&
-                     es.state != EmbeddingProviderState::Failed);
+                    (snap.embeddingAvailable || providerReady);
                 setVal(metrics::kEmbeddingState, static_cast<size_t>(es.state));
                 setReady(readiness::kEmbeddingReady, embeddingOperational);
                 setReady(readiness::kEmbeddingDegraded,
-                         es.state == EmbeddingProviderState::Degraded ||
-                             es.state == EmbeddingProviderState::Failed);
+                         es.state == EmbeddingProviderState::Degraded);
             } catch (...) {
             }
             try {

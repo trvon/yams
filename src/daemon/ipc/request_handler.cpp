@@ -2149,8 +2149,7 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
 
                 try {
                     auto es = sm->getEmbeddingProviderFsmSnapshot();
-                    if (es.state == EmbeddingProviderState::Degraded ||
-                        es.state == EmbeddingProviderState::Failed) {
+                    if (es.state == EmbeddingProviderState::Degraded) {
                         finishWithError(ErrorCode::InvalidState,
                                         "Embedding generation disabled: provider degraded");
                         return;

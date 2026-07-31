@@ -1933,7 +1933,7 @@ public:
     // =========================================================================
 
     /// Lock error threshold for scaling down concurrency (default 5)
-    /// When dbLockErrorsWindow exceeds this, TuningManager reduces KG/embed concurrency
+    /// When recent lock errors exceed this, TuningManager reduces KG/embed concurrency
     /// Environment: YAMS_DB_LOCK_THRESHOLD
     static uint32_t dbLockErrorThreshold() {
         if (const char* s = std::getenv("YAMS_DB_LOCK_THRESHOLD")) {

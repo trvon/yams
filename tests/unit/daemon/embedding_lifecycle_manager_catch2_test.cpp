@@ -50,16 +50,6 @@ TEST_CASE("EmbeddingLifecycleManager FSM transitions", "[daemon][embedding-lifec
     CHECK(snap.embeddingDimension == 384);
 }
 
-TEST_CASE("EmbeddingLifecycleManager isDegraded", "[daemon][embedding-lifecycle][catch2]") {
-    EmbeddingLifecycleManager mgr(nullDeps());
-
-    mgr.fsm().dispatch(ProviderDegradedEvent{"plugin crashed"});
-    CHECK(mgr.isDegraded());
-
-    mgr.fsm().dispatch(ProviderRecoveryEvent{});
-    CHECK_FALSE(mgr.isDegraded());
-}
-
 TEST_CASE("EmbeddingLifecycleManager model name and plugin name setters",
           "[daemon][embedding-lifecycle][catch2]") {
     EmbeddingLifecycleManager mgr(nullDeps());

@@ -146,7 +146,6 @@ int main() {
         cfg.socketPath = runtime_root / "sock";
         cfg.pidFile = runtime_root / "daemon.pid";
         cfg.logFile = runtime_root / "daemon.log";
-        cfg.maxMemoryGb = 1;
         cfg.enableModelProvider = false;
         cfg.autoLoadPlugins = false;
 

@@ -94,8 +94,6 @@ struct DaemonStats {
     std::atomic<uint64_t> ipcTasksActive{0};
     // macOS AF_UNIX acceptor recovery counter
     std::atomic<uint64_t> ipcEinvalRebuilds{0};
-    // Accept loop backpressure metrics
-    std::atomic<uint64_t> acceptBackpressureDelays{0};
     std::atomic<uint64_t> acceptCapacityDelays{0};
 
     // Background repair metrics (idle-only coordinator)
@@ -114,8 +112,7 @@ struct DaemonStats {
     std::atomic<bool> repairInProgress{false};
 
     // Database contention metrics (for adaptive concurrency scaling)
-    std::atomic<uint64_t> dbLockErrors{0};       // Total "database is locked" errors
-    std::atomic<uint64_t> dbLockErrorsWindow{0}; // Errors in current tuning window
+    std::atomic<uint64_t> dbLockErrors{0}; // Total "database is locked" errors
 
     // Unified request admission metrics
     std::atomic<uint64_t> listRequestsActive{0};

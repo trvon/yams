@@ -585,7 +585,6 @@ public:
      *
      * When unset, callers should default to "simeon".
      */
-    static RerankerBackendPolicy resolveRerankerBackendPolicy();
     static RerankerBackendPolicy resolveRerankerBackendPolicy(const DaemonConfig& config);
 
     /**
@@ -595,7 +594,6 @@ public:
      * MallocStackLogging is active. profile = "memory" forces it; "normal"/"off"
      * disables it. Per-action suppression keys override profile defaults.
      */
-    static InstrumentationPolicy resolveInstrumentationPolicy();
     static InstrumentationPolicy resolveInstrumentationPolicy(const DaemonConfig& config);
 
     /**

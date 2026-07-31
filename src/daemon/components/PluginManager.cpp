@@ -1144,8 +1144,7 @@ Result<size_t> PluginManager::adoptEntityProviders() {
 bool PluginManager::isModelProviderDegraded() const {
     try {
         auto snap = embeddingFsm_.snapshot();
-        return snap.state == EmbeddingProviderState::Degraded ||
-               snap.state == EmbeddingProviderState::Failed;
+        return snap.state == EmbeddingProviderState::Degraded;
     } catch (...) {
         return false;
     }

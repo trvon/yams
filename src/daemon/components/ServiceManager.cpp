@@ -259,8 +259,7 @@ void ServiceManager::refreshPluginStatusSnapshot() {
         bool providerDegraded = false;
         try {
             auto es = embeddingLifecycle_.fsmSnapshot();
-            providerDegraded = (es.state == EmbeddingProviderState::Degraded ||
-                                es.state == EmbeddingProviderState::Failed);
+            providerDegraded = es.state == EmbeddingProviderState::Degraded;
         } catch (const std::exception& e) {
             spdlog::debug("Failed to snapshot embedding FSM state: {}", e.what());
         } catch (...) {

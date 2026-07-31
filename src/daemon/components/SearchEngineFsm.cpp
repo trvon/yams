@@ -10,7 +10,6 @@ namespace detail {
 struct SENotBuilt;
 struct SEBuilding;
 struct SEReady;
-struct SEDegraded;
 struct SEFailed;
 struct SEAwaitingDrain;
 
@@ -24,7 +23,6 @@ struct SearchEngineMachine : tinyfsm::MooreMachine<SearchEngineMachine> {
     virtual void react(const SearchEngineRebuildStartedEvent& ev);
     virtual void react(const SearchEngineRebuildCompletedEvent&) {}
     virtual void react(const SearchEngineRebuildFailedEvent&) {}
-    virtual void react(const SearchEngineRebuildDegradedEvent& ev);
     virtual void react(const SearchEngineRebuildRequestedEvent& ev);
     virtual void react(const SearchEngineIndexingDrainedEvent&) {}
 
@@ -42,11 +40,6 @@ void SearchEngineMachine::react(const SearchEngineRebuildStartedEvent& ev) {
     snap.buildDurationMs = 0;
     snap.rebuildPending = false;
     transit<SEBuilding>();
-}
-
-void SearchEngineMachine::react(const SearchEngineRebuildDegradedEvent& ev) {
-    snap.lastError = ev.reason;
-    transit<SEDegraded>();
 }
 
 void SearchEngineMachine::react(const SearchEngineRebuildRequestedEvent& ev) {
@@ -100,10 +93,6 @@ struct SEReady : SearchEngineMachine {
     void entry() override { applyEntry(SearchEngineState::Ready); }
 };
 
-struct SEDegraded : SearchEngineMachine {
-    void entry() override { applyEntry(SearchEngineState::Degraded); }
-};
-
 struct SEFailed : SearchEngineMachine {
     void entry() override { applyEntry(SearchEngineState::Failed); }
 };
@@ -134,16 +123,11 @@ bool canDispatch(SearchEngineState state, const SearchEngineRebuildStartedEvent&
 
 bool canDispatch(SearchEngineState state, const SearchEngineRebuildCompletedEvent&) {
     return state == SearchEngineState::Building || state == SearchEngineState::NotBuilt ||
-           state == SearchEngineState::Ready || state == SearchEngineState::Failed ||
-           state == SearchEngineState::Degraded;
+           state == SearchEngineState::Ready || state == SearchEngineState::Failed;
 }
 
 bool canDispatch(SearchEngineState state, const SearchEngineRebuildFailedEvent&) {
     return state == SearchEngineState::Building;
-}
-
-bool canDispatch(SearchEngineState state, const SearchEngineRebuildDegradedEvent&) {
-    return state != SearchEngineState::AwaitingDrain;
 }
 
 template <typename Event>
@@ -195,15 +179,6 @@ void SearchEngineFsm::dispatch(const SearchEngineRebuildCompletedEvent& ev) {
 void SearchEngineFsm::dispatch(const SearchEngineRebuildFailedEvent& ev) {
     validateDispatch(snapshot().state, ev,
                      "SearchEngineFsm SearchEngineRebuildFailedEvent requires Building state");
-    std::lock_guard<std::mutex> lock(sharedMutex());
-    detail::SearchEngineMachine::dispatch(ev);
-    syncAtomicState();
-}
-
-void SearchEngineFsm::dispatch(const SearchEngineRebuildDegradedEvent& ev) {
-    validateDispatch(
-        snapshot().state, ev,
-        "SearchEngineFsm SearchEngineRebuildDegradedEvent must not arrive while awaiting drain");
     std::lock_guard<std::mutex> lock(sharedMutex());
     detail::SearchEngineMachine::dispatch(ev);
     syncAtomicState();

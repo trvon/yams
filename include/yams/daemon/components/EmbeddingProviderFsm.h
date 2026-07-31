@@ -12,8 +12,7 @@ enum class EmbeddingProviderState {
     ProviderAdopted,
     ModelLoading,
     ModelReady,
-    Degraded,
-    Failed
+    Degraded
 };
 
 struct ProviderSnapshot {
@@ -33,16 +32,7 @@ struct ModelLoadedEvent {
     std::string modelName;
     std::size_t dimension;
 };
-struct LoadFailureEvent {
-    std::string error;
-};
 struct ProviderDegradedEvent {
-    std::string reason;
-};
-struct ModelReloadRequestedEvent {
-    std::string modelName;
-};
-struct ProviderRecoveryEvent {
     std::string reason;
 };
 
@@ -53,7 +43,6 @@ struct EPProviderAdopted;
 struct EPModelLoading;
 struct EPModelReady;
 struct EPDegraded;
-struct EPFailed;
 
 struct EmbeddingProviderMachine : tinyfsm::MooreMachine<EmbeddingProviderMachine> {
     inline static ProviderSnapshot snap{};
@@ -61,10 +50,7 @@ struct EmbeddingProviderMachine : tinyfsm::MooreMachine<EmbeddingProviderMachine
     virtual void react(const ProviderAdoptedEvent&);
     virtual void react(const ModelLoadStartedEvent&);
     virtual void react(const ModelLoadedEvent&);
-    virtual void react(const LoadFailureEvent&);
     virtual void react(const ProviderDegradedEvent&);
-    virtual void react(const ModelReloadRequestedEvent&) {}
-    virtual void react(const ProviderRecoveryEvent&) {}
 };
 
 struct EPUnavailable : EmbeddingProviderMachine {
@@ -85,28 +71,6 @@ struct EPModelReady : EmbeddingProviderMachine {
 
 struct EPDegraded : EmbeddingProviderMachine {
     void entry() override { snap.state = EmbeddingProviderState::Degraded; }
-    void react(const ModelReloadRequestedEvent& ev) override {
-        snap.modelName = ev.modelName;
-        snap.lastError.clear();
-        transit<EPModelLoading>();
-    }
-    void react(const ProviderRecoveryEvent&) override {
-        snap.lastError.clear();
-        transit<EPProviderAdopted>();
-    }
-};
-
-struct EPFailed : EmbeddingProviderMachine {
-    void entry() override { snap.state = EmbeddingProviderState::Failed; }
-    void react(const ModelReloadRequestedEvent& ev) override {
-        snap.modelName = ev.modelName;
-        snap.lastError.clear();
-        transit<EPModelLoading>();
-    }
-    void react(const ProviderRecoveryEvent&) override {
-        snap.lastError.clear();
-        transit<EPProviderAdopted>();
-    }
 };
 
 inline void EmbeddingProviderMachine::react(const ProviderAdoptedEvent&) {
@@ -123,11 +87,6 @@ inline void EmbeddingProviderMachine::react(const ModelLoadedEvent& ev) {
     snap.embeddingDimension = ev.dimension;
     snap.lastError.clear();
     transit<EPModelReady>();
-}
-
-inline void EmbeddingProviderMachine::react(const LoadFailureEvent& ev) {
-    snap.lastError = ev.error;
-    transit<EPFailed>();
 }
 
 inline void EmbeddingProviderMachine::react(const ProviderDegradedEvent& ev) {

@@ -1100,10 +1100,6 @@ ConfigResolver::TopologyTunerPolicy ConfigResolver::resolveTopologyTunerPolicy()
     return policy;
 }
 
-ConfigResolver::RerankerBackendPolicy ConfigResolver::resolveRerankerBackendPolicy() {
-    return resolveRerankerBackendPolicy(DaemonConfig{});
-}
-
 ConfigResolver::RerankerBackendPolicy
 ConfigResolver::resolveRerankerBackendPolicy(const DaemonConfig& config) {
     RerankerBackendPolicy policy;
@@ -1131,10 +1127,6 @@ ConfigResolver::resolveRerankerBackendPolicy(const DaemonConfig& config) {
     }
 
     return policy;
-}
-
-ConfigResolver::InstrumentationPolicy ConfigResolver::resolveInstrumentationPolicy() {
-    return resolveInstrumentationPolicy(DaemonConfig{});
 }
 
 ConfigResolver::InstrumentationPolicy
