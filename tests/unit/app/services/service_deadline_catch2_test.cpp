@@ -15,6 +15,7 @@
 
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/app/services/retrieval_service.h>
+#include <yams/compat/thread_stop_compat.h>
 #include <yams/daemon/client/client_transport.h>
 
 namespace {
@@ -82,7 +83,7 @@ struct IoRunner {
 
     boost::asio::io_context io_;
     boost::asio::executor_work_guard<boost::asio::io_context::executor_type> work_;
-    std::jthread thread_;
+    yams::compat::jthread thread_;
 };
 
 } // namespace
