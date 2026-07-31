@@ -39,12 +39,8 @@ struct DaemonConfig {
     std::filesystem::path socketPath;
     std::filesystem::path pidFile;
     std::filesystem::path logFile;
-    size_t maxMemoryGb = 4;
     std::chrono::milliseconds requestTimeout{5000};
-    bool healthMonitoring = true;
     std::string logLevel = "info";
-    size_t maxLogFiles = 5;
-    size_t maxLogSizeMb = 10;
     bool enableModelProvider = false;
     bool modelProviderRequired = false;
     ModelPoolConfig modelPoolConfig;
@@ -72,7 +68,6 @@ struct DaemonConfig {
     struct InstrumentationPolicy {
         // "auto" enables the memory profile when MallocStackLogging is present;
         // "memory" forces it; "normal"/"off" disables it.
-        std::string profile{"auto"};
         bool memoryProfileActive{false};
         bool suppressAutoRepair{false};
         bool suppressSimeonLexicalBuild{false};
@@ -83,10 +78,6 @@ struct DaemonConfig {
     // Per-plugin configuration: plugin name -> JSON config string
     // Parsed from [plugins.<name>] sections in config.toml
     std::map<std::string, std::string> pluginConfigs;
-
-    // Streaming keepalive configuration
-    std::chrono::milliseconds heartbeatInterval{500}; // default 500ms
-    std::chrono::milliseconds heartbeatJitter{50};    // default +/-50ms applied per tick
 
     // Adaptive tuning configuration (no envs)
     TuningConfig tuning{};

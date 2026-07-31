@@ -41,10 +41,12 @@ yams_onnx_plugin_srcs = [
   'ort_runtime_loader.cpp',
   'onnx_model_pool.cpp',
   'onnx_colbert_session.cpp',
-  '../../src/vector/tokenizer.cpp',
 ]
 
 plugin_cppargs = []
+if get_option('build-tests') or get_option('build-benchmarks')
+  plugin_cppargs += ['-DYAMS_TEST_PROVIDER_CONTROLS=1']
+endif
 
 # GPU provider defines - these MUST be passed to the plugin for GPU acceleration to work.
 # Conan sets these in pkg-config Cflags, but CMake method may not propagate them.
@@ -72,12 +74,12 @@ onnx_plugin_deps = [
   spdlog_dep,
   json_dep,
   yams_core,
+  dependency('yams_vector'),
   yams_onnx_resource,
   boost_dep,
 ] + win_extra_deps
 
 onnx_compile_dep = onnx_dep.partial_dependency(compile_args: true, includes: true)
-
 onnx_plugin_deps += [onnx_compile_dep]
 
 onnx_plugin_link_args = []
@@ -95,7 +97,7 @@ endif
 
 yams_onnx_plugin = shared_module('yams_onnx_plugin',
   yams_onnx_plugin_srcs,
-  include_directories: [ include_directories('../../include') ],
+  include_directories: [include_directories('../../include')],
   dependencies: onnx_plugin_deps,
   link_args: onnx_plugin_link_args,
   cpp_args: plugin_cppargs,

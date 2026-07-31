@@ -8,7 +8,7 @@
 
 namespace yams::daemon {
 
-enum class SearchEngineState { NotBuilt, Building, Ready, Degraded, Failed, AwaitingDrain };
+enum class SearchEngineState { NotBuilt, Building, Ready, Failed, AwaitingDrain };
 
 struct SearchEngineSnapshot {
     SearchEngineState state{SearchEngineState::NotBuilt};
@@ -35,10 +35,6 @@ struct SearchEngineRebuildFailedEvent {
     std::string error;
 };
 
-struct SearchEngineRebuildDegradedEvent {
-    std::string reason;
-};
-
 struct SearchEngineRebuildRequestedEvent {
     std::string reason;
     bool includeVectorSearch{false};
@@ -59,7 +55,6 @@ public:
     void dispatch(const SearchEngineRebuildStartedEvent& ev);
     void dispatch(const SearchEngineRebuildCompletedEvent& ev);
     void dispatch(const SearchEngineRebuildFailedEvent& ev);
-    void dispatch(const SearchEngineRebuildDegradedEvent& ev);
     bool dispatch(const SearchEngineRebuildRequestedEvent& ev);
     void dispatch(const SearchEngineIndexingDrainedEvent& ev);
 

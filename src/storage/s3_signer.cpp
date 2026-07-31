@@ -54,7 +54,7 @@ std::string percentEncode(const std::string& s, bool encodeSlash = false) {
         if (std::strchr(unreserved, c) || (!encodeSlash && c == '/')) {
             out.push_back((char)c);
         } else {
-            char buf[4];
+            char buf[4]{};
             std::snprintf(buf, sizeof(buf), "%%%02X", c);
             out.append(buf);
         }
@@ -114,8 +114,8 @@ std::string formatAmzDate(std::string* outShortDate) {
 #else
     gmtime_r(&t, &gmt);
 #endif
-    char bufTs[32];
-    char bufD[16];
+    char bufTs[32]{};
+    char bufD[16]{};
     // Use strftime to avoid manual snprintf size calculations (eliminates truncation warnings)
     if (std::strftime(bufTs, sizeof(bufTs), "%Y%m%dT%H%M%SZ", &gmt) == 0) {
         return {};

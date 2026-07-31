@@ -158,10 +158,13 @@ static int c_get(void* backend, const char* key, void** out_buf, size_t* out_len
     auto r = h->impl->get(key, std::nullopt, GetOptions{});
     if (std::holds_alternative<std::vector<std::uint8_t>>(r)) {
         const auto& v = std::get<std::vector<std::uint8_t>>(r);
-        void* p = std::malloc(v.size());
-        if (!p)
-            return -2;
-        std::memcpy(p, v.data(), v.size());
+        void* p = nullptr;
+        if (!v.empty()) {
+            p = std::malloc(v.size());
+            if (!p)
+                return -2;
+            std::memcpy(p, v.data(), v.size());
+        }
         *out_buf = p;
         *out_len = v.size();
         return 0;
@@ -252,11 +255,6 @@ static int c_list(void* backend, const char* prefix, char** out_list_json, const
 }
 
 } // namespace
-
-std::shared_ptr<IObjectStorageBackend> wrap_c_abi(yams_object_storage_v1* /*v1_iface*/) {
-    // Not implemented in this slice (out of scope); can be added on demand.
-    return nullptr;
-}
 
 std::pair<yams_object_storage_v1*, void*>
 expose_as_c_abi_with_state(std::shared_ptr<IObjectStorageBackend> impl) {

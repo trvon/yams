@@ -22,6 +22,7 @@
 #include <boost/asio/io_context.hpp>
 #include <yams/common/utf8_utils.h>
 #include <yams/daemon/components/MetadataWriteFacade.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/metadata/connection_pool.h>
 
@@ -1133,6 +1134,7 @@ TEST_CASE("MetadataRepository: batch repair status update preserves duplicate ha
 TEST_CASE("MetadataRepository: batch repair status update does not stack retry loops under lock",
           "[unit][metadata][repository][repair][contention]") {
     const auto dbPath = tempDbPath("metadata_repo_repair_lock_");
+    REQUIRE((daemon::TuneAdvisor::getAndResetDbLockErrors() == 0));
 
     ConnectionPoolConfig repoCfg;
     repoCfg.minConnections = 1;
@@ -1168,6 +1170,9 @@ TEST_CASE("MetadataRepository: batch repair status update does not stack retry l
     REQUIRE_FALSE((result.has_value()));
     CHECK((result.error().message.find("locked") != std::string::npos));
     CHECK((elapsed < std::chrono::milliseconds(3000)));
+    const auto lockErrors = daemon::TuneAdvisor::getAndResetDbLockErrors();
+    INFO("reported lock errors: " << lockErrors);
+    CHECK((lockErrors == 2));
 
     REQUIRE(((*heldConn.value())->execute("ROLLBACK").has_value()));
 

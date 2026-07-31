@@ -13,6 +13,7 @@
 
 #include <yams/core/assert.hpp>
 #include <yams/core/atomic_utils.h>
+#include <yams/metadata/db_lock_telemetry.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/storage/sqlite_retry.h>
 
@@ -350,7 +351,7 @@ Result<void> MetadataRepository::batchUpdateDocumentEmbeddingStatusByHashes(
         std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
     }
 
-    daemon::TuneAdvisor::reportDbLockError();
+    reportDbLockError();
     return Error{ErrorCode::DatabaseError,
                  "batchUpdateDocumentEmbeddingStatusByHashes: max retries exceeded"};
 }
@@ -445,7 +446,7 @@ MetadataRepository::batchCompleteDocumentEmbeddingsByHashes(const std::vector<st
 
     if (!result) {
         if (storage::sqlite_retry::isBusyOrLockedMessage(result.error().message)) {
-            daemon::TuneAdvisor::reportDbLockError();
+            reportDbLockError();
         }
         return result.error();
     }
@@ -612,7 +613,7 @@ Result<void> MetadataRepository::reconcileDocumentEmbeddingStatusByHashes(
         std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
     }
 
-    daemon::TuneAdvisor::reportDbLockError();
+    reportDbLockError();
     return Error{ErrorCode::DatabaseError,
                  "reconcileDocumentEmbeddingStatusByHashes: max retries exceeded"};
 }
@@ -998,7 +999,7 @@ MetadataRepository::batchUpdateDocumentRepairStatuses(const std::vector<std::str
     });
 
     if (!result && storage::sqlite_retry::isBusyOrLockedMessage(result.error().message)) {
-        daemon::TuneAdvisor::reportDbLockError();
+        reportDbLockError();
     }
     return result;
 }

@@ -419,6 +419,13 @@ bool VectorIndexCoordinator::requestCheckpoint() noexcept {
     } catch (...) {
         return false;
     }
+    if (fut.wait_for(checkpointWaitTimeout_) != std::future_status::ready) {
+        spdlog::warn(
+            "[VectorIndexCoordinator] requestCheckpoint timed out after {}ms; queued persistence "
+            "may still complete",
+            checkpointWaitTimeout_.count());
+        return false;
+    }
     return fut.get();
 }
 

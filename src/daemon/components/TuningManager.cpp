@@ -405,6 +405,35 @@ bool TuningManager::testing_shouldAllowZeroPostIngestTargets(bool daemonIdle, bo
     return shouldAllowZeroPostIngestTargets(daemonIdle, postIngestBusy);
 }
 
+OnnxSlotBudget computeOnnxSlotBudget(uint32_t desiredMax, uint32_t glinerReserved,
+                                     uint32_t embedReserved, uint32_t rerankerReserved,
+                                     uint32_t pressureCap, bool underPressure) noexcept {
+    if (underPressure) {
+        desiredMax = std::min(desiredMax, pressureCap);
+    } else {
+        const auto totalReserved = static_cast<std::uint64_t>(glinerReserved) +
+                                   static_cast<std::uint64_t>(embedReserved) +
+                                   static_cast<std::uint64_t>(rerankerReserved);
+        desiredMax = static_cast<uint32_t>(
+            std::min<std::uint64_t>(std::max<std::uint64_t>(desiredMax, totalReserved + 1u), 64u));
+    }
+    desiredMax = std::clamp(desiredMax, 2u, 64u);
+
+    uint32_t remainingForReserved = desiredMax - 1u;
+    const auto consume = [&remainingForReserved](uint32_t requested) {
+        const uint32_t granted = std::min(requested, remainingForReserved);
+        remainingForReserved -= granted;
+        return granted;
+    };
+
+    return OnnxSlotBudget{
+        .maxSlots = desiredMax,
+        .glinerReserved = consume(glinerReserved),
+        .embedReserved = consume(embedReserved),
+        .rerankerReserved = consume(rerankerReserved),
+    };
+}
+
 void TuningManager::configureOnnxConcurrencyRegistry() {
     // Configure OnnxConcurrencyRegistry based on TuneAdvisor settings
     // This should only be called once during initialization
@@ -416,22 +445,58 @@ void TuningManager::configureOnnxConcurrencyRegistry() {
     const uint32_t embedReserved = TuneAdvisor::onnxEmbedReserved();
     const uint32_t rerankerReserved = TuneAdvisor::onnxRerankerReserved();
 
-    // Ensure at least 1 shared slot beyond reserved and a hard minimum of 2.
-    const uint32_t totalReserved = glinerReserved + embedReserved + rerankerReserved;
-    const uint32_t maxSlots =
-        std::max<uint32_t>(std::max<uint32_t>(maxConcurrent, 2u), totalReserved + 1);
+    const auto slotBudget =
+        computeOnnxSlotBudget(maxConcurrent, glinerReserved, embedReserved, rerankerReserved,
+                              /*pressureCap=*/maxConcurrent, /*underPressure=*/false);
 
     // Configure the registry
-    registry.setMaxSlots(maxSlots);
-    registry.setReservedSlots(OnnxLane::Gliner, glinerReserved);
-    registry.setReservedSlots(OnnxLane::Embedding, embedReserved);
-    registry.setReservedSlots(OnnxLane::Reranker, rerankerReserved);
+    registry.setMaxSlots(slotBudget.maxSlots);
+    registry.setReservedSlots(OnnxLane::Gliner, slotBudget.glinerReserved);
+    registry.setReservedSlots(OnnxLane::Embedding, slotBudget.embedReserved);
+    registry.setReservedSlots(OnnxLane::Reranker, slotBudget.rerankerReserved);
     registry.setReservedSlots(OnnxLane::Other, 0);
 
     spdlog::info(
         "[TuningManager] Configured OnnxConcurrencyRegistry: maxSlots={}, reserved=[gliner={}, "
         "embed={}, reranker={}]",
-        maxSlots, glinerReserved, embedReserved, rerankerReserved);
+        slotBudget.maxSlots, slotBudget.glinerReserved, slotBudget.embedReserved,
+        slotBudget.rerankerReserved);
+}
+
+void TuningManager::reconcileOnnxSlotBudget(ResourceGovernor& governor,
+                                            const ResourceSnapshot& snapshot) noexcept {
+    try {
+        auto& registry = OnnxConcurrencyRegistry::instance();
+        const bool underPressure = TuneAdvisor::enableResourceGovernor() &&
+                                   snapshot.level >= ResourcePressureLevel::Critical;
+        const auto slotBudget = computeOnnxSlotBudget(
+            TuneAdvisor::onnxMaxConcurrent(), TuneAdvisor::onnxGlinerReserved(),
+            TuneAdvisor::onnxEmbedReserved(), TuneAdvisor::onnxRerankerReserved(),
+            governor.maxEmbedConcurrency(), underPressure);
+
+        // Apply reserved first, then maxSlots to avoid transient states where reserved > max.
+        if (lastOnnxGliner_ != slotBudget.glinerReserved) {
+            registry.setReservedSlots(OnnxLane::Gliner, slotBudget.glinerReserved);
+            lastOnnxGliner_ = slotBudget.glinerReserved;
+        }
+        if (lastOnnxEmbed_ != slotBudget.embedReserved) {
+            registry.setReservedSlots(OnnxLane::Embedding, slotBudget.embedReserved);
+            lastOnnxEmbed_ = slotBudget.embedReserved;
+        }
+        if (lastOnnxReranker_ != slotBudget.rerankerReserved) {
+            registry.setReservedSlots(OnnxLane::Reranker, slotBudget.rerankerReserved);
+            lastOnnxReranker_ = slotBudget.rerankerReserved;
+        }
+        if (lastOnnxMax_ != slotBudget.maxSlots) {
+            registry.setMaxSlots(slotBudget.maxSlots);
+            lastOnnxMax_ = slotBudget.maxSlots;
+            spdlog::info("[TuningManager] ONNX slots set to {}", slotBudget.maxSlots);
+        }
+    } catch (const std::exception& e) {
+        logIgnoredTuningException("ONNX slot tuning failed", e);
+    } catch (...) {
+        logIgnoredTuningException("ONNX slot tuning failed");
+    }
 }
 
 bool TuningManager::tick_once() {
@@ -459,65 +524,7 @@ bool TuningManager::tick_once() {
     // Resource Governor: collect metrics and respond to memory pressure
     // =========================================================================
     // Dynamically clamp ONNX concurrency to governor caps (keeps global pools aligned)
-    try {
-        auto& registry = OnnxConcurrencyRegistry::instance();
-        uint32_t desiredMax = std::max<uint32_t>(2u, TuneAdvisor::onnxMaxConcurrent());
-        uint32_t glinerReserved = TuneAdvisor::onnxGlinerReserved();
-        uint32_t embedReserved = TuneAdvisor::onnxEmbedReserved();
-        uint32_t rerankerReserved = TuneAdvisor::onnxRerankerReserved();
-
-        const bool underPressure = TuneAdvisor::enableResourceGovernor() &&
-                                   govSnap.level >= ResourcePressureLevel::Critical;
-        if (underPressure) {
-            desiredMax = std::min<uint32_t>(desiredMax, governor.maxEmbedConcurrency());
-        } else {
-            // Under normal conditions, preserve the invariant that there is at least 1 shared slot
-            // beyond the configured reserved total.
-            const uint32_t totalReservedWanted = glinerReserved + embedReserved + rerankerReserved;
-            desiredMax = std::max<uint32_t>(desiredMax, totalReservedWanted + 1u);
-        }
-
-        desiredMax = std::max<uint32_t>(desiredMax, 2u);
-        if (desiredMax > 64u) { // counting_semaphore<64> limit in registry
-            desiredMax = 64u;
-        }
-
-        // Always leave at least 1 shared slot beyond reserved budgets when possible.
-        uint32_t remainingForReserved = (desiredMax > 1u) ? (desiredMax - 1u) : 0u;
-        auto consume = [&remainingForReserved](uint32_t v) {
-            if (remainingForReserved == 0)
-                return 0u;
-            uint32_t take = std::min(v, remainingForReserved);
-            remainingForReserved -= take;
-            return take;
-        };
-        uint32_t effGliner = consume(glinerReserved);
-        uint32_t effEmbed = consume(embedReserved);
-        uint32_t effReranker = consume(rerankerReserved);
-
-        // Apply reserved first, then maxSlots to avoid transient states where reserved > max.
-        if (lastOnnxGliner_ != effGliner) {
-            registry.setReservedSlots(OnnxLane::Gliner, effGliner);
-            lastOnnxGliner_ = effGliner;
-        }
-        if (lastOnnxEmbed_ != effEmbed) {
-            registry.setReservedSlots(OnnxLane::Embedding, effEmbed);
-            lastOnnxEmbed_ = effEmbed;
-        }
-        if (lastOnnxReranker_ != effReranker) {
-            registry.setReservedSlots(OnnxLane::Reranker, effReranker);
-            lastOnnxReranker_ = effReranker;
-        }
-        if (lastOnnxMax_ != desiredMax) {
-            registry.setMaxSlots(desiredMax);
-            lastOnnxMax_ = desiredMax;
-            spdlog::info("[TuningManager] ONNX slots set to {}", desiredMax);
-        }
-    } catch (const std::exception& e) {
-        logIgnoredTuningException("ONNX slot tuning failed", e);
-    } catch (...) {
-        logIgnoredTuningException("ONNX slot tuning failed");
-    }
+    reconcileOnnxSlotBudget(governor, govSnap);
 
 #if defined(TRACY_ENABLE)
     TracyPlot("governor.rss_mb", static_cast<double>(govSnap.rssBytes) / (1024.0 * 1024.0));

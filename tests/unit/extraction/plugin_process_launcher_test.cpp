@@ -16,11 +16,10 @@
 
 #include <chrono>
 #include <filesystem>
-#include <fstream>
 #include <string>
 #include <thread>
 
-// PyInstaller executables need ~3s to unpack/start on first run (can be slower on CI)
+// External plugins can need time to initialize before accepting requests.
 constexpr auto PROCESS_STARTUP_WAIT = std::chrono::seconds{3};
 // PyInstaller executables may need extra time to respond after stdin is closed
 constexpr auto RPC_TIMEOUT = std::chrono::seconds{8};
@@ -67,44 +66,6 @@ fs::path getMockPluginPath() {
     fs::path file_path = fs::absolute(fs::path(__FILE__));
     fs::path tests_dir = file_path.parent_path().parent_path().parent_path();
     return tests_dir / "fixtures" / "mock_plugin.py";
-}
-
-// Get compiled plugin path (platform-aware)
-fs::path getCompiledPluginPath() {
-    // Try environment variable first
-    const char* source_dir = std::getenv("YAMS_SOURCE_DIR");
-    fs::path base;
-
-    if (source_dir) {
-        base = fs::path(source_dir);
-    } else {
-        // Fall back to relative path from __FILE__
-        // __FILE__ = tests/unit/extraction/plugin_process_launcher_test.cpp
-        // We want: plugins/yams-ghidra-plugin/dist/
-        fs::path file_path = fs::absolute(fs::path(__FILE__));
-        base = file_path.parent_path().parent_path().parent_path().parent_path();
-    }
-
-    fs::path plugin_dir = base / "plugins" / "yams-ghidra-plugin" / "dist";
-
-#ifdef _WIN32
-    return plugin_dir / "plugin.exe";
-#else
-    return plugin_dir / "plugin";
-#endif
-}
-
-bool isCompatibleCompiledPlugin(const fs::path& plugin) {
-#if defined(__linux__)
-    std::ifstream input(plugin, std::ios::binary);
-    char magic[4]{};
-    input.read(magic, sizeof(magic));
-    return input.gcount() == static_cast<std::streamsize>(sizeof(magic)) && magic[0] == '\x7f' &&
-           magic[1] == 'E' && magic[2] == 'L' && magic[3] == 'F';
-#else
-    (void)plugin;
-    return true;
-#endif
 }
 
 // Helper: read stdout with timeout, return string
@@ -180,11 +141,11 @@ TEST_CASE("PluginProcess launcher basic spawn", "[extraction][plugin][launcher]"
             .executable = python, .args = {"-u", mock_plugin.string()} // -u for unbuffered
         };
 
-        PluginProcess process{std::move(config)};
+        PluginProcess process{config};
 
         CHECK(process.is_alive());
-        CHECK(process.state() == ProcessState::Ready);
-        CHECK(process.pid() > 0);
+        CHECK((process.state() == ProcessState::Ready));
+        CHECK((process.pid() > 0));
 
         INFO("PID: " << process.pid());
 
@@ -193,7 +154,7 @@ TEST_CASE("PluginProcess launcher basic spawn", "[extraction][plugin][launcher]"
         CHECK(process.is_alive());
 
         process.terminate();
-        CHECK(process.state() == ProcessState::Terminated);
+        CHECK((process.state() == ProcessState::Terminated));
     }
 }
 
@@ -206,7 +167,7 @@ TEST_CASE("PluginProcess launcher stdin/stdout", "[extraction][plugin][launcher]
     SECTION("Write to stdin and read from stdout") {
         PluginProcessConfig config{.executable = python, .args = {"-u", mock_plugin.string()}};
 
-        PluginProcess process{std::move(config)};
+        PluginProcess process{config};
         REQUIRE(process.is_alive());
 
         // Wait for process to be ready
@@ -220,7 +181,7 @@ TEST_CASE("PluginProcess launcher stdin/stdout", "[extraction][plugin][launcher]
 
         size_t written = process.write_stdin(to_bytes(request_str));
         INFO("Wrote " << written << " bytes");
-        CHECK(written == request_str.size());
+        CHECK((written == request_str.size()));
 
         // Read response
         std::string response = readStdoutWithTimeout(process, RPC_TIMEOUT);
@@ -230,10 +191,10 @@ TEST_CASE("PluginProcess launcher stdin/stdout", "[extraction][plugin][launcher]
 
         // Parse and validate response
         auto parsed = json::parse(response);
-        CHECK(parsed["jsonrpc"] == "2.0");
-        CHECK(parsed["id"] == 1);
+        CHECK((parsed["jsonrpc"] == "2.0"));
+        CHECK((parsed["id"] == 1));
         CHECK(parsed.contains("result"));
-        CHECK(parsed["result"]["name"] == "mock_plugin");
+        CHECK((parsed["result"]["name"] == "mock_plugin"));
 
         process.terminate();
     }
@@ -251,7 +212,7 @@ TEST_CASE("PluginProcess launcher environment variables", "[extraction][plugin][
             .args = {"-u", mock_plugin.string()},
             .env = {{"PYTHONUNBUFFERED", "1"}, {"YAMS_TEST_VAR", "test_value"}}};
 
-        PluginProcess process{std::move(config)};
+        PluginProcess process{config};
         REQUIRE(process.is_alive());
 
         // Give process time to initialize
@@ -278,7 +239,7 @@ TEST_CASE("PluginProcess launcher working directory", "[extraction][plugin][laun
 
         INFO("Workdir: " << workdir.string());
 
-        PluginProcess process{std::move(config)};
+        PluginProcess process{config};
         REQUIRE(process.is_alive());
 
         std::this_thread::sleep_for(std::chrono::milliseconds{200});
@@ -294,7 +255,7 @@ TEST_CASE("PluginProcess launcher Windows-specific", "[extraction][plugin][launc
         // Simple test - spawn cmd.exe and run echo
         PluginProcessConfig config{.executable = "cmd.exe", .args = {"/c", "echo", "hello"}};
 
-        PluginProcess process{std::move(config)};
+        PluginProcess process{config};
 
         // cmd.exe /c echo will exit immediately
         std::this_thread::sleep_for(std::chrono::milliseconds{500});
@@ -311,7 +272,7 @@ TEST_CASE("PluginProcess launcher Windows-specific", "[extraction][plugin][launc
                                    .args = {"-NoProfile", "-Command",
                                             "[Console]::Out.WriteLine('hello from powershell')"}};
 
-        PluginProcess process{std::move(config)};
+        PluginProcess process{config};
 
         auto output = readStdoutWithTimeout(process, std::chrono::seconds{5});
         INFO("Output: " << output);
@@ -335,7 +296,7 @@ TEST_CASE("PluginProcess launcher Windows-specific", "[extraction][plugin][launc
 
         INFO("Path with spaces: " << destPlugin.string());
 
-        PluginProcess process{std::move(config)};
+        PluginProcess process{config};
         REQUIRE(process.is_alive());
 
         std::this_thread::sleep_for(std::chrono::milliseconds{200});
@@ -370,11 +331,11 @@ TEST_CASE("PluginProcess launcher rapid spawn/terminate", "[extraction][plugin][
 
             PluginProcessConfig config{.executable = python, .args = {"-u", mock_plugin.string()}};
 
-            PluginProcess process{std::move(config)};
+            PluginProcess process{config};
             CHECK(process.is_alive());
 
             process.terminate();
-            CHECK(process.state() == ProcessState::Terminated);
+            CHECK((process.state() == ProcessState::Terminated));
         }
     }
 
@@ -408,7 +369,7 @@ TEST_CASE("PluginProcess launcher I/O timing", "[extraction][plugin][launcher]")
     SECTION("Multiple requests in sequence") {
         PluginProcessConfig config{.executable = python, .args = {"-u", mock_plugin.string()}};
 
-        PluginProcess process{std::move(config)};
+        PluginProcess process{config};
         REQUIRE(process.is_alive());
 
         std::this_thread::sleep_for(std::chrono::milliseconds{200});
@@ -434,7 +395,7 @@ TEST_CASE("PluginProcess launcher I/O timing", "[extraction][plugin][launcher]")
                     read_pos += newline + 1;
 
                     auto parsed = json::parse(line);
-                    CHECK(parsed["id"] == i);
+                    CHECK((parsed["id"] == i));
                 }
             }
         }
@@ -447,102 +408,13 @@ TEST_CASE("PluginProcess launcher error handling", "[extraction][plugin][launche
     SECTION("Non-existent executable throws") {
         PluginProcessConfig config{.executable = "this_executable_does_not_exist_12345"};
 
-        CHECK_THROWS([&]() { PluginProcess process{std::move(config)}; }());
+        CHECK_THROWS([&]() { PluginProcess process{config}; }());
     }
 
     SECTION("Invalid executable throws") {
         // Try to execute a directory
         PluginProcessConfig config{.executable = fs::temp_directory_path()};
 
-        CHECK_THROWS([&]() { PluginProcess process{std::move(config)}; }());
-    }
-}
-
-// Test specifically for the compiled PyInstaller executable scenario
-TEST_CASE("PluginProcess launcher compiled executable",
-          "[extraction][plugin][launcher][compiled]") {
-    // Get platform-appropriate compiled plugin path
-    fs::path compiled_plugin = getCompiledPluginPath();
-
-    if (!fs::exists(compiled_plugin)) {
-        SKIP("Compiled plugin not found at: " + compiled_plugin.string() +
-             " - run 'python build.py' in yams-ghidra-plugin first");
-    }
-    if (!isCompatibleCompiledPlugin(compiled_plugin)) {
-        SKIP("Compiled plugin exists but is not executable for this test host: " +
-             compiled_plugin.string());
-    }
-
-    SECTION("Spawn compiled PyInstaller executable") {
-        INFO("Testing compiled plugin: " << compiled_plugin.string());
-
-        PluginProcessConfig config{.executable = compiled_plugin,
-                                   .args = {},
-                                   .env = {},
-                                   .workdir = compiled_plugin.parent_path()};
-
-        PluginProcess process{std::move(config)};
-
-        INFO("Process spawned, PID: " << process.pid());
-        INFO("Process state: " << static_cast<int>(process.state()));
-        CHECK(process.is_alive());
-
-        // Wait for PyInstaller unpacking (can be slow on first run)
-        std::this_thread::sleep_for(PROCESS_STARTUP_WAIT);
-
-        INFO("After startup wait, alive: " << process.is_alive());
-        REQUIRE(process.is_alive());
-
-        // Send handshake
-        json request = {{"jsonrpc", "2.0"}, {"id", 1}, {"method", "handshake.manifest"}};
-        std::string request_str = request.dump() + "\n";
-
-        INFO("Sending request: " << request_str);
-        size_t written = process.write_stdin(to_bytes(request_str));
-        INFO("Wrote " << written << " bytes");
-        CHECK(written == request_str.size());
-
-        // PyInstaller executables require stdin to be closed before they send a response
-        // This signals EOF to the plugin
-        process.close_stdin();
-
-        // Read response with timeout
-        std::string response = readStdoutWithTimeout(process, RPC_TIMEOUT);
-        INFO("Response received (" << response.size() << " bytes): " << response);
-
-        // Check stderr for errors
-        auto stderr_data = process.read_stderr();
-        if (!stderr_data.empty()) {
-            std::string stderr_str = from_bytes(stderr_data);
-            INFO("Stderr: " << stderr_str);
-        }
-
-        if (response.empty()) {
-            process.terminate();
-            SKIP("Compiled plugin did not respond to handshake - rebuild with 'python build.py'");
-        }
-
-        // Parse response
-        auto parsed = json::parse(response);
-        CHECK(parsed["jsonrpc"] == "2.0");
-        CHECK(parsed["id"] == 1);
-        CHECK(parsed.contains("result"));
-
-        process.terminate();
-    }
-
-    SECTION("Compiled executable with environment variables") {
-        PluginProcessConfig config{.executable = compiled_plugin,
-                                   .args = {},
-                                   .env = {{"PYTHONUNBUFFERED", "1"}},
-                                   .workdir = compiled_plugin.parent_path()};
-
-        PluginProcess process{std::move(config)};
-        REQUIRE(process.is_alive());
-
-        std::this_thread::sleep_for(PROCESS_STARTUP_WAIT);
-        CHECK(process.is_alive());
-
-        process.terminate();
+        CHECK_THROWS([&]() { PluginProcess process{config}; }());
     }
 }

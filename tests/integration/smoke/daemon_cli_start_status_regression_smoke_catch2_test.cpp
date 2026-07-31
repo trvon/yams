@@ -29,14 +29,6 @@ using namespace std::chrono_literals;
 
 namespace {
 
-bool setEnvValue(const std::string& key, const std::string& value) {
-    return setenv(key.c_str(), value.c_str(), 1) == 0;
-}
-
-bool unsetEnvValue(const std::string& key) {
-    return unsetenv(key.c_str()) == 0;
-}
-
 struct CommandResult {
     int exitCode = -1;
     std::string output;

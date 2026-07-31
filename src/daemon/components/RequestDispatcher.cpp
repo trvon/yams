@@ -394,11 +394,11 @@ RequestDispatcher::handleShutdownRequest(const ShutdownRequest& req) {
     if (lifecycle_) {
         bool graceful = req.graceful;
         // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only test-mode compatibility check.
-        const bool testingEnvSet = std::getenv("YAMS_TESTING") != nullptr;
+        bool inTestMode = std::getenv("YAMS_TESTING") != nullptr;
+#if defined(YAMS_TESTING) || defined(YAMS_TEST_LIFECYCLE_CONTROLS)
         // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only test-mode compatibility check.
-        const bool safeSingleInstanceEnvSet =
-            std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE") != nullptr;
-        bool inTestMode = testingEnvSet || safeSingleInstanceEnvSet;
+        inTestMode = inTestMode || std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE") != nullptr;
+#endif
         lifecycle_->requestShutdown(graceful, inTestMode);
     }
 

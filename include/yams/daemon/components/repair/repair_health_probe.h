@@ -14,10 +14,6 @@ namespace yams::vector {
 class VectorDatabase;
 }
 
-namespace yams::daemon {
-class GraphComponent;
-}
-
 namespace yams::daemon::repair {
 
 struct RepairHealthSnapshot {
@@ -50,7 +46,6 @@ class RepairHealthProbe {
 public:
     RepairHealthProbe(std::shared_ptr<metadata::IMetadataRepository> meta,
                       std::shared_ptr<vector::VectorDatabase> vectorDb,
-                      std::shared_ptr<GraphComponent> graphComponent,
                       std::shared_ptr<metadata::KnowledgeGraphStore> kgStore);
 
     RepairHealthSnapshot probe(const RepairHealthOptions& options) const;
@@ -60,7 +55,6 @@ private:
 
     std::shared_ptr<metadata::IMetadataRepository> meta_;
     std::shared_ptr<vector::VectorDatabase> vectorDb_;
-    std::shared_ptr<GraphComponent> graphComponent_;
     std::shared_ptr<metadata::KnowledgeGraphStore> kgStore_;
 };
 

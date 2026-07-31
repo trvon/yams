@@ -8,7 +8,7 @@ namespace yamsfmt = std;
 namespace yamsfmt = fmt;
 #endif
 #include <yams/core/types.h>
-#include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/metadata/db_lock_telemetry.h>
 #include <yams/storage/reference_db.h>
 
 #include <algorithm>
@@ -168,7 +168,7 @@ bool Statement::step() {
             yamsfmt::format("Statement execution failed: {}", sqlite3_errmsg(db_)));
     }
 
-    daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
+    metadata::reportDbLockError(); // Signal contention for adaptive scaling
     throw std::runtime_error("Statement execution failed: max retries exceeded");
 }
 
@@ -263,8 +263,7 @@ Database::~Database() {
             spdlog::warn("ReferenceDB close_v2 deferred/failed for '{}': {}", path_,
                          sqlite3_errstr(rc));
         }
-        trace_reference_db_lifetime("close.sqlite", this, path_, db, rc,
-                                    liveStatementsBeforeClose);
+        trace_reference_db_lifetime("close.sqlite", this, path_, db, rc, liveStatementsBeforeClose);
         db_ = nullptr;
     }
     trace_reference_db_lifetime("close.end", this, path_, db_);
@@ -296,7 +295,7 @@ void Database::execute(const std::string& sql) {
         throw std::runtime_error(yamsfmt::format("SQL execution failed: {}", error));
     }
 
-    daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
+    metadata::reportDbLockError(); // Signal contention for adaptive scaling
     throw std::runtime_error("SQL execution failed: max retries exceeded");
 }
 
@@ -351,7 +350,8 @@ int Database::changes() const {
 
 // WAL checkpoint
 void Database::checkpoint() {
-    int log, ckpt;
+    int log = 0;
+    int ckpt = 0;
     sqlite3_wal_checkpoint_v2(db_, nullptr, SQLITE_CHECKPOINT_PASSIVE, &log, &ckpt);
 }
 

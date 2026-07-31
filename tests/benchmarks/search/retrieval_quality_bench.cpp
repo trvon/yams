@@ -815,8 +815,6 @@ struct QueryDiagnosticsSummary {
     std::uint64_t graphRerankAppliedQueryCount = 0;
     std::uint64_t compressedAnnEnabledQueryCount = 0;
     std::uint64_t compressedAnnAppliedQueryCount = 0;
-    std::uint64_t turboQuantEnabledQueryCount = 0;
-    std::uint64_t turboQuantAppliedQueryCount = 0;
     std::uint64_t semanticRescueNonZeroQueryCount = 0;
     std::uint64_t missMissingPreFusionCount = 0;
     std::uint64_t missFusionCutoffCount = 0;
@@ -827,10 +825,6 @@ struct QueryDiagnosticsSummary {
     std::vector<double> semanticRescueTargetSamples;
     std::vector<double> compressedAnnResultCountSamples;
     std::unordered_map<std::string, std::uint64_t> compressedAnnSkipReasonCounts;
-    std::vector<double> turboQuantWindowSamples;
-    std::vector<double> turboQuantCandidateSamples;
-    std::vector<double> turboQuantPackedCandidatesScoredSamples;
-    std::unordered_map<std::string, std::uint64_t> turboQuantSkipReasonCounts;
     std::vector<double> fusionPreFusionUniqueCountSamples;
     std::vector<double> fusionPostFusionCountSamples;
     std::vector<double> fusionDroppedCountSamples;
@@ -1511,27 +1505,6 @@ static void ingestQueryDiagnostics(QueryDiagnosticsSummary& summary,
     if (compressedAnnSkipReason.has_value() && !compressedAnnSkipReason->empty()) {
         summary.compressedAnnSkipReasonCounts[*compressedAnnSkipReason]++;
     }
-    if (parseBoolStat(searchStats, "turboquant_enabled").value_or(false)) {
-        summary.turboQuantEnabledQueryCount++;
-    }
-    if (parseBoolStat(searchStats, "turboquant_rerank_applied").value_or(false)) {
-        summary.turboQuantAppliedQueryCount++;
-    }
-
-    if (auto v = parseDoubleStat(searchStats, "turboquant_rerank_window")) {
-        summary.turboQuantWindowSamples.push_back(*v);
-    }
-    if (auto v = parseDoubleStat(searchStats, "turboquant_candidate_count")) {
-        summary.turboQuantCandidateSamples.push_back(*v);
-    }
-    if (auto v = parseDoubleStat(searchStats, "turboquant_packed_candidates_scored")) {
-        summary.turboQuantPackedCandidatesScoredSamples.push_back(*v);
-    }
-    if (auto it = searchStats.find("turboquant_skip_reason");
-        it != searchStats.end() && !it->second.empty()) {
-        summary.turboQuantSkipReasonCounts[it->second]++;
-    }
-
     if (auto v = parseDoubleStat(searchStats, "semantic_rescue_rate")) {
         summary.semanticRescueRateSamples.push_back(*v);
     }
@@ -1912,8 +1885,6 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
         {"graph_rerank_applied_query_count", summary.graphRerankAppliedQueryCount},
         {"compressed_ann_enabled_query_count", summary.compressedAnnEnabledQueryCount},
         {"compressed_ann_applied_query_count", summary.compressedAnnAppliedQueryCount},
-        {"turboquant_enabled_query_count", summary.turboQuantEnabledQueryCount},
-        {"turboquant_applied_query_count", summary.turboQuantAppliedQueryCount},
         {"semantic_rescue_nonzero_query_count", summary.semanticRescueNonZeroQueryCount},
         {"miss_missing_pre_fusion_count", summary.missMissingPreFusionCount},
         {"miss_fusion_cutoff_count", summary.missFusionCutoffCount},
@@ -1950,10 +1921,6 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
          static_cast<double>(summary.compressedAnnEnabledQueryCount) / queryCount},
         {"compressed_ann_apply_rate",
          static_cast<double>(summary.compressedAnnAppliedQueryCount) / queryCount},
-        {"turboquant_enabled_rate",
-         static_cast<double>(summary.turboQuantEnabledQueryCount) / queryCount},
-        {"turboquant_apply_rate",
-         static_cast<double>(summary.turboQuantAppliedQueryCount) / queryCount},
         {"adaptive_fusion_enabled_query_count", summary.adaptiveFusionEnabledQueryCount},
         {"adaptive_fusion_enabled_rate",
          static_cast<double>(summary.adaptiveFusionEnabledQueryCount) / queryCount},
@@ -1968,11 +1935,6 @@ static json queryDiagnosticsToJson(const QueryDiagnosticsSummary& summary) {
         {"miss_topk_drop_rate", static_cast<double>(summary.missTopKDropCount) / queryCount},
         {"compressed_ann_result_count", summarizeSamples(summary.compressedAnnResultCountSamples)},
         {"compressed_ann_skip_reasons", summary.compressedAnnSkipReasonCounts},
-        {"turboquant_window", summarizeSamples(summary.turboQuantWindowSamples)},
-        {"turboquant_candidate_count", summarizeSamples(summary.turboQuantCandidateSamples)},
-        {"turboquant_packed_candidates_scored",
-         summarizeSamples(summary.turboQuantPackedCandidatesScoredSamples)},
-        {"turboquant_skip_reasons", summary.turboQuantSkipReasonCounts},
         {"stage_metrics", yams::bench::stageRetrievalMetricsToJson(summary.stageRetrievalMetrics)},
         {"semantic_rescue_rate", summarizeSamples(summary.semanticRescueRateSamples)},
         {"semantic_rescue_final_count", summarizeSamples(summary.semanticRescueFinalCountSamples)},
@@ -2929,61 +2891,6 @@ static std::vector<OptimizationCandidate> defaultOptimizationCandidates() {
              {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
              {"YAMS_SEARCH_ZOOM_LEVEL", "STREET"},
          }},
-        {"diag_turboquant_off_mixed_precision",
-         "MIXED_PRECISION baseline with TurboQuant rerank forced off",
-         {
-             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
-             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
-             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
-             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
-             {"YAMS_VECTOR_ENABLE_TURBOQUANT_STORAGE", "1"},
-             {"YAMS_VECTOR_TURBOQUANT_BITS", "4"},
-             {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
-             {"YAMS_SEARCH_FUSION_CANDIDATE_LIMIT", "100"},
-             {"YAMS_SEARCH_TURBOQUANT_RERANK_WINDOW", "100"},
-             {"YAMS_SEARCH_TURBOQUANT_RERANK_DIM", "768"},
-             {"YAMS_SEARCH_ENABLE_TURBOQUANT_RERANK", "0"},
-         },
-         false,
-         true},
-        {"diag_turboquant_on_mixed_precision",
-         "MIXED_PRECISION baseline with TurboQuant rerank forced on",
-         {
-             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
-             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
-             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
-             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
-             {"YAMS_VECTOR_ENABLE_TURBOQUANT_STORAGE", "1"},
-             {"YAMS_VECTOR_TURBOQUANT_BITS", "4"},
-             {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
-             {"YAMS_SEARCH_FUSION_CANDIDATE_LIMIT", "100"},
-             {"YAMS_SEARCH_TURBOQUANT_RERANK_WINDOW", "100"},
-             {"YAMS_SEARCH_TURBOQUANT_RERANK_DIM", "768"},
-             {"YAMS_SEARCH_ENABLE_TURBOQUANT_RERANK", "1"},
-         },
-         false,
-         true},
-        {"diag_turboquant_on_compressed_ann_mixed_precision",
-         "MIXED_PRECISION with TurboQuant rerank and compressed ANN forced on",
-         {
-             {"YAMS_ENABLE_ENV_OVERRIDES", "1"},
-             {"YAMS_BENCH_FORCE_TUNING_OVERRIDE", std::nullopt},
-             {"YAMS_TUNING_OVERRIDE", "MIXED_PRECISION"},
-             {"YAMS_SEARCH_ENABLE_GRAPH_RERANK", "1"},
-             {"YAMS_VECTOR_ENABLE_TURBOQUANT_STORAGE", "1"},
-             {"YAMS_VECTOR_TURBOQUANT_BITS", "4"},
-             {"YAMS_CANDIDATE_MULTIPLIER", "3.0"},
-             {"YAMS_SEARCH_FUSION_CANDIDATE_LIMIT", "100"},
-             {"YAMS_SEARCH_TURBOQUANT_RERANK_WINDOW", "100"},
-             {"YAMS_SEARCH_TURBOQUANT_RERANK_DIM", "768"},
-             {"YAMS_SEARCH_ENABLE_TURBOQUANT_RERANK", "1"},
-             {"YAMS_SEARCH_ENABLE_COMPRESSED_ANN", "1"},
-             {"YAMS_SEARCH_COMPRESSED_ANN_DIM", "768"},
-             {"YAMS_SEARCH_COMPRESSED_ANN_BITS", "4"},
-             {"YAMS_SEARCH_COMPRESSED_ANN_TOPK", "100"},
-         },
-         false,
-         true},
         {"mixed_precision_semantic_recall_v1",
          "MIXED_PRECISION + looser vector gate + extra semantic rescue",
          {
@@ -9207,7 +9114,6 @@ static int runOptimizationLoop() {
                   << hybridDiag["trace_coverage"].get<double>() << "  sem_rescue_mean="
                   << hybridDiag["semantic_rescue_rate"]["mean"].get<double>()
                   << "  ca_apply_rate=" << hybridDiag["compressed_ann_apply_rate"].get<double>()
-                  << "  tq_apply_rate=" << hybridDiag["turboquant_apply_rate"].get<double>()
                   << "  vec_only_below_mean="
                   << hybridDiag["vector_only_below_threshold"]["mean"].get<double>()
                   << "  no_relevant_hit_rate="
@@ -9218,7 +9124,6 @@ static int runOptimizationLoop() {
         std::cout << "    timing_tradeoffs=" << summarizeTimingTradeoffs(hybridDiag) << "\n";
         std::cout << "    ca_skip_reasons=" << hybridDiag["compressed_ann_skip_reasons"].dump()
                   << "\n";
-        std::cout << "    tq_skip_reasons=" << hybridDiag["turboquant_skip_reasons"].dump() << "\n";
         std::cout << "    stage_tradeoffs=" << summarizeStageTradeoffs(hybridDiag) << "\n";
         std::cout << "    stage_quality=" << summarizeStageMetricGaps(hybridDiag) << "\n";
         if (result.traceTopN > 0 || result.traceComponentTopN > 0) {
@@ -9439,11 +9344,6 @@ int main(int argc, char** argv) {
     std::cout << "  MAP (Mean Average Precision):   " << std::setw(10) << g_final_metrics.map
               << "\n";
     const auto hybridDiag = queryDiagnosticsToJson(g_final_hybrid_diagnostics);
-    std::cout << "  TurboQuant enabled/apply rate:  " << std::setw(10)
-              << hybridDiag["turboquant_enabled_rate"].get<double>() << " / " << std::setw(10)
-              << hybridDiag["turboquant_apply_rate"].get<double>() << "\n";
-    std::cout << "  TurboQuant packed cand mean:    " << std::setw(10)
-              << hybridDiag["turboquant_packed_candidates_scored"]["mean"].get<double>() << "\n";
     std::cout << "  Stage quality gaps:             " << summarizeStageMetricGaps(hybridDiag)
               << "\n";
     std::cout << "  vectors.db bytes:                " << std::setw(10)

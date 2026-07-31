@@ -25,6 +25,7 @@
 #include <yams/storage/compressed_storage_engine.h>
 #include <yams/storage/storage_engine.h>
 
+#include "common/test_helpers_catch2.h"
 #include "src/compression/zstandard_compressor.h"
 
 using namespace yams;
@@ -615,8 +616,9 @@ TEST_CASE("CompressedStorageEngine stores incompressible bytes unchanged for gen
     CHECK_FALSE(CompressionHeader::parse(uploaded).has_value());
 }
 
-TEST_CASE("CompressedStorageEngine rejects corrupted compressed payload from generic backend",
+TEST_CASE("CompressedStorageEngine rejects CRC corruption when bypass environment is set",
           "[storage][compressed][backend][corrupt][catch2]") {
+    yams::test::ScopedEnvVar skipCrc("YAMS_SKIP_DECOMPRESS_CRC", std::string("1"));
     auto capturing = std::make_shared<CapturingStorageEngine>();
 
     CompressedStorageEngine::Config config;
@@ -633,12 +635,29 @@ TEST_CASE("CompressedStorageEngine rejects corrupted compressed payload from gen
     REQUIRE(engine.store(hash, data).has_value());
     auto corrupted = capturing->captured(hash);
     REQUIRE((corrupted.size() > CompressionHeader::SIZE));
-    corrupted[CompressionHeader::SIZE] ^= std::byte{0x01};
-    REQUIRE(capturing->store(hash, corrupted).has_value());
 
-    auto readBack = engine.retrieve(hash);
-    REQUIRE_FALSE(readBack.has_value());
-    CHECK((readBack.error().code == ErrorCode::HashMismatch));
+    SECTION("compressed payload CRC") {
+        corrupted[CompressionHeader::SIZE] ^= std::byte{0x01};
+        REQUIRE(capturing->store(hash, corrupted).has_value());
+
+        auto readBack = engine.retrieve(hash);
+        REQUIRE_FALSE(readBack.has_value());
+        CHECK((readBack.error().code == ErrorCode::HashMismatch));
+    }
+
+    SECTION("decompressed payload CRC") {
+        auto parsed = CompressionHeader::parse(corrupted);
+        REQUIRE(parsed.has_value());
+        auto header = parsed.value();
+        header.uncompressedCRC32 ^= 0x01;
+        auto serialized = header.serialize();
+        std::copy(serialized.begin(), serialized.end(), corrupted.begin());
+        REQUIRE(capturing->store(hash, corrupted).has_value());
+
+        auto readBack = engine.retrieve(hash);
+        REQUIRE_FALSE(readBack.has_value());
+        CHECK((readBack.error().code == ErrorCode::HashMismatch));
+    }
 }
 
 TEST_CASE("CompressedStorageEngine keeps incomplete header-shaped raw bytes unchanged",

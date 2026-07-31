@@ -669,22 +669,14 @@ public:
         }
     }
 
-    yams::Result<nlohmann::json> queryStep(const std::string& op, const nlohmann::json& params) {
-        const size_t idx = next_.fetch_add(1, std::memory_order_relaxed) % clients_.size();
-        return clients_[idx]->queryStep(op, params);
-    }
-
     yams::Result<nlohmann::json> queryStepForSlot(size_t slot, const std::string& op,
                                                   const nlohmann::json& params) {
         const size_t idx = slot % clients_.size();
         return clients_[idx]->queryStep(op, params);
     }
 
-    size_t size() const { return clients_.size(); }
-
 private:
     std::vector<std::unique_ptr<MCPPipelineClient>> clients_;
-    std::atomic<size_t> next_{0};
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2296,19 +2288,6 @@ bool waitForSlotLimit(DaemonClient& client, size_t targetLimit, std::chrono::mil
             return true;
         }
         std::this_thread::sleep_for(250ms);
-    }
-    return false;
-}
-
-bool waitForActiveConnectionsAtLeast(DaemonClient& client, size_t targetActive,
-                                     std::chrono::milliseconds timeout) {
-    const auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        const auto snap = DaemonSnapshot::capture(client);
-        if (snap.activeConnections >= targetActive) {
-            return true;
-        }
-        std::this_thread::sleep_for(100ms);
     }
     return false;
 }
@@ -4576,11 +4555,9 @@ TEST_CASE("Multi-client ingestion: scaling curve", "[!benchmark][multi-client][s
     // Run the same workload at increasing powers-of-two clients to find scaling limits.
     auto baseCfg = BenchConfig::fromEnv();
     std::vector<int> clientCounts;
-    for (int n = 1; n <= baseCfg.scalingMaxClients; n *= 2) {
-        clientCounts.push_back(n);
-        if (n > (std::numeric_limits<int>::max() / 2)) {
-            break;
-        }
+    for (std::int64_t n = 1; n <= baseCfg.scalingMaxClients;) {
+        clientCounts.push_back(static_cast<int>(n));
+        n *= 2;
     }
     if (!clientCounts.empty() && clientCounts.back() != baseCfg.scalingMaxClients) {
         clientCounts.push_back(baseCfg.scalingMaxClients);

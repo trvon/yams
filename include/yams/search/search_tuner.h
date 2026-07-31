@@ -709,6 +709,15 @@ struct RuntimeTelemetry {
 };
 
 /**
+ * @brief Add best-effort stage and fusion trace summaries to runtime telemetry.
+ *
+ * Malformed stage data does not prevent fusion data from being collected, and vice versa.
+ */
+void populateRuntimeTelemetrySignals(RuntimeTelemetry& telemetry,
+                                     const nlohmann::json& stageSummary,
+                                     const nlohmann::json& fusionSummary) noexcept;
+
+/**
  * @brief Per-query context vector consumed by tuning policies.
  *
  * R1 introduced this as an empty struct. R2 populates corpus-slow +

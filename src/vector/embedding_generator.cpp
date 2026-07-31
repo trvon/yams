@@ -134,12 +134,15 @@ public:
             if (auto inproc = getenvCopy("YAMS_IN_DAEMON"); inproc && isTruthyEnvValue(*inproc)) {
                 // In synthetic/unit tests we intentionally force a deterministic mock provider
                 // while running in-daemon mode.
+                bool useMockProvider = false;
+#if defined(YAMS_TESTING) || defined(YAMS_TEST_PROVIDER_CONTROLS)
                 if (auto mockProvider = getenvCopy("YAMS_USE_MOCK_PROVIDER");
                     mockProvider && isTruthyEnvValue(*mockProvider)) {
-                    fallback_provider_ = yams::ml::createEmbeddingProvider("Mock");
-                } else {
-                    fallback_provider_ = yams::ml::createEmbeddingProvider();
+                    useMockProvider = true;
                 }
+#endif
+                fallback_provider_ = useMockProvider ? yams::ml::createEmbeddingProvider("Mock")
+                                                     : yams::ml::createEmbeddingProvider();
                 if (fallback_provider_ && fallback_provider_->isAvailable()) {
                     auto initRes = fallback_provider_->initialize();
                     if (!initRes) {

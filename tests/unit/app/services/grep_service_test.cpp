@@ -1,5 +1,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include <yams/api/content_store_builder.h>
+#include <yams/app/services/retrieval_path_policy.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/compat/unistd.h>
 #include <yams/metadata/connection_pool.h>
@@ -238,6 +239,7 @@ struct GrepFixture {
 
     void addDocument(std::string_view name, std::string_view content) {
         auto path = tmpDir_ / name;
+        std::filesystem::create_directories(path.parent_path());
         std::ofstream{path} << content;
 
         auto docService = makeDocumentService(ctx_);
@@ -729,6 +731,33 @@ TEST_CASE("GrepService - Broad regex grep does not stop at candidate cap",
     CHECK(res.value().totalMatches == 1);
     REQUIRE(res.value().filesWith.size() == 1);
     CHECK(res.value().filesWith.front().find("old_match.txt") != std::string::npos);
+}
+
+TEST_CASE("GrepService - Workspace scope rejects generated retrieval artifacts",
+          "[grep][service][scope]") {
+    SKIP_GREP_ON_WINDOWS();
+
+    GrepFixture fixture;
+    fixture.addDocument("src/authored.cpp", "shared_scope_token authored\n");
+    fixture.addDocument("meson.build", "shared_scope_token build definition\n");
+    fixture.addDocument("bin/tool.py", "shared_scope_token tool\n");
+    fixture.addDocument("build/fold/findings.sarif", "shared_scope_token fold\n");
+    fixture.addDocument(".pi/tasks/agent.json", "shared_scope_token agent\n");
+    fixture.addDocument("audit_artifacts/report.json", "shared_scope_token audit\n");
+
+    auto res = fixture.grep({
+        .pattern = "shared_scope_token.*",
+        .scopePathPrefix = fixture.tmpDir_.string(),
+        .regexOnly = true,
+        .useSession = false,
+    });
+
+    REQUIRE(res);
+    REQUIRE(res.value().results.size() == 3);
+    CHECK(std::ranges::none_of(res.value().results, [](const auto& result) {
+        return utils::isGeneratedWorkspacePath(result.file);
+    }));
+    CHECK(res.value().searchStats.at("generated_candidates_rejected") == "3");
 }
 
 TEST_CASE("GrepService - Edge Cases", "[grep][service][edge]") {

@@ -1,5 +1,6 @@
 #include <yams/daemon/components/grep_result_window.h>
 
+#include <algorithm>
 #include <cctype>
 #include <functional>
 #include <string>
@@ -26,6 +27,20 @@ std::string normalizeLine(std::string_view line) {
         normalized.push_back(static_cast<char>(character));
     }
     return normalized;
+}
+
+bool isBinaryLike(std::string_view text) {
+    return text.find('\0') != std::string_view::npos;
+}
+
+bool isBinaryLike(const app::services::GrepMatch& match) {
+    if (isBinaryLike(match.line)) {
+        return true;
+    }
+    const auto containsBinaryText = [](const auto& lines) {
+        return std::ranges::any_of(lines, [](const auto& line) { return isBinaryLike(line); });
+    };
+    return containsBinaryText(match.before) || containsBinaryText(match.after);
 }
 
 struct MatchIdentity {
@@ -70,6 +85,9 @@ Selection select(const std::vector<app::services::GrepFileResult>& fileResults,
     for (const auto& fileResult : fileResults) {
         for (const auto& match : fileResult.matches) {
             ++selection.stats.inputMatches;
+            if (isBinaryLike(match)) {
+                continue;
+            }
             MatchIdentity identity{
                 .file = fileResult.file,
                 .lineNumber = match.lineNumber,

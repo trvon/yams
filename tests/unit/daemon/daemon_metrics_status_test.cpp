@@ -5067,6 +5067,58 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         CHECK_FALSE(graphResp.connectedNodes[0].properties.empty());
     }
 
+    SECTION("graph query list by type scopes and paginates within current code roots") {
+        fixture.initMetadata();
+
+        const auto sourcePath = fixture.testDir / "src" / "inside.cpp";
+        const auto includePath = fixture.testDir / "include" / "inside.hpp";
+        const auto testPath = fixture.testDir / "tests" / "outside.cpp";
+        for (const auto& path : {sourcePath, includePath, testPath}) {
+            std::filesystem::create_directories(path.parent_path());
+            std::ofstream out(path);
+            REQUIRE(out.good());
+            out << "int value;\n";
+        }
+
+        REQUIRE(fixture.repo->insertDocument(makeGraphDispatcherDocument(sourcePath, "hash-src"))
+                    .has_value());
+        REQUIRE(
+            fixture.repo->insertDocument(makeGraphDispatcherDocument(includePath, "hash-include"))
+                .has_value());
+        REQUIRE(fixture.repo->insertDocument(makeGraphDispatcherDocument(testPath, "hash-test"))
+                    .has_value());
+
+        fixture.upsertNode("function:insideSource@" + sourcePath.string(), "insideSource",
+                           "function");
+        fixture.upsertNode("function:insideHeader@" + includePath.string(), "insideHeader",
+                           "function");
+        fixture.upsertNode("function:outsideTest@" + testPath.string(), "outsideTest", "function");
+
+        GraphQueryRequest firstPage;
+        firstPage.listByType = true;
+        firstPage.nodeType = "function";
+        firstPage.scopePathPrefix = fixture.testDir.string();
+        firstPage.limit = 1;
+
+        auto firstRaw = dispatchRequest(*fixture.dispatcher, Request{firstPage});
+        REQUIRE(std::holds_alternative<GraphQueryResponse>(firstRaw));
+        const auto& first = std::get<GraphQueryResponse>(firstRaw);
+        CHECK(first.totalNodesFound == 2);
+        CHECK(first.truncated);
+        REQUIRE(first.connectedNodes.size() == 1);
+        CHECK(first.connectedNodes.front().label != "outsideTest");
+
+        firstPage.offset = 1;
+        auto secondRaw = dispatchRequest(*fixture.dispatcher, Request{firstPage});
+        REQUIRE(std::holds_alternative<GraphQueryResponse>(secondRaw));
+        const auto& second = std::get<GraphQueryResponse>(secondRaw);
+        CHECK(second.totalNodesFound == 2);
+        CHECK_FALSE(second.truncated);
+        REQUIRE(second.connectedNodes.size() == 1);
+        CHECK(second.connectedNodes.front().label != "outsideTest");
+        CHECK(second.connectedNodes.front().nodeId != first.connectedNodes.front().nodeId);
+    }
+
     SECTION("graph query list by type reports store errors") {
         fixture.initMetadata();
         fixture.execSql("ALTER TABLE kg_nodes RENAME TO kg_nodes_broken");

@@ -111,7 +111,6 @@ run_ci() {
 
 	export CI=true
 	export RUNNER_OS=macOS
-	export YAMS_DISABLE_FAISS=1
 	export YAMS_ENABLE_MOBILE_BINDINGS=false
 	export YAMS_CONAN_HOST_PROFILE="${YAMS_CONAN_HOST_PROFILE:-./conan/profiles/host-macos-apple-clang}"
 	export YAMS_CONAN_ARCH="${YAMS_CONAN_ARCH:-${conan_arch}}"

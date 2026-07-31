@@ -6,7 +6,6 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -68,16 +67,11 @@ parseVectorSearchEngine(std::string_view raw) {
 
 enum class EntityEmbeddingType { SIGNATURE, DOCUMENTATION, ALIAS, CONTEXT };
 
-enum class VectorBackendType { SqliteVec, Faiss };
-
 struct VectorDatabaseConfig {
     std::string database_path = "vectors.db";
     std::string table_name = "document_embeddings";
     size_t embedding_dim = 0;
     bool create_if_missing = true;
-    std::string index_type = "IVF_PQ";
-    size_t num_partitions = 256;
-    size_t num_sub_quantizers = 96;
     bool enable_checkpoints = true;
     size_t checkpoint_frequency = 1000;
     size_t max_batch_size = 1000;
@@ -105,27 +99,9 @@ struct VectorDatabaseConfig {
     size_t simeon_pq_rerank_factor = 2;
     uint64_t simeon_pq_seed = 0xC0FFEE5EED5EEDC0ULL;
     bool suppress_search_index_builds = false;
-    bool enable_turboquant_storage = false;
-    uint8_t turboquant_bits = 4;
-    uint64_t turboquant_seed = 42;
-    bool quantized_primary_storage = false;
-    VectorBackendType backend_type = VectorBackendType::SqliteVec;
 };
 
 struct VectorRecord {
-    enum class QuantizedFormat : uint8_t {
-        NONE = 0,
-        TURBOquant_1 = 1,
-    };
-
-    struct QuantizedEmbedding {
-        QuantizedFormat format = QuantizedFormat::NONE;
-        uint8_t bits_per_channel = 0;
-        uint64_t seed = 0;
-        std::vector<uint8_t> packed_codes;
-        std::vector<float> per_coord_scales;
-    };
-
     std::string chunk_id;
     std::string document_hash;
     std::vector<float> embedding;
@@ -142,7 +118,6 @@ struct VectorRecord {
     std::chrono::system_clock::time_point embedded_at;
     bool is_stale = false;
     size_t embedding_dim = 0;
-    QuantizedEmbedding quantized;
     EmbeddingLevel level = EmbeddingLevel::CHUNK;
     std::vector<std::string> source_chunk_ids;
     std::string parent_document_hash;

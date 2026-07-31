@@ -12,6 +12,53 @@
 
 namespace yams::search {
 
+void populateRuntimeTelemetrySignals(RuntimeTelemetry& telemetry,
+                                     const nlohmann::json& stageSummary,
+                                     const nlohmann::json& fusionSummary) noexcept {
+    try {
+        if (stageSummary.is_object()) {
+            for (const auto& [name, data] : stageSummary.items()) {
+                if (!data.is_object()) {
+                    continue;
+                }
+                RuntimeStageSignal signal;
+                signal.enabled = data.value("enabled", false);
+                signal.attempted = data.value("attempted", false);
+                signal.contributed = data.value("contributed", false);
+                signal.skipped = data.value("skipped", false);
+                signal.durationMs = data.value("duration_ms", 0.0);
+                signal.rawHitCount = data.value("raw_hit_count", std::size_t{0});
+                signal.uniqueDocCount = data.value("unique_doc_count", std::size_t{0});
+                signal.scoreStatsValid = data.value("score_stats_valid", false);
+                signal.minScore = data.value("min_score", 0.0);
+                signal.maxScore = data.value("max_score", 0.0);
+                telemetry.stages.emplace(name, signal);
+            }
+        }
+    } catch (...) { // NOLINT(bugprone-empty-catch) — telemetry must not fail a search
+    }
+
+    try {
+        if (fusionSummary.is_object()) {
+            for (const auto& [name, data] : fusionSummary.items()) {
+                if (!data.is_object()) {
+                    continue;
+                }
+                RuntimeFusionSignal signal;
+                signal.enabled = data.value("enabled", false);
+                signal.contributedToFinal = data.value("contributed_to_final", false);
+                signal.configuredWeight = data.value("weight", 0.0);
+                signal.finalScoreMass = data.value("final_score_mass", 0.0);
+                signal.finalTopDocCount = data.value("final_top_doc_count", std::size_t{0});
+                signal.rawHitCount = data.value("raw_hit_count", std::size_t{0});
+                signal.uniqueDocCount = data.value("unique_doc_count", std::size_t{0});
+                telemetry.fusionSources.emplace(name, signal);
+            }
+        }
+    } catch (...) { // NOLINT(bugprone-empty-catch) — telemetry must not fail a search
+    }
+}
+
 namespace {
 
 constexpr std::uint64_t kAdaptiveWarmupObservations = 5;

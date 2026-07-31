@@ -661,7 +661,7 @@ private:
         if (!pipe) {
             return output;
         }
-        char buffer[256];
+        char buffer[256]{};
         while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
             output.append(buffer);
         }
@@ -1025,7 +1025,7 @@ private:
                     selfExe = fs::path(buf);
                 }
 #else
-                char buf[4096];
+                char buf[4096]{};
                 ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
                 if (n > 0) {
                     buf[n] = '\0';

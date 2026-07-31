@@ -543,7 +543,7 @@ TEST_CASE("CliSubprocessSegfaultRegressionSmoke.ShortLivedCommandsExitCleanly",
     const fs::path socketPath = fs::path("/tmp") / ("yams_cli_" + unique + ".sock");
     const fs::path pidFile = root / "yams-daemon.pid";
     const fs::path daemonLogPath = root / "yams-daemon.log";
-    const fs::path docPath = root / "turboquant_cli_smoke.txt";
+    const fs::path docPath = root / "vector_cli_smoke.txt";
 
     fs::create_directories(dataDir);
     fs::create_directories(runtimeDir);
@@ -562,7 +562,7 @@ TEST_CASE("CliSubprocessSegfaultRegressionSmoke.ShortLivedCommandsExitCleanly",
 
     {
         std::ofstream doc(docPath);
-        doc << "turboquant hnsw teardown regression smoke token\n";
+        doc << "vector search teardown regression smoke token\n";
         doc << "short lived cli subprocess search list daemon status\n";
     }
 
@@ -631,15 +631,15 @@ TEST_CASE("CliSubprocessSegfaultRegressionSmoke.ShortLivedCommandsExitCleanly",
 
     SubprocessResult warmSearch;
     const bool warmSearchOk =
-        waitForCommandSuccess(*yamsBinary, {"search", "turboquant hnsw", "--limit", "5"}, probeEnv,
+        waitForCommandSuccess(*yamsBinary, {"search", "vector search", "--limit", "5"}, probeEnv,
                               scaledTimeout(20s), &warmSearch);
-    INFO(describeFailure({"search", "turboquant hnsw", "--limit", "5"}, warmSearch)
+    INFO(describeFailure({"search", "vector search", "--limit", "5"}, warmSearch)
          << "\ndaemon log:\n"
          << readTextFile(daemonLogPath));
     REQUIRE(warmSearchOk);
 
     std::vector<std::vector<std::string>> commands = {
-        {"search", "turboquant hnsw", "--limit", "5"},
+        {"search", "vector search", "--limit", "5"},
         {"daemon", "status", "-d"},
     };
     if (!isThreadSanitizerBuild()) {

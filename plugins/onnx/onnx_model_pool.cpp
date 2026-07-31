@@ -458,14 +458,15 @@ public:
         }
 #endif
 
-        // Lightweight, environment-driven mock mode for CI and constrained hosts
-        // (works regardless of gtest being present in this translation unit).
+#if defined(YAMS_TESTING) || defined(YAMS_TEST_PROVIDER_CONTROLS)
+        // Lightweight, environment-driven mock mode for tests.
         if (std::getenv("YAMS_USE_MOCK_PROVIDER") || std::getenv("YAMS_SKIP_MODEL_LOADING") ||
             std::getenv("YAMS_TEST_MODE")) {
             test_mode_ = true;
             spdlog::warn("[ONNX] Mock provider mode enabled via env; skipping ONNX init");
             return;
         }
+#endif
 
         const auto& runtimeInfo = yams::onnx_util::OrtRuntimeLoader::instance().ensureLoaded();
         if (!runtimeInfo.available) {
@@ -2194,6 +2195,7 @@ std::pair<int, int> OnnxModelSession::getThreading() const {
 // ============================================================================
 
 OnnxModelPool::OnnxModelPool(const ModelPoolConfig& config) : config_(config) {
+#if defined(YAMS_TESTING) || defined(YAMS_TEST_PROVIDER_CONTROLS)
     // In mock mode, avoid initializing any ONNX Runtime state to prevent
     // platform-specific crashes on hosts without compatible runtimes.
     if (std::getenv("YAMS_USE_MOCK_PROVIDER") || std::getenv("YAMS_SKIP_MODEL_LOADING") ||
@@ -2201,6 +2203,7 @@ OnnxModelPool::OnnxModelPool(const ModelPoolConfig& config) : config_(config) {
         spdlog::warn("[ONNX] Mock provider mode enabled; skipping global ONNX environment init");
         return;
     }
+#endif
 
     if (config_.asyncLoading) {
         size_t threads = config_.loadWorkerThreads > 0 ? config_.loadWorkerThreads : 1;
@@ -2265,9 +2268,6 @@ Result<void> OnnxModelPool::initialize() {
         return Result<void>();
     }
 
-    // Mark as startup mode - reduces pool sizes during initial loading
-    TuneAdvisor::setOnnxStartupMode(true);
-
     spdlog::info("Initializing ONNX model pool with max {} models", config_.maxLoadedModels);
 
     const auto& runtimeInfo = yams::onnx_util::OrtRuntimeLoader::instance().ensureLoaded();
@@ -2317,16 +2317,10 @@ Result<void> OnnxModelPool::initialize() {
                         }
                     }
                 }
-                // Clear startup mode - normal pool sizing now applies to new models
-                TuneAdvisor::setOnnxStartupMode(false);
                 spdlog::info("Background model preloading completed");
             } catch (const std::exception& e) {
                 try {
                     spdlog::error("[ONNX] Background preload crashed: {}", e.what());
-                } catch (...) {
-                }
-                try {
-                    TuneAdvisor::setOnnxStartupMode(false);
                 } catch (...) {
                 }
             } catch (...) {
@@ -2334,15 +2328,8 @@ Result<void> OnnxModelPool::initialize() {
                     spdlog::error("[ONNX] Background preload crashed with unknown exception");
                 } catch (...) {
                 }
-                try {
-                    TuneAdvisor::setOnnxStartupMode(false);
-                } catch (...) {
-                }
             }
         });
-    } else {
-        // No preload configured - clear startup mode immediately
-        TuneAdvisor::setOnnxStartupMode(false);
     }
 
     initialized_.store(true, std::memory_order_release);

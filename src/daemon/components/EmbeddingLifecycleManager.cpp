@@ -261,8 +261,7 @@ ProviderSnapshot EmbeddingLifecycleManager::fsmSnapshot() const {
 bool EmbeddingLifecycleManager::isDegraded() const {
     try {
         auto snap = fsm_.snapshot();
-        return snap.state == EmbeddingProviderState::Degraded ||
-               snap.state == EmbeddingProviderState::Failed;
+        return snap.state == EmbeddingProviderState::Degraded;
     } catch (...) {
         return false;
     }

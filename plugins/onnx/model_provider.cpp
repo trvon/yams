@@ -555,12 +555,14 @@ struct ProviderCtx {
             } else if (keepModelHot && !preferredModel.empty()) {
                 cfg.preloadModels = {preferredModel};
             }
+#if defined(YAMS_TESTING) || defined(YAMS_TEST_PROVIDER_CONTROLS)
             // Force no-preload in test/mock environments to avoid background threads
             if (std::getenv("YAMS_SKIP_MODEL_LOADING") || std::getenv("YAMS_TEST_MODE") ||
                 std::getenv("YAMS_USE_MOCK_PROVIDER")) {
                 cfg.preloadModels.clear();
                 cfg.lazyLoading = true;
             }
+#endif
         } catch (const std::exception&) {
             // ignore config parse errors
         }
@@ -1702,9 +1704,11 @@ struct ProviderSingleton {
                 dim = 3072;
             else if (lm.find("text-embedding-3-small") != std::string::npos)
                 dim = 1536;
+#if defined(YAMS_TESTING) || defined(YAMS_TEST_PROVIDER_CONTROLS)
             else if (lm.find("test-model") != std::string::npos &&
                      (std::getenv("YAMS_TEST_MODE") || std::getenv("YAMS_USE_MOCK_PROVIDER")))
                 dim = 384;
+#endif
 
             if (dim > 0) {
                 *out_dim = dim;

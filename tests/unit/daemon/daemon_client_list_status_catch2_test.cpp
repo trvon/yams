@@ -18,6 +18,7 @@
 #include <yams/cli/cli_sync.h>
 #include <yams/core/types.h>
 #include <yams/daemon/client/asio_connection_pool.h>
+#include <yams/daemon/client/client_transport.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
@@ -32,6 +33,34 @@ using namespace std::chrono_literals;
 namespace fs = std::filesystem;
 
 namespace {
+
+class RecordingTransport final : public IClientTransport {
+public:
+    boost::asio::awaitable<Result<Response>, boost::asio::any_io_executor>
+    send_request(Request request) override {
+        ++unaryRequests;
+        lastRequest = std::move(request);
+        co_return ListResponse{.totalCount = 1, .queryInfo = "in-process"};
+    }
+
+    boost::asio::awaitable<Result<void>, boost::asio::any_io_executor>
+    send_request_streaming(Request request, const HeaderCallback& onHeader, const ChunkCallback&,
+                           const ErrorCallback&, const CompleteCallback& onComplete) override {
+        ++streamingRequests;
+        lastRequest = std::move(request);
+        if (onHeader) {
+            onHeader(ListResponse{.totalCount = 1, .queryInfo = "in-process"});
+        }
+        if (onComplete) {
+            onComplete();
+        }
+        co_return Result<void>();
+    }
+
+    std::size_t unaryRequests{0};
+    std::size_t streamingRequests{0};
+    std::optional<Request> lastRequest;
+};
 
 fs::path makeTempRuntimeDir(const std::string& name) {
     auto base = fs::temp_directory_path();
@@ -63,12 +92,13 @@ std::vector<uint8_t> readFrame(boost::asio::local::stream_protocol::socket& sock
     MessageFramer::FrameHeader header = netHeader;
     header.from_network();
 
-    std::vector<uint8_t> frame(sizeof(netHeader) + header.payload_size);
+    const auto headerBytes = sizeof(netHeader);
+    std::vector<uint8_t> frame(headerBytes + header.payload_size);
     std::memcpy(frame.data(), &netHeader, sizeof(netHeader));
 
     if (header.payload_size > 0) {
-        boost::asio::read(
-            sock, boost::asio::buffer(frame.data() + sizeof(netHeader), header.payload_size), ec);
+        boost::asio::read(sock,
+                          boost::asio::buffer(frame.data() + headerBytes, header.payload_size), ec);
         if (ec) {
             throw std::runtime_error("read payload failed: " + ec.message());
         }
@@ -157,6 +187,23 @@ void writeAddResponse(boost::asio::local::stream_protocol::socket& sock, uint64_
 }
 
 } // namespace
+
+TEST_CASE("DaemonClient dispatches through an injected transport", "[daemon][client][transport]") {
+    auto transport = std::make_shared<RecordingTransport>();
+    ClientConfig cfg;
+    cfg.transportMode = ClientTransportMode::InProcess;
+    cfg.transport = transport;
+
+    DaemonClient client(cfg);
+    auto result = yams::cli::run_sync(client.list(ListRequest{}), 2s);
+
+    REQUIRE(result);
+    CHECK(result.value().queryInfo == "in-process");
+    CHECK(transport->unaryRequests == 0);
+    CHECK(transport->streamingRequests == 1);
+    REQUIRE(transport->lastRequest.has_value());
+    CHECK(std::holds_alternative<ListRequest>(*transport->lastRequest));
+}
 
 TEST_CASE("DaemonClient add accepts a successful transport retry without replaying it again",
           "[daemon][client][add][regression]") {

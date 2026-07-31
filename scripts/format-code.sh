@@ -143,7 +143,9 @@ FILE_ARRAY=()
 if [[ "$READ_FROM_STDIN" == true ]]; then
     print_color "$BLUE" "Reading file list from stdin..."
     while IFS= read -r line; do
-        [[ -n "$line" ]] && FILE_ARRAY+=("$line")
+        if [[ -n "$line" && "$line" =~ \.(cpp|h|hpp|cc|cxx)$ ]]; then
+            FILE_ARRAY+=("$line")
+        fi
     done
 elif [[ "$GIT_ONLY" == true ]]; then
     # Get list of modified files (staged and unstaged)

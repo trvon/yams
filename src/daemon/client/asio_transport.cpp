@@ -25,8 +25,6 @@
 #include <spdlog/spdlog.h>
 #include <atomic>
 #include <chrono>
-#include <cstdlib>
-#include <cstring>
 #include <deque>
 #include <future>
 #include <memory>
@@ -93,13 +91,7 @@ void retire_connection(const std::shared_ptr<AsioConnection>& conn, const char* 
 } // namespace
 
 AsioTransportAdapter::AsioTransportAdapter(const Options& opts) : opts_(opts) {
-    bool metrics_on = FsmMetricsRegistry::instance().enabled();
-    const char* s = std::getenv("YAMS_FSM_SNAPSHOTS");
-    bool snaps_on = (s && (std::strcmp(s, "1") == 0 || std::strcmp(s, "true") == 0 ||
-                           std::strcmp(s, "TRUE") == 0 || std::strcmp(s, "on") == 0 ||
-                           std::strcmp(s, "ON") == 0));
-    fsm_.enable_metrics(metrics_on);
-    fsm_.enable_snapshots(snaps_on);
+    fsm_.enable_metrics(FsmMetricsRegistry::instance().enabled());
 }
 
 boost::asio::awaitable<Result<std::shared_ptr<AsioConnection>>>

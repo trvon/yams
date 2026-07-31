@@ -57,6 +57,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
         serviceReq.context = req.context;
         serviceReq.pathPattern = req.pathPattern;
         serviceReq.pathPatterns = req.pathPatterns;
+        serviceReq.scopePathPrefix = req.scopePathPrefix;
         serviceReq.tags = req.tags;
         serviceReq.matchAllTags = req.matchAllTags;
         serviceReq.extension = req.extension;

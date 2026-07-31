@@ -2,6 +2,11 @@ tl_expected_dep = dependency('tl-expected', required: true)
 protobuf_dep = dependency('protobuf')
 nlohmann_json_dep = dependency('nlohmann_json')
 
+daemon_client_testing_cpp_args = []
+if get_option('build-tests') or get_option('build-benchmarks')
+  daemon_client_testing_cpp_args += ['-DYAMS_TEST_LIFECYCLE_CONTROLS=1']
+endif
+
 # Protobuf generation for client
 protoc_override = get_option('protoc-path')
 proto_prefix = protobuf_dep.get_variable(pkgconfig: 'prefix', default_value: '')
@@ -107,7 +112,8 @@ yams_daemon_client_lib = static_library('yams_daemon_client',
     tl_expected_dep,
     nlohmann_json_dep,
   ],
-  cpp_args: cpp.get_id() == 'msvc' ? ['/wd4100'] : ['-Wno-unused-parameter'],
+  cpp_args: daemon_client_testing_cpp_args +
+    (cpp.get_id() == 'msvc' ? ['/wd4100'] : ['-Wno-unused-parameter']),
   include_directories: include_directories('../../../include'),
   install: true,
 )

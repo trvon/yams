@@ -383,7 +383,7 @@ bool socket_looks_healthy(AsioConnection::socket_t& socket) {
         return false;
     }
     if (pfd.revents & POLLIN) {
-        char buf;
+        char buf{};
         ssize_t n = ::recv(fd, &buf, 1, MSG_PEEK | MSG_DONTWAIT);
         if (n == 0) {
             return false;

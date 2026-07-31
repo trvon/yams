@@ -5,6 +5,7 @@
 #include <chrono>
 #include <filesystem>
 #include <functional>
+#include <future>
 #include <memory>
 #include <optional>
 #include <span>
@@ -869,19 +870,19 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     req.foreground = false;
     req.maxRetries = 3;
 
+    std::promise<void> queueFullPromise;
+    auto queueFullFuture = queueFullPromise.get_future();
+    std::atomic<bool> queueFullNotified{false};
+    auto progress = [&](const RepairEvent& event) {
+        if (event.operation == "stuck_docs" &&
+            event.message == "Waiting for post-ingest queue capacity" &&
+            !queueFullNotified.exchange(true)) {
+            queueFullPromise.set_value();
+        }
+    };
     auto repairFuture = boost::asio::co_spawn(
-        sm->getWorkerExecutor(), repair.executeRepairAsync(req, nullptr), boost::asio::use_future);
-    std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    auto status = repairFuture.wait_for(std::chrono::milliseconds(0));
-    // The future may already be ready if the background loop processed the
-    // document before the explicit repair ran. That's fine — the doc is recovered.
-    CHECK((status == std::future_status::timeout || status == std::future_status::ready));
-
-    std::thread releaseSlot([postIngestRpc]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
-        InternalEventBus::PostIngestTask drained;
-        (void)postIngestRpc->try_pop(drained);
-    });
+        sm->getWorkerExecutor(), repair.executeRepairAsync(req, progress), boost::asio::use_future);
+    REQUIRE((queueFullFuture.wait_for(std::chrono::seconds(5)) == std::future_status::ready));
 
     RequestDispatcher dispatcher(nullptr, sm.get(), &state_);
     ListRequest listReq;
@@ -902,11 +903,10 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     CHECK((response.items.front().path == doc.filePath));
     CHECK((listMs < 200));
 
+    InternalEventBus::PostIngestTask drained;
+    REQUIRE((postIngestRpc->try_pop(drained)));
     REQUIRE((repairFuture.wait_for(std::chrono::seconds(2)) == std::future_status::ready));
     const auto repairResp = repairFuture.get();
-    if (releaseSlot.joinable()) {
-        releaseSlot.join();
-    }
 
     REQUIRE(repairResp.success);
     const auto op = findOperationResult(repairResp, "stuck_docs");

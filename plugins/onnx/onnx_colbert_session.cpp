@@ -54,11 +54,13 @@ class OnnxColbertSession::Impl {
 public:
     Impl(const std::string& modelPath, const std::string& modelName, const ColbertConfig& config)
         : modelPath_(modelPath), modelName_(modelName), config_(config), preprocessor_({}) {
+#if defined(YAMS_TESTING) || defined(YAMS_TEST_PROVIDER_CONTROLS)
         if (std::getenv("YAMS_USE_MOCK_PROVIDER") || std::getenv("YAMS_SKIP_MODEL_LOADING") ||
             std::getenv("YAMS_TEST_MODE")) {
             testMode_ = true;
             return;
         }
+#endif
 
         const auto& runtimeInfo = yams::onnx_util::OrtRuntimeLoader::instance().ensureLoaded();
         if (!runtimeInfo.available) {

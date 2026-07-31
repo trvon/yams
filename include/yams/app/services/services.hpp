@@ -233,6 +233,7 @@ struct SearchRequest {
     // Filtering
     std::string pathPattern;               // glob-like filename/path filter (legacy)
     std::vector<std::string> pathPatterns; // multiple glob patterns (preferred)
+    std::string scopePathPrefix;           // workspace root for daemon-owned cwd scoping
     std::vector<std::string> tags;         // filter by tags (presence-based)
     bool matchAllTags{false};              // require all specified tags
     std::vector<std::pair<std::string, std::string>>
@@ -358,6 +359,7 @@ public:
 struct GrepRequest {
     std::string pattern;
     std::vector<std::string> paths; // optional subset to search (files/dirs)
+    std::string scopePathPrefix;    // workspace root for daemon-owned cwd scoping
 
     // File selection
     std::vector<std::string> includePatterns; // file patterns to include

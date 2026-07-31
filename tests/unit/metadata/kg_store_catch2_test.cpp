@@ -53,6 +53,44 @@ struct KGStoreFixture {
     std::filesystem::path dbPath_;
 };
 
+TEST_CASE_METHOD(KGStoreFixture, "KG Store scopes typed nodes before pagination",
+                 "[unit][metadata][kg][scope]") {
+    const std::vector<KGNode> nodes{
+        {.nodeKey = "function:alpha@/repo/src/alpha.cpp", .label = "alpha", .type = "function"},
+        {.nodeKey = "reference:beta@/repo/include/beta.hpp",
+         .label = "beta",
+         .type = "function",
+         .properties = R"({"source_file":"/repo/include/beta.hpp"})"},
+        {.nodeKey = "function:other@/other/src/other.cpp",
+         .label = "other",
+         .type = "function",
+         .properties = R"({"file_path":"/other/src/other.cpp"})"},
+        {.nodeKey = "function:malformed",
+         .label = "malformed",
+         .type = "function",
+         .properties = "not-json"},
+    };
+    REQUIRE((store_->upsertNodes(nodes).has_value()));
+
+    const std::vector<KGPathRange> ranges{
+        {.lower = "/repo/src/", .upper = "/repo/src0"},
+        {.lower = "/repo/include/", .upper = "/repo/include0"},
+    };
+    auto count = store_->countNodesByTypeInPathRanges("function", ranges);
+    REQUIRE((count.has_value()));
+    CHECK((count.value() == 2));
+
+    auto first = store_->findNodesByTypeInPathRanges("function", ranges, 1, 0);
+    REQUIRE((first.has_value()));
+    REQUIRE((first.value().size() == 1));
+    CHECK((first.value().front().label.value_or("") == "alpha"));
+
+    auto second = store_->findNodesByTypeInPathRanges("function", ranges, 1, 1);
+    REQUIRE((second.has_value()));
+    REQUIRE((second.value().size() == 1));
+    CHECK((second.value().front().label.value_or("") == "beta"));
+}
+
 template <typename Seeder>
 Result<void> seedWithoutForeignKeys(const std::filesystem::path& dbPath, Seeder&& seeder) {
     Database db;

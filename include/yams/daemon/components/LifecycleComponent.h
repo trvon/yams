@@ -33,6 +33,10 @@ public:
     Result<void> initialize() override;
     void shutdown() override;
 
+#ifdef YAMS_TESTING
+    static bool testingAggressiveModeEnabled() { return aggressiveModeEnabled(); }
+#endif
+
 private:
     struct PidFileInfo {
         pid_t pid = 0;

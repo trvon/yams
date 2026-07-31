@@ -11,8 +11,8 @@
 #include <sstream>
 #include <string_view>
 #include <thread>
-#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/metadata/database.h>
+#include <yams/metadata/db_lock_telemetry.h>
 #include <yams/storage/sqlite_retry.h>
 
 namespace yams::metadata {
@@ -101,7 +101,7 @@ bool testing_isTransientIntegrityCheckMessage(std::string_view message) {
 
 // Statement implementation
 Statement::Statement(sqlite3* db, const std::string& sql) {
-    const char* tail;
+    const char* tail = nullptr;
     int rc = sqlite3_prepare_v2(db, sql.c_str(), -1, &stmt_, &tail);
     if (rc != SQLITE_OK) {
         throw std::runtime_error("Failed to prepare statement: " + std::string(sqlite3_errmsg(db)));
@@ -307,7 +307,7 @@ Result<void> Statement::execute() {
         }
         return make_sqlite_error(rc, errMsg);
     }
-    daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
+    reportDbLockError(); // Signal contention for adaptive scaling
     return Error{ErrorCode::DatabaseError, "Failed to execute statement: max retries exceeded"};
 }
 
@@ -342,7 +342,7 @@ Result<bool> Statement::step() {
         }
         return make_sqlite_error(rc, errMsg);
     }
-    daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
+    reportDbLockError(); // Signal contention for adaptive scaling
     return Error{ErrorCode::DatabaseError, "Failed to step statement: max retries exceeded"};
 }
 

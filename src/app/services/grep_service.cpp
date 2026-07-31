@@ -2,6 +2,8 @@
 #include <yams/app/services/grep_regex.hpp>
 #include <yams/app/services/literal_extractor.hpp>
 #include <yams/app/services/path_projection.hpp>
+#include <yams/app/services/retrieval_path_policy.hpp>
+#include <yams/app/services/service_utils.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/simd_newline_scanner.hpp>
 #include <yams/common/utf8_utils.h>
@@ -697,6 +699,7 @@ public:
             const size_t maxFileSize = 100 * 1024 * 1024;
             size_t filesSkippedType = 0;
             size_t filesSkippedSize = 0;
+            size_t filesSkippedGenerated = 0;
             std::vector<metadata::GrepCandidateProjection> filteredDocs;
             filteredDocs.reserve(docs.size());
 
@@ -707,12 +710,18 @@ public:
                     ext = doc.filePath.substr(dotPos + 1);
                 }
 
-                auto category = yams::magic::getPruneCategory(doc.filePath, ext);
-                if (category == yams::magic::PruneCategory::BuildObject ||
-                    category == yams::magic::PruneCategory::BuildLibrary ||
-                    category == yams::magic::PruneCategory::BuildExecutable ||
-                    category == yams::magic::PruneCategory::BuildArchive ||
-                    category == yams::magic::PruneCategory::Packages) {
+                const auto isBinaryArtifactCategory = [](yams::magic::PruneCategory category) {
+                    return category == yams::magic::PruneCategory::BuildObject ||
+                           category == yams::magic::PruneCategory::BuildLibrary ||
+                           category == yams::magic::PruneCategory::BuildExecutable ||
+                           category == yams::magic::PruneCategory::BuildArchive ||
+                           category == yams::magic::PruneCategory::Packages;
+                };
+                const auto pathCategory = yams::magic::getPruneCategory(doc.filePath, ext);
+                const auto leafCategory = yams::magic::getPruneCategory(
+                    std::filesystem::path(doc.filePath).filename().generic_string(), ext);
+                if (isBinaryArtifactCategory(leafCategory) ||
+                    (isBinaryArtifactCategory(pathCategory) && !isTextMime(doc.mimeType))) {
                     return true;
                 }
 
@@ -728,6 +737,12 @@ public:
             };
 
             for (auto& d : docs) {
+                if (!req.scopePathPrefix.empty() &&
+                    (!utils::isPathWithinScope(d.filePath, req.scopePathPrefix) ||
+                     utils::isGeneratedWorkspacePath(d.filePath))) {
+                    ++filesSkippedGenerated;
+                    continue;
+                }
                 if (shouldSkipFile(d)) {
                     filesSkippedType++;
                     continue;
@@ -749,11 +764,15 @@ public:
             }
 
             docs = std::move(filteredDocs);
+            phaseTimings["generated_candidates_rejected"] =
+                static_cast<std::int64_t>(filesSkippedGenerated);
         }
         recordPhaseMetric(phaseTimings, "phase_candidate_classification_ms",
                           "grep::phase::candidate_classification_ms", candidateClassificationStart);
 
         GrepResponse response;
+        response.searchStats["generated_candidates_rejected"] =
+            std::to_string(phaseTimings["generated_candidates_rejected"]);
         if (literalFtsFallback) {
             response.searchStats["fts_literal_fallback"] = "true";
         }

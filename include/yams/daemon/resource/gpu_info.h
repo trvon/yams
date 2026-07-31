@@ -213,7 +213,7 @@ inline std::string sysctlString(const char* name) {
 // Returns true if Apple Silicon was detected (caller can skip slower paths).
 inline bool detectAppleSiliconGpu(GpuInfo& info) {
     // Check for ARM64 (Apple Silicon)
-    int64_t arm64 = 0;
+    int arm64 = 0;
     size_t len = sizeof(arm64);
     if (sysctlbyname("hw.optional.arm64", &arm64, &len, nullptr, 0) != 0 || arm64 == 0)
         return false;

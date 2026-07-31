@@ -45,12 +45,6 @@ public:
         float compaction_threshold = 0.2f; ///< Compact when >20% deleted
         size_t filter_candidate_chunks_per_doc =
             10; ///< Estimated chunks per document for filtering
-        // TurboQuant settings (mirrored from VectorDatabaseConfig)
-        bool enable_turboquant_storage = false;
-        bool quantized_primary_storage =
-            false; ///< Store quantized sidecar only; reconstruct floats on read
-        uint8_t turboquant_bits = 4;
-        uint64_t turboquant_seed = 42;
         VectorSearchEngine search_engine = VectorSearchEngine::SimeonPqAdc;
         bool vec0_phss_enabled = false;
         size_t vec0_phss_candidates = 64;
@@ -214,13 +208,6 @@ public:
 
     /// Explicitly ensure sqlite-vec module is loaded (for doctor command)
     Result<void> ensureVecLoaded();
-
-    Result<void> persistTurboQuantPerCoordScales(size_t dim, uint8_t bits, uint64_t seed,
-                                                 const std::vector<float>& scales) override;
-
-    Result<void> persistTurboQuantFittedModel(size_t dim, uint8_t bits, uint64_t seed,
-                                              const std::vector<float>& scales,
-                                              const std::vector<float>& centroids) override;
 
 private:
     class Impl;

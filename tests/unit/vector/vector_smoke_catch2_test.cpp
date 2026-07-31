@@ -100,31 +100,6 @@ TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke insert and search basic",
     CHECK(results[0].chunk_id == "test_hash_001");
 }
 
-#ifdef YAMS_TEST_HAS_FAISS
-TEST_CASE("FAISS backend releases a fresh HNSW index", "[vector][faiss][lifetime][catch2]") {
-    yams::test::TempDirGuard tempDir{"yams_faiss_lifetime_"};
-    const auto databasePath = tempDir.path() / "vectors.db";
-
-    VectorDatabaseConfig config;
-    config.backend_type = VectorBackendType::Faiss;
-    config.database_path = databasePath.string();
-    config.embedding_dim = 4;
-
-    VectorDatabase db(config);
-    REQUIRE(db.initializeChecked().has_value());
-
-    VectorRecord record;
-    record.chunk_id = "faiss_chunk";
-    record.document_hash = "faiss_document";
-    record.embedding = {1.0F, 0.0F, 0.0F, 0.0F};
-    record.embedding_dim = record.embedding.size();
-    REQUIRE(db.insertVectorChecked(record).has_value());
-
-    db.close();
-    CHECK(std::filesystem::exists(tempDir.path() / "vectors.faiss_idx"));
-}
-#endif
-
 TEST_CASE_METHOD(VectorSmokeFixture, "VectorSmoke insert and search with vec0 engine",
                  "[vector][smoke][vec0][catch2]") {
     skipIfNeeded();

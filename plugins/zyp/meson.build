@@ -217,8 +217,7 @@ zyp_extraction_bench = executable('zyp_extraction_bench',
   dependencies: [zpdf_dep],
   cpp_args: zyp_cpp_args,
   build_rpath: zpdf_build_dir,
+  build_by_default: false,
   install: false,
   override_options: ['b_sanitize=none'],
 )
-
-alias_target('bench_zyp', zyp_extraction_bench)

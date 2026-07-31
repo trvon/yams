@@ -68,13 +68,13 @@ void ensure_plugin_logger() {
 }
 
 char* dup_cstr(const std::string& s) {
-    if (s.empty())
-        return nullptr;
     char* p = static_cast<char*>(std::malloc(s.size() + 1));
     if (p)
         std::memcpy(p, s.c_str(), s.size() + 1);
     return p;
 }
+
+void free_result_abi(void*, yams_entity_extraction_result_v2* res);
 
 // Initialize session lazily
 bool ensure_session() {
@@ -112,6 +112,7 @@ int extract_abi(void*, const char* content, size_t content_len,
                 yams_entity_extraction_result_v2** out) {
     if (!out)
         return YAMS_PLUGIN_ERR_INVALID;
+    *out = nullptr;
 
     auto* r = static_cast<yams_entity_extraction_result_v2*>(
         std::calloc(1, sizeof(yams_entity_extraction_result_v2)));
@@ -133,6 +134,10 @@ int extract_abi(void*, const char* content, size_t content_len,
     // Ensure session is initialized
     if (!ensure_session()) {
         r->error = dup_cstr(get_ctx().last_error);
+        if (!r->error) {
+            free_result_abi(nullptr, r);
+            return YAMS_PLUGIN_ERR_INVALID;
+        }
         *out = r;
         return YAMS_PLUGIN_OK; // Return OK but with error message
     }
@@ -157,6 +162,10 @@ int extract_abi(void*, const char* content, size_t content_len,
             yams::daemon::OnnxConcurrencyRegistry::instance(), yams::daemon::OnnxLane::Gliner);
         if (!slotGuard.acquired()) {
             r->error = dup_cstr("ONNX slot timeout for GLiNER");
+            if (!r->error) {
+                free_result_abi(nullptr, r);
+                return YAMS_PLUGIN_ERR_INVALID;
+            }
             *out = r;
             return YAMS_PLUGIN_OK;
         }
@@ -194,6 +203,10 @@ int extract_abi(void*, const char* content, size_t content_len,
             props["start_word"] = span.start_word;
             props["end_word"] = span.end_word;
             r->entities[i].properties_json = dup_cstr(props.dump());
+            if (!r->entities[i].text || !r->entities[i].type || !r->entities[i].properties_json) {
+                free_result_abi(nullptr, r);
+                return YAMS_PLUGIN_ERR_INVALID;
+            }
         }
     }
 

@@ -67,3 +67,19 @@ TEST_CASE("Grep result window retains equal text at distinct evidence locations"
     CHECK(selection.stats.emittedMatches == 3);
     CHECK(selection.matches.size() == 3);
 }
+
+TEST_CASE("Grep result window rejects binary-like indexed lines", "[daemon][grep][result-window]") {
+    std::string binaryLike{"prefix"};
+    binaryLike.push_back('\0');
+    binaryLike += "suffix";
+    const std::vector fileResults{
+        makeFileResult("generated.sarif", {makeMatch(1, std::move(binaryLike))}),
+        makeFileResult("source.cpp", {makeMatch(2, "readable evidence")}),
+    };
+
+    const auto selection = yams::daemon::grep_result_window::select(fileResults, 20);
+
+    CHECK(selection.stats.inputMatches == 2);
+    REQUIRE(selection.matches.size() == 1);
+    CHECK(selection.matches.front().file == "source.cpp");
+}

@@ -1,73 +1,16 @@
 #include <spdlog/spdlog.h>
-#include <future>
 #include <map>
 #include <mutex>
 #include <optional>
+#include <yams/daemon/client/await_result_sync.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/ml/provider.h>
-#include <boost/asio/awaitable.hpp>
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
 
 namespace yams::ml {
 
 std::unique_ptr<IEmbeddingProvider> createMockEmbeddingProvider();
-
-template <typename T, typename MakeAwaitable>
-static Result<T> awaitDaemonCall(MakeAwaitable&& make, std::chrono::milliseconds timeout) {
-    if (yams::daemon::GlobalIOContext::is_destroyed()) {
-        return Error{ErrorCode::SystemShutdown, "IO context destroyed during shutdown"};
-    }
-
-    auto shared_promise = std::make_shared<std::promise<Result<T>>>();
-    auto fut = shared_promise->get_future();
-    auto completed = std::make_shared<std::atomic<bool>>(false);
-
-    boost::asio::co_spawn(
-        yams::daemon::GlobalIOContext::global_executor(),
-        [state = shared_promise, completed,
-         maker = std::forward<MakeAwaitable>(make)]() mutable -> boost::asio::awaitable<void> {
-            try {
-                auto result = co_await maker();
-                if (!completed->exchange(true)) {
-                    state->set_value(std::move(result));
-                }
-            } catch (const std::exception& ex) {
-                if (!completed->exchange(true)) {
-                    state->set_value(
-                        Error{ErrorCode::Unknown, std::string("await exception: ") + ex.what()});
-                }
-            } catch (...) {
-                if (!completed->exchange(true)) {
-                    state->set_value(Error{ErrorCode::Unknown, "await exception"});
-                }
-            }
-            co_return;
-        },
-        boost::asio::detached);
-
-    if (timeout.count() > 0) {
-        const auto status = fut.wait_for(timeout);
-        if (status != std::future_status::ready) {
-            if (!completed->exchange(true)) {
-                try {
-                    shared_promise->set_value(Error{ErrorCode::Timeout, "daemon call timeout"});
-                } catch (const std::exception& ex) {
-                    spdlog::debug("Ignoring timeout promise completion race: {}", ex.what());
-                } catch (...) {
-                    spdlog::debug("Ignoring timeout promise completion race");
-                }
-            }
-            return Error{ErrorCode::Timeout, "daemon call timeout"};
-        }
-    } else {
-        fut.wait();
-    }
-
-    return fut.get();
-}
 
 class DaemonClientEmbeddingProvider : public IEmbeddingProvider {
 public:
@@ -97,10 +40,13 @@ public:
             cfg.requestTimeout = requestTimeout_;
             cfg.maxRetries = 3;
 
-            client_ = std::make_unique<daemon::DaemonClient>(cfg);
+            client_ = std::make_shared<daemon::DaemonClient>(cfg);
 
-            auto statusResult = awaitDaemonCall<daemon::StatusResponse>(
-                [this]() { return client_->status(); }, std::chrono::seconds(5));
+            auto client = client_;
+            auto statusResult = daemon::detail::awaitResultSync<daemon::StatusResponse>(
+                daemon::GlobalIOContext::global_executor(),
+                [client = std::move(client)]() { return client->status(); },
+                std::chrono::seconds(5), "Embedding provider status");
 
             if (statusResult) {
                 const auto& status = statusResult.value();
@@ -141,8 +87,13 @@ public:
         req.text = text;
         req.normalize = true;
 
-        auto result = awaitDaemonCall<daemon::EmbeddingResponse>(
-            [this, &req]() { return client_->generateEmbedding(req); }, requestTimeout_);
+        auto client = client_;
+        auto result = daemon::detail::awaitResultSync<daemon::EmbeddingResponse>(
+            daemon::GlobalIOContext::global_executor(),
+            [client = std::move(client), req = std::move(req)]() {
+                return client->generateEmbedding(req);
+            },
+            requestTimeout_, "Embedding generation");
 
         if (!result) {
             return Error{result.error().code, result.error().message};
@@ -173,8 +124,13 @@ public:
         req.batchSize = 8; // Reasonable sub-batch for streaming
 
         // Use streaming batch embeddings for better progress tracking
-        auto result = awaitDaemonCall<daemon::BatchEmbeddingResponse>(
-            [this, &req]() { return client_->streamingBatchEmbeddings(req); }, batchTimeout_);
+        auto client = client_;
+        auto result = daemon::detail::awaitResultSync<daemon::BatchEmbeddingResponse>(
+            daemon::GlobalIOContext::global_executor(),
+            [client = std::move(client), req = std::move(req)]() {
+                return client->streamingBatchEmbeddings(req);
+            },
+            batchTimeout_, "Batch embedding generation");
 
         if (!result) {
             return Error{result.error().code, result.error().message};
@@ -202,7 +158,7 @@ public:
     size_t getMaxSequenceLength() const override { return cachedSeqLen_ > 0 ? cachedSeqLen_ : 512; }
 
 private:
-    std::unique_ptr<daemon::DaemonClient> client_;
+    std::shared_ptr<daemon::DaemonClient> client_;
     bool initialized_;
     mutable size_t cachedDim_ = 0;
     mutable size_t cachedSeqLen_ = 0;
@@ -267,17 +223,6 @@ std::unique_ptr<IEmbeddingProvider> createEmbeddingProvider(const std::string& p
         if (provider && provider->isAvailable()) {
             return provider;
         }
-    }
-
-    if (auto factory = findEmbeddingProviderFactory("DaemonClient")) {
-        auto provider = (*factory)();
-        if (provider && provider->isAvailable()) {
-            return provider;
-        }
-    }
-
-    if (auto factory = findEmbeddingProviderFactory("Mock")) {
-        return (*factory)();
     }
 
     spdlog::error("No embedding providers available");

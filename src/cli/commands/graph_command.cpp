@@ -303,10 +303,6 @@ private:
         }
     }
 
-    static std::int64_t toUnixSeconds(std::chrono::sys_seconds tp) {
-        return tp.time_since_epoch().count();
-    }
-
     void printGraphNotFoundHints(const std::string& name) const {
         const auto displayName = projectPathForCli(name, invocationCwd_);
         if (!displayName.empty()) {
@@ -322,104 +318,6 @@ private:
             std::cout << yams::cli::ui::status_info("Or explore graph labels with: " + searchHint)
                       << "\n";
         }
-    }
-
-    Result<std::optional<metadata::DocumentInfo>> findLocalGraphDocument() const {
-        if (cli_ == nullptr) {
-            return Error{ErrorCode::InvalidState, "CLI unavailable"};
-        }
-        auto ensured = cli_->ensureMetadataInitialized();
-        if (!ensured) {
-            return ensured.error();
-        }
-        auto repo = cli_->getMetadataRepository();
-        if (!repo) {
-            return Error{ErrorCode::InvalidState, "Metadata repository unavailable"};
-        }
-
-        if (!hash_.empty()) {
-            return repo->getDocumentByHash(hash_);
-        }
-        if (name_.empty()) {
-            return std::optional<metadata::DocumentInfo>{};
-        }
-
-        auto exact = repo->findDocumentByExactPath(name_);
-        if (exact && exact.value().has_value()) {
-            return exact.value();
-        }
-        if (!std::filesystem::path(name_).is_absolute()) {
-            const auto absolute = (invocationCwd_ / name_).lexically_normal().generic_string();
-            exact = repo->findDocumentByExactPath(absolute);
-            if (exact && exact.value().has_value()) {
-                return exact.value();
-            }
-        }
-
-        auto pickNewest = [](const std::vector<metadata::DocumentInfo>& docs)
-            -> std::optional<metadata::DocumentInfo> {
-            if (docs.empty()) {
-                return std::nullopt;
-            }
-            return *std::max_element(docs.begin(), docs.end(), [](const auto& a, const auto& b) {
-                return a.indexedTime < b.indexedTime;
-            });
-        };
-
-        metadata::DocumentQueryOptions q;
-        q.fileName = std::filesystem::path(name_).filename().string();
-        q.limit = 32;
-        q.orderByIndexedDesc = true;
-        if (!q.fileName->empty()) {
-            auto byName = repo->queryDocuments(q);
-            if (byName) {
-                if (auto picked = pickNewest(byName.value())) {
-                    return picked;
-                }
-            }
-        }
-
-        metadata::DocumentQueryOptions contains;
-        contains.containsFragment = name_;
-        contains.limit = 64;
-        contains.orderByIndexedDesc = true;
-        auto byFragment = repo->queryDocuments(contains);
-        if (byFragment) {
-            return pickNewest(byFragment.value());
-        }
-        return std::optional<metadata::DocumentInfo>{};
-    }
-
-    Result<void> renderLocalDocumentGraphFallback() const {
-        auto docRes = findLocalGraphDocument();
-        if (!docRes) {
-            if (!name_.empty()) {
-                printGraphNotFoundHints(name_);
-            }
-            return docRes.error();
-        }
-        if (!docRes.value().has_value()) {
-            if (!name_.empty()) {
-                printGraphNotFoundHints(name_);
-                return Error{ErrorCode::NotFound, "Document not found with name: " + name_};
-            }
-            return Error{ErrorCode::NotFound, "Document not found"};
-        }
-
-        const auto& doc = *docRes.value();
-        yams::daemon::GetResponse resp;
-        resp.hash = doc.sha256Hash;
-        resp.path = projectPathForCli(doc.filePath, invocationCwd_);
-        resp.name = doc.fileName;
-        resp.fileName = doc.fileName;
-        resp.size = static_cast<std::uint64_t>(std::max<std::int64_t>(0, doc.fileSize));
-        resp.mimeType = doc.mimeType;
-        resp.fileType = doc.fileExtension;
-        resp.created = toUnixSeconds(doc.createdTime);
-        resp.modified = toUnixSeconds(doc.modifiedTime);
-        resp.indexed = toUnixSeconds(doc.indexedTime);
-        resp.graphEnabled = false;
-        return printDocumentGraphResponse(resp);
     }
 
     struct GraphSearchGroup {
@@ -595,20 +493,6 @@ private:
         }
         auto leaseHandle = std::move(leaseRes.value());
         printFallbackNoticeIfNeeded(leaseHandle.plan);
-        if (leaseHandle.plan.resolvedMode == yams::daemon::ClientTransportMode::InProcess &&
-            cli_ != nullptr && cli_->hasExplicitDataDir()) {
-            if (wantsJsonOutput()) {
-                json out;
-                out["totalTypes"] = 0;
-                out["nodeTypes"] = json::array();
-                std::cout << out.dump(2) << "\n";
-            } else {
-                std::cout << yams::cli::ui::section_header("Available Node Types") << "\n\n";
-                std::cout << yams::cli::ui::status_info("No node types found in knowledge graph")
-                          << "\n";
-            }
-            co_return Result<void>();
-        }
         auto& client = **leaseHandle.lease;
 
         auto r = co_await executeGraphListTypesQuery(client);
@@ -872,26 +756,21 @@ private:
         printFallbackNoticeIfNeeded(leaseHandle.plan);
         auto& client = **leaseHandle.lease;
 
+        const auto cwd = std::filesystem::current_path();
         auto r = co_await executeGraphListByTypeQuery(
             client, GraphListByTypeQueryOptions{.nodeType = listNodeType_,
                                                 .limit = limit_,
                                                 .offset = offset_,
-                                                .verbose = verbose_});
+                                                .verbose = verbose_,
+                                                .scopePathPrefix =
+                                                    scopeToCwd_ ? cwd.generic_string() : ""});
         if (!r) {
             std::cerr << "Graph query error: " << r.error().message << "\n";
             co_return r.error();
         }
 
         const auto& resp = r.value();
-        std::vector<yams::daemon::GraphNode> nodes = resp.connectedNodes;
-        const auto cwd = std::filesystem::current_path();
-        if (scopeToCwd_) {
-            auto res = buildGraphCurrentScopePathSet(cli_, cwd);
-            if (!res) {
-                co_return res.error();
-            }
-            nodes = filterNodesToScopedPaths(std::move(nodes), res.value(), cwd);
-        }
+        const auto& nodes = resp.connectedNodes;
 
         if (wantsJsonOutput()) {
             json out;
@@ -966,25 +845,6 @@ private:
         co_return Result<void>();
     }
 
-    static std::vector<yams::daemon::GraphNode>
-    filterNodesToScopedPaths(std::vector<yams::daemon::GraphNode> nodes,
-                             const std::unordered_set<std::string>& scopedPaths,
-                             const std::filesystem::path& cwd) {
-        std::vector<yams::daemon::GraphNode> filtered;
-        filtered.reserve(nodes.size());
-        for (const auto& node : nodes) {
-            auto nodePathOpt = extractGraphNodePath(node);
-            if (!nodePathOpt.has_value()) {
-                continue;
-            }
-            auto normalized = normalizeGraphScopePath(nodePathOpt.value(), cwd);
-            if (scopedPaths.count(normalized) > 0) {
-                filtered.push_back(node);
-            }
-        }
-        return filtered;
-    }
-
     boost::asio::awaitable<Result<void>> executeGraphTraversal() {
         using namespace yams::daemon;
 
@@ -994,10 +854,6 @@ private:
         }
         auto leaseHandle = std::move(leaseRes.value());
         printFallbackNoticeIfNeeded(leaseHandle.plan);
-        if (leaseHandle.plan.resolvedMode == yams::daemon::ClientTransportMode::InProcess &&
-            (!name_.empty() || !hash_.empty()) && nodeKey_.empty() && nodeId_ < 0) {
-            co_return renderLocalDocumentGraphFallback();
-        }
         auto& client = **leaseHandle.lease;
 
         const GraphTraversalQueryOptions traversalOptions{.depth = depth_,
@@ -1065,39 +921,6 @@ private:
 
     boost::asio::awaitable<Result<void>> executeGraphExplore() {
         const bool scopeToInvocationCwd = !globalExplore_;
-        const auto renderLocal = [&]() -> Result<void> {
-            auto appCtx = cli_ ? cli_->getAppContext() : nullptr;
-            if (appCtx == nullptr) {
-                return Error{ErrorCode::InvalidState, "CLI app context unavailable"};
-            }
-            auto service =
-                app::services::makeGraphContextService(appCtx->kgStore, appCtx->metadataRepo);
-            if (!service) {
-                return Error{ErrorCode::InvalidState, "Graph context service unavailable"};
-            }
-            app::services::GraphExploreRequest localReq;
-            localReq.query = exploreQuery_;
-            if (scopeToInvocationCwd) {
-                localReq.scopePathPrefix = invocationCwd_.lexically_normal().generic_string();
-            }
-            localReq.budget.maxFiles = exploreMaxFiles_;
-            auto localResult = service->explore(localReq);
-            if (!localResult) {
-                return localResult.error();
-            }
-            if (wantsJsonOutput()) {
-                std::cout << yams::cli::makeGraphExploreJson(localResult.value()).dump(2) << "\n";
-            } else {
-                yams::cli::renderGraphExploreMarkdown(std::cout, localResult.value(),
-                                                      invocationCwd_);
-            }
-            return Result<void>();
-        };
-
-        if (cli_ != nullptr && cli_->hasExplicitDataDir()) {
-            co_return renderLocal();
-        }
-
         auto leaseRes = acquireGraphClientLease();
         if (!leaseRes) {
             co_return leaseRes.error();
@@ -1115,22 +938,13 @@ private:
 
         auto result = co_await client.call(req);
         if (!result) {
-            const auto& err = result.error();
-            const bool daemonCompatibilityFailure =
-                err.code == ErrorCode::InvalidData && err.message == "Unexpected response type";
-            if (!yams::cli::is_transport_failure(err) && !daemonCompatibilityFailure) {
-                co_return err;
-            }
-            spdlog::debug("graph explore daemon request failed; falling back to local service: {}",
-                          err.message);
-            co_return renderLocal();
+            co_return result.error();
         }
 
         auto appResponse = yams::cli::mapGraphExploreResponseFromDaemon(result.value());
         if (scopeToInvocationCwd && graphExploreEscapesScope(appResponse, invocationCwd_)) {
-            spdlog::debug("graph explore daemon returned out-of-scope results; falling back to "
-                          "local service");
-            co_return renderLocal();
+            co_return Error{ErrorCode::InvalidData,
+                            "Daemon graph explore returned results outside the requested scope"};
         }
         if (wantsJsonOutput()) {
             std::cout << yams::cli::makeGraphExploreJson(appResponse).dump(2) << "\n";
@@ -1266,33 +1080,6 @@ private:
     }
 
     boost::asio::awaitable<Result<void>> executeGraphLookup() {
-        const auto renderLocal = [&]() -> Result<void> {
-            auto appCtx = cli_ ? cli_->getAppContext() : nullptr;
-            if (appCtx == nullptr) {
-                return Error{ErrorCode::InvalidState, "CLI app context unavailable"};
-            }
-            auto service =
-                app::services::makeGraphContextService(appCtx->kgStore, appCtx->metadataRepo);
-            if (!service) {
-                return Error{ErrorCode::InvalidState, "Graph context service unavailable"};
-            }
-            app::services::GraphSymbolLookupRequest req;
-            req.symbol = lookupSymbol_;
-            if (!lookupAtFile_.empty()) {
-                req.file = lookupAtFile_;
-            }
-            req.includeCode = verbose_;
-            auto result = service->lookupSymbol(req);
-            if (!result) {
-                return result.error();
-            }
-            renderLookup(result.value());
-            return Result<void>();
-        };
-
-        if (cli_ != nullptr && cli_->hasExplicitDataDir()) {
-            co_return renderLocal();
-        }
         auto leaseRes = acquireGraphClientLease();
         if (!leaseRes) {
             co_return leaseRes.error();
@@ -1310,46 +1097,13 @@ private:
         req.includeCode = verbose_;
         auto result = co_await client.call(req);
         if (!result) {
-            const auto& err = result.error();
-            const bool daemonCompatibilityFailure =
-                err.code == ErrorCode::InvalidData && err.message == "Unexpected response type";
-            if (!yams::cli::is_transport_failure(err) && !daemonCompatibilityFailure) {
-                co_return err;
-            }
-            co_return renderLocal();
+            co_return result.error();
         }
         renderLookup(result.value());
         co_return Result<void>();
     }
 
     boost::asio::awaitable<Result<void>> executeGraphImpact() {
-        const auto renderLocal = [&]() -> Result<void> {
-            auto appCtx = cli_ ? cli_->getAppContext() : nullptr;
-            if (appCtx == nullptr) {
-                return Error{ErrorCode::InvalidState, "CLI app context unavailable"};
-            }
-            auto service =
-                app::services::makeGraphContextService(appCtx->kgStore, appCtx->metadataRepo);
-            if (!service) {
-                return Error{ErrorCode::InvalidState, "Graph context service unavailable"};
-            }
-            app::services::GraphImpactRequest req;
-            req.symbol = impactSymbol_;
-            if (!globalExplore_) {
-                req.scopePathPrefix = invocationCwd_.lexically_normal().generic_string();
-            }
-            req.depth = static_cast<std::size_t>(depth_);
-            auto result = service->impact(req);
-            if (!result) {
-                return result.error();
-            }
-            renderImpact(result.value());
-            return Result<void>();
-        };
-
-        if (cli_ != nullptr && cli_->hasExplicitDataDir()) {
-            co_return renderLocal();
-        }
         auto leaseRes = acquireGraphClientLease();
         if (!leaseRes) {
             co_return leaseRes.error();
@@ -1366,13 +1120,7 @@ private:
         req.depth = static_cast<uint64_t>(depth_);
         auto result = co_await client.call(req);
         if (!result) {
-            const auto& err = result.error();
-            const bool daemonCompatibilityFailure =
-                err.code == ErrorCode::InvalidData && err.message == "Unexpected response type";
-            if (!yams::cli::is_transport_failure(err) && !daemonCompatibilityFailure) {
-                co_return err;
-            }
-            co_return renderLocal();
+            co_return result.error();
         }
         renderImpact(result.value());
         co_return Result<void>();
@@ -1383,31 +1131,6 @@ private:
             co_return Error{ErrorCode::InvalidArgument, "--trace requires --to <symbol>"};
         }
         const auto maxDepth = static_cast<uint64_t>(depth_ > 1 ? depth_ : 6);
-        const auto renderLocal = [&]() -> Result<void> {
-            auto appCtx = cli_ ? cli_->getAppContext() : nullptr;
-            if (appCtx == nullptr) {
-                return Error{ErrorCode::InvalidState, "CLI app context unavailable"};
-            }
-            auto service =
-                app::services::makeGraphContextService(appCtx->kgStore, appCtx->metadataRepo);
-            if (!service) {
-                return Error{ErrorCode::InvalidState, "Graph context service unavailable"};
-            }
-            app::services::GraphTraceRequest req;
-            req.from = traceFrom_;
-            req.to = traceTo_;
-            req.maxDepth = static_cast<std::size_t>(maxDepth);
-            auto result = service->trace(req);
-            if (!result) {
-                return result.error();
-            }
-            renderTrace(result.value());
-            return Result<void>();
-        };
-
-        if (cli_ != nullptr && cli_->hasExplicitDataDir()) {
-            co_return renderLocal();
-        }
         auto leaseRes = acquireGraphClientLease();
         if (!leaseRes) {
             co_return leaseRes.error();
@@ -1422,13 +1145,7 @@ private:
         req.maxDepth = maxDepth;
         auto result = co_await client.call(req);
         if (!result) {
-            const auto& err = result.error();
-            const bool daemonCompatibilityFailure =
-                err.code == ErrorCode::InvalidData && err.message == "Unexpected response type";
-            if (!yams::cli::is_transport_failure(err) && !daemonCompatibilityFailure) {
-                co_return err;
-            }
-            co_return renderLocal();
+            co_return result.error();
         }
         renderTrace(result.value());
         co_return Result<void>();
@@ -1436,31 +1153,6 @@ private:
 
     boost::asio::awaitable<Result<void>> executeGraphAffectedTests() {
         const auto depth = static_cast<uint64_t>(depth_);
-        const auto renderLocal = [&]() -> Result<void> {
-            auto appCtx = cli_ ? cli_->getAppContext() : nullptr;
-            if (appCtx == nullptr) {
-                return Error{ErrorCode::InvalidState, "CLI app context unavailable"};
-            }
-            auto service =
-                app::services::makeGraphContextService(appCtx->kgStore, appCtx->metadataRepo);
-            if (!service) {
-                return Error{ErrorCode::InvalidState, "Graph context service unavailable"};
-            }
-            app::services::GraphAffectedTestsRequest req;
-            req.changedFiles = affectedTestsFiles_;
-            req.depth = static_cast<std::size_t>(depth);
-            req.testPathPattern = testPathPattern_;
-            auto result = service->affectedTests(req);
-            if (!result) {
-                return result.error();
-            }
-            renderAffectedTests(result.value());
-            return Result<void>();
-        };
-
-        if (cli_ != nullptr && cli_->hasExplicitDataDir()) {
-            co_return renderLocal();
-        }
         auto leaseRes = acquireGraphClientLease();
         if (!leaseRes) {
             co_return leaseRes.error();
@@ -1475,13 +1167,7 @@ private:
         req.testPathPattern = testPathPattern_;
         auto result = co_await client.call(req);
         if (!result) {
-            const auto& err = result.error();
-            const bool daemonCompatibilityFailure =
-                err.code == ErrorCode::InvalidData && err.message == "Unexpected response type";
-            if (!yams::cli::is_transport_failure(err) && !daemonCompatibilityFailure) {
-                co_return err;
-            }
-            co_return renderLocal();
+            co_return result.error();
         }
         renderAffectedTests(result.value());
         co_return Result<void>();

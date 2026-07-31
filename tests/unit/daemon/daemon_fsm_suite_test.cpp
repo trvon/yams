@@ -504,29 +504,6 @@ TEST_CASE("EmbeddingProviderFSM: Basic lifecycle", "[daemon][fsm][embedding-prov
     }
 }
 
-TEST_CASE("EmbeddingProviderFSM: Load failure", "[daemon][fsm][embedding-provider][failure]") {
-    EmbeddingProviderFsm efsm;
-
-    SECTION("Load failure transitions to Failed") {
-        GIVEN("Provider attempting to load model") {
-            efsm.dispatch(ModelLoadStartedEvent{"model"});
-
-            WHEN("Load fails") {
-                efsm.dispatch(LoadFailureEvent{"ONNX runtime error"});
-
-                THEN("Provider is not ready") {
-                    REQUIRE_FALSE(efsm.isReady());
-                }
-
-                THEN("Error is captured") {
-                    auto snapshot = efsm.snapshot();
-                    REQUIRE(snapshot.lastError.find("ONNX") != std::string::npos);
-                }
-            }
-        }
-    }
-}
-
 // =============================================================================
 // SearchEngineFSM Tests
 // =============================================================================

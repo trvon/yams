@@ -65,12 +65,8 @@ std::unique_ptr<IStorageBackend> StorageBackendFactory::create(const BackendConf
         if (auto pluginBackend = tryCreateS3PluginBackend(config)) {
             return pluginBackend;
         }
-        auto backend = std::make_unique<URLBackend>();
-        if (auto result = backend->initialize(config); !result) {
-            spdlog::error("Failed to initialize URL backend: {}", result.error().message);
-            return nullptr;
-        }
-        return backend;
+        spdlog::error("S3 backend plugin not found or failed to initialize");
+        return nullptr;
     }
 
     if (type == "http" || type == "https" || type == "ftp") {

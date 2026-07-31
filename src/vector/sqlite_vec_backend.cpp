@@ -1,12 +1,11 @@
 #include <yams/core/assert.hpp>
 #include <yams/vector/sqlite_vec_backend.h>
-#include <yams/vector/turboquant.h>
 #include <yams/vector/vector_database.h>
 #include <yams/vector/vector_schema_migration.h>
 #include <yams/vector/vector_utils.h>
 
 #include <yams/common/time_utils.h>
-#include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/metadata/db_lock_telemetry.h>
 #include <yams/storage/sqlite_retry.h>
 
 #include "simeon_pq_persistence.h"
@@ -226,120 +225,6 @@ inline bool normalizeEmbeddingInPlace(std::vector<float>& embedding) {
     return true;
 }
 
-// Persist per-coord scales to the DB. Returns true on success.
-inline bool saveTurboQuantPerCoordScales(sqlite3* db, size_t dim, uint8_t bits, uint64_t seed,
-                                         const std::vector<float>& scales) {
-    if (scales.size() != dim || dim == 0) {
-        return false;
-    }
-    // Serialize scales as binary blob (little-endian IEEE-754 floats)
-    std::vector<uint8_t> blob(scales.size() * sizeof(float));
-    for (size_t i = 0; i < scales.size(); ++i) {
-        float val = scales[i];
-        std::memcpy(&blob[i * sizeof(float)], &val, sizeof(float));
-    }
-
-    sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(db,
-                                "INSERT OR REPLACE INTO turboquant_quantizer_meta (dim, bits, "
-                                "seed, fit_version, per_coord_scales) "
-                                "VALUES (?, ?, ?, ?, ?)",
-                                -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        return false;
-    }
-    sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(dim));
-    sqlite3_bind_int(stmt, 2, static_cast<int>(bits));
-    sqlite3_bind_int64(stmt, 3, static_cast<sqlite3_int64>(seed));
-    sqlite3_bind_int(stmt, 4, 1); // fit_version = 1 (scales only)
-    sqlite3_bind_blob(stmt, 5, blob.data(), static_cast<int>(blob.size()), SQLITE_TRANSIENT);
-    rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    return rc == SQLITE_DONE;
-}
-
-// Save the full fitted model (v2: scales + per-coord centroids).
-// Returns false if dim==0 or if centroids size doesn't match dim*num_centroids.
-inline bool saveTurboQuantFittedModel(sqlite3* db, size_t dim, uint8_t bits, uint64_t seed,
-                                      const std::vector<float>& scales,
-                                      const std::vector<float>& centroids) {
-    if (dim == 0 || scales.size() != dim) {
-        return false;
-    }
-    size_t num_centroids = 1u << bits;
-    if (!centroids.empty() && centroids.size() != dim * num_centroids) {
-        return false; // Mismatch
-    }
-
-    // Serialize scales
-    std::vector<uint8_t> scales_blob(scales.size() * sizeof(float));
-    for (size_t i = 0; i < scales.size(); ++i) {
-        float val = scales[i];
-        std::memcpy(&scales_blob[i * sizeof(float)], &val, sizeof(float));
-    }
-
-    // Serialize centroids (may be empty for v1 fallback)
-    std::vector<uint8_t> centroids_blob(centroids.size() * sizeof(float));
-    for (size_t i = 0; i < centroids.size(); ++i) {
-        float val = centroids[i];
-        std::memcpy(&centroids_blob[i * sizeof(float)], &val, sizeof(float));
-    }
-
-    int fit_version = centroids.empty() ? 1 : 2;
-
-    sqlite3_stmt* stmt = nullptr;
-    int rc =
-        sqlite3_prepare_v2(db,
-                           "INSERT OR REPLACE INTO turboquant_quantizer_meta "
-                           "(dim, bits, seed, fit_version, per_coord_scales, per_coord_centroids) "
-                           "VALUES (?, ?, ?, ?, ?, ?)",
-                           -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        return false;
-    }
-    sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(dim));
-    sqlite3_bind_int(stmt, 2, static_cast<int>(bits));
-    sqlite3_bind_int64(stmt, 3, static_cast<sqlite3_int64>(seed));
-    sqlite3_bind_int(stmt, 4, fit_version);
-    sqlite3_bind_blob(stmt, 5, scales_blob.data(), static_cast<int>(scales_blob.size()),
-                      SQLITE_TRANSIENT);
-    sqlite3_bind_blob(stmt, 6, centroids_blob.data(), static_cast<int>(centroids_blob.size()),
-                      SQLITE_TRANSIENT);
-    rc = sqlite3_step(stmt);
-    sqlite3_finalize(stmt);
-    return rc == SQLITE_DONE;
-}
-
-// Load per-coord scales from the DB. Returns empty vector if not found.
-inline std::vector<float> loadTurboQuantPerCoordScales(sqlite3* db, size_t dim, uint8_t bits,
-                                                       uint64_t seed) {
-    std::vector<float> scales;
-    sqlite3_stmt* stmt = nullptr;
-    int rc = sqlite3_prepare_v2(db,
-                                "SELECT per_coord_scales FROM turboquant_quantizer_meta "
-                                "WHERE dim = ? AND bits = ? AND seed = ?",
-                                -1, &stmt, nullptr);
-    if (rc != SQLITE_OK) {
-        return scales;
-    }
-    sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(dim));
-    sqlite3_bind_int(stmt, 2, static_cast<int>(bits));
-    sqlite3_bind_int64(stmt, 3, static_cast<sqlite3_int64>(seed));
-    if (sqlite3_step(stmt) == SQLITE_ROW) {
-        const void* blob = sqlite3_column_blob(stmt, 0);
-        int blob_bytes = sqlite3_column_bytes(stmt, 0);
-        if (blob && blob_bytes > 0) {
-            size_t num_floats = blob_bytes / sizeof(float);
-            if (num_floats == dim) {
-                scales.resize(dim);
-                std::memcpy(scales.data(), blob, blob_bytes);
-            }
-        }
-    }
-    sqlite3_finalize(stmt);
-    return scales;
-}
-
 inline bool isFiniteEmbedding(const std::vector<float>& embedding) {
     for (float val : embedding) {
         if (!std::isfinite(val)) {
@@ -382,7 +267,7 @@ inline bool beginTransactionWithRetry(sqlite3* db) {
                      attempt + 1, retryPolicy.maxRetries);
         break;
     }
-    daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
+    metadata::reportDbLockError(); // Signal contention for adaptive scaling
     return false;
 }
 
@@ -404,7 +289,7 @@ inline bool execWithRetry(sqlite3* db, const char* sql) {
                      attempt + 1, retryPolicy.maxRetries);
         break;
     }
-    daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
+    metadata::reportDbLockError(); // Signal contention for adaptive scaling
     return false;
 }
 
@@ -425,8 +310,8 @@ inline int stepWithRetry(sqlite3_stmt* stmt) {
         }
         return rc; // Non-retryable error
     }
-    daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
-    return SQLITE_BUSY;                       // Max retries exceeded
+    metadata::reportDbLockError(); // Signal contention for adaptive scaling
+    return SQLITE_BUSY;            // Max retries exceeded
 }
 
 // RAII guard to ensure prepared statements are reset after use.
@@ -475,11 +360,7 @@ CREATE TABLE IF NOT EXISTS vectors (
     level INTEGER DEFAULT 0,
     source_chunk_ids TEXT,
     parent_document_hash TEXT,
-    child_document_hashes TEXT,
-    quantized_format INTEGER DEFAULT 0,
-    quantized_bits INTEGER DEFAULT 0,
-    quantized_seed INTEGER DEFAULT 0,
-    quantized_packed_codes BLOB
+    child_document_hashes TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_vectors_chunk_id ON vectors(chunk_id);
@@ -488,25 +369,6 @@ CREATE INDEX IF NOT EXISTS idx_vectors_model ON vectors(model_id, model_version)
 CREATE INDEX IF NOT EXISTS idx_vectors_embedding_dim ON vectors(embedding_dim);
 CREATE INDEX IF NOT EXISTS idx_vectors_level ON vectors(level, document_hash);
 )sql";
-
-// Global quantizer metadata table: stores per-coord scales once per quantizer config.
-// Per-coord scales are global (same for all vectors with the same seed+dim).
-// Fitted quantizer model metadata (v1: scales only; v2: scales + per-coord centroids).
-// The fit_version field enables forward-compatible loading:
-//   v1: per_coord_scales is non-null, per_coord_centroids is null
-//   v2: per_coord_scales is non-null, per_coord_centroids is non-null
-// Centroid storage: dim * num_centroids floats (little-endian IEEE-754), row-major per coord.
-constexpr const char* kCreateTurboQuantMeta = R"sql(
-CREATE TABLE IF NOT EXISTS turboquant_quantizer_meta (
-    rowid INTEGER PRIMARY KEY,
-    dim INTEGER NOT NULL,
-    bits INTEGER NOT NULL,
-    seed INTEGER NOT NULL,
-    fit_version INTEGER NOT NULL DEFAULT 1,
-    per_coord_scales BLOB,
-    per_coord_centroids BLOB,
-    UNIQUE(dim, bits, seed)
-))sql";
 
 constexpr const char* kCreateSimeonPqMeta = R"sql(
 CREATE TABLE IF NOT EXISTS simeon_pq_meta (
@@ -538,8 +400,7 @@ AFTER INSERT ON vectors BEGIN
     UPDATE vector_index_generation SET generation = generation + 1 WHERE id = 1;
 END;
 CREATE TRIGGER IF NOT EXISTS vectors_index_generation_update_v2
-AFTER UPDATE OF chunk_id, document_hash, embedding, embedding_dim, quantized_format,
-                quantized_bits, quantized_seed, quantized_packed_codes ON vectors BEGIN
+AFTER UPDATE OF chunk_id, document_hash, embedding, embedding_dim ON vectors BEGIN
     UPDATE vector_index_generation SET generation = generation + 1 WHERE id = 1;
 END;
 DROP TRIGGER IF EXISTS vectors_index_generation_update;
@@ -563,9 +424,8 @@ INSERT INTO vectors (
     start_offset, end_offset, metadata,
     model_id, model_version, embedding_version, content_hash,
     created_at, embedded_at, is_stale, level,
-    source_chunk_ids, parent_document_hash, child_document_hashes,
-    quantized_format, quantized_bits, quantized_seed, quantized_packed_codes
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    source_chunk_ids, parent_document_hash, child_document_hashes
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 )sql";
 
 constexpr const char* kSelectByChunkId = R"sql(
@@ -573,8 +433,7 @@ SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
        start_offset, end_offset, metadata,
        model_id, model_version, embedding_version, content_hash,
        created_at, embedded_at, is_stale, level,
-       source_chunk_ids, parent_document_hash, child_document_hashes,
-       quantized_format, quantized_bits, quantized_seed, quantized_packed_codes
+       source_chunk_ids, parent_document_hash, child_document_hashes
 FROM vectors WHERE chunk_id = ?
 )sql";
 
@@ -583,8 +442,7 @@ SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
        start_offset, end_offset, metadata,
        model_id, model_version, embedding_version, content_hash,
        created_at, embedded_at, is_stale, level,
-       source_chunk_ids, parent_document_hash, child_document_hashes,
-       quantized_format, quantized_bits, quantized_seed, quantized_packed_codes
+       source_chunk_ids, parent_document_hash, child_document_hashes
 FROM vectors WHERE rowid = ?
 )sql";
 
@@ -593,8 +451,7 @@ SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
        start_offset, end_offset, metadata,
        model_id, model_version, embedding_version, content_hash,
        created_at, embedded_at, is_stale, level,
-       source_chunk_ids, parent_document_hash, child_document_hashes,
-       quantized_format, quantized_bits, quantized_seed, quantized_packed_codes
+       source_chunk_ids, parent_document_hash, child_document_hashes
 FROM vectors WHERE document_hash = ?
 )sql";
 
@@ -847,12 +704,6 @@ public:
             return Error{ErrorCode::InvalidState, "Already initialized"};
         }
 
-        // Contract: quantized-primary storage requires TurboQuant sidecar for reconstruction
-        if (config_.quantized_primary_storage && !config_.enable_turboquant_storage) {
-            return Error{ErrorCode::InvalidArgument,
-                         "quantized_primary_storage=true requires enable_turboquant_storage=true"};
-        }
-
         query_dim_counts_.clear();
 
         // Embedding workers can concurrently search this one backend while semantic graph
@@ -926,18 +777,15 @@ public:
                              "Schema migration failed: " + migrate_result.error().message};
             }
             spdlog::info("V2 to V2.1 migration completed successfully");
-        } else if (schema_version == VectorSchemaMigration::SchemaVersion::V2_1) {
-            // Upgrade V2.1 to V2.2 (add quantized sidecar columns)
-            spdlog::info("Detected V2.1 vector schema, upgrading to V2.2...");
-            auto migrate_result = VectorSchemaMigration::migrateV2_1ToV2_2(db_);
+        } else if (schema_version == VectorSchemaMigration::SchemaVersion::V2_2) {
+            spdlog::info("Detected legacy TurboQuant vector schema, retiring unused storage...");
+            auto migrate_result = VectorSchemaMigration::migrateV2_2ToV2_3(db_);
             if (!migrate_result) {
-                spdlog::error("V2.1 to V2.2 migration failed: {}", migrate_result.error().message);
+                spdlog::error("TurboQuant retirement failed: {}", migrate_result.error().message);
                 sqlite3_close(db_);
                 db_ = nullptr;
-                return Error{ErrorCode::DatabaseError,
-                             "Schema migration failed: " + migrate_result.error().message};
+                return migrate_result.error();
             }
-            spdlog::info("V2.1 to V2.2 migration completed successfully");
         }
 
         db_path_ = db_path;
@@ -1038,15 +886,6 @@ public:
             std::string err = err_msg ? err_msg : "Unknown error";
             sqlite3_free(err_msg);
             return Error{ErrorCode::DatabaseError, "Failed to create entity_vectors table: " + err};
-        }
-
-        // Create TurboQuant quantizer metadata table for global per-coord scales
-        rc = sqlite3_exec(db_, kCreateTurboQuantMeta, nullptr, nullptr, &err_msg);
-        if (rc != SQLITE_OK) {
-            std::string err = err_msg ? err_msg : "Unknown error";
-            sqlite3_free(err_msg);
-            return Error{ErrorCode::DatabaseError,
-                         "Failed to create turboquant_quantizer_meta table: " + err};
         }
 
         if (auto er = ensurePersistenceSchema(); !er) {
@@ -1949,8 +1788,7 @@ SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
        start_offset, end_offset, metadata,
        model_id, model_version, embedding_version, content_hash,
        created_at, embedded_at, is_stale, level,
-       source_chunk_ids, parent_document_hash, child_document_hashes,
-       quantized_format, quantized_bits, quantized_seed, quantized_packed_codes
+       source_chunk_ids, parent_document_hash, child_document_hashes
 FROM vectors WHERE level = ?
 )sql";
 
@@ -1993,8 +1831,7 @@ SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
        start_offset, end_offset, metadata,
        model_id, model_version, embedding_version, content_hash,
        created_at, embedded_at, is_stale, level,
-       source_chunk_ids, parent_document_hash, child_document_hashes,
-       quantized_format, quantized_bits, quantized_seed, quantized_packed_codes
+       source_chunk_ids, parent_document_hash, child_document_hashes
 FROM vectors WHERE level = ?
 )sql";
 
@@ -2140,8 +1977,7 @@ SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
        start_offset, end_offset, metadata,
        model_id, model_version, embedding_version, content_hash,
        created_at, embedded_at, is_stale, level,
-       source_chunk_ids, parent_document_hash, child_document_hashes,
-       quantized_format, quantized_bits, quantized_seed, quantized_packed_codes
+       source_chunk_ids, parent_document_hash, child_document_hashes
 FROM vectors
 WHERE model_version = ?1
 ORDER BY embedded_at DESC, rowid ASC
@@ -2746,7 +2582,6 @@ public:
 
         // Drop main vectors and auxiliary metadata tables
         tables_to_drop.push_back("DROP TABLE IF EXISTS vectors");
-        tables_to_drop.push_back("DROP TABLE IF EXISTS turboquant_quantizer_meta");
 
         for (const auto& sql : tables_to_drop) {
             char* err_msg = nullptr;
@@ -3165,17 +3000,9 @@ private:
         sqlite3_bind_text(stmt_insert_, 1, record.chunk_id.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(stmt_insert_, 2, record.document_hash.c_str(), -1, SQLITE_TRANSIENT);
 
-        // Embedding as blob: skip when quantized-primary storage is enabled
-        // (embedding is reconstructed from quantized sidecar on read)
-        if (config_.quantized_primary_storage && !record.embedding.empty()) {
-            sqlite3_bind_null(stmt_insert_, 3);
-        } else {
-            sqlite3_bind_blob(stmt_insert_, 3, record.embedding.data(),
-                              record.embedding.size() * sizeof(float), SQLITE_TRANSIENT);
-        }
+        sqlite3_bind_blob(stmt_insert_, 3, record.embedding.data(),
+                          record.embedding.size() * sizeof(float), SQLITE_TRANSIENT);
 
-        // Embedding dimension: always populate it so search-index maintenance can use it
-        // even when the float blob is absent in quantized-primary mode.
         size_t effective_dim =
             record.embedding_dim > 0 ? record.embedding_dim : record.embedding.size();
         sqlite3_bind_int64(stmt_insert_, 4, static_cast<int64_t>(effective_dim));
@@ -3208,18 +3035,6 @@ private:
                           SQLITE_TRANSIENT);
         std::string child_hashes_json = serializeStringVector(record.child_document_hashes);
         sqlite3_bind_text(stmt_insert_, 19, child_hashes_json.c_str(), -1, SQLITE_TRANSIENT);
-
-        // Quantized sidecar columns (packed TurboQuant codes)
-        sqlite3_bind_int(stmt_insert_, 20, static_cast<int>(record.quantized.format));
-        sqlite3_bind_int(stmt_insert_, 21, static_cast<int>(record.quantized.bits_per_channel));
-        sqlite3_bind_int64(stmt_insert_, 22, static_cast<int64_t>(record.quantized.seed));
-        if (!record.quantized.packed_codes.empty()) {
-            sqlite3_bind_blob(stmt_insert_, 23, record.quantized.packed_codes.data(),
-                              static_cast<int>(record.quantized.packed_codes.size()),
-                              SQLITE_TRANSIENT);
-        } else {
-            sqlite3_bind_null(stmt_insert_, 23);
-        }
 
         int rc = stepWithRetry(stmt_insert_);
         if (rc != SQLITE_DONE) {
@@ -3295,7 +3110,7 @@ private:
         const char* doc_hash_txt = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
         record.document_hash = doc_hash_txt ? doc_hash_txt : "";
 
-        // Embedding blob — may be NULL in quantized-primary mode
+        // Embedding blob
         const void* blob = sqlite3_column_blob(stmt, 3);
         int blob_size = sqlite3_column_bytes(stmt, 3);
         if (blob && blob_size > 0) {
@@ -3304,9 +3119,7 @@ private:
             std::memcpy(record.embedding.data(), blob, blob_size);
             record.embedding_dim = num_floats;
         } else {
-            // Quantized-primary row: embedding blob is absent; use embedding_dim column
             record.embedding_dim = static_cast<size_t>(sqlite3_column_int64(stmt, 4));
-            // Note: embedding will be empty; caller (VectorDatabase) dequantizes on read
         }
 
         const char* content = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 5));
@@ -3342,19 +3155,6 @@ private:
 
         const char* child_hashes = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 19));
         record.child_document_hashes = deserializeStringVector(child_hashes ? child_hashes : "");
-
-        // Quantized sidecar columns (packed TurboQuant codes)
-        record.quantized.format =
-            static_cast<VectorRecord::QuantizedFormat>(sqlite3_column_int(stmt, 20));
-        record.quantized.bits_per_channel = static_cast<uint8_t>(sqlite3_column_int(stmt, 21));
-        record.quantized.seed = static_cast<uint64_t>(sqlite3_column_int64(stmt, 22));
-
-        const void* qblob = sqlite3_column_blob(stmt, 23);
-        int qblob_size = sqlite3_column_bytes(stmt, 23);
-        if (qblob && qblob_size > 0) {
-            record.quantized.packed_codes.resize(static_cast<size_t>(qblob_size));
-            std::memcpy(record.quantized.packed_codes.data(), qblob, qblob_size);
-        }
 
         return record;
     }
@@ -3448,44 +3248,16 @@ private:
         return Result<void>{};
     }
 
-    std::unique_ptr<TurboQuantMSE> makeTurboQuantForDimUnlocked(size_t dim) const {
-        std::unique_ptr<TurboQuantMSE> tq;
-        if (config_.enable_turboquant_storage || config_.quantized_primary_storage) {
-            TurboQuantConfig cfg;
-            cfg.dimension = dim;
-            cfg.bits_per_channel = config_.turboquant_bits;
-            cfg.seed = config_.turboquant_seed;
-            tq = std::make_unique<TurboQuantMSE>(cfg);
-            auto scales = loadTurboQuantPerCoordScales(db_, dim, config_.turboquant_bits,
-                                                       config_.turboquant_seed);
-            if (!scales.empty()) {
-                tq->setPerCoordScales(std::move(scales));
-            }
-        }
-        return tq;
-    }
-
     std::optional<std::pair<size_t, std::vector<float>>>
-    decodeVectorForDimRowUnlocked(sqlite3_stmt* stmt, size_t dim, TurboQuantMSE* tq) const {
+    decodeVectorForDimRowUnlocked(sqlite3_stmt* stmt, size_t dim) const {
         size_t rowid = static_cast<size_t>(sqlite3_column_int64(stmt, 0));
         const void* blob = sqlite3_column_blob(stmt, 1);
         int blob_size = sqlite3_column_bytes(stmt, 1);
 
         std::vector<float> embedding;
-        if (blob && blob_size > 0 && (blob_size % static_cast<int>(sizeof(float))) == 0) {
+        if (blob && blob_size == static_cast<int>(dim * sizeof(float))) {
             embedding.resize(static_cast<size_t>(blob_size) / sizeof(float));
             std::memcpy(embedding.data(), blob, static_cast<size_t>(blob_size));
-        } else if (tq) {
-            auto fmt = static_cast<VectorRecord::QuantizedFormat>(sqlite3_column_int(stmt, 2));
-            if (fmt == VectorRecord::QuantizedFormat::TURBOquant_1) {
-                const void* qblob = sqlite3_column_blob(stmt, 5);
-                int qblob_size = sqlite3_column_bytes(stmt, 5);
-                if (qblob && qblob_size > 0) {
-                    std::vector<uint8_t> packed(static_cast<size_t>(qblob_size));
-                    std::memcpy(packed.data(), qblob, static_cast<size_t>(qblob_size));
-                    embedding = vector_utils::packedDequantizeVector(packed, dim, tq);
-                }
-            }
         }
 
         if (embedding.empty() || !isFiniteEmbedding(embedding)) {
@@ -3498,8 +3270,7 @@ private:
     queryVectorsForDimUnlocked(size_t dim) {
         std::vector<std::pair<size_t, std::vector<float>>> rows;
         const char* sql =
-            "SELECT rowid, embedding, quantized_format, quantized_bits, quantized_seed, "
-            "quantized_packed_codes FROM vectors WHERE embedding_dim = ? ORDER BY rowid";
+            "SELECT rowid, embedding FROM vectors WHERE embedding_dim = ? ORDER BY rowid";
         sqlite3_stmt* stmt = nullptr;
         if (sqlite3_prepare_v2(db_, sql, -1, &stmt, nullptr) != SQLITE_OK) {
             return Error{ErrorCode::DatabaseError, "Failed to prepare vector scan for dim " +
@@ -3508,12 +3279,10 @@ private:
         }
         StmtFinalizeGuard finalize(stmt);
 
-        auto tq = makeTurboQuantForDimUnlocked(dim);
-
         sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(dim));
         int rc = SQLITE_OK;
         while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
-            if (auto decoded = decodeVectorForDimRowUnlocked(stmt, dim, tq.get())) {
+            if (auto decoded = decodeVectorForDimRowUnlocked(stmt, dim)) {
                 rows.push_back(std::move(*decoded));
             }
         }
@@ -3607,8 +3376,7 @@ private:
         }
 
         const char* select_sql =
-            "SELECT rowid, embedding, quantized_format, quantized_bits, quantized_seed, "
-            "quantized_packed_codes FROM vectors "
+            "SELECT rowid, embedding FROM vectors "
             "WHERE (CASE WHEN embedding_dim IS NULL OR embedding_dim = 0 "
             "THEN LENGTH(embedding) / 4 ELSE embedding_dim END) = ? ORDER BY rowid";
         sqlite3_stmt* select_stmt = nullptr;
@@ -3619,10 +3387,9 @@ private:
                          "Failed to prepare vec0 source scan for dim " + std::to_string(dim)};
         }
 
-        auto tq = makeTurboQuantForDimUnlocked(dim);
         sqlite3_bind_int64(select_stmt, 1, static_cast<sqlite3_int64>(dim));
         while (sqlite3_step(select_stmt) == SQLITE_ROW) {
-            auto decoded = decodeVectorForDimRowUnlocked(select_stmt, dim, tq.get());
+            auto decoded = decodeVectorForDimRowUnlocked(select_stmt, dim);
             if (!decoded) {
                 continue;
             }
@@ -4040,6 +3807,9 @@ private:
         if (it->second->exact_fallback) {
             return Result<void>{};
         }
+        if (it->second->persisted_snapshot && persistedBackingStoreUnchangedUnlocked(*it->second)) {
+            return Result<void>{};
+        }
         std::string errorMessage;
         if (!detail::savePersistedSimeonPq(db_, dim, it->second->pq, config_.simeon_pq_seed,
                                            config_.simeon_pq_train_limit, it->second->rerank_factor,
@@ -4231,20 +4001,6 @@ private:
                                                .count());
         }
 
-        std::unique_ptr<TurboQuantMSE> rerankQuantizer;
-        if (config_.quantized_primary_storage) {
-            TurboQuantConfig quantizerConfig;
-            quantizerConfig.dimension = query_dim;
-            quantizerConfig.bits_per_channel = config_.turboquant_bits;
-            quantizerConfig.seed = config_.turboquant_seed;
-            rerankQuantizer = std::make_unique<TurboQuantMSE>(quantizerConfig);
-            auto scales = loadTurboQuantPerCoordScales(db_, query_dim, config_.turboquant_bits,
-                                                       config_.turboquant_seed);
-            if (!scales.empty()) {
-                rerankQuantizer->setPerCoordScales(std::move(scales));
-            }
-        }
-
         std::vector<VectorRecord> records;
         records.reserve(scores.size());
         for (const auto& [approxScore, idx] : scores) {
@@ -4262,17 +4018,6 @@ private:
             }
             if (diagnostics != nullptr) {
                 ++diagnostics->materializedRows;
-            }
-            if (record_opt->embedding.empty() && rerankQuantizer &&
-                record_opt->quantized.format == VectorRecord::QuantizedFormat::TURBOquant_1 &&
-                !record_opt->quantized.packed_codes.empty()) {
-                record_opt->embedding = vector_utils::packedDequantizeVector(
-                    record_opt->quantized.packed_codes, query_dim, rerankQuantizer.get());
-                if (record_opt->embedding.size() != query_dim ||
-                    !isFiniteEmbedding(record_opt->embedding) ||
-                    isZeroNormEmbedding(record_opt->embedding)) {
-                    record_opt->embedding.clear();
-                }
             }
             float similarity = approxScore;
             if (!record_opt->embedding.empty()) {
@@ -4327,26 +4072,10 @@ private:
     void refreshQueryDimCountsUnlocked() {
         query_dim_counts_.clear();
 
-        const char* count_sql =
-            "SELECT embedding, embedding_dim, quantized_format, quantized_bits, quantized_seed, "
-            "quantized_packed_codes FROM vectors";
+        const char* count_sql = "SELECT embedding, embedding_dim FROM vectors";
         sqlite3_stmt* stmt = nullptr;
         if (sqlite3_prepare_v2(db_, count_sql, -1, &stmt, nullptr) != SQLITE_OK) {
             return;
-        }
-
-        std::unique_ptr<TurboQuantMSE> count_tq;
-        if (config_.enable_turboquant_storage || config_.quantized_primary_storage) {
-            TurboQuantConfig cfg;
-            cfg.dimension = config_.embedding_dim;
-            cfg.bits_per_channel = config_.turboquant_bits;
-            cfg.seed = config_.turboquant_seed;
-            count_tq = std::make_unique<TurboQuantMSE>(cfg);
-            auto scales = loadTurboQuantPerCoordScales(
-                db_, config_.embedding_dim, config_.turboquant_bits, config_.turboquant_seed);
-            if (!scales.empty()) {
-                count_tq->setPerCoordScales(std::move(scales));
-            }
         }
 
         while (sqlite3_step(stmt) == SQLITE_ROW) {
@@ -4370,22 +4099,6 @@ private:
             if (blob && blob_size > 0 && (blob_size % static_cast<int>(sizeof(float))) == 0) {
                 embedding.resize(num_floats);
                 std::memcpy(embedding.data(), blob, static_cast<size_t>(blob_size));
-            } else {
-                if (!count_tq) {
-                    continue;
-                }
-                auto fmt = static_cast<VectorRecord::QuantizedFormat>(sqlite3_column_int(stmt, 2));
-                if (fmt != VectorRecord::QuantizedFormat::TURBOquant_1) {
-                    continue;
-                }
-                const void* qblob = sqlite3_column_blob(stmt, 5);
-                int qblob_size = sqlite3_column_bytes(stmt, 5);
-                if (!qblob || qblob_size <= 0) {
-                    continue;
-                }
-                std::vector<uint8_t> packed(static_cast<size_t>(qblob_size));
-                std::memcpy(packed.data(), qblob, static_cast<size_t>(qblob_size));
-                embedding = vector_utils::packedDequantizeVector(packed, dim, count_tq.get());
             }
 
             if (embedding.empty() || isZeroNormEmbedding(embedding) ||
@@ -4421,9 +4134,7 @@ private:
             diagnostics->exactDistanceEvaluationsObserved = true;
         }
 
-        // Extended SQL to include quantized sidecar columns for dequantization in
-        // quantized-primary mode (where the float blob is NULL). Push bounded
-        // candidate sets into SQLite so idx_vectors_document_hash avoids a
+        // Push bounded candidate sets into SQLite so idx_vectors_document_hash avoids a
         // full-table scan. Very large sets retain the in-memory filter fallback
         // when they exceed SQLite's bind-variable limit.
         std::string sql = R"sql(
@@ -4431,8 +4142,7 @@ SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
        start_offset, end_offset, metadata,
        model_id, model_version, embedding_version, content_hash,
        created_at, embedded_at, is_stale, level,
-       source_chunk_ids, parent_document_hash, child_document_hashes,
-       quantized_format, quantized_bits, quantized_seed, quantized_packed_codes
+       source_chunk_ids, parent_document_hash, child_document_hashes
 FROM vectors
 WHERE embedding_dim = ?1
 )sql";
@@ -4486,22 +4196,6 @@ WHERE embedding_dim = ?1
             }
         };
 
-        // Dequantizer for quantized-primary rows (when float blob is absent)
-        std::unique_ptr<TurboQuantMSE> bf_tq;
-        if (config_.enable_turboquant_storage || config_.quantized_primary_storage) {
-            TurboQuantConfig cfg;
-            cfg.dimension = query_embedding.size();
-            cfg.bits_per_channel = config_.turboquant_bits;
-            cfg.seed = config_.turboquant_seed;
-            bf_tq = std::make_unique<TurboQuantMSE>(cfg);
-            // Load fitted per-coord scales from DB if available
-            auto scales = loadTurboQuantPerCoordScales(
-                db_, query_embedding.size(), config_.turboquant_bits, config_.turboquant_seed);
-            if (!scales.empty()) {
-                bf_tq->setPerCoordScales(std::move(scales));
-            }
-        }
-
         // Fast path (no metadata filters): score from the embedding column and retain full
         // records only while they are top-k candidates. Keeping each winner from the same SQLite
         // snapshot as its score prevents a concurrent writer from pairing an old score with a
@@ -4530,7 +4224,6 @@ WHERE embedding_dim = ?1
             std::vector<ScoredRow> scored;
             scored.reserve(rowSelection == ExactRowSelection::AllMatching ? candidate_hashes.size()
                                                                           : k + 1);
-            std::vector<float> dequant_buffer;
             int scanRc = SQLITE_OK;
             while ((scanRc = sqlite3_step(stmt)) == SQLITE_ROW) {
                 if (diagnostics) {
@@ -4548,24 +4241,10 @@ WHERE embedding_dim = ?1
                 const void* blob = sqlite3_column_blob(stmt, 3);
                 const int bytes = sqlite3_column_bytes(stmt, 3);
                 std::span<const float> embedding;
-                if (blob && bytes == static_cast<int>(dim * sizeof(float))) {
-                    embedding = std::span<const float>(static_cast<const float*>(blob), dim);
-                } else if (bf_tq) {
-                    const void* packed = sqlite3_column_blob(stmt, 23);
-                    const int packed_bytes = sqlite3_column_bytes(stmt, 23);
-                    if (!packed || packed_bytes <= 0) {
-                        continue;
-                    }
-                    std::vector<uint8_t> codes(static_cast<const uint8_t*>(packed),
-                                               static_cast<const uint8_t*>(packed) + packed_bytes);
-                    dequant_buffer = vector_utils::packedDequantizeVector(codes, dim, bf_tq.get());
-                    if (dequant_buffer.size() != dim) {
-                        continue;
-                    }
-                    embedding = std::span<const float>(dequant_buffer);
-                } else {
+                if (!blob || bytes != static_cast<int>(dim * sizeof(float))) {
                     continue;
                 }
+                embedding = std::span<const float>(static_cast<const float*>(blob), dim);
 
                 if (diagnostics) {
                     ++diagnostics->exactDistanceEvaluations;
@@ -4668,12 +4347,6 @@ WHERE embedding_dim = ?1
 
             auto record = recordFromStatement(stmt);
 
-            // Dequantize if embedding is absent but quantized sidecar is present
-            if (record.embedding.empty() && !record.quantized.packed_codes.empty() && bf_tq) {
-                record.embedding = vector_utils::packedDequantizeVector(
-                    record.quantized.packed_codes, query_embedding.size(), bf_tq.get());
-            }
-
             bool metadata_match = true;
             for (const auto& [key, value] : metadata_filters) {
                 auto it = record.metadata.find(key);
@@ -4688,9 +4361,6 @@ WHERE embedding_dim = ?1
 
             if (!record.embedding.empty() && record.embedding.size() != query_embedding.size()) {
                 continue;
-            }
-            if (record.embedding.empty() && record.embedding_dim != query_embedding.size()) {
-                continue; // Quantized-primary row: use embedding_dim for dimension check
             }
             if (isZeroNormEmbedding(record.embedding) || !isFiniteEmbedding(record.embedding)) {
                 continue;
@@ -5122,40 +4792,6 @@ Result<void> SqliteVecBackend::commitTransaction() {
 
 Result<void> SqliteVecBackend::rollbackTransaction() {
     return impl_->rollbackTransaction();
-}
-
-Result<void> SqliteVecBackend::persistTurboQuantPerCoordScales(size_t dim, uint8_t bits,
-                                                               uint64_t seed,
-                                                               const std::vector<float>& scales) {
-    if (scales.size() != dim) {
-        return Error{ErrorCode::InvalidArgument, "Scale dimension mismatch"};
-    }
-    auto* db = impl_->dbHandle();
-    if (!db) {
-        return Error{ErrorCode::NotInitialized, "Database not initialized"};
-    }
-    bool ok = saveTurboQuantPerCoordScales(db, dim, bits, seed, scales);
-    if (!ok) {
-        return Error{ErrorCode::DatabaseError, "Failed to persist per-coord scales"};
-    }
-    return {};
-}
-
-Result<void> SqliteVecBackend::persistTurboQuantFittedModel(size_t dim, uint8_t bits, uint64_t seed,
-                                                            const std::vector<float>& scales,
-                                                            const std::vector<float>& centroids) {
-    if (scales.size() != dim) {
-        return Error{ErrorCode::InvalidArgument, "Scales dimension mismatch"};
-    }
-    auto* db = impl_->dbHandle();
-    if (!db) {
-        return Error{ErrorCode::NotInitialized, "Database not initialized"};
-    }
-    bool ok = saveTurboQuantFittedModel(db, dim, bits, seed, scales, centroids);
-    if (!ok) {
-        return Error{ErrorCode::DatabaseError, "Failed to persist fitted quantizer model"};
-    }
-    return {};
 }
 
 // ============================================================================

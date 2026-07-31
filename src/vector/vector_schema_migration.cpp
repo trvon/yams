@@ -3,13 +3,15 @@
 #include <chrono>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <unordered_set>
 
 #include <sqlite3.h>
 #include <spdlog/spdlog.h>
 
 #include <yams/core/types.h>
-#include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/metadata/db_lock_telemetry.h>
 #include <yams/storage/sqlite_retry.h>
 
 namespace yams::vector {
@@ -59,7 +61,7 @@ Result<void> executeSQL(sqlite3* db, const char* sql) {
         return Error{ErrorCode::DatabaseError, std::move(err)};
     }
 
-    daemon::TuneAdvisor::reportDbLockError(); // Signal contention for adaptive scaling
+    metadata::reportDbLockError(); // Signal contention for adaptive scaling
     return Error{ErrorCode::DatabaseError, "Max retries exceeded"};
 }
 
@@ -72,6 +74,228 @@ Result<void> beginTransaction(sqlite3* db) {
     // SQLite: use BEGIN IMMEDIATE to acquire write lock immediately
     return executeSQL(db, "BEGIN IMMEDIATE");
 #endif
+}
+
+class TransactionGuard {
+public:
+    explicit TransactionGuard(sqlite3* db) : db_(db) {}
+
+    TransactionGuard(const TransactionGuard&) = delete;
+    TransactionGuard& operator=(const TransactionGuard&) = delete;
+
+    ~TransactionGuard() {
+        if (active_) {
+            (void)executeSQL(db_, "ROLLBACK");
+        }
+    }
+
+    Result<void> begin() {
+        auto result = beginTransaction(db_);
+        active_ = result.has_value();
+        return result;
+    }
+
+    Result<void> commit() {
+        auto result = executeSQL(db_, "COMMIT");
+        if (result) {
+            active_ = false;
+        }
+        return result;
+    }
+
+private:
+    sqlite3* db_;
+    bool active_ = false;
+};
+
+Result<std::int64_t> queryInt64(sqlite3* db, const char* sql) {
+    sqlite3_stmt* stmt = nullptr;
+    const int prepareRc = sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr);
+    if (prepareRc != SQLITE_OK) {
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to prepare migration query: " + std::string(sqlite3_errmsg(db))};
+    }
+
+    const int stepRc = sqlite3_step(stmt);
+    if (stepRc != SQLITE_ROW) {
+        const std::string message = sqlite3_errmsg(db);
+        sqlite3_finalize(stmt);
+        return Error{ErrorCode::DatabaseError, "Failed to execute migration query: " + message};
+    }
+
+    const std::int64_t value = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    return value;
+}
+
+Result<void> rejectUnsupportedVectorSchemaObjects(sqlite3* db) {
+    static const std::unordered_set<std::string_view> supportedObjects = {
+        "idx_vectors_chunk_id",
+        "idx_vectors_document_hash",
+        "idx_vectors_model",
+        "idx_vectors_embedding_dim",
+        "idx_vectors_level",
+        "vectors_index_generation_insert",
+        "vectors_index_generation_update",
+        "vectors_index_generation_update_v2",
+        "vectors_index_generation_delete",
+    };
+
+    constexpr const char* sql = R"sql(
+        SELECT type, name
+        FROM sqlite_master
+        WHERE sql IS NOT NULL
+          AND (
+              (tbl_name = 'vectors' AND type IN ('index', 'trigger'))
+              OR (type = 'view' AND lower(sql) LIKE '%vectors%')
+          )
+    )sql";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to inspect vector schema objects: " + std::string(sqlite3_errmsg(db))};
+    }
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const auto* type = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        const auto* name = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        const std::string_view objectType = type ? type : "";
+        const std::string_view objectName = name ? name : "";
+        if (objectType == "view" || !supportedObjects.contains(objectName)) {
+            const std::string message =
+                "Cannot retire TurboQuant because custom schema object '" +
+                std::string(objectName) + "' (" + std::string(objectType) +
+                ") depends on vectors; remove or migrate it explicitly, then retry";
+            sqlite3_finalize(stmt);
+            return Error{ErrorCode::InvalidState, message};
+        }
+    }
+
+    const int rc = sqlite3_finalize(stmt);
+    if (rc != SQLITE_OK) {
+        return Error{ErrorCode::DatabaseError, "Failed while inspecting vector schema objects: " +
+                                                   std::string(sqlite3_errmsg(db))};
+    }
+    return Result<void>{};
+}
+
+Result<void> copyVectorsToCanonicalTable(sqlite3* db, std::int64_t expectedRows) {
+    constexpr const char* createVectors = R"sql(
+        CREATE TABLE vectors_v2_3 (
+            rowid INTEGER PRIMARY KEY,
+            chunk_id TEXT UNIQUE NOT NULL,
+            document_hash TEXT NOT NULL,
+            embedding BLOB,
+            embedding_dim INTEGER,
+            content TEXT,
+            start_offset INTEGER DEFAULT 0,
+            end_offset INTEGER DEFAULT 0,
+            metadata TEXT,
+            model_id TEXT,
+            model_version TEXT,
+            embedding_version INTEGER DEFAULT 1,
+            content_hash TEXT,
+            created_at INTEGER,
+            embedded_at INTEGER,
+            is_stale INTEGER DEFAULT 0,
+            level INTEGER DEFAULT 0,
+            source_chunk_ids TEXT,
+            parent_document_hash TEXT,
+            child_document_hashes TEXT
+        )
+    )sql";
+    auto result = executeSQL(db, createVectors);
+    if (!result) {
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to create replacement vectors table: " + result.error().message};
+    }
+
+    constexpr const char* copyVectors = R"sql(
+        INSERT INTO vectors_v2_3 (
+            rowid, chunk_id, document_hash, embedding, embedding_dim, content,
+            start_offset, end_offset, metadata, model_id, model_version,
+            embedding_version, content_hash, created_at, embedded_at, is_stale,
+            level, source_chunk_ids, parent_document_hash, child_document_hashes
+        )
+        SELECT
+            rowid, chunk_id, document_hash, embedding, embedding_dim, content,
+            start_offset, end_offset, metadata, model_id, model_version,
+            embedding_version, content_hash, created_at, embedded_at, is_stale,
+            level, source_chunk_ids, parent_document_hash, child_document_hashes
+        FROM vectors
+    )sql";
+    result = executeSQL(db, copyVectors);
+    if (!result) {
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to copy vectors into replacement table: " + result.error().message};
+    }
+
+    auto copiedRows = queryInt64(db, "SELECT COUNT(*) FROM vectors_v2_3");
+    if (!copiedRows) {
+        return copiedRows.error();
+    }
+    if (copiedRows.value() != expectedRows) {
+        return Error{ErrorCode::DatabaseError,
+                     "Vector schema migration copied an unexpected number of rows"};
+    }
+    return Result<void>{};
+}
+
+Result<void> installCanonicalVectorSchema(sqlite3* db) {
+    auto result = executeSQL(db, R"sql(
+        DROP TABLE vectors;
+        ALTER TABLE vectors_v2_3 RENAME TO vectors;
+        CREATE INDEX idx_vectors_chunk_id ON vectors(chunk_id);
+        CREATE INDEX idx_vectors_document_hash ON vectors(document_hash);
+        CREATE INDEX idx_vectors_model ON vectors(model_id, model_version);
+        CREATE INDEX idx_vectors_embedding_dim ON vectors(embedding_dim);
+        CREATE INDEX idx_vectors_level ON vectors(level, document_hash);
+        CREATE TABLE IF NOT EXISTS vector_index_generation (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            generation INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT OR IGNORE INTO vector_index_generation(id, generation) VALUES (1, 0);
+        CREATE TRIGGER vectors_index_generation_insert
+        AFTER INSERT ON vectors BEGIN
+            UPDATE vector_index_generation SET generation = generation + 1 WHERE id = 1;
+        END;
+        CREATE TRIGGER vectors_index_generation_update_v2
+        AFTER UPDATE OF chunk_id, document_hash, embedding, embedding_dim ON vectors BEGIN
+            UPDATE vector_index_generation SET generation = generation + 1 WHERE id = 1;
+        END;
+        CREATE TRIGGER vectors_index_generation_delete
+        AFTER DELETE ON vectors BEGIN
+            UPDATE vector_index_generation SET generation = generation + 1 WHERE id = 1;
+        END;
+        DROP TABLE IF EXISTS turboquant_quantizer_meta;
+    )sql");
+    if (!result) {
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to install canonical vector schema: " + result.error().message};
+    }
+    return Result<void>{};
+}
+
+Result<void> verifyDatabaseIntegrity(sqlite3* db) {
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(db, "PRAGMA quick_check", -1, &stmt, nullptr) != SQLITE_OK) {
+        return Error{ErrorCode::DatabaseError,
+                     "Failed to prepare post-migration integrity check: " +
+                         std::string(sqlite3_errmsg(db))};
+    }
+
+    const int stepRc = sqlite3_step(stmt);
+    const auto* text = stepRc == SQLITE_ROW
+                           ? reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0))
+                           : nullptr;
+    const bool integrityOk = text && std::string_view(text) == "ok";
+    sqlite3_finalize(stmt);
+    if (!integrityOk) {
+        return Error{ErrorCode::DatabaseError,
+                     "Post-migration SQLite integrity check did not return ok"};
+    }
+    return Result<void>{};
 }
 
 // Check if vec0 module is available (needed to read V1 embeddings)
@@ -151,7 +375,7 @@ VectorSchemaMigration::SchemaVersion VectorSchemaMigration::detectVersion(sqlite
             return SchemaVersion::V2_2;
         }
         if (columnExists(db, "vectors", "embedding_dim")) {
-            return SchemaVersion::V2_1;
+            return SchemaVersion::V2_3;
         }
         return SchemaVersion::V2;
     }
@@ -246,69 +470,71 @@ Result<void> VectorSchemaMigration::migrateV2ToV2_1(sqlite3* db) {
     return Result<void>{};
 }
 
-bool VectorSchemaMigration::hasQuantizedColumns(sqlite3* db) {
-    if (!db) {
-        return false;
-    }
-    return columnExists(db, "vectors", "quantized_packed_codes");
-}
-
-Result<void> VectorSchemaMigration::migrateV2_1ToV2_2(sqlite3* db) {
+Result<void> VectorSchemaMigration::migrateV2_2ToV2_3(sqlite3* db) {
     if (!db) {
         return Error{ErrorCode::InvalidArgument, "Database handle is null"};
     }
 
-    // Check if already migrated
-    if (hasQuantizedColumns(db)) {
-        spdlog::debug("Database already has quantized columns, skipping migration");
+    const auto version = detectVersion(db);
+    if (version == SchemaVersion::V2_3) {
         return Result<void>{};
     }
+    if (version != SchemaVersion::V2_2) {
+        return Error{ErrorCode::InvalidState,
+                     "Cannot retire TurboQuant: database is not at V2.2 schema"};
+    }
 
-    spdlog::info("Starting V2.1 to V2.2 schema migration (adding quantized sidecar columns)...");
+    auto packedRows = queryInt64(db, "SELECT COUNT(*) FROM vectors "
+                                     "WHERE COALESCE(quantized_format, 0) != 0 "
+                                     "OR quantized_packed_codes IS NOT NULL");
+    if (!packedRows) {
+        return packedRows.error();
+    }
+    if (packedRows.value() != 0) {
+        return Error{
+            ErrorCode::InvalidState,
+            "Cannot retire TurboQuant while packed vector data exists. Reopen this database "
+            "with a pre-removal YAMS release, export/regenerate float embeddings, then retry."};
+    }
 
-    // Begin transaction
-    auto result = beginTransaction(db);
+    auto schemaCheck = rejectUnsupportedVectorSchemaObjects(db);
+    if (!schemaCheck) {
+        return schemaCheck;
+    }
+
+    auto rowCount = queryInt64(db, "SELECT COUNT(*) FROM vectors");
+    if (!rowCount) {
+        return rowCount.error();
+    }
+
+    TransactionGuard transaction(db);
+    auto result = transaction.begin();
     if (!result) {
         return result;
     }
 
-    // Add quantized columns
-    result = executeSQL(db, "ALTER TABLE vectors ADD COLUMN quantized_format INTEGER DEFAULT 0");
+    result = copyVectorsToCanonicalTable(db, rowCount.value());
     if (!result) {
-        executeSQL(db, "ROLLBACK");
-        return Error{ErrorCode::DatabaseError,
-                     "Failed to add quantized_format column: " + result.error().message};
+        return result;
     }
 
-    result = executeSQL(db, "ALTER TABLE vectors ADD COLUMN quantized_bits INTEGER DEFAULT 0");
+    result = installCanonicalVectorSchema(db);
     if (!result) {
-        executeSQL(db, "ROLLBACK");
-        return Error{ErrorCode::DatabaseError,
-                     "Failed to add quantized_bits column: " + result.error().message};
+        return result;
     }
 
-    result = executeSQL(db, "ALTER TABLE vectors ADD COLUMN quantized_seed INTEGER DEFAULT 0");
+    result = verifyDatabaseIntegrity(db);
     if (!result) {
-        executeSQL(db, "ROLLBACK");
-        return Error{ErrorCode::DatabaseError,
-                     "Failed to add quantized_seed column: " + result.error().message};
+        return result;
     }
 
-    result = executeSQL(db, "ALTER TABLE vectors ADD COLUMN quantized_packed_codes BLOB");
-    if (!result) {
-        executeSQL(db, "ROLLBACK");
-        return Error{ErrorCode::DatabaseError,
-                     "Failed to add quantized_packed_codes column: " + result.error().message};
-    }
-
-    // Commit transaction
-    result = executeSQL(db, "COMMIT");
+    result = transaction.commit();
     if (!result) {
         return Error{ErrorCode::DatabaseError,
-                     "Failed to commit migration: " + result.error().message};
+                     "Failed to commit TurboQuant retirement: " + result.error().message};
     }
 
-    spdlog::info("V2.1 to V2.2 migration completed successfully");
+    spdlog::info("Retired unused TurboQuant vector storage; schema is now V2.3");
     return Result<void>{};
 }
 
@@ -327,8 +553,8 @@ Result<void> VectorSchemaMigration::migrateV1ToV2(sqlite3* db,
         return migrateV2ToV2_1(db);
     }
 
-    if (version == SchemaVersion::V2_1) {
-        spdlog::info("Database already at V2.1 schema, skipping migration");
+    if (version == SchemaVersion::V2_3) {
+        spdlog::info("Database already at canonical float-only schema, skipping migration");
         return Result<void>{};
     }
 

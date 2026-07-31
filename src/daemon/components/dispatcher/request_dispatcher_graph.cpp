@@ -4,9 +4,11 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <cctype>
+#include <limits>
 #include <unordered_set>
 #include <yams/app/services/graph_context_service.hpp>
 #include <yams/app/services/graph_query_service.hpp>
+#include <yams/app/services/graph_scope_service.hpp>
 #include <yams/core/assert.hpp>
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/RequestDispatcher.h>
@@ -531,28 +533,54 @@ RequestDispatcher::handleGraphQueryListByType(const GraphQueryRequest& req,
                                               "nodeType is required for listByType mode");
     }
 
-    // Query nodes by type with pagination
-    auto nodesResult = kgStore->findNodesByType(req.nodeType, req.limit, req.offset);
-    if (!nodesResult) {
-        co_return dispatch::makeErrorResponse(nodesResult.error().code,
-                                              nodesResult.error().message);
-    }
-
     GraphQueryResponse resp;
     resp.kgAvailable = true;
-    auto totalCount = kgStore->countNodesByType(req.nodeType);
+    const auto scopedRanges = req.scopePathPrefix.empty()
+                                  ? std::vector<metadata::KGPathRange>{}
+                                  : app::services::buildGraphCodeScopePathRanges(
+                                        std::filesystem::path(req.scopePathPrefix));
+    auto totalCount = scopedRanges.empty()
+                          ? kgStore->countNodesByType(req.nodeType)
+                          : kgStore->countNodesByTypeInPathRanges(req.nodeType, scopedRanges);
     if (!totalCount) {
         co_return dispatch::makeErrorResponse(totalCount.error().code, totalCount.error().message);
     }
-    resp.totalNodesFound = static_cast<uint64_t>(totalCount.value());
-    resp.truncated = (nodesResult.value().size() >= req.limit);
+    if (totalCount.value() < 0 ||
+        static_cast<std::uint64_t>(totalCount.value()) >
+            static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        co_return dispatch::makeErrorResponse(ErrorCode::InvalidData,
+                                              "Invalid graph node count for listByType");
+    }
+    const auto totalNodeCount = static_cast<std::size_t>(totalCount.value());
+    std::vector<metadata::KGNode> nodes;
+    if (scopedRanges.empty()) {
+        auto nodesResult = kgStore->findNodesByType(req.nodeType, req.limit, req.offset);
+        if (!nodesResult) {
+            co_return dispatch::makeErrorResponse(nodesResult.error().code,
+                                                  nodesResult.error().message);
+        }
+        nodes = std::move(nodesResult.value());
+        resp.totalNodesFound = static_cast<uint64_t>(totalNodeCount);
+        const auto returnedThrough = static_cast<std::uint64_t>(req.offset) + nodes.size();
+        resp.truncated = returnedThrough < resp.totalNodesFound;
+    } else {
+        auto nodesResult =
+            kgStore->findNodesByTypeInPathRanges(req.nodeType, scopedRanges, req.limit, req.offset);
+        if (!nodesResult) {
+            co_return dispatch::makeErrorResponse(nodesResult.error().code,
+                                                  nodesResult.error().message);
+        }
+        nodes = std::move(nodesResult.value());
+        resp.totalNodesFound = static_cast<uint64_t>(totalNodeCount);
+        const auto returnedThrough = static_cast<std::uint64_t>(req.offset) + nodes.size();
+        resp.truncated = returnedThrough < resp.totalNodesFound;
+    }
     resp.maxDepthReached = 0;
 
     dispatch::GraphQueryResponseMapper::setOriginNode(resp, -1, "", "listByType:" + req.nodeType,
                                                       "query");
 
-    resp.connectedNodes =
-        dispatch::KGNodeMapper::mapKGNodes(nodesResult.value(), req.includeNodeProperties);
+    resp.connectedNodes = dispatch::KGNodeMapper::mapKGNodes(nodes, req.includeNodeProperties);
 
     spdlog::debug("GraphQuery listByType: returning {} nodes of type '{}'",
                   resp.connectedNodes.size(), req.nodeType);

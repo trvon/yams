@@ -128,3 +128,20 @@ TEST_CASE("ObjectStorageAdapter forwards C ABI operations and rejects missing st
     table->destroy(handle);
     std::free(table);
 }
+
+TEST_CASE("ObjectStorageAdapter represents an empty object without an allocation",
+          "[storage][object-storage][adapter][catch2]") {
+    auto impl = std::make_shared<FakeBackend>();
+    auto [table, handle] = expose_as_c_abi_with_state(impl);
+    REQUIRE(table != nullptr);
+    REQUIRE(handle != nullptr);
+
+    void* outBuf = reinterpret_cast<void*>(0x1);
+    std::size_t outLen = 1;
+    REQUIRE(table->get(handle, "empty", &outBuf, &outLen, nullptr) == 0);
+    CHECK(outBuf == nullptr);
+    CHECK(outLen == 0);
+
+    table->destroy(handle);
+    std::free(table);
+}

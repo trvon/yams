@@ -203,10 +203,6 @@ public:
         std::optional<bool> strategyRouterEnabled;
     };
 
-    struct VectorBackendPolicy {
-        std::optional<std::string> backend; // "sqlite_vec" (default) | "faiss"
-    };
-
     struct RerankerBackendPolicy {
         std::optional<std::string> backend;
     };
@@ -558,8 +554,6 @@ public:
      * - embeddings.simeon.pq_bytes       = int (0 = off; reserved for
      *                                          post-encode PQ in storage layer)
      */
-    static VectorBackendPolicy resolveVectorBackendPolicy();
-
     /**
      * @brief Resolve Simeon encoder config from env + config file.
      *
@@ -591,7 +585,6 @@ public:
      *
      * When unset, callers should default to "simeon".
      */
-    static RerankerBackendPolicy resolveRerankerBackendPolicy();
     static RerankerBackendPolicy resolveRerankerBackendPolicy(const DaemonConfig& config);
 
     /**
@@ -601,7 +594,6 @@ public:
      * MallocStackLogging is active. profile = "memory" forces it; "normal"/"off"
      * disables it. Per-action suppression keys override profile defaults.
      */
-    static InstrumentationPolicy resolveInstrumentationPolicy();
     static InstrumentationPolicy resolveInstrumentationPolicy(const DaemonConfig& config);
 
     /**

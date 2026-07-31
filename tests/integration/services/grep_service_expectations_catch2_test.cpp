@@ -225,6 +225,38 @@ TEST_CASE_METHOD(GrepServiceExpectationsFixture, "GrepService: regex-only pathsO
     CHECK(hasHello);
 }
 
+TEST_CASE_METHOD(GrepServiceExpectationsFixture,
+                 "GrepService: synchronous add is immediately visible without light indexing",
+                 "[integration][services][grep]") {
+    start();
+
+    yams::app::services::DocumentIngestionService ingestion;
+    yams::app::services::AddOptions addOptions;
+    addOptions.socketPath = socketPath();
+    addOptions.explicitDataDir = storageDir();
+    addOptions.content = "transport fallback smoke\n";
+    addOptions.name = "transport-smoke.txt";
+    addOptions.noEmbeddings = true;
+    addOptions.waitForProcessing = true;
+    auto add = ingestion.addViaDaemon(addOptions);
+    REQUIRE(add);
+
+    auto* serviceManager = daemon()->getServiceManager();
+    auto context = serviceManager->getAppContext();
+    auto grepService = yams::app::services::makeGrepService(context);
+
+    yams::app::services::GrepRequest request;
+    request.pattern = "transport";
+    request.literalText = true;
+    request.maxCount = 10;
+
+    auto result = grepService->grep(request);
+    REQUIRE(result);
+    CHECK(result.value().totalMatches > 0);
+    REQUIRE_FALSE(result.value().results.empty());
+    CHECK(result.value().results.front().file.find("transport-smoke.txt") != std::string::npos);
+}
+
 TEST_CASE_METHOD(GrepServiceExpectationsFixture, "GrepService: count mode structure",
                  "[integration][services][grep]") {
     start();

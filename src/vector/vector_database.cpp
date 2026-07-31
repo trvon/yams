@@ -5,14 +5,9 @@
 #include <yams/core/atomic_utils.h>
 #include <yams/profiling.h>
 #include <yams/vector/sqlite_vec_backend.h>
-#include <yams/vector/turboquant.h>
 #include <yams/vector/vector_backend.h>
 #include <yams/vector/vector_database.h>
 #include <yams/vector/vector_utils.h>
-
-#ifdef YAMS_HAS_FAISS
-#include <yams/vector/faiss_backend.h>
-#endif
 
 #include <algorithm>
 #include <atomic>
@@ -20,7 +15,6 @@
 #include <filesystem>
 #include <iomanip>
 #include <mutex>
-#include <random>
 #include <shared_mutex>
 #include <sstream>
 #include <unordered_map>
@@ -47,23 +41,9 @@ class VectorDatabase::Impl {
 public:
     explicit Impl(const VectorDatabaseConfig& config)
         : config_(config), initialized_{false}, has_error_(false) {
-        if (config_.backend_type == VectorBackendType::Faiss) {
-#ifdef YAMS_HAS_FAISS
-            FaissBackendConfig faissConfig;
-            faissConfig.embeddingDim = config_.embedding_dim;
-            backend_ = std::make_unique<FaissBackend>(faissConfig);
-            return;
-#endif
-            // Fall through to SqliteVec when faiss not built
-        }
-
         // Default: SqliteVec backend
         SqliteVecBackend::Config backend_config;
         backend_config.embedding_dim = config_.embedding_dim;
-        backend_config.enable_turboquant_storage = config_.enable_turboquant_storage;
-        backend_config.quantized_primary_storage = config_.quantized_primary_storage;
-        backend_config.turboquant_bits = config_.turboquant_bits;
-        backend_config.turboquant_seed = config_.turboquant_seed;
         backend_config.search_engine = config_.search_engine;
         backend_config.vec0_phss_enabled = config_.vec0_phss_enabled;
         backend_config.vec0_phss_candidates = config_.vec0_phss_candidates;
@@ -81,15 +61,6 @@ public:
 
         if (initialized_) {
             return true;
-        }
-
-        // Contract: quantized-primary storage requires a TurboQuant sidecar to be present.
-        // Without it, there is no way to reconstruct embeddings from packed codes on read.
-        if (config_.quantized_primary_storage && !config_.enable_turboquant_storage) {
-            setError(
-                "quantized_primary_storage=true requires enable_turboquant_storage=true: "
-                "cannot reconstruct embeddings from packed codes without TurboQuant configuration");
-            return false;
         }
 
         try {
@@ -341,25 +312,7 @@ public:
         }
 
         try {
-            // TurboQuant compression if enabled
-            VectorRecord to_insert = record;
-            if (config_.enable_turboquant_storage &&
-                record.quantized.format == VectorRecord::QuantizedFormat::NONE &&
-                record.embedding.size() == config_.embedding_dim) {
-                // Get owned TurboQuantMSE (creates/configures on first call)
-                TurboQuantMSE* tq = ensureTurboQuant();
-                YAMS_ASSERT(tq != nullptr,
-                            "TurboQuant must be initialized before packed quantization");
-
-                // Use packed format for storage
-                to_insert.quantized.format = VectorRecord::QuantizedFormat::TURBOquant_1;
-                to_insert.quantized.bits_per_channel = config_.turboquant_bits;
-                to_insert.quantized.seed = config_.turboquant_seed;
-                to_insert.quantized.packed_codes =
-                    vector_utils::packedQuantizeVector(record.embedding, tq);
-            }
-
-            auto result = backend_->insertVector(to_insert);
+            auto result = backend_->insertVector(record);
             if (!result) {
                 setError("Insert failed: " + result.error().message);
                 return false;
@@ -446,52 +399,12 @@ public:
         }
 
         try {
-            // Apply TurboQuant compression if enabled
-            std::unique_lock<std::shared_mutex> compressionLock(mutex_);
-            const bool useTurboQuant = config_.enable_turboquant_storage;
-            const size_t embeddingDim = config_.embedding_dim;
-            const auto turboquantBits = config_.turboquant_bits;
-            const auto turboquantSeed = config_.turboquant_seed;
-            TurboQuantMSE* tq = useTurboQuant ? ensureTurboQuant() : nullptr;
-
-            if (useTurboQuant) {
-                YAMS_ASSERT(tq != nullptr,
-                            "TurboQuant must be initialized before batch packed quantization");
-                // Get owned TurboQuantMSE (creates/configures on first call)
-                std::vector<VectorRecord> compressed_records;
-                compressed_records.reserve(records.size());
-
-                for (const auto& record : records) {
-                    VectorRecord compressed = record;
-                    if (record.quantized.format == VectorRecord::QuantizedFormat::NONE &&
-                        record.embedding.size() == embeddingDim) {
-                        compressed.quantized.format = VectorRecord::QuantizedFormat::TURBOquant_1;
-                        compressed.quantized.bits_per_channel = turboquantBits;
-                        compressed.quantized.seed = turboquantSeed;
-                        compressed.quantized.packed_codes =
-                            vector_utils::packedQuantizeVector(record.embedding, tq);
-                    }
-                    compressed_records.push_back(std::move(compressed));
-                }
-
-                compressionLock.unlock();
-
-                // Don't hold our mutex while calling backend to avoid potential deadlock
-                auto result = backend_->insertVectorsBatch(compressed_records);
-                if (!result) {
-                    std::unique_lock<std::shared_mutex> lock(mutex_);
-                    setError("Batch insert failed: " + result.error().message);
-                    return false;
-                }
-            } else {
-                compressionLock.unlock();
-                // Don't hold our mutex while calling backend to avoid potential deadlock
-                auto result = backend_->insertVectorsBatch(records);
-                if (!result) {
-                    std::unique_lock<std::shared_mutex> lock(mutex_);
-                    setError("Batch insert failed: " + result.error().message);
-                    return false;
-                }
+            // Do not hold our mutex while calling the backend to avoid deadlock.
+            auto result = backend_->insertVectorsBatch(records);
+            if (!result) {
+                std::unique_lock<std::shared_mutex> lock(mutex_);
+                setError("Batch insert failed: " + result.error().message);
+                return false;
             }
 
             // Update component-owned metrics
@@ -522,22 +435,7 @@ public:
         }
 
         try {
-            // Apply TurboQuant compression if enabled
-            VectorRecord to_update = record;
-            if (config_.enable_turboquant_storage &&
-                record.quantized.format == VectorRecord::QuantizedFormat::NONE &&
-                record.embedding.size() == config_.embedding_dim) {
-                TurboQuantMSE* tq = ensureTurboQuant();
-                YAMS_ASSERT(tq != nullptr,
-                            "TurboQuant must be initialized before packed quantization");
-                to_update.quantized.format = VectorRecord::QuantizedFormat::TURBOquant_1;
-                to_update.quantized.bits_per_channel = config_.turboquant_bits;
-                to_update.quantized.seed = config_.turboquant_seed;
-                to_update.quantized.packed_codes =
-                    vector_utils::packedQuantizeVector(record.embedding, tq);
-            }
-
-            auto result = backend_->updateVector(chunk_id, to_update);
+            auto result = backend_->updateVector(chunk_id, record);
             if (!result) {
                 setError("Update failed: " + result.error().message);
                 return false;
@@ -756,19 +654,6 @@ public:
             return result;
         }
 
-        // TurboQuant decompression: dequantize if enabled OR if quantized-primary storage is active
-        // (embedding blob is NULL, so it needs reconstruction from packed codes)
-        if ((config_.enable_turboquant_storage || config_.quantized_primary_storage) &&
-            opt_record->quantized.format == VectorRecord::QuantizedFormat::TURBOquant_1 &&
-            !opt_record->quantized.packed_codes.empty()) {
-            // Dequantize from packed storage using owned quantizer
-            TurboQuantMSE* tq = ensureTurboQuant();
-            YAMS_ASSERT(tq != nullptr,
-                        "TurboQuant must be initialized before packed dequantization");
-            opt_record->embedding = vector_utils::packedDequantizeVector(
-                opt_record->quantized.packed_codes, config_.embedding_dim, tq);
-        }
-
         return result;
     }
 
@@ -785,21 +670,7 @@ public:
             return {};
         }
 
-        auto records = std::move(result.value());
-        if (config_.enable_turboquant_storage || config_.quantized_primary_storage) {
-            TurboQuantMSE* tq = ensureTurboQuant();
-            YAMS_ASSERT(tq != nullptr,
-                        "TurboQuant must be initialized before packed dequantization");
-            for (auto& [id, rec] : records) {
-                if (rec.quantized.format == VectorRecord::QuantizedFormat::TURBOquant_1 &&
-                    !rec.quantized.packed_codes.empty() && rec.embedding.empty()) {
-                    rec.embedding = vector_utils::packedDequantizeVector(rec.quantized.packed_codes,
-                                                                         config_.embedding_dim, tq);
-                }
-            }
-        }
-
-        return records;
+        return std::move(result.value());
     }
 
     std::vector<VectorRecord> getVectorsByDocument(const std::string& document_hash) const {
@@ -810,21 +681,7 @@ public:
             return {};
         }
 
-        auto records = std::move(result.value());
-        if (config_.enable_turboquant_storage || config_.quantized_primary_storage) {
-            TurboQuantMSE* tq = ensureTurboQuant();
-            YAMS_ASSERT(tq != nullptr,
-                        "TurboQuant must be initialized before packed dequantization");
-            for (auto& rec : records) {
-                if (rec.quantized.format == VectorRecord::QuantizedFormat::TURBOquant_1 &&
-                    !rec.quantized.packed_codes.empty() && rec.embedding.empty()) {
-                    rec.embedding = vector_utils::packedDequantizeVector(rec.quantized.packed_codes,
-                                                                         config_.embedding_dim, tq);
-                }
-            }
-        }
-
-        return records;
+        return std::move(result.value());
     }
 
     std::unordered_map<std::string, VectorRecord> getDocumentLevelVectorsAll() const {
@@ -835,21 +692,7 @@ public:
             return {};
         }
 
-        auto records = std::move(result.value());
-        if (config_.enable_turboquant_storage || config_.quantized_primary_storage) {
-            TurboQuantMSE* tq = ensureTurboQuant();
-            YAMS_ASSERT(tq != nullptr,
-                        "TurboQuant must be initialized before packed dequantization");
-            for (auto& [_hash, rec] : records) {
-                if (rec.quantized.format == VectorRecord::QuantizedFormat::TURBOquant_1 &&
-                    !rec.quantized.packed_codes.empty() && rec.embedding.empty()) {
-                    rec.embedding = vector_utils::packedDequantizeVector(rec.quantized.packed_codes,
-                                                                         config_.embedding_dim, tq);
-                }
-            }
-        }
-
-        return records;
+        return std::move(result.value());
     }
 
     Result<size_t>
@@ -859,23 +702,8 @@ public:
         }
 
         std::shared_lock<std::shared_mutex> lock(mutex_);
-        TurboQuantMSE* tq = (config_.enable_turboquant_storage || config_.quantized_primary_storage)
-                                ? ensureTurboQuant()
-                                : nullptr;
-        if (config_.enable_turboquant_storage || config_.quantized_primary_storage) {
-            YAMS_ASSERT(tq != nullptr,
-                        "TurboQuant must be initialized before packed dequantization");
-        }
-
-        return backend_->forEachDocumentLevelVector([&](VectorRecord&& rec) {
-            if ((config_.enable_turboquant_storage || config_.quantized_primary_storage) &&
-                rec.quantized.format == VectorRecord::QuantizedFormat::TURBOquant_1 &&
-                !rec.quantized.packed_codes.empty() && rec.embedding.empty()) {
-                rec.embedding = vector_utils::packedDequantizeVector(rec.quantized.packed_codes,
-                                                                     config_.embedding_dim, tq);
-            }
-            return visitor(std::move(rec));
-        });
+        return backend_->forEachDocumentLevelVector(
+            [&](VectorRecord&& rec) { return visitor(std::move(rec)); });
     }
 
     bool hasEmbedding(const std::string& document_hash) const {
@@ -998,43 +826,6 @@ public:
         }
 
         return backend_->deleteEntityVectorsByDocument(document_hash);
-    }
-
-    Result<size_t>
-    fitAndPersistPerCoordScales(const std::vector<std::vector<float>>& training_vectors) {
-        std::unique_lock<std::shared_mutex> lock(mutex_);
-
-        if (!initialized_) {
-            return Error{ErrorCode::NotInitialized, "Database not initialized"};
-        }
-
-        if (!config_.enable_turboquant_storage && !config_.quantized_primary_storage) {
-            return Error{ErrorCode::InvalidState, "TurboQuant is not enabled"};
-        }
-
-        if (training_vectors.empty()) {
-            return Error{ErrorCode::InvalidState, "No training vectors provided"};
-        }
-
-        // Fit scales
-        yams::vector::TurboQuantConfig cfg;
-        cfg.dimension = config_.embedding_dim;
-        cfg.bits_per_channel = config_.turboquant_bits;
-        cfg.seed = config_.turboquant_seed;
-        yams::vector::TurboQuantMSE tq(cfg);
-        tq.fitPerCoordScales(training_vectors, training_vectors.size());
-
-        // Persist to DB using the full-fitted-model path (v2: scales + centroids)
-        // Note: fitPerCoordCentroids() is available but Milestone 9 benchmarks show it does NOT
-        // improve scoring on random/unit-sphere data. Keeping scales-only for now.
-        auto scales = tq.perCoordScales();
-        backend_->persistTurboQuantPerCoordScales(config_.embedding_dim, config_.turboquant_bits,
-                                                  config_.turboquant_seed, scales);
-
-        spdlog::info("Fitted and persisted {} per-coord scales for dim={} bits={}", scales.size(),
-                     config_.embedding_dim, static_cast<int>(config_.turboquant_bits));
-
-        return scales.size();
     }
 
     Result<std::vector<EntityVectorRecord>>
@@ -1463,35 +1254,6 @@ private:
     // Component-owned metrics (updated on insert/delete, read by DaemonMetrics)
     mutable std::atomic<size_t> cachedVectorCount_{0};
     mutable std::atomic<bool> counterInitialized_{false};
-
-    // Owned TurboQuantMSE instance - replaces global/TLS plumbing.
-    // Initialized lazily on first use when enable_turboquant_storage is true.
-    mutable std::unique_ptr<TurboQuantMSE> turboquant_;
-    mutable std::mutex turboquant_mutex_;
-
-    /**
-     * Lazily initialize (or re-configure) the owned TurboQuantMSE member.
-     * Returns the raw pointer for use with vector_utils overloads.
-     * Idempotent: subsequent calls with the same config return the existing instance.
-     */
-    TurboQuantMSE* ensureTurboQuant() const {
-        if (!config_.enable_turboquant_storage) {
-            return nullptr;
-        }
-
-        std::lock_guard<std::mutex> lock(turboquant_mutex_);
-        if (!turboquant_ || turboquant_->config().dimension != config_.embedding_dim ||
-            turboquant_->config().bits_per_channel != config_.turboquant_bits) {
-            TurboQuantConfig cfg;
-            cfg.dimension = config_.embedding_dim;
-            cfg.bits_per_channel = config_.turboquant_bits;
-            cfg.seed = config_.turboquant_seed;
-            turboquant_ = std::make_unique<TurboQuantMSE>(cfg);
-            spdlog::debug("VectorDB: TurboQuant configured: dim={} bits={}", cfg.dimension,
-                          cfg.bits_per_channel);
-        }
-        return turboquant_.get();
-    }
 };
 
 // VectorDatabase implementation

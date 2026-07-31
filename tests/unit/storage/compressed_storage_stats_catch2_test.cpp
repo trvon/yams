@@ -4,7 +4,6 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <vector>
@@ -148,13 +147,6 @@ TEST_CASE_METHOD(CompressedStorageStatsFixture,
 TEST_CASE_METHOD(CompressedStorageStatsFixture,
                  "CompressedStorageStats CRC mismatch on retrieve increments error counters",
                  "[storage][compression][stats][crc][catch2]") {
-    // Ensure CRC checks are enabled
-#if defined(_WIN32)
-    _putenv_s("YAMS_SKIP_DECOMPRESS_CRC", "");
-#else
-    unsetenv("YAMS_SKIP_DECOMPRESS_CRC");
-#endif
-
     StorageConfig baseCfg{.basePath = tempRoot, .enableCompression = false};
     auto base = std::make_shared<StorageEngine>(baseCfg);
 

@@ -267,7 +267,6 @@ esac
 
 export CI=true
 export RUNNER_OS=Linux
-export YAMS_DISABLE_FAISS=1
 export ENABLE_TSAN=false
 export YAMS_ENABLE_MOBILE_BINDINGS=false
 export YAMS_BUILD_DIR="${YAMS_SMOLVM_BUILD_DIR:-build/smolvm-linux}"

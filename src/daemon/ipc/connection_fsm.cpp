@@ -206,19 +206,9 @@ static StateBase* state_for(ConnectionFsm::State s) {
     }
 }
 
-struct SnapshotEntry {
-    ConnectionFsm::State state;
-    uint64_t ns_since_epoch;
-    const char* last_event;
-    uint64_t bytes_transferred;
-};
-
 struct MetricsCounters {
     uint64_t header_reads_started{0};
     uint64_t payload_reads_completed{0};
-    uint64_t payload_writes_completed{0};
-    uint64_t bytes_sent{0};
-    uint64_t bytes_received{0};
     uint64_t transitions{0};
     uint64_t timeouts_total{0};
     uint64_t retries_total{0};
@@ -231,35 +221,12 @@ struct ConfigValues {
     uint32_t idle_timeout_ms{30000};
     std::size_t max_retries{3};
     bool enable_metrics{true};
-    bool enable_snapshots{false};
 };
-
-namespace {
-// Fixed-size ring buffer to bound snapshot memory
-template <std::size_t N> struct SnapshotRing {
-    static_assert(N > 0, "SnapshotRing requires N > 0");
-    std::array<SnapshotEntry, N> buf{};
-    std::uint32_t head{0};
-    std::uint32_t size{0};
-    std::uint64_t dropped{0};
-    void push(const SnapshotEntry& s) {
-        buf[head] = s;
-        head = (head + 1) % N;
-        if (size < N)
-            ++size;
-        else
-            ++dropped;
-    }
-};
-} // unnamed namespace
 
 // Define the PIMPL that was forward-declared in the header
 struct ConnectionFsm::Impl {
     ConfigValues cfg{};
     MetricsCounters metrics{};
-    SnapshotRing<256> snapshots{};
-    const char* last_event{"init"};
-    uint64_t total_bytes{0};
     StateBase* current{nullptr};
     // Phase 2: timer deadlines (consumed by on_timeout externally)
     std::chrono::steady_clock::time_point idle_deadline{};
@@ -307,10 +274,6 @@ void ConnectionFsm::enable_metrics(bool on) noexcept {
     if (auto* impl = impl_.get())
         impl->cfg.enable_metrics = on;
 }
-void ConnectionFsm::enable_snapshots(bool on) noexcept {
-    if (auto* impl = impl_.get())
-        impl->cfg.enable_snapshots = on;
-}
 void ConnectionFsm::set_write_cap_bytes(std::size_t bytes) noexcept {
     if (auto* impl = impl_.get())
         impl->write_cap_bytes = bytes;
@@ -320,19 +283,6 @@ void ConnectionFsm::set_backpressure_watermarks(uint32_t low_percent,
     if (auto* impl = impl_.get()) {
         impl->low_wm_percent = low_percent;
         impl->high_wm_percent = high_percent;
-    }
-}
-
-void ConnectionFsm::debug_dump_snapshots(std::size_t max_entries) const noexcept {
-    auto* impl = impl_.get();
-    if (!impl || impl->snapshots.size == 0)
-        return;
-    const std::uint32_t cap = 256;
-    std::uint32_t count =
-        static_cast<std::uint32_t>(std::min<std::size_t>(max_entries, impl->snapshots.size));
-    std::uint32_t start = (impl->snapshots.head + (impl->snapshots.size + cap - count) % cap) % cap;
-    for (std::uint32_t i = 0; i < count; ++i) {
-        [[maybe_unused]] const auto& s = impl->snapshots.buf[(start + i) % cap];
     }
 }
 
@@ -409,15 +359,6 @@ bool ConnectionFsm::transition(State next, [[maybe_unused]] const char* reason) 
                       }()));
 #endif
         }
-        if (impl->cfg.enable_snapshots) {
-            SnapshotEntry e{
-                state_,
-                static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                          std::chrono::steady_clock::now().time_since_epoch())
-                                          .count()),
-                impl->last_event, impl->total_bytes};
-            impl->snapshots.push(e);
-        }
         // Switch active state implementation and call entry()
         impl->current = state_for(state_);
         if (impl->current)
@@ -449,8 +390,6 @@ bool ConnectionFsm::transition(State next, [[maybe_unused]] const char* reason) 
 }
 
 void ConnectionFsm::on_accept(uint64_t fd) {
-    if (auto* impl = impl_.get())
-        impl->last_event = "accept";
     fd_ = fd;
     if (auto* impl = impl_.get(); impl && impl->current) {
         auto next = impl->current->on_accept(fd);
@@ -460,8 +399,6 @@ void ConnectionFsm::on_accept(uint64_t fd) {
 }
 
 void ConnectionFsm::on_connect(uint64_t fd) {
-    if (auto* impl = impl_.get())
-        impl->last_event = "connect";
     fd_ = fd;
     if (auto* impl = impl_.get(); impl && impl->current) {
         auto next = impl->current->on_connect(fd);
@@ -472,7 +409,6 @@ void ConnectionFsm::on_connect(uint64_t fd) {
 
 void ConnectionFsm::on_readable(std::size_t) {
     if (auto* impl = impl_.get()) {
-        impl->last_event = "readable";
         impl->metrics.header_reads_started +=
             (state_ == State::Connected || state_ == State::ReadingHeader) ? 1 : 0;
         if (state_ == State::Connected || state_ == State::ReadingHeader) {
@@ -500,8 +436,6 @@ void ConnectionFsm::on_readable(std::size_t) {
 }
 
 void ConnectionFsm::on_writable(std::size_t) {
-    if (auto* impl = impl_.get())
-        impl->last_event = "writable";
     // Writes are driven by higher-level events; ignore spurious signals in other states
     switch (state_) {
         case State::WritingHeader:
@@ -513,8 +447,6 @@ void ConnectionFsm::on_writable(std::size_t) {
 }
 
 void ConnectionFsm::on_header_parsed(const FrameInfo& info) {
-    if (auto* impl = impl_.get())
-        impl->last_event = "header_parsed";
     if (auto* impl = impl_.get(); impl && impl->current) {
         auto next = impl->current->on_header_parsed(info.payload_size);
         if (next.has)
@@ -524,7 +456,6 @@ void ConnectionFsm::on_header_parsed(const FrameInfo& info) {
 
 void ConnectionFsm::on_body_parsed() {
     if (auto* impl = impl_.get()) {
-        impl->last_event = "body_parsed";
         impl->metrics.payload_reads_completed++;
         // Emit to FsmMetricsRegistry
         FsmMetricsRegistry::instance().incrementPayloadReads(1);
@@ -547,8 +478,6 @@ void ConnectionFsm::on_body_parsed() {
 }
 
 void ConnectionFsm::on_stream_next(bool done) {
-    if (auto* impl = impl_.get())
-        impl->last_event = done ? "stream_done" : "stream_next";
     if (auto* impl = impl_.get(); impl && impl->current) {
         auto next = impl->current->on_stream_next(done);
         if (next.has) {
@@ -564,8 +493,6 @@ void ConnectionFsm::on_stream_next(bool done) {
 }
 
 void ConnectionFsm::on_timeout([[maybe_unused]] Operation op) {
-    if (auto* impl = impl_.get())
-        impl->last_event = "timeout";
     if (auto* impl = impl_.get()) {
         impl->metrics.timeouts_total++;
         FsmMetricsRegistry::instance().incrementTimeouts(1);
@@ -609,8 +536,6 @@ void ConnectionFsm::on_error(int err) {
 }
 
 void ConnectionFsm::on_error(int err, const char* where) {
-    if (auto* impl = impl_.get())
-        impl->last_event = "error";
     if (auto* impl = impl_.get()) {
         impl->metrics.errors_total++;
         FsmMetricsRegistry::instance().incrementErrors(1);
@@ -630,8 +555,6 @@ void ConnectionFsm::on_error(int err, const char* where) {
 }
 
 void ConnectionFsm::on_close_request() {
-    if (auto* impl = impl_.get())
-        impl->last_event = "close_request";
     if (auto* impl = impl_.get(); impl && impl->current) {
         auto next = impl->current->on_close_request();
         if (next.has) {
@@ -651,8 +574,6 @@ void ConnectionFsm::on_close_request() {
 }
 
 void ConnectionFsm::on_response_complete(bool close_after) {
-    if (auto* impl = impl_.get())
-        impl->last_event = close_after ? "response_complete_close" : "response_complete_keep";
     // If we are streaming or just wrote a header/payload and persistent connection is desired,
     // transition back to Connected to allow the next request. Otherwise go to Closing.
     switch (state_) {

@@ -40,6 +40,7 @@ struct RetrievalOptions {
         false}; // Default to false for text output; set true for binary efficiency
     std::optional<yams::daemon::ClientTransportMode> transportMode;
     std::optional<bool> autoStart;
+    std::shared_ptr<yams::daemon::IClientTransport> transport;
 };
 
 struct GetOptions {
@@ -74,6 +75,7 @@ struct GetOptions {
 struct GrepOptions {
     std::string pattern;
     std::vector<std::string> paths;
+    std::string scopePathPrefix;
     bool caseInsensitive = false;
     bool invertMatch = false;
     int contextLines = 0;
@@ -171,6 +173,7 @@ struct SearchOptions {
     std::string hashQuery;
     std::string pathPattern;
     std::vector<std::string> pathPatterns;
+    std::string scopePathPrefix;
     std::vector<std::string> tags;
     bool matchAllTags = false;
     std::string extension;

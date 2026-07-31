@@ -4389,6 +4389,15 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         return docIdForResult(a) < docIdForResult(b);
     };
 
+    if (params.pathPredicate) {
+        const auto beforeScopeFilter = response.results.size();
+        std::erase_if(response.results, [&](const auto& result) {
+            return !params.pathPredicate(result.document.filePath);
+        });
+        response.debugStats["path_predicate_rejected"] =
+            std::to_string(beforeScopeFilter - response.results.size());
+    }
+
     const SearchTopKLimitOutcome topKOutcome = applySearchTopKLimit(
         response.results, workingConfig, userLimit, buriedVectorRankThreshold,
         finalLexicalAwareLess, isFinalSemanticRescueCandidate, finalSemanticRescueBetter,
@@ -5026,53 +5035,18 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         telemetry.adaptiveFusionEnabled = workingConfig.enableAdaptiveFusion;
         telemetry.zoomLevel = effectiveZoomLevel;
 
+        nlohmann::json stageSummary;
         try {
-            auto stageSummary = traceCollector.buildStageSummaryJson();
-            if (stageSummary.is_object()) {
-                for (const auto& [name, data] : stageSummary.items()) {
-                    if (!data.is_object()) {
-                        continue;
-                    }
-                    SearchTuner::RuntimeStageSignal signal;
-                    signal.enabled = data.value("enabled", false);
-                    signal.attempted = data.value("attempted", false);
-                    signal.contributed = data.value("contributed", false);
-                    signal.skipped = data.value("skipped", false);
-                    signal.durationMs = data.value("duration_ms", 0.0);
-                    signal.rawHitCount = data.value("raw_hit_count", 0UL);
-                    signal.uniqueDocCount = data.value("unique_doc_count", 0UL);
-                    signal.scoreStatsValid = data.value("score_stats_valid", false);
-                    signal.minScore = data.value("min_score", 0.0);
-                    signal.maxScore = data.value("max_score", 0.0);
-                    telemetry.stages.emplace(name, signal);
-                }
-            }
-        } catch (...) { // NOLINT(bugprone-empty-catch) — best-effort telemetry; skip stage summary
-                        // if trace data is malformed
+            stageSummary = traceCollector.buildStageSummaryJson();
+        } catch (...) { // NOLINT(bugprone-empty-catch) — telemetry must not fail a search
         }
-
+        nlohmann::json fusionSummary;
         try {
-            auto fusionSummary = traceCollector.buildFusionSourceSummaryJson(
+            fusionSummary = traceCollector.buildFusionSourceSummaryJson(
                 allComponentResults, response.results, std::max<size_t>(userLimit, size_t{25}));
-            if (fusionSummary.is_object()) {
-                for (const auto& [name, data] : fusionSummary.items()) {
-                    if (!data.is_object()) {
-                        continue;
-                    }
-                    SearchTuner::RuntimeFusionSignal signal;
-                    signal.enabled = data.value("enabled", false);
-                    signal.contributedToFinal = data.value("contributed_to_final", false);
-                    signal.configuredWeight = data.value("weight", 0.0);
-                    signal.finalScoreMass = data.value("final_score_mass", 0.0);
-                    signal.finalTopDocCount = data.value("final_top_doc_count", 0UL);
-                    signal.rawHitCount = data.value("raw_hit_count", 0UL);
-                    signal.uniqueDocCount = data.value("unique_doc_count", 0UL);
-                    telemetry.fusionSources.emplace(name, signal);
-                }
-            }
-        } catch (...) { // NOLINT(bugprone-empty-catch) — best-effort telemetry; skip fusion summary
-                        // if trace data is malformed
+        } catch (...) { // NOLINT(bugprone-empty-catch) — telemetry must not fail a search
         }
+        populateRuntimeTelemetrySignals(telemetry, stageSummary, fusionSummary);
 
         tuner_->observe(telemetry);
         const auto tunerState = tuner_->adaptiveStateToJson();

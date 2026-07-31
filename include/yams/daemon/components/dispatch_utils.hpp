@@ -298,8 +298,7 @@ inline std::pair<std::string, size_t> build_plugins_json(ServiceManager* sm) {
                         try {
                             auto es = sm->getEmbeddingProviderFsmSnapshot();
                             const bool providerDegraded =
-                                (es.state == EmbeddingProviderState::Degraded ||
-                                 es.state == EmbeddingProviderState::Failed);
+                                es.state == EmbeddingProviderState::Degraded;
                             if (providerDegraded) {
                                 rec["degraded"] = true;
                                 if (!sm->lastModelError().empty())
@@ -343,8 +342,7 @@ build_typed_providers(ServiceManager* sm, const yams::daemon::StateComponent* st
         bool providerDegraded = false;
         try {
             auto es = sm->getEmbeddingProviderFsmSnapshot();
-            providerDegraded = (es.state == EmbeddingProviderState::Degraded ||
-                                es.state == EmbeddingProviderState::Failed);
+            providerDegraded = es.state == EmbeddingProviderState::Degraded;
         } catch (...) {
         }
         const std::string lastErr = sm->lastModelError();

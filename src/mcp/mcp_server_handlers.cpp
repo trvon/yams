@@ -240,11 +240,9 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         dreq.pathPatterns.push_back(pathPattern);
     }
 
-    // CWD scoping: inject glob patterns to restrict results to a directory
     if (!req.cwd.empty()) {
-        auto cwdPatterns = yams::app::services::utils::buildCwdScopePatterns(req.cwd);
-        dreq.pathPatterns.insert(dreq.pathPatterns.end(), cwdPatterns.begin(), cwdPatterns.end());
-        spdlog::debug("[MCP] Scoping search to CWD: {} ({} patterns)", req.cwd, cwdPatterns.size());
+        dreq.scopePathPrefix = req.cwd;
+        spdlog::debug("[MCP] Scoping search to workspace: {}", req.cwd);
     }
 
     dreq.tags = req.tags;
@@ -597,13 +595,10 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         dreq.recursive = true;
     }
 
-    // CWD scoping: inject glob patterns to restrict results to a directory
     if (!req.cwd.empty()) {
-        auto cwdPatterns = yams::app::services::utils::buildCwdScopePatterns(req.cwd);
-        dreq.includePatterns.insert(dreq.includePatterns.end(), cwdPatterns.begin(),
-                                    cwdPatterns.end());
+        dreq.scopePathPrefix = req.cwd;
         dreq.recursive = true;
-        spdlog::debug("[MCP] Scoping grep to CWD: {} ({} patterns)", req.cwd, cwdPatterns.size());
+        spdlog::debug("[MCP] Scoping grep to workspace: {}", req.cwd);
     }
 
     std::vector<std::string> initial_paths = req.paths;

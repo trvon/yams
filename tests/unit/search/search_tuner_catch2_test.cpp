@@ -38,6 +38,70 @@ using Catch::Approx;
 static_assert(!std::is_reference_v<decltype(std::declval<const SearchTuner&>().getParams())>,
               "SearchTuner parameter reads must return a concurrency-safe snapshot");
 
+TEST_CASE("Runtime telemetry hydrates trace summaries", "[unit][search_tuner][telemetry]") {
+    RuntimeTelemetry telemetry;
+    const auto stageSummary = nlohmann::json{{"vector",
+                                              {{"enabled", true},
+                                               {"attempted", true},
+                                               {"contributed", true},
+                                               {"skipped", false},
+                                               {"duration_ms", 2.5},
+                                               {"raw_hit_count", 17},
+                                               {"unique_doc_count", 11},
+                                               {"score_stats_valid", true},
+                                               {"min_score", 0.25},
+                                               {"max_score", 0.91}}},
+                                             {"ignored", "not-an-object"}};
+    const auto fusionSummary = nlohmann::json{{"text",
+                                               {{"enabled", true},
+                                                {"contributed_to_final", true},
+                                                {"weight", 0.4},
+                                                {"final_score_mass", 1.25},
+                                                {"final_top_doc_count", 4},
+                                                {"raw_hit_count", 9},
+                                                {"unique_doc_count", 7}}},
+                                              {"ignored", 42}};
+
+    populateRuntimeTelemetrySignals(telemetry, stageSummary, fusionSummary);
+
+    REQUIRE(telemetry.stages.size() == 1);
+    const auto& stage = telemetry.stages.at("vector");
+    CHECK(stage.enabled);
+    CHECK(stage.attempted);
+    CHECK(stage.contributed);
+    CHECK_FALSE(stage.skipped);
+    CHECK(stage.durationMs == Approx(2.5));
+    CHECK(stage.rawHitCount == 17);
+    CHECK(stage.uniqueDocCount == 11);
+    CHECK(stage.scoreStatsValid);
+    CHECK(stage.minScore == Approx(0.25));
+    CHECK(stage.maxScore == Approx(0.91));
+
+    REQUIRE(telemetry.fusionSources.size() == 1);
+    const auto& fusion = telemetry.fusionSources.at("text");
+    CHECK(fusion.enabled);
+    CHECK(fusion.contributedToFinal);
+    CHECK(fusion.configuredWeight == Approx(0.4));
+    CHECK(fusion.finalScoreMass == Approx(1.25));
+    CHECK(fusion.finalTopDocCount == 4);
+    CHECK(fusion.rawHitCount == 9);
+    CHECK(fusion.uniqueDocCount == 7);
+}
+
+TEST_CASE("Runtime telemetry treats malformed trace summaries independently",
+          "[unit][search_tuner][telemetry]") {
+    RuntimeTelemetry telemetry;
+    const auto malformedStage = nlohmann::json{{"vector", {{"enabled", nlohmann::json::array()}}}};
+    const auto validFusion = nlohmann::json{{"text", {{"enabled", true}, {"raw_hit_count", 3}}}};
+
+    REQUIRE_NOTHROW(populateRuntimeTelemetrySignals(telemetry, malformedStage, validFusion));
+
+    CHECK(telemetry.stages.empty());
+    REQUIRE(telemetry.fusionSources.size() == 1);
+    CHECK(telemetry.fusionSources.at("text").enabled);
+    CHECK(telemetry.fusionSources.at("text").rawHitCount == 3);
+}
+
 TEST_CASE("SearchTuner parameter snapshots are safe during observation",
           "[unit][search_tuner][concurrency]") {
     CorpusStats stats;

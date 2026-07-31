@@ -69,9 +69,6 @@ public:
     void set_backpressure_watermarks(uint32_t low_percent, uint32_t high_percent) noexcept;
     void set_max_retries(std::size_t n) noexcept;
     void enable_metrics(bool on) noexcept;
-    void enable_snapshots(bool on) noexcept;
-    // Dump recent state snapshots to the log (no output parameters for header minimalism)
-    void debug_dump_snapshots(std::size_t max_entries = 10) const noexcept;
 
     // Event ingress (call on IO thread)
     void on_accept(uint64_t fd);

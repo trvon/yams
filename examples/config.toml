@@ -151,12 +151,6 @@ database_path = "vectors.db"
 table_name = "document_embeddings"
 # Embedding dimension (new installs default to simeon-default / 1024; existing DBs keep their stored dim)
 embedding_dim = 1024
-# Index type: "FLAT", "IVF_PQ", "HNSW"
-index_type = "IVF_PQ"
-# Number of partitions for IVF index
-num_partitions = 256
-# Number of sub-quantizers for PQ
-num_sub_quantizers = 96
 # Enable periodic checkpoints
 enable_checkpoints = true
 # Operations between checkpoints
@@ -330,8 +324,6 @@ initial_delay_minutes = 10
 [tuning]
 # Default tuning preset applied by the daemon. Options: "efficient", "balanced", "aggressive".
 profile = "balanced"
-# CLI <-> daemon client-pool worker threads
-cli_pool_threads = 2
 # Max concurrent in-flight list requests admitted to the daemon
 list_inflight_limit = 8
 # How long list requests wait for admission before erroring (ms)
@@ -345,7 +337,6 @@ grep_admission_wait_ms = 20000
 # idle_cpu_pct = 10.0
 # idle_mux_low_bytes = 4194304
 # idle_shrink_hold_ms = 5000
-# aggressive_idle_shrink = false
 # pool_cooldown_ms = 500
 # pool_scale_step = 1
 # pool_ipc_min = 1
@@ -478,7 +469,7 @@ final_top_k = 10
 fusion_strategy = "LINEAR_COMBINATION"
 # RRF constant (for RECIPROCAL_RANK)
 rrf_k = 60.0
-# Enable post-fusion rerank-style passes (TurboQuant / score replacement)
+# Enable post-fusion rerank-style score replacement
 enable_reranking = true
 # Number of top fused results eligible for rerank-style passes
 rerank_top_k = 20
@@ -699,16 +690,6 @@ max_sessions = 3
 idle_timeout_s = 300
 # Validate session health before use
 validate_on_acquire = true
-
-[daemon.client]
-# Use daemon for embedding generation
-use_daemon = true
-# Fall back to local generation if daemon fails
-fallback_to_local = true
-# Maximum retry attempts
-max_retries = 3
-# Batch size for embedding requests
-batch_size = 32
 
 [classification]
 # Enable BART-based document classification for intelligent tagging

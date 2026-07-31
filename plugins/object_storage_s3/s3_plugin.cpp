@@ -99,7 +99,7 @@ static std::string percentEncodeRfc3986(const std::string& s, bool preserveSlash
         if (std::strchr(unreserved, static_cast<int>(c)) || (preserveSlash && c == '/')) {
             out.push_back(static_cast<char>(c));
         } else {
-            char buf[4];
+            char buf[4]{};
             std::snprintf(buf, sizeof(buf), "%%%02X", static_cast<unsigned int>(c));
             out.append(buf);
         }
@@ -328,7 +328,7 @@ public:
                 if (std::strchr(unreserved, static_cast<int>(c))) {
                     out.push_back(static_cast<char>(c));
                 } else {
-                    char buf[4];
+                    char buf[4]{};
                     std::snprintf(buf, sizeof(buf), "%%%02X", static_cast<unsigned int>(c));
                     out.append(buf);
                 }
@@ -774,10 +774,13 @@ static int s3_get(void* backend, const char* key, void** out_buf, size_t* out_le
     if (!r)
         return YAMS_PLUGIN_ERR_NOT_FOUND;
     auto& data = r.value();
-    void* buf = std::malloc(data.size());
-    if (!buf)
-        return YAMS_PLUGIN_ERR_INVALID;
-    std::memcpy(buf, data.data(), data.size());
+    void* buf = nullptr;
+    if (!data.empty()) {
+        buf = std::malloc(data.size());
+        if (!buf)
+            return YAMS_PLUGIN_ERR_INVALID;
+        std::memcpy(buf, data.data(), data.size());
+    }
     *out_buf = buf;
     *out_len = data.size();
     return YAMS_PLUGIN_OK;

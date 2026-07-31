@@ -39,7 +39,7 @@ template <typename Task>
 PressureLimitedPollerConfig<Task> makeCapabilitySleepConfig(
     std::atomic<bool>& stopFlag, std::atomic<bool>& startedFlag, std::atomic<bool>& pauseFlag,
     std::shared_ptr<boost::asio::steady_timer> wakeTimer, std::mutex& wakeMutex) {
-    PressureLimitedPollerConfig<Task> cfg;
+    PressureLimitedPollerConfig<Task> cfg{};
     cfg.stageName = "test-capability-sleep";
     cfg.stopFlag = &stopFlag;
     cfg.startedFlag = &startedFlag;
@@ -72,7 +72,7 @@ PressureLimitedPollerConfig<Task>
 makeWakeTimerConfig(std::atomic<bool>& stopFlag, std::atomic<bool>& startedFlag,
                     std::atomic<bool>& pauseFlag,
                     std::shared_ptr<boost::asio::steady_timer> wakeTimer, std::mutex& wakeMutex) {
-    PressureLimitedPollerConfig<Task> cfg;
+    PressureLimitedPollerConfig<Task> cfg{};
     cfg.stageName = "test-wake-timer";
     cfg.stopFlag = &stopFlag;
     cfg.startedFlag = &startedFlag;

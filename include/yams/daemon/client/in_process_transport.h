@@ -1,5 +1,6 @@
 #pragma once
 
+#include <filesystem>
 #include <memory>
 
 #if __has_include(<yams/daemon/client/client_transport.h>)
@@ -34,5 +35,8 @@ public:
 private:
     std::shared_ptr<EmbeddedServiceHost> host_;
 };
+
+Result<std::shared_ptr<IClientTransport>>
+makeInProcessTransport(const std::filesystem::path& dataDir);
 
 } // namespace yams::daemon

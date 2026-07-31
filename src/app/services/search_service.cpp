@@ -6,6 +6,7 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/app/services/enhanced_search_executor.h>
 #include <yams/app/services/path_projection.hpp>
+#include <yams/app/services/retrieval_path_policy.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/common/string_utils.h>
@@ -860,6 +861,11 @@ public:
         if (normalizedReq.pathPatterns.empty() && !normalizedReq.pathPattern.empty()) {
             normalizedReq.pathPatterns.push_back(normalizedReq.pathPattern);
         }
+        if (!normalizedReq.scopePathPrefix.empty()) {
+            auto scopePatterns = utils::buildCwdScopePatterns(normalizedReq.scopePathPrefix);
+            normalizedReq.pathPatterns.insert(normalizedReq.pathPatterns.end(),
+                                              scopePatterns.begin(), scopePatterns.end());
+        }
         appendMacPathAliases(normalizedReq.pathPatterns);
 
         if (normalizedReq.extension.empty() && !parsed.scope.ext.empty()) {
@@ -868,6 +874,21 @@ public:
         if (normalizedReq.mimeType.empty() && !parsed.scope.mime.empty()) {
             normalizedReq.mimeType = parsed.scope.mime;
         }
+
+        const auto applyWorkspaceScope = [&](SearchResponse response) {
+            if (normalizedReq.scopePathPrefix.empty()) {
+                return response;
+            }
+            const auto rejected = [&](std::string_view path) {
+                return !utils::isPathWithinScope(path, normalizedReq.scopePathPrefix) ||
+                       utils::isGeneratedWorkspacePath(path);
+            };
+            std::erase_if(response.results, [&](const auto& item) { return rejected(item.path); });
+            std::erase_if(response.paths, rejected);
+            response.total =
+                normalizedReq.pathsOnly ? response.paths.size() : response.results.size();
+            return response;
+        };
 
         if (!normalizedReq.hash.empty()) {
             YAMS_ZONE_SCOPED_N("search_service::hash_lookup");
@@ -878,7 +899,7 @@ public:
             auto result = co_await searchByHashPrefix(normalizedReq, &metadataTelemetry);
             setExecTime(result, t0);
             if (result) {
-                co_return result;
+                co_return Result<SearchResponse>(applyWorkspaceScope(std::move(result).value()));
             }
             co_return result;
         }
@@ -888,7 +909,7 @@ public:
             auto result = co_await searchByHashPrefix(normalizedReq, &metadataTelemetry);
             setExecTime(result, t0);
             if (result) {
-                co_return result;
+                co_return Result<SearchResponse>(applyWorkspaceScope(std::move(result).value()));
             }
             co_return result;
         }
@@ -927,7 +948,7 @@ public:
                 resp.type = "path";
                 resp.searchStats["mode"] = "path";
                 resp.queryInfo = "path/name contains match";
-                co_return Result<SearchResponse>(std::move(resp));
+                co_return Result<SearchResponse>(applyWorkspaceScope(std::move(resp)));
             }
             // Fall through to standard paths on error.
         }
@@ -954,7 +975,7 @@ public:
                                           ? std::vector<std::string>{normalizedReq.pathPattern}
                                           : std::vector<std::string>{});
 
-        if (result && !patterns.empty()) {
+        if (result && (!patterns.empty() || !normalizedReq.scopePathPrefix.empty())) {
             auto matchesPattern = [](const std::string& value,
                                      const std::string& rawPattern) -> bool {
                 if (rawPattern.empty()) {
@@ -989,6 +1010,11 @@ public:
                 std::vector<std::string> filteredPaths;
                 filteredPaths.reserve(resp.paths.size());
                 for (const auto& path : resp.paths) {
+                    if (!normalizedReq.scopePathPrefix.empty() &&
+                        (!utils::isPathWithinScope(path, normalizedReq.scopePathPrefix) ||
+                         utils::isGeneratedWorkspacePath(path))) {
+                        continue;
+                    }
                     for (const auto& pattern : patterns) {
                         if (matchesPattern(path, pattern)) {
                             filteredPaths.push_back(path);
@@ -1002,6 +1028,11 @@ public:
                 std::vector<SearchItem> filtered;
                 filtered.reserve(resp.results.size());
                 for (const auto& item : resp.results) {
+                    if (!normalizedReq.scopePathPrefix.empty() &&
+                        (!utils::isPathWithinScope(item.path, normalizedReq.scopePathPrefix) ||
+                         utils::isGeneratedWorkspacePath(item.path))) {
+                        continue;
+                    }
                     // Match ANY pattern (OR logic)
                     for (const auto& pattern : patterns) {
                         if (matchesPattern(item.path, pattern)) {
@@ -1845,6 +1876,12 @@ private:
         // Propagate tag filters to the search engine (used for candidate gathering/ranking)
         params.tags = req.tags;
         params.matchAllTags = req.matchAllTags;
+        if (!req.scopePathPrefix.empty()) {
+            params.pathPredicate = [scope = req.scopePathPrefix](std::string_view path) {
+                return utils::isPathWithinScope(path, scope) &&
+                       !utils::isGeneratedWorkspacePath(path);
+            };
+        }
 
         // Apply scope filters
         if (!scope.ext.empty()) {
@@ -1946,6 +1983,11 @@ private:
         }
 
         auto matchesPathFilters = [&](const std::string& filePath) {
+            if (!req.scopePathPrefix.empty() &&
+                (!utils::isPathWithinScope(filePath, req.scopePathPrefix) ||
+                 utils::isGeneratedWorkspacePath(filePath))) {
+                return false;
+            }
             if (effectivePathPatterns.empty()) {
                 return true;
             }
@@ -2264,6 +2306,10 @@ private:
                 std::vector<int64_t> ids;
                 ids.reserve(patternDocsRes.value().size());
                 for (const auto& doc : patternDocsRes.value()) {
+                    if (!req.scopePathPrefix.empty() &&
+                        utils::isGeneratedWorkspacePath(doc.filePath)) {
+                        continue;
+                    }
                     ids.push_back(doc.id);
                 }
                 spdlog::debug("[SearchService] Path pattern filter matched {} documents",
@@ -2280,6 +2326,10 @@ private:
             if (patternDocsRes) {
                 std::unordered_set<int64_t> pathDocIds;
                 for (const auto& doc : patternDocsRes.value()) {
+                    if (!req.scopePathPrefix.empty() &&
+                        utils::isGeneratedWorkspacePath(doc.filePath)) {
+                        continue;
+                    }
                     pathDocIds.insert(doc.id);
                 }
                 std::vector<int64_t> intersected;
@@ -2608,7 +2658,8 @@ private:
             auto effectiveResults = r.value();
             const bool pathOnlyPrefilter =
                 !searchReq.pathPatterns.empty() && searchReq.tags.empty() &&
-                searchReq.metadataFilters.empty() && !sessionFilterApplied;
+                searchReq.metadataFilters.empty() && !sessionFilterApplied &&
+                searchReq.scopePathPrefix.empty();
             if (effectiveResults.totalCount == 0 && docIds.has_value() && pathOnlyPrefilter) {
                 auto unfiltered = ctx_.metadataRepo->search(
                     processedQuery, static_cast<int>(searchReq.limit), 0, std::nullopt);

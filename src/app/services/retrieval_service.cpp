@@ -3,15 +3,13 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <filesystem>
-#include <future>
 #include <optional>
 #include <sstream>
 #include <boost/asio/awaitable.hpp>
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
 #include <yams/app/services/literal_extractor.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
+#include <yams/daemon/client/await_result_sync.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/metadata_repository.h>
@@ -44,6 +42,7 @@ static yams::daemon::ClientConfig makeClientConfig(const RetrievalOptions& opts)
         cfg.autoStart = *opts.autoStart;
     }
     cfg.executor = opts.executor;
+    cfg.transport = opts.transport;
     return cfg;
 }
 
@@ -83,6 +82,7 @@ static yams::daemon::GrepRequest makeGrepRequest(const GrepOptions& req_opts) {
     yams::daemon::GrepRequest req;
     req.pattern = req_opts.pattern;
     req.paths = req_opts.paths;
+    req.scopePathPrefix = req_opts.scopePathPrefix;
     req.caseInsensitive = req_opts.caseInsensitive;
     req.invertMatch = req_opts.invertMatch;
     req.contextLines = req_opts.contextLines;
@@ -183,6 +183,7 @@ static yams::daemon::SearchRequest makeSearchRequest(const SearchOptions& req_op
     req.hashQuery = req_opts.hashQuery;
     req.pathPattern = req_opts.pathPattern;
     req.pathPatterns = req_opts.pathPatterns;
+    req.scopePathPrefix = req_opts.scopePathPrefix;
     req.tags = req_opts.tags;
     req.matchAllTags = req_opts.matchAllTags;
     req.extension = req_opts.extension;
@@ -243,47 +244,9 @@ static boost::asio::any_io_executor selectExecutor(const RetrievalOptions& opts)
 template <typename T, typename AwaitableFactory>
 Result<T> runClientCallWithTimeout(const RetrievalOptions& opts, std::string_view opName,
                                    AwaitableFactory&& makeAwaitable) {
-    std::promise<Result<T>> promise;
-    std::promise<void> done;
-    auto future = promise.get_future();
-    auto doneFuture = done.get_future();
-    const auto opNameString = std::string(opName);
-
-    boost::asio::co_spawn(
-        selectExecutor(opts),
-        [promise = std::move(promise), done = std::move(done),
-         makeAwaitable = std::forward<AwaitableFactory>(makeAwaitable),
-         opNameString]() mutable -> boost::asio::awaitable<void> {
-            try {
-                auto result = co_await makeAwaitable();
-                promise.set_value(std::move(result));
-            } catch (const std::exception& e) {
-                promise.set_value(Error{ErrorCode::InternalError,
-                                        opNameString + " failed with exception: " + e.what()});
-            } catch (...) {
-                promise.set_value(Error{ErrorCode::InternalError,
-                                        opNameString + " failed with unknown exception"});
-            }
-            done.set_value();
-            co_return;
-        },
-        boost::asio::detached);
-
-    try {
-        if (future.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) ==
-            std::future_status::ready) {
-            auto result = future.get();
-            doneFuture.wait();
-            return result;
-        }
-    } catch (const std::exception& e) {
-        doneFuture.wait();
-        return Error{ErrorCode::InternalError,
-                     opNameString + " failed with exception: " + e.what()};
-    }
-
-    doneFuture.wait();
-    return Error{ErrorCode::Timeout, opNameString + " timed out"};
+    return yams::daemon::detail::awaitResultSync<T>(
+        selectExecutor(opts), std::forward<AwaitableFactory>(makeAwaitable),
+        std::chrono::milliseconds(std::max(1, opts.requestTimeoutMs)), opName);
 }
 
 std::shared_ptr<yams::daemon::DaemonClient>
@@ -365,19 +328,12 @@ RetrievalService::getChunkedBuffer(const GetInitOptions& req_opts, std::size_t c
     // Prefer native chunked protocol; fallback to unary Get on error/timeout
     {
         auto client = getOrCreateClient(opts);
-        std::promise<Result<ChunkedGetResult>> p2;
-        std::promise<void> done;
-        auto f2 = p2.get_future();
-        auto done_f = done.get_future();
-        boost::asio::co_spawn(
-            selectExecutor(opts),
-            [client, req, capBytes, p = std::move(p2),
-             d = std::move(done)]() mutable -> boost::asio::awaitable<void> {
+        auto chunkedResult = runClientCallWithTimeout<ChunkedGetResult>(
+            opts, "get",
+            [client, req, capBytes]() mutable -> boost::asio::awaitable<Result<ChunkedGetResult>> {
                 auto init = co_await client->getInit(req);
                 if (!init) {
-                    p.set_value(init.error());
-                    d.set_value();
-                    co_return;
+                    co_return init.error();
                 }
                 const auto& ir = init.value();
                 std::string buffer;
@@ -396,9 +352,7 @@ RetrievalService::getChunkedBuffer(const GetInitOptions& req_opts, std::size_t c
                         yams::daemon::GetEndRequest e{};
                         e.transferId = ir.transferId;
                         (void)co_await client->getEnd(e);
-                        p.set_value(cRes.error());
-                        d.set_value();
-                        co_return;
+                        co_return cRes.error();
                     }
                     const auto& chunk = cRes.value();
                     const auto wrote = chunk.data.size();
@@ -414,29 +368,21 @@ RetrievalService::getChunkedBuffer(const GetInitOptions& req_opts, std::size_t c
                 end.transferId = ir.transferId;
                 (void)co_await client->getEnd(end);
                 ChunkedGetResult out{ir, std::move(buffer)};
-                p.set_value(Result<ChunkedGetResult>(std::move(out)));
-                d.set_value();
-                co_return;
-            },
-            boost::asio::detached);
-        if (f2.wait_for(std::chrono::milliseconds(opts.requestTimeoutMs)) ==
-            std::future_status::ready) {
-            auto r = f2.get();
-            done_f.wait();
-            if (r)
-                return r;
+                co_return Result<ChunkedGetResult>(std::move(out));
+            });
+        if (chunkedResult) {
+            return chunkedResult;
+        }
+        {
             // If streaming is explicitly enabled, don't fallback; propagate error.
             if (opts.enableStreaming) {
-                return r.error();
+                return chunkedResult.error();
             }
             // Otherwise, fall through to unary fallback only for common transport limits
-            auto ec = r.error().code;
-            if (ec != ErrorCode::NotImplemented && ec != ErrorCode::Timeout &&
-                ec != ErrorCode::NetworkError) {
-                return r.error();
+            auto ec = chunkedResult.error().code;
+            if (ec != ErrorCode::NotImplemented && ec != ErrorCode::NetworkError) {
+                return chunkedResult.error();
             }
-        } else {
-            done_f.wait();
         }
     }
     // Fallback to unary Get

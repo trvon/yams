@@ -14,9 +14,7 @@ bool isCodeProfileState(TuningState state) {
 
 } // namespace
 
-// File-static forward declarations (defined after the intent layer).
-static void applyAdaptiveBudgetLayer(std::string_view query, const SearchEngineConfig& config,
-                                     TunedParams& params, QueryPolicyResolution& /*resolution*/);
+// File-static forward declaration (defined after the intent layer).
 static void applyQueryComplexityLayer(std::string_view query, TunedParams& params);
 
 namespace {
@@ -103,12 +101,6 @@ QueryPolicyResolution resolveQueryPolicy(std::string_view query,
     applyZoomLayer(resolution.effectiveZoomLevel, params);
     if (baseConfig.enableIntentAdaptiveWeighting) {
         applyIntentLayer(resolution.routeDecision.intent.label, params);
-    }
-
-    // Adaptive budget scaling: narrow queries (1-2 terms) get reduced
-    // vector/graph budget; complex queries (4+ terms) get expanded fusion.
-    if (baseConfig.enableAdaptiveBudgeting) {
-        applyAdaptiveBudgetLayer(query, baseConfig, params, resolution);
     }
 
     // Query complexity routing: skip expensive graph expansion for simple
@@ -252,43 +244,6 @@ void applyIntentLayer(QueryIntent intent, TunedParams& params) {
         case QueryIntent::Mixed:
             break;
     }
-}
-
-// ---------------------------------------------------------------------------
-// Layer 6: Adaptive Budget (per-query component cap scaling)
-// ---------------------------------------------------------------------------
-
-static void applyAdaptiveBudgetLayer(std::string_view query, const SearchEngineConfig& config,
-                                     TunedParams& params, QueryPolicyResolution& /*resolution*/) {
-    // Count whitespace-separated tokens as a proxy for query signal strength.
-    std::size_t tokenCount = 0;
-    bool inToken = false;
-    for (char c : query) {
-        if (std::isspace(static_cast<unsigned char>(c))) {
-            inToken = false;
-        } else if (!inToken) {
-            inToken = true;
-            ++tokenCount;
-        }
-    }
-
-    if (tokenCount <= config.narrowQueryTokenThreshold) {
-        // Narrow query: reduce vector/graph budget (high signal, less fusion needed).
-        params.vectorMaxResults = static_cast<std::size_t>(
-            static_cast<float>(params.vectorMaxResults) * config.narrowQueryVectorReduction);
-        params.entityVectorMaxResults = static_cast<std::size_t>(
-            static_cast<float>(params.entityVectorMaxResults) * config.narrowQueryVectorReduction);
-    } else if (tokenCount >= config.complexQueryTokenThreshold) {
-        // Complex query: expand fusion/rerank budget.
-        params.fusionCandidateLimit = static_cast<std::size_t>(
-            static_cast<float>(params.fusionCandidateLimit) * config.complexQueryFusionExpansion);
-        params.rerankTopK = static_cast<std::size_t>(static_cast<float>(params.rerankTopK) *
-                                                     config.complexQueryFusionExpansion);
-    }
-
-    // Clamp to sane bounds.
-    params.vectorMaxResults = std::max(params.vectorMaxResults, std::size_t{4});
-    params.entityVectorMaxResults = std::max(params.entityVectorMaxResults, std::size_t{2});
 }
 
 // ---------------------------------------------------------------------------

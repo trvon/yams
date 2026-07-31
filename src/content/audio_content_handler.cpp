@@ -205,7 +205,7 @@ extractUsingFFProbe(const std::filesystem::path& path) {
                                    path.string());
 
     if (FILE* pipe = popen(cmd.c_str(), "r")) {
-        char buffer[4096];
+        char buffer[4096]{};
         std::string result;
         constexpr int bufferSize = static_cast<int>(sizeof(buffer));
         while (fgets(buffer, bufferSize, pipe)) {

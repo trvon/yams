@@ -14,6 +14,7 @@
 #include <yams/config/config_migration.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/daemon.h>
 
 #include <chrono>
 #include <cstdlib>
@@ -1255,7 +1256,7 @@ default_limit = 10
 )");
         EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
 
-        auto policy = ConfigResolver::resolveRerankerBackendPolicy();
+        auto policy = ConfigResolver::resolveRerankerBackendPolicy(DaemonConfig{});
         CHECK_FALSE(policy.backend.has_value());
     }
 
@@ -1266,7 +1267,7 @@ reranker_backend = "colbert"
 )");
         EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
 
-        auto policy = ConfigResolver::resolveRerankerBackendPolicy();
+        auto policy = ConfigResolver::resolveRerankerBackendPolicy(DaemonConfig{});
         REQUIRE(policy.backend.has_value());
         CHECK(*policy.backend == "colbert");
     }
@@ -1278,7 +1279,7 @@ reranker_backend = "ONNX"
 )");
         EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
 
-        auto policy = ConfigResolver::resolveRerankerBackendPolicy();
+        auto policy = ConfigResolver::resolveRerankerBackendPolicy(DaemonConfig{});
         REQUIRE(policy.backend.has_value());
         CHECK(*policy.backend == "onnx");
     }
@@ -1296,7 +1297,7 @@ log_level = "info"
         EnvGuard msl("MallocStackLoggingNoCompact", "1");
         EnvGuard mslCompact("MallocStackLogging", "0");
 
-        auto policy = ConfigResolver::resolveInstrumentationPolicy();
+        auto policy = ConfigResolver::resolveInstrumentationPolicy(DaemonConfig{});
         CHECK(policy.profile == "auto");
         CHECK(policy.memoryProfileActive);
         CHECK(policy.suppressAutoRepair);
@@ -1312,7 +1313,7 @@ profile = "normal"
         EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
         EnvGuard msl("MallocStackLoggingNoCompact", "1");
 
-        auto policy = ConfigResolver::resolveInstrumentationPolicy();
+        auto policy = ConfigResolver::resolveInstrumentationPolicy(DaemonConfig{});
         CHECK(policy.profile == "normal");
         CHECK_FALSE(policy.memoryProfileActive);
         CHECK_FALSE(policy.suppressAutoRepair);
@@ -1333,7 +1334,7 @@ msl_stack_log_warn_mb = 1536
         EnvGuard msl("MallocStackLogging", "0");
         EnvGuard mslCompact("MallocStackLoggingNoCompact", "0");
 
-        auto policy = ConfigResolver::resolveInstrumentationPolicy();
+        auto policy = ConfigResolver::resolveInstrumentationPolicy(DaemonConfig{});
         CHECK(policy.profile == "memory");
         CHECK(policy.memoryProfileActive);
         CHECK_FALSE(policy.suppressAutoRepair);

@@ -1591,6 +1591,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleGrepRequest(const Grep
             auto grepService = app::services::makeGrepService(appContext);
             app::services::GrepRequest serviceReq;
             serviceReq.pattern = req.pattern;
+            serviceReq.scopePathPrefix = req.scopePathPrefix;
             if (!req.paths.empty()) {
                 serviceReq.paths = req.paths;
             } else if (!req.path.empty()) {

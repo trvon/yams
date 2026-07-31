@@ -399,13 +399,14 @@ std::unique_ptr<IModelProvider> createModelProvider([[maybe_unused]] const Model
         return std::make_unique<MockModelProvider>();
     }
 
-    if (std::getenv("YAMS_USE_MOCK_PROVIDER") != nullptr) {
+#if defined(YAMS_TESTING) || defined(YAMS_TEST_PROVIDER_CONTROLS)
+    if (ConfigResolver::envTruthy(std::getenv("YAMS_USE_MOCK_PROVIDER"))) {
         spdlog::info("Using mock model provider (YAMS_USE_MOCK_PROVIDER set)");
         return std::make_unique<MockModelProvider>();
     }
 
     // Check for ONNX test mode
-    if (std::getenv("YAMS_USE_ONNX") != nullptr && preferredProvider == "ONNX") {
+    if (ConfigResolver::envTruthy(std::getenv("YAMS_USE_ONNX")) && preferredProvider == "ONNX") {
         spdlog::info("Using mock ONNX provider for testing (YAMS_USE_ONNX set)");
         // Create a mock provider that behaves like ONNX for tests
         class MockOnnxProvider : public MockModelProvider {
@@ -415,9 +416,10 @@ std::unique_ptr<IModelProvider> createModelProvider([[maybe_unused]] const Model
         };
         return std::make_unique<MockOnnxProvider>();
     }
+#endif
 
     // Check if ONNX is disabled
-    if (std::getenv("YAMS_DISABLE_ONNX") != nullptr) {
+    if (ConfigResolver::envTruthy(std::getenv("YAMS_DISABLE_ONNX"))) {
         spdlog::info("ONNX disabled (YAMS_DISABLE_ONNX set), using null provider");
         return std::make_unique<NullModelProvider>();
     }

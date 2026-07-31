@@ -26,7 +26,8 @@ public:
         V1 = 1,   ///< Old schema: doc_embeddings (vec0) + doc_metadata
         V2 = 2,   ///< Unified vectors table schema (legacy installs may still carry HNSW tables)
         V2_1 = 3, ///< V2 with embedding_dim column
-        V2_2 = 4  ///< V2.1 with quantized sidecar columns (TurboQuant packed codes)
+        V2_2 = 4, ///< V2.1 with quantized sidecar columns (TurboQuant packed codes)
+        V2_3 = 5  ///< Canonical float-only schema after TurboQuant retirement
     };
 
     /**
@@ -72,23 +73,16 @@ public:
     static bool hasEmbeddingDimColumn(sqlite3* db);
 
     /**
-     * @brief Migrate V2.1 schema to V2.2 (add quantized sidecar columns)
+     * @brief Retire unused V2.2 TurboQuant storage from the canonical schema
      *
-     * Steps:
-     * 1. Add quantized_format, quantized_bits, quantized_seed, quantized_packed_codes columns
-     * 2. Columns default to 0/NULL — no data backfill needed
+     * The migration fails without mutation when packed-code data is present or
+     * when rebuilding the vectors table would discard an unsupported custom
+     * schema object.
      *
      * @param db SQLite database handle
      * @return Success or error
      */
-    static Result<void> migrateV2_1ToV2_2(sqlite3* db);
-
-    /**
-     * @brief Check if vectors table has quantized sidecar columns
-     * @param db SQLite database handle
-     * @return true if quantized columns exist
-     */
-    static bool hasQuantizedColumns(sqlite3* db);
+    static Result<void> migrateV2_2ToV2_3(sqlite3* db);
 
     /**
      * @brief Rollback V2 migration (restore V1 schema)

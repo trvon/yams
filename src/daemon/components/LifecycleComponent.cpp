@@ -802,6 +802,7 @@ bool LifecycleComponent::waitForProcessExit(pid_t pid, std::chrono::milliseconds
 }
 
 bool LifecycleComponent::aggressiveModeEnabled() {
+#if defined(YAMS_TESTING) || defined(YAMS_TEST_LIFECYCLE_CONTROLS)
     // Test guard: allow unit/integration tests to disable kill-others behavior
     // without changing the production default.
     if (const char* test_guard = std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
@@ -811,6 +812,7 @@ bool LifecycleComponent::aggressiveModeEnabled() {
             return false; // SAFE mode during tests
         }
     }
+#endif
 
     // Production default: aggressive ON unless explicitly opted out.
     const char* env = std::getenv("YAMS_DAEMON_KILL_OTHERS");

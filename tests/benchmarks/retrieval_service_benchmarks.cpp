@@ -373,61 +373,6 @@ bool waitForCorpusIndexed(std::size_t expectedDocs, std::chrono::milliseconds ti
     return false;
 }
 
-bool waitForEmbeddingDrain(std::size_t minDocCount, std::chrono::milliseconds timeout) {
-    auto deadline = std::chrono::steady_clock::now() + timeout;
-    uint64_t lastVectorCount = 0;
-    int stableCount = 0;
-    constexpr int stableRequired = 10;
-
-    while (std::chrono::steady_clock::now() < deadline) {
-        auto status = cli::run_sync(g_client->status(), std::chrono::seconds(5));
-        if (!status) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            continue;
-        }
-
-        const auto& st = status.value();
-        uint64_t vectorCount = 0;
-        uint64_t embedQueued = 0;
-        uint64_t embedInFlight = 0;
-        uint64_t postQueued = 0;
-        uint64_t postInFlight = 0;
-
-        if (auto it = st.requestCounts.find("vector_count"); it != st.requestCounts.end()) {
-            vectorCount = it->second;
-        }
-        if (auto it = st.requestCounts.find("embed_svc_queued"); it != st.requestCounts.end()) {
-            embedQueued = it->second;
-        }
-        if (auto it = st.requestCounts.find("embed_in_flight"); it != st.requestCounts.end()) {
-            embedInFlight = it->second;
-        }
-        if (auto it = st.requestCounts.find("post_ingest_queued"); it != st.requestCounts.end()) {
-            postQueued = it->second;
-        }
-        if (auto it = st.requestCounts.find("post_ingest_inflight"); it != st.requestCounts.end()) {
-            postInFlight = it->second;
-        }
-
-        const bool embedDrained = (embedQueued == 0 && embedInFlight == 0);
-        if (vectorCount != lastVectorCount || !embedDrained) {
-            stableCount = 0;
-            lastVectorCount = vectorCount;
-        } else {
-            ++stableCount;
-        }
-
-        if (isVectorDbReady(st) && embedDrained && stableCount >= stableRequired) {
-            if (minDocCount == 0)
-                return true;
-            return vectorCount >= static_cast<uint64_t>(minDocCount);
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    }
-    return false;
-}
-
 struct DrainMetrics {
     uint64_t maxEmbedQueued{0};
     uint64_t maxEmbedInflight{0};
@@ -477,18 +422,6 @@ bool waitForEmbeddingDrainWithMetrics(std::size_t minDocCount, std::chrono::mill
         }
 
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    }
-    return false;
-}
-
-bool waitForVectorDbServing(std::chrono::milliseconds timeout) {
-    auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        auto status = cli::run_sync(g_client->status(), std::chrono::seconds(5));
-        if (status && isVectorDbReady(status.value())) {
-            return true;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
     }
     return false;
 }

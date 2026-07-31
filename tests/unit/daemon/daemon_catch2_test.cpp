@@ -70,7 +70,6 @@ struct DaemonFixture {
         config_.socketPath = runtime_root_ / "sock";
         config_.pidFile = runtime_root_ / "daemon.pid";
         config_.logFile = runtime_root_ / "daemon.log";
-        config_.maxMemoryGb = 1.0;
 
         // When ABI plugins are disabled, no model provider can be adopted,
         // so disable the requirement to avoid init failure.

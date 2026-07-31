@@ -188,8 +188,6 @@ int main(int argc, char* argv[]) {
         app.add_option("--data-dir,--storage", cliDataDir, "Data directory for storage");
         app.add_option("--pid-file", config.pidFile, "PID file path");
         app.add_option("--log-file", config.logFile, "Log file path");
-        app.add_option("--max-memory", config.maxMemoryGb, "Maximum memory usage (GB)")
-            ->default_val(8);
         app.add_option("--log-level", config.logLevel, "Log level (trace/debug/info/warn/error)")
             ->default_val("info");
         app.add_option("--plugin-dir", config.pluginDir, "Directory containing plugins");
@@ -228,16 +226,6 @@ int main(int argc, char* argv[]) {
             std::string v;
             if (next_str(v))
                 config.logFile = v;
-        } else if (arg == "--max-memory") {
-            std::string v;
-            if (next_str(v)) {
-                try {
-                    config.maxMemoryGb = static_cast<size_t>(std::stoul(v));
-                } catch (const std::exception& e) {
-                    std::cerr << "Warning: invalid --max-memory value '" << v << "': " << e.what()
-                              << "\n";
-                }
-            }
         } else if (arg == "--log-level") {
             (void)next_str(config.logLevel);
         } else if (arg == "--plugin-dir") {
@@ -304,15 +292,6 @@ int main(int argc, char* argv[]) {
                     } else if (auto it3 = daemonSection.find("storage_path");
                                it3 != daemonSection.end()) {
                         config.dataDir = fs::path(it3->second);
-                    }
-                }
-
-                // Max memory
-                if (daemonSection.find("max_memory_gb") != daemonSection.end()) {
-                    try {
-                        config.maxMemoryGb = std::stoi(daemonSection.at("max_memory_gb"));
-                    } catch (const std::exception& e) {
-                        spdlog::warn("Config: failed to parse daemon.max_memory_gb: {}", e.what());
                     }
                 }
 
@@ -783,7 +762,6 @@ int main(int argc, char* argv[]) {
 
     {
         const auto policy = yams::daemon::ConfigResolver::resolveInstrumentationPolicy(config);
-        config.instrumentation.profile = policy.profile;
         config.instrumentation.memoryProfileActive = policy.memoryProfileActive;
         config.instrumentation.suppressAutoRepair = policy.suppressAutoRepair;
         config.instrumentation.suppressSimeonLexicalBuild = policy.suppressSimeonLexicalBuild;

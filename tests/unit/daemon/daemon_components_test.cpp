@@ -21,6 +21,7 @@
 #include <yams/compat/unistd.h>
 
 #include <yams/daemon/components/IOCoordinator.h>
+#include <yams/daemon/components/LifecycleComponent.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/SearchEngineManager.h>
 #include <yams/daemon/components/SocketServer.h>
@@ -73,6 +74,19 @@ fs::path makeTempRuntimeDir(const std::string& name) {
     return dir;
 }
 
+TEST_CASE("LifecycleComponent test safe-instance guard overrides production aggressive mode",
+          "[daemon][lifecycle][single-instance]") {
+    yams::test::ScopedEnvVar safeGuard{"YAMS_TEST_SAFE_SINGLE_INSTANCE", std::string{"1"}};
+    yams::test::ScopedEnvVar killOthers{"YAMS_DAEMON_KILL_OTHERS", std::string{"1"}};
+    CHECK_FALSE(LifecycleComponent::testingAggressiveModeEnabled());
+
+    safeGuard.unset();
+    CHECK(LifecycleComponent::testingAggressiveModeEnabled());
+
+    killOthers.set("0");
+    CHECK_FALSE(LifecycleComponent::testingAggressiveModeEnabled());
+}
+
 TEST_CASE("SearchEngineManager runtime executor is isolated from unavailable shared workers",
           "[daemon][search][executor][liveness]") {
     constexpr std::size_t kRequestConcurrency = 8;
@@ -120,11 +134,8 @@ template <typename ResultLike> bool isPermissionDenied(const ResultLike& result)
 // Test resource for pool testing
 class TestResource {
 public:
-    explicit TestResource(int id) : id_(id), valid_(true) { creationCount_++; }
+    TestResource() { creationCount_++; }
 
-    ~TestResource() { destructionCount_++; }
-
-    int getId() const { return id_; }
     bool isValid() const { return valid_; }
     void invalidate() { valid_ = false; }
 
@@ -135,24 +146,19 @@ public:
 
     static void resetCounters() {
         creationCount_ = 0;
-        destructionCount_ = 0;
         workCount_ = 0;
     }
 
     static int getCreationCount() { return creationCount_; }
-    static int getDestructionCount() { return destructionCount_; }
     static int getWorkCount() { return workCount_; }
 
 private:
-    int id_;
-    bool valid_;
+    bool valid_{true};
     static std::atomic<int> creationCount_;
-    static std::atomic<int> destructionCount_;
     static std::atomic<int> workCount_;
 };
 
 std::atomic<int> TestResource::creationCount_{0};
-std::atomic<int> TestResource::destructionCount_{0};
 std::atomic<int> TestResource::workCount_{0};
 
 using yams::test::ScopedEnvVar;
@@ -438,7 +444,6 @@ TEST_CASE("Socket path resolution: proxy path derived from main socket",
 
 TEST_CASE("ResourcePool: Basic lifecycle", "[daemon][components][pool]") {
     TestResource::resetCounters();
-    std::atomic<int> resourceIdCounter{0};
 
     PoolConfig<TestResource> config;
     config.minSize = 3;
@@ -453,9 +458,8 @@ TEST_CASE("ResourcePool: Basic lifecycle", "[daemon][components][pool]") {
         using namespace yams;
         auto pool = std::make_unique<ResourcePool<TestResource>>(
             config,
-            [&resourceIdCounter](const std::string&) -> Result<std::shared_ptr<TestResource>> {
-                return Result<std::shared_ptr<TestResource>>(
-                    std::make_shared<TestResource>(++resourceIdCounter));
+            [](const std::string&) -> Result<std::shared_ptr<TestResource>> {
+                return Result<std::shared_ptr<TestResource>>(std::make_shared<TestResource>());
             },
             [](const TestResource& r) { return r.isValid(); });
 
@@ -464,15 +468,13 @@ TEST_CASE("ResourcePool: Basic lifecycle", "[daemon][components][pool]") {
     }
 
     TestResource::resetCounters();
-    resourceIdCounter = 0;
 
     SECTION("Resource acquisition and release") {
         using namespace yams;
         auto pool = std::make_unique<ResourcePool<TestResource>>(
             config,
-            [&resourceIdCounter](const std::string&) -> Result<std::shared_ptr<TestResource>> {
-                return Result<std::shared_ptr<TestResource>>(
-                    std::make_shared<TestResource>(++resourceIdCounter));
+            [](const std::string&) -> Result<std::shared_ptr<TestResource>> {
+                return Result<std::shared_ptr<TestResource>>(std::make_shared<TestResource>());
             },
             [](const TestResource& r) { return r.isValid(); });
 
@@ -489,15 +491,13 @@ TEST_CASE("ResourcePool: Basic lifecycle", "[daemon][components][pool]") {
     }
 
     TestResource::resetCounters();
-    resourceIdCounter = 0;
 
     SECTION("Invalid resources are replaced") {
         using namespace yams;
         auto pool = std::make_unique<ResourcePool<TestResource>>(
             config,
-            [&resourceIdCounter](const std::string&) -> Result<std::shared_ptr<TestResource>> {
-                return Result<std::shared_ptr<TestResource>>(
-                    std::make_shared<TestResource>(++resourceIdCounter));
+            [](const std::string&) -> Result<std::shared_ptr<TestResource>> {
+                return Result<std::shared_ptr<TestResource>>(std::make_shared<TestResource>());
             },
             [](const TestResource& r) { return r.isValid(); });
 
@@ -522,7 +522,6 @@ TEST_CASE("ResourcePool: Basic lifecycle", "[daemon][components][pool]") {
 
 TEST_CASE("ResourcePool: Concurrency", "[daemon][components][pool][concurrent]") {
     TestResource::resetCounters();
-    std::atomic<int> resourceIdCounter{0};
 
     PoolConfig<TestResource> config;
     config.minSize = 2;
@@ -536,9 +535,8 @@ TEST_CASE("ResourcePool: Concurrency", "[daemon][components][pool][concurrent]")
     using namespace yams;
     auto pool = std::make_unique<ResourcePool<TestResource>>(
         config,
-        [&resourceIdCounter](const std::string&) -> Result<std::shared_ptr<TestResource>> {
-            return Result<std::shared_ptr<TestResource>>(
-                std::make_shared<TestResource>(++resourceIdCounter));
+        [](const std::string&) -> Result<std::shared_ptr<TestResource>> {
+            return Result<std::shared_ptr<TestResource>>(std::make_shared<TestResource>());
         },
         [](const TestResource& r) { return r.isValid(); });
 

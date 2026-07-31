@@ -5,7 +5,6 @@
 {"name": "Database", "kind": "class", "file": "include/yams/metadata/database.h", "line": 142, "qualified_name": "yams::metadata::Database"}
 {"name": "ConnectionPool", "kind": "class", "file": "include/yams/metadata/connection_pool.h", "line": 95, "qualified_name": "yams::metadata::ConnectionPool"}
 {"name": "SqliteKnowledgeGraphStore", "kind": "class", "file": "src/metadata/knowledge_graph_store_sqlite.cpp", "line": 31, "qualified_name": "yams::metadata::SqliteKnowledgeGraphStore"}
-{"name": "VectorIndex", "kind": "class", "file": "include/yams/vector/vector_index_manager.h", "line": 166, "qualified_name": "yams::vector::VectorIndex"}
 {"name": "EmbeddingGenerator", "kind": "class", "file": "include/yams/vector/embedding_generator.h", "line": 253, "qualified_name": "yams::vector::EmbeddingGenerator"}
 {"name": "CompressedStorageEngine", "kind": "class", "file": "include/yams/storage/compressed_storage_engine.h", "line": 18, "qualified_name": "yams::storage::CompressedStorageEngine"}
 {"name": "URLBackend", "kind": "class", "file": "include/yams/storage/storage_backend.h", "line": 158, "qualified_name": "yams::storage::URLBackend"}

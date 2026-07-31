@@ -88,6 +88,7 @@ executeGraphListByTypeQuery(yams::daemon::DaemonClient& client,
     req.limit = static_cast<std::uint32_t>(options.limit);
     req.offset = static_cast<std::uint32_t>(options.offset);
     req.includeNodeProperties = options.verbose;
+    req.scopePathPrefix = options.scopePathPrefix;
     co_return co_await client.call(req);
 }
 

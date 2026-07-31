@@ -4,8 +4,10 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -22,6 +24,7 @@ struct SearchParams {
     std::optional<std::string> extension;
     std::optional<int64_t> modifiedAfter;
     std::optional<int64_t> modifiedBefore;
+    std::function<bool(std::string_view)> pathPredicate;
 };
 
 struct SearchEngineConfig {
@@ -507,18 +510,6 @@ struct SearchEngineConfig {
     // Training-free at inference: the arm name is selected by TunerMAB
     // from qrel-free proxy rewards. Empty = use existing scoring path.
     std::string simeonBanditArm;
-
-    /// When true, scale per-component result caps (textMaxResults,
-    /// vectorMaxResults, etc.) per query based on signal strength.
-    /// Narrow queries (1-2 terms) get reduced vector/graph budget;
-    /// complex queries (4+ terms) get expanded fusion budget.
-    bool enableAdaptiveBudgeting = false;
-
-    /// Scaling factors for adaptive per-query budgets.
-    float narrowQueryVectorReduction = 0.5f;    // multiply vector caps for ≤ threshold
-    float complexQueryFusionExpansion = 1.5f;   // multiply fusion caps for ≥ threshold
-    std::size_t narrowQueryTokenThreshold = 2;  // ≤ this = narrow
-    std::size_t complexQueryTokenThreshold = 4; // ≥ this = complex
 
     /// Reapply the operator-selected topology policy after corpus tuning.
     /// Topology routing is an execution policy, not a corpus-derived relevance

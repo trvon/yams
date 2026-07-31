@@ -385,7 +385,7 @@ TEST_CASE("IntegrationSmoke.GraphExploreRendersAgentContext", "[smoke][integrati
     createGraphExploreFixture(root);
     ScopedCurrentPath cwdGuard(root / "repo");
 
-    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::nullopt);
+    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::string("1"));
     yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::nullopt);
     yams::test::ScopedEnvVar dataEnv("YAMS_DATA_DIR", (root / "data").string());
     yams::test::ScopedEnvVar storageEnv("YAMS_STORAGE", (root / "data").string());
@@ -450,7 +450,7 @@ TEST_CASE("IntegrationSmoke.GraphTopologyModesReadStoredSnapshot", "[smoke][inte
     const fs::path root = yams::test::make_temp_dir("yams_graph_topology_");
     const auto fixture = createStoredTopologyFixture(root);
 
-    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::nullopt);
+    yams::test::ScopedEnvVar embedded("YAMS_EMBEDDED", std::string("1"));
     yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", std::nullopt);
     yams::test::ScopedEnvVar dataEnv("YAMS_DATA_DIR", fixture.dataDir.string());
     yams::test::ScopedEnvVar storageEnv("YAMS_STORAGE", fixture.dataDir.string());

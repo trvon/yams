@@ -124,7 +124,6 @@ jobs:
     name: Tests (${{ matrix.suffix }})
     env:
       BUILD_DIR: builddir
-      YAMS_DISABLE_FAISS: 1
       YAMS_CONAN_COMPILER_VERSION: ${{ matrix.conan_compiler_version || '' }}
       YAMS_MSBUILD_VS_VERSION: ${{ matrix.msbuild_vs_version || '' }}
     strategy:

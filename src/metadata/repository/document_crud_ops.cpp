@@ -568,7 +568,7 @@ Result<int64_t> MetadataRepository::insertDocument(const DocumentInfo& info) {
 
         // Check if a row was actually inserted (changes() returns 0 if INSERT was ignored)
         int changes = db.changes();
-        int64_t docId;
+        int64_t docId = 0;
 
         if (changes > 0) {
             // New document inserted

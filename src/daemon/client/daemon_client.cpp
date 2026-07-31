@@ -8,6 +8,7 @@
 #endif
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/asio_transport.h>
+#include <yams/daemon/client/await_result_sync.h>
 #include <yams/daemon/client/client_transport.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
@@ -26,13 +27,10 @@
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/associated_executor.hpp>
 #include <boost/asio/async_result.hpp>
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
 #include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
-#include <boost/asio/use_future.hpp>
 
 #include <spdlog/spdlog.h>
 
@@ -44,7 +42,6 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <future>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -183,35 +180,6 @@ std::optional<Error> rewriteListTransportError(const Error& err) {
     }
 }
 
-template <typename T>
-Result<T> awaitResultSync(boost::asio::awaitable<Result<T>> aw, std::chrono::milliseconds timeout) {
-    auto prom = std::make_shared<std::promise<Result<T>>>();
-    auto fut = prom->get_future();
-    auto& io = GlobalIOContext::instance().get_io_context();
-
-    boost::asio::co_spawn(
-        io,
-        [aw = std::move(aw), prom]() mutable -> boost::asio::awaitable<void> {
-            try {
-                prom->set_value(co_await std::move(aw));
-            } catch (const std::exception& e) {
-                prom->set_value(
-                    Error{ErrorCode::InternalError, std::string("Awaitable threw: ") + e.what()});
-            } catch (...) {
-                prom->set_value(
-                    Error{ErrorCode::InternalError, "Awaitable threw unknown exception"});
-            }
-            co_return;
-        },
-        boost::asio::detached);
-
-    if (timeout.count() > 0 && fut.wait_for(timeout) != std::future_status::ready) {
-        return Error{ErrorCode::Timeout, "Awaitable timed out"};
-    }
-
-    return fut.get();
-}
-
 } // namespace
 
 // Implementation class
@@ -227,6 +195,7 @@ public:
     bool isShuttingDown() const { return shutting_down_.load(std::memory_order_acquire); }
 
     ClientConfig config_;
+    std::shared_ptr<IClientTransport> transport_;
     ClientTransportMode resolvedTransportMode_{ClientTransportMode::Socket};
     CircuitBreaker breaker_;
     std::chrono::milliseconds headerTimeout_{30000}; // 30s default
@@ -237,6 +206,10 @@ public:
     std::atomic<bool> shutting_down_{false}; // Set when DaemonClient is being destroyed
 
     void refresh_transport() {
+        if (transport_) {
+            pool_.reset();
+            return;
+        }
         transportOptions_.socketPath = config_.socketPath;
         transportOptions_.headerTimeout = headerTimeout_;
         transportOptions_.bodyTimeout = bodyTimeout_;
@@ -452,10 +425,11 @@ static std::filesystem::path deriveMainSocketFromProxy(const std::filesystem::pa
 
 // DaemonClient implementation
 DaemonClient::DaemonClient(const ClientConfig& config) : pImpl(std::make_shared<Impl>(config)) {
+    pImpl->transport_ = config.transport;
     pImpl->resolvedTransportMode_ = resolve_transport_mode(pImpl->config_);
     pImpl->config_.transportMode = pImpl->resolvedTransportMode_;
 
-    if (pImpl->resolvedTransportMode_ == ClientTransportMode::InProcess) {
+    if (pImpl->resolvedTransportMode_ == ClientTransportMode::InProcess && !pImpl->transport_) {
         spdlog::warn(
             "In-process daemon transport is not available in the socket-only daemon client; "
             "falling back to socket transport");
@@ -589,14 +563,17 @@ static bool pingDaemonSync(const std::filesystem::path& socketPath) {
         opts.bodyTimeout = kProbeTimeout;
         opts.poolEnabled = false;
 
-        AsioTransportAdapter adapter(opts);
+        auto adapter = std::make_shared<AsioTransportAdapter>(opts);
 
         PingRequest ping;
         ping.timestamp = std::chrono::steady_clock::now();
 
-        auto response = awaitResultSync<Response>(
-            adapter.send_request(Request{std::in_place_type<PingRequest>, ping}),
-            kProbeTimeout + std::chrono::milliseconds(250));
+        auto response = detail::awaitResultSync<Response>(
+            GlobalIOContext::global_executor(),
+            [adapter = std::move(adapter), ping]() mutable {
+                return adapter->send_request(Request{std::in_place_type<PingRequest>, ping});
+            },
+            kProbeTimeout + std::chrono::milliseconds(250), "Daemon ping");
         if (!response) {
             spdlog::debug("DaemonClient::pingDaemonSync probe failed for '{}': {}", path->string(),
                           response.error().message);
@@ -733,6 +710,10 @@ static bool shouldRetryViaMainSocket(const Error& err) {
 boost::asio::awaitable<Result<void>> DaemonClient::connect() {
     // Capture shared_ptr to extend Impl lifetime across co_await suspension points
     auto impl = pImpl;
+    if (impl->transport_) {
+        impl->explicitly_disconnected_ = false;
+        co_return Result<void>();
+    }
     // Async variant using adapter's connect helper and timers; avoids blocking sleeps
     // If daemon is not reachable and autoStart is disabled, surface a failure.
     const auto socketPath = impl->config_.socketPath.empty()
@@ -898,6 +879,9 @@ bool DaemonClient::isConnected() const {
     // If explicitly disconnected, return false until reconnect
     if (pImpl->explicitly_disconnected_) {
         return false;
+    }
+    if (pImpl->transport_) {
+        return true;
     }
     // Treat connectivity as liveness of the daemon (socket + ping), not a persistent socket
     constexpr auto kHealthyTtl = std::chrono::seconds(2);
@@ -1085,6 +1069,9 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(const Request
     if (!impl || impl->isShuttingDown()) {
         co_return Error{ErrorCode::InvalidState, "DaemonClient is shutting down"};
     }
+    if (impl->transport_) {
+        co_return co_await impl->transport_->send_request(Request{req});
+    }
     const auto selectedSocket = selectSocketPathForRequest(impl->config_, ownedReq);
     spdlog::debug("DaemonClient::sendRequest: [{}] streaming={} sock='{}'",
                   getRequestName(ownedReq), false, selectedSocket.string());
@@ -1133,6 +1120,9 @@ boost::asio::awaitable<Result<Response>> DaemonClient::sendRequest(Request&& req
     auto impl = pImpl;
     if (!impl || impl->isShuttingDown()) {
         co_return Error{ErrorCode::InvalidState, "DaemonClient is shutting down"};
+    }
+    if (impl->transport_) {
+        co_return co_await impl->transport_->send_request(std::move(req));
     }
     const auto type = getRequestName(req);
     const auto selectedSocket = selectSocketPathForRequest(impl->config_, req);
@@ -1650,6 +1640,11 @@ DaemonClient::sendRequestStreaming(const Request& req,
     };
     auto onError = [handler](const Error& e) { handler->onError(e); };
     auto onComplete = [handler]() { handler->onComplete(); };
+
+    if (impl->transport_) {
+        co_return co_await impl->transport_->send_request_streaming(std::move(ownedReq), onHeader,
+                                                                    onChunk, onError, onComplete);
+    }
 
     // Use request-type-aware timeout without shortening configured limits
     auto opts = impl->transportOptions_;
@@ -2465,7 +2460,7 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
             // Try to auto-detect relative to this process path
             // On Linux, read /proc/self/exe
             std::filesystem::path selfExe;
-            char buf[4096];
+            char buf[4096]{};
             ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
             if (n > 0) {
                 buf[n] = '\0';

@@ -1100,42 +1100,6 @@ ConfigResolver::TopologyTunerPolicy ConfigResolver::resolveTopologyTunerPolicy()
     return policy;
 }
 
-namespace {
-
-std::optional<std::string> readEnvString(const char* name) {
-    const char* raw = std::getenv(name);
-    if (!raw || !*raw)
-        return std::nullopt;
-    return std::string(raw);
-}
-
-} // namespace
-
-ConfigResolver::VectorBackendPolicy ConfigResolver::resolveVectorBackendPolicy() {
-    VectorBackendPolicy policy;
-
-    try {
-        namespace fs = std::filesystem;
-        fs::path cfgPath = resolveDefaultConfigPath();
-        if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            auto kv = parseSimpleTomlFlat(cfgPath);
-            if (auto it = kv.find("vector_database.backend"); it != kv.end() && !it->second.empty())
-                policy.backend = it->second;
-        }
-    } catch (const std::exception& e) {
-        spdlog::debug("Error reading config for vector backend: {}", e.what());
-    }
-
-    if (auto v = readEnvString("YAMS_VECTOR_BACKEND"))
-        policy.backend = std::move(v);
-
-    return policy;
-}
-
-ConfigResolver::RerankerBackendPolicy ConfigResolver::resolveRerankerBackendPolicy() {
-    return resolveRerankerBackendPolicy(DaemonConfig{});
-}
-
 ConfigResolver::RerankerBackendPolicy
 ConfigResolver::resolveRerankerBackendPolicy(const DaemonConfig& config) {
     RerankerBackendPolicy policy;
@@ -1163,10 +1127,6 @@ ConfigResolver::resolveRerankerBackendPolicy(const DaemonConfig& config) {
     }
 
     return policy;
-}
-
-ConfigResolver::InstrumentationPolicy ConfigResolver::resolveInstrumentationPolicy() {
-    return resolveInstrumentationPolicy(DaemonConfig{});
 }
 
 ConfigResolver::InstrumentationPolicy
@@ -1364,15 +1324,11 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
     applyUint32("io_conn_per_thread", &TuneAdvisor::setIoConnPerThread);
     applyUint32("post_ingest_threads", &TuneAdvisor::setPostIngestThreads);
     applyUint32("post_ingest_queue_max", &TuneAdvisor::setPostIngestQueueMax);
-    applyUint32("cli_pool_threads", &TuneAdvisor::setCliRequestPoolThreads);
     applyUint32("list_inflight_limit", &TuneAdvisor::setListInflightLimit);
     applyUint32("list_admission_wait_ms", &TuneAdvisor::setListAdmissionWaitMs);
     applyUint32("grep_inflight_limit", &TuneAdvisor::setGrepInflightLimit);
     applyUint32("grep_admission_wait_ms", &TuneAdvisor::setGrepAdmissionWaitMs);
 
-    if (auto value = parseBoolean(tuning, "tuning", "aggressive_idle_shrink")) {
-        TuneAdvisor::setAggressiveIdleShrinkEnabled(*value);
-    }
     if (auto value = parseBoolean(tuning, "tuning", "use_internal_bus_for_repair")) {
         TuneAdvisor::setUseInternalBusForRepair(*value);
     }

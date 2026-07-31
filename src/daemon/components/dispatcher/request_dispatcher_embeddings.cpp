@@ -131,8 +131,7 @@ RequestDispatcher::handleEmbedDocumentsRequest(const EmbedDocumentsRequest& req)
     }
     try {
         auto es = serviceManager_->getEmbeddingProviderFsmSnapshot();
-        if (es.state == EmbeddingProviderState::Degraded ||
-            es.state == EmbeddingProviderState::Failed) {
+        if (es.state == EmbeddingProviderState::Degraded) {
             co_return dispatch::makeErrorResponse(
                 ErrorCode::InvalidState, "Embedding generation disabled: provider degraded");
         }

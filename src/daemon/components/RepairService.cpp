@@ -289,13 +289,16 @@ boost::asio::awaitable<bool>
 queueWithBackoff(std::shared_ptr<SpscQueue<JobT>> queue, JobT&& job,
                  boost::asio::steady_timer& timer, std::atomic<bool>& running,
                  const std::string& jobTypeName, size_t jobSize, int initialDelayMs = 50,
-                 int maxDelayMs = 1000, std::function<bool()> shouldStop = {}) {
+                 int maxDelayMs = 1000, std::function<bool()> shouldStop = {},
+                 std::function<void()> onQueueFull = {}) {
     const auto queueStart = std::chrono::steady_clock::now();
     uint64_t totalWaitMs = 0;
     int retries = 0;
     while (!queue->try_push(std::forward<JobT>(job))) {
         if (!running.load(std::memory_order_relaxed) || (shouldStop && shouldStop()))
             co_return false;
+        if (retries == 0 && onQueueFull)
+            onQueueFull();
         const int cappedRetries = std::min(retries, 5);
         const int delayMs = std::min(initialDelayMs * (1 << cappedRetries), maxDelayMs);
         totalWaitMs += static_cast<uint64_t>(delayMs);
@@ -542,7 +545,7 @@ boost::asio::awaitable<void> RepairService::backgroundLoop(ShutdownState* shutdo
         }
 
         // Deferred initial scan
-        bool queueEmpty;
+        bool queueEmpty = false;
         {
             std::lock_guard<std::mutex> lk(queueMutex_);
             queueEmpty = pendingDocuments_.empty();
@@ -1440,8 +1443,18 @@ RepairService::recoverStuckDocumentsAsync(const RepairRequest& req, const Progre
         const std::string jobLabel =
             std::string(useRpcChannel ? "post_ingest_rpc" : "post_ingest") + " stuck-doc " +
             std::to_string(i + 1) + "/" + std::to_string(stuckDocs.size());
-        const bool pushed = co_await queueWithBackoff(postIngestChannel, std::move(task), timer,
-                                                      running_, jobLabel, 1, 500, 500, isCanceled);
+        auto notifyQueueFull = [&progress]() {
+            if (!progress)
+                return;
+            RepairEvent event;
+            event.phase = "repairing";
+            event.operation = "stuck_docs";
+            event.message = "Waiting for post-ingest queue capacity";
+            progress(event);
+        };
+        const bool pushed =
+            co_await queueWithBackoff(postIngestChannel, std::move(task), timer, running_, jobLabel,
+                                      1, 500, 500, isCanceled, notifyQueueFull);
         if (pushed) {
             TuningManager::notifyWakeup();
             auto docRes = meta->getDocument(s.docId);
@@ -2461,7 +2474,7 @@ RepairOperationResult RepairService::cleanOrphanedChunks(bool dryRun, bool verbo
 
     // Get referenced hashes
     std::set<std::string> referencedHashes;
-    sqlite3_stmt* stmt;
+    sqlite3_stmt* stmt = nullptr;
     const char* sql = "SELECT block_hash FROM block_references WHERE ref_count > 0";
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) == SQLITE_OK) {
         while (sqlite3_step(stmt) == SQLITE_ROW) {
