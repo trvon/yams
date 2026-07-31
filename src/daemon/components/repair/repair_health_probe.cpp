@@ -1,6 +1,5 @@
 #include <yams/daemon/components/repair/repair_health_probe.h>
 
-#include <yams/daemon/components/GraphComponent.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/vector/vector_database.h>
@@ -12,10 +11,8 @@ namespace yams::daemon::repair {
 
 RepairHealthProbe::RepairHealthProbe(std::shared_ptr<metadata::IMetadataRepository> meta,
                                      std::shared_ptr<vector::VectorDatabase> vectorDb,
-                                     std::shared_ptr<GraphComponent> graphComponent,
                                      std::shared_ptr<metadata::KnowledgeGraphStore> kgStore)
-    : meta_(std::move(meta)), vectorDb_(std::move(vectorDb)),
-      graphComponent_(std::move(graphComponent)), kgStore_(std::move(kgStore)) {}
+    : meta_(std::move(meta)), vectorDb_(std::move(vectorDb)), kgStore_(std::move(kgStore)) {}
 
 bool RepairHealthProbe::vectorsDisabledByEnv() {
     YAMS_ZONE_SCOPED_N("RepairHealth::vectorsDisabledByEnv");
@@ -63,26 +60,13 @@ RepairHealthSnapshot RepairHealthProbe::probe(const RepairHealthOptions& options
     }
 
     if (checkGraph) {
-        if (!graphComponent_) {
-            snapshot.graphIntegrityOk = false;
-            snapshot.issues.push_back("GraphComponent not available");
-        } else {
-            auto healthRes = graphComponent_->validateGraph();
-            if (!healthRes) {
-                snapshot.graphIntegrityOk = false;
-                snapshot.issues.push_back("Graph health check failed: " +
-                                          healthRes.error().message);
-            } else if (!healthRes.value().issues.empty()) {
-                snapshot.issues.push_back("Graph health issues: " +
-                                          healthRes.value().issues.front());
-            }
-        }
-
         if (!kgStore_) {
+            snapshot.graphIntegrityOk = false;
             snapshot.issues.push_back("KnowledgeGraphStore not available");
         } else {
             auto countRes = kgStore_->countNodesByType("document");
             if (!countRes) {
+                snapshot.graphIntegrityOk = false;
                 snapshot.issues.push_back("KG node count failed: " + countRes.error().message);
             } else {
                 snapshot.graphDocNodes = static_cast<uint64_t>(countRes.value());

@@ -942,9 +942,9 @@ void BackgroundTaskManager::launchAutoRepairTask() {
 
                     if (fastInterval.count() > 0 && now >= nextFast) {
                         if (canRunAuto()) {
-                            repair::RepairHealthProbe probe(
-                                self->getMetadataRepo(), self->getVectorDatabase(),
-                                self->getGraphComponent(), self->getKgStore());
+                            repair::RepairHealthProbe probe(self->getMetadataRepo(),
+                                                            self->getVectorDatabase(),
+                                                            self->getKgStore());
                             repair::RepairHealthOptions opts;
                             opts.checkFts5 = false;
                             opts.checkEmbeddings = false;
@@ -961,16 +961,17 @@ void BackgroundTaskManager::launchAutoRepairTask() {
 
                     if (warmInterval.count() > 0 && now >= nextWarm) {
                         if (canRunAuto()) {
-                            repair::RepairHealthProbe probe(
-                                self->getMetadataRepo(), self->getVectorDatabase(),
-                                self->getGraphComponent(), self->getKgStore());
+                            repair::RepairHealthProbe probe(self->getMetadataRepo(),
+                                                            self->getVectorDatabase(),
+                                                            self->getKgStore());
                             repair::RepairHealthOptions opts;
+                            opts.checkFts5 = false;
+                            opts.checkEmbeddings = false;
+                            opts.scanDocuments = false;
                             auto health = probe.probe(opts);
                             spdlog::info(
-                                "[AutoRepair] health: docs={} fts5_missing={} embed_missing={} "
-                                "graph_gap={} graph_ok={}",
-                                health.documentsScanned, health.missingFts5,
-                                health.missingEmbeddings, health.graphDocNodeGap,
+                                "[AutoRepair] health: graph_docs={} semantic_gap={} graph_ok={}",
+                                health.graphDocNodes, health.semanticNeighborEdgeGap,
                                 health.graphIntegrityOk);
                             for (const auto& issue : health.issues) {
                                 spdlog::debug("[AutoRepair] health issue: {}", issue);
