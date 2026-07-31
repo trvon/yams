@@ -311,7 +311,7 @@ inline int stepWithRetry(sqlite3_stmt* stmt) {
         return rc; // Non-retryable error
     }
     metadata::reportDbLockError(); // Signal contention for adaptive scaling
-    return SQLITE_BUSY;                       // Max retries exceeded
+    return SQLITE_BUSY;            // Max retries exceeded
 }
 
 // RAII guard to ensure prepared statements are reset after use.
@@ -3807,8 +3807,7 @@ private:
         if (it->second->exact_fallback) {
             return Result<void>{};
         }
-        if (it->second->persisted_snapshot &&
-            persistedBackingStoreUnchangedUnlocked(*it->second)) {
+        if (it->second->persisted_snapshot && persistedBackingStoreUnchangedUnlocked(*it->second)) {
             return Result<void>{};
         }
         std::string errorMessage;

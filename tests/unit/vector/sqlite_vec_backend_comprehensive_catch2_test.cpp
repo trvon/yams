@@ -2711,6 +2711,37 @@ TEST_CASE_METHOD(
 }
 
 TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend does not rewrite an unchanged Simeon PQ snapshot",
+                 "[vector][backend][search][spq][persistence][catch2]") {
+    skipIfNeeded();
+
+    constexpr size_t kDim = 64;
+    SqliteVecBackend::Config config;
+    config.embedding_dim = kDim;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_centroids = 16;
+    config.simeon_pq_train_limit = 32;
+
+    SqliteVecBackend backend(config);
+    REQUIRE((backend.initialize(":memory:").has_value()));
+    REQUIRE((backend.createTables(kDim).has_value()));
+    for (int i = 0; i < 32; ++i) {
+        REQUIRE((backend
+                     .insertVector(createVectorRecord("unchanged_persist_" + std::to_string(i),
+                                                      createEmbedding(kDim, float(i + 1))))
+                     .has_value()));
+    }
+
+    REQUIRE((backend.buildIndex().has_value()));
+    REQUIRE((backend.persistIndex().has_value()));
+    const auto changesAfterFirstPersist = sqlite3_total_changes64(backend.getDbHandle());
+
+    REQUIRE((backend.persistIndex().has_value()));
+    CHECK((sqlite3_total_changes64(backend.getDbHandle()) == changesAfterFirstPersist));
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
                  "SqliteVecBackend rejects persisted Simeon PQ with a different recipe",
                  "[vector][backend][search][spq][persistence][catch2]") {
     skipIfNeeded();
