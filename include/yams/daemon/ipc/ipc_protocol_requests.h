@@ -1435,7 +1435,7 @@ struct GrepRequest {
     std::string pattern;            // Regex pattern
     std::string path;               // Optional path filter (deprecated - use paths)
     std::vector<std::string> paths; // Multiple paths to search (NEW)
-    std::string scopePathPrefix;     // Workspace root for daemon-owned cwd scoping
+    std::string scopePathPrefix;    // Workspace root for daemon-owned cwd scoping
     bool caseInsensitive = false;
     bool invertMatch = false;
     int contextLines = 0;  // Combined context (overrides before/after if > 0)
