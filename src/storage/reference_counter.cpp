@@ -585,26 +585,49 @@ std::unique_ptr<StatementCache> createReferenceStatementCache(Database& db) {
 
 // Initialize database
 Result<void> ReferenceCounter::initializeDatabase() {
-    try {
-        yams::common::ensureDirectories(pImpl->config.databasePath.parent_path());
+    // A concurrent writer (e.g. a prior add command's async batch commit on a slow
+    // host) can hold the reference database long enough to exhaust ReferenceDB's
+    // short retry budget, failing CLI/daemon startup with "database is locked".
+    // Retry the whole init (schema + migrations) with a bounded, growing backoff so
+    // transient contention does not fail startup.
+    constexpr int kMaxInitLockRetries = 6;
+    constexpr int kBaseRetryDelayMs = 250;
+    for (int attempt = 0;; ++attempt) {
+        try {
+            yams::common::ensureDirectories(pImpl->config.databasePath.parent_path());
 
-        pImpl->db = std::make_unique<Database>(pImpl->config.databasePath);
-        configureReferenceDatabase(*pImpl->db, pImpl->config);
-        applyReferenceSchema(*pImpl->db);
+            pImpl->db = std::make_unique<Database>(pImpl->config.databasePath);
+            configureReferenceDatabase(*pImpl->db, pImpl->config);
+            applyReferenceSchema(*pImpl->db);
 
-        auto migration = executeSchemaMigrations();
-        if (!migration) {
-            return migration;
+            auto migration = executeSchemaMigrations();
+            if (!migration) {
+                return migration;
+            }
+
+            pImpl->stmtCache = createReferenceStatementCache(*pImpl->db);
+
+            spdlog::debug("Reference counter database initialized at {}",
+                          pImpl->config.databasePath.string());
+            return {};
+        } catch (const std::exception& e) {
+            const std::string what = e.what();
+            const bool transientLock = what.find("database is locked") != std::string::npos ||
+                                       what.find("SQLITE_BUSY") != std::string::npos;
+            if (transientLock && attempt < kMaxInitLockRetries) {
+                const int delayMs = kBaseRetryDelayMs * (1 << std::min(attempt, 4));
+                spdlog::warn("Reference counter init hit a transient lock (attempt {}/{}); "
+                             "retrying in {}ms",
+                             attempt + 1, kMaxInitLockRetries, delayMs);
+                // Drop the handle and cached statements so the next attempt reopens cleanly.
+                pImpl->db.reset();
+                pImpl->stmtCache.reset();
+                std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+                continue;
+            }
+            spdlog::error("Failed to initialize reference counter database: {}", e.what());
+            return Result<void>(ErrorCode::DatabaseError);
         }
-
-        pImpl->stmtCache = createReferenceStatementCache(*pImpl->db);
-
-        spdlog::debug("Reference counter database initialized at {}",
-                      pImpl->config.databasePath.string());
-        return {};
-    } catch (const std::exception& e) {
-        spdlog::error("Failed to initialize reference counter database: {}", e.what());
-        return Result<void>(ErrorCode::DatabaseError);
     }
 }
 

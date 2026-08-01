@@ -1812,3 +1812,40 @@ TEST_CASE("ReferenceCounter survives WAL-only checkpoint after forced close",
 
     cleanup();
 }
+
+TEST_CASE("ReferenceCounter init retries when the database is transiently locked",
+          "[storage][reference][lock]") {
+    const auto dbPath = std::filesystem::temp_directory_path() /
+                        std::format("yams_refcount_lock_catch2_{}.db",
+                                    std::chrono::system_clock::now().time_since_epoch().count());
+    struct Cleanup {
+        std::filesystem::path p;
+        ~Cleanup() {
+            std::filesystem::remove(p);
+            std::filesystem::remove(p.string() + "-wal");
+            std::filesystem::remove(p.string() + "-shm");
+        }
+    } cleanup{dbPath};
+
+    // Hold a write lock on the database so the first init attempt must wait.
+    sqlite3* blocker = nullptr;
+    REQUIRE(sqlite3_open(dbPath.c_str(), &blocker) == SQLITE_OK);
+    execSql(blocker, "BEGIN IMMEDIATE");
+
+    // Release the lock shortly after init starts so the retry path is exercised.
+    std::thread releaser([blocker] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        char* err = nullptr;
+        sqlite3_exec(blocker, "ROLLBACK", nullptr, nullptr, &err);
+        sqlite3_free(err);
+        sqlite3_close(blocker);
+    });
+
+    // Small busy timeout keeps the inner retries fast; the outer init retry
+    // must succeed once the lock is released.
+    ReferenceCounter::Config config{.databasePath = dbPath, .enableWAL = true, .busyTimeout = 10};
+    std::unique_ptr<ReferenceCounter> refCounter;
+    REQUIRE_NOTHROW(refCounter = std::make_unique<ReferenceCounter>(std::move(config)));
+
+    releaser.join();
+}
