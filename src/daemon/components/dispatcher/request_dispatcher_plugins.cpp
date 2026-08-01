@@ -1,13 +1,10 @@
 // Split from RequestDispatcher.cpp: plugin-related handlers
-#include <algorithm>
 #include <filesystem>
-#include <set>
 #include <vector>
 #include <yams/daemon/components/dispatch_response.hpp>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/PluginHostFsm.h>
 #include <yams/daemon/components/RequestDispatcher.h>
-#include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/plugin_host.h>
 
@@ -65,56 +62,41 @@ RequestDispatcher::handlePluginScanRequest(const PluginScanRequest& req) {
         "plugin_scan", [this, req]() -> boost::asio::awaitable<Response> {
             co_return co_await guard_plugin_host_ready(
                 serviceManager_, [this, req]() -> boost::asio::awaitable<Response> {
-                    auto abi = serviceManager_ ? serviceManager_->getAbiPluginHost() : nullptr;
-                    auto external =
-                        serviceManager_ ? serviceManager_->getExternalPluginHost() : nullptr;
-
-                    if (!abi && !external)
+                    auto* pluginManager = serviceManager_->getPluginManager();
+                    if (!pluginManager) {
+                        co_return yams::daemon::dispatch::makeErrorResponse(
+                            ErrorCode::InvalidState, "Plugin manager unavailable");
+                    }
+                    if (!pluginManager->getPluginHost() &&
+                        !pluginManager->getExternalPluginHost()) {
                         co_return yams::daemon::dispatch::makeErrorResponse(
                             ErrorCode::NotImplemented, "No plugin host available");
+                    }
 
-                    PluginScanResponse resp;
-                    auto scanTarget = [&](const auto& host, const auto& target) {
-                        if (host) {
-                            if (auto r = host->scanTarget(target)) {
-                                resp.plugins.push_back(toRecord(r.value()));
-                                return true;
-                            }
-                        }
-                        return false;
-                    };
-                    auto scanDirectory = [&](const auto& host, const auto& dir) {
-                        if (host) {
-                            if (auto r = host->scanDirectory(dir))
-                                for (auto& sr : r.value())
-                                    resp.plugins.push_back(toRecord(sr));
-                        }
-                    };
-
+                    std::vector<PluginManager::DiscoveredPlugin> discovered;
                     if (!req.target.empty()) {
-                        // Try ABI first, then external
-                        bool any = scanTarget(abi, req.target);
-                        if (!any && external) {
-                            any = scanTarget(external, req.target);
-                        }
-                        if (!any)
+                        auto result = pluginManager->scanPluginTarget(req.target);
+                        if (!result) {
                             co_return yams::daemon::dispatch::makeErrorResponse(
                                 ErrorCode::NotFound, "No plugin found at target");
-                    } else if (!req.dir.empty()) {
-                        scanDirectory(abi, req.dir);
-                        scanDirectory(external, req.dir);
+                        }
+                        discovered.push_back(result.value());
                     } else {
-                        // Scan default directories for ABI plugins
-                        for (const auto& dir : yams::daemon::dispatch::defaultAbiPluginDirs()) {
-                            scanDirectory(abi, dir);
+                        auto result = req.dir.empty() ? pluginManager->scanConfiguredPluginRoots()
+                                                      : pluginManager->scanPluginDirectory(req.dir);
+                        if (!result) {
+                            co_return yams::daemon::dispatch::makeErrorResponse(
+                                result.error().code, result.error().message);
                         }
-                        // Scan default directories for external plugins
-                        for (const auto& dir :
-                             yams::daemon::dispatch::defaultExternalPluginDirs()) {
-                            scanDirectory(external, dir);
-                        }
+                        discovered = result.value();
                     }
-                    co_return resp;
+
+                    PluginScanResponse response;
+                    response.plugins.reserve(discovered.size());
+                    for (const auto& plugin : discovered) {
+                        response.plugins.push_back(toRecord(plugin.descriptor));
+                    }
+                    co_return response;
                 });
         });
 }
@@ -125,116 +107,44 @@ RequestDispatcher::handlePluginLoadRequest(const PluginLoadRequest& req) {
         "plugin_load", [this, req]() -> boost::asio::awaitable<Response> {
             co_return co_await guard_plugin_host_ready(
                 serviceManager_, [this, req]() -> boost::asio::awaitable<Response> {
-                    auto abi = serviceManager_ ? serviceManager_->getAbiPluginHost() : nullptr;
-                    auto external =
-                        serviceManager_ ? serviceManager_->getExternalPluginHost() : nullptr;
-
-                    if (!abi && !external) {
+                    auto* pluginManager = serviceManager_->getPluginManager();
+                    if (!pluginManager) {
+                        co_return yams::daemon::dispatch::makeErrorResponse(
+                            ErrorCode::InvalidState, "Plugin manager unavailable");
+                    }
+                    if (!pluginManager->getPluginHost() &&
+                        !pluginManager->getExternalPluginHost()) {
                         co_return yams::daemon::dispatch::makeErrorResponse(
                             ErrorCode::NotImplemented, "No plugin host available");
                     }
 
-                    PluginLoadResponse lr;
-                    std::filesystem::path target(req.pathOrName);
-
-                    // Check if it's an external plugin file (.py, .js, or yams-plugin.json nearby)
-                    auto isExternalPlugin = [](const std::filesystem::path& p) -> bool {
-                        auto ext = p.extension().string();
-                        if (ext == ".py" || ext == ".js")
-                            return true;
-                        // Check for yams-plugin.json in same directory
-                        if (std::filesystem::exists(p.parent_path() / "yams-plugin.json"))
-                            return true;
-                        return false;
-                    };
-
-                    auto scanTarget = [&](auto host) -> bool {
-                        if (host && host->scanTarget(target)) {
-                            lr = {false, "dry-run", toRecord(host->scanTarget(target).value())};
-                            return true;
-                        }
-                        return false;
-                    };
-
-                    if (req.dryRun) {
-                        // Try ABI first, then external
-                        if (scanTarget(abi)) {
-                            co_return lr;
-                        }
-                        if (scanTarget(external)) {
-                            co_return lr;
-                        }
+                    auto resolved = pluginManager->resolvePluginTarget(req.pathOrName);
+                    if (!resolved) {
                         co_return yams::daemon::dispatch::makeErrorResponse(ErrorCode::NotFound,
                                                                             "Plugin not found");
                     }
+                    const auto& target = resolved.value();
 
-                    if (!std::filesystem::exists(target)) {
-                        // Search ABI plugin directories
-                        for (const auto& dir : yams::daemon::dispatch::defaultAbiPluginDirs()) {
-                            auto candidate = dir / req.pathOrName;
-                            if (std::filesystem::exists(candidate)) {
-                                target = candidate;
-                                break;
-                            }
-                        }
-                        // Search external plugin directories
-                        if (!std::filesystem::exists(target)) {
-                            for (const auto& dir :
-                                 yams::daemon::dispatch::defaultExternalPluginDirs()) {
-                                auto candidate = dir / req.pathOrName;
-                                if (std::filesystem::exists(candidate)) {
-                                    target = candidate;
-                                    break;
-                                }
-                            }
-                        }
-                        if (!std::filesystem::exists(target)) {
+                    if (req.dryRun) {
+                        auto discovered = pluginManager->scanPluginTarget(target);
+                        if (!discovered) {
                             co_return yams::daemon::dispatch::makeErrorResponse(ErrorCode::NotFound,
                                                                                 "Plugin not found");
                         }
+                        co_return PluginLoadResponse{false, "dry-run",
+                                                     toRecord(discovered.value().descriptor)};
                     }
 
-                    auto loadPlugin = [&](auto host, const std::string& ext = "") -> bool {
-                        if (host && (ext.empty() || target.extension() == ext)) {
-                            if (auto r = host->load(target, req.configJson)) {
-                                lr = {true, "loaded", toRecord(r.value())};
-                                if (serviceManager_) {
-                                    serviceManager_->adoptModelProviderFromHosts(lr.record.name);
-                                    // Refresh status snapshot so new plugin appears in list
-                                    serviceManager_->refreshPluginStatusSnapshot();
-                                }
-                                return true;
-                            }
-                        }
-                        return false;
-                    };
-
-                    // Route to appropriate host based on file type
-                    if (isExternalPlugin(target)) {
-                        // Try external host first for Python/JS plugins
-                        if (loadPlugin(external)) {
-                            co_return lr;
-                        }
-                    } else {
-                        // Try ABI host for native plugins
-                        if (loadPlugin(abi)) {
-                            co_return lr;
-                        }
+                    auto loaded = pluginManager->loadPluginTarget(target, req.configJson);
+                    if (!loaded) {
+                        co_return yams::daemon::dispatch::makeErrorResponse(
+                            ErrorCode::InternalError, "Plugin load failed for: " + target.string());
                     }
 
-                    // Fallback: try the other host
-                    if (isExternalPlugin(target)) {
-                        if (loadPlugin(abi)) {
-                            co_return lr;
-                        }
-                    } else {
-                        if (loadPlugin(external)) {
-                            co_return lr;
-                        }
-                    }
-
-                    co_return yams::daemon::dispatch::makeErrorResponse(
-                        ErrorCode::InternalError, "Plugin load failed for: " + target.string());
+                    PluginLoadResponse response{true, "loaded", toRecord(loaded.value())};
+                    serviceManager_->adoptModelProviderFromHosts(response.record.name);
+                    serviceManager_->refreshPluginStatusSnapshot();
+                    co_return response;
                 });
         });
 }
@@ -245,28 +155,17 @@ RequestDispatcher::handlePluginUnloadRequest(const PluginUnloadRequest& req) con
         "plugin_unload", [this, req]() -> boost::asio::awaitable<Response> {
             co_return co_await guard_plugin_host_ready(
                 serviceManager_, [this, req]() -> boost::asio::awaitable<Response> {
-                    auto abi = serviceManager_ ? serviceManager_->getAbiPluginHost() : nullptr;
-                    auto external =
-                        serviceManager_ ? serviceManager_->getExternalPluginHost() : nullptr;
-
-                    bool ok = false;
-                    // Try ABI host first
-                    if (abi) {
-                        if (auto r = abi->unload(req.name))
-                            ok = true;
-                    }
-                    // Try external host
-                    if (!ok && external) {
-                        if (auto r = external->unload(req.name))
-                            ok = true;
-                    }
-                    if (!ok)
+                    auto* pluginManager = serviceManager_->getPluginManager();
+                    if (!pluginManager) {
                         co_return yams::daemon::dispatch::makeErrorResponse(
-                            ErrorCode::NotFound, "Plugin not found or unload failed");
-                    // Refresh status snapshot so unloaded plugin is removed from list
-                    if (serviceManager_) {
-                        serviceManager_->refreshPluginStatusSnapshot();
+                            ErrorCode::InvalidState, "Plugin manager unavailable");
                     }
+                    auto result = pluginManager->unloadPlugin(req.name);
+                    if (!result) {
+                        co_return yams::daemon::dispatch::makeErrorResponse(
+                            result.error().code, "Plugin not found or unload failed");
+                    }
+                    serviceManager_->refreshPluginStatusSnapshot();
                     co_return SuccessResponse{"unloaded"};
                 });
         });
@@ -278,21 +177,17 @@ RequestDispatcher::handlePluginTrustListRequest(const PluginTrustListRequest& /*
         "plugin_trust_list", [this]() -> boost::asio::awaitable<Response> {
             co_return co_await guard_plugin_host_ready(
                 serviceManager_, [this]() -> boost::asio::awaitable<Response> {
-                    auto abi = serviceManager_ ? serviceManager_->getAbiPluginHost() : nullptr;
-                    auto external =
-                        serviceManager_ ? serviceManager_->getExternalPluginHost() : nullptr;
+                    auto* pluginManager = serviceManager_->getPluginManager();
+                    if (!pluginManager) {
+                        co_return yams::daemon::dispatch::makeErrorResponse(
+                            ErrorCode::InvalidState, "Plugin manager unavailable");
+                    }
 
-                    PluginTrustListResponse resp;
-                    if (abi)
-                        for (auto& p : abi->trustList())
-                            resp.paths.push_back(p.string());
-                    if (external)
-                        for (auto& p : external->trustList())
-                            resp.paths.push_back(p.string());
-                    std::sort(resp.paths.begin(), resp.paths.end());
-                    resp.paths.erase(std::unique(resp.paths.begin(), resp.paths.end()),
-                                     resp.paths.end());
-                    co_return resp;
+                    PluginTrustListResponse response;
+                    for (const auto& path : pluginManager->trustList()) {
+                        response.paths.push_back(path.string());
+                    }
+                    co_return response;
                 });
         });
 }
@@ -303,127 +198,47 @@ RequestDispatcher::handlePluginTrustAddRequest(const PluginTrustAddRequest& req)
         "plugin_trust_add", [this, req]() -> boost::asio::awaitable<Response> {
             co_return co_await guard_plugin_host_ready(
                 serviceManager_, [this, req]() -> boost::asio::awaitable<Response> {
-                    auto abi = serviceManager_ ? serviceManager_->getAbiPluginHost() : nullptr;
-                    auto external =
-                        serviceManager_ ? serviceManager_->getExternalPluginHost() : nullptr;
-
-                    // Add to both ABI and external trust lists
-                    bool abiOk = abi && abi->trustAdd(req.path);
-                    bool externalOk = external && external->trustAdd(req.path);
-
-                    if (!abiOk && !externalOk) {
+                    auto* pluginManager = serviceManager_->getPluginManager();
+                    if (!pluginManager) {
+                        co_return yams::daemon::dispatch::makeErrorResponse(
+                            ErrorCode::InvalidState, "Plugin manager unavailable");
+                    }
+                    if (auto trustResult = pluginManager->trustAdd(req.path); !trustResult) {
                         co_return yams::daemon::dispatch::makeErrorResponse(ErrorCode::Unknown,
                                                                             "Trust add failed");
                     }
 
-                    auto path = std::filesystem::path(req.path);
-
-                    auto getLoadedPaths = [](auto host) -> std::set<std::filesystem::path> {
-                        std::set<std::filesystem::path> paths;
-                        if (host) {
-                            for (const auto& desc : host->listLoaded()) {
-                                // Store both the exact path and parent directory.
-                                paths.insert(std::filesystem::weakly_canonical(desc.path));
-                                if (desc.path.has_parent_path()) {
-                                    paths.insert(
-                                        std::filesystem::weakly_canonical(desc.path.parent_path()));
-                                }
-                            }
-                        }
-                        return paths;
-                    };
-
-                    auto isAlreadyLoaded = [](const std::filesystem::path& p,
-                                              const std::set<std::filesystem::path>& loaded) {
-                        auto canonical = std::filesystem::weakly_canonical(p);
-                        return loaded.count(canonical) > 0;
-                    };
+                    const auto path = std::filesystem::path(req.path);
+                    if (pluginManager->isPluginLoadedFrom(path)) {
+                        spdlog::debug("trust add: path {} already loaded, skipping scan",
+                                      path.string());
+                        co_return SuccessResponse{"ok"};
+                    }
 
                     auto refreshLoadedPlugins = [sm = serviceManager_]() {
-                        if (sm) {
-                            (void)sm->adoptModelProviderFromHosts();
-                            sm->refreshPluginStatusSnapshot();
-                        }
+                        (void)sm->adoptModelProviderFromHosts();
+                        sm->refreshPluginStatusSnapshot();
                     };
 
-                    const auto abiLoadedPaths = getLoadedPaths(abi);
-                    const auto externalLoadedPaths = getLoadedPaths(external);
-                    if (isAlreadyLoaded(path, abiLoadedPaths) ||
-                        isAlreadyLoaded(path, externalLoadedPaths)) {
-                        spdlog::debug("trust add: path {} already loaded, skipping scan",
-                                      path.string());
-                        co_return SuccessResponse{"ok"};
-                    }
-
-                    const bool skipAbi = !abi;
-                    const bool skipExternal = !external;
-
-                    if (skipAbi && skipExternal) {
-                        spdlog::debug("trust add: path {} already loaded, skipping scan",
-                                      path.string());
-                        co_return SuccessResponse{"ok"};
-                    }
-
                     if (std::filesystem::is_regular_file(path)) {
-                        auto ext = path.extension().string();
-                        std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
-
-                        bool loaded = false;
-                        if (ext == ".py" || ext == ".js") {
-                            if (external && !skipExternal) {
-                                loaded = external->load(path, "").has_value();
-                            }
-                        } else if (abi && !skipAbi) {
-                            loaded = abi->load(path, "").has_value();
-                        }
-
+                        auto loaded = pluginManager->loadPluginTarget(path);
                         if (!loaded) {
                             co_return yams::daemon::dispatch::makeErrorResponse(
                                 ErrorCode::InternalError,
                                 "Plugin load failed for: " + path.string());
                         }
-
                         refreshLoadedPlugins();
                         co_return SuccessResponse{"ok"};
                     }
 
-                    auto exec = serviceManager_->getWorkerExecutor();
-                    boost::asio::co_spawn(
-                        exec,
-                        [abi, external, path, skipAbi, skipExternal,
-                         refreshLoadedPlugins =
-                             std::move(refreshLoadedPlugins)]() -> boost::asio::awaitable<void> {
-                            try {
-                                auto loadPlugins = [](auto host, const auto& dir) {
-                                    if (host) {
-                                        if (auto r = host->scanDirectory(dir)) {
-                                            for (const auto& d : r.value()) {
-                                                (void)host->load(d.path, "");
-                                            }
-                                        }
-                                    }
-                                };
-
-                                if (std::filesystem::is_directory(path)) {
-                                    if (!skipAbi)
-                                        loadPlugins(abi, path);
-                                    if (!skipExternal)
-                                        loadPlugins(external, path);
-                                }
-
-                                refreshLoadedPlugins();
-                            } catch (const std::exception& e) {
-                                spdlog::warn("trust add async load failed for {}: {}",
-                                             path.string(), e.what());
-                            } catch (...) {
-                                spdlog::warn(
-                                    "trust add async load failed for {} with unknown error",
-                                    path.string());
-                            }
-                            co_return;
-                        },
-                        boost::asio::detached);
-
+                    if (std::filesystem::is_directory(path)) {
+                        auto loaded = pluginManager->loadPluginDirectory(path);
+                        if (!loaded) {
+                            yams::daemon::dispatch::logDispatchFailureNoexcept(
+                                "plugin_trust_add", loaded.error().message.c_str());
+                        }
+                    }
+                    refreshLoadedPlugins();
                     co_return SuccessResponse{"ok"};
                 });
         });
@@ -435,19 +250,11 @@ RequestDispatcher::handlePluginTrustRemoveRequest(const PluginTrustRemoveRequest
         "plugin_trust_remove", [this, req]() -> boost::asio::awaitable<Response> {
             co_return co_await guard_plugin_host_ready(
                 serviceManager_, [this, req]() -> boost::asio::awaitable<Response> {
-                    auto abi = serviceManager_ ? serviceManager_->getAbiPluginHost() : nullptr;
-                    auto external =
-                        serviceManager_ ? serviceManager_->getExternalPluginHost() : nullptr;
-
-                    // Remove from both hosts
-                    bool abiOk = abi && abi->trustRemove(req.path);
-                    bool externalOk = external && external->trustRemove(req.path);
-
-                    if (!abiOk && !externalOk) {
+                    auto* pluginManager = serviceManager_->getPluginManager();
+                    if (!pluginManager || !pluginManager->trustRemove(req.path)) {
                         co_return yams::daemon::dispatch::makeErrorResponse(ErrorCode::Unknown,
                                                                             "Trust remove failed");
                     }
-
                     co_return SuccessResponse{"ok"};
                 });
         });

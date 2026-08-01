@@ -323,7 +323,7 @@ TEST_CASE("ExternalPluginHost - Load Non-Existent Plugin", "[external-plugin][ho
 
     auto result = host.load("/nonexistent/plugin.py", "{}");
     REQUIRE_FALSE(result.has_value());
-    CHECK(result.error().code == ErrorCode::FileNotFound);
+    CHECK((result.error().code == ErrorCode::FileNotFound));
 }
 
 TEST_CASE("ExternalPluginHost - Unload Non-Existent Plugin", "[external-plugin][host][unload]") {
@@ -333,7 +333,7 @@ TEST_CASE("ExternalPluginHost - Unload Non-Existent Plugin", "[external-plugin][
 
     auto result = host.unload("nonexistent-plugin");
     REQUIRE_FALSE(result.has_value());
-    CHECK(result.error().code == ErrorCode::NotFound);
+    CHECK((result.error().code == ErrorCode::NotFound));
 }
 
 TEST_CASE("ExternalPluginHost - Health Check Non-Existent Plugin",
@@ -344,7 +344,7 @@ TEST_CASE("ExternalPluginHost - Health Check Non-Existent Plugin",
 
     auto result = host.health("nonexistent-plugin");
     REQUIRE_FALSE(result.has_value());
-    CHECK(result.error().code == ErrorCode::NotFound);
+    CHECK((result.error().code == ErrorCode::NotFound));
 }
 
 TEST_CASE("ExternalPluginHost - RPC Call Non-Existent Plugin", "[external-plugin][host][rpc]") {
@@ -355,7 +355,7 @@ TEST_CASE("ExternalPluginHost - RPC Call Non-Existent Plugin", "[external-plugin
     nlohmann::json emptyParams = nlohmann::json::object();
     auto result = host.callRpc("nonexistent-plugin", "test.method", emptyParams);
     REQUIRE_FALSE(result.has_value());
-    CHECK(result.error().code == ErrorCode::NotFound);
+    CHECK((result.error().code == ErrorCode::NotFound));
 }
 
 TEST_CASE("ExternalPluginHost - Scan Empty Directory", "[external-plugin][host][scan]") {
@@ -378,7 +378,7 @@ TEST_CASE("ExternalPluginHost - Scan Non-Existent Directory", "[external-plugin]
 
     auto result = host.scanDirectory("/nonexistent/directory");
     REQUIRE_FALSE(result.has_value());
-    CHECK(result.error().code == ErrorCode::InvalidPath);
+    CHECK((result.error().code == ErrorCode::InvalidPath));
 }
 
 TEST_CASE("ExternalPluginHost - Get Stats Empty", "[external-plugin][host][stats]") {
@@ -388,7 +388,7 @@ TEST_CASE("ExternalPluginHost - Get Stats Empty", "[external-plugin][host][stats
 
     auto stats = host.getStats();
     REQUIRE(stats.contains("total_loaded"));
-    CHECK(stats["total_loaded"].get<size_t>() == 0);
+    CHECK((stats["total_loaded"].get<size_t>() == 0));
     REQUIRE(stats.contains("plugins"));
     CHECK(stats["plugins"].is_array());
     CHECK(stats["plugins"].empty());
@@ -442,13 +442,13 @@ TEST_CASE("ExternalPluginHost - Plugin Manifest Interfaces Parsing",
         REQUIRE(result.has_value());
 
         const auto& desc = result.value();
-        CHECK(desc.name == "test_interfaces_plugin");
-        CHECK(desc.version == "1.0.0");
+        CHECK((desc.name == "test_interfaces_plugin"));
+        CHECK((desc.version == "1.0.0"));
 
         // Verify interfaces were parsed
-        REQUIRE(desc.interfaces.size() == 2);
-        CHECK(desc.interfaces[0] == "content_extractor_v1");
-        CHECK(desc.interfaces[1] == "kg_entity_provider_v1");
+        REQUIRE((desc.interfaces.size() == 2));
+        CHECK((desc.interfaces[0] == "content_extractor_v1"));
+        CHECK((desc.interfaces[1] == "kg_entity_provider_v1"));
     }
 
     SECTION("Empty interfaces array results in empty interfaces") {
@@ -499,11 +499,11 @@ TEST_CASE("ExternalPluginHost - Plugin Manifest Interfaces Parsing",
 
         const auto& desc = result.value();
         // Should have inferred interfaces from capabilities
-        REQUIRE(desc.interfaces.size() == 2);
-        CHECK(std::find(desc.interfaces.begin(), desc.interfaces.end(), "content_extractor_v1") !=
-              desc.interfaces.end());
-        CHECK(std::find(desc.interfaces.begin(), desc.interfaces.end(), "symbol_extractor_v1") !=
-              desc.interfaces.end());
+        REQUIRE((desc.interfaces.size() == 2));
+        CHECK((std::find(desc.interfaces.begin(), desc.interfaces.end(), "content_extractor_v1") !=
+               desc.interfaces.end()));
+        CHECK((std::find(desc.interfaces.begin(), desc.interfaces.end(), "symbol_extractor_v1") !=
+               desc.interfaces.end()));
     }
 }
 

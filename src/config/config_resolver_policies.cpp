@@ -9,7 +9,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <charconv>
 #include <cstdlib>
 #include <filesystem>
 #include <map>
@@ -83,6 +82,11 @@ bool ConfigResolver::envTruthy(const char* value) {
     std::string v(value);
     std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return std::tolower(c); });
     return !(v == "0" || v == "false" || v == "off" || v == "no");
+}
+
+bool ConfigResolver::resolvePluginDirStrict(bool configuredStrict) {
+    const auto override = readEnvString("YAMS_PLUGIN_DIR_STRICT");
+    return override ? envTruthy(override->c_str()) : configuredStrict;
 }
 
 std::filesystem::path ConfigResolver::resolveDefaultConfigPath() {

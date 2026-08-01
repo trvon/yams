@@ -7,32 +7,132 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include "../../../common/test_helpers_catch2.h"
+
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/resource/model_provider.h>
+#include <yams/daemon/resource/plugin_content_extractor_adapter.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
-#include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
+#include <utility>
 
-#ifdef _WIN32
-static int setenv(const char* name, const char* value, int /*overwrite*/) {
-    return _putenv_s(name, value);
-}
-static void unsetenv(const char* name) {
-    _putenv_s(name, "");
-}
-#endif
+#include <nlohmann/json.hpp>
 
 using namespace yams::daemon;
 
+template <typename T>
+concept HasIndependentPluginStatusSnapshot =
+    requires(const T& manager) { manager.getStatusSnapshot(); };
+
+static_assert(!HasIndependentPluginStatusSnapshot<PluginManager>,
+              "ServiceManager is the sole plugin status snapshot authority");
+
 namespace {
+
+class CountingAbiPluginHost final : public AbiPluginHost {
+public:
+    CountingAbiPluginHost() = default;
+
+    std::vector<PluginDescriptor> listLoaded() const override {
+        ++listCalls;
+        if (unloadCalls == 0) {
+            return {{.name = "counted_plugin"}};
+        }
+        return {};
+    }
+
+    yams::Result<void> unload(const std::string&) override {
+        ++unloadCalls;
+        return {};
+    }
+
+    mutable std::size_t listCalls{0};
+    std::size_t unloadCalls{0};
+};
+
+class RecordingPluginHost final : public IPluginHost {
+public:
+    yams::Result<PluginDescriptor> scanTarget(const std::filesystem::path&) override {
+        return descriptor;
+    }
+    yams::Result<std::vector<PluginDescriptor>>
+    scanDirectory(const std::filesystem::path&) override {
+        return std::vector<PluginDescriptor>{descriptor};
+    }
+    yams::Result<PluginDescriptor> load(const std::filesystem::path& path,
+                                        const std::string& configJson) override {
+        loadedPath = path;
+        loadedConfigJson = configJson;
+        descriptor.path = path;
+        return descriptor;
+    }
+    yams::Result<void> unload(const std::string&) override { return {}; }
+    std::vector<PluginDescriptor> listLoaded() const override { return {}; }
+    std::vector<std::filesystem::path> trustList() const override { return {}; }
+    yams::Result<void> trustAdd(const std::filesystem::path&) override { return {}; }
+    yams::Result<void> trustRemove(const std::filesystem::path&) override { return {}; }
+    yams::Result<std::string> health(const std::string&) override { return std::string("{}"); }
+
+    PluginDescriptor descriptor;
+    std::filesystem::path loadedPath;
+    std::string loadedConfigJson;
+};
+
+class DiscoveryAbiPluginHost final : public AbiPluginHost {
+public:
+    yams::Result<PluginDescriptor> scanTarget(const std::filesystem::path& path) override {
+        ++targetScans;
+        auto result = descriptor;
+        result.path = path;
+        return result;
+    }
+
+    yams::Result<std::vector<PluginDescriptor>>
+    scanDirectory(const std::filesystem::path& path) override {
+        ++directoryScans;
+        auto result = descriptor;
+        result.path = path / descriptor.path.filename();
+        return std::vector<PluginDescriptor>{result};
+    }
+
+    yams::Result<PluginDescriptor> load(const std::filesystem::path& path,
+                                        const std::string& configJson) override {
+        ++loads;
+        loadedConfigJson = configJson;
+        auto result = descriptor;
+        result.path = path;
+        loadedPlugins.push_back(result);
+        return result;
+    }
+
+    yams::Result<void> unload(const std::string& name) override {
+        std::erase_if(loadedPlugins, [&](const auto& loaded) { return loaded.name == name; });
+        return {};
+    }
+
+    std::vector<PluginDescriptor> listLoaded() const override { return loadedPlugins; }
+    std::vector<std::filesystem::path> trustList() const override { return trustedPaths; }
+
+    PluginDescriptor descriptor{.name = "libyams_glint",
+                                .path = "libyams_glint.so",
+                                .interfaces = {"content_extractor_v1"}};
+    std::vector<std::filesystem::path> trustedPaths;
+    std::vector<PluginDescriptor> loadedPlugins;
+    std::size_t targetScans{0};
+    std::size_t directoryScans{0};
+    std::size_t loads{0};
+    std::string loadedConfigJson;
+};
 
 struct PluginManagerFixture {
     std::filesystem::path tempDir;
@@ -71,13 +171,26 @@ struct PluginManagerFixture {
 
 } // namespace
 
+TEST_CASE("PluginContentExtractorAdapter retains ABI plugin lease",
+          "[daemon][components][plugin][lifetime][catch2]") {
+    auto keepAlive = std::make_shared<int>(42);
+    std::weak_ptr<int> weakKeepAlive = keepAlive;
+    auto adapter = std::make_shared<PluginContentExtractorAdapter>(
+        nullptr, std::static_pointer_cast<void>(keepAlive));
+    keepAlive.reset();
+
+    CHECK_FALSE(weakKeepAlive.expired());
+    adapter.reset();
+    CHECK(weakKeepAlive.expired());
+}
+
 TEST_CASE_METHOD(PluginManagerFixture, "PluginManager construction",
                  "[daemon][components][plugin][catch2]") {
     auto deps = makeDeps();
 
     SECTION("construction succeeds with valid dependencies") {
         PluginManager mgr(deps);
-        CHECK(mgr.getName() == std::string("PluginManager"));
+        CHECK((mgr.getName() == std::string("PluginManager")));
     }
 }
 
@@ -110,6 +223,33 @@ TEST_CASE_METHOD(PluginManagerFixture, "PluginManager initialize/shutdown lifecy
     }
 }
 
+TEST_CASE_METHOD(PluginManagerFixture, "PluginManager autoload is synchronous",
+                 "[daemon][components][plugin][autoload][catch2]") {
+    config.useMockModelProvider = true;
+    PluginManager mgr(makeDeps());
+    REQUIRE(mgr.initialize());
+
+    const auto result = mgr.autoloadPlugins();
+
+    REQUIRE(result);
+    CHECK((result.value() == 0));
+}
+
+TEST_CASE_METHOD(PluginManagerFixture, "PluginManager owns shared host shutdown",
+                 "[daemon][components][plugin][ownership][catch2]") {
+    CountingAbiPluginHost sharedHost;
+    auto deps = makeDeps();
+    deps.sharedPluginHost = &sharedHost;
+    PluginManager mgr(deps);
+    REQUIRE(mgr.initialize());
+
+    mgr.shutdown();
+    mgr.shutdown();
+
+    CHECK((sharedHost.listCalls == 1));
+    CHECK((sharedHost.unloadCalls == 1));
+}
+
 TEST_CASE_METHOD(PluginManagerFixture, "PluginManager plugin host accessors",
                  "[daemon][components][plugin][catch2]") {
     auto deps = makeDeps();
@@ -122,14 +262,161 @@ TEST_CASE_METHOD(PluginManagerFixture, "PluginManager plugin host accessors",
         (void)host;
     }
 
-    SECTION("plugin loader is nullptr before init") {
-        auto loader = mgr.getPluginLoader();
-        (void)loader;
-    }
-
     SECTION("external plugin host is nullptr before init") {
         auto ext = mgr.getExternalPluginHost();
         (void)ext;
+    }
+}
+
+TEST_CASE_METHOD(PluginManagerFixture, "PluginManager applies name policy to fallback host",
+                 "[daemon][components][plugin][policy][catch2]") {
+    yams::test::ScopedEnvVar namePolicyEnv("YAMS_PLUGIN_NAME_POLICY", std::nullopt);
+    config.pluginNamePolicy = "spec";
+
+    const auto nonPlugin = tempDir / "third_party.so";
+    {
+        std::ofstream pluginFile(nonPlugin, std::ios::binary);
+        REQUIRE(pluginFile.good());
+        pluginFile.put('\0');
+    }
+
+    const auto requireSpecPolicy = [&](AbiPluginHost& host) {
+        REQUIRE(host.scanDirectory(tempDir));
+        const auto skips = host.getLastScanSkips();
+        const auto skip = std::find_if(skips.begin(), skips.end(),
+                                       [&](const auto& entry) { return entry.first == nonPlugin; });
+        REQUIRE((skip != skips.end()));
+        CHECK((skip->second == "name policy: require libyams_* or yams_*"));
+    };
+
+    SECTION("fallback host") {
+        PluginManager mgr(makeDeps());
+        REQUIRE(mgr.initialize());
+        auto* host = mgr.getPluginHost();
+        REQUIRE((host != nullptr));
+        requireSpecPolicy(*host);
+    }
+
+    SECTION("shared host") {
+        AbiPluginHost sharedHost(tempDir / "shared-plugins.trust");
+        auto deps = makeDeps();
+        deps.sharedPluginHost = &sharedHost;
+        PluginManager mgr(deps);
+        REQUIRE(mgr.initialize());
+        requireSpecPolicy(sharedHost);
+    }
+}
+
+TEST_CASE_METHOD(PluginManagerFixture, "PluginManager configured loads use one config path",
+                 "[daemon][components][plugin][config][catch2]") {
+    PluginManager mgr(makeDeps());
+    RecordingPluginHost host;
+
+    SECTION("short aliases resolve for ABI and external hosts") {
+        config.pluginConfigs["glint"] = R"({"mode":"fast"})";
+        host.descriptor.name = "yams_glint";
+        host.descriptor.path = tempDir / "libyams_glint.so";
+
+        REQUIRE(mgr.loadConfiguredPlugin(host, host.descriptor));
+        CHECK((host.loadedPath == host.descriptor.path));
+        CHECK((host.loadedConfigJson == R"({"mode":"fast"})"));
+    }
+
+    SECTION("conflicting aliases fail closed") {
+        config.pluginConfigs["glint"] = R"({"mode":"short"})";
+        config.pluginConfigs["yams_glint"] = R"({"mode":"prefixed"})";
+        host.descriptor.name = "yams_glint";
+        host.descriptor.path = tempDir / "libyams_glint.so";
+
+        auto result = mgr.loadConfiguredPlugin(host, host.descriptor);
+
+        REQUIRE_FALSE(result);
+        CHECK((result.error().code == yams::ErrorCode::InvalidData));
+        CHECK(host.loadedPath.empty());
+    }
+
+    SECTION("ONNX pool constraints are applied after config resolution") {
+        config.pluginConfigs["onnx"] = R"({"mode":"fast"})";
+        config.modelPoolConfig.maxLoadedModels = 7;
+        host.descriptor.name = "yams_onnx";
+        host.descriptor.path = tempDir / "libyams_onnx.so";
+        host.descriptor.interfaces = {"model_provider_v1"};
+
+        REQUIRE(mgr.loadConfiguredPlugin(host, host.descriptor));
+        const auto loadedConfig = nlohmann::json::parse(host.loadedConfigJson);
+        CHECK((loadedConfig["mode"] == "fast"));
+        CHECK((loadedConfig["max_loaded_models"] == 7));
+    }
+}
+
+TEST_CASE_METHOD(PluginManagerFixture, "PluginManager owns discovery routing and loading",
+                 "[daemon][components][plugin][discovery][catch2]") {
+    config.pluginDirStrict = true;
+    DiscoveryAbiPluginHost abiHost;
+    abiHost.trustedPaths = {tempDir / "plugins", tempDir / "plugins"};
+    config.pluginConfigs["glint"] = R"({"mode":"canonical"})";
+
+    auto deps = makeDeps();
+    deps.sharedPluginHost = &abiHost;
+    PluginManager mgr(deps);
+    REQUIRE(mgr.initialize());
+
+    SECTION("target discovery chooses one host and uses canonical configured load") {
+        abiHost.descriptor.interfaces.clear();
+        const auto pluginPath = tempDir / "libyams_glint.so";
+        auto discovered = mgr.scanPluginTarget(pluginPath);
+        REQUIRE(discovered);
+        CHECK((discovered.value().host == PluginManager::PluginHostKind::Abi));
+        CHECK((discovered.value().descriptor.path == pluginPath));
+        CHECK((abiHost.targetScans == 1));
+
+        auto loaded = mgr.loadDiscoveredPlugin(discovered.value());
+        REQUIRE(loaded);
+        CHECK((abiHost.loads == 1));
+        CHECK((abiHost.loadedConfigJson == R"({"mode":"canonical"})"));
+        auto snapshot = mgr.getPluginHostFsmSnapshot();
+        CHECK((snapshot.state == PluginHostState::Ready));
+        CHECK((snapshot.loadedCount == 1));
+        CHECK((snapshot.loadedPlugins == std::vector<std::string>{"libyams_glint"}));
+
+        REQUIRE(mgr.unloadPlugin("libyams_glint"));
+        snapshot = mgr.getPluginHostFsmSnapshot();
+        CHECK((snapshot.state == PluginHostState::Ready));
+        CHECK((snapshot.loadedCount == 0));
+        CHECK(snapshot.loadedPlugins.empty());
+    }
+
+    SECTION("runtime interfaces reject unsafe hot unload") {
+        const std::array<const char*, 6> runtimeInterfaces = {
+            "model_provider_v1",   "content_extractor_v1",  "symbol_extractor_v1",
+            "entity_extractor_v2", "kg_entity_provider_v1", "future_runtime_v9"};
+        for (const auto* interfaceName : runtimeInterfaces) {
+            INFO("interface=" << interfaceName);
+            abiHost.descriptor.interfaces = {interfaceName};
+            abiHost.loadedPlugins = {abiHost.descriptor};
+
+            auto result = mgr.unloadPlugin("libyams_glint");
+            REQUIRE_FALSE(result);
+            CHECK((result.error().code == yams::ErrorCode::InvalidState));
+            CHECK((abiHost.loadedPlugins.size() == 1));
+        }
+    }
+
+    SECTION("configured discovery roots are deduplicated and obey strict mode") {
+        auto discovered = mgr.scanConfiguredPluginRoots();
+        REQUIRE(discovered);
+        REQUIRE((discovered.value().size() == 1));
+        CHECK((discovered.value().front().host == PluginManager::PluginHostKind::Abi));
+        CHECK((abiHost.directoryScans == 1));
+    }
+
+    SECTION("loaded child does not suppress its containing directory") {
+        const auto pluginDirectory = tempDir / "plugins";
+        const auto loadedPath = pluginDirectory / "libyams_one.so";
+        abiHost.loadedPlugins = {{.name = "yams_one", .path = loadedPath}};
+
+        CHECK(mgr.isPluginLoadedFrom(loadedPath));
+        CHECK_FALSE(mgr.isPluginLoadedFrom(pluginDirectory));
     }
 }
 
@@ -168,42 +455,18 @@ TEST_CASE("PluginManager getName returns component name", "[daemon][components][
     deps.resolvePreferredModel = []() { return std::string("test"); };
 
     PluginManager mgr(deps);
-    CHECK(std::string(mgr.getName()) == "PluginManager");
+    CHECK((std::string(mgr.getName()) == "PluginManager"));
 }
 
 namespace {
 
 struct ScopedEmbedBackend {
-    std::string savedBackend;
-    bool hadBackend{false};
-    std::string savedPreferred;
-    bool hadPreferred{false};
+    yams::test::ScopedEnvVar backend;
+    yams::test::ScopedEnvVar preferredModel;
 
-    explicit ScopedEmbedBackend(const char* backend) {
-        if (const char* p = std::getenv("YAMS_EMBED_BACKEND")) {
-            savedBackend = p;
-            hadBackend = true;
-        }
-        if (const char* p = std::getenv("YAMS_PREFERRED_MODEL")) {
-            savedPreferred = p;
-            hadPreferred = true;
-        }
-        setenv("YAMS_EMBED_BACKEND", backend, 1);
-        unsetenv("YAMS_PREFERRED_MODEL");
-    }
-
-    ~ScopedEmbedBackend() {
-        if (hadBackend) {
-            setenv("YAMS_EMBED_BACKEND", savedBackend.c_str(), 1);
-        } else {
-            unsetenv("YAMS_EMBED_BACKEND");
-        }
-        if (hadPreferred) {
-            setenv("YAMS_PREFERRED_MODEL", savedPreferred.c_str(), 1);
-        } else {
-            unsetenv("YAMS_PREFERRED_MODEL");
-        }
-    }
+    explicit ScopedEmbedBackend(const char* selectedBackend)
+        : backend("YAMS_EMBED_BACKEND", std::string(selectedBackend)),
+          preferredModel("YAMS_PREFERRED_MODEL", std::nullopt) {}
 };
 
 class TaggedInProcessProvider : public IModelProvider {
@@ -280,10 +543,10 @@ TEST_CASE_METHOD(PluginManagerFixture,
     REQUIRE(result.value());
 
     auto provider = mgr.getModelProvider();
-    REQUIRE(provider != nullptr);
-    CHECK(provider->getProviderName() == expectedTag);
+    REQUIRE((provider != nullptr));
+    CHECK((provider->getProviderName() == expectedTag));
     CHECK(provider->isTrainingFree());
-    CHECK(mgr.getEmbeddingModelName() == expectedTag);
+    CHECK((mgr.getEmbeddingModelName() == expectedTag));
 }
 
 TEST_CASE_METHOD(
@@ -299,5 +562,5 @@ TEST_CASE_METHOD(
     auto result = mgr.adoptModelProvider();
     REQUIRE(result.has_value());
     CHECK_FALSE(result.value());
-    CHECK(mgr.getModelProvider() == nullptr);
+    CHECK((mgr.getModelProvider() == nullptr));
 }

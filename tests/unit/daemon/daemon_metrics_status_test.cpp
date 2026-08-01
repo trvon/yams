@@ -849,7 +849,8 @@ std::filesystem::path writeTempFile(const std::string& prefix, const std::string
 }
 
 std::filesystem::path createMockExternalPlugin(const std::filesystem::path& baseDir,
-                                               const std::string& name) {
+                                               const std::string& name,
+                                               bool requireTrustedConfig = false) {
     auto pluginDir = baseDir / name;
     std::filesystem::create_directories(pluginDir);
 
@@ -858,6 +859,9 @@ std::filesystem::path createMockExternalPlugin(const std::filesystem::path& base
         pluginFile << R"PY(#!/usr/bin/env python3
 import json
 import sys
+
+EXPECTED_MODE = )PY"
+                   << (requireTrustedConfig ? R"PY("trusted")PY" : "None") << R"PY(
 
 
 def handle_request(req):
@@ -869,6 +873,8 @@ def handle_request(req):
             "interfaces": ["content_extractor_v1"]
         }
     if method == "plugin.init":
+        if EXPECTED_MODE and req.get("params", {}).get("mode") != EXPECTED_MODE:
+            raise ValueError("missing configured mode")
         return {"status": "initialized"}
     if method == "plugin.health":
         return {"status": "ok"}
@@ -5544,9 +5550,12 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
 
 TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches",
           "[daemon][plugin][dispatcher]") {
-    auto makeReadyService = []() {
+    auto makeReadyService = [](bool configureExternalPlugin = false) {
         DaemonConfig cfg;
         cfg.dataDir = makeTempDir("yams_plugin_dispatcher_");
+        if (configureExternalPlugin) {
+            cfg.pluginConfigs["dispatcher_external_plugin"] = R"({"mode":"trusted"})";
+        }
 
         auto state = std::make_unique<StateComponent>();
         state->readiness.contentStoreReady.store(true, std::memory_order_relaxed);
@@ -5685,6 +5694,33 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
         CHECK(err.message == "Plugin not found");
     }
 
+    SECTION("plugin dry run does not execute an untrusted standalone script") {
+        auto [state, lifecycleFsm, svc] = makeReadyService();
+        StubLifecycle lifecycle;
+        RequestDispatcher dispatcher(&lifecycle, svc.get(), state.get());
+        auto shimPath = makePythonShimPath();
+        ScopedEnvVar pythonGuard("PATH", shimPath.c_str());
+
+        const auto scanDir = makeTempDir("yams_untrusted_plugin_scan_");
+        const auto marker = scanDir / "scan-executed";
+        const auto script = scanDir / "untrusted.py";
+        {
+            std::ofstream out(script);
+            CHECK(out.good());
+            out << "from pathlib import Path\nPath(" << nlohmann::json(marker.string()).dump()
+                << ").write_text('executed')\n";
+        }
+
+        PluginLoadRequest request;
+        request.pathOrName = script.string();
+        request.dryRun = true;
+        auto response = dispatchRequest(dispatcher, Request{request});
+
+        CHECK(std::holds_alternative<ErrorResponse>(response));
+        CHECK_FALSE(std::filesystem::exists(marker));
+        std::filesystem::remove_all(scanDir);
+    }
+
     SECTION("plugin scan and load search default directories") {
         auto homeDir = makeTempDir("yams_plugin_home_");
         auto homeText = homeDir.string();
@@ -5781,7 +5817,9 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
 
         auto externalUnloadResp =
             dispatchRequest(dispatcher, Request{PluginUnloadRequest{"dispatcher_external_plugin"}});
-        REQUIRE(std::holds_alternative<SuccessResponse>(externalUnloadResp));
+        REQUIRE(std::holds_alternative<ErrorResponse>(externalUnloadResp));
+        CHECK((std::get<ErrorResponse>(externalUnloadResp).code == ErrorCode::InvalidState));
+        CHECK((external->listLoaded().size() == 1));
     }
 
     SECTION("plugin handlers route external plugins when ABI host is absent") {
@@ -5831,9 +5869,9 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
         auto unloadResp =
             dispatchRequest(dispatcher, Request{PluginUnloadRequest{"dispatcher_external_plugin"}});
 
-        REQUIRE(std::holds_alternative<SuccessResponse>(unloadResp));
-        CHECK(std::get<SuccessResponse>(unloadResp).message == "unloaded");
-        CHECK(external->listLoaded().empty());
+        REQUIRE(std::holds_alternative<ErrorResponse>(unloadResp));
+        CHECK((std::get<ErrorResponse>(unloadResp).code == ErrorCode::InvalidState));
+        CHECK((external->listLoaded().size() == 1));
     }
 
     SECTION("plugin load routes direct external files before ABI fallback") {
@@ -5864,7 +5902,9 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
 
         auto unloadResp =
             dispatchRequest(dispatcher, Request{PluginUnloadRequest{"dispatcher_external_plugin"}});
-        REQUIRE(std::holds_alternative<SuccessResponse>(unloadResp));
+        REQUIRE(std::holds_alternative<ErrorResponse>(unloadResp));
+        CHECK((std::get<ErrorResponse>(unloadResp).code == ErrorCode::InvalidState));
+        CHECK((external->listLoaded().size() == 1));
     }
 
     SECTION("plugin load recognizes manifest-adjacent executable files") {
@@ -5903,7 +5943,9 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
 
         auto unloadResp =
             dispatchRequest(dispatcher, Request{PluginUnloadRequest{"dispatcher_external_plugin"}});
-        REQUIRE(std::holds_alternative<SuccessResponse>(unloadResp));
+        REQUIRE(std::holds_alternative<ErrorResponse>(unloadResp));
+        CHECK((std::get<ErrorResponse>(unloadResp).code == ErrorCode::InvalidState));
+        CHECK((external->listLoaded().size() == 1));
 #endif
     }
 
@@ -5927,15 +5969,15 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
         CHECK(err.message == "Plugin load failed for: " + pluginFile.string());
     }
 
-    SECTION("plugin trust add loads regular files and reuses loaded path metadata") {
-        auto [state, lifecycleFsm, svc] = makeReadyService();
+    SECTION("plugin trust add loads regular files with configured plugin settings") {
+        auto [state, lifecycleFsm, svc] = makeReadyService(true);
         StubLifecycle lifecycle;
         RequestDispatcher dispatcher(&lifecycle, svc.get(), state.get());
         auto shimPath = makePythonShimPath();
         ScopedEnvVar pythonGuard("PATH", shimPath.c_str());
 
-        auto pluginDir =
-            createMockExternalPlugin(svc->getResolvedDataDir(), "dispatcher_external_trust_file");
+        auto pluginDir = createMockExternalPlugin(svc->getResolvedDataDir(),
+                                                  "dispatcher_external_trust_file", true);
         auto pluginFile = pluginDir / "plugin.py";
 
         auto trustAddResp =
@@ -5954,7 +5996,9 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
 
         auto unloadResp =
             dispatchRequest(dispatcher, Request{PluginUnloadRequest{"dispatcher_external_plugin"}});
-        REQUIRE(std::holds_alternative<SuccessResponse>(unloadResp));
+        REQUIRE(std::holds_alternative<ErrorResponse>(unloadResp));
+        CHECK((std::get<ErrorResponse>(unloadResp).code == ErrorCode::InvalidState));
+        CHECK((external->listLoaded().size() == 1));
     }
 }
 
@@ -6794,7 +6838,7 @@ TEST_CASE("AbiPluginHost: failed plugin loads are retained in last scan skips",
         SKIP("Installed yams_glint plugin not present");
     }
 
-    AbiPluginHost host(nullptr);
+    AbiPluginHost host;
     const auto trustFile = makeTempDir("yams_glint_skip_status_") / "plugins.trust";
     host.setTrustFile(trustFile);
     REQUIRE(host.trustAdd(pluginPath.parent_path()));

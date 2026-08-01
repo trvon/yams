@@ -1,5 +1,6 @@
 #include <fstream>
 #include <map>
+#include <mutex>
 #include <sstream>
 #include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
@@ -19,17 +20,16 @@
 #endif
 
 namespace yams::config {
-namespace {
 
 std::string getenv_copy(const char* key) {
+    static std::mutex environmentMutex;
+    std::lock_guard lock(environmentMutex);
     const char* raw = std::getenv(key); // NOLINT(concurrency-mt-unsafe)
     if (raw && *raw) {
         return raw;
     }
     return {};
 }
-
-} // namespace
 
 std::filesystem::path expand_tilde(const std::string& path) {
     if (!path.empty() && path[0] == '~') {

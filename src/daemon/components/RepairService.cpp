@@ -45,6 +45,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <set>
 #include <span>
 #include <string>
 #include <thread>

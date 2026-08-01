@@ -1,27 +1,14 @@
-#include <cstdlib>
-#include <fcntl.h>
-#include <fstream>
-#include <map>
-#ifndef _WIN32
-#include <poll.h>
-#endif
-#include <regex>
-#include <set>
-#include <signal.h>
-#include <sstream>
-#ifndef _WIN32
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#endif
-#include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/resource/plugin_host.h>
+
 #include <yams/daemon/resource/abi_plugin_loader.h>
+
+#include <mutex>
 
 namespace yams::daemon {
 
 struct AbiPluginHost::Impl {
+    mutable std::mutex mutex;
     AbiPluginLoader loader;
-    ServiceManager* sm{nullptr};
     static PluginDescriptor map(const AbiPluginLoader::ScanResult& sr) {
         PluginDescriptor d;
         d.name = sr.name;
@@ -34,36 +21,28 @@ struct AbiPluginHost::Impl {
     }
 };
 
-AbiPluginHost::AbiPluginHost(ServiceManager* sm, const std::filesystem::path& trustFile)
+AbiPluginHost::AbiPluginHost(const std::filesystem::path& trustFile)
     : pImpl(std::make_unique<Impl>()) {
-    pImpl->sm = sm;
     if (!trustFile.empty())
         pImpl->loader.setTrustFile(trustFile);
-    // Configure name policy from daemon config, if available
-    try {
-        std::string policy;
-        if (sm)
-            policy = sm->getConfig().pluginNamePolicy;
-        if (const char* env = std::getenv("YAMS_PLUGIN_NAME_POLICY"))
-            policy = env;
-        for (auto& c : policy)
-            c = static_cast<char>(std::tolower(c));
-        if (policy == "spec")
-            pImpl->loader.setNamePolicy(AbiPluginLoader::NamePolicy::Spec);
-        else
-            pImpl->loader.setNamePolicy(AbiPluginLoader::NamePolicy::Relaxed);
-    } catch (...) {
-        // Intentional best-effort path; keep the primary operation unaffected.
-    }
 }
 
 AbiPluginHost::~AbiPluginHost() = default;
 
 void AbiPluginHost::setTrustFile(const std::filesystem::path& trustFile) {
+    std::lock_guard lock(pImpl->mutex);
     pImpl->loader.setTrustFile(trustFile);
 }
 
+void AbiPluginHost::setNamePolicy(AbiPluginHost::NamePolicy policy) {
+    std::lock_guard lock(pImpl->mutex);
+    pImpl->loader.setNamePolicy(policy == AbiPluginHost::NamePolicy::Spec
+                                    ? AbiPluginLoader::NamePolicy::Spec
+                                    : AbiPluginLoader::NamePolicy::Relaxed);
+}
+
 Result<PluginDescriptor> AbiPluginHost::scanTarget(const std::filesystem::path& file) {
+    std::lock_guard lock(pImpl->mutex);
     auto r = pImpl->loader.scanTarget(file);
     if (!r)
         return r.error();
@@ -72,6 +51,7 @@ Result<PluginDescriptor> AbiPluginHost::scanTarget(const std::filesystem::path& 
 
 Result<std::vector<PluginDescriptor>>
 AbiPluginHost::scanDirectory(const std::filesystem::path& dir) {
+    std::lock_guard lock(pImpl->mutex);
     auto r = pImpl->loader.scanDirectory(dir);
     if (!r)
         return r.error();
@@ -84,6 +64,23 @@ AbiPluginHost::scanDirectory(const std::filesystem::path& dir) {
 
 Result<PluginDescriptor> AbiPluginHost::load(const std::filesystem::path& file,
                                              const std::string& configJson) {
+    std::lock_guard lock(pImpl->mutex);
+    std::error_code ec;
+    auto requested = std::filesystem::weakly_canonical(file, ec);
+    if (ec) {
+        requested = file.lexically_normal();
+        ec.clear();
+    }
+    for (const auto& loaded : pImpl->loader.loaded()) {
+        auto loadedPath = std::filesystem::weakly_canonical(loaded.path, ec);
+        if (ec) {
+            loadedPath = loaded.path.lexically_normal();
+            ec.clear();
+        }
+        if (loadedPath == requested) {
+            return Impl::map(loaded);
+        }
+    }
     auto r = pImpl->loader.load(file, configJson);
     if (!r)
         return r.error();
@@ -91,10 +88,12 @@ Result<PluginDescriptor> AbiPluginHost::load(const std::filesystem::path& file,
 }
 
 Result<void> AbiPluginHost::unload(const std::string& name) {
+    std::lock_guard lock(pImpl->mutex);
     return pImpl->loader.unload(name);
 }
 
 std::vector<PluginDescriptor> AbiPluginHost::listLoaded() const {
+    std::lock_guard lock(pImpl->mutex);
     std::vector<PluginDescriptor> out;
     for (auto& sr : pImpl->loader.loaded())
         out.push_back(Impl::map(sr));
@@ -102,39 +101,57 @@ std::vector<PluginDescriptor> AbiPluginHost::listLoaded() const {
 }
 
 std::vector<std::filesystem::path> AbiPluginHost::trustList() const {
+    std::lock_guard lock(pImpl->mutex);
     return pImpl->loader.trustList();
 }
 
 Result<void> AbiPluginHost::trustAdd(const std::filesystem::path& p) {
+    std::lock_guard lock(pImpl->mutex);
     return pImpl->loader.trustAdd(p);
 }
 
 Result<void> AbiPluginHost::trustRemove(const std::filesystem::path& p) {
+    std::lock_guard lock(pImpl->mutex);
     return pImpl->loader.trustRemove(p);
 }
 
 Result<std::string> AbiPluginHost::health(const std::string& name) {
+    std::lock_guard lock(pImpl->mutex);
     return pImpl->loader.health(name);
 }
 
 Result<void*> AbiPluginHost::getInterface(const std::string& name,    // plugin name
                                           const std::string& ifaceId, // interface ID
                                           uint32_t version) {
+    std::lock_guard lock(pImpl->mutex);
     return pImpl->loader.getInterface(name, ifaceId, version);
 }
 
 Result<std::shared_ptr<void>> AbiPluginHost::acquireKeepAlive(const std::string& name) const {
+    std::lock_guard lock(pImpl->mutex);
     return pImpl->loader.acquireKeepAlive(name);
 }
 
+Result<AbiPluginHost::InterfaceLease> AbiPluginHost::acquireInterface(const std::string& name,
+                                                                      const std::string& ifaceId,
+                                                                      uint32_t version) {
+    std::lock_guard lock(pImpl->mutex);
+    auto interface = pImpl->loader.getInterface(name, ifaceId, version);
+    if (!interface) {
+        return interface.error();
+    }
+    auto keepAlive = pImpl->loader.acquireKeepAlive(name);
+    if (!keepAlive) {
+        return keepAlive.error();
+    }
+    return InterfaceLease{interface.value(), keepAlive.value()};
+}
+
 std::vector<std::pair<std::filesystem::path, std::string>> AbiPluginHost::getLastScanSkips() const {
+    std::lock_guard lock(pImpl->mutex);
     std::vector<std::pair<std::filesystem::path, std::string>> out;
-    try {
-        for (const auto& s : pImpl->loader.getLastSkips()) {
-            out.emplace_back(s.path, s.reason);
-        }
-    } catch (...) {
-        // Intentional best-effort path; keep the primary operation unaffected.
+    for (const auto& skip : pImpl->loader.getLastSkips()) {
+        out.emplace_back(skip.path, skip.reason);
     }
     return out;
 }

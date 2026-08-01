@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <vector>
@@ -28,13 +29,7 @@
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/search/search_engine.h>
 
-#include <filesystem>
-
 namespace yams::daemon::dispatch {
-
-// Forward declarations
-const std::vector<std::filesystem::path>& defaultAbiPluginDirs() noexcept;
-const std::vector<std::filesystem::path>& defaultExternalPluginDirs() noexcept;
 
 /**
  * @brief Offload a synchronous function to the WorkCoordinator's thread pool.
@@ -237,23 +232,41 @@ inline VectorDiag collect_vector_diag(ServiceManager* sm) {
         if (provider) {
             try {
                 d.embeddingsAvailable = provider->isAvailable();
+            } catch (const std::exception& e) {
+                spdlog::debug("collect_vector_diag: provider availability failed: {}", e.what());
+                d.embeddingsAvailable = false;
             } catch (...) {
+                spdlog::debug("collect_vector_diag: provider availability failed");
+                d.embeddingsAvailable = false;
             }
         }
         if (cachedEngine) {
             try {
                 const auto& cfg = cachedEngine->getConfig();
                 d.scoringEnabled = (cfg.vectorWeight > 0.0f) && d.embeddingsAvailable;
+            } catch (const std::exception& e) {
+                spdlog::debug("collect_vector_diag: search config failed: {}", e.what());
+                d.scoringEnabled = false;
             } catch (...) {
+                spdlog::debug("collect_vector_diag: search config failed");
+                d.scoringEnabled = false;
             }
         }
         try {
             // Get build reason from FSM snapshot instead of lastSearchBuildReason_
             auto fsmSnapshot = sm->getSearchEngineFsmSnapshot();
-            d.buildReason = std::move(fsmSnapshot.buildReason);
+            d.buildReason = fsmSnapshot.buildReason;
+        } catch (const std::exception& e) {
+            spdlog::debug("collect_vector_diag: search FSM snapshot failed: {}", e.what());
+            d.buildReason = "status-error";
         } catch (...) {
+            spdlog::debug("collect_vector_diag: search FSM snapshot failed");
+            d.buildReason = "status-error";
         }
+    } catch (const std::exception& e) {
+        spdlog::debug("collect_vector_diag failed: {}", e.what());
     } catch (...) {
+        spdlog::debug("collect_vector_diag failed");
     }
     return d;
 }
@@ -304,10 +317,16 @@ inline std::pair<std::string, size_t> build_plugins_json(ServiceManager* sm) {
                                 if (!sm->lastModelError().empty())
                                     rec["error"] = sm->lastModelError();
                             }
+                        } catch (const std::exception& e) {
+                            spdlog::debug("build_plugins_json: provider FSM failed: {}", e.what());
                         } catch (...) {
+                            spdlog::debug("build_plugins_json: provider FSM failed");
                         }
                     }
+                } catch (const std::exception& e) {
+                    spdlog::debug("build_plugins_json: provider details failed: {}", e.what());
                 } catch (...) {
+                    spdlog::debug("build_plugins_json: provider details failed");
                 }
                 arr.push_back(std::move(rec));
             }
@@ -324,7 +343,10 @@ inline std::pair<std::string, size_t> build_plugins_json(ServiceManager* sm) {
         if (external) {
             addPlugins(external->listLoaded(), "external");
         }
+    } catch (const std::exception& e) {
+        spdlog::debug("build_plugins_json failed: {}", e.what());
     } catch (...) {
+        spdlog::debug("build_plugins_json failed");
     }
     return {arr.dump(), count};
 }
@@ -343,7 +365,10 @@ build_typed_providers(ServiceManager* sm, const yams::daemon::StateComponent* st
         try {
             auto es = sm->getEmbeddingProviderFsmSnapshot();
             providerDegraded = es.state == EmbeddingProviderState::Degraded;
+        } catch (const std::exception& e) {
+            spdlog::debug("build_typed_providers: provider FSM failed: {}", e.what());
         } catch (...) {
+            spdlog::debug("build_typed_providers: provider FSM failed");
         }
         const std::string lastErr = sm->lastModelError();
         // Use cached snapshot - refreshed on plugin load/unload events, not on every status
@@ -396,21 +421,31 @@ build_typed_providers(ServiceManager* sm, const yams::daemon::StateComponent* st
     return providers;
 }
 
+inline void logDispatchFailureNoexcept(const char* tag, const char* message) noexcept {
+    try {
+        spdlog::warn("[Dispatch] {}: exception: {}", tag, message);
+    } catch (const std::exception& loggingError) {
+        std::fputs("Dispatch logging failed for ", stderr);
+        std::fputs(tag, stderr);
+        std::fputs(": ", stderr);
+        std::fputs(loggingError.what(), stderr);
+        std::fputc('\n', stderr);
+    } catch (...) {
+        std::fputs("Dispatch logging failed for ", stderr);
+        std::fputs(tag, stderr);
+        std::fputc('\n', stderr);
+    }
+}
+
 // guard_await: standardize exception capture and error mapping for awaitable handlers.
 template <typename Fn> boost::asio::awaitable<Response> guard_await(const char* tag, Fn&& fn) {
     try {
         co_return co_await fn();
     } catch (const std::exception& e) {
-        try {
-            spdlog::warn("[Dispatch] {}: exception: {}", tag, e.what());
-        } catch (...) {
-        }
+        logDispatchFailureNoexcept(tag, e.what());
         co_return makeErrorResponse(ErrorCode::InternalError, e.what());
     } catch (...) {
-        try {
-            spdlog::warn("[Dispatch] {}: unknown exception", tag);
-        } catch (...) {
-        }
+        logDispatchFailureNoexcept(tag, "unknown exception");
         co_return makeErrorResponse(ErrorCode::InternalError, "unknown exception");
     }
 }

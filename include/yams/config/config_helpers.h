@@ -15,6 +15,9 @@
 
 namespace yams::config {
 
+/// Copy one environment value at the process-environment boundary.
+std::string getenv_copy(const char* key);
+
 // String trimming utilities
 inline void ltrim(std::string& s) {
     s.erase(s.begin(),

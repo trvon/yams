@@ -11,14 +11,11 @@
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/plugin_host.h>
 
-#include <boost/asio/any_io_executor.hpp>
-#include <boost/asio/awaitable.hpp>
-
 #include <atomic>
 #include <filesystem>
 #include <functional>
 #include <memory>
-#include <shared_mutex>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -31,8 +28,6 @@ class ExternalEntityProviderAdapter;
 }
 
 namespace yams::daemon {
-
-class AbiPluginLoader;
 class AbiPluginHost;
 class AbiEntityExtractorAdapter;
 class AbiSymbolExtractorAdapter;
@@ -55,36 +50,13 @@ std::string adjustOnnxConfigJson(const std::string& configJson, std::size_t defa
  * - Trust management
  * - Plugin autoloading from configured directories
  * - Interface adoption (model provider, content extractors, symbol extractors)
- * - Plugin status snapshots for diagnostics
  * - FSM tracking (PluginHostFsm, EmbeddingProviderFsm)
  *
  * ## Thread Safety
- * - Status snapshots use shared_mutex for concurrent reads
  * - Autoload uses FSM guards to prevent concurrent scans
  */
 class PluginManager : public IComponent {
 public:
-    /**
-     * @brief Plugin status record for a single plugin.
-     */
-    struct PluginStatusRecord {
-        std::string name;
-        bool isProvider{false};
-        bool ready{false};
-        bool degraded{false};
-        std::string error;
-        std::uint32_t modelsLoaded{0};
-    };
-
-    /**
-     * @brief Snapshot of all plugin status for diagnostics.
-     */
-    struct StatusSnapshot {
-        PluginHostSnapshot hostState;
-        ProviderSnapshot providerState;
-        std::vector<PluginStatusRecord> plugins;
-    };
-
     /**
      * @brief Dependency injection for PluginManager.
      */
@@ -117,24 +89,26 @@ public:
     // IComponent interface
     const char* getName() const override { return "PluginManager"; }
     Result<void> initialize() override;
-    void shutdown() override;
+    void shutdown() noexcept override;
 
     // --- Plugin Host Operations ---
 
+    enum class PluginHostKind { Abi, External };
+
+    struct DiscoveredPlugin {
+        PluginHostKind host;
+        PluginDescriptor descriptor;
+    };
+
     /**
-     * @brief Get the ABI plugin host for native C++ plugins.
+     * @brief Get the active ABI plugin host for native C++ plugins.
      */
-    AbiPluginHost* getPluginHost() const { return pluginHost_.get(); }
+    AbiPluginHost* getPluginHost() const { return getActivePluginHost(); }
 
     /**
      * @brief Get the external plugin host for Python/JS plugins.
      */
     ExternalPluginHost* getExternalPluginHost() const { return externalHost_.get(); }
-
-    /**
-     * @brief Get the plugin loader.
-     */
-    AbiPluginLoader* getPluginLoader() const { return pluginLoader_.get(); }
 
     /**
      * @brief Set the PostIngestQueue for wiring entity providers.
@@ -157,6 +131,66 @@ public:
      */
     Result<void> trustRemove(const std::filesystem::path& path);
 
+    /**
+     * @brief Load a scanned plugin with daemon configuration applied.
+     *
+     * Resolves short-name aliases from DaemonConfig::pluginConfigs and applies
+     * model-provider constraints such as the ONNX model-pool minimum. A non-empty
+     * explicitConfigJson overrides pluginConfigs before constraints are applied.
+     */
+    Result<PluginDescriptor> loadConfiguredPlugin(IPluginHost& host,
+                                                  const PluginDescriptor& descriptor,
+                                                  std::string explicitConfigJson = {}) const;
+
+    /**
+     * @brief Discover one plugin target using canonical ABI/external routing.
+     */
+    Result<DiscoveredPlugin> scanPluginTarget(const std::filesystem::path& target) const;
+
+    /**
+     * @brief Discover all ABI and external plugins in an explicit directory.
+     */
+    Result<std::vector<DiscoveredPlugin>>
+    scanPluginDirectory(const std::filesystem::path& directory) const;
+
+    /**
+     * @brief Discover plugins from trusted and configured default roots.
+     */
+    Result<std::vector<DiscoveredPlugin>> scanConfiguredPluginRoots() const;
+
+    /**
+     * @brief Resolve a direct path or plugin name against canonical scan roots.
+     */
+    Result<std::filesystem::path> resolvePluginTarget(const std::filesystem::path& target) const;
+
+    /**
+     * @brief Load a discovered plugin through its owning host with configuration applied.
+     */
+    Result<PluginDescriptor> loadDiscoveredPlugin(const DiscoveredPlugin& discovered,
+                                                  std::string explicitConfigJson = {});
+
+    /**
+     * @brief Discover and load one direct path or plugin name.
+     */
+    Result<PluginDescriptor> loadPluginTarget(const std::filesystem::path& target,
+                                              std::string explicitConfigJson = {});
+
+    /**
+     * @brief Discover and load every plugin in an explicit directory.
+     */
+    Result<std::vector<PluginDescriptor>>
+    loadPluginDirectory(const std::filesystem::path& directory);
+
+    /**
+     * @brief Unload a plugin through its owning host and reconcile FSM state.
+     */
+    Result<void> unloadPlugin(const std::string& name);
+
+    /**
+     * @brief Check whether a file or directory already owns a loaded plugin.
+     */
+    bool isPluginLoadedFrom(const std::filesystem::path& path) const;
+
     // --- Autoload & Adoption ---
 
     /**
@@ -165,11 +199,9 @@ public:
      * Scans trust list and default plugin directories, loads discovered plugins,
      * and adopts interfaces (model provider, extractors).
      *
-     * @param executor Executor for async operations
      * @return Number of plugins loaded
      */
-    boost::asio::awaitable<Result<size_t>>
-    autoloadPlugins(const boost::asio::any_io_executor& executor);
+    Result<size_t> autoloadPlugins();
 
     /**
      * @brief Adopt model provider from loaded plugins.
@@ -217,8 +249,8 @@ public:
 
     // --- Adopted Interface Accessors ---
 
-    std::shared_ptr<IModelProvider> getModelProvider() const { return modelProvider_; }
-    const std::string& getAdoptedProviderPluginName() const { return adoptedProviderPluginName_; }
+    std::shared_ptr<IModelProvider> getModelProvider() const;
+    std::string getAdoptedProviderPluginName() const;
 
     const std::vector<std::shared_ptr<extraction::IContentExtractor>>&
     getContentExtractors() const {
@@ -257,12 +289,12 @@ public:
     /**
      * @brief Get embedding model name (set after successful adoption).
      */
-    const std::string& getEmbeddingModelName() const { return embeddingModelName_; }
+    std::string getEmbeddingModelName() const;
 
     /**
      * @brief Set embedding model name.
      */
-    void setEmbeddingModelName(const std::string& name) { embeddingModelName_ = name; }
+    void setEmbeddingModelName(const std::string& name);
 
     /**
      * @brief Get embedding dimension from model provider.
@@ -270,16 +302,6 @@ public:
     size_t getEmbeddingDimension() const;
 
     // --- Status & Diagnostics ---
-
-    /**
-     * @brief Get current status snapshot (non-blocking).
-     */
-    StatusSnapshot getStatusSnapshot() const;
-
-    /**
-     * @brief Refresh the cached status snapshot.
-     */
-    void refreshStatusSnapshot();
 
     /**
      * @brief Get plugin host FSM snapshot.
@@ -339,24 +361,14 @@ public:
         }
     }
 
-    /**
-     * @brief Set cached model count (for status snapshot).
-     */
-    void setCachedModelCount(std::uint32_t count) {
-        cachedModelCount_.store(count, std::memory_order_relaxed);
-    }
-
 #if YAMS_DAEMON_TEST_HOOKS_ENABLED
     YAMS_DAEMON_TEST_HOOK void testingSetEmbeddingDegraded(bool degraded, const std::string& error);
 #endif
 #ifdef YAMS_TESTING
-    void __test_setModelProvider(std::shared_ptr<IModelProvider> provider) {
-        modelProvider_ = std::move(provider);
-    }
-    void __test_setExternalPluginHost(std::unique_ptr<ExternalPluginHost> host) {
+    void testingSetExternalPluginHost(std::unique_ptr<ExternalPluginHost> host) {
         externalHost_ = std::move(host);
     }
-    void __test_setSharedPluginHost(AbiPluginHost* host) { sharedPluginHost_ = host; }
+    void testingSetSharedPluginHost(AbiPluginHost* host) { sharedPluginHost_ = host; }
 #endif
 
 private:
@@ -365,14 +377,17 @@ private:
     AbiPluginHost* getActivePluginHost() const {
         return sharedPluginHost_ ? sharedPluginHost_ : pluginHost_.get();
     }
+    IPluginHost* getHost(PluginHostKind kind) const;
+    std::vector<std::pair<PluginHostKind, std::filesystem::path>> pluginScanRoots() const;
 
     Dependencies deps_;
+    mutable std::recursive_mutex pluginLifecycleMutex_;
 
     // Plugin infrastructure
-    std::unique_ptr<AbiPluginLoader> pluginLoader_;
     std::unique_ptr<AbiPluginHost> pluginHost_;        // Owned when created internally
     std::unique_ptr<ExternalPluginHost> externalHost_; // For Python/JS plugins
     AbiPluginHost* sharedPluginHost_{nullptr};         // Non-owning when shared from ServiceManager
+    std::atomic<bool> shutdownInvoked_{false};
 
     // FSMs for state tracking
     PluginHostFsm pluginHostFsm_;
@@ -387,11 +402,6 @@ private:
     std::vector<std::shared_ptr<AbiEntityExtractorAdapter>> entityExtractors_;
     std::vector<std::shared_ptr<ExternalEntityProviderAdapter>> entityProviders_;
     PostIngestQueue* postIngestQueue_{nullptr};
-
-    // Status snapshot cache
-    mutable std::shared_mutex statusMutex_;
-    StatusSnapshot statusSnapshot_;
-    std::atomic<std::uint32_t> cachedModelCount_{0};
 };
 
 } // namespace yams::daemon

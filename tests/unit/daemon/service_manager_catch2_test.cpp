@@ -67,8 +67,8 @@ std::optional<fs::path> findQuarantinedFile(const fs::path& dataDir) {
             ec.clear();
             continue;
         }
-        if (it->path().filename().string().rfind(prefix, 0) == 0 &&
-            it->path().extension() != ".sentinel") {
+        const auto name = it->path().filename().string();
+        if (name.starts_with(prefix) && !name.ends_with("-wal") && !name.ends_with("-shm")) {
             return it->path();
         }
     }
@@ -188,6 +188,33 @@ void requireReadyDatabaseState(const StateComponent& state) {
     CHECK((state.readiness.databasePhase == "ready"));
 }
 
+struct PluginHostLifecycleCounters {
+    std::atomic<std::size_t> listCalls{0};
+    std::atomic<std::size_t> unloadCalls{0};
+};
+
+class CountingAbiPluginHost final : public AbiPluginHost {
+public:
+    explicit CountingAbiPluginHost(std::shared_ptr<PluginHostLifecycleCounters> counters)
+        : counters_(counters) {}
+
+    std::vector<PluginDescriptor> listLoaded() const override {
+        counters_->listCalls.fetch_add(1, std::memory_order_relaxed);
+        if (counters_->unloadCalls.load(std::memory_order_relaxed) == 0) {
+            return {{.name = "counted_plugin"}};
+        }
+        return {};
+    }
+
+    Result<void> unload(const std::string&) override {
+        counters_->unloadCalls.fetch_add(1, std::memory_order_relaxed);
+        return {};
+    }
+
+private:
+    std::shared_ptr<PluginHostLifecycleCounters> counters_;
+};
+
 } // namespace
 
 // Test fixture for ServiceManager tests
@@ -281,6 +308,18 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager destructor handles clean
     REQUIRE_NOTHROW(sm.reset());
 }
 
+TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager delegates shared plugin host shutdown once",
+                 "[daemon][service_manager][plugin][ownership][shutdown]") {
+    ServiceManager sm(config_, state_, lifecycleFsm_);
+    auto counters = std::make_shared<PluginHostLifecycleCounters>();
+    sm.__test_setAbiHost(std::make_unique<CountingAbiPluginHost>(counters));
+
+    sm.shutdown();
+
+    CHECK((counters->listCalls.load(std::memory_order_relaxed) == 1));
+    CHECK((counters->unloadCalls.load(std::memory_order_relaxed) == 1));
+}
+
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager getConfig returns configuration",
                  "[daemon][service_manager]") {
     ServiceManager sm(config_, state_, lifecycleFsm_);
@@ -301,9 +340,9 @@ TEST_CASE("ServiceManager session watcher uses configured intervals without busy
           "[daemon][service_manager][session_watch]") {
     using namespace std::chrono_literals;
 
-    CHECK(ServiceManager::__test_sessionWatcherDelay(false, 0) == 2s);
-    CHECK(ServiceManager::__test_sessionWatcherDelay(true, 250) == 250ms);
-    CHECK(ServiceManager::__test_sessionWatcherDelay(true, 20) == 100ms);
+    CHECK((ServiceManager::__test_sessionWatcherDelay(false, 0) == 2s));
+    CHECK((ServiceManager::__test_sessionWatcherDelay(true, 250) == 250ms));
+    CHECK((ServiceManager::__test_sessionWatcherDelay(true, 20) == 100ms));
 }
 
 TEST_CASE("ServiceManager session watcher refreshes every retrieval index",
@@ -311,10 +350,10 @@ TEST_CASE("ServiceManager session watcher refreshes every retrieval index",
     auto request = ServiceManager::__test_makeSessionWatchRequest("coding", "/workspace/yams",
                                                                   {"src/search/search_engine.cpp"});
 
-    CHECK(request.directoryPath == "/workspace/yams");
-    CHECK(request.includePatterns == std::vector<std::string>{"src/search/search_engine.cpp"});
+    CHECK((request.directoryPath == "/workspace/yams"));
+    CHECK((request.includePatterns == std::vector<std::string>{"src/search/search_engine.cpp"}));
     CHECK(request.recursive);
-    CHECK(request.sessionId == "coding");
+    CHECK((request.sessionId == "coding"));
     CHECK_FALSE(request.noEmbeddings);
 }
 
@@ -336,32 +375,32 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     indexingService.failuresRemaining = 1;
     CHECK_FALSE(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
                                                                 "coding", watchedDirectory));
-    REQUIRE(indexingService.requests.size() == 1);
-    CHECK(indexingService.requests.front().includePatterns ==
-          std::vector<std::string>{"changed.cpp"});
+    REQUIRE((indexingService.requests.size() == 1));
+    CHECK((indexingService.requests.front().includePatterns ==
+           std::vector<std::string>{"changed.cpp"}));
 
     CHECK(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
                                                           "coding", watchedDirectory));
-    CHECK(indexingService.requests.size() == 2);
+    CHECK((indexingService.requests.size() == 2));
 
     CHECK(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
                                                           "coding", watchedDirectory));
-    CHECK(indexingService.requests.size() == 2);
+    CHECK((indexingService.requests.size() == 2));
 
     REQUIRE(fs::remove(watchedFile));
     documentService.failuresRemaining = 1;
     CHECK_FALSE(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
                                                                 "coding", watchedDirectory));
-    REQUIRE(documentService.deleteRequests.size() == 1);
-    CHECK(documentService.deleteRequests.front().name == watchedFile.string());
+    REQUIRE((documentService.deleteRequests.size() == 1));
+    CHECK((documentService.deleteRequests.front().name == watchedFile.string()));
 
     CHECK(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
                                                           "coding", watchedDirectory));
-    CHECK(documentService.deleteRequests.size() == 2);
+    CHECK((documentService.deleteRequests.size() == 2));
 
     CHECK(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
                                                           "coding", watchedDirectory));
-    CHECK(documentService.deleteRequests.size() == 2);
+    CHECK((documentService.deleteRequests.size() == 2));
 }
 
 TEST_CASE("ServiceManager topology readiness follows artifact freshness",
@@ -414,8 +453,8 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager tuning config getter doe
     config_.tuning.ingestStoreBatchSize = 19;
     ServiceManager sm(config_, state_, lifecycleFsm_);
     const auto& tuning = sm.getTuningConfig();
-    CHECK(tuning.ingestStoreBatchSize == 19);
-    CHECK(sm.getIngestStoreBatchSize() == 19);
+    CHECK((tuning.ingestStoreBatchSize == 19));
+    CHECK((sm.getIngestStoreBatchSize() == 19));
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager set tuning config doesn't crash",
@@ -429,7 +468,7 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager set tuning config doesn'
     tc.ingestStoreBatchSize = 23;
 
     REQUIRE_NOTHROW(sm.setTuningConfig(tc));
-    CHECK(sm.getIngestStoreBatchSize() == 23);
+    CHECK((sm.getIngestStoreBatchSize() == 23));
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager getWorkerQueueDepth doesn't crash",

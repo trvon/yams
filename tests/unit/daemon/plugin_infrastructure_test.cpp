@@ -2,16 +2,15 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
-#include <random>
-#include <thread>
-#include <catch2/catch_test_macros.hpp>
 #include "../../common/test_helpers_catch2.h"
+#include <catch2/catch_test_macros.hpp>
 #include <yams/compat/unistd.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
+#include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/plugins/model_provider_v1.h>
 
@@ -113,11 +112,27 @@ struct RequestDispatcherFixture {
     }
 };
 
+TEST_CASE("Plugin discovery ignores bundled zpdf runtime library",
+          "[plugin][discovery][runtime-dependency]") {
+    PluginHostFixture fixture;
+    AbiPluginLoader loader;
+    loader.setNamePolicy(AbiPluginLoader::NamePolicy::Spec);
+    fixture.makeFile("libzpdf.so", "runtime dependency");
+    fixture.makeFile("libzpdf.dylib", "runtime dependency");
+    fixture.makeFile("zpdf.dll", "runtime dependency");
+
+    auto result = loader.scanDirectory(fixture.tempDir_);
+
+    REQUIRE(result);
+    CHECK(result.value().empty());
+    CHECK(loader.getLastSkips().empty());
+}
+
 TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
     PluginHostFixture fixture;
 
     SECTION("Trust policy add and remove") {
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         auto initial = host.trustList().size();
@@ -126,7 +141,7 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
 
         REQUIRE(host.trustAdd(dir));
         auto tl = host.trustList();
-        CHECK(tl.size() == initial + 1);
+        CHECK((tl.size() == initial + 1));
 
         auto canon_dir = fs::weakly_canonical(dir);
         bool found = false;
@@ -140,7 +155,7 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
 
         REQUIRE(host.trustRemove(dir));
         auto after = host.trustList();
-        CHECK(after.size() == initial);
+        CHECK((after.size() == initial));
 
         bool still_present = false;
         for (const auto& p : after) {
@@ -153,18 +168,18 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
     }
 
     SECTION("Load untrusted plugin returns unauthorized") {
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         auto fake = fixture.makeFile("fake_plugin.so", "not a real so");
         auto res = host.load(fake, "{}");
 
         REQUIRE_FALSE(res);
-        CHECK(res.error().code == ErrorCode::Unauthorized);
+        CHECK((res.error().code == ErrorCode::Unauthorized));
     }
 
     SECTION("Plugin discovery - scan non-existent target") {
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         auto fake = fixture.tempDir_ / "nonexistent.so";
@@ -174,7 +189,7 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
     }
 
     SECTION("Plugin discovery - scan empty directory") {
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         auto emptyDir = fixture.tempDir_ / "empty_plugins";
@@ -186,7 +201,7 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
     }
 
     SECTION("Trust file corruption - invalid JSON") {
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         {
@@ -199,7 +214,7 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
     }
 
     SECTION("Trust operations with same trust file path") {
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         auto dir1 = fixture.tempDir_ / "trusted_dir1";
@@ -211,16 +226,16 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
         REQUIRE(host.trustAdd(dir2));
 
         auto tl = host.trustList();
-        CHECK(tl.size() >= 2);
+        CHECK((tl.size() >= 2));
 
         REQUIRE(host.trustRemove(dir1));
         auto after_remove = host.trustList();
-        CHECK(after_remove.size() == tl.size() - 1);
+        CHECK((after_remove.size() == tl.size() - 1));
     }
 
 #if !defined(_WIN32)
     SECTION("Trust file permissions are private") {
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         auto dir = fixture.tempDir_ / "trusted_perms_dir";
@@ -232,7 +247,7 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
         std::error_code ec;
         auto perms = fs::status(fixture.trustFile_, ec).permissions();
         REQUIRE_FALSE(ec);
-        CHECK((perms & (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none);
+        CHECK(((perms & (fs::perms::group_all | fs::perms::others_all)) == fs::perms::none));
     }
 #endif
 
@@ -243,7 +258,7 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
         fs::create_directories(dir2);
 
         {
-            AbiPluginHost host(nullptr);
+            AbiPluginHost host;
             host.setTrustFile(fixture.trustFile_);
             REQUIRE(host.trustAdd(dir1));
             REQUIRE(host.trustAdd(dir2));
@@ -251,7 +266,7 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
         }
 
         {
-            AbiPluginHost reloaded(nullptr);
+            AbiPluginHost reloaded;
             reloaded.setTrustFile(fixture.trustFile_);
             auto tl = reloaded.trustList();
             auto c1 = fs::weakly_canonical(dir1);
@@ -269,7 +284,7 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
     }
 
     SECTION("List loaded plugins when empty") {
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         auto loaded = host.listLoaded();
@@ -278,7 +293,7 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
 
 #ifdef TEST_ABI_PLUGIN_FILE
     SECTION("Load mock model plugin and get interface") {
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         fs::path pluginPath(TEST_ABI_PLUGIN_FILE);
@@ -314,7 +329,7 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
     }
 
     SECTION("Plugin unloading - unload non-existent plugin") {
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         auto res = host.unload("nonexistent_plugin");
@@ -322,7 +337,7 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
     }
 
     SECTION("Plugin unloading - list loaded after unload") {
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         fs::path pluginPath(TEST_ABI_PLUGIN_FILE);
@@ -332,6 +347,10 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
         auto lr = host.load(pluginPath, "{}");
         REQUIRE(lr);
 
+        auto duplicate = host.load(pluginPath, R"({"duplicate":true})");
+        REQUIRE(duplicate);
+        CHECK((duplicate.value().name == lr.value().name));
+
         auto loaded_before = host.listLoaded();
         CHECK(loaded_before.size() == 1);
 
@@ -340,10 +359,20 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
 
         auto loaded_after = host.listLoaded();
         CHECK(loaded_after.empty());
+
+        auto first = std::async(std::launch::async, [&] { return host.load(pluginPath, "{}"); });
+        auto second = std::async(std::launch::async, [&] { return host.load(pluginPath, "{}"); });
+        auto firstResult = first.get();
+        auto secondResult = second.get();
+        REQUIRE(firstResult);
+        REQUIRE(secondResult);
+        CHECK((firstResult.value().name == secondResult.value().name));
+        CHECK((host.listLoaded().size() == 1));
+        REQUIRE(host.unload(firstResult.value().name));
     }
 
     SECTION("Plugin keepalive defers physical unload until adapters release") {
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         fs::path pluginPath(TEST_ABI_PLUGIN_FILE);
@@ -354,13 +383,11 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
         REQUIRE(lr);
         const auto pluginName = lr.value().name;
 
-        auto keepalive = host.acquireKeepAlive(pluginName);
-        REQUIRE(keepalive);
-        REQUIRE(keepalive.value() != nullptr);
+        auto lease = host.acquireInterface(pluginName, "model_provider_v1", 1);
+        REQUIRE(lease);
+        REQUIRE(lease.value().keepAlive != nullptr);
 
-        auto ifaceRes = host.getInterface(pluginName, "model_provider_v1", 1);
-        REQUIRE(ifaceRes);
-        auto* table = reinterpret_cast<yams_model_provider_v1*>(ifaceRes.value());
+        auto* table = reinterpret_cast<yams_model_provider_v1*>(lease.value().interface);
         REQUIRE(table != nullptr);
 
         REQUIRE(host.unload(pluginName));
@@ -373,7 +400,7 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
         CHECK(loaded);
         CHECK(table->unload_model(table->self, "test_model") == 0);
 
-        keepalive.value().reset();
+        lease.value().keepAlive.reset();
 
         // After releasing keepalive, plugin can be loaded again normally.
         auto lr2 = host.load(pluginPath, "{}");
@@ -383,7 +410,7 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
     }
 
     SECTION("Plugin health check - healthy plugin") {
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         fs::path pluginPath(TEST_ABI_PLUGIN_FILE);
@@ -399,7 +426,7 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
     }
 
     SECTION("Plugin health check - non-existent plugin") {
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         auto health = host.health("nonexistent_plugin");
@@ -407,7 +434,7 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
     }
 
     SECTION("Plugin discovery - scan target finds plugin") {
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         fs::path pluginPath(TEST_ABI_PLUGIN_FILE);
@@ -421,7 +448,7 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
     }
 
     SECTION("Plugin discovery - scan directory finds plugins") {
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         fs::path pluginPath(TEST_ABI_PLUGIN_FILE);
@@ -445,7 +472,7 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
     }
 
     SECTION("Plugin discovery - scan directory finds plugins in nested plugin folders") {
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         fs::path pluginPath(TEST_ABI_PLUGIN_FILE);
@@ -474,7 +501,7 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
     }
 
     SECTION("Plugin discovery - getLastScanSkips after scan") {
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         fs::path pluginPath(TEST_ABI_PLUGIN_FILE);
@@ -485,7 +512,7 @@ TEST_CASE("PluginHost - Trust Management", "[plugin][host][trust]") {
     }
 
     SECTION("Plugin reload - unload and reload same plugin") {
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         fs::path pluginPath(TEST_ABI_PLUGIN_FILE);
@@ -621,7 +648,7 @@ TEST_CASE("RequestDispatcher - Plugin Integration", "[plugin][dispatcher][integr
         CHECK(final_state.find("ModelProvider") == final_state.end());
     }
 
-    SECTION("Plugin status snapshot after load") {
+    SECTION("ServiceManager status snapshot is authoritative after plugin load") {
         fs::path plugin(TEST_ABI_PLUGIN_FILE);
 
         PluginTrustAddRequest tadd;
@@ -632,19 +659,26 @@ TEST_CASE("RequestDispatcher - Plugin Integration", "[plugin][dispatcher][integr
         lreq.pathOrName = plugin.string();
         auto lr = fixture.dispatcher_->handlePluginLoadRequest(lreq);
         REQUIRE(std::holds_alternative<PluginLoadResponse>(lr));
+        const auto& loaded = std::get<PluginLoadResponse>(lr);
 
-        auto snapshot = fixture.svc_->getPluginStatusSnapshot();
+        const auto snapshot = fixture.svc_->getPluginStatusSnapshot();
+        const auto hostSnapshot = fixture.svc_->getPluginHostFsmSnapshot();
+        CHECK((snapshot.host.state == hostSnapshot.state));
+        CHECK((snapshot.host.loadedPlugins == hostSnapshot.loadedPlugins));
         CHECK_FALSE(snapshot.records.empty());
 
-        bool found_provider = false;
+        auto provider = fixture.svc_->getModelProvider();
+        REQUIRE(provider);
+        bool foundProvider = false;
         for (const auto& rec : snapshot.records) {
-            if (rec.isProvider) {
-                found_provider = true;
+            if (rec.name == loaded.record.name && rec.isProvider) {
+                foundProvider = true;
                 CHECK(rec.ready);
                 CHECK_FALSE(rec.degraded);
+                CHECK((rec.modelsLoaded == provider->getLoadedModelCount()));
             }
         }
-        CHECK(found_provider);
+        CHECK(foundProvider);
     }
 
     SECTION("Plugin unload through dispatcher") {
@@ -696,7 +730,7 @@ TEST_CASE("Plugin Advanced Scenarios", "[plugin][advanced][stress]") {
 #ifdef TEST_ABI_PLUGIN_FILE
     SECTION("Concurrent trust operations") {
         PluginHostFixture fixture;
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         std::vector<std::future<Result<void>>> futures;
@@ -728,7 +762,7 @@ TEST_CASE("Plugin Advanced Scenarios", "[plugin][advanced][stress]") {
 
     SECTION("Rapid load and unload cycles") {
         PluginHostFixture fixture;
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         fs::path pluginPath(TEST_ABI_PLUGIN_FILE);
@@ -753,7 +787,7 @@ TEST_CASE("Plugin Advanced Scenarios", "[plugin][advanced][stress]") {
 
     SECTION("Plugin scan with invalid files in directory") {
         PluginHostFixture fixture;
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         auto testDir = fixture.tempDir_ / "mixed_files";
@@ -773,7 +807,7 @@ TEST_CASE("Plugin Advanced Scenarios", "[plugin][advanced][stress]") {
 
     SECTION("Load plugin with custom configuration JSON") {
         PluginHostFixture fixture;
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         fs::path pluginPath(TEST_ABI_PLUGIN_FILE);
@@ -792,7 +826,7 @@ TEST_CASE("Plugin Advanced Scenarios", "[plugin][advanced][stress]") {
 
     SECTION("Plugin interface retrieval with wrong version") {
         PluginHostFixture fixture;
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         fs::path pluginPath(TEST_ABI_PLUGIN_FILE);
@@ -810,7 +844,7 @@ TEST_CASE("Plugin Advanced Scenarios", "[plugin][advanced][stress]") {
 
     SECTION("Plugin interface retrieval with wrong interface ID") {
         PluginHostFixture fixture;
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         fs::path pluginPath(TEST_ABI_PLUGIN_FILE);
@@ -865,7 +899,7 @@ TEST_CASE("Plugin Advanced Scenarios", "[plugin][advanced][stress]") {
 
     SECTION("Plugin load with empty configuration") {
         PluginHostFixture fixture;
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         fs::path pluginPath(TEST_ABI_PLUGIN_FILE);
@@ -886,7 +920,7 @@ TEST_CASE("Plugin Advanced Scenarios", "[plugin][advanced][stress]") {
 
     SECTION("Trust list after multiple add/remove operations") {
         PluginHostFixture fixture;
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(fixture.trustFile_);
 
         std::vector<fs::path> dirs;

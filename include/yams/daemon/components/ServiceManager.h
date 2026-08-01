@@ -61,7 +61,6 @@
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/retrieval_session.h>
 #include <yams/daemon/resource/abi_entity_extractor_adapter.h>
-#include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/plugin_host.h>
@@ -95,7 +94,6 @@ class VectorDatabase;
 } // namespace yams::vector
 namespace yams::daemon {
 
-class AbiPluginLoader;
 class ExternalPluginHost;
 class IModelProvider;
 class RetrievalSessionManager;
@@ -477,7 +475,6 @@ public:
     // Stop source for cancelling async initialization coroutine during shutdown
     AsyncInitOrchestrator asyncInit_;
 
-    AbiPluginLoader* getAbiPluginLoader() const { return abiPluginLoader_.get(); }
     AbiPluginHost* getAbiPluginHost() const { return abiHost_.get(); }
     ExternalPluginHost* getExternalPluginHost() const {
         return pluginManager_ ? pluginManager_->getExternalPluginHost() : nullptr;
@@ -636,12 +633,12 @@ public:
     void __test_setAbiHost(std::unique_ptr<AbiPluginHost> host) {
         abiHost_ = std::move(host);
         if (pluginManager_) {
-            pluginManager_->__test_setSharedPluginHost(abiHost_.get());
+            pluginManager_->testingSetSharedPluginHost(abiHost_.get());
         }
     }
     void __test_setExternalPluginHost(std::unique_ptr<ExternalPluginHost> host) {
         if (pluginManager_) {
-            pluginManager_->__test_setExternalPluginHost(std::move(host));
+            pluginManager_->testingSetExternalPluginHost(std::move(host));
         }
     }
     void __test_setCachedSearchEngine(const std::shared_ptr<yams::search::SearchEngine>& engine,
@@ -649,7 +646,6 @@ public:
         searchEngineManager_.setEngine(engine, vectorEnabled);
     }
     AbiPluginHost* __test_getAbiHost() const { return abiHost_.get(); }
-    AbiPluginLoader* __test_getAbiPluginLoader() const { return abiPluginLoader_.get(); }
 #endif
 
 #if YAMS_DAEMON_TEST_HOOKS_ENABLED
@@ -769,7 +765,8 @@ private:
     std::shared_ptr<IModelProvider> modelProvider_;
     std::shared_ptr<IModelProvider> simeonRerankerProvider_;
 
-    std::unique_ptr<AbiPluginLoader> abiPluginLoader_;
+    // ServiceManager owns the shared ABI host storage. PluginManager owns its
+    // configuration, loading, interface adoption, and one-time shutdown lifecycle.
     std::unique_ptr<AbiPluginHost> abiHost_;
     // NOTE: ExternalPluginHost moved to PluginManager (PBI-093)
     std::unique_ptr<RetrievalSessionManager> retrievalSessions_;

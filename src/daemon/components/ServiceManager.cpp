@@ -90,7 +90,6 @@
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/resource/abi_content_extractor_adapter.h>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
-#include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
@@ -165,59 +164,6 @@ inline void setOnnxShutdownMarker(bool enabled) {
     onnxShutdownMarker().store(enabled, std::memory_order_release);
 }
 
-// Template-based plugin adoption helper to reduce code duplication
-template <typename AbiTableType, typename AdapterType, typename ContainerValueType>
-size_t
-adoptPluginInterface(yams::daemon::AbiPluginHost* host, const std::string& interfaceName,
-                     uint32_t interfaceVersion,
-                     std::vector<std::shared_ptr<ContainerValueType>>& targetContainer,
-                     const std::function<bool(const AbiTableType*)>& validateTable = nullptr) {
-    size_t adopted = 0;
-    if (!host)
-        return adopted;
-
-    for (const auto& descriptor : host->listLoaded()) {
-        // Check if plugin exposes the requested interface
-        bool hasInterface = false;
-        for (const auto& id : descriptor.interfaces) {
-            if (id == interfaceName) {
-                hasInterface = true;
-                break;
-            }
-        }
-        if (!hasInterface)
-            continue;
-
-        // Get the interface table
-        auto ifaceRes = host->getInterface(descriptor.name, interfaceName, interfaceVersion);
-        if (!ifaceRes)
-            continue;
-
-        auto* table = reinterpret_cast<AbiTableType*>(ifaceRes.value());
-        if (!table)
-            continue;
-
-        // Optional validation
-        if (validateTable && !validateTable(table))
-            continue;
-
-        // Create adapter and add to container
-        try {
-            auto adapter = std::make_shared<AdapterType>(table);
-            targetContainer.push_back(std::move(adapter));
-            ++adopted;
-            spdlog::info("Adopted {} from plugin: {}", interfaceName, descriptor.name);
-        } catch (const std::exception& e) {
-            spdlog::warn("Failed to create adapter for {} from plugin {}: {}", interfaceName,
-                         descriptor.name, e.what());
-        } catch (...) {
-            spdlog::warn("Failed to create adapter for {} from plugin {} (unknown error)",
-                         interfaceName, descriptor.name);
-        }
-    }
-    return adopted;
-}
-
 std::uint64_t nowUnixMillis() {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                           std::chrono::system_clock::now().time_since_epoch())
@@ -266,9 +212,16 @@ void ServiceManager::refreshPluginStatusSnapshot() {
             spdlog::debug("Failed to snapshot embedding FSM state: unknown error");
         }
         const bool providerReady = state_.readiness.modelProviderReady.load();
-        const auto providerError =
-            lifecycleFsm_.degradationReason("embeddings"); // Use lifecycleFsm instead
-        const std::uint32_t modelsLoaded = 0;
+        const auto providerError = lifecycleFsm_.degradationReason("embeddings");
+        std::uint32_t modelsLoaded = 0;
+        if (auto provider = loadModelProvider()) {
+            try {
+                modelsLoaded = static_cast<std::uint32_t>(std::min<std::size_t>(
+                    provider->getLoadedModelCount(), std::numeric_limits<std::uint32_t>::max()));
+            } catch (const std::exception& e) {
+                spdlog::debug("Failed to snapshot loaded model count: {}", e.what());
+            }
+        }
         // Helper lambda to add plugin records
         auto addPluginRecords = [&](const std::vector<PluginDescriptor>& loaded,
                                     [[maybe_unused]] const std::string& pluginType) {
@@ -333,6 +286,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                                                      [this]() { return getVectorDatabase(); }}),
       lifecycleFsm_(lifecycleFsm) {
     spdlog::debug("[ServiceManager] Constructor start");
+    config_.pluginDirStrict = ConfigResolver::resolvePluginDirStrict(config_.pluginDirStrict);
     tuningConfig_ = config_.tuning;
     ingestStoreBatchSize_.store(tuningConfig_.ingestStoreBatchSize, std::memory_order_relaxed);
 
@@ -570,7 +524,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                 } else {
                     trustFile = yams::config::get_daemon_plugin_trust_file();
                 }
-                abiHost_ = std::make_unique<AbiPluginHost>(this, trustFile);
+                abiHost_ = std::make_unique<AbiPluginHost>(trustFile);
                 spdlog::debug("ServiceManager: AbiPluginHost initialized (trustFile='{}')",
                               trustFile.string());
             }
@@ -583,11 +537,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
         spdlog::debug("[Startup] deferring vector DB init to async phase");
 
         if (abiHost_) {
-            bool strictPluginDirMode = config_.pluginDirStrict;
-            if (const std::string envStrict = getenvCopy("YAMS_PLUGIN_DIR_STRICT");
-                !envStrict.empty()) {
-                strictPluginDirMode = ConfigResolver::envTruthy(envStrict.c_str());
-            }
+            const bool strictPluginDirMode = config_.pluginDirStrict;
 
             // Trust from env
             if (const std::string env = getenvCopy("YAMS_PLUGIN_DIR"); !env.empty()) {
@@ -838,47 +788,6 @@ yams::Result<void> ServiceManager::initialize() {
     // Initialize WALManager via DatabaseManager (owns lifecycle + metrics provider)
     if (databaseManager_) {
         databaseManager_->initializeWal(resolvedDataDir_);
-    }
-
-    // Log plugin scan directories for troubleshooting
-    try {
-        std::string dirs;
-        std::vector<std::filesystem::path> pluginDirs;
-        bool strictPluginDirMode = config_.pluginDirStrict;
-        if (const std::string envStrict = getenvCopy("YAMS_PLUGIN_DIR_STRICT");
-            !envStrict.empty()) {
-            strictPluginDirMode = ConfigResolver::envTruthy(envStrict.c_str());
-        }
-#ifdef _WIN32
-        // Windows: use LOCALAPPDATA for user plugins
-        if (const std::string localAppData = getenvCopy("LOCALAPPDATA"); !localAppData.empty())
-            pluginDirs.push_back(std::filesystem::path(localAppData) / "yams" / "plugins");
-        else if (const std::string userProfile = getenvCopy("USERPROFILE"); !userProfile.empty())
-            pluginDirs.push_back(std::filesystem::path(userProfile) / "AppData" / "Local" / "yams" /
-                                 "plugins");
-#else
-        if (const std::string home = getenvCopy("HOME"); !home.empty())
-            pluginDirs.push_back(std::filesystem::path(home) / ".local" / "lib" / "yams" /
-                                 "plugins");
-        pluginDirs.push_back(std::filesystem::path("/usr/local/lib/yams/plugins"));
-        pluginDirs.push_back(std::filesystem::path("/usr/lib/yams/plugins"));
-#endif
-#ifdef YAMS_INSTALL_PREFIX
-        pluginDirs.push_back(std::filesystem::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" /
-                             "plugins");
-#endif
-        for (const auto& d : pluginDirs) {
-            if (!dirs.empty())
-                dirs += ";";
-            dirs += d.string();
-        }
-        spdlog::info("Plugin default scan directories (strict={}): {}", strictPluginDirMode, dirs);
-        spdlog::info("Plugin trust file: {}",
-                     yams::config::get_daemon_plugin_trust_file().string());
-    } catch (const std::exception& e) {
-        spdlog::debug("Failed to log plugin directories: {}", e.what());
-    } catch (...) {
-        spdlog::debug("Failed to log plugin directories: unknown error");
     }
 
     // File type detector init skipped to reduce compile-time deps; non-fatal fallback remains.
@@ -1283,21 +1192,12 @@ void ServiceManager::resetRetrievalSessionsForShutdown() {
 }
 
 void ServiceManager::unloadPluginsForShutdown() {
-    spdlog::info("[ServiceManager] Phase 6.9: Unloading plugins");
-    try {
-        if (!abiHost_) {
-            spdlog::info("[ServiceManager] Phase 6.9: No ABI host, no plugins to unload");
-            return;
-        }
-
-        const auto loaded = abiHost_->listLoaded();
-        spdlog::info("[ServiceManager] Phase 6.9: Unloading {} plugins", loaded.size());
-        for (const auto& d : loaded) {
-            (void)abiHost_->unload(d.name);
-        }
-        spdlog::info("[ServiceManager] Phase 6.9: All plugins unloaded");
-    } catch (...) {
-        spdlog::warn("[ServiceManager] Phase 6.9: Exception during plugin unloading");
+    spdlog::info("[ServiceManager] Phase 6.9: Delegating plugin shutdown to PluginManager");
+    if (pluginManager_) {
+        pluginManager_->shutdown();
+        spdlog::info("[ServiceManager] Phase 6.9: PluginManager shutdown complete");
+    } else {
+        spdlog::info("[ServiceManager] Phase 6.9: No PluginManager to shut down");
     }
 }
 
@@ -1426,7 +1326,6 @@ void ServiceManager::shutdownExtractedManagers() {
     spdlog::info("[ServiceManager] Phase 9: Releasing extracted managers");
     try {
         if (pluginManager_) {
-            pluginManager_->shutdown();
             pluginManager_.reset();
             spdlog::info("[ServiceManager] Phase 9.1: PluginManager reset");
         }
@@ -1447,16 +1346,10 @@ void ServiceManager::shutdownExtractedManagers() {
 void ServiceManager::releasePluginInfrastructure() {
     spdlog::info("[ServiceManager] Phase 10: Releasing plugin infrastructure");
     try {
-        abiPluginLoader_.reset();
-        spdlog::info("[ServiceManager] Phase 10.1: ABI plugin loader reset");
-    } catch (...) {
-        spdlog::warn("[ServiceManager] Phase 10.1: Exception resetting ABI plugin loader");
-    }
-    try {
         abiHost_.reset();
-        spdlog::info("[ServiceManager] Phase 10.2: ABI host reset");
+        spdlog::info("[ServiceManager] Phase 10.1: ABI host reset");
     } catch (...) {
-        spdlog::warn("[ServiceManager] Phase 10.2: Exception resetting ABI host");
+        spdlog::warn("[ServiceManager] Phase 10.1: Exception resetting ABI host");
     }
 
     spdlog::info("[ServiceManager] Phase 10.5: Releasing WorkCoordinator");
@@ -3128,8 +3021,8 @@ std::chrono::milliseconds ServiceManager::runSessionWatcherIteration() {
         return sessionWatcherDelay(false, 0);
     }
 
-    const bool watchEnabled = sessionService->watchEnabled(*current);
-    const auto delay = sessionWatcherDelay(watchEnabled, sessionService->watchIntervalMs(*current));
+    const bool watchEnabled = sessionService->watchEnabled(current);
+    const auto delay = sessionWatcherDelay(watchEnabled, sessionService->watchIntervalMs(current));
     if (!watchEnabled) {
         return delay;
     }
@@ -3140,7 +3033,7 @@ std::chrono::milliseconds ServiceManager::runSessionWatcherIteration() {
     }
     auto documentService = yams::app::services::makeDocumentService(appCtx);
 
-    for (const auto& pattern : sessionService->getPinnedPatterns(*current)) {
+    for (const auto& pattern : sessionService->getPinnedPatterns(current)) {
         scanSessionWatchDirectory(*indexingService, documentService.get(), *current, pattern);
     }
     return delay;
@@ -3781,8 +3674,7 @@ boost::asio::awaitable<Result<size_t>> ServiceManager::autoloadPluginsNow() {
         co_return Error{ErrorCode::InvalidState, "PluginManager not initialized"};
     }
 
-    auto executor = getWorkerExecutor();
-    auto result = co_await pluginManager_->autoloadPlugins(executor);
+    auto result = pluginManager_->autoloadPlugins();
 
     if (result) {
         spdlog::info("ServiceManager: Autoloaded {} plugins via PluginManager", result.value());

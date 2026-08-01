@@ -21,7 +21,12 @@ using json = nlohmann::json;
 
 PluginContentExtractorAdapter::PluginContentExtractorAdapter(yams_content_extractor_v1* table,
                                                              std::string name)
-    : name_(std::move(name)), backend_(AbiBackend{table}) {}
+    : PluginContentExtractorAdapter(table, {}, std::move(name)) {}
+
+PluginContentExtractorAdapter::PluginContentExtractorAdapter(yams_content_extractor_v1* table,
+                                                             std::shared_ptr<void> pluginKeepalive,
+                                                             std::string name)
+    : name_(std::move(name)), backend_(AbiBackend{table, std::move(pluginKeepalive)}) {}
 
 PluginContentExtractorAdapter::PluginContentExtractorAdapter(
     ExternalPluginHost* host, std::string pluginName, std::vector<std::string> supportedMimes,

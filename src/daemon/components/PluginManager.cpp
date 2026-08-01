@@ -12,7 +12,6 @@
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/resource/abi_entity_extractor_adapter.h>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
-#include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/daemon/resource/external_entity_provider_adapter.h>
 #include <yams/daemon/resource/external_plugin_host.h>
@@ -33,19 +32,106 @@
 
 #include <algorithm>
 #include <cctype>
-#include <fstream>
-#include <sstream>
+#include <cstdio>
+#include <cstdlib>
+#include <optional>
 #include <type_traits>
 #include <unordered_set>
+#include <utility>
 
 namespace yams::daemon {
+namespace {
+
+std::optional<std::string> getenvCopy(const char* name) {
+    auto value = yams::config::getenv_copy(name);
+    if (value.empty()) {
+        return std::nullopt;
+    }
+    return value;
+}
+
+void writeShutdownFailure(const char* operation, const char* name = nullptr,
+                          const char* message = nullptr) noexcept {
+    std::fputs("PluginManager ", stderr);
+    std::fputs(operation, stderr);
+    if (name) {
+        std::fputs(" for ", stderr);
+        std::fputs(name, stderr);
+    }
+    if (message) {
+        std::fputs(": ", stderr);
+        std::fputs(message, stderr);
+    }
+    std::fputc('\n', stderr);
+}
+
+void appendPluginNameVariant(std::vector<std::string>& variants, const std::string& variant) {
+    if (!variant.empty() &&
+        std::find(variants.begin(), variants.end(), variant) == variants.end()) {
+        variants.push_back(variant);
+    }
+}
+
+std::vector<std::string> pluginNameVariants(const std::string& name) {
+    std::vector<std::string> variants;
+    appendPluginNameVariant(variants, name);
+    if (name.rfind("libyams_", 0) == 0 && name.size() > 8) {
+        appendPluginNameVariant(variants, name.substr(8));
+        appendPluginNameVariant(variants, name.substr(3));
+    } else if (name.rfind("yams_", 0) == 0 && name.size() > 5) {
+        appendPluginNameVariant(variants, name.substr(5));
+    }
+    return variants;
+}
+
+std::string pluginDiscoveryKey(const PluginDescriptor& descriptor) {
+    std::error_code ec;
+    auto canonical = std::filesystem::weakly_canonical(descriptor.path, ec);
+    if (ec) {
+        canonical = descriptor.path.lexically_normal();
+    }
+    return canonical.string() + "\n" + descriptor.name;
+}
+
+std::string normalizedExtension(const std::filesystem::path& target) {
+    auto extension = target.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return extension;
+}
+
+bool isExternalPluginTarget(const std::filesystem::path& target) {
+    const auto extension = normalizedExtension(target);
+    if (extension == ".py" || extension == ".js") {
+        return true;
+    }
+    std::error_code ec;
+    if (std::filesystem::is_directory(target, ec)) {
+        return std::filesystem::exists(target / "yams-plugin.json", ec);
+    }
+    return target.has_parent_path() &&
+           std::filesystem::exists(target.parent_path() / "yams-plugin.json", ec);
+}
+
+bool isAbiPluginTarget(const std::filesystem::path& target) {
+    const auto extension = normalizedExtension(target);
+    return extension == ".so" || extension == ".dylib" || extension == ".dll";
+}
+
+bool exposesRuntimeInterface(const PluginDescriptor& descriptor) {
+    // PluginManager cannot prove that an unknown interface has no live consumer. Fail closed for
+    // every declared interface so future ABI additions cannot bypass unload safety.
+    return !descriptor.interfaces.empty();
+}
+
+} // namespace
 
 std::string adjustOnnxConfigJson(const std::string& configJson, std::size_t defaultMax) {
     nlohmann::json cfgJson = nlohmann::json::object();
     if (!configJson.empty()) {
         auto parsed = nlohmann::json::parse(configJson, nullptr, false);
         if (!parsed.is_discarded() && parsed.is_object()) {
-            cfgJson = std::move(parsed);
+            cfgJson = std::exchange(parsed, nlohmann::json{});
         }
     }
 
@@ -83,11 +169,11 @@ adoptPluginInterfaceImpl(AbiPluginHost* host, const std::string& interfaceName,
         if (!hasInterface)
             continue;
 
-        auto ifaceRes = host->getInterface(descriptor.name, interfaceName, interfaceVersion);
-        if (!ifaceRes)
+        auto lease = host->acquireInterface(descriptor.name, interfaceName, interfaceVersion);
+        if (!lease)
             continue;
 
-        auto* table = reinterpret_cast<AbiTableType*>(ifaceRes.value());
+        auto* table = reinterpret_cast<AbiTableType*>(lease.value().interface);
         if (!table)
             continue;
 
@@ -95,20 +181,14 @@ adoptPluginInterfaceImpl(AbiPluginHost* host, const std::string& interfaceName,
             continue;
 
         try {
-            std::shared_ptr<void> keepalive;
-            auto keepaliveRes = host->acquireKeepAlive(descriptor.name);
-            if (keepaliveRes) {
-                keepalive = std::move(keepaliveRes.value());
-            }
-
             std::shared_ptr<AdapterType> adapter;
             if constexpr (std::is_constructible_v<AdapterType, AbiTableType*,
                                                   std::shared_ptr<void>>) {
-                adapter = std::make_shared<AdapterType>(table, std::move(keepalive));
+                adapter = std::make_shared<AdapterType>(table, lease.value().keepAlive);
             } else {
                 adapter = std::make_shared<AdapterType>(table);
             }
-            targetContainer.push_back(std::move(adapter));
+            targetContainer.push_back(adapter);
             ++adopted;
             spdlog::info("Adopted {} from plugin: {}", interfaceName, descriptor.name);
         } catch (const std::exception& e) {
@@ -119,17 +199,17 @@ adoptPluginInterfaceImpl(AbiPluginHost* host, const std::string& interfaceName,
     return adopted;
 }
 
-PluginManager::PluginManager(Dependencies deps) : deps_(std::move(deps)) {}
+PluginManager::PluginManager(Dependencies deps) {
+    std::swap(deps_, deps);
+}
 
 PluginManager::~PluginManager() {
     shutdown();
 }
 
 Result<void> PluginManager::initialize() {
+    std::lock_guard lifecycleLock(pluginLifecycleMutex_);
     spdlog::debug("[PluginManager] Initializing");
-
-    // Create plugin loader
-    pluginLoader_ = std::make_unique<AbiPluginLoader>();
 
     // Use shared plugin host if provided, otherwise create our own with retry
     if (deps_.sharedPluginHost) {
@@ -143,7 +223,7 @@ Result<void> PluginManager::initialize() {
         bool trustOk = false;
         for (int attempt = 0; attempt < 3; ++attempt) {
             try {
-                pluginHost_ = std::make_unique<AbiPluginHost>(nullptr, trustFile);
+                pluginHost_ = std::make_unique<AbiPluginHost>(trustFile);
                 spdlog::info("[PluginManager] AbiPluginHost initialized with trust file: {}",
                              trustFile.string());
                 trustOk = true;
@@ -195,14 +275,14 @@ Result<void> PluginManager::initialize() {
     // Configure name policy
     if (deps_.config) {
         std::string policy = deps_.config->pluginNamePolicy;
-        if (const char* env = std::getenv("YAMS_PLUGIN_NAME_POLICY"))
-            policy = env;
+        if (const auto env = getenvCopy("YAMS_PLUGIN_NAME_POLICY"))
+            policy = *env;
         for (auto& c : policy)
             c = static_cast<char>(std::tolower(c));
-        if (policy == "spec")
-            pluginLoader_->setNamePolicy(AbiPluginLoader::NamePolicy::Spec);
-        else
-            pluginLoader_->setNamePolicy(AbiPluginLoader::NamePolicy::Relaxed);
+        if (auto* host = getActivePluginHost()) {
+            host->setNamePolicy(policy == "spec" ? AbiPluginHost::NamePolicy::Spec
+                                                 : AbiPluginHost::NamePolicy::Relaxed);
+        }
     }
 
     // Treat a host with zero plugins as a valid steady state. Autoload can still
@@ -212,36 +292,55 @@ Result<void> PluginManager::initialize() {
     return Result<void>{};
 }
 
-void PluginManager::shutdown() {
-    spdlog::debug("[PluginManager] Shutting down");
+void PluginManager::shutdown() noexcept {
+    std::lock_guard lifecycleLock(pluginLifecycleMutex_);
+    if (shutdownInvoked_.exchange(true, std::memory_order_acq_rel)) {
+        return;
+    }
 
-    // Shutdown external plugin host first (terminates child processes)
-    externalHost_.reset();
+    try {
+        spdlog::debug("[PluginManager] Shutting down");
+    } catch (...) {
+        std::fputs("PluginManager shutdown logging failed\n", stderr);
+    }
 
-    // Clear adopted interfaces
+    // Release adopted interfaces before destroying or unloading either host. Runtime hot-unload
+    // rejects interface-bearing plugins because other daemon components can hold shared adapter
+    // copies; shutdown is the quiesced path that safely releases them.
     modelProvider_.reset();
     contentExtractors_.clear();
     symbolExtractors_.clear();
+    entityExtractors_.clear();
     entityProviders_.clear();
+    externalHost_.reset();
 
-    // Unload plugins
-    if (getActivePluginHost()) {
-        for (const auto& d : getActivePluginHost()->listLoaded()) {
-            try {
-                getActivePluginHost()->unload(d.name);
-            } catch (const std::exception& e) {
-                spdlog::debug("[PluginManager] unload failed for '{}': {}", d.name, e.what());
-            } catch (...) {
-                spdlog::debug("[PluginManager] unload failed for '{}': unknown exception", d.name);
+    try {
+        if (auto* host = getActivePluginHost()) {
+            for (const auto& descriptor : host->listLoaded()) {
+                try {
+                    auto result = host->unload(descriptor.name);
+                    if (!result) {
+                        writeShutdownFailure("unload failed", descriptor.name.c_str(),
+                                             result.error().message.c_str());
+                    }
+                } catch (const std::exception& e) {
+                    writeShutdownFailure("unload failed", descriptor.name.c_str(), e.what());
+                } catch (...) {
+                    writeShutdownFailure("unload failed", descriptor.name.c_str());
+                }
             }
         }
+    } catch (const std::exception& e) {
+        writeShutdownFailure("could not enumerate plugins during shutdown", nullptr, e.what());
+    } catch (...) {
+        std::fputs("PluginManager could not enumerate plugins during shutdown\n", stderr);
     }
 
     pluginHost_.reset();
-    pluginLoader_.reset();
 }
 
 std::vector<std::filesystem::path> PluginManager::trustList() const {
+    std::lock_guard lifecycleLock(pluginLifecycleMutex_);
     std::vector<std::filesystem::path> paths;
     if (getActivePluginHost()) {
         auto abi = getActivePluginHost()->trustList();
@@ -257,6 +356,7 @@ std::vector<std::filesystem::path> PluginManager::trustList() const {
 }
 
 Result<void> PluginManager::trustAdd(const std::filesystem::path& path) {
+    std::lock_guard lifecycleLock(pluginLifecycleMutex_);
     Result<void> lastErr{Error{ErrorCode::InvalidState, "Plugin host not initialized"}};
     bool any = false;
 
@@ -284,6 +384,7 @@ Result<void> PluginManager::trustAdd(const std::filesystem::path& path) {
 }
 
 Result<void> PluginManager::trustRemove(const std::filesystem::path& path) {
+    std::lock_guard lifecycleLock(pluginLifecycleMutex_);
     Result<void> lastErr{Error{ErrorCode::InvalidState, "Plugin host not initialized"}};
     bool any = false;
 
@@ -310,8 +411,389 @@ Result<void> PluginManager::trustRemove(const std::filesystem::path& path) {
     return lastErr;
 }
 
-boost::asio::awaitable<Result<size_t>>
-PluginManager::autoloadPlugins(const boost::asio::any_io_executor& executor) {
+Result<PluginDescriptor> PluginManager::loadConfiguredPlugin(IPluginHost& host,
+                                                             const PluginDescriptor& descriptor,
+                                                             std::string explicitConfigJson) const {
+    std::lock_guard lifecycleLock(pluginLifecycleMutex_);
+    std::string configJson = std::exchange(explicitConfigJson, {});
+    std::string configKey;
+
+    if (configJson.empty() && deps_.config) {
+        for (const auto& variant : pluginNameVariants(descriptor.name)) {
+            const auto it = deps_.config->pluginConfigs.find(variant);
+            if (it == deps_.config->pluginConfigs.end()) {
+                continue;
+            }
+            if (configKey.empty()) {
+                configJson = it->second;
+                configKey = variant;
+                continue;
+            }
+            if (it->second != configJson) {
+                return Error{ErrorCode::InvalidData,
+                             "Conflicting plugin configuration aliases for: " + descriptor.name};
+            }
+        }
+    }
+
+    if (!configKey.empty()) {
+        spdlog::info("[PluginManager] applying configured settings to plugin '{}' (key '{}')",
+                     descriptor.name, configKey);
+    }
+
+    const bool isModelProvider =
+        std::find(descriptor.interfaces.begin(), descriptor.interfaces.end(),
+                  "model_provider_v1") != descriptor.interfaces.end();
+    const bool isOnnxPlugin = descriptor.name.find("onnx") != std::string::npos;
+    if (isModelProvider && isOnnxPlugin) {
+        const std::size_t defaultMax =
+            deps_.config ? deps_.config->modelPoolConfig.maxLoadedModels : 0;
+        configJson = adjustOnnxConfigJson(configJson, defaultMax);
+        spdlog::info("[PluginManager] enforcing ONNX model pool max_loaded_models");
+    }
+
+    return host.load(descriptor.path, configJson);
+}
+
+IPluginHost* PluginManager::getHost(PluginHostKind kind) const {
+    if (kind == PluginHostKind::Abi) {
+        return getActivePluginHost();
+    }
+    return externalHost_.get();
+}
+
+std::vector<std::pair<PluginManager::PluginHostKind, std::filesystem::path>>
+PluginManager::pluginScanRoots() const {
+    using Root = std::pair<PluginHostKind, std::filesystem::path>;
+    auto appendRoot = [](std::vector<Root>& roots, PluginHostKind kind,
+                         const std::filesystem::path& path) {
+        if (path.empty()) {
+            return;
+        }
+        const auto duplicate = std::find_if(roots.begin(), roots.end(), [&](const Root& root) {
+            return root.first == kind && root.second == path;
+        });
+        if (duplicate == roots.end()) {
+            roots.emplace_back(kind, path);
+        }
+    };
+
+    std::vector<Root> trustedRoots;
+    for (const auto kind : {PluginHostKind::Abi, PluginHostKind::External}) {
+        if (const auto* host = getHost(kind)) {
+            for (const auto& path : host->trustList()) {
+                appendRoot(trustedRoots, kind, path);
+            }
+        }
+    }
+
+    const bool strictMode = deps_.config ? deps_.config->pluginDirStrict : false;
+    if (strictMode) {
+        return trustedRoots;
+    }
+
+    std::vector<Root> roots;
+
+    namespace fs = std::filesystem;
+#ifdef _WIN32
+    std::optional<fs::path> userBase;
+    if (const auto localAppData = getenvCopy("LOCALAPPDATA")) {
+        userBase = fs::path(*localAppData) / "yams";
+    } else if (const auto userProfile = getenvCopy("USERPROFILE")) {
+        userBase = fs::path(*userProfile) / "AppData" / "Local" / "yams";
+    }
+    if (userBase) {
+        appendRoot(roots, PluginHostKind::Abi, *userBase / "plugins");
+        appendRoot(roots, PluginHostKind::External, *userBase / "external-plugins");
+    }
+    if (const auto programFiles = getenvCopy("ProgramFiles")) {
+        const auto installBase = fs::path(*programFiles) / "YAMS" / "lib" / "yams";
+        appendRoot(roots, PluginHostKind::Abi, installBase / "plugins");
+        appendRoot(roots, PluginHostKind::External, installBase / "external-plugins");
+    }
+#else
+    if (const auto home = getenvCopy("HOME")) {
+        const auto userBase = fs::path(*home) / ".local" / "lib" / "yams";
+        appendRoot(roots, PluginHostKind::Abi, userBase / "plugins");
+        appendRoot(roots, PluginHostKind::External, userBase / "external-plugins");
+    }
+#ifdef __APPLE__
+    appendRoot(roots, PluginHostKind::Abi, "/opt/homebrew/lib/yams/plugins");
+    appendRoot(roots, PluginHostKind::External, "/opt/homebrew/lib/yams/external-plugins");
+#endif
+    appendRoot(roots, PluginHostKind::Abi, "/usr/local/lib/yams/plugins");
+    appendRoot(roots, PluginHostKind::External, "/usr/local/lib/yams/external-plugins");
+    appendRoot(roots, PluginHostKind::Abi, "/usr/lib/yams/plugins");
+    appendRoot(roots, PluginHostKind::External, "/usr/lib/yams/external-plugins");
+#endif
+#ifdef YAMS_INSTALL_PREFIX
+    const auto installBase = fs::path(YAMS_INSTALL_PREFIX) / "lib" / "yams";
+    appendRoot(roots, PluginHostKind::Abi, installBase / "plugins");
+    appendRoot(roots, PluginHostKind::External, installBase / "external-plugins");
+#endif
+    for (const auto& [kind, path] : trustedRoots) {
+        appendRoot(roots, kind, path);
+    }
+    return roots;
+}
+
+Result<PluginManager::DiscoveredPlugin>
+PluginManager::scanPluginTarget(const std::filesystem::path& target) const {
+    if (!getHost(PluginHostKind::Abi) && !getHost(PluginHostKind::External)) {
+        return Error{ErrorCode::InvalidState, "No plugin host available"};
+    }
+
+    const bool externalTarget = isExternalPluginTarget(target);
+    const bool abiTarget = isAbiPluginTarget(target);
+    const auto preferred = externalTarget ? PluginHostKind::External : PluginHostKind::Abi;
+    if (auto* host = getHost(preferred)) {
+        if (auto result = host->scanTarget(target)) {
+            return DiscoveredPlugin{preferred, result.value()};
+        }
+    }
+    if (!externalTarget && !abiTarget) {
+        const auto fallback =
+            preferred == PluginHostKind::Abi ? PluginHostKind::External : PluginHostKind::Abi;
+        if (auto* host = getHost(fallback)) {
+            if (auto result = host->scanTarget(target)) {
+                return DiscoveredPlugin{fallback, result.value()};
+            }
+        }
+    }
+    return Error{ErrorCode::NotFound, "No plugin found at target: " + target.string()};
+}
+
+Result<std::vector<PluginManager::DiscoveredPlugin>>
+PluginManager::scanPluginDirectory(const std::filesystem::path& directory) const {
+    std::vector<DiscoveredPlugin> discovered;
+    std::unordered_set<std::string> seen;
+    bool hasHost = false;
+
+    for (const auto kind : {PluginHostKind::Abi, PluginHostKind::External}) {
+        auto* host = getHost(kind);
+        if (!host) {
+            continue;
+        }
+        hasHost = true;
+        auto result = host->scanDirectory(directory);
+        if (!result) {
+            spdlog::debug("[PluginManager] scan failed for {}: {}", directory.string(),
+                          result.error().message);
+            continue;
+        }
+        for (auto& descriptor : result.value()) {
+            const auto key = pluginDiscoveryKey(descriptor);
+            if (seen.insert(key).second) {
+                discovered.push_back(DiscoveredPlugin{kind, descriptor});
+            }
+        }
+    }
+
+    if (!hasHost) {
+        return Error{ErrorCode::InvalidState, "No plugin host available"};
+    }
+    return discovered;
+}
+
+Result<std::vector<PluginManager::DiscoveredPlugin>>
+PluginManager::scanConfiguredPluginRoots() const {
+    std::vector<DiscoveredPlugin> discovered;
+    std::unordered_set<std::string> seen;
+
+    for (const auto& [kind, root] : pluginScanRoots()) {
+        auto* host = getHost(kind);
+        if (!host) {
+            continue;
+        }
+
+        std::error_code ec;
+        Result<std::vector<PluginDescriptor>> result{
+            Error{ErrorCode::InvalidState, "Plugin root was not scanned"}};
+        if (std::filesystem::is_regular_file(root, ec)) {
+            auto targetResult = host->scanTarget(root);
+            if (targetResult) {
+                result = std::vector<PluginDescriptor>{targetResult.value()};
+            } else {
+                result = targetResult.error();
+            }
+        } else {
+            result = host->scanDirectory(root);
+        }
+        if (!result) {
+            spdlog::debug("[PluginManager] scan failed for {}: {}", root.string(),
+                          result.error().message);
+            continue;
+        }
+        for (auto& descriptor : result.value()) {
+            const auto key = pluginDiscoveryKey(descriptor);
+            if (seen.insert(key).second) {
+                discovered.push_back(DiscoveredPlugin{kind, descriptor});
+            }
+        }
+    }
+    return discovered;
+}
+
+Result<std::filesystem::path>
+PluginManager::resolvePluginTarget(const std::filesystem::path& target) const {
+    std::error_code ec;
+    if (std::filesystem::exists(target, ec)) {
+        return target;
+    }
+    for (const auto& [kind, root] : pluginScanRoots()) {
+        (void)kind;
+        if (!std::filesystem::is_directory(root, ec)) {
+            ec.clear();
+            continue;
+        }
+        auto candidate = root / target;
+        if (std::filesystem::exists(candidate, ec)) {
+            return candidate;
+        }
+        ec.clear();
+    }
+    return Error{ErrorCode::NotFound, "Plugin not found: " + target.string()};
+}
+
+Result<PluginDescriptor> PluginManager::loadDiscoveredPlugin(const DiscoveredPlugin& discovered,
+                                                             std::string explicitConfigJson) {
+    std::lock_guard lifecycleLock(pluginLifecycleMutex_);
+    auto* host = getHost(discovered.host);
+    if (!host) {
+        return Error{ErrorCode::InvalidState, "Plugin host not initialized"};
+    }
+
+    auto result =
+        loadConfiguredPlugin(*host, discovered.descriptor, std::exchange(explicitConfigJson, {}));
+    if (!result) {
+        pluginHostFsm_.dispatch(PluginLoadRejectedEvent{result.error().message});
+        return result.error();
+    }
+
+    pluginHostFsm_.dispatch(PluginLoadedEvent{result.value().name});
+    std::size_t loadedCount = 0;
+    for (const auto kind : {PluginHostKind::Abi, PluginHostKind::External}) {
+        if (const auto* candidateHost = getHost(kind)) {
+            loadedCount += candidateHost->listLoaded().size();
+        }
+    }
+    pluginHostFsm_.dispatch(AllPluginsLoadedEvent{loadedCount});
+    return result.value();
+}
+
+Result<PluginDescriptor> PluginManager::loadPluginTarget(const std::filesystem::path& target,
+                                                         std::string explicitConfigJson) {
+    std::lock_guard lifecycleLock(pluginLifecycleMutex_);
+    auto resolved = resolvePluginTarget(target);
+    if (!resolved) {
+        return resolved.error();
+    }
+    auto discovered = scanPluginTarget(resolved.value());
+    if (!discovered) {
+        return discovered.error();
+    }
+    return loadDiscoveredPlugin(discovered.value(), std::exchange(explicitConfigJson, {}));
+}
+
+Result<std::vector<PluginDescriptor>>
+PluginManager::loadPluginDirectory(const std::filesystem::path& directory) {
+    std::lock_guard lifecycleLock(pluginLifecycleMutex_);
+    auto discovered = scanPluginDirectory(directory);
+    if (!discovered) {
+        return discovered.error();
+    }
+
+    std::vector<PluginDescriptor> loaded;
+    std::optional<Error> lastError;
+    for (const auto& candidate : discovered.value()) {
+        auto result = loadDiscoveredPlugin(candidate);
+        if (result) {
+            loaded.push_back(result.value());
+        } else {
+            lastError = result.error();
+        }
+    }
+    if (loaded.empty() && lastError) {
+        return *lastError;
+    }
+    return loaded;
+}
+
+Result<void> PluginManager::unloadPlugin(const std::string& name) {
+    std::lock_guard lifecycleLock(pluginLifecycleMutex_);
+    for (const auto kind : {PluginHostKind::Abi, PluginHostKind::External}) {
+        auto* host = getHost(kind);
+        if (!host) {
+            continue;
+        }
+        const auto loaded = host->listLoaded();
+        const auto match = std::find_if(loaded.begin(), loaded.end(), [&](const auto& descriptor) {
+            return descriptor.name == name;
+        });
+        if (match == loaded.end()) {
+            continue;
+        }
+        if (exposesRuntimeInterface(*match)) {
+            const std::string message =
+                "Hot unload is unsafe for a plugin with active runtime interfaces; restart the "
+                "daemon to unload: " +
+                name;
+            pluginHostFsm_.dispatch(PluginLoadRejectedEvent{message});
+            return Error{ErrorCode::InvalidState, message};
+        }
+        auto result = host->unload(name);
+        if (!result) {
+            pluginHostFsm_.dispatch(PluginLoadRejectedEvent{result.error().message});
+            return result.error();
+        }
+        if (adoptedProviderPluginName_ == name) {
+            modelProvider_.reset();
+            adoptedProviderPluginName_.clear();
+            embeddingModelName_.clear();
+            if (deps_.state) {
+                deps_.state->readiness.modelProviderReady = false;
+            }
+        }
+        (void)adoptModelProvider();
+        (void)adoptContentExtractors();
+        (void)adoptSymbolExtractors();
+        (void)adoptEntityExtractors();
+        (void)adoptEntityProviders();
+        pluginHostFsm_.dispatch(PluginUnloadedEvent{name});
+        return {};
+    }
+    return Error{ErrorCode::NotFound, "Plugin not loaded: " + name};
+}
+
+bool PluginManager::isPluginLoadedFrom(const std::filesystem::path& path) const {
+    std::error_code ec;
+    auto requested = std::filesystem::weakly_canonical(path, ec);
+    if (ec) {
+        requested = path.lexically_normal();
+        ec.clear();
+    }
+
+    for (const auto kind : {PluginHostKind::Abi, PluginHostKind::External}) {
+        const auto* host = getHost(kind);
+        if (!host) {
+            continue;
+        }
+        for (const auto& descriptor : host->listLoaded()) {
+            auto loaded = std::filesystem::weakly_canonical(descriptor.path, ec);
+            if (ec) {
+                loaded = descriptor.path.lexically_normal();
+                ec.clear();
+            }
+            if (loaded == requested) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+Result<size_t> PluginManager::autoloadPlugins() {
+    std::lock_guard lifecycleLock(pluginLifecycleMutex_);
     size_t loadedCount = 0;
 
     try {
@@ -320,26 +802,28 @@ PluginManager::autoloadPlugins(const boost::asio::any_io_executor& executor) {
         if (ps == PluginHostState::ScanningDirectories || ps == PluginHostState::LoadingPlugins) {
             spdlog::warn("[PluginManager] autoload skipped: scan already in progress");
             pluginHostFsm_.dispatch(AllPluginsLoadedEvent{0});
-            co_return Result<size_t>(0);
+            return Result<size_t>(0);
         }
 
         // Check for mock provider or disabled plugins
         if (deps_.config && deps_.config->useMockModelProvider) {
             spdlog::info("[PluginManager] autoload skipped (mock provider in use)");
             pluginHostFsm_.dispatch(AllPluginsLoadedEvent{0});
-            co_return Result<size_t>(0);
+            return Result<size_t>(0);
         }
 #if defined(YAMS_TESTING) || defined(YAMS_TEST_PROVIDER_CONTROLS)
-        if (ConfigResolver::envTruthy(std::getenv("YAMS_USE_MOCK_PROVIDER"))) {
+        if (const auto mockProvider = getenvCopy("YAMS_USE_MOCK_PROVIDER");
+            mockProvider && ConfigResolver::envTruthy(mockProvider->c_str())) {
             spdlog::info("[PluginManager] autoload skipped (mock provider via env)");
             pluginHostFsm_.dispatch(AllPluginsLoadedEvent{0});
-            co_return Result<size_t>(0);
+            return Result<size_t>(0);
         }
 #endif
-        if (const char* d = std::getenv("YAMS_DISABLE_ABI_PLUGINS"); d && *d) {
+        if (const auto disabled = getenvCopy("YAMS_DISABLE_ABI_PLUGINS");
+            disabled && !disabled->empty()) {
             spdlog::info("[PluginManager] autoload disabled by YAMS_DISABLE_ABI_PLUGINS");
             pluginHostFsm_.dispatch(AllPluginsLoadedEvent{0});
-            co_return Result<size_t>(0);
+            return Result<size_t>(0);
         }
 
         bool skipAbiModelProviders = false;
@@ -350,7 +834,7 @@ PluginManager::autoloadPlugins(const boost::asio::any_io_executor& executor) {
                 const auto known = getRegisteredProviders();
                 if (std::find(known.begin(), known.end(), backend) != known.end()) {
                     skipAbiModelProviders = true;
-                    inProcessBackend = std::move(backend);
+                    inProcessBackend = backend;
                     spdlog::info("[PluginManager] model_provider plugins will be filtered: "
                                  "backend='{}' is satisfied in-process",
                                  inProcessBackend);
@@ -358,291 +842,54 @@ PluginManager::autoloadPlugins(const boost::asio::any_io_executor& executor) {
             }
         }
 
-        // Build list of plugin directories to scan
-        std::vector<std::filesystem::path> roots;
-        std::vector<std::filesystem::path> trustedRoots;
-        std::vector<std::filesystem::path> defaultRoots;
-
-        // Add trust list paths
-        if (getActivePluginHost()) {
-            for (const auto& p : getActivePluginHost()->trustList()) {
-                trustedRoots.push_back(p);
-                roots.push_back(p);
-            }
+        const auto roots = pluginScanRoots();
+        spdlog::info("[PluginManager] autoload: {} resolved roots to scan", roots.size());
+        for (const auto& [host, root] : roots) {
+            spdlog::debug("[PluginManager] scan root: host={} path='{}'",
+                          host == PluginHostKind::Abi ? "abi" : "external", root.string());
         }
-
-        // Add platform-specific default directories unless strict plugin-dir mode is enabled.
-        // Strict mode is useful for benchmark/test isolation where only explicitly trusted roots
-        // should be scanned.
-        namespace fs = std::filesystem;
-        bool strictPluginDirMode = deps_.config ? deps_.config->pluginDirStrict : false;
-        if (const char* envStrict = std::getenv("YAMS_PLUGIN_DIR_STRICT")) {
-            strictPluginDirMode = ConfigResolver::envTruthy(envStrict);
-        }
-        if (!strictPluginDirMode) {
-#ifdef _WIN32
-            defaultRoots.push_back(yams::config::get_data_dir() / "plugins");
-#else
-            if (const char* home = std::getenv("HOME")) {
-                defaultRoots.push_back(fs::path(home) / ".local" / "lib" / "yams" / "plugins");
-            }
-#ifdef __APPLE__
-            // macOS: Homebrew default install location
-            defaultRoots.push_back(fs::path("/opt/homebrew/lib/yams/plugins"));
-#endif
-            defaultRoots.push_back(fs::path("/usr/local/lib/yams/plugins"));
-            defaultRoots.push_back(fs::path("/usr/lib/yams/plugins"));
-#endif
-#ifdef YAMS_INSTALL_PREFIX
-            defaultRoots.push_back(fs::path(YAMS_INSTALL_PREFIX) / "lib" / "yams" / "plugins");
-#endif
-        } else {
-            spdlog::info("[PluginManager] strict plugin-dir mode enabled; skipping default plugin "
-                         "roots");
-        }
-
-        roots.insert(roots.end(), defaultRoots.begin(), defaultRoots.end());
-
-        // Deduplicate
-        std::sort(roots.begin(), roots.end());
-        roots.erase(std::unique(roots.begin(), roots.end()), roots.end());
-
-        auto joinPaths = [](const std::vector<std::filesystem::path>& paths) {
-            std::string out;
-            for (const auto& p : paths) {
-                if (!out.empty())
-                    out += ";";
-                out += p.string();
-            }
-            return out;
-        };
-
-        if (!trustedRoots.empty()) {
-            std::sort(trustedRoots.begin(), trustedRoots.end());
-            trustedRoots.erase(std::unique(trustedRoots.begin(), trustedRoots.end()),
-                               trustedRoots.end());
-        }
-        if (!defaultRoots.empty()) {
-            std::sort(defaultRoots.begin(), defaultRoots.end());
-            defaultRoots.erase(std::unique(defaultRoots.begin(), defaultRoots.end()),
-                               defaultRoots.end());
-        }
-
-        spdlog::info("[PluginManager] trust roots ({}): {}", trustedRoots.size(),
-                     joinPaths(trustedRoots));
-        spdlog::info("[PluginManager] default roots (strict={} count={}): {}", strictPluginDirMode,
-                     defaultRoots.size(), joinPaths(defaultRoots));
-
-        spdlog::info("[PluginManager] effective scan roots: {}", joinPaths(roots));
-        spdlog::info("[PluginManager] autoload: {} roots to scan", roots.size());
         pluginHostFsm_.dispatch(PluginScanStartedEvent{roots.size()});
 
-        // Load ABI plugins serially. Native plugin load is a synchronous dlopen/init path, and
-        // serializing it avoids overlapping dynamic-loader work during startup.
-        std::unordered_set<std::string> scheduledPluginNames;
-
-        for (const auto& root : roots) {
-            spdlog::info("[PluginManager] scanning: {}", root.string());
-
-            if (!getActivePluginHost())
-                continue;
-
-            auto scanResult = getActivePluginHost()->scanDirectory(root);
-            if (!scanResult) {
-                spdlog::debug("[PluginManager] scan failed for {}: {}", root.string(),
-                              scanResult.error().message);
-                pluginHostFsm_.dispatch(PluginLoadFailedEvent{scanResult.error().message});
-                continue;
-            }
-
-            for (const auto& desc : scanResult.value()) {
-                spdlog::info("[PluginManager] candidate: '{}' path='{}' ifaces=[{}]", desc.name,
-                             desc.path.string(), [&]() {
-                                 std::string s;
-                                 for (size_t i = 0; i < desc.interfaces.size(); i++) {
-                                     if (i)
-                                         s += ",";
-                                     s += desc.interfaces[i];
-                                 }
-                                 return s;
-                             }());
-
-                // Create awaitable load task
-                // Use getActivePluginHost() to get the correct host (shared or owned)
-                auto host = getActivePluginHost();
-                if (!host) {
-                    spdlog::warn("[PluginManager] no active plugin host for loading");
-                    continue;
-                }
-                const auto& path = desc.path;
-                const auto& pluginName = desc.name;
-
-                if (!scheduledPluginNames.insert(pluginName).second) {
-                    spdlog::info(
-                        "[PluginManager] skipping duplicate plugin candidate '{}' from '{}'"
-                        " (already scheduled)",
-                        pluginName, path.string());
-                    continue;
-                }
-
-                // Look up plugin-specific config from DaemonConfig
-                // Try multiple name variants: the config may use a short name (e.g., "glint")
-                // while the plugin descriptor uses the full name (e.g., "yams_glint")
-                std::string configJson;
-                if (deps_.config) {
-                    // Build list of name variants to try
-                    std::vector<std::string> nameVariants = {pluginName};
-
-                    // If name starts with "yams_", also try without the prefix
-                    if (pluginName.rfind("yams_", 0) == 0 && pluginName.size() > 5) {
-                        nameVariants.push_back(pluginName.substr(5));
-                    }
-                    // If name starts with "libyams_", try without the "lib" and "libyams_" prefixes
-                    if (pluginName.rfind("libyams_", 0) == 0 && pluginName.size() > 8) {
-                        nameVariants.push_back(pluginName.substr(8)); // without "libyams_"
-                        nameVariants.push_back(pluginName.substr(3)); // without "lib" (yams_*)
-                    }
-
-                    for (const auto& variant : nameVariants) {
-                        auto it = deps_.config->pluginConfigs.find(variant);
-                        if (it != deps_.config->pluginConfigs.end()) {
-                            configJson = it->second;
-                            spdlog::info(
-                                "[PluginManager] passing config to plugin '{}' (key '{}'): {}",
-                                pluginName, variant, configJson);
-                            break;
-                        }
-                    }
-                }
-
-                const bool isModelProvider =
-                    std::find(desc.interfaces.begin(), desc.interfaces.end(),
-                              "model_provider_v1") != desc.interfaces.end();
-                if (isModelProvider && skipAbiModelProviders) {
-                    spdlog::info("[PluginManager] skipping model_provider plugin '{}' "
-                                 "(path='{}'): backend='{}' is satisfied in-process",
-                                 pluginName, path.string(), inProcessBackend);
-                    continue;
-                }
-                const bool isOnnxPlugin = (pluginName.find("onnx") != std::string::npos);
-                if (isModelProvider && isOnnxPlugin) {
-                    std::size_t defaultMax =
-                        deps_.config ? deps_.config->modelPoolConfig.maxLoadedModels : 0;
-                    configJson = adjustOnnxConfigJson(configJson, defaultMax);
-                    spdlog::info("[PluginManager] enforcing ONNX model pool max_loaded_models");
-                }
-
-                try {
-                    auto res = host->load(path, configJson);
-                    if (res) {
-                        auto loaded = std::move(res.value());
-                        ++loadedCount;
-                        spdlog::info("[PluginManager] loaded: '{}'", loaded.name);
-                        pluginHostFsm_.dispatch(PluginLoadedEvent{std::move(loaded.name)});
-                    } else {
-                        spdlog::warn("[PluginManager] load failed: {}", res.error().message);
-                        pluginHostFsm_.dispatch(PluginLoadFailedEvent{res.error().message});
-                    }
-                } catch (const std::exception& e) {
-                    spdlog::warn("[PluginManager] load exception: {}", e.what());
-                }
-            }
+        auto scanResult = scanConfiguredPluginRoots();
+        if (!scanResult) {
+            pluginHostFsm_.dispatch(PluginLoadFailedEvent{scanResult.error().message});
+            return scanResult.error();
         }
 
-        // External plugins autoload: scan external plugin directories
-        if (externalHost_) {
-            std::vector<std::filesystem::path> externalRoots;
-
-            // Add external trust list paths
-            for (const auto& p : externalHost_->trustList()) {
-                externalRoots.push_back(p);
+        std::unordered_set<std::string> scheduledPluginNames;
+        for (const auto& discovered : scanResult.value()) {
+            const auto& descriptor = discovered.descriptor;
+            if (!scheduledPluginNames.insert(descriptor.name).second) {
+                spdlog::info("[PluginManager] skipping duplicate plugin candidate '{}' from '{}'",
+                             descriptor.name, descriptor.path.string());
+                continue;
             }
 
-            // Add platform-specific default external plugin directories
-#ifdef _WIN32
-            externalRoots.push_back(yams::config::get_data_dir() / "external-plugins");
-#else
-            if (const char* home = std::getenv("HOME")) {
-                externalRoots.push_back(fs::path(home) / ".local" / "lib" / "yams" /
-                                        "external-plugins");
+            const bool isModelProvider =
+                std::find(descriptor.interfaces.begin(), descriptor.interfaces.end(),
+                          "model_provider_v1") != descriptor.interfaces.end();
+            if (discovered.host == PluginHostKind::Abi && isModelProvider &&
+                skipAbiModelProviders) {
+                spdlog::info("[PluginManager] skipping model_provider plugin '{}' (path='{}'): "
+                             "backend='{}' is satisfied in-process",
+                             descriptor.name, descriptor.path.string(), inProcessBackend);
+                continue;
             }
-#ifdef __APPLE__
-            // macOS: Homebrew default install location
-            externalRoots.push_back(fs::path("/opt/homebrew/lib/yams/external-plugins"));
-#endif
-            externalRoots.push_back(fs::path("/usr/local/lib/yams/external-plugins"));
-            externalRoots.push_back(fs::path("/usr/lib/yams/external-plugins"));
-#endif
 
-            // Deduplicate
-            std::sort(externalRoots.begin(), externalRoots.end());
-            externalRoots.erase(std::unique(externalRoots.begin(), externalRoots.end()),
-                                externalRoots.end());
-
-            for (const auto& root : externalRoots) {
-                if (!std::filesystem::exists(root))
+            try {
+                auto loadResult = loadDiscoveredPlugin(discovered);
+                if (!loadResult) {
+                    spdlog::warn("[PluginManager] load failed for '{}': {}", descriptor.name,
+                                 loadResult.error().message);
+                    pluginHostFsm_.dispatch(PluginLoadFailedEvent{loadResult.error().message});
                     continue;
-
-                try {
-                    spdlog::info("[PluginManager] scanning external root: {}", root.string());
-                    auto scanResult = externalHost_->scanDirectory(root);
-                    if (scanResult) {
-                        for (const auto& desc : scanResult.value()) {
-                            spdlog::info("[PluginManager] loading external plugin '{}' from {}",
-                                         desc.name, desc.path.string());
-
-                            // Look up plugin-specific config from DaemonConfig
-                            // Try multiple name variants (same logic as ABI plugins)
-                            std::string configJson;
-                            if (deps_.config) {
-                                std::vector<std::string> nameVariants = {desc.name};
-                                if (desc.name.rfind("yams_", 0) == 0 && desc.name.size() > 5) {
-                                    nameVariants.push_back(desc.name.substr(5));
-                                }
-                                if (desc.name.rfind("libyams_", 0) == 0 && desc.name.size() > 8) {
-                                    nameVariants.push_back(desc.name.substr(8));
-                                    nameVariants.push_back(desc.name.substr(3));
-                                }
-
-                                for (const auto& variant : nameVariants) {
-                                    auto it = deps_.config->pluginConfigs.find(variant);
-                                    if (it != deps_.config->pluginConfigs.end()) {
-                                        configJson = it->second;
-                                        spdlog::info("[PluginManager] passing config to external "
-                                                     "plugin '{}' (key '{}'): {}",
-                                                     desc.name, variant, configJson);
-                                        break;
-                                    }
-                                }
-                            }
-
-                            auto loadResult = externalHost_->load(desc.path, configJson);
-                            if (loadResult) {
-                                ++loadedCount;
-                                spdlog::info("[PluginManager] loaded external: '{}' (ifaces=[{}])",
-                                             loadResult.value().name, [&]() {
-                                                 std::string s;
-                                                 for (size_t i = 0;
-                                                      i < loadResult.value().interfaces.size();
-                                                      ++i) {
-                                                     if (i)
-                                                         s += ",";
-                                                     s += loadResult.value().interfaces[i];
-                                                 }
-                                                 return s;
-                                             }());
-                                auto loaded = std::move(loadResult.value());
-                                pluginHostFsm_.dispatch(PluginLoadedEvent{std::move(loaded.name)});
-                            } else {
-                                spdlog::warn("[PluginManager] external plugin load failed: {}",
-                                             loadResult.error().message);
-                            }
-                        }
-                    }
-                } catch (const std::exception& e) {
-                    spdlog::warn("[PluginManager] external scan error at {}: {}", root.string(),
-                                 e.what());
                 }
+                ++loadedCount;
+                spdlog::info("[PluginManager] loaded: '{}'", loadResult.value().name);
+            } catch (const std::exception& e) {
+                spdlog::warn("[PluginManager] load exception for '{}': {}", descriptor.name,
+                             e.what());
+                pluginHostFsm_.dispatch(PluginLoadFailedEvent{e.what()});
             }
         }
 
@@ -660,16 +907,16 @@ PluginManager::autoloadPlugins(const boost::asio::any_io_executor& executor) {
         adoptEntityExtractors();
         adoptEntityProviders();
 
-        refreshStatusSnapshot();
-        co_return Result<size_t>(loadedCount);
+        return Result<size_t>(loadedCount);
 
     } catch (const std::exception& e) {
         spdlog::error("[PluginManager] autoload exception: {}", e.what());
-        co_return Error{ErrorCode::InternalError, e.what()};
+        return Error{ErrorCode::InternalError, e.what()};
     }
 }
 
 Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName) {
+    std::lock_guard lifecycleLock(pluginLifecycleMutex_);
     if (!getActivePluginHost()) {
         return Error{ErrorCode::InvalidState, "Plugin host not initialized"};
     }
@@ -682,7 +929,6 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
             if (preferredMatches) {
                 spdlog::info("[PluginManager] Reusing adopted model provider: {}",
                              adoptedProviderPluginName_);
-                refreshStatusSnapshot();
                 return Result<bool>(true);
             }
         }
@@ -697,8 +943,9 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
                     auto stem = std::filesystem::path(d.path).stem().string();
                     if (stem == name)
                         return d.path.string();
-                } catch (...) {
-                    // Path stem fallback is best-effort; continue scanning descriptors.
+                } catch (const std::exception& e) {
+                    spdlog::debug("[PluginManager] failed to inspect path '{}': {}",
+                                  d.path.string(), e.what());
                 }
             }
             return {};
@@ -707,20 +954,19 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
         auto tryAdopt = [&](const std::string& pluginName) -> bool {
             // Prefer latest interface version, but fall back to v3 for older plugins.
             // NOTE: Host-side code supports v3+ (v4 adds optional evict_under_pressure).
-            auto ifaceRes = getActivePluginHost()->getInterface(
+            auto lease = getActivePluginHost()->acquireInterface(
                 pluginName, YAMS_IFACE_MODEL_PROVIDER_V1, YAMS_IFACE_MODEL_PROVIDER_V1_VERSION);
-            if (!ifaceRes) {
-                ifaceRes =
-                    getActivePluginHost()->getInterface(pluginName, YAMS_IFACE_MODEL_PROVIDER_V1,
-                                                        /*version*/ 3u);
+            if (!lease) {
+                lease = getActivePluginHost()->acquireInterface(
+                    pluginName, YAMS_IFACE_MODEL_PROVIDER_V1, /*version*/ 3u);
             }
-            if (!ifaceRes) {
+            if (!lease) {
                 spdlog::warn("[PluginManager] No model_provider_v1 interface for '{}': {}",
-                             pluginName, ifaceRes.error().message);
+                             pluginName, lease.error().message);
                 return false;
             }
 
-            auto* table = reinterpret_cast<yams_model_provider_v1*>(ifaceRes.value());
+            auto* table = reinterpret_cast<yams_model_provider_v1*>(lease.value().interface);
             if (!table) {
                 spdlog::debug("[PluginManager] Null provider table for '{}'", pluginName);
                 return false;
@@ -740,13 +986,8 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
                              pluginName, table->abi_version, YAMS_IFACE_MODEL_PROVIDER_V1_VERSION);
             }
 
-            std::shared_ptr<void> keepalive;
-            auto keepaliveRes = getActivePluginHost()->acquireKeepAlive(pluginName);
-            if (keepaliveRes) {
-                keepalive = std::move(keepaliveRes.value());
-            }
-
-            modelProvider_ = std::make_shared<AbiModelProviderAdapter>(table, std::move(keepalive));
+            modelProvider_ =
+                std::make_shared<AbiModelProviderAdapter>(table, lease.value().keepAlive);
             adoptedProviderPluginName_ = pluginName;
 
             if (deps_.state) {
@@ -768,7 +1009,7 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
                     spdlog::info("[PluginManager] Provider ready: model='{}', dim={}", modelName,
                                  dimension);
                     embeddingFsm_.dispatch(ModelLoadedEvent{modelName, dimension});
-                    embeddingModelName_ = std::move(modelName);
+                    embeddingModelName_ = modelName;
                 }
 
                 if (deps_.lifecycleFsm) {
@@ -776,15 +1017,6 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
                 }
             }
 
-            // Update model count cache
-            try {
-                auto count = static_cast<std::uint32_t>(modelProvider_->getLoadedModelCount());
-                cachedModelCount_.store(count, std::memory_order_relaxed);
-            } catch (...) {
-                cachedModelCount_.store(0, std::memory_order_relaxed);
-            }
-
-            refreshStatusSnapshot();
             return true;
         };
 
@@ -796,7 +1028,7 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
                              backend);
                 return false;
             }
-            modelProvider_ = std::move(provider);
+            modelProvider_.reset(provider.release());
             adoptedProviderPluginName_ = backend;
             if (deps_.state) {
                 deps_.state->readiness.modelProviderReady = true;
@@ -815,13 +1047,6 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
             if (deps_.lifecycleFsm) {
                 deps_.lifecycleFsm->setSubsystemDegraded("embeddings", false);
             }
-            try {
-                auto count = static_cast<std::uint32_t>(modelProvider_->getLoadedModelCount());
-                cachedModelCount_.store(count, std::memory_order_relaxed);
-            } catch (...) {
-                cachedModelCount_.store(0, std::memory_order_relaxed);
-            }
-            refreshStatusSnapshot();
             return true;
         };
 
@@ -859,8 +1084,9 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
                         lowerStem.find("onnx") != std::string::npos && tryAdopt(stem)) {
                         return true;
                     }
-                } catch (...) {
-                    // Alternate path-stem adoption is best-effort.
+                } catch (const std::exception& e) {
+                    spdlog::debug("[PluginManager] failed to inspect ONNX path '{}': {}",
+                                  d.path.string(), e.what());
                 }
             }
             spdlog::warn("[PluginManager] ONNX Runtime embeddings requested, but no usable ONNX "
@@ -899,8 +1125,9 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
                     if (tryAdopt(alt))
                         return Result<bool>(true);
                 }
-            } catch (...) {
-                // Alternate path-stem adoption is best-effort.
+            } catch (const std::exception& e) {
+                spdlog::debug("[PluginManager] failed to inspect alternate path '{}': {}",
+                              d.path.string(), e.what());
             }
         }
 
@@ -912,7 +1139,6 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
         // No provider found
         spdlog::warn("[PluginManager] No model provider adopted from any plugin");
         embeddingFsm_.dispatch(ProviderDegradedEvent{"no provider adopted"});
-        refreshStatusSnapshot();
         return Result<bool>(false);
 
     } catch (const std::exception& e) {
@@ -921,6 +1147,7 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
 }
 
 Result<size_t> PluginManager::adoptContentExtractors() {
+    std::lock_guard lifecycleLock(pluginLifecycleMutex_);
     try {
         size_t adopted = 0;
 
@@ -976,8 +1203,8 @@ Result<size_t> PluginManager::adoptContentExtractors() {
 
                 try {
                     auto adapter = std::make_shared<PluginContentExtractorAdapter>(
-                        externalHost_.get(), desc.name, std::move(mimes), std::move(extensions));
-                    contentExtractors_.push_back(std::move(adapter));
+                        externalHost_.get(), desc.name, mimes, extensions);
+                    contentExtractors_.push_back(adapter);
                     ++adopted;
                     spdlog::info("Adopted content_extractor_v1 from external plugin: {}",
                                  desc.name);
@@ -995,6 +1222,7 @@ Result<size_t> PluginManager::adoptContentExtractors() {
 }
 
 Result<size_t> PluginManager::adoptSymbolExtractors() {
+    std::lock_guard lifecycleLock(pluginLifecycleMutex_);
     try {
         // Clear existing extractors to avoid duplicates on re-adoption
         symbolExtractors_.clear();
@@ -1020,6 +1248,7 @@ Result<size_t> PluginManager::adoptSymbolExtractors() {
 }
 
 Result<size_t> PluginManager::adoptEntityExtractors() {
+    std::lock_guard lifecycleLock(pluginLifecycleMutex_);
     try {
         // Clear existing extractors to avoid duplicates on re-adoption
         entityExtractors_.clear();
@@ -1049,6 +1278,7 @@ Result<size_t> PluginManager::adoptEntityExtractors() {
 }
 
 Result<size_t> PluginManager::adoptEntityProviders() {
+    std::lock_guard lifecycleLock(pluginLifecycleMutex_);
     try {
         size_t adopted = 0;
 
@@ -1115,8 +1345,8 @@ Result<size_t> PluginManager::adoptEntityProviders() {
 
             try {
                 auto adapter = std::make_shared<ExternalEntityProviderAdapter>(
-                    externalHost_.get(), desc.name, rpcMethod, std::move(extensions));
-                entityProviders_.push_back(std::move(adapter));
+                    externalHost_.get(), desc.name, rpcMethod, extensions);
+                entityProviders_.push_back(adapter);
                 ++adopted;
                 spdlog::info("Adopted kg_entity_provider_v1 from external plugin: {} (method={})",
                              desc.name, rpcMethod);
@@ -1126,8 +1356,8 @@ Result<size_t> PluginManager::adoptEntityProviders() {
             }
         }
 
-        // Wire entity providers to PostIngestQueue if available
-        if (adopted > 0 && postIngestQueue_) {
+        // Always reconcile the queue, including clearing providers after plugin unload.
+        if (postIngestQueue_) {
             postIngestQueue_->setEntityProviders(entityProviders_);
             spdlog::info("[PluginManager] Wired {} entity providers to PostIngestQueue", adopted);
         } else if (adopted > 0) {
@@ -1139,6 +1369,26 @@ Result<size_t> PluginManager::adoptEntityProviders() {
     } catch (const std::exception& e) {
         return Error{ErrorCode::Unknown, e.what()};
     }
+}
+
+std::shared_ptr<IModelProvider> PluginManager::getModelProvider() const {
+    std::lock_guard lifecycleLock(pluginLifecycleMutex_);
+    return modelProvider_;
+}
+
+std::string PluginManager::getAdoptedProviderPluginName() const {
+    std::lock_guard lifecycleLock(pluginLifecycleMutex_);
+    return adoptedProviderPluginName_;
+}
+
+std::string PluginManager::getEmbeddingModelName() const {
+    std::lock_guard lifecycleLock(pluginLifecycleMutex_);
+    return embeddingModelName_;
+}
+
+void PluginManager::setEmbeddingModelName(const std::string& name) {
+    std::lock_guard lifecycleLock(pluginLifecycleMutex_);
+    embeddingModelName_ = name;
 }
 
 bool PluginManager::isModelProviderDegraded() const {
@@ -1164,6 +1414,7 @@ void PluginManager::clearModelProviderError() {
 }
 
 size_t PluginManager::getEmbeddingDimension() const {
+    std::lock_guard lifecycleLock(pluginLifecycleMutex_);
     if (!modelProvider_ || !modelProvider_->isAvailable())
         return 0;
 
@@ -1180,57 +1431,6 @@ size_t PluginManager::getEmbeddingDimension() const {
     } catch (...) {
         return 0;
     }
-}
-
-PluginManager::StatusSnapshot PluginManager::getStatusSnapshot() const {
-    std::shared_lock lock(statusMutex_);
-    return statusSnapshot_;
-}
-
-void PluginManager::refreshStatusSnapshot() {
-    StatusSnapshot snap;
-
-    try {
-        snap.hostState = pluginHostFsm_.snapshot();
-    } catch (...) {
-        // Status snapshots are best-effort; retain default host state.
-    }
-
-    try {
-        snap.providerState = embeddingFsm_.snapshot();
-    } catch (...) {
-        // Status snapshots are best-effort; retain default provider state.
-    }
-
-    // Helper lambda to add plugin records
-    auto addPluginRecord = [&](const PluginDescriptor& d) {
-        PluginStatusRecord rec;
-        rec.name = d.name;
-        rec.isProvider = (d.name == adoptedProviderPluginName_);
-        rec.ready = rec.isProvider && modelProvider_ && modelProvider_->isAvailable();
-        rec.degraded = rec.isProvider && isModelProviderDegraded();
-        if (rec.isProvider) {
-            rec.modelsLoaded = cachedModelCount_.load(std::memory_order_relaxed);
-        }
-        snap.plugins.push_back(std::move(rec));
-    };
-
-    // Build plugin records from ABI (native) plugins
-    if (getActivePluginHost()) {
-        for (const auto& d : getActivePluginHost()->listLoaded()) {
-            addPluginRecord(d);
-        }
-    }
-
-    // PBI-096: Include external (Python/JS) plugins
-    if (externalHost_) {
-        for (const auto& d : externalHost_->listLoaded()) {
-            addPluginRecord(d);
-        }
-    }
-
-    std::lock_guard lock(statusMutex_);
-    statusSnapshot_ = std::move(snap);
 }
 
 void PluginManager::testingSetEmbeddingDegraded(bool degraded, const std::string& error) {

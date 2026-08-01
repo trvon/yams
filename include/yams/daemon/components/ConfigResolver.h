@@ -248,6 +248,10 @@ public:
      */
     static bool envTruthy(const char* value);
 
+    /// Resolve the effective plugin-directory strict mode. A non-empty
+    /// YAMS_PLUGIN_DIR_STRICT compatibility overlay takes precedence over typed config.
+    static bool resolvePluginDirStrict(bool configuredStrict);
+
     /**
      * @brief Resolve the default config file path.
      *

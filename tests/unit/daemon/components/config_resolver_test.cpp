@@ -52,6 +52,31 @@ struct ConfigResolverFixture {
     }
 };
 
+class PostIngestStageActivityGuard {
+public:
+    PostIngestStageActivityGuard()
+        : previousMask_(yams::daemon::TuneAdvisor::postIngestStageActiveMask()) {
+        for (std::uint8_t i = 0; i < 6; ++i) {
+            yams::daemon::TuneAdvisor::setPostIngestStageActive(
+                static_cast<yams::daemon::TuneAdvisor::PostIngestStage>(i), true);
+        }
+    }
+
+    ~PostIngestStageActivityGuard() {
+        for (std::uint8_t i = 0; i < 6; ++i) {
+            yams::daemon::TuneAdvisor::setPostIngestStageActive(
+                static_cast<yams::daemon::TuneAdvisor::PostIngestStage>(i),
+                (previousMask_ & (1u << i)) != 0);
+        }
+    }
+
+    PostIngestStageActivityGuard(const PostIngestStageActivityGuard&) = delete;
+    PostIngestStageActivityGuard& operator=(const PostIngestStageActivityGuard&) = delete;
+
+private:
+    std::uint32_t previousMask_;
+};
+
 class ProfileGuard {
     yams::daemon::TuneAdvisor::Profile prev_;
 
@@ -311,6 +336,24 @@ TEST_CASE("ConfigResolver::envTruthy correctly parses truthy values",
         CHECK(ConfigResolver::envTruthy("123"));
         CHECK(ConfigResolver::envTruthy("yep"));
         CHECK(ConfigResolver::envTruthy("nope"));
+    }
+}
+
+TEST_CASE("ConfigResolver resolves plugin strict mode once from typed config and environment",
+          "[daemon][components][config][plugin][catch2]") {
+    SECTION("typed config is used without an environment override") {
+        EnvGuard strictEnv("YAMS_PLUGIN_DIR_STRICT", "");
+        CHECK(ConfigResolver::resolvePluginDirStrict(true));
+    }
+
+    SECTION("environment can enable strict mode") {
+        EnvGuard strictEnv("YAMS_PLUGIN_DIR_STRICT", "on");
+        CHECK(ConfigResolver::resolvePluginDirStrict(false));
+    }
+
+    SECTION("environment can disable strict mode") {
+        EnvGuard strictEnv("YAMS_PLUGIN_DIR_STRICT", "off");
+        CHECK_FALSE(ConfigResolver::resolvePluginDirStrict(true));
     }
 }
 
@@ -854,6 +897,7 @@ worker_poll_ms = 100
 
 TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
           "[daemon][components][config][catch2]") {
+    PostIngestStageActivityGuard stageActivityGuard;
     SECTION("efficient profile scales post-ingest concurrency down") {
         ProfileGuard guard(yams::daemon::TuneAdvisor::Profile::Efficient);
         EnvGuard maxThreadsGuard("YAMS_MAX_THREADS", "0");

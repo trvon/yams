@@ -37,6 +37,7 @@ static const char* dlerror() {
 #endif
 #include <fstream>
 #include <regex>
+#include <string_view>
 #include <yams/app/services/services.hpp>
 #include <yams/config/config_helpers.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
@@ -50,6 +51,10 @@ namespace yams::daemon {
 extern void registerModelProvider(const std::string& name, ModelProviderFactory factory);
 
 // macOS provides dlopen_preflight in <dlfcn.h>; no forward decl needed
+
+static bool isBundledRuntimeDependency(std::string_view filename) {
+    return filename == "libzpdf.so" || filename == "libzpdf.dylib" || filename == "zpdf.dll";
+}
 
 static std::vector<std::string> parseInterfacesFromManifest(const std::string& manifestJson) {
     std::vector<std::string> out;
@@ -221,7 +226,7 @@ AbiPluginLoader::scanDirectory(const std::filesystem::path& dir) const {
         } catch (...) {
         }
         if (!looks_like_yams) {
-            if (namePolicy == NamePolicy::Spec) {
+            if (namePolicy == NamePolicy::Spec && !isBundledRuntimeDependency(fname)) {
                 appendSkip(SkipInfo{p, "name policy: require libyams_* or yams_*"});
             }
             return;
