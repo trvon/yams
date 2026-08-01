@@ -97,6 +97,7 @@ if (get_option('enable-integration-tests') or dbg) and (get_option('enable-integ
     suite: ['catch2', 'integration', 'services', 'grep'],
     env: {
       'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+      'YAMS_DISABLE_SESSION_WATCHER': '1',
       'YAMS_STRESS_ITERS': services_stress_iters,
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
       'TSAN_OPTIONS': _test_tsan_options,

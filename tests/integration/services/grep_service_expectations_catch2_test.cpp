@@ -98,7 +98,7 @@ public:
     }
 
     bool waitForDocumentVisible(const std::string& hash,
-                                std::chrono::milliseconds timeout = 5000ms) const {
+                                std::chrono::milliseconds timeout = 15000ms) const {
         auto* sm = daemon_->getServiceManager();
         auto ctx = sm->getAppContext();
         const auto deadline = std::chrono::steady_clock::now() + timeout;

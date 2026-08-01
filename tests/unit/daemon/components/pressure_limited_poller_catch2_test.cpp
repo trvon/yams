@@ -195,8 +195,7 @@ private:
 
     void cancelWakeTimer() {
         std::lock_guard<std::mutex> lock(wakeMutex_);
-        boost::system::error_code ec;
-        wakeTimer_->cancel(ec);
+        wakeTimer_->cancel();
     }
 
     void stop() {
@@ -236,7 +235,7 @@ TEST_CASE("PressureLimitedPoller coalesces normal-priority trickle into a bounde
 
     CHECK_FALSE(harness.timedOut);
     CHECK(harness.deferredPushSucceeded());
-    CHECK(harness.observed == std::vector<int>{1, 2, 3, 4});
+    CHECK((harness.observed == std::vector<int>{1, 2, 3, 4}));
 }
 
 TEST_CASE("PressureLimitedPoller does not coalesce high-priority batch work",
@@ -246,7 +245,7 @@ TEST_CASE("PressureLimitedPoller does not coalesce high-priority batch work",
     harness.scheduleNormal(7, 2ms);
     harness.run();
 
-    CHECK(harness.observed == std::vector<int>{42});
+    CHECK((harness.observed == std::vector<int>{42}));
 }
 
 TEST_CASE("PressureLimitedPoller bounds lone normal-task coalescing latency",
@@ -256,8 +255,8 @@ TEST_CASE("PressureLimitedPoller bounds lone normal-task coalescing latency",
     harness.run(50ms);
 
     CHECK_FALSE(harness.timedOut);
-    CHECK(harness.observed == std::vector<int>{9});
-    CHECK(harness.elapsed < 50ms);
+    CHECK((harness.observed == std::vector<int>{9}));
+    CHECK((harness.elapsed < 50ms));
 }
 
 // ---------------------------------------------------------------------------

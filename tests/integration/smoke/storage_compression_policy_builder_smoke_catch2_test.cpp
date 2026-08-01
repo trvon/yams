@@ -1,8 +1,7 @@
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <vector>
-#include "../../common/env_compat.h"
+#include "../../common/test_helpers_catch2.h"
 #include <catch2/catch_test_macros.hpp>
 #include <yams/api/content_store_builder.h>
 #include <yams/compat/unistd.h>
@@ -50,7 +49,7 @@ never_compress_below = 1048576  # 1 MiB
 async_compression = false
 )TOML";
     write_config(xdg, cfg);
-    setenv("XDG_CONFIG_HOME", xdg.string().c_str(), 1);
+    yams::test::ScopedEnvVar configHome("XDG_CONFIG_HOME", xdg.string());
 
     ContentStoreBuilder b;
     b.withStoragePath(temp_root);
@@ -64,7 +63,7 @@ async_compression = false
 
     auto put = store->storeBytes(std::span<const std::byte>(payload.data(), payload.size()));
     REQUIRE(put.has_value());
-    CHECK(put.value().contentHash == hash);
+    CHECK((put.value().contentHash == hash));
 
     // Inspect raw object via plain storage engine
     StorageConfig base_cfg{.basePath = temp_root, .enableCompression = false};
@@ -74,7 +73,7 @@ async_compression = false
     if (raw.value().size() >= CompressionHeader::SIZE) {
         CompressionHeader hdr{};
         std::memcpy(&hdr, raw.value().data(), sizeof(hdr));
-        CHECK(hdr.magic != CompressionHeader::MAGIC);
+        CHECK((hdr.magic != CompressionHeader::MAGIC));
     }
 }
 
@@ -93,7 +92,7 @@ never_compress_below = 1
 async_compression = false
 )TOML";
     write_config(xdg, cfg);
-    setenv("XDG_CONFIG_HOME", xdg.string().c_str(), 1);
+    yams::test::ScopedEnvVar configHome("XDG_CONFIG_HOME", xdg.string());
 
     ContentStoreBuilder b;
     b.withStoragePath(temp_root);
@@ -107,14 +106,14 @@ async_compression = false
 
     auto put = store->storeBytes(std::span<const std::byte>(payload.data(), payload.size()));
     REQUIRE(put.has_value());
-    CHECK(put.value().contentHash == hash);
+    CHECK((put.value().contentHash == hash));
 
     StorageConfig base_cfg{.basePath = temp_root, .enableCompression = false};
     StorageEngine base(base_cfg);
     auto raw = base.retrieve(hash);
     REQUIRE(raw.has_value());
-    REQUIRE(raw.value().size() >= CompressionHeader::SIZE);
+    REQUIRE((raw.value().size() >= CompressionHeader::SIZE));
     CompressionHeader hdr{};
     std::memcpy(&hdr, raw.value().data(), sizeof(hdr));
-    CHECK(hdr.magic == CompressionHeader::MAGIC);
+    CHECK((hdr.magic == CompressionHeader::MAGIC));
 }

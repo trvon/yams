@@ -41,6 +41,7 @@ else
       suite: ['integration', 'search', 'hybrid', 'semantic', 'catch2'],
       env: {
         'YAMS_TEST_SAFE_SINGLE_INSTANCE': '1',
+        'YAMS_DISABLE_SESSION_WATCHER': '1',
         'TSAN_OPTIONS': _test_tsan_options,
         # Note: Do NOT set YAMS_DISABLE_VECTORS - we need vector search for hybrid tests
       },

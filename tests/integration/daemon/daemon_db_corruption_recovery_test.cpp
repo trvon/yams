@@ -117,8 +117,8 @@ std::optional<fs::path> findQuarantinedFile(const fs::path& dataDir) {
             ec.clear();
             continue;
         }
-        if (it->path().filename().string().rfind(prefix, 0) == 0 &&
-            it->path().extension() != ".sentinel") {
+        const auto name = it->path().filename().string();
+        if (name.starts_with(prefix) && !name.ends_with("-wal") && !name.ends_with("-shm")) {
             return it->path();
         }
     }

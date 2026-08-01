@@ -1134,7 +1134,9 @@ TEST_CASE("MetadataRepository: batch repair status update preserves duplicate ha
 TEST_CASE("MetadataRepository: batch repair status update does not stack retry loops under lock",
           "[unit][metadata][repository][repair][contention]") {
     const auto dbPath = tempDbPath("metadata_repo_repair_lock_");
-    REQUIRE((daemon::TuneAdvisor::getAndResetDbLockErrors() == 0));
+    // Other contention tests intentionally increment this process-global advisory counter.
+    // Each case owns its observation window and must not depend on Catch2 execution order.
+    (void)daemon::TuneAdvisor::getAndResetDbLockErrors();
 
     ConnectionPoolConfig repoCfg;
     repoCfg.minConnections = 1;
