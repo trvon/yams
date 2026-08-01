@@ -498,7 +498,13 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
         co_return *ok;
     if (auto* er = std::get_if<ErrorResponse>(&payload))
         co_return Error{er->code, er->message};
-    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
+
+    const auto requestName = getRequestName(Request{req});
+    const auto expectedName = getResponseName(Response{ResponseOfT<Req>{}});
+    co_return Error{ErrorCode::InvalidData,
+                    "Unexpected response type for " + requestName + ": expected " + expectedName +
+                        ", received " + getResponseName(payload) +
+                        ". Possible CLI/daemon protocol mismatch; run 'yams daemon restart'"};
 }
 
 // ============================================================================

@@ -490,7 +490,8 @@ enum class MessageType : uint8_t {
 MessageType getMessageType(const Request& req);
 MessageType getMessageType(const Response& res);
 
-// Request name for logging
+// Request and response names for logging and protocol diagnostics
 std::string getRequestName(const Request& req);
+std::string getResponseName(const Response& res);
 
 } // namespace yams::daemon

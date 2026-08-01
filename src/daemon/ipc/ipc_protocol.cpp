@@ -1,5 +1,7 @@
 #include <yams/daemon/ipc/ipc_protocol.h>
 
+#include <array>
+
 namespace yams::daemon {
 
 // Trait to map request/response types to MessageType
@@ -558,6 +560,62 @@ static constexpr MessageType kResponseTypeMap[] = {
     MessageType::RepairEvent_MsgType          // 49
 };
 
+// MUST MATCH Response std::variant order in ipc_protocol_responses.h
+static constexpr std::array<const char*, 50> kResponseNameMap = {
+    "SearchResponse",              // 0
+    "AddResponse",                 // 1
+    "GetResponse",                 // 2
+    "GetInitResponse",             // 3
+    "GetChunkResponse",            // 4
+    "StatusResponse",              // 5
+    "SuccessResponse",             // 6
+    "ErrorResponse",               // 7
+    "PongResponse",                // 8
+    "EmbeddingResponse",           // 9
+    "BatchEmbeddingResponse",      // 10
+    "ModelLoadResponse",           // 11
+    "ModelStatusResponse",         // 12
+    "ListResponse",                // 13
+    "AddDocumentResponse",         // 14
+    "GrepResponse",                // 15
+    "UpdateDocumentResponse",      // 16
+    "GetStatsResponse",            // 17
+    "DownloadResponse",            // 18
+    "ListDownloadJobsResponse",    // 19
+    "DeleteResponse",              // 20
+    "PrepareSessionResponse",      // 21
+    "EmbedDocumentsResponse",      // 22
+    "PluginScanResponse",          // 23
+    "PluginLoadResponse",          // 24
+    "PluginTrustListResponse",     // 25
+    "CatResponse",                 // 26
+    "ListSessionsResponse",        // 27
+    "ListTreeDiffResponse",        // 28
+    "FileHistoryResponse",         // 29
+    "PruneResponse",               // 30
+    "ListSnapshotsResponse",       // 31
+    "RestoreCollectionResponse",   // 32
+    "RestoreSnapshotResponse",     // 33
+    "GraphQueryResponse",          // 34
+    "GraphExploreResponse",        // 35
+    "GraphSymbolLookupResponse",   // 36
+    "GraphTraceResponse",          // 37
+    "GraphImpactResponse",         // 38
+    "GraphAffectedTestsResponse",  // 39
+    "GraphPathHistoryResponse",    // 40
+    "GraphRepairResponse",         // 41
+    "GraphValidateResponse",       // 42
+    "KgIngestResponse",            // 43
+    "MetadataValueCountsResponse", // 44
+    "BatchResponse",               // 45
+    "EmbeddingEvent",              // 46
+    "ModelLoadEvent",              // 47
+    "RepairResponse",              // 48
+    "RepairEvent"                  // 49
+};
+
+static_assert(std::size(kResponseNameMap) == std::variant_size_v<Response>);
+
 MessageType getMessageType(const Request& req) {
     const size_t idx = req.index();
     if (idx < std::size(kRequestTypeMap)) {
@@ -581,6 +639,14 @@ std::string getRequestName(const Request& req) {
         return kRequestNameMap[idx];
     }
     return "Unknown";
+}
+
+std::string getResponseName(const Response& res) {
+    const size_t idx = res.index();
+    if (idx < std::size(kResponseNameMap)) {
+        return kResponseNameMap[idx];
+    }
+    return "UnknownResponse";
 }
 
 } // namespace yams::daemon
