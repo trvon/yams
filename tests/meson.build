@@ -1390,6 +1390,7 @@ if catch2_dep.found()
     files(
       'unit/common/format_catch2_test.cpp',
       'unit/common/pattern_utils_catch2_test.cpp',
+      'unit/common/string_utils_catch2_test.cpp',
       'unit/common/test_utils_catch2_test.cpp',
       'unit/common/time_utils_catch2_test.cpp',
       'unit/common/utf8_utils_catch2_test.cpp',

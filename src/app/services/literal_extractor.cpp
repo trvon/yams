@@ -3,20 +3,14 @@
 #include <cstring>
 #include <yams/app/services/literal_extractor.hpp>
 #include <yams/app/services/simd_memmem.hpp>
+#include <yams/common/string_utils.h>
 
 namespace yams {
 namespace app {
 namespace services {
 
-// Regex metacharacters that break literal sequences
-static const char* const kMetaChars = "\\^$.|?*+()[]{}";
-
 bool LiteralExtractor::isMetaChar(char c) {
-    for (const char* p = kMetaChars; *p; ++p) {
-        if (*p == c)
-            return true;
-    }
-    return false;
+    return yams::common::isRegexMetaChar(c);
 }
 
 const std::string& LiteralExtractor::ExtractionResult::longest() const {

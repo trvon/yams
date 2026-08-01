@@ -6,6 +6,7 @@
 #include <yams/app/services/service_utils.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/simd_newline_scanner.hpp>
+#include <yams/common/string_utils.h>
 #include <yams/common/utf8_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/core/cpp23_features.hpp>
@@ -60,8 +61,6 @@ private:
     int active_{1};
 };
 
-static constexpr std::string_view kRegexSpecialChars = "\\^$.|?*+()[]{}";
-
 #if __cpp_lib_string_contains >= 202011L
 template <typename StringType, typename SubType>
 constexpr bool string_contains(const StringType& str, const SubType& substr) noexcept {
@@ -73,18 +72,6 @@ constexpr bool string_contains(const StringType& str, const SubType& substr) noe
     return str.find(substr) != StringType::npos;
 }
 #endif
-
-static std::string escapeRegex(std::string_view text) {
-    std::string escaped;
-    escaped.reserve(text.size() * 2);
-    for (char c : text) {
-        if (kRegexSpecialChars.find(c) != std::string_view::npos) {
-            escaped += '\\';
-        }
-        escaped += c;
-    }
-    return escaped;
-}
 
 struct PathTreeConfigSettings {
     bool enabled{false};
@@ -141,10 +128,6 @@ static PathTreeConfigSettings loadPathTreeConfigSettings() {
             cfg.mode = v;
     }
     return cfg;
-}
-
-static constexpr bool hasWildcard(std::string_view s) noexcept {
-    return s.find('*') != std::string_view::npos || s.find('?') != std::string_view::npos;
 }
 
 static std::string normalizePathForCompare(const std::string& path) {
@@ -287,7 +270,7 @@ static bool pathFilterMatch(const std::string& filePath, const std::vector<std::
     for (const auto& f : filters) {
         if (f.empty())
             continue;
-        if (hasWildcard(f)) {
+        if (yams::common::hasWildcard(f)) {
             // First try a straight glob match (supports '*' and '?')
             if (yams::app::services::utils::matchGlob(globDoc, normalizeForGlobMatch(f)))
                 return true;
@@ -413,7 +396,7 @@ public:
         {
             YAMS_ZONE_SCOPED_N("grep_service::pattern_prep");
             if (req.literalText) {
-                regexPattern = escapeRegex(regexPattern);
+                regexPattern = yams::common::escapeRegex(regexPattern);
             }
 
             // Extract literals for two-phase matching (ripgrep strategy)
@@ -655,7 +638,7 @@ public:
                         bool matches = false;
                         const std::string docGlobPath = normalizeForGlobMatch(doc.filePath);
                         for (const auto& pattern : req.includePatterns) {
-                            if (hasWildcard(pattern)) {
+                            if (yams::common::hasWildcard(pattern)) {
                                 if (yams::app::services::utils::matchGlob(
                                         docGlobPath, normalizeForGlobMatch(pattern))) {
                                     matches = true;
@@ -1395,7 +1378,7 @@ public:
                                     bool ok = false;
                                     const std::string pathGlob = normalizeForGlobMatch(path);
                                     for (const auto& p : req.includePatterns) {
-                                        if (hasWildcard(p)) {
+                                        if (yams::common::hasWildcard(p)) {
                                             if (yams::app::services::utils::matchGlob(
                                                     pathGlob, normalizeForGlobMatch(p))) {
                                                 ok = true;
@@ -1610,7 +1593,7 @@ private:
 
         std::vector<std::string> prefixes;
         for (const auto& raw : req.paths) {
-            if (hasWildcard(raw))
+            if (yams::common::hasWildcard(raw))
                 continue;
             auto norm = canonicalize(raw);
             if (!norm.empty())

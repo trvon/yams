@@ -55,4 +55,48 @@ namespace yams::common {
     return output;
 }
 
+[[nodiscard]] inline std::string trimCopy(std::string_view value) {
+    std::size_t start = 0;
+    std::size_t end = value.size();
+    while (start < end && std::isspace(static_cast<unsigned char>(value[start])) != 0) {
+        ++start;
+    }
+    while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1])) != 0) {
+        --end;
+    }
+    return std::string(value.substr(start, end - start));
+}
+
+/**
+ * @brief Whether a string contains glob metacharacters (* or ?).
+ */
+[[nodiscard]] inline bool hasWildcard(std::string_view value) noexcept {
+    return value.find('*') != std::string_view::npos || value.find('?') != std::string_view::npos;
+}
+
+// Regex metacharacters that break literal sequences.
+inline constexpr std::string_view kRegexMetaChars = "\\^$.|?*+()[]{}";
+
+/**
+ * @brief Whether a character is a regex metacharacter.
+ */
+[[nodiscard]] inline bool isRegexMetaChar(char c) noexcept {
+    return kRegexMetaChars.find(c) != std::string_view::npos;
+}
+
+/**
+ * @brief Escape regex metacharacters so the input matches literally.
+ */
+[[nodiscard]] inline std::string escapeRegex(std::string_view text) {
+    std::string escaped;
+    escaped.reserve(text.size() * 2);
+    for (char c : text) {
+        if (isRegexMetaChar(c)) {
+            escaped += '\\';
+        }
+        escaped += c;
+    }
+    return escaped;
+}
+
 } // namespace yams::common

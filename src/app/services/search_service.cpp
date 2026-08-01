@@ -96,10 +96,6 @@ bool looksLikeHash(const std::string& s) {
     return isHex(s);
 }
 
-static bool hasWildcard(const std::string& s) {
-    return s.find('*') != std::string::npos || s.find('?') != std::string::npos;
-}
-
 static void appendMacPathAliases(std::vector<std::string>& patterns) {
 #if defined(__APPLE__)
     if (patterns.empty()) {
@@ -136,19 +132,6 @@ static void appendMacPathAliases(std::vector<std::string>& patterns) {
 }
 
 // Helper function to escape regex special characters
-static std::string escapeRegex(const std::string& text) {
-    static const std::string specialChars = "\\^$.|?*+()[]{}";
-    std::string escaped;
-    escaped.reserve(text.size() * 2);
-    for (char c : text) {
-        if (specialChars.find(c) != std::string::npos) {
-            escaped += '\\';
-        }
-        escaped += c;
-    }
-    return escaped;
-}
-
 struct ParsedMetadataQuery {
     std::string residualQuery;
     std::vector<std::pair<std::string, std::string>> filters;
@@ -363,17 +346,10 @@ static bool wildcardMatch(const std::string& text, const std::string& pattern) {
 
 // Heuristic: treat as path/filename when the query contains a separator
 // or looks like a single token with an extension and no spaces.
-static std::string trimCopy(std::string s) {
-    const auto isSpace = [](unsigned char c) { return static_cast<bool>(std::isspace(c)); };
-    s.erase(s.begin(), std::find_if_not(s.begin(), s.end(), isSpace));
-    s.erase(std::find_if_not(s.rbegin(), s.rend(), isSpace).base(), s.end());
-    return s;
-}
-
 // Stricter heuristic for query routing: avoid misclassifying code-like tokens as hashes.
 // Require explicit prefix or a long hex length with at least one alpha hex digit.
 bool looksLikeHashQuery(const std::string& raw) {
-    auto trimmed = trimCopy(raw);
+    auto trimmed = yams::common::trimCopy(raw);
     if (trimmed.empty())
         return false;
 
@@ -392,16 +368,16 @@ bool looksLikeHashQuery(const std::string& raw) {
     };
 
     if (auto v = stripPrefix("hash:"); !v.empty()) {
-        return looksLikeHash(trimCopy(std::move(v)));
+        return looksLikeHash(yams::common::trimCopy(std::move(v)));
     }
     if (auto v = stripPrefix("sha1:"); !v.empty()) {
-        return looksLikeHash(trimCopy(std::move(v)));
+        return looksLikeHash(yams::common::trimCopy(std::move(v)));
     }
     if (auto v = stripPrefix("sha256:"); !v.empty()) {
-        return looksLikeHash(trimCopy(std::move(v)));
+        return looksLikeHash(yams::common::trimCopy(std::move(v)));
     }
     if (auto v = stripPrefix("md5:"); !v.empty()) {
-        return looksLikeHash(trimCopy(std::move(v)));
+        return looksLikeHash(yams::common::trimCopy(std::move(v)));
     }
 
     if (!looksLikeHash(trimmed))
@@ -416,7 +392,7 @@ bool looksLikeHashQuery(const std::string& raw) {
 }
 
 std::optional<std::string> extractHashPrefix(const std::string& raw) {
-    auto trimmed = trimCopy(raw);
+    auto trimmed = yams::common::trimCopy(raw);
     if (trimmed.empty())
         return std::nullopt;
 
@@ -426,7 +402,7 @@ std::optional<std::string> extractHashPrefix(const std::string& raw) {
 
     auto stripPrefix = [&](std::string_view prefix) -> std::string {
         if (lower.rfind(prefix, 0) == 0) {
-            return trimCopy(trimmed.substr(prefix.size()));
+            return yams::common::trimCopy(trimmed.substr(prefix.size()));
         }
         return {};
     };
@@ -464,11 +440,11 @@ static bool looksLikePathToken(const std::string& token) {
         return true;
     }
     // Wildcards also indicate a path-style intent
-    return hasWildcard(token);
+    return yams::common::hasWildcard(token);
 }
 
 static bool looksLikePathQuery(const std::string& raw) {
-    auto trimmed = trimCopy(raw);
+    auto trimmed = yams::common::trimCopy(raw);
     if (trimmed.empty())
         return false;
 
@@ -501,7 +477,7 @@ static double computePathMatchScore(const metadata::DocumentInfo& doc, const std
     const std::string path = !doc.filePath.empty() ? doc.filePath : doc.fileName;
     const std::string pathLower = yams::common::asciiToLowerCopy(path);
     const std::string nameLower = yams::common::asciiToLowerCopy(doc.fileName);
-    const std::string queryLower = yams::common::asciiToLowerCopy(trimCopy(query));
+    const std::string queryLower = yams::common::asciiToLowerCopy(yams::common::trimCopy(query));
 
     if (queryLower.empty()) {
         return 0.01;
@@ -981,7 +957,7 @@ public:
                 if (rawPattern.empty()) {
                     return false;
                 }
-                if (hasWildcard(rawPattern)) {
+                if (yams::common::hasWildcard(rawPattern)) {
                     std::string normalized = rawPattern;
                     // Normalize glob patterns for path matching:
                     // - "*.ext" should match any path ending in .ext (prepend **/)
@@ -1595,7 +1571,7 @@ private:
         const auto recentLexicalDeltaHashes = buildRecentLexicalDeltaSet(ctx_);
         std::vector<metadata::DocumentInfo> docs;
 
-        std::string pathQuery = trimCopy(req.query);
+        std::string pathQuery = yams::common::trimCopy(req.query);
         const bool quotedPathQuery =
             (pathQuery.size() >= 2 && ((pathQuery.front() == '"' && pathQuery.back() == '"') ||
                                        (pathQuery.front() == '\'' && pathQuery.back() == '\'')));
@@ -1603,7 +1579,7 @@ private:
             pathQuery = pathQuery.substr(1, pathQuery.size() - 2);
         }
 
-        const bool wildcard = hasWildcard(pathQuery);
+        const bool wildcard = yams::common::hasWildcard(pathQuery);
 
         std::string likePattern;
         if (wildcard) {
@@ -1737,7 +1713,7 @@ private:
             if (rawPattern.empty()) {
                 return false;
             }
-            if (hasWildcard(rawPattern)) {
+            if (yams::common::hasWildcard(rawPattern)) {
                 std::string pattern = rawPattern;
                 if (!pattern.empty() && pattern.front() == '*' &&
                     (pattern.size() == 1 || pattern[1] != '*')) { // NOLINT(bugprone-branch-clone)
@@ -1995,7 +1971,7 @@ private:
                 if (patternRaw.empty()) {
                     continue;
                 }
-                if (hasWildcard(patternRaw)) {
+                if (yams::common::hasWildcard(patternRaw)) {
                     std::string pattern = patternRaw;
                     if (!pattern.empty() && pattern.front() != '*' && pattern.front() != '/' &&
                         pattern.find(":/") == std::string::npos) {
@@ -2276,7 +2252,7 @@ private:
 
         if (req.literalText) {
             // Escape regex special characters
-            processedQuery = escapeRegex(req.query);
+            processedQuery = yams::common::escapeRegex(req.query);
         }
 
         // Get docIds for tags if provided

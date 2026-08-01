@@ -30,6 +30,7 @@
 #include <yams/app/services/document_ingestion_service.h>
 // Daemon client API for daemon-first add
 #include <yams/cli/daemon_helpers.h>
+#include <yams/common/string_utils.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/response_of.hpp>
@@ -48,18 +49,6 @@ using json = nlohmann::json;
 
 namespace {
 
-std::string trimCopy(std::string_view sv) {
-    std::size_t start = 0;
-    std::size_t end = sv.size();
-    while (start < end && std::isspace(static_cast<unsigned char>(sv[start]))) {
-        ++start;
-    }
-    while (end > start && std::isspace(static_cast<unsigned char>(sv[end - 1]))) {
-        --end;
-    }
-    return std::string(sv.substr(start, end - start));
-}
-
 std::string scrubDaemonLoadMessage(std::string_view message) {
     std::string cleaned(message);
     const std::string needle(kDaemonLoadMessage);
@@ -67,7 +56,7 @@ std::string scrubDaemonLoadMessage(std::string_view message) {
     if (pos != std::string::npos) {
         cleaned.erase(pos, needle.size());
     }
-    cleaned = trimCopy(cleaned);
+    cleaned = yams::common::trimCopy(cleaned);
     if (cleaned.empty()) {
         cleaned = "Daemon rejected request";
     }
@@ -220,7 +209,7 @@ Result<std::vector<std::string>> sanitizeStringList(const std::vector<std::strin
     std::vector<std::string> cleaned;
     cleaned.reserve(raw.size());
     for (const auto& entry : raw) {
-        std::string trimmed = trimCopy(entry);
+        std::string trimmed = yams::common::trimCopy(entry);
         if (trimmed.empty())
             continue;
         if (trimmed.size() > maxLen) {
@@ -247,8 +236,8 @@ sanitizeMetadata(const std::vector<std::string>& metadataRaw) {
             return Error{ErrorCode::InvalidArgument,
                          "Metadata entries must be formatted as key=value"};
         }
-        std::string key = trimCopy(std::string_view(kv).substr(0, pos));
-        std::string value = trimCopy(std::string_view(kv).substr(pos + 1));
+        std::string key = yams::common::trimCopy(std::string_view(kv).substr(0, pos));
+        std::string value = yams::common::trimCopy(std::string_view(kv).substr(pos + 1));
         if (key.empty()) {
             return Error{ErrorCode::InvalidArgument, "Metadata key cannot be empty"};
         }
@@ -495,7 +484,7 @@ public:
                     co_return sanitizedMetadataRes.error();
                 const auto& sanitizedMetadata = sanitizedMetadataRes.value();
 
-                std::string sanitizedCollection = trimCopy(collection_);
+                std::string sanitizedCollection = yams::common::trimCopy(collection_);
                 if (hasUnsupportedControlChars(sanitizedCollection)) {
                     co_return Error{ErrorCode::InvalidArgument,
                                     "Collection contains unsupported control characters"};
@@ -503,8 +492,8 @@ public:
                 if (sanitizedCollection.size() > kMaxCollectionLength) {
                     co_return Error{ErrorCode::InvalidArgument, "Collection name exceeds limit"};
                 }
-                std::string sanitizedSnapshotId = trimCopy(snapshotId_);
-                std::string sanitizedSnapshotLabel = trimCopy(snapshotLabel_);
+                std::string sanitizedSnapshotId = yams::common::trimCopy(snapshotId_);
+                std::string sanitizedSnapshotLabel = yams::common::trimCopy(snapshotLabel_);
                 if (hasUnsupportedControlChars(sanitizedSnapshotId) ||
                     hasUnsupportedControlChars(sanitizedSnapshotLabel)) {
                     co_return Error{ErrorCode::InvalidArgument,
@@ -515,7 +504,7 @@ public:
                     co_return Error{ErrorCode::InvalidArgument,
                                     "Snapshot identifiers exceed maximum length"};
                 }
-                std::string sanitizedMimeType = trimCopy(mimeType_);
+                std::string sanitizedMimeType = yams::common::trimCopy(mimeType_);
                 if (sanitizedMimeType.size() > kMaxMimeTypeLength) {
                     co_return Error{ErrorCode::InvalidArgument, "MIME type exceeds maximum length"};
                 }
@@ -665,7 +654,7 @@ public:
                 };
 
                 // Validate document name once
-                std::string sanitizedName = trimCopy(documentName_);
+                std::string sanitizedName = yams::common::trimCopy(documentName_);
                 if (sanitizedName.size() > kMaxNameLength) {
                     co_return Error{ErrorCode::InvalidArgument,
                                     "Document name exceeds maximum length"};

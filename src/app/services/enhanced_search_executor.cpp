@@ -1,5 +1,6 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include <yams/app/services/enhanced_search_executor.h>
+#include <yams/common/string_utils.h>
 
 #include <filesystem>
 #include <fstream>
@@ -8,14 +9,6 @@
 namespace yams::app::services {
 
 namespace fs = std::filesystem;
-
-static std::string trim(const std::string& s) {
-    auto l = s.find_first_not_of(" \t");
-    if (l == std::string::npos)
-        return "";
-    auto r = s.find_last_not_of(" \t");
-    return s.substr(l, r - l + 1);
-}
 
 EnhancedConfig EnhancedSearchExecutor::loadConfigFromToml() {
     EnhancedConfig out{};
@@ -48,7 +41,7 @@ EnhancedConfig EnhancedSearchExecutor::loadConfigFromToml() {
     };
 
     while (std::getline(in, line)) {
-        auto l = trim(line);
+        auto l = yams::common::trimCopy(line);
         if (l.empty() || l[0] == '#')
             continue;
         if (l.front() == '[') {
@@ -60,8 +53,8 @@ EnhancedConfig EnhancedSearchExecutor::loadConfigFromToml() {
         auto eq = l.find('=');
         if (eq == std::string::npos)
             continue;
-        auto key = trim(l.substr(0, eq));
-        auto val = trim(l.substr(eq + 1));
+        auto key = yams::common::trimCopy(l.substr(0, eq));
+        auto val = yams::common::trimCopy(l.substr(eq + 1));
         if (!val.empty() && val.front() == '"' && val.back() == '"')
             val = val.substr(1, val.size() - 2);
 

@@ -791,15 +791,7 @@ using yams::cli::cli_perf_trace;
 using yams::cli::cli_perf_trace_enabled;
 
 inline std::string trim_copy(std::string_view sv) {
-    std::size_t start = 0;
-    std::size_t end = sv.size();
-    while (start < end && std::isspace(static_cast<unsigned char>(sv[start])) != 0) {
-        ++start;
-    }
-    while (end > start && std::isspace(static_cast<unsigned char>(sv[end - 1])) != 0) {
-        --end;
-    }
-    return std::string(sv.substr(start, end - start));
+    return yams::common::trimCopy(sv);
 }
 
 inline bool is_socket_mode_forced_by_env() {
