@@ -5,6 +5,7 @@
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/time_filters.h>
 #include <yams/cli/time_parser.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
@@ -1839,76 +1840,13 @@ private:
     }
 
     bool applyTimeFilters(const metadata::DocumentInfo& doc) {
-        // Parse and apply created time filters
-        if (!createdAfter_.empty()) {
-            auto afterTime = TimeParser::parse(createdAfter_);
-            if (!afterTime) {
-                spdlog::warn("Invalid created-after time: {}", createdAfter_);
-                return true; // Don't filter on invalid input
-            }
-            if (doc.createdTime < afterTime.value()) {
-                return false;
-            }
-        }
-
-        if (!createdBefore_.empty()) {
-            auto beforeTime = TimeParser::parse(createdBefore_);
-            if (!beforeTime) {
-                spdlog::warn("Invalid created-before time: {}", createdBefore_);
-                return true;
-            }
-            if (doc.createdTime > beforeTime.value()) {
-                return false;
-            }
-        }
-
-        // Parse and apply modified time filters
-        if (!modifiedAfter_.empty()) {
-            auto afterTime = TimeParser::parse(modifiedAfter_);
-            if (!afterTime) {
-                spdlog::warn("Invalid modified-after time: {}", modifiedAfter_);
-                return true;
-            }
-            if (doc.modifiedTime < afterTime.value()) {
-                return false;
-            }
-        }
-
-        if (!modifiedBefore_.empty()) {
-            auto beforeTime = TimeParser::parse(modifiedBefore_);
-            if (!beforeTime) {
-                spdlog::warn("Invalid modified-before time: {}", modifiedBefore_);
-                return true;
-            }
-            if (doc.modifiedTime > beforeTime.value()) {
-                return false;
-            }
-        }
-
-        // Parse and apply indexed time filters
-        if (!indexedAfter_.empty()) {
-            auto afterTime = TimeParser::parse(indexedAfter_);
-            if (!afterTime) {
-                spdlog::warn("Invalid indexed-after time: {}", indexedAfter_);
-                return true;
-            }
-            if (doc.indexedTime < afterTime.value()) {
-                return false;
-            }
-        }
-
-        if (!indexedBefore_.empty()) {
-            auto beforeTime = TimeParser::parse(indexedBefore_);
-            if (!beforeTime) {
-                spdlog::warn("Invalid indexed-before time: {}", indexedBefore_);
-                return true;
-            }
-            if (doc.indexedTime > beforeTime.value()) {
-                return false;
-            }
-        }
-
-        return true;
+        const yams::cli::DocTimeFilters filters{.createdAfter = createdAfter_,
+                                                .createdBefore = createdBefore_,
+                                                .modifiedAfter = modifiedAfter_,
+                                                .modifiedBefore = modifiedBefore_,
+                                                .indexedAfter = indexedAfter_,
+                                                .indexedBefore = indexedBefore_};
+        return yams::cli::applyDocTimeFilters(doc, filters);
     }
 
     bool applyChangeFilters(const metadata::DocumentInfo& doc) {

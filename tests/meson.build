@@ -1401,6 +1401,7 @@ if catch2_dep.found()
       'unit/cli/prompt_util_catch2_test.cpp',
       'unit/cli/recommendation_util_catch2_test.cpp',
       'unit/cli/status_metrics_catch2_test.cpp',
+      'unit/cli/time_filters_catch2_test.cpp',
       'unit/cli/stream_heuristics_catch2_test.cpp',
       'unit/cli/time_parser_catch2_test.cpp',
       'unit/cli/version_generated_header_catch2_test.cpp',
