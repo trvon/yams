@@ -1389,6 +1389,7 @@ if catch2_dep.found()
     version_header,
     files(
       'unit/common/format_catch2_test.cpp',
+      'unit/common/crc32_catch2_test.cpp',
       'unit/common/pattern_utils_catch2_test.cpp',
       'unit/common/string_utils_catch2_test.cpp',
       'unit/common/test_utils_catch2_test.cpp',

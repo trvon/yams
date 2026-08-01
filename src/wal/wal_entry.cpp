@@ -1,3 +1,4 @@
+#include <yams/common/crc32.h>
 #include <yams/wal/wal_entry.h>
 
 #include <array>
@@ -14,17 +15,8 @@
 namespace {
 
 uint32_t crc32(const void* data, size_t length) {
-    const uint8_t* bytes = static_cast<const uint8_t*>(data);
-    uint32_t crc = 0xFFFFFFFF;
-
-    for (size_t i = 0; i < length; ++i) {
-        crc ^= bytes[i];
-        for (int j = 0; j < 8; ++j) {
-            crc = (crc >> 1) ^ (0xEDB88320 * (crc & 1));
-        }
-    }
-
-    return ~crc;
+    return yams::common::crc32(
+        std::span<const std::byte>(static_cast<const std::byte*>(data), length));
 }
 
 uint32_t checkedMetadataPartSize(size_t size, const char* field) {
@@ -277,8 +269,9 @@ std::vector<std::byte> WALEntry::UpdateMetadataData::encode(const std::string& h
     data.keySize = checkedMetadataPartSize(key.size(), "key");
     data.valueSize = checkedMetadataPartSize(value.size(), "value");
 
+    const size_t metadataHeaderSize = sizeof(UpdateMetadataData);
     std::vector<std::byte> result;
-    result.reserve(sizeof(UpdateMetadataData) + key.size() + value.size());
+    result.reserve(metadataHeaderSize + key.size() + value.size());
     appendObjectBytes(result, data);
 
     // Copy key and value
@@ -303,7 +296,8 @@ WALEntry::UpdateMetadataData::decode(std::span<const std::byte> data) {
     }
 
     // Verify size
-    size_t expectedSize = sizeof(UpdateMetadataData) + result->keySize + result->valueSize;
+    const size_t metadataHeaderSize = sizeof(UpdateMetadataData);
+    size_t expectedSize = metadataHeaderSize + result->keySize + result->valueSize;
     if (data.size() < expectedSize) {
         return std::nullopt;
     }
