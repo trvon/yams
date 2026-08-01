@@ -7,6 +7,7 @@
 #include <yams/app/services/enhanced_search_executor.h>
 #include <yams/app/services/path_projection.hpp>
 #include <yams/app/services/retrieval_path_policy.hpp>
+#include <yams/app/services/service_utils.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/common/string_utils.h>
@@ -522,31 +523,6 @@ static double computePathMatchScore(const metadata::DocumentInfo& doc, const std
 }
 
 // Presence-based tag match using metadata repository
-static bool isTransientMetadataError(const Error& err) {
-    switch (err.code) {
-        case ErrorCode::NotInitialized:
-        case ErrorCode::DatabaseError:
-        case ErrorCode::ResourceBusy:
-        case ErrorCode::OperationInProgress:
-        case ErrorCode::Timeout:
-            return true;
-        case ErrorCode::InternalError: {
-            const auto& msg = err.message;
-            return msg.find("database is locked") != std::string::npos ||
-                   msg.find("readonly") != std::string::npos ||
-                   msg.find("busy") != std::string::npos;
-        }
-        default:
-            return false;
-    }
-}
-
-struct MetadataTelemetry {
-    std::atomic<std::uint64_t> operations{0};
-    std::atomic<std::uint64_t> retries{0};
-    std::atomic<std::uint64_t> transientFailures{0};
-};
-
 template <typename Fn>
 boost::asio::awaitable<decltype(std::declval<Fn>()())>
 retryMetadataOp(Fn&& fn, std::size_t maxAttempts = 4,

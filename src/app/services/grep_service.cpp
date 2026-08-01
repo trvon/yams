@@ -61,18 +61,6 @@ private:
     int active_{1};
 };
 
-#if __cpp_lib_string_contains >= 202011L
-template <typename StringType, typename SubType>
-constexpr bool string_contains(const StringType& str, const SubType& substr) noexcept {
-    return str.contains(substr);
-}
-#else
-template <typename StringType, typename SubType>
-constexpr bool string_contains(const StringType& str, const SubType& substr) noexcept {
-    return str.find(substr) != StringType::npos;
-}
-#endif
-
 struct PathTreeConfigSettings {
     bool enabled{false};
     std::string mode{"fallback"};
@@ -196,30 +184,6 @@ static std::string normalizeForGlobMatch(const std::string& value) {
     return out;
 }
 
-static bool isTransientMetadataError(const Error& err) noexcept {
-    switch (err.code) {
-        case ErrorCode::NotInitialized:
-        case ErrorCode::DatabaseError:
-        case ErrorCode::ResourceBusy:
-        case ErrorCode::OperationInProgress:
-        case ErrorCode::Timeout:
-            return true;
-        case ErrorCode::InternalError: {
-            const auto& msg = err.message;
-            return string_contains(msg, "database is locked") || string_contains(msg, "readonly") ||
-                   string_contains(msg, "busy");
-        }
-        default:
-            return false;
-    }
-}
-
-struct MetadataTelemetry {
-    std::atomic<std::uint64_t> operations{0};
-    std::atomic<std::uint64_t> retries{0};
-    std::atomic<std::uint64_t> transientFailures{0};
-};
-
 using GrepClock = std::chrono::steady_clock;
 
 static void recordPhaseMetric(std::map<std::string, std::int64_t>& phaseTimings,
@@ -294,7 +258,7 @@ static bool pathFilterMatch(const std::string& filePath, const std::vector<std::
             auto normalizedFilter = normalizePathForCompare(f);
             if (normalizedFilter.empty())
                 continue;
-            if (string_contains(normalizedDoc, normalizedFilter))
+            if (features::string_contains(normalizedDoc, normalizedFilter))
                 return true;
         }
     }
@@ -647,7 +611,7 @@ public:
                             } else {
                                 const auto normalizedPattern = normalizeForGlobMatch(pattern);
                                 if (!normalizedPattern.empty() &&
-                                    string_contains(docGlobPath, normalizedPattern)) {
+                                    features::string_contains(docGlobPath, normalizedPattern)) {
                                     matches = true;
                                     break;
                                 }
@@ -1403,7 +1367,7 @@ public:
                                         } else {
                                             const auto normalized = normalizeForGlobMatch(p);
                                             if (!normalized.empty() &&
-                                                string_contains(pathGlob, normalized)) {
+                                                features::string_contains(pathGlob, normalized)) {
                                                 ok = true;
                                                 break;
                                             }

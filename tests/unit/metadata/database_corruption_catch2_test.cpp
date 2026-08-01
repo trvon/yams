@@ -80,12 +80,6 @@ int64_t countRows(Database& db) {
     return stmt.value().getInt64(0);
 }
 
-struct ArtifactGuard {
-    explicit ArtifactGuard(std::filesystem::path p) : path(std::move(p)) {}
-    ~ArtifactGuard() { remove_sqlite_artifacts(path); }
-    std::filesystem::path path;
-};
-
 } // namespace
 
 TEST_CASE("checkIntegrity detects mid-file page corruption as non-transient",

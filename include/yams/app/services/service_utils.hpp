@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -12,6 +13,39 @@
 #include <yams/metadata/path_utils.h>
 
 namespace yams::app::services {
+/**
+ * @brief Retry telemetry counters shared by metadata retry loops.
+ */
+struct MetadataTelemetry {
+    std::atomic<std::uint64_t> operations{0};
+    std::atomic<std::uint64_t> retries{0};
+    std::atomic<std::uint64_t> transientFailures{0};
+};
+
+/**
+ * @brief Whether an error is transient (safe to retry).
+ *
+ * Structured error codes plus message-level checks for the SQLite lock errors
+ * that surface as InternalError.
+ */
+inline bool isTransientMetadataError(const Error& err) noexcept {
+    switch (err.code) {
+        case ErrorCode::NotInitialized:
+        case ErrorCode::DatabaseError:
+        case ErrorCode::ResourceBusy:
+        case ErrorCode::OperationInProgress:
+        case ErrorCode::Timeout:
+            return true;
+        case ErrorCode::InternalError: {
+            const auto& msg = err.message;
+            return msg.find("database is locked") != std::string::npos ||
+                   msg.find("readonly") != std::string::npos ||
+                   msg.find("busy") != std::string::npos;
+        }
+        default:
+            return false;
+    }
+}
 
 inline std::string normalizeExtension(const std::string& ext) {
     if (ext.empty())

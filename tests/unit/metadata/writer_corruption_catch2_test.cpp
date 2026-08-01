@@ -28,12 +28,6 @@ namespace {
 
 constexpr std::chrono::seconds kFutureTimeout{30};
 
-struct ArtifactGuard {
-    explicit ArtifactGuard(std::filesystem::path p) : path(std::move(p)) {}
-    ~ArtifactGuard() { remove_sqlite_artifacts(path); }
-    std::filesystem::path path;
-};
-
 struct CorruptRepoFixture {
     CorruptRepoFixture() : dbPath_(migrated_metadata_db_template().clone("yams_writer_corrupt_")) {
         corruptPage(dbPath_, static_cast<std::uint64_t>(tableRootPage(dbPath_, "documents")));
