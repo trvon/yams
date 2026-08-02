@@ -671,7 +671,7 @@ void PostIngestQueue::resumeStage(Stage stage) {
     const auto idx = static_cast<std::size_t>(stage);
     YAMS_PRECONDITION(idx < kStageCount, "resumeStage requires a valid PostIngestQueue::Stage");
     stagePaused_[idx].store(false, std::memory_order_release);
-    TuneAdvisor::setPostIngestStageActive(kTuneAdvisorStages[idx], true);
+    refreshStageAvailability();
     spdlog::info("[PostIngestQueue] Resumed {} stage", kStageNames[idx]);
 }
 
@@ -679,6 +679,16 @@ bool PostIngestQueue::isStagePaused(Stage stage) const {
     const auto idx = static_cast<std::size_t>(stage);
     YAMS_PRECONDITION(idx < kStageCount, "isStagePaused requires a valid PostIngestQueue::Stage");
     return stagePaused_[idx].load(std::memory_order_acquire);
+}
+
+void PostIngestQueue::setKnowledgeGraphEnabled(bool enabled) {
+    knowledgeGraphEnabled_.store(enabled, std::memory_order_release);
+    refreshStageAvailability();
+    spdlog::info("[PostIngestQueue] KnowledgeGraph dispatch {}", enabled ? "enabled" : "disabled");
+}
+
+bool PostIngestQueue::isKnowledgeGraphEnabled() const {
+    return knowledgeGraphEnabled_.load(std::memory_order_acquire);
 }
 
 void PostIngestQueue::pauseAll() {
@@ -745,8 +755,9 @@ void PostIngestQueue::refreshStageAvailability() {
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Extraction,
                                           extractionActive);
 
-    const bool kgActive =
-        graphComponent_ != nullptr && !stagePaused_[1].load(std::memory_order_acquire);
+    const bool kgActive = graphComponent_ != nullptr &&
+                          knowledgeGraphEnabled_.load(std::memory_order_acquire) &&
+                          !stagePaused_[1].load(std::memory_order_acquire);
     TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::KnowledgeGraph, kgActive);
 
     bool symbolCapable = false;
@@ -787,7 +798,8 @@ void PostIngestQueue::logStageAvailabilitySnapshot() const {
         "title={}}} paused={{extraction={}, kg={}, symbol={}, entity={}, title={}}} limits={{"
         "extraction={}, kg={}, symbol={}, entity={}, title={}}}",
         !stagePaused_[0].load(std::memory_order_acquire),
-        graphComponent_ != nullptr && !stagePaused_[1].load(std::memory_order_acquire),
+        graphComponent_ != nullptr && knowledgeGraphEnabled_.load(std::memory_order_acquire) &&
+            !stagePaused_[1].load(std::memory_order_acquire),
         symbolCapable && !stagePaused_[2].load(std::memory_order_acquire),
         entityCapable && !stagePaused_[3].load(std::memory_order_acquire),
         hasTitleExtractor() && !stagePaused_[4].load(std::memory_order_acquire),
@@ -858,7 +870,7 @@ std::size_t PostIngestQueue::resolveChannelCapacity() const {
 }
 
 std::size_t PostIngestQueue::boundedStageChannelCapacity(std::size_t defaultCap) const {
-    return std::max<std::size_t>(1u, defaultCap);
+    return std::max<std::size_t>(1u, std::min(defaultCap, resolveChannelCapacity()));
 }
 
 double PostIngestQueue::kgChannelFillRatio(std::size_t* depthOut, std::size_t* capacityOut) const {
@@ -905,7 +917,7 @@ std::size_t PostIngestQueue::adaptiveStageBatchSize(std::size_t queueDepth,
 }
 
 bool PostIngestQueue::isKgChannelBackpressured() const {
-    if (maxKgConcurrent() == 0) {
+    if (!knowledgeGraphEnabled_.load(std::memory_order_acquire)) {
         return false;
     }
     return kgChannelFillRatio() >= PostIngestQueue::kKgBackpressureThreshold;
@@ -1694,13 +1706,10 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
                                           const std::string& filePath,
                                           std::vector<std::string> tags,
                                           std::shared_ptr<std::vector<std::byte>> contentBytes) {
-    // Do not let a disabled/saturated KG stage throttle extraction throughput.
-    // KG is an optional downstream enrichment path; metadata extraction/indexing should continue.
-    const bool kgStageActive = (graphComponent_ != nullptr) &&
-                               !stagePaused_[1].load(std::memory_order_acquire) &&
-                               (maxKgConcurrent() > 0);
-    if (!kgStageActive) {
-        InternalEventBus::instance().incKgDropped();
+    // A disabled KG stage is outside the pipeline contract. A temporarily paused or
+    // dynamically capped stage remains inside the contract: buffer its work and let channel
+    // backpressure bound upstream admission instead of silently dropping enrichment.
+    if (!graphComponent_ || !knowledgeGraphEnabled_.load(std::memory_order_acquire)) {
         return;
     }
 
@@ -1714,20 +1723,27 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
     job.contentBytes = std::move(contentBytes);
     job.enqueuedAt = std::chrono::steady_clock::now();
 
-    // push_wait attempts an immediate non-blocking push before applying bounded backoff.
-    static constexpr auto kEnqueueTimeout = std::chrono::milliseconds(10);
-    if (!channel->push_wait(std::move(job), kEnqueueTimeout)) {
-        const auto n = InternalEventBus::instance().kgDropped();
-        if (((n + 1u) % 64u) == 1u) {
-            spdlog::warn(
-                "[PostIngestQueue] KG channel full (depth={}/{}), dropping job for {} (drops={})",
-                channel->size_approx(), channel->capacity(), hash.substr(0, 12), n + 1u);
+    // A full KG channel is backpressure, not data loss. Retry in short bounded waits so
+    // shutdown and explicit KG disablement can cancel the dispatch. A temporary pause keeps
+    // the job alive until the KG poller resumes and creates capacity.
+    static constexpr auto kEnqueueRetry = std::chrono::milliseconds(10);
+    while (!stop_.load(std::memory_order_acquire) &&
+           knowledgeGraphEnabled_.load(std::memory_order_acquire)) {
+        if (channel->push_wait(job, kEnqueueRetry)) {
+            InternalEventBus::instance().incKgQueued();
+            TuningManager::notifyWakeup();
+            signalWakeTimer(Stage::KnowledgeGraph);
+            return;
         }
+    }
+
+    if (stop_.load(std::memory_order_acquire)) {
         InternalEventBus::instance().incKgDropped();
+        spdlog::warn("[PostIngestQueue] KG dispatch cancelled during shutdown for {}",
+                     hash.substr(0, 12));
     } else {
-        InternalEventBus::instance().incKgQueued();
-        TuningManager::notifyWakeup();
-        signalWakeTimer(Stage::KnowledgeGraph);
+        spdlog::info("[PostIngestQueue] KG dispatch cancelled by explicit disablement for {}",
+                     hash.substr(0, 12));
     }
 }
 
@@ -3327,7 +3343,8 @@ PostIngestQueue::PreparedDispatchPlan
 PostIngestQueue::buildDispatchPlan(const PreparedMetadataEntry& prepared, bool embedStageActive,
                                    bool hasEmbedQueue) const {
     return PreparedDispatchPlan{
-        .dispatchKg = prepared.shouldDispatchKg,
+        .dispatchKg =
+            prepared.shouldDispatchKg && knowledgeGraphEnabled_.load(std::memory_order_acquire),
         .dispatchSymbol = prepared.shouldDispatchSymbol,
         .dispatchEntity = prepared.shouldDispatchEntity,
         .dispatchTitle = prepared.shouldDispatchTitle,

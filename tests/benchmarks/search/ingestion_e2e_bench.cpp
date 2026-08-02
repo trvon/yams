@@ -23,6 +23,10 @@
     YAMS_BENCH_OUTPUT=path            - JSON output file (default: stdout)
     YAMS_BENCH_DISABLE_KG=1           - Disable KG post-ingest enrichment for ablation
     YAMS_BENCH_SEARCH_PROBES=0        - Disable fixed post-ingest search probes
+    YAMS_BENCH_PHASE=initial|replay|resume
+                                      - Select lifecycle contract (default: initial)
+    YAMS_BENCH_FIXTURE_ROOT=path      - Externally owned yams_e2e_bench_* temp root used across
+                                        fresh processes; caller must remove it
 
   Metrics collected:
     - Total pipeline duration (start → all stages complete)
@@ -217,6 +221,40 @@ bool envFlagEnabled(const char* name) {
     return value == "1" || value == "true" || value == "yes" || value == "on";
 }
 
+bool pathWithin(const fs::path& candidate, const fs::path& root) {
+    const auto relative = candidate.lexically_relative(root);
+    return !relative.empty() && relative.native() != "." && *relative.begin() != "..";
+}
+
+std::optional<fs::path> externalFixtureRoot() {
+    const char* configured = std::getenv("YAMS_BENCH_FIXTURE_ROOT");
+    if (configured == nullptr || *configured == '\0') {
+        return std::nullopt;
+    }
+
+    auto candidate = fs::weakly_canonical(fs::absolute(configured));
+    const auto tempRoot = fs::weakly_canonical(fs::temp_directory_path());
+    bool isolated = pathWithin(candidate, tempRoot);
+#ifndef _WIN32
+    isolated = isolated || pathWithin(candidate, fs::weakly_canonical("/tmp"));
+#endif
+    const auto name = candidate.filename().string();
+    if (!isolated || !name.starts_with("yams_e2e_bench_")) {
+        throw std::runtime_error(
+            "YAMS_BENCH_FIXTURE_ROOT must be an isolated yams_e2e_bench_* temp directory");
+    }
+    return candidate;
+}
+
+std::string benchPhase() {
+    const char* configured = std::getenv("YAMS_BENCH_PHASE");
+    const std::string phase = configured != nullptr && *configured != '\0' ? configured : "initial";
+    if (phase != "initial" && phase != "replay" && phase != "resume") {
+        throw std::runtime_error("YAMS_BENCH_PHASE must be initial, replay, or resume");
+    }
+    return phase;
+}
+
 int benchEnvInt(const char* name, int fallback, int minimum, int maximum) {
     const char* raw = std::getenv(name);
     if (raw == nullptr || *raw == '\0') {
@@ -271,15 +309,20 @@ std::uint32_t benchPostIngestBatchSize() {
 class SimpleDaemonHarness {
 public:
     SimpleDaemonHarness() {
-        auto id = randomId();
+        if (const auto configuredRoot = externalFixtureRoot()) {
+            root_ = *configuredRoot;
+            externallyOwnedRoot_ = true;
+        } else {
+            auto id = randomId();
 #ifdef _WIN32
-        const auto tempBase = fs::temp_directory_path();
+            const auto tempBase = fs::temp_directory_path();
 #else
-        // Keep Unix-domain socket paths well below sockaddr_un::sun_path limits while placing
-        // every fixture artifact under one directory for deterministic cleanup.
-        const auto tempBase = fs::path("/tmp");
+            // Keep Unix-domain socket paths well below sockaddr_un::sun_path limits while placing
+            // every fixture artifact under one directory for deterministic cleanup.
+            const auto tempBase = fs::path("/tmp");
 #endif
-        root_ = tempBase / ("yams_e2e_bench_" + id);
+            root_ = tempBase / ("yams_e2e_bench_" + id);
+        }
         yams::common::ensureDirectories(root_);
         data_ = root_ / "data";
         yams::common::ensureDirectories(data_);
@@ -538,7 +581,7 @@ private:
 
     void cleanup() {
         std::error_code ec;
-        if (!root_.empty())
+        if (!root_.empty() && !externallyOwnedRoot_)
             fs::remove_all(root_, ec);
     }
 
@@ -550,6 +593,7 @@ private:
     bool glinerRequested_{false};
     bool pluginAutoloadEnabled_{false};
     bool shutdownSucceeded_{false};
+    bool externallyOwnedRoot_{false};
 };
 
 // ============================================================================
@@ -629,7 +673,10 @@ struct VectorOracleSnapshot {
     std::uint64_t documentVectors{0};
     std::uint64_t invalidDimensions{0};
     std::uint64_t nonFiniteValues{0};
+    std::uint64_t searchResultCount{0};
+    std::uint64_t nonFiniteSearchScores{0};
     std::string fingerprint;
+    std::string searchFingerprint;
 };
 
 VectorOracleSnapshot captureVectorOracle(const yams::vector::VectorDatabase& vectorDb,
@@ -648,6 +695,7 @@ VectorOracleSnapshot captureVectorOracle(const yams::vector::VectorDatabase& vec
 
     Fnv1a64 fingerprint;
     fingerprint.addInteger(expectedDim);
+    std::vector<float> canonicalQuery;
     for (const auto& hash : hashes) {
         auto records = vectorDb.getVectorsByDocument(hash);
         std::sort(records.begin(), records.end(), [](const auto& lhs, const auto& rhs) {
@@ -702,6 +750,9 @@ VectorOracleSnapshot captureVectorOracle(const yams::vector::VectorDatabase& vec
                 }
                 fingerprint.addFloat(value);
             }
+            if (canonicalQuery.empty() && record.embedding.size() == expectedDim) {
+                canonicalQuery = record.embedding;
+            }
             ++snapshot.fetchedVectors;
             if (record.level == yams::vector::EmbeddingLevel::DOCUMENT) {
                 ++snapshot.documentVectors;
@@ -711,8 +762,27 @@ VectorOracleSnapshot captureVectorOracle(const yams::vector::VectorDatabase& vec
         }
     }
     snapshot.fingerprint = fingerprint.fingerprint();
+    if (!canonicalQuery.empty()) {
+        yams::vector::VectorSearchParams params;
+        params.k = 10;
+        params.similarity_threshold = -1.0F;
+        const auto results = vectorDb.search(canonicalQuery, params);
+        Fnv1a64 searchFingerprint;
+        searchFingerprint.addInteger(results.size());
+        for (const auto& record : results) {
+            searchFingerprint.addBytes(record.chunk_id);
+            searchFingerprint.addBytes(record.document_hash);
+            if (!std::isfinite(record.relevance_score)) {
+                ++snapshot.nonFiniteSearchScores;
+            }
+            searchFingerprint.addFloat(record.relevance_score);
+        }
+        snapshot.searchResultCount = results.size();
+        snapshot.searchFingerprint = searchFingerprint.fingerprint();
+    }
     snapshot.complete = snapshot.fetchedVectors == snapshot.storedVectors &&
                         snapshot.invalidDimensions == 0 && snapshot.nonFiniteValues == 0 &&
+                        snapshot.searchResultCount > 0 && snapshot.nonFiniteSearchScores == 0 &&
                         snapshot.error.empty();
     return snapshot;
 }
@@ -948,6 +1018,8 @@ struct SearchImpactProbe {
     uint64_t returned_count = 0;
     std::vector<std::string> top_ids{};
     std::vector<std::string> top_paths{};
+    std::vector<double> top_scores{};
+    bool scores_finite = true;
 
     json toJson() const {
         return json{{"name", name},
@@ -964,7 +1036,9 @@ struct SearchImpactProbe {
                     {"total_count", total_count},
                     {"returned_count", returned_count},
                     {"top_ids", top_ids},
-                    {"top_paths", top_paths}};
+                    {"top_paths", top_paths},
+                    {"top_scores", top_scores},
+                    {"scores_finite", scores_finite}};
     }
 };
 
@@ -1007,6 +1081,7 @@ struct BenchmarkResult {
     std::string corpus_fingerprint;
     std::string ingest_mode = "single_file_serial";
     std::size_t ingest_concurrency = 1;
+    std::string fixture_phase = "initial";
     std::uint32_t post_ingest_coalesce_ms = 0;
     std::uint32_t post_ingest_batch_size = 0;
     std::uint64_t enrichment_timeout_ms = 30000;
@@ -1074,6 +1149,17 @@ struct BenchmarkResult {
     yams::daemon::VectorIndexTelemetry vector_index_telemetry;
     VectorPersistenceSnapshot vector_persistence;
     std::string search_result_fingerprint;
+    std::string search_score_fingerprint;
+    bool startup_oracle_required = false;
+    bool startup_oracle_complete = false;
+    std::uint64_t startup_stored_documents = 0;
+    bool startup_stored_document_count_readable = false;
+    bool startup_vector_reusable = false;
+    VectorOracleSnapshot startup_vector_oracle;
+    yams::daemon::VectorIndexTelemetry startup_vector_index_telemetry;
+    std::vector<SearchImpactProbe> startup_search_impact;
+    std::string startup_search_result_fingerprint;
+    std::string startup_search_score_fingerprint;
 
     // Per-stage metrics
     StageMetrics metadata_storage;
@@ -1134,6 +1220,7 @@ struct BenchmarkResult {
                             {"corpus_fingerprint", corpus_fingerprint},
                             {"ingest_mode", ingest_mode},
                             {"ingest_concurrency", ingest_concurrency},
+                            {"fixture_phase", fixture_phase},
                             {"post_ingest_coalesce_ms", post_ingest_coalesce_ms},
                             {"post_ingest_batch_size", post_ingest_batch_size},
                             {"enrichment_timeout_ms", enrichment_timeout_ms},
@@ -1177,20 +1264,45 @@ struct BenchmarkResult {
                               {"searchability_ready_ms", searchability_ready_ms},
                               {"shutdown_ms", shutdown_ms},
                               {"lifecycle_ms", lifecycle_ms}};
-        j["storage_oracle"] = {{"stored_documents", stored_documents},
-                               {"stored_document_count_readable", stored_document_count_readable},
-                               {"stored_document_count_error", stored_document_count_error},
-                               {"stored_vectors", vector_oracle.storedVectors},
-                               {"fetched_vectors", vector_oracle.fetchedVectors},
-                               {"embedded_documents", vector_oracle.embeddedDocuments},
-                               {"chunk_vectors", vector_oracle.chunkVectors},
-                               {"document_vectors", vector_oracle.documentVectors},
-                               {"invalid_vector_dimensions", vector_oracle.invalidDimensions},
-                               {"non_finite_vector_values", vector_oracle.nonFiniteValues},
-                               {"vector_oracle_complete", vector_oracle.complete},
-                               {"vector_oracle_error", vector_oracle.error},
-                               {"embedding_fingerprint", vector_oracle.fingerprint},
-                               {"search_result_fingerprint", search_result_fingerprint}};
+        j["storage_oracle"] = {
+            {"stored_documents", stored_documents},
+            {"stored_document_count_readable", stored_document_count_readable},
+            {"stored_document_count_error", stored_document_count_error},
+            {"stored_vectors", vector_oracle.storedVectors},
+            {"fetched_vectors", vector_oracle.fetchedVectors},
+            {"embedded_documents", vector_oracle.embeddedDocuments},
+            {"chunk_vectors", vector_oracle.chunkVectors},
+            {"document_vectors", vector_oracle.documentVectors},
+            {"invalid_vector_dimensions", vector_oracle.invalidDimensions},
+            {"non_finite_vector_values", vector_oracle.nonFiniteValues},
+            {"vector_search_result_count", vector_oracle.searchResultCount},
+            {"non_finite_vector_search_scores", vector_oracle.nonFiniteSearchScores},
+            {"vector_search_fingerprint", vector_oracle.searchFingerprint},
+            {"vector_oracle_complete", vector_oracle.complete},
+            {"vector_oracle_error", vector_oracle.error},
+            {"embedding_fingerprint", vector_oracle.fingerprint},
+            {"search_result_fingerprint", search_result_fingerprint},
+            {"search_score_fingerprint", search_score_fingerprint}};
+        j["restart_oracle"] = {
+            {"required", startup_oracle_required},
+            {"complete", startup_oracle_complete},
+            {"stored_documents", startup_stored_documents},
+            {"stored_document_count_readable", startup_stored_document_count_readable},
+            {"vector_reusable", startup_vector_reusable},
+            {"stored_vectors", startup_vector_oracle.storedVectors},
+            {"embedded_documents", startup_vector_oracle.embeddedDocuments},
+            {"invalid_vector_dimensions", startup_vector_oracle.invalidDimensions},
+            {"non_finite_vector_values", startup_vector_oracle.nonFiniteValues},
+            {"vector_search_result_count", startup_vector_oracle.searchResultCount},
+            {"non_finite_vector_search_scores", startup_vector_oracle.nonFiniteSearchScores},
+            {"vector_search_fingerprint", startup_vector_oracle.searchFingerprint},
+            {"vector_oracle_complete", startup_vector_oracle.complete},
+            {"embedding_fingerprint", startup_vector_oracle.fingerprint},
+            {"search_result_fingerprint", startup_search_result_fingerprint},
+            {"search_score_fingerprint", startup_search_score_fingerprint},
+            {"coordinator_ready", startup_vector_index_telemetry.ready},
+            {"coordinator_rebuilding", startup_vector_index_telemetry.rebuilding},
+            {"coordinator_epoch", startup_vector_index_telemetry.rebuildEpoch}};
         j["vector_index"] = {
             {"rebuild_ok", vector_rebuild_ok},
             {"rebuild_error", vector_rebuild_error},
@@ -1380,6 +1492,11 @@ struct BenchmarkResult {
             searchImpact.push_back(probe.toJson());
         }
         j["search_impact"] = std::move(searchImpact);
+        json startupSearchImpact = json::array();
+        for (const auto& probe : startup_search_impact) {
+            startupSearchImpact.push_back(probe.toJson());
+        }
+        j["startup_search_impact"] = std::move(startupSearchImpact);
 
         j["post_ingest_batch_metrics"] = {
             {"extraction_batches", post_ingest_metrics.batches.extractionBatches},
@@ -1654,12 +1771,14 @@ runSearchImpactProbes(const std::shared_ptr<yams::daemon::DaemonClient>& client,
             probe.top_ids.push_back(item.id);
             probe.top_paths.push_back(item.path.empty() ? std::string{}
                                                         : fs::path(item.path).filename().string());
+            probe.top_scores.push_back(item.score);
+            probe.scores_finite = probe.scores_finite && std::isfinite(item.score);
             if (probe.top_paths.size() >= 5) {
                 break;
             }
         }
         probe.ok =
-            !probe.top_paths.empty() &&
+            probe.scores_finite && !probe.top_paths.empty() &&
             std::ranges::all_of(probe.top_paths, [](const auto& path) { return !path.empty(); });
         if (!probe.ok) {
             probe.error = "search returned no stable document paths";
@@ -1678,6 +1797,18 @@ std::string fingerprintSearchImpact(const std::vector<SearchImpactProbe>& probes
         fingerprint.addInteger(probe.top_paths.size());
         for (const auto& path : probe.top_paths) {
             fingerprint.addBytes(path);
+        }
+    }
+    return fingerprint.fingerprint();
+}
+
+std::string fingerprintSearchScores(const std::vector<SearchImpactProbe>& probes) {
+    Fnv1a64 fingerprint;
+    for (const auto& probe : probes) {
+        fingerprint.addBytes(probe.name);
+        fingerprint.addInteger(probe.top_scores.size());
+        for (const double score : probe.top_scores) {
+            fingerprint.addInteger(std::bit_cast<std::uint64_t>(score));
         }
     }
     return fingerprint.fingerprint();
@@ -1707,6 +1838,7 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
     result.poll_interval_ms = pollIntervalMs;
     result.ingest_mode = std::move(ingestMode);
     result.ingest_concurrency = std::max<std::size_t>(1, ingestConcurrency);
+    result.fixture_phase = benchPhase();
     result.post_ingest_coalesce_ms = benchPostIngestCoalesceMs();
     result.post_ingest_batch_size = yams::daemon::TuneAdvisor::postIngestBatchSize();
     result.timestamp = nowIso8601();
@@ -1727,6 +1859,7 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
     spdlog::info("Doc size: {} bytes", docSize);
     spdlog::info("Poll interval: {} ms", pollIntervalMs);
     spdlog::info("Ingest mode: {} (concurrency={})", result.ingest_mode, result.ingest_concurrency);
+    spdlog::info("Fixture phase: {}", result.fixture_phase);
     spdlog::info("Post-ingest coalesce window: {} ms", result.post_ingest_coalesce_ms);
     spdlog::info("Post-ingest batch size: {}", result.post_ingest_batch_size);
     spdlog::info("KG enrichment: {}", result.kg_enabled ? "enabled" : "disabled");
@@ -1809,6 +1942,61 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
         } else {
             spdlog::warn("Model provider not available");
         }
+
+        if (result.fixture_phase != "initial") {
+            result.startup_oracle_required = result.fixture_phase == "replay";
+            if (auto metadataRepo = serviceManager->getMetadataRepo()) {
+                if (auto countResult = metadataRepo->getDocumentCount(); countResult) {
+                    result.startup_stored_documents =
+                        static_cast<std::uint64_t>(std::max<std::int64_t>(0, countResult.value()));
+                    result.startup_stored_document_count_readable = true;
+                }
+            }
+
+            if (!vectorsDisabled) {
+                if (auto vectorDb = serviceManager->getVectorDatabase()) {
+                    if (result.startup_oracle_required) {
+                        const auto reuseDeadline = std::chrono::steady_clock::now() + 30s;
+                        while (!vectorDb->hasReusablePersistedSearchIndex() &&
+                               std::chrono::steady_clock::now() < reuseDeadline) {
+                            std::this_thread::sleep_for(20ms);
+                        }
+                    }
+                    result.startup_vector_reusable = vectorDb->hasReusablePersistedSearchIndex();
+                    result.startup_vector_oracle =
+                        captureVectorOracle(*vectorDb, result.embedding_dimension);
+                }
+                if (auto coordinator = serviceManager->getVectorIndexCoordinator()) {
+                    result.startup_vector_index_telemetry = coordinator->snapshot();
+                }
+            }
+
+            const bool startupStorageComplete =
+                result.startup_stored_document_count_readable &&
+                result.startup_stored_documents == static_cast<std::uint64_t>(corpusSize);
+            const bool startupVectorComplete =
+                vectorsDisabled ||
+                (result.startup_vector_reusable && result.startup_vector_oracle.complete &&
+                 result.startup_vector_oracle.embeddedDocuments ==
+                     static_cast<std::uint64_t>(corpusSize));
+            if (result.startup_oracle_required) {
+                result.startup_search_impact =
+                    runSearchImpactProbes(client, vectorsDisabled, result.kg_enabled,
+                                          startupStorageComplete && startupVectorComplete);
+                result.startup_search_result_fingerprint =
+                    fingerprintSearchImpact(result.startup_search_impact);
+                result.startup_search_score_fingerprint =
+                    fingerprintSearchScores(result.startup_search_impact);
+            }
+            bool startupSearchComplete = true;
+            for (const auto& probe : result.startup_search_impact) {
+                startupSearchComplete =
+                    startupSearchComplete && (!probe.required_by_contract || probe.ok);
+            }
+            result.startup_oracle_complete =
+                startupStorageComplete && startupVectorComplete && startupSearchComplete;
+        }
+
         serviceManager->setEmbeddingPhaseTimingSink(embeddingTimingSink);
         yams::app::services::resetDocumentStorePhaseTimings();
         yams::api::resetContentStorePhaseTimings();
@@ -1824,7 +2012,7 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
             result.gliner_stage_active =
                 postIngest->hasTitleExtractor() && !envFlagEnabled("YAMS_DISABLE_GLINER_TITLES");
             if (!result.kg_enabled) {
-                postIngest->pauseStage(yams::daemon::PostIngestQueue::Stage::KnowledgeGraph);
+                postIngest->setKnowledgeGraphEnabled(false);
             }
         }
     }
@@ -2238,6 +2426,7 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
     result.search_impact =
         runSearchImpactProbes(client, vectorsDisabled, result.kg_enabled, corePipelineComplete);
     result.search_result_fingerprint = fingerprintSearchImpact(result.search_impact);
+    result.search_score_fingerprint = fingerprintSearchScores(result.search_impact);
     bool searchOracleComplete = true;
     for (const auto& probe : result.search_impact) {
         if (!probe.required_by_contract) {
@@ -2251,16 +2440,25 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
         }
     }
 
+    const auto expectedStoredDocuments = static_cast<std::uint64_t>(corpusSize);
     const bool documentOracleComplete =
-        result.stored_document_count_readable &&
-        result.stored_documents == static_cast<std::uint64_t>(successCount.load());
+        result.stored_document_count_readable && result.stored_documents == expectedStoredDocuments;
     const bool vectorOracleComplete =
-        vectorsDisabled ||
-        (result.vector_rebuild_ok && result.vector_oracle.complete &&
-         result.vector_oracle.embeddedDocuments == static_cast<std::uint64_t>(successCount.load()));
+        vectorsDisabled || (result.vector_rebuild_ok && result.vector_oracle.complete &&
+                            result.vector_oracle.embeddedDocuments == expectedStoredDocuments);
     const bool glinerOracleComplete = !result.gliner_requested || result.gliner_stage_active;
     result.pipeline_complete = result.pipeline_complete && documentOracleComplete &&
                                vectorOracleComplete && glinerOracleComplete && searchOracleComplete;
+    if (result.startup_oracle_required) {
+        const bool replayFingerprintsStable =
+            result.startup_vector_oracle.fingerprint == result.vector_oracle.fingerprint &&
+            result.startup_vector_oracle.searchFingerprint ==
+                result.vector_oracle.searchFingerprint &&
+            result.startup_search_result_fingerprint == result.search_result_fingerprint &&
+            result.startup_search_score_fingerprint == result.search_score_fingerprint;
+        result.pipeline_complete =
+            result.pipeline_complete && result.startup_oracle_complete && replayFingerprintsStable;
+    }
 
     result.total_duration_ms = std::max(result.enrichment_ready_ms, result.searchability_ready_ms);
     const double elapsedSeconds = static_cast<double>(result.total_duration_ms) / 1000.0;
@@ -2330,48 +2528,52 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
 // main - Entry point
 // ============================================================================
 
-int main(int /*argc*/, char* /*argv*/[]) {
-    // Set log level
-    const char* logLevel = std::getenv("YAMS_LOG_LEVEL");
-    if (logLevel != nullptr && std::string(logLevel) == "debug") {
-        spdlog::set_level(spdlog::level::debug);
-    } else {
-        spdlog::set_level(spdlog::level::info);
+int main(int /*argc*/, char* /*argv*/[]) noexcept {
+    try {
+        // Set log level
+        const char* logLevel = std::getenv("YAMS_LOG_LEVEL");
+        if (logLevel != nullptr && std::string(logLevel) == "debug") {
+            spdlog::set_level(spdlog::level::debug);
+        } else {
+            spdlog::set_level(spdlog::level::info);
+        }
+
+        // Read configuration from environment
+        const int corpusSize = benchEnvInt("YAMS_BENCH_CORPUS_SIZE", 100, 1, 1000000);
+        const int docSize = benchEnvInt("YAMS_BENCH_DOC_SIZE", 1000, 1, 100 * 1024 * 1024);
+        const int pollInterval = benchEnvInt("YAMS_BENCH_POLL_INTERVAL_MS", 100, 1, 60000);
+
+        std::string ingestMode = "single_file_serial";
+        if (const char* env = std::getenv("YAMS_BENCH_INGEST_MODE")) {
+            ingestMode = env;
+        }
+
+        const auto ingestConcurrency =
+            static_cast<std::size_t>(benchEnvInt("YAMS_BENCH_INGEST_CONCURRENCY", 4, 1, 1024));
+
+        const char* outputPath = std::getenv("YAMS_BENCH_OUTPUT");
+
+        BenchmarkResult result =
+            runBenchmark(corpusSize, docSize, pollInterval, ingestMode, ingestConcurrency);
+        const std::string jsonStr = result.toJson().dump(2);
+
+        if (outputPath != nullptr) {
+            std::ofstream outFile(outputPath);
+            outFile << jsonStr << '\n';
+            spdlog::info("Results written to: {}", outputPath);
+        } else {
+            std::cout << jsonStr << '\n';
+        }
+
+        return result.metadata_storage.failures > 0 || !result.pipeline_complete ||
+                       result.dropped_batches > 0
+                   ? 1
+                   : 0;
+    } catch (const std::exception& error) {
+        spdlog::error("Ingestion E2E benchmark failed: {}", error.what());
+        return 2;
+    } catch (...) {
+        spdlog::error("Ingestion E2E benchmark failed with an unknown exception");
+        return 2;
     }
-
-    // Read configuration from environment
-    const int corpusSize = benchEnvInt("YAMS_BENCH_CORPUS_SIZE", 100, 1, 1000000);
-    const int docSize = benchEnvInt("YAMS_BENCH_DOC_SIZE", 1000, 1, 100 * 1024 * 1024);
-    const int pollInterval = benchEnvInt("YAMS_BENCH_POLL_INTERVAL_MS", 100, 1, 60000);
-
-    std::string ingestMode = "single_file_serial";
-    if (const char* env = std::getenv("YAMS_BENCH_INGEST_MODE")) {
-        ingestMode = env;
-    }
-
-    const auto ingestConcurrency =
-        static_cast<std::size_t>(benchEnvInt("YAMS_BENCH_INGEST_CONCURRENCY", 4, 1, 1024));
-
-    const char* outputPath = std::getenv("YAMS_BENCH_OUTPUT");
-
-    // Run benchmark
-    BenchmarkResult result =
-        runBenchmark(corpusSize, docSize, pollInterval, ingestMode, ingestConcurrency);
-
-    // Output results
-    json output = result.toJson();
-    std::string jsonStr = output.dump(2);
-
-    if (outputPath != nullptr) {
-        std::ofstream outFile(outputPath);
-        outFile << jsonStr << '\n';
-        spdlog::info("Results written to: {}", outputPath);
-    } else {
-        std::cout << jsonStr << '\n';
-    }
-
-    return result.metadata_storage.failures > 0 || !result.pipeline_complete ||
-                   result.dropped_batches > 0
-               ? 1
-               : 0;
 }

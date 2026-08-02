@@ -452,7 +452,11 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
     spdlog::debug("[ServiceManager] Creating WorkCoordinator...");
     try {
         workCoordinator_ = std::make_unique<WorkCoordinator>();
-        auto threadCount = yams::daemon::TuneAdvisor::workCoordinatorThreads();
+        // Extraction may synchronously apply bounded backpressure while a downstream poller
+        // drains its channel. Keep one worker available for that consumer even when a legacy
+        // override requests a single worker.
+        const auto threadCount =
+            std::max<std::uint32_t>(2u, yams::daemon::TuneAdvisor::workCoordinatorThreads());
         workCoordinator_->start(threadCount);
         spdlog::info("[ServiceManager] WorkCoordinator created with {} worker threads (budget {}%, "
                      "override={})",
@@ -2160,14 +2164,14 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     // Initialize post-ingest queue (decouple extraction/index/graph from add paths)
     try {
         using TA = yams::daemon::TuneAdvisor;
-        auto qcap = static_cast<std::size_t>(TA::postIngestQueueMax());
+        const auto qcap = config_.tuning.postIngestCapacity > 0
+                              ? static_cast<std::size_t>(config_.tuning.postIngestCapacity)
+                              : static_cast<std::size_t>(TA::postIngestQueueMax());
         auto newPostIngest = std::make_shared<PostIngestQueue>(
             getContentStore(), getMetadataRepo(), contentExtractors_, getKgStore(),
             loadGraphComponent(), workCoordinator_.get(), nullptr, qcap);
 
         try {
-            if (config_.tuning.postIngestCapacity > 0)
-                newPostIngest->setCapacity(config_.tuning.postIngestCapacity);
             newPostIngest->setBatchCoalesceWindow(
                 std::chrono::milliseconds(config_.tuning.postIngestCoalesceMs));
         } catch (const std::exception& e) {

@@ -14,7 +14,6 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <thread>
 #include <vector>
 
 #include <boost/asio/co_spawn.hpp>
@@ -97,8 +96,9 @@ makeWakeTimerConfig(std::atomic<bool>& stopFlag, std::atomic<bool>& startedFlag,
 
 class BatchPollerHarness {
 public:
-    explicit BatchPollerHarness(std::chrono::milliseconds coalesceWindow)
-        : coalesceWindow_(coalesceWindow),
+    explicit BatchPollerHarness(std::chrono::milliseconds coalesceWindow,
+                                bool limiterEnabled = true)
+        : coalesceWindow_(coalesceWindow), limiterEnabled_(limiterEnabled),
           wakeTimer_(std::make_shared<boost::asio::steady_timer>(ioContext_)),
           channel_(std::make_shared<SpscQueue<int>>(16)) {}
 
@@ -110,6 +110,10 @@ public:
     }
 
     bool deferredPushSucceeded() const { return deferredPushSucceeded_; }
+
+    const std::vector<std::string>& acquiredLimiterIds() const { return acquiredLimiterIds_; }
+    const std::vector<std::string>& completedLimiterIds() const { return completedLimiterIds_; }
+    std::size_t hashCalls() const { return hashCalls_; }
 
     bool pushHighPriority(int value) {
         if (!highPriorityChannel_) {
@@ -164,23 +168,36 @@ private:
         cfg.pauseFlag = &pauseFlag_;
         cfg.wasActiveFlag = &wasActive_;
         cfg.inFlightCounter = &inFlight_;
+        cfg.getLimiterFn = [this]() -> GradientLimiter* {
+            return limiterEnabled_ ? &limiter_ : nullptr;
+        };
         cfg.maxConcurrentFn = []() -> std::size_t { return 4; };
-        cfg.tryAcquireFn = [this](GradientLimiter*, const std::string& hash, const std::string&) {
-            if (postAfterAdmissionValue_ && hash == std::to_string(*postAfterAdmissionValue_)) {
-                postAfterAdmissionValue_.reset();
-                auto values = std::move(postAfterAdmissionValues_);
-                boost::asio::post(ioContext_, [this, values = std::move(values)]() {
-                    for (const int value : values) {
-                        deferredPushSucceeded_ =
-                            channel_->try_push(value) && deferredPushSucceeded_;
-                    }
-                    cancelWakeTimer();
-                });
+        cfg.tryAcquireFn = [this](GradientLimiter*, const std::string& limiterId,
+                                  const std::string&) {
+            acquiredLimiterIds_.push_back(limiterId);
+            if (postAfterAdmissionValue_) {
+                const auto expected = std::to_string(*postAfterAdmissionValue_);
+                if (limiterId == expected || limiterId.ends_with("#" + expected)) {
+                    postAfterAdmissionValue_.reset();
+                    auto values = std::move(postAfterAdmissionValues_);
+                    boost::asio::post(ioContext_, [this, values = std::move(values)]() {
+                        for (const int value : values) {
+                            deferredPushSucceeded_ =
+                                channel_->try_push(value) && deferredPushSucceeded_;
+                        }
+                        cancelWakeTimer();
+                    });
+                }
             }
             return true;
         };
-        cfg.completeJobFn = [](const std::string&, bool) {};
-        cfg.getHashFn = [](const int& task) { return std::to_string(task); };
+        cfg.completeJobFn = [this](const std::string& limiterId, bool) {
+            completedLimiterIds_.push_back(limiterId);
+        };
+        cfg.getHashFn = [this](const int& task) {
+            ++hashCalls_;
+            return std::to_string(task);
+        };
         cfg.executor = ioContext_.get_executor();
         cfg.batchMode = true;
         cfg.batchSizeFn = []() -> std::size_t { return 4; };
@@ -207,6 +224,8 @@ private:
     }
 
     std::chrono::milliseconds coalesceWindow_;
+    bool limiterEnabled_{true};
+    GradientLimiter limiter_{"test-batch"};
     boost::asio::io_context ioContext_;
     std::atomic<bool> stopFlag_{false};
     std::atomic<bool> startedFlag_{false};
@@ -220,6 +239,9 @@ private:
     std::vector<std::shared_ptr<boost::asio::steady_timer>> arrivals_;
     std::optional<int> postAfterAdmissionValue_;
     std::vector<int> postAfterAdmissionValues_;
+    std::vector<std::string> acquiredLimiterIds_;
+    std::vector<std::string> completedLimiterIds_;
+    std::size_t hashCalls_{0};
     bool deferredPushSucceeded_{true};
     std::chrono::steady_clock::time_point startedAt_{};
 };
@@ -257,6 +279,84 @@ TEST_CASE("PressureLimitedPoller bounds lone normal-task coalescing latency",
     CHECK_FALSE(harness.timedOut);
     CHECK((harness.observed == std::vector<int>{9}));
     CHECK((harness.elapsed < 50ms));
+}
+
+TEST_CASE("PressureLimitedPoller assigns unique limiter IDs to duplicate task identities",
+          "[daemon][poller][limiter][identity][catch2]") {
+    BatchPollerHarness harness{0ms};
+    REQUIRE(harness.pushNormal(7));
+    REQUIRE(harness.pushNormal(7));
+    harness.run();
+
+    REQUIRE((harness.acquiredLimiterIds().size() == 2));
+    CHECK((harness.acquiredLimiterIds()[0] != harness.acquiredLimiterIds()[1]));
+    CHECK((harness.completedLimiterIds() == harness.acquiredLimiterIds()));
+}
+
+TEST_CASE("PressureLimitedPoller batch path skips identities without a limiter",
+          "[daemon][poller][batch][limiter][identity][catch2]") {
+    BatchPollerHarness harness{0ms, false};
+    REQUIRE(harness.pushNormal(7));
+    REQUIRE(harness.pushNormal(8));
+    harness.run();
+
+    CHECK((harness.observed == std::vector<int>{7, 8}));
+    CHECK((harness.hashCalls() == 0));
+    CHECK(harness.acquiredLimiterIds().empty());
+    CHECK(harness.completedLimiterIds().empty());
+}
+
+TEST_CASE("PressureLimitedPoller single-item path skips identities without a limiter",
+          "[daemon][poller][single][limiter][identity][catch2]") {
+    boost::asio::io_context ioc;
+    std::atomic<bool> stopFlag{false};
+    std::atomic<bool> startedFlag{false};
+    std::atomic<bool> pauseFlag{false};
+    std::atomic<bool> wasActive{false};
+    std::atomic<std::size_t> inFlight{0};
+    std::mutex wakeMutex;
+    auto wakeTimer = std::make_shared<boost::asio::steady_timer>(ioc);
+    auto channel = std::make_shared<SpscQueue<int>>(16);
+    REQUIRE(channel->try_push(9));
+
+    std::size_t hashCalls = 0;
+    std::size_t completedCalls = 0;
+    std::vector<int> observed;
+    PressureLimitedPollerConfig<int> cfg;
+    cfg.stageName = "test-single";
+    cfg.stopFlag = &stopFlag;
+    cfg.startedFlag = &startedFlag;
+    cfg.pauseFlag = &pauseFlag;
+    cfg.wasActiveFlag = &wasActive;
+    cfg.inFlightCounter = &inFlight;
+    cfg.getLimiterFn = []() -> GradientLimiter* { return nullptr; };
+    cfg.maxConcurrentFn = []() -> std::size_t { return 1; };
+    cfg.tryAcquireFn = [](GradientLimiter*, const std::string&, const std::string&) {
+        return true;
+    };
+    cfg.completeJobFn = [&completedCalls](const std::string&, bool) { ++completedCalls; };
+    cfg.getHashFn = [&hashCalls](const int& task) {
+        ++hashCalls;
+        return std::to_string(task);
+    };
+    cfg.processFn = [&observed, &stopFlag, &wakeTimer, &wakeMutex](int& task) {
+        observed.push_back(task);
+        stopFlag.store(true, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(wakeMutex);
+        wakeTimer->cancel();
+    };
+    cfg.executor = ioc.get_executor();
+    cfg.enableCpuThrottling = false;
+    cfg.wakeTimer = wakeTimer;
+    cfg.wakeTimerMutex = &wakeMutex;
+
+    boost::asio::co_spawn(ioc, pressureLimitedPoll<int>(channel, std::move(cfg)),
+                          boost::asio::detached);
+    ioc.run();
+
+    CHECK((observed == std::vector<int>{9}));
+    CHECK((hashCalls == 0));
+    CHECK((completedCalls == 0));
 }
 
 // ---------------------------------------------------------------------------

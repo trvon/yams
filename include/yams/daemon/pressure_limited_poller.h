@@ -2,9 +2,11 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #if __has_include(<spdlog/spdlog.h>)
@@ -52,6 +54,20 @@ inline bool requeueWithBackoff(const std::shared_ptr<SpscQueue<Task>>& channel, 
         }
     }
     return false;
+}
+
+inline std::string makeLimiterJobId(std::string_view stageName, std::string_view taskIdentity) {
+    static std::atomic<std::uint64_t> sequence{0};
+    const auto id = sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+
+    std::string limiterId;
+    limiterId.reserve(stageName.size() + taskIdentity.size() + 32);
+    limiterId.append(stageName);
+    limiterId.append("#job#");
+    limiterId.append(std::to_string(id));
+    limiterId.push_back('#');
+    limiterId.append(taskIdentity);
+    return limiterId;
 }
 
 inline bool applyPressureToLimit(std::size_t& maxConcurrent) {
@@ -266,8 +282,12 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                     cfg.highPriorityMaxPerBatchFn ? cfg.highPriorityMaxPerBatchFn() : batchSize;
                 std::vector<Task> batch;
                 batch.reserve(batchSize);
+                std::vector<std::string> limiterIds;
                 Task task;
                 GradientLimiter* lim = cfg.getLimiterFn ? cfg.getLimiterFn() : nullptr;
+                if (cfg.batchLimiterPerTask && lim) {
+                    limiterIds.reserve(batchSize);
+                }
                 std::string batchLimiterId;
                 bool batchLimiterAcquired = false;
 
@@ -317,8 +337,13 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                             break;
                         }
 
-                        if (cfg.batchLimiterPerTask &&
-                            !cfg.tryAcquireFn(lim, cfg.getHashFn(task), cfg.stageName)) {
+                        std::string limiterId;
+                        if (cfg.batchLimiterPerTask && lim) {
+                            limiterId =
+                                detail::makeLimiterJobId(cfg.stageName, cfg.getHashFn(task));
+                        }
+                        if (cfg.batchLimiterPerTask && lim &&
+                            !cfg.tryAcquireFn(lim, limiterId, cfg.stageName)) {
                             // Push back to the originating channel to preserve priority.
                             bool requeued = false;
                             if (fromHighPriority && cfg.highPriorityChannel) {
@@ -339,6 +364,9 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                         didWork = true;
                         cfg.inFlightCounter->fetch_add(1);
                         batch.push_back(std::move(task));
+                        if (cfg.batchLimiterPerTask && lim) {
+                            limiterIds.push_back(std::move(limiterId));
+                        }
                         if (fromHighPriority) {
                             ++hpTaken;
                             highPriorityTaken = true;
@@ -374,18 +402,11 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                 if (didWork && !batch.empty()) {
                     cfg.wasActiveFlag->store(true, std::memory_order_release);
                     const std::size_t batchCount = batch.size();
-                    std::vector<std::string> hashes;
-                    if (cfg.batchLimiterPerTask && lim) {
-                        hashes.reserve(batchCount);
-                        for (const auto& t : batch) {
-                            hashes.push_back(cfg.getHashFn(t));
-                        }
-                    }
                     if (cfg.callbackInFlightCounter) {
                         cfg.callbackInFlightCounter->fetch_add(1, std::memory_order_acq_rel);
                     }
                     boost::asio::post(cfg.executor, [cfg, batch = std::move(batch), batchCount,
-                                                     hashes = std::move(hashes),
+                                                     limiterIds = std::move(limiterIds),
                                                      batchLimiterId = std::move(batchLimiterId),
                                                      batchLimiterAcquired]() mutable {
                         PressureLimitedPollerCallbackGuard<Task> callbackGuard(cfg);
@@ -404,8 +425,8 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                         if (batchLimiterAcquired) {
                             cfg.completeJobFn(batchLimiterId, success);
                         }
-                        for (const auto& h : hashes) {
-                            cfg.completeJobFn(h, success);
+                        for (const auto& limiterId : limiterIds) {
+                            cfg.completeJobFn(limiterId, success);
                         }
                         cfg.inFlightCounter->fetch_sub(batchCount);
                         if (cfg.checkDrainFn) {
@@ -420,15 +441,18 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                 Task job;
                 while (cfg.inFlightCounter->load() < maxConcurrent && channel->try_pop(job)) {
                     GradientLimiter* lim = cfg.getLimiterFn ? cfg.getLimiterFn() : nullptr;
-                    std::string hash = cfg.getHashFn(job);
-                    if (!cfg.tryAcquireFn(lim, hash, cfg.stageName)) {
-                        if (!detail::requeueWithBackoff(channel, std::move(job))) {
-                            spdlog::warn(
-                                "[PostIngestQueue] {} poller failed to requeue throttled task; "
-                                "breaking to avoid hot-spin",
-                                cfg.stageName);
+                    std::string limiterId;
+                    if (lim) {
+                        limiterId = detail::makeLimiterJobId(cfg.stageName, cfg.getHashFn(job));
+                        if (!cfg.tryAcquireFn(lim, limiterId, cfg.stageName)) {
+                            if (!detail::requeueWithBackoff(channel, std::move(job))) {
+                                spdlog::warn(
+                                    "[PostIngestQueue] {} poller failed to requeue throttled task; "
+                                    "breaking to avoid hot-spin",
+                                    cfg.stageName);
+                            }
+                            break;
                         }
-                        break;
                     }
                     didWork = true;
                     cfg.wasActiveFlag->store(true, std::memory_order_release);
@@ -437,7 +461,7 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                         cfg.callbackInFlightCounter->fetch_add(1, std::memory_order_acq_rel);
                     }
                     boost::asio::post(cfg.executor, [cfg, job = std::move(job),
-                                                     hash = std::move(hash)]() mutable {
+                                                     limiterId = std::move(limiterId)]() mutable {
                         PressureLimitedPollerCallbackGuard<Task> callbackGuard(cfg);
                         bool success = false;
                         try {
@@ -450,7 +474,9 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
                             spdlog::error("[PostIngestQueue] {} processFn threw non-std exception",
                                           cfg.stageName);
                         }
-                        cfg.completeJobFn(hash, success);
+                        if (!limiterId.empty()) {
+                            cfg.completeJobFn(limiterId, success);
+                        }
                         cfg.inFlightCounter->fetch_sub(1);
                         if (cfg.checkDrainFn) {
                             cfg.checkDrainFn();

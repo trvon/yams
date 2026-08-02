@@ -341,11 +341,6 @@ public:
     GradientLimiter* titleLimiter() const;
     GradientLimiter* embedLimiter() const;
 
-    void setCapacity(std::size_t cap) {
-        if (cap > 0) {
-            capacity_.store(cap, std::memory_order_relaxed);
-        }
-    }
     void setBatchCoalesceWindow(std::chrono::milliseconds window) {
         constexpr auto kMaxWindow = std::chrono::milliseconds{20};
         const auto bounded = std::clamp(window, std::chrono::milliseconds{0}, kMaxWindow);
@@ -382,6 +377,11 @@ public:
     /// @param stage The stage to check
     /// @return true if the stage is paused
     [[nodiscard]] bool isStagePaused(Stage stage) const;
+
+    /// Explicitly enable or disable KG dispatch. Unlike pauseStage(), disabling dispatch marks
+    /// KG as outside the active pipeline contract; temporary pauses continue buffering work.
+    void setKnowledgeGraphEnabled(bool enabled);
+    [[nodiscard]] bool isKnowledgeGraphEnabled() const;
 
     /// Pause all processing stages (emergency shutdown)
     void pauseAll();
@@ -505,6 +505,7 @@ private:
     std::array<std::atomic<bool>, kStageCount> stageStarted_{};
     std::array<std::atomic<bool>, kStageCount> stagePaused_{};
     std::array<std::atomic<std::size_t>, kStageCount> stageInFlight_{};
+    std::atomic<bool> knowledgeGraphEnabled_{true};
     std::atomic<std::size_t> callbacksInFlight_{0};
 
     [[nodiscard]] bool anyStageStarted() const {

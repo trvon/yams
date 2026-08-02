@@ -330,15 +330,16 @@ public:
         return ingestStoreBatchSize_.load(std::memory_order_relaxed);
     }
     void setTuningConfig(const TuningConfig& cfg) {
-        ingestStoreBatchSize_.store(cfg.ingestStoreBatchSize, std::memory_order_relaxed);
-        tuningConfig_ = cfg;
+        auto applied = cfg;
         auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
         if (piq) {
-            if (cfg.postIngestCapacity > 0) {
-                piq->setCapacity(cfg.postIngestCapacity);
-            }
-            piq->setBatchCoalesceWindow(std::chrono::milliseconds(cfg.postIngestCoalesceMs));
+            // Channel capacity is construction-time state. Preserve the effective value during a
+            // live update so configuration/status cannot claim a resize that did not occur.
+            applied.postIngestCapacity = tuningConfig_.postIngestCapacity;
+            piq->setBatchCoalesceWindow(std::chrono::milliseconds(applied.postIngestCoalesceMs));
         }
+        ingestStoreBatchSize_.store(applied.ingestStoreBatchSize, std::memory_order_relaxed);
+        tuningConfig_ = applied;
     }
     const std::vector<std::shared_ptr<yams::extraction::IContentExtractor>>&
     getContentExtractors() const {

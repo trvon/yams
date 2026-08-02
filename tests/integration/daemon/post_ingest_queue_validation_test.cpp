@@ -9,8 +9,11 @@
  * 4. Background repair detects and fixes missing indexes
  */
 
+#include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <future>
+#include <memory>
 #include <thread>
 #include <catch2/catch_test_macros.hpp>
 #include <yams/compat/unistd.h>
@@ -41,6 +44,29 @@ using namespace yams::daemon;
 using namespace yams::app::services;
 
 namespace {
+
+class WorkCoordinatorThreadsGuard {
+public:
+    explicit WorkCoordinatorThreadsGuard(std::uint32_t threads)
+        : previous_(TuneAdvisor::workCoordinatorThreads()) {
+        TuneAdvisor::setWorkCoordinatorThreads(threads);
+    }
+    ~WorkCoordinatorThreadsGuard() { TuneAdvisor::setWorkCoordinatorThreads(previous_); }
+
+private:
+    std::uint32_t previous_;
+};
+
+struct DrainSignal {
+    std::promise<void> promise;
+    std::atomic<bool> signalled{false};
+
+    void notify() {
+        if (!signalled.exchange(true, std::memory_order_acq_rel)) {
+            promise.set_value();
+        }
+    }
+};
 
 /**
  * @brief Test fixture for PostIngestQueue validation
@@ -85,7 +111,7 @@ public:
         // Enable post-ingest queue with minimal threads for testing
         config_.tuning.postIngestThreadsMin = 2;
         config_.tuning.postIngestThreadsMax = 4;
-        config_.tuning.postIngestCapacity = 100;
+        config_.tuning.postIngestCapacity = 4;
 
         // Create state and lifecycle components
         state_ = std::make_unique<StateComponent>();
@@ -151,6 +177,43 @@ public:
         return false;
     }
 
+    bool waitForKgQueued(std::uint64_t target,
+                         std::chrono::milliseconds timeout = std::chrono::seconds(30)) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (InternalEventBus::instance().kgQueued() >= target) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return false;
+    }
+
+    bool waitForFailed(std::size_t target,
+                       std::chrono::milliseconds timeout = std::chrono::seconds(30)) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (auto queue = serviceManager_->getPostIngestQueue();
+                queue && queue->failed() >= target) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return false;
+    }
+
+    bool waitForExtractionIdle(std::chrono::milliseconds timeout = std::chrono::seconds(30)) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (auto queue = serviceManager_->getPostIngestQueue();
+                queue && queue->size() == 0 && queue->totalInFlight() == 0) {
+                return true;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        return false;
+    }
+
     // Helper: Create and store a document
     std::string storeDocument(const std::string& filename, const std::string& content) {
         auto fixture = fixtureManager_->createTextFixture(filename, content);
@@ -189,24 +252,20 @@ TEST_CASE("PostIngestQueue - Initialization", "[daemon][post-ingest][init]") {
 
     SECTION("PostIngestQueue is created") {
         auto queue = fixture.serviceManager_->getPostIngestQueue();
-        REQUIRE(queue != nullptr);
+        REQUIRE((queue != nullptr));
 
         INFO("Queue should have capacity");
-        REQUIRE(queue->capacity() > 0);
+        REQUIRE((queue->capacity() > 0));
     }
 
     SECTION("PostIngestQueue metrics are accessible") {
         auto queue = fixture.serviceManager_->getPostIngestQueue();
-        REQUIRE(queue != nullptr);
+        REQUIRE((queue != nullptr));
 
-        auto size = queue->size();
-        auto processed = queue->processed();
-        auto failed = queue->failed();
-
-        INFO("Initial metrics should be reasonable");
-        REQUIRE(size >= 0);
-        REQUIRE(processed >= 0);
-        REQUIRE(failed >= 0);
+        INFO("Fresh queue metrics should be empty");
+        CHECK((queue->size() == 0));
+        CHECK((queue->processed() == 0));
+        CHECK((queue->failed() == 0));
     }
 }
 
@@ -220,9 +279,9 @@ TEST_CASE("PostIngestQueue - Document Enqueuing", "[daemon][post-ingest][enqueue
 
     SECTION("Documents are enqueued after storage") {
         auto queue = fixture.serviceManager_->getPostIngestQueue();
-        REQUIRE(queue != nullptr);
+        REQUIRE((queue != nullptr));
 
-        auto initialProcessed = queue->processed();
+        const auto initialProcessed = queue->processed();
 
         // Store a document
         auto hash = fixture.storeDocument("test.txt", "Hello World");
@@ -231,17 +290,13 @@ TEST_CASE("PostIngestQueue - Document Enqueuing", "[daemon][post-ingest][enqueue
         // Manually enqueue to post-ingest (simulating what IngestService does)
         fixture.serviceManager_->enqueuePostIngest(hash, "text/plain");
 
-        // Wait a bit for processing
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
-        auto afterProcessed = queue->processed();
-        INFO("PostIngestQueue should have processed the document");
-        REQUIRE(afterProcessed > initialProcessed);
+        INFO("PostIngestQueue should process the document before the deadline");
+        REQUIRE(fixture.waitForProcessed(initialProcessed + 1, std::chrono::seconds(30)));
     }
 
     SECTION("Multiple documents are processed") {
         auto queue = fixture.serviceManager_->getPostIngestQueue();
-        REQUIRE(queue != nullptr);
+        REQUIRE((queue != nullptr));
 
         auto initialProcessed = queue->processed();
 
@@ -301,7 +356,7 @@ TEST_CASE("PostIngestQueue - FTS5 Indexing", "[daemon][post-ingest][fts5]") {
 
         REQUIRE(result);
         INFO("Document should be found in FTS5 search");
-        REQUIRE(result.value().results.size() > 0);
+        REQUIRE((result.value().results.size() > 0));
 
         // Verify the document was actually indexed
         bool found = false;
@@ -325,7 +380,7 @@ TEST_CASE("PostIngestQueue - Synchronous Indexing", "[daemon][post-ingest][sync]
 
     SECTION("Documents are indexed via async channel") {
         auto queue = fixture.serviceManager_->getPostIngestQueue();
-        REQUIRE(queue != nullptr);
+        REQUIRE((queue != nullptr));
 
         auto hash = fixture.storeDocument("sync_test.txt", "Sync content for async test");
 
@@ -350,7 +405,7 @@ TEST_CASE("PostIngestQueue - Synchronous Indexing", "[daemon][post-ingest][sync]
         auto result = fut.get();
 
         REQUIRE(result);
-        REQUIRE(result.value().results.size() > 0);
+        REQUIRE((result.value().results.size() > 0));
     }
 }
 
@@ -360,7 +415,13 @@ TEST_CASE("PostIngestQueue - continues processing when KG stage is paused",
     PostIngestQueueFixture fixture;
 
     auto queue = fixture.serviceManager_->getPostIngestQueue();
-    REQUIRE(queue != nullptr);
+    REQUIRE((queue != nullptr));
+
+    auto& bus = InternalEventBus::instance();
+    const auto processedBefore = queue->processed();
+    const auto kgQueuedBefore = bus.kgQueued();
+    const auto kgConsumedBefore = bus.kgConsumed();
+    const auto kgDroppedBefore = bus.kgDropped();
 
     queue->pauseStage(PostIngestQueue::Stage::KnowledgeGraph);
 
@@ -368,7 +429,11 @@ TEST_CASE("PostIngestQueue - continues processing when KG stage is paused",
                                       "Pipeline should still index this content when KG is paused");
     fixture.serviceManager_->enqueuePostIngest(hash, "text/plain");
 
-    REQUIRE(fixture.waitForQueueDrain(std::chrono::seconds(30)));
+    REQUIRE(fixture.waitForProcessed(processedBefore + 1, std::chrono::seconds(30)));
+    REQUIRE(fixture.waitForKgQueued(kgQueuedBefore + 1, std::chrono::seconds(30)));
+    CHECK((bus.kgQueued() == kgQueuedBefore + 1));
+    CHECK((bus.kgConsumed() == kgConsumedBefore));
+    CHECK((bus.kgDropped() == kgDroppedBefore));
 
     auto appContext = fixture.serviceManager_->getAppContext();
     auto searchService = makeSearchService(appContext);
@@ -386,9 +451,17 @@ TEST_CASE("PostIngestQueue - continues processing when KG stage is paused",
     auto result = fut.get();
 
     REQUIRE(result);
-    REQUIRE(result.value().results.size() > 0);
+    REQUIRE((result.value().results.size() > 0));
 
+    auto drainSignal = std::make_shared<DrainSignal>();
+    auto drainedFuture = drainSignal->promise.get_future();
+    queue->setDrainCallback([drainSignal]() { drainSignal->notify(); });
     queue->resumeStage(PostIngestQueue::Stage::KnowledgeGraph);
+    REQUIRE((drainedFuture.wait_for(std::chrono::seconds(10)) == std::future_status::ready));
+    queue->setDrainCallback({});
+
+    CHECK((bus.kgConsumed() == kgConsumedBefore + 1));
+    CHECK((bus.kgDropped() == kgDroppedBefore));
 }
 
 // ============================================================================
@@ -399,39 +472,151 @@ TEST_CASE("PostIngestQueue - Capacity and Backpressure", "[daemon][post-ingest][
     SKIP_DAEMON_TEST_ON_WINDOWS();
     PostIngestQueueFixture fixture;
 
-    SECTION("Queue respects capacity limits") {
+    SECTION("Runtime tuning does not misreport construction-time channel capacity") {
         auto queue = fixture.serviceManager_->getPostIngestQueue();
-        REQUIRE(queue != nullptr);
+        REQUIRE((queue != nullptr));
+        const auto constructedCapacity = queue->capacity();
 
-        auto capacity = queue->capacity();
+        auto tuning = fixture.serviceManager_->getTuningConfig();
+        tuning.postIngestCapacity = static_cast<std::uint32_t>(constructedCapacity + 32);
+        fixture.serviceManager_->setTuningConfig(tuning);
+
+        CHECK((queue->capacity() == constructedCapacity));
+        CHECK(
+            (fixture.serviceManager_->getTuningConfig().postIngestCapacity == constructedCapacity));
+    }
+
+    SECTION("Paused extraction applies deterministic bounded backpressure") {
+        auto queue = fixture.serviceManager_->getPostIngestQueue();
+        REQUIRE((queue != nullptr));
+
+        queue->pauseStage(PostIngestQueue::Stage::Extraction);
+        REQUIRE(queue->isStagePaused(PostIngestQueue::Stage::Extraction));
+
+        const auto capacity = queue->capacity();
         INFO("Queue capacity: " << capacity);
-        REQUIRE(capacity > 0);
+        REQUIRE((capacity > 1));
 
-        // Try to enqueue more than capacity (using tryEnqueue)
-        std::vector<PostIngestQueue::Task> tasks;
-        for (size_t i = 0; i < capacity + 10; i++) {
+        std::size_t enqueued = 0;
+        std::size_t rejected = 0;
+        for (std::size_t i = 0; i < capacity + 10; ++i) {
             PostIngestQueue::Task task;
-            task.hash = "hash_" + std::to_string(i);
+            task.hash = "backpressure_hash_" + std::to_string(i);
             task.mime = "text/plain";
-            tasks.push_back(task);
-        }
-
-        size_t enqueued = 0;
-        size_t rejected = 0;
-
-        for (auto& task : tasks) {
             if (queue->tryEnqueue(std::move(task))) {
-                enqueued++;
+                ++enqueued;
             } else {
-                rejected++;
+                ++rejected;
             }
         }
 
         INFO("Enqueued: " << enqueued << ", Rejected: " << rejected);
+        CHECK((enqueued == capacity - 1));
+        CHECK((rejected == 11));
+        CHECK((queue->size() == enqueued));
 
-        // At least some should be rejected when exceeding capacity
-        // (Note: some may process quickly, so we can't guarantee exact rejection count)
-        REQUIRE(enqueued <= capacity + 10);
+        const auto failedBefore = queue->failed();
+        queue->resumeStage(PostIngestQueue::Stage::Extraction);
+        REQUIRE(fixture.waitForFailed(failedBefore + enqueued, std::chrono::seconds(10)));
+        CHECK((queue->size() == 0));
+    }
+}
+
+TEST_CASE("PostIngestQueue - KG disable and saturation semantics",
+          "[daemon][post-ingest][backpressure]") {
+    SKIP_DAEMON_TEST_ON_WINDOWS();
+    WorkCoordinatorThreadsGuard workerGuard(1);
+    PostIngestQueueFixture fixture;
+    auto queue = fixture.serviceManager_->getPostIngestQueue();
+    REQUIRE((queue != nullptr));
+    auto& bus = InternalEventBus::instance();
+
+    SECTION("Explicit disable is outside the pipeline and does not count as a drop") {
+        const auto processedBefore = queue->processed();
+        const auto queuedBefore = bus.kgQueued();
+        const auto consumedBefore = bus.kgConsumed();
+        const auto droppedBefore = bus.kgDropped();
+        queue->setKnowledgeGraphEnabled(false);
+
+        const auto hash = fixture.storeDocument("kg-disabled.txt", "explicitly disabled KG");
+        REQUIRE(queue->tryEnqueue(PostIngestQueue::Task{
+            .hash = hash, .mime = "text/plain", .filePath = "kg-disabled.txt"}));
+        REQUIRE(fixture.waitForProcessed(processedBefore + 1, std::chrono::seconds(10)));
+
+        CHECK((bus.kgQueued() == queuedBefore));
+        CHECK((bus.kgConsumed() == consumedBefore));
+        CHECK((bus.kgDropped() == droppedBefore));
+    }
+
+    SECTION("Disable racing a saturated dispatch cancels without recording a drop") {
+        const auto queuedBefore = bus.kgQueued();
+        const auto consumedBefore = bus.kgConsumed();
+        const auto droppedBefore = bus.kgDropped();
+        queue->pauseStage(PostIngestQueue::Stage::KnowledgeGraph);
+
+        std::size_t accepted = 0;
+        for (std::size_t i = 0; i < 32; ++i) {
+            const auto name = "kg-disable-race-" + std::to_string(i) + ".txt";
+            const auto hash = fixture.storeDocument(name, "KG disable race " + std::to_string(i));
+            if (queue->tryEnqueue(
+                    PostIngestQueue::Task{.hash = hash, .mime = "text/plain", .filePath = name})) {
+                ++accepted;
+            }
+        }
+        REQUIRE((accepted > 3));
+        REQUIRE((accepted < 32));
+        REQUIRE(fixture.waitForKgQueued(queuedBefore + 3, std::chrono::seconds(10)));
+
+        queue->setKnowledgeGraphEnabled(false);
+        REQUIRE(fixture.waitForExtractionIdle(std::chrono::seconds(10)));
+        CHECK((bus.kgDropped() == droppedBefore));
+
+        const auto queuedAfterDisable = bus.kgQueued();
+        queue->setKnowledgeGraphEnabled(true);
+        auto drainSignal = std::make_shared<DrainSignal>();
+        auto drainedFuture = drainSignal->promise.get_future();
+        queue->setDrainCallback([drainSignal]() { drainSignal->notify(); });
+        queue->resumeStage(PostIngestQueue::Stage::KnowledgeGraph);
+        REQUIRE((drainedFuture.wait_for(std::chrono::seconds(30)) == std::future_status::ready));
+        queue->setDrainCallback({});
+
+        CHECK((bus.kgConsumed() == consumedBefore + (queuedAfterDisable - queuedBefore)));
+        CHECK((bus.kgDropped() == droppedBefore));
+    }
+
+    SECTION("Saturated paused KG preserves every accepted job with one requested worker") {
+        const auto processedBefore = queue->processed();
+        const auto queuedBefore = bus.kgQueued();
+        const auto consumedBefore = bus.kgConsumed();
+        const auto droppedBefore = bus.kgDropped();
+        queue->pauseStage(PostIngestQueue::Stage::KnowledgeGraph);
+
+        std::size_t accepted = 0;
+        for (std::size_t i = 0; i < 32; ++i) {
+            const auto name = "kg-saturated-" + std::to_string(i) + ".txt";
+            const auto hash =
+                fixture.storeDocument(name, "saturated KG document " + std::to_string(i));
+            if (queue->tryEnqueue(
+                    PostIngestQueue::Task{.hash = hash, .mime = "text/plain", .filePath = name})) {
+                ++accepted;
+            }
+        }
+        REQUIRE((accepted > 0));
+        REQUIRE((accepted < 32));
+        REQUIRE(fixture.waitForKgQueued(queuedBefore + 1, std::chrono::seconds(10)));
+        CHECK((bus.kgDropped() == droppedBefore));
+
+        auto drainSignal = std::make_shared<DrainSignal>();
+        auto drainedFuture = drainSignal->promise.get_future();
+        queue->setDrainCallback([drainSignal]() { drainSignal->notify(); });
+        queue->resumeStage(PostIngestQueue::Stage::KnowledgeGraph);
+
+        REQUIRE((drainedFuture.wait_for(std::chrono::seconds(30)) == std::future_status::ready));
+        queue->setDrainCallback({});
+        REQUIRE(fixture.waitForProcessed(processedBefore + accepted, std::chrono::seconds(10)));
+        CHECK((bus.kgQueued() == queuedBefore + accepted));
+        CHECK((bus.kgConsumed() == consumedBefore + accepted));
+        CHECK((bus.kgDropped() == droppedBefore));
     }
 }
 
@@ -443,25 +628,26 @@ TEST_CASE("PostIngestQueue - Error Handling", "[daemon][post-ingest][errors]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
     PostIngestQueueFixture fixture;
 
-    SECTION("Invalid hash doesn't crash") {
+    SECTION("Missing content records extraction failure before the queue drains") {
         auto queue = fixture.serviceManager_->getPostIngestQueue();
-        REQUIRE(queue != nullptr);
+        REQUIRE((queue != nullptr));
 
-        // Enqueue a task with non-existent hash
-        fixture.serviceManager_->enqueuePostIngest("nonexistent_hash_12345", "text/plain");
+        queue->pauseStage(PostIngestQueue::Stage::Extraction);
+        REQUIRE(queue->isStagePaused(PostIngestQueue::Stage::Extraction));
 
-        // Wait a bit
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        const auto failedBefore = queue->failed();
+        PostIngestQueue::Task task;
+        task.hash = "nonexistent_hash_12345";
+        task.mime = "text/plain";
+        REQUIRE(queue->tryEnqueue(std::move(task)));
 
-        // Queue should still be operational
-        auto failed = queue->failed();
-        auto processed = queue->processed();
+        queue->resumeStage(PostIngestQueue::Stage::Extraction);
+        REQUIRE(fixture.waitForFailed(failedBefore + 1, std::chrono::seconds(10)));
 
-        INFO("Failed tasks: " << failed);
-        INFO("Processed tasks: " << processed);
-
-        // Should have recorded a failure (wrap in parentheses for Catch2)
-        REQUIRE((failed > 0 || processed > 0));
+        INFO("failed before=" << failedBefore << ", after=" << queue->failed());
+        CHECK((queue->failed() == failedBefore + 1));
+        CHECK((queue->size() == 0));
+        CHECK((queue->totalInFlight() == 0));
     }
 }
 

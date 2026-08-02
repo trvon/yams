@@ -53,25 +53,43 @@ env -u YAMS_DISABLE_VECTORS -u YAMS_BENCH_FORCE_MOCK_EMBEDDINGS \
 
 ### Decision contract
 
-The decision fixture retains seed 42 and directory ingestion. Until multi-document GLiNER
-liveness is fixed, decision evidence is split into two isolated lanes rather than hiding the
-failure behind a timeout:
+The decision fixture retains seed 42 and directory ingestion. Decision evidence uses two
+complementary isolated lanes:
 
-1. A real-GLiNER identity lane proves the exact local model, title queue accounting, Simeon
-   identity, stable search paths, inference timing, and clean lifecycle. This lane currently uses
-   one 1,000-byte document because a five-document run reproducibly stalls after consuming one
-   title job.
+1. A combined real-GLiNER lane uses five 1,000-byte documents and proves the exact local model,
+   exact post/embed/KG/title accounting, Simeon identity, stable search paths, inference timing,
+   and clean lifecycle.
 2. A multi-chunk persistence lane disables GLiNER and uses 100 documents of 8,192 target bytes.
    It must produce at least 256 vector rows, train and persist SPQ, reload the persisted generation,
    and preserve exact output fingerprints.
 
-Both lanes require three repeats with identical workload identities. They are complementary
-baselines, not evidence that the combined multi-document full path is healthy. A product decision
-still requires the combined GLiNER path to pass after its liveness defect is fixed, plus a fresh
-process restart-reuse check.
+Both lanes require three repeats with identical workload identities. The combined lane must consume
+all five KG and title jobs; partial progress is a liveness failure, not a timeout to relax. A product
+decision also requires a fresh-process SPQ restart-reuse check.
 
 Any before/after comparison must use the identical generated corpus fingerprint and parameters.
 Record the selected values in the run report rather than silently changing this contract.
+
+### Fresh-process restart and replay
+
+The benchmark accepts harness-only `YAMS_BENCH_PHASE=initial|replay|resume` and
+`YAMS_BENCH_FIXTURE_ROOT`. An explicit root must be an isolated `yams_e2e_bench_*` directory below
+the system temporary directory; the external driver owns that root and must remove it in a
+`finally`/signal-cleanup path. Default invocations remain self-cleaning.
+
+A restart gate runs `initial`, `replay`, and a second `replay` in separate benchmark processes over
+the same root. Each replay must observe the complete corpus before admission, reuse the persisted
+SPQ generation, and preserve exact document/vector counts, embedding bits, direct-vector top-k
+identities and score bits, normalized application top-k paths, and clean shutdown. Startup and
+post-replay fingerprints must match, as must both replay processes. Application fusion scores may
+only be compared exactly within the same persisted fixture because KG edges carry creation times;
+across independently timestamped fixtures, compare the exact direct-vector score fingerprint and
+normalized application result identities unless the KG timestamp identity is also pinned.
+
+An interruption gate sends termination only to the isolated child during serial admission, requires
+normal daemon shutdown, then runs `resume` over the retained partial fixture. Resume must report the
+partial startup counts and converge to the exact full document/vector fingerprints without drops,
+duplicates, lock errors, writer errors, or remnants.
 
 ## Required experiment identity
 
@@ -113,11 +131,14 @@ A valid run satisfies all of the following:
 4. Stored vector count equals the emitted chunk-vector count. Every vector has the declared
    dimension and only finite values. A deterministic ordering of normalized `(document identity,
    chunk identity, offsets, model identity, embedding bits)` has the same fingerprint across
-   repeats and before/after runs.
+   repeats and before/after runs. A canonical direct-vector query returns finite top-k scores and an
+   exact identity/score-bit fingerprint.
 5. Keyword, semantic, and graph/hybrid probes succeed after drain. Their fingerprint uses stable
    document/hash or normalized corpus-relative path identities, not transient numeric row IDs.
+   Required score vectors are finite and aligned with those identities.
 6. A corpus large enough for PQ records the current vector generation, persists the SPQ snapshot,
-   reopens it as reusable, and returns the same top-result fingerprint before and after restart.
+   reopens it as reusable, and returns the same direct-vector top-k identity/score fingerprint
+   before and after restart.
 7. Content hashes and document/chunk/vector identities are unchanged by an optimization.
 8. Shutdown succeeds without an isolated socket, PID, WAL, SHM, queue worker, or lease remaining.
 
