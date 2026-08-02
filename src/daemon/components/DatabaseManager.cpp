@@ -1,7 +1,8 @@
 // Copyright 2025 The YAMS Authors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include <yams/daemon/components/DatabaseManager.h>
+#include "../../../include/yams/daemon/components/DatabaseManager.h"
+#include "../../../include/yams/daemon/components/db_integrity_stamp.h"
 #include <yams/daemon/components/init_utils.hpp>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -151,27 +152,47 @@ void DatabaseManager::shutdown() {
         readPool = std::move(readConnectionPool_);
         writePool = std::move(connectionPool_);
     }
+    bool poolsQuiesced = true;
     if (readPool) {
         try {
+            const auto stats = readPool->getStats();
+            if (stats.activeConnections != 0) {
+                poolsQuiesced = false;
+                spdlog::warn("[DatabaseManager] ReadConnectionPool shutdown found {} active "
+                             "lease(s); clean-shutdown stamp disabled",
+                             stats.activeConnections);
+            }
             readPool->shutdown();
         } catch (const std::exception& e) {
+            poolsQuiesced = false;
             spdlog::debug("[DatabaseManager] ReadConnectionPool shutdown failed: {}", e.what());
         } catch (...) {
+            poolsQuiesced = false;
             spdlog::debug(
                 "[DatabaseManager] ReadConnectionPool shutdown failed: unknown exception");
         }
     }
     if (writePool) {
         try {
+            const auto stats = writePool->getStats();
+            if (stats.activeConnections != 0) {
+                poolsQuiesced = false;
+                spdlog::warn("[DatabaseManager] ConnectionPool shutdown found {} active lease(s); "
+                             "clean-shutdown stamp disabled",
+                             stats.activeConnections);
+            }
             writePool->shutdown();
         } catch (const std::exception& e) {
+            poolsQuiesced = false;
             spdlog::debug("[DatabaseManager] ConnectionPool shutdown failed: {}", e.what());
         } catch (...) {
+            poolsQuiesced = false;
             spdlog::debug("[DatabaseManager] ConnectionPool shutdown failed: unknown exception");
         }
     }
 
     std::string dbPath;
+    bool checkpointCompleted = false;
     bool cleanupMalformedSidecars = false;
     if (database_ && database_->isOpen()) {
         dbPath = database_->path();
@@ -183,6 +204,7 @@ void DatabaseManager::shutdown() {
             spdlog::warn("[DatabaseManager] Shutdown WAL checkpoint (TRUNCATE) failed: {}",
                          message);
         } else {
+            checkpointCompleted = true;
             spdlog::info("[DatabaseManager] Shutdown WAL checkpoint (TRUNCATE) completed");
         }
     }
@@ -191,11 +213,22 @@ void DatabaseManager::shutdown() {
         try {
             database_->close();
         } catch (const std::exception& e) {
+            checkpointCompleted = false;
             spdlog::debug("[DatabaseManager] database close failed: {}", e.what());
         } catch (...) {
+            checkpointCompleted = false;
             spdlog::debug("[DatabaseManager] database close failed: unknown exception");
         }
         database_.reset();
+    }
+
+    if (!dbPath.empty() && checkpointCompleted && poolsQuiesced) {
+        auto sidecarsCleared = clearDbCleanShutdownSidecars(dbPath);
+        if (!sidecarsCleared) {
+            checkpointCompleted = false;
+            spdlog::warn("[DatabaseManager] Clean-checkpoint sidecar cleanup failed: {}",
+                         sidecarsCleared.error().message);
+        }
     }
 
     if (cleanupMalformedSidecars && !dbPath.empty()) {
@@ -211,6 +244,23 @@ void DatabaseManager::shutdown() {
                                   sidecarEc.message());
                 }
             }
+        }
+    }
+
+    const bool stampEligible = integrityStampEligible_.exchange(false, std::memory_order_acq_rel);
+    if (!dbPath.empty() && checkpointCompleted && poolsQuiesced && stampEligible) {
+        auto stampResult = publishDbCleanShutdownStamp(dbPath);
+        if (stampResult) {
+            spdlog::info("[DatabaseManager] Published clean-shutdown integrity stamp");
+        } else {
+            spdlog::warn("[DatabaseManager] Clean-shutdown stamp unavailable: {}",
+                         stampResult.error().message);
+        }
+    } else if (!dbPath.empty()) {
+        auto invalidateResult = invalidateDbCleanShutdownStamp(dbPath);
+        if (!invalidateResult) {
+            spdlog::debug("[DatabaseManager] Could not invalidate integrity stamp: {}",
+                          invalidateResult.error().message);
         }
     }
 }

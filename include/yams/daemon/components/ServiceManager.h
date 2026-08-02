@@ -806,6 +806,7 @@ private:
     std::atomic<uint32_t> ingestStoreBatchSize_{64};
 
     std::atomic<bool> shutdownInvoked_{false};
+    std::atomic<bool> databaseIntegrityStampEligible_{false};
     std::mutex maintenanceMutex_;
     std::atomic<bool> semanticTopologyMaintenanceScheduled_{false};
     std::atomic<bool> topologyRebuildPending_{false};

@@ -16,6 +16,9 @@ struct DaemonReadiness {
     std::atomic<bool> ipcServerReady{false};
     std::atomic<bool> contentStoreReady{false};
     std::atomic<bool> databaseReady{false};
+    // True only when startup consumed a matching clean-shutdown stamp and safely
+    // bypassed the full SQLite quick_check scan.
+    std::atomic<bool> databaseIntegrityFastPath{false};
     std::atomic<bool> metadataRepoReady{false};
     std::atomic<bool> searchEngineReady{false};
     std::atomic<bool> modelProviderReady{false};

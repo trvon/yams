@@ -6586,6 +6586,22 @@ TEST_CASE("DaemonMetrics: snapshot includes canonical readiness flags",
     }
 }
 
+TEST_CASE("DaemonMetrics: snapshot exposes metadata integrity fast-path use",
+          "[daemon][metrics][readiness]") {
+    StateComponent state;
+    state.readiness.databaseIntegrityFastPath.store(true, std::memory_order_release);
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_metrics_integrity_fast_path_");
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    DaemonMetrics metrics(nullptr, &state, &svc, svc.getWorkCoordinator());
+
+    auto snap = metrics.getSnapshot();
+    REQUIRE(snap != nullptr);
+    REQUIRE((snap->diagnosticCounters.count("database_integrity_fast_path") == 1));
+    CHECK((snap->diagnosticCounters.at("database_integrity_fast_path") == 1));
+}
+
 TEST_CASE("DaemonMetrics: snapshot reports generated build version", "[daemon][metrics][version]") {
     StateComponent state;
     DaemonLifecycleFsm lifecycleFsm;

@@ -16,12 +16,14 @@
 
 #include "../../common/test_helpers_catch2.h"
 
+#include "../../../include/yams/daemon/components/db_integrity_stamp.h"
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/repair/repair_health_probe.h>
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/daemon.h>
 #include <yams/metadata/database.h>
 
@@ -43,7 +45,9 @@ void seedMetadataDb(const fs::path& dbPath, const std::string& value = "seed") {
         db.execute("CREATE TABLE IF NOT EXISTS startup_probe(id INTEGER PRIMARY KEY, value TEXT)"));
     REQUIRE(db.execute("DELETE FROM startup_probe"));
     REQUIRE(db.execute("INSERT INTO startup_probe(value) VALUES('" + value + "')"));
+    REQUIRE(db.execute("PRAGMA wal_checkpoint(TRUNCATE)"));
     db.close();
+    REQUIRE(clearDbCleanShutdownSidecars(dbPath));
 }
 
 void writeCorruptDb(const fs::path& dbPath) {
@@ -585,6 +589,34 @@ TEST_CASE_METHOD(ServiceManagerFixture,
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager consumes clean shutdown proof and republishes it on shutdown",
+                 "[daemon][service_manager][startup][integrity_stamp]") {
+    config_.enableModelProvider = false;
+    config_.useMockModelProvider = false;
+    config_.autoLoadPlugins = false;
+
+    const auto dbPath = metadataDbPath(config_);
+    seedMetadataDb(dbPath, "clean_restart");
+    const auto initialStamp = publishDbCleanShutdownStamp(dbPath);
+    const std::string initialStampInfo =
+        initialStamp ? "clean stamp published" : initialStamp.error().message;
+    INFO(initialStampInfo);
+    REQUIRE(initialStamp);
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    REQUIRE(sm->initialize());
+    sm->startAsyncInit();
+    const auto ready = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE((ready.state == ServiceManagerState::Ready));
+    CHECK(state_.readiness.databaseIntegrityFastPath.load(std::memory_order_acquire));
+
+    sm->shutdown();
+    const auto nextStartup = consumeDbCleanShutdownStamp(dbPath);
+    CHECK(nextStartup.trustedCleanShutdown);
+    CHECK(nextStartup.invalidationPersisted);
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
                  "ServiceManager records recovery provenance for corrupt metadata DB startup",
                  "[daemon][service_manager][startup][recovery]") {
     config_.enableModelProvider = false;
@@ -626,6 +658,7 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager clears stale metadata WA
 
     const auto dbPath = metadataDbPath(config_);
     seedMetadataDb(dbPath, "stale_wal_seed");
+    REQUIRE(publishDbCleanShutdownStamp(dbPath));
     const std::string staleWalPayload = "stale-wal";
     seedDummyWalSidecar(dbPath, staleWalPayload);
 
@@ -637,6 +670,7 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager clears stale metadata WA
     REQUIRE((smSnap.state == ServiceManagerState::Ready));
 
     requireReadyDatabaseState(state_);
+    CHECK_FALSE(state_.readiness.databaseIntegrityFastPath.load(std::memory_order_acquire));
     {
         std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
         CHECK(state_.readiness.databaseRecoveredFrom.empty());

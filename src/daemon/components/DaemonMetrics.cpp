@@ -1712,6 +1712,8 @@ void DaemonMetrics::populateResourceVectorSnapshot(MetricsSnapshot& out, bool de
                 out.diagnosticCounters["msl_stack_log_warn_bytes"] = warnBytes;
             }
         }
+        out.diagnosticCounters["database_integrity_fast_path"] =
+            state_->readiness.databaseIntegrityFastPath.load(std::memory_order_acquire) ? 1u : 0u;
 #if defined(TRACY_ENABLE)
         TracyPlot("daemon.mem.mb", out.memoryUsageMb);
         TracyPlot("daemon.cpu.pct", out.cpuUsagePercent);

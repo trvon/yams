@@ -37,6 +37,7 @@
 #include <malloc/malloc.h>
 #endif
 
+#include "../../../include/yams/daemon/components/ServiceManager.h"
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/associated_executor.hpp>
 #include <boost/asio/async_result.hpp>
@@ -63,6 +64,7 @@
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/DatabaseManager.h>
+#include <yams/daemon/components/db_integrity_stamp.h>
 #include <yams/daemon/components/db_recovery.h>
 #include <yams/daemon/components/db_salvage.h>
 #include <yams/daemon/components/dispatch_utils.hpp>
@@ -75,7 +77,6 @@
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/ResourceGovernor.h>
-#include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TopologyTuner.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -1077,7 +1078,17 @@ void ServiceManager::quiesceServicesBeforeWorkerShutdown(
             blockingPool_->join();
             spdlog::info("[ServiceManager] Phase 3.9: Blocking I/O pool stopped");
         } catch (const std::exception& e) {
+            databaseIntegrityStampEligible_.store(false, std::memory_order_release);
+            if (databaseManager_) {
+                databaseManager_->setIntegrityStampEligible(false);
+            }
             spdlog::warn("[ServiceManager] Phase 3.9: Blocking pool stop failed: {}", e.what());
+        } catch (...) {
+            databaseIntegrityStampEligible_.store(false, std::memory_order_release);
+            if (databaseManager_) {
+                databaseManager_->setIntegrityStampEligible(false);
+            }
+            spdlog::warn("[ServiceManager] Phase 3.9: Blocking pool stop failed");
         }
         blockingPool_.reset();
     }
@@ -1109,6 +1120,7 @@ void ServiceManager::stopWorkCoordinatorForShutdown(
     }
 
     spdlog::info("[ServiceManager] Phase 5: Joining WorkCoordinator threads");
+    bool workersQuiesced = true;
     if (workCoordinator_) {
         try {
             if (!workCoordinator_->joinWithTimeout(shutdown_budget::kWorkCoordinatorJoinTimeout)) {
@@ -1116,16 +1128,31 @@ void ServiceManager::stopWorkCoordinatorForShutdown(
                              "retrying with extended timeout to avoid unsafe teardown races");
                 if (!workCoordinator_->joinWithTimeout(
                         shutdown_budget::kWorkCoordinatorExtendedJoinTimeout)) {
+                    workersQuiesced = false;
                     spdlog::warn("[ServiceManager] Phase 5: Extended timeout expired with workers "
                                  "still active; abandoning remaining workers to avoid "
                                  "indefinite daemon hang during shutdown");
                     workCoordinator_->abandonWorkersForShutdown();
                 }
             }
-            spdlog::info("[ServiceManager] Phase 5: WorkCoordinator threads joined");
+            if (workersQuiesced) {
+                spdlog::info("[ServiceManager] Phase 5: WorkCoordinator threads joined");
+            }
         } catch (const std::exception& e) {
+            workersQuiesced = false;
             spdlog::warn("[ServiceManager] Phase 5: WorkCoordinator join failed: {}", e.what());
+        } catch (...) {
+            workersQuiesced = false;
+            spdlog::warn("[ServiceManager] Phase 5: WorkCoordinator join failed");
         }
+    }
+    if (!workersQuiesced) {
+        databaseIntegrityStampEligible_.store(false, std::memory_order_release);
+        if (databaseManager_) {
+            databaseManager_->setIntegrityStampEligible(false);
+        }
+        spdlog::warn("[ServiceManager] Clean-shutdown integrity stamp disabled because database "
+                     "workers did not quiesce");
     }
 
     if (checkpointManagerHold) {
@@ -1719,6 +1746,7 @@ ServiceManager::initializeMetadataDatabaseAt(const std::filesystem::path& dbPath
         }
     }
 
+    bool migrationOk = dbOk;
     if (dbOk) {
         const int migrationTimeout = read_timeout_ms("YAMS_DB_MIGRATE_TIMEOUT_MS", 0, 0);
         try {
@@ -1726,7 +1754,7 @@ ServiceManager::initializeMetadataDatabaseAt(const std::filesystem::path& dbPath
         } catch (...) {
             spdlog::debug("[ServiceManager] MigrationStartedEvent dispatch failed");
         }
-        const bool migrationOk = co_await init::await_record_duration(
+        migrationOk = co_await init::await_record_duration(
             "migrations",
             [&]() -> boost::asio::awaitable<bool> {
                 co_return co_await co_migrateDatabase(migrationTimeout, token);
@@ -1738,23 +1766,29 @@ ServiceManager::initializeMetadataDatabaseAt(const std::filesystem::path& dbPath
             } catch (...) {
                 spdlog::debug("[ServiceManager] MigrationCompletedEvent dispatch failed");
             }
+        } else {
+            databaseIntegrityStampEligible_.store(false, std::memory_order_release);
         }
     }
     spdlog::info("[ServiceManager] Phase: Database Migrated.");
 
-    if (dbOk) {
+    if (dbOk && migrationOk) {
         finalizeDatabaseStartup(dbPath);
     }
 
-    co_return dbOk;
+    co_return dbOk&& migrationOk;
 }
 
 void ServiceManager::finalizeDatabaseStartup(const std::filesystem::path& dbPath) {
     if (databaseManager_) {
         databaseManager_->setDatabase(database_);
+        databaseManager_->setIntegrityStampEligible(
+            databaseIntegrityStampEligible_.load(std::memory_order_acquire));
         runStartupSalvageIfNeeded(dbPath);
         const bool poolsOk = databaseManager_->initializePools(dbPath);
         if (!poolsOk) {
+            databaseIntegrityStampEligible_.store(false, std::memory_order_release);
+            databaseManager_->setIntegrityStampEligible(false);
             spdlog::warn("[ServiceManager] DatabaseManager pool initialization failed — degraded");
         }
         writeBootstrapStatusFile(config_, state_, this);
@@ -3161,8 +3195,10 @@ bool ServiceManager::openDatabaseOnce(const std::filesystem::path& dbPath) {
 }
 
 bool ServiceManager::ensureDatabaseIntegrityOrRecover(const std::filesystem::path& dbPath) {
+    databaseIntegrityStampEligible_.store(false, std::memory_order_release);
     auto integrity = database_->checkIntegrity();
     if (integrity) {
+        databaseIntegrityStampEligible_.store(true, std::memory_order_release);
         return true;
     }
 
@@ -3218,7 +3254,9 @@ bool ServiceManager::ensureDatabaseIntegrityOrRecover(const std::filesystem::pat
         state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
     }
 
-    return openDatabaseOnce(dbPath);
+    const bool reopened = openDatabaseOnce(dbPath);
+    databaseIntegrityStampEligible_.store(reopened, std::memory_order_release);
+    return reopened;
 }
 
 bool ServiceManager::shouldAutoVacuum(std::uint64_t databaseBytes, std::uint64_t pageCount,
@@ -3371,6 +3409,10 @@ void ServiceManager::scheduleVacuumIfUseful(const std::filesystem::path& dbPath)
 
 bool ServiceManager::openDatabaseBlocking(const std::filesystem::path& dbPath) {
     try {
+        state_.readiness.databaseIntegrityFastPath.store(false, std::memory_order_release);
+        databaseIntegrityStampEligible_.store(false, std::memory_order_release);
+        const auto stampDecision = consumeDbCleanShutdownStamp(dbPath);
+
         // Phase A: recover stale WAL (can be slow on large DBs).
         recoverStaleWalIfPresent(dbPath);
         if (shutdownInvoked_.load(std::memory_order_acquire)) {
@@ -3389,9 +3431,19 @@ bool ServiceManager::openDatabaseBlocking(const std::filesystem::path& dbPath) {
             return false;
         }
 
-        // Phase C: integrity check (can be very slow on large DBs).
-        if (!ensureDatabaseIntegrityOrRecover(dbPath)) {
-            return false;
+        // Phase C: integrity check (can be very slow on large DBs). A matching
+        // clean-shutdown stamp is consumed before open, so any crash during this
+        // lifecycle forces the full path next time.
+        if (stampDecision.trustedCleanShutdown) {
+            databaseIntegrityStampEligible_.store(true, std::memory_order_release);
+            state_.readiness.databaseIntegrityFastPath.store(true, std::memory_order_release);
+            spdlog::info("[ServiceManager] Metadata integrity fast path: trusted clean shutdown");
+        } else {
+            spdlog::info("[ServiceManager] Running full metadata integrity check: {}",
+                         stampDecision.reason);
+            if (!ensureDatabaseIntegrityOrRecover(dbPath)) {
+                return false;
+            }
         }
         if (shutdownInvoked_.load(std::memory_order_acquire)) {
             spdlog::info("[ServiceManager] Shutdown requested; aborting DB open after integrity "

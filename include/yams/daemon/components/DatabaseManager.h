@@ -3,9 +3,9 @@
 
 #pragma once
 
-#include <yams/core/types.h>
-#include <yams/daemon/components/IComponent.h>
-#include <yams/daemon/components/WalMetricsProvider.h>
+#include "../../core/types.h"
+#include "IComponent.h"
+#include "WalMetricsProvider.h"
 
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
@@ -120,6 +120,11 @@ public:
         database_ = std::move(database);
     }
 
+    /** Allow clean shutdown to publish a reusable startup-integrity stamp. */
+    void setIntegrityStampEligible(bool eligible) {
+        integrityStampEligible_.store(eligible, std::memory_order_release);
+    }
+
     /**
      * @brief Store the content store shared_ptr (atomic release).
      */
@@ -223,6 +228,7 @@ private:
     std::string contentStoreError_;
 
     std::filesystem::path dbPath_;
+    std::atomic<bool> integrityStampEligible_{false};
 
     mutable Stats stats_;
 };
