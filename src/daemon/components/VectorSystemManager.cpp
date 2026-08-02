@@ -482,22 +482,18 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                     const auto rows = vdb->getVectorCount();
                     vectorDbReady = (rows > 0);
                     if (vectorDbReady) {
-                        // Eagerly prepare the search index so first query doesn't
-                        // pay the O(n log n) ANN build cost (profiler: 99% CPU).
-                        spdlog::info("[VectorInit] preparing search index for {} vectors", rows);
-                        if (vdb->prepareSearchIndex()) {
-                            spdlog::info("[VectorInit] search index ready");
-                        } else {
-                            spdlog::warn("[VectorInit] search index prepare failed: {}",
-                                         vdb->getLastError());
-                        }
+                        // VectorIndexCoordinator is the sole authority for loading or rebuilding
+                        // search indexes. ServiceManager wires the initialized database into the
+                        // coordinator immediately after this method returns.
+                        spdlog::info("[VectorInit] Found {} vectors; deferring search index "
+                                     "preparation to coordinator",
+                                     rows);
                     } else {
                         spdlog::info("[VectorInit] Empty vector DB; index will be built on first "
                                      "embedding batch (coordinator owns index readiness)");
                     }
                 } catch (...) {
-                    spdlog::debug(
-                        "[VectorInit] failed probing vector count/search index readiness");
+                    spdlog::debug("[VectorInit] failed probing vector count readiness");
                 }
 
                 // Update state (DB readiness only; index readiness is managed by coordinator)

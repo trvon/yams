@@ -2183,15 +2183,29 @@ LIMIT ?2
                 if (simeon_pq_indices_.contains(dim) && !hasCurrentSimeonPqStateUnlocked(dim)) {
                     markSimeonPqDimDirtyUnlocked(dim);
                 }
-                // Dirty means the live vectors have changed since the in-memory or persisted
-                // snapshot was built. Rebuild from current rows before considering disk state;
-                // loading an older snapshot here would silently omit committed mutations.
-                if (simeon_pq_dirty_dims_.contains(dim)) {
+                const auto rebuildAndPersist = [&]() -> Result<void> {
                     auto rebuild = rebuildSimeonPqDimUnlocked(dim);
                     if (!rebuild) {
                         return Error{ErrorCode::InvalidState,
                                      std::string("Simeon PQ index for dim ") + std::to_string(dim) +
                                          " build failed: " + rebuild.error().message};
+                    }
+                    auto persisted = saveSimeonPqDimUnlocked(dim);
+                    if (!persisted) {
+                        return Error{
+                            persisted.error().code,
+                            std::string("Simeon PQ index for dim ") + std::to_string(dim) +
+                                " rebuilt but persistence failed: " + persisted.error().message};
+                    }
+                    return Result<void>{};
+                };
+                // Dirty means the live vectors have changed since the in-memory or persisted
+                // snapshot was built. Rebuild from current rows before considering disk state;
+                // loading an older snapshot here would silently omit committed mutations.
+                if (simeon_pq_dirty_dims_.contains(dim)) {
+                    auto rebuilt = rebuildAndPersist();
+                    if (!rebuilt) {
+                        return rebuilt;
                     }
                     continue;
                 }
@@ -2199,12 +2213,11 @@ LIMIT ?2
                     continue;
                 }
                 // Missing, corrupt, or recipe-incompatible persisted state is not reusable.
-                // Rebuild from the authoritative vectors table.
-                auto rebuild = rebuildSimeonPqDimUnlocked(dim);
-                if (!rebuild) {
-                    return Error{ErrorCode::InvalidState,
-                                 std::string("Simeon PQ index for dim ") + std::to_string(dim) +
-                                     " build failed: " + rebuild.error().message};
+                // Rebuild from the authoritative vectors table and save the validated generation
+                // so the next clean restart can load it instead of repeating the build.
+                auto rebuilt = rebuildAndPersist();
+                if (!rebuilt) {
+                    return rebuilt;
                 }
             }
             return Result<void>{};

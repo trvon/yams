@@ -117,6 +117,19 @@ vector_memory_scaling_bench = executable('vector_memory_scaling_bench',
 
 alias_target('bench_vector_memory_scaling', vector_memory_scaling_bench)
 
+vector_persistence_warm_start_bench = executable('vector_persistence_warm_start_bench',
+  files('vector_persistence_warm_start_bench.cpp'),
+  include_directories: incs,
+  dependencies: [
+    dependency('yams_vector'),
+    dependency('spdlog'),
+  ] + tracy_deps,
+  cpp_args: tracy_args,
+  install: false,
+)
+
+alias_target('bench_vector_persistence_warm_start', vector_persistence_warm_start_bench)
+
 # Large-scale ingestion benchmark (requires google-benchmark and provides its own main)
 if benchmark_dep.found()
   large_scale_ingestion_bench_deps = [
