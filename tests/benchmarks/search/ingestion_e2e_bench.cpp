@@ -48,18 +48,26 @@
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/VectorIndexCoordinator.h>
 #include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/daemon.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/storage/reference_counter.h>
 #include <yams/storage/reference_counter_writer.h>
 #include <yams/vector/simeon_embedding_backend.h>
+#include <yams/vector/vector_database.h>
+
+#include <sqlite3.h>
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <cctype>
+#include <charconv>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -67,19 +75,28 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <unordered_map>
 #include <vector>
 #include <yams/compat/unistd.h>
+
+#if defined(__APPLE__) || defined(__linux__)
+#include <sys/resource.h>
+#endif
 
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 using json = nlohmann::json;
 
 namespace {
+
+constexpr const char* kSimeonModel = "simeon-default";
 
 int64_t nonNegativeDeltaMs(int64_t endMs, int64_t startMs) noexcept {
     return endMs > startMs ? endMs - startMs : 0;
@@ -96,15 +113,122 @@ uint64_t saturatedAdd(uint64_t lhs, uint64_t rhs) noexcept {
     return lhs + rhs;
 }
 
+std::string fnvFingerprint(std::uint64_t value) {
+    std::ostringstream out;
+    out << "fnv1a64:" << std::hex << std::setfill('0') << std::setw(16) << value;
+    return out.str();
+}
+
+class Fnv1a64 {
+public:
+    void addBytes(std::string_view value) {
+        addInteger(value.size());
+        for (const auto byte : value) {
+            addByte(static_cast<unsigned char>(byte));
+        }
+    }
+
+    void addInteger(std::uint64_t value) {
+        for (unsigned shift = 0; shift < 64; shift += 8) {
+            addByte(static_cast<unsigned char>((value >> shift) & 0xffU));
+        }
+    }
+
+    void addFloat(float value) { addInteger(std::bit_cast<std::uint32_t>(value)); }
+
+    [[nodiscard]] std::string fingerprint() const { return fnvFingerprint(value_); }
+
+private:
+    void addByte(unsigned char byte) {
+        value_ ^= byte;
+        value_ *= 1099511628211ULL;
+    }
+
+    std::uint64_t value_{14695981039346656037ULL};
+};
+
+std::uint64_t percentileUs(std::vector<std::uint64_t> samples, double percentile) {
+    if (samples.empty()) {
+        return 0;
+    }
+    std::sort(samples.begin(), samples.end());
+    const auto rank =
+        static_cast<std::size_t>(std::ceil(percentile * static_cast<double>(samples.size())));
+    return samples[std::min(samples.size() - 1, rank > 0 ? rank - 1 : 0)];
+}
+
+std::uint64_t peakRssBytes() noexcept {
+#if defined(__APPLE__) || defined(__linux__)
+    rusage usage{};
+    if (getrusage(RUSAGE_SELF, &usage) != 0) {
+        return 0;
+    }
+#if defined(__APPLE__)
+    return static_cast<std::uint64_t>(usage.ru_maxrss);
+#else
+    return static_cast<std::uint64_t>(usage.ru_maxrss) * 1024ULL;
+#endif
+#else
+    return 0;
+#endif
+}
+
+std::uint64_t sidecarBytes(const fs::path& dataDir, std::string_view suffix) {
+    std::uint64_t total = 0;
+    std::error_code ec;
+    for (fs::recursive_directory_iterator it(dataDir, ec), end; !ec && it != end;
+         it.increment(ec)) {
+        if (!it->is_regular_file(ec)) {
+            continue;
+        }
+        const auto name = it->path().filename().string();
+        if (name.size() < suffix.size() ||
+            name.compare(name.size() - suffix.size(), suffix.size(), suffix) != 0) {
+            continue;
+        }
+        const auto size = it->file_size(ec);
+        if (!ec) {
+            total = saturatedAdd(total, static_cast<std::uint64_t>(size));
+        }
+    }
+    return total;
+}
+
+bool hasSidecars(const fs::path& dataDir) {
+    std::error_code ec;
+    for (fs::recursive_directory_iterator it(dataDir, ec), end; !ec && it != end;
+         it.increment(ec)) {
+        const auto name = it->path().filename().string();
+        if (name.ends_with("-wal") || name.ends_with("-shm")) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool envFlagEnabled(const char* name) {
     const char* raw = std::getenv(name);
-    if (!raw || !*raw) {
+    if (raw == nullptr || *raw == '\0') {
         return false;
     }
     std::string value(raw);
     std::transform(value.begin(), value.end(), value.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return value == "1" || value == "true" || value == "yes" || value == "on";
+}
+
+int benchEnvInt(const char* name, int fallback, int minimum, int maximum) {
+    const char* raw = std::getenv(name);
+    if (raw == nullptr || *raw == '\0') {
+        return fallback;
+    }
+    const std::string_view value(raw);
+    int parsed = 0;
+    const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), parsed);
+    return error == std::errc{} && end == value.data() + value.size() && parsed >= minimum &&
+                   parsed <= maximum
+               ? parsed
+               : fallback;
 }
 
 std::uint32_t benchPostIngestCoalesceMs() {
@@ -148,11 +272,18 @@ class SimpleDaemonHarness {
 public:
     SimpleDaemonHarness() {
         auto id = randomId();
-        root_ = fs::temp_directory_path() / ("yams_e2e_bench_" + id);
+#ifdef _WIN32
+        const auto tempBase = fs::temp_directory_path();
+#else
+        // Keep Unix-domain socket paths well below sockaddr_un::sun_path limits while placing
+        // every fixture artifact under one directory for deterministic cleanup.
+        const auto tempBase = fs::path("/tmp");
+#endif
+        root_ = tempBase / ("yams_e2e_bench_" + id);
         yams::common::ensureDirectories(root_);
         data_ = root_ / "data";
         yams::common::ensureDirectories(data_);
-        sock_ = fs::path("/tmp") / ("e2e_bench_" + id + ".sock");
+        sock_ = root_ / "daemon.sock";
         pid_ = root_ / "bench.pid";
         log_ = root_ / "bench.log";
     }
@@ -162,22 +293,47 @@ public:
         cleanup();
     }
 
+    SimpleDaemonHarness(const SimpleDaemonHarness&) = delete;
+    SimpleDaemonHarness& operator=(const SimpleDaemonHarness&) = delete;
+
     bool start() {
         // Save original working directory and change to temp dir
         // This prevents session auto-watch from indexing CWD
         originalCwd_ = fs::current_path();
         fs::current_path(root_);
 
-        // Also isolate session state to prevent global session watch from triggering
-        originalXdgState_ = std::getenv("XDG_STATE_HOME") ? std::getenv("XDG_STATE_HOME") : "";
-        setenv("XDG_STATE_HOME", (root_ / "state").string().c_str(), 1);
+        // Isolate every daemon-owned path. Plugin/model discovery must not fall through to the
+        // installed daemon's config, cache, corpus, or embedding selection.
+        saveAndUnsetEnvironment("YAMS_CONFIG_PATH");
+        saveAndUnsetEnvironment("YAMS_CONFIG");
+        saveAndUnsetEnvironment("YAMS_EMBED_BACKEND");
+        saveAndUnsetEnvironment("YAMS_PREFERRED_MODEL");
+        saveAndSetEnvironment("XDG_STATE_HOME", root_ / "state");
+        saveAndSetEnvironment("XDG_CONFIG_HOME", root_ / "config");
+        saveAndSetEnvironment("XDG_CACHE_HOME", root_ / "cache");
+        saveAndSetEnvironment("YAMS_DATA_DIR", data_);
         yams::common::ensureDirectories(root_ / "state" / "yams" / "sessions");
+
+        const auto configPath = root_ / "config" / "yams" / "config.toml";
+        yams::common::ensureDirectories(configPath.parent_path());
+        {
+            std::ofstream configFile(configPath);
+            if (!configFile) {
+                spdlog::error("Failed to create isolated benchmark config: {}",
+                              configPath.string());
+                return false;
+            }
+            configFile << "[embeddings]\n"
+                          "backend = \"simeon\"\n"
+                          "preferred_model = \"simeon-default\"\n";
+        }
 
         yams::daemon::DaemonConfig cfg;
         cfg.dataDir = data_;
         cfg.socketPath = sock_;
         cfg.pidFile = pid_;
         cfg.logFile = log_;
+        cfg.configFilePath = configPath;
         cfg.enableModelProvider = true;
         // Disable auto-repair during benchmarks to avoid background work (per-hash DB checks,
         // vector cleanup, etc.) affecting ingestion measurements.
@@ -194,12 +350,13 @@ public:
         bool vectorsDisabled = disableVectors && std::string(disableVectors) == "1";
         vectorsDisabled = vectorsDisabled || mockEmbeddingsRequested;
 
-        const char* benchModelEnv = std::getenv("YAMS_BENCH_EMBED_MODEL");
-        std::string benchModel = benchModelEnv && *benchModelEnv ? benchModelEnv : "simeon-default";
-        const bool useSimeon = benchModel == "simeon-default" || benchModel == "simeon";
-
-        if (useSimeon && !std::getenv("YAMS_EMBED_BACKEND")) {
-            setenv("YAMS_EMBED_BACKEND", "simeon", 1);
+        glinerRequested_ = !envFlagEnabled("YAMS_DISABLE_GLINER_TITLES");
+        if (const char* pluginDir = std::getenv("YAMS_BENCH_GLINT_PLUGIN_DIR");
+            glinerRequested_ && pluginDir && *pluginDir && fs::is_directory(pluginDir)) {
+            cfg.pluginDir = fs::absolute(pluginDir);
+            cfg.pluginDirStrict = true;
+            cfg.trustedPluginPaths = {cfg.pluginDir};
+            pluginAutoloadEnabled_ = true;
         }
 
         if (vectorsDisabled) {
@@ -208,22 +365,15 @@ public:
             spdlog::info("Using mock model provider (YAMS_BENCH_FORCE_MOCK_EMBEDDINGS={} "
                          "YAMS_DISABLE_VECTORS={})",
                          mockEmbeddingsRequested ? 1 : 0, disableVectors ? disableVectors : "0");
-        } else if (useSimeon) {
-            // Simeon is built in and deterministic, so it is the preferred default for
-            // ingestion profiling. Avoid plugin startup and ONNX model load noise.
-            cfg.useMockModelProvider = false;
-            cfg.autoLoadPlugins = false;
-            cfg.modelPoolConfig.lazyLoading = false;
-            cfg.modelPoolConfig.preloadModels = {"simeon-default"};
-            spdlog::info("Using Simeon embedding provider for ingestion benchmark");
         } else {
-            // Use real model provider with plugins for accurate end-to-end benchmark
+            // Simeon is the benchmark's fixed production-default embedding provider. Optional
+            // Glint autoload exercises the independent GLiNER title stage without changing the
+            // embedding space.
             cfg.useMockModelProvider = false;
-            cfg.autoLoadPlugins = true;
-
-            // Configure model pool for real embedding generation
+            cfg.autoLoadPlugins = pluginAutoloadEnabled_;
             cfg.modelPoolConfig.lazyLoading = false;
-            cfg.modelPoolConfig.preloadModels = {benchModel};
+            cfg.modelPoolConfig.preloadModels = {kSimeonModel};
+            spdlog::info("Using Simeon embedding provider for ingestion benchmark");
         }
 
         daemon_ = std::make_unique<yams::daemon::YamsDaemon>(cfg);
@@ -245,8 +395,8 @@ public:
                 spdlog::info("Daemon ready at socket: {}", sock_.string());
                 if (!vectorsDisabled) {
                     if (auto* sm = daemon_->getServiceManager()) {
-                        auto ready = sm->ensureEmbeddingModelReadySync(
-                            useSimeon ? "simeon-default" : benchModel, {}, 10000, false, false);
+                        auto ready = sm->ensureEmbeddingModelReadySync(kSimeonModel, {}, 10000,
+                                                                       false, false);
                         if (!ready) {
                             spdlog::warn("Embedding model not ready: {}", ready.error().message);
                         }
@@ -295,26 +445,31 @@ public:
 
             // Reset GlobalIOContext to clean up threads and io_context state
             // Temporarily unset YAMS_TESTING to allow reset() to actually work
-            const char* yams_testing = std::getenv("YAMS_TESTING");
-            const char* yams_safe = std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
-            if (yams_testing) {
+            const auto yamsTesting = std::getenv("YAMS_TESTING")
+                                         ? std::optional<std::string>(std::getenv("YAMS_TESTING"))
+                                         : std::nullopt;
+            const auto yamsSafe =
+                std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE")
+                    ? std::optional<std::string>(std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE"))
+                    : std::nullopt;
+            if (yamsTesting) {
                 unsetenv("YAMS_TESTING");
             }
-            if (yams_safe) {
+            if (yamsSafe) {
                 unsetenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
             }
 
             yams::daemon::GlobalIOContext::reset();
             spdlog::info("[SimpleDaemonHarness] GlobalIOContext reset complete");
 
-            // Restore environment variables
-            if (yams_testing) {
-                setenv("YAMS_TESTING", yams_testing, 1);
+            if (yamsTesting) {
+                setenv("YAMS_TESTING", yamsTesting->c_str(), 1);
             }
-            if (yams_safe) {
-                setenv("YAMS_TEST_SAFE_SINGLE_INSTANCE", yams_safe, 1);
+            if (yamsSafe) {
+                setenv("YAMS_TEST_SAFE_SINGLE_INSTANCE", yamsSafe->c_str(), 1);
             }
 
+            shutdownSucceeded_ = static_cast<bool>(stopResult) && !daemon_->isRunning();
             daemon_.reset();
 
             // Allow OS to fully release thread resources (macOS needs this)
@@ -328,18 +483,18 @@ public:
             fs::current_path(originalCwd_, ec);
         }
 
-        // Restore original XDG_STATE_HOME
-        if (originalXdgState_.empty()) {
-            unsetenv("XDG_STATE_HOME");
-        } else {
-            setenv("XDG_STATE_HOME", originalXdgState_.c_str(), 1);
-        }
+        restoreEnvironment();
     }
 
-    const fs::path& socketPath() const { return sock_; }
-    const fs::path& root() const { return root_; }
-    const fs::path& dataDir() const { return data_; }
-    yams::daemon::YamsDaemon* daemon() const { return daemon_.get(); }
+    [[nodiscard]] const fs::path& socketPath() const { return sock_; }
+    [[nodiscard]] const fs::path& root() const { return root_; }
+    [[nodiscard]] const fs::path& dataDir() const { return data_; }
+    [[nodiscard]] const fs::path& pidPath() const { return pid_; }
+    [[nodiscard]] bool glinerRequested() const { return glinerRequested_; }
+    [[nodiscard]] bool pluginAutoloadEnabled() const { return pluginAutoloadEnabled_; }
+    [[nodiscard]] bool shutdownSucceeded() const { return shutdownSucceeded_; }
+    [[nodiscard]] bool stopRequested() const { return daemon_ && daemon_->isStopRequested(); }
+    [[nodiscard]] yams::daemon::YamsDaemon* daemon() const { return daemon_.get(); }
 
 private:
     static std::string randomId() {
@@ -352,6 +507,35 @@ private:
         return out;
     }
 
+    void saveAndSetEnvironment(const std::string& key, const fs::path& value) {
+        std::optional<std::string> previous;
+        if (const char* current = std::getenv(key.c_str())) {
+            previous = current;
+        }
+        savedEnvironment_.emplace_back(key, std::move(previous));
+        setenv(key.c_str(), value.string().c_str(), 1);
+    }
+
+    void saveAndUnsetEnvironment(const std::string& key) {
+        std::optional<std::string> previous;
+        if (const char* current = std::getenv(key.c_str())) {
+            previous = current;
+        }
+        savedEnvironment_.emplace_back(key, std::move(previous));
+        unsetenv(key.c_str());
+    }
+
+    void restoreEnvironment() {
+        for (auto it = savedEnvironment_.rbegin(); it != savedEnvironment_.rend(); ++it) {
+            if (it->second) {
+                setenv(it->first.c_str(), it->second->c_str(), 1);
+            } else {
+                unsetenv(it->first.c_str());
+            }
+        }
+        savedEnvironment_.clear();
+    }
+
     void cleanup() {
         std::error_code ec;
         if (!root_.empty())
@@ -362,7 +546,10 @@ private:
     std::thread runLoopThread_;
     fs::path root_, data_, sock_, pid_, log_;
     fs::path originalCwd_;
-    std::string originalXdgState_;
+    std::vector<std::pair<std::string, std::optional<std::string>>> savedEnvironment_;
+    bool glinerRequested_{false};
+    bool pluginAutoloadEnabled_{false};
+    bool shutdownSucceeded_{false};
 };
 
 // ============================================================================
@@ -378,6 +565,7 @@ struct CorpusGenerator {
     std::vector<std::string> createdFiles;
     std::mt19937 rng{kSeed};
     size_t docSize;
+    std::uint64_t generatedBytes{0};
     std::uint64_t fingerprintValue{kFnvOffsetBasis};
 
     CorpusGenerator(const fs::path& dir, size_t size) : corpusDir(dir), docSize(size) {
@@ -418,6 +606,7 @@ struct CorpusGenerator {
             std::string filename = "doc_" + std::to_string(i) + ".txt";
             const std::string document = content.str();
             std::ofstream(corpusDir / filename) << document;
+            generatedBytes = saturatedAdd(generatedBytes, document.size());
             hashBytes(filename);
             hashBytes(document);
             createdFiles.push_back(filename);
@@ -429,6 +618,180 @@ struct CorpusGenerator {
         spdlog::info("Corpus generation complete: {} files", createdFiles.size());
     }
 };
+
+struct VectorOracleSnapshot {
+    bool complete{false};
+    std::string error;
+    std::uint64_t storedVectors{0};
+    std::uint64_t fetchedVectors{0};
+    std::uint64_t embeddedDocuments{0};
+    std::uint64_t chunkVectors{0};
+    std::uint64_t documentVectors{0};
+    std::uint64_t invalidDimensions{0};
+    std::uint64_t nonFiniteValues{0};
+    std::string fingerprint;
+};
+
+VectorOracleSnapshot captureVectorOracle(const yams::vector::VectorDatabase& vectorDb,
+                                         std::size_t expectedDim) {
+    VectorOracleSnapshot snapshot;
+    snapshot.storedVectors = vectorDb.getVectorCount();
+    auto hashesResult = vectorDb.getEmbeddedDocumentHashesChecked();
+    if (!hashesResult) {
+        snapshot.error = hashesResult.error().message;
+        return snapshot;
+    }
+
+    std::vector<std::string> hashes(hashesResult.value().begin(), hashesResult.value().end());
+    std::sort(hashes.begin(), hashes.end());
+    snapshot.embeddedDocuments = hashes.size();
+
+    Fnv1a64 fingerprint;
+    fingerprint.addInteger(expectedDim);
+    for (const auto& hash : hashes) {
+        auto records = vectorDb.getVectorsByDocument(hash);
+        std::sort(records.begin(), records.end(), [](const auto& lhs, const auto& rhs) {
+            if (lhs.chunk_id != rhs.chunk_id) {
+                return lhs.chunk_id < rhs.chunk_id;
+            }
+            if (lhs.document_hash != rhs.document_hash) {
+                return lhs.document_hash < rhs.document_hash;
+            }
+            if (lhs.level != rhs.level) {
+                return static_cast<int>(lhs.level) < static_cast<int>(rhs.level);
+            }
+            if (lhs.start_offset != rhs.start_offset) {
+                return lhs.start_offset < rhs.start_offset;
+            }
+            if (lhs.end_offset != rhs.end_offset) {
+                return lhs.end_offset < rhs.end_offset;
+            }
+            if (lhs.model_id != rhs.model_id) {
+                return lhs.model_id < rhs.model_id;
+            }
+            if (lhs.model_version != rhs.model_version) {
+                return lhs.model_version < rhs.model_version;
+            }
+            const auto sharedSize = std::min(lhs.embedding.size(), rhs.embedding.size());
+            for (std::size_t index = 0; index < sharedSize; ++index) {
+                const auto lhsBits = std::bit_cast<std::uint32_t>(lhs.embedding[index]);
+                const auto rhsBits = std::bit_cast<std::uint32_t>(rhs.embedding[index]);
+                if (lhsBits != rhsBits) {
+                    return lhsBits < rhsBits;
+                }
+            }
+            return lhs.embedding.size() < rhs.embedding.size();
+        });
+        fingerprint.addBytes(hash);
+        fingerprint.addInteger(records.size());
+        for (const auto& record : records) {
+            fingerprint.addBytes(record.chunk_id);
+            fingerprint.addBytes(record.document_hash);
+            fingerprint.addInteger(static_cast<std::uint64_t>(record.level));
+            fingerprint.addInteger(record.start_offset);
+            fingerprint.addInteger(record.end_offset);
+            fingerprint.addBytes(record.model_id);
+            fingerprint.addBytes(record.model_version);
+            fingerprint.addInteger(record.embedding.size());
+            if (record.embedding.size() != expectedDim) {
+                ++snapshot.invalidDimensions;
+            }
+            for (const auto value : record.embedding) {
+                if (!std::isfinite(value)) {
+                    ++snapshot.nonFiniteValues;
+                }
+                fingerprint.addFloat(value);
+            }
+            ++snapshot.fetchedVectors;
+            if (record.level == yams::vector::EmbeddingLevel::DOCUMENT) {
+                ++snapshot.documentVectors;
+            } else {
+                ++snapshot.chunkVectors;
+            }
+        }
+    }
+    snapshot.fingerprint = fingerprint.fingerprint();
+    snapshot.complete = snapshot.fetchedVectors == snapshot.storedVectors &&
+                        snapshot.invalidDimensions == 0 && snapshot.nonFiniteValues == 0 &&
+                        snapshot.error.empty();
+    return snapshot;
+}
+
+struct VectorPersistenceSnapshot {
+    bool readable{false};
+    std::string error;
+    std::int64_t authoritativeGeneration{-1};
+    std::int64_t sourceGeneration{-1};
+    std::uint64_t persistedVectorCount{0};
+    std::uint64_t codeCount{0};
+    bool trained{false};
+};
+
+VectorPersistenceSnapshot captureVectorPersistence(const fs::path& databasePath,
+                                                   std::size_t dimension) {
+    VectorPersistenceSnapshot snapshot;
+    sqlite3* db = nullptr;
+    const int openRc = sqlite3_open_v2(databasePath.string().c_str(), &db,
+                                       SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nullptr);
+    if (openRc != SQLITE_OK || db == nullptr) {
+        snapshot.error = db ? sqlite3_errmsg(db) : "sqlite open failed";
+        if (db) {
+            sqlite3_close(db);
+        }
+        return snapshot;
+    }
+
+    auto queryOne = [&](const char* sql, std::int64_t bindValue,
+                        std::vector<std::int64_t>& values) -> bool {
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
+            snapshot.error = sqlite3_errmsg(db);
+            return false;
+        }
+        if (bindValue >= 0) {
+            sqlite3_bind_int64(stmt, 1, bindValue);
+        }
+        const int stepRc = sqlite3_step(stmt);
+        if (stepRc == SQLITE_ROW) {
+            const int columns = sqlite3_column_count(stmt);
+            values.reserve(columns);
+            for (int column = 0; column < columns; ++column) {
+                values.push_back(sqlite3_column_int64(stmt, column));
+            }
+        } else if (stepRc != SQLITE_DONE) {
+            snapshot.error = sqlite3_errmsg(db);
+        }
+        sqlite3_finalize(stmt);
+        return stepRc == SQLITE_ROW;
+    };
+
+    std::vector<std::int64_t> generation;
+    const bool generationOk =
+        queryOne("SELECT generation FROM vector_index_generation WHERE id = 1", -1, generation);
+    std::vector<std::int64_t> pqMeta;
+    const bool pqOk = queryOne(
+        "SELECT source_generation, trained, vector_count FROM simeon_pq_meta WHERE dim = ?",
+        static_cast<std::int64_t>(dimension), pqMeta);
+    std::vector<std::int64_t> codes;
+    const bool codesOk = queryOne("SELECT COUNT(*) FROM simeon_pq_codes WHERE dim = ?",
+                                  static_cast<std::int64_t>(dimension), codes);
+    sqlite3_close(db);
+
+    if (generationOk && !generation.empty()) {
+        snapshot.authoritativeGeneration = generation[0];
+    }
+    if (pqOk && pqMeta.size() == 3) {
+        snapshot.sourceGeneration = pqMeta[0];
+        snapshot.trained = pqMeta[1] != 0;
+        snapshot.persistedVectorCount =
+            static_cast<std::uint64_t>(std::max<std::int64_t>(0, pqMeta[2]));
+    }
+    if (codesOk && !codes.empty()) {
+        snapshot.codeCount = static_cast<std::uint64_t>(std::max<std::int64_t>(0, codes[0]));
+    }
+    snapshot.readable = generationOk && pqOk && codesOk;
+    return snapshot;
+}
 
 // ============================================================================
 // QueueSnapshot - Capture queue depths and counters at a point in time
@@ -534,6 +897,41 @@ struct StageMetrics {
     }
 };
 
+struct BenchmarkEmbeddingPhaseTiming {
+    static constexpr std::size_t kMaxSamples = 4096;
+
+    std::uint64_t calls{0};
+    std::uint64_t totalUs{0};
+    std::uint64_t maxUs{0};
+    std::vector<std::uint64_t> samplesUs;
+    bool samplesTruncated{false};
+};
+
+class BenchmarkEmbeddingTimingSink final : public yams::daemon::EmbeddingPhaseTimingSink {
+public:
+    void record(std::string_view phase, std::uint64_t elapsedUs) override {
+        std::lock_guard lock(mutex_);
+        auto& timing = timings_[std::string(phase)];
+        ++timing.calls;
+        timing.totalUs += elapsedUs;
+        timing.maxUs = std::max(timing.maxUs, elapsedUs);
+        if (timing.samplesUs.size() < BenchmarkEmbeddingPhaseTiming::kMaxSamples) {
+            timing.samplesUs.push_back(elapsedUs);
+        } else {
+            timing.samplesTruncated = true;
+        }
+    }
+
+    std::unordered_map<std::string, BenchmarkEmbeddingPhaseTiming> snapshot() const {
+        std::lock_guard lock(mutex_);
+        return timings_;
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::unordered_map<std::string, BenchmarkEmbeddingPhaseTiming> timings_;
+};
+
 struct SearchImpactProbe {
     std::string name;
     std::string query;
@@ -549,6 +947,7 @@ struct SearchImpactProbe {
     uint64_t total_count = 0;
     uint64_t returned_count = 0;
     std::vector<std::string> top_ids{};
+    std::vector<std::string> top_paths{};
 
     json toJson() const {
         return json{{"name", name},
@@ -564,7 +963,8 @@ struct SearchImpactProbe {
                     {"daemon_elapsed_ms", daemon_elapsed_ms},
                     {"total_count", total_count},
                     {"returned_count", returned_count},
-                    {"top_ids", top_ids}};
+                    {"top_ids", top_ids},
+                    {"top_paths", top_paths}};
     }
 };
 
@@ -609,22 +1009,36 @@ struct BenchmarkResult {
     std::size_t ingest_concurrency = 1;
     std::uint32_t post_ingest_coalesce_ms = 0;
     std::uint32_t post_ingest_batch_size = 0;
+    std::uint64_t enrichment_timeout_ms = 30000;
     std::string timestamp;
     std::string embedding_model = "simeon-default";
     std::string embedding_backend = "simeon";
+    std::string embedding_provider;
+    std::string embedding_provider_version;
+    std::string embedding_model_uri;
+    std::string embedding_space_identity;
+    std::size_t embedding_dimension = 0;
     std::string simeon_recipe;
+    std::uint64_t generated_bytes = 0;
     bool kg_enabled = true;
+    bool gliner_requested = false;
+    bool plugin_autoload_enabled = false;
+    bool gliner_stage_active = false;
+    std::string gliner_model_path;
 
     // Overall metrics
     int64_t total_duration_ms = 0;
     double throughput_docs_per_sec = 0.0;
+    double throughput_mib_per_sec = 0.0;
     bool pipeline_complete = false;
     uint64_t expected_post = 0;
     uint64_t expected_embed = 0;
     uint64_t expected_kg = 0;
+    uint64_t expected_title = 0;
     uint64_t observed_post = 0;
     uint64_t observed_embed = 0;
     uint64_t observed_kg = 0;
+    uint64_t observed_title = 0;
     bool stages_settled = false;
     bool enrichment_drained = false;
     bool write_coordinator_flushed = false;
@@ -632,16 +1046,41 @@ struct BenchmarkResult {
     int64_t storage_ready_ms = 0;
     int64_t pipeline_drain_ms = 0;
     int64_t enrichment_ready_ms = 0;
+    int64_t vector_index_finalize_ms = 0;
     int64_t searchability_ready_ms = 0;
+    int64_t daemon_startup_ms = 0;
+    int64_t shutdown_ms = 0;
+    int64_t lifecycle_ms = 0;
+    std::uint64_t cpu_ms = 0;
+    std::uint64_t peak_rss_before_bytes = 0;
+    std::uint64_t peak_rss_after_bytes = 0;
+    std::uint64_t wal_bytes_before = 0;
+    std::uint64_t wal_bytes_after = 0;
+    std::uint64_t wal_growth_bytes = 0;
+    std::uint64_t db_lock_errors = 0;
+    bool shutdown_succeeded = false;
+    bool socket_removed = false;
+    bool pid_removed = false;
+    bool sidecars_removed = false;
     AddDispatchMetrics add_dispatch_metrics;
+
+    std::uint64_t stored_documents = 0;
+    bool stored_document_count_readable = false;
+    std::string stored_document_count_error;
+    VectorOracleSnapshot vector_oracle;
+    bool vector_rebuild_ok = false;
+    std::string vector_rebuild_error;
+    bool vector_index_reusable = false;
+    yams::daemon::VectorIndexTelemetry vector_index_telemetry;
+    VectorPersistenceSnapshot vector_persistence;
+    std::string search_result_fingerprint;
 
     // Per-stage metrics
     StageMetrics metadata_storage;
     StageMetrics fts5_extraction;
     StageMetrics embedding_generation;
     StageMetrics kg_extraction;
-    std::unordered_map<std::string, yams::daemon::EmbeddingService::PhaseTiming>
-        embedding_phase_timings;
+    std::unordered_map<std::string, BenchmarkEmbeddingPhaseTiming> embedding_phase_timings;
     std::unordered_map<std::string, yams::app::services::DocumentStorePhaseTiming>
         document_store_phase_timings;
     std::unordered_map<std::string, yams::api::ContentStorePhaseTiming> content_store_phase_timings;
@@ -686,7 +1125,7 @@ struct BenchmarkResult {
     bool has_write_coordinator_stats = false;
     yams::daemon::WriteCoordinator::Stats write_coordinator_stats;
 
-    json toJson() const {
+    [[nodiscard]] json toJson() const {
         json j;
         j["test_config"] = {{"corpus_size", corpus_size},
                             {"doc_size", doc_size},
@@ -697,14 +1136,26 @@ struct BenchmarkResult {
                             {"ingest_concurrency", ingest_concurrency},
                             {"post_ingest_coalesce_ms", post_ingest_coalesce_ms},
                             {"post_ingest_batch_size", post_ingest_batch_size},
+                            {"enrichment_timeout_ms", enrichment_timeout_ms},
                             {"timestamp", timestamp},
                             {"embedding_model", embedding_model},
                             {"embedding_backend", embedding_backend},
+                            {"embedding_provider", embedding_provider},
+                            {"embedding_provider_version", embedding_provider_version},
+                            {"embedding_model_uri", embedding_model_uri},
+                            {"embedding_space_identity", embedding_space_identity},
+                            {"embedding_dimension", embedding_dimension},
                             {"simeon_recipe", simeon_recipe},
-                            {"kg_enabled", kg_enabled}};
+                            {"generated_bytes", generated_bytes},
+                            {"kg_enabled", kg_enabled},
+                            {"gliner_requested", gliner_requested},
+                            {"plugin_autoload_enabled", plugin_autoload_enabled},
+                            {"gliner_stage_active", gliner_stage_active},
+                            {"gliner_model_path", gliner_model_path}};
 
         j["total_duration_ms"] = total_duration_ms;
         j["throughput_docs_per_sec"] = throughput_docs_per_sec;
+        j["throughput_mib_per_sec"] = throughput_mib_per_sec;
         j["pipeline_status"] = {{"complete", pipeline_complete},
                                 {"stages_settled", stages_settled},
                                 {"enrichment_drained", enrichment_drained},
@@ -714,12 +1165,60 @@ struct BenchmarkResult {
                                 {"expected_embed", expected_embed},
                                 {"observed_embed", observed_embed},
                                 {"expected_kg", expected_kg},
-                                {"observed_kg", observed_kg}};
-        j["phase_timings"] = {{"admission_ms", admission_ms},
+                                {"observed_kg", observed_kg},
+                                {"expected_title", expected_title},
+                                {"observed_title", observed_title}};
+        j["phase_timings"] = {{"daemon_startup_ms", daemon_startup_ms},
+                              {"admission_ms", admission_ms},
                               {"storage_ready_ms", storage_ready_ms},
                               {"pipeline_drain_ms", pipeline_drain_ms},
                               {"enrichment_ready_ms", enrichment_ready_ms},
-                              {"searchability_ready_ms", searchability_ready_ms}};
+                              {"vector_index_finalize_ms", vector_index_finalize_ms},
+                              {"searchability_ready_ms", searchability_ready_ms},
+                              {"shutdown_ms", shutdown_ms},
+                              {"lifecycle_ms", lifecycle_ms}};
+        j["storage_oracle"] = {{"stored_documents", stored_documents},
+                               {"stored_document_count_readable", stored_document_count_readable},
+                               {"stored_document_count_error", stored_document_count_error},
+                               {"stored_vectors", vector_oracle.storedVectors},
+                               {"fetched_vectors", vector_oracle.fetchedVectors},
+                               {"embedded_documents", vector_oracle.embeddedDocuments},
+                               {"chunk_vectors", vector_oracle.chunkVectors},
+                               {"document_vectors", vector_oracle.documentVectors},
+                               {"invalid_vector_dimensions", vector_oracle.invalidDimensions},
+                               {"non_finite_vector_values", vector_oracle.nonFiniteValues},
+                               {"vector_oracle_complete", vector_oracle.complete},
+                               {"vector_oracle_error", vector_oracle.error},
+                               {"embedding_fingerprint", vector_oracle.fingerprint},
+                               {"search_result_fingerprint", search_result_fingerprint}};
+        j["vector_index"] = {
+            {"rebuild_ok", vector_rebuild_ok},
+            {"rebuild_error", vector_rebuild_error},
+            {"reusable_persisted_index", vector_index_reusable},
+            {"coordinator_epoch", vector_index_telemetry.rebuildEpoch},
+            {"coordinator_pending_reasons", vector_index_telemetry.pendingReasons},
+            {"coordinator_active_bulk_scopes", vector_index_telemetry.activeBulkScopes},
+            {"coordinator_rebuilding", vector_index_telemetry.rebuilding},
+            {"coordinator_ready", vector_index_telemetry.ready},
+            {"coordinator_progress_pct", vector_index_telemetry.progressPct},
+            {"persistence_readable", vector_persistence.readable},
+            {"persistence_error", vector_persistence.error},
+            {"authoritative_generation", vector_persistence.authoritativeGeneration},
+            {"source_generation", vector_persistence.sourceGeneration},
+            {"trained", vector_persistence.trained},
+            {"persisted_vector_count", vector_persistence.persistedVectorCount},
+            {"code_count", vector_persistence.codeCount}};
+        j["resources"] = {{"cpu_ms", cpu_ms},
+                          {"peak_rss_before_bytes", peak_rss_before_bytes},
+                          {"peak_rss_after_bytes", peak_rss_after_bytes},
+                          {"wal_bytes_before", wal_bytes_before},
+                          {"wal_bytes_after", wal_bytes_after},
+                          {"wal_growth_bytes", wal_growth_bytes},
+                          {"db_lock_errors", db_lock_errors},
+                          {"shutdown_succeeded", shutdown_succeeded},
+                          {"socket_removed", socket_removed},
+                          {"pid_removed", pid_removed},
+                          {"sidecars_removed", sidecars_removed}};
         j["add_dispatch_metrics"] = add_dispatch_metrics.toJson();
 
         j["stages"] = {{"metadata_storage", metadata_storage.toJson()},
@@ -729,13 +1228,23 @@ struct BenchmarkResult {
 
         json phaseTimings = json::object();
         for (const auto& [phase, timing] : embedding_phase_timings) {
-            phaseTimings[phase] = {{"calls", timing.calls},
-                                   {"total_ms", timing.totalMs},
-                                   {"max_ms", timing.maxMs},
-                                   {"avg_ms", timing.calls == 0
-                                                  ? 0.0
-                                                  : static_cast<double>(timing.totalMs) /
-                                                        static_cast<double>(timing.calls)}};
+            phaseTimings[phase] = {
+                {"calls", timing.calls},
+                {"total_ms", timing.totalUs / 1000},
+                {"max_ms", timing.maxUs / 1000},
+                {"avg_ms", timing.calls == 0 ? 0.0
+                                             : static_cast<double>(timing.totalUs) /
+                                                   (1000.0 * static_cast<double>(timing.calls))},
+                {"total_us", timing.totalUs},
+                {"max_us", timing.maxUs},
+                {"avg_us", timing.calls == 0 ? 0.0
+                                             : static_cast<double>(timing.totalUs) /
+                                                   static_cast<double>(timing.calls)},
+                {"p50_us", percentileUs(timing.samplesUs, 0.50)},
+                {"p95_us", percentileUs(timing.samplesUs, 0.95)},
+                {"p99_us", percentileUs(timing.samplesUs, 0.99)},
+                {"samples", timing.samplesUs.size()},
+                {"samples_truncated", timing.samplesTruncated}};
         }
         j["embedding_phase_timings"] = std::move(phaseTimings);
 
@@ -1076,7 +1585,7 @@ std::vector<SearchImpactProbe>
 runSearchImpactProbes(const std::shared_ptr<yams::daemon::DaemonClient>& client,
                       bool vectorsDisabled, bool kgEnabled, bool pipelineComplete) {
     if (const char* searchProbes = std::getenv("YAMS_BENCH_SEARCH_PROBES");
-        searchProbes && std::string(searchProbes) == "0") {
+        searchProbes != nullptr && std::string(searchProbes) == "0") {
         return {};
     }
 
@@ -1138,21 +1647,46 @@ runSearchImpactProbes(const std::shared_ptr<yams::daemon::DaemonClient>& client,
         }
 
         const auto& value = response.value();
-        probe.ok = true;
         probe.daemon_elapsed_ms = value.elapsed.count();
         probe.total_count = static_cast<uint64_t>(value.totalCount);
         probe.returned_count = static_cast<uint64_t>(value.results.size());
         for (const auto& item : value.results) {
-            if (!item.id.empty()) {
-                probe.top_ids.push_back(item.id);
-            }
-            if (probe.top_ids.size() >= 5) {
+            probe.top_ids.push_back(item.id);
+            probe.top_paths.push_back(item.path.empty() ? std::string{}
+                                                        : fs::path(item.path).filename().string());
+            if (probe.top_paths.size() >= 5) {
                 break;
             }
+        }
+        probe.ok =
+            !probe.top_paths.empty() &&
+            std::ranges::all_of(probe.top_paths, [](const auto& path) { return !path.empty(); });
+        if (!probe.ok) {
+            probe.error = "search returned no stable document paths";
         }
     }
 
     return probes;
+}
+
+std::string fingerprintSearchImpact(const std::vector<SearchImpactProbe>& probes) {
+    Fnv1a64 fingerprint;
+    for (const auto& probe : probes) {
+        fingerprint.addBytes(probe.name);
+        fingerprint.addInteger(probe.ok ? 1 : 0);
+        fingerprint.addInteger(probe.total_count);
+        fingerprint.addInteger(probe.top_paths.size());
+        for (const auto& path : probe.top_paths) {
+            fingerprint.addBytes(path);
+        }
+    }
+    return fingerprint.fingerprint();
+}
+
+boost::asio::awaitable<yams::Result<yams::app::services::BatchAddResult>>
+submitBatchAsync(yams::app::services::DocumentIngestionService& service,
+                 const std::vector<yams::app::services::AddOptions>& batch, int requestWindow) {
+    co_return co_await service.addBatchAsync(batch, requestWindow);
 }
 
 // ============================================================================
@@ -1161,9 +1695,13 @@ runSearchImpactProbes(const std::shared_ptr<yams::daemon::DaemonClient>& client,
 
 BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
                              std::string ingestMode, std::size_t ingestConcurrency) {
+    const auto _lifecycleStart = std::chrono::steady_clock::now();
+    const auto _cpuStart = std::clock();
     yams::daemon::TuneAdvisor::setPostIngestBatchSize(benchPostIngestBatchSize());
 
     BenchmarkResult result;
+    auto embeddingTimingSink = std::make_shared<BenchmarkEmbeddingTimingSink>();
+    result.peak_rss_before_bytes = peakRssBytes();
     result.corpus_size = corpusSize;
     result.doc_size = docSize;
     result.poll_interval_ms = pollIntervalMs;
@@ -1172,20 +1710,16 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
     result.post_ingest_coalesce_ms = benchPostIngestCoalesceMs();
     result.post_ingest_batch_size = yams::daemon::TuneAdvisor::postIngestBatchSize();
     result.timestamp = nowIso8601();
-    if (const char* env = std::getenv("YAMS_BENCH_EMBED_MODEL"); env && *env) {
-        result.embedding_model = env;
-    }
     const char* forceMockEmbeddings = std::getenv("YAMS_BENCH_FORCE_MOCK_EMBEDDINGS");
     const bool mockEmbeddingsRequested =
-        forceMockEmbeddings && std::string(forceMockEmbeddings) == "1";
+        forceMockEmbeddings != nullptr && std::string(forceMockEmbeddings) == "1";
     const char* disableVectors = std::getenv("YAMS_DISABLE_VECTORS");
-    const bool vectorsDisabled =
-        mockEmbeddingsRequested || (disableVectors && std::string(disableVectors) == "1");
-    const bool simeonModel =
-        result.embedding_model == "simeon-default" || result.embedding_model == "simeon";
-    result.embedding_backend = vectorsDisabled ? "mock" : (simeonModel ? "simeon" : "onnxruntime");
-    result.simeon_recipe =
-        (!vectorsDisabled && simeonModel) ? yams::vector::simeonRecipeLabel() : "";
+    const bool vectorsDisabled = mockEmbeddingsRequested ||
+                                 (disableVectors != nullptr && std::string(disableVectors) == "1");
+    if (vectorsDisabled) {
+        result.embedding_backend = "mock";
+    }
+    result.simeon_recipe = !vectorsDisabled ? yams::vector::simeonRecipeLabel() : "";
     result.kg_enabled = !envFlagEnabled("YAMS_BENCH_DISABLE_KG");
 
     spdlog::info("=== Ingestion E2E Benchmark ===");
@@ -1200,10 +1734,36 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
     // Phase 1: Start daemon
     spdlog::info("Phase 1: Starting daemon...");
     SimpleDaemonHarness harness;
+    const auto startupStart = std::chrono::steady_clock::now();
     if (!harness.start()) {
         spdlog::error("Failed to start daemon");
         return result;
     }
+    result.daemon_startup_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                   std::chrono::steady_clock::now() - startupStart)
+                                   .count();
+    result.gliner_requested = harness.glinerRequested();
+    result.plugin_autoload_enabled = harness.pluginAutoloadEnabled();
+    if (const char* modelPath = std::getenv("YAMS_GLINT_MODEL_PATH"); modelPath != nullptr) {
+        result.gliner_model_path = modelPath;
+    }
+    result.wal_bytes_before = sidecarBytes(harness.dataDir(), "-wal");
+
+    const auto stopHarness = [&](bool capturePersistence) {
+        const auto shutdownStart = std::chrono::steady_clock::now();
+        harness.stop();
+        result.shutdown_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - shutdownStart)
+                                 .count();
+        result.shutdown_succeeded = harness.shutdownSucceeded();
+        result.socket_removed = !fs::exists(harness.socketPath());
+        result.pid_removed = !fs::exists(harness.pidPath());
+        result.sidecars_removed = !hasSidecars(harness.dataDir());
+        if (capturePersistence && !vectorsDisabled) {
+            result.vector_persistence = captureVectorPersistence(harness.dataDir() / "vectors.db",
+                                                                 result.embedding_dimension);
+        }
+    };
 
     // Phase 2: Generate corpus
     spdlog::info("Phase 2: Generating test corpus...");
@@ -1211,6 +1771,7 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
     CorpusGenerator corpus(corpusDir, docSize);
     corpus.generateDocuments(corpusSize);
     result.corpus_fingerprint = corpus.fingerprint();
+    result.generated_bytes = corpus.generatedBytes;
 
     // Phase 3: Connect to daemon
     spdlog::info("Phase 3: Connecting to daemon...");
@@ -1228,17 +1789,27 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
     spdlog::info("Connected to daemon at {}", harness.socketPath().string());
 
     // Log model provider status
-    auto serviceManager = harness.daemon()->getServiceManager();
-    if (serviceManager) {
+    auto* serviceManager = harness.daemon()->getServiceManager();
+    if (serviceManager != nullptr) {
         auto modelProvider = serviceManager->getModelProvider();
         if (modelProvider && modelProvider->isAvailable()) {
             auto loadedModels = modelProvider->getLoadedModels();
             spdlog::info("Model provider: {} model(s) loaded: {}", loadedModels.size(),
                          loadedModels.empty() ? "none" : std::to_string(loadedModels.size()));
+            result.embedding_provider = modelProvider->getProviderName();
+            result.embedding_provider_version = modelProvider->getProviderVersion();
+            result.embedding_dimension = modelProvider->getEmbeddingDim(result.embedding_model);
+            result.embedding_space_identity =
+                modelProvider->getEmbeddingSpaceIdentity(result.embedding_model);
+            if (auto info = modelProvider->getModelInfo(result.embedding_model); info) {
+                result.embedding_model_uri = info.value().path;
+            } else {
+                result.embedding_model_uri = "simeon://" + result.embedding_model;
+            }
         } else {
             spdlog::warn("Model provider not available");
         }
-        serviceManager->resetEmbeddingPhaseTimings();
+        serviceManager->setEmbeddingPhaseTimingSink(embeddingTimingSink);
         yams::app::services::resetDocumentStorePhaseTimings();
         yams::api::resetContentStorePhaseTimings();
         yams::metadata::resetMetadataInsertPhaseTimings();
@@ -1250,6 +1821,8 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
         }
         if (auto postIngest = serviceManager->getPostIngestQueue()) {
             postIngest->resetMetrics();
+            result.gliner_stage_active =
+                postIngest->hasTitleExtractor() && !envFlagEnabled("YAMS_DISABLE_GLINER_TITLES");
             if (!result.kg_enabled) {
                 postIngest->pauseStage(yams::daemon::PostIngestQueue::Stage::KnowledgeGraph);
             }
@@ -1264,8 +1837,11 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
     uint64_t baselinePostDropped = bus.postDropped();
     uint64_t baselineKgConsumed = bus.kgConsumed();
     uint64_t baselineKgDropped = bus.kgDropped();
-    spdlog::info("Baseline counters: embed={}, post={}, kg={}", baselineEmbedConsumed,
-                 baselinePostConsumed, baselineKgConsumed);
+    uint64_t baselineTitleQueued = bus.titleQueued();
+    uint64_t baselineTitleConsumed = bus.titleConsumed();
+    uint64_t baselineTitleDropped = bus.titleDropped();
+    spdlog::info("Baseline counters: embed={}, post={}, kg={}, title={}", baselineEmbedConsumed,
+                 baselinePostConsumed, baselineKgConsumed, baselineTitleConsumed);
 
     // Phase 4: Ingest documents
     spdlog::info("Phase 4: Ingesting {} documents...", corpusSize);
@@ -1324,12 +1900,8 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
         }
 
         yams::app::services::DocumentIngestionService ingestionService(client);
-        auto submitBatch =
-            [&]() -> boost::asio::awaitable<yams::Result<yams::app::services::BatchAddResult>> {
-            co_return co_await ingestionService.addBatchAsync(batch,
-                                                              static_cast<int>(requestWindow));
-        };
-        auto batchResult = yams::cli::run_sync(submitBatch(), 120s);
+        auto batchResult = yams::cli::run_sync(
+            submitBatchAsync(ingestionService, batch, static_cast<int>(requestWindow)), 120s);
         if (!batchResult) {
             spdlog::warn("Pipelined ingestion failed: {}", batchResult.error().message);
             failCount.store(corpusSize, std::memory_order_relaxed);
@@ -1343,6 +1915,9 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
         result.ingest_mode = "single_file_serial";
         result.ingest_concurrency = 1;
         for (const auto& filename : corpus.createdFiles) {
+            if (harness.stopRequested()) {
+                break;
+            }
             addSingleFile(*client, filename);
         }
     }
@@ -1380,9 +1955,18 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
     uint64_t expectedPost = static_cast<std::uint64_t>(successCount.load());
     uint64_t expectedEmbed = vectorsDisabled ? 0 : static_cast<std::uint64_t>(successCount.load());
     uint64_t expectedKg = result.kg_enabled ? static_cast<std::uint64_t>(successCount.load()) : 0;
+    uint64_t expectedTitle =
+        result.gliner_stage_active ? static_cast<std::uint64_t>(successCount.load()) : 0;
     result.expected_post = expectedPost;
     result.expected_embed = expectedEmbed;
     result.expected_kg = expectedKg;
+    result.expected_title = expectedTitle;
+    constexpr std::uint64_t kBaseEnrichmentTimeoutMs = 30000;
+    constexpr std::uint64_t kPerTitleTimeoutMs = 60000;
+    constexpr std::uint64_t kMaxEnrichmentTimeoutMs = 2ULL * 60ULL * 60ULL * 1000ULL;
+    result.enrichment_timeout_ms =
+        std::min(kMaxEnrichmentTimeoutMs,
+                 saturatedAdd(kBaseEnrichmentTimeoutMs, expectedTitle * kPerTitleTimeoutMs));
 
     // Poll until every expected item is consumed or explicitly dropped. Drops settle the
     // workload but never satisfy the lossless completion contract.
@@ -1396,7 +1980,8 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
     uint64_t lastKgConsumedDelta = 0;
     uint64_t lastKgDroppedDelta = 0;
 
-    while (std::chrono::steady_clock::now() < pipelineDeadline && !allStagesSettled) {
+    while (std::chrono::steady_clock::now() < pipelineDeadline && !allStagesSettled &&
+           !harness.stopRequested()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(pollIntervalMs));
 
         QueueSnapshot snap = captureQueueSnapshot();
@@ -1532,11 +2117,12 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
     // The core counters can settle before entity/title work and deferred KG writes commit.
     // Wait for every PostIngestQueue stage to drain, then flush the WriteCoordinator.
     result.enrichment_drained = false;
-    const auto enrichmentDeadline = std::chrono::steady_clock::now() + 30s;
-    while (std::chrono::steady_clock::now() < enrichmentDeadline) {
+    const auto enrichmentDeadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(result.enrichment_timeout_ms);
+    while (std::chrono::steady_clock::now() < enrichmentDeadline && !harness.stopRequested()) {
         lastSnap = captureQueueSnapshot();
         bool postIngestIdle = true;
-        if (serviceManager) {
+        if (serviceManager != nullptr) {
             if (auto postIngest = serviceManager->getPostIngestQueue()) {
                 postIngestIdle =
                     postIngest->size() == 0 && postIngest->kgQueueDepth() == 0 &&
@@ -1546,7 +2132,7 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
         }
         const bool embeddingIdle =
             lastSnap.embed_jobs == 0 &&
-            (!serviceManager || serviceManager->getEmbeddingInFlightJobs() == 0);
+            (serviceManager == nullptr || serviceManager->getEmbeddingInFlightJobs() == 0);
         if (postIngestIdle && embeddingIdle) {
             result.enrichment_drained = true;
             break;
@@ -1554,8 +2140,19 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
         std::this_thread::sleep_for(std::chrono::milliseconds(pollIntervalMs));
     }
 
+    if (harness.stopRequested()) {
+        lastSnap = captureQueueSnapshot();
+        result.observed_post = counterDelta(lastSnap.post_consumed, baselinePostConsumed);
+        result.observed_embed = counterDelta(lastSnap.embed_consumed, baselineEmbedConsumed);
+        result.observed_kg = counterDelta(lastSnap.kg_consumed, baselineKgConsumed);
+        result.observed_title = counterDelta(lastSnap.title_consumed, baselineTitleConsumed);
+        spdlog::warn("Termination requested; stopping isolated benchmark fixture");
+        stopHarness(false);
+        return result;
+    }
+
     result.write_coordinator_flushed = true;
-    if (serviceManager) {
+    if (serviceManager != nullptr) {
         if (auto* writeCoordinator = serviceManager->getWriteCoordinator()) {
             auto flushResult = writeCoordinator->flush(30s);
             result.write_coordinator_flushed = static_cast<bool>(flushResult);
@@ -1577,39 +2174,105 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
     result.final_entity_queued = lastSnap.entity_queued;
     result.final_entity_consumed = lastSnap.entity_consumed;
     result.final_entity_dropped = lastSnap.entity_dropped;
-    result.final_title_queued = lastSnap.title_queued;
-    result.final_title_consumed = lastSnap.title_consumed;
-    result.final_title_dropped = lastSnap.title_dropped;
+    result.final_title_queued = counterDelta(lastSnap.title_queued, baselineTitleQueued);
+    result.final_title_consumed = counterDelta(lastSnap.title_consumed, baselineTitleConsumed);
+    result.final_title_dropped = counterDelta(lastSnap.title_dropped, baselineTitleDropped);
+    result.observed_title = result.final_title_consumed;
     result.dropped_batches = saturatedAdd(
         result.dropped_batches,
         saturatedAdd(result.final_symbol_dropped,
                      saturatedAdd(result.final_entity_dropped, result.final_title_dropped)));
 
-    result.pipeline_complete = allStagesComplete && result.enrichment_drained &&
+    const bool titleComplete = result.observed_title == result.expected_title;
+    result.pipeline_complete = allStagesComplete && titleComplete && result.enrichment_drained &&
                                result.write_coordinator_flushed && result.dropped_batches == 0 &&
                                failCount.load(std::memory_order_relaxed) == 0;
     const int64_t enrichmentEndMs = nowMs();
     result.pipeline_drain_ms = nonNegativeDeltaMs(enrichmentEndMs, storageReadyEndMs);
     result.enrichment_ready_ms = nonNegativeDeltaMs(enrichmentEndMs, ingestStartMs);
-    result.total_duration_ms = result.enrichment_ready_ms;
-    result.throughput_docs_per_sec =
-        result.total_duration_ms > 0
-            ? static_cast<double>(successCount.load()) / (result.total_duration_ms / 1000.0)
-            : 0.0;
 
-    spdlog::info("Phase 6: Running fixed search-impact probes...");
-    result.search_impact =
-        runSearchImpactProbes(client, vectorsDisabled, result.kg_enabled, result.pipeline_complete);
-    for (const auto& probe : result.search_impact) {
-        if (probe.name == "keyword" && probe.ok &&
-            probe.total_count >= static_cast<std::uint64_t>(successCount.load())) {
-            result.searchability_ready_ms = nonNegativeDeltaMs(probe.completed_ms, ingestStartMs);
-            break;
+    if (serviceManager != nullptr) {
+        if (auto metadataRepo = serviceManager->getMetadataRepo()) {
+            auto countResult = metadataRepo->getDocumentCount();
+            if (countResult) {
+                result.stored_documents =
+                    static_cast<std::uint64_t>(std::max<std::int64_t>(0, countResult.value()));
+                result.stored_document_count_readable = true;
+            } else {
+                result.stored_document_count_error = countResult.error().message;
+            }
+        }
+
+        if (!vectorsDisabled) {
+            const auto vectorFinalizeStart = std::chrono::steady_clock::now();
+            if (auto coordinator = serviceManager->getVectorIndexCoordinator()) {
+                auto rebuildResult = yams::cli::run_sync(
+                    coordinator->requestRebuild(yams::daemon::RebuildReason::EmbeddingBatch), 300s);
+                result.vector_rebuild_ok = static_cast<bool>(rebuildResult);
+                if (!rebuildResult) {
+                    result.vector_rebuild_error = rebuildResult.error().message;
+                }
+                result.vector_index_telemetry = coordinator->snapshot();
+            } else {
+                result.vector_rebuild_error = "vector index coordinator unavailable";
+            }
+            result.vector_index_finalize_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - vectorFinalizeStart)
+                    .count();
+
+            if (auto vectorDb = serviceManager->getVectorDatabase()) {
+                result.vector_index_reusable = vectorDb->hasReusablePersistedSearchIndex();
+                result.vector_oracle = captureVectorOracle(*vectorDb, result.embedding_dimension);
+            } else {
+                result.vector_oracle.error = "vector database unavailable";
+            }
+        } else {
+            result.vector_rebuild_ok = true;
+            result.vector_oracle.complete = true;
         }
     }
 
-    if (serviceManager) {
-        result.embedding_phase_timings = serviceManager->getEmbeddingPhaseTimingsSnapshot();
+    const bool corePipelineComplete = result.pipeline_complete;
+    spdlog::info("Phase 6: Running fixed search-impact probes...");
+    result.search_impact =
+        runSearchImpactProbes(client, vectorsDisabled, result.kg_enabled, corePipelineComplete);
+    result.search_result_fingerprint = fingerprintSearchImpact(result.search_impact);
+    bool searchOracleComplete = true;
+    for (const auto& probe : result.search_impact) {
+        if (!probe.required_by_contract) {
+            continue;
+        }
+        searchOracleComplete = searchOracleComplete && probe.ok;
+        if (probe.ok) {
+            result.searchability_ready_ms =
+                std::max(result.searchability_ready_ms,
+                         nonNegativeDeltaMs(probe.completed_ms, ingestStartMs));
+        }
+    }
+
+    const bool documentOracleComplete =
+        result.stored_document_count_readable &&
+        result.stored_documents == static_cast<std::uint64_t>(successCount.load());
+    const bool vectorOracleComplete =
+        vectorsDisabled ||
+        (result.vector_rebuild_ok && result.vector_oracle.complete &&
+         result.vector_oracle.embeddedDocuments == static_cast<std::uint64_t>(successCount.load()));
+    const bool glinerOracleComplete = !result.gliner_requested || result.gliner_stage_active;
+    result.pipeline_complete = result.pipeline_complete && documentOracleComplete &&
+                               vectorOracleComplete && glinerOracleComplete && searchOracleComplete;
+
+    result.total_duration_ms = std::max(result.enrichment_ready_ms, result.searchability_ready_ms);
+    const double elapsedSeconds = static_cast<double>(result.total_duration_ms) / 1000.0;
+    result.throughput_docs_per_sec =
+        elapsedSeconds > 0.0 ? static_cast<double>(successCount.load()) / elapsedSeconds : 0.0;
+    result.throughput_mib_per_sec =
+        elapsedSeconds > 0.0
+            ? (static_cast<double>(result.generated_bytes) / (1024.0 * 1024.0)) / elapsedSeconds
+            : 0.0;
+
+    if (serviceManager != nullptr) {
+        result.embedding_phase_timings = embeddingTimingSink->snapshot();
         result.document_store_phase_timings =
             yams::app::services::getDocumentStorePhaseTimingsSnapshot();
         result.content_store_phase_timings = yams::api::getContentStorePhaseTimingsSnapshot();
@@ -1628,11 +2291,36 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
         if (auto postIngest = serviceManager->getPostIngestQueue()) {
             result.post_ingest_metrics = postIngest->metricsSnapshot();
         }
+        result.db_lock_errors =
+            harness.daemon()->getState().stats.dbLockErrors.load(std::memory_order_relaxed);
     }
+
+    result.wal_bytes_after = sidecarBytes(harness.dataDir(), "-wal");
+    result.wal_growth_bytes = result.wal_bytes_after > result.wal_bytes_before
+                                  ? result.wal_bytes_after - result.wal_bytes_before
+                                  : 0;
+
+    stopHarness(true);
+
+    result.peak_rss_after_bytes = peakRssBytes();
+    const auto cpuEnd = std::clock();
+    if (_cpuStart != static_cast<std::clock_t>(-1) && cpuEnd != static_cast<std::clock_t>(-1) &&
+        cpuEnd >= _cpuStart) {
+        result.cpu_ms = static_cast<std::uint64_t>(
+            (static_cast<double>(cpuEnd - _cpuStart) * 1000.0) / CLOCKS_PER_SEC);
+    }
+    result.lifecycle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                              std::chrono::steady_clock::now() - _lifecycleStart)
+                              .count();
+
+    const bool cleanShutdown = result.shutdown_succeeded && result.socket_removed &&
+                               result.pid_removed && result.sidecars_removed;
+    result.pipeline_complete = result.pipeline_complete && cleanShutdown;
 
     spdlog::info("=== Benchmark Complete ===");
     spdlog::info("Total duration: {} ms", result.total_duration_ms);
-    spdlog::info("Throughput: {:.2f} docs/sec", result.throughput_docs_per_sec);
+    spdlog::info("Throughput: {:.2f} docs/sec ({:.2f} MiB/sec)", result.throughput_docs_per_sec,
+                 result.throughput_mib_per_sec);
     spdlog::info("Dropped batches: {}", result.dropped_batches);
 
     return result;
@@ -1645,37 +2333,24 @@ BenchmarkResult runBenchmark(int corpusSize, int docSize, int pollIntervalMs,
 int main(int /*argc*/, char* /*argv*/[]) {
     // Set log level
     const char* logLevel = std::getenv("YAMS_LOG_LEVEL");
-    if (logLevel && std::string(logLevel) == "debug") {
+    if (logLevel != nullptr && std::string(logLevel) == "debug") {
         spdlog::set_level(spdlog::level::debug);
     } else {
         spdlog::set_level(spdlog::level::info);
     }
 
     // Read configuration from environment
-    int corpusSize = 100;
-    if (const char* env = std::getenv("YAMS_BENCH_CORPUS_SIZE")) {
-        corpusSize = std::atoi(env);
-    }
-
-    int docSize = 1000;
-    if (const char* env = std::getenv("YAMS_BENCH_DOC_SIZE")) {
-        docSize = std::atoi(env);
-    }
-
-    int pollInterval = 100;
-    if (const char* env = std::getenv("YAMS_BENCH_POLL_INTERVAL_MS")) {
-        pollInterval = std::atoi(env);
-    }
+    const int corpusSize = benchEnvInt("YAMS_BENCH_CORPUS_SIZE", 100, 1, 1000000);
+    const int docSize = benchEnvInt("YAMS_BENCH_DOC_SIZE", 1000, 1, 100 * 1024 * 1024);
+    const int pollInterval = benchEnvInt("YAMS_BENCH_POLL_INTERVAL_MS", 100, 1, 60000);
 
     std::string ingestMode = "single_file_serial";
     if (const char* env = std::getenv("YAMS_BENCH_INGEST_MODE")) {
         ingestMode = env;
     }
 
-    std::size_t ingestConcurrency = 4;
-    if (const char* env = std::getenv("YAMS_BENCH_INGEST_CONCURRENCY")) {
-        ingestConcurrency = static_cast<std::size_t>(std::max(1, std::atoi(env)));
-    }
+    const auto ingestConcurrency =
+        static_cast<std::size_t>(benchEnvInt("YAMS_BENCH_INGEST_CONCURRENCY", 4, 1, 1024));
 
     const char* outputPath = std::getenv("YAMS_BENCH_OUTPUT");
 
@@ -1687,12 +2362,12 @@ int main(int /*argc*/, char* /*argv*/[]) {
     json output = result.toJson();
     std::string jsonStr = output.dump(2);
 
-    if (outputPath) {
+    if (outputPath != nullptr) {
         std::ofstream outFile(outputPath);
-        outFile << jsonStr << std::endl;
+        outFile << jsonStr << '\n';
         spdlog::info("Results written to: {}", outputPath);
     } else {
-        std::cout << jsonStr << std::endl;
+        std::cout << jsonStr << '\n';
     }
 
     return result.metadata_storage.failures > 0 || !result.pipeline_complete ||

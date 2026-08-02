@@ -517,14 +517,9 @@ public:
     uint64_t getEmbeddingSemanticUpdateErrors() const {
         return embeddingLifecycle_.semanticUpdateErrors();
     }
-    std::unordered_map<std::string, EmbeddingService::PhaseTiming>
-    getEmbeddingPhaseTimingsSnapshot() const {
-        return embeddingService_ ? embeddingService_->phaseTimingsSnapshot()
-                                 : std::unordered_map<std::string, EmbeddingService::PhaseTiming>{};
-    }
-    void resetEmbeddingPhaseTimings() {
+    void setEmbeddingPhaseTimingSink(std::shared_ptr<EmbeddingPhaseTimingSink> sink) {
         if (embeddingService_) {
-            embeddingService_->resetPhaseTimings();
+            embeddingService_->setPhaseTimingSink(std::move(sink));
         }
     }
 

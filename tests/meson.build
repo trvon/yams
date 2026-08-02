@@ -468,6 +468,7 @@ if catch2_dep.found()
       'unit/daemon/components/checkpoint_manager_test.cpp',
       'unit/daemon/components/config_resolver_test.cpp',
       'unit/daemon/components/database_manager_test.cpp',
+      'unit/daemon/components/embedding_service_timing_catch2_test.cpp',
       'unit/daemon/components/plugin_manager_test.cpp',
       'unit/daemon/plugin_manager_config_test.cpp',
       'unit/daemon/components/topology_tuner_catch2_test.cpp',

@@ -2339,6 +2339,13 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
                                                   const std::string& filePath,
                                                   const std::string& language,
                                                   const std::string& /*mimeType*/) {
+    const auto stageStart = std::chrono::steady_clock::now();
+    struct StageTimingGuard {
+        PostIngestQueue* self;
+        std::chrono::steady_clock::time_point start;
+        ~StageTimingGuard() { self->recordTiming("title_process", start); }
+    } stageTimingGuard{this, stageStart};
+
     titleNlDocsProcessed_.fetch_add(1, std::memory_order_relaxed);
     auto titleExtractor = getTitleExtractor();
     if (!titleExtractor) {
@@ -2393,7 +2400,15 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
         static const std::unordered_set<std::string> kTitleTypes = {
             "title", "heading", "function", "class", "method", "module", "file", "symbol"};
 
-        auto result = titleExtractor(textSnippet, kCombinedEntityTypes);
+        auto result = [&]() {
+            const auto inferenceStart = std::chrono::steady_clock::now();
+            struct InferenceTimingGuard {
+                PostIngestQueue* self;
+                std::chrono::steady_clock::time_point start;
+                ~InferenceTimingGuard() { self->recordTiming("title_gliner_infer", start); }
+            } inferenceTimingGuard{this, inferenceStart};
+            return titleExtractor(textSnippet, kCombinedEntityTypes);
+        }();
         if (!result || !result.value().usedGliner || result.value().concepts.empty()) {
             spdlog::debug("[PostIngestQueue] GLiNER returned no concepts for {}",
                           hash.substr(0, 12));

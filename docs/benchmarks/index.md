@@ -10,6 +10,7 @@ kept as optional, gitignored local tooling. Per-run detail:
 | Local harness | `tests/benchmarks/xplan/` (optional; not distributed) |
 | Artifacts | `build/benchmarks/<plan>/<stamp>/` (gitignored) |
 | Micro baselines (code) | `tests/benchmarks/baseline/*.json` |
+| Full Simeon ingestion oracle | [`ingestion_oracle.md`](ingestion_oracle.md) |
 
 **Corpora:** quality plans use **BEIR scifact** (`dataset=scifact`, 2000 docs × 50
 queries) by default. Cache: `~/.cache/yams/benchmarks/<name>` (auto-download).
@@ -27,6 +28,10 @@ queries) by default. Cache: `~/.cache/yams/benchmarks/<name>` (auto-download).
 **Builds:** `build/release` (ingest, repair, quality); `build/prepush-macos` (load, ops — Catch2)
 
 ### Ingest — `ingest_pipeline` (80 docs × 1 KB, synthetic throughput)
+
+This historical snapshot predates the full Simeon identity, persistence, and lifecycle contract in
+[`ingestion_oracle.md`](ingestion_oracle.md); do not use it as the comprehensive optimization
+baseline.
 
 | Arm | docs/s | wall_ms | complete |
 |-----|------:|--------:|----------|

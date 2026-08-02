@@ -89,29 +89,21 @@ void EmbeddingService::start() {
     spdlog::info("EmbeddingService: started channel poller");
 }
 
-std::unordered_map<std::string, EmbeddingService::PhaseTiming>
-EmbeddingService::phaseTimingsSnapshot() const {
-    std::lock_guard<std::mutex> lock(phaseTimingsMutex_);
-    return phaseTimings_;
-}
-
-void EmbeddingService::resetPhaseTimings() {
-    YAMS_ZONE_SCOPED_N("Embedding::resetPhaseTimings");
-    std::lock_guard<std::mutex> lock(phaseTimingsMutex_);
-    phaseTimings_.clear();
-}
-
-void EmbeddingService::recordPhaseTiming(const std::string& phase,
+void EmbeddingService::recordPhaseTiming(std::string_view phase,
                                          std::chrono::steady_clock::time_point start) {
-    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - start)
-                        .count();
-    std::lock_guard<std::mutex> lock(phaseTimingsMutex_);
-    auto& timing = phaseTimings_[phase];
-    timing.calls += 1;
-    timing.totalMs += static_cast<uint64_t>(std::max<long long>(0, ms));
-    timing.maxMs =
-        std::max<uint64_t>(timing.maxMs, static_cast<uint64_t>(std::max<long long>(0, ms)));
+    auto sink = std::atomic_load_explicit(&phaseTimingSink_, std::memory_order_acquire);
+    if (!sink) {
+        return;
+    }
+
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    const auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
+    const auto nonNegativeUs = static_cast<std::uint64_t>(std::max<std::int64_t>(0, elapsedUs));
+    try {
+        sink->record(phase, nonNegativeUs);
+    } catch (...) {
+        // Instrumentation must never affect embedding or semantic-graph work.
+    }
 }
 
 void EmbeddingService::enqueueRepairStatusUpdate(std::vector<std::string> hashes,
@@ -1666,7 +1658,8 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     if (const char* s = std::getenv("YAMS_EMBED_TIMING_WARN_MS")) {
         try {
             warnMs = static_cast<uint64_t>(std::stoull(s));
-        } catch (...) {
+        } catch (const std::exception& e) {
+            spdlog::debug("Ignoring invalid YAMS_EMBED_TIMING_WARN_MS: {}", e.what());
         }
     }
 
@@ -1683,13 +1676,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now() - start)
                             .count();
-        {
-            std::lock_guard<std::mutex> lock(phaseTimingsMutex_);
-            auto& timing = phaseTimings_[phase];
-            timing.calls += 1;
-            timing.totalMs += static_cast<uint64_t>(std::max<long long>(0, ms));
-            timing.maxMs = std::max<uint64_t>(timing.maxMs, static_cast<uint64_t>(ms));
-        }
+        recordPhaseTiming(phase, start);
         if (timingEnabled || ms >= static_cast<long long>(warnMs)) {
             spdlog::info("[EmbeddingService] job={} phase={} dur_ms={} {}", jobTag, phase, ms,
                          detail);

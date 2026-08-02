@@ -172,14 +172,14 @@ void TuningManager::stop() {
         }
         try {
             wakeDrain->set_value();
-        } catch (...) {
-            // Intentional best-effort path; keep the primary operation unaffected.
+        } catch (const std::future_error& e) {
+            spdlog::debug("TuningManager wake-drain completion error: {}", e.what());
         }
     });
     try {
         wakeDrainFuture.wait();
-    } catch (...) {
-        // Intentional best-effort path; keep the primary operation unaffected.
+    } catch (const std::future_error& e) {
+        spdlog::debug("TuningManager wake-drain wait error: {}", e.what());
     }
 
     try {
@@ -798,6 +798,9 @@ bool TuningManager::tick_once() {
             }
 
             const uint64_t dbLockErrors = TuneAdvisor::getAndResetDbLockErrors();
+            if (state_ != nullptr && dbLockErrors > 0) {
+                state_->stats.dbLockErrors.fetch_add(dbLockErrors, std::memory_order_relaxed);
+            }
             const uint32_t lockThreshold = TuneAdvisor::dbLockErrorThreshold();
 
             auto budget = TuneAdvisor::postIngestBudgetAll(/*includeDynamicCaps=*/true);
@@ -890,7 +893,7 @@ bool TuningManager::tick_once() {
                 // keep embed target derived from budget/governor instead of stale limiter state.
             }
 
-            if (dbLockErrors > lockThreshold * 2) {
+            if (dbLockErrors > static_cast<std::uint64_t>(lockThreshold) * 2ULL) {
                 kgTarget = std::min<uint32_t>(kgTarget, 2);
                 embedTarget = std::min<uint32_t>(embedTarget, 1);
                 spdlog::debug("TuningManager: DB lock errors ({}) severe; KG/embed reduced",
