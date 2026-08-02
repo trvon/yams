@@ -1854,6 +1854,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_topology_identity_exe = executable('catch2_topology_identity',
+    files('unit/topology/protected_relation_identity_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_topology_factory_exe = executable('catch2_topology_factory',
     files('unit/topology/topology_factory_catch2_test.cpp'),
     include_directories: incs,
@@ -2485,6 +2494,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'topology'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
+  )
+
+  test('topology_identity', catch2_topology_identity_exe,
+    suite: ['catch2', 'unit', 'topology'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
   )
 
   test('topology_factory', catch2_topology_factory_exe,

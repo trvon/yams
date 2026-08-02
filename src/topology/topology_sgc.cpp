@@ -75,7 +75,7 @@ void applySGCSmoothing(std::vector<TopologyDocumentInput>& documents,
             if (config.reciprocalOnly && !neighbor.reciprocal) {
                 continue;
             }
-            if (neighbor.score < minEdge) {
+            if (!std::isfinite(neighbor.score) || neighbor.score < minEdge) {
                 continue;
             }
             const float w = std::max(0.0F, neighbor.score);

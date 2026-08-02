@@ -73,6 +73,17 @@ core_bench = executable('yams_core_benchmarks', files('core_benchmarks.cpp'),
   install: false,
 )
 
+topology_build_bench = executable('topology_build_bench', files('topology_build_bench.cpp'),
+  include_directories: incs,
+  dependencies: [
+    dependency('yams_topology'),
+    dependency('nlohmann_json'),
+  ] + tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  install: false,
+)
+alias_target('bench_topology_build', topology_build_bench)
+
 grep_bench = executable('yams_grep_benchmarks', files('grep_benchmarks.cpp'),
   include_directories: incs,
   dependencies: [test_deps, dependency('yams_benchmarks')] + tracy_deps,
