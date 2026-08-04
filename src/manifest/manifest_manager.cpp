@@ -1,5 +1,6 @@
 #include <spdlog/spdlog.h>
 #include <yams/common/fs_utils.h>
+#include <yams/config/config_helpers.h>
 #include <yams/core/checked_arithmetic.h>
 #include <yams/crypto/hasher.h>
 #include <yams/manifest/manifest_manager.h>
@@ -12,8 +13,6 @@ namespace yamsfmt = fmt;
 #endif
 
 #include <algorithm>
-#include <charconv>
-#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <fstream>
@@ -27,15 +26,6 @@ namespace yamsfmt = fmt;
 namespace yams::manifest {
 
 namespace {
-
-std::optional<std::string> getenvCopy(const char* name) {
-    static std::mutex envMutex;
-    std::lock_guard<std::mutex> lock(envMutex);
-    if (const char* value = std::getenv(name)) { // NOLINT(concurrency-mt-unsafe)
-        return std::string(value);
-    }
-    return std::nullopt;
-}
 
 std::optional<uint32_t> checkedU32(std::size_t value) {
     uint32_t narrowed = 0;
@@ -540,14 +530,9 @@ Result<void> ManifestManager::reconstructFile(const Manifest& manifest,
     const std::size_t totalChunks = manifest.chunks.size();
     // Prefetch window size: default to half the system cores; allow override via env
     std::size_t prefetch = std::max<std::size_t>(1, std::thread::hardware_concurrency() / 2);
-    if (auto value = getenvCopy("YAMS_RECONSTRUCT_PREFETCH")) {
-        std::size_t parsed = 0;
-        const char* begin = value->data();
-        const char* end = begin + value->size();
-        const auto [parsedEnd, error] = std::from_chars(begin, end, parsed);
-        if (error == std::errc{} && parsedEnd == end && parsed > 0 && parsed <= 64) {
-            prefetch = parsed;
-        }
+    if (auto value = yams::config::read_env_size("YAMS_RECONSTRUCT_PREFETCH").value;
+        value && *value > 0 && *value <= 64) {
+        prefetch = *value;
     }
     // Clamp to a reasonable upper bound
     if (prefetch > 64)

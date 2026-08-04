@@ -3,6 +3,7 @@ sqlite_dep = dependency('sqlite3', required: true)
 openssl_dep = dependency('openssl', modules: ['crypto'], required: true)
 json_dep = dependency('nlohmann_json', required: true)
 yams_core = dependency('yams_core', required: false)
+yams_config_dep = dependency('yams_config', required: true)
 yams_storage_engine_dep = dependency('yams_storage_engine', required: false)
 
 yams_metadata = static_library('yams_metadata',
@@ -38,7 +39,7 @@ yams_metadata = static_library('yams_metadata',
     'versioning_util.cpp',
   ],
   include_directories: include_directories('../../include'),
-  dependencies: [spdlog_dep, sqlite_dep, openssl_dep, json_dep, yams_core, yams_storage_engine_dep],
+  dependencies: [spdlog_dep, sqlite_dep, openssl_dep, json_dep, yams_core, yams_config_dep, yams_storage_engine_dep],
   install: true,
 )
 
@@ -52,6 +53,6 @@ pkg.generate(yams_metadata,
 yams_metadata_dep = declare_dependency(
   link_with: yams_metadata,
   include_directories: include_directories('../../include'),
-  dependencies: [sqlite_dep, json_dep],
+  dependencies: [sqlite_dep, json_dep, yams_config_dep],
 )
 meson.override_dependency('yams_metadata', yams_metadata_dep)

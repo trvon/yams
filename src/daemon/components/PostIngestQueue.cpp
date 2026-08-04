@@ -16,6 +16,7 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/api/content_store.h>
 #include <yams/common/utf8_utils.h>
+#include <yams/config/config_helpers.h>
 #include <yams/core/assert.hpp>
 #include <yams/core/atomic_utils.h>
 #include <yams/daemon/async_batcher.h>
@@ -275,23 +276,11 @@ std::vector<NlAliasVariant> buildNlAliasVariants(const std::string& entityText,
     return variants;
 }
 
-// Copy an environment variable under a static mutex so thread-safety
-// checkers can see we're serializing access to the env block.
-inline std::optional<std::string> getenvCopy(const char* name) {
-    static std::mutex envMutex;
-    std::lock_guard<std::mutex> lock(envMutex);
-    if (const char* value = std::getenv(name)) { // NOLINT(concurrency-mt-unsafe)
-        return std::string(value);
-    }
-    return std::nullopt;
-}
-
 // Check if GLiNER title extraction is disabled via environment variable
 // Set YAMS_DISABLE_GLINER_TITLES=1 for faster ingestion at the cost of title quality
 inline bool isGlinerTitleExtractionDisabled() {
     static const bool disabled = []() {
-        auto env = getenvCopy("YAMS_DISABLE_GLINER_TITLES");
-        return env && *env == "1";
+        return yams::config::read_env_bool("YAMS_DISABLE_GLINER_TITLES").valueOr(false);
     }();
     return disabled;
 }

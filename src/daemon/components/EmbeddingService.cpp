@@ -2,6 +2,7 @@
 #include <yams/daemon/components/WriteCoordinator.h>
 
 #include <spdlog/spdlog.h>
+#include <yams/config/config_helpers.h>
 #include <yams/core/assert.hpp>
 #include <yams/profiling.h>
 
@@ -217,14 +218,9 @@ void EmbeddingService::shutdown() {
     }
 
     std::chrono::milliseconds maxWait{30000};
-    if (const char* env = std::getenv("YAMS_EMBED_SHUTDOWN_WAIT_MS")) {
-        try {
-            const auto parsed = static_cast<std::chrono::milliseconds::rep>(std::stoll(env));
-            if (parsed > 0) {
-                maxWait = std::chrono::milliseconds(parsed);
-            }
-        } catch (...) {
-        }
+    if (auto configured = yams::config::read_env_milliseconds("YAMS_EMBED_SHUTDOWN_WAIT_MS").value;
+        configured && configured->count() > 0) {
+        maxWait = *configured;
     }
 
     const auto deadline = std::chrono::steady_clock::now() + maxWait;

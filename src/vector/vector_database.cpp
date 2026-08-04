@@ -1,6 +1,7 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <fstream>
+#include <yams/config/config_helpers.h>
 #include <yams/core/assert.hpp>
 #include <yams/core/atomic_utils.h>
 #include <yams/profiling.h>
@@ -21,17 +22,6 @@
 #include <unordered_set>
 
 namespace yams::vector {
-
-namespace {
-std::optional<std::string> getenvCopy(const char* name) {
-    static std::mutex envMutex;
-    std::lock_guard<std::mutex> lock(envMutex);
-    if (const char* value = std::getenv(name)) { // NOLINT(concurrency-mt-unsafe)
-        return std::string(value);
-    }
-    return std::nullopt;
-}
-} // namespace
 
 /**
  * Private implementation class (PIMPL pattern)
@@ -81,14 +71,9 @@ public:
 
             // Allow test/CI override to force in-memory vector DB
             std::string db_path = config_.database_path;
-            bool force_in_memory = config_.use_in_memory;
-            if (auto env_mem = getenvCopy("YAMS_VDB_IN_MEMORY"); env_mem) {
-                std::string v(*env_mem);
-                std::transform(v.begin(), v.end(), v.begin(),
-                               [](unsigned char c) { return (char)std::tolower(c); });
-                force_in_memory =
-                    force_in_memory || (v == "1" || v == "true" || v == "yes" || v == "on");
-            }
+            const bool force_in_memory =
+                config_.use_in_memory ||
+                yams::config::read_env_bool("YAMS_VDB_IN_MEMORY").valueOr(false);
             if (force_in_memory) {
                 db_path = ":memory:";
             }
@@ -103,36 +88,18 @@ public:
             // Respect test/CI bypass: when sqlite-vec init is skipped, do not attempt to create
             // virtual tables (avoids 'no such module: vec0'). Allow test harnesses to override so
             // unit tests can exercise vector flows even with YAMS_DISABLE_VECTORS.
-            bool vec_bypass = false;
-            bool vec_bypass_protected = false; // do not auto-enable during tests if set via env
-            try {
-                if (auto env = getenvCopy("YAMS_DISABLE_VECTORS"); env) {
-                    std::string v(*env);
-                    std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                    vec_bypass = (v == "1" || v == "true" || v == "yes" || v == "on");
-                    vec_bypass_protected = vec_bypass_protected || vec_bypass;
-                }
-                if (!vec_bypass) {
-                    if (auto env = getenvCopy("YAMS_SQLITE_VEC_SKIP_INIT"); env) {
-                        std::string v(*env);
-                        std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                        vec_bypass = (v == "1" || v == "true" || v == "yes" || v == "on");
-                        vec_bypass_protected = vec_bypass_protected || vec_bypass;
-                    }
-                }
-                if (vec_bypass && !vec_bypass_protected) {
-                    if (auto testEnv = getenvCopy("YAMS_TESTING"); testEnv) {
-                        std::string v(*testEnv);
-                        std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                        if (v == "1" || v == "true" || v == "yes" || v == "on") {
-                            spdlog::debug(
-                                "[VectorDB] override disable flag during testing; creating tables");
-                            vec_bypass = false;
-                        }
-                    }
-                }
-            } catch (...) {
-                spdlog::debug("[VectorDB] env-based vector bypass probe failed");
+            const auto vectorPolicy = yams::config::resolve_vector_environment();
+            bool vec_bypass = !vectorPolicy.enabled;
+            bool vec_bypass_protected = vec_bypass; // do not auto-enable explicit bypasses in tests
+            if (!vec_bypass) {
+                vec_bypass =
+                    yams::config::read_env_bool("YAMS_SQLITE_VEC_SKIP_INIT").valueOr(false);
+                vec_bypass_protected = vec_bypass;
+            }
+            if (vec_bypass && !vec_bypass_protected &&
+                yams::config::read_env_bool("YAMS_TESTING").valueOr(false)) {
+                spdlog::debug("[VectorDB] override disable flag during testing; creating tables");
+                vec_bypass = false;
             }
 
             // Create tables only when explicitly allowed (and not bypassed)

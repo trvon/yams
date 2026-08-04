@@ -6,14 +6,14 @@
 #include <condition_variable>
 #include <csignal>
 #include <cstdio>
-#include <cstdlib>
+#include <limits>
 #include <mutex>
 #include <string>
-#include <string_view>
 #include <thread>
 
 #include <spdlog/spdlog.h>
 
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/shutdown_budget.h>
 
@@ -21,20 +21,8 @@ namespace yams::daemon {
 
 namespace {
 
-std::string getenvCopy(std::string_view name) {
-    static std::mutex envMutex;
-    std::lock_guard<std::mutex> lock(envMutex);
-    const std::string key(name);
-    const char* env = std::getenv(key.c_str()); // NOLINT(concurrency-mt-unsafe)
-    if (!env || !*env) {
-        return {};
-    }
-    return std::string(env);
-}
-
 bool isSupervisorManagedForegroundDaemon() {
-    const std::string managed = getenvCopy("YAMS_DAEMON_FOREGROUND");
-    return managed == "1" || managed == "true" || managed == "TRUE";
+    return yams::config::read_env_bool("YAMS_DAEMON_FOREGROUND").valueOr(false);
 }
 
 } // namespace
@@ -86,32 +74,25 @@ void DaemonLifecycleAdapter::requestShutdown(bool graceful, bool inTestMode) {
         try {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-            if (const std::string env = getenvCopy("YAMS_SHUTDOWN_FORCE_EXIT_MS"); !env.empty()) {
-                try {
-                    int parsed = std::stoi(env);
-                    if (parsed <= 0) {
-                        timeoutMs = 0;
-                    } else {
-                        timeoutMs = std::max(parsed, 1000);
-                        if (graceful) {
-                            const auto requested = std::chrono::milliseconds(timeoutMs);
-                            const auto clamped =
-                                shutdown_budget::clampGracefulShutdownWaitTimeout(requested);
-                            if (clamped != requested) {
-                                spdlog::info("Clamping graceful shutdown timeout from {}ms to "
-                                             "{}ms to cover ServiceManager join budgets",
-                                             requested.count(), clamped.count());
-                            }
-                            timeoutMs = static_cast<int>(clamped.count());
+            if (auto configured =
+                    yams::config::read_env_milliseconds("YAMS_SHUTDOWN_FORCE_EXIT_MS").value) {
+                if (configured->count() == 0) {
+                    timeoutMs = 0;
+                } else {
+                    auto requested = std::max(*configured, std::chrono::milliseconds(1000));
+                    if (graceful) {
+                        const auto clamped =
+                            shutdown_budget::clampGracefulShutdownWaitTimeout(requested);
+                        if (clamped != requested) {
+                            spdlog::info("Clamping graceful shutdown timeout from {}ms to "
+                                         "{}ms to cover ServiceManager join budgets",
+                                         requested.count(), clamped.count());
                         }
+                        requested = clamped;
                     }
-                } catch (const std::exception& e) {
-                    spdlog::debug("Ignoring invalid YAMS_SHUTDOWN_FORCE_EXIT_MS '{}': {}", env,
-                                  e.what());
-                } catch (...) {
-                    spdlog::debug("Ignoring invalid YAMS_SHUTDOWN_FORCE_EXIT_MS '{}': unknown "
-                                  "error",
-                                  env);
+                    requested = std::min(
+                        requested, std::chrono::milliseconds{std::numeric_limits<int>::max()});
+                    timeoutMs = static_cast<int>(requested.count());
                 }
             }
 

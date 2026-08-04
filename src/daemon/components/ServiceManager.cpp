@@ -6,7 +6,6 @@
 #include <atomic>
 #include <cctype>
 #include <cstdio>
-#include <cstdlib>
 #include <ctime>
 #include <fcntl.h>
 #include <filesystem>
@@ -138,22 +137,6 @@ bool isEphemeralDataDir(const std::filesystem::path& path) {
 // Convenience alias for ConfigResolver timeouts
 inline int read_timeout_ms(const char* envName, int defaultMs, int minMs) {
     return yams::daemon::ConfigResolver::readTimeoutMs(envName, defaultMs, minMs);
-}
-
-std::string getenvCopy(std::string_view name) {
-    static std::mutex envMutex;
-    std::lock_guard<std::mutex> lock(envMutex);
-    const std::string key(name);
-    const char* env = std::getenv(key.c_str()); // NOLINT(concurrency-mt-unsafe)
-    if (!env || !*env) {
-        return {};
-    }
-    return std::string(env);
-}
-
-bool envTruthyCopy(std::string_view name) {
-    const std::string env = getenvCopy(name);
-    return !env.empty() && yams::daemon::ConfigResolver::envTruthy(env.c_str());
 }
 
 yams::Result<void> ensureDataDirectory(const std::filesystem::path& dataDir) {
@@ -372,7 +355,8 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
     // `YAMS_TOPOLOGY_REBUILD_MIN_INTERVAL_MS` overrides.
     {
         std::int64_t throttleMs = 60'000; // 60s default
-        if (const std::string raw = getenvCopy("YAMS_TOPOLOGY_REBUILD_MIN_INTERVAL_MS");
+        if (const std::string raw =
+                yams::config::getenv_copy("YAMS_TOPOLOGY_REBUILD_MIN_INTERVAL_MS");
             !raw.empty()) {
             try {
                 throttleMs = std::max<std::int64_t>(0, std::stoll(raw));
@@ -535,7 +519,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                 std::transform(v.begin(), v.end(), v.begin(), ::tolower);
                 return v == "0" || v == "false" || v == "off" || v == "no";
             };
-            const std::string embedOnAdd = getenvCopy("YAMS_EMBED_ON_ADD");
+            const std::string embedOnAdd = yams::config::getenv_copy("YAMS_EMBED_ON_ADD");
             if (!falsy(embedOnAdd.c_str())) {
                 embeddingLifecycle_.setAutoOnAdd(true);
                 spdlog::debug("YAMS_TESTING: defaulting embeddingsAutoOnAdd_=true");
@@ -573,7 +557,8 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             const bool strictPluginDirMode = config_.pluginDirStrict;
 
             // Trust from env
-            if (const std::string env = getenvCopy("YAMS_PLUGIN_DIR"); !env.empty()) {
+            if (const std::string env = yams::config::getenv_copy("YAMS_PLUGIN_DIR");
+                !env.empty()) {
                 try {
                     std::string raw(env);
                     std::vector<std::string> parts;
@@ -2125,7 +2110,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
     // Lightweight session directory watcher (polling), idle until SessionService enables it.
     const bool startSessionWatcher =
-        shouldStartSessionWatcher(getenvCopy("YAMS_DISABLE_SESSION_WATCHER"));
+        shouldStartSessionWatcher(yams::config::getenv_copy("YAMS_DISABLE_SESSION_WATCHER"));
     if (!startSessionWatcher) {
         spdlog::info("[ServiceManager] Session watcher disabled by test override");
     } else {
@@ -2235,7 +2220,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             if (piq) {
                 piq->setDrainCallback([this]() {
                     const bool disableDrainTopologyRebuild = []() {
-                        const std::string env = getenvCopy("YAMS_DISABLE_DRAIN_TOPOLOGY_REBUILD");
+                        const std::string env =
+                            yams::config::getenv_copy("YAMS_DISABLE_DRAIN_TOPOLOGY_REBUILD");
                         return env == "1";
                     }();
                     const bool repairActive =
@@ -2268,7 +2254,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     spdlog::info("[ServiceManager] Phase: Post-Ingest Queue Initialized.");
 
     // Skip EmbeddingService init when vectors are disabled (benchmark/compat mode)
-    const bool vectorsDisabled = envTruthyCopy("YAMS_DISABLE_VECTORS");
+    const bool vectorsDisabled = !yams::config::resolve_vector_environment().enabled;
     if (!vectorsDisabled) {
         // Initialize EmbeddingService for async embedding generation
         try {
@@ -2411,7 +2397,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     // AUTOLOAD PLUGINS (MOVED UP)
     try {
         bool enableAutoload = config_.autoLoadPlugins;
-        if (const std::string env = getenvCopy("YAMS_AUTOLOAD_PLUGINS"); !env.empty()) {
+        if (const std::string env = yams::config::getenv_copy("YAMS_AUTOLOAD_PLUGINS");
+            !env.empty()) {
             std::string v(env);
             for (auto& c : v)
                 c = static_cast<char>(std::tolower(c));
@@ -2751,8 +2738,7 @@ void ServiceManager::scheduleInitialSearchBuild() {
 
             try {
                 // Determine vector readiness: honor env disables and presence of vector infra.
-                const bool vectorsDisabled = envTruthyCopy("YAMS_DISABLE_VECTORS") ||
-                                             envTruthyCopy("YAMS_DISABLE_VECTOR_DB");
+                const bool vectorsDisabled = !yams::config::resolve_vector_environment().enabled;
                 bool vectorEnabled = false;
                 if (vectorsDisabled) {
                     spdlog::info("[SearchBuild] Vector search disabled via env flag; building "
@@ -3709,7 +3695,8 @@ void ServiceManager::wireSearchEngineRuntimeAdapters(
     if (auto policy = ConfigResolver::resolveRerankerBackendPolicy(config_); policy.backend) {
         rerankerBackend = *policy.backend;
     }
-    if (const std::string env = getenvCopy("YAMS_SEARCH_RERANKER_BACKEND"); !env.empty()) {
+    if (const std::string env = yams::config::getenv_copy("YAMS_SEARCH_RERANKER_BACKEND");
+        !env.empty()) {
         rerankerBackend = env;
         std::transform(rerankerBackend.begin(), rerankerBackend.end(), rerankerBackend.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -4439,7 +4426,8 @@ void ServiceManager::requestTopologyRebuild(const std::string& reason,
                         rebuildHashes.size() >= kTopologyOverlayDirtyThreshold ||
                         freshness.lexicalDeltaRecentDocs >= kTopologyOverlayDirtyThreshold;
                     const bool forceImmediate = []() {
-                        const std::string value = getenvCopy("YAMS_TEST_FORCE_TOPOLOGY_REBUILD");
+                        const std::string value =
+                            yams::config::getenv_copy("YAMS_TEST_FORCE_TOPOLOGY_REBUILD");
                         return !value.empty() && value[0] != '0';
                     }();
                     if (!overlayHeavy && !overlayAged && !forceImmediate) {

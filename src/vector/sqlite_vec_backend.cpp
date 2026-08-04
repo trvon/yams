@@ -1,3 +1,4 @@
+#include <yams/config/config_helpers.h>
 #include <yams/core/assert.hpp>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
@@ -22,7 +23,6 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -147,15 +147,6 @@ std::uint64_t stableStringKey(std::string_view value) noexcept {
     return hash;
 }
 
-std::optional<std::string> getenvCopy(const char* name) {
-    static std::mutex envMutex;
-    std::lock_guard<std::mutex> lock(envMutex);
-    if (const char* value = std::getenv(name)) { // NOLINT(concurrency-mt-unsafe)
-        return std::string(value);
-    }
-    return std::nullopt;
-}
-
 bool db_lifetime_trace_enabled() {
     static std::atomic<int> cached{-1};
     int cachedValue = cached.load(std::memory_order_relaxed);
@@ -163,8 +154,7 @@ bool db_lifetime_trace_enabled() {
         return cachedValue == 1;
     }
 
-    auto env = getenvCopy("YAMS_TRACE_DB_LIFETIME");
-    bool enabled = env.has_value() && !env->empty() && *env != "0";
+    const bool enabled = yams::config::read_env_bool("YAMS_TRACE_DB_LIFETIME").valueOr(false);
     cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
     return enabled;
 }
@@ -1146,7 +1136,7 @@ public:
                 if (old_record) {
                     old_dims[idx] = !old_record->embedding.empty() ? old_record->embedding.size()
                                                                    : old_record->embedding_dim;
-                    old_rowids[idx] = *existing_rowid;
+                    old_rowids[idx] = existing_rowid;
                     if (old_dims[idx]) {
                         vec0_affected_dims.insert(*old_dims[idx]);
                     }
@@ -4098,9 +4088,7 @@ private:
                 (blob && blob_size > 0) ? static_cast<size_t>(blob_size) / sizeof(float) : 0;
 
             size_t dim = static_cast<size_t>(sqlite3_column_int64(stmt, 1));
-            if (dim == 0) {
-                dim = num_floats;
-            } else if (num_floats > 0 && dim != num_floats) {
+            if (num_floats > 0 && dim != num_floats) {
                 dim = num_floats;
             }
 

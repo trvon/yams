@@ -29,6 +29,7 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 
 // Include daemon client for DaemonBackend
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/ml/provider.h>
@@ -46,28 +47,6 @@ class DaemonBackend;
 // Local awaitable bridge (build-only) to await daemon calls without legacy async_bridge.
 // Callers must ensure the supplied awaitable factory owns any state it touches because the
 // spawned coroutine may outlive the timeout return path.
-static std::optional<std::string> getenvCopy(const char* name) {
-    static std::mutex env_mutex;
-    std::lock_guard<std::mutex> lock(env_mutex);
-    if (const char* value = std::getenv(name)) { // NOLINT(concurrency-mt-unsafe)
-        return std::string(value);
-    }
-    return std::nullopt;
-}
-
-static bool isTruthyEnvValue(std::string_view value) {
-    if (value.empty()) {
-        return false;
-    }
-
-    std::string normalized(value);
-    for (auto& c : normalized) {
-        c = static_cast<char>(std::tolower(c));
-    }
-
-    return normalized != "0" && normalized != "false" && normalized != "off" && normalized != "no";
-}
-
 template <typename T, typename MakeAwaitable>
 static yams::Result<T> await_with_timeout(MakeAwaitable&& make, std::chrono::milliseconds timeout) {
     auto shared_promise = std::make_shared<std::promise<yams::Result<T>>>();
@@ -131,15 +110,13 @@ public:
         try {
             // If running inside the daemon process, prefer an in-process embedding provider to
             // avoid recursive IPC calls back into the daemon.
-            if (auto inproc = getenvCopy("YAMS_IN_DAEMON"); inproc && isTruthyEnvValue(*inproc)) {
+            if (yams::config::read_env_bool("YAMS_IN_DAEMON").valueOr(false)) {
                 // In synthetic/unit tests we intentionally force a deterministic mock provider
                 // while running in-daemon mode.
                 bool useMockProvider = false;
 #if defined(YAMS_TESTING) || defined(YAMS_TEST_PROVIDER_CONTROLS)
-                if (auto mockProvider = getenvCopy("YAMS_USE_MOCK_PROVIDER");
-                    mockProvider && isTruthyEnvValue(*mockProvider)) {
-                    useMockProvider = true;
-                }
+                useMockProvider =
+                    yams::config::read_env_bool("YAMS_USE_MOCK_PROVIDER").valueOr(false);
 #endif
                 fallback_provider_ = useMockProvider ? yams::ml::createEmbeddingProvider("Mock")
                                                      : yams::ml::createEmbeddingProvider();
@@ -220,17 +197,11 @@ public:
 
                     // Allow extended preload timeout via env (default 30s)
                     std::chrono::milliseconds preload_timeout = std::chrono::seconds(30);
-                    if (auto timeoutOverride = getenvCopy("YAMS_MODEL_PRELOAD_TIMEOUT_MS");
-                        timeoutOverride) {
-                        try {
-                            long v = std::stol(*timeoutOverride);
-                            if (v > 0)
-                                preload_timeout = std::chrono::milliseconds(v);
-                        } catch (...) {
-                            spdlog::debug(
-                                "DaemonBackend: invalid YAMS_MODEL_PRELOAD_TIMEOUT_MS='{}'",
-                                *timeoutOverride);
-                        }
+                    if (auto configured =
+                            yams::config::read_env_milliseconds("YAMS_MODEL_PRELOAD_TIMEOUT_MS")
+                                .value;
+                        configured && configured->count() > 0) {
+                        preload_timeout = *configured;
                     }
 
                     if (model_already_loaded) {

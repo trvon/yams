@@ -1,10 +1,19 @@
+#include <array>
+#include <charconv>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_set>
+
+#include <spdlog/spdlog.h>
+
 #include <yams/common/fs_utils.h>
+#include <yams/common/string_utils.h>
 #include <yams/config/config_helpers.h>
+#include <yams/config/detail/config_parse_utils.h>
 
 #ifdef _WIN32
 #if defined(__has_include)
@@ -21,15 +30,184 @@
 #endif
 
 namespace yams::config {
+namespace {
+
+std::mutex& processEnvironmentMutex() {
+    // Environment reads occur from process-lifetime singleton teardown paths. Keep this boundary
+    // alive until process exit rather than depending on cross-translation-unit destruction order.
+    static auto* mutex = new std::mutex();
+    return *mutex;
+}
+
+void warnEnvironmentOnce(const std::string& message) {
+    static auto* warningMutex = new std::mutex();
+    static auto* warnings = new std::unordered_set<std::string>();
+    bool firstOccurrence = false;
+    {
+        std::lock_guard lock(*warningMutex);
+        firstOccurrence = warnings->insert(message).second;
+    }
+    if (firstOccurrence) {
+        spdlog::warn("{}", message);
+    }
+}
+
+template <typename T, typename Parser>
+ParsedEnvironmentValue<T> readTypedEnvironment(std::string_view key, std::string_view expected,
+                                               Parser&& parser) {
+    ParsedEnvironmentValue<T> result;
+    const auto raw = getenv_optional(key);
+    if (!raw || detail::trimView(*raw).empty()) {
+        return result;
+    }
+
+    result.present = true;
+    result.raw = *raw;
+    result.value = parser(*raw);
+    if (!result.value) {
+        warnEnvironmentOnce("Ignoring invalid environment " + std::string(key) + "='" +
+                            yams::common::sanitizeForTerminal(*raw) + "'; expected " +
+                            std::string(expected));
+    }
+    return result;
+}
+
+} // namespace
+
+std::optional<std::string> getenv_optional(std::string_view key) {
+    const std::string name(key);
+    std::lock_guard lock(processEnvironmentMutex());
+    const char* raw = std::getenv(name.c_str()); // NOLINT(concurrency-mt-unsafe)
+    if (raw != nullptr) {
+        return std::string(raw);
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> getenv_nonempty(std::string_view key) {
+    const auto value = getenv_optional(key);
+    return value && !value->empty() ? value : std::nullopt;
+}
+
+bool set_environment(const char* key, const char* value) noexcept {
+    if (key == nullptr || *key == '\0') {
+        return false;
+    }
+    try {
+        std::lock_guard lock(processEnvironmentMutex());
+#ifdef _WIN32
+        return _putenv_s(key, value != nullptr ? value : "") == 0;
+#else
+        if (value != nullptr) {
+            // NOLINTNEXTLINE(concurrency-mt-unsafe): serialized by processEnvironmentMutex().
+            return ::setenv(key, value, 1) == 0;
+        }
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): serialized by processEnvironmentMutex().
+        return ::unsetenv(key) == 0;
+#endif
+    } catch (...) {
+        return false;
+    }
+}
 
 std::string getenv_copy(const char* key) {
-    static std::mutex environmentMutex;
-    std::lock_guard lock(environmentMutex);
-    const char* raw = std::getenv(key); // NOLINT(concurrency-mt-unsafe)
-    if (raw && *raw) {
-        return raw;
+    const auto value = getenv_nonempty(key);
+    return value.value_or(std::string{});
+}
+
+ParsedEnvironmentValue<bool> read_env_bool(std::string_view key) {
+    return readTypedEnvironment<bool>(
+        key, "one of 1/0, true/false, yes/no, on/off",
+        [](std::string_view raw) { return detail::parseTomlBool(detail::trimView(raw)); });
+}
+
+ParsedEnvironmentValue<std::size_t> read_env_size(std::string_view key) {
+    return readTypedEnvironment<std::size_t>(
+        key, "a non-negative integer",
+        [](std::string_view raw) { return detail::parseUnsignedIntegral<std::size_t>(raw); });
+}
+
+ParsedEnvironmentValue<int> read_env_int(std::string_view key) {
+    return readTypedEnvironment<int>(key, "an integer", [](std::string_view raw) {
+        raw = detail::trimView(raw);
+        int value{};
+        const char* begin = raw.data();
+        const char* end = begin + raw.size();
+        const auto [parsedEnd, error] = std::from_chars(begin, end, value);
+        return error == std::errc{} && parsedEnd == end ? std::optional<int>{value}
+                                                        : std::optional<int>{};
+    });
+}
+
+ParsedEnvironmentValue<std::uint32_t> read_env_u32(std::string_view key) {
+    return readTypedEnvironment<std::uint32_t>(key, "a uint32 integer", [](std::string_view raw) {
+        return detail::parseUnsignedIntegral<std::uint32_t>(raw);
+    });
+}
+
+ParsedEnvironmentValue<float> read_env_float(std::string_view key) {
+    return readTypedEnvironment<float>(key, "a finite number", [](std::string_view raw) {
+        const auto parsed = detail::parseDouble(raw);
+        if (!parsed || *parsed > std::numeric_limits<float>::max() ||
+            *parsed < std::numeric_limits<float>::lowest()) {
+            return std::optional<float>{};
+        }
+        return std::optional<float>{static_cast<float>(*parsed)};
+    });
+}
+
+ParsedEnvironmentValue<double> read_env_double(std::string_view key) {
+    return readTypedEnvironment<double>(key, "a finite number", detail::parseDouble);
+}
+
+ParsedEnvironmentValue<std::chrono::milliseconds> read_env_milliseconds(std::string_view key) {
+    return readTypedEnvironment<std::chrono::milliseconds>(
+        key, "a non-negative integer number of milliseconds", [](std::string_view raw) {
+            const auto parsed = detail::parseUnsignedIntegral<std::chrono::milliseconds::rep>(raw);
+            return parsed ? std::optional{std::chrono::milliseconds{*parsed}}
+                          : std::optional<std::chrono::milliseconds>{};
+        });
+}
+
+VectorEnvironmentPolicy resolve_vector_environment(bool configuredEnabled) {
+    constexpr std::array<std::string_view, 3> kDisableAliases{
+        "YAMS_DISABLE_VECTORS", "YAMS_DISABLE_VECTOR", "YAMS_DISABLE_VECTOR_DB"};
+
+    VectorEnvironmentPolicy policy;
+    policy.enabled = configuredEnabled;
+    bool sawFalse = false;
+    for (const auto alias : kDisableAliases) {
+        const auto parsed = read_env_bool(alias);
+        if (parsed.invalid()) {
+            policy.diagnostics.push_back("Ignoring invalid vector-disable alias " +
+                                         std::string(alias) + "='" +
+                                         yams::common::sanitizeForTerminal(parsed.raw) + "'");
+            continue;
+        }
+        if (!parsed.value) {
+            continue;
+        }
+        if (*parsed.value) {
+            policy.disableSources.emplace_back(alias);
+        } else {
+            sawFalse = true;
+        }
     }
-    return {};
+
+    if (!policy.disableSources.empty()) {
+        policy.enabled = false;
+        if (sawFalse) {
+            const std::string diagnostic =
+                "Conflicting vector-disable aliases; a valid disable=true value wins";
+            policy.diagnostics.push_back(diagnostic);
+            warnEnvironmentOnce(diagnostic);
+        }
+    }
+    return policy;
+}
+
+std::string sanitize_for_terminal(std::string_view in) {
+    return yams::common::sanitizeForTerminal(in);
 }
 
 std::filesystem::path expand_tilde(const std::string& path) {

@@ -2,6 +2,7 @@
 #include <yams/daemon/client/asio_connection_pool.h>
 #undef YAMS_DAEMON_TEST_HOOKS_IMPL
 
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/client/ipc_wait_config.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -27,10 +28,8 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cctype>
 #include <cerrno>
 #include <chrono>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <optional>
@@ -78,20 +77,8 @@ using boost::asio::use_future;
 
 namespace {
 
-bool env_truthy(const char* value) {
-    if (!value) {
-        return false;
-    }
-    std::string normalized(value);
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return !(normalized.empty() || normalized == "0" || normalized == "false" ||
-             normalized == "off" || normalized == "no");
-}
-
 bool cli_one_shot_shutdown_enabled() {
-    // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only test/CLI process knob, not mutated here.
-    return env_truthy(std::getenv("YAMS_CLI_ONE_SHOT"));
+    return yams::config::read_env_bool("YAMS_CLI_ONE_SHOT").valueOr(false);
 }
 
 void log_pool_debug(const char* message) noexcept {

@@ -60,6 +60,7 @@ yams_app_services_lib = static_library('yams_app_services',
   ],
   dependencies: [
     dependency('yams_api'),
+    dependency('yams_config'),
     dependency('yams_daemon_client'),
     dependency('yams_metadata'),
     dependency('yams_search'),
@@ -83,6 +84,7 @@ yams_app_services_dep = declare_dependency(
   include_directories: include_directories('../../../include'),
   dependencies: [
     dependency('yams_api'),
+    dependency('yams_config'),
     dependency('yams_daemon_client'),
     dependency('yams_metadata'),
     dependency('yams_search'),

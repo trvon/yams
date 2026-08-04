@@ -4,6 +4,7 @@
 #include <yams/daemon/components/WriteCoordinator.h>
 
 #include <yams/compat/thread_stop_compat.h>
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/components/GraphComponent.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/ResourceGovernor.h>
@@ -40,7 +41,6 @@
 #include <sqlite3.h>
 #include <algorithm>
 #include <cctype>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -58,17 +58,6 @@ namespace {
 
 constexpr size_t kMaxTextToPersistInMetadataBytes =
     16ULL * 1024ULL * 1024ULL; // 16 MiB (best-effort)
-
-std::string getenvCopy(std::string_view name) {
-    static std::mutex envMutex;
-    std::lock_guard<std::mutex> lock(envMutex);
-    const std::string key(name);
-    const char* env = std::getenv(key.c_str()); // NOLINT(concurrency-mt-unsafe)
-    if (!env || !*env) {
-        return {};
-    }
-    return std::string(env);
-}
 
 template <typename Meta>
 inline void submitRepairStatusUpdate(const RepairServiceContext& ctx, Meta& metaRepo,
@@ -124,13 +113,9 @@ uint64_t repairOperationCode(std::string_view operation) {
     return 0;
 }
 
-// Check if vector operations are disabled via environment variables
+// Check the shared vector compatibility policy used by search and initialization.
 bool vectorsDisabledByEnv() {
-    if (!getenvCopy("YAMS_DISABLE_VECTORS").empty())
-        return true;
-    if (!getenvCopy("YAMS_DISABLE_VECTOR_DB").empty())
-        return true;
-    return false;
+    return !yams::config::resolve_vector_environment().enabled;
 }
 
 std::string normalizedRepairExtension(const metadata::DocumentInfo& doc) {

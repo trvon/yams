@@ -1,9 +1,7 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
-#include <future>
 #include <iostream>
 #include <map>
-#include <mutex>
 #include <optional>
 #include <set>
 #include <boost/asio/awaitable.hpp>
@@ -24,19 +22,6 @@
 #include <yams/plugins/plugin_repo_client.hpp>
 
 namespace yams::cli {
-
-namespace {
-
-std::optional<std::string> getenvCopy(const char* name) {
-    static std::mutex envMutex;
-    std::lock_guard<std::mutex> lock(envMutex);
-    if (const char* value = std::getenv(name)) { // NOLINT(concurrency-mt-unsafe)
-        return std::string(value);
-    }
-    return std::nullopt;
-}
-
-} // namespace
 
 class PluginCommand : public ICommand {
 public:
@@ -833,15 +818,6 @@ void PluginCommand::trustList(bool details) {
             std::cout << "  - " << p << "\n";
 
         if (details) {
-            auto parseBool = [](std::string value, bool fallback) {
-                if (value.empty()) {
-                    return fallback;
-                }
-                std::transform(value.begin(), value.end(), value.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                return value == "1" || value == "true" || value == "yes" || value == "on";
-            };
-
             std::cout << "\nTrust file: " << yams::config::get_daemon_plugin_trust_file().string()
                       << "\n";
             std::cout << "Legacy trust file: "
@@ -850,18 +826,16 @@ void PluginCommand::trustList(bool details) {
             bool strictMode = false;
             auto cfgMap = yams::config::parse_simple_toml(yams::config::get_config_path());
             if (auto it = cfgMap.find("daemon.plugin_dir_strict"); it != cfgMap.end()) {
-                strictMode = parseBool(it->second, strictMode);
+                strictMode = yams::config::parse_bool(it->second, strictMode);
             }
-            if (auto envStrict = getenvCopy("YAMS_PLUGIN_DIR_STRICT")) {
-                strictMode = parseBool(*envStrict, strictMode);
-            }
+            strictMode = yams::config::read_env_bool("YAMS_PLUGIN_DIR_STRICT").valueOr(strictMode);
 
             std::vector<std::filesystem::path> defaultRoots;
             if (!strictMode) {
 #ifdef _WIN32
                 defaultRoots.push_back(yams::config::get_data_dir() / "plugins");
 #else
-                if (auto home = getenvCopy("HOME")) {
+                if (auto home = yams::config::getenv_optional("HOME")) {
                     defaultRoots.push_back(std::filesystem::path(*home) / ".local" / "lib" /
                                            "yams" / "plugins");
                 }
@@ -1028,15 +1002,6 @@ void PluginCommand::trustReset() {
 void PluginCommand::trustStatus() {
     using namespace yams::daemon;
 
-    auto parseBool = [](std::string value, bool fallback) {
-        if (value.empty()) {
-            return fallback;
-        }
-        std::transform(value.begin(), value.end(), value.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        return value == "1" || value == "true" || value == "yes" || value == "on";
-    };
-
     auto splitEnvPaths = [](const char* raw) {
         std::vector<std::string> out;
         if (!raw || !*raw) {
@@ -1062,18 +1027,16 @@ void PluginCommand::trustStatus() {
     auto cfgMap = yams::config::parse_simple_toml(yams::config::get_config_path());
     bool strictMode = false;
     if (auto it = cfgMap.find("daemon.plugin_dir_strict"); it != cfgMap.end()) {
-        strictMode = parseBool(it->second, strictMode);
+        strictMode = yams::config::parse_bool(it->second, strictMode);
     }
-    if (auto envStrict = getenvCopy("YAMS_PLUGIN_DIR_STRICT")) {
-        strictMode = parseBool(*envStrict, strictMode);
-    }
+    strictMode = yams::config::read_env_bool("YAMS_PLUGIN_DIR_STRICT").valueOr(strictMode);
 
     std::vector<std::filesystem::path> defaultRoots;
     if (!strictMode) {
 #ifdef _WIN32
         defaultRoots.push_back(yams::config::get_data_dir() / "plugins");
 #else
-        if (auto home = getenvCopy("HOME")) {
+        if (auto home = yams::config::getenv_optional("HOME")) {
             defaultRoots.push_back(std::filesystem::path(*home) / ".local" / "lib" / "yams" /
                                    "plugins");
         }
@@ -1122,7 +1085,7 @@ void PluginCommand::trustStatus() {
         effectiveRoots.insert(p);
     }
 
-    const auto envPluginDir = getenvCopy("YAMS_PLUGIN_DIR");
+    const auto envPluginDir = yams::config::getenv_optional("YAMS_PLUGIN_DIR");
     auto envPluginDirs = splitEnvPaths(envPluginDir ? envPluginDir->c_str() : nullptr);
     for (const auto& p : envPluginDirs) {
         effectiveRoots.insert(p);
@@ -1134,8 +1097,8 @@ void PluginCommand::trustStatus() {
               << "\n";
     std::cout << "Strict plugin-dir mode: " << (strictMode ? "on" : "off") << "\n";
 
-    const auto envPluginDirStrict = getenvCopy("YAMS_PLUGIN_DIR_STRICT");
-    const auto envDisableAbiPlugins = getenvCopy("YAMS_DISABLE_ABI_PLUGINS");
+    const auto envPluginDirStrict = yams::config::getenv_optional("YAMS_PLUGIN_DIR_STRICT");
+    const auto envDisableAbiPlugins = yams::config::getenv_optional("YAMS_DISABLE_ABI_PLUGINS");
 
     std::cout << "\nEnvironment overrides:\n";
     std::cout << "  YAMS_PLUGIN_DIR=" << (envPluginDir ? *envPluginDir : "(unset)") << "\n";

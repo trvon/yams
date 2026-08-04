@@ -136,37 +136,37 @@ TEST_CASE("TuneAdvisor bounded override readers share env and override behavior"
 
     {
         EnvGuard env("YAMS_WORKER_POLL_MS", "75");
-        CHECK(TuneAdvisor::workerPollMs() == 75u);
+        CHECK((TuneAdvisor::workerPollMs() == 75u));
 
         TuneAdvisor::setWorkerPollMs(90u);
-        CHECK(TuneAdvisor::workerPollMs() == 90u);
+        CHECK((TuneAdvisor::workerPollMs() == 90u));
         TuneAdvisor::setWorkerPollMs(0);
-        CHECK(TuneAdvisor::workerPollMs() == 75u);
+        CHECK((TuneAdvisor::workerPollMs() == 75u));
     }
 
     {
         EnvGuard env("YAMS_WORKER_POLL_MS", "49");
-        CHECK(TuneAdvisor::workerPollMs() == 150u);
+        CHECK((TuneAdvisor::workerPollMs() == 150u));
     }
 
     {
         EnvGuard env("YAMS_POOL_SCALE_STEP", "16");
-        CHECK(TuneAdvisor::poolScaleStep() == 16);
+        CHECK((TuneAdvisor::poolScaleStep() == 16));
     }
 
     {
         EnvGuard env("YAMS_POOL_SCALE_STEP", "17");
-        CHECK(TuneAdvisor::poolScaleStep() == 1);
+        CHECK((TuneAdvisor::poolScaleStep() == 1));
     }
 
     {
         EnvGuard env("YAMS_CONN_SLOTS_STEP", "128");
-        CHECK(TuneAdvisor::connectionSlotsScaleStep() == 128u);
+        CHECK((TuneAdvisor::connectionSlotsScaleStep() == 128u));
     }
 
     {
         EnvGuard env("YAMS_CONN_SLOTS_STEP", "129");
-        CHECK(TuneAdvisor::connectionSlotsScaleStep() == 16u);
+        CHECK((TuneAdvisor::connectionSlotsScaleStep() == 16u));
     }
 
     TuneAdvisor::setWorkerPollMs(0);
@@ -189,14 +189,14 @@ TEST_CASE("ConfigResolver applies one typed tuning snapshot for startup and relo
     base.topologyAlgorithm = "multiscale";
 
     const auto resolved = ConfigResolver::applyRuntimeTuning(sections, base);
-    CHECK(resolved.targetCpuPercent == 175);
-    CHECK(resolved.postIngestCapacity == 4096);
-    CHECK(resolved.postIngestThreadsMin == 3);
-    CHECK(resolved.ingestStoreBatchSize == 23);
-    CHECK(resolved.postIngestCoalesceMs == 3);
-    CHECK(resolved.controlIntervalMs == 250);
-    CHECK(resolved.postIngestThreadsMax == 12);
-    CHECK(resolved.topologyAlgorithm == "multiscale");
+    CHECK((resolved.targetCpuPercent == 175));
+    CHECK((resolved.postIngestCapacity == 4096));
+    CHECK((resolved.postIngestThreadsMin == 3));
+    CHECK((resolved.ingestStoreBatchSize == 23));
+    CHECK((resolved.postIngestCoalesceMs == 3));
+    CHECK((resolved.controlIntervalMs == 250));
+    CHECK((resolved.postIngestThreadsMax == 12));
+    CHECK((resolved.topologyAlgorithm == "multiscale"));
 
     sections["tuning"] = {{"target_cpu_percent", "-1"},
                           {"post_ingest_capacity", "-2"},
@@ -209,11 +209,11 @@ TEST_CASE("ConfigResolver applies one typed tuning snapshot for startup and relo
     base.controlIntervalMs = 500;
     base.postIngestCoalesceMs = 4;
     const auto rejected = ConfigResolver::applyRuntimeTuning(sections, base);
-    CHECK(rejected.targetCpuPercent == 80);
-    CHECK(rejected.postIngestCapacity == 2048);
-    CHECK(rejected.ingestStoreBatchSize == 32);
-    CHECK(rejected.controlIntervalMs == 500);
-    CHECK(rejected.postIngestCoalesceMs == 4);
+    CHECK((rejected.targetCpuPercent == 80));
+    CHECK((rejected.postIngestCapacity == 2048));
+    CHECK((rejected.ingestStoreBatchSize == 32));
+    CHECK((rejected.controlIntervalMs == 500));
+    CHECK((rejected.postIngestCoalesceMs == 4));
 }
 
 TEST_CASE("ConfigResolver::resolveEmbeddingChunkingPolicy defaults are embedding-safe",
@@ -222,7 +222,7 @@ TEST_CASE("ConfigResolver::resolveEmbeddingChunkingPolicy defaults are embedding
     EnvGuard cfg("YAMS_CONFIG_PATH", "");
 
     auto policy = ConfigResolver::resolveEmbeddingChunkingPolicy();
-    CHECK(policy.strategy == yams::vector::ChunkingStrategy::PARAGRAPH_BASED);
+    CHECK((policy.strategy == yams::vector::ChunkingStrategy::PARAGRAPH_BASED));
     CHECK_FALSE(policy.config.preserve_sentences);
     CHECK_FALSE(policy.config.use_token_count);
 }
@@ -255,7 +255,7 @@ TEST_CASE("ConfigResolver::resolveEmbeddingChunkingPolicy supports all embed str
             EnvGuard g("YAMS_EMBED_CHUNK_STRATEGY", tc.value);
 
             auto policy = ConfigResolver::resolveEmbeddingChunkingPolicy();
-            CHECK(policy.strategy == tc.expected);
+            CHECK((policy.strategy == tc.expected));
 
             auto chunker = yams::vector::createChunker(policy.strategy, policy.config, nullptr);
             REQUIRE(chunker);
@@ -266,7 +266,7 @@ TEST_CASE("ConfigResolver::resolveEmbeddingChunkingPolicy supports all embed str
             REQUIRE_FALSE(chunks.empty());
 
             for (const auto& c : chunks) {
-                CHECK(c.strategy_used == tc.expected);
+                CHECK((c.strategy_used == tc.expected));
                 CHECK_FALSE(c.content.empty());
             }
         }
@@ -292,12 +292,12 @@ preserve_sentences = 0
     EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
 
     auto policy = ConfigResolver::resolveEmbeddingChunkingPolicy();
-    CHECK(policy.strategy == yams::vector::ChunkingStrategy::FIXED_SIZE);
-    CHECK(policy.config.target_chunk_size == 256);
-    CHECK(policy.config.min_chunk_size == 64);
-    CHECK(policy.config.max_chunk_size == 512);
-    CHECK(policy.config.overlap_size == 0);
-    CHECK(policy.config.overlap_percentage == 0.0);
+    CHECK((policy.strategy == yams::vector::ChunkingStrategy::FIXED_SIZE));
+    CHECK((policy.config.target_chunk_size == 256));
+    CHECK((policy.config.min_chunk_size == 64));
+    CHECK((policy.config.max_chunk_size == 512));
+    CHECK((policy.config.overlap_size == 0));
+    CHECK((policy.config.overlap_percentage == 0.0));
     CHECK_FALSE(policy.config.use_token_count);
     CHECK_FALSE(policy.config.preserve_sentences);
 }
@@ -329,13 +329,12 @@ TEST_CASE("ConfigResolver::envTruthy correctly parses truthy values",
         CHECK_FALSE(ConfigResolver::envTruthy(nullptr));
     }
 
-    SECTION("unrecognized values are truthy (not in falsey list)") {
-        // The implementation treats anything NOT in {0, false, off, no} as truthy
-        CHECK(ConfigResolver::envTruthy("garbage"));
-        CHECK(ConfigResolver::envTruthy("maybe"));
-        CHECK(ConfigResolver::envTruthy("123"));
-        CHECK(ConfigResolver::envTruthy("yep"));
-        CHECK(ConfigResolver::envTruthy("nope"));
+    SECTION("unrecognized values are rejected") {
+        CHECK_FALSE(ConfigResolver::envTruthy("garbage"));
+        CHECK_FALSE(ConfigResolver::envTruthy("maybe"));
+        CHECK_FALSE(ConfigResolver::envTruthy("123"));
+        CHECK_FALSE(ConfigResolver::envTruthy("yep"));
+        CHECK_FALSE(ConfigResolver::envTruthy("nope"));
     }
 }
 
@@ -355,6 +354,12 @@ TEST_CASE("ConfigResolver resolves plugin strict mode once from typed config and
         EnvGuard strictEnv("YAMS_PLUGIN_DIR_STRICT", "off");
         CHECK_FALSE(ConfigResolver::resolvePluginDirStrict(true));
     }
+
+    SECTION("invalid environment values preserve the typed default") {
+        EnvGuard strictEnv("YAMS_PLUGIN_DIR_STRICT", "tru");
+        CHECK(ConfigResolver::resolvePluginDirStrict(true));
+        CHECK_FALSE(ConfigResolver::resolvePluginDirStrict(false));
+    }
 }
 
 TEST_CASE_METHOD(ConfigResolverFixture, "ConfigResolver parseSimpleTomlFlat parses TOML files",
@@ -367,8 +372,8 @@ log_level = "debug"
 )");
 
         auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
-        CHECK(config["daemon.socket_path"] == "/tmp/test.sock");
-        CHECK(config["daemon.log_level"] == "debug");
+        CHECK((config["daemon.socket_path"] == "/tmp/test.sock"));
+        CHECK((config["daemon.log_level"] == "debug"));
     }
 
     SECTION("missing file returns empty map") {
@@ -391,8 +396,8 @@ key = "value"
 )");
 
         auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
-        CHECK(config["section.key"] == "value");
-        CHECK(config.size() == 1);
+        CHECK((config["section.key"] == "value"));
+        CHECK((config.size() == 1));
     }
 
     SECTION("multiple sections parsed correctly") {
@@ -405,8 +410,8 @@ key2 = "value2"
 )");
 
         auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
-        CHECK(config["section1.key1"] == "value1");
-        CHECK(config["section2.key2"] == "value2");
+        CHECK((config["section1.key1"] == "value1"));
+        CHECK((config["section2.key2"] == "value2"));
     }
 
     SECTION("daemon resolver delegates to shared parser semantics") {
@@ -424,11 +429,11 @@ socket_path = "/tmp/yams.sock"
 
         auto resolverConfig = ConfigResolver::parseSimpleTomlFlat(configPath);
         auto sharedConfig = yams::config::parse_simple_toml(configPath);
-        CHECK(resolverConfig == sharedConfig);
-        CHECK(resolverConfig["top_level"] == "root");
-        CHECK(resolverConfig["search.path_tree.enable"] == "true");
-        CHECK(resolverConfig["search.path_tree.mode"] == "preferred");
-        CHECK(resolverConfig["search.path_tree.quoted_hash"] == "# not a comment");
+        CHECK((resolverConfig == sharedConfig));
+        CHECK((resolverConfig["top_level"] == "root"));
+        CHECK((resolverConfig["search.path_tree.enable"] == "true"));
+        CHECK((resolverConfig["search.path_tree.mode"] == "preferred"));
+        CHECK((resolverConfig["search.path_tree.quoted_hash"] == "# not a comment"));
     }
 }
 
@@ -440,7 +445,7 @@ TEST_CASE_METHOD(ConfigResolverFixture,
         EnvGuard guard("YAMS_CONFIG_PATH", configPath.string());
 
         auto resolved = ConfigResolver::resolveDefaultConfigPath();
-        CHECK(resolved == configPath);
+        CHECK((resolved == configPath));
     }
 
     SECTION("returns empty path if no config found") {
@@ -463,8 +468,8 @@ data_dir = "~/.yams/data"
 )");
     EnvGuard configGuard("YAMS_CONFIG_PATH", configPath.string());
 
-    CHECK(ConfigResolver::resolveEmbeddingBackend() == "simeon");
-    CHECK(ConfigResolver::resolveEmbeddingBackend("auto") == "auto");
+    CHECK((ConfigResolver::resolveEmbeddingBackend() == "simeon"));
+    CHECK((ConfigResolver::resolveEmbeddingBackend("auto") == "auto"));
 }
 
 TEST_CASE_METHOD(ConfigResolverFixture,
@@ -478,7 +483,7 @@ TEST_CASE_METHOD(ConfigResolverFixture,
 backend = "daemon"
 )");
         EnvGuard configGuard("YAMS_CONFIG_PATH", configPath.string());
-        CHECK(ConfigResolver::resolveEmbeddingBackend() == "daemon");
+        CHECK((ConfigResolver::resolveEmbeddingBackend() == "daemon"));
     }
 
     SECTION("normalizes uppercase simeon from config") {
@@ -487,7 +492,7 @@ backend = "daemon"
 backend = "SIMEON"
 )");
         EnvGuard configGuard("YAMS_CONFIG_PATH", configPath.string());
-        CHECK(ConfigResolver::resolveEmbeddingBackend() == "simeon");
+        CHECK((ConfigResolver::resolveEmbeddingBackend() == "simeon"));
     }
 
     SECTION("maps legacy onnx backend names to onnxruntime") {
@@ -496,7 +501,7 @@ backend = "SIMEON"
 backend = "local_onnx"
 )");
         EnvGuard configGuard("YAMS_CONFIG_PATH", configPath.string());
-        CHECK(ConfigResolver::resolveEmbeddingBackend() == "onnxruntime");
+        CHECK((ConfigResolver::resolveEmbeddingBackend() == "onnxruntime"));
     }
 
     SECTION("normalizes explicit onnxruntime from config") {
@@ -505,7 +510,7 @@ backend = "local_onnx"
 backend = "ONNX-RUNTIME"
 )");
         EnvGuard configGuard("YAMS_CONFIG_PATH", configPath.string());
-        CHECK(ConfigResolver::resolveEmbeddingBackend() == "onnxruntime");
+        CHECK((ConfigResolver::resolveEmbeddingBackend() == "onnxruntime"));
     }
 }
 
@@ -514,22 +519,22 @@ TEST_CASE_METHOD(ConfigResolverFixture,
                  "[daemon][components][config][catch2]") {
     SECTION("maps onnx env alias") {
         EnvGuard backendGuard("YAMS_EMBED_BACKEND", "onnx");
-        CHECK(ConfigResolver::resolveEmbeddingBackend() == "onnxruntime");
+        CHECK((ConfigResolver::resolveEmbeddingBackend() == "onnxruntime"));
     }
 
     SECTION("maps local_onnx env alias") {
         EnvGuard backendGuard("YAMS_EMBED_BACKEND", "local_onnx");
-        CHECK(ConfigResolver::resolveEmbeddingBackend() == "onnxruntime");
+        CHECK((ConfigResolver::resolveEmbeddingBackend() == "onnxruntime"));
     }
 
     SECTION("maps ort env alias") {
         EnvGuard backendGuard("YAMS_EMBED_BACKEND", "ort");
-        CHECK(ConfigResolver::resolveEmbeddingBackend() == "onnxruntime");
+        CHECK((ConfigResolver::resolveEmbeddingBackend() == "onnxruntime"));
     }
 
     SECTION("keeps daemon env selection distinct") {
         EnvGuard backendGuard("YAMS_EMBED_BACKEND", "daemon");
-        CHECK(ConfigResolver::resolveEmbeddingBackend() == "daemon");
+        CHECK((ConfigResolver::resolveEmbeddingBackend() == "daemon"));
     }
 }
 
@@ -581,26 +586,26 @@ minhash_alpha = 0.15
     auto policy = ConfigResolver::resolveTopologyEnginePolicy();
 
     REQUIRE(policy.engine.has_value());
-    CHECK(*policy.engine == "connected");
+    CHECK((*policy.engine == "connected"));
     REQUIRE(policy.routingRepresentativeCount.has_value());
-    CHECK(*policy.routingRepresentativeCount == 4);
+    CHECK((*policy.routingRepresentativeCount == 4));
     REQUIRE(policy.boundarySpillEnabled.has_value());
     CHECK(*policy.boundarySpillEnabled);
     REQUIRE(policy.boundarySpillLimit.has_value());
-    CHECK(*policy.boundarySpillLimit == 1);
+    CHECK((*policy.boundarySpillLimit == 1));
     REQUIRE(policy.boundarySpillDistanceRatio.has_value());
-    CHECK(*policy.boundarySpillDistanceRatio == Catch::Approx(1.2));
+    CHECK((*policy.boundarySpillDistanceRatio == Catch::Approx(1.2)));
     REQUIRE(policy.boundarySpillResidualPenalty.has_value());
-    CHECK(*policy.boundarySpillResidualPenalty == Catch::Approx(1.5));
+    CHECK((*policy.boundarySpillResidualPenalty == Catch::Approx(1.5)));
     CHECK(*policy.featureEntityFusion);
-    CHECK(*policy.featureEntitySignatureK == 12);
-    CHECK(*policy.featureEntityFusionAlpha == Catch::Approx(0.2F));
-    CHECK(*policy.featureEntityMinConfidence == Catch::Approx(0.5F));
+    CHECK((*policy.featureEntitySignatureK == 12));
+    CHECK((*policy.featureEntityFusionAlpha == Catch::Approx(0.2F)));
+    CHECK((*policy.featureEntityMinConfidence == Catch::Approx(0.5F)));
     CHECK(*policy.featureMatryoshkaCoarseView);
-    CHECK(*policy.featureMatryoshkaTargetDim == 256);
+    CHECK((*policy.featureMatryoshkaTargetDim == 256));
     CHECK(*policy.featureMinHashSketch);
-    CHECK(*policy.featureMinHashSketchDim == 24);
-    CHECK(*policy.featureMinHashAlpha == Catch::Approx(0.15F));
+    CHECK((*policy.featureMinHashSketchDim == 24));
+    CHECK((*policy.featureMinHashAlpha == Catch::Approx(0.15F)));
 }
 
 TEST_CASE_METHOD(ConfigResolverFixture,
@@ -639,45 +644,45 @@ rrf_k = 33
     auto policy = ConfigResolver::resolveTopologyRoutingPolicy();
 
     REQUIRE(policy.enableWeakQueryRouting.has_value());
-    CHECK(*policy.enableWeakQueryRouting == true);
+    CHECK((*policy.enableWeakQueryRouting == true));
     REQUIRE(policy.vectorPolicy.has_value());
-    CHECK(*policy.vectorPolicy == "shadow");
+    CHECK((*policy.vectorPolicy == "shadow"));
     REQUIRE(policy.maxClusters.has_value());
-    CHECK(*policy.maxClusters == 3U);
+    CHECK((*policy.maxClusters == 3U));
     REQUIRE(policy.minClusters.has_value());
-    CHECK(*policy.minClusters == 1U);
+    CHECK((*policy.minClusters == 1U));
     REQUIRE(policy.maxSeedDocuments.has_value());
-    CHECK(*policy.maxSeedDocuments == 24U);
+    CHECK((*policy.maxSeedDocuments == 24U));
     REQUIRE(policy.representativeLimit.has_value());
-    CHECK(*policy.representativeLimit == 2U);
+    CHECK((*policy.representativeLimit == 2U));
     REQUIRE(policy.annCandidateLimit.has_value());
-    CHECK(*policy.annCandidateLimit == 16U);
+    CHECK((*policy.annCandidateLimit == 16U));
     REQUIRE(policy.adaptiveProbeScoreGap.has_value());
-    CHECK(*policy.adaptiveProbeScoreGap == Catch::Approx(0.07F));
+    CHECK((*policy.adaptiveProbeScoreGap == Catch::Approx(0.07F)));
     REQUIRE(policy.narrowMinBoundaryMargin.has_value());
-    CHECK(*policy.narrowMinBoundaryMargin == Catch::Approx(0.03F));
+    CHECK((*policy.narrowMinBoundaryMargin == Catch::Approx(0.03F)));
     REQUIRE(policy.maxDocs.has_value());
-    CHECK(*policy.maxDocs == 42U);
+    CHECK((*policy.maxDocs == 42U));
     REQUIRE(policy.expansionOutputLimit.has_value());
-    CHECK(*policy.expansionOutputLimit == 96U);
+    CHECK((*policy.expansionOutputLimit == 96U));
     REQUIRE(policy.graphWeightedSeedRanking.has_value());
     CHECK(*policy.graphWeightedSeedRanking);
     REQUIRE(policy.medoidBoost.has_value());
     CHECK(*policy.medoidBoost > 0.19f);
     CHECK(*policy.medoidBoost < 0.21f);
-    CHECK(*policy.routeCalibrationFingerprint == "atlas-123");
-    CHECK(*policy.routeCalibrationQueries == 100U);
-    CHECK(*policy.routeCalibrationProtectedCandidates == 250U);
-    CHECK(*policy.routeCalibrationMissedProtectedCandidates == 2U);
-    CHECK(*policy.routeMinCalibrationQueries == 75U);
-    CHECK(*policy.routeMaxMissesPerThousand == 10U);
-    CHECK(*policy.routeCalibrationMinBoundaryMargin == Catch::Approx(0.2F));
-    CHECK(*policy.routeCalibrationMinSeedHits == 2U);
-    CHECK(*policy.routeWorkMaxRowsVisited == 64U);
-    CHECK(*policy.routeWorkMaxExactDistanceEvaluations == 32U);
-    CHECK(*policy.routeWorkMaxAnnCandidates == 48U);
+    CHECK((*policy.routeCalibrationFingerprint == "atlas-123"));
+    CHECK((*policy.routeCalibrationQueries == 100U));
+    CHECK((*policy.routeCalibrationProtectedCandidates == 250U));
+    CHECK((*policy.routeCalibrationMissedProtectedCandidates == 2U));
+    CHECK((*policy.routeMinCalibrationQueries == 75U));
+    CHECK((*policy.routeMaxMissesPerThousand == 10U));
+    CHECK((*policy.routeCalibrationMinBoundaryMargin == Catch::Approx(0.2F)));
+    CHECK((*policy.routeCalibrationMinSeedHits == 2U));
+    CHECK((*policy.routeWorkMaxRowsVisited == 64U));
+    CHECK((*policy.routeWorkMaxExactDistanceEvaluations == 32U));
+    CHECK((*policy.routeWorkMaxAnnCandidates == 48U));
     REQUIRE(policy.rrfK.has_value());
-    CHECK(*policy.rrfK == 33.0f);
+    CHECK((*policy.rrfK == 33.0f));
 }
 
 TEST_CASE("Generated config keeps topology-assisted hybrid search as the product default",
@@ -687,9 +692,9 @@ TEST_CASE("Generated config keeps topology-assisted hybrid search as the product
     REQUIRE(topologyIt != defaults.end());
 
     const auto& topology = topologyIt->second;
-    CHECK(topology.at("mode") == "hybrid_assist");
-    CHECK(topology.at("vector_policy") == "shadow");
-    CHECK(topology.at("graph_weighted_seed_ranking") == "false");
+    CHECK((topology.at("mode") == "hybrid_assist"));
+    CHECK((topology.at("vector_policy") == "shadow"));
+    CHECK((topology.at("graph_weighted_seed_ranking") == "false"));
     CHECK_FALSE(topology.contains("enable_weak_query_routing"));
     CHECK_FALSE(topology.contains("routing_variant"));
 }
@@ -704,7 +709,7 @@ evidence_weight = 0.03
     EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
     auto topology = ConfigResolver::resolveTopologyRoutingPolicy();
     REQUIRE(topology.evidenceWeight.has_value());
-    CHECK(*topology.evidenceWeight == Catch::Approx(0.03F));
+    CHECK((*topology.evidenceWeight == Catch::Approx(0.03F)));
 }
 
 TEST_CASE_METHOD(ConfigResolverFixture,
@@ -719,11 +724,11 @@ TEST_CASE_METHOD(ConfigResolverFixture,
     auto policy = ConfigResolver::resolveTopologyRoutingPolicy();
 
     REQUIRE(policy.enableWeakQueryRouting.has_value());
-    CHECK(*policy.enableWeakQueryRouting == true);
+    CHECK((*policy.enableWeakQueryRouting == true));
     REQUIRE(policy.maxClusters.has_value());
-    CHECK(*policy.maxClusters == 5U);
+    CHECK((*policy.maxClusters == 5U));
     REQUIRE(policy.maxDocs.has_value());
-    CHECK(*policy.maxDocs == 17U);
+    CHECK((*policy.maxDocs == 17U));
     REQUIRE(policy.medoidBoost.has_value());
     CHECK(*policy.medoidBoost > 0.14f);
     CHECK(*policy.medoidBoost < 0.16f);
@@ -740,7 +745,7 @@ update_semantic_graph_during_ingest = false
     EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
     auto policy = ConfigResolver::resolveEmbeddingSelectionPolicy();
 
-    CHECK(policy.updateSemanticGraphDuringIngest == false);
+    CHECK((policy.updateSemanticGraphDuringIngest == false));
 }
 
 TEST_CASE_METHOD(ConfigResolverFixture,
@@ -763,19 +768,19 @@ delta_intra_edge = 0.05
     auto policy = ConfigResolver::resolveTopologyTunerPolicy();
 
     REQUIRE(policy.enabled.has_value());
-    CHECK(*policy.enabled == true);
+    CHECK((*policy.enabled == true));
     REQUIRE(policy.cooldownMinutes.has_value());
-    CHECK(*policy.cooldownMinutes == 30u);
+    CHECK((*policy.cooldownMinutes == 30u));
     REQUIRE(policy.docCountDelta.has_value());
-    CHECK(*policy.docCountDelta == 250u);
+    CHECK((*policy.docCountDelta == 250u));
     REQUIRE(policy.rewardAlphaSingleton.has_value());
-    CHECK(*policy.rewardAlphaSingleton == 0.5);
+    CHECK((*policy.rewardAlphaSingleton == 0.5));
     REQUIRE(policy.rewardBetaGiantCluster.has_value());
-    CHECK(*policy.rewardBetaGiantCluster == 0.3);
+    CHECK((*policy.rewardBetaGiantCluster == 0.3));
     REQUIRE(policy.rewardGammaGiniDeviation.has_value());
-    CHECK(*policy.rewardGammaGiniDeviation == 0.15);
+    CHECK((*policy.rewardGammaGiniDeviation == 0.15));
     REQUIRE(policy.rewardDeltaIntraEdge.has_value());
-    CHECK(*policy.rewardDeltaIntraEdge == 0.05);
+    CHECK((*policy.rewardDeltaIntraEdge == 0.05));
 }
 
 TEST_CASE_METHOD(ConfigResolverFixture,
@@ -790,7 +795,7 @@ enabled = false
     auto policy = ConfigResolver::resolveTopologyTunerPolicy();
 
     REQUIRE(policy.enabled.has_value());
-    CHECK(*policy.enabled == false);
+    CHECK((*policy.enabled == false));
 }
 
 TEST_CASE("ConfigResolver vector sentinel operations",
@@ -809,7 +814,7 @@ TEST_CASE("ConfigResolver vector sentinel operations",
         ConfigResolver::writeVectorSentinel(tempDir, 384, "test_table", 1);
         auto dim = ConfigResolver::readVectorSentinelDim(tempDir);
         REQUIRE(dim.has_value());
-        CHECK(dim.value() == 384);
+        CHECK((dim.value() == 384));
     }
 
     SECTION("different dimensions are preserved") {
@@ -817,7 +822,7 @@ TEST_CASE("ConfigResolver vector sentinel operations",
             ConfigResolver::writeVectorSentinel(tempDir, testDim, "test", 1);
             auto dim = ConfigResolver::readVectorSentinelDim(tempDir);
             REQUIRE(dim.has_value());
-            CHECK(dim.value() == testDim);
+            CHECK((dim.value() == testDim));
         }
     }
 
@@ -833,7 +838,7 @@ TEST_CASE_METHOD(ConfigResolverFixture, "ConfigResolver parses [tuning] section"
 profile = "efficient"
 )");
         auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
-        CHECK(config["tuning.profile"] == "efficient");
+        CHECK((config["tuning.profile"] == "efficient"));
     }
 
     SECTION("balanced profile parses correctly") {
@@ -842,7 +847,7 @@ profile = "efficient"
 profile = "balanced"
 )");
         auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
-        CHECK(config["tuning.profile"] == "balanced");
+        CHECK((config["tuning.profile"] == "balanced"));
     }
 
     SECTION("aggressive profile parses correctly") {
@@ -851,7 +856,7 @@ profile = "balanced"
 profile = "aggressive"
 )");
         auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
-        CHECK(config["tuning.profile"] == "aggressive");
+        CHECK((config["tuning.profile"] == "aggressive"));
     }
 
     SECTION("conservative alias for efficient") {
@@ -860,7 +865,7 @@ profile = "aggressive"
 profile = "conservative"
 )");
         auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
-        CHECK(config["tuning.profile"] == "conservative");
+        CHECK((config["tuning.profile"] == "conservative"));
     }
 
     SECTION("case-insensitive profile names") {
@@ -869,7 +874,7 @@ profile = "conservative"
 profile = "EFFICIENT"
 )");
         auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
-        CHECK(config["tuning.profile"] == "EFFICIENT");
+        CHECK((config["tuning.profile"] == "EFFICIENT"));
     }
 
     SECTION("missing tuning section returns empty") {
@@ -878,7 +883,7 @@ profile = "EFFICIENT"
 socket_path = "/tmp/test.sock"
 )");
         auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
-        CHECK(config.find("tuning.profile") == config.end());
+        CHECK((config.find("tuning.profile") == config.end()));
     }
 
     SECTION("multiple tuning options parsed together") {
@@ -889,9 +894,9 @@ pool_cooldown_ms = 250
 worker_poll_ms = 100
 )");
         auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
-        CHECK(config["tuning.profile"] == "aggressive");
-        CHECK(config["tuning.pool_cooldown_ms"] == "250");
-        CHECK(config["tuning.worker_poll_ms"] == "100");
+        CHECK((config["tuning.profile"] == "aggressive"));
+        CHECK((config["tuning.pool_cooldown_ms"] == "250"));
+        CHECK((config["tuning.worker_poll_ms"] == "100"));
     }
 }
 
@@ -907,13 +912,13 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
         // Efficient profile scale is 0.0, old totalBudget = 2
         // With active-stage floor: total = max(2, 6 active stages) = 6
         // Each stage gets 1 slot; batching remains a cap and does not reserve work.
-        CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
-        CHECK(TuneAdvisor::postKgConcurrent() == 1u);
-        CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
-        CHECK(TuneAdvisor::postTitleConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
-        CHECK(TuneAdvisor::postIngestBatchSize() == 32u);
+        CHECK((TuneAdvisor::postExtractionConcurrent() == 1u));
+        CHECK((TuneAdvisor::postKgConcurrent() == 1u));
+        CHECK((TuneAdvisor::postSymbolConcurrent() == 1u));
+        CHECK((TuneAdvisor::postEntityConcurrent() == 1u));
+        CHECK((TuneAdvisor::postTitleConcurrent() == 1u));
+        CHECK((TuneAdvisor::postEmbedConcurrent() == 1u));
+        CHECK((TuneAdvisor::postIngestBatchSize() == 32u));
     }
 
     SECTION("balanced profile uses medium values") {
@@ -925,13 +930,13 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
         // Balanced profile scale is 0.5, old totalBudget = 2
         // With active-stage floor: total = max(2, 6 active stages) = 6
         // Each stage gets 1 slot; batching remains a cap and does not reserve work.
-        CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
-        CHECK(TuneAdvisor::postKgConcurrent() == 1u);
-        CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
-        CHECK(TuneAdvisor::postTitleConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
-        CHECK(TuneAdvisor::postIngestBatchSize() == 32u);
+        CHECK((TuneAdvisor::postExtractionConcurrent() == 1u));
+        CHECK((TuneAdvisor::postKgConcurrent() == 1u));
+        CHECK((TuneAdvisor::postSymbolConcurrent() == 1u));
+        CHECK((TuneAdvisor::postEntityConcurrent() == 1u));
+        CHECK((TuneAdvisor::postTitleConcurrent() == 1u));
+        CHECK((TuneAdvisor::postEmbedConcurrent() == 1u));
+        CHECK((TuneAdvisor::postIngestBatchSize() == 32u));
     }
 
     SECTION("aggressive profile uses maximum values") {
@@ -943,43 +948,43 @@ TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
         // Aggressive profile scale is 1.0, old totalBudget = 3
         // With active-stage floor: total = max(3, 6 active stages) = 6
         // Each stage gets 1 slot; batching remains a cap and does not reserve work.
-        CHECK(TuneAdvisor::postExtractionConcurrent() == 1u);
-        CHECK(TuneAdvisor::postKgConcurrent() == 1u);
-        CHECK(TuneAdvisor::postSymbolConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEntityConcurrent() == 1u);
-        CHECK(TuneAdvisor::postTitleConcurrent() == 1u);
-        CHECK(TuneAdvisor::postEmbedConcurrent() == 1u);
-        CHECK(TuneAdvisor::postIngestBatchSize() == 32u);
+        CHECK((TuneAdvisor::postExtractionConcurrent() == 1u));
+        CHECK((TuneAdvisor::postKgConcurrent() == 1u));
+        CHECK((TuneAdvisor::postSymbolConcurrent() == 1u));
+        CHECK((TuneAdvisor::postEntityConcurrent() == 1u));
+        CHECK((TuneAdvisor::postTitleConcurrent() == 1u));
+        CHECK((TuneAdvisor::postEmbedConcurrent() == 1u));
+        CHECK((TuneAdvisor::postIngestBatchSize() == 32u));
     }
 
     SECTION("profile affects cpuBudgetPercent") {
         {
             ProfileGuard guard(yams::daemon::TuneAdvisor::Profile::Efficient);
-            CHECK(TuneAdvisor::cpuBudgetPercent() == 40u);
+            CHECK((TuneAdvisor::cpuBudgetPercent() == 40u));
         }
         {
             ProfileGuard guard(yams::daemon::TuneAdvisor::Profile::Balanced);
-            CHECK(TuneAdvisor::cpuBudgetPercent() == 50u);
+            CHECK((TuneAdvisor::cpuBudgetPercent() == 50u));
         }
         {
             ProfileGuard guard(yams::daemon::TuneAdvisor::Profile::Aggressive);
             // 40.0 + 1.0 * 20.0 = 60
-            CHECK(TuneAdvisor::cpuBudgetPercent() == 60u);
+            CHECK((TuneAdvisor::cpuBudgetPercent() == 60u));
         }
     }
 
     SECTION("profile affects poolCooldownMs") {
         {
             ProfileGuard guard(yams::daemon::TuneAdvisor::Profile::Efficient);
-            CHECK(TuneAdvisor::poolCooldownMs() == 750u);
+            CHECK((TuneAdvisor::poolCooldownMs() == 750u));
         }
         {
             ProfileGuard guard(yams::daemon::TuneAdvisor::Profile::Balanced);
-            CHECK(TuneAdvisor::poolCooldownMs() == 500u);
+            CHECK((TuneAdvisor::poolCooldownMs() == 500u));
         }
         {
             ProfileGuard guard(yams::daemon::TuneAdvisor::Profile::Aggressive);
-            CHECK(TuneAdvisor::poolCooldownMs() == 250u);
+            CHECK((TuneAdvisor::poolCooldownMs() == 250u));
         }
     }
 }
@@ -994,7 +999,7 @@ TEST_CASE("YAMS_TUNING_PROFILE env var overrides config", "[daemon][components][
         EnvGuard envGuard("YAMS_TUNING_PROFILE", "efficient");
 
         auto profile = yams::daemon::TuneAdvisor::tuningProfile();
-        CHECK(profile == yams::daemon::TuneAdvisor::Profile::Efficient);
+        CHECK((profile == yams::daemon::TuneAdvisor::Profile::Efficient));
     }
 
     SECTION("aggressive profile from env var") {
@@ -1002,7 +1007,7 @@ TEST_CASE("YAMS_TUNING_PROFILE env var overrides config", "[daemon][components][
         EnvGuard envGuard("YAMS_TUNING_PROFILE", "aggressive");
 
         auto profile = yams::daemon::TuneAdvisor::tuningProfile();
-        CHECK(profile == yams::daemon::TuneAdvisor::Profile::Aggressive);
+        CHECK((profile == yams::daemon::TuneAdvisor::Profile::Aggressive));
     }
 
     SECTION("conservative alias maps to efficient") {
@@ -1010,7 +1015,7 @@ TEST_CASE("YAMS_TUNING_PROFILE env var overrides config", "[daemon][components][
         EnvGuard envGuard("YAMS_TUNING_PROFILE", "conservative");
 
         auto profile = yams::daemon::TuneAdvisor::Profile::Efficient;
-        CHECK(yams::daemon::TuneAdvisor::tuningProfile() == profile);
+        CHECK((yams::daemon::TuneAdvisor::tuningProfile() == profile));
     }
 
     SECTION("invalid env var falls back to balanced") {
@@ -1018,7 +1023,7 @@ TEST_CASE("YAMS_TUNING_PROFILE env var overrides config", "[daemon][components][
         EnvGuard envGuard("YAMS_TUNING_PROFILE", "invalid_profile");
 
         auto profile = yams::daemon::TuneAdvisor::tuningProfile();
-        CHECK(profile == yams::daemon::TuneAdvisor::Profile::Balanced);
+        CHECK((profile == yams::daemon::TuneAdvisor::Profile::Balanced));
     }
 
     SECTION("empty env var falls back to balanced") {
@@ -1026,7 +1031,7 @@ TEST_CASE("YAMS_TUNING_PROFILE env var overrides config", "[daemon][components][
         EnvGuard envGuard("YAMS_TUNING_PROFILE", "");
 
         auto profile = yams::daemon::TuneAdvisor::tuningProfile();
-        CHECK(profile == yams::daemon::TuneAdvisor::Profile::Balanced);
+        CHECK((profile == yams::daemon::TuneAdvisor::Profile::Balanced));
     }
 }
 
@@ -1063,19 +1068,19 @@ title_concurrent = 2
         EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
         auto caps = ConfigResolver::resolvePostIngestCaps();
         REQUIRE(caps.totalConcurrent.has_value());
-        CHECK(*caps.totalConcurrent == 12u);
+        CHECK((*caps.totalConcurrent == 12u));
         REQUIRE(caps.embedConcurrent.has_value());
-        CHECK(*caps.embedConcurrent == 4u);
+        CHECK((*caps.embedConcurrent == 4u));
         REQUIRE(caps.extractionConcurrent.has_value());
-        CHECK(*caps.extractionConcurrent == 5u);
+        CHECK((*caps.extractionConcurrent == 5u));
         REQUIRE(caps.kgConcurrent.has_value());
-        CHECK(*caps.kgConcurrent == 6u);
+        CHECK((*caps.kgConcurrent == 6u));
         REQUIRE(caps.symbolConcurrent.has_value());
-        CHECK(*caps.symbolConcurrent == 3u);
+        CHECK((*caps.symbolConcurrent == 3u));
         REQUIRE(caps.entityConcurrent.has_value());
-        CHECK(*caps.entityConcurrent == 2u);
+        CHECK((*caps.entityConcurrent == 2u));
         REQUIRE(caps.titleConcurrent.has_value());
-        CHECK(*caps.titleConcurrent == 2u);
+        CHECK((*caps.titleConcurrent == 2u));
     }
 
     SECTION("out-of-range values are dropped (nullopt)") {
@@ -1104,10 +1109,10 @@ kg_concurrent = 5
         auto caps = ConfigResolver::resolvePostIngestCaps();
         CHECK_FALSE(caps.totalConcurrent.has_value());
         REQUIRE(caps.embedConcurrent.has_value());
-        CHECK(*caps.embedConcurrent == 3u);
+        CHECK((*caps.embedConcurrent == 3u));
         CHECK_FALSE(caps.extractionConcurrent.has_value());
         REQUIRE(caps.kgConcurrent.has_value());
-        CHECK(*caps.kgConcurrent == 5u);
+        CHECK((*caps.kgConcurrent == 5u));
         CHECK_FALSE(caps.symbolConcurrent.has_value());
         CHECK_FALSE(caps.entityConcurrent.has_value());
         CHECK_FALSE(caps.titleConcurrent.has_value());
@@ -1161,21 +1166,21 @@ pq_bytes = 64
         }
         auto policy = ConfigResolver::resolveSimeonEncoderPolicy();
         REQUIRE(policy.ngramMode.has_value());
-        CHECK(*policy.ngramMode == "char_and_word");
+        CHECK((*policy.ngramMode == "char_and_word"));
         REQUIRE(policy.ngramMin.has_value());
-        CHECK(*policy.ngramMin == 3u);
+        CHECK((*policy.ngramMin == 3u));
         REQUIRE(policy.ngramMax.has_value());
-        CHECK(*policy.ngramMax == 5u);
+        CHECK((*policy.ngramMax == 5u));
         REQUIRE(policy.sketchDim.has_value());
-        CHECK(*policy.sketchDim == 4096u);
+        CHECK((*policy.sketchDim == 4096u));
         REQUIRE(policy.outputDim.has_value());
-        CHECK(*policy.outputDim == 384u);
+        CHECK((*policy.outputDim == 384u));
         REQUIRE(policy.projection.has_value());
-        CHECK(*policy.projection == "fwht");
+        CHECK((*policy.projection == "fwht"));
         REQUIRE(policy.l2Normalize.has_value());
         CHECK(*policy.l2Normalize);
         REQUIRE(policy.pqBytes.has_value());
-        CHECK(*policy.pqBytes == 64u);
+        CHECK((*policy.pqBytes == 64u));
     }
 
     SECTION("env vars override TOML values") {
@@ -1192,11 +1197,11 @@ output_dim = 256
 
         auto policy = ConfigResolver::resolveSimeonEncoderPolicy();
         REQUIRE(policy.projection.has_value());
-        CHECK(*policy.projection == "fwht");
+        CHECK((*policy.projection == "fwht"));
         REQUIRE(policy.sketchDim.has_value());
-        CHECK(*policy.sketchDim == 8192u);
+        CHECK((*policy.sketchDim == 8192u));
         REQUIRE(policy.outputDim.has_value());
-        CHECK(*policy.outputDim == 1024u);
+        CHECK((*policy.outputDim == 1024u));
     }
 }
 
@@ -1237,11 +1242,11 @@ max_corpus_docs = 200000
         REQUIRE(policy.enabled.has_value());
         CHECK(*policy.enabled);
         REQUIRE(policy.variant.has_value());
-        CHECK(*policy.variant == "sab_smooth");
+        CHECK((*policy.variant == "sab_smooth"));
         REQUIRE(policy.subwordGamma.has_value());
-        CHECK(*policy.subwordGamma == 5.0f);
+        CHECK((*policy.subwordGamma == 5.0f));
         REQUIRE(policy.maxCorpusDocs.has_value());
-        CHECK(*policy.maxCorpusDocs == 200000u);
+        CHECK((*policy.maxCorpusDocs == 200000u));
     }
 
     SECTION("env vars override TOML values") {
@@ -1258,11 +1263,11 @@ max_corpus_docs = 50000
 
         auto policy = ConfigResolver::resolveSimeonBm25Policy();
         REQUIRE(policy.variant.has_value());
-        CHECK(*policy.variant == "sab_smooth");
+        CHECK((*policy.variant == "sab_smooth"));
         REQUIRE(policy.subwordGamma.has_value());
-        CHECK(*policy.subwordGamma == 7.5f);
+        CHECK((*policy.subwordGamma == 7.5f));
         REQUIRE(policy.maxCorpusDocs.has_value());
-        CHECK(*policy.maxCorpusDocs == 123456u);
+        CHECK((*policy.maxCorpusDocs == 123456u));
     }
 
     SECTION("fragment geometry encoder profile is read from TOML") {
@@ -1274,7 +1279,7 @@ encoder_profile = "fixed_hash_384"
 
         auto policy = ConfigResolver::resolveSimeonBm25Policy();
         REQUIRE(policy.fragmentGeometryEncoderProfile.has_value());
-        CHECK(*policy.fragmentGeometryEncoderProfile == "fixed_hash_384");
+        CHECK((*policy.fragmentGeometryEncoderProfile == "fixed_hash_384"));
     }
 
     SECTION("embedding encoder profile is read from TOML") {
@@ -1286,7 +1291,7 @@ encoder_profile = "fixed_hash_384"
 
         auto policy = ConfigResolver::resolveSimeonEncoderPolicy();
         REQUIRE(policy.encoderProfile.has_value());
-        CHECK(*policy.encoderProfile == "fixed_hash_384");
+        CHECK((*policy.encoderProfile == "fixed_hash_384"));
     }
 }
 
@@ -1313,7 +1318,7 @@ reranker_backend = "colbert"
 
         auto policy = ConfigResolver::resolveRerankerBackendPolicy(DaemonConfig{});
         REQUIRE(policy.backend.has_value());
-        CHECK(*policy.backend == "colbert");
+        CHECK((*policy.backend == "colbert"));
     }
 
     SECTION("normalizes reranker backend to lowercase") {
@@ -1325,7 +1330,7 @@ reranker_backend = "ONNX"
 
         auto policy = ConfigResolver::resolveRerankerBackendPolicy(DaemonConfig{});
         REQUIRE(policy.backend.has_value());
-        CHECK(*policy.backend == "onnx");
+        CHECK((*policy.backend == "onnx"));
     }
 }
 
@@ -1342,7 +1347,7 @@ log_level = "info"
         EnvGuard mslCompact("MallocStackLogging", "0");
 
         auto policy = ConfigResolver::resolveInstrumentationPolicy(DaemonConfig{});
-        CHECK(policy.profile == "auto");
+        CHECK((policy.profile == "auto"));
         CHECK(policy.memoryProfileActive);
         CHECK(policy.suppressAutoRepair);
         CHECK(policy.suppressSimeonLexicalBuild);
@@ -1358,7 +1363,7 @@ profile = "normal"
         EnvGuard msl("MallocStackLoggingNoCompact", "1");
 
         auto policy = ConfigResolver::resolveInstrumentationPolicy(DaemonConfig{});
-        CHECK(policy.profile == "normal");
+        CHECK((policy.profile == "normal"));
         CHECK_FALSE(policy.memoryProfileActive);
         CHECK_FALSE(policy.suppressAutoRepair);
         CHECK_FALSE(policy.suppressSimeonLexicalBuild);
@@ -1379,11 +1384,11 @@ msl_stack_log_warn_mb = 1536
         EnvGuard mslCompact("MallocStackLoggingNoCompact", "0");
 
         auto policy = ConfigResolver::resolveInstrumentationPolicy(DaemonConfig{});
-        CHECK(policy.profile == "memory");
+        CHECK((policy.profile == "memory"));
         CHECK(policy.memoryProfileActive);
         CHECK_FALSE(policy.suppressAutoRepair);
         CHECK(policy.suppressSimeonLexicalBuild);
         CHECK(policy.suppressVectorIndexBuild);
-        CHECK(policy.mslStackLogWarnBytes == 1536ULL * 1024ULL * 1024ULL);
+        CHECK((policy.mslStackLogWarnBytes == 1536ULL * 1024ULL * 1024ULL));
     }
 }

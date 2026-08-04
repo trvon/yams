@@ -33,7 +33,6 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
-#include <cstdlib>
 #include <optional>
 #include <type_traits>
 #include <unordered_set>
@@ -41,14 +40,6 @@
 
 namespace yams::daemon {
 namespace {
-
-std::optional<std::string> getenvCopy(const char* name) {
-    auto value = yams::config::getenv_copy(name);
-    if (value.empty()) {
-        return std::nullopt;
-    }
-    return value;
-}
 
 void writeShutdownFailure(const char* operation, const char* name = nullptr,
                           const char* message = nullptr) noexcept {
@@ -275,7 +266,7 @@ Result<void> PluginManager::initialize() {
     // Configure name policy
     if (deps_.config) {
         std::string policy = deps_.config->pluginNamePolicy;
-        if (const auto env = getenvCopy("YAMS_PLUGIN_NAME_POLICY"))
+        if (const auto env = yams::config::getenv_optional("YAMS_PLUGIN_NAME_POLICY"))
             policy = *env;
         for (auto& c : policy)
             c = static_cast<char>(std::tolower(c));
@@ -497,22 +488,22 @@ PluginManager::pluginScanRoots() const {
     namespace fs = std::filesystem;
 #ifdef _WIN32
     std::optional<fs::path> userBase;
-    if (const auto localAppData = getenvCopy("LOCALAPPDATA")) {
+    if (const auto localAppData = yams::config::getenv_optional("LOCALAPPDATA")) {
         userBase = fs::path(*localAppData) / "yams";
-    } else if (const auto userProfile = getenvCopy("USERPROFILE")) {
+    } else if (const auto userProfile = yams::config::getenv_optional("USERPROFILE")) {
         userBase = fs::path(*userProfile) / "AppData" / "Local" / "yams";
     }
     if (userBase) {
         appendRoot(roots, PluginHostKind::Abi, *userBase / "plugins");
         appendRoot(roots, PluginHostKind::External, *userBase / "external-plugins");
     }
-    if (const auto programFiles = getenvCopy("ProgramFiles")) {
+    if (const auto programFiles = yams::config::getenv_optional("ProgramFiles")) {
         const auto installBase = fs::path(*programFiles) / "YAMS" / "lib" / "yams";
         appendRoot(roots, PluginHostKind::Abi, installBase / "plugins");
         appendRoot(roots, PluginHostKind::External, installBase / "external-plugins");
     }
 #else
-    if (const auto home = getenvCopy("HOME")) {
+    if (const auto home = yams::config::getenv_optional("HOME")) {
         const auto userBase = fs::path(*home) / ".local" / "lib" / "yams";
         appendRoot(roots, PluginHostKind::Abi, userBase / "plugins");
         appendRoot(roots, PluginHostKind::External, userBase / "external-plugins");
@@ -812,15 +803,13 @@ Result<size_t> PluginManager::autoloadPlugins() {
             return Result<size_t>(0);
         }
 #if defined(YAMS_TESTING) || defined(YAMS_TEST_PROVIDER_CONTROLS)
-        if (const auto mockProvider = getenvCopy("YAMS_USE_MOCK_PROVIDER");
-            mockProvider && ConfigResolver::envTruthy(mockProvider->c_str())) {
+        if (yams::config::read_env_bool("YAMS_USE_MOCK_PROVIDER").valueOr(false)) {
             spdlog::info("[PluginManager] autoload skipped (mock provider via env)");
             pluginHostFsm_.dispatch(AllPluginsLoadedEvent{0});
             return Result<size_t>(0);
         }
 #endif
-        if (const auto disabled = getenvCopy("YAMS_DISABLE_ABI_PLUGINS");
-            disabled && !disabled->empty()) {
+        if (yams::config::read_env_bool("YAMS_DISABLE_ABI_PLUGINS").valueOr(false)) {
             spdlog::info("[PluginManager] autoload disabled by YAMS_DISABLE_ABI_PLUGINS");
             pluginHostFsm_.dispatch(AllPluginsLoadedEvent{0});
             return Result<size_t>(0);

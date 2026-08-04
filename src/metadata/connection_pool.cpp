@@ -3,30 +3,19 @@
 #include <atomic>
 #include <cctype>
 #include <cstdio>
-#include <cstdlib>
 #include <limits>
 #include <source_location>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <yams/config/config_helpers.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/profiling.h>
 
 namespace yams::metadata {
 
 namespace {
-
-std::string getenvCopy(std::string_view name) {
-    static std::mutex envMutex;
-    std::lock_guard<std::mutex> lock(envMutex);
-    const std::string key(name);
-    const char* env = std::getenv(key.c_str()); // NOLINT(concurrency-mt-unsafe)
-    if (!env || !*env) {
-        return {};
-    }
-    return std::string(env);
-}
 
 bool metadata_pool_trace_enabled() {
     static std::atomic<int> cached{-1};
@@ -35,8 +24,7 @@ bool metadata_pool_trace_enabled() {
         return cachedValue == 1;
     }
 
-    const std::string env = getenvCopy("YAMS_METADATA_TRACE");
-    bool enabled = !env.empty() && std::string_view(env) != "0";
+    const bool enabled = yams::config::read_env_bool("YAMS_METADATA_TRACE").valueOr(false);
     cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
     return enabled;
 }
@@ -58,8 +46,7 @@ bool db_lifetime_trace_enabled() {
         return cachedValue == 1;
     }
 
-    const std::string env = getenvCopy("YAMS_TRACE_DB_LIFETIME");
-    bool enabled = !env.empty() && std::string_view(env) != "0";
+    const bool enabled = yams::config::read_env_bool("YAMS_TRACE_DB_LIFETIME").valueOr(false);
     cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
     return enabled;
 }
@@ -85,8 +72,7 @@ bool sqlite_profile_trace_enabled() {
         return cachedValue == 1;
     }
 
-    const std::string env = getenvCopy("YAMS_SQL_TRACE");
-    bool enabled = !env.empty() && std::string_view(env) != "0";
+    const bool enabled = yams::config::read_env_bool("YAMS_SQL_TRACE").valueOr(false);
     cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
     return enabled;
 }
@@ -99,15 +85,10 @@ int sqlite_profile_min_ms() {
     }
 
     int value = 200;
-    if (const std::string env = getenvCopy("YAMS_SQL_TRACE_MIN_MS"); !env.empty()) {
-        try {
-            int parsed = std::stoi(env);
-            if (parsed > 0) {
-                value = parsed;
-            }
-        } catch (const std::exception&) {
-            spdlog::debug("Ignoring invalid YAMS_SQL_TRACE_MIN_MS value");
-        }
+    if (auto configured = yams::config::read_env_milliseconds("YAMS_SQL_TRACE_MIN_MS").value;
+        configured && configured->count() > 0 &&
+        configured->count() <= std::numeric_limits<int>::max()) {
+        value = static_cast<int>(configured->count());
     }
     cached.store(value, std::memory_order_relaxed);
     return value;
@@ -681,14 +662,9 @@ Result<std::unique_ptr<Database>> ConnectionPool::createConnection() {
 Result<void> ConnectionPool::configureConnection(Database& db) {
     // Allow env-var override for busy_timeout (default from config, typically 15000ms)
     auto effectiveBusyTimeout = config_.busyTimeout;
-    if (const std::string envBusy = getenvCopy("YAMS_DB_BUSY_TIMEOUT_MS"); !envBusy.empty()) {
-        try {
-            auto v = std::stoul(envBusy);
-            if (v > 0)
-                effectiveBusyTimeout = std::chrono::milliseconds(v);
-        } catch (const std::exception&) {
-            spdlog::debug("Ignoring invalid YAMS_DB_BUSY_TIMEOUT_MS value");
-        }
+    if (auto configured = yams::config::read_env_milliseconds("YAMS_DB_BUSY_TIMEOUT_MS").value;
+        configured && configured->count() > 0) {
+        effectiveBusyTimeout = *configured;
     }
 
     // Set busy timeout
@@ -717,7 +693,7 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
     }
 
     // Additional pragmas for performance (more relaxed when running tests)
-    if (!getenvCopy("YAMS_TEST_TMPDIR").empty()) {
+    if (!yams::config::getenv_copy("YAMS_TEST_TMPDIR").empty()) {
         db.execute("PRAGMA synchronous = OFF");
     } else {
         db.execute("PRAGMA synchronous = NORMAL");
@@ -760,29 +736,15 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
     // Both are overridable: YAMS_DB_CACHE_SIZE_MB (write pool), YAMS_DB_READ_CACHE_SIZE_MB.
     int defaultCacheMB = config_.readOnly ? 32 : 256;
     const char* envName = config_.readOnly ? "YAMS_DB_READ_CACHE_SIZE_MB" : "YAMS_DB_CACHE_SIZE_MB";
-    if (const std::string envCache = getenvCopy(envName); !envCache.empty()) {
-        try {
-            int mb = std::stoi(envCache);
-            if (mb > 0)
-                defaultCacheMB = mb;
-        } catch (const std::exception&) {
-            spdlog::debug("Ignoring invalid {} value", envName);
-        }
+    if (auto value = yams::config::read_env_int(envName).value; value && *value > 0) {
+        defaultCacheMB = *value;
     }
     // Also check the generic env var as fallback for read pool
     if (config_.readOnly) {
-        if (const std::string envGeneric = getenvCopy("YAMS_DB_CACHE_SIZE_MB");
-            !envGeneric.empty()) {
-            // Only use generic if specific read var wasn't set
-            if (getenvCopy("YAMS_DB_READ_CACHE_SIZE_MB").empty()) {
-                try {
-                    int mb = std::stoi(envGeneric);
-                    if (mb > 0)
-                        defaultCacheMB = mb;
-                } catch (const std::exception&) {
-                    spdlog::debug("Ignoring invalid YAMS_DB_CACHE_SIZE_MB value");
-                }
-            }
+        const auto generic = yams::config::read_env_int("YAMS_DB_CACHE_SIZE_MB");
+        if (generic.value && *generic.value > 0 &&
+            !yams::config::getenv_optional("YAMS_DB_READ_CACHE_SIZE_MB").has_value()) {
+            defaultCacheMB = *generic.value;
         }
     }
     constexpr int kMaxCacheSizeMB = std::numeric_limits<int>::max() / 1024;

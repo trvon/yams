@@ -2033,9 +2033,12 @@ if catch2_dep.found()
   )
 
   config_parse_utils_exe = executable('config_parse_utils',
-    files('unit/config/config_parse_utils_catch2_test.cpp'),
+    files(
+      'unit/config/config_parse_utils_catch2_test.cpp',
+      'unit/config/environment_catch2_test.cpp',
+    ),
     include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep],
+    dependencies: [catch2_dep, catch2_main_dep, dependency('yams_config'), dependency('spdlog')],
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
     build_rpath: ':'.join(_test_rpaths),
     install: false,

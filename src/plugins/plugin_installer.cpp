@@ -11,10 +11,8 @@
 #include <array>
 #include <cctype>
 #include <chrono>
-#include <cstdlib>
 #include <fstream>
 #include <iomanip>
-#include <mutex>
 #include <regex>
 #include <set>
 #include <sstream>
@@ -100,15 +98,6 @@ Result<void> validatePluginVersion(std::string_view version) {
                      "Invalid plugin version. Use only letters, numbers, '.', '_', '-' and '+'."};
     }
     return {};
-}
-
-std::optional<std::string> getenvCopy(const char* name) {
-    static std::mutex envMutex;
-    std::lock_guard<std::mutex> lock(envMutex);
-    if (const char* value = std::getenv(name)) { // NOLINT(concurrency-mt-unsafe)
-        return std::string(value);
-    }
-    return std::nullopt;
 }
 
 bool isRelativePathSafe(const fs::path& path) {
@@ -709,7 +698,7 @@ std::unique_ptr<IPluginInstaller> makePluginInstaller(std::shared_ptr<IPluginRep
 
 fs::path getDefaultPluginInstallDir() {
     // Check environment variable first
-    if (auto envDir = getenvCopy("YAMS_PLUGIN_DIR")) {
+    if (auto envDir = yams::config::getenv_optional("YAMS_PLUGIN_DIR")) {
         return fs::path(*envDir);
     }
 
@@ -721,14 +710,14 @@ fs::path getDefaultPluginInstallDir() {
         CoTaskMemFree(localAppData);
         return result;
     }
-    if (auto localAppData = getenvCopy("LOCALAPPDATA")) {
+    if (auto localAppData = yams::config::getenv_optional("LOCALAPPDATA")) {
         return fs::path(*localAppData) / "yams" / "plugins";
     }
     return fs::path(".") / "yams" / "plugins";
 #else
     // Unix: ~/.local/lib/yams/plugins
     fs::path homeDir;
-    if (auto home = getenvCopy("HOME")) {
+    if (auto home = yams::config::getenv_optional("HOME")) {
         homeDir = *home;
     } else {
         struct passwd pwd;

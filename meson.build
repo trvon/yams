@@ -782,6 +782,7 @@ if wasi_enabled
 else
   # Core libraries (ordered by dependency)
   subdir('src/core')
+  subdir('src/config')
   subdir('src/crypto')
   subdir('src/chunking')
   subdir('src/compression')
@@ -790,7 +791,6 @@ else
   subdir('src/manifest')
   subdir('src/metadata')
   subdir('src/integrity')
-  subdir('src/config')
   subdir('src/extraction')
   subdir('src/detection')
   subdir('src/content')

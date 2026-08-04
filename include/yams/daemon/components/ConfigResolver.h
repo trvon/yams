@@ -241,7 +241,8 @@ public:
     /**
      * @brief Check if an environment variable value is "truthy".
      *
-     * Returns true for any value except: empty, "0", "false", "off", "no" (case-insensitive).
+     * Returns true only for 1, true, yes, or on (case-insensitive). Unknown values are false;
+     * callers that need to preserve a typed default should use config::read_env_bool().
      *
      * @param value Environment variable value (may be nullptr)
      * @return true if value is truthy, false otherwise

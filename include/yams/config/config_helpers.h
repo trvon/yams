@@ -3,7 +3,8 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
-#include <cstdlib>
+#include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <map>
 #include <optional>
@@ -11,13 +12,55 @@
 #include <string_view>
 #include <vector>
 
-#include <yams/common/string_utils.h>
 #include <yams/core/types.h>
 
 namespace yams::config {
 
-/// Copy one environment value at the process-environment boundary.
+/// A copied process-environment value with strict parse state.
+///
+/// `present && !value` is an invalid configured value. `!present` means the variable was not set.
+template <typename T> struct ParsedEnvironmentValue {
+    bool present{false};
+    std::optional<T> value;
+    std::string raw;
+
+    [[nodiscard]] bool invalid() const noexcept { return present && !value.has_value(); }
+    [[nodiscard]] T valueOr(T fallback) const { return value.value_or(fallback); }
+};
+
+/// Copy one environment value at the process-environment boundary, preserving an explicitly empty
+/// value. All production environment reads should pass through this shared boundary.
+std::optional<std::string> getenv_optional(std::string_view key);
+
+/// Copy a non-empty environment value; unset and explicitly empty values return nullopt.
+std::optional<std::string> getenv_nonempty(std::string_view key);
+
+/// Set or unset one process-environment value under the same boundary lock used by readers.
+/// A null value unsets the key. Returns false when the platform mutation fails.
+bool set_environment(const char* key, const char* value) noexcept;
+
+/// Compatibility accessor that maps unset and explicitly empty values to an empty string.
 std::string getenv_copy(const char* key);
+
+/// Strict typed environment readers. Invalid values emit a bounded warning and leave `value`
+/// empty so callers can preserve their typed default.
+ParsedEnvironmentValue<bool> read_env_bool(std::string_view key);
+ParsedEnvironmentValue<std::size_t> read_env_size(std::string_view key);
+ParsedEnvironmentValue<int> read_env_int(std::string_view key);
+ParsedEnvironmentValue<std::uint32_t> read_env_u32(std::string_view key);
+ParsedEnvironmentValue<float> read_env_float(std::string_view key);
+ParsedEnvironmentValue<double> read_env_double(std::string_view key);
+ParsedEnvironmentValue<std::chrono::milliseconds> read_env_milliseconds(std::string_view key);
+
+/// Effective vector compatibility policy. A valid true value from any disable alias wins
+/// conservatively; false and invalid aliases do not override a disabled typed default.
+struct VectorEnvironmentPolicy {
+    bool enabled{true};
+    std::vector<std::string> disableSources;
+    std::vector<std::string> diagnostics;
+};
+
+VectorEnvironmentPolicy resolve_vector_environment(bool configuredEnabled = true);
 
 // String trimming utilities
 inline void ltrim(std::string& s) {
@@ -50,9 +93,7 @@ inline std::string unquote(std::string val) {
 std::filesystem::path expand_tilde(const std::string& path);
 
 // Terminal sanitization
-inline std::string sanitize_for_terminal(std::string_view in) {
-    return yams::common::sanitizeForTerminal(in);
-}
+std::string sanitize_for_terminal(std::string_view in);
 
 // Time parsing
 inline std::chrono::milliseconds parse_ms(std::string_view s) {

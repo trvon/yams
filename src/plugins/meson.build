@@ -8,6 +8,7 @@ curl_dep = dependency('libcurl', required: true)
 openssl_dep = dependency('openssl', modules: ['ssl', 'crypto'], required: true)
 libarchive_dep = dependency('libarchive', required: true)
 yams_core = dependency('yams_core', required: true)
+yams_config = dependency('yams_config', required: true)
 
 yams_plugins_mgmt = static_library('yams_plugins_mgmt',
   [
@@ -15,7 +16,7 @@ yams_plugins_mgmt = static_library('yams_plugins_mgmt',
     'plugin_installer.cpp',
   ],
   include_directories: include_directories('../../include'),
-  dependencies: [spdlog_dep, json_dep, threads_dep, curl_dep, openssl_dep, libarchive_dep, yams_core],
+  dependencies: [spdlog_dep, json_dep, threads_dep, curl_dep, openssl_dep, libarchive_dep, yams_core, yams_config],
   install: true,
 )
 
@@ -29,5 +30,6 @@ pkg.generate(yams_plugins_mgmt,
 yams_plugins_mgmt_dep = declare_dependency(
   link_with: yams_plugins_mgmt,
   include_directories: include_directories('../../include'),
+  dependencies: [yams_config],
 )
 meson.override_dependency('yams_plugins_mgmt', yams_plugins_mgmt_dep)

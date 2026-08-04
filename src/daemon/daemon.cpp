@@ -129,29 +129,15 @@ void YamsDaemon::snapshotRuntimeEnvironment() {
     runtimeEnvironmentBeforeStart_.clear();
     for (const char* name :
          {"YAMS_IN_DAEMON", "YAMS_STORAGE", "YAMS_DATA_DIR", "YAMS_CONFIG", "YAMS_DAEMON_SOCKET"}) {
-        // NOLINTNEXTLINE(concurrency-mt-unsafe): snapshot precedes this daemon's compatibility
-        // writes
-        const char* value = std::getenv(name);
-        runtimeEnvironmentBeforeStart_.emplace(name, value ? std::optional<std::string>{value}
-                                                           : std::nullopt);
+        runtimeEnvironmentBeforeStart_.emplace(name, yams::config::getenv_optional(name));
     }
 }
 
 void YamsDaemon::restoreRuntimeEnvironment() noexcept {
     for (const auto& [name, value] : runtimeEnvironmentBeforeStart_) {
-#ifdef _WIN32
-        _putenv_s(name.c_str(), value ? value->c_str() : "");
-#else
-        if (value) {
-            // NOLINTNEXTLINE(concurrency-mt-unsafe): restoring constructor-owned compatibility
-            // state
-            ::setenv(name.c_str(), value->c_str(), 1);
-        } else {
-            // NOLINTNEXTLINE(concurrency-mt-unsafe): restoring constructor-owned compatibility
-            // state
-            ::unsetenv(name.c_str());
+        if (!yams::config::set_environment(name.c_str(), value ? value->c_str() : nullptr)) {
+            std::fputs("YamsDaemon failed to restore runtime environment\n", stderr);
         }
-#endif
     }
     runtimeEnvironmentBeforeStart_.clear();
 }
@@ -234,39 +220,21 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config)
 
     // Let in-process components such as EmbeddingGenerator know they are running.
     // inside the daemon so they can avoid creating a DaemonBackend and self-calling the IPC API.
-#ifndef _WIN32
-    ::setenv("YAMS_IN_DAEMON", "1", 1); // NOLINT(concurrency-mt-unsafe)
-#else
-    _putenv_s("YAMS_IN_DAEMON", "1");
-#endif
+    (void)yams::config::set_environment("YAMS_IN_DAEMON", "1");
 
     if (!config_.dataDir.empty()) {
-#ifndef _WIN32
-        ::setenv("YAMS_STORAGE", config_.dataDir.c_str(), 1);  // NOLINT(concurrency-mt-unsafe)
-        ::setenv("YAMS_DATA_DIR", config_.dataDir.c_str(), 1); // NOLINT(concurrency-mt-unsafe)
-#else
-        _putenv_s("YAMS_STORAGE", config_.dataDir.string().c_str());
-        _putenv_s("YAMS_DATA_DIR", config_.dataDir.string().c_str());
-#endif
+        (void)yams::config::set_environment("YAMS_STORAGE", config_.dataDir.c_str());
+        (void)yams::config::set_environment("YAMS_DATA_DIR", config_.dataDir.c_str());
         spdlog::debug("Seeded data path aliases='{}'", config_.dataDir.string());
     }
 
     if (!config_.configFilePath.empty()) {
-#ifndef _WIN32
-        ::setenv("YAMS_CONFIG", config_.configFilePath.c_str(), 1); // NOLINT(concurrency-mt-unsafe)
-#else
-        _putenv_s("YAMS_CONFIG", config_.configFilePath.string().c_str());
-#endif
+        (void)yams::config::set_environment("YAMS_CONFIG", config_.configFilePath.c_str());
         spdlog::debug("Seeded YAMS_CONFIG='{}'", config_.configFilePath.string());
     }
 
     if (!config_.socketPath.empty()) {
-#ifndef _WIN32
-        // NOLINTNEXTLINE(concurrency-mt-unsafe): constructor seeds child component context
-        ::setenv("YAMS_DAEMON_SOCKET", config_.socketPath.c_str(), 1);
-#else
-        _putenv_s("YAMS_DAEMON_SOCKET", config_.socketPath.string().c_str());
-#endif
+        (void)yams::config::set_environment("YAMS_DAEMON_SOCKET", config_.socketPath.c_str());
         spdlog::debug("Seeded YAMS_DAEMON_SOCKET='{}'", config_.socketPath.string());
     }
 }
@@ -695,8 +663,7 @@ Result<void> YamsDaemon::start() {
     // Fast-start mode for tests: skip heavy service initialization and allow
     // streaming stubs/status responses to operate over the live socket server.
     // Enable by setting YAMS_TEST_FAST_START=1 in the environment.
-    if (const char* fast = std::getenv("YAMS_TEST_FAST_START");
-        fast && *fast && std::string(fast) != "0" && std::string(fast) != "false") {
+    if (yams::config::read_env_bool("YAMS_TEST_FAST_START").valueOr(false)) {
         spdlog::warn("YAMS_TEST_FAST_START enabled: skipping ServiceManager initialization");
         // Leave lifecycle FSM in its current (Initializing) state; readiness flags
         // for services remain false. RequestDispatcher will serve Status responses

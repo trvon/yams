@@ -7,7 +7,6 @@
 
 #include <spdlog/spdlog.h>
 
-#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
@@ -25,36 +24,6 @@ using yams::config::detail::parseUnsignedIntegral;
 
 std::optional<std::size_t> parseSize(std::string_view raw) {
     return parseUnsignedIntegral<std::size_t>(raw);
-}
-
-std::string getenvValue(const char* name) {
-    const char* raw = std::getenv(name); // NOLINT(concurrency-mt-unsafe)
-    return raw != nullptr ? std::string(raw) : std::string{};
-}
-
-std::optional<std::string> readEnvString(const char* name) {
-    auto raw = getenvValue(name);
-    if (raw.empty())
-        return std::nullopt;
-    return raw;
-}
-
-std::optional<std::uint32_t> readEnvU32(const char* name) {
-    auto raw = getenvValue(name);
-    if (raw.empty())
-        return std::nullopt;
-    return parseUnsignedIntegral<std::uint32_t>(raw);
-}
-
-std::optional<float> readEnvFloat(const char* name) {
-    auto raw = getenvValue(name);
-    if (raw.empty())
-        return std::nullopt;
-    auto parsed = parseDouble(raw);
-    if (!parsed) {
-        return std::nullopt;
-    }
-    return static_cast<float>(*parsed);
 }
 
 std::optional<std::uint32_t> parseTomlU32(const std::string& s) {
@@ -76,21 +45,18 @@ std::optional<float> parseTomlFloat(const std::string& s) {
 } // namespace
 
 bool ConfigResolver::envTruthy(const char* value) {
-    if (!value || !*value) {
+    if (value == nullptr) {
         return false;
     }
-    std::string v(value);
-    std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) { return std::tolower(c); });
-    return !(v == "0" || v == "false" || v == "off" || v == "no");
+    return parseTomlBool(value).value_or(false);
 }
 
 bool ConfigResolver::resolvePluginDirStrict(bool configuredStrict) {
-    const auto override = readEnvString("YAMS_PLUGIN_DIR_STRICT");
-    return override ? envTruthy(override->c_str()) : configuredStrict;
+    return yams::config::read_env_bool("YAMS_PLUGIN_DIR_STRICT").valueOr(configuredStrict);
 }
 
 std::filesystem::path ConfigResolver::resolveDefaultConfigPath() {
-    if (auto explicitPath = getenvValue("YAMS_CONFIG_PATH"); !explicitPath.empty()) {
+    if (auto explicitPath = yams::config::getenv_copy("YAMS_CONFIG_PATH"); !explicitPath.empty()) {
         std::filesystem::path p{explicitPath};
         if (std::filesystem::exists(p))
             return p;
@@ -98,32 +64,32 @@ std::filesystem::path ConfigResolver::resolveDefaultConfigPath() {
     // YAMS_CONFIG is the canonical env var used by test fixtures and
     // config_helpers.cpp; accept it here so resolver-based policies respect
     // the harness-supplied TOML.
-    if (auto fixtureConfig = getenvValue("YAMS_CONFIG"); !fixtureConfig.empty()) {
+    if (auto fixtureConfig = yams::config::getenv_copy("YAMS_CONFIG"); !fixtureConfig.empty()) {
         std::filesystem::path p{fixtureConfig};
         if (std::filesystem::exists(p))
             return p;
     }
 #ifdef _WIN32
     // Windows: prefer roaming APPDATA for config (matches get_config_dir())
-    if (auto appdata = getenvValue("APPDATA"); !appdata.empty()) {
+    if (auto appdata = yams::config::getenv_copy("APPDATA"); !appdata.empty()) {
         std::filesystem::path p = std::filesystem::path(appdata) / "yams" / "config.toml";
         if (std::filesystem::exists(p))
             return p;
     }
 #endif
-    if (auto xdg = getenvValue("XDG_CONFIG_HOME"); !xdg.empty()) {
+    if (auto xdg = yams::config::getenv_copy("XDG_CONFIG_HOME"); !xdg.empty()) {
         std::filesystem::path p = std::filesystem::path(xdg) / "yams" / "config.toml";
         if (std::filesystem::exists(p))
             return p;
     }
-    if (auto home = getenvValue("HOME"); !home.empty()) {
+    if (auto home = yams::config::getenv_copy("HOME"); !home.empty()) {
         std::filesystem::path p = std::filesystem::path(home) / ".config" / "yams" / "config.toml";
         if (std::filesystem::exists(p))
             return p;
     }
 #ifdef _WIN32
     // Windows: check LOCALAPPDATA
-    if (auto localAppData = getenvValue("LOCALAPPDATA"); !localAppData.empty()) {
+    if (auto localAppData = yams::config::getenv_copy("LOCALAPPDATA"); !localAppData.empty()) {
         std::filesystem::path p = std::filesystem::path(localAppData) / "yams" / "config.toml";
         if (std::filesystem::exists(p))
             return p;
@@ -151,7 +117,7 @@ std::string ConfigResolver::resolveEmbeddingBackend(const std::string& defaultVa
         return s;
     };
 
-    if (auto envp = getenvValue("YAMS_EMBED_BACKEND"); !envp.empty()) {
+    if (auto envp = yams::config::getenv_copy("YAMS_EMBED_BACKEND"); !envp.empty()) {
         return normalize(std::move(envp));
     }
 
@@ -206,19 +172,19 @@ ConfigResolver::SimeonEncoderPolicy ConfigResolver::resolveSimeonEncoderPolicy()
         spdlog::debug("Error reading config for simeon encoder policy: {}", e.what());
     }
 
-    if (auto v = readEnvString("YAMS_SIMEON_NGRAM_MODE"))
+    if (auto v = yams::config::getenv_nonempty("YAMS_SIMEON_NGRAM_MODE"))
         policy.ngramMode = std::move(v);
-    if (auto v = readEnvU32("YAMS_SIMEON_NGRAM_MIN"))
+    if (auto v = yams::config::read_env_u32("YAMS_SIMEON_NGRAM_MIN").value)
         policy.ngramMin = v;
-    if (auto v = readEnvU32("YAMS_SIMEON_NGRAM_MAX"))
+    if (auto v = yams::config::read_env_u32("YAMS_SIMEON_NGRAM_MAX").value)
         policy.ngramMax = v;
-    if (auto v = readEnvU32("YAMS_SIMEON_SKETCH_DIM"))
+    if (auto v = yams::config::read_env_u32("YAMS_SIMEON_SKETCH_DIM").value)
         policy.sketchDim = v;
-    if (auto v = readEnvU32("YAMS_SIMEON_OUTPUT_DIM"))
+    if (auto v = yams::config::read_env_u32("YAMS_SIMEON_OUTPUT_DIM").value)
         policy.outputDim = v;
-    if (auto v = readEnvString("YAMS_SIMEON_PROJECTION"))
+    if (auto v = yams::config::getenv_nonempty("YAMS_SIMEON_PROJECTION"))
         policy.projection = std::move(v);
-    if (auto v = readEnvU32("YAMS_SIMEON_PQ_BYTES"))
+    if (auto v = yams::config::read_env_u32("YAMS_SIMEON_PQ_BYTES").value)
         policy.pqBytes = v;
 
     return policy;
@@ -254,25 +220,25 @@ ConfigResolver::EmbeddingRuntimePolicy ConfigResolver::resolveEmbeddingRuntimePo
     }
 
     // Env overrides (preserve existing test/CI overlays)
-    if (auto v = readEnvString("YAMS_EMBED_BACKEND"))
+    if (auto v = yams::config::getenv_nonempty("YAMS_EMBED_BACKEND"))
         policy.backend = std::move(v);
-    if (auto v = readEnvString("YAMS_PREFERRED_MODEL"))
+    if (auto v = yams::config::getenv_nonempty("YAMS_PREFERRED_MODEL"))
         policy.preferredModel = std::move(v);
-    if (auto v = readEnvString("YAMS_EMBED_BATCH")) {
+    if (auto v = yams::config::getenv_nonempty("YAMS_EMBED_BATCH")) {
         try {
             policy.batchSize = static_cast<std::size_t>(std::stoull(*v));
         } catch (...) {
             spdlog::debug("config: failed to parse YAMS_EMBED_BATCH size_t");
         }
     }
-    if (auto v = readEnvString("YAMS_EMBED_BATCH_TARGET")) {
+    if (auto v = yams::config::getenv_nonempty("YAMS_EMBED_BATCH_TARGET")) {
         try {
             policy.batchTarget = static_cast<std::size_t>(std::stoull(*v));
         } catch (...) {
             spdlog::debug("config: failed to parse YAMS_EMBED_BATCH_TARGET size_t");
         }
     }
-    if (auto v = readEnvString("YAMS_REPAIR_LOCK_TIMEOUT_MS")) {
+    if (auto v = yams::config::getenv_nonempty("YAMS_REPAIR_LOCK_TIMEOUT_MS")) {
         try {
             policy.repairLockTimeoutMs = static_cast<std::uint64_t>(std::stoull(*v));
         } catch (...) {
@@ -334,45 +300,41 @@ ConfigResolver::SimeonBm25Policy ConfigResolver::resolveSimeonBm25Policy() {
         spdlog::debug("Error reading config for simeon bm25 policy: {}", e.what());
     }
 
-    if (auto raw = getenvValue("YAMS_SIMEON_BM25_ENABLED"); !raw.empty()) {
-        if (auto b = parseTomlBool(raw))
-            policy.enabled = b;
-    }
-    if (auto v = readEnvString("YAMS_SIMEON_BM25_VARIANT"))
+    if (auto value = yams::config::read_env_bool("YAMS_SIMEON_BM25_ENABLED").value)
+        policy.enabled = value;
+    if (auto v = yams::config::getenv_nonempty("YAMS_SIMEON_BM25_VARIANT"))
         policy.variant = std::move(v);
-    if (auto v = readEnvFloat("YAMS_SIMEON_BM25_SUBWORD_GAMMA"))
+    if (auto v = yams::config::read_env_float("YAMS_SIMEON_BM25_SUBWORD_GAMMA").value)
         policy.subwordGamma = v;
-    if (auto v = readEnvString("YAMS_SIMEON_BM25_MAX_CORPUS_DOCS"))
+    if (auto v = yams::config::getenv_nonempty("YAMS_SIMEON_BM25_MAX_CORPUS_DOCS"))
         policy.maxCorpusDocs = parseSize(*v);
-    if (auto v = readEnvString("YAMS_SIMEON_BM25_MAX_CORPUS_BYTES"))
+    if (auto v = yams::config::getenv_nonempty("YAMS_SIMEON_BM25_MAX_CORPUS_BYTES"))
         policy.maxCorpusBytes = parseSize(*v);
-    if (auto v = readEnvString("YAMS_SIMEON_BM25_BUILD_DOC_CHUNK_BYTES"))
+    if (auto v = yams::config::getenv_nonempty("YAMS_SIMEON_BM25_BUILD_DOC_CHUNK_BYTES"))
         policy.buildDocChunkBytes = parseSize(*v);
-    if (auto v = readEnvString("YAMS_SIMEON_BM25_BUILD_DOC_MAX_CHUNKS"))
+    if (auto v = yams::config::getenv_nonempty("YAMS_SIMEON_BM25_BUILD_DOC_MAX_CHUNKS"))
         policy.buildDocMaxChunks = parseSize(*v);
-    if (auto raw = getenvValue("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_ENABLED"); !raw.empty()) {
-        if (auto b = parseTomlBool(raw))
-            policy.fragmentGeometryEnabled = b;
-    }
-    if (auto v = readEnvString("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_MAX_DOCS"))
+    if (auto value =
+            yams::config::read_env_bool("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_ENABLED").value)
+        policy.fragmentGeometryEnabled = value;
+    if (auto v = yams::config::getenv_nonempty("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_MAX_DOCS"))
         policy.fragmentGeometryMaxDocs = parseSize(*v);
-    if (auto v = readEnvString("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_MAX_CORPUS_BYTES"))
+    if (auto v =
+            yams::config::getenv_nonempty("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_MAX_CORPUS_BYTES"))
         policy.fragmentGeometryMaxCorpusBytes = parseSize(*v);
-    if (auto v = readEnvString("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_PMI_SAMPLE_DOCS"))
+    if (auto v =
+            yams::config::getenv_nonempty("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_PMI_SAMPLE_DOCS"))
         policy.fragmentGeometryPmiSampleDocs = parseSize(*v);
-    if (auto v = readEnvString("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_PMI_SAMPLE_BYTES"))
+    if (auto v =
+            yams::config::getenv_nonempty("YAMS_SIMEON_BM25_FRAGMENT_GEOMETRY_PMI_SAMPLE_BYTES"))
         policy.fragmentGeometryPmiSampleBytes = parseSize(*v);
-    if (auto raw = getenvValue("YAMS_SIMEON_BM25_ROUTER_ENABLED"); !raw.empty()) {
-        if (auto b = parseTomlBool(raw))
-            policy.routerEnabled = b;
-    }
-    if (auto v = readEnvString("YAMS_SIMEON_BM25_ROUTER_PRESET"))
+    if (auto value = yams::config::read_env_bool("YAMS_SIMEON_BM25_ROUTER_ENABLED").value)
+        policy.routerEnabled = value;
+    if (auto v = yams::config::getenv_nonempty("YAMS_SIMEON_BM25_ROUTER_PRESET"))
         policy.routerPreset = std::move(v);
 
-    if (auto raw = getenvValue("YAMS_SIMEON_STRATEGY_ROUTER_ENABLED"); !raw.empty()) {
-        if (auto b = parseTomlBool(raw))
-            policy.strategyRouterEnabled = b;
-    }
+    if (auto value = yams::config::read_env_bool("YAMS_SIMEON_STRATEGY_ROUTER_ENABLED").value)
+        policy.strategyRouterEnabled = value;
 
     return policy;
 }

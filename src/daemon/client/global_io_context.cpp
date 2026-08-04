@@ -1,11 +1,9 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
-#include <cctype>
-#include <cstdlib>
+#include <cstdio>
 #include <memory>
-#include <new>
-#include <string>
+#include <new> // IWYU pragma: keep — placement new below constructs private GlobalIOContext
 #include <thread>
 
 #include <boost/asio.hpp>
@@ -13,24 +11,13 @@
 
 #include <spdlog/spdlog.h>
 
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/client/asio_connection.h>
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 
 namespace {
-bool env_truthy(const char* value) {
-    if (!value)
-        return false;
-
-    std::string normalized(value);
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-
-    return !(normalized.empty() || normalized == "0" || normalized == "false" ||
-             normalized == "off" || normalized == "no");
-}
-
 std::atomic<int> g_nifty_counter{0};
 alignas(yams::daemon::GlobalIOContext) char g_global_io_context_storage[sizeof(
     yams::daemon::GlobalIOContext)];
@@ -60,6 +47,8 @@ void log_noexcept_warning(const char* message) noexcept {
     try {
         spdlog::warn("{}", message);
     } catch (...) {
+        std::fputs(message, stderr);
+        std::fputc('\n', stderr);
     }
 }
 
@@ -67,6 +56,10 @@ void log_noexcept_warning(const char* message, const std::exception& e) noexcept
     try {
         spdlog::warn("{}: {}", message, e.what());
     } catch (...) {
+        std::fputs(message, stderr);
+        std::fputs(": ", stderr);
+        std::fputs(e.what(), stderr);
+        std::fputc('\n', stderr);
     }
 }
 
@@ -74,6 +67,8 @@ void log_noexcept_error(const char* message) noexcept {
     try {
         spdlog::error("{}", message);
     } catch (...) {
+        std::fputs(message, stderr);
+        std::fputc('\n', stderr);
     }
 }
 
@@ -81,6 +76,10 @@ void log_noexcept_error(const char* message, const std::exception& e) noexcept {
     try {
         spdlog::error("{}: {}", message, e.what());
     } catch (...) {
+        std::fputs(message, stderr);
+        std::fputs(": ", stderr);
+        std::fputs(e.what(), stderr);
+        std::fputc('\n', stderr);
     }
 }
 
@@ -126,11 +125,11 @@ void GlobalIOContext::reset() {
         return;
     }
 
-    if (env_truthy(std::getenv("YAMS_TESTING"))) {
+    if (yams::config::read_env_bool("YAMS_TESTING").valueOr(false)) {
         return;
     }
 #if defined(YAMS_TESTING) || defined(YAMS_TEST_LIFECYCLE_CONTROLS)
-    if (env_truthy(std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE"))) {
+    if (yams::config::read_env_bool("YAMS_TEST_SAFE_SINGLE_INSTANCE").valueOr(false)) {
         return;
     }
 #endif

@@ -74,13 +74,6 @@ std::optional<bool> parseBoolValue(std::string raw) {
     return std::nullopt;
 }
 
-std::string getenvValue(const char* name) {
-    if (const char* value = std::getenv(name)) {
-        return value;
-    }
-    return {};
-}
-
 std::string embeddingDispatchEnvSignature() {
     static constexpr const char* kEnvNames[] = {
         "YAMS_EMBED_SELECTION_STRATEGY",
@@ -103,7 +96,7 @@ std::string embeddingDispatchEnvSignature() {
     for (const auto* name : kEnvNames) {
         signature += name;
         signature += '=';
-        signature += getenvValue(name);
+        signature += yams::config::getenv_copy(name);
         signature += '\n';
     }
     return signature;
@@ -239,9 +232,9 @@ bool ConfigResolver::detectEmbeddingPreloadFlag(const DaemonConfig& config) {
         }
     }
 
-    // Environment override wins
-    if (const char* env = std::getenv("YAMS_EMBED_PRELOAD_ON_STARTUP")) {
-        flag = envTruthy(env);
+    // Environment override wins only when it is a valid boolean.
+    if (auto value = yams::config::read_env_bool("YAMS_EMBED_PRELOAD_ON_STARTUP").value) {
+        flag = *value;
     }
 
     return flag;
@@ -275,19 +268,11 @@ ConfigResolver::EmbeddingSelectionPolicy ConfigResolver::resolveEmbeddingSelecti
     };
 
     auto parseSize = [](const std::string& raw, std::size_t fallback) {
-        try {
-            return static_cast<std::size_t>(std::stoull(raw));
-        } catch (...) {
-            return fallback;
-        }
+        return parseUnsignedIntegral<std::size_t>(raw).value_or(fallback);
     };
 
     auto parseDouble = [](const std::string& raw, double fallback) {
-        try {
-            return std::stod(raw);
-        } catch (...) {
-            return fallback;
-        }
+        return yams::config::detail::parseDouble(raw).value_or(fallback);
     };
 
     try {
@@ -319,29 +304,27 @@ ConfigResolver::EmbeddingSelectionPolicy ConfigResolver::resolveEmbeddingSelecti
                 }
             }
         }
+    } catch (const std::exception& error) {
+        spdlog::debug("Error reading embedding selection policy: {}", error.what());
     } catch (...) {
-        // Intentional best-effort path; keep the primary operation unaffected.
+        spdlog::debug("Error reading embedding selection policy: unknown error");
     }
 
-    // Env overrides (config component owns this precedence)
-    if (const char* v = std::getenv("YAMS_EMBED_SELECTION_STRATEGY")) {
-        policy.strategy = parseStrategy(v);
+    // Env overrides (config component owns this precedence).
+    if (auto value = yams::config::getenv_nonempty("YAMS_EMBED_SELECTION_STRATEGY")) {
+        policy.strategy = parseStrategy(*value);
     }
-    if (const char* v = std::getenv("YAMS_EMBED_SELECTION_MODE")) {
-        policy.mode = parseMode(v);
+    if (auto value = yams::config::getenv_nonempty("YAMS_EMBED_SELECTION_MODE")) {
+        policy.mode = parseMode(*value);
     }
-    if (const char* v = std::getenv("YAMS_EMBED_MAX_CHUNKS_PER_DOC")) {
-        policy.maxChunksPerDoc = parseSize(v, policy.maxChunksPerDoc);
-    }
-    if (const char* v = std::getenv("YAMS_EMBED_MAX_CHARS_PER_DOC")) {
-        policy.maxCharsPerDoc = parseSize(v, policy.maxCharsPerDoc);
-    }
-    if (const char* v = std::getenv("YAMS_EMBED_SELECTION_HEADING_BOOST")) {
-        policy.headingBoost = parseDouble(v, policy.headingBoost);
-    }
-    if (const char* v = std::getenv("YAMS_EMBED_SELECTION_INTRO_BOOST")) {
-        policy.introBoost = parseDouble(v, policy.introBoost);
-    }
+    policy.maxChunksPerDoc = yams::config::read_env_size("YAMS_EMBED_MAX_CHUNKS_PER_DOC")
+                                 .valueOr(policy.maxChunksPerDoc);
+    policy.maxCharsPerDoc =
+        yams::config::read_env_size("YAMS_EMBED_MAX_CHARS_PER_DOC").valueOr(policy.maxCharsPerDoc);
+    policy.headingBoost = yams::config::read_env_double("YAMS_EMBED_SELECTION_HEADING_BOOST")
+                              .valueOr(policy.headingBoost);
+    policy.introBoost = yams::config::read_env_double("YAMS_EMBED_SELECTION_INTRO_BOOST")
+                            .valueOr(policy.introBoost);
 
     return policy;
 }
@@ -426,72 +409,57 @@ ConfigResolver::EmbeddingChunkingPolicy ConfigResolver::resolveEmbeddingChunking
         if (!cfgPath.empty()) {
             applyFromKv(parseSimpleTomlFlat(cfgPath));
         }
+    } catch (const std::exception& error) {
+        spdlog::debug("Error reading embedding chunking policy: {}", error.what());
     } catch (...) {
-        // Intentional best-effort path; keep the primary operation unaffected.
+        spdlog::debug("Error reading embedding chunking policy: unknown error");
     }
 
     // Env overrides (backwards compatible with existing embedding pipeline vars).
-    if (const char* v = std::getenv("YAMS_EMBED_CHUNK_STRATEGY")) {
-        if (auto s = parseChunkingStrategy(v); s) {
-            policy.strategy = *s;
-            policy.config.strategy = *s;
+    if (auto value = yams::config::getenv_nonempty("YAMS_EMBED_CHUNK_STRATEGY")) {
+        if (auto strategy = parseChunkingStrategy(*value)) {
+            policy.strategy = *strategy;
+            policy.config.strategy = *strategy;
             policy.overridden = true;
         }
     }
-    if (const char* v = std::getenv("YAMS_EMBED_CHUNK_PRESERVE_SENTENCES")) {
-        if (auto b = parseBool01(v); b) {
-            policy.config.preserve_sentences = *b;
-            policy.overridden = true;
-        }
+    if (auto value = yams::config::read_env_bool("YAMS_EMBED_CHUNK_PRESERVE_SENTENCES").value) {
+        policy.config.preserve_sentences = *value;
+        policy.overridden = true;
     }
-    if (const char* v = std::getenv("YAMS_EMBED_CHUNK_USE_TOKENS")) {
-        if (auto b = parseBool01(v); b) {
-            policy.config.use_token_count = *b;
-            policy.overridden = true;
-        }
+    if (auto value = yams::config::read_env_bool("YAMS_EMBED_CHUNK_USE_TOKENS").value) {
+        policy.config.use_token_count = *value;
+        policy.overridden = true;
     }
-    if (const char* v = std::getenv("YAMS_EMBED_CHUNK_TARGET")) {
-        if (auto s = parseSize(v); s && *s > 0) {
-            policy.config.target_chunk_size = *s;
-            policy.overridden = true;
-        }
+    if (auto value = yams::config::read_env_size("YAMS_EMBED_CHUNK_TARGET").value;
+        value && *value > 0) {
+        policy.config.target_chunk_size = *value;
+        policy.overridden = true;
     }
-    if (const char* v = std::getenv("YAMS_EMBED_CHUNK_MAX")) {
-        if (auto s = parseSize(v); s && *s > 0) {
-            policy.config.max_chunk_size = *s;
-            policy.overridden = true;
-        }
+    if (auto value = yams::config::read_env_size("YAMS_EMBED_CHUNK_MAX").value;
+        value && *value > 0) {
+        policy.config.max_chunk_size = *value;
+        policy.overridden = true;
     }
-    if (const char* v = std::getenv("YAMS_EMBED_CHUNK_MIN")) {
-        if (auto s = parseSize(v); s && *s > 0) {
-            policy.config.min_chunk_size = *s;
-            policy.overridden = true;
-        }
+    if (auto value = yams::config::read_env_size("YAMS_EMBED_CHUNK_MIN").value;
+        value && *value > 0) {
+        policy.config.min_chunk_size = *value;
+        policy.overridden = true;
     }
-    if (const char* v = std::getenv("YAMS_EMBED_CHUNK_OVERLAP")) {
-        if (auto s = parseSize(v); s) {
-            policy.config.overlap_size = *s;
-            if (*s == 0) {
-                policy.config.overlap_percentage = 0.0;
-            }
-            policy.overridden = true;
+    if (auto value = yams::config::read_env_size("YAMS_EMBED_CHUNK_OVERLAP").value) {
+        policy.config.overlap_size = *value;
+        if (*value == 0) {
+            policy.config.overlap_percentage = 0.0;
         }
+        policy.overridden = true;
     }
-    if (const char* v = std::getenv("YAMS_EMBED_CHUNK_OVERLAP_PCT")) {
-        if (auto d = parseDouble(v); d) {
-            double pct = *d;
-            if (pct < 0.0) {
-                pct = 0.0;
-            }
-            if (pct > 1.0) {
-                pct = 1.0;
-            }
-            policy.config.overlap_percentage = pct;
-            if (pct == 0.0) {
-                policy.config.overlap_size = 0;
-            }
-            policy.overridden = true;
+    if (auto value = yams::config::read_env_float("YAMS_EMBED_CHUNK_OVERLAP_PCT").value) {
+        const double percentage = std::clamp(static_cast<double>(*value), 0.0, 1.0);
+        policy.config.overlap_percentage = percentage;
+        if (percentage == 0.0) {
+            policy.config.overlap_size = 0;
         }
+        policy.overridden = true;
     }
 
     // Sanity: ensure min <= target <= max.
@@ -560,14 +528,12 @@ std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,
         return false;
     };
 
-    if (const char* envp = std::getenv("YAMS_PREFERRED_MODEL")) {
-        preferred = envp;
-        if (!preferred.empty()) {
-            spdlog::debug("Preferred model from environment: {}", preferred);
-            if (acceptAsPreferred(preferred))
-                return preferred;
-            preferred.clear();
-        }
+    if (auto configured = yams::config::getenv_nonempty("YAMS_PREFERRED_MODEL")) {
+        preferred = *configured;
+        spdlog::debug("Preferred model from environment: {}", preferred);
+        if (acceptAsPreferred(preferred))
+            return preferred;
+        preferred.clear();
     }
 
     try {
@@ -890,70 +856,44 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
         spdlog::debug("Error reading config for topology routing policy: {}", e.what());
     }
 
-    auto readEnv = [](const char* name) -> const char* { return std::getenv(name); };
-    if (const char* env = readEnv("YAMS_SEARCH_ENABLE_TOPOLOGY_WEAK_ROUTING")) {
-        if (auto parsed = parseBoolValue(env); parsed.has_value()) {
-            policy.enableWeakQueryRouting = *parsed;
-        }
+    if (auto value =
+            yams::config::read_env_bool("YAMS_SEARCH_ENABLE_TOPOLOGY_WEAK_ROUTING").value) {
+        policy.enableWeakQueryRouting = value;
     }
-    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS")) {
-        if (auto parsed = parseSize(env); parsed.has_value()) {
-            policy.maxClusters = *parsed;
-        }
+    if (auto value = yams::config::read_env_size("YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS").value) {
+        policy.maxClusters = value;
     }
-    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_MAX_DOCS")) {
-        if (auto parsed = parseSize(env); parsed.has_value()) {
-            policy.maxDocs = *parsed;
-        }
+    if (auto value = yams::config::read_env_size("YAMS_SEARCH_TOPOLOGY_MAX_DOCS").value) {
+        policy.maxDocs = value;
     }
-    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_MEDOID_BOOST")) {
-        try {
-            policy.medoidBoost = std::stof(env);
-        } catch (const std::exception&) {
-            spdlog::debug("config: failed to parse YAMS_SEARCH_TOPOLOGY_MEDOID_BOOST float");
-        }
+    if (auto value = yams::config::read_env_float("YAMS_SEARCH_TOPOLOGY_MEDOID_BOOST").value) {
+        policy.medoidBoost = value;
     }
-    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_ROUTE_SCORING")) {
-        if (*env) {
-            policy.routeScoring = std::string(trimView(env));
-        }
+    if (auto value = yams::config::getenv_nonempty("YAMS_SEARCH_TOPOLOGY_ROUTE_SCORING")) {
+        policy.routeScoring = std::string(trimView(*value));
     }
-    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_SPARSE_DENSE_ALPHA")) {
-        try {
-            policy.sparseDenseAlpha = std::stof(env);
-        } catch (const std::exception&) {
-            spdlog::debug("config: failed to parse YAMS_SEARCH_TOPOLOGY_SPARSE_DENSE_ALPHA float");
-        }
+    if (auto value =
+            yams::config::read_env_float("YAMS_SEARCH_TOPOLOGY_SPARSE_DENSE_ALPHA").value) {
+        policy.sparseDenseAlpha = value;
     }
-    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_MIN_ROUTE_SCORE")) {
-        try {
-            policy.minRouteScore = std::stof(env);
-        } catch (const std::exception&) {
-            spdlog::debug("config: failed to parse YAMS_SEARCH_TOPOLOGY_MIN_ROUTE_SCORE float");
-        }
+    if (auto value = yams::config::read_env_float("YAMS_SEARCH_TOPOLOGY_MIN_ROUTE_SCORE").value) {
+        policy.minRouteScore = value;
     }
-    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE")) {
-        if (*env) {
-            policy.expansionSource = std::string(trimView(env));
-        }
+    if (auto value = yams::config::getenv_nonempty("YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE")) {
+        policy.expansionSource = std::string(trimView(*value));
     }
-    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE")) {
-        try {
-            policy.graphNeighborMinScore = std::stof(env);
-        } catch (const std::exception&) {
-            spdlog::debug(
-                "config: failed to parse YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE float");
-        }
+    if (auto value =
+            yams::config::read_env_float("YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE").value) {
+        policy.graphNeighborMinScore = value;
     }
-    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_RECIPROCAL_ONLY")) {
-        if (auto parsed = parseBoolValue(env); parsed.has_value()) {
-            policy.graphNeighborReciprocalOnly = *parsed;
-        }
+    if (auto value =
+            yams::config::read_env_bool("YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_RECIPROCAL_ONLY")
+                .value) {
+        policy.graphNeighborReciprocalOnly = value;
     }
-    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_GRAPH_VECTOR_SEED_PROBE")) {
-        if (auto parsed = parseSize(env); parsed.has_value()) {
-            policy.graphVectorSeedProbe = *parsed;
-        }
+    if (auto value =
+            yams::config::read_env_size("YAMS_SEARCH_TOPOLOGY_GRAPH_VECTOR_SEED_PROBE").value) {
+        policy.graphVectorSeedProbe = value;
     }
 
     return policy;
@@ -1028,17 +968,17 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
     }
 
     const auto applyBoolEnv = [](const char* name, std::optional<bool>& target) {
-        if (const auto value = parseBoolValue(getenvValue(name)); value.has_value()) {
+        if (const auto value = parseBoolValue(yams::config::getenv_copy(name)); value.has_value()) {
             target = value;
         }
     };
     const auto applySizeEnv = [](const char* name, std::optional<std::size_t>& target) {
-        if (const auto value = parseSize(getenvValue(name)); value.has_value()) {
+        if (const auto value = parseSize(yams::config::getenv_copy(name)); value.has_value()) {
             target = value;
         }
     };
     const auto applyFloatEnv = [](const char* name, std::optional<float>& target) {
-        if (const auto value = parseDouble(getenvValue(name)); value.has_value()) {
+        if (const auto value = parseDouble(yams::config::getenv_copy(name)); value.has_value()) {
             target = static_cast<float>(*value);
         }
     };
@@ -1189,8 +1129,9 @@ ConfigResolver::resolveInstrumentationPolicy(const DaemonConfig& config) {
         spdlog::debug("Error reading config for instrumentation policy: {}", e.what());
     }
 
-    const bool mslActive = envTruthy(std::getenv("MallocStackLogging")) ||
-                           envTruthy(std::getenv("MallocStackLoggingNoCompact"));
+    const bool mslActive =
+        yams::config::read_env_bool("MallocStackLogging").valueOr(false) ||
+        yams::config::read_env_bool("MallocStackLoggingNoCompact").valueOr(false);
     if (policy.profile.empty()) {
         policy.profile = "auto";
     }
@@ -1393,7 +1334,7 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
     const auto applyPostIngestCap = [&](std::string_view key, const char* envName,
                                         std::uint32_t minimum, std::uint32_t maximum, auto setter) {
         auto value = parseUnsigned(postIngest, "tuning.post_ingest", key);
-        if (!value || std::getenv(envName) != nullptr) {
+        if (!value || yams::config::getenv_optional(envName).has_value()) {
             return;
         }
         if (*value < minimum || *value > maximum) {
@@ -1525,8 +1466,9 @@ ConfigResolver::WriteCoordinatorTuning ConfigResolver::resolveWriteCoordinatorTu
                 if (raw >= 1000 && raw <= 1000000) {
                     tuning.kgDedupMaxEdges = raw;
                 }
-            } catch (const std::exception&) {
-                // Invalid user input leaves the typed default unchanged.
+            } catch (const std::exception& error) {
+                spdlog::debug("Invalid tuning.write_coordinator.kg_dedup_max_edges: {}",
+                              error.what());
             }
         }
     } catch (const std::exception& e) {
@@ -1539,12 +1481,10 @@ ConfigResolver::WriteCoordinatorTuning ConfigResolver::resolveWriteCoordinatorTu
 std::string ConfigResolver::resolveRerankerModel(const DaemonConfig& config) {
     std::string preferred;
 
-    if (const char* envp = std::getenv("YAMS_RERANKER_MODEL")) {
-        preferred = envp;
-        if (!preferred.empty()) {
-            spdlog::debug("Reranker model from environment: {}", preferred);
-            return preferred;
-        }
+    if (auto configured = yams::config::getenv_nonempty("YAMS_RERANKER_MODEL")) {
+        preferred = *configured;
+        spdlog::debug("Reranker model from environment: {}", preferred);
+        return preferred;
     }
 
     try {
@@ -1594,10 +1534,8 @@ bool ConfigResolver::isSymbolExtractionEnabled(const DaemonConfig& config) {
 }
 
 int ConfigResolver::readTimeoutMs(const char* envName, int defaultMs, int minMs) {
-    if (const char* v = std::getenv(envName)) {
-        if (auto val = parseSignedIntegral<int>(v)) {
-            return std::max(minMs, *val);
-        }
+    if (auto value = yams::config::read_env_int(envName).value) {
+        return std::max(minMs, *value);
     }
     return defaultMs;
 }
@@ -1608,19 +1546,14 @@ size_t ConfigResolver::readVectorMaxElements() {
     constexpr size_t kMaxMaxElements = 10000000; // 10M reasonable upper bound
 
     // 1. Environment variable takes precedence
-    if (const char* env = std::getenv("YAMS_VECTOR_MAX_ELEMENTS")) {
-        try {
-            size_t val = std::stoull(env);
-            if (val >= kMinMaxElements && val <= kMaxMaxElements) {
-                spdlog::info("[ConfigResolver] Using YAMS_VECTOR_MAX_ELEMENTS={}", val);
-                return val;
-            }
-            spdlog::warn(
-                "[ConfigResolver] YAMS_VECTOR_MAX_ELEMENTS={} out of range [{}, {}], using default",
-                val, kMinMaxElements, kMaxMaxElements);
-        } catch (...) {
-            spdlog::warn("[ConfigResolver] Invalid YAMS_VECTOR_MAX_ELEMENTS value, using default");
+    if (auto value = yams::config::read_env_size("YAMS_VECTOR_MAX_ELEMENTS").value) {
+        if (*value >= kMinMaxElements && *value <= kMaxMaxElements) {
+            spdlog::info("[ConfigResolver] Using YAMS_VECTOR_MAX_ELEMENTS={}", *value);
+            return *value;
         }
+        spdlog::warn(
+            "[ConfigResolver] YAMS_VECTOR_MAX_ELEMENTS={} out of range [{}, {}], using default",
+            *value, kMinMaxElements, kMaxMaxElements);
     }
 
     // 2. Config file
@@ -1640,8 +1573,10 @@ size_t ConfigResolver::readVectorMaxElements() {
                     "[ConfigResolver] vector_database.max_elements={} out of range, using default",
                     val);
             }
+        } catch (const std::exception& error) {
+            spdlog::debug("Invalid vector_database.max_elements config: {}", error.what());
         } catch (...) {
-            // Ignore parse errors
+            spdlog::debug("Invalid vector_database.max_elements config: unknown error");
         }
     }
 

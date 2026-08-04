@@ -6,6 +6,7 @@
 #else
 #include "../../../include/yams/common/fs_utils.h"
 #endif
+#include <yams/common/string_utils.h>
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/asio_transport.h>
 #include <yams/daemon/client/await_result_sync.h>

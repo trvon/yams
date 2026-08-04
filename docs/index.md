@@ -38,6 +38,7 @@ yams serve
 - [Build from source](BUILD.md)
 - [Benchmarks](benchmarks/)
 - [Runtime path authority](architecture/runtime-paths.md)
+- [Environment override policy](architecture/environment-overrides.md)
 - [Roadmap](roadmap.md)
 - [Newsletter](newsletter.md)
 - [Contributing](https://github.com/trvon/yams/blob/main/CONTRIBUTING.md)

@@ -1,10 +1,10 @@
 #include <yams/daemon/components/repair/repair_health_probe.h>
 
+#include <yams/config/config_helpers.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/vector/vector_database.h>
 
-#include <cstdlib>
 #include <unordered_set>
 
 namespace yams::daemon::repair {
@@ -16,11 +16,7 @@ RepairHealthProbe::RepairHealthProbe(std::shared_ptr<metadata::IMetadataReposito
 
 bool RepairHealthProbe::vectorsDisabledByEnv() {
     YAMS_ZONE_SCOPED_N("RepairHealth::vectorsDisabledByEnv");
-    if (const char* env = std::getenv("YAMS_DISABLE_VECTORS"); env && *env)
-        return true;
-    if (const char* env = std::getenv("YAMS_DISABLE_VECTOR_DB"); env && *env)
-        return true;
-    return false;
+    return !yams::config::resolve_vector_environment().enabled;
 }
 
 RepairHealthSnapshot RepairHealthProbe::probe(const RepairHealthOptions& options) const {

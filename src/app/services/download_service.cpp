@@ -1,12 +1,11 @@
 #include <spdlog/spdlog.h>
 #include <chrono>
-#include <cstdlib>
 #include <filesystem>
-#include <mutex>
 #include <string_view>
 #include <yams/app/services/download_metadata_entries.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/common/fs_utils.h>
+#include <yams/config/config_helpers.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/downloader/downloader.hpp>
 #include <yams/extraction/extraction_util.h>
@@ -18,15 +17,6 @@ namespace yams::app::services {
 namespace {
 constexpr std::size_t kMaxIndexedDownloadTextBytes = std::size_t{16} * 1024 * 1024;
 
-std::string getenvCopy(std::string_view key) {
-    static std::mutex envMutex;
-    std::lock_guard<std::mutex> lock(envMutex);
-    if (const char* value =
-            std::getenv(std::string(key).c_str())) { // NOLINT(concurrency-mt-unsafe)
-        return value;
-    }
-    return {};
-}
 } // namespace
 
 class DownloadServiceImpl : public IDownloadService {
@@ -47,9 +37,11 @@ public:
         // Initialize download manager once with proper config
         // Get storage path from content store or environment
         fs::path storagePath;
-        if (const std::string storageEnv = getenvCopy("YAMS_STORAGE"); !storageEnv.empty()) {
+        if (const std::string storageEnv = yams::config::getenv_copy("YAMS_STORAGE");
+            !storageEnv.empty()) {
             storagePath = fs::path(storageEnv);
-        } else if (const std::string homeEnv = getenvCopy("HOME"); !homeEnv.empty()) {
+        } else if (const std::string homeEnv = yams::config::getenv_copy("HOME");
+                   !homeEnv.empty()) {
             storagePath = fs::path(homeEnv) / "yams";
         } else {
             storagePath = fs::current_path() / "yams";

@@ -4,6 +4,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/simeon_model_provider.h>
@@ -136,7 +137,7 @@ public:
                       .path = "/mock/path/" + modelName,
                       .embeddingDim = embeddingDim_,
                       .maxSequenceLength = 512,
-                      .memoryUsageBytes = 100 * 1024 * 1024, // 100MB mock size
+                      .memoryUsageBytes = std::size_t{100} * 1024 * 1024, // 100MB mock size
                       .loadTime = std::chrono::system_clock::now(),
                       .requestCount = 0,
                       .errorCount = 0};
@@ -400,13 +401,14 @@ std::unique_ptr<IModelProvider> createModelProvider([[maybe_unused]] const Model
     }
 
 #if defined(YAMS_TESTING) || defined(YAMS_TEST_PROVIDER_CONTROLS)
-    if (ConfigResolver::envTruthy(std::getenv("YAMS_USE_MOCK_PROVIDER"))) {
+    if (yams::config::read_env_bool("YAMS_USE_MOCK_PROVIDER").valueOr(false)) {
         spdlog::info("Using mock model provider (YAMS_USE_MOCK_PROVIDER set)");
         return std::make_unique<MockModelProvider>();
     }
 
     // Check for ONNX test mode
-    if (ConfigResolver::envTruthy(std::getenv("YAMS_USE_ONNX")) && preferredProvider == "ONNX") {
+    if (yams::config::read_env_bool("YAMS_USE_ONNX").valueOr(false) &&
+        preferredProvider == "ONNX") {
         spdlog::info("Using mock ONNX provider for testing (YAMS_USE_ONNX set)");
         // Create a mock provider that behaves like ONNX for tests
         class MockOnnxProvider : public MockModelProvider {
@@ -419,7 +421,7 @@ std::unique_ptr<IModelProvider> createModelProvider([[maybe_unused]] const Model
 #endif
 
     // Check if ONNX is disabled
-    if (ConfigResolver::envTruthy(std::getenv("YAMS_DISABLE_ONNX"))) {
+    if (yams::config::read_env_bool("YAMS_DISABLE_ONNX").valueOr(false)) {
         spdlog::info("ONNX disabled (YAMS_DISABLE_ONNX set), using null provider");
         return std::make_unique<NullModelProvider>();
     }
