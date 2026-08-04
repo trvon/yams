@@ -125,17 +125,66 @@ void YamsDaemon::restoreTuningProfileOverrideSnapshot() noexcept {
     tuningProfileOverrideSnapshotActive_ = false;
 }
 
+void YamsDaemon::snapshotRuntimeEnvironment() {
+    runtimeEnvironmentBeforeStart_.clear();
+    for (const char* name :
+         {"YAMS_IN_DAEMON", "YAMS_STORAGE", "YAMS_DATA_DIR", "YAMS_CONFIG", "YAMS_DAEMON_SOCKET"}) {
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): snapshot precedes this daemon's compatibility
+        // writes
+        const char* value = std::getenv(name);
+        runtimeEnvironmentBeforeStart_.emplace(name, value ? std::optional<std::string>{value}
+                                                           : std::nullopt);
+    }
+}
+
+void YamsDaemon::restoreRuntimeEnvironment() noexcept {
+    for (const auto& [name, value] : runtimeEnvironmentBeforeStart_) {
+#ifdef _WIN32
+        _putenv_s(name.c_str(), value ? value->c_str() : "");
+#else
+        if (value) {
+            // NOLINTNEXTLINE(concurrency-mt-unsafe): restoring constructor-owned compatibility
+            // state
+            ::setenv(name.c_str(), value->c_str(), 1);
+        } else {
+            // NOLINTNEXTLINE(concurrency-mt-unsafe): restoring constructor-owned compatibility
+            // state
+            ::unsetenv(name.c_str());
+        }
+#endif
+    }
+    runtimeEnvironmentBeforeStart_.clear();
+}
+
 YamsDaemon::YamsDaemon(const DaemonConfig& config)
     : config_(config), asyncInitStartedFuture_(asyncInitStartedPromise_.get_future().share()) {
     spdlog::info("[YamsDaemon] Constructor entry");
-    // Resolve paths if not explicitly set
-    if (config_.socketPath.empty()) {
-        // Keep centralized FSM-based resolution for consistency with client/CLI
-        config_.socketPath = yams::daemon::ConnectionFsm::resolve_socket_path_config_first();
+    yams::config::RuntimePathOverrides pathOverrides;
+    if (!config_.configFilePath.empty()) {
+        pathOverrides.configFile = config_.configFilePath;
     }
-    if (config_.pidFile.empty()) {
-        config_.pidFile = resolveSystemPath(PathType::PidFile);
+    if (!config_.dataDir.empty()) {
+        pathOverrides.dataDir = config_.dataDir;
     }
+    if (!config_.socketPath.empty()) {
+        pathOverrides.socketPath = config_.socketPath;
+    }
+    if (!config_.pidFile.empty()) {
+        pathOverrides.pidFile = config_.pidFile;
+    }
+    auto runtimePaths = yams::config::resolve_runtime_paths(pathOverrides);
+    if (!runtimePaths) {
+        throw std::invalid_argument(runtimePaths.error().message);
+    }
+    config_.configFilePath = runtimePaths.value().configFile.value;
+    config_.dataDir = runtimePaths.value().dataDir.value;
+    config_.socketPath = runtimePaths.value().socketPath.value;
+    config_.pidFile = runtimePaths.value().pidFile.value;
+    for (const auto& diagnostic : runtimePaths.value().diagnostics) {
+        spdlog::warn("YamsDaemon runtime path policy: {}", diagnostic);
+    }
+    snapshotRuntimeEnvironment();
+
     if (config_.logFile.empty()) {
         config_.logFile = resolveSystemPath(PathType::LogFile);
     }
@@ -193,11 +242,13 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config)
 
     if (!config_.dataDir.empty()) {
 #ifndef _WIN32
-        ::setenv("YAMS_STORAGE", config_.dataDir.c_str(), 1); // NOLINT(concurrency-mt-unsafe)
+        ::setenv("YAMS_STORAGE", config_.dataDir.c_str(), 1);  // NOLINT(concurrency-mt-unsafe)
+        ::setenv("YAMS_DATA_DIR", config_.dataDir.c_str(), 1); // NOLINT(concurrency-mt-unsafe)
 #else
         _putenv_s("YAMS_STORAGE", config_.dataDir.string().c_str());
+        _putenv_s("YAMS_DATA_DIR", config_.dataDir.string().c_str());
 #endif
-        spdlog::debug("Seeded YAMS_STORAGE='{}'", config_.dataDir.string());
+        spdlog::debug("Seeded data path aliases='{}'", config_.dataDir.string());
     }
 
     if (!config_.configFilePath.empty()) {
@@ -211,8 +262,8 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config)
 
     if (!config_.socketPath.empty()) {
 #ifndef _WIN32
-        ::setenv("YAMS_DAEMON_SOCKET", config_.socketPath.c_str(),
-                 1); // NOLINT(concurrency-mt-unsafe)
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): constructor seeds child component context
+        ::setenv("YAMS_DAEMON_SOCKET", config_.socketPath.c_str(), 1);
 #else
         _putenv_s("YAMS_DAEMON_SOCKET", config_.socketPath.string().c_str());
 #endif
@@ -256,6 +307,7 @@ YamsDaemon::~YamsDaemon() {
     }
 
     restoreTuningProfileOverrideSnapshot();
+    restoreRuntimeEnvironment();
 }
 
 Result<size_t> YamsDaemon::autoloadPluginsNow() {
@@ -1279,6 +1331,14 @@ std::filesystem::path getXDGStateHome() {
 
 std::filesystem::path YamsDaemon::resolveSystemPath(PathType type) {
     namespace fs = std::filesystem;
+    if (type == PathType::Socket || type == PathType::PidFile) {
+        auto runtimePaths = yams::config::resolve_runtime_paths();
+        if (!runtimePaths) {
+            throw std::invalid_argument(runtimePaths.error().message);
+        }
+        return type == PathType::Socket ? runtimePaths.value().socketPath.value
+                                        : runtimePaths.value().pidFile.value;
+    }
 #ifndef _WIN32
     bool isRoot = (geteuid() == 0);
     uid_t uid = getuid();
@@ -1286,19 +1346,8 @@ std::filesystem::path YamsDaemon::resolveSystemPath(PathType type) {
 
     switch (type) {
         case PathType::Socket:
-            return yams::daemon::ConnectionFsm::resolve_socket_path();
         case PathType::PidFile:
-#ifdef _WIN32
-            if (auto xdg = getXDGRuntimeDir(); !xdg.empty() && canWriteToDirectory(xdg))
-                return xdg / "yams-daemon.pid";
-            return fs::temp_directory_path() / "yams-daemon.pid";
-#else
-            if (isRoot)
-                return fs::path("/var/run/yams-daemon.pid");
-            if (auto xdg = getXDGRuntimeDir(); !xdg.empty() && canWriteToDirectory(xdg))
-                return xdg / "yams-daemon.pid";
-            return fs::path("/tmp") / ("yams-daemon-" + std::to_string(uid) + ".pid");
-#endif
+            break;
         case PathType::LogFile:
 #ifdef _WIN32
             if (auto xdg = getXDGStateHome(); !xdg.empty()) {

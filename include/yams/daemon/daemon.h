@@ -17,6 +17,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <yams/compat/thread_stop_compat.h>
 //
@@ -201,6 +202,7 @@ public:
 
     int tuningProfileOverrideBeforeStart_{0};
     bool tuningProfileOverrideSnapshotActive_{false};
+    std::map<std::string, std::optional<std::string>> runtimeEnvironmentBeforeStart_;
 
     bool modelPreloadSkipped_{false};
     std::chrono::steady_clock::time_point repairBusySince_{};
@@ -223,6 +225,8 @@ public:
 
     void snapshotTuningProfileForRuntime();
     void restoreTuningProfileOverrideSnapshot() noexcept;
+    void snapshotRuntimeEnvironment();
+    void restoreRuntimeEnvironment() noexcept;
 
     // Set a hook that will be called each iteration of runLoop() to check for signals
     // Returns true if shutdown was requested

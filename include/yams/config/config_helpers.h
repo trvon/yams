@@ -12,6 +12,7 @@
 #include <vector>
 
 #include <yams/common/string_utils.h>
+#include <yams/core/types.h>
 
 namespace yams::config {
 
@@ -91,6 +92,49 @@ std::vector<std::filesystem::path> parse_path_list(const std::string& raw);
 // Get standard config path
 std::filesystem::path get_config_path(const std::string& override_path = "");
 
+/// Origin of one effective runtime path.
+enum class RuntimePathSource {
+    Explicit,
+    ConfigFile,
+    Environment,
+    PlatformDefault,
+};
+
+/// One resolved path plus the authority that selected it.
+struct ResolvedRuntimePath {
+    std::filesystem::path value;
+    RuntimePathSource source{RuntimePathSource::PlatformDefault};
+    std::string sourceName;
+};
+
+/// Explicit typed overrides. A populated field has precedence over config, environment aliases,
+/// and platform defaults.
+struct RuntimePathOverrides {
+    std::optional<std::filesystem::path> configFile;
+    std::optional<std::filesystem::path> dataDir;
+    std::optional<std::filesystem::path> runtimeDir;
+    std::optional<std::filesystem::path> socketPath;
+    std::optional<std::filesystem::path> pidFile;
+};
+
+/// Immutable effective path snapshot shared by daemon, client, CLI, MCP, and services.
+///
+/// Precedence is explicit typed override, supported config key, compatibility environment alias,
+/// then platform default. Data config intentionally precedes environment aliases for compatibility
+/// with the established CLI contract. Conflicting aliases fail unless a higher-precedence explicit
+/// or configured data path makes them inactive; inactive conflicts are retained in diagnostics.
+struct ResolvedRuntimePaths {
+    ResolvedRuntimePath configFile;
+    ResolvedRuntimePath dataDir;
+    ResolvedRuntimePath runtimeDir;
+    ResolvedRuntimePath socketPath;
+    ResolvedRuntimePath pidFile;
+    std::vector<std::string> diagnostics;
+};
+
+Result<ResolvedRuntimePaths>
+resolve_runtime_paths(const RuntimePathOverrides& overrides = RuntimePathOverrides{});
+
 // Platform-specific directory resolution (follows OS best practices)
 // Windows: APPDATA (roaming) for config, LOCALAPPDATA for data/cache/runtime
 // Unix/macOS: XDG Base Directory Specification
@@ -128,7 +172,9 @@ std::filesystem::path get_daemon_plugin_trust_file();
 /// Default: <config_dir>/plugins_trust.txt
 std::filesystem::path get_legacy_plugin_trust_file();
 
-// Daemon-specific config/path resolution (env → config → defaults)
+// Compatibility path accessors backed by resolve_runtime_paths(). They throw
+// std::invalid_argument when active aliases conflict instead of returning an empty/CWD-relative
+// path.
 std::filesystem::path resolve_socket_path_from_config();
 std::filesystem::path resolve_pid_file_from_config();
 std::filesystem::path resolve_data_dir_from_config();

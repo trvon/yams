@@ -166,6 +166,24 @@ yams::Result<void> ensureDataDirectory(const std::filesystem::path& dataDir) {
     return {};
 }
 
+yams::Result<yams::config::ResolvedRuntimePaths>
+resolveServiceRuntimePaths(const yams::daemon::DaemonConfig& config) {
+    yams::config::RuntimePathOverrides overrides;
+    if (!config.configFilePath.empty()) {
+        overrides.configFile = config.configFilePath;
+    }
+    if (!config.dataDir.empty()) {
+        overrides.dataDir = config.dataDir;
+    }
+    if (!config.socketPath.empty()) {
+        overrides.socketPath = config.socketPath;
+    }
+    if (!config.pidFile.empty()) {
+        overrides.pidFile = config.pidFile;
+    }
+    return yams::config::resolve_runtime_paths(overrides);
+}
+
 std::atomic<bool>& onnxShutdownMarker() {
     static std::atomic<bool> marker{false};
     return marker;
@@ -760,15 +778,13 @@ ServiceManager::initializeImpl(const std::function<void()>& beforePoolConfigure)
 
     // Validate data directory synchronously to fail fast if unwritable
     namespace fs = std::filesystem;
-    fs::path dataDir = config_.dataDir;
-    if (dataDir.empty()) {
-        if (const std::string xdgDataHome = getenvCopy("XDG_DATA_HOME"); !xdgDataHome.empty()) {
-            dataDir = fs::path(xdgDataHome) / "yams";
-        } else if (const std::string homeEnv = getenvCopy("HOME"); !homeEnv.empty()) {
-            dataDir = fs::path(homeEnv) / ".local" / "share" / "yams";
-        } else {
-            dataDir = fs::path(".") / "yams_data";
-        }
+    auto runtimePaths = resolveServiceRuntimePaths(config_);
+    if (!runtimePaths) {
+        return runtimePaths.error();
+    }
+    const fs::path dataDir = runtimePaths.value().dataDir.value;
+    for (const auto& diagnostic : runtimePaths.value().diagnostics) {
+        spdlog::warn("ServiceManager runtime path policy: {}", diagnostic);
     }
     auto directoryResult = ensureDataDirectory(dataDir);
     if (!directoryResult) {
@@ -1490,7 +1506,13 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
     }
     try {
         namespace fs = std::filesystem;
-        fs::path dir = yams::daemon::YamsDaemon::getXDGRuntimeDir();
+        auto runtimePaths = resolveServiceRuntimePaths(cfg);
+        if (!runtimePaths) {
+            spdlog::debug("[ServiceManager] Bootstrap path resolution failed: {}",
+                          runtimePaths.error().message);
+            return;
+        }
+        const fs::path& dir = runtimePaths.value().runtimeDir.value;
         if (dir.empty())
             return;
         yams::common::ensureDirectories(dir);
@@ -1653,16 +1675,11 @@ static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
 Result<std::filesystem::path> ServiceManager::initializeDataDirAndContentStore() {
     namespace fs = std::filesystem;
 
-    fs::path dataDir = config_.dataDir;
-    if (dataDir.empty()) {
-        if (const std::string xdgDataHome = getenvCopy("XDG_DATA_HOME"); !xdgDataHome.empty()) {
-            dataDir = fs::path(xdgDataHome) / "yams";
-        } else if (const std::string homeEnv = getenvCopy("HOME"); !homeEnv.empty()) {
-            dataDir = fs::path(homeEnv) / ".local" / "share" / "yams";
-        } else {
-            dataDir = fs::path(".") / "yams_data";
-        }
+    auto runtimePaths = resolveServiceRuntimePaths(config_);
+    if (!runtimePaths) {
+        return runtimePaths.error();
     }
+    fs::path dataDir = runtimePaths.value().dataDir.value;
 
     auto directoryResult = ensureDataDirectory(dataDir);
     if (!directoryResult) {

@@ -27,6 +27,8 @@
 #include <yams/mcp/mcp_server.h>
 #include <yams/mcp/tool_registry.h>
 
+#include "../../common/test_helpers_catch2.h"
+
 using namespace std::chrono_literals;
 using json = nlohmann::json;
 using Catch::Matchers::ContainsSubstring;
@@ -76,12 +78,12 @@ auto run_awaitable(Awaitable aw, std::chrono::milliseconds timeout = 3s)
 
 class CompositeDispatchFixture {
 public:
+    yams::test::ScopedEnvVar discoveryEnv{"YAMS_ENABLE_LOCAL_MCP_DISCOVERY", "0"};
+    yams::test::ScopedEnvVar autostartEnv{"YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1"};
+    std::optional<yams::test::ScopedEnvVar> socketPathEnv;
     std::shared_ptr<MCPServer> server;
 
     CompositeDispatchFixture() {
-        setenv("YAMS_ENABLE_LOCAL_MCP_DISCOVERY", "0", 1);
-        setenv("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1", 1);
-
         auto transport = std::make_unique<NullTransport>();
         server = std::make_shared<MCPServer>(std::move(transport));
 
@@ -89,7 +91,7 @@ public:
             std::string("yams-mcp-composite-test-") +
             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".sock";
         auto socketPath = std::filesystem::temp_directory_path() / uniqueName;
-        setenv("YAMS_DAEMON_SOCKET_PATH", socketPath.string().c_str(), 1);
+        socketPathEnv.emplace("YAMS_DAEMON_SOCKET_PATH", socketPath.string());
 
         yams::daemon::ClientConfig cfg;
         cfg.autoStart = false;
@@ -390,7 +392,7 @@ TEST_CASE_METHOD(CompositeDispatchFixture, "query - describe op works without da
     if (result.contains("structuredContent")) {
         auto& data = result["structuredContent"]["data"];
         CHECK(data.contains("op"));
-        CHECK(data["op"] == "search");
+        CHECK((data["op"] == "search"));
         CHECK(data.contains("paramsSchema"));
     }
 }
@@ -544,7 +546,7 @@ TEST_CASE_METHOD(CompositeDispatchFixture,
     CHECK_FALSE(isRoutingError(result));
     REQUIRE(result.contains("structuredContent"));
     auto& data = result["structuredContent"]["data"];
-    CHECK(data["op"] == "search");
+    CHECK((data["op"] == "search"));
 }
 
 TEST_CASE_METHOD(CompositeDispatchFixture,
@@ -598,7 +600,7 @@ TEST_CASE_METHOD(CompositeDispatchFixture, "query - write op in query returns cl
     REQUIRE(result["error"].contains("data"));
     REQUIRE(result["error"]["data"].contains("toolResult"));
     // Validation happens before any pipeline execution; expect a direct error message.
-    CHECK(result["error"].value("message", std::string{}).find("Pipeline:") == std::string::npos);
+    CHECK((result["error"].value("message", std::string{}).find("Pipeline:") == std::string::npos));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -635,7 +637,7 @@ TEST_CASE_METHOD(CompositeDispatchFixture,
 
     const auto& data = result["error"]["data"];
     REQUIRE(data.is_object());
-    CHECK(data.value("tool", std::string{}) == "execute");
+    CHECK((data.value("tool", std::string{}) == "execute"));
     REQUIRE(data.contains("toolResult"));
     REQUIRE(data["toolResult"].is_object());
     CHECK(data["toolResult"].value("isError", false));
@@ -657,7 +659,7 @@ TEST_CASE_METHOD(CompositeDispatchFixture, "execute - non-write op returns clear
     REQUIRE(result.contains("error"));
     REQUIRE(result["error"].contains("data"));
     REQUIRE(result["error"]["data"].contains("toolResult"));
-    CHECK(result["error"].value("message", std::string{}).find("Execute:") != std::string::npos);
+    CHECK((result["error"].value("message", std::string{}).find("Execute:") != std::string::npos));
 }
 
 TEST_CASE_METHOD(CompositeDispatchFixture, "execute - operation missing op field",
@@ -755,8 +757,8 @@ TEST_CASE_METHOD(CompositeDispatchFixture, "execute - continueOnError processes 
     if (result.contains("structuredContent") && result["structuredContent"].contains("data")) {
         auto& data = result["structuredContent"]["data"];
         if (data.contains("results")) {
-            CHECK(data["results"].size() == 2);
-            CHECK(data["totalOps"] == 2);
+            CHECK((data["results"].size() == 2));
+            CHECK((data["totalOps"] == 2));
         }
     }
 }
@@ -780,8 +782,8 @@ TEST_CASE_METHOD(CompositeDispatchFixture, "execute - stops on error by default"
     if (result.contains("structuredContent") && result["structuredContent"].contains("data")) {
         auto& data = result["structuredContent"]["data"];
         if (data.contains("results")) {
-            CHECK(data["results"].size() == 1);
-            CHECK(data["failed"] == 1);
+            CHECK((data["results"].size() == 1));
+            CHECK((data["failed"] == 1));
         }
     }
 }
@@ -913,8 +915,8 @@ TEST_CASE_METHOD(CompositeDispatchFixture, "composite errors do not duplicate Er
     INFO("result: " << result.dump(2));
     REQUIRE(result.contains("error"));
     const auto message = result["error"].value("message", std::string{});
-    CHECK(message.find("Error: Error:") == std::string::npos);
-    CHECK(message.find("Provide 'hash' or 'name' for get") != std::string::npos);
+    CHECK((message.find("Error: Error:") == std::string::npos));
+    CHECK((message.find("Provide 'hash' or 'name' for get") != std::string::npos));
 }
 
 TEST_CASE_METHOD(CompositeDispatchFixture,
@@ -975,7 +977,8 @@ TEST_CASE_METHOD(CompositeDispatchFixture,
         CHECK_FALSE(isRoutingError(executeResult));
         CHECK(reachedHandler(directResult));
         CHECK(reachedHandler(executeResult));
-        CHECK(classifyAddRoutingOutcome(directResult) == classifyAddRoutingOutcome(executeResult));
+        CHECK(
+            (classifyAddRoutingOutcome(directResult) == classifyAddRoutingOutcome(executeResult)));
     }
 }
 
@@ -1067,24 +1070,24 @@ TEST_CASE_METHOD(CompositeDispatchFixture, "query - multi-step with describe ret
         auto& data = result["structuredContent"]["data"];
         CHECK(data.contains("steps"));
         CHECK(data.contains("totalSteps"));
-        CHECK(data["totalSteps"] == 2);
+        CHECK((data["totalSteps"] == 2));
         CHECK(data.contains("completedSteps"));
-        CHECK(data["completedSteps"] == 2);
+        CHECK((data["completedSteps"] == 2));
 
         if (data.contains("steps") && data["steps"].is_array()) {
-            CHECK(data["steps"].size() == 2);
+            CHECK((data["steps"].size() == 2));
 
             // First step: describe all ops
             auto& step0 = data["steps"][0];
-            CHECK(step0["stepIndex"] == 0);
-            CHECK(step0["op"] == "describe");
+            CHECK((step0["stepIndex"] == 0));
+            CHECK((step0["op"] == "describe"));
             CHECK(step0["result"].contains("query_ops"));
 
             // Second step: describe grep
             auto& step1 = data["steps"][1];
-            CHECK(step1["stepIndex"] == 1);
-            CHECK(step1["op"] == "describe");
-            CHECK(step1["result"]["op"] == "grep");
+            CHECK((step1["stepIndex"] == 1));
+            CHECK((step1["op"] == "describe"));
+            CHECK((step1["result"]["op"] == "grep"));
             CHECK(step1["result"].contains("paramsSchema"));
         }
     }
@@ -1106,15 +1109,15 @@ TEST_CASE_METHOD(CompositeDispatchFixture, "query - partial pipeline failures st
     CHECK_THAT(text, ContainsSubstring("Daemon socket not found for test harness"));
 
     const auto& data = result["structuredContent"]["data"];
-    REQUIRE(data["totalSteps"] == 2);
-    REQUIRE(data["completedSteps"] == 2);
+    REQUIRE((data["totalSteps"] == 2));
+    REQUIRE((data["completedSteps"] == 2));
     REQUIRE(data["steps"].is_array());
-    REQUIRE(data["steps"].size() == 2);
-    CHECK(data["steps"][0]["op"] == "describe");
+    REQUIRE((data["steps"].size() == 2));
+    CHECK((data["steps"][0]["op"] == "describe"));
     CHECK_FALSE(data["steps"][0]["isError"].get<bool>());
-    CHECK(data["steps"][1]["op"] == "search");
+    CHECK((data["steps"][1]["op"] == "search"));
     CHECK(data["steps"][1]["isError"].get<bool>());
-    CHECK(data["steps"][1]["result"]["error"] == "Daemon socket not found for test harness");
+    CHECK((data["steps"][1]["result"]["error"] == "Daemon socket not found for test harness"));
 }
 
 TEST_CASE_METHOD(CompositeDispatchFixture, "query - single-step returns direct result",
@@ -1131,7 +1134,7 @@ TEST_CASE_METHOD(CompositeDispatchFixture, "query - single-step returns direct r
         auto& data = result["structuredContent"]["data"];
         // Single-step: direct result, NOT wrapped in {steps: [...]}
         CHECK(data.contains("op"));
-        CHECK(data["op"] == "list");
+        CHECK((data["op"] == "list"));
         CHECK(data.contains("paramsSchema"));
         CHECK_FALSE(data.contains("steps"));
     }

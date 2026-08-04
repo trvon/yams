@@ -68,7 +68,7 @@ void signal_handler(int signo) {
         for (int i = 0; i < n; ++i) {
             spdlog::critical("Backtrace[{}]: {}", i, syms[i]);
         }
-        free(syms);
+        free(static_cast<void*>(syms));
     }
 #endif
     // Give logger a moment to flush
@@ -102,16 +102,7 @@ void setup_fatal_handlers() {
 }
 
 void clear_session_index_on_start() {
-    const char* xdg = std::getenv("XDG_STATE_HOME");
-    const char* home = std::getenv("HOME");
-    std::filesystem::path root;
-    if (xdg && *xdg) {
-        root = std::filesystem::path(xdg) / "yams";
-    } else if (home && *home) {
-        root = std::filesystem::path(home) / ".local" / "state" / "yams";
-    } else {
-        root = std::filesystem::current_path() / ".yams_state";
-    }
+    const auto root = yams::config::get_state_dir();
 
     auto index = root / "sessions" / "index.json";
     if (!std::filesystem::exists(index)) {
@@ -147,13 +138,16 @@ void clear_session_index_on_start() {
     }
 }
 
-std::filesystem::path extractExplicitDataDirFromArgv(int argc, char* argv[]) {
+std::filesystem::path
+extractExplicitPathFromArgv(int argc, char* argv[],
+                            std::initializer_list<std::string_view> optionNames) {
     for (int i = 1; i < argc; ++i) {
         if (!argv[i]) {
             continue;
         }
-        std::string_view arg{argv[i]};
-        if ((arg == "--data-dir" || arg == "--storage") && i + 1 < argc && argv[i + 1]) {
+        const std::string_view arg{argv[i]};
+        if (std::find(optionNames.begin(), optionNames.end(), arg) != optionNames.end() &&
+            i + 1 < argc && argv[i + 1]) {
             return std::filesystem::path(argv[i + 1]);
         }
     }
@@ -167,11 +161,15 @@ int main(int argc, char* argv[]) {
 
     // Set YAMS_IN_DAEMON=1 to signal we're running inside the daemon process
     // This prevents EmbeddingGenerator from trying to connect back to us via IPC
-    setenv("YAMS_IN_DAEMON", "1", 1);
+    setenv("YAMS_IN_DAEMON", "1", 1); // NOLINT(concurrency-mt-unsafe): pre-thread startup
 
     yams::daemon::DaemonConfig config;
     std::string configPath;
-    const auto argvExplicitDataDir = extractExplicitDataDirFromArgv(argc, argv);
+    const auto argvExplicitConfig = extractExplicitPathFromArgv(argc, argv, {"--config"});
+    const auto argvExplicitDataDir =
+        extractExplicitPathFromArgv(argc, argv, {"--data-dir", "--storage"});
+    const auto argvExplicitSocket = extractExplicitPathFromArgv(argc, argv, {"--socket"});
+    const auto argvExplicitPid = extractExplicitPathFromArgv(argc, argv, {"--pid-file"});
 
     // Capture CLI-provided data dir separately so explicit CLI can win over config and env.
     std::filesystem::path cliDataDir;
@@ -270,30 +268,8 @@ int main(int argc, char* argv[]) {
                 // Load daemon configuration from file
                 const auto& daemonSection = tomlConfig.at("daemon");
 
-                // Socket path
-                if (config.socketPath.empty() &&
-                    daemonSection.find("socket_path") != daemonSection.end()) {
-                    config.socketPath = fs::path(daemonSection.at("socket_path"));
-                }
-
-                // PID file
-                if (config.pidFile.empty() &&
-                    daemonSection.find("pid_file") != daemonSection.end()) {
-                    config.pidFile = fs::path(daemonSection.at("pid_file"));
-                }
-
-                // Data directory (aka storage) — allow multiple key forms for compatibility
-                if (config.dataDir.empty()) {
-                    if (auto it = daemonSection.find("data_dir"); it != daemonSection.end()) {
-                        config.dataDir = fs::path(it->second);
-                    } else if (auto it2 = daemonSection.find("storage");
-                               it2 != daemonSection.end()) {
-                        config.dataDir = fs::path(it2->second);
-                    } else if (auto it3 = daemonSection.find("storage_path");
-                               it3 != daemonSection.end()) {
-                        config.dataDir = fs::path(it3->second);
-                    }
-                }
+                // Runtime paths are resolved together after TOML parsing so CLI, config,
+                // environment aliases, and platform defaults cannot diverge.
 
                 // Log level
                 if (config.logLevel.empty() &&
@@ -689,69 +665,46 @@ int main(int argc, char* argv[]) {
                     }
                 }
             }
-
-            // Load core configuration for data directory
-            if (config.dataDir.empty() && tomlConfig.find("core") != tomlConfig.end()) {
-                const auto& coreSection = tomlConfig.at("core");
-                if (coreSection.find("data_dir") != coreSection.end()) {
-                    std::string dataDir = coreSection.at("data_dir");
-                    // Expand ~ to home directory
-                    if (!dataDir.empty() && dataDir[0] == '~') {
-                        if (const char* homeEnv = std::getenv("HOME")) {
-                            dataDir = (fs::path(homeEnv) / dataDir.substr(2)).string();
-                        }
-                    }
-                    config.dataDir = fs::path(dataDir).string();
-                }
-            }
         }
     }
-
-    // Simple helper to expand a leading '~' to $HOME for file-system paths.
-    auto expand_tilde = [](const std::filesystem::path& p) -> std::filesystem::path {
-        namespace fs = std::filesystem;
-        if (p.empty())
-            return p;
-        auto s = p.string();
-        if (!s.empty() && s[0] == '~') {
-            const char* home = std::getenv("HOME");
-            if (home && *home) {
-                if (s.size() == 1) {
-                    return fs::path(home);
-                }
-                if (s.size() > 1 && (s[1] == '/' || s[1] == '\\')) {
-                    // "~/..." → "$HOME/..."
-                    return fs::path(home) / s.substr(2);
-                }
-            }
-        }
-        return p;
-    };
 
     // Normalize key paths early (before daemonizing) so relative or '~' inputs don't break after
     // chdir("/"). Keep explicit CLI choices intact but canonicalize them.
     try {
-        config.socketPath = expand_tilde(config.socketPath);
-        config.pidFile = expand_tilde(config.pidFile);
-        config.logFile = expand_tilde(config.logFile);
-        // dataDir may be normalized earlier; expand '~' here as a last pass.
-        config.dataDir = expand_tilde(config.dataDir);
+        config.socketPath = yams::config::expand_tilde(config.socketPath.string());
+        config.pidFile = yams::config::expand_tilde(config.pidFile.string());
+        config.logFile = yams::config::expand_tilde(config.logFile.string());
     } catch (const std::exception& e) {
         spdlog::debug("Path normalization error (best-effort): {}", e.what());
     }
 
-    // Precedence for daemon storage root:
-    //   explicit CLI --data-dir > config file > env > default
+    yams::config::RuntimePathOverrides pathOverrides;
+    if (!argvExplicitConfig.empty()) {
+        pathOverrides.configFile = argvExplicitConfig;
+    }
     if (!argvExplicitDataDir.empty()) {
-        config.dataDir = argvExplicitDataDir;
+        pathOverrides.dataDir = argvExplicitDataDir;
     } else if (cliProvidedDataDir && !cliDataDir.empty()) {
-        config.dataDir = std::filesystem::path(cliDataDir);
-    } else if (config.dataDir.empty()) {
-        if (const char* storageEnv = std::getenv("YAMS_STORAGE")) {
-            config.dataDir = std::filesystem::path(storageEnv);
-        } else if (const char* dataEnv = std::getenv("YAMS_DATA_DIR")) {
-            config.dataDir = std::filesystem::path(dataEnv);
-        }
+        pathOverrides.dataDir = cliDataDir;
+    }
+    if (!argvExplicitSocket.empty()) {
+        pathOverrides.socketPath = argvExplicitSocket;
+    }
+    if (!argvExplicitPid.empty()) {
+        pathOverrides.pidFile = argvExplicitPid;
+    }
+
+    auto runtimePaths = yams::config::resolve_runtime_paths(pathOverrides);
+    if (!runtimePaths) {
+        std::cerr << "Runtime path configuration error: " << runtimePaths.error().message << "\n";
+        return 1;
+    }
+    config.configFilePath = runtimePaths.value().configFile.value;
+    config.dataDir = runtimePaths.value().dataDir.value;
+    config.socketPath = runtimePaths.value().socketPath.value;
+    config.pidFile = runtimePaths.value().pidFile.value;
+    for (const auto& diagnostic : runtimePaths.value().diagnostics) {
+        std::cerr << "Warning: " << diagnostic << "\n";
     }
 
     // Resolve log file path if not specified
@@ -864,6 +817,7 @@ int main(int argc, char* argv[]) {
 
     // Let managed service launches tell the shutdown path not to force an
     // out-of-band process exit from the request-handling thread.
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): before daemon threads start
     setenv("YAMS_DAEMON_FOREGROUND", foreground ? "1" : "0", 1);
 
     // Daemonize if not running in foreground

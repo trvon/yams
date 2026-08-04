@@ -38,10 +38,7 @@
 #include <boost/asio/this_coro.hpp>
 
 #include <cmath>
-#include <future>
 #include <iomanip>
-#include <mutex>
-#include <thread>
 
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
@@ -51,7 +48,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <errno.h>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -59,8 +55,6 @@
 #include <iterator>
 #include <memory>
 #include <optional>
-#include <random>
-#include <regex>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -298,7 +292,8 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
 
     // Optional fast-first strategy: quick keyword preview before full hybrid
     if (dreq.searchType == "hybrid") {
-        if (const char* ff = std::getenv("YAMS_MCP_SEARCH_FAST_FIRST"); ff && *ff && ff[0] != '0') {
+        const auto fastFirst = yams::config::getenv_copy("YAMS_MCP_SEARCH_FAST_FIRST");
+        if (!fastFirst.empty() && fastFirst.front() != '0') {
             yams::daemon::SearchRequest kreq = dreq;
             kreq.searchType = "keyword";
             kreq.fuzzy = false;    // keep preview snappy
@@ -553,6 +548,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                     }
                 }
             } catch (...) {
+                spdlog::debug("Unable to build local search-result diff");
             }
         }
     }
@@ -633,6 +629,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             try {
                 base = std::filesystem::path(p).filename().string();
             } catch (...) {
+                spdlog::debug("Unable to derive grep basename from '{}'", p);
             }
             if (!base.empty() && base != p) {
                 final_paths.insert(std::string("*") + base);
@@ -678,7 +675,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                     "info", "grep fast-first: returning semantic semantic suggestions"));
             }
         } catch (...) {
-            // best-effort notification
+            spdlog::debug("Unable to send grep fast-first notification");
         }
         yams::daemon::SearchRequest sreq;
         sreq.query = req.pattern;
@@ -739,12 +736,14 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     }
 
     std::ostringstream oss;
-    size_t maxOutputBytes = 16 * 1024;
-    if (const char* env = std::getenv("YAMS_MCP_GREP_MAX_OUTPUT_BYTES")) {
+    size_t maxOutputBytes = size_t{16} * 1024;
+    if (const auto env = yams::config::getenv_copy("YAMS_MCP_GREP_MAX_OUTPUT_BYTES");
+        !env.empty()) {
         try {
             maxOutputBytes = std::max<size_t>(1024, static_cast<size_t>(std::stoul(env)));
         } catch (...) {
-            maxOutputBytes = 16 * 1024;
+            spdlog::debug("Ignoring invalid YAMS_MCP_GREP_MAX_OUTPUT_BYTES value");
+            maxOutputBytes = size_t{16} * 1024;
         }
     }
     out.outputMaxBytes = maxOutputBytes;
@@ -813,9 +812,8 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         (void)req;
         co_return Error{ErrorCode::NotSupported, "download is not supported on WASI build"};
 #else
-    const bool verbose =
-        (std::getenv("YAMS_POOL_VERBOSE") && std::string(std::getenv("YAMS_POOL_VERBOSE")) != "0" &&
-         std::string(std::getenv("YAMS_POOL_VERBOSE")) != "false");
+    const auto verboseValue = yams::config::getenv_copy("YAMS_POOL_VERBOSE");
+    const bool verbose = !verboseValue.empty() && verboseValue != "0" && verboseValue != "false";
     if (verbose) {
         spdlog::debug("[MCP] download: url='{}' post_index={} store_only={} export='{}'", req.url,
                       req.postIndex, req.storeOnly, req.exportPath);
@@ -891,18 +889,18 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     yams::downloader::StorageConfig storage{};
     yams::downloader::DownloaderConfig cfg{};
 
-    // Read config and resolve storage path to match CLI behavior
-    std::filesystem::path resolvedDataRoot;
+    // Read config and storage paths from the same immutable runtime-path snapshot.
+    auto runtimePaths = yams::config::resolve_runtime_paths();
+    if (!runtimePaths) {
+        co_return runtimePaths.error();
+    }
+    for (const auto& diagnostic : runtimePaths.value().diagnostics) {
+        spdlog::warn("MCP runtime path policy: {}", diagnostic);
+    }
+    std::filesystem::path resolvedDataRoot = runtimePaths.value().dataDir.value;
     try {
         namespace fs = std::filesystem;
-
-        // Load config.toml if present
-        fs::path configPath;
-        if (const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME")) {
-            configPath = fs::path(xdgConfigHome) / "yams" / "config.toml";
-        } else if (const char* homeEnv = std::getenv("HOME")) {
-            configPath = fs::path(homeEnv) / ".config" / "yams" / "config.toml";
-        }
+        const fs::path& configPath = runtimePaths.value().configFile.value;
 
         std::map<std::string, std::map<std::string, std::string>> toml;
         if (!configPath.empty() && fs::exists(configPath)) {
@@ -919,18 +917,21 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                 try {
                     cfg.defaultConcurrency = std::stoi(f->second);
                 } catch (...) {
+                    spdlog::debug("Ignoring invalid downloader.default_concurrency");
                 }
             }
             if (auto f = dl.find("default_chunk_size_bytes"); f != dl.end()) {
                 try {
                     cfg.defaultChunkSizeBytes = static_cast<std::size_t>(std::stoull(f->second));
                 } catch (...) {
+                    spdlog::debug("Ignoring invalid downloader.default_chunk_size_bytes");
                 }
             }
             if (auto f = dl.find("default_timeout_ms"); f != dl.end()) {
                 try {
                     cfg.defaultTimeout = std::chrono::milliseconds(std::stoll(f->second));
                 } catch (...) {
+                    spdlog::debug("Ignoring invalid downloader.default_timeout_ms");
                 }
             }
             if (auto f = dl.find("follow_redirects"); f != dl.end()) {
@@ -946,40 +947,10 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                 try {
                     cfg.maxFileBytes = static_cast<std::uint64_t>(std::stoull(f->second));
                 } catch (...) {
+                    spdlog::debug("Ignoring invalid downloader.max_file_bytes");
                 }
             }
         }
-
-        // Determine data root (env > core.data_dir > XDG_DATA_HOME > ~/.local/share/yams)
-        fs::path dataRoot;
-        if (const char* envStorage = std::getenv("YAMS_STORAGE")) {
-            if (envStorage && *envStorage)
-                dataRoot = fs::path(envStorage);
-        }
-        if (dataRoot.empty()) {
-            if (auto it = toml.find("core"); it != toml.end()) {
-                const auto& core = it->second;
-                if (auto f = core.find("data_dir"); f != core.end() && !f->second.empty()) {
-                    std::string p = f->second;
-                    if (!p.empty() && p.front() == '~') {
-                        if (const char* home = std::getenv("HOME")) {
-                            p = std::string(home) + p.substr(1);
-                        }
-                    }
-                    dataRoot = fs::path(p);
-                }
-            }
-        }
-        if (dataRoot.empty()) {
-            if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME")) {
-                dataRoot = fs::path(xdgDataHome) / "yams";
-            } else if (const char* homeEnv = std::getenv("HOME")) {
-                dataRoot = fs::path(homeEnv) / ".local" / "share" / "yams";
-            } else {
-                dataRoot = fs::current_path() / "yams_data";
-            }
-        }
-        resolvedDataRoot = std::move(dataRoot);
 
         // Allow explicit overrides via [storage] objects_dir/staging_dir
         fs::path objectsDir;
@@ -994,9 +965,9 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             }
         }
         if (objectsDir.empty())
-            objectsDir = dataRoot / "storage" / "objects";
+            objectsDir = resolvedDataRoot / "storage" / "objects";
         if (stagingDir.empty())
-            stagingDir = dataRoot / "storage" / "staging";
+            stagingDir = resolvedDataRoot / "storage" / "staging";
 
         // Relative storage paths in config are resolved against data root.
         if (!resolvedDataRoot.empty()) {
@@ -1011,7 +982,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         storage.stagingDir = std::move(stagingDir);
 
     } catch (...) {
-        // Use defaults silently if config parsing fails
+        spdlog::debug("Unable to parse downloader runtime configuration; using defaults");
     }
 
     // Apply request-level overrides (request has priority)
@@ -1044,7 +1015,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             }
         }
     } catch (...) {
-        // Best-effort alignment only; fall back to config/env-derived storage roots.
+        spdlog::debug("Unable to align download storage with daemon status");
     }
 
     // Resolve and ensure staging directory exists to avoid regression
@@ -1059,16 +1030,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         };
 
         if (storage.stagingDir.empty()) {
-            // Prefer XDG_STATE_HOME, then HOME, then /tmp
-            fs::path staging;
-            if (const char* xdgState = std::getenv("XDG_STATE_HOME")) {
-                staging = fs::path(xdgState) / "yams" / "staging";
-            } else if (const char* homeEnv = std::getenv("HOME")) {
-                staging = fs::path(homeEnv) / ".local" / "state" / "yams" / "staging";
-            } else {
-                staging = fs::path("/tmp") / "yams" / "staging";
-            }
-            storage.stagingDir = staging;
+            storage.stagingDir = yams::config::get_state_dir() / "staging";
         }
 
         // Resolve late relative staging path against data root if available.
@@ -1083,13 +1045,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                 fallbackStaging = resolvedDataRoot / "storage" / "staging";
             }
             if (fallbackStaging.empty()) {
-                if (const char* xdgState = std::getenv("XDG_STATE_HOME"); xdgState && *xdgState) {
-                    fallbackStaging = fs::path(xdgState) / "yams" / "staging";
-                } else if (const char* homeEnv = std::getenv("HOME"); homeEnv && *homeEnv) {
-                    fallbackStaging = fs::path(homeEnv) / ".local" / "state" / "yams" / "staging";
-                } else {
-                    fallbackStaging = fs::path("/tmp") / "yams" / "staging";
-                }
+                fallbackStaging = yams::config::get_state_dir() / "staging";
             }
             if (!ensure_dir(fallbackStaging)) {
                 co_return Error{ErrorCode::InternalError,
@@ -1137,18 +1093,12 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     mcp_response.storedPath = final.storedPath.string();
     mcp_response.sizeBytes = final.sizeBytes;
     mcp_response.success = final.success;
-    if (final.httpStatus)
-        mcp_response.httpStatus = *final.httpStatus;
-    if (final.etag)
-        mcp_response.etag = *final.etag;
-    if (final.lastModified)
-        mcp_response.lastModified = *final.lastModified;
-    if (final.checksumOk)
-        mcp_response.checksumOk = *final.checksumOk;
-    if (final.contentType)
-        mcp_response.contentType = *final.contentType;
-    if (final.suggestedName)
-        mcp_response.suggestedName = *final.suggestedName;
+    mcp_response.httpStatus = final.httpStatus;
+    mcp_response.etag = final.etag;
+    mcp_response.lastModified = final.lastModified;
+    mcp_response.checksumOk = final.checksumOk;
+    mcp_response.contentType = final.contentType;
+    mcp_response.suggestedName = final.suggestedName;
 
     if (verbose) {
         spdlog::debug(
@@ -1183,16 +1133,10 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                     }
                 }
             } catch (...) {
+                spdlog::debug("Unable to resolve daemon content-store root for post-index");
             }
             if (baseDir.empty()) {
-                if (const char* xdgDataHome = std::getenv("XDG_DATA_HOME");
-                    xdgDataHome && *xdgDataHome) {
-                    baseDir = std::filesystem::path(xdgDataHome) / "yams";
-                } else if (const char* homeEnv = std::getenv("HOME"); homeEnv && *homeEnv) {
-                    baseDir = std::filesystem::path(homeEnv) / ".local" / "share" / "yams";
-                } else {
-                    baseDir = std::filesystem::current_path();
-                }
+                baseDir = resolvedDataRoot;
             }
             absPath = baseDir / absPath;
         }
@@ -1286,9 +1230,17 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         {
             auto now = std::chrono::system_clock::now();
             auto t = std::chrono::system_clock::to_time_t(now);
-            std::stringstream ss;
-            ss << std::put_time(std::localtime(&t), "%FT%T%z");
-            addReq.metadata["downloaded_at"] = ss.str();
+            std::tm localTime{};
+#ifdef _WIN32
+            const bool converted = localtime_s(&localTime, &t) == 0;
+#else
+            const bool converted = localtime_r(&t, &localTime) != nullptr;
+#endif
+            if (converted) {
+                std::stringstream ss;
+                ss << std::put_time(&localTime, "%FT%T%z");
+                addReq.metadata["downloaded_at"] = ss.str();
+            }
         }
         // Merge user metadata
         for (const auto& [k, v] : req.metadata)
@@ -1460,7 +1412,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             std::error_code ec;
             fs::path p(tmp);
             if (!p.is_absolute()) {
-                if (const char* pwd = std::getenv("PWD")) {
+                if (const auto pwd = yams::config::getenv_copy("PWD"); !pwd.empty()) {
                     fs::path cand = fs::path(pwd) / p;
                     if (fs::exists(cand, ec))
                         p = cand;
@@ -1471,6 +1423,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                 try {
                     resolvedName = p.filename().string();
                 } catch (...) {
+                    spdlog::debug("Unable to derive a filename from '{}'", p.string());
                 }
             }
         }
@@ -1505,13 +1458,11 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             _p = _p.substr(7);
         }
         if (!_p.empty() && _p.front() == '~') {
-            if (const char* home = std::getenv("HOME")) {
-                _p = std::string(home) + _p.substr(1);
-            }
+            _p = yams::config::expand_tilde(_p).string();
         }
         if (!_p.empty() && _p.front() != '/') {
             std::vector<std::filesystem::path> bases;
-            if (const char* pwd = std::getenv("PWD"); pwd && *pwd) {
+            if (const auto pwd = yams::config::getenv_copy("PWD"); !pwd.empty()) {
                 bases.emplace_back(pwd);
             }
             bases.emplace_back(std::filesystem::current_path());
@@ -1668,21 +1619,11 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
     mcp_response.size = resp.size;
     mcp_response.mimeType = resp.mimeType;
     mcp_response.compressed = resp.compressed;
-    if (resp.compressionAlgorithm.has_value()) {
-        mcp_response.compressionAlgorithm = resp.compressionAlgorithm.value();
-    }
-    if (resp.compressionLevel.has_value()) {
-        mcp_response.compressionLevel = resp.compressionLevel.value();
-    }
-    if (resp.uncompressedSize.has_value()) {
-        mcp_response.uncompressedSize = resp.uncompressedSize.value();
-    }
-    if (resp.compressedCrc32.has_value()) {
-        mcp_response.compressedCrc32 = resp.compressedCrc32.value();
-    }
-    if (resp.uncompressedCrc32.has_value()) {
-        mcp_response.uncompressedCrc32 = resp.uncompressedCrc32.value();
-    }
+    mcp_response.compressionAlgorithm = resp.compressionAlgorithm;
+    mcp_response.compressionLevel = resp.compressionLevel;
+    mcp_response.uncompressedSize = resp.uncompressedSize;
+    mcp_response.compressedCrc32 = resp.compressedCrc32;
+    mcp_response.uncompressedCrc32 = resp.uncompressedCrc32;
     if (!resp.compressionHeader.empty()) {
         std::ostringstream oss;
         for (uint8_t byte : resp.compressionHeader) {
@@ -1741,12 +1682,14 @@ MCPServer::handleRetrieveDocument(const MCPRetrieveDocumentRequest& req) {
             mcp_response.content = resp.content;
         }
 
-        size_t maxContentBytes = 32 * 1024;
-        if (const char* env = std::getenv("YAMS_MCP_GET_MAX_CONTENT_BYTES")) {
+        size_t maxContentBytes = size_t{32} * 1024;
+        if (const auto env = yams::config::getenv_copy("YAMS_MCP_GET_MAX_CONTENT_BYTES");
+            !env.empty()) {
             try {
                 maxContentBytes = std::max<size_t>(1024, static_cast<size_t>(std::stoul(env)));
             } catch (...) {
-                maxContentBytes = 32 * 1024;
+                spdlog::debug("Ignoring invalid YAMS_MCP_GET_MAX_CONTENT_BYTES value");
+                maxContentBytes = size_t{32} * 1024;
             }
         }
         mcp_response.contentMaxBytes = static_cast<uint64_t>(maxContentBytes);
@@ -1862,6 +1805,7 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
                         docJson["local_input_file"] = *resolved.absPath;
                     }
                 } catch (...) {
+                    spdlog::debug("Unable to annotate local list input '{}'", req.name);
                 }
             }
         }
@@ -1923,6 +1867,7 @@ MCPServer::handleListDocuments(const MCPListDocumentsRequest& req) {
                         }
                     }
                 } catch (...) {
+                    spdlog::debug("Unable to build local list diff for '{}'", req.name);
                 }
             }
         }
@@ -2044,9 +1989,7 @@ MCPServer::handleAddDirectory(const MCPAddDirectoryRequest& req) {
             path_str = path_str.substr(7);
         }
         if (!path_str.empty() && path_str.front() == '~') {
-            if (const char* home = std::getenv("HOME")) {
-                path_str = std::string(home) + path_str.substr(1);
-            }
+            path_str = yams::config::expand_tilde(path_str).string();
         }
         dir_path = std::filesystem::path(path_str);
         if (dir_path.is_relative()) {
@@ -2118,6 +2061,7 @@ MCPServer::handleDoctor(const MCPDoctorRequest& req) {
             daemon_client_config_.socketPath =
                 yams::daemon::socket_utils::resolve_socket_path_config_first();
         } catch (...) {
+            spdlog::debug("Unable to resolve daemon socket for doctor response");
         }
     }
     bool socketExists = false;
@@ -2129,11 +2073,13 @@ MCPServer::handleDoctor(const MCPDoctorRequest& req) {
         boost::asio::local::stream_protocol::socket probe(exec);
         if (!sock.empty()) {
             boost::system::error_code bec;
-            probe.connect(boost::asio::local::stream_protocol::endpoint(sock.string()), bec);
+            (void)probe.connect(boost::asio::local::stream_protocol::endpoint(sock.string()), bec);
             connectable = !bec;
-            probe.close();
+            boost::system::error_code closeError;
+            (void)probe.close(closeError);
         }
     } catch (...) {
+        spdlog::debug("Unable to probe daemon socket for doctor response");
     }
 
     // Try daemon status; tolerate failure and still return a response with diagnostics
@@ -2290,11 +2236,10 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
         std::string normName = req.name;
         try {
             if (!normName.empty() && normName.front() == '~') {
-                if (const char* home = std::getenv("HOME")) {
-                    normName = std::string(home) + normName.substr(1);
-                }
+                normName = yams::config::expand_tilde(normName).string();
             }
         } catch (...) {
+            spdlog::debug("Unable to expand update target path '{}'", req.name);
         }
         // Reuse shared daemon client to avoid per-request connection overhead
         auto clientRes = requireDaemonClient();
@@ -2393,6 +2338,7 @@ MCPServer::handleUpdateMetadata(const MCPUpdateMetadataRequest& req) {
                 try {
                     stem = std::filesystem::path(normName).stem().string();
                 } catch (...) {
+                    spdlog::debug("Unable to derive update target stem from '{}'", normName);
                 }
                 lr = tryList(std::string("%/") + stem + "%");
             }

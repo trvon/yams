@@ -2,6 +2,7 @@
 #include <map>
 #include <mutex>
 #include <sstream>
+#include <stdexcept>
 #include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 
@@ -36,7 +37,7 @@ std::filesystem::path expand_tilde(const std::string& path) {
         if (const auto home = getenv_copy("HOME"); !home.empty()) {
             // path may be "~" (bare home) or "~/..." (relative to home).
             // path.substr(2) would throw std::out_of_range for a bare "~".
-            if (path.size() >= 2 && path[1] == '/') {
+            if (path.size() >= 2 && (path[1] == '/' || path[1] == '\\')) {
                 return std::filesystem::path(home) / path.substr(2);
             }
             if (path.size() == 1) {
@@ -72,26 +73,15 @@ std::filesystem::path get_config_dir() {
     return std::filesystem::current_path() / ".yams";
 }
 
-std::filesystem::path get_data_dir() {
-    // Check YAMS_DATA_DIR environment variable first (used by test fixtures)
-    if (const auto dataDir = getenv_copy("YAMS_DATA_DIR"); !dataDir.empty()) {
-        return std::filesystem::path(dataDir);
-    }
-    // Also check legacy YAMS_STORAGE env var for backwards compatibility
-    if (const auto storage = getenv_copy("YAMS_STORAGE"); !storage.empty()) {
-        return std::filesystem::path(storage);
-    }
+static std::filesystem::path get_platform_data_dir() {
 #ifdef _WIN32
-    // Windows: Use LOCALAPPDATA for local data (databases, indices)
     if (const auto localAppData = getenv_copy("LOCALAPPDATA"); !localAppData.empty()) {
         return std::filesystem::path(localAppData) / "yams";
     }
-    // Fallback to USERPROFILE
     if (const auto userProfile = getenv_copy("USERPROFILE"); !userProfile.empty()) {
         return std::filesystem::path(userProfile) / "AppData" / "Local" / "yams";
     }
 #else
-    // Unix: Follow XDG Base Directory Specification
     if (const auto xdgData = getenv_copy("XDG_DATA_HOME"); !xdgData.empty()) {
         return std::filesystem::path(xdgData) / "yams";
     }
@@ -99,8 +89,15 @@ std::filesystem::path get_data_dir() {
         return std::filesystem::path(home) / ".local" / "share" / "yams";
     }
 #endif
-    // Last resort: current directory
     return std::filesystem::current_path() / "yams_data";
+}
+
+std::filesystem::path get_data_dir() {
+    auto resolved = resolve_runtime_paths();
+    if (resolved) {
+        return resolved.value().dataDir.value;
+    }
+    throw std::invalid_argument(resolved.error().message);
 }
 
 std::filesystem::path get_cache_dir() {
@@ -192,6 +189,62 @@ bool can_write_to_directory(const std::filesystem::path& dir) {
     return true;
 }
 
+std::filesystem::path
+resolve_default_socket_path(const std::optional<std::filesystem::path>& runtimeOverride) {
+    namespace fs = std::filesystem;
+    if (runtimeOverride && !runtimeOverride->empty()) {
+        return *runtimeOverride / "yams-daemon.sock";
+    }
+#ifdef _WIN32
+    if (const auto localAppData = getenv_copy("LOCALAPPDATA"); !localAppData.empty()) {
+        const auto runtimeDir = fs::path(localAppData) / "yams";
+        std::error_code error;
+        yams::common::ensureDirectories(runtimeDir, error);
+        if (!error && can_write_to_directory(runtimeDir)) {
+            return runtimeDir / "yams-daemon.sock";
+        }
+    }
+    return fs::temp_directory_path() / "yams-daemon.sock";
+#else
+    if (geteuid() == 0) {
+        return fs::path("/var/run/yams-daemon.sock");
+    }
+    if (const auto xdgRuntime = getenv_copy("XDG_RUNTIME_DIR"); !xdgRuntime.empty()) {
+        const fs::path runtimeDir(xdgRuntime);
+        if (can_write_to_directory(runtimeDir)) {
+            return runtimeDir / "yams-daemon.sock";
+        }
+    }
+    return fs::path("/tmp") /
+           ("yams-daemon-" + std::to_string(static_cast<unsigned long long>(getuid())) + ".sock");
+#endif
+}
+
+std::filesystem::path
+resolve_default_pid_path(const std::optional<std::filesystem::path>& runtimeOverride) {
+    namespace fs = std::filesystem;
+    if (runtimeOverride && !runtimeOverride->empty()) {
+        return *runtimeOverride / "yams-daemon.pid";
+    }
+#ifdef _WIN32
+    if (auto runtimeDir = get_daemon_runtime_dir();
+        !runtimeDir.empty() && can_write_to_directory(runtimeDir)) {
+        return runtimeDir / "yams-daemon.pid";
+    }
+    return fs::temp_directory_path() / "yams-daemon.pid";
+#else
+    if (geteuid() == 0) {
+        return fs::path("/var/run/yams-daemon.pid");
+    }
+    if (auto runtimeDir = get_daemon_runtime_dir();
+        !runtimeDir.empty() && can_write_to_directory(runtimeDir)) {
+        return runtimeDir / "yams-daemon.pid";
+    }
+    return fs::path("/tmp") /
+           ("yams-daemon-" + std::to_string(static_cast<unsigned long long>(getuid())) + ".pid");
+#endif
+}
+
 std::filesystem::path get_state_home_for_daemon_log() {
     auto stateDir = get_state_dir();
     if (stateDir.empty()) {
@@ -220,26 +273,11 @@ std::filesystem::path get_daemon_status_file() {
 }
 
 std::filesystem::path resolve_daemon_pid_file_path() {
-    if (auto configured = resolve_pid_file_from_config(); !configured.empty()) {
-        return configured;
+    auto resolved = resolve_runtime_paths();
+    if (resolved) {
+        return resolved.value().pidFile.value;
     }
-#ifdef _WIN32
-    if (auto runtimeDir = get_daemon_runtime_dir();
-        !runtimeDir.empty() && can_write_to_directory(runtimeDir)) {
-        return runtimeDir / "yams-daemon.pid";
-    }
-    return std::filesystem::temp_directory_path() / "yams-daemon.pid";
-#else
-    if (geteuid() == 0) {
-        return std::filesystem::path("/var/run/yams-daemon.pid");
-    }
-    if (auto runtimeDir = get_daemon_runtime_dir();
-        !runtimeDir.empty() && can_write_to_directory(runtimeDir)) {
-        return runtimeDir / "yams-daemon.pid";
-    }
-    return std::filesystem::path("/tmp") /
-           ("yams-daemon-" + std::to_string(static_cast<unsigned long long>(getuid())) + ".pid");
-#endif
+    throw std::invalid_argument(resolved.error().message);
 }
 
 std::filesystem::path resolve_daemon_log_file_path() {
@@ -331,7 +369,8 @@ std::string parse_config_value(const std::filesystem::path& config_path, const s
                     trim(v);
                 }
 
-                if (k == key) {
+                const bool qualifiedKey = !section.empty() && k == section + "." + key;
+                if ((in_target_section && k == key) || qualifiedKey) {
                     return unquote(v);
                 }
             }
@@ -353,117 +392,197 @@ std::filesystem::path get_config_path(const std::string& override_path) {
     return get_config_dir() / "config.toml";
 }
 
-// Helper to parse path-specific config values with tilde expansion
-static std::filesystem::path parse_config_path_value(const std::filesystem::path& config_path,
-                                                     const std::string& target_section,
-                                                     const std::string& target_key) {
-    if (!std::filesystem::exists(config_path))
-        return {};
+// Helper to parse path-specific config values with tilde expansion.
+static std::filesystem::path parse_config_path_value(const std::filesystem::path& configPath,
+                                                     const std::string& targetSection,
+                                                     const std::string& targetKey) {
+    const auto value = parse_config_value(configPath, targetSection, targetKey);
+    return value.empty() ? std::filesystem::path{} : expand_tilde(value);
+}
 
-    std::ifstream f(config_path);
-    std::string line, current_section;
+namespace {
 
-    while (std::getline(f, line)) {
-        trim(line);
-        if (line.empty() || line[0] == '#')
-            continue;
+bool paths_equal(const std::filesystem::path& lhs, const std::filesystem::path& rhs) {
+    return lhs.lexically_normal() == rhs.lexically_normal();
+}
 
-        if (line.front() == '[') {
-            trim(line);
-            if (line.size() >= 2 && line.back() == ']') {
-                current_section = line.substr(1, line.size() - 2);
-                trim(current_section);
-            }
-            continue;
+ResolvedRuntimePath make_resolved_path(std::filesystem::path value, RuntimePathSource source,
+                                       std::string sourceName) {
+    return ResolvedRuntimePath{std::move(value), source, std::move(sourceName)};
+}
+
+std::string alias_conflict_message(std::string_view firstName,
+                                   const std::filesystem::path& firstValue,
+                                   std::string_view secondName,
+                                   const std::filesystem::path& secondValue) {
+    return "Conflicting runtime path aliases " + std::string(firstName) + "='" +
+           firstValue.string() + "' and " + std::string(secondName) + "='" + secondValue.string() +
+           "'";
+}
+
+} // namespace
+
+Result<ResolvedRuntimePaths> resolve_runtime_paths(const RuntimePathOverrides& overrides) {
+    ResolvedRuntimePaths resolved;
+
+    if (overrides.configFile && !overrides.configFile->empty()) {
+        resolved.configFile = make_resolved_path(expand_tilde(overrides.configFile->string()),
+                                                 RuntimePathSource::Explicit, "explicit config");
+    } else if (const auto configEnv = getenv_copy("YAMS_CONFIG"); !configEnv.empty()) {
+        resolved.configFile = make_resolved_path(expand_tilde(configEnv),
+                                                 RuntimePathSource::Environment, "YAMS_CONFIG");
+    } else {
+        resolved.configFile = make_resolved_path(
+            get_config_path(), RuntimePathSource::PlatformDefault, "platform config default");
+    }
+
+    std::vector<std::pair<std::string, std::filesystem::path>> configuredDataPaths;
+    const auto addConfiguredDataPath = [&](std::string section, std::string key) {
+        if (auto value = parse_config_path_value(resolved.configFile.value, section, key);
+            !value.empty()) {
+            configuredDataPaths.emplace_back(section + "." + key, std::move(value));
         }
+    };
+    addConfiguredDataPath("core", "data_dir");
+    addConfiguredDataPath("daemon", "data_dir");
+    addConfiguredDataPath("daemon", "storage");
+    addConfiguredDataPath("daemon", "storage_path");
 
-        auto pos = line.find('=');
-        if (pos == std::string::npos)
-            continue;
-
-        std::string key = line.substr(0, pos);
-        std::string val = line.substr(pos + 1);
-        trim(key);
-        val = unquote(val);
-
-        // Support both "daemon.socket_path" and "[daemon] socket_path"
-        if (key == target_section + "." + target_key ||
-            (current_section == target_section && key == target_key)) {
-            return expand_tilde(val);
+    const auto explicitData = overrides.dataDir && !overrides.dataDir->empty();
+    if (configuredDataPaths.size() > 1) {
+        const auto& [firstName, firstValue] = configuredDataPaths.front();
+        for (auto it = std::next(configuredDataPaths.begin()); it != configuredDataPaths.end();
+             ++it) {
+            if (!paths_equal(firstValue, it->second)) {
+                const auto message =
+                    alias_conflict_message(firstName, firstValue, it->first, it->second);
+                if (!explicitData) {
+                    return Error{ErrorCode::InvalidData, message};
+                }
+                resolved.diagnostics.push_back(message + " (ignored by explicit data path)");
+            }
         }
     }
-    return {};
+
+    const auto legacyStorage = getenv_copy("YAMS_STORAGE");
+    const auto canonicalData = getenv_copy("YAMS_DATA_DIR");
+    const bool dataEnvConflict = !legacyStorage.empty() && !canonicalData.empty() &&
+                                 !paths_equal(legacyStorage, canonicalData);
+    const bool configuredData = !configuredDataPaths.empty();
+    if (dataEnvConflict) {
+        const auto message =
+            alias_conflict_message("YAMS_STORAGE", legacyStorage, "YAMS_DATA_DIR", canonicalData);
+        if (!explicitData && !configuredData) {
+            return Error{ErrorCode::InvalidData, message};
+        }
+        resolved.diagnostics.push_back(message + " (ignored by higher-precedence data path)");
+    }
+
+    if (explicitData) {
+        resolved.dataDir = make_resolved_path(expand_tilde(overrides.dataDir->string()),
+                                              RuntimePathSource::Explicit, "explicit data path");
+    } else if (configuredData) {
+        resolved.dataDir =
+            make_resolved_path(configuredDataPaths.front().second, RuntimePathSource::ConfigFile,
+                               configuredDataPaths.front().first);
+    } else if (!canonicalData.empty()) {
+        resolved.dataDir = make_resolved_path(expand_tilde(canonicalData),
+                                              RuntimePathSource::Environment, "YAMS_DATA_DIR");
+    } else if (!legacyStorage.empty()) {
+        resolved.dataDir = make_resolved_path(expand_tilde(legacyStorage),
+                                              RuntimePathSource::Environment, "YAMS_STORAGE");
+    } else {
+        resolved.dataDir = make_resolved_path(
+            get_platform_data_dir(), RuntimePathSource::PlatformDefault, "platform data default");
+    }
+
+    const auto explicitRuntime = overrides.runtimeDir && !overrides.runtimeDir->empty();
+    if (explicitRuntime) {
+        resolved.runtimeDir =
+            make_resolved_path(expand_tilde(overrides.runtimeDir->string()),
+                               RuntimePathSource::Explicit, "explicit runtime path");
+    } else {
+        resolved.runtimeDir = make_resolved_path(
+            get_runtime_dir(), RuntimePathSource::PlatformDefault, "platform runtime default");
+    }
+
+    const auto canonicalSocket = getenv_copy("YAMS_DAEMON_SOCKET");
+    const auto compatibilitySocket = getenv_copy("YAMS_DAEMON_SOCKET_PATH");
+    const bool explicitSocket = overrides.socketPath && !overrides.socketPath->empty();
+    if (!canonicalSocket.empty() && !compatibilitySocket.empty() &&
+        !paths_equal(canonicalSocket, compatibilitySocket)) {
+        const auto message = alias_conflict_message("YAMS_DAEMON_SOCKET", canonicalSocket,
+                                                    "YAMS_DAEMON_SOCKET_PATH", compatibilitySocket);
+        if (!explicitSocket) {
+            return Error{ErrorCode::InvalidData, message};
+        }
+        resolved.diagnostics.push_back(message + " (ignored by explicit socket path)");
+    }
+
+    if (explicitSocket) {
+        resolved.socketPath =
+            make_resolved_path(expand_tilde(overrides.socketPath->string()),
+                               RuntimePathSource::Explicit, "explicit socket path");
+    } else if (!canonicalSocket.empty()) {
+        resolved.socketPath = make_resolved_path(
+            expand_tilde(canonicalSocket), RuntimePathSource::Environment, "YAMS_DAEMON_SOCKET");
+    } else if (!compatibilitySocket.empty()) {
+        resolved.socketPath =
+            make_resolved_path(expand_tilde(compatibilitySocket), RuntimePathSource::Environment,
+                               "YAMS_DAEMON_SOCKET_PATH");
+    } else if (auto configured =
+                   parse_config_path_value(resolved.configFile.value, "daemon", "socket_path");
+               !configured.empty()) {
+        resolved.socketPath = make_resolved_path(
+            std::move(configured), RuntimePathSource::ConfigFile, "daemon.socket_path");
+    } else {
+        resolved.socketPath = make_resolved_path(
+            resolve_default_socket_path(explicitRuntime ? std::optional{resolved.runtimeDir.value}
+                                                        : std::nullopt),
+            RuntimePathSource::PlatformDefault, "platform socket default");
+    }
+
+    const bool explicitPid = overrides.pidFile && !overrides.pidFile->empty();
+    if (explicitPid) {
+        resolved.pidFile = make_resolved_path(expand_tilde(overrides.pidFile->string()),
+                                              RuntimePathSource::Explicit, "explicit PID path");
+    } else if (auto configured =
+                   parse_config_path_value(resolved.configFile.value, "daemon", "pid_file");
+               !configured.empty()) {
+        resolved.pidFile = make_resolved_path(std::move(configured), RuntimePathSource::ConfigFile,
+                                              "daemon.pid_file");
+    } else {
+        resolved.pidFile = make_resolved_path(
+            resolve_default_pid_path(explicitRuntime ? std::optional{resolved.runtimeDir.value}
+                                                     : std::nullopt),
+            RuntimePathSource::PlatformDefault, "platform PID default");
+    }
+
+    return resolved;
 }
 
 std::filesystem::path resolve_socket_path_from_config() {
-    // 1) YAMS_DAEMON_SOCKET env
-    if (const auto env = getenv_copy("YAMS_DAEMON_SOCKET"); !env.empty()) {
-        return std::filesystem::path(env);
+    auto resolved = resolve_runtime_paths();
+    if (resolved) {
+        return resolved.value().socketPath.value;
     }
-
-    // 2) config.toml daemon.socket_path
-    std::filesystem::path config_path;
-    if (const auto cfg_env = getenv_copy("YAMS_CONFIG"); !cfg_env.empty()) {
-        config_path = std::filesystem::path(cfg_env);
-    } else {
-        config_path = get_config_path();
-    }
-
-    if (!config_path.empty()) {
-        if (auto result = parse_config_path_value(config_path, "daemon", "socket_path");
-            !result.empty()) {
-            return result;
-        }
-    }
-
-    // 3) Default
-    return {};
+    throw std::invalid_argument(resolved.error().message);
 }
 
 std::filesystem::path resolve_pid_file_from_config() {
-    std::filesystem::path config_path;
-    if (const auto cfg_env = getenv_copy("YAMS_CONFIG"); !cfg_env.empty()) {
-        config_path = std::filesystem::path(cfg_env);
-    } else {
-        config_path = get_config_path();
+    auto resolved = resolve_runtime_paths();
+    if (resolved) {
+        return resolved.value().pidFile.value;
     }
-
-    if (!config_path.empty()) {
-        if (auto result = parse_config_path_value(config_path, "daemon", "pid_file");
-            !result.empty()) {
-            return result;
-        }
-    }
-
-    return {};
+    throw std::invalid_argument(resolved.error().message);
 }
 
 std::filesystem::path resolve_data_dir_from_config() {
-    // 1) config.toml core.data_dir
-    std::filesystem::path config_path;
-    if (const auto cfg_env = getenv_copy("YAMS_CONFIG"); !cfg_env.empty()) {
-        config_path = std::filesystem::path(cfg_env);
-    } else {
-        config_path = get_config_path();
+    auto resolved = resolve_runtime_paths();
+    if (resolved) {
+        return resolved.value().dataDir.value;
     }
-
-    if (!config_path.empty()) {
-        if (auto result = parse_config_path_value(config_path, "core", "data_dir");
-            !result.empty()) {
-            return result;
-        }
-    }
-
-    // 2) Environment overrides when config does not set a data dir.
-    if (const auto env = getenv_copy("YAMS_STORAGE"); !env.empty()) {
-        return std::filesystem::path(env);
-    }
-    if (const auto env = getenv_copy("YAMS_DATA_DIR"); !env.empty()) {
-        return std::filesystem::path(env);
-    }
-
-    // 3) Platform-specific default
-    return get_data_dir();
+    throw std::invalid_argument(resolved.error().message);
 }
 
 std::string resolve_daemon_mode_from_config() {

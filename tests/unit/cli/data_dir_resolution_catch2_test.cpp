@@ -11,10 +11,11 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string>
 
-#include <yams/compat/unistd.h>
 #include "../../common/test_helpers_catch2.h"
+#include <yams/compat/unistd.h>
 
 namespace fs = std::filesystem;
 
@@ -65,23 +66,24 @@ TEST_CASE("DataDirResolution - get_data_dir returns non-empty path", "[cli][data
 
 TEST_CASE("DataDirResolution - get_data_dir contains yams", "[cli][data_dir][catch2]") {
     auto dataDir = yams::config::get_data_dir();
-    CHECK(dataDir.string().find("yams") != std::string::npos);
+    CHECK((dataDir.string().find("yams") != std::string::npos));
 }
 
 #ifndef _WIN32
 TEST_CASE("DataDirResolution - get_data_dir respects XDG_DATA_HOME", "[cli][data_dir][catch2]") {
     ScopedEnv clearDataDir("YAMS_DATA_DIR", std::nullopt);
     ScopedEnv clearStorage("YAMS_STORAGE", std::nullopt);
+    ScopedEnv configEnv("YAMS_CONFIG", "/nonexistent/config.toml");
     ScopedEnv xdg("XDG_DATA_HOME", "/custom/data");
     auto dataDir = yams::config::get_data_dir();
-    CHECK(dataDir == fs::path("/custom/data/yams"));
+    CHECK((dataDir == fs::path("/custom/data/yams")));
 }
 #else
 TEST_CASE("DataDirResolution - get_data_dir respects LOCALAPPDATA", "[cli][data_dir][catch2]") {
     const char* localAppData = std::getenv("LOCALAPPDATA");
     if (localAppData) {
         auto dataDir = yams::config::get_data_dir();
-        CHECK(dataDir.string().find("yams") != std::string::npos);
+        CHECK((dataDir.string().find("yams") != std::string::npos));
     }
 }
 #endif
@@ -97,23 +99,23 @@ TEST_CASE("DataDirResolution - get_config_dir returns non-empty path", "[cli][da
 
 TEST_CASE("DataDirResolution - get_config_dir contains yams", "[cli][data_dir][catch2]") {
     auto configDir = yams::config::get_config_dir();
-    CHECK(configDir.string().find("yams") != std::string::npos);
+    CHECK((configDir.string().find("yams") != std::string::npos));
 }
 
 // ============================================================================
 // resolve_data_dir_from_config() - Precedence tests
 // ============================================================================
 
-TEST_CASE("DataDirResolution - env YAMS_STORAGE takes precedence", "[cli][data_dir][catch2]") {
+TEST_CASE("DataDirResolution - legacy YAMS_STORAGE remains supported", "[cli][data_dir][catch2]") {
     ScopedEnv storage("YAMS_STORAGE", "/env/storage/path");
-    ScopedEnv dataDir("YAMS_DATA_DIR", "/env/data/path");
+    ScopedEnv dataDir("YAMS_DATA_DIR", std::nullopt);
     ScopedEnv configEnv("YAMS_CONFIG", "/nonexistent/config.toml");
 
-    REQUIRE(std::getenv("YAMS_STORAGE") != nullptr);
-    CHECK(std::string(std::getenv("YAMS_STORAGE")) == "/env/storage/path");
+    REQUIRE((std::getenv("YAMS_STORAGE") != nullptr));
+    CHECK((std::string(std::getenv("YAMS_STORAGE")) == "/env/storage/path"));
 
     auto resolved = yams::config::resolve_data_dir_from_config();
-    CHECK(resolved == fs::path("/env/storage/path"));
+    CHECK((resolved == fs::path("/env/storage/path")));
 }
 
 TEST_CASE("DataDirResolution - env YAMS_DATA_DIR used if no storage", "[cli][data_dir][catch2]") {
@@ -121,11 +123,11 @@ TEST_CASE("DataDirResolution - env YAMS_DATA_DIR used if no storage", "[cli][dat
     ScopedEnv dataDir("YAMS_DATA_DIR", "/env/data/path");
     ScopedEnv configEnv("YAMS_CONFIG", "/nonexistent/config.toml");
 
-    REQUIRE(std::getenv("YAMS_DATA_DIR") != nullptr);
-    CHECK(std::string(std::getenv("YAMS_DATA_DIR")) == "/env/data/path");
+    REQUIRE((std::getenv("YAMS_DATA_DIR") != nullptr));
+    CHECK((std::string(std::getenv("YAMS_DATA_DIR")) == "/env/data/path"));
 
     auto resolved = yams::config::resolve_data_dir_from_config();
-    CHECK(resolved == fs::path("/env/data/path"));
+    CHECK((resolved == fs::path("/env/data/path")));
 }
 
 TEST_CASE("DataDirResolution - config data_dir used with YAMS_CONFIG env",
@@ -139,7 +141,7 @@ data_dir = "/from/config/file"
     ScopedEnv configEnv("YAMS_CONFIG", config.pathStr().c_str());
 
     auto resolved = yams::config::resolve_data_dir_from_config();
-    CHECK(resolved == fs::path("/from/config/file"));
+    CHECK((resolved == fs::path("/from/config/file")));
 }
 
 TEST_CASE("DataDirResolution - config takes precedence over env", "[cli][data_dir][catch2]") {
@@ -151,7 +153,7 @@ data_dir = "/from/config/file"
     ScopedEnv configEnv("YAMS_CONFIG", config.pathStr().c_str());
 
     auto resolved = yams::config::resolve_data_dir_from_config();
-    CHECK(resolved == fs::path("/from/config/file"));
+    CHECK((resolved == fs::path("/from/config/file")));
 }
 
 TEST_CASE("DataDirResolution - falls back to platform default", "[cli][data_dir][catch2]") {
@@ -161,7 +163,7 @@ TEST_CASE("DataDirResolution - falls back to platform default", "[cli][data_dir]
 
     auto resolved = yams::config::resolve_data_dir_from_config();
     CHECK_FALSE(resolved.empty());
-    CHECK(resolved.string().find("yams") != std::string::npos);
+    CHECK((resolved.string().find("yams") != std::string::npos));
 }
 
 TEST_CASE("DataDirResolution - explicit CLI data dir overrides config and env",
@@ -183,9 +185,9 @@ data_dir = "/from/config/file"
     char* argv[] = {arg0.data(), arg1.data(), arg2.data(), arg3.data(), arg4.data()};
 
     const int rc = cli.run(5, argv);
-    REQUIRE(rc == 0);
+    REQUIRE((rc == 0));
     CHECK(cli.hasExplicitDataDir());
-    CHECK(cli.getDataPath() == fs::path("/from/cli/flag"));
+    CHECK((cli.getDataPath() == fs::path("/from/cli/flag")));
 }
 
 TEST_CASE("DataDirResolution - CLI uses config before env when no explicit override",
@@ -205,9 +207,9 @@ data_dir = "/from/config/file"
     char* argv[] = {arg0.data(), arg1.data(), arg2.data()};
 
     const int rc = cli.run(3, argv);
-    REQUIRE(rc == 0);
+    REQUIRE((rc == 0));
     CHECK_FALSE(cli.hasExplicitDataDir());
-    CHECK(cli.getDataPath() == fs::path("/from/config/file"));
+    CHECK((cli.getDataPath() == fs::path("/from/config/file")));
 }
 
 TEST_CASE("DataDirResolution - daemon pid file uses config when present",
@@ -219,7 +221,7 @@ pid_file = "/tmp/from-config.pid"
     ScopedEnv configEnv("YAMS_CONFIG", config.pathStr().c_str());
 
     auto resolved = yams::cli::YamsCLI::resolveConfiguredDaemonPidFilePath();
-    CHECK(resolved == fs::path("/tmp/from-config.pid"));
+    CHECK((resolved == fs::path("/tmp/from-config.pid")));
 }
 
 TEST_CASE("DataDirResolution - daemon pid file falls back when config missing",
@@ -228,7 +230,113 @@ TEST_CASE("DataDirResolution - daemon pid file falls back when config missing",
 
     auto resolved = yams::cli::YamsCLI::resolveConfiguredDaemonPidFilePath();
     CHECK_FALSE(resolved.empty());
-    CHECK(resolved.filename().string().find("yams-daemon") != std::string::npos);
+    CHECK((resolved.filename().string().find("yams-daemon") != std::string::npos));
+}
+
+// ============================================================================
+// resolve_runtime_paths() - Typed cross-component policy tests
+// ============================================================================
+
+TEST_CASE("RuntimePaths - conflicting data aliases fail without a higher-precedence source",
+          "[config][runtime_paths][catch2]") {
+    ScopedEnv storage("YAMS_STORAGE", "/legacy/data");
+    ScopedEnv dataDir("YAMS_DATA_DIR", "/canonical/data");
+    ScopedEnv configEnv("YAMS_CONFIG", "/nonexistent/config.toml");
+
+    const auto resolved = yams::config::resolve_runtime_paths();
+
+    REQUIRE_FALSE(resolved);
+    CHECK((resolved.error().code == yams::ErrorCode::InvalidData));
+    CHECK((resolved.error().message.find("YAMS_STORAGE") != std::string::npos));
+    CHECK((resolved.error().message.find("YAMS_DATA_DIR") != std::string::npos));
+    CHECK_THROWS_AS(yams::config::get_data_dir(), std::invalid_argument);
+    CHECK_THROWS_AS(yams::config::resolve_data_dir_from_config(), std::invalid_argument);
+}
+
+TEST_CASE("RuntimePaths - explicit and configured data paths preserve documented precedence",
+          "[config][runtime_paths][catch2]") {
+    TempConfig config(R"(
+[core]
+data_dir = "/from/config/file"
+)");
+    ScopedEnv storage("YAMS_STORAGE", "/legacy/data");
+    ScopedEnv dataDir("YAMS_DATA_DIR", "/canonical/data");
+    ScopedEnv configEnv("YAMS_CONFIG", config.pathStr());
+
+    yams::config::RuntimePathOverrides overrides;
+    overrides.dataDir = "/from/explicit/option";
+    const auto explicitPaths = yams::config::resolve_runtime_paths(overrides);
+    REQUIRE(explicitPaths);
+    CHECK((explicitPaths.value().dataDir.value == fs::path("/from/explicit/option")));
+    CHECK((explicitPaths.value().dataDir.source == yams::config::RuntimePathSource::Explicit));
+    CHECK_FALSE(explicitPaths.value().diagnostics.empty());
+
+    overrides.dataDir.reset();
+    const auto configuredPaths = yams::config::resolve_runtime_paths(overrides);
+    REQUIRE(configuredPaths);
+    CHECK((configuredPaths.value().dataDir.value == fs::path("/from/config/file")));
+    CHECK((configuredPaths.value().dataDir.source == yams::config::RuntimePathSource::ConfigFile));
+    CHECK_FALSE(configuredPaths.value().diagnostics.empty());
+}
+
+TEST_CASE("RuntimePaths - socket and pid resolve in one config snapshot",
+          "[config][runtime_paths][catch2]") {
+    TempConfig config(R"(
+[daemon]
+socket_path = "/from/config/yams.sock" # inline comment
+pid_file = "/from/config/yams.pid" # inline comment
+)");
+    ScopedEnv configEnv("YAMS_CONFIG", config.pathStr());
+    ScopedEnv socketEnv("YAMS_DAEMON_SOCKET", std::nullopt);
+    ScopedEnv socketPathEnv("YAMS_DAEMON_SOCKET_PATH", std::nullopt);
+    ScopedEnv storage("YAMS_STORAGE", std::nullopt);
+    ScopedEnv dataDir("YAMS_DATA_DIR", std::nullopt);
+
+    const auto resolved = yams::config::resolve_runtime_paths();
+
+    REQUIRE(resolved);
+    CHECK((resolved.value().configFile.value == config.path()));
+    CHECK((resolved.value().socketPath.value == fs::path("/from/config/yams.sock")));
+    CHECK((resolved.value().socketPath.source == yams::config::RuntimePathSource::ConfigFile));
+    CHECK((resolved.value().pidFile.value == fs::path("/from/config/yams.pid")));
+    CHECK((resolved.value().pidFile.source == yams::config::RuntimePathSource::ConfigFile));
+}
+
+TEST_CASE("RuntimePaths - explicit runtime root derives socket and PID defaults",
+          "[config][runtime_paths][catch2]") {
+    ScopedEnv configEnv("YAMS_CONFIG", "/nonexistent/config.toml");
+    ScopedEnv socketEnv("YAMS_DAEMON_SOCKET", std::nullopt);
+    ScopedEnv socketPathEnv("YAMS_DAEMON_SOCKET_PATH", std::nullopt);
+    ScopedEnv storage("YAMS_STORAGE", std::nullopt);
+    ScopedEnv dataDir("YAMS_DATA_DIR", std::nullopt);
+    ScopedEnv home("HOME", "/home/runtime-user");
+
+    yams::config::RuntimePathOverrides overrides;
+    overrides.runtimeDir = "~/isolated/runtime";
+    const auto resolved = yams::config::resolve_runtime_paths(overrides);
+
+    REQUIRE(resolved);
+    CHECK((resolved.value().runtimeDir.value == fs::path("/home/runtime-user/isolated/runtime")));
+    CHECK((resolved.value().socketPath.value ==
+           fs::path("/home/runtime-user/isolated/runtime/yams-daemon.sock")));
+    CHECK((resolved.value().pidFile.value ==
+           fs::path("/home/runtime-user/isolated/runtime/yams-daemon.pid")));
+}
+
+TEST_CASE("RuntimePaths - conflicting socket aliases fail closed",
+          "[config][runtime_paths][catch2]") {
+    ScopedEnv configEnv("YAMS_CONFIG", "/nonexistent/config.toml");
+    ScopedEnv socketEnv("YAMS_DAEMON_SOCKET", "/tmp/canonical.sock");
+    ScopedEnv socketPathEnv("YAMS_DAEMON_SOCKET_PATH", "/tmp/compat.sock");
+    ScopedEnv storage("YAMS_STORAGE", std::nullopt);
+    ScopedEnv dataDir("YAMS_DATA_DIR", std::nullopt);
+
+    const auto resolved = yams::config::resolve_runtime_paths();
+
+    REQUIRE_FALSE(resolved);
+    CHECK((resolved.error().code == yams::ErrorCode::InvalidData));
+    CHECK((resolved.error().message.find("YAMS_DAEMON_SOCKET") != std::string::npos));
+    CHECK((resolved.error().message.find("YAMS_DAEMON_SOCKET_PATH") != std::string::npos));
 }
 
 // ============================================================================
@@ -242,7 +350,7 @@ data_dir = "/test/path"
 )");
 
     auto value = yams::config::parse_config_value(config.path(), "core", "data_dir");
-    CHECK(value == "/test/path");
+    CHECK((value == "/test/path"));
 }
 
 TEST_CASE("DataDirResolution - parse_config_value handles quoted values",
@@ -253,7 +361,7 @@ data_dir = "/path/with spaces"
 )");
 
     auto value = yams::config::parse_config_value(config.path(), "core", "data_dir");
-    CHECK(value == "/path/with spaces");
+    CHECK((value == "/path/with spaces"));
 }
 
 TEST_CASE("DataDirResolution - parse_config_value handles single quotes",
@@ -264,7 +372,7 @@ data_dir = '/single/quoted'
 )");
 
     auto value = yams::config::parse_config_value(config.path(), "core", "data_dir");
-    CHECK(value == "/single/quoted");
+    CHECK((value == "/single/quoted"));
 }
 
 TEST_CASE("DataDirResolution - parse_config_value ignores comments", "[cli][data_dir][catch2]") {
@@ -275,7 +383,7 @@ data_dir = "/actual/value" # inline comment
 )");
 
     auto value = yams::config::parse_config_value(config.path(), "core", "data_dir");
-    CHECK(value == "/actual/value");
+    CHECK((value == "/actual/value"));
 }
 
 TEST_CASE("DataDirResolution - parse_config_value returns empty for missing key",
@@ -322,19 +430,19 @@ TEST_CASE("DataDirResolution - expand_tilde expands home", "[cli][data_dir][catc
     ScopedEnv home("HOME", "/home/testuser");
 
     auto expanded = yams::config::expand_tilde("~/some/path");
-    CHECK(expanded == fs::path("/home/testuser/some/path"));
+    CHECK((expanded == fs::path("/home/testuser/some/path")));
 }
 
 TEST_CASE("DataDirResolution - expand_tilde leaves absolute paths unchanged",
           "[cli][data_dir][catch2]") {
     auto expanded = yams::config::expand_tilde("/absolute/path");
-    CHECK(expanded == fs::path("/absolute/path"));
+    CHECK((expanded == fs::path("/absolute/path")));
 }
 
 TEST_CASE("DataDirResolution - expand_tilde leaves relative paths unchanged",
           "[cli][data_dir][catch2]") {
     auto expanded = yams::config::expand_tilde("relative/path");
-    CHECK(expanded == fs::path("relative/path"));
+    CHECK((expanded == fs::path("relative/path")));
 }
 #endif
 
@@ -355,10 +463,10 @@ TEST_CASE("DataDirResolution - resolved path does not contain descriptions",
 
     for (const auto& pattern : badPatterns) {
         INFO("Checking pattern: " << pattern);
-        CHECK(dataDir.string().find(pattern) == std::string::npos);
-        CHECK(configDir.string().find(pattern) == std::string::npos);
-        CHECK(cacheDir.string().find(pattern) == std::string::npos);
-        CHECK(runtimeDir.string().find(pattern) == std::string::npos);
+        CHECK((dataDir.string().find(pattern) == std::string::npos));
+        CHECK((configDir.string().find(pattern) == std::string::npos));
+        CHECK((cacheDir.string().find(pattern) == std::string::npos));
+        CHECK((runtimeDir.string().find(pattern) == std::string::npos));
     }
 }
 
@@ -371,10 +479,10 @@ data_dir = "/proper/path"
 
     auto value = yams::config::parse_config_value(config.path(), "core", "data_dir");
 
-    CHECK(value == "/proper/path");
-    CHECK(value.find("[Deprecated]") == std::string::npos);
-    CHECK(value.find("file/directory") == std::string::npos);
-    CHECK(value.find("Data directory") == std::string::npos);
+    CHECK((value == "/proper/path"));
+    CHECK((value.find("[Deprecated]") == std::string::npos));
+    CHECK((value.find("file/directory") == std::string::npos));
+    CHECK((value.find("Data directory") == std::string::npos));
 }
 
 // ============================================================================
@@ -383,9 +491,10 @@ data_dir = "/proper/path"
 
 TEST_CASE("DataDirResolution - socket_path env takes precedence", "[cli][data_dir][catch2]") {
     ScopedEnv socketEnv("YAMS_DAEMON_SOCKET", "/env/yams.sock");
+    ScopedEnv socketPathEnv("YAMS_DAEMON_SOCKET_PATH", std::nullopt);
 
     auto resolved = yams::config::resolve_socket_path_from_config();
-    CHECK(resolved == fs::path("/env/yams.sock"));
+    CHECK((resolved == fs::path("/env/yams.sock")));
 }
 
 TEST_CASE("DataDirResolution - socket_path from config file", "[cli][data_dir][catch2]") {
@@ -394,10 +503,11 @@ TEST_CASE("DataDirResolution - socket_path from config file", "[cli][data_dir][c
 socket_path = "/from/config/yams.sock"
 )");
     ScopedEnv socketEnv("YAMS_DAEMON_SOCKET", "");
+    ScopedEnv socketPathEnv("YAMS_DAEMON_SOCKET_PATH", std::nullopt);
     ScopedEnv configEnv("YAMS_CONFIG", config.pathStr().c_str());
 
     auto resolved = yams::config::resolve_socket_path_from_config();
-    CHECK(resolved == fs::path("/from/config/yams.sock"));
+    CHECK((resolved == fs::path("/from/config/yams.sock")));
 }
 
 TEST_CASE("DataDirResolution - socket_path env overrides config", "[cli][data_dir][catch2]") {
@@ -406,10 +516,11 @@ TEST_CASE("DataDirResolution - socket_path env overrides config", "[cli][data_di
 socket_path = "/from/config/yams.sock"
 )");
     ScopedEnv socketEnv("YAMS_DAEMON_SOCKET", "/env/wins.sock");
+    ScopedEnv socketPathEnv("YAMS_DAEMON_SOCKET_PATH", std::nullopt);
     ScopedEnv configEnv("YAMS_CONFIG", config.pathStr().c_str());
 
     auto resolved = yams::config::resolve_socket_path_from_config();
-    CHECK(resolved == fs::path("/env/wins.sock"));
+    CHECK((resolved == fs::path("/env/wins.sock")));
 }
 
 // ============================================================================
@@ -419,17 +530,17 @@ socket_path = "/from/config/yams.sock"
 TEST_CASE("DataDirResolution - parse_path_list handles comma-separated",
           "[cli][data_dir][catch2]") {
     auto paths = yams::config::parse_path_list("/path/a,/path/b,/path/c");
-    REQUIRE(paths.size() == 3);
-    CHECK(paths[0] == fs::path("/path/a"));
-    CHECK(paths[1] == fs::path("/path/b"));
-    CHECK(paths[2] == fs::path("/path/c"));
+    REQUIRE((paths.size() == 3));
+    CHECK((paths[0] == fs::path("/path/a")));
+    CHECK((paths[1] == fs::path("/path/b")));
+    CHECK((paths[2] == fs::path("/path/c")));
 }
 
 TEST_CASE("DataDirResolution - parse_path_list handles TOML array", "[cli][data_dir][catch2]") {
     auto paths = yams::config::parse_path_list(R"(["/path/a", "/path/b"])");
-    REQUIRE(paths.size() == 2);
-    CHECK(paths[0] == fs::path("/path/a"));
-    CHECK(paths[1] == fs::path("/path/b"));
+    REQUIRE((paths.size() == 2));
+    CHECK((paths[0] == fs::path("/path/a")));
+    CHECK((paths[1] == fs::path("/path/b")));
 }
 
 TEST_CASE("DataDirResolution - parse_path_list handles empty string", "[cli][data_dir][catch2]") {
@@ -439,9 +550,9 @@ TEST_CASE("DataDirResolution - parse_path_list handles empty string", "[cli][dat
 
 TEST_CASE("DataDirResolution - parse_path_list handles whitespace", "[cli][data_dir][catch2]") {
     auto paths = yams::config::parse_path_list("  /path/a  ,  /path/b  ");
-    REQUIRE(paths.size() == 2);
-    CHECK(paths[0] == fs::path("/path/a"));
-    CHECK(paths[1] == fs::path("/path/b"));
+    REQUIRE((paths.size() == 2));
+    CHECK((paths[0] == fs::path("/path/a")));
+    CHECK((paths[1] == fs::path("/path/b")));
 }
 
 #ifndef _WIN32
@@ -449,8 +560,8 @@ TEST_CASE("DataDirResolution - parse_path_list expands tilde", "[cli][data_dir][
     ScopedEnv home("HOME", "/home/testuser");
 
     auto paths = yams::config::parse_path_list("~/path/a,~/path/b");
-    REQUIRE(paths.size() == 2);
-    CHECK(paths[0] == fs::path("/home/testuser/path/a"));
-    CHECK(paths[1] == fs::path("/home/testuser/path/b"));
+    REQUIRE((paths.size() == 2));
+    CHECK((paths[0] == fs::path("/home/testuser/path/a")));
+    CHECK((paths[1] == fs::path("/home/testuser/path/b")));
 }
 #endif

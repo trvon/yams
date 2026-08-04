@@ -4,13 +4,10 @@
 
 namespace yams::daemon::socket_utils {
 
-// Resolve the AF_UNIX socket path using environment first (YAMS_DAEMON_SOCKET),
-// then XDG_RUNTIME_DIR, then a per-user /tmp fallback for non-root, or /var/run for root.
+// Compatibility entry points backed by config::resolve_runtime_paths(). Both resolve the same
+// immutable policy: explicit/environment socket, daemon.socket_path, then platform default.
+// Conflicting socket aliases throw std::invalid_argument rather than selecting a daemon silently.
 std::filesystem::path resolve_socket_path();
-
-// Resolve with config-first semantics: try YAMS_DAEMON_SOCKET, then read
-// YAMS_CONFIG when set, otherwise the platform config.toml, for daemon.socket_path.
-// If not found, fall back to resolve_socket_path().
 std::filesystem::path resolve_socket_path_config_first();
 
 // Derive the proxy/control socket path from the main daemon socket path.

@@ -8,6 +8,8 @@
 
 #include <yams/mcp/mcp_server.h>
 
+#include "../../common/test_helpers_catch2.h"
+
 using yams::mcp::ITransport;
 using yams::mcp::MCPServer;
 using yams::mcp::MessageResult;
@@ -26,17 +28,7 @@ public:
     void close() override {}
 };
 
-void setenv_strict(const char* k, const char* v) {
-#if defined(_WIN32)
-    // On Windows, _putenv_s cannot accept nullptr - use empty string to unset
-    _putenv_s(k, v ? v : "");
-#else
-    if (v)
-        ::setenv(k, v, 1);
-    else
-        ::unsetenv(k);
-#endif
-}
+using yams::test::ScopedEnvVar;
 } // namespace
 
 TEST_CASE("MCP DaemonSocketResolution - Honors env socket override",
@@ -44,7 +36,7 @@ TEST_CASE("MCP DaemonSocketResolution - Honors env socket override",
     auto t = std::make_unique<NullTransport>();
     MCPServer svr(std::move(t));
     std::string captured;
-    setenv_strict("YAMS_DAEMON_SOCKET", "/tmp/yams-alt.sock");
+    ScopedEnvVar socketEnv("YAMS_DAEMON_SOCKET", "/tmp/yams-alt.sock");
     svr.setEnsureDaemonClientHook([&](const yams::daemon::ClientConfig& cfg) -> yams::Result<void> {
         captured = cfg.socketPath.string();
         return yams::Result<void>();
@@ -57,11 +49,10 @@ TEST_CASE("MCP DaemonSocketResolution - Honors env socket override",
     }
     // Tolerant: captured may still be empty on constrained builds
     if (!captured.empty()) {
-        CHECK(captured.find("/tmp/yams-alt.sock") != std::string::npos);
+        CHECK((captured.find("/tmp/yams-alt.sock") != std::string::npos));
     } else {
         SKIP("ensureDaemonClient not invoked on this build; skipping strict override check.");
     }
-    setenv_strict("YAMS_DAEMON_SOCKET", nullptr);
 }
 
 TEST_CASE("MCP DaemonSocketResolution - Structured error includes socket and hint",
@@ -69,7 +60,7 @@ TEST_CASE("MCP DaemonSocketResolution - Structured error includes socket and hin
     auto t = std::make_unique<NullTransport>();
     MCPServer svr(std::move(t));
     // Force a known socket path via env
-    setenv_strict("YAMS_DAEMON_SOCKET", "/run/user/1000/yams-daemon.sock");
+    ScopedEnvVar socketEnv("YAMS_DAEMON_SOCKET", "/run/user/1000/yams-daemon.sock");
     // Force ensureDaemonClient to fail with NetworkError
     svr.setEnsureDaemonClientHook([&](const yams::daemon::ClientConfig& cfg) -> yams::Result<void> {
         (void)cfg;
@@ -83,14 +74,13 @@ TEST_CASE("MCP DaemonSocketResolution - Structured error includes socket and hin
                msg.find("YAMS_DAEMON_SOCKET") != std::string::npos) ||
               (msg.find("dial") != std::string::npos) || (!msg.empty());
     CHECK(ok);
-    setenv_strict("YAMS_DAEMON_SOCKET", nullptr);
 }
 
 TEST_CASE("MCP DoctorPath - Doctor uses same resolved socket", "[mcp][socket][doctor][catch2]") {
     auto t = std::make_unique<NullTransport>();
     MCPServer svr(std::move(t));
     std::string captured;
-    setenv_strict("XDG_RUNTIME_DIR", "/run/user/1001");
+    ScopedEnvVar runtimeEnv("XDG_RUNTIME_DIR", "/run/user/1001");
     svr.setEnsureDaemonClientHook([&](const yams::daemon::ClientConfig& cfg) -> yams::Result<void> {
         captured = cfg.socketPath.string();
         return yams::Error{yams::ErrorCode::NetworkError, "dial error"};

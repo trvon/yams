@@ -18,6 +18,7 @@
 using nlohmann::json;
 
 #include <yams/compat/unistd.h>
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/daemon_lifecycle.h>
@@ -173,6 +174,30 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon creation and destruction", "[daemon][lif
     daemon_ = std::make_unique<YamsDaemon>(config_);
     REQUIRE(daemon_ != nullptr);
     REQUIRE_FALSE(daemon_->isRunning());
+}
+
+TEST_CASE_METHOD(DaemonFixture, "Daemon restores compatibility path environment",
+                 "[daemon][lifecycle][environment]") {
+    yams::test::ScopedEnvVar storage("YAMS_STORAGE", "/before/storage");
+    yams::test::ScopedEnvVar data("YAMS_DATA_DIR", "/before/data");
+    yams::test::ScopedEnvVar config("YAMS_CONFIG", "/before/config.toml");
+    yams::test::ScopedEnvVar socket("YAMS_DAEMON_SOCKET", "/before/socket.sock");
+    yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", "before");
+
+    config_.configFilePath = runtime_root_ / "config.toml";
+    daemon_ = std::make_unique<YamsDaemon>(config_);
+    CHECK((yams::config::getenv_copy("YAMS_STORAGE") == config_.dataDir.string()));
+    CHECK((yams::config::getenv_copy("YAMS_DATA_DIR") == config_.dataDir.string()));
+    CHECK((yams::config::getenv_copy("YAMS_CONFIG") == config_.configFilePath.string()));
+    CHECK((yams::config::getenv_copy("YAMS_DAEMON_SOCKET") == config_.socketPath.string()));
+    CHECK((yams::config::getenv_copy("YAMS_IN_DAEMON") == "1"));
+
+    daemon_.reset();
+    CHECK((yams::config::getenv_copy("YAMS_STORAGE") == "/before/storage"));
+    CHECK((yams::config::getenv_copy("YAMS_DATA_DIR") == "/before/data"));
+    CHECK((yams::config::getenv_copy("YAMS_CONFIG") == "/before/config.toml"));
+    CHECK((yams::config::getenv_copy("YAMS_DAEMON_SOCKET") == "/before/socket.sock"));
+    CHECK((yams::config::getenv_copy("YAMS_IN_DAEMON") == "before"));
 }
 
 TEST_CASE_METHOD(DaemonFixture, "Daemon tuning reload preserves unspecified values",

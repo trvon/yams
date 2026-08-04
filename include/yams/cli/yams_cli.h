@@ -174,7 +174,6 @@ public:
 private:
     // Track if config provided data dir and the CLI option to enforce precedence
     CLI::Option* storageOpt_{nullptr};
-    bool configProvidesDataDir_{false};
     /**
      * Compression configuration loaded from config file
      */

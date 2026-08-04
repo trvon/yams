@@ -1,10 +1,8 @@
 #include <spdlog/spdlog.h>
 #include <array>
-#include <fstream>
 #include <future>
 #include <iostream>
 #include <map>
-#include <sstream>
 #include <yams/api/content_store_builder.h>
 #include <yams/cli/cli_perf_trace.h>
 #include <yams/cli/command_catalog.h>
@@ -149,34 +147,15 @@ YamsCLI::YamsCLI(boost::asio::any_io_executor executor) : executor_(std::move(ex
     app_->set_version_flag("--version", YAMS_VERSION_STRING);
 #endif
 
-    // Global options
-    // Use platform-specific data directory (XDG_DATA_HOME on Unix, LOCALAPPDATA on Windows)
+    // Global options use the shared runtime-path snapshot. If aliases conflict, keep a harmless
+    // display default here; applyParsedDataDirPrecedence() reports the conflict after CLI parsing,
+    // when an explicit --data-dir can safely disambiguate it.
     std::filesystem::path defaultDataPath = yams::config::get_data_dir();
-    // Try to load default data dir from config.toml (core.data_dir)
-    try {
-        auto cfgPath = getConfigPath();
-        if (std::filesystem::exists(cfgPath)) {
-            auto cfg = parseSimpleToml(cfgPath);
-            auto it = cfg.find("core.data_dir");
-            if (it != cfg.end() && !it->second.empty()) {
-                std::string p = it->second;
-                // Expand leading ~ to HOME
-                if (!p.empty() && p.front() == '~') {
-                    if (const char* home = std::getenv("HOME")) {
-                        p = std::string(home) + p.substr(1);
-                    }
-                }
-                defaultDataPath = std::filesystem::path(p);
-                // Record that config provided a value to enforce precedence later
-                configProvidesDataDir_ = true;
-            }
-        }
-    } catch (...) {
-        // Ignore config errors and keep env-based fallback
+    if (auto runtimePaths = yams::config::resolve_runtime_paths(); runtimePaths) {
+        defaultDataPath = runtimePaths.value().dataDir.value;
     }
 
-    // We intentionally do not bind envname() here so we can enforce precedence
-    // (explicit CLI > config > env > default).
+    // We intentionally do not bind envname() here so the typed resolver can enforce precedence.
     storageOpt_ = app_->add_option("--data-dir,--storage", dataPath_, "Data directory for storage")
                       ->default_val(defaultDataPath.string());
 
@@ -185,7 +164,7 @@ YamsCLI::YamsCLI(boost::asio::any_io_executor executor) : executor_(std::move(ex
 }
 
 YamsCLI::~YamsCLI() {
-    if (std::getenv("YAMS_TRACE_CLI_LIFETIME")) {
+    if (!yams::config::getenv_copy("YAMS_TRACE_CLI_LIFETIME").empty()) {
         std::fprintf(stderr,
                      "[YamsCLI::~YamsCLI] appContext=%ld contentStore=%ld connectionPool=%ld "
                      "database=%ld metadataRepo=%ld kgStore=%ld vectorDatabase=%ld\n",
@@ -213,7 +192,7 @@ YamsCLI::~YamsCLI() {
         try {
             vectorDatabase_->close();
         } catch (...) {
-            // Intentional best-effort path; keep the primary operation unaffected.
+            spdlog::debug("Vector database close failed during CLI teardown");
         }
         vectorDatabase_.reset();
     }
@@ -224,7 +203,7 @@ YamsCLI::~YamsCLI() {
         try {
             connectionPool_->shutdown();
         } catch (...) {
-            // Intentional best-effort path; keep the primary operation unaffected.
+            spdlog::debug("Connection pool shutdown failed during CLI teardown");
         }
         connectionPool_.reset();
     }
@@ -233,7 +212,7 @@ YamsCLI::~YamsCLI() {
         try {
             database_->close();
         } catch (...) {
-            // Intentional best-effort path; keep the primary operation unaffected.
+            spdlog::debug("Metadata database close failed during CLI teardown");
         }
         database_.reset();
     }
@@ -248,7 +227,8 @@ bool YamsCLI::hasExplicitDataDir() const {
 void YamsCLI::registerCommandsForRun(std::string_view subcmd) {
     const auto t0 = std::chrono::steady_clock::now();
     bool fastPathRegistered = false;
-    if (envValueTruthy(std::getenv("YAMS_CLI_ONE_SHOT")) && !subcmd.empty()) {
+    const auto oneShot = yams::config::getenv_copy("YAMS_CLI_ONE_SHOT");
+    if (envValueTruthy(oneShot.c_str()) && !subcmd.empty()) {
         fastPathRegistered = registerBuiltinCommandsFor(subcmd);
     }
     if (!fastPathRegistered) {
@@ -436,7 +416,7 @@ void YamsCLI::applyParsedLogLevel() {
         return std::nullopt;
     };
 
-    if (const char* envLvl = std::getenv("YAMS_LOG_LEVEL"); envLvl && *envLvl) {
+    if (const auto envLvl = yams::config::getenv_copy("YAMS_LOG_LEVEL"); !envLvl.empty()) {
         if (auto lvl = parseLevel(envLvl)) {
             spdlog::set_level(*lvl);
         }
@@ -455,23 +435,18 @@ void YamsCLI::applyParsedLogLevel() {
 }
 
 void YamsCLI::applyParsedDataDirPrecedence() {
-    try {
-        if (storageOpt_ && storageOpt_->count() > 0) {
-            return;
-        }
-        if (configProvidesDataDir_) {
-            return;
-        }
+    yams::config::RuntimePathOverrides overrides;
+    if (storageOpt_ && storageOpt_->count() > 0) {
+        overrides.dataDir = dataPath_;
+    }
 
-        const char* envStorage = std::getenv("YAMS_STORAGE");
-        const char* envDataDir = std::getenv("YAMS_DATA_DIR");
-        if (envStorage && *envStorage) {
-            dataPath_ = fs::path(envStorage);
-        } else if (envDataDir && *envDataDir) {
-            dataPath_ = fs::path(envDataDir);
-        }
-    } catch (...) {
-        // Intentional best-effort path; keep the primary operation unaffected.
+    auto runtimePaths = yams::config::resolve_runtime_paths(overrides);
+    if (!runtimePaths) {
+        throw std::invalid_argument(runtimePaths.error().message);
+    }
+    dataPath_ = runtimePaths.value().dataDir.value;
+    for (const auto& diagnostic : runtimePaths.value().diagnostics) {
+        std::cerr << "Warning: " << diagnostic << '\n';
     }
 }
 
@@ -784,13 +759,11 @@ std::shared_ptr<daemon::IModelProvider> YamsCLI::getLocalModelProvider() {
                 }
             }
         } catch (...) {
-            // Intentional best-effort path; keep the primary operation unaffected.
+            spdlog::debug("Unable to read the preferred embedding model from config");
         }
     }
     if (preferredModel.empty()) {
-        if (const char* env = std::getenv("YAMS_PREFERRED_MODEL")) {
-            preferredModel = env;
-        }
+        preferredModel = yams::config::getenv_copy("YAMS_PREFERRED_MODEL");
     }
 
     auto tryAdoptProvider =
@@ -1099,21 +1072,20 @@ Result<void> YamsCLI::initializeStorage() {
                             try {
                                 vectorDimension = static_cast<size_t>(std::stoul(it->second));
                             } catch (...) {
-                                // Intentional best-effort path; keep the primary operation
-                                // unaffected.
+                                spdlog::debug("Ignoring invalid embeddings.embedding_dim value");
                             }
                         }
                     }
                 } catch (...) {
-                    // Intentional best-effort path; keep the primary operation unaffected.
+                    spdlog::debug("Unable to read embedding dimension from config");
                 }
             }
             if (vectorDimension == 0) {
-                if (const char* envd = std::getenv("YAMS_EMBED_DIM")) {
+                if (const auto envd = yams::config::getenv_copy("YAMS_EMBED_DIM"); !envd.empty()) {
                     try {
                         vectorDimension = static_cast<size_t>(std::stoul(envd));
                     } catch (...) {
-                        // Intentional best-effort path; keep the primary operation unaffected.
+                        spdlog::debug("Ignoring invalid YAMS_EMBED_DIM value");
                     }
                 }
             }
@@ -1125,7 +1097,7 @@ Result<void> YamsCLI::initializeStorage() {
                             vectorDimension = d;
                     }
                 } catch (...) {
-                    // Intentional best-effort path; keep the primary operation unaffected.
+                    spdlog::debug("Unable to query the embedding generator dimension");
                 }
             }
 
@@ -1143,11 +1115,10 @@ Result<void> YamsCLI::initializeStorage() {
                             preferredModel = it->second;
                     }
                 } catch (...) {
-                    // Intentional best-effort path; keep the primary operation unaffected.
+                    spdlog::debug("Unable to read preferred model while resolving dimension");
                 }
                 if (preferredModel.empty()) {
-                    if (const char* p = std::getenv("YAMS_PREFERRED_MODEL"))
-                        preferredModel = p;
+                    preferredModel = yams::config::getenv_copy("YAMS_PREFERRED_MODEL");
                 }
 
                 // Try preferred model dimension from config.json or name heuristic
@@ -1215,15 +1186,14 @@ Result<void> YamsCLI::initializeStorage() {
                             if (it != cfg.end() && !it->second.empty())
                                 pref = it->second;
                         }
-                        if (const char* p = std::getenv("YAMS_PREFERRED_MODEL")) {
-                            if (pref.empty())
-                                pref = p;
+                        if (pref.empty()) {
+                            pref = yams::config::getenv_copy("YAMS_PREFERRED_MODEL");
                         }
                         if (!pref.empty() && fs::exists(modelsPath / pref / "model.onnx")) {
                             selectedModel = pref;
                         }
                     } catch (...) {
-                        // Intentional best-effort path; keep the primary operation unaffected.
+                        spdlog::debug("Unable to resolve preferred local embedding model");
                     }
 
                     // 2) Known models (MiniLM/mpnet/nomic)
@@ -1461,9 +1431,9 @@ std::filesystem::path YamsCLI::findMagicNumbersFile() {
 
     std::vector<fs::path> searchPaths;
 
-    // 1. Check environment variable
-    if (const char* dataDir = std::getenv("YAMS_DATA_DIR")) {
-        searchPaths.push_back(fs::path(dataDir) / "magic_numbers.json");
+    // 1. Check the resolved runtime data root.
+    if (auto runtimePaths = yams::config::resolve_runtime_paths(); runtimePaths) {
+        searchPaths.push_back(runtimePaths.value().dataDir.value / "magic_numbers.json");
     }
 
     // 2. Check relative to executable location (for installed binaries)
@@ -1489,7 +1459,7 @@ std::filesystem::path YamsCLI::findMagicNumbersFile() {
         }
 #endif
     } catch (...) {
-        // Ignore errors in getting executable path
+        spdlog::debug("Unable to inspect executable-relative magic-number paths");
     }
 
     // 3. Check relative to current working directory (development/testing)
@@ -1592,7 +1562,8 @@ void YamsCLI::checkConfigMigration() {
         if (needsResult.value()) {
             // In non-interactive mode (tests, CI), auto-accept migration
             bool autoMigrate = false;
-            if (envValueTruthy(std::getenv("YAMS_NON_INTERACTIVE"))) {
+            const auto nonInteractive = yams::config::getenv_copy("YAMS_NON_INTERACTIVE");
+            if (envValueTruthy(nonInteractive.c_str())) {
                 autoMigrate = true;
             }
 
