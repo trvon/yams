@@ -642,6 +642,9 @@ public:
         searchEngineManager_.setEngine(engine, vectorEnabled);
     }
     AbiPluginHost* __test_getAbiHost() const { return abiHost_.get(); }
+    Result<void> __test_initializeWithPoolConfiguration(std::function<void()> beforeConfigure) {
+        return initializeImpl(std::move(beforeConfigure));
+    }
 #endif
 
 #if YAMS_DAEMON_TEST_HOOKS_ENABLED
@@ -708,6 +711,8 @@ private:
     std::chrono::milliseconds runSessionWatcherIteration();
     boost::asio::awaitable<void> co_runSessionWatcher(const yams::compat::stop_token& token);
 
+    Result<void> initializeImpl(const std::function<void()>& beforePoolConfigure);
+    Result<void> configureResourcePools(const std::function<void()>& beforeConfigure);
     Result<std::filesystem::path> initializeDataDirAndContentStore();
     boost::asio::awaitable<bool> initializeMetadataDatabaseAt(const std::filesystem::path& dbPath,
                                                               yams::compat::stop_token token);

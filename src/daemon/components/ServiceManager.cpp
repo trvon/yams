@@ -156,6 +156,16 @@ bool envTruthyCopy(std::string_view name) {
     return !env.empty() && yams::daemon::ConfigResolver::envTruthy(env.c_str());
 }
 
+yams::Result<void> ensureDataDirectory(const std::filesystem::path& dataDir) {
+    std::error_code error;
+    if (!yams::common::ensureDirectories(dataDir, error)) {
+        return yams::Error{yams::ErrorCode::IOError, "Failed to create data directory '" +
+                                                         dataDir.string() +
+                                                         "': " + error.message()};
+    }
+    return {};
+}
+
 std::atomic<bool>& onnxShutdownMarker() {
     static std::atomic<bool> marker{false};
     return marker;
@@ -740,6 +750,11 @@ ServiceManager::~ServiceManager() {
 }
 
 yams::Result<void> ServiceManager::initialize() {
+    return initializeImpl({});
+}
+
+yams::Result<void>
+ServiceManager::initializeImpl(const std::function<void()>& beforePoolConfigure) {
     // Clear any stale shutdown marker from prior daemon lifecycles in this process.
     setOnnxShutdownMarker(false);
 
@@ -755,18 +770,16 @@ yams::Result<void> ServiceManager::initialize() {
             dataDir = fs::path(".") / "yams_data";
         }
     }
-    std::error_code ec;
-    yams::common::ensureDirectories(dataDir);
+    auto directoryResult = ensureDataDirectory(dataDir);
+    if (!directoryResult) {
+        return directoryResult.error();
+    }
     spdlog::info("ServiceManager: resolved data directory: {}", dataDir.string());
     if (isEphemeralDataDir(dataDir)) {
         spdlog::warn("ServiceManager: resolved data directory appears ephemeral: {}. "
                      "This is allowed, but status/repair results will reflect only this temporary "
                      "store.",
                      dataDir.string());
-    }
-    if (ec) {
-        return Error{ErrorCode::IOError,
-                     std::string("Failed to create storage directory: ") + ec.message()};
     }
     // Probe write access
     const auto probe = dataDir / ".yams-write-test";
@@ -778,10 +791,21 @@ yams::Result<void> ServiceManager::initialize() {
         f << "ok";
         f.close();
     }
-    fs::remove(probe, ec);
+    std::error_code probeCleanupError;
+    fs::remove(probe, probeCleanupError);
+    if (probeCleanupError) {
+        spdlog::warn("ServiceManager: failed to remove data-directory write probe '{}': {}",
+                     probe.string(), probeCleanupError.message());
+    }
 
     // Persist resolved dataDir for downstream components/telemetry
     resolvedDataDir_ = std::move(dataDir);
+
+    // Configure required pool defaults before initializing storage-backed services.
+    auto poolResult = configureResourcePools(beforePoolConfigure);
+    if (!poolResult) {
+        return poolResult.error();
+    }
 
     // Cross-validate embedding backend + preferred model at startup.
     // Emits spdlog warnings for mismatches (e.g. ONNX model under simeon).
@@ -803,52 +827,46 @@ yams::Result<void> ServiceManager::initialize() {
     // Async initialization is now triggered explicitly via startAsyncInit()
     // to allow the daemon main loop to start first.
 
-    // Configure pool defaults via ResourceGovernor from TuneAdvisor for known components
+    // Search engine initialization is handled separately via searchEngineManager_.
+    return Result<void>();
+}
+
+Result<void> ServiceManager::configureResourcePools(const std::function<void()>& beforeConfigure) {
     try {
+        if (beforeConfigure) {
+            beforeConfigure();
+        }
+
         ResourceGovernor::PoolConfig ipcCfg{};
-        ipcCfg.min_size = TuneAdvisor::poolMinSizeIpc();
-        if (ipcCfg.min_size < 4) {
-            ipcCfg.min_size = 4;
-        }
-        ipcCfg.max_size = TuneAdvisor::poolMaxSizeIpc();
-        if (ipcCfg.max_size < ipcCfg.min_size) {
-            ipcCfg.max_size = ipcCfg.min_size;
-        }
+        ipcCfg.min_size = std::max<std::uint32_t>(4, TuneAdvisor::poolMinSizeIpc());
+        ipcCfg.max_size = std::max(ipcCfg.min_size, TuneAdvisor::poolMaxSizeIpc());
         ipcCfg.cooldown_ms = TuneAdvisor::poolCooldownMs();
         ipcCfg.low_watermark = TuneAdvisor::poolLowWatermarkPercent();
         ipcCfg.high_watermark = TuneAdvisor::poolHighWatermarkPercent();
         ResourceGovernor::instance().configurePool("ipc", ipcCfg);
 
         ResourceGovernor::PoolConfig ioCfg{};
-        ioCfg.min_size = TuneAdvisor::poolMinSizeIpcIo();
-        if (ioCfg.min_size < 2) {
-            ioCfg.min_size = 2;
-        }
-        try {
-            auto dynCap = TuneAdvisor::recommendedThreads(0.5 /*backgroundFactor*/);
-            ioCfg.max_size = std::min(TuneAdvisor::poolMaxSizeIpcIo(), dynCap);
-        } catch (...) {
-            ioCfg.max_size = TuneAdvisor::poolMaxSizeIpcIo();
-        }
-        if (ioCfg.max_size < ioCfg.min_size) {
-            ioCfg.max_size = ioCfg.min_size;
-        }
+        ioCfg.min_size = std::max<std::uint32_t>(2, TuneAdvisor::poolMinSizeIpcIo());
+        const auto dynCap = TuneAdvisor::recommendedThreads(0.5 /*backgroundFactor*/);
+        ioCfg.max_size = std::min(TuneAdvisor::poolMaxSizeIpcIo(), dynCap);
+        ioCfg.max_size = std::max(ioCfg.min_size, ioCfg.max_size);
         ioCfg.cooldown_ms = TuneAdvisor::poolCooldownMs();
         ioCfg.low_watermark = TuneAdvisor::poolLowWatermarkPercent();
         ioCfg.high_watermark = TuneAdvisor::poolHighWatermarkPercent();
         ResourceGovernor::instance().configurePool("ipc_io", ioCfg);
+
         spdlog::info("Pool defaults configured: ipc[min={},max={}] io[min={},max={}]",
                      ipcCfg.min_size, ipcCfg.max_size, ioCfg.min_size, ioCfg.max_size);
-
-        // Seed FsmMetricsRegistry with initial pool sizes for immediate visibility in status
         FsmMetricsRegistry::instance().setIpcPoolSize(static_cast<uint32_t>(ipcCfg.min_size));
         FsmMetricsRegistry::instance().setIoPoolSize(static_cast<uint32_t>(ioCfg.min_size));
-    } catch (const std::exception& e) {
-        spdlog::debug("Pool configure error: {}", e.what());
+        return {};
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::InternalError,
+                     std::string("Failed to configure resource pools: ") + error.what()};
+    } catch (...) {
+        return Error{ErrorCode::InternalError,
+                     "Failed to configure resource pools: unknown exception"};
     }
-
-    // Search engine initialization is handled separately via searchEngineManager_.
-    return Result<void>();
 }
 
 void ServiceManager::startAsyncInit(std::promise<void>* barrierPromise,
@@ -1646,7 +1664,10 @@ Result<std::filesystem::path> ServiceManager::initializeDataDirAndContentStore()
         }
     }
 
-    yams::common::ensureDirectories(dataDir);
+    auto directoryResult = ensureDataDirectory(dataDir);
+    if (!directoryResult) {
+        return directoryResult.error();
+    }
     resolvedDataDir_ = dataDir;
 
     auto storageDecision =
@@ -1659,7 +1680,10 @@ Result<std::filesystem::path> ServiceManager::initializeDataDirAndContentStore()
 
     if (storageDecision.value().activeDataDir != dataDir) {
         dataDir = storageDecision.value().activeDataDir;
-        yams::common::ensureDirectories(dataDir);
+        directoryResult = ensureDataDirectory(dataDir);
+        if (!directoryResult) {
+            return directoryResult.error();
+        }
         resolvedDataDir_ = dataDir;
     }
 

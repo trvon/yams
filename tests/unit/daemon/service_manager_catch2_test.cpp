@@ -11,6 +11,7 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <system_error>
 #include <thread>
 
@@ -304,6 +305,38 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager construction with missin
                  "[daemon][service_manager]") {
     fs::remove_all(config_.dataDir);
     REQUIRE_NOTHROW(ServiceManager(config_, state_, lifecycleFsm_));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager initialize reports data directory creation failures",
+                 "[daemon][service_manager][startup][error]") {
+    fs::remove_all(config_.dataDir);
+    {
+        std::ofstream blocker(config_.dataDir);
+        REQUIRE(blocker.good());
+        blocker << "not a directory";
+    }
+
+    ServiceManager sm(config_, state_, lifecycleFsm_);
+    const auto result = sm.initialize();
+
+    REQUIRE_FALSE(result);
+    CHECK((result.error().code == ErrorCode::IOError));
+    CHECK((result.error().message.find("Failed to create data directory") != std::string::npos));
+    CHECK((result.error().message.find(config_.dataDir.string()) != std::string::npos));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager pool configuration failures propagate through Result",
+                 "[daemon][service_manager][startup][error]") {
+    ServiceManager sm(config_, state_, lifecycleFsm_);
+
+    const auto result = sm.__test_initializeWithPoolConfiguration(
+        [] { throw std::runtime_error("forced pool configuration failure"); });
+
+    REQUIRE_FALSE(result);
+    CHECK((result.error().code == ErrorCode::InternalError));
+    CHECK((result.error().message.find("forced pool configuration failure") != std::string::npos));
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager destructor handles cleanup",
