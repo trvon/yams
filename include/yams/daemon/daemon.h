@@ -2,6 +2,7 @@
 
 #include <yams/core/types.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
+#include <yams/daemon/components/embedding_service_config.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuningConfig.h>
 #include <yams/daemon/resource/onnx_model_pool.h> // For DaemonConfig
@@ -62,6 +63,9 @@ struct DaemonConfig {
     // outlive the command and make teardown expensive. Request handlers may still perform explicit
     // writes, but opportunistic reconcile/rebuild work is suppressed.
     bool embeddedOneShot = false;
+
+    // Immutable startup safeguards consumed by EmbeddingService.
+    EmbeddingServiceConfig embeddingService;
 
     // Typed runtime instrumentation profile. The "memory" profile suppresses
     // opportunistic startup maintenance that creates large transient allocator

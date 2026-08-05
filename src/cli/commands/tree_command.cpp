@@ -1,11 +1,9 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
-#include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <optional>
 #include <string>
-#include <string_view>
 #include <vector>
 #include <CLI/CLI.hpp>
 #include <fmt/core.h>
@@ -14,7 +12,6 @@
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/core/types.h>
-#include <yams/metadata/connection_pool.h>
 #include <yams/metadata/metadata_repository.h>
 
 namespace yams::cli {
@@ -107,8 +104,9 @@ void printTreeText(const nlohmann::json& node, int indent = 0) {
     const auto weight = node.value("centroid_weight", 0);
     auto missing = node.value("missing", false);
 
-    fmt::print("{}{:<} (path={}, docs={}, centroid_weight={}", std::string(indent * 2, ' '),
-               segment, path, docs, weight);
+    fmt::print("{}{:<} (path={}, docs={}, centroid_weight={}",
+               std::string(static_cast<std::size_t>(indent) * 2U, ' '), segment, path, docs,
+               weight);
     if (missing)
         fmt::print(" [missing]");
     fmt::print(")\n");
@@ -155,38 +153,6 @@ public:
         }
 
         auto metadataRepo = cli_->getMetadataRepository();
-        std::unique_ptr<metadata::ConnectionPool> fallbackPool;
-        std::shared_ptr<metadata::MetadataRepository> fallbackRepo;
-
-        if (!metadataRepo) {
-            std::filesystem::path dbPath;
-            const char* metadataEnv = std::getenv("YAMS_BENCH_METADATA_DB");
-            if (metadataEnv && std::string_view(metadataEnv).empty() == false)
-                dbPath = metadataEnv;
-
-            if (dbPath.empty()) {
-                const char* datasetEnv = std::getenv("YAMS_BENCH_DATASET_DIR");
-                if (datasetEnv && std::string_view(datasetEnv).empty() == false) {
-                    std::filesystem::path dir(datasetEnv);
-                    std::filesystem::path candidate = dir / "yams.db";
-                    if (std::filesystem::exists(candidate))
-                        dbPath = candidate;
-                }
-            }
-
-            if (!dbPath.empty() && std::filesystem::exists(dbPath)) {
-                metadata::ConnectionPoolConfig cfg;
-                cfg.minConnections = 1;
-                cfg.maxConnections = 2;
-                fallbackPool = std::make_unique<metadata::ConnectionPool>(dbPath.string(), cfg);
-                auto init = fallbackPool->initialize();
-                if (!init)
-                    return init.error();
-                fallbackRepo = std::make_shared<metadata::MetadataRepository>(*fallbackPool);
-                metadataRepo = fallbackRepo;
-                spdlog::info("tree command: using metadata DB {}", dbPath.string());
-            }
-        }
 
         if (!metadataRepo) {
             return Error{ErrorCode::NotInitialized, "Metadata repository unavailable"};

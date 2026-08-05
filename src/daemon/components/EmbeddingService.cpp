@@ -47,12 +47,34 @@ namespace daemon {
 
 EmbeddingService::EmbeddingService(std::shared_ptr<api::IContentStore> store,
                                    std::shared_ptr<metadata::MetadataRepository> meta,
-                                   WorkCoordinator* coordinator)
-    : store_(std::move(store)), meta_(std::move(meta)), coordinator_(coordinator),
+                                   WorkCoordinator* coordinator, EmbeddingServiceConfig config)
+    : config_(std::move(config)), effectiveConfig_(resolveConcurrencyPolicy(config_)),
+      store_(std::move(store)), meta_(std::move(meta)), coordinator_(coordinator),
       strand_(coordinator_->makeStrand()) {}
 
 EmbeddingService::~EmbeddingService() {
     shutdown();
+}
+
+EffectiveEmbeddingServiceConfig
+EmbeddingService::resolveConcurrencyPolicy(const EmbeddingServiceConfig& config) {
+    if (config.coremlUnifiedConcurrency > 0) {
+        return EffectiveEmbeddingServiceConfig{config.coremlUnifiedConcurrency,
+                                               config.coremlUnifiedConcurrencySource.empty()
+                                                   ? std::string{"typed:explicit"}
+                                                   : config.coremlUnifiedConcurrencySource};
+    }
+
+    const auto compatibility = yams::config::read_env_size("YAMS_EMBED_COREML_SAFE_CONCURRENCY");
+    if (compatibility.value && *compatibility.value > 0) {
+        return EffectiveEmbeddingServiceConfig{*compatibility.value,
+                                               "environment:YAMS_EMBED_COREML_SAFE_CONCURRENCY"};
+    }
+    return {};
+}
+
+EffectiveEmbeddingServiceConfig EmbeddingService::effectiveConcurrencyPolicy() const {
+    return effectiveConfig_;
 }
 
 Result<void> EmbeddingService::initialize() {
@@ -1221,32 +1243,13 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
     const auto& gpuInfo = resource::detectGpu();
     const bool coremlUnifiedHardware =
         gpuInfo.detected && gpuInfo.provider == "coreml" && gpuInfo.unifiedMemory;
-    std::size_t coremlUnifiedCap = 1;
-    std::string embedProfile;
-    if (const char* s = std::getenv("YAMS_BENCH_EMBED_PROFILE")) {
-        embedProfile = s;
-        std::transform(embedProfile.begin(), embedProfile.end(), embedProfile.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        if (embedProfile == "safe") {
-            coremlUnifiedCap = 1;
-        } else if (embedProfile == "balanced") {
-            coremlUnifiedCap = 2;
-        }
-    }
-    if (const char* s = std::getenv("YAMS_EMBED_COREML_SAFE_CONCURRENCY")) {
-        try {
-            const auto parsed = static_cast<std::size_t>(std::stoull(s));
-            if (parsed > 0) {
-                coremlUnifiedCap = parsed;
-            }
-        } catch (...) {
-        }
-    }
+    const auto concurrencyPolicy = effectiveConcurrencyPolicy();
+    const std::size_t coremlUnifiedCap = concurrencyPolicy.coremlUnifiedConcurrency;
     if (coremlUnifiedHardware) {
         spdlog::info(
             "[EmbeddingService] CoreML unified-memory safety mode available: non-Simeon embed "
-            "jobs capped at {} (profile='{}')",
-            coremlUnifiedCap, embedProfile.empty() ? "default" : embedProfile);
+            "jobs capped at {} (source='{}')",
+            coremlUnifiedCap, concurrencyPolicy.coremlUnifiedConcurrencySource);
     }
     auto usesSimeonPreferredModel = [&]() {
         std::string preferred;

@@ -36,6 +36,8 @@ fs = import('fs')
 raw_environment_policy_script = files('scripts/check_raw_environment_calls.py')
 raw_environment_policy_tests = files('scripts/test_check_raw_environment_calls.py')
 raw_environment_allowlist = files('scripts/raw_environment_allowlist.txt')
+benchmark_environment_policy_script = files('scripts/check_benchmark_environment_leaks.py')
+benchmark_environment_policy_tests = files('scripts/test_check_benchmark_environment_leaks.py')
 test('raw_environment_policy_unit',
   python_exe,
   args: [raw_environment_policy_tests],
@@ -49,6 +51,18 @@ test('raw_environment_policy',
     '--root', meson.project_source_root(),
     '--allowlist', raw_environment_allowlist,
   ],
+  suite: ['unit', 'policy', 'environment'],
+  timeout: 30,
+)
+test('benchmark_environment_policy_unit',
+  python_exe,
+  args: [benchmark_environment_policy_tests],
+  suite: ['unit', 'policy', 'environment'],
+  timeout: 30,
+)
+test('benchmark_environment_policy',
+  python_exe,
+  args: [benchmark_environment_policy_script, '--root', meson.project_source_root()],
   suite: ['unit', 'policy', 'environment'],
   timeout: 30,
 )

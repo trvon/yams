@@ -2291,7 +2291,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             }
             (void)taThreads; // Retrieved for future use in embedding service configuration
             auto embeddingService = std::make_shared<EmbeddingService>(
-                getContentStore(), getMetadataRepo(), workCoordinator_.get());
+                getContentStore(), getMetadataRepo(), workCoordinator_.get(),
+                config_.embeddingService);
 
             auto initRes = embeddingService->initialize();
             if (initRes) {

@@ -396,16 +396,31 @@ bool waitForCorpusIndexed(
     return false;
 }
 
+enum class EmbedProfile { Default, Safe, Balanced };
+
+std::string_view embedProfileName(EmbedProfile profile) {
+    switch (profile) {
+        case EmbedProfile::Safe:
+            return "safe";
+        case EmbedProfile::Balanced:
+            return "balanced";
+        case EmbedProfile::Default:
+            return "default";
+    }
+    return "default";
+}
+
 struct IngestionBenchConfig {
     size_t documentCount{10000};
     bool enableEmbeddings{false};
     std::string tuningProfile;
+    EmbedProfile embedProfile{EmbedProfile::Default};
     size_t batchSize{1000};
     double duplicationRate{0.05};
     bool operator==(const IngestionBenchConfig& other) const {
         return documentCount == other.documentCount && enableEmbeddings == other.enableEmbeddings &&
-               tuningProfile == other.tuningProfile && batchSize == other.batchSize &&
-               duplicationRate == other.duplicationRate;
+               tuningProfile == other.tuningProfile && embedProfile == other.embedProfile &&
+               batchSize == other.batchSize && duplicationRate == other.duplicationRate;
     }
 };
 
@@ -730,11 +745,22 @@ std::string getTuningProfile() {
     return "";
 }
 
-std::string getBenchEmbedProfile() {
-    if (const char* env = std::getenv("YAMS_BENCH_EMBED_PROFILE")) {
-        return std::string(env);
+EmbedProfile getBenchEmbedProfile() {
+    const auto configured = yams::config::getenv_nonempty("YAMS_BENCH_EMBED_PROFILE");
+    if (!configured) {
+        return EmbedProfile::Default;
     }
-    return "";
+    std::string normalized = *configured;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (normalized == "safe") {
+        return EmbedProfile::Safe;
+    }
+    if (normalized == "balanced") {
+        return EmbedProfile::Balanced;
+    }
+    spdlog::warn("Ignoring unknown benchmark embed profile '{}'", *configured);
+    return EmbedProfile::Default;
 }
 
 double getDuplicationRate() {
@@ -759,12 +785,11 @@ void SetupHarness(const IngestionBenchConfig& config) {
               << (config.tuningProfile.empty() ? "default" : config.tuningProfile) << "\n";
     std::cout << "Duplication rate: " << (config.duplicationRate * 100) << "%\n";
 
-    const std::string embedProfile = getBenchEmbedProfile();
     const auto mockBenchConfig = (config.enableEmbeddings && useMockEmbeddingsForBench())
                                      ? writeMockEmbeddingConfig()
                                      : std::optional<std::filesystem::path>{};
-    if (!embedProfile.empty()) {
-        std::cout << "Embed benchmark profile: " << embedProfile << "\n";
+    if (config.embedProfile != EmbedProfile::Default) {
+        std::cout << "Embed benchmark profile: " << embedProfileName(config.embedProfile) << "\n";
     }
 
     // Set benchmark compatibility values through guards so repeated arms restore their exact host
@@ -783,9 +808,6 @@ void SetupHarness(const IngestionBenchConfig& config) {
     g_environment.emplace_back(
         "YAMS_CONFIG",
         mockBenchConfig ? std::optional<std::string>{mockBenchConfig->string()} : std::nullopt);
-    g_environment.emplace_back("YAMS_BENCH_EMBED_PROFILE",
-                               embedProfile.empty() ? std::nullopt
-                                                    : std::optional<std::string>{embedProfile});
 
     // Disable automatic search engine rebuilds by default for benchmark determinism.
     // Rebuilds compete with ingestion and can dominate runtime on large corpora.
@@ -803,6 +825,15 @@ void SetupHarness(const IngestionBenchConfig& config) {
     // AutoRepair/RepairService can compete with ingestion at high scale (per-hash DB checks).
     // Disable for benchmark determinism and throughput analysis.
     harnessOptions.enableAutoRepair = false;
+    if (config.embedProfile != EmbedProfile::Default) {
+        const auto embedProfile = config.embedProfile;
+        harnessOptions.configureDaemon = [embedProfile](yams::daemon::DaemonConfig& daemonConfig) {
+            daemonConfig.embeddingService.coremlUnifiedConcurrency =
+                embedProfile == EmbedProfile::Balanced ? 2U : 1U;
+            daemonConfig.embeddingService.coremlUnifiedConcurrencySource =
+                "harness:large_scale_ingestion:" + std::string(embedProfileName(embedProfile));
+        };
+    }
     if (mockBenchConfig.has_value()) {
         harnessOptions.configPath = *mockBenchConfig;
     }
@@ -1245,6 +1276,7 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
         config.tuningProfile = env;
     }
 
+    config.embedProfile = getBenchEmbedProfile();
     config.duplicationRate = getDuplicationRate();
 
     // Setup harness

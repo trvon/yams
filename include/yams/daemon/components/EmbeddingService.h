@@ -14,6 +14,7 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/strand.hpp>
+#include <yams/daemon/components/embedding_service_config.h>
 #include <yams/daemon/components/IComponent.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/metadata/document_metadata.h>
@@ -60,7 +61,7 @@ class EmbeddingService : public IComponent {
 public:
     EmbeddingService(std::shared_ptr<api::IContentStore> store,
                      std::shared_ptr<metadata::MetadataRepository> meta,
-                     WorkCoordinator* coordinator);
+                     WorkCoordinator* coordinator, EmbeddingServiceConfig config = {});
     ~EmbeddingService() override;
 
     const char* getName() const override { return "EmbeddingService"; }
@@ -105,6 +106,9 @@ public:
 
     void setTopologyRebuildRequester(std::function<void(const std::vector<std::string>&)> cb);
 
+    // Exposes the immutable effective safeguard and its provenance for status/tests.
+    EffectiveEmbeddingServiceConfig effectiveConcurrencyPolicy() const;
+
     // Wipes semantic_neighbor edges and rebuilds against every vdb doc in one
     // pass. Per-job rebuilds make each doc's top-K depend on job-completion
     // order; a corpus-wide pass is deterministic.
@@ -121,6 +125,9 @@ public:
 
 private:
     friend class EmbeddingServiceTimingTestAccess;
+
+    static EffectiveEmbeddingServiceConfig
+    resolveConcurrencyPolicy(const EmbeddingServiceConfig& config);
 
     // Parallel poller that dispatches jobs to work executor
     boost::asio::awaitable<void> channelPoller();
@@ -144,6 +151,8 @@ private:
                                       std::string modelName, std::string source);
     void enqueueEmbeddingCompletion(std::vector<std::string> hashes, std::string modelName);
 
+    const EmbeddingServiceConfig config_;
+    const EffectiveEmbeddingServiceConfig effectiveConfig_;
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::MetadataRepository> meta_;
     WorkCoordinator* coordinator_;

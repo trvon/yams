@@ -9,6 +9,8 @@
 #include <yams/daemon/components/EmbeddingService.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 
+#include "../../../common/test_helpers_catch2.h"
+
 using namespace std::chrono_literals;
 
 namespace yams::daemon {
@@ -43,6 +45,48 @@ public:
 };
 
 } // namespace
+
+TEST_CASE("EmbeddingService ignores benchmark environment in production policy",
+          "[daemon][components][embedding][config][catch2]") {
+    yams::test::ScopedEnvVar benchmarkProfile{"YAMS_BENCH_EMBED_PROFILE", "balanced"};
+    yams::test::ScopedEnvVar productConcurrency{"YAMS_EMBED_COREML_SAFE_CONCURRENCY", std::nullopt};
+    WorkCoordinator coordinator;
+    EmbeddingService service(nullptr, nullptr, &coordinator);
+
+    const auto effective = service.effectiveConcurrencyPolicy();
+    CHECK((effective.coremlUnifiedConcurrency == 1U));
+    CHECK((effective.coremlUnifiedConcurrencySource == "default"));
+}
+
+TEST_CASE("EmbeddingService accepts typed CoreML concurrency policy",
+          "[daemon][components][embedding][config][catch2]") {
+    yams::test::ScopedEnvVar benchmarkProfile{"YAMS_BENCH_EMBED_PROFILE", "safe"};
+    yams::test::ScopedEnvVar productConcurrency{"YAMS_EMBED_COREML_SAFE_CONCURRENCY", "7"};
+    WorkCoordinator coordinator;
+    EmbeddingServiceConfig policy;
+    policy.coremlUnifiedConcurrency = 2U;
+    policy.coremlUnifiedConcurrencySource = "harness:typed";
+    EmbeddingService service(nullptr, nullptr, &coordinator, policy);
+
+    const auto effective = service.effectiveConcurrencyPolicy();
+    CHECK((effective.coremlUnifiedConcurrency == 2U));
+    CHECK((effective.coremlUnifiedConcurrencySource == "harness:typed"));
+}
+
+TEST_CASE("EmbeddingService freezes the compatibility concurrency at construction",
+          "[daemon][components][embedding][config][catch2]") {
+    yams::test::ScopedEnvVar productConcurrency{"YAMS_EMBED_COREML_SAFE_CONCURRENCY", "3"};
+    WorkCoordinator coordinator;
+    EmbeddingService service(nullptr, nullptr, &coordinator);
+
+    {
+        yams::test::ScopedEnvVar changedConcurrency{"YAMS_EMBED_COREML_SAFE_CONCURRENCY", "9"};
+        const auto effective = service.effectiveConcurrencyPolicy();
+        CHECK((effective.coremlUnifiedConcurrency == 3U));
+        CHECK((effective.coremlUnifiedConcurrencySource ==
+               "environment:YAMS_EMBED_COREML_SAFE_CONCURRENCY"));
+    }
+}
 
 TEST_CASE("EmbeddingService phase timing is optional and replaceable",
           "[daemon][components][embedding][timing][catch2]") {
