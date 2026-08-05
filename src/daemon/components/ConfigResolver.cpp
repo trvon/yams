@@ -1246,10 +1246,8 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
                                                 TuningConfig tuningConfig) {
     [[maybe_unused]] TuneAdvisor::ConfiguredOverrideUpdate configuredOverrideUpdate;
 
-    // An empty provenance map identifies a fresh lifecycle snapshot. Clear only the overrides
-    // owned by this resolver so a prior in-process daemon cannot leak typed tuning into the next
-    // one. Reload passes the current snapshot (including provenance) and therefore remains
-    // incremental.
+    // A fresh unresolved typed snapshot clears only the overrides owned by this resolver so a
+    // prior configured generation cannot leak into a new lifecycle or replacement reload.
     if (!tuningConfig.tuneAdvisorOverridesResolved) {
         TuneAdvisor::resetConfiguredOverrides();
         tuningConfig.tuneAdvisorOverridesResolved = true;

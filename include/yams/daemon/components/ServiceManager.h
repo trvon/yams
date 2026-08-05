@@ -325,16 +325,19 @@ public:
     // Tuning configuration (no envs): getter/setter with live application where applicable.
     // Return a copy so reload cannot invalidate or race a caller-held reference.
     TuningConfig getTuningConfig() const {
+        [[maybe_unused]] auto publication = TuneAdvisor::beginConfiguredOverridePublication();
         std::lock_guard lock(tuningConfigMutex_);
         return tuningConfig_;
     }
     std::map<std::string, std::string> getRuntimeTuningStatus() const {
+        [[maybe_unused]] auto publication = TuneAdvisor::beginConfiguredOverridePublication();
         std::lock_guard lock(runtimeTuningStatusMutex_);
         return runtimeTuningStatus_;
     }
     uint32_t getIngestStoreBatchSize() const {
         return ingestStoreBatchSize_.load(std::memory_order_relaxed);
     }
+    void releaseTuningLifecycle() noexcept { tuningLifecycleLease_.release(); }
     void setTuningConfig(const TuningConfig& cfg) {
         [[maybe_unused]] auto publication = TuneAdvisor::beginConfiguredOverridePublication();
         auto applied = cfg;
@@ -343,13 +346,16 @@ public:
         if (piq) {
             // Channel capacity is construction-time state. Preserve the effective value during a
             // live update so configuration/status cannot claim a resize that did not occur.
+            const auto requestedCapacity = applied.postIngestCapacity;
             applied.postIngestCapacity = previous.postIngestCapacity;
+            if (requestedCapacity != applied.postIngestCapacity) {
+                applied.provenance.insert_or_assign(
+                    "tuning.post_ingest_capacity", "runtime:construction-time-post-ingest-channel");
+            }
             piq->setBatchCoalesceWindow(std::chrono::milliseconds(applied.postIngestCoalesceMs));
         }
         ingestStoreBatchSize_.store(applied.ingestStoreBatchSize, std::memory_order_relaxed);
-        for (const auto& [key, source] : previous.provenance) {
-            applied.provenance.try_emplace(key, source);
-        }
+        snapshotRuntimeTuningSources(applied, &previous);
         {
             std::lock_guard lock(tuningConfigMutex_);
             tuningConfig_ = applied;
@@ -758,7 +764,7 @@ private:
     quiesceServicesBeforeWorkerShutdown(std::unique_ptr<CheckpointManager>& checkpointManagerHold);
     void stopWorkCoordinatorForShutdown(std::unique_ptr<CheckpointManager>& checkpointManagerHold);
     void clearCachedServiceState();
-    void snapshotRuntimeTuningSources();
+    void snapshotRuntimeTuningSources(TuningConfig& tuning, const TuningConfig* previous) const;
     void refreshRuntimeTuningStatus();
     void seedBuiltinContentExtractors();
     void shutdownModelProviderForShutdown();

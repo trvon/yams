@@ -137,6 +137,12 @@ public:
 #endif
     }
 
+    /// Report whether the immutable lifecycle compatibility snapshot contains a key. This lets
+    /// status provenance describe the snapshotted source without re-reading ambient state.
+    static bool hasCompatibilityEnvironmentValue(const char* name) {
+        return compatibilityEnvironment(name) != nullptr;
+    }
+
     // Serializes process-wide value publication with the matching instance config/status update.
     // The mutex is recursive so ConfigResolver's aggregate update can nest inside a daemon reload
     // publication transaction on the same thread.
@@ -153,6 +159,27 @@ public:
 
     static ConfiguredOverridePublication beginConfiguredOverridePublication() {
         return ConfiguredOverridePublication{};
+    }
+
+    /// Hold lifecycle membership stable while deciding and publishing a process-global reload.
+    /// Without the retained lock, a new embedded manager could join after validation and receive a
+    /// snapshot that becomes stale before construction returns.
+    class ConfiguredOverrideReloadGuard {
+    public:
+        ConfiguredOverrideReloadGuard()
+            : lock_(TuneAdvisor::configuredOverrideLifecycleMutex()),
+              allowed_(TuneAdvisor::configuredOverrideLifecycleCount() <= 1) {}
+        ConfiguredOverrideReloadGuard(const ConfiguredOverrideReloadGuard&) = delete;
+        ConfiguredOverrideReloadGuard& operator=(const ConfiguredOverrideReloadGuard&) = delete;
+        explicit operator bool() const noexcept { return allowed_; }
+
+    private:
+        std::unique_lock<std::mutex> lock_;
+        bool allowed_{false};
+    };
+
+    static ConfiguredOverrideReloadGuard beginConfiguredOverrideReload() {
+        return ConfiguredOverrideReloadGuard{};
     }
 
     // Serializes one ConfigResolver update and publishes an even sequence when all related atomics
@@ -197,8 +224,19 @@ public:
             }
             ++count;
         }
-        ~ConfiguredOverrideLifecycleLease() {
+        ~ConfiguredOverrideLifecycleLease() { release(); }
+
+        ConfiguredOverrideLifecycleLease(const ConfiguredOverrideLifecycleLease&) = delete;
+        ConfiguredOverrideLifecycleLease&
+        operator=(const ConfiguredOverrideLifecycleLease&) = delete;
+
+        [[nodiscard]] bool ownsInitialization() const noexcept { return primary_; }
+        void release() noexcept {
             std::lock_guard lock(TuneAdvisor::configuredOverrideLifecycleMutex());
+            if (!active_) {
+                return;
+            }
+            active_ = false;
             auto& count = TuneAdvisor::configuredOverrideLifecycleCount();
             if (count > 0) {
                 --count;
@@ -208,12 +246,6 @@ public:
                 TuneAdvisor::configuredOverrideLifecycleCv().notify_all();
             }
         }
-
-        ConfiguredOverrideLifecycleLease(const ConfiguredOverrideLifecycleLease&) = delete;
-        ConfiguredOverrideLifecycleLease&
-        operator=(const ConfiguredOverrideLifecycleLease&) = delete;
-
-        [[nodiscard]] bool ownsInitialization() const noexcept { return primary_; }
         void commitInitialization() noexcept {
             if (!primary_ || committed_) {
                 return;
@@ -227,6 +259,7 @@ public:
     private:
         bool primary_{false};
         bool committed_{false};
+        bool active_{true};
     };
 
     static std::uint64_t configuredOverridesVersion() noexcept {

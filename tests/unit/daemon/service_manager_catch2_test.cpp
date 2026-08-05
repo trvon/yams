@@ -437,6 +437,44 @@ TEST_CASE_METHOD(ServiceManagerFixture,
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture,
+                 "Live tuning refresh reports preserved construction-time capacity",
+                 "[daemon][service_manager][config][tuning][physical-state]") {
+    config_.enableModelProvider = false;
+    config_.useMockModelProvider = false;
+    config_.autoLoadPlugins = false;
+    config_.tuning.postIngestCapacity = 111;
+    config_.tuning.provenance["tuning.post_ingest_capacity"] = "config:tuning.post_ingest_capacity";
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    auto beforeInitialization = sm->getTuningConfig();
+    beforeInitialization.postIngestCapacity = 222;
+    beforeInitialization.provenance["tuning.post_ingest_capacity"] =
+        "config:tuning.post_ingest_capacity";
+    sm->setTuningConfig(beforeInitialization);
+
+    REQUIRE(sm->initialize());
+    sm->startAsyncInit();
+    const auto ready = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE((ready.state == ServiceManagerState::Ready));
+    REQUIRE(sm->getPostIngestQueue() != nullptr);
+    CHECK((sm->getPostIngestQueue()->capacity() == 222u));
+
+    TuningConfig refreshed;
+    refreshed.tuneAdvisorOverridesResolved = true;
+    sm->setTuningConfig(refreshed);
+
+    const auto effective = sm->getTuningConfig();
+    CHECK((effective.postIngestCapacity == 222u));
+    CHECK((effective.provenance.at("tuning.post_ingest_capacity") ==
+           "runtime:construction-time-post-ingest-channel"));
+    const auto status = sm->getRuntimeTuningStatus();
+    CHECK((status.at("post_ingest.capacity") == "222"));
+    CHECK((status.at("post_ingest.capacity.source") ==
+           "runtime:construction-time-post-ingest-channel"));
+    sm->shutdown();
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
                  "Runtime tuning status publishes values from one configured generation",
                  "[daemon][service_manager][config][tuning][snapshot]") {
     config_.tuning.tuneAdvisorOverridesResolved = true;

@@ -278,6 +278,12 @@ YamsDaemon::~YamsDaemon() {
         }
     }
 
+    // Constructor-only and failed-start daemons may retain ServiceManager through callbacks. End
+    // their process-global tuning membership even when no running stop path was needed.
+    if (serviceManager_) {
+        serviceManager_->releaseTuningLifecycle();
+    }
+
     try {
         reapCompletedShutdownThread();
     } catch (const std::exception& e) {
@@ -1407,6 +1413,15 @@ void YamsDaemon::reloadTuningConfig() {
         configFilePath = config_.configFilePath;
         currentTuning = config_.tuning;
     }
+    auto lifecycleGuard = TuneAdvisor::beginConfiguredOverrideReload();
+    if (!lifecycleGuard) {
+        spdlog::warn("[Reload] Skipped tuning reload while multiple daemon lifecycles are active");
+        return;
+    }
+    if (serviceManager_) {
+        // ServiceManager resolves construction-time policy after daemon config construction.
+        currentTuning = serviceManager_->getTuningConfig();
+    }
 
     try {
         if (configFilePath.empty()) {
@@ -1428,14 +1443,19 @@ void YamsDaemon::reloadTuningConfig() {
             spdlog::warn("[Reload] Failed to parse config: {}", parsed.error().message);
             return;
         }
-        const auto tuning =
-            ConfigResolver::applyRuntimeTuning(parsed.value(), std::move(currentTuning));
+        // Reload is replacement, not merge: removed TOML keys must revoke both their configured
+        // overrides and provenance. Preserve only topology selection, which is construction-time
+        // state owned outside the runtime-tuning resolver.
+        TuningConfig baseline;
+        baseline.topologyAlgorithm = currentTuning.topologyAlgorithm;
+        auto tuning = ConfigResolver::applyRuntimeTuning(parsed.value(), std::move(baseline));
+        if (serviceManager_) {
+            serviceManager_->setTuningConfig(tuning);
+            tuning = serviceManager_->getTuningConfig();
+        }
         {
             std::lock_guard<std::mutex> lock(configMutex_);
             config_.tuning = tuning;
-        }
-        if (serviceManager_) {
-            serviceManager_->setTuningConfig(tuning);
         }
         spdlog::info("[Reload] Applied tuning config: cap={}, threads={}..{}",
                      tuning.postIngestCapacity, tuning.postIngestThreadsMin,

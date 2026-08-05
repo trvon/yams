@@ -177,6 +177,39 @@ TEST_CASE("Fresh typed tuning lifecycle does not inherit prior process overrides
     CHECK(TuneAdvisor::enableResourceGovernor());
 }
 
+TEST_CASE("Fresh runtime tuning resolution revokes removed configured overrides",
+          "[daemon][components][config][tuning][reload][catch2]") {
+    EnvGuard ipcCompatibility{"YAMS_IPC_TIMEOUT_MS", ""};
+    EnvGuard admissionCompatibility{"YAMS_ADMISSION_CONTROL", ""};
+    EnvGuard memoryCompatibility{"YAMS_MEMORY_WARNING_PCT", ""};
+    EnvGuard postIngestCompatibility{"YAMS_POST_INGEST_RPC_QUEUE_MAX", ""};
+
+    ConfigResolver::ConfigSections configured;
+    configured["tuning"] = {{"target_cpu_percent", "321"}};
+    configured["tuning.ipc"] = {{"timeout_ms", "4321"}};
+    configured["tuning.resource"] = {{"admission_control", "false"},
+                                     {"memory_warning_threshold", "0.91"}};
+    configured["tuning.post_ingest"] = {{"rpc_queue_max", "333"}};
+
+    const auto applied = ConfigResolver::applyRuntimeTuning(configured, TuningConfig{});
+    REQUIRE((applied.provenance.at("tuning.ipc.timeout_ms") == "config:tuning.ipc.timeout_ms"));
+    CHECK((TuneAdvisor::ipcTimeoutMs() == 4321u));
+    CHECK_FALSE(TuneAdvisor::enableAdmissionControl());
+    CHECK((TuneAdvisor::memoryWarningThreshold() == Catch::Approx(0.91)));
+    CHECK((TuneAdvisor::postIngestRpcQueueMax() == 333u));
+
+    const auto versionBeforeRemoval = TuneAdvisor::configuredOverridesVersion();
+    const auto reverted = ConfigResolver::applyRuntimeTuning({}, TuningConfig{});
+
+    CHECK((TuneAdvisor::configuredOverridesVersion() == versionBeforeRemoval + 2));
+    CHECK((reverted.targetCpuPercent == 200u));
+    CHECK(reverted.provenance.empty());
+    CHECK((TuneAdvisor::ipcTimeoutMs() == 15000u));
+    CHECK(TuneAdvisor::enableAdmissionControl());
+    CHECK((TuneAdvisor::memoryWarningThreshold() == Catch::Approx(0.75)));
+    CHECK((TuneAdvisor::postIngestRpcQueueMax() == 256u));
+}
+
 TEST_CASE("ConfigResolver applies one typed tuning snapshot for startup and reload",
           "[daemon][components][config][tuning][catch2]") {
     EnvGuard ipcCompatibility{"YAMS_IPC_TIMEOUT_MS", "8765"};

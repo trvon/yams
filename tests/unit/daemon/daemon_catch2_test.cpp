@@ -327,34 +327,106 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon construction failure releases acquired e
     CHECK((yams::config::getenv_copy("YAMS_DAEMON_SOCKET") == "/before/socket"));
 }
 
-TEST_CASE_METHOD(DaemonFixture, "Daemon tuning reload preserves unspecified values",
+TEST_CASE_METHOD(DaemonFixture, "Daemon tuning reload revokes removed overrides coherently",
                  "[daemon][tuning][reload]") {
     SKIP_ON_WINDOWS();
 
+    yams::test::ScopedEnvVar ipcCompatibility{"YAMS_IPC_TIMEOUT_MS", std::nullopt};
+    yams::test::ScopedEnvVar admissionCompatibility{"YAMS_ADMISSION_CONTROL", std::nullopt};
+    yams::test::ScopedEnvVar memoryCompatibility{"YAMS_MEMORY_WARNING_PCT", std::nullopt};
+    yams::test::ScopedEnvVar postIngestCompatibility{"YAMS_POST_INGEST_RPC_QUEUE_MAX",
+                                                     std::nullopt};
     const auto configPath = runtime_root_ / "config.toml";
-    {
-        std::ofstream out(configPath);
+    const auto writeOverrides = [&](bool enabled) {
+        std::ofstream out(configPath, std::ios::trunc);
         REQUIRE(out.is_open());
+        if (!enabled) {
+            out << "# runtime tuning overrides removed\n";
+            return;
+        }
         out << "[tuning]\n";
         out << "target_cpu_percent = 321\n";
-        out << "post_ingest_capacity = 111\n";
-        out << "control_interval_ms = 222\n";
-    }
+        out << "[tuning.ipc]\n";
+        out << "timeout_ms = 4321\n";
+        out << "[tuning.resource]\n";
+        out << "admission_control = false\n";
+        out << "memory_warning_threshold = 0.91\n";
+        out << "[tuning.post_ingest]\n";
+        out << "rpc_queue_max = 333\n";
+    };
+    writeOverrides(true);
 
     config_.configFilePath = configPath;
-    config_.tuning.postIngestThreadsMin = 5;
-    config_.tuning.holdMs = 777;
-
     daemon_ = std::make_unique<YamsDaemon>(config_);
     REQUIRE(daemon_ != nullptr);
+    auto activeTuning = daemon_->serviceManager_->getTuningConfig();
+    activeTuning.topologyAlgorithm = "exact";
+    daemon_->serviceManager_->setTuningConfig(activeTuning);
 
     daemon_->reloadTuningConfig();
+    CHECK((daemon_->config_.tuning.targetCpuPercent == 321u));
+    CHECK((TuneAdvisor::ipcTimeoutMs() == 4321u));
+    CHECK_FALSE(TuneAdvisor::enableAdmissionControl());
+    CHECK((TuneAdvisor::memoryWarningThreshold() == 0.91));
+    CHECK((TuneAdvisor::postIngestRpcQueueMax() == 333u));
+    CHECK((daemon_->config_.tuning.provenance.at("tuning.ipc.timeout_ms") ==
+           "config:tuning.ipc.timeout_ms"));
 
-    CHECK(daemon_->config_.tuning.targetCpuPercent == 321u);
-    CHECK(daemon_->config_.tuning.postIngestCapacity == 111u);
-    CHECK(daemon_->config_.tuning.controlIntervalMs == 222u);
-    CHECK(daemon_->config_.tuning.postIngestThreadsMin == 5u);
-    CHECK(daemon_->config_.tuning.holdMs == 777u);
+    writeOverrides(false);
+    const auto versionBeforeRemoval = TuneAdvisor::configuredOverridesVersion();
+    daemon_->reloadTuningConfig();
+
+    CHECK((TuneAdvisor::configuredOverridesVersion() == versionBeforeRemoval + 2));
+    CHECK((daemon_->config_.tuning.targetCpuPercent == 200u));
+    CHECK((daemon_->config_.tuning.topologyAlgorithm == "exact"));
+    CHECK(daemon_->config_.tuning.provenance.empty());
+    CHECK((TuneAdvisor::ipcTimeoutMs() == 15000u));
+    CHECK(TuneAdvisor::enableAdmissionControl());
+    CHECK((TuneAdvisor::memoryWarningThreshold() == 0.75));
+    CHECK((TuneAdvisor::postIngestRpcQueueMax() == 256u));
+
+    const auto status = daemon_->serviceManager_->getRuntimeTuningStatus();
+    CHECK((status.at("ipc.timeout_ms") == "15000"));
+    CHECK((status.at("ipc.timeout_ms.source") == "default"));
+    CHECK((status.at("resource.admission_control") == "1"));
+    CHECK((status.at("resource.admission_control.source") == "default"));
+    CHECK((status.at("resource.memory_warning_threshold") == "0.750000"));
+    CHECK((status.at("resource.memory_warning_threshold.source") == "default"));
+    CHECK((status.at("post_ingest.rpc_queue_max") == "256"));
+    CHECK((status.at("post_ingest.rpc_queue_max.source") == "default"));
+}
+
+TEST_CASE_METHOD(DaemonFixture, "Daemon tuning reload rejects multiple active lifecycles",
+                 "[daemon][tuning][reload][lifecycle]") {
+    SKIP_ON_WINDOWS();
+
+    yams::test::ScopedEnvVar ipcCompatibility{"YAMS_IPC_TIMEOUT_MS", std::nullopt};
+    const auto configPath = runtime_root_ / "config.toml";
+    config_.configFilePath = configPath;
+    daemon_ = std::make_unique<YamsDaemon>(config_);
+    REQUIRE(daemon_ != nullptr);
+    REQUIRE((TuneAdvisor::ipcTimeoutMs() == 15000u));
+
+    auto nestedConfig = config_;
+    nestedConfig.dataDir = runtime_root_ / "nested-data";
+    nestedConfig.socketPath = runtime_root_ / "nested.sock";
+    nestedConfig.pidFile = runtime_root_ / "nested.pid";
+    nestedConfig.logFile = runtime_root_ / "nested.log";
+    YamsDaemon nested(nestedConfig);
+
+    {
+        std::ofstream out(configPath, std::ios::trunc);
+        REQUIRE(out.is_open());
+        out << "[tuning.ipc]\n";
+        out << "timeout_ms = 4321\n";
+    }
+    const auto versionBefore = TuneAdvisor::configuredOverridesVersion();
+    daemon_->reloadTuningConfig();
+
+    CHECK((TuneAdvisor::configuredOverridesVersion() == versionBefore));
+    CHECK((TuneAdvisor::ipcTimeoutMs() == 15000u));
+    CHECK((daemon_->config_.tuning.provenance.count("tuning.ipc.timeout_ms") == 0));
+    CHECK((daemon_->serviceManager_->getRuntimeTuningStatus().at("ipc.timeout_ms") == "15000"));
 }
 
 TEST_CASE_METHOD(DaemonFixture, "Lifecycle shutdown waits for owner-thread stop",

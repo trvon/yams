@@ -333,7 +333,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             tuningConfig_.tuneAdvisorOverridesResolved = true;
         }
         ingestStoreBatchSize_.store(tuningConfig_.ingestStoreBatchSize, std::memory_order_relaxed);
-        snapshotRuntimeTuningSources();
+        snapshotRuntimeTuningSources(tuningConfig_, nullptr);
         refreshRuntimeTuningStatus();
         tuningLifecycleLease_.commitInitialization();
     }
@@ -788,7 +788,8 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
     }
 }
 
-void ServiceManager::snapshotRuntimeTuningSources() {
+void ServiceManager::snapshotRuntimeTuningSources(TuningConfig& tuning,
+                                                  const TuningConfig* previous) const {
     static constexpr std::pair<std::string_view, const char*> kCompatibilitySources[] = {
         {"tuning.ipc.timeout_ms", "YAMS_IPC_TIMEOUT_MS"},
         {"tuning.ipc.stream_chunk_timeout_ms", "YAMS_STREAM_CHUNK_TIMEOUT_MS"},
@@ -808,10 +809,21 @@ void ServiceManager::snapshotRuntimeTuningSources() {
         {"tuning.resource.cpu_hysteresis_ms", "YAMS_CPU_LEVEL_HYSTERESIS_MS"},
     };
     for (const auto& [configKey, environmentKey] : kCompatibilitySources) {
-        if (!tuningConfig_.provenance.contains(std::string(configKey)) &&
-            yams::config::getenv_optional(environmentKey).has_value()) {
-            tuningConfig_.provenance.emplace(configKey, std::string{"compatibility-environment:"} +
-                                                            environmentKey);
+        const std::string key{configKey};
+        if (tuning.provenance.contains(key)) {
+            continue;
+        }
+        if (previous) {
+            const auto prior = previous->provenance.find(key);
+            if (prior != previous->provenance.end() &&
+                prior->second.starts_with("compatibility-environment:")) {
+                tuning.provenance.emplace(key, prior->second);
+                continue;
+            }
+        }
+        if (TuneAdvisor::hasCompatibilityEnvironmentValue(environmentKey)) {
+            tuning.provenance.emplace(key,
+                                      std::string{"compatibility-environment:"} + environmentKey);
         }
     }
 }
@@ -1614,6 +1626,7 @@ void ServiceManager::shutdown() {
     }
 
     YAMS_ASSERT(fsmStopped, "ServiceManager FSM must reach Stopped at shutdown completion");
+    tuningLifecycleLease_.release();
     setOnnxShutdownMarker(false);
 }
 
@@ -2335,23 +2348,30 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     // Initialize post-ingest queue (decouple extraction/index/graph from add paths)
     try {
         using TA = yams::daemon::TuneAdvisor;
-        const auto qcap = config_.tuning.postIngestCapacity > 0
-                              ? static_cast<std::size_t>(config_.tuning.postIngestCapacity)
-                              : static_cast<std::size_t>(TA::postIngestQueueMax());
-        auto newPostIngest = std::make_shared<PostIngestQueue>(
-            getContentStore(), getMetadataRepo(), contentExtractors_, getKgStore(),
-            loadGraphComponent(), workCoordinator_.get(), nullptr, qcap);
+        std::shared_ptr<PostIngestQueue> newPostIngest;
+        std::size_t qcap = 0;
+        {
+            // Keep live reload out until the physical channel reflects the same typed snapshot.
+            [[maybe_unused]] auto publication = TA::beginConfiguredOverridePublication();
+            const auto tuning = getTuningConfig();
+            qcap = tuning.postIngestCapacity > 0
+                       ? static_cast<std::size_t>(tuning.postIngestCapacity)
+                       : static_cast<std::size_t>(TA::postIngestQueueMax());
+            newPostIngest = std::make_shared<PostIngestQueue>(
+                getContentStore(), getMetadataRepo(), contentExtractors_, getKgStore(),
+                loadGraphComponent(), workCoordinator_.get(), nullptr, qcap);
 
-        try {
-            newPostIngest->setBatchCoalesceWindow(
-                std::chrono::milliseconds(config_.tuning.postIngestCoalesceMs));
-        } catch (const std::exception& e) {
-            spdlog::debug("[ServiceManager] post-ingest tuning apply failed: {}", e.what());
-        } catch (...) {
-            spdlog::debug("[ServiceManager] post-ingest tuning apply failed");
+            try {
+                newPostIngest->setBatchCoalesceWindow(
+                    std::chrono::milliseconds(tuning.postIngestCoalesceMs));
+            } catch (const std::exception& e) {
+                spdlog::debug("[ServiceManager] post-ingest tuning apply failed: {}", e.what());
+            } catch (...) {
+                spdlog::debug("[ServiceManager] post-ingest tuning apply failed");
+            }
+
+            std::atomic_store_explicit(&postIngest_, newPostIngest, std::memory_order_release);
         }
-
-        std::atomic_store_explicit(&postIngest_, newPostIngest, std::memory_order_release);
         spdlog::info("Post-ingest queue initialized (capacity={})", qcap);
 
         // Wire PluginManager to PIQ so adoptEntityProviders() can reach it
