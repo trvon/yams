@@ -98,8 +98,7 @@ TEST_CASE("typed environment readers distinguish unset valid and invalid values"
         REQUIRE(generation.has_value());
         REQUIRE(yams::config::set_environment("YAMS_TEST_OWNED_ENV", "leased"));
 
-        CHECK((yams::config::restore_environment_if_owned("YAMS_TEST_OWNED_ENV", "leased",
-                                                          *generation, std::string{"before"}) ==
+        CHECK((yams::config::restore_environment_if_owned("YAMS_TEST_OWNED_ENV", *generation) ==
                yams::config::EnvironmentRestoreResult::OwnershipLost));
         CHECK((yams::config::getenv_optional("YAMS_TEST_OWNED_ENV") == "leased"));
     }
@@ -110,11 +109,130 @@ TEST_CASE("typed environment readers distinguish unset valid and invalid values"
             yams::config::set_environment_owned("YAMS_TEST_OWNED_ENV", "leased");
         REQUIRE(generation.has_value());
 
-        CHECK((yams::config::restore_environment_if_owned("YAMS_TEST_OWNED_ENV", "leased",
-                                                          *generation, std::string{"before"}) ==
+        CHECK((yams::config::restore_environment_if_owned("YAMS_TEST_OWNED_ENV", *generation) ==
                yams::config::EnvironmentRestoreResult::Restored));
         CHECK((yams::config::getenv_optional("YAMS_TEST_OWNED_ENV") == "before"));
     }
+
+    SECTION("nested restoration resumes the outer environment lease") {
+        ScopedEnvVar restore{"YAMS_TEST_OWNED_ENV", std::string{"before"}};
+        const auto outer = yams::config::set_environment_owned("YAMS_TEST_OWNED_ENV", "outer");
+        REQUIRE(outer.has_value());
+        const auto inner = yams::config::set_environment_owned("YAMS_TEST_OWNED_ENV", "inner");
+        REQUIRE(inner.has_value());
+
+        REQUIRE((yams::config::restore_environment_if_owned("YAMS_TEST_OWNED_ENV", *inner) ==
+                 yams::config::EnvironmentRestoreResult::Restored));
+        CHECK((yams::config::getenv_optional("YAMS_TEST_OWNED_ENV") == "outer"));
+
+        CHECK((yams::config::restore_environment_if_owned("YAMS_TEST_OWNED_ENV", *outer) ==
+               yams::config::EnvironmentRestoreResult::Restored));
+        CHECK((yams::config::getenv_optional("YAMS_TEST_OWNED_ENV") == "before"));
+    }
+
+    SECTION("non-LIFO release rebases the newer lease onto the original value") {
+        ScopedEnvVar restore{"YAMS_TEST_OWNED_ENV", std::string{"before"}};
+        const auto outer = yams::config::set_environment_owned("YAMS_TEST_OWNED_ENV", "outer");
+        REQUIRE(outer.has_value());
+        const auto inner = yams::config::set_environment_owned("YAMS_TEST_OWNED_ENV", "inner");
+        REQUIRE(inner.has_value());
+
+        REQUIRE((yams::config::restore_environment_if_owned("YAMS_TEST_OWNED_ENV", *outer) ==
+                 yams::config::EnvironmentRestoreResult::Released));
+        CHECK((yams::config::getenv_optional("YAMS_TEST_OWNED_ENV") == "inner"));
+
+        CHECK((yams::config::restore_environment_if_owned("YAMS_TEST_OWNED_ENV", *inner) ==
+               yams::config::EnvironmentRestoreResult::Restored));
+        CHECK((yams::config::getenv_optional("YAMS_TEST_OWNED_ENV") == "before"));
+    }
+
+    SECTION("same-value nested leases still restore by ownership token") {
+        ScopedEnvVar restore{"YAMS_TEST_OWNED_ENV", std::string{"before"}};
+        const auto outer = yams::config::set_environment_owned("YAMS_TEST_OWNED_ENV", "same");
+        REQUIRE(outer.has_value());
+        const auto inner = yams::config::set_environment_owned("YAMS_TEST_OWNED_ENV", "same");
+        REQUIRE(inner.has_value());
+
+        REQUIRE((yams::config::restore_environment_if_owned("YAMS_TEST_OWNED_ENV", *inner) ==
+                 yams::config::EnvironmentRestoreResult::Restored));
+        REQUIRE((yams::config::restore_environment_if_owned("YAMS_TEST_OWNED_ENV", *outer) ==
+                 yams::config::EnvironmentRestoreResult::Restored));
+        CHECK((yams::config::getenv_optional("YAMS_TEST_OWNED_ENV") == "before"));
+    }
+
+    SECTION("ownership tokens reject cross-key confusion") {
+        ScopedEnvVar restoreA{"YAMS_TEST_OWNED_ENV_A", std::string{"before-a"}};
+        ScopedEnvVar restoreB{"YAMS_TEST_OWNED_ENV_B", std::string{"before-b"}};
+        const auto leaseA = yams::config::set_environment_owned("YAMS_TEST_OWNED_ENV_A", "a");
+        const auto leaseB = yams::config::set_environment_owned("YAMS_TEST_OWNED_ENV_B", "b");
+        REQUIRE(leaseA.has_value());
+        REQUIRE(leaseB.has_value());
+
+        CHECK((yams::config::restore_environment_if_owned("YAMS_TEST_OWNED_ENV_A", *leaseB) ==
+               yams::config::EnvironmentRestoreResult::OwnershipLost));
+        CHECK((yams::config::getenv_optional("YAMS_TEST_OWNED_ENV_A") == "a"));
+        REQUIRE((yams::config::restore_environment_if_owned("YAMS_TEST_OWNED_ENV_B", *leaseB) ==
+                 yams::config::EnvironmentRestoreResult::Restored));
+        REQUIRE((yams::config::restore_environment_if_owned("YAMS_TEST_OWNED_ENV_A", *leaseA) ==
+                 yams::config::EnvironmentRestoreResult::Restored));
+    }
+
+    SECTION("restore errors invalidate a current lease chain") {
+        ScopedEnvVar restore{"YAMS_TEST_OWNED_ENV", std::string{"before"}};
+        const auto outer = yams::config::set_environment_owned("YAMS_TEST_OWNED_ENV", "outer");
+        const auto inner = yams::config::set_environment_owned("YAMS_TEST_OWNED_ENV", "inner");
+        REQUIRE(outer.has_value());
+        REQUIRE(inner.has_value());
+
+        yams::config::testing_fail_owned_environment_restore_once();
+        CHECK((yams::config::restore_environment_if_owned("YAMS_TEST_OWNED_ENV", *inner) ==
+               yams::config::EnvironmentRestoreResult::Error));
+        CHECK((yams::config::restore_environment_if_owned("YAMS_TEST_OWNED_ENV", *outer) ==
+               yams::config::EnvironmentRestoreResult::OwnershipLost));
+        CHECK((yams::config::getenv_optional("YAMS_TEST_OWNED_ENV") == "inner"));
+    }
+
+    SECTION("restore errors invalidate a non-LIFO lease chain") {
+        ScopedEnvVar restore{"YAMS_TEST_OWNED_ENV", std::string{"before"}};
+        const auto outer = yams::config::set_environment_owned("YAMS_TEST_OWNED_ENV", "outer");
+        const auto inner = yams::config::set_environment_owned("YAMS_TEST_OWNED_ENV", "inner");
+        REQUIRE(outer.has_value());
+        REQUIRE(inner.has_value());
+
+        yams::config::testing_fail_owned_environment_restore_once();
+        CHECK((yams::config::restore_environment_if_owned("YAMS_TEST_OWNED_ENV", *outer) ==
+               yams::config::EnvironmentRestoreResult::Error));
+        CHECK((yams::config::restore_environment_if_owned("YAMS_TEST_OWNED_ENV", *inner) ==
+               yams::config::EnvironmentRestoreResult::OwnershipLost));
+        CHECK((yams::config::getenv_optional("YAMS_TEST_OWNED_ENV") == "inner"));
+    }
+
+#ifdef _WIN32
+    SECTION("Windows lease ownership canonicalizes case variants and restores unset state") {
+        ScopedEnvVar restore{"YAMS_TEST_CASE_ENV", std::nullopt};
+
+        const auto outer = yams::config::set_environment_owned("YAMS_TEST_CASE_ENV", "outer");
+        REQUIRE(outer.has_value());
+        const auto inner = yams::config::set_environment_owned("yams_test_case_env", "inner");
+        REQUIRE(inner.has_value());
+        REQUIRE((yams::config::restore_environment_if_owned("YAMS_TEST_CASE_ENV", *outer) ==
+                 yams::config::EnvironmentRestoreResult::Released));
+        REQUIRE((yams::config::restore_environment_if_owned("yams_test_case_env", *inner) ==
+                 yams::config::EnvironmentRestoreResult::Restored));
+        CHECK_FALSE(yams::config::getenv_optional("YAMS_TEST_CASE_ENV").has_value());
+
+        const auto lifoOuter = yams::config::set_environment_owned("YAMS_TEST_CASE_ENV", "outer");
+        REQUIRE(lifoOuter.has_value());
+        const auto lifoInner = yams::config::set_environment_owned("yams_test_case_env", "inner");
+        REQUIRE(lifoInner.has_value());
+        REQUIRE((yams::config::restore_environment_if_owned("yams_test_case_env", *lifoInner) ==
+                 yams::config::EnvironmentRestoreResult::Restored));
+        CHECK((yams::config::getenv_optional("YAMS_TEST_CASE_ENV") == "outer"));
+        REQUIRE((yams::config::restore_environment_if_owned("YAMS_TEST_CASE_ENV", *lifoOuter) ==
+                 yams::config::EnvironmentRestoreResult::Restored));
+        CHECK_FALSE(yams::config::getenv_optional("YAMS_TEST_CASE_ENV").has_value());
+    }
+#endif
 }
 
 TEST_CASE("ScopedEnvVar restores prior values and preserves unset state",

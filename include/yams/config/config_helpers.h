@@ -40,22 +40,32 @@ std::optional<std::string> getenv_nonempty(std::string_view key);
 std::map<std::string, std::string> snapshot_environment_prefix(std::string_view prefix);
 
 /// Set or unset one process-environment value under the same boundary lock used by readers.
-/// A null value unsets the key. Returns false when the platform mutation fails.
+/// A null value unsets the key. Returns false when the platform mutation fails. All first-party
+/// writers must use this boundary so same-value ABA writes remain observable to lease ownership.
 bool set_environment(const char* key, const char* value) noexcept;
 
-/// Set a value and return its monotonic boundary generation. The generation can later prove that
-/// an ownership lease still controls the key before restoring a prior value.
+/// Lease a value and return its monotonic ownership token. Nested leases form a per-key chain, so
+/// restoring an inner lease resumes its predecessor without allowing unrelated writers to be
+/// overwritten.
 std::optional<std::uint64_t> set_environment_owned(const char* key, const char* value) noexcept;
 
-enum class EnvironmentRestoreResult { Restored, OwnershipLost, Error };
+enum class EnvironmentRestoreResult { Restored, Released, OwnershipLost, Error };
 
-/// Restore `value` only when both the copied current value and boundary generation still match the
-/// lease. This prevents a daemon teardown from overwriting a newer writer, including ABA writes
-/// that happen to install the same text.
-EnvironmentRestoreResult
-restore_environment_if_owned(const char* key, std::string_view installedValue,
-                             std::uint64_t installedGeneration,
-                             const std::optional<std::string>& value) noexcept;
+/// Release one lease by token. A current lease restores its captured predecessor; an outer lease
+/// released out of order is spliced from the ownership chain without changing the newer value.
+/// Writers using `set_environment()` invalidate the chain, including same-value ABA writes. A raw
+/// writer that bypasses the required boundary is detectable only when it changes the text.
+EnvironmentRestoreResult restore_environment_if_owned(const char* key,
+                                                      std::uint64_t installedGeneration) noexcept;
+
+#ifdef YAMS_TESTING
+/// Fail one owned lease acquisition after `successfulLeases` successful acquisitions.
+/// The one-shot hook resets when it fires.
+void testing_fail_owned_environment_lease_after(std::size_t successfulLeases) noexcept;
+
+/// Make the next owned-lease release return Error after invalidating its ownership chain.
+void testing_fail_owned_environment_restore_once() noexcept;
+#endif
 
 /// Compatibility accessor that maps unset and explicitly empty values to an empty string.
 std::string getenv_copy(const char* key);

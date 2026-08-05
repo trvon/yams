@@ -234,6 +234,99 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon environment lease detects same-value new
     CHECK((yams::config::getenv_copy("YAMS_DAEMON_SOCKET") == installed));
 }
 
+TEST_CASE_METHOD(DaemonFixture, "Nested daemons restore every runtime environment lease",
+                 "[daemon][lifecycle][environment][ownership][nested]") {
+    std::vector<yams::test::ScopedEnvVar> original;
+    original.reserve(6);
+    original.emplace_back("YAMS_IN_DAEMON", std::string{"before-daemon"});
+    original.emplace_back("YAMS_STORAGE", std::string{"/before/storage"});
+    original.emplace_back("YAMS_DATA_DIR", std::string{"/before/data"});
+    original.emplace_back("YAMS_CONFIG", std::string{"/before/config"});
+    original.emplace_back("YAMS_CONFIG_PATH", std::string{"/before/config-path"});
+    original.emplace_back("YAMS_DAEMON_SOCKET", std::string{"/before/socket"});
+
+    auto outerConfig = config_;
+    outerConfig.dataDir = runtime_root_ / "outer-data";
+    outerConfig.configFilePath = runtime_root_ / "outer.toml";
+    outerConfig.socketPath = runtime_root_ / "outer.sock";
+    outerConfig.pidFile = runtime_root_ / "outer.pid";
+
+    auto innerConfig = config_;
+    innerConfig.dataDir = runtime_root_ / "inner-data";
+    innerConfig.configFilePath = runtime_root_ / "inner.toml";
+    innerConfig.socketPath = runtime_root_ / "inner.sock";
+    innerConfig.pidFile = runtime_root_ / "inner.pid";
+
+    const auto checkInstalled = [](const DaemonConfig& expected) {
+        CHECK((yams::config::getenv_copy("YAMS_IN_DAEMON") == "1"));
+        CHECK((yams::config::getenv_copy("YAMS_STORAGE") == expected.dataDir.string()));
+        CHECK((yams::config::getenv_copy("YAMS_DATA_DIR") == expected.dataDir.string()));
+        CHECK((yams::config::getenv_copy("YAMS_CONFIG") == expected.configFilePath.string()));
+        CHECK((yams::config::getenv_copy("YAMS_CONFIG_PATH") == expected.configFilePath.string()));
+        CHECK((yams::config::getenv_copy("YAMS_DAEMON_SOCKET") == expected.socketPath.string()));
+    };
+    const auto checkOriginal = [] {
+        CHECK((yams::config::getenv_copy("YAMS_IN_DAEMON") == "before-daemon"));
+        CHECK((yams::config::getenv_copy("YAMS_STORAGE") == "/before/storage"));
+        CHECK((yams::config::getenv_copy("YAMS_DATA_DIR") == "/before/data"));
+        CHECK((yams::config::getenv_copy("YAMS_CONFIG") == "/before/config"));
+        CHECK((yams::config::getenv_copy("YAMS_CONFIG_PATH") == "/before/config-path"));
+        CHECK((yams::config::getenv_copy("YAMS_DAEMON_SOCKET") == "/before/socket"));
+    };
+
+    SECTION("LIFO destruction resumes the outer daemon") {
+        auto outer = std::make_unique<YamsDaemon>(outerConfig);
+        checkInstalled(outerConfig);
+        auto inner = std::make_unique<YamsDaemon>(innerConfig);
+        checkInstalled(innerConfig);
+
+        inner.reset();
+        checkInstalled(outerConfig);
+        outer.reset();
+        checkOriginal();
+    }
+
+    SECTION("non-LIFO destruction rebases the inner daemon onto the original state") {
+        auto outer = std::make_unique<YamsDaemon>(outerConfig);
+        auto inner = std::make_unique<YamsDaemon>(innerConfig);
+        checkInstalled(innerConfig);
+
+        outer.reset();
+        checkInstalled(innerConfig);
+        inner.reset();
+        checkOriginal();
+    }
+}
+
+TEST_CASE_METHOD(DaemonFixture, "Daemon construction failure releases acquired environment leases",
+                 "[daemon][lifecycle][environment][ownership][failure]") {
+    std::vector<yams::test::ScopedEnvVar> original;
+    original.reserve(6);
+    original.emplace_back("YAMS_IN_DAEMON", std::string{"before-daemon"});
+    original.emplace_back("YAMS_STORAGE", std::string{"/before/storage"});
+    original.emplace_back("YAMS_DATA_DIR", std::string{"/before/data"});
+    original.emplace_back("YAMS_CONFIG", std::string{"/before/config"});
+    original.emplace_back("YAMS_CONFIG_PATH", std::string{"/before/config-path"});
+    original.emplace_back("YAMS_DAEMON_SOCKET", std::string{"/before/socket"});
+
+    config_.configFilePath = runtime_root_ / "failure.toml";
+    yams::config::testing_fail_owned_environment_lease_after(2);
+    try {
+        auto unexpected = std::make_unique<YamsDaemon>(config_);
+        FAIL("YamsDaemon construction unexpectedly succeeded");
+    } catch (const std::runtime_error& error) {
+        CHECK(std::string_view{error.what()}.starts_with(
+            "YamsDaemon failed to lease environment key YAMS_DATA_DIR"));
+    }
+
+    CHECK((yams::config::getenv_copy("YAMS_IN_DAEMON") == "before-daemon"));
+    CHECK((yams::config::getenv_copy("YAMS_STORAGE") == "/before/storage"));
+    CHECK((yams::config::getenv_copy("YAMS_DATA_DIR") == "/before/data"));
+    CHECK((yams::config::getenv_copy("YAMS_CONFIG") == "/before/config"));
+    CHECK((yams::config::getenv_copy("YAMS_CONFIG_PATH") == "/before/config-path"));
+    CHECK((yams::config::getenv_copy("YAMS_DAEMON_SOCKET") == "/before/socket"));
+}
+
 TEST_CASE_METHOD(DaemonFixture, "Daemon tuning reload preserves unspecified values",
                  "[daemon][tuning][reload]") {
     SKIP_ON_WINDOWS();

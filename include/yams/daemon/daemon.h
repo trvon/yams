@@ -216,13 +216,11 @@ public:
     std::atomic<bool> shutdownThreadActive_{false};
 
     struct RuntimeEnvironmentLease {
-        std::string value;
-        std::uint64_t generation{0};
+        std::uint64_t token{0};
     };
 
     int tuningProfileOverrideBeforeStart_{0};
     bool tuningProfileOverrideSnapshotActive_{false};
-    std::map<std::string, std::optional<std::string>> runtimeEnvironmentBeforeStart_;
     std::map<std::string, RuntimeEnvironmentLease> runtimeEnvironmentLeases_;
 
     bool modelPreloadSkipped_{false};
@@ -246,7 +244,6 @@ public:
 
     void snapshotTuningProfileForRuntime();
     void restoreTuningProfileOverrideSnapshot() noexcept;
-    void snapshotRuntimeEnvironment();
     void leaseRuntimeEnvironment(const char* name, const std::string& value);
     void restoreRuntimeEnvironment() noexcept;
 

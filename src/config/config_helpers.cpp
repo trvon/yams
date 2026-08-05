@@ -1,12 +1,15 @@
+#include <algorithm>
 #include <array>
 #include <charconv>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <map>
 #include <mutex>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 #include <spdlog/spdlog.h>
 
@@ -44,9 +47,93 @@ std::mutex& processEnvironmentMutex() {
     return *mutex;
 }
 
-std::unordered_map<std::string, std::uint64_t>& processEnvironmentGenerations() {
-    static auto* generations = new std::unordered_map<std::string, std::uint64_t>();
-    return *generations;
+struct EnvironmentLeaseRecord {
+    std::string installedValue;
+    std::optional<std::string> previousValue;
+    std::optional<std::uint64_t> parent;
+};
+
+struct EnvironmentOwnershipState {
+    std::optional<std::uint64_t> currentLease;
+    std::unordered_map<std::uint64_t, EnvironmentLeaseRecord> leases;
+};
+
+unsigned char foldEnvironmentKeyByte(unsigned char byte) noexcept {
+#ifdef _WIN32
+    if (byte >= static_cast<unsigned char>('a') && byte <= static_cast<unsigned char>('z')) {
+        return static_cast<unsigned char>(byte - static_cast<unsigned char>('a') +
+                                          static_cast<unsigned char>('A'));
+    }
+#endif
+    return byte;
+}
+
+struct EnvironmentKeyHash {
+    using is_transparent = void;
+
+    std::size_t operator()(std::string_view key) const noexcept {
+#ifdef _WIN32
+        constexpr std::size_t kOffsetBasis = sizeof(std::size_t) == 8
+                                                 ? std::size_t{1469598103934665603ULL}
+                                                 : std::size_t{2166136261U};
+        constexpr std::size_t kPrime =
+            sizeof(std::size_t) == 8 ? std::size_t{1099511628211ULL} : std::size_t{16777619U};
+        std::size_t hash = kOffsetBasis;
+        for (const unsigned char byte : key) {
+            hash ^= foldEnvironmentKeyByte(byte);
+            hash *= kPrime;
+        }
+        return hash;
+#else
+        return std::hash<std::string_view>{}(key);
+#endif
+    }
+};
+
+struct EnvironmentKeyEqual {
+    using is_transparent = void;
+
+    bool operator()(std::string_view left, std::string_view right) const noexcept {
+        if (left.size() != right.size()) {
+            return false;
+        }
+        return std::equal(left.begin(), left.end(), right.begin(), [](char lhs, char rhs) {
+            return foldEnvironmentKeyByte(static_cast<unsigned char>(lhs)) ==
+                   foldEnvironmentKeyByte(static_cast<unsigned char>(rhs));
+        });
+    }
+};
+
+using EnvironmentOwnershipMap = std::unordered_map<std::string, EnvironmentOwnershipState,
+                                                   EnvironmentKeyHash, EnvironmentKeyEqual>;
+
+EnvironmentOwnershipMap& processEnvironmentOwnership() {
+    static auto* ownership = new EnvironmentOwnershipMap();
+    return *ownership;
+}
+
+std::uint64_t& processEnvironmentLeaseGeneration() {
+    static auto* generation = new std::uint64_t{0};
+    return *generation;
+}
+
+std::optional<std::size_t>& ownedLeaseFailureCountdown() {
+    static auto* countdown = new std::optional<std::size_t>();
+    return *countdown;
+}
+
+bool& ownedLeaseRestoreFailurePending() {
+    static auto* pending = new bool{false};
+    return *pending;
+}
+
+std::optional<std::string> environmentValueLocked(const char* key) {
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): caller holds processEnvironmentMutex().
+    const char* raw = std::getenv(key);
+    if (raw == nullptr) {
+        return std::nullopt;
+    }
+    return std::string{raw};
 }
 
 bool mutateEnvironmentLocked(const char* key, const char* value) noexcept {
@@ -179,50 +266,149 @@ std::map<std::string, std::string> snapshot_environment_prefix(std::string_view 
 }
 
 bool set_environment(const char* key, const char* value) noexcept {
-    return set_environment_owned(key, value).has_value();
+    if (key == nullptr || *key == '\0') {
+        return false;
+    }
+    try {
+        std::lock_guard lock(processEnvironmentMutex());
+        auto& ownership = processEnvironmentOwnership()[key];
+        if (!mutateEnvironmentLocked(key, value)) {
+            return false;
+        }
+        ownership.currentLease.reset();
+        ownership.leases.clear();
+        return true;
+    } catch (...) {
+        return false;
+    }
 }
 
 std::optional<std::uint64_t> set_environment_owned(const char* key, const char* value) noexcept {
-    if (key == nullptr || *key == '\0') {
+    if (key == nullptr || *key == '\0' || value == nullptr) {
         return std::nullopt;
     }
     try {
         std::lock_guard lock(processEnvironmentMutex());
-        auto& generation = processEnvironmentGenerations()[key];
-        if (generation == std::numeric_limits<std::uint64_t>::max() ||
-            !mutateEnvironmentLocked(key, value)) {
+        auto& failureCountdown = ownedLeaseFailureCountdown();
+        if (failureCountdown) {
+            if (*failureCountdown == 0) {
+                failureCountdown.reset();
+                return std::nullopt;
+            }
+            --*failureCountdown;
+        }
+        auto& ownership = processEnvironmentOwnership()[key];
+        auto& generation = processEnvironmentLeaseGeneration();
+        if (generation == std::numeric_limits<std::uint64_t>::max()) {
             return std::nullopt;
         }
-        return ++generation;
+
+        const auto previousValue = environmentValueLocked(key);
+        auto parent = ownership.currentLease;
+        if (parent) {
+            const auto active = ownership.leases.find(*parent);
+            if (active == ownership.leases.end() || !previousValue ||
+                *previousValue != active->second.installedValue) {
+                // A writer bypassed the shared boundary. Do not let an older lease later
+                // overwrite that value after this new lease restores it.
+                ownership.currentLease.reset();
+                ownership.leases.clear();
+                parent.reset();
+            }
+        }
+
+        const auto token = generation + 1;
+        const auto [lease, inserted] = ownership.leases.emplace(
+            token, EnvironmentLeaseRecord{
+                       .installedValue = value, .previousValue = previousValue, .parent = parent});
+        if (!inserted) {
+            return std::nullopt;
+        }
+        if (!mutateEnvironmentLocked(key, value)) {
+            ownership.leases.erase(lease);
+            return std::nullopt;
+        }
+        generation = token;
+        ownership.currentLease = token;
+        return token;
     } catch (...) {
         return std::nullopt;
     }
 }
 
-EnvironmentRestoreResult
-restore_environment_if_owned(const char* key, std::string_view installedValue,
-                             std::uint64_t installedGeneration,
-                             const std::optional<std::string>& value) noexcept {
+EnvironmentRestoreResult restore_environment_if_owned(const char* key,
+                                                      std::uint64_t installedGeneration) noexcept {
     if (key == nullptr || *key == '\0') {
         return EnvironmentRestoreResult::Error;
     }
     try {
         std::lock_guard lock(processEnvironmentMutex());
-        const auto generation = processEnvironmentGenerations().find(key);
-        const char* raw = std::getenv(key); // NOLINT(concurrency-mt-unsafe): boundary lock held.
-        if (generation == processEnvironmentGenerations().end() ||
-            generation->second != installedGeneration || raw == nullptr ||
-            std::string_view(raw) != installedValue) {
+        const auto state = processEnvironmentOwnership().find(std::string_view{key});
+        if (state == processEnvironmentOwnership().end()) {
             return EnvironmentRestoreResult::OwnershipLost;
         }
-        if (generation->second == std::numeric_limits<std::uint64_t>::max() ||
-            !mutateEnvironmentLocked(key, value ? value->c_str() : nullptr)) {
+        auto& ownership = state->second;
+        const auto lease = ownership.leases.find(installedGeneration);
+        if (lease == ownership.leases.end()) {
+            return EnvironmentRestoreResult::OwnershipLost;
+        }
+        if (ownedLeaseRestoreFailurePending()) {
+            ownedLeaseRestoreFailurePending() = false;
+            ownership.currentLease.reset();
+            ownership.leases.clear();
             return EnvironmentRestoreResult::Error;
         }
-        ++generation->second;
+        if (ownership.currentLease != installedGeneration) {
+            const auto child =
+                std::find_if(ownership.leases.begin(), ownership.leases.end(),
+                             [installedGeneration](const auto& candidate) {
+                                 return candidate.second.parent == installedGeneration;
+                             });
+            if (child == ownership.leases.end()) {
+                ownership.leases.erase(lease);
+                return EnvironmentRestoreResult::OwnershipLost;
+            }
+            child->second.previousValue.swap(lease->second.previousValue);
+            child->second.parent = lease->second.parent;
+            ownership.leases.erase(lease);
+            return EnvironmentRestoreResult::Released;
+        }
+
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): processEnvironmentMutex() is held.
+        const char* currentValue = std::getenv(key);
+        if (currentValue == nullptr || currentValue != lease->second.installedValue) {
+            ownership.currentLease.reset();
+            ownership.leases.clear();
+            return EnvironmentRestoreResult::OwnershipLost;
+        }
+        if (!mutateEnvironmentLocked(key, lease->second.previousValue
+                                              ? lease->second.previousValue->c_str()
+                                              : nullptr)) {
+            ownership.currentLease.reset();
+            ownership.leases.clear();
+            return EnvironmentRestoreResult::Error;
+        }
+        ownership.currentLease = lease->second.parent;
+        ownership.leases.erase(lease);
         return EnvironmentRestoreResult::Restored;
     } catch (...) {
         return EnvironmentRestoreResult::Error;
+    }
+}
+
+void testing_fail_owned_environment_lease_after(std::size_t successfulLeases) noexcept {
+    try {
+        std::lock_guard lock(processEnvironmentMutex());
+        ownedLeaseFailureCountdown() = successfulLeases;
+    } catch (...) {
+    }
+}
+
+void testing_fail_owned_environment_restore_once() noexcept {
+    try {
+        std::lock_guard lock(processEnvironmentMutex());
+        ownedLeaseRestoreFailurePending() = true;
+    } catch (...) {
     }
 }
 

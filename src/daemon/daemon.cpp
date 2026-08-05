@@ -125,32 +125,24 @@ void YamsDaemon::restoreTuningProfileOverrideSnapshot() noexcept {
     tuningProfileOverrideSnapshotActive_ = false;
 }
 
-void YamsDaemon::snapshotRuntimeEnvironment() {
-    runtimeEnvironmentBeforeStart_.clear();
-    runtimeEnvironmentLeases_.clear();
-    for (const char* name : {"YAMS_IN_DAEMON", "YAMS_STORAGE", "YAMS_DATA_DIR", "YAMS_CONFIG",
-                             "YAMS_CONFIG_PATH", "YAMS_DAEMON_SOCKET"}) {
-        runtimeEnvironmentBeforeStart_.emplace(name, yams::config::getenv_optional(name));
-    }
-}
-
 void YamsDaemon::leaseRuntimeEnvironment(const char* name, const std::string& value) {
-    const auto generation = yams::config::set_environment_owned(name, value.c_str());
-    if (!generation.has_value()) {
+    const auto [lease, inserted] = runtimeEnvironmentLeases_.try_emplace(name);
+    if (!inserted) {
+        throw std::logic_error(
+            std::string{"YamsDaemon attempted to lease environment key twice: "} + name);
+    }
+
+    const auto token = yams::config::set_environment_owned(name, value.c_str());
+    if (!token.has_value()) {
+        runtimeEnvironmentLeases_.erase(lease);
         throw std::runtime_error(std::string{"YamsDaemon failed to lease environment key "} + name);
     }
-    runtimeEnvironmentLeases_.insert_or_assign(
-        name, RuntimeEnvironmentLease{.value = value, .generation = *generation});
+    lease->second.token = *token;
 }
 
 void YamsDaemon::restoreRuntimeEnvironment() noexcept {
-    for (const auto& [name, value] : runtimeEnvironmentBeforeStart_) {
-        const auto lease = runtimeEnvironmentLeases_.find(name);
-        if (lease == runtimeEnvironmentLeases_.end()) {
-            continue;
-        }
-        const auto result = yams::config::restore_environment_if_owned(
-            name.c_str(), lease->second.value, lease->second.generation, value);
+    for (const auto& [name, lease] : runtimeEnvironmentLeases_) {
+        const auto result = yams::config::restore_environment_if_owned(name.c_str(), lease.token);
         if (result == yams::config::EnvironmentRestoreResult::OwnershipLost) {
             std::fprintf(stderr, "YamsDaemon left newer environment owner unchanged for key %s\n",
                          name.c_str());
@@ -159,7 +151,6 @@ void YamsDaemon::restoreRuntimeEnvironment() noexcept {
         }
     }
     runtimeEnvironmentLeases_.clear();
-    runtimeEnvironmentBeforeStart_.clear();
 }
 
 YamsDaemon::YamsDaemon(const DaemonConfig& config)
@@ -189,7 +180,6 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config)
     for (const auto& diagnostic : runtimePaths.value().diagnostics) {
         spdlog::warn("YamsDaemon runtime path policy: {}", diagnostic);
     }
-    snapshotRuntimeEnvironment();
     const auto restoreEnvironment = [this](YamsDaemon*) { restoreRuntimeEnvironment(); };
     std::unique_ptr<YamsDaemon, decltype(restoreEnvironment)> restoreOnFailure(this,
                                                                                restoreEnvironment);
