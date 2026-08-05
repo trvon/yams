@@ -2057,6 +2057,7 @@ if catch2_dep.found()
     files(
       'unit/config/config_parse_utils_catch2_test.cpp',
       'unit/config/environment_catch2_test.cpp',
+      'unit/config/flat_toml_reader_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [
@@ -2068,6 +2069,13 @@ if catch2_dep.found()
     ],
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
     build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  config_reader_link_smoke_exe = executable('config_reader_link_smoke',
+    files('unit/config/config_reader_link_smoke.cpp'),
+    include_directories: incs,
+    dependencies: [dependency('yams_api')],
     install: false,
   )
 
@@ -2331,6 +2339,7 @@ if catch2_dep.found()
     files(
       'unit/app/services/service_utilities_test.cpp',
       'unit/app/services/download_metadata_entries_test.cpp',
+      'unit/app/services/enhanced_search_config_catch2_test.cpp',
       'unit/app/services/retrieval_service_mapping_catch2_test.cpp',
     ),
     include_directories: incs,
@@ -2644,6 +2653,12 @@ if catch2_dep.found()
     args: ['[config][environment]', '--order', 'rand', '--rng-seed', '66'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
+  )
+
+  test('config_reader_link_smoke', config_reader_link_smoke_exe,
+    suite: ['unit', 'config', 'link'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
   )
 
   test('detection', detection_exe,

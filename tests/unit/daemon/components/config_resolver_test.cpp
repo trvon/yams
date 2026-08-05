@@ -340,60 +340,9 @@ TEST_CASE("ConfigResolver resolves plugin strict mode once from typed config and
     }
 }
 
-TEST_CASE_METHOD(ConfigResolverFixture, "ConfigResolver parseSimpleTomlFlat parses TOML files",
+TEST_CASE_METHOD(ConfigResolverFixture, "shared flat TOML parser handles daemon policy files",
                  "[daemon][components][config][catch2]") {
-    SECTION("basic TOML parsing with sections") {
-        auto configPath = writeToml("test.toml", R"(
-[daemon]
-socket_path = "/tmp/test.sock"
-log_level = "debug"
-)");
-
-        auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
-        CHECK((config["daemon.socket_path"] == "/tmp/test.sock"));
-        CHECK((config["daemon.log_level"] == "debug"));
-    }
-
-    SECTION("missing file returns empty map") {
-        auto config = ConfigResolver::parseSimpleTomlFlat(tempDir / "nonexistent.toml");
-        CHECK(config.empty());
-    }
-
-    SECTION("empty file returns empty map") {
-        auto configPath = writeToml("empty.toml", "");
-        auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
-        CHECK(config.empty());
-    }
-
-    SECTION("comments are ignored") {
-        auto configPath = writeToml("comments.toml", R"(
-# This is a comment
-[section]
-# Another comment
-key = "value"
-)");
-
-        auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
-        CHECK((config["section.key"] == "value"));
-        CHECK((config.size() == 1));
-    }
-
-    SECTION("multiple sections parsed correctly") {
-        auto configPath = writeToml("multi.toml", R"(
-[section1]
-key1 = "value1"
-
-[section2]
-key2 = "value2"
-)");
-
-        auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
-        CHECK((config["section1.key1"] == "value1"));
-        CHECK((config["section2.key2"] == "value2"));
-    }
-
-    SECTION("daemon resolver delegates to shared parser semantics") {
-        auto configPath = writeToml("shared_semantics.toml", R"(
+    auto configPath = writeToml("shared_semantics.toml", R"(
 top_level = "root" # inline comment
 
 [search.path_tree]
@@ -405,14 +354,47 @@ quoted_hash = "# not a comment"
 socket_path = "/tmp/yams.sock"
 )");
 
-        auto resolverConfig = ConfigResolver::parseSimpleTomlFlat(configPath);
-        auto sharedConfig = yams::config::parse_simple_toml(configPath);
-        CHECK((resolverConfig == sharedConfig));
-        CHECK((resolverConfig["top_level"] == "root"));
-        CHECK((resolverConfig["search.path_tree.enable"] == "true"));
-        CHECK((resolverConfig["search.path_tree.mode"] == "preferred"));
-        CHECK((resolverConfig["search.path_tree.quoted_hash"] == "# not a comment"));
-    }
+    auto config = yams::config::parse_simple_toml(configPath);
+    CHECK((config["top_level"] == "root"));
+    CHECK((config["search.path_tree.enable"] == "true"));
+    CHECK((config["search.path_tree.mode"] == "preferred"));
+    CHECK((config["search.path_tree.quoted_hash"] == "# not a comment"));
+    CHECK((config["daemon.socket_path"] == "/tmp/yams.sock"));
+    CHECK(yams::config::parse_simple_toml(tempDir / "nonexistent.toml").empty());
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture, "installed ConfigResolver compatibility lookups remain",
+                 "[daemon][components][config][compatibility][catch2]") {
+    const auto configPath = writeToml("compatibility.toml", R"toml(
+[search]
+reranker_model = "compat-reranker"
+
+[plugins.symbol_extraction]
+enable = false
+
+[tuning.post_ingest]
+total_concurrent = 12
+embed_concurrent = 4
+batch_size = 32
+)toml");
+    EnvGuard configEnvironment{"YAMS_CONFIG_PATH", configPath.string()};
+    EnvGuard rerankerEnvironment{"YAMS_RERANKER_MODEL", std::nullopt};
+
+    const auto values = ConfigResolver::parseSimpleTomlFlat(configPath);
+    CHECK((values.at("search.reranker_model") == "compat-reranker"));
+
+    DaemonConfig daemonConfig;
+    daemonConfig.configFilePath = configPath;
+    CHECK((ConfigResolver::resolveRerankerModel(daemonConfig) == "compat-reranker"));
+    CHECK_FALSE(ConfigResolver::isSymbolExtractionEnabled(daemonConfig));
+
+    const auto caps = ConfigResolver::resolvePostIngestCaps();
+    REQUIRE(caps.totalConcurrent.has_value());
+    CHECK((*caps.totalConcurrent == 12U));
+    REQUIRE(caps.embedConcurrent.has_value());
+    CHECK((*caps.embedConcurrent == 4U));
+    REQUIRE(caps.batchSize.has_value());
+    CHECK((*caps.batchSize == 32U));
 }
 
 TEST_CASE_METHOD(ConfigResolverFixture,
@@ -646,8 +628,8 @@ rrf_k = 33
     REQUIRE(policy.graphWeightedSeedRanking.has_value());
     CHECK(*policy.graphWeightedSeedRanking);
     REQUIRE(policy.medoidBoost.has_value());
-    CHECK(*policy.medoidBoost > 0.19f);
-    CHECK(*policy.medoidBoost < 0.21f);
+    CHECK((*policy.medoidBoost > 0.19f));
+    CHECK((*policy.medoidBoost < 0.21f));
     CHECK((*policy.routeCalibrationFingerprint == "atlas-123"));
     CHECK((*policy.routeCalibrationQueries == 100U));
     CHECK((*policy.routeCalibrationProtectedCandidates == 250U));
@@ -667,7 +649,7 @@ TEST_CASE("Generated config keeps topology-assisted hybrid search as the product
           "[config][search][topology][catch2]") {
     const auto defaults = yams::config::ConfigMigrator::getLatestConfigDefaults();
     const auto topologyIt = defaults.find("search.topology");
-    REQUIRE(topologyIt != defaults.end());
+    REQUIRE((topologyIt != defaults.end()));
 
     const auto& topology = topologyIt->second;
     CHECK((topology.at("mode") == "hybrid_assist"));
@@ -708,8 +690,8 @@ TEST_CASE_METHOD(ConfigResolverFixture,
     REQUIRE(policy.maxDocs.has_value());
     CHECK((*policy.maxDocs == 17U));
     REQUIRE(policy.medoidBoost.has_value());
-    CHECK(*policy.medoidBoost > 0.14f);
-    CHECK(*policy.medoidBoost < 0.16f);
+    CHECK((*policy.medoidBoost > 0.14f));
+    CHECK((*policy.medoidBoost < 0.16f));
 }
 
 TEST_CASE_METHOD(ConfigResolverFixture,
@@ -808,74 +790,18 @@ TEST_CASE("ConfigResolver vector sentinel operations",
     std::filesystem::remove_all(tempDir, ec);
 }
 
-TEST_CASE_METHOD(ConfigResolverFixture, "ConfigResolver parses [tuning] section",
+TEST_CASE_METHOD(ConfigResolverFixture, "shared flat TOML parser reads tuning sections",
                  "[daemon][components][config][catch2]") {
-    SECTION("efficient profile parses correctly") {
-        auto configPath = writeToml("efficient.toml", R"(
-[tuning]
-profile = "efficient"
-)");
-        auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
-        CHECK((config["tuning.profile"] == "efficient"));
-    }
-
-    SECTION("balanced profile parses correctly") {
-        auto configPath = writeToml("balanced.toml", R"(
-[tuning]
-profile = "balanced"
-)");
-        auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
-        CHECK((config["tuning.profile"] == "balanced"));
-    }
-
-    SECTION("aggressive profile parses correctly") {
-        auto configPath = writeToml("aggressive.toml", R"(
-[tuning]
-profile = "aggressive"
-)");
-        auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
-        CHECK((config["tuning.profile"] == "aggressive"));
-    }
-
-    SECTION("conservative alias for efficient") {
-        auto configPath = writeToml("conservative.toml", R"(
-[tuning]
-profile = "conservative"
-)");
-        auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
-        CHECK((config["tuning.profile"] == "conservative"));
-    }
-
-    SECTION("case-insensitive profile names") {
-        auto configPath = writeToml("case_test.toml", R"(
-[tuning]
-profile = "EFFICIENT"
-)");
-        auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
-        CHECK((config["tuning.profile"] == "EFFICIENT"));
-    }
-
-    SECTION("missing tuning section returns empty") {
-        auto configPath = writeToml("no_tuning.toml", R"(
-[daemon]
-socket_path = "/tmp/test.sock"
-)");
-        auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
-        CHECK((config.find("tuning.profile") == config.end()));
-    }
-
-    SECTION("multiple tuning options parsed together") {
-        auto configPath = writeToml("multi_tuning.toml", R"(
+    auto configPath = writeToml("multi_tuning.toml", R"(
 [tuning]
 profile = "aggressive"
 pool_cooldown_ms = 250
 worker_poll_ms = 100
 )");
-        auto config = ConfigResolver::parseSimpleTomlFlat(configPath);
-        CHECK((config["tuning.profile"] == "aggressive"));
-        CHECK((config["tuning.pool_cooldown_ms"] == "250"));
-        CHECK((config["tuning.worker_poll_ms"] == "100"));
-    }
+    auto config = yams::config::parse_simple_toml(configPath);
+    CHECK((config["tuning.profile"] == "aggressive"));
+    CHECK((config["tuning.pool_cooldown_ms"] == "250"));
+    CHECK((config["tuning.worker_poll_ms"] == "100"));
 }
 
 TEST_CASE("Tuning profile from config affects TuneAdvisor methods",
@@ -1010,90 +936,6 @@ TEST_CASE("YAMS_TUNING_PROFILE env var overrides config", "[daemon][components][
 
         auto profile = yams::daemon::TuneAdvisor::tuningProfile();
         CHECK((profile == yams::daemon::TuneAdvisor::Profile::Balanced));
-    }
-}
-
-TEST_CASE_METHOD(ConfigResolverFixture,
-                 "ConfigResolver::resolvePostIngestCaps reads [tuning.post_ingest]",
-                 "[daemon][components][config][post_ingest][catch2]") {
-    SECTION("missing section returns all nullopt") {
-        auto configPath = writeToml("no_post_ingest.toml", R"(
-[tuning]
-profile = "balanced"
-)");
-        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
-        auto caps = ConfigResolver::resolvePostIngestCaps();
-        CHECK_FALSE(caps.totalConcurrent.has_value());
-        CHECK_FALSE(caps.embedConcurrent.has_value());
-        CHECK_FALSE(caps.extractionConcurrent.has_value());
-        CHECK_FALSE(caps.kgConcurrent.has_value());
-        CHECK_FALSE(caps.symbolConcurrent.has_value());
-        CHECK_FALSE(caps.entityConcurrent.has_value());
-        CHECK_FALSE(caps.titleConcurrent.has_value());
-    }
-
-    SECTION("all keys populate the struct") {
-        auto configPath = writeToml("post_ingest.toml", R"(
-[tuning.post_ingest]
-total_concurrent = 12
-embed_concurrent = 4
-extraction_concurrent = 5
-kg_concurrent = 6
-symbol_concurrent = 3
-entity_concurrent = 2
-title_concurrent = 2
-)");
-        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
-        auto caps = ConfigResolver::resolvePostIngestCaps();
-        REQUIRE(caps.totalConcurrent.has_value());
-        CHECK((*caps.totalConcurrent == 12u));
-        REQUIRE(caps.embedConcurrent.has_value());
-        CHECK((*caps.embedConcurrent == 4u));
-        REQUIRE(caps.extractionConcurrent.has_value());
-        CHECK((*caps.extractionConcurrent == 5u));
-        REQUIRE(caps.kgConcurrent.has_value());
-        CHECK((*caps.kgConcurrent == 6u));
-        REQUIRE(caps.symbolConcurrent.has_value());
-        CHECK((*caps.symbolConcurrent == 3u));
-        REQUIRE(caps.entityConcurrent.has_value());
-        CHECK((*caps.entityConcurrent == 2u));
-        REQUIRE(caps.titleConcurrent.has_value());
-        CHECK((*caps.titleConcurrent == 2u));
-    }
-
-    SECTION("out-of-range values are dropped (nullopt)") {
-        auto configPath = writeToml("oor.toml", R"(
-[tuning.post_ingest]
-total_concurrent = 0
-embed_concurrent = 99
-extraction_concurrent = 500
-entity_concurrent = 17
-)");
-        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
-        auto caps = ConfigResolver::resolvePostIngestCaps();
-        CHECK_FALSE(caps.totalConcurrent.has_value());
-        CHECK_FALSE(caps.embedConcurrent.has_value());
-        CHECK_FALSE(caps.extractionConcurrent.has_value());
-        CHECK_FALSE(caps.entityConcurrent.has_value());
-    }
-
-    SECTION("partial population — only set keys populate") {
-        auto configPath = writeToml("partial.toml", R"(
-[tuning.post_ingest]
-embed_concurrent = 3
-kg_concurrent = 5
-)");
-        EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
-        auto caps = ConfigResolver::resolvePostIngestCaps();
-        CHECK_FALSE(caps.totalConcurrent.has_value());
-        REQUIRE(caps.embedConcurrent.has_value());
-        CHECK((*caps.embedConcurrent == 3u));
-        CHECK_FALSE(caps.extractionConcurrent.has_value());
-        REQUIRE(caps.kgConcurrent.has_value());
-        CHECK((*caps.kgConcurrent == 5u));
-        CHECK_FALSE(caps.symbolConcurrent.has_value());
-        CHECK_FALSE(caps.entityConcurrent.has_value());
-        CHECK_FALSE(caps.titleConcurrent.has_value());
     }
 }
 

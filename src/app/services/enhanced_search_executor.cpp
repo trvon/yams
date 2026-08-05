@@ -1,87 +1,84 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include <yams/app/services/enhanced_search_executor.h>
-#include <yams/common/string_utils.h>
+#include <yams/config/config_helpers.h>
+#include <yams/config/detail/config_parse_utils.h>
 
-#include <filesystem>
-#include <fstream>
-#include <regex>
+#include <initializer_list>
+#include <optional>
+#include <string_view>
 
 namespace yams::app::services {
 
-namespace fs = std::filesystem;
-
 EnhancedConfig EnhancedSearchExecutor::loadConfigFromToml() {
-    EnhancedConfig out{};
-    // Resolve config path
-    fs::path cfgPath;
-    if (const char* xdg = std::getenv("XDG_CONFIG_HOME"))
-        cfgPath = fs::path(xdg) / "yams" / "config.toml";
-    else if (const char* home = std::getenv("HOME"))
-        cfgPath = fs::path(home) / ".config" / "yams" / "config.toml";
-    if (cfgPath.empty() || !fs::exists(cfgPath))
-        return out; // defaults (disabled)
+    EnhancedConfig config{};
+    bool invalidValue = false;
+    const auto values = yams::config::parse_simple_toml(yams::config::get_config_path());
 
-    std::ifstream in(cfgPath);
-    if (!in)
-        return out;
-
-    std::string line;
-    std::string section;
-    auto is_bool = [](const std::string& v) {
-        auto t = v;
-        for (auto& c : t)
-            c = static_cast<char>(::tolower(c));
-        return t == "true" || t == "false" || t == "1" || t == "0";
-    };
-    auto to_bool = [&](const std::string& v) {
-        auto t = v;
-        for (auto& c : t)
-            c = static_cast<char>(::tolower(c));
-        return t == "true" || t == "1";
-    };
-
-    while (std::getline(in, line)) {
-        auto l = yams::common::trimCopy(line);
-        if (l.empty() || l[0] == '#')
-            continue;
-        if (l.front() == '[') {
-            auto end = l.find(']');
-            if (end != std::string::npos)
-                section = l.substr(1, end - 1);
-            continue;
+    const auto findValue =
+        [&](std::initializer_list<std::string_view> keys) -> std::optional<std::string_view> {
+        for (const auto key : keys) {
+            if (const auto it = values.find(std::string(key)); it != values.end()) {
+                return it->second;
+            }
         }
-        auto eq = l.find('=');
-        if (eq == std::string::npos)
-            continue;
-        auto key = yams::common::trimCopy(l.substr(0, eq));
-        auto val = yams::common::trimCopy(l.substr(eq + 1));
-        if (!val.empty() && val.front() == '"' && val.back() == '"')
-            val = val.substr(1, val.size() - 2);
+        return std::nullopt;
+    };
+    const auto assignDouble = [&](std::initializer_list<std::string_view> keys, double& target) {
+        if (const auto raw = findValue(keys)) {
+            if (const auto parsed = yams::config::detail::parseDouble(*raw)) {
+                target = *parsed;
+            } else {
+                invalidValue = true;
+            }
+        }
+    };
 
-        if (section == "search.enhanced" || section == "experimental.enhanced_search") {
-            if (key == "enable" && is_bool(val))
-                out.enable = to_bool(val);
-            else if (key == "classification_weight")
-                out.classification_weight = std::stod(val);
-            else if (key == "kg_expansion_weight")
-                out.kg_expansion_weight = std::stod(val);
-            else if (key == "hotzone_weight")
-                out.hotzone_weight = std::stod(val);
-            else if (key == "enhanced_search_timeout_ms")
-                out.enhanced_search_timeout_ms = std::stoi(val);
-        } else if (section == "search.hotzones" || section == "experimental.hotzones") {
-            if (key == "decay_interval_hours")
-                out.hotzones.half_life_hours = std::stod(val);
-            else if (key == "max_boost_factor")
-                out.hotzones.max_boost_factor = std::stod(val);
-            else if (key == "enable_persistence" && is_bool(val))
-                out.hotzones.enable_persistence = to_bool(val);
-            else if (key == "data_file")
-                out.hotzones.data_file = val;
-            // Other experimental keys (e.g., decay_factor, min_frequency) are ignored in Phase A.
+    if (const auto raw =
+            findValue({"search.enhanced.enable", "experimental.enhanced_search.enable"})) {
+        if (const auto parsed = yams::config::detail::parseTomlBool(*raw)) {
+            config.enable = *parsed;
+        } else {
+            invalidValue = true;
         }
     }
-    return out;
+    assignDouble({"search.enhanced.classification_weight",
+                  "experimental.enhanced_search.classification_weight"},
+                 config.classification_weight);
+    assignDouble(
+        {"search.enhanced.kg_expansion_weight", "experimental.enhanced_search.kg_expansion_weight"},
+        config.kg_expansion_weight);
+    assignDouble({"search.enhanced.hotzone_weight", "experimental.enhanced_search.hotzone_weight"},
+                 config.hotzone_weight);
+    if (const auto raw = findValue({"search.enhanced.enhanced_search_timeout_ms",
+                                    "experimental.enhanced_search.enhanced_search_timeout_ms"})) {
+        if (const auto parsed = yams::config::detail::parseUnsignedIntegral<int>(*raw)) {
+            config.enhanced_search_timeout_ms = *parsed;
+        } else {
+            invalidValue = true;
+        }
+    }
+
+    assignDouble(
+        {"search.hotzones.decay_interval_hours", "experimental.hotzones.decay_interval_hours"},
+        config.hotzones.half_life_hours);
+    assignDouble({"search.hotzones.max_boost_factor", "experimental.hotzones.max_boost_factor"},
+                 config.hotzones.max_boost_factor);
+    if (const auto raw = findValue(
+            {"search.hotzones.enable_persistence", "experimental.hotzones.enable_persistence"})) {
+        if (const auto parsed = yams::config::detail::parseTomlBool(*raw)) {
+            config.hotzones.enable_persistence = *parsed;
+        } else {
+            invalidValue = true;
+        }
+    }
+    if (const auto raw =
+            findValue({"search.hotzones.data_file", "experimental.hotzones.data_file"})) {
+        config.hotzones.data_file = *raw;
+    }
+
+    // Preserve the previous fail-closed section behavior: one malformed recognized setting
+    // disables the enhancement instead of enabling a partially defaulted pipeline.
+    return invalidValue ? EnhancedConfig{} : config;
 }
 
 void EnhancedSearchExecutor::apply(const AppContext& /*ctx*/, const EnhancedConfig& cfg,

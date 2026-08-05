@@ -182,6 +182,9 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon restores compatibility path environment"
     yams::test::ScopedEnvVar storage("YAMS_STORAGE", "/before/storage");
     yams::test::ScopedEnvVar data("YAMS_DATA_DIR", "/before/data");
     yams::test::ScopedEnvVar config("YAMS_CONFIG", "/before/config.toml");
+    const auto compatibilityConfig = runtime_root_ / "before-compatibility.toml";
+    std::ofstream(compatibilityConfig) << "[daemon]\nmode = \"old\"\n";
+    yams::test::ScopedEnvVar configCompatibility("YAMS_CONFIG_PATH", compatibilityConfig.string());
     yams::test::ScopedEnvVar socket("YAMS_DAEMON_SOCKET", "/before/socket.sock");
     yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", "before");
 
@@ -190,6 +193,8 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon restores compatibility path environment"
     CHECK((yams::config::getenv_copy("YAMS_STORAGE") == config_.dataDir.string()));
     CHECK((yams::config::getenv_copy("YAMS_DATA_DIR") == config_.dataDir.string()));
     CHECK((yams::config::getenv_copy("YAMS_CONFIG") == config_.configFilePath.string()));
+    CHECK((yams::config::getenv_copy("YAMS_CONFIG_PATH") == config_.configFilePath.string()));
+    CHECK((yams::config::get_config_path() == config_.configFilePath));
     CHECK((yams::config::getenv_copy("YAMS_DAEMON_SOCKET") == config_.socketPath.string()));
     CHECK((yams::config::getenv_copy("YAMS_IN_DAEMON") == "1"));
 
@@ -197,6 +202,7 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon restores compatibility path environment"
     CHECK((yams::config::getenv_copy("YAMS_STORAGE") == "/before/storage"));
     CHECK((yams::config::getenv_copy("YAMS_DATA_DIR") == "/before/data"));
     CHECK((yams::config::getenv_copy("YAMS_CONFIG") == "/before/config.toml"));
+    CHECK((yams::config::getenv_copy("YAMS_CONFIG_PATH") == compatibilityConfig.string()));
     CHECK((yams::config::getenv_copy("YAMS_DAEMON_SOCKET") == "/before/socket.sock"));
     CHECK((yams::config::getenv_copy("YAMS_IN_DAEMON") == "before"));
 }

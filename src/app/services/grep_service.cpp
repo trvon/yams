@@ -66,28 +66,9 @@ struct PathTreeConfigSettings {
     std::string mode{"fallback"};
 };
 
-static std::filesystem::path resolveConfigPath() {
-    if (const char* explicitPath = std::getenv("YAMS_CONFIG_PATH")) {
-        std::filesystem::path p{explicitPath};
-        if (std::filesystem::exists(p))
-            return p;
-    }
-    if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
-        std::filesystem::path p = std::filesystem::path(xdg) / "yams" / "config.toml";
-        if (std::filesystem::exists(p))
-            return p;
-    }
-    if (const char* home = std::getenv("HOME")) {
-        std::filesystem::path p = std::filesystem::path(home) / ".config" / "yams" / "config.toml";
-        if (std::filesystem::exists(p))
-            return p;
-    }
-    return {};
-}
-
 static PathTreeConfigSettings loadPathTreeConfigSettings() {
     PathTreeConfigSettings cfg;
-    if (auto cfgPath = resolveConfigPath(); !cfgPath.empty()) {
+    if (const auto cfgPath = yams::config::get_config_path(); std::filesystem::exists(cfgPath)) {
         auto values = yams::config::parse_simple_toml(cfgPath);
         if (auto it = values.find("search.path_tree.enable"); it != values.end()) {
             auto v = yams::common::asciiToLowerCopy(it->second);
@@ -100,8 +81,8 @@ static PathTreeConfigSettings loadPathTreeConfigSettings() {
         }
     }
 
-    if (const char* envEnable = std::getenv("YAMS_GREP_PATH_TREE")) {
-        auto v = yams::common::asciiToLowerCopy(envEnable);
+    if (const auto envEnable = yams::config::getenv_optional("YAMS_GREP_PATH_TREE")) {
+        auto v = yams::common::asciiToLowerCopy(*envEnable);
         if (v == "0" || v == "false" || v == "off" || v == "no") {
             cfg.enabled = false;
         } else {
@@ -110,8 +91,8 @@ static PathTreeConfigSettings loadPathTreeConfigSettings() {
                 cfg.mode = v;
         }
     }
-    if (const char* envMode = std::getenv("YAMS_GREP_PATH_TREE_MODE")) {
-        auto v = yams::common::asciiToLowerCopy(envMode);
+    if (const auto envMode = yams::config::getenv_optional("YAMS_GREP_PATH_TREE_MODE")) {
+        auto v = yams::common::asciiToLowerCopy(*envMode);
         if (v == "preferred" || v == "fallback")
             cfg.mode = v;
     }
@@ -409,14 +390,11 @@ public:
             afterContext = 0;
 
         // Stage caps and timeouts (env-overridable)
-        auto getenv_int = [](const char* k, int def) -> int {
-            if (const char* v = std::getenv(k)) {
-                try {
-                    return std::max(0, std::stoi(v));
-                } catch (...) {
-                }
+        auto getenv_int = [](const char* key, int defaultValue) -> int {
+            if (const auto value = yams::config::read_env_int(key).value) {
+                return std::max(0, *value);
             }
-            return def;
+            return defaultValue;
         };
         // PERFORMANCE: Lower default limits to prevent timeouts on large repos
         // Users can override with environment variables if needed
@@ -643,7 +621,7 @@ public:
         const auto candidateClassificationStart = GrepClock::now();
         {
             YAMS_ZONE_SCOPED_N("grep_service::candidate_classification");
-            const size_t maxFileSize = 100 * 1024 * 1024;
+            const size_t maxFileSize = 100ULL * 1024 * 1024;
             size_t filesSkippedType = 0;
             size_t filesSkippedSize = 0;
             size_t filesSkippedGenerated = 0;
@@ -1403,7 +1381,10 @@ public:
                             }
                         }
                     }
+                } catch (const std::exception& error) {
+                    spdlog::debug("[GrepService] semantic fallback failed: {}", error.what());
                 } catch (...) {
+                    spdlog::debug("[GrepService] semantic fallback failed with unknown error");
                 }
             }
         }
@@ -1567,9 +1548,7 @@ private:
         if (!prefixes.empty()) {
             for (const auto& prefix : prefixes) {
                 auto nodeRes = repo->findPathTreeNodeByFullPath(prefix);
-                if (nodeRes && nodeRes.value()) {
-                    fetchPrefix(prefix);
-                } else if (pathTreePreferred_) {
+                if ((nodeRes && nodeRes.value()) || pathTreePreferred_) {
                     fetchPrefix(prefix);
                 }
             }

@@ -21,7 +21,6 @@ src/cli/commands/doctor_command.cpp:93:raw-env/setenv # Windows compatibility wr
 src/cli/commands/doctor_command.cpp:101:raw-env/_putenv_s # Windows compatibility wrapper; migrate under task 71
 src/cli/commands/doctor_command.cpp:103:raw-env/unsetenv # Windows compatibility wrapper; migrate under task 71
 src/cli/commands/doctor_command.cpp:104:raw-env/_putenv_s # Windows compatibility wrapper; migrate under task 71
-src/cli/commands/doctor_command.cpp:463:raw-env/setenv # Doctor compatibility default-if-unset; migrate under task 71
 src/cli/commands/search_command.cpp:1215:raw-env/setenv # Search client data-path compatibility; migrate under task 71
 src/cli/commands/search_command.cpp:1217:raw-env/setenv # Search client data-path compatibility; migrate under task 71
 src/daemon/client/daemon_client.cpp:1219:raw-env/_putenv_s # Client timeout compatibility write; migrate under task 71
@@ -39,12 +38,12 @@ src/daemon/daemon_main.cpp:821:raw-env/setenv # Pre-thread foreground process ma
 src/extraction/plugin_process.cpp:282:raw-env/setenv # Child plugin process environment construction
 src/mcp/mcp_server.cpp:74:raw-env/setenv # Windows compatibility wrapper; migrate under task 71
 src/mcp/mcp_server.cpp:81:raw-env/_putenv_s # Windows compatibility wrapper; migrate under task 71
-src/mcp/mcp_server_handlers.cpp:69:raw-env/setenv # Windows compatibility wrapper; migrate under task 71
-src/mcp/mcp_server_handlers.cpp:76:raw-env/_putenv_s # Windows compatibility wrapper; migrate under task 71
+src/mcp/mcp_server_handlers.cpp:68:raw-env/setenv # Windows compatibility wrapper; migrate under task 71
+src/mcp/mcp_server_handlers.cpp:75:raw-env/_putenv_s # Windows compatibility wrapper; migrate under task 71
 src/mcp/mcp_server_tool_registry.cpp:72:raw-env/setenv # Windows compatibility wrapper; migrate under task 71
 src/mcp/mcp_server_tool_registry.cpp:79:raw-env/_putenv_s # Windows compatibility wrapper; migrate under task 71
-src/mcp/mcp_server_transport.cpp:72:raw-env/setenv # Windows compatibility wrapper; migrate under task 71
-src/mcp/mcp_server_transport.cpp:79:raw-env/_putenv_s # Windows compatibility wrapper; migrate under task 71
+src/mcp/mcp_server_transport.cpp:71:raw-env/setenv # Windows compatibility wrapper; migrate under task 71
+src/mcp/mcp_server_transport.cpp:78:raw-env/_putenv_s # Windows compatibility wrapper; migrate under task 71
 tools/fuzzing/fuzz_plugin_abi_mount.cpp:55:raw-env/setenv # Single-process fuzz harness setup
 tools/fuzzing/fuzz_plugin_abi_negotiation.cpp:51:raw-env/setenv # Single-process fuzz harness setup
 tools/yams-cli/main.cpp:39:raw-env/setenv # Pre-thread one-shot executable marker

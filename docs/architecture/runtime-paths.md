@@ -6,7 +6,7 @@ YAMS resolves process paths once through `yams::config::resolve_runtime_paths()`
 
 | Path | Precedence (highest first) |
 |---|---|
-| Config file | explicit `--config`/typed override, `YAMS_CONFIG`, platform config default |
+| Config file | explicit `--config`/typed override, existing `YAMS_CONFIG_PATH` compatibility override, `YAMS_CONFIG`, platform config default |
 | Data directory | explicit `--data-dir`/typed override, TOML `core.data_dir`, compatible `[daemon]` data keys, `YAMS_DATA_DIR` or legacy `YAMS_STORAGE`, platform data default |
 | Runtime directory | explicit typed override, `XDG_RUNTIME_DIR`/Windows runtime default, per-user temporary fallback |
 | Daemon socket | explicit `--socket`/typed override, `YAMS_DAEMON_SOCKET` or compatibility `YAMS_DAEMON_SOCKET_PATH`, TOML `daemon.socket_path`, platform socket default |
@@ -16,7 +16,7 @@ Every resolved field records its `RuntimePathSource` and source name. The snapsh
 
 ## Alias conflicts
 
-Compatibility aliases remain supported. Equal aliases are accepted. Unequal aliases fail closed when they would decide the effective path:
+Compatibility aliases remain supported. `YAMS_CONFIG_PATH` is a legacy test/daemon override: it is used only when it names an existing file, then `YAMS_CONFIG` remains the canonical environment path. Equal path aliases are accepted. Unequal aliases fail closed when they would decide the effective path:
 
 - `YAMS_DATA_DIR` versus `YAMS_STORAGE`
 - `YAMS_DAEMON_SOCKET` versus `YAMS_DAEMON_SOCKET_PATH`

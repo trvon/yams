@@ -5,6 +5,7 @@ sqlite_dep = dependency('sqlite3', required: true)
 yams_core = dependency('yams_core', required: false)
 yams_crypto = dependency('yams_crypto', required: false)
 yams_compression = dependency('yams_compression', required: false)
+yams_config = dependency('yams_config', required: true)
 
 storage_testing_cpp_args = []
 if get_option('build-tests') or (get_option('buildtype') == 'debug' and not get_option('build-fuzzers'))
@@ -31,7 +32,16 @@ yams_storage_engine = static_library('yams_storage_engine',
     '../storage/object_storage_adapter.cpp',
   ],
   include_directories: include_directories('../../include'),
-  dependencies: [spdlog_dep, threads_dep, curl_dep, yams_core, yams_crypto, yams_compression, dl_dep] + apple_security_deps,
+  dependencies: [
+    spdlog_dep,
+    threads_dep,
+    curl_dep,
+    yams_core,
+    yams_crypto,
+    yams_compression,
+    yams_config,
+    dl_dep,
+  ] + apple_security_deps,
   cpp_args: storage_testing_cpp_args,
   install: true,
 )
@@ -63,6 +73,7 @@ pkg.generate(yams_reference_counter,
 yams_storage_engine_dep = declare_dependency(
   link_with: yams_storage_engine,
   include_directories: include_directories('../../include'),
+  dependencies: [yams_config],
 )
 meson.override_dependency('yams_storage_engine', yams_storage_engine_dep)
 

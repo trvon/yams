@@ -10,6 +10,7 @@ yams_api_lib = static_library('yams_api',
   ],
   dependencies: [
     dependency('yams_core'),
+    dependency('yams_config'),
     dependency('yams_storage_engine'),
     dependency('yams_reference_counter'),
     dependency('yams_chunking'),
@@ -39,6 +40,7 @@ pkg.generate(yams_api_lib,
 yams_api_dep = declare_dependency(
   link_with: yams_api_lib,
   include_directories: include_directories('../../include'),
+  dependencies: [dependency('yams_config')],
 )
 
 meson.override_dependency('yams_api', yams_api_dep)

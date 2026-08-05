@@ -4,7 +4,6 @@
 #include <limits>
 #include <map>
 #include <mutex>
-#include <sstream>
 #include <stdexcept>
 #include <unordered_set>
 
@@ -50,6 +49,34 @@ void warnEnvironmentOnce(const std::string& message) {
     if (firstOccurrence) {
         spdlog::warn("{}", message);
     }
+}
+
+std::size_t findFlatTomlComment(std::string_view value) {
+    char activeQuote = '\0';
+    bool escaped = false;
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        const char current = value[i];
+        if (activeQuote == '"' && escaped) {
+            escaped = false;
+            continue;
+        }
+        if (activeQuote == '"' && current == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (activeQuote != '\0') {
+            if (current == activeQuote) {
+                activeQuote = '\0';
+            }
+            continue;
+        }
+        if (current == '"' || current == '\'') {
+            activeQuote = current;
+        } else if (current == '#') {
+            return i;
+        }
+    }
+    return std::string_view::npos;
 }
 
 template <typename T, typename Parser>
@@ -502,71 +529,30 @@ std::filesystem::path get_legacy_plugin_trust_file() {
 
 std::string parse_config_value(const std::filesystem::path& config_path, const std::string& section,
                                const std::string& key) {
-    std::ifstream file(config_path);
-    if (!file) {
-        return "";
+    const auto values = parse_simple_toml(config_path);
+    const auto qualifiedKey = section.empty() ? key : section + "." + key;
+    if (const auto it = values.find(qualifiedKey); it != values.end()) {
+        return it->second;
     }
-
-    std::string line;
-    std::string currentSection;
-    bool in_target_section = section.empty();
-
-    while (std::getline(file, line)) {
-        trim(line);
-
-        // Skip comments and empty lines
-        if (line.empty() || line[0] == '#') {
-            continue;
-        }
-
-        // Check for section headers [section]
-        if (line[0] == '[') {
-            size_t end = line.find(']');
-            if (end != std::string::npos) {
-                currentSection = line.substr(1, end - 1);
-                trim(currentSection);
-                in_target_section = (section.empty() || currentSection == section);
-            }
-            continue;
-        }
-
-        // Parse key-value pairs
-        if (in_target_section) {
-            size_t eq = line.find('=');
-            if (eq != std::string::npos) {
-                std::string k = line.substr(0, eq);
-                std::string v = line.substr(eq + 1);
-
-                trim(k);
-                trim(v);
-
-                // Remove inline comments
-                size_t comment = v.find('#');
-                if (comment != std::string::npos) {
-                    v = v.substr(0, comment);
-                    trim(v);
-                }
-
-                const bool qualifiedKey = !section.empty() && k == section + "." + key;
-                if ((in_target_section && k == key) || qualifiedKey) {
-                    return unquote(v);
-                }
-            }
-        }
-    }
-
-    return "";
+    return {};
 }
 
 std::filesystem::path get_config_path(const std::string& override_path) {
     if (!override_path.empty()) {
         return std::filesystem::path(override_path);
     }
-    // Check YAMS_CONFIG environment variable first (used by test fixtures)
-    if (const auto configEnv = getenv_copy("YAMS_CONFIG"); !configEnv.empty()) {
-        return std::filesystem::path(configEnv);
+    // Compatibility override retained for ConfigResolver callers and older harnesses. A stale
+    // compatibility path falls through to the canonical path instead of masking it.
+    if (const auto compatibilityEnv = getenv_copy("YAMS_CONFIG_PATH"); !compatibilityEnv.empty()) {
+        const auto compatibilityPath = expand_tilde(compatibilityEnv);
+        std::error_code error;
+        if (std::filesystem::exists(compatibilityPath, error) && !error) {
+            return compatibilityPath;
+        }
     }
-    // Use the platform-specific config directory helper
+    if (const auto configEnv = getenv_copy("YAMS_CONFIG"); !configEnv.empty()) {
+        return expand_tilde(configEnv);
+    }
     return get_config_dir() / "config.toml";
 }
 
@@ -606,12 +592,26 @@ Result<ResolvedRuntimePaths> resolve_runtime_paths(const RuntimePathOverrides& o
     if (overrides.configFile && !overrides.configFile->empty()) {
         resolved.configFile = make_resolved_path(expand_tilde(overrides.configFile->string()),
                                                  RuntimePathSource::Explicit, "explicit config");
-    } else if (const auto configEnv = getenv_copy("YAMS_CONFIG"); !configEnv.empty()) {
-        resolved.configFile = make_resolved_path(expand_tilde(configEnv),
-                                                 RuntimePathSource::Environment, "YAMS_CONFIG");
     } else {
-        resolved.configFile = make_resolved_path(
-            get_config_path(), RuntimePathSource::PlatformDefault, "platform config default");
+        const auto compatibilityConfig = getenv_copy("YAMS_CONFIG_PATH");
+        const auto canonicalConfig = getenv_copy("YAMS_CONFIG");
+        std::error_code compatibilityError;
+        const bool compatibilityActive =
+            !compatibilityConfig.empty() &&
+            std::filesystem::exists(expand_tilde(compatibilityConfig), compatibilityError) &&
+            !compatibilityError;
+        const auto configSource = compatibilityActive || !canonicalConfig.empty()
+                                      ? RuntimePathSource::Environment
+                                      : RuntimePathSource::PlatformDefault;
+        const auto configSourceName =
+            compatibilityActive
+                ? "YAMS_CONFIG_PATH"
+                : (!canonicalConfig.empty() ? "YAMS_CONFIG" : "platform config default");
+        const auto configPath = compatibilityActive
+                                    ? expand_tilde(compatibilityConfig)
+                                    : (!canonicalConfig.empty() ? expand_tilde(canonicalConfig)
+                                                                : get_config_dir() / "config.toml");
+        resolved.configFile = make_resolved_path(configPath, configSource, configSourceName);
     }
 
     std::vector<std::pair<std::string, std::filesystem::path>> configuredDataPaths;
@@ -772,12 +772,7 @@ std::string resolve_daemon_mode_from_config() {
         }
     }
 
-    std::filesystem::path config_path;
-    if (const auto cfg_env = getenv_copy("YAMS_CONFIG"); !cfg_env.empty()) {
-        config_path = std::filesystem::path(cfg_env);
-    } else {
-        config_path = get_config_path();
-    }
+    const std::filesystem::path config_path = get_config_path();
 
     if (!config_path.empty()) {
         auto value = parse_config_value(config_path, "daemon", "mode");
@@ -803,15 +798,45 @@ std::vector<std::filesystem::path> parse_path_list(const std::string& raw) {
         s = s.substr(1, s.size() - 2);
     }
 
-    std::stringstream ss(s);
+    char activeQuote = '\0';
+    bool escaped = false;
     std::string item;
-    while (std::getline(ss, item, ',')) {
+    const auto appendItem = [&] {
         trim(item);
         item = unquote(item);
-        if (item.empty())
+        if (!item.empty()) {
+            out.emplace_back(expand_tilde(item));
+        }
+        item.clear();
+    };
+    for (const char current : s) {
+        if (activeQuote == '"' && escaped) {
+            item.push_back(current);
+            escaped = false;
             continue;
-        out.emplace_back(expand_tilde(item));
+        }
+        if (activeQuote == '"' && current == '\\') {
+            item.push_back(current);
+            escaped = true;
+            continue;
+        }
+        if (activeQuote != '\0') {
+            item.push_back(current);
+            if (current == activeQuote) {
+                activeQuote = '\0';
+            }
+            continue;
+        }
+        if (current == '"' || current == '\'') {
+            activeQuote = current;
+            item.push_back(current);
+        } else if (current == ',') {
+            appendItem();
+        } else {
+            item.push_back(current);
+        }
     }
+    appendItem();
 
     return out;
 }
@@ -860,16 +885,12 @@ std::map<std::string, std::string> parse_simple_toml(const std::filesystem::path
             trim(key);
             trim(value);
 
-            // Remove inline comments (but be careful with quoted strings)
-            bool inQuote = false;
-            for (size_t i = 0; i < value.size(); ++i) {
-                if (value[i] == '"' || value[i] == '\'') {
-                    inQuote = !inQuote;
-                } else if (value[i] == '#' && !inQuote) {
-                    value = value.substr(0, i);
-                    trim(value);
-                    break;
-                }
+            // Remove inline comments while respecting the active quote type and escaped double
+            // quotes. The flat reader deliberately preserves escape sequences in returned values.
+            if (const auto comment = findFlatTomlComment(value);
+                comment != std::string_view::npos) {
+                value.resize(comment);
+                trim(value);
             }
 
             value = unquote(value);

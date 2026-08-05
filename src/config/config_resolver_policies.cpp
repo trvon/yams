@@ -56,46 +56,8 @@ bool ConfigResolver::resolvePluginDirStrict(bool configuredStrict) {
 }
 
 std::filesystem::path ConfigResolver::resolveDefaultConfigPath() {
-    if (auto explicitPath = yams::config::getenv_copy("YAMS_CONFIG_PATH"); !explicitPath.empty()) {
-        std::filesystem::path p{explicitPath};
-        if (std::filesystem::exists(p))
-            return p;
-    }
-    // YAMS_CONFIG is the canonical env var used by test fixtures and
-    // config_helpers.cpp; accept it here so resolver-based policies respect
-    // the harness-supplied TOML.
-    if (auto fixtureConfig = yams::config::getenv_copy("YAMS_CONFIG"); !fixtureConfig.empty()) {
-        std::filesystem::path p{fixtureConfig};
-        if (std::filesystem::exists(p))
-            return p;
-    }
-#ifdef _WIN32
-    // Windows: prefer roaming APPDATA for config (matches get_config_dir())
-    if (auto appdata = yams::config::getenv_copy("APPDATA"); !appdata.empty()) {
-        std::filesystem::path p = std::filesystem::path(appdata) / "yams" / "config.toml";
-        if (std::filesystem::exists(p))
-            return p;
-    }
-#endif
-    if (auto xdg = yams::config::getenv_copy("XDG_CONFIG_HOME"); !xdg.empty()) {
-        std::filesystem::path p = std::filesystem::path(xdg) / "yams" / "config.toml";
-        if (std::filesystem::exists(p))
-            return p;
-    }
-    if (auto home = yams::config::getenv_copy("HOME"); !home.empty()) {
-        std::filesystem::path p = std::filesystem::path(home) / ".config" / "yams" / "config.toml";
-        if (std::filesystem::exists(p))
-            return p;
-    }
-#ifdef _WIN32
-    // Windows: check LOCALAPPDATA
-    if (auto localAppData = yams::config::getenv_copy("LOCALAPPDATA"); !localAppData.empty()) {
-        std::filesystem::path p = std::filesystem::path(localAppData) / "yams" / "config.toml";
-        if (std::filesystem::exists(p))
-            return p;
-    }
-#endif
-    return {};
+    const auto path = yams::config::get_config_path();
+    return std::filesystem::exists(path) ? path : std::filesystem::path{};
 }
 
 std::map<std::string, std::string>
@@ -125,7 +87,7 @@ std::string ConfigResolver::resolveEmbeddingBackend(const std::string& defaultVa
         namespace fs = std::filesystem;
         fs::path cfgPath = resolveDefaultConfigPath();
         if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            auto kv = parseSimpleTomlFlat(cfgPath);
+            auto kv = yams::config::parse_simple_toml(cfgPath);
             auto it = kv.find("embeddings.backend");
             if (it != kv.end() && !it->second.empty()) {
                 return normalize(it->second);
@@ -145,7 +107,7 @@ ConfigResolver::SimeonEncoderPolicy ConfigResolver::resolveSimeonEncoderPolicy()
         namespace fs = std::filesystem;
         fs::path cfgPath = resolveDefaultConfigPath();
         if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            auto kv = parseSimpleTomlFlat(cfgPath);
+            auto kv = yams::config::parse_simple_toml(cfgPath);
             if (auto it = kv.find("embeddings.simeon.encoder_profile");
                 it != kv.end() && !it->second.empty())
                 policy.encoderProfile = it->second;
@@ -197,7 +159,7 @@ ConfigResolver::EmbeddingRuntimePolicy ConfigResolver::resolveEmbeddingRuntimePo
         namespace fs = std::filesystem;
         fs::path cfgPath = resolveDefaultConfigPath();
         if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            auto kv = parseSimpleTomlFlat(cfgPath);
+            auto kv = yams::config::parse_simple_toml(cfgPath);
             if (auto it = kv.find("embeddings.runtime.backend");
                 it != kv.end() && !it->second.empty())
                 policy.backend = it->second;
@@ -256,7 +218,7 @@ ConfigResolver::SimeonBm25Policy ConfigResolver::resolveSimeonBm25Policy() {
         namespace fs = std::filesystem;
         fs::path cfgPath = resolveDefaultConfigPath();
         if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            auto kv = parseSimpleTomlFlat(cfgPath);
+            auto kv = yams::config::parse_simple_toml(cfgPath);
             if (auto it = kv.find("embeddings.simeon.bm25.enabled"); it != kv.end())
                 policy.enabled = parseTomlBool(it->second);
             if (auto it = kv.find("embeddings.simeon.bm25.variant");

@@ -48,8 +48,9 @@ TEST_CASE("StorageCompressionPolicyBuilderSmoke.ThresholdSkipsCompression",
 never_compress_below = 1048576  # 1 MiB
 async_compression = false
 )TOML";
-    write_config(xdg, cfg);
-    yams::test::ScopedEnvVar configHome("XDG_CONFIG_HOME", xdg.string());
+    const auto configPath = write_config(xdg, cfg);
+    yams::test::ScopedEnvVar compatibilityConfig("YAMS_CONFIG_PATH", std::nullopt);
+    yams::test::ScopedEnvVar canonicalConfig("YAMS_CONFIG", configPath);
 
     ContentStoreBuilder b;
     b.withStoragePath(temp_root);

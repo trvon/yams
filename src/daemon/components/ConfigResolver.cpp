@@ -219,7 +219,7 @@ bool ConfigResolver::detectEmbeddingPreloadFlag(const DaemonConfig& config) {
         cfgPath = resolveDefaultConfigPath();
     if (!cfgPath.empty()) {
         try {
-            auto kv = parseSimpleTomlFlat(cfgPath);
+            auto kv = yams::config::parse_simple_toml(cfgPath);
             auto it = kv.find("embeddings.preload_on_startup");
             if (it != kv.end()) {
                 std::string lower = it->second;
@@ -278,7 +278,7 @@ ConfigResolver::EmbeddingSelectionPolicy ConfigResolver::resolveEmbeddingSelecti
     try {
         auto cfgPath = resolveDefaultConfigPath();
         if (!cfgPath.empty()) {
-            auto kv = parseSimpleTomlFlat(cfgPath);
+            auto kv = yams::config::parse_simple_toml(cfgPath);
             if (auto it = kv.find("embeddings.selection.strategy"); it != kv.end()) {
                 policy.strategy = parseStrategy(it->second);
             }
@@ -407,7 +407,7 @@ ConfigResolver::EmbeddingChunkingPolicy ConfigResolver::resolveEmbeddingChunking
     try {
         auto cfgPath = resolveDefaultConfigPath();
         if (!cfgPath.empty()) {
-            applyFromKv(parseSimpleTomlFlat(cfgPath));
+            applyFromKv(yams::config::parse_simple_toml(cfgPath));
         }
     } catch (const std::exception& error) {
         spdlog::debug("Error reading embedding chunking policy: {}", error.what());
@@ -542,7 +542,7 @@ std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,
             !config.configFilePath.empty() ? config.configFilePath : resolveDefaultConfigPath();
         if (!cfgPath.empty() && fs::exists(cfgPath)) {
             // Flat parse for explicit keys
-            auto kv = parseSimpleTomlFlat(cfgPath);
+            auto kv = yams::config::parse_simple_toml(cfgPath);
             auto it = kv.find("embeddings.preferred_model");
             if (it != kv.end() && !it->second.empty()) {
                 preferred = it->second;
@@ -728,7 +728,7 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
         namespace fs = std::filesystem;
         fs::path cfgPath = resolveDefaultConfigPath();
         if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            auto kv = parseSimpleTomlFlat(cfgPath);
+            auto kv = yams::config::parse_simple_toml(cfgPath);
             auto parseFloat = [](const std::string& s) -> std::optional<float> {
                 try {
                     return std::stof(s);
@@ -907,7 +907,7 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
         fs::path cfgPath = resolveDefaultConfigPath();
         std::map<std::string, std::string> kv;
         if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            kv = parseSimpleTomlFlat(cfgPath);
+            kv = yams::config::parse_simple_toml(cfgPath);
         }
 
         if (auto it = kv.find("topology.engine"); it != kv.end()) {
@@ -1005,7 +1005,7 @@ ConfigResolver::TopologyTunerPolicy ConfigResolver::resolveTopologyTunerPolicy()
             return policy;
         }
 
-        auto kv = parseSimpleTomlFlat(cfgPath);
+        auto kv = yams::config::parse_simple_toml(cfgPath);
 
         if (auto it = kv.find("topology.tuner.enabled"); it != kv.end()) {
             policy.enabled = ConfigResolver::envTruthy(it->second.c_str());
@@ -1055,7 +1055,7 @@ ConfigResolver::resolveRerankerBackendPolicy(const DaemonConfig& config) {
         fs::path cfgPath =
             !config.configFilePath.empty() ? config.configFilePath : resolveDefaultConfigPath();
         if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            auto kv = parseSimpleTomlFlat(cfgPath);
+            auto kv = yams::config::parse_simple_toml(cfgPath);
             if (auto it = kv.find("search.reranker_backend");
                 it != kv.end() && !it->second.empty()) {
                 policy.backend = normalize(it->second);
@@ -1108,7 +1108,7 @@ ConfigResolver::resolveInstrumentationPolicy(const DaemonConfig& config) {
         fs::path cfgPath =
             !config.configFilePath.empty() ? config.configFilePath : resolveDefaultConfigPath();
         if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            auto kv = parseSimpleTomlFlat(cfgPath);
+            auto kv = yams::config::parse_simple_toml(cfgPath);
             if (auto it = kv.find("daemon.instrumentation.profile");
                 it != kv.end() && !it->second.empty()) {
                 policy.profile = normalize(it->second);
@@ -1394,52 +1394,52 @@ ConfigResolver::PostIngestCaps ConfigResolver::resolvePostIngestCaps() {
     PostIngestCaps caps;
 
     try {
-        namespace fs = std::filesystem;
-        fs::path cfgPath = resolveDefaultConfigPath();
-        if (cfgPath.empty() || !fs::exists(cfgPath)) {
+        const auto configPath = resolveDefaultConfigPath();
+        if (configPath.empty()) {
             return caps;
         }
-
-        auto kv = parseSimpleTomlFlat(cfgPath);
-
-        auto parseBounded = [](const std::string& s, std::uint32_t lo,
-                               std::uint32_t hi) -> std::optional<std::uint32_t> {
-            try {
-                auto raw = static_cast<std::uint32_t>(std::stoul(s));
-                if (raw < lo || raw > hi)
-                    return std::nullopt;
-                return raw;
-            } catch (const std::exception&) {
+        const auto values = yams::config::parse_simple_toml(configPath);
+        const auto parseBounded = [](std::string_view raw, std::uint32_t minimum,
+                                     std::uint32_t maximum) -> std::optional<std::uint32_t> {
+            const auto parsed = parseUnsignedIntegral<std::uint32_t>(raw);
+            if (!parsed || *parsed < minimum || *parsed > maximum) {
                 return std::nullopt;
             }
+            return parsed;
         };
 
-        if (auto it = kv.find("tuning.post_ingest.total_concurrent"); it != kv.end()) {
+        if (const auto it = values.find("tuning.post_ingest.total_concurrent");
+            it != values.end()) {
             caps.totalConcurrent = parseBounded(it->second, 1, 256);
         }
-        if (auto it = kv.find("tuning.post_ingest.embed_concurrent"); it != kv.end()) {
+        if (const auto it = values.find("tuning.post_ingest.embed_concurrent");
+            it != values.end()) {
             caps.embedConcurrent = parseBounded(it->second, 1, 32);
         }
-        if (auto it = kv.find("tuning.post_ingest.extraction_concurrent"); it != kv.end()) {
+        if (const auto it = values.find("tuning.post_ingest.extraction_concurrent");
+            it != values.end()) {
             caps.extractionConcurrent = parseBounded(it->second, 1, 64);
         }
-        if (auto it = kv.find("tuning.post_ingest.kg_concurrent"); it != kv.end()) {
+        if (const auto it = values.find("tuning.post_ingest.kg_concurrent"); it != values.end()) {
             caps.kgConcurrent = parseBounded(it->second, 1, 64);
         }
-        if (auto it = kv.find("tuning.post_ingest.symbol_concurrent"); it != kv.end()) {
+        if (const auto it = values.find("tuning.post_ingest.symbol_concurrent");
+            it != values.end()) {
             caps.symbolConcurrent = parseBounded(it->second, 1, 32);
         }
-        if (auto it = kv.find("tuning.post_ingest.entity_concurrent"); it != kv.end()) {
+        if (const auto it = values.find("tuning.post_ingest.entity_concurrent");
+            it != values.end()) {
             caps.entityConcurrent = parseBounded(it->second, 1, 16);
         }
-        if (auto it = kv.find("tuning.post_ingest.title_concurrent"); it != kv.end()) {
+        if (const auto it = values.find("tuning.post_ingest.title_concurrent");
+            it != values.end()) {
             caps.titleConcurrent = parseBounded(it->second, 1, 16);
         }
-        if (auto it = kv.find("tuning.post_ingest.batch_size"); it != kv.end()) {
+        if (const auto it = values.find("tuning.post_ingest.batch_size"); it != values.end()) {
             caps.batchSize = parseBounded(it->second, 1, 256);
         }
-    } catch (const std::exception& e) {
-        spdlog::debug("Error reading config for post-ingest caps: {}", e.what());
+    } catch (const std::exception& error) {
+        spdlog::debug("Error reading config for post-ingest caps: {}", error.what());
     }
 
     return caps;
@@ -1455,7 +1455,7 @@ ConfigResolver::WriteCoordinatorTuning ConfigResolver::resolveWriteCoordinatorTu
             return tuning;
         }
 
-        auto kv = parseSimpleTomlFlat(cfgPath);
+        auto kv = yams::config::parse_simple_toml(cfgPath);
 
         if (auto it = kv.find("tuning.write_coordinator.kg_dedup_enabled"); it != kv.end()) {
             tuning.kgDedupEnabled = parseBoolValue(it->second);
@@ -1479,58 +1479,38 @@ ConfigResolver::WriteCoordinatorTuning ConfigResolver::resolveWriteCoordinatorTu
 }
 
 std::string ConfigResolver::resolveRerankerModel(const DaemonConfig& config) {
-    std::string preferred;
-
-    if (auto configured = yams::config::getenv_nonempty("YAMS_RERANKER_MODEL")) {
-        preferred = *configured;
-        spdlog::debug("Reranker model from environment: {}", preferred);
-        return preferred;
+    if (const auto configured = yams::config::getenv_nonempty("YAMS_RERANKER_MODEL")) {
+        return *configured;
     }
 
     try {
-        namespace fs = std::filesystem;
-        fs::path cfgPath =
+        const auto configPath =
             !config.configFilePath.empty() ? config.configFilePath : resolveDefaultConfigPath();
-        if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            auto kv = parseSimpleTomlFlat(cfgPath);
-            auto it = kv.find("search.reranker_model");
-            if (it != kv.end() && !it->second.empty()) {
-                preferred = it->second;
-                spdlog::debug("Reranker model from config: {}", preferred);
-                return preferred;
-            }
+        const auto values = yams::config::parse_simple_toml(configPath);
+        if (const auto it = values.find("search.reranker_model");
+            it != values.end() && !it->second.empty()) {
+            return it->second;
         }
-    } catch (const std::exception& e) {
-        spdlog::debug("Error reading config for reranker model: {}", e.what());
+    } catch (const std::exception& error) {
+        spdlog::debug("Error reading config for reranker model: {}", error.what());
     }
-
-    return preferred;
+    return {};
 }
 
 bool ConfigResolver::isSymbolExtractionEnabled(const DaemonConfig& config) {
-    bool enableSymbols = true;
-
     try {
-        namespace fs = std::filesystem;
-        fs::path cfgPath =
+        const auto configPath =
             !config.configFilePath.empty() ? config.configFilePath : resolveDefaultConfigPath();
-        if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            auto flat = parseSimpleTomlFlat(cfgPath);
-            auto it = flat.find("plugins.symbol_extraction.enable");
-            if (it != flat.end()) {
-                std::string v = it->second;
-                std::transform(v.begin(), v.end(), v.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                enableSymbols = !(v == "0" || v == "false" || v == "off" || v == "no");
-            }
+        const auto values = yams::config::parse_simple_toml(configPath);
+        if (const auto it = values.find("plugins.symbol_extraction.enable"); it != values.end()) {
+            return parseTomlBool(it->second).value_or(true);
         }
-    } catch (const std::exception& e) {
-        spdlog::debug("[ConfigResolver] Failed to read symbol extraction flag: {}", e.what());
+    } catch (const std::exception& error) {
+        spdlog::debug("[ConfigResolver] Failed to read symbol extraction flag: {}", error.what());
     } catch (...) {
         spdlog::debug("[ConfigResolver] Failed to read symbol extraction flag: unknown error");
     }
-
-    return enableSymbols;
+    return true;
 }
 
 int ConfigResolver::readTimeoutMs(const char* envName, int defaultMs, int minMs) {
@@ -1560,7 +1540,7 @@ size_t ConfigResolver::readVectorMaxElements() {
     auto cfgPath = resolveDefaultConfigPath();
     if (!cfgPath.empty()) {
         try {
-            auto kv = parseSimpleTomlFlat(cfgPath);
+            auto kv = yams::config::parse_simple_toml(cfgPath);
             auto it = kv.find("vector_database.max_elements");
             if (it != kv.end() && !it->second.empty()) {
                 size_t val = std::stoull(it->second);

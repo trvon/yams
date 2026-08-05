@@ -15,7 +15,6 @@
 #include <yams/compression/compression_header.h>
 #include <yams/compression/compressor_interface.h>
 #include <yams/config/config_helpers.h>
-#include <yams/config/config_migration.h>
 #include <yams/core/task.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
@@ -902,67 +901,57 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
         namespace fs = std::filesystem;
         const fs::path& configPath = runtimePaths.value().configFile.value;
 
-        std::map<std::string, std::map<std::string, std::string>> toml;
-        if (!configPath.empty() && fs::exists(configPath)) {
-            yams::config::ConfigMigrator migrator;
-            if (auto parsed = migrator.parseTomlConfig(configPath)) {
-                toml = std::move(parsed.value());
+        const auto toml = yams::config::parse_simple_toml(configPath);
+
+        // Downloader defaults from config.
+        if (auto value = toml.find("downloader.default_concurrency"); value != toml.end()) {
+            try {
+                cfg.defaultConcurrency = std::stoi(value->second);
+            } catch (...) {
+                spdlog::debug("Ignoring invalid downloader.default_concurrency");
+            }
+        }
+        if (auto value = toml.find("downloader.default_chunk_size_bytes"); value != toml.end()) {
+            try {
+                cfg.defaultChunkSizeBytes = static_cast<std::size_t>(std::stoull(value->second));
+            } catch (...) {
+                spdlog::debug("Ignoring invalid downloader.default_chunk_size_bytes");
+            }
+        }
+        if (auto value = toml.find("downloader.default_timeout_ms"); value != toml.end()) {
+            try {
+                cfg.defaultTimeout = std::chrono::milliseconds(std::stoll(value->second));
+            } catch (...) {
+                spdlog::debug("Ignoring invalid downloader.default_timeout_ms");
+            }
+        }
+        if (auto value = toml.find("downloader.follow_redirects"); value != toml.end()) {
+            cfg.followRedirects = (value->second == "true");
+        }
+        if (auto value = toml.find("downloader.resume"); value != toml.end()) {
+            cfg.resume = (value->second == "true");
+        }
+        if (auto value = toml.find("downloader.store_only"); value != toml.end()) {
+            cfg.storeOnly = (value->second == "true");
+        }
+        if (auto value = toml.find("downloader.max_file_bytes"); value != toml.end()) {
+            try {
+                cfg.maxFileBytes = static_cast<std::uint64_t>(std::stoull(value->second));
+            } catch (...) {
+                spdlog::debug("Ignoring invalid downloader.max_file_bytes");
             }
         }
 
-        // Downloader defaults from config
-        if (auto it = toml.find("downloader"); it != toml.end()) {
-            const auto& dl = it->second;
-            if (auto f = dl.find("default_concurrency"); f != dl.end()) {
-                try {
-                    cfg.defaultConcurrency = std::stoi(f->second);
-                } catch (...) {
-                    spdlog::debug("Ignoring invalid downloader.default_concurrency");
-                }
-            }
-            if (auto f = dl.find("default_chunk_size_bytes"); f != dl.end()) {
-                try {
-                    cfg.defaultChunkSizeBytes = static_cast<std::size_t>(std::stoull(f->second));
-                } catch (...) {
-                    spdlog::debug("Ignoring invalid downloader.default_chunk_size_bytes");
-                }
-            }
-            if (auto f = dl.find("default_timeout_ms"); f != dl.end()) {
-                try {
-                    cfg.defaultTimeout = std::chrono::milliseconds(std::stoll(f->second));
-                } catch (...) {
-                    spdlog::debug("Ignoring invalid downloader.default_timeout_ms");
-                }
-            }
-            if (auto f = dl.find("follow_redirects"); f != dl.end()) {
-                cfg.followRedirects = (f->second == "true");
-            }
-            if (auto f = dl.find("resume"); f != dl.end()) {
-                cfg.resume = (f->second == "true");
-            }
-            if (auto f = dl.find("store_only"); f != dl.end()) {
-                cfg.storeOnly = (f->second == "true");
-            }
-            if (auto f = dl.find("max_file_bytes"); f != dl.end()) {
-                try {
-                    cfg.maxFileBytes = static_cast<std::uint64_t>(std::stoull(f->second));
-                } catch (...) {
-                    spdlog::debug("Ignoring invalid downloader.max_file_bytes");
-                }
-            }
-        }
-
-        // Allow explicit overrides via [storage] objects_dir/staging_dir
+        // Allow explicit overrides via [storage] objects_dir/staging_dir.
         fs::path objectsDir;
         fs::path stagingDir;
-        if (auto it = toml.find("storage"); it != toml.end()) {
-            const auto& st = it->second;
-            if (auto f = st.find("objects_dir"); f != st.end() && !f->second.empty()) {
-                objectsDir = fs::path(f->second);
-            }
-            if (auto f = st.find("staging_dir"); f != st.end() && !f->second.empty()) {
-                stagingDir = fs::path(f->second);
-            }
+        if (auto value = toml.find("storage.objects_dir");
+            value != toml.end() && !value->second.empty()) {
+            objectsDir = fs::path(value->second);
+        }
+        if (auto value = toml.find("storage.staging_dir");
+            value != toml.end() && !value->second.empty()) {
+            stagingDir = fs::path(value->second);
         }
         if (objectsDir.empty())
             objectsDir = resolvedDataRoot / "storage" / "objects";

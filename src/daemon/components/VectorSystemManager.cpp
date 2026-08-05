@@ -210,7 +210,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
         auto cfgPath = ConfigResolver::resolveDefaultConfigPath();
         if (!cfgPath.empty()) {
             try {
-                auto kv = ConfigResolver::parseSimpleTomlFlat(cfgPath);
+                auto kv = yams::config::parse_simple_toml(cfgPath);
                 auto it = kv.find("embeddings.embedding_dim");
                 if (it != kv.end() && !it->second.empty()) {
                     if (auto parsed = parseUnsigned<size_t>(it->second)) {
@@ -273,7 +273,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
         auto cfgPath = ConfigResolver::resolveDefaultConfigPath();
         if (!cfgPath.empty()) {
             try {
-                auto kv = ConfigResolver::parseSimpleTomlFlat(cfgPath);
+                auto kv = yams::config::parse_simple_toml(cfgPath);
                 // Check preload_models list for known model names
                 auto preload = kv.find("daemon.models.preload_models");
                 if (preload != kv.end() && !preload->second.empty()) {
@@ -315,7 +315,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
     auto cfgPath = ConfigResolver::resolveDefaultConfigPath();
     if (!cfgPath.empty()) {
         try {
-            auto kv = ConfigResolver::parseSimpleTomlFlat(cfgPath);
+            auto kv = yams::config::parse_simple_toml(cfgPath);
             if (auto it = kv.find("vector_database.search_engine");
                 it != kv.end() && !it->second.empty()) {
                 std::string normalized(it->second);

@@ -190,6 +190,26 @@ data_dir = "/from/config/file"
     CHECK((cli.getDataPath() == fs::path("/from/cli/flag")));
 }
 
+TEST_CASE("DataDirResolution - explicit CLI data dir disambiguates conflicting aliases",
+          "[cli][data_dir][catch2]") {
+    ScopedEnv storage("YAMS_STORAGE", "/legacy/conflict");
+    ScopedEnv dataDir("YAMS_DATA_DIR", "/canonical/conflict");
+    ScopedEnv configEnv("YAMS_CONFIG", "/nonexistent/config.toml");
+
+    yams::cli::YamsCLI cli;
+    std::string arg0 = "yams";
+    std::string arg1 = "--data-dir";
+    std::string arg2 = "/from/explicit/option";
+    std::string arg3 = "completion";
+    std::string arg4 = "bash";
+    char* argv[] = {arg0.data(), arg1.data(), arg2.data(), arg3.data(), arg4.data()};
+
+    const int rc = cli.run(5, argv);
+    REQUIRE((rc == 0));
+    CHECK(cli.hasExplicitDataDir());
+    CHECK((cli.getDataPath() == fs::path("/from/explicit/option")));
+}
+
 TEST_CASE("DataDirResolution - CLI uses config before env when no explicit override",
           "[cli][data_dir][catch2]") {
     TempConfig config(R"(

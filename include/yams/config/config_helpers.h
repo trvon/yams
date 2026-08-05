@@ -122,7 +122,7 @@ inline bool parse_bool(std::string_view value, bool fallback = false) {
     return fallback;
 }
 
-// Parse a value from TOML config file
+// Read one ordinary scalar through the shared flat-TOML parser.
 std::string parse_config_value(const std::filesystem::path& config_path, const std::string& section,
                                const std::string& key);
 
@@ -130,7 +130,8 @@ std::string parse_config_value(const std::filesystem::path& config_path, const s
 // Accepts forms like "a,b" or ["a", "b"]. Tilde expansion is applied.
 std::vector<std::filesystem::path> parse_path_list(const std::string& raw);
 
-// Get standard config path
+// Resolve the ordinary config path: explicit argument, existing YAMS_CONFIG_PATH compatibility
+// override, YAMS_CONFIG, then the platform config default. The path need not exist.
 std::filesystem::path get_config_path(const std::string& override_path = "");
 
 /// Origin of one effective runtime path.
@@ -234,11 +235,13 @@ std::filesystem::path resolve_daemon_pid_file_path();
 std::filesystem::path resolve_daemon_log_file_path();
 
 // ============================================================================
-// Full TOML config parsing and writing utilities
+// Ordinary flat-TOML config parsing and writing utilities
 // ============================================================================
 
-/// Parse entire config file into a map with section.key format
-/// e.g., [embeddings] dim = 384 becomes "embeddings.dim" -> "384"
+/// Parse ordinary scalar lookups into a map with section.key format.
+/// e.g., [embeddings] dim = 384 becomes "embeddings.dim" -> "384". Single/double quoted
+/// values and quote-aware inline comments are supported; arrays remain raw strings. Migration,
+/// multiline TOML, nested objects, and schema validation belong to ConfigMigrator.
 std::map<std::string, std::string> parse_simple_toml(const std::filesystem::path& path);
 
 /// Dimension configuration from config file

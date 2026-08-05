@@ -1,6 +1,7 @@
 #include <yams/storage/storage_runtime_resolver.h>
 
 #include <yams/common/string_utils.h>
+#include <yams/config/config_helpers.h>
 #include <yams/storage/storage_backend.h>
 #include <yams/storage/storage_backend_engine_adapter.h>
 
@@ -14,8 +15,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cstdlib>
-#include <fstream>
 #include <map>
 #include <mutex>
 #include <regex>
@@ -38,14 +37,7 @@ std::string toLower(std::string value) {
 }
 
 std::string expandTilde(std::string_view value) {
-    if (value.empty() || value.front() != '~') {
-        return std::string(value);
-    }
-    const char* home = std::getenv("HOME");
-    if (!home || !*home) {
-        return std::string(value);
-    }
-    return std::string(home) + std::string(value.substr(1));
+    return yams::config::expand_tilde(std::string(value)).string();
 }
 
 std::string normalizeS3Endpoint(std::string endpoint) {
@@ -313,59 +305,6 @@ bool parseBool(std::string raw) {
     return raw == "1" || raw == "true" || raw == "yes" || raw == "on";
 }
 
-std::map<std::string, std::string> parseSimpleToml(const std::filesystem::path& path) {
-    std::map<std::string, std::string> config;
-    std::ifstream file(path);
-    if (!file) {
-        return config;
-    }
-
-    std::string line;
-    std::string currentSection;
-    while (std::getline(file, line)) {
-        line = trim(line);
-        if (line.empty() || line[0] == '#') {
-            continue;
-        }
-
-        if (line.front() == '[' && line.back() == ']') {
-            currentSection = trim(line.substr(1, line.size() - 2));
-            if (!currentSection.empty()) {
-                currentSection.push_back('.');
-            }
-            continue;
-        }
-
-        auto eq = line.find('=');
-        if (eq == std::string::npos) {
-            continue;
-        }
-        std::string key = trim(line.substr(0, eq));
-        std::string value = trim(line.substr(eq + 1));
-
-        bool inQuote = false;
-        for (size_t i = 0; i < value.size(); ++i) {
-            if (value[i] == '"' || value[i] == '\'') {
-                inQuote = !inQuote;
-            } else if (value[i] == '#' && !inQuote) {
-                value = trim(value.substr(0, i));
-                break;
-            }
-        }
-        if (value.size() >= 2) {
-            const char first = value.front();
-            const char last = value.back();
-            if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
-                value = value.substr(1, value.size() - 2);
-            }
-        }
-
-        config[currentSection + key] = value;
-    }
-
-    return config;
-}
-
 std::string getOrDefault(const std::map<std::string, std::string>& cfg, const std::string& key,
                          const std::string& fallback = {}) {
     auto it = cfg.find(key);
@@ -551,7 +490,7 @@ resolveStorageBootstrapDecision(const std::filesystem::path& configPath,
     decision.requestedDataDir = requestedDataDir;
     decision.activeDataDir = requestedDataDir;
 
-    const auto cfg = parseSimpleToml(configPath);
+    const auto cfg = yams::config::parse_simple_toml(configPath);
     std::string configuredEngine = toLower(getOrDefault(cfg, "storage.engine", "local"));
     if (configuredEngine.empty()) {
         configuredEngine = "local";
@@ -668,13 +607,13 @@ resolveStorageBootstrapDecision(const std::filesystem::path& configPath,
         std::string apiToken = getOrDefault(cfg, "storage.s3.r2.api_token",
                                             getOrDefault(cfg, "storage.s3.r2_api_token", ""));
         if (apiToken.empty()) {
-            if (const char* envToken = std::getenv("YAMS_R2_API_TOKEN"); envToken && *envToken) {
-                apiToken = envToken;
+            if (const auto envToken = yams::config::getenv_nonempty("YAMS_R2_API_TOKEN")) {
+                apiToken = *envToken;
             }
         }
         if (apiToken.empty()) {
-            if (const char* cfToken = std::getenv("CLOUDFLARE_API_TOKEN"); cfToken && *cfToken) {
-                apiToken = cfToken;
+            if (const auto cfToken = yams::config::getenv_nonempty("CLOUDFLARE_API_TOKEN")) {
+                apiToken = *cfToken;
             }
         }
         if (apiToken.empty()) {

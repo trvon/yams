@@ -150,14 +150,13 @@ YamsCLI::YamsCLI(boost::asio::any_io_executor executor) : executor_(std::move(ex
     // Global options use the shared runtime-path snapshot. If aliases conflict, keep a harmless
     // display default here; applyParsedDataDirPrecedence() reports the conflict after CLI parsing,
     // when an explicit --data-dir can safely disambiguate it.
-    std::filesystem::path defaultDataPath = yams::config::get_data_dir();
-    if (auto runtimePaths = yams::config::resolve_runtime_paths(); runtimePaths) {
-        defaultDataPath = runtimePaths.value().dataDir.value;
-    }
+    const auto runtimePaths = yams::config::resolve_runtime_paths();
 
     // We intentionally do not bind envname() here so the typed resolver can enforce precedence.
-    storageOpt_ = app_->add_option("--data-dir,--storage", dataPath_, "Data directory for storage")
-                      ->default_val(defaultDataPath.string());
+    storageOpt_ = app_->add_option("--data-dir,--storage", dataPath_, "Data directory for storage");
+    if (runtimePaths) {
+        storageOpt_->default_val(runtimePaths.value().dataDir.value.string());
+    }
 
     app_->add_flag("-v,--verbose", verbose_, "Enable verbose output");
     app_->add_flag("--json", jsonOutput_, "Output in JSON format");
@@ -752,7 +751,7 @@ std::shared_ptr<daemon::IModelProvider> YamsCLI::getLocalModelProvider() {
         try {
             auto cfgPath = getConfigPath();
             if (fs::exists(cfgPath)) {
-                auto cfg = parseSimpleToml(cfgPath);
+                auto cfg = yams::config::parse_simple_toml(cfgPath);
                 auto it = cfg.find("embeddings.preferred_model");
                 if (it != cfg.end() && !it->second.empty()) {
                     preferredModel = it->second;
@@ -1066,7 +1065,7 @@ Result<void> YamsCLI::initializeStorage() {
                 try {
                     auto cfgPath = getConfigPath();
                     if (fs::exists(cfgPath)) {
-                        auto cfg = parseSimpleToml(cfgPath);
+                        auto cfg = yams::config::parse_simple_toml(cfgPath);
                         auto it = cfg.find("embeddings.embedding_dim");
                         if (it != cfg.end()) {
                             try {
@@ -1109,7 +1108,7 @@ Result<void> YamsCLI::initializeStorage() {
                 try {
                     auto cfgPath = getConfigPath();
                     if (fs::exists(cfgPath)) {
-                        auto cfg = parseSimpleToml(cfgPath);
+                        auto cfg = yams::config::parse_simple_toml(cfgPath);
                         auto it = cfg.find("embeddings.preferred_model");
                         if (it != cfg.end() && !it->second.empty())
                             preferredModel = it->second;
@@ -1181,7 +1180,7 @@ Result<void> YamsCLI::initializeStorage() {
                         std::string pref;
                         auto cfgPath = getConfigPath();
                         if (fs::exists(cfgPath)) {
-                            auto cfg = parseSimpleToml(cfgPath);
+                            auto cfg = yams::config::parse_simple_toml(cfgPath);
                             auto it = cfg.find("embeddings.preferred_model");
                             if (it != cfg.end() && !it->second.empty())
                                 pref = it->second;
@@ -1503,7 +1502,7 @@ YamsCLI::CompressionConfig YamsCLI::loadCompressionConfig() const {
         return config; // Return defaults
     }
 
-    auto configMap = parseSimpleToml(configPath);
+    auto configMap = yams::config::parse_simple_toml(configPath);
 
     // Load compression enable flag
     if (configMap.find("compression.enable") != configMap.end()) {
@@ -1540,10 +1539,6 @@ YamsCLI::CompressionConfig YamsCLI::loadCompressionConfig() const {
 fs::path YamsCLI::getConfigPath() const {
     // Use platform-specific config path (XDG_CONFIG_HOME on Unix, APPDATA on Windows)
     return yams::config::get_config_path();
-}
-
-std::map<std::string, std::string> YamsCLI::parseSimpleToml(const fs::path& path) const {
-    return yams::config::parse_simple_toml(path);
 }
 
 void YamsCLI::checkConfigMigration() {

@@ -4,15 +4,14 @@
 #include <yams/chunking/streaming_chunker.h>
 #include <yams/common/fs_utils.h>
 #include <yams/compression/compression_policy.h>
+#include <yams/config/config_helpers.h>
 #include <yams/storage/compressed_storage_engine.h>
 
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <charconv>
 #include <filesystem>
-#include <fstream>
 #include <limits>
-#include <map>
 #include <optional>
 #include <sstream>
 
@@ -202,12 +201,12 @@ struct ContentStoreBuilder::Impl {
         hasAlwaysCompressAbove = false;
 
         // Try to read config file
-        fs::path configPath = getConfigPath();
+        const fs::path configPath = yams::config::get_config_path();
         if (!fs::exists(configPath)) {
             return; // Use defaults if no config
         }
 
-        auto configMap = parseSimpleToml(configPath);
+        auto configMap = yams::config::parse_simple_toml(configPath);
 
         // Load compression levels
         if (auto it = configMap.find("compression.zstd_level"); it != configMap.end()) {
@@ -272,94 +271,6 @@ struct ContentStoreBuilder::Impl {
 
         spdlog::debug("Loaded compression config: zstd_level={}, lzma_level={}, threshold={}",
                       rules.defaultZstdLevel, rules.defaultLzmaLevel, rules.neverCompressBelow);
-    }
-
-    bool getConfigBool(const std::string& key, bool defaultValue) {
-        fs::path configPath = getConfigPath();
-        if (!fs::exists(configPath)) {
-            return defaultValue;
-        }
-
-        auto configMap = parseSimpleToml(configPath);
-        if (configMap.find(key) != configMap.end()) {
-            return configMap[key] == "true";
-        }
-        return defaultValue;
-    }
-
-    fs::path getConfigPath() const {
-        const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME");
-        const char* homeEnv = std::getenv("HOME");
-
-        fs::path configHome;
-        if (xdgConfigHome) {
-            configHome = fs::path(xdgConfigHome);
-        } else if (homeEnv) {
-            configHome = fs::path(homeEnv) / ".config";
-        } else {
-            return fs::path("~/.config") / "yams" / "config.toml";
-        }
-
-        return configHome / "yams" / "config.toml";
-    }
-
-    std::map<std::string, std::string> parseSimpleToml(const fs::path& path) const {
-        std::map<std::string, std::string> parsedConfig;
-        std::ifstream file(path);
-        if (!file) {
-            return parsedConfig;
-        }
-
-        std::string line;
-        std::string currentSection;
-
-        while (std::getline(file, line)) {
-            // Skip comments and empty lines
-            if (line.empty() || line[0] == '#')
-                continue;
-
-            // Check for section headers
-            if (line[0] == '[') {
-                size_t end = line.find(']');
-                if (end != std::string::npos) {
-                    currentSection = line.substr(1, end - 1);
-                    if (!currentSection.empty()) {
-                        currentSection += ".";
-                    }
-                }
-                continue;
-            }
-
-            // Parse key-value pairs
-            size_t eq = line.find('=');
-            if (eq != std::string::npos) {
-                std::string key = line.substr(0, eq);
-                std::string value = line.substr(eq + 1);
-
-                // Trim whitespace
-                key.erase(0, key.find_first_not_of(" \t"));
-                key.erase(key.find_last_not_of(" \t") + 1);
-                value.erase(0, value.find_first_not_of(" \t"));
-                value.erase(value.find_last_not_of(" \t") + 1);
-
-                // Remove quotes if present
-                if (value.size() >= 2 && value[0] == '"' && value.back() == '"') {
-                    value = value.substr(1, value.size() - 2);
-                }
-
-                // Remove comments from value
-                size_t comment = value.find('#');
-                if (comment != std::string::npos) {
-                    value.resize(comment);
-                    // Trim again after removing comment
-                    value.erase(value.find_last_not_of(" \t") + 1);
-                }
-
-                parsedConfig[currentSection + key] = value;
-            }
-        }
-
-        return parsedConfig;
     }
 };
 

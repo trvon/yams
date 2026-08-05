@@ -209,11 +209,6 @@ private:
     std::filesystem::path getConfigPath() const;
 
     /**
-     * Parse a simple TOML config file
-     */
-    std::map<std::string, std::string> parseSimpleToml(const std::filesystem::path& path) const;
-
-    /**
      * Check if config migration is needed and prompt user
      */
     void checkConfigMigration();

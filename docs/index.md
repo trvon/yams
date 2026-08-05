@@ -38,6 +38,7 @@ yams serve
 - [Build from source](BUILD.md)
 - [Benchmarks](benchmarks/)
 - [Runtime path authority](architecture/runtime-paths.md)
+- [Configuration reading boundaries](architecture/config-reading.md)
 - [Environment override policy](architecture/environment-overrides.md)
 - [Roadmap](roadmap.md)
 - [Newsletter](newsletter.md)

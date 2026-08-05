@@ -127,8 +127,8 @@ void YamsDaemon::restoreTuningProfileOverrideSnapshot() noexcept {
 
 void YamsDaemon::snapshotRuntimeEnvironment() {
     runtimeEnvironmentBeforeStart_.clear();
-    for (const char* name :
-         {"YAMS_IN_DAEMON", "YAMS_STORAGE", "YAMS_DATA_DIR", "YAMS_CONFIG", "YAMS_DAEMON_SOCKET"}) {
+    for (const char* name : {"YAMS_IN_DAEMON", "YAMS_STORAGE", "YAMS_DATA_DIR", "YAMS_CONFIG",
+                             "YAMS_CONFIG_PATH", "YAMS_DAEMON_SOCKET"}) {
         runtimeEnvironmentBeforeStart_.emplace(name, yams::config::getenv_optional(name));
     }
 }
@@ -170,6 +170,27 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config)
         spdlog::warn("YamsDaemon runtime path policy: {}", diagnostic);
     }
     snapshotRuntimeEnvironment();
+    const auto restoreEnvironment = [this](YamsDaemon*) { restoreRuntimeEnvironment(); };
+    std::unique_ptr<YamsDaemon, decltype(restoreEnvironment)> restoreOnFailure(this,
+                                                                               restoreEnvironment);
+
+    // Normalize compatibility aliases before constructing dependent components. Their
+    // constructors perform ordinary config/path lookups and must observe this resolved snapshot.
+    (void)yams::config::set_environment("YAMS_IN_DAEMON", "1");
+    if (!config_.dataDir.empty()) {
+        (void)yams::config::set_environment("YAMS_STORAGE", config_.dataDir.c_str());
+        (void)yams::config::set_environment("YAMS_DATA_DIR", config_.dataDir.c_str());
+        spdlog::debug("Seeded data path aliases='{}'", config_.dataDir.string());
+    }
+    if (!config_.configFilePath.empty()) {
+        (void)yams::config::set_environment("YAMS_CONFIG", config_.configFilePath.c_str());
+        (void)yams::config::set_environment("YAMS_CONFIG_PATH", config_.configFilePath.c_str());
+        spdlog::debug("Seeded config path aliases='{}'", config_.configFilePath.string());
+    }
+    if (!config_.socketPath.empty()) {
+        (void)yams::config::set_environment("YAMS_DAEMON_SOCKET", config_.socketPath.c_str());
+        spdlog::debug("Seeded YAMS_DAEMON_SOCKET='{}'", config_.socketPath.string());
+    }
 
     if (config_.logFile.empty()) {
         config_.logFile = resolveSystemPath(PathType::LogFile);
@@ -218,25 +239,8 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config)
     spdlog::info("  PID file: {}", config_.pidFile.string());
     spdlog::info("  Log file: {}", config_.logFile.string());
 
-    // Let in-process components such as EmbeddingGenerator know they are running.
-    // inside the daemon so they can avoid creating a DaemonBackend and self-calling the IPC API.
-    (void)yams::config::set_environment("YAMS_IN_DAEMON", "1");
-
-    if (!config_.dataDir.empty()) {
-        (void)yams::config::set_environment("YAMS_STORAGE", config_.dataDir.c_str());
-        (void)yams::config::set_environment("YAMS_DATA_DIR", config_.dataDir.c_str());
-        spdlog::debug("Seeded data path aliases='{}'", config_.dataDir.string());
-    }
-
-    if (!config_.configFilePath.empty()) {
-        (void)yams::config::set_environment("YAMS_CONFIG", config_.configFilePath.c_str());
-        spdlog::debug("Seeded YAMS_CONFIG='{}'", config_.configFilePath.string());
-    }
-
-    if (!config_.socketPath.empty()) {
-        (void)yams::config::set_environment("YAMS_DAEMON_SOCKET", config_.socketPath.c_str());
-        spdlog::debug("Seeded YAMS_DAEMON_SOCKET='{}'", config_.socketPath.string());
-    }
+    // Successful construction transfers environment restoration to the daemon destructor.
+    [[maybe_unused]] YamsDaemon* environmentOwner = restoreOnFailure.release();
 }
 
 YamsDaemon::~YamsDaemon() {

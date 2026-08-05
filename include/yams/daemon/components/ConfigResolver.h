@@ -152,6 +152,7 @@ public:
         std::optional<std::size_t> persistenceSampleSize;
     };
 
+    /// Compatibility shape retained for external consumers. Startup tuning uses ConfigSections.
     struct PostIngestCaps {
         std::optional<std::uint32_t> totalConcurrent;
         std::optional<std::uint32_t> embedConcurrent;
@@ -257,26 +258,19 @@ public:
      * @brief Resolve the default config file path.
      *
      * Search order:
-     * 1. YAMS_CONFIG_PATH environment variable
-     * 2. $XDG_CONFIG_HOME/yams/config.toml
-     * 3. $HOME/.config/yams/config.toml
+     * 1. Existing YAMS_CONFIG_PATH compatibility override
+     * 2. YAMS_CONFIG canonical environment override
+     * 3. Platform config default from yams::config::get_config_path()
      *
      * @return Path to config file if found, empty path otherwise
      */
     static std::filesystem::path resolveDefaultConfigPath();
 
     /**
-     * @brief Parse a simple TOML file into a flat key-value map.
+     * @brief Compatibility wrapper around yams::config::parse_simple_toml().
      *
-     * Supports basic TOML features:
-     * - [section] headers (flattened as "section.key")
-     * - key = "value" assignments
-     * - # comments
-     *
-     * Does NOT support: nested tables, arrays, multi-line strings.
-     *
-     * @param path Path to TOML file
-     * @return Map of flattened keys to values
+     * New code should call the shared config reader directly. This installed API remains available
+     * for source and static-link compatibility.
      */
     static std::map<std::string, std::string>
     parseSimpleTomlFlat(const std::filesystem::path& path);
@@ -370,24 +364,10 @@ public:
     resolveEmbeddingConfig(const DaemonConfig& config,
                            const std::filesystem::path& resolvedDataDir);
 
-    /**
-     * @brief Resolve the preferred reranker model name from env/config.
-     *
-     * Precedence:
-     * 1. Environment variable YAMS_RERANKER_MODEL (if non-empty)
-     * 2. Config file key search.reranker_model
-     *
-     * @param config Daemon configuration (used for config file path)
-     * @return Reranker model name or empty string if none found
-     */
+    /// Compatibility lookup retained for installed consumers; typed startup policy is preferred.
     static std::string resolveRerankerModel(const DaemonConfig& config);
 
-    /**
-     * @brief Determine if symbol extraction plugins should be enabled.
-     *
-     * Reads plugins.symbol_extraction.enable from config.toml when present;
-     * defaults to true when unset or on parse errors.
-     */
+    /// Compatibility lookup retained for installed consumers; typed plugin policy is preferred.
     static bool isSymbolExtractionEnabled(const DaemonConfig& config);
 
     /**
@@ -602,21 +582,9 @@ public:
     static InstrumentationPolicy resolveInstrumentationPolicy(const DaemonConfig& config);
 
     /**
-     * @brief Resolve post-ingest concurrency caps from config file.
+     * @brief Compatibility resolver for [tuning.post_ingest] concurrency caps.
      *
-     * Reads [tuning.post_ingest] keys. Each entry is optional; callers apply
-     * values via TuneAdvisor::setPost*Concurrent() only when the corresponding
-     * YAMS_POST_*_CONCURRENT env var is not set (env wins).
-     *
-     * Config keys:
-     * - tuning.post_ingest.total_concurrent    = int (1..256)
-     * - tuning.post_ingest.embed_concurrent    = int (1..32)
-     * - tuning.post_ingest.extraction_concurrent = int (1..64)
-     * - tuning.post_ingest.kg_concurrent       = int (1..64)
-     * - tuning.post_ingest.symbol_concurrent   = int (1..32)
-     * - tuning.post_ingest.entity_concurrent   = int (1..16)
-     * - tuning.post_ingest.title_concurrent    = int (1..16)
-     * - tuning.post_ingest.batch_size          = int (1..256)
+     * New startup code applies the typed tuning snapshot through ConfigSections.
      */
     static PostIngestCaps resolvePostIngestCaps();
 
