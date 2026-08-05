@@ -1869,6 +1869,16 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_metadata_content_transaction_exe = executable(
+    'catch2_metadata_content_transaction',
+    files('unit/metadata/metadata_content_transaction_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
 #Metadata Repository Cache Tests(Catch2) - cache operations
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
@@ -2536,6 +2546,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'metadata', 'repository'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 180
+  )
+
+  test('metadata_content_transaction', catch2_metadata_content_transaction_exe,
+    suite: ['catch2', 'unit', 'metadata', 'repository', 'transaction'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
   )
 
   test('metadata_repository_cache', catch2_metadata_repository_cache_exe,

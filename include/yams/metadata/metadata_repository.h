@@ -953,6 +953,8 @@ public:
     }
 
 private:
+    class ContentBatchOps;
+
     ConnectionPool& pool_;
     ConnectionPool* readPool_{nullptr};
     bool hasPathIndexing_{false};
