@@ -38,6 +38,10 @@ raw_environment_policy_tests = files('scripts/test_check_raw_environment_calls.p
 raw_environment_allowlist = files('scripts/raw_environment_allowlist.txt')
 benchmark_environment_policy_script = files('scripts/check_benchmark_environment_leaks.py')
 benchmark_environment_policy_tests = files('scripts/test_check_benchmark_environment_leaks.py')
+configuration_authority_policy_script = files('scripts/check_configuration_authority.py')
+configuration_authority_policy_tests = files('scripts/test_check_configuration_authority.py')
+production_environment_keys = files('scripts/production_environment_keys.txt')
+configuration_reader_allowlist = files('scripts/configuration_reader_allowlist.txt')
 test('raw_environment_policy_unit',
   python_exe,
   args: [raw_environment_policy_tests],
@@ -64,6 +68,23 @@ test('benchmark_environment_policy',
   python_exe,
   args: [benchmark_environment_policy_script, '--root', meson.project_source_root()],
   suite: ['unit', 'policy', 'environment'],
+  timeout: 30,
+)
+test('configuration_authority_policy_unit',
+  python_exe,
+  args: [configuration_authority_policy_tests],
+  suite: ['unit', 'policy', 'configuration'],
+  timeout: 30,
+)
+test('configuration_authority_policy',
+  python_exe,
+  args: [
+    configuration_authority_policy_script,
+    '--root', meson.project_source_root(),
+    '--environment-allowlist', production_environment_keys,
+    '--reader-allowlist', configuration_reader_allowlist,
+  ],
+  suite: ['unit', 'policy', 'configuration'],
   timeout: 30,
 )
 

@@ -1,0 +1,15 @@
+# Reviewed TOML-named definitions/candidates. Ordinary flat lookups must route
+# through yams::config::parse_simple_toml; additions require explicit review.
+src/app/services/enhanced_search_executor.cpp:loadConfigFromToml
+src/app/services/enhanced_search_executor.cpp:parseTomlBool
+src/cli/commands/config_command.cpp:parse_simple_toml
+src/cli/commands/doctor/doctor_context.cpp:parseToml
+src/cli/commands/init_command.cpp:escapeTomlString
+src/config/config_helpers.cpp:findFlatTomlComment
+src/config/config_helpers.cpp:parse_simple_toml
+src/config/config_migration.cpp:parseTomlConfig
+src/config/config_migration.cpp:writeTomlConfig
+src/config/config_resolver_policies.cpp:parseSimpleTomlFlat
+src/config/config_resolver_policies.cpp:parseTomlFloat
+src/config/config_resolver_policies.cpp:parseTomlSize
+src/config/config_resolver_policies.cpp:parseTomlU32
