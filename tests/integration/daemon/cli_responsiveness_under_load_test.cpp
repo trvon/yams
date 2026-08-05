@@ -58,17 +58,10 @@ bool connectWithRetry(DaemonClient& client, int maxRetries = 3) {
     return false;
 }
 
-void startHarnessWithRetry(DaemonHarness& harness, int maxRetries = 3,
-                           std::chrono::milliseconds retryDelay = 250ms) {
-    for (int attempt = 0; attempt < maxRetries; ++attempt) {
-        if (harness.start(30s)) {
-            return;
-        }
-        harness.stop();
-        std::this_thread::sleep_for(retryDelay);
+void startHarnessWithRetry(DaemonHarness& harness, std::size_t maxRetries = 3) {
+    if (!harness.startWithRetry(30s, maxRetries)) {
+        SKIP("Skipping CLI responsiveness section due to daemon startup instability");
     }
-
-    SKIP("Skipping CLI responsiveness section due to daemon startup instability");
 }
 
 std::string generateLargeContent(size_t sizeBytes) {
@@ -119,7 +112,7 @@ TEST_CASE("CLI commands remain responsive under heavy ingestion load",
                     req.name = "load_test_thread" + std::to_string(threadId) + "_doc" +
                                std::to_string(doc) + ".txt";
                     // Use moderately sized content to create actual load
-                    req.content = generateLargeContent(10 * 1024); // 10KB per doc
+                    req.content = generateLargeContent(std::size_t{10} * 1024); // 10KB per doc
 
                     auto result = yams::cli::run_sync(threadClient.streamingAddDocument(req), 30s);
                     if (result.has_value()) {
@@ -164,7 +157,7 @@ TEST_CASE("CLI commands remain responsive under heavy ingestion load",
 
         // Status should succeed most of the time (allow some failures due to timing)
         float successRate = static_cast<float>(statusSuccesses.load()) / statusAttempts.load();
-        REQUIRE(successRate >= 0.8f); // At least 80% success rate
+        REQUIRE((successRate >= 0.8f)); // At least 80% success rate
     }
 
     SECTION("ping responds during heavy ingestion") {
@@ -187,7 +180,7 @@ TEST_CASE("CLI commands remain responsive under heavy ingestion load",
                     AddDocumentRequest req;
                     req.name = "ping_test_thread" + std::to_string(threadId) + "_doc" +
                                std::to_string(doc) + ".txt";
-                    req.content = generateLargeContent(20 * 1024); // 20KB per doc
+                    req.content = generateLargeContent(std::size_t{20} * 1024); // 20KB per doc
 
                     auto result = yams::cli::run_sync(threadClient.streamingAddDocument(req), 30s);
                     if (result.has_value()) {
@@ -210,7 +203,7 @@ TEST_CASE("CLI commands remain responsive under heavy ingestion load",
             if (pingResult.has_value()) {
                 pingSuccesses.fetch_add(1);
                 // Ping should be fast even under load (with sanitizer-adjusted timeout)
-                REQUIRE(elapsed < std::chrono::seconds(1 * kSanitizerTimeoutMultiplier));
+                REQUIRE((elapsed < std::chrono::seconds(1 * kSanitizerTimeoutMultiplier)));
             } else {
                 WARN("Ping failed: " << pingResult.error().message);
             }
@@ -229,7 +222,7 @@ TEST_CASE("CLI commands remain responsive under heavy ingestion load",
 
         // Ping should have very high success rate
         float successRate = static_cast<float>(pingSuccesses.load()) / pingAttempts.load();
-        REQUIRE(successRate >= 0.9f); // At least 90% success rate for ping
+        REQUIRE((successRate >= 0.9f)); // At least 90% success rate for ping
     }
 
     SECTION("shutdown request honored under load") {
@@ -249,7 +242,7 @@ TEST_CASE("CLI commands remain responsive under heavy ingestion load",
                     AddDocumentRequest req;
                     req.name = "shutdown_test_thread" + std::to_string(threadId) + "_doc" +
                                std::to_string(doc) + ".txt";
-                    req.content = generateLargeContent(5 * 1024);
+                    req.content = generateLargeContent(std::size_t{5} * 1024);
 
                     auto result = yams::cli::run_sync(threadClient.streamingAddDocument(req), 30s);
                     if (result.has_value()) {
@@ -272,7 +265,7 @@ TEST_CASE("CLI commands remain responsive under heavy ingestion load",
              << std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() << "ms");
 
         // Shutdown should be acknowledged quickly, allowing for sanitizer slowdown.
-        REQUIRE(elapsed < std::chrono::seconds(3 * kSanitizerTimeoutMultiplier));
+        REQUIRE((elapsed < std::chrono::seconds(3 * kSanitizerTimeoutMultiplier)));
 
         stopIngesting.store(true);
         for (auto& t : ingestThreads) {

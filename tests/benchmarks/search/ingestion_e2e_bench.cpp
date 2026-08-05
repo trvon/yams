@@ -43,6 +43,7 @@
 
 #include "tests/common/test_helpers_catch2.h"
 #include "tests/integration/daemon/test_async_helpers.h"
+#include "tests/integration/daemon/test_daemon_harness.h"
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <yams/api/content_store.h>
@@ -350,7 +351,7 @@ public:
     SimpleDaemonHarness& operator=(const SimpleDaemonHarness&) = delete;
 
     bool start() {
-        if (daemon_ || !savedEnvironment_.empty()) {
+        if (harness_ || !savedEnvironment_.empty()) {
             spdlog::error("SimpleDaemonHarness start called while a prior start is still active");
             return false;
         }
@@ -381,22 +382,11 @@ public:
                               configPath.string());
                 return false;
             }
-            configFile << "[embeddings]\n"
+            configFile << "config_version = 3\n"
+                          "[embeddings]\n"
                           "backend = \"simeon\"\n"
                           "preferred_model = \"simeon-default\"\n";
         }
-
-        yams::daemon::DaemonConfig cfg;
-        cfg.dataDir = data_;
-        cfg.socketPath = sock_;
-        cfg.pidFile = pid_;
-        cfg.logFile = log_;
-        cfg.configFilePath = configPath;
-        cfg.enableModelProvider = true;
-        // Disable auto-repair during benchmarks to avoid background work (per-hash DB checks,
-        // vector cleanup, etc.) affecting ingestion measurements.
-        cfg.enableAutoRepair = false;
-        cfg.tuning.postIngestCoalesceMs = benchPostIngestCoalesceMs();
 
         // Benchmark embedding-mode contract:
         // - YAMS_BENCH_FORCE_MOCK_EMBEDDINGS=1 forces mock model provider
@@ -408,18 +398,33 @@ public:
         bool vectorsDisabled = disableVectors && std::string(disableVectors) == "1";
         vectorsDisabled = vectorsDisabled || mockEmbeddingsRequested;
 
+        yams::test::DaemonHarness::Options options;
+        options.rootDir = root_;
+        options.preserveRoot = true;
+        options.dataDir = data_;
+        options.socketPath = sock_;
+        options.pidFile = pid_;
+        options.logFile = log_;
+        options.configPath = configPath;
+        options.enableModelProvider = true;
+        options.enableAutoRepair = false;
+        options.requireReadyLifecycle = true;
+        options.configureDaemon = [](yams::daemon::DaemonConfig& config) {
+            config.tuning.postIngestCoalesceMs = benchPostIngestCoalesceMs();
+        };
+
         glinerRequested_ = !envFlagEnabled("YAMS_DISABLE_GLINER_TITLES");
         if (const char* pluginDir = std::getenv("YAMS_BENCH_GLINT_PLUGIN_DIR");
             glinerRequested_ && pluginDir && *pluginDir && fs::is_directory(pluginDir)) {
-            cfg.pluginDir = fs::absolute(pluginDir);
-            cfg.pluginDirStrict = true;
-            cfg.trustedPluginPaths = {cfg.pluginDir};
+            options.pluginDir = fs::absolute(pluginDir);
+            options.pluginDirStrict = true;
+            options.trustedPluginPaths = {*options.pluginDir};
             pluginAutoloadEnabled_ = true;
         }
 
         if (vectorsDisabled) {
-            cfg.useMockModelProvider = true;
-            cfg.autoLoadPlugins = false;
+            options.useMockModelProvider = true;
+            options.autoLoadPlugins = false;
             spdlog::info("Using mock model provider (YAMS_BENCH_FORCE_MOCK_EMBEDDINGS={} "
                          "YAMS_DISABLE_VECTORS={})",
                          mockEmbeddingsRequested ? 1 : 0, disableVectors ? disableVectors : "0");
@@ -427,104 +432,46 @@ public:
             // Simeon is the benchmark's fixed production-default embedding provider. Optional
             // Glint autoload exercises the independent GLiNER title stage without changing the
             // embedding space.
-            cfg.useMockModelProvider = false;
-            cfg.autoLoadPlugins = pluginAutoloadEnabled_;
-            cfg.modelPoolConfig.lazyLoading = false;
-            cfg.modelPoolConfig.preloadModels = {kSimeonModel};
+            options.useMockModelProvider = false;
+            options.autoLoadPlugins = pluginAutoloadEnabled_;
+            options.configureModelPool = true;
+            options.modelPoolLazyLoading = false;
+            options.preloadModels = {kSimeonModel};
             spdlog::info("Using Simeon embedding provider for ingestion benchmark");
         }
 
-        daemon_ = std::make_unique<yams::daemon::YamsDaemon>(cfg);
-
-        auto s = daemon_->start();
-        if (!s) {
-            spdlog::error("Failed to start daemon: {}", s.error().message);
+        harness_ = std::make_unique<yams::test::DaemonHarness>(std::move(options));
+        if (!harness_->startWithRetry(30s, 2, [](yams::daemon::YamsDaemon*) {})) {
+            spdlog::error("Failed to start shared daemon harness");
             return false;
         }
 
-        // Start runLoop in background thread - CRITICAL for processing requests
-        runLoopThread_ = std::thread([this]() { daemon_->runLoop(); });
-
-        auto deadline = std::chrono::steady_clock::now() + 30s;
-        while (std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::sleep_for(100ms);
-            auto lifecycle = daemon_->getLifecycle().snapshot();
-            if (lifecycle.state == yams::daemon::LifecycleState::Ready) {
-                spdlog::info("Daemon ready at socket: {}", sock_.string());
-                if (!vectorsDisabled) {
-                    if (auto* sm = daemon_->getServiceManager()) {
-                        auto ready = sm->ensureEmbeddingModelReadySync(kSimeonModel, {}, 10000,
-                                                                       false, false);
-                        if (!ready) {
-                            spdlog::warn("Embedding model not ready: {}", ready.error().message);
-                        }
-                    }
+        spdlog::info("Daemon ready at socket: {}", sock_.string());
+        if (!vectorsDisabled) {
+            if (auto* sm = harness_->daemon()->getServiceManager()) {
+                auto ready =
+                    sm->ensureEmbeddingModelReadySync(kSimeonModel, {}, 10000, false, false);
+                if (!ready) {
+                    spdlog::warn("Embedding model not ready: {}", ready.error().message);
                 }
-                return true;
-            }
-            if (lifecycle.state == yams::daemon::LifecycleState::Failed) {
-                spdlog::error("Daemon failed to start");
-                return false;
             }
         }
-        spdlog::error("Daemon startup timeout");
-        return false;
+        return true;
     }
 
     void stop() {
-        if (daemon_) {
-            spdlog::info("[SimpleDaemonHarness] Stopping daemon (running={})...",
-                         daemon_->isRunning());
-
-            auto stopResult = daemon_->stop();
-            if (!stopResult) {
-                spdlog::warn("[SimpleDaemonHarness] Daemon stop returned error: {}",
-                             stopResult.error().message);
-            }
-
-            // Join the runLoop thread before continuing
-            if (runLoopThread_.joinable()) {
-                runLoopThread_.join();
-            }
-
-            // Wait for daemon to report it's no longer running
-            int isRunningRetries = 0;
-            while (daemon_->isRunning() && isRunningRetries < 50) {
-                std::this_thread::sleep_for(10ms);
-                isRunningRetries++;
-            }
-            if (isRunningRetries > 0) {
-                spdlog::info("[SimpleDaemonHarness] Waited {}ms for isRunning() to become false",
-                             isRunningRetries * 10);
-            }
-
-            spdlog::info("[SimpleDaemonHarness] Daemon stopped (running={}), resetting instance...",
-                         daemon_->isRunning());
-
-            // Reset GlobalIOContext with test sentinels temporarily unset through the shared
-            // environment boundary. The guards restore their exact prior state after reset.
-            {
-                yams::test::ScopedEnvVar testingEnvironment{"YAMS_TESTING", std::nullopt};
-                yams::test::ScopedEnvVar safeEnvironment{"YAMS_TEST_SAFE_SINGLE_INSTANCE",
-                                                         std::nullopt};
-                yams::daemon::GlobalIOContext::reset();
-                spdlog::info("[SimpleDaemonHarness] GlobalIOContext reset complete");
-            }
-
-            shutdownSucceeded_ = static_cast<bool>(stopResult) && !daemon_->isRunning();
-            daemon_.reset();
-
-            // Allow OS to fully release thread resources (macOS needs this)
-            // Real model provider + plugins create additional threads beyond base daemon
-            std::this_thread::sleep_for(500ms);
+        if (harness_) {
+            harness_->stop();
+            shutdownSucceeded_ = harness_->shutdownSucceeded();
+            harness_.reset();
         }
 
-        // Restore original working directory
+        // Restore original working directory only after the shared harness has released daemon
+        // resources and restored its own scoped process state.
         if (!originalCwd_.empty()) {
             std::error_code ec;
             fs::current_path(originalCwd_, ec);
         }
-
         restoreEnvironment();
     }
 
@@ -535,8 +482,12 @@ public:
     [[nodiscard]] bool glinerRequested() const { return glinerRequested_; }
     [[nodiscard]] bool pluginAutoloadEnabled() const { return pluginAutoloadEnabled_; }
     [[nodiscard]] bool shutdownSucceeded() const { return shutdownSucceeded_; }
-    [[nodiscard]] bool stopRequested() const { return daemon_ && daemon_->isStopRequested(); }
-    [[nodiscard]] yams::daemon::YamsDaemon* daemon() const { return daemon_.get(); }
+    [[nodiscard]] bool stopRequested() const {
+        return harness_ && harness_->daemon() && harness_->daemon()->isStopRequested();
+    }
+    [[nodiscard]] yams::daemon::YamsDaemon* daemon() const {
+        return harness_ ? harness_->daemon() : nullptr;
+    }
 
 private:
     static std::string randomId() {
@@ -569,8 +520,7 @@ private:
             fs::remove_all(root_, ec);
     }
 
-    std::unique_ptr<yams::daemon::YamsDaemon> daemon_;
-    std::thread runLoopThread_;
+    std::unique_ptr<yams::test::DaemonHarness> harness_;
     fs::path root_, data_, sock_, pid_, log_;
     fs::path originalCwd_;
     std::vector<yams::test::ScopedEnvVar> savedEnvironment_;

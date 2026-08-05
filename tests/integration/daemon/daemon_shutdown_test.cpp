@@ -46,17 +46,10 @@ bool connectWithRetry(DaemonClient& client, int maxRetries = 3,
     return false;
 }
 
-void startHarnessWithRetry(DaemonHarness& harness, int maxRetries = 3,
-                           std::chrono::milliseconds retryDelay = 250ms) {
-    for (int attempt = 0; attempt < maxRetries; ++attempt) {
-        if (harness.start(30s)) {
-            return;
-        }
-        harness.stop();
-        std::this_thread::sleep_for(retryDelay);
+void startHarnessWithRetry(DaemonHarness& harness, std::size_t maxRetries = 3) {
+    if (!harness.startWithRetry(30s, maxRetries)) {
+        SKIP("Skipping shutdown integration section due to daemon startup instability");
     }
-
-    SKIP("Skipping shutdown integration section due to daemon startup instability");
 }
 
 bool waitForLifecycleState(const YamsDaemon& daemon, LifecycleState state,
@@ -115,7 +108,7 @@ TEST_CASE("Daemon shutdown timing", "[daemon][shutdown][timing]") {
         auto elapsed = std::chrono::steady_clock::now() - start;
 
         REQUIRE(result.has_value());
-        REQUIRE(elapsed < 500ms);
+        REQUIRE((elapsed < 500ms));
     }
 
     SECTION("shutdown request still works after restarting the same daemon instance") {
@@ -289,7 +282,7 @@ TEST_CASE("Daemon shutdown with in-flight operations", "[daemon][shutdown][opera
             t.join();
         }
 
-        REQUIRE(completedOps >= 1);
+        REQUIRE((completedOps >= 1));
     }
 }
 
@@ -328,7 +321,7 @@ TEST_CASE("Daemon shutdown idempotency", "[daemon][shutdown][idempotent]") {
             t.join();
         }
 
-        REQUIRE(successCount >= 1);
+        REQUIRE((successCount >= 1));
     }
 }
 
@@ -355,7 +348,7 @@ TEST_CASE("Daemon shutdown after operations", "[daemon][shutdown][lifecycle]") {
         listReq.limit = 10;
         auto listResult = yams::cli::run_sync(client.list(listReq), 5s);
         REQUIRE(listResult.has_value());
-        REQUIRE(listResult.value().items.size() >= 5);
+        REQUIRE((listResult.value().items.size() >= 5));
 
         auto shutdownResult = yams::cli::run_sync(client.shutdown(true), 5s);
         REQUIRE(shutdownResult.has_value());
@@ -416,7 +409,7 @@ TEST_CASE("Daemon shutdown under load", "[daemon][shutdown][stress]") {
             t.join();
         }
 
-        REQUIRE(successfulOps > 0);
+        REQUIRE((successfulOps > 0));
     }
 }
 
@@ -435,7 +428,7 @@ TEST_CASE("Daemon graceful shutdown behavior", "[daemon][shutdown][graceful]") {
 
         // Verify daemon actually stops
         const auto* daemon = harness.daemon();
-        REQUIRE(daemon != nullptr);
+        REQUIRE((daemon != nullptr));
 
         // Wait for daemon to stop (max 5 seconds)
         auto deadline = std::chrono::steady_clock::now() + 5s;

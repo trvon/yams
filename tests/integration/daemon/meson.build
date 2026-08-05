@@ -16,6 +16,10 @@ else
     'daemon_shutdown_test.cpp',
   )
 
+  daemon_harness_srcs = files(
+    'daemon_harness_catch2_test.cpp',
+  )
+
   post_ingest_queue_validation_srcs = files(
     'post_ingest_queue_validation_test.cpp',
   )
@@ -248,6 +252,62 @@ else
       dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
       cpp_args: ['-DYAMS_TESTING=1'],
       install: false,
+    )
+
+    daemon_harness_exe = executable('yams_daemon_harness_tests_catch2',
+      daemon_harness_srcs,
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
+      cpp_args: ['-DYAMS_TESTING=1'],
+      install: false,
+    )
+
+    test('daemon_harness_startup_rollback',
+      daemon_harness_exe,
+      suite: ['integration', 'daemon', 'catch2', 'harness'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: [
+        'DaemonHarness rolls back owned endpoints when startup callback fails',
+        '--allow-running-no-tests',
+      ],
+    )
+
+    test('daemon_harness_endpoint_ownership',
+      daemon_harness_exe,
+      suite: ['integration', 'daemon', 'catch2', 'harness'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: [
+        'DaemonHarness preserves endpoints claimed after fixture construction',
+        '--allow-running-no-tests',
+      ],
+    )
+
+    test('daemon_harness_config_exception',
+      daemon_harness_exe,
+      suite: ['integration', 'daemon', 'catch2', 'harness'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: [
+        'DaemonHarness restores process state when configuration throws',
+        '--allow-running-no-tests',
+      ],
+    )
+
+    test('daemon_harness_config_lifecycle',
+      daemon_harness_exe,
+      suite: ['integration', 'daemon', 'catch2', 'harness'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: [
+        'DaemonHarness isolates config and observes lifecycle cleanup',
+        '--allow-running-no-tests',
+      ],
     )
 
     # Split shutdown tests into individual processes

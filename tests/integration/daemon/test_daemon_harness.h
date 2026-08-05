@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <map>
 #include <optional>
@@ -18,6 +19,7 @@
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/daemon.h>
+#include <yams/daemon/ipc/socket_utils.h>
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
@@ -46,6 +48,9 @@ struct DaemonHarnessOptions {
     bool pluginDirStrict = false;
     bool enableAutoRepair = true;
     bool isolateState = false;
+    bool isolateConfig = false;
+    std::string isolatedConfigContents;
+    bool requireReadyLifecycle = false;
     bool skipSocketVerificationOnReady = false;
     bool configureModelPool = false;
     bool modelPoolLazyLoading = true;
@@ -53,10 +58,14 @@ struct DaemonHarnessOptions {
     std::optional<std::filesystem::path> pluginDir = std::nullopt;
     // Per-plugin configuration: plugin name -> JSON config string
     std::map<std::string, std::string> pluginConfigs = {};
-    // Override the data directory instead of creating a temp one.
-    // When set, the harness uses this existing path (e.g. a real corpus)
-    // and skips cleanup of the data dir on destruction.
+    // Override harness paths when a benchmark needs every artifact under one fixture root.
+    // `preserveRoot` keeps caller-owned fixture roots while generated roots remain RAII-owned.
+    std::optional<std::filesystem::path> rootDir = std::nullopt;
+    bool preserveRoot = false;
     std::optional<std::filesystem::path> dataDir = std::nullopt;
+    std::optional<std::filesystem::path> socketPath = std::nullopt;
+    std::optional<std::filesystem::path> pidFile = std::nullopt;
+    std::optional<std::filesystem::path> logFile = std::nullopt;
     // Optional fixture content to seed `dataDir` with. When both are set
     // and `dataDir` exists but is empty (or doesn't exist), the harness
     // recursively copies the fixture's contents into `dataDir` before
@@ -83,13 +92,15 @@ public:
         // Ensure mock provider and disable ABI plugins for stability
         // Create temp working dir
         auto id = random_id();
-        root_ = fs::temp_directory_path() / (std::string("yams_it_") + id);
+        root_ =
+            options_.rootDir.value_or(fs::temp_directory_path() / (std::string("yams_it_") + id));
+        ownsRoot_ = !options_.preserveRoot;
         fs::create_directories(root_);
 
-        // Use caller-provided dataDir if set (e.g. existing corpus), else create temp
+        // Use caller-provided dataDir if set (e.g. existing corpus), else create temp.
+        // Root ownership is tracked independently, so external data remains untouched.
         if (options_.dataDir) {
             data_ = *options_.dataDir;
-            externalDataDir_ = true; // skip cleanup of external data
             fs::create_directories(data_);
         } else {
             data_ = root_ / "data";
@@ -128,12 +139,16 @@ public:
         // On Windows, AF_UNIX sockets work but need a valid Windows path
         // On Unix, use /tmp for short paths to avoid AF_UNIX length limits
 #ifdef _WIN32
-        sock_ = fs::temp_directory_path() / ("daemon_" + id + ".sock");
+        const auto defaultSocket = fs::temp_directory_path() / ("daemon_" + id + ".sock");
 #else
-        sock_ = std::filesystem::path("/tmp") / ("daemon_" + id + ".sock");
+        const auto defaultSocket = std::filesystem::path("/tmp") / ("daemon_" + id + ".sock");
 #endif
-        pid_ = root_ / ("daemon_" + id + ".pid");
-        log_ = root_ / ("daemon_" + id + ".log");
+        sock_ = options_.socketPath.value_or(defaultSocket);
+        proxySock_ = yams::daemon::socket_utils::derive_proxy_socket_path(sock_);
+        pid_ = options_.pidFile.value_or(root_ / ("daemon_" + id + ".pid"));
+        log_ = options_.logFile.value_or(root_ / ("daemon_" + id + ".log"));
+        ownershipMarker_ = sock_;
+        ownershipMarker_ += ".harness-owner";
 
         // NOTE: Do NOT create daemon instance in constructor!
         // Creating YamsDaemon initializes ServiceManager which spawns worker threads.
@@ -154,7 +169,29 @@ public:
 
     bool start(std::chrono::milliseconds timeout = std::chrono::seconds(10),
                PreRunLoopCallback preRunLoopCallback = nullptr) {
+        try {
+            return startUnchecked(timeout, std::move(preRunLoopCallback));
+        } catch (const std::exception& error) {
+            spdlog::error("[DaemonHarness] Startup threw: {}", error.what());
+        } catch (...) {
+            spdlog::error("[DaemonHarness] Startup threw an unknown exception");
+        }
+        rollbackFailedStart();
+        return false;
+    }
+
+private:
+    bool startUnchecked(std::chrono::milliseconds timeout, PreRunLoopCallback preRunLoopCallback) {
         ensureDefaultLogger();
+        if (daemon_ || runLoopThread_.joinable()) {
+            spdlog::error("[DaemonHarness] start called while a prior start is active");
+            return false;
+        }
+        if (!claimEndpointNamespace()) {
+            return false;
+        }
+        shutdownSucceeded_ = false;
+        startAttempted_ = true;
         // Always create new daemon instance on start()
         // (daemon cannot be restarted after stop() - must create new instance)
         spdlog::info("[DaemonHarness] Creating new daemon instance...");
@@ -167,14 +204,37 @@ public:
             isolateStateActive_ = true;
         }
 
+        auto effectiveConfigPath = options_.configPath;
+        if (!effectiveConfigPath && options_.isolateConfig) {
+            const auto configDirectory = root_ / "config" / "yams";
+            std::filesystem::create_directories(configDirectory);
+            effectiveConfigPath = configDirectory / "config.toml";
+            std::ofstream configFile(*effectiveConfigPath, std::ios::trunc);
+            if (!configFile) {
+                spdlog::error("[DaemonHarness] Failed to create isolated config: {}",
+                              effectiveConfigPath->string());
+                rollbackFailedStart();
+                return false;
+            }
+            configFile << "config_version = 3\n";
+            if (!options_.isolatedConfigContents.empty()) {
+                configFile << options_.isolatedConfigContents;
+                if (options_.isolatedConfigContents.back() != '\n') {
+                    configFile << '\n';
+                }
+            }
+            configFile.close();
+            xdgConfigEnvironment_.emplace("XDG_CONFIG_HOME", (root_ / "config").string());
+        }
+
         yams::daemon::DaemonConfig cfg;
-        if (options_.configPath) {
-            configEnvironment_.emplace("YAMS_CONFIG", options_.configPath->string());
+        if (effectiveConfigPath) {
+            configEnvironment_.emplace("YAMS_CONFIG", effectiveConfigPath->string());
             // ConfigResolver policies use YAMS_CONFIG_PATH as their highest-priority
             // source. Keep it aligned with the explicit harness config so an ambient
             // developer config cannot silently change a benchmark/test arm.
-            configPathEnvironment_.emplace("YAMS_CONFIG_PATH", options_.configPath->string());
-            cfg.configFilePath = *options_.configPath;
+            configPathEnvironment_.emplace("YAMS_CONFIG_PATH", effectiveConfigPath->string());
+            cfg.configFilePath = *effectiveConfigPath;
         }
         cfg.dataDir = data_;
         cfg.socketPath = sock_;
@@ -205,7 +265,8 @@ public:
         spdlog::info("[DaemonHarness] Calling daemon_->start()...");
         auto s = daemon_->start();
         if (!s) {
-            spdlog::error("[DaemonHarness] daemon_->start() failed!");
+            spdlog::error("[DaemonHarness] daemon_->start() failed: {}", s.error().message);
+            stop();
             return false;
         }
         spdlog::info("[DaemonHarness] daemon_->start() succeeded, starting runLoop thread...");
@@ -214,7 +275,17 @@ public:
         // This runs BEFORE the runLoop thread starts, avoiding race conditions.
         if (preRunLoopCallback) {
             spdlog::info("[DaemonHarness] Invoking pre-runLoop callback...");
-            preRunLoopCallback(daemon_.get());
+            try {
+                preRunLoopCallback(daemon_.get());
+            } catch (const std::exception& error) {
+                spdlog::error("[DaemonHarness] pre-runLoop callback failed: {}", error.what());
+                stop();
+                return false;
+            } catch (...) {
+                spdlog::error("[DaemonHarness] pre-runLoop callback failed");
+                stop();
+                return false;
+            }
         }
 
 #ifdef YAMS_TESTING
@@ -235,40 +306,12 @@ public:
                                  stopResult.error().message);
                 }
             });
-            // Give runLoop time to enter and trigger async init
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
             spdlog::info(
                 "[DaemonHarness] runLoop thread started, polling for daemon Ready state...");
         }
 
-        // Poll for daemon to reach a usable lifecycle state in lifecycle FSM.
-        // Ready or Degraded both indicate initialization completed enough for IPC tests.
-        auto deadline = std::chrono::steady_clock::now() + timeout;
-        bool lifecycleReady = false;
-
-        while (std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-            // Check lifecycle state first
-            auto lifecycle = daemon_->getLifecycle().snapshot();
-            if (lifecycle.state == yams::daemon::LifecycleState::Ready ||
-                lifecycle.state == yams::daemon::LifecycleState::Degraded) {
-                lifecycleReady = true;
-                spdlog::info("[DaemonHarness] Daemon lifecycle reached usable state: {}",
-                             static_cast<int>(lifecycle.state));
-                break;
-            } else if (lifecycle.state == yams::daemon::LifecycleState::Failed) {
-                spdlog::error("[DaemonHarness] Daemon lifecycle reached Failed state: {}",
-                              lifecycle.lastError);
-                return false;
-            }
-        }
-
-        if (!lifecycleReady) {
-            auto lifecycle = daemon_->getLifecycle().snapshot();
-            spdlog::error(
-                "[DaemonHarness] Timeout waiting for Ready state after {}ms (current state: {})",
-                timeout.count(), static_cast<int>(lifecycle.state));
+        if (!waitForUsableLifecycle(timeout)) {
+            stop();
             return false;
         }
 
@@ -290,6 +333,19 @@ public:
         }
         spdlog::error("[DaemonHarness] Daemon Ready but socket connection failed at: {}",
                       sock_.string());
+        stop();
+        return false;
+    }
+
+public:
+    [[nodiscard]] bool startWithRetry(std::chrono::milliseconds timeout, std::size_t maxAttempts,
+                                      PreRunLoopCallback preRunLoopCallback = nullptr) {
+        for (std::size_t attempt = 0; attempt < maxAttempts; ++attempt) {
+            if (start(timeout, preRunLoopCallback)) {
+                return true;
+            }
+            stop();
+        }
         return false;
     }
 
@@ -300,6 +356,7 @@ public:
             std::fflush(stderr);
         }
         if (daemon_) {
+            bool stopCallSucceeded = true;
             spdlog::info("[DaemonHarness] Stopping daemon (running={})...", daemon_->isRunning());
 
             if (runLoopThread_.joinable()) {
@@ -315,23 +372,16 @@ public:
             if (daemon_->isRunning() ||
                 !daemon_->waitForStopCompletion(std::chrono::milliseconds(0))) {
                 auto stopResult = daemon_->stop();
+                stopCallSucceeded = static_cast<bool>(stopResult);
                 if (!stopResult) {
                     spdlog::warn("[DaemonHarness] Daemon stop returned error: {}",
                                  stopResult.error().message);
                 }
             }
 
-            // Wait for daemon to report it's no longer running
-            int isRunningRetries = 0;
-            while (daemon_->isRunning() && isRunningRetries < 50) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                isRunningRetries++;
-            }
-            if (isRunningRetries > 0) {
-                spdlog::info("[DaemonHarness] Waited {}ms for isRunning() to become false",
-                             isRunningRetries * 10);
-            }
-
+            const bool stopped =
+                wait_for_condition(std::chrono::seconds(2), std::chrono::milliseconds(10),
+                                   [this] { return !daemon_->isRunning(); });
             spdlog::info("[DaemonHarness] Daemon stopped (running={}), resetting instance...",
                          daemon_->isRunning());
 
@@ -355,28 +405,17 @@ public:
             // Windows needs additional time before GlobalIOContext::reset()
             // Windows thread cleanup is slower than Unix
 #ifdef _WIN32
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            // Skip GlobalIOContext operations on Windows for now - causes SIGSEGV
-            // The io_context threads will be cleaned up when the process exits
+            // Skip GlobalIOContext operations on Windows for now - causes SIGSEGV.
             spdlog::info("[DaemonHarness] Skipping GlobalIOContext::restart() on Windows");
 #else
             spdlog::info("[DaemonHarness] GlobalIOContext restart deferred");
 #endif
 
-            if (isolateStateActive_) {
-                std::error_code ec;
-                if (!originalCwd_.empty()) {
-                    std::filesystem::current_path(originalCwd_, ec);
-                }
-                xdgStateEnvironment_.reset();
-                isolateStateActive_ = false;
-            }
-
-            configPathEnvironment_.reset();
-            configEnvironment_.reset();
-
-            // Reset daemon so it can be recreated on next start()
+            // Destroy environment-owning daemon components before restoring the harness guards.
+            // Otherwise a nested component destructor can restore the isolated value over the
+            // caller's original process environment.
             daemon_.reset();
+            restoreProcessState();
 
             if (yams::config::getenv_optional("YAMS_TRACE_HARNESS_LIFETIME")) {
                 std::fprintf(stderr, "[DaemonHarness::stop] exit daemon=%p runLoopJoinable=%d\n",
@@ -384,47 +423,60 @@ public:
                 std::fflush(stderr);
             }
 
-            // CRITICAL: Allow OS to fully release thread resources (macOS needs this)
-            // Each daemon creates ~48 threads (32 SocketServer + 16 ServiceManager).
-            // macOS has strict per-process thread creation rate limits and needs time
-            // to reclaim thread resources before next daemon starts creating threads.
-            // Testing shows: 250ms → crashes at daemon #6, 500ms allows ~10 daemons, 750ms more
-            // conservative. Increased to 750ms for improved stability on resource-constrained CI
-            // runners.
-            std::this_thread::sleep_for(std::chrono::milliseconds(
-                750)); // Wait for socket file to be removed by daemon shutdown
-            int socketRetries = 0;
-            while (std::filesystem::exists(sock_) && socketRetries < 50) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(20));
-                socketRetries++;
+            const bool artifactsRemoved = waitForOwnedArtifactsRemoved(std::chrono::seconds(2));
+            shutdownSucceeded_ = stopCallSucceeded && stopped && artifactsRemoved;
+            if (!artifactsRemoved) {
+                spdlog::warn("[DaemonHarness] Owned endpoint artifacts remained after shutdown; "
+                             "removing the harness-owned namespace");
+                removeOwnedArtifacts();
             }
 
-            if (socketRetries > 0) {
-                spdlog::info("[DaemonHarness] Waited {}ms for socket file removal",
-                             socketRetries * 20);
-            }
-
-            // Verify socket is truly gone
-            if (std::filesystem::exists(sock_)) {
-                spdlog::warn("[DaemonHarness] Socket file still exists after {}ms",
-                             socketRetries * 20);
-            }
-
-            // Additional brief wait to ensure OS fully releases socket
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-            spdlog::info(
-                "[DaemonHarness] Stop complete (isRunning check: {}ms, socket cleanup: {}ms)",
-                isRunningRetries * 10, socketRetries * 20);
+            releaseEndpointNamespace();
+            startAttempted_ = false;
+            spdlog::info("[DaemonHarness] Stop complete (stopped={}, artifactsRemoved={})", stopped,
+                         artifactsRemoved);
         }
     }
 
     const std::filesystem::path& socketPath() const { return sock_; }
+    const std::filesystem::path& proxySocketPath() const { return proxySock_; }
+    const std::filesystem::path& pidPath() const { return pid_; }
     const std::filesystem::path& dataDir() const { return data_; }
     const std::filesystem::path& rootDir() const { return root_; }
+    bool shutdownSucceeded() const { return shutdownSucceeded_; }
     yams::daemon::YamsDaemon* daemon() const { return daemon_.get(); }
 
 private:
+    bool waitForUsableLifecycle(std::chrono::milliseconds timeout) const {
+        const bool reachedTerminal =
+            wait_for_condition(timeout, std::chrono::milliseconds(20), [this] {
+                const auto state = daemon_->getLifecycle().snapshot().state;
+                return state == yams::daemon::LifecycleState::Ready ||
+                       (!options_.requireReadyLifecycle &&
+                        state == yams::daemon::LifecycleState::Degraded) ||
+                       state == yams::daemon::LifecycleState::Failed;
+            });
+        const auto lifecycle = daemon_->getLifecycle().snapshot();
+        const bool usable = lifecycle.state == yams::daemon::LifecycleState::Ready ||
+                            (!options_.requireReadyLifecycle &&
+                             lifecycle.state == yams::daemon::LifecycleState::Degraded);
+        if (usable) {
+            spdlog::info("[DaemonHarness] Daemon lifecycle reached usable state: {}",
+                         static_cast<int>(lifecycle.state));
+            return true;
+        }
+        if (lifecycle.state == yams::daemon::LifecycleState::Failed) {
+            spdlog::error("[DaemonHarness] Daemon lifecycle reached Failed state: {}",
+                          lifecycle.lastError);
+            return false;
+        }
+        spdlog::error("[DaemonHarness] {} waiting for usable lifecycle after {}ms "
+                      "(current state: {})",
+                      reachedTerminal ? "Rejected lifecycle state while" : "Timeout",
+                      timeout.count(), static_cast<int>(lifecycle.state));
+        return false;
+    }
+
     // Install a default spdlog logger once per process if none exists, so plugins
     // and harness code that call spdlog::info(...) don't dereference a null default
     // logger. Mirrors daemon_main's init order (set_default_logger before plugin load).
@@ -484,33 +536,107 @@ private:
         spdlog::error("[DaemonHarness] Socket verification timed out after {}ms", timeout.count());
         return false;
     }
-    void cleanup() {
-        namespace fs = std::filesystem;
+    bool claimEndpointNamespace() {
         std::error_code ec;
-        if (externalDataDir_) {
-            // Only remove temp root (socket, pid, log) — preserve external data dir
-            if (!root_.empty()) {
-                // Remove everything in root_ except data_ (which is external)
-                for (auto& entry : fs::directory_iterator(root_, ec)) {
-                    fs::remove_all(entry.path(), ec);
-                }
-                fs::remove(root_, ec);
+        if (!std::filesystem::create_directory(ownershipMarker_, ec)) {
+            spdlog::error("[DaemonHarness] Socket namespace is already claimed: {} ({})",
+                          sock_.string(), ec ? ec.message() : "ownership marker exists");
+            return false;
+        }
+        endpointClaimed_ = true;
+        if (std::filesystem::exists(sock_) || std::filesystem::exists(proxySock_) ||
+            std::filesystem::exists(pid_)) {
+            spdlog::error("[DaemonHarness] Refusing pre-existing daemon artifacts in claimed "
+                          "namespace: {}",
+                          sock_.string());
+            releaseEndpointNamespace();
+            return false;
+        }
+        return true;
+    }
+
+    void releaseEndpointNamespace() noexcept {
+        if (!endpointClaimed_) {
+            return;
+        }
+        std::error_code ec;
+        std::filesystem::remove(ownershipMarker_, ec);
+        endpointClaimed_ = false;
+    }
+
+    bool waitForOwnedArtifactsRemoved(std::chrono::milliseconds timeout) const {
+        if (!endpointClaimed_) {
+            return true;
+        }
+        return wait_for_condition(timeout, std::chrono::milliseconds(20), [this] {
+            return !std::filesystem::exists(sock_) && !std::filesystem::exists(proxySock_) &&
+                   !std::filesystem::exists(pid_);
+        });
+    }
+
+    void removeOwnedArtifacts() noexcept {
+        if (!endpointClaimed_) {
+            return;
+        }
+        std::error_code ec;
+        std::filesystem::remove(sock_, ec);
+        ec.clear();
+        std::filesystem::remove(proxySock_, ec);
+        ec.clear();
+        std::filesystem::remove(pid_, ec);
+    }
+
+    void rollbackFailedStart() noexcept {
+        try {
+            stop();
+        } catch (const std::exception& error) {
+            std::fprintf(stderr, "DaemonHarness rollback stop failed: %s\n", error.what());
+        } catch (...) {
+            std::fputs("DaemonHarness rollback stop failed with an unknown exception\n", stderr);
+        }
+        restoreProcessState();
+        removeOwnedArtifacts();
+        releaseEndpointNamespace();
+        startAttempted_ = false;
+    }
+
+    void restoreProcessState() noexcept {
+        if (isolateStateActive_) {
+            std::error_code ec;
+            if (!originalCwd_.empty()) {
+                std::filesystem::current_path(originalCwd_, ec);
             }
-        } else {
-            if (!root_.empty())
-                fs::remove_all(root_, ec);
+            xdgStateEnvironment_.reset();
+            isolateStateActive_ = false;
+        }
+        configPathEnvironment_.reset();
+        configEnvironment_.reset();
+        xdgConfigEnvironment_.reset();
+    }
+
+    void cleanup() {
+        removeOwnedArtifacts();
+        releaseEndpointNamespace();
+        if (ownsRoot_ && !root_.empty()) {
+            std::error_code ec;
+            std::filesystem::remove_all(root_, ec);
         }
     }
 
     std::unique_ptr<yams::daemon::YamsDaemon> daemon_;
     std::thread runLoopThread_; // Background thread for runLoop
-    std::filesystem::path root_, data_, sock_, pid_, log_;
+    std::filesystem::path root_, data_, sock_, proxySock_, pid_, log_;
+    std::filesystem::path ownershipMarker_;
     std::filesystem::path originalCwd_;
+    bool ownsRoot_ = true;
+    bool endpointClaimed_ = false;
+    bool shutdownSucceeded_ = false;
+    bool startAttempted_ = false;
     std::optional<ScopedEnvVar> xdgStateEnvironment_;
+    std::optional<ScopedEnvVar> xdgConfigEnvironment_;
     std::optional<ScopedEnvVar> configEnvironment_;
     std::optional<ScopedEnvVar> configPathEnvironment_;
     bool isolateStateActive_ = false;
-    bool externalDataDir_ = false;
     Options options_;
 };
 

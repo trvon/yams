@@ -1319,6 +1319,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_benchmark_invocation_exe = executable('catch2_benchmark_invocation',
+    files('unit/benchmarks/benchmark_invocation_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep],
+    cpp_args: test_cpp_noerror_args,
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_retrieval_benchmark_support_exe = executable('catch2_retrieval_benchmark_support',
     files(
       'unit/search/retrieval_benchmark_support_catch2_test.cpp',
@@ -3488,6 +3497,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'search', 'benchmark', 'yams-7ez4'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
+  )
+
+  test('benchmark_invocation', catch2_benchmark_invocation_exe,
+    suite: ['catch2', 'unit', 'benchmark', 'harness'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
   )
 
   test('retrieval_benchmark_support', catch2_retrieval_benchmark_support_exe,

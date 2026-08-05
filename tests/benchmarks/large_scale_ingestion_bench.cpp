@@ -29,7 +29,7 @@
 #include <tracy/Tracy.hpp>
 #endif
 
-#include "../common/benchmark_tracker.h"
+#include "../common/benchmark_invocation.h"
 #include "../common/test_data_generator.h"
 #include "../common/test_helpers_catch2.h"
 #include "../integration/daemon/test_async_helpers.h"
@@ -695,20 +695,6 @@ bool useMockEmbeddingsForBench() {
     return false;
 }
 
-std::optional<std::filesystem::path> writeMockEmbeddingConfig() {
-    namespace fs = std::filesystem;
-    auto cfgPath = fs::temp_directory_path() /
-                   ("yams_bench_mock_embeddings_" + std::to_string(::getpid()) + ".toml");
-    std::ofstream out(cfgPath);
-    if (!out) {
-        return std::nullopt;
-    }
-    out << "[embeddings]\n";
-    out << "embedding_dim = 384\n";
-    out << "preferred_model = \"all-MiniLM-L6-v2\"\n";
-    return cfgPath;
-}
-
 void ensureBenchmarkEmbeddingsReady(yams::test::DaemonHarness* harness, bool enableEmbeddings,
                                     bool useMockEmbeddings) {
     if (!enableEmbeddings || !harness || !harness->daemon()) {
@@ -768,13 +754,13 @@ double getDuplicationRate() {
 }
 
 // Setup harness with configuration
-void SetupHarness(const IngestionBenchConfig& config) {
+bool SetupHarness(const IngestionBenchConfig& config) {
     if (g_harness && g_activeConfig == config) {
-        return; // Already initialized
+        return true; // Already initialized
     }
 
-    g_harness.reset();
     g_client.reset();
+    g_harness.reset();
     g_environment.clear();
     g_activeConfig = config;
 
@@ -785,9 +771,6 @@ void SetupHarness(const IngestionBenchConfig& config) {
               << (config.tuningProfile.empty() ? "default" : config.tuningProfile) << "\n";
     std::cout << "Duplication rate: " << (config.duplicationRate * 100) << "%\n";
 
-    const auto mockBenchConfig = (config.enableEmbeddings && useMockEmbeddingsForBench())
-                                     ? writeMockEmbeddingConfig()
-                                     : std::optional<std::filesystem::path>{};
     if (config.embedProfile != EmbedProfile::Default) {
         std::cout << "Embed benchmark profile: " << embedProfileName(config.embedProfile) << "\n";
     }
@@ -805,9 +788,8 @@ void SetupHarness(const IngestionBenchConfig& config) {
                                mockEmbeddings ? std::optional<std::string>{"1"} : std::nullopt);
     g_environment.emplace_back("YAMS_EMBED_DIM",
                                mockEmbeddings ? std::optional<std::string>{"384"} : std::nullopt);
-    g_environment.emplace_back(
-        "YAMS_CONFIG",
-        mockBenchConfig ? std::optional<std::string>{mockBenchConfig->string()} : std::nullopt);
+    g_environment.emplace_back("YAMS_CONFIG", std::nullopt);
+    g_environment.emplace_back("YAMS_CONFIG_PATH", std::nullopt);
 
     // Disable automatic search engine rebuilds by default for benchmark determinism.
     // Rebuilds compete with ingestion and can dominate runtime on large corpora.
@@ -825,6 +807,13 @@ void SetupHarness(const IngestionBenchConfig& config) {
     // AutoRepair/RepairService can compete with ingestion at high scale (per-hash DB checks).
     // Disable for benchmark determinism and throughput analysis.
     harnessOptions.enableAutoRepair = false;
+    harnessOptions.isolateState = true;
+    harnessOptions.isolateConfig = true;
+    if (mockEmbeddings) {
+        harnessOptions.isolatedConfigContents = "[embeddings]\n"
+                                                "embedding_dim = 384\n"
+                                                "preferred_model = \"all-MiniLM-L6-v2\"\n";
+    }
     if (config.embedProfile != EmbedProfile::Default) {
         const auto embedProfile = config.embedProfile;
         harnessOptions.configureDaemon = [embedProfile](yams::daemon::DaemonConfig& daemonConfig) {
@@ -833,9 +822,6 @@ void SetupHarness(const IngestionBenchConfig& config) {
             daemonConfig.embeddingService.coremlUnifiedConcurrencySource =
                 "harness:large_scale_ingestion:" + std::string(embedProfileName(embedProfile));
         };
-    }
-    if (mockBenchConfig.has_value()) {
-        harnessOptions.configPath = *mockBenchConfig;
     }
     if (config.enableEmbeddings) {
         const bool useMock = useMockEmbeddingsForBench();
@@ -852,9 +838,12 @@ void SetupHarness(const IngestionBenchConfig& config) {
         }
     }
     g_harness = std::make_unique<DaemonHarness>(harnessOptions);
-    if (!g_harness->start(std::chrono::seconds(30), [](yams::daemon::YamsDaemon*) {})) {
+    if (!g_harness->startWithRetry(std::chrono::seconds(30), 2, [](yams::daemon::YamsDaemon*) {})) {
         std::cerr << "ERROR: Failed to start daemon\n";
-        std::exit(1);
+        g_harness.reset();
+        g_environment.clear();
+        g_activeConfig = {};
+        return false;
     }
 
     // Create client
@@ -886,6 +875,7 @@ void SetupHarness(const IngestionBenchConfig& config) {
     }
 
     std::cout << "Daemon started successfully\n\n";
+    return true;
 }
 
 void TeardownHarness() {
@@ -1280,7 +1270,10 @@ static void BM_LargeScaleIngestion(benchmark::State& state) {
     config.duplicationRate = getDuplicationRate();
 
     // Setup harness
-    SetupHarness(config);
+    if (!SetupHarness(config)) {
+        state.SkipWithError("failed to start isolated daemon harness");
+        return;
+    }
 
     for (auto _ : state) {
         state.PauseTiming();
@@ -1724,13 +1717,7 @@ BENCHMARK(BM_LargeScaleIngestion)
 } // anonymous namespace
 
 int main(int argc, char** argv) {
-    const bool listOnly = [&]() {
-        for (int i = 1; i < argc; ++i) {
-            if (std::string(argv[i]) == "--benchmark_list_tests")
-                return true;
-        }
-        return false;
-    }();
+    const bool listOnly = yams::test::normalizeBenchmarkListArguments(argc, argv);
 
     std::cout << "\n";
     std::cout << "╔═══════════════════════════════════════════════════════════════════╗\n";
@@ -1792,14 +1779,18 @@ int main(int argc, char** argv) {
                 defaultConfig.documentCount = getDocCount();
                 defaultConfig.enableEmbeddings = getEnableEmbeddings();
                 defaultConfig.tuningProfile = getTuningProfile();
-                SetupHarness(defaultConfig);
+                if (!SetupHarness(defaultConfig)) {
+                    return 1;
+                }
             }
         } else {
             IngestionBenchConfig defaultConfig;
             defaultConfig.documentCount = getDocCount();
             defaultConfig.enableEmbeddings = getEnableEmbeddings();
             defaultConfig.tuningProfile = getTuningProfile();
-            SetupHarness(defaultConfig);
+            if (!SetupHarness(defaultConfig)) {
+                return 1;
+            }
         }
     }
 
