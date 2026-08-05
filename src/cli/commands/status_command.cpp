@@ -115,7 +115,6 @@ public:
                         const auto detailStale = getCount("status_detail_stale") != 0;
                         const auto detailAvailable = getCount("status_detail_available") != 0;
                         const auto searchMetrics = effectiveSearchMetrics(s);
-                        std::string svcSummary;
                         std::string waitingSummary;
                         if (jsonOutput_) {
                             nlohmann::json j;
@@ -307,42 +306,36 @@ public:
                                 j["skippedPlugins"] = std::move(skipped);
                             }
                             // Include storage stats: render only daemon-provided counts (no local
-                            // scans)
-                            try {
-                                // Prefer authoritative metadata counts; fallback to storage object
-                                // count
-                                uint64_t docs = getCount("documents_total");
-                                if (docs == 0)
-                                    docs = getCount("storage_documents");
-                                uint64_t idxDocs = getCount("documents_indexed");
-                                uint64_t logical = getCount("storage_logical_bytes");
-                                // Prefer aggregated physical total if available
-                                uint64_t physical = getCount("physical_total_bytes");
-                                if (physical == 0)
-                                    physical = getCount("storage_physical_bytes");
-                                uint64_t dedupSaved = getCount("cas_dedup_saved_bytes");
+                            // scans). Prefer authoritative metadata counts; fallback to storage
+                            // object count.
+                            uint64_t docs = getCount("documents_total");
+                            if (docs == 0)
+                                docs = getCount("storage_documents");
+                            uint64_t idxDocs = getCount("documents_indexed");
+                            uint64_t logical = getCount("storage_logical_bytes");
+                            uint64_t physical = getCount("physical_total_bytes");
+                            if (physical == 0)
+                                physical = getCount("storage_physical_bytes");
+                            uint64_t dedupSaved = getCount("cas_dedup_saved_bytes");
 
-                                if (docs > 0)
-                                    j["totalDocuments"] = docs;
-                                if (idxDocs > 0)
-                                    j["indexedDocuments"] = idxDocs;
-                                j["logicalBytes"] = logical;
-                                if (physical > 0)
-                                    j["physicalBytes"] = physical;
-                                // Only compute savings when physical is known
-                                if (physical > 0 && logical > 0) {
-                                    uint64_t spaceSaved =
-                                        (logical > physical) ? (logical - physical) : 0ULL;
-                                    double spaceSavedPct = static_cast<double>(spaceSaved) * 100.0 /
-                                                           static_cast<double>(logical);
-                                    if (spaceSaved > 0)
-                                        j["spaceSavingsBytes"] = spaceSaved;
-                                    j["spaceSavingsPercent"] = spaceSavedPct;
-                                }
-                                if (dedupSaved > 0)
-                                    j["deduplicatedBytes"] = dedupSaved;
-                            } catch (...) {
+                            if (docs > 0)
+                                j["totalDocuments"] = docs;
+                            if (idxDocs > 0)
+                                j["indexedDocuments"] = idxDocs;
+                            j["logicalBytes"] = logical;
+                            if (physical > 0)
+                                j["physicalBytes"] = physical;
+                            if (physical > 0 && logical > 0) {
+                                uint64_t spaceSaved =
+                                    (logical > physical) ? (logical - physical) : 0ULL;
+                                double spaceSavedPct = static_cast<double>(spaceSaved) * 100.0 /
+                                                       static_cast<double>(logical);
+                                if (spaceSaved > 0)
+                                    j["spaceSavingsBytes"] = spaceSaved;
+                                j["spaceSavingsPercent"] = spaceSavedPct;
                             }
+                            if (dedupSaved > 0)
+                                j["deduplicatedBytes"] = dedupSaved;
 
                             // Embedding runtime telemetry
                             {
@@ -375,7 +368,12 @@ public:
                                 sr["cache_hit_rate"] = searchMetrics.cacheHitRate;
                                 sr["avg_latency_us"] = searchMetrics.avgLatencyUs;
                                 sr["concurrency_limit"] = searchMetrics.concurrencyLimit;
+                                sr["automatic_rebuilds"] = s.searchAutomaticRebuildsEnabled;
+                                sr["automatic_rebuilds_source"] = s.searchAutomaticRebuildsSource;
                                 j["search"] = std::move(sr);
+                            }
+                            if (!s.runtimeTuning.empty()) {
+                                j["runtime_tuning"] = s.runtimeTuning;
                             }
                             // Search tuning state (corpus-aware FSM)
                             if (!s.searchTuningState.empty()) {
@@ -604,7 +602,30 @@ public:
                                     tuneVal << " (" << s.searchTuningReason << ")";
                                 searchRows.push_back({"Tuning", tuneVal.str(), ""});
                             }
+                            std::string maintenance = s.searchAutomaticRebuildsEnabled
+                                                          ? "automatic rebuilds enabled"
+                                                          : "automatic rebuilds disabled";
+                            if (!s.searchAutomaticRebuildsSource.empty()) {
+                                maintenance += " (" + s.searchAutomaticRebuildsSource + ")";
+                            }
+                            searchRows.push_back({"Maintenance", std::move(maintenance), ""});
                             render_rows(std::cout, searchRows);
+
+                            if (!s.runtimeTuning.empty()) {
+                                std::cout << "\n" << section_header("Runtime Tuning") << "\n\n";
+                                std::vector<Row> tuningRows;
+                                for (const auto& [key, value] : s.runtimeTuning) {
+                                    if (key.ends_with(".source")) {
+                                        continue;
+                                    }
+                                    const auto source = s.runtimeTuning.find(key + ".source");
+                                    tuningRows.push_back({key, value,
+                                                          source == s.runtimeTuning.end()
+                                                              ? std::string{}
+                                                              : source->second});
+                                }
+                                render_rows(std::cout, tuningRows);
+                            }
 
                             // Resource Governor with progress bar
                             if (s.governorBudgetBytes > 0) {
@@ -725,12 +746,10 @@ public:
 
                             // Embedding runtime summary (prefer readiness when daemon omits fields)
                             bool embedAvail = s.embeddingAvailable;
-                            try {
-                                auto it = s.readinessStates.find("vector_embeddings_available");
-                                if (it != s.readinessStates.end())
-                                    embedAvail = it->second;
-                            } catch (...) {
-                            }
+                            auto embeddingReady =
+                                s.readinessStates.find("vector_embeddings_available");
+                            if (embeddingReady != s.readinessStates.end())
+                                embedAvail = embeddingReady->second;
 
                             // Plugins & Embeddings section
                             bool hasPlugins = !s.providers.empty();
@@ -827,30 +846,29 @@ public:
                                 render_rows(std::cout, plugRows);
                             }
 
-                            // Surface degraded flags prominently when present
-                            try {
-                                auto it_pd = s.readinessStates.find("plugins_degraded");
-                                auto it_ed = s.readinessStates.find("embedding_degraded");
-                                if ((it_pd != s.readinessStates.end() && it_pd->second) ||
-                                    (it_ed != s.readinessStates.end() && it_ed->second)) {
-                                    std::cout << "\n";
-                                    std::vector<Row> degraded;
-                                    if (it_pd != s.readinessStates.end() && it_pd->second) {
-                                        degraded.push_back(
-                                            {"⚠ Degraded",
-                                             colorize("Plugins may be unavailable", Ansi::YELLOW),
-                                             ""});
-                                    }
-                                    if (it_ed != s.readinessStates.end() && it_ed->second) {
-                                        degraded.push_back(
-                                            {"⚠ Degraded",
-                                             colorize("Embeddings may be unavailable",
-                                                      Ansi::YELLOW),
-                                             ""});
-                                    }
-                                    render_rows(std::cout, degraded);
+                            // Surface degraded flags prominently when present.
+                            auto pluginsDegraded = s.readinessStates.find("plugins_degraded");
+                            auto embeddingsDegraded = s.readinessStates.find("embedding_degraded");
+                            if ((pluginsDegraded != s.readinessStates.end() &&
+                                 pluginsDegraded->second) ||
+                                (embeddingsDegraded != s.readinessStates.end() &&
+                                 embeddingsDegraded->second)) {
+                                std::cout << "\n";
+                                std::vector<Row> degraded;
+                                if (pluginsDegraded != s.readinessStates.end() &&
+                                    pluginsDegraded->second) {
+                                    degraded.push_back(
+                                        {"⚠ Degraded",
+                                         colorize("Plugins may be unavailable", Ansi::YELLOW), ""});
                                 }
-                            } catch (...) {
+                                if (embeddingsDegraded != s.readinessStates.end() &&
+                                    embeddingsDegraded->second) {
+                                    degraded.push_back(
+                                        {"⚠ Degraded",
+                                         colorize("Embeddings may be unavailable", Ansi::YELLOW),
+                                         ""});
+                                }
+                                render_rows(std::cout, degraded);
                             }
 
                             if (!s.ready && !waitingSummary.empty()) {
@@ -981,12 +999,9 @@ public:
                                 }
 
                                 bool vecReady = false;
-                                try {
-                                    auto it = s.readinessStates.find("vector_index");
-                                    if (it != s.readinessStates.end())
-                                        vecReady = it->second;
-                                } catch (...) {
-                                }
+                                auto vectorReady = s.readinessStates.find("vector_index");
+                                if (vectorReady != s.readinessStates.end())
+                                    vecReady = vectorReady->second;
 
                                 std::string line = "VECDB: ";
                                 uint64_t vecBytes = getU64("vector_physical_bytes");

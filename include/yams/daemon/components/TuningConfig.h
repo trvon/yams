@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <string>
 
 namespace yams::daemon {
@@ -35,6 +36,15 @@ struct TuningConfig {
     // Default "connected" preserves pre-P3 behavior (connected-components engine).
     // Unknown values fall back to "connected" at resolve time.
     std::string topologyAlgorithm{"connected"};
+
+    // True after ConfigResolver has established a fresh lifecycle boundary for the legacy
+    // TuneAdvisor atomics. Direct embedded ServiceManager construction starts with false and must
+    // therefore clear any resolver-owned overrides left by an earlier in-process daemon.
+    bool tuneAdvisorOverridesResolved{false};
+
+    // Valid product configuration keys that contributed to the effective startup policy.
+    // Compatibility environment sources are appended by ServiceManager when it snapshots them.
+    std::map<std::string, std::string> provenance;
 };
 
 } // namespace yams::daemon

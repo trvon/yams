@@ -1244,9 +1244,24 @@ ConfigResolver::resolveInstrumentationPolicy(const DaemonConfig& config) {
 
 TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
                                                 TuningConfig tuningConfig) {
+    [[maybe_unused]] TuneAdvisor::ConfiguredOverrideUpdate configuredOverrideUpdate;
+
+    // An empty provenance map identifies a fresh lifecycle snapshot. Clear only the overrides
+    // owned by this resolver so a prior in-process daemon cannot leak typed tuning into the next
+    // one. Reload passes the current snapshot (including provenance) and therefore remains
+    // incremental.
+    if (!tuningConfig.tuneAdvisorOverridesResolved) {
+        TuneAdvisor::resetConfiguredOverrides();
+        tuningConfig.tuneAdvisorOverridesResolved = true;
+    }
+
     const auto findSection = [&](std::string_view name) -> const ConfigSection* {
         auto it = sections.find(std::string(name));
         return it == sections.end() ? nullptr : &it->second;
+    };
+    const auto noteSource = [&](std::string_view sectionName, std::string_view key) {
+        const std::string qualified = std::string(sectionName) + "." + std::string(key);
+        tuningConfig.provenance.insert_or_assign(qualified, "config:" + qualified);
     };
     const auto findValue = [](const ConfigSection* section,
                               std::string_view key) -> const std::string* {
@@ -1333,6 +1348,7 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
     const auto applyUint32 = [&](std::string_view key, auto setter) {
         if (auto value = parseUint32(tuning, "tuning", key)) {
             setter(*value);
+            noteSource("tuning", key);
         }
     };
     applyUint32("backpressure_read_pause_ms", &TuneAdvisor::setBackpressureReadPauseMs);
@@ -1384,11 +1400,13 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
     const auto updateSize = [&](std::string_view key, std::size_t& field) {
         if (auto value = parseSize(tuning, "tuning", key)) {
             field = *value;
+            noteSource("tuning", key);
         }
     };
     const auto updateUint32 = [&](std::string_view key, std::uint32_t& field) {
         if (auto value = parseUint32(tuning, "tuning", key)) {
             field = *value;
+            noteSource("tuning", key);
         }
     };
     updateUint32("target_cpu_percent", tuningConfig.targetCpuPercent);
@@ -1399,6 +1417,80 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
     updateSize("admit_stop_threshold", tuningConfig.admitStopThreshold);
     updateUint32("control_interval_ms", tuningConfig.controlIntervalMs);
     updateUint32("hold_ms", tuningConfig.holdMs);
+
+    const auto* ipc = findSection("tuning.ipc");
+    if (auto value = parseUint32(ipc, "tuning.ipc", "timeout_ms")) {
+        if (*value >= 500 && *value <= 600000) {
+            TuneAdvisor::setIpcTimeoutMs(*value);
+            noteSource("tuning.ipc", "timeout_ms");
+        } else {
+            spdlog::warn("Config: tuning.ipc.timeout_ms outside range 500..600000");
+        }
+    }
+    if (auto value = parseUint32(ipc, "tuning.ipc", "stream_chunk_timeout_ms")) {
+        if (*value >= 1000 && *value <= 600000) {
+            TuneAdvisor::setStreamChunkTimeoutMs(*value);
+            noteSource("tuning.ipc", "stream_chunk_timeout_ms");
+        } else {
+            spdlog::warn("Config: tuning.ipc.stream_chunk_timeout_ms outside range 1000..600000");
+        }
+    }
+
+    const auto* resource = findSection("tuning.resource");
+    if (auto value = parseBoolean(resource, "tuning.resource", "enabled")) {
+        TuneAdvisor::setEnableResourceGovernor(*value);
+        noteSource("tuning.resource", "enabled");
+    }
+    if (auto value = parseBoolean(resource, "tuning.resource", "admission_control")) {
+        TuneAdvisor::setEnableAdmissionControl(*value);
+        noteSource("tuning.resource", "admission_control");
+    }
+    if (auto value = parseUint32(resource, "tuning.resource", "warning_scale_percent")) {
+        if (*value >= 10 && *value <= 100) {
+            TuneAdvisor::setGovernorWarningScalePercent(*value);
+            noteSource("tuning.resource", "warning_scale_percent");
+        } else {
+            spdlog::warn("Config: tuning.resource.warning_scale_percent outside range 10..100");
+        }
+    }
+    if (auto value = parseUnsigned(resource, "tuning.resource", "memory_budget_bytes")) {
+        constexpr std::uint64_t kMinimumMemoryBudget = 64ULL * 1024ULL * 1024ULL;
+        if (*value >= kMinimumMemoryBudget) {
+            TuneAdvisor::setMemoryBudgetBytes(*value);
+            noteSource("tuning.resource", "memory_budget_bytes");
+        } else {
+            spdlog::warn("Config: tuning.resource.memory_budget_bytes below 64 MiB");
+        }
+    }
+    const auto applyResourceThreshold = [&](std::string_view key, auto setter) {
+        if (auto value = parseFloating(resource, "tuning.resource", key)) {
+            if (*value >= 0.5 && *value <= 0.99) {
+                setter(*value);
+                noteSource("tuning.resource", key);
+            } else {
+                spdlog::warn("Config: tuning.resource.{} outside range 0.5..0.99", key);
+            }
+        }
+    };
+    applyResourceThreshold("memory_warning_threshold", &TuneAdvisor::setMemoryWarningThreshold);
+    applyResourceThreshold("memory_critical_threshold", &TuneAdvisor::setMemoryCriticalThreshold);
+    applyResourceThreshold("memory_emergency_threshold", &TuneAdvisor::setMemoryEmergencyThreshold);
+    if (auto value = parseUint32(resource, "tuning.resource", "memory_hysteresis_ms")) {
+        if (*value >= 10 && *value <= 10000) {
+            TuneAdvisor::setMemoryHysteresisMs(*value);
+            noteSource("tuning.resource", "memory_hysteresis_ms");
+        } else {
+            spdlog::warn("Config: tuning.resource.memory_hysteresis_ms outside range 10..10000");
+        }
+    }
+    if (auto value = parseUint32(resource, "tuning.resource", "cpu_hysteresis_ms")) {
+        if (*value >= 10 && *value <= 10000) {
+            TuneAdvisor::setCpuLevelHysteresisMs(*value);
+            noteSource("tuning.resource", "cpu_hysteresis_ms");
+        } else {
+            spdlog::warn("Config: tuning.resource.cpu_hysteresis_ms outside range 10..10000");
+        }
+    }
 
     const auto* ingest = findSection("tuning.ingest");
     if (auto value = parseUnsigned(ingest, "tuning.ingest", "store_batch_size")) {
@@ -1416,15 +1508,32 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
         constexpr std::uint64_t kMaxCoalesceMs = 20;
         if (*value <= kMaxCoalesceMs) {
             tuningConfig.postIngestCoalesceMs = static_cast<std::uint32_t>(*value);
+            noteSource("tuning.post_ingest", "coalesce_ms");
         } else {
             spdlog::warn("Config: tuning.post_ingest.coalesce_ms outside range 0..{}",
                          kMaxCoalesceMs);
         }
     }
-    const auto applyPostIngestCap = [&](std::string_view key, const char* envName,
-                                        std::uint32_t minimum, std::uint32_t maximum, auto setter) {
+    if (auto value = parseUint32(postIngest, "tuning.post_ingest", "rpc_queue_max")) {
+        if (*value >= 10 && *value <= 1'000'000) {
+            TuneAdvisor::setPostIngestRpcQueueMax(*value);
+            noteSource("tuning.post_ingest", "rpc_queue_max");
+        } else {
+            spdlog::warn("Config: tuning.post_ingest.rpc_queue_max outside range 10..1000000");
+        }
+    }
+    if (auto value = parseUint32(postIngest, "tuning.post_ingest", "rpc_max_per_batch")) {
+        if (*value >= 1 && *value <= 1024) {
+            TuneAdvisor::setPostIngestRpcMaxPerBatch(*value);
+            noteSource("tuning.post_ingest", "rpc_max_per_batch");
+        } else {
+            spdlog::warn("Config: tuning.post_ingest.rpc_max_per_batch outside range 1..1024");
+        }
+    }
+    const auto applyPostIngestCap = [&](std::string_view key, std::uint32_t minimum,
+                                        std::uint32_t maximum, auto setter) {
         auto value = parseUnsigned(postIngest, "tuning.post_ingest", key);
-        if (!value || yams::config::getenv_optional(envName).has_value()) {
+        if (!value) {
             return;
         }
         if (*value < minimum || *value > maximum) {
@@ -1433,23 +1542,16 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
             return;
         }
         setter(static_cast<std::uint32_t>(*value));
+        noteSource("tuning.post_ingest", key);
     };
-    applyPostIngestCap("total_concurrent", "YAMS_POST_INGEST_TOTAL_CONCURRENT", 1, 256,
-                       &TuneAdvisor::setPostIngestTotalConcurrent);
-    applyPostIngestCap("embed_concurrent", "YAMS_POST_EMBED_CONCURRENT", 1, 32,
-                       &TuneAdvisor::setPostEmbedConcurrent);
-    applyPostIngestCap("extraction_concurrent", "YAMS_POST_EXTRACTION_CONCURRENT", 1, 64,
-                       &TuneAdvisor::setPostExtractionConcurrent);
-    applyPostIngestCap("kg_concurrent", "YAMS_POST_KG_CONCURRENT", 1, 64,
-                       &TuneAdvisor::setPostKgConcurrent);
-    applyPostIngestCap("symbol_concurrent", "YAMS_POST_SYMBOL_CONCURRENT", 1, 32,
-                       &TuneAdvisor::setPostSymbolConcurrent);
-    applyPostIngestCap("entity_concurrent", "YAMS_POST_ENTITY_CONCURRENT", 1, 16,
-                       &TuneAdvisor::setPostEntityConcurrent);
-    applyPostIngestCap("title_concurrent", "YAMS_POST_TITLE_CONCURRENT", 1, 16,
-                       &TuneAdvisor::setPostTitleConcurrent);
-    applyPostIngestCap("batch_size", "YAMS_POST_INGEST_BATCH_SIZE", 1, 256,
-                       &TuneAdvisor::setPostIngestBatchSize);
+    applyPostIngestCap("total_concurrent", 1, 256, &TuneAdvisor::setPostIngestTotalConcurrent);
+    applyPostIngestCap("embed_concurrent", 1, 32, &TuneAdvisor::setPostEmbedConcurrent);
+    applyPostIngestCap("extraction_concurrent", 1, 64, &TuneAdvisor::setPostExtractionConcurrent);
+    applyPostIngestCap("kg_concurrent", 1, 64, &TuneAdvisor::setPostKgConcurrent);
+    applyPostIngestCap("symbol_concurrent", 1, 32, &TuneAdvisor::setPostSymbolConcurrent);
+    applyPostIngestCap("entity_concurrent", 1, 16, &TuneAdvisor::setPostEntityConcurrent);
+    applyPostIngestCap("title_concurrent", 1, 16, &TuneAdvisor::setPostTitleConcurrent);
+    applyPostIngestCap("batch_size", 1, 256, &TuneAdvisor::setPostIngestBatchSize);
 
     const auto* gradient = findSection("gradient_limiter");
     if (auto value = parseBoolean(gradient, "gradient_limiter", "enable")) {
@@ -1478,6 +1580,24 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
     }
 
     return tuningConfig;
+}
+
+void ConfigResolver::applySearchMaintenance(const ConfigSections& sections, DaemonConfig& config) {
+    const auto section = sections.find("search");
+    if (section == sections.end()) {
+        return;
+    }
+    const auto value = section->second.find("automatic_rebuilds");
+    if (value == section->second.end()) {
+        return;
+    }
+    const auto parsed = parseBoolValue(value->second);
+    if (!parsed.has_value()) {
+        spdlog::warn("Config: failed to parse search.automatic_rebuilds as boolean");
+        return;
+    }
+    config.searchMaintenance.automaticRebuildsEnabled = parsed;
+    config.searchMaintenance.automaticRebuildsSource = "config:search.automatic_rebuilds";
 }
 
 ConfigResolver::PostIngestCaps ConfigResolver::resolvePostIngestCaps() {

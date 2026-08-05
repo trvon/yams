@@ -35,9 +35,27 @@ std::optional<std::string> getenv_optional(std::string_view key);
 /// Copy a non-empty environment value; unset and explicitly empty values return nullopt.
 std::optional<std::string> getenv_nonempty(std::string_view key);
 
+/// Copy every present process-environment entry whose name starts with `prefix` while holding the
+/// shared boundary lock. The returned map is an immutable point-in-time lifecycle input.
+std::map<std::string, std::string> snapshot_environment_prefix(std::string_view prefix);
+
 /// Set or unset one process-environment value under the same boundary lock used by readers.
 /// A null value unsets the key. Returns false when the platform mutation fails.
 bool set_environment(const char* key, const char* value) noexcept;
+
+/// Set a value and return its monotonic boundary generation. The generation can later prove that
+/// an ownership lease still controls the key before restoring a prior value.
+std::optional<std::uint64_t> set_environment_owned(const char* key, const char* value) noexcept;
+
+enum class EnvironmentRestoreResult { Restored, OwnershipLost, Error };
+
+/// Restore `value` only when both the copied current value and boundary generation still match the
+/// lease. This prevents a daemon teardown from overwriting a newer writer, including ABA writes
+/// that happen to install the same text.
+EnvironmentRestoreResult
+restore_environment_if_owned(const char* key, std::string_view installedValue,
+                             std::uint64_t installedGeneration,
+                             const std::optional<std::string>& value) noexcept;
 
 /// Compatibility accessor that maps unset and explicitly empty values to an empty string.
 std::string getenv_copy(const char* key);

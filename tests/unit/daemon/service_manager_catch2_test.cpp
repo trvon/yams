@@ -25,6 +25,7 @@
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/daemon.h>
 #include <yams/metadata/database.h>
 
@@ -301,6 +302,24 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager multiple construction is
     SUCCEED();
 }
 
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "Concurrent embedded ServiceManager preserves active tuning lifecycle",
+                 "[daemon][service_manager][config][tuning][lifecycle]") {
+    yams::test::ScopedEnvVar timeout{"YAMS_IPC_TIMEOUT_MS", std::nullopt};
+    TuneAdvisor::setIpcTimeoutMs(4321);
+    config_.tuning.tuneAdvisorOverridesResolved = true;
+    ServiceManager owner(config_, state_, lifecycleFsm_);
+    REQUIRE((owner.getRuntimeTuningStatus().at("ipc.timeout_ms") == "4321"));
+
+    auto directConfig = config_;
+    directConfig.tuning.tuneAdvisorOverridesResolved = false;
+    ServiceManager embedded(directConfig, state_, lifecycleFsm_);
+
+    CHECK((TuneAdvisor::ipcTimeoutMs() == 4321u));
+    CHECK((owner.getRuntimeTuningStatus().at("ipc.timeout_ms") == "4321"));
+    CHECK((embedded.getRuntimeTuningStatus().at("ipc.timeout_ms") == "4321"));
+}
+
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager construction with missing data directory",
                  "[daemon][service_manager]") {
     fs::remove_all(config_.dataDir);
@@ -364,6 +383,102 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager getConfig returns config
     const auto& cfg = sm.getConfig();
     REQUIRE((cfg.dataDir == config_.dataDir));
     REQUIRE((cfg.socketPath == config_.socketPath));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager snapshots search rebuild compatibility policy once",
+                 "[daemon][service_manager][config][search]") {
+    yams::test::ScopedEnvVar disableRebuilds{"YAMS_DISABLE_SEARCH_REBUILDS", std::string{"1"}};
+
+    ServiceManager sm(config_, state_, lifecycleFsm_);
+    const auto& policy = sm.getConfig().searchMaintenance;
+    REQUIRE(policy.automaticRebuildsEnabled.has_value());
+    CHECK_FALSE(*policy.automaticRebuildsEnabled);
+    CHECK((policy.automaticRebuildsSource ==
+           "compatibility-environment:YAMS_DISABLE_SEARCH_REBUILDS"));
+    REQUIRE((sm.getSearchComponent() != nullptr));
+    CHECK_FALSE(sm.getSearchComponent()->getConfig().automaticRebuildsEnabled);
+
+    disableRebuilds.set("0");
+    CHECK_FALSE(*sm.getConfig().searchMaintenance.automaticRebuildsEnabled);
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "Typed search rebuild policy outranks compatibility environment",
+                 "[daemon][service_manager][config][search]") {
+    yams::test::ScopedEnvVar disableRebuilds{"YAMS_DISABLE_SEARCH_REBUILDS", std::string{"1"}};
+    config_.searchMaintenance.automaticRebuildsEnabled = true;
+    config_.searchMaintenance.automaticRebuildsSource = "typed:test";
+
+    ServiceManager sm(config_, state_, lifecycleFsm_);
+    const auto& policy = sm.getConfig().searchMaintenance;
+    REQUIRE(policy.automaticRebuildsEnabled.has_value());
+    CHECK(*policy.automaticRebuildsEnabled);
+    CHECK((policy.automaticRebuildsSource == "typed:test"));
+    REQUIRE((sm.getSearchComponent() != nullptr));
+    CHECK(sm.getSearchComponent()->getConfig().automaticRebuildsEnabled);
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager snapshots runtime tuning provenance across live refresh",
+                 "[daemon][service_manager][config][tuning][snapshot]") {
+    yams::test::ScopedEnvVar timeout{"YAMS_IPC_TIMEOUT_MS", std::string{"4321"}};
+
+    ServiceManager sm(config_, state_, lifecycleFsm_);
+    const auto snapshot = sm.getTuningConfig();
+    REQUIRE((sm.getRuntimeTuningStatus().at("ipc.timeout_ms.source") ==
+             "compatibility-environment:YAMS_IPC_TIMEOUT_MS"));
+
+    timeout.unset();
+    sm.setTuningConfig(snapshot);
+
+    CHECK((sm.getRuntimeTuningStatus().at("ipc.timeout_ms.source") ==
+           "compatibility-environment:YAMS_IPC_TIMEOUT_MS"));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "Runtime tuning status publishes values from one configured generation",
+                 "[daemon][service_manager][config][tuning][snapshot]") {
+    config_.tuning.tuneAdvisorOverridesResolved = true;
+    TuneAdvisor::setIpcTimeoutMs(1001);
+    TuneAdvisor::setMemoryWarningThreshold(0.61);
+    ServiceManager sm(config_, state_, lifecycleFsm_);
+
+    std::atomic<bool> stop{false};
+    std::thread writer([&] {
+        bool alternate = false;
+        while (!stop.load(std::memory_order_acquire)) {
+            [[maybe_unused]] auto update = TuneAdvisor::beginConfiguredOverrideUpdate();
+            TuneAdvisor::setIpcTimeoutMs(alternate ? 1001 : 2002);
+            TuneAdvisor::setMemoryWarningThreshold(alternate ? 0.61 : 0.82);
+            alternate = !alternate;
+        }
+    });
+
+    for (int i = 0; i < 500; ++i) {
+        sm.setTuningConfig(sm.getTuningConfig());
+        const auto status = sm.getRuntimeTuningStatus();
+        const auto timeout = status.at("ipc.timeout_ms");
+        const auto warning = status.at("resource.memory_warning_threshold");
+        CHECK(((timeout == "1001" && warning == "0.610000") ||
+               (timeout == "2002" && warning == "0.820000")));
+    }
+
+    stop.store(true, std::memory_order_release);
+    writer.join();
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "Direct embedded ServiceManager starts a fresh tuning lifecycle",
+                 "[daemon][service_manager][config][tuning][lifecycle]") {
+    yams::test::ScopedEnvVar timeout{"YAMS_IPC_TIMEOUT_MS", std::nullopt};
+    TuneAdvisor::setIpcTimeoutMs(4321);
+    REQUIRE_FALSE(config_.tuning.tuneAdvisorOverridesResolved);
+
+    ServiceManager sm(config_, state_, lifecycleFsm_);
+
+    CHECK(sm.getTuningConfig().tuneAdvisorOverridesResolved);
+    CHECK((sm.getRuntimeTuningStatus().at("ipc.timeout_ms") == "15000"));
 }
 
 TEST_CASE("ServiceManager session watcher honors only the test disable gate",

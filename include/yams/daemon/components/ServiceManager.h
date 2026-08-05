@@ -8,13 +8,11 @@
 #include <future>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
-#include <stop_token>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 #include "IComponent.h"
 #include <boost/asio/any_io_executor.hpp>
@@ -325,21 +323,38 @@ public:
     std::size_t getWorkerQueueDepth() const;
 
     // Tuning configuration (no envs): getter/setter with live application where applicable.
-    const TuningConfig& getTuningConfig() const { return tuningConfig_; }
+    // Return a copy so reload cannot invalidate or race a caller-held reference.
+    TuningConfig getTuningConfig() const {
+        std::lock_guard lock(tuningConfigMutex_);
+        return tuningConfig_;
+    }
+    std::map<std::string, std::string> getRuntimeTuningStatus() const {
+        std::lock_guard lock(runtimeTuningStatusMutex_);
+        return runtimeTuningStatus_;
+    }
     uint32_t getIngestStoreBatchSize() const {
         return ingestStoreBatchSize_.load(std::memory_order_relaxed);
     }
     void setTuningConfig(const TuningConfig& cfg) {
+        [[maybe_unused]] auto publication = TuneAdvisor::beginConfiguredOverridePublication();
         auto applied = cfg;
+        const auto previous = getTuningConfig();
         auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
         if (piq) {
             // Channel capacity is construction-time state. Preserve the effective value during a
             // live update so configuration/status cannot claim a resize that did not occur.
-            applied.postIngestCapacity = tuningConfig_.postIngestCapacity;
+            applied.postIngestCapacity = previous.postIngestCapacity;
             piq->setBatchCoalesceWindow(std::chrono::milliseconds(applied.postIngestCoalesceMs));
         }
         ingestStoreBatchSize_.store(applied.ingestStoreBatchSize, std::memory_order_relaxed);
-        tuningConfig_ = applied;
+        for (const auto& [key, source] : previous.provenance) {
+            applied.provenance.try_emplace(key, source);
+        }
+        {
+            std::lock_guard lock(tuningConfigMutex_);
+            tuningConfig_ = applied;
+        }
+        refreshRuntimeTuningStatus();
     }
     const std::vector<std::shared_ptr<yams::extraction::IContentExtractor>>&
     getContentExtractors() const {
@@ -743,6 +758,8 @@ private:
     quiesceServicesBeforeWorkerShutdown(std::unique_ptr<CheckpointManager>& checkpointManagerHold);
     void stopWorkCoordinatorForShutdown(std::unique_ptr<CheckpointManager>& checkpointManagerHold);
     void clearCachedServiceState();
+    void snapshotRuntimeTuningSources();
+    void refreshRuntimeTuningStatus();
     void seedBuiltinContentExtractors();
     void shutdownModelProviderForShutdown();
     void resetRetrievalSessionsForShutdown();
@@ -759,6 +776,8 @@ private:
     boost::asio::awaitable<bool> co_migrateDatabase(int timeout_ms, yams::compat::stop_token token);
     bool detectEmbeddingPreloadFlag() const { return embeddingLifecycle_.detectPreloadFlag(); }
 
+    // Declared first so the process-wide compatibility lease outlives all managed services.
+    TuneAdvisor::ConfiguredOverrideLifecycleLease tuningLifecycleLease_;
     DaemonConfig config_;
     StateComponent& state_;
 
@@ -805,7 +824,10 @@ private:
     TopologyManager topologyManager_;
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors_;
     std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> symbolExtractors_;
+    mutable std::mutex tuningConfigMutex_;
     TuningConfig tuningConfig_{};
+    mutable std::mutex runtimeTuningStatusMutex_;
+    std::map<std::string, std::string> runtimeTuningStatus_;
     // Independent advisory scalar; it does not publish or synchronize other tuning fields.
     std::atomic<uint32_t> ingestStoreBatchSize_{64};
 

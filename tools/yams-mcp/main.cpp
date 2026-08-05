@@ -10,22 +10,12 @@
 
 #include <CLI/CLI.hpp>
 
+#include <yams/config/config_helpers.h>
 #include <yams/mcp/mcp_server.h>
 
 #ifdef _WIN32
 #include <cstdlib>
 #include <yams/platform/windows_init.h>
-// Windows implementation of setenv
-inline int setenv(const char* name, const char* value, int overwrite) {
-    int errcode = 0;
-    if (!overwrite) {
-        size_t envsize = 0;
-        errcode = getenv_s(&envsize, NULL, 0, name);
-        if (errcode || envsize)
-            return errcode;
-    }
-    return _putenv_s(name, value);
-}
 #endif
 
 std::atomic<bool> g_running{true};
@@ -112,16 +102,15 @@ int main(int argc, char* argv[]) {
             spdlog::set_level(spdlog::level::err);
 
         spdlog::set_pattern("[%Y-%m-%d %H:%M:%S.%e] [%l] [%n] %v");
-        // Apply hot/cold modes for list/grep/retrieval so MCP uses hot paths like CLI
-        if (!list_mode.empty()) {
-            setenv("YAMS_LIST_MODE", list_mode.c_str(), 1); // NOLINT(concurrency-mt-unsafe)
-        }
-        if (!grep_mode.empty()) {
-            setenv("YAMS_GREP_MODE", grep_mode.c_str(), 1); // NOLINT(concurrency-mt-unsafe)
-        }
-        if (!retrieval_mode.empty()) {
-            setenv("YAMS_RETRIEVAL_MODE", retrieval_mode.c_str(),
-                   1); // NOLINT(concurrency-mt-unsafe)
+        // These CLI compatibility modes are installed before server threads start and use the
+        // shared process-environment boundary. New MCP tuning belongs in typed server options.
+        for (const auto& [name, value] :
+             {std::pair{"YAMS_LIST_MODE", list_mode}, std::pair{"YAMS_GREP_MODE", grep_mode},
+              std::pair{"YAMS_RETRIEVAL_MODE", retrieval_mode}}) {
+            if (!value.empty() && !yams::config::set_environment(name, value.c_str())) {
+                throw std::runtime_error(std::string{"Failed to apply MCP compatibility mode "} +
+                                         name);
+            }
         }
     } catch (const std::exception& e) {
         std::cerr << "Failed to setup logging: " << e.what() << std::endl;

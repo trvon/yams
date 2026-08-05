@@ -1211,19 +1211,6 @@ Result<SearchResponse> DaemonClient::StreamingSearchHandler::getResults() const 
     return response;
 }
 
-// Static helper to set timeout environment variables
-void DaemonClient::setTimeoutEnvVars(std::chrono::milliseconds headerTimeout,
-                                     std::chrono::milliseconds bodyTimeout) {
-    // Set environment variables
-#ifdef _WIN32
-    _putenv_s("YAMS_HEADER_TIMEOUT", std::to_string(headerTimeout.count()).c_str());
-    _putenv_s("YAMS_BODY_TIMEOUT", std::to_string(bodyTimeout.count()).c_str());
-#else
-    setenv("YAMS_HEADER_TIMEOUT", std::to_string(headerTimeout.count()).c_str(), 1);
-    setenv("YAMS_BODY_TIMEOUT", std::to_string(bodyTimeout.count()).c_str(), 1);
-#endif
-}
-
 // Streaming list helper method
 boost::asio::awaitable<Result<ListResponse>> DaemonClient::streamingList(const ListRequest& req) {
     auto handler = std::make_shared<StreamingListHandler>(req.pathsOnly, req.limit);
@@ -2105,6 +2092,9 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
     if (!config.pidFile.empty()) {
         pathOverrides.pidFile = config.pidFile;
     }
+    if (!config.configPath.empty()) {
+        pathOverrides.configFile = config.configPath;
+    }
     auto runtimePaths = yams::config::resolve_runtime_paths(pathOverrides);
     if (!runtimePaths) {
         return runtimePaths.error();
@@ -2114,14 +2104,22 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
     const auto dataDir = paths.dataDir.value;
     const auto pidFile = paths.pidFile.value;
     const auto configPath = paths.configFile.value;
+    // Copy deployment overrides before fork/CreateProcess. Explicit typed launch fields outrank
+    // compatibility environment values, and the child receives all policy as CLI arguments.
+    const std::optional<std::string> daemonBinOverride =
+        !config.daemonBinary.empty() ? std::optional<std::string>{config.daemonBinary.string()}
+                                     : yams::config::getenv_nonempty("YAMS_DAEMON_BIN");
+    const std::optional<std::string> logLevelOverride =
+        !config.logLevel.empty() ? std::optional<std::string>{config.logLevel}
+                                 : yams::config::getenv_nonempty("YAMS_LOG_LEVEL");
 
 #ifdef _WIN32
     // Windows implementation using CreateProcess
 
     // Find yams-daemon.exe
     std::filesystem::path exePath;
-    if (const char* daemonBin = std::getenv("YAMS_DAEMON_BIN"); daemonBin && *daemonBin) {
-        exePath = daemonBin;
+    if (daemonBinOverride) {
+        exePath = *daemonBinOverride;
     } else {
         // Auto-detect relative to this process path
         wchar_t selfPath[MAX_PATH];
@@ -2160,21 +2158,12 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
     if (!configPath.empty() && std::filesystem::exists(configPath)) {
         cmdLine += L" --config \"" + configPath.wstring() + L"\"";
     }
-    if (const char* ll = std::getenv("YAMS_LOG_LEVEL"); ll && *ll) {
-        std::wstring logLevel(ll, ll + strlen(ll));
+    if (logLevelOverride) {
+        const std::wstring logLevel(logLevelOverride->begin(), logLevelOverride->end());
         cmdLine += L" --log-level " + logLevel;
     }
     if (!dataDir.empty()) {
         cmdLine += L" --data-dir \"" + dataDir.wstring() + L"\"";
-    }
-
-    // Set up environment variables for the child process
-    if (!dataDir.empty()) {
-        SetEnvironmentVariableW(L"YAMS_STORAGE", dataDir.wstring().c_str());
-        SetEnvironmentVariableW(L"YAMS_DATA_DIR", dataDir.wstring().c_str());
-    }
-    if (!socketPath.empty()) {
-        SetEnvironmentVariableW(L"YAMS_DAEMON_SOCKET", socketPath.wstring().c_str());
     }
 
     // Create process with DETACHED_PROCESS flag so it doesn't share console
@@ -2221,105 +2210,83 @@ Result<void> DaemonClient::startDaemon(const ClientConfig& config) {
 #else
     // Unix implementation using fork/exec
 
-    // Fork and exec yams-daemon
-    pid_t pid = fork();
-    if (pid < 0) {
-        return Error{ErrorCode::InternalError, "Failed to fork: " + std::string(strerror(errno))};
+    // Resolve executable and build all argv storage before fork. The child path must use only
+    // async-signal-safe functions until exec because the client may already have worker threads.
+    std::string exePath;
+    if (daemonBinOverride) {
+        exePath = *daemonBinOverride;
+    } else {
+        std::filesystem::path selfExe;
+        char buffer[4096]{};
+        const ssize_t length = ::readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
+        if (length > 0) {
+            buffer[length] = '\0';
+            selfExe = std::filesystem::path(buffer);
+        }
+        if (!selfExe.empty()) {
+            const auto cliDir = selfExe.parent_path();
+            const std::vector<std::filesystem::path> candidates = {
+                cliDir / "yams-daemon", cliDir.parent_path() / "yams-daemon",
+                cliDir.parent_path() / "daemon" / "yams-daemon",
+                cliDir.parent_path().parent_path() / "daemon" / "yams-daemon",
+                cliDir.parent_path().parent_path() / "yams-daemon"};
+            for (const auto& candidate : candidates) {
+                if (std::filesystem::exists(candidate)) {
+                    exePath = candidate.string();
+                    break;
+                }
+            }
+        }
+        if (exePath.empty()) {
+            exePath = "yams-daemon";
+        }
     }
 
+    std::vector<std::string> ownedArgs;
+    ownedArgs.reserve(11);
+    ownedArgs.push_back(exePath);
+    ownedArgs.push_back("--socket");
+    ownedArgs.push_back(socketPath.string());
+    if (!pidFile.empty()) {
+        ownedArgs.push_back("--pid-file");
+        ownedArgs.push_back(pidFile.string());
+    }
+    if (!configPath.empty() && std::filesystem::exists(configPath)) {
+        ownedArgs.push_back("--config");
+        ownedArgs.push_back(configPath.string());
+    }
+    if (logLevelOverride) {
+        ownedArgs.push_back("--log-level");
+        ownedArgs.push_back(*logLevelOverride);
+    }
+    if (!dataDir.empty()) {
+        ownedArgs.push_back("--data-dir");
+        ownedArgs.push_back(dataDir.string());
+    }
+    std::vector<char*> args;
+    args.reserve(ownedArgs.size() + 1);
+    for (auto& arg : ownedArgs) {
+        args.push_back(arg.data());
+    }
+    args.push_back(nullptr);
+
+    const pid_t pid = ::fork();
+    if (pid < 0) {
+        const std::error_code forkError(errno, std::generic_category());
+        return Error{ErrorCode::InternalError, "Failed to fork: " + forkError.message()};
+    }
     if (pid == 0) {
-        // Child process - exec yams-daemon
-        // Detach stdio from parent (MCP/CLI) to avoid corrupting parent's stdout framing
-        int devnull = ::open("/dev/null", O_RDWR);
+        const int devnull = ::open("/dev/null", O_RDWR);
         if (devnull >= 0) {
             (void)::dup2(devnull, STDIN_FILENO);
             (void)::dup2(devnull, STDOUT_FILENO);
             (void)::dup2(devnull, STDERR_FILENO);
-            if (devnull > 2)
-                ::close(devnull);
-        }
-        // If a dataDir is provided, export it and pass as explicit CLI arg
-        if (!dataDir.empty()) {
-            setenv("YAMS_STORAGE", dataDir.c_str(), 1);
-            // Also export legacy alias used by some components
-            setenv("YAMS_DATA_DIR", dataDir.c_str(), 1);
-        }
-
-        // Allow overriding daemon path for development via YAMS_DAEMON_BIN
-        std::string exePath;
-        if (const char* daemonBin = std::getenv("YAMS_DAEMON_BIN"); daemonBin && *daemonBin) {
-            exePath = daemonBin;
-        } else {
-            // Try to auto-detect relative to this process path
-            // On Linux, read /proc/self/exe
-            std::filesystem::path selfExe;
-            char buf[4096]{};
-            ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
-            if (n > 0) {
-                buf[n] = '\0';
-                selfExe = std::filesystem::path(buf);
-            }
-            if (!selfExe.empty()) {
-                auto cliDir = selfExe.parent_path();
-                // Common build-tree locations
-                std::vector<std::filesystem::path> candidates = {
-                    cliDir / "yams-daemon", cliDir.parent_path() / "yams-daemon",
-                    cliDir.parent_path() / "daemon" / "yams-daemon",
-                    cliDir.parent_path().parent_path() / "daemon" / "yams-daemon",
-                    cliDir.parent_path().parent_path() / "yams-daemon"};
-                for (const auto& p : candidates) {
-                    if (std::filesystem::exists(p)) {
-                        exePath = p.string();
-                        break;
-                    }
-                }
-            }
-            if (exePath.empty()) {
-                // Fall back to PATH lookup
-                exePath = "yams-daemon";
+            if (devnull > STDERR_FILENO) {
+                (void)::close(devnull);
             }
         }
-
-        // Ensure child daemon inherits our resolved socket path for consistency
-        if (!socketPath.empty()) {
-            setenv("YAMS_DAEMON_SOCKET", socketPath.c_str(), 1);
-        }
-
-        // Use execlp to search PATH (or direct path if overridden) for yams-daemon
-        // Pass socket and optional config/log-level arguments
-        const char* ll = std::getenv("YAMS_LOG_LEVEL");
-        // Build args vector conditionally
-        std::vector<const char*> args;
-        args.push_back(exePath.c_str());
-        args.push_back("--socket");
-        args.push_back(socketPath.c_str());
-        if (!pidFile.empty()) {
-            args.push_back("--pid-file");
-            args.push_back(pidFile.c_str());
-        }
-
-        bool haveCfg = !configPath.empty() && std::filesystem::exists(configPath);
-        if (haveCfg) {
-            args.push_back("--config");
-            args.push_back(configPath.c_str());
-        }
-        if (ll && *ll) {
-            args.push_back("--log-level");
-            args.push_back(ll);
-        }
-        if (!dataDir.empty()) {
-            args.push_back("--data-dir");
-            args.push_back(dataDir.c_str());
-        }
-        args.push_back(nullptr);
-
-        execvp(exePath.c_str(), const_cast<char* const*>(args.data()));
-
-        // If we get here, exec failed
-        spdlog::error("Failed to exec yams-daemon: {}", strerror(errno));
-        spdlog::error("Make sure yams-daemon is installed and in your PATH");
-        spdlog::error("You can manually start the daemon with: yams daemon start");
-        exit(1);
+        ::execvp(args[0], args.data());
+        ::_exit(127);
     }
 
     // Parent process: we don't wait for the daemon to exit.

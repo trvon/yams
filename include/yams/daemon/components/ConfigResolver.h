@@ -257,6 +257,10 @@ public:
      */
     static TuningConfig applyRuntimeTuning(const ConfigSections& sections, TuningConfig base);
 
+    /// Apply the canonical [search].automatic_rebuilds startup policy. Compatibility environment
+    /// is resolved later only when this typed value remains absent.
+    static void applySearchMaintenance(const ConfigSections& sections, DaemonConfig& config);
+
     /**
      * @brief Check if an environment variable value is "truthy".
      *

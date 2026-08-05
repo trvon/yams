@@ -1413,6 +1413,21 @@ template <> struct ProtoBinding<StatusResponse> {
             kv->set_key("search_tuning_param:" + key);
             kv->set_value(std::to_string(value));
         }
+        {
+            auto* kv = o->add_request_counts();
+            kv->set_key("search_automatic_rebuilds_enabled");
+            kv->set_value(r.searchAutomaticRebuildsEnabled ? "1" : "0");
+        }
+        if (!r.searchAutomaticRebuildsSource.empty()) {
+            auto* kv = o->add_request_counts();
+            kv->set_key("search_automatic_rebuilds_source");
+            kv->set_value(r.searchAutomaticRebuildsSource);
+        }
+        for (const auto& [key, value] : r.runtimeTuning) {
+            auto* kv = o->add_request_counts();
+            kv->set_key("runtime_tuning:" + key);
+            kv->set_value(value);
+        }
 
         // Proxy socket observability (serialized via request_counts until proto gains fields)
         if (!r.proxySocketPath.empty()) {
@@ -1652,6 +1667,19 @@ template <> struct ProtoBinding<StatusResponse> {
                     r.vectorDbDim = static_cast<uint32_t>(std::stoul(kv.value()));
                 } catch (...) {
                 }
+                continue;
+            }
+            if (kv.key() == "search_automatic_rebuilds_enabled") {
+                r.searchAutomaticRebuildsEnabled =
+                    kv.value() == "1" || kv.value() == "true" || kv.value() == "yes";
+                continue;
+            }
+            if (kv.key() == "search_automatic_rebuilds_source") {
+                r.searchAutomaticRebuildsSource = kv.value();
+                continue;
+            }
+            if (kv.key().rfind("runtime_tuning:", 0) == 0) {
+                r.runtimeTuning[kv.key().substr(std::strlen("runtime_tuning:"))] = kv.value();
                 continue;
             }
             if (kv.key() == "search_tuning_state") {

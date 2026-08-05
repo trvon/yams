@@ -35,7 +35,18 @@ SearchEngineBuilder::buildEmbedded(const BuildOptions& options) {
     // Determine config: auto-tune or use provided config
     SearchEngineConfig cfg = options.config;
 
-    const auto environment = LegacySearchConfigEnvironment::fromProcess();
+    const auto environment =
+        options.compatibilityEnvironmentSnapshotted
+            ? LegacySearchConfigEnvironment{[snapshot = options.compatibilityEnvironment](
+                                                std::string_view name)
+                                                -> std::optional<std::string> {
+                  const auto value = snapshot.find(std::string{name});
+                  if (value == snapshot.end()) {
+                      return std::nullopt;
+                  }
+                  return value->second;
+              }}
+            : LegacySearchConfigEnvironment::fromProcess();
     const auto envOverride = environment.tuningStateOverride();
 
     // Priority: env override > options override > autoTune

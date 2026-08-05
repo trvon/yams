@@ -1,9 +1,11 @@
 #include "search_config_environment_internal.h"
 
+#include <yams/config/config_helpers.h>
+#include <yams/search/search_environment.hpp>
+
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
-#include <cstdlib>
 #include <utility>
 
 namespace yams::search {
@@ -12,13 +14,24 @@ LegacySearchConfigEnvironment::LegacySearchConfigEnvironment(SearchEnvironmentLo
     : lookup_(std::move(lookup)) {}
 
 LegacySearchConfigEnvironment LegacySearchConfigEnvironment::fromProcess() {
-    return LegacySearchConfigEnvironment{[](std::string_view name) -> std::optional<std::string> {
-        const std::string key{name};
-        if (const char* value = std::getenv(key.c_str())) {
-            return std::string{value};
-        }
-        return std::nullopt;
-    }};
+    return LegacySearchConfigEnvironment{
+        [](std::string_view name) { return yams::config::getenv_optional(name); }};
+}
+
+SearchEnvironmentSnapshot snapshotLegacySearchEnvironment() {
+    SearchEnvironmentSnapshot snapshot;
+    LegacySearchConfigEnvironment recordingEnvironment{
+        [&snapshot](std::string_view name) -> std::optional<std::string> {
+            auto value = yams::config::getenv_optional(name);
+            if (value.has_value()) {
+                snapshot.emplace(std::string{name}, *value);
+            }
+            return value;
+        }};
+    (void)recordingEnvironment.tuningStateOverride();
+    SearchEngineConfig probe;
+    (void)recordingEnvironment.applyTo(probe);
+    return snapshot;
 }
 
 bool LegacySearchConfigEnvironment::enabled() const {
@@ -75,7 +88,9 @@ SearchEnvironmentPins LegacySearchConfigEnvironment::applyTo(SearchEngineConfig&
         if (const auto value = getEnvString(name)) {
             try {
                 return std::stof(*value);
-            } catch (...) {
+            } catch (const std::exception& error) {
+                spdlog::warn("Invalid legacy search environment {}='{}': {}", name, *value,
+                             error.what());
             }
         }
         return std::nullopt;
@@ -84,7 +99,9 @@ SearchEnvironmentPins LegacySearchConfigEnvironment::applyTo(SearchEngineConfig&
         if (const auto value = getEnvString(name)) {
             try {
                 return std::stoi(*value);
-            } catch (...) {
+            } catch (const std::exception& error) {
+                spdlog::warn("Invalid legacy search environment {}='{}': {}", name, *value,
+                             error.what());
             }
         }
         return std::nullopt;

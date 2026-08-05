@@ -43,7 +43,6 @@
 #ifndef _WIN32
 #include <unistd.h>
 #endif
-#include <future>
 #include <regex>
 #include <set>
 #include <signal.h>
@@ -113,17 +112,6 @@ static std::string describeProcess(pid_t pid) {
     return out;
 }
 
-// Windows implementation of setenv
-inline int setenv(const char* name, const char* value, int overwrite) {
-    int errcode = 0;
-    if (!overwrite) {
-        size_t envsize = 0;
-        errcode = getenv_s(&envsize, NULL, 0, name);
-        if (errcode || envsize)
-            return errcode;
-    }
-    return _putenv_s(name, value);
-}
 #endif
 
 using nlohmann::json;
@@ -1011,9 +999,8 @@ private:
             std::string exePath;
             if (!startDaemonBinary_.empty()) {
                 exePath = startDaemonBinary_;
-            } else if (const char* daemonBin = std::getenv("YAMS_DAEMON_BIN");
-                       daemonBin && *daemonBin) {
-                exePath = daemonBin;
+            } else if (const auto daemonBin = yams::config::getenv_nonempty("YAMS_DAEMON_BIN")) {
+                exePath = *daemonBin;
             } else {
                 // Try to auto-detect relative to CLI binary location
                 std::error_code ec;
@@ -1067,20 +1054,9 @@ private:
                 }
             }
 
-            // Pass storage directory via env for the daemon
-            if (!dataDir_.empty()) {
-                setenv("YAMS_STORAGE", dataDir_.c_str(), 1);
-            } else if (cli_) {
-                auto p = cli_->getDataPath();
-                if (!p.empty())
-                    setenv("YAMS_STORAGE", p.string().c_str(), 1);
-            }
-            // Pass log level via env too (daemon may read it)
-            if (!startLogLevel_.empty()) {
-                setenv("YAMS_LOG_LEVEL", startLogLevel_.c_str(), 1);
-            }
+            // Build argv using stable storage first, then create the char* array. Runtime paths and
+            // log policy are explicit; the post-fork branch does not mutate process environment.
 
-            // Build argv using stable storage first, then create the char* array
             std::vector<std::string> args;
             args.push_back(exePath); // argv[0]
             // Only pass --socket if explicitly provided by the user to avoid overriding config
@@ -1139,16 +1115,9 @@ private:
                 config.dataDir = cli_->getDataPath();
             }
 
-            // Optional: pass debug overrides via environment for the child process
-            if (!startLogLevel_.empty()) {
-                setenv("YAMS_LOG_LEVEL", startLogLevel_.c_str(), 1);
-            }
-            if (!startDaemonBinary_.empty()) {
-                setenv("YAMS_DAEMON_BIN", startDaemonBinary_.c_str(), 1);
-            }
-            if (!startConfigPath_.empty()) {
-                setenv("YAMS_CONFIG", startConfigPath_.c_str(), 1);
-            }
+            config.logLevel = startLogLevel_;
+            config.daemonBinary = startDaemonBinary_;
+            config.configPath = startConfigPath_;
 
             // The daemon owns stale lifecycle-artifact recovery while acquiring its
             // process and data-directory locks. Removing files here can orphan a live
@@ -1509,7 +1478,7 @@ private:
         // Check for stale socket (and show readiness summary if daemon responds)
         if (socket_exists) {
             std::cout << "\nDaemon Probe:\n";
-            setenv("YAMS_CLIENT_DEBUG", "1", 1);
+            (void)yams::config::set_environment("YAMS_CLIENT_DEBUG", "1");
             bool alive = daemon::DaemonClient::isDaemonRunning(effectiveSocket);
             if (alive) {
                 std::cout << "  Socket: "
@@ -1776,7 +1745,7 @@ private:
 
         if (detailed_) {
             // Enable client debug logging for ping/connect path
-            setenv("YAMS_CLIENT_DEBUG", "1", 1);
+            (void)yams::config::set_environment("YAMS_CLIENT_DEBUG", "1");
         }
 
         // Check if daemon is running (prefer socket; fall back to PID).
@@ -2341,7 +2310,7 @@ private:
         }
         Error lastErr{};
         for (int attempt = 0; attempt < 5; ++attempt) {
-            setenv("YAMS_CLIENT_DEBUG", detailed_ ? "1" : "0", 1);
+            (void)yams::config::set_environment("YAMS_CLIENT_DEBUG", detailed_ ? "1" : "0");
             yams::daemon::ClientConfig cfg;
             cfg.socketPath = effectiveSocket;
             auto statusResult = runDaemonClient(
@@ -2574,8 +2543,8 @@ private:
                                              ? static_cast<double>(status.governorRssBytes) /
                                                    status.governorBudgetBytes
                                              : 0.0;
-                    uint64_t memMb = status.governorRssBytes / (1024 * 1024);
-                    uint64_t budgetMb = status.governorBudgetBytes / (1024 * 1024);
+                    uint64_t memMb = status.governorRssBytes / (1024ULL * 1024ULL);
+                    uint64_t budgetMb = status.governorBudgetBytes / (1024ULL * 1024ULL);
                     std::ostringstream memBar;
                     memBar << progress_bar(memFraction, 12, "#", "░", Ansi::GREEN, Ansi::YELLOW,
                                            Ansi::RED, true)
@@ -3530,6 +3499,9 @@ private:
             config.dataDir = dataDir_;
         else if (cli_)
             config.dataDir = cli_->getDataPath().string();
+        config.logLevel = startLogLevel_;
+        config.daemonBinary = startDaemonBinary_;
+        config.configPath = startConfigPath_;
 
         auto result = daemon::DaemonClient::startDaemon(config);
         exitOnError(result, "Failed to start daemon");
@@ -3558,9 +3530,8 @@ private:
         std::vector<fs::path> candidates;
 
 #ifdef _WIN32
-        const char* localAppData = std::getenv("LOCALAPPDATA");
-        if (localAppData) {
-            candidates.push_back(fs::path(localAppData) / "yams" / "daemon.log");
+        if (const auto localAppData = yams::config::getenv_nonempty("LOCALAPPDATA")) {
+            candidates.push_back(fs::path(*localAppData) / "yams" / "daemon.log");
         }
         candidates.push_back(fs::temp_directory_path() / "yams-daemon.log");
 #else
@@ -3569,14 +3540,10 @@ private:
             candidates.push_back(fs::path("/var/log/yams-daemon.log"));
         }
         // XDG_STATE_HOME or ~/.local/state
-        const char* xdgState = std::getenv("XDG_STATE_HOME");
-        if (xdgState) {
-            candidates.push_back(fs::path(xdgState) / "yams" / "daemon.log");
-        } else {
-            const char* home = std::getenv("HOME");
-            if (home) {
-                candidates.push_back(fs::path(home) / ".local" / "state" / "yams" / "daemon.log");
-            }
+        if (const auto xdgState = yams::config::getenv_nonempty("XDG_STATE_HOME")) {
+            candidates.push_back(fs::path(*xdgState) / "yams" / "daemon.log");
+        } else if (const auto home = yams::config::getenv_nonempty("HOME")) {
+            candidates.push_back(fs::path(*home) / ".local" / "state" / "yams" / "daemon.log");
         }
         // Fallback to /tmp
         candidates.push_back(fs::path("/tmp") /

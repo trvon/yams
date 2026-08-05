@@ -14,6 +14,7 @@
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/thread_pool.hpp>
 #include <yams/core/types.h> // For Result type
+#include <yams/search/search_environment.hpp>
 
 namespace yams::app::services {
 class IGraphQueryService;
@@ -178,8 +179,11 @@ public:
         return runtimeExecutor_.get_executor();
     }
 #endif
+    [[nodiscard]] std::optional<std::size_t> topologyMaxClustersSnapshot() const;
 
 private:
+    struct RuntimePolicy;
+
     void refreshSnapshot();
 
     // FSM for state tracking
@@ -204,6 +208,8 @@ private:
     std::unordered_set<std::string> recentLexicalDeltaSet_;
     std::filesystem::path tunerStatePath_;
     std::string embeddingBackend_;
+    yams::search::SearchEnvironmentSnapshot compatibilityEnvironment_;
+    std::unique_ptr<RuntimePolicy> runtimePolicy_;
 
     // Search fanout and query embedding work must not share the ingestion/repair executor.
     // Blocking downstream backpressure can otherwise prevent the futures awaited by every

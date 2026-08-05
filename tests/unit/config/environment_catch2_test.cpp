@@ -90,6 +90,31 @@ TEST_CASE("typed environment readers distinguish unset valid and invalid values"
         REQUIRE(yams::config::set_environment("YAMS_TEST_SHARED_ENV", nullptr));
         CHECK_FALSE(yams::config::getenv_optional("YAMS_TEST_SHARED_ENV").has_value());
     }
+
+    SECTION("owned restoration rejects a newer ABA writer") {
+        ScopedEnvVar restore{"YAMS_TEST_OWNED_ENV", std::string{"before"}};
+        const auto generation =
+            yams::config::set_environment_owned("YAMS_TEST_OWNED_ENV", "leased");
+        REQUIRE(generation.has_value());
+        REQUIRE(yams::config::set_environment("YAMS_TEST_OWNED_ENV", "leased"));
+
+        CHECK((yams::config::restore_environment_if_owned("YAMS_TEST_OWNED_ENV", "leased",
+                                                          *generation, std::string{"before"}) ==
+               yams::config::EnvironmentRestoreResult::OwnershipLost));
+        CHECK((yams::config::getenv_optional("YAMS_TEST_OWNED_ENV") == "leased"));
+    }
+
+    SECTION("owned restoration restores the prior value while the lease is current") {
+        ScopedEnvVar restore{"YAMS_TEST_OWNED_ENV", std::string{"before"}};
+        const auto generation =
+            yams::config::set_environment_owned("YAMS_TEST_OWNED_ENV", "leased");
+        REQUIRE(generation.has_value());
+
+        CHECK((yams::config::restore_environment_if_owned("YAMS_TEST_OWNED_ENV", "leased",
+                                                          *generation, std::string{"before"}) ==
+               yams::config::EnvironmentRestoreResult::Restored));
+        CHECK((yams::config::getenv_optional("YAMS_TEST_OWNED_ENV") == "before"));
+    }
 }
 
 TEST_CASE("ScopedEnvVar restores prior values and preserves unset state",

@@ -47,9 +47,11 @@ public:
         double growthRatioThreshold;               // Growth ratio to trigger rebuild (default: 10x)
         uint64_t growthAbsoluteThreshold;          // Absolute doc count increase (default: +1000)
         std::chrono::milliseconds checkIntervalMs; // Min interval between checks (default: 5s)
+        bool automaticRebuildsEnabled;             // Lifecycle-resolved maintenance policy
 
         Config()
-            : growthRatioThreshold(10.0), growthAbsoluteThreshold(1000), checkIntervalMs(5000) {}
+            : growthRatioThreshold(10.0), growthAbsoluteThreshold(1000), checkIntervalMs(5000),
+              automaticRebuildsEnabled(true) {}
     };
 
     SearchComponent(ServiceManager& serviceManager, StateComponent& state,

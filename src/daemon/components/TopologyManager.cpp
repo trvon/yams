@@ -3,9 +3,9 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <chrono>
-#include <cstdlib>
 #include <string>
 #include <string_view>
+#include <yams/config/config_helpers.h>
 #include <yams/core/assert.hpp>
 #include <yams/profiling.h>
 
@@ -29,43 +29,43 @@ using yams::Result;
 namespace {
 
 std::string envOr(const char* name, std::string_view fallback) {
-    const char* raw = std::getenv(name);
-    if (raw != nullptr && *raw != '\0') {
-        return raw;
+    const auto raw = yams::config::getenv_optional(name);
+    if (raw && !raw->empty()) {
+        return *raw;
     }
     return std::string{fallback};
 }
 
 double envDoubleOr(const char* name, double fallback) {
-    const char* raw = std::getenv(name);
-    if (raw == nullptr || *raw == '\0') {
+    const auto raw = yams::config::getenv_optional(name);
+    if (!raw || raw->empty()) {
         return fallback;
     }
     try {
-        return std::stod(raw);
+        return std::stod(*raw);
     } catch (...) {
         return fallback;
     }
 }
 
 std::size_t envSizeOr(const char* name, std::size_t fallback) {
-    const char* raw = std::getenv(name);
-    if (raw == nullptr || *raw == '\0') {
+    const auto raw = yams::config::getenv_optional(name);
+    if (!raw || raw->empty()) {
         return fallback;
     }
     try {
-        return static_cast<std::size_t>(std::stoull(raw));
+        return static_cast<std::size_t>(std::stoull(*raw));
     } catch (...) {
         return fallback;
     }
 }
 
 bool envBoolOr(const char* name, bool fallback) {
-    const char* raw = std::getenv(name);
-    if (raw == nullptr || *raw == '\0') {
+    const auto raw = yams::config::getenv_optional(name);
+    if (!raw || raw->empty()) {
         return fallback;
     }
-    const std::string_view v{raw};
+    const std::string_view v{*raw};
     if (v == "0" || v == "false" || v == "False" || v == "no" || v == "off") {
         return false;
     }

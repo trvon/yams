@@ -153,15 +153,46 @@ TEST_CASE("TuneAdvisor bounded override readers share env and override behavior"
     TuneAdvisor::setConnectionSlotsScaleStep(0);
 }
 
+TEST_CASE("Fresh typed tuning lifecycle does not inherit prior process overrides",
+          "[daemon][components][config][tuning][lifecycle][catch2]") {
+    EnvGuard ipcCompatibility{"YAMS_IPC_TIMEOUT_MS", ""};
+    EnvGuard resourceCompatibility{"YAMS_MEMORY_WARNING_PCT", ""};
+    EnvGuard rpcCompatibility{"YAMS_POST_INGEST_RPC_QUEUE_MAX", ""};
+    EnvGuard governorCompatibility{"YAMS_ENABLE_RESOURCE_GOVERNOR", ""};
+
+    TuneAdvisor::setIpcTimeoutMs(4321);
+    TuneAdvisor::setMemoryWarningThreshold(0.88);
+    TuneAdvisor::setPostIngestRpcQueueMax(333);
+    TuneAdvisor::setEnableResourceGovernor(false);
+    const auto versionBefore = TuneAdvisor::configuredOverridesVersion();
+    REQUIRE_FALSE(versionBefore & 1U);
+
+    const auto fresh = ConfigResolver::applyRuntimeTuning({}, TuningConfig{});
+
+    CHECK((TuneAdvisor::configuredOverridesVersion() == versionBefore + 2));
+    CHECK(fresh.provenance.empty());
+    CHECK((TuneAdvisor::ipcTimeoutMs() == 15000u));
+    CHECK((TuneAdvisor::memoryWarningThreshold() == Catch::Approx(0.75)));
+    CHECK((TuneAdvisor::postIngestRpcQueueMax() == 256u));
+    CHECK(TuneAdvisor::enableResourceGovernor());
+}
+
 TEST_CASE("ConfigResolver applies one typed tuning snapshot for startup and reload",
           "[daemon][components][config][tuning][catch2]") {
+    EnvGuard ipcCompatibility{"YAMS_IPC_TIMEOUT_MS", "8765"};
+    EnvGuard resourceCompatibility{"YAMS_MEMORY_WARNING_PCT", "80"};
     ConfigResolver::ConfigSections sections;
     sections["tuning"] = {{"target_cpu_percent", "175"},
                           {"post_ingest_capacity", "4096"},
                           {"post_ingest_threads_min", "3"},
                           {"control_interval_ms", "250"}};
     sections["tuning.ingest"] = {{"store_batch_size", "23"}};
-    sections["tuning.post_ingest"] = {{"coalesce_ms", "3"}};
+    sections["tuning.ipc"] = {{"timeout_ms", "4321"}, {"stream_chunk_timeout_ms", "9876"}};
+    sections["tuning.resource"] = {{"memory_warning_threshold", "0.77"}};
+    sections["tuning.post_ingest"] = {{"coalesce_ms", "3"},
+                                      {"total_concurrent", "12"},
+                                      {"rpc_queue_max", "333"},
+                                      {"rpc_max_per_batch", "7"}};
 
     TuningConfig base;
     base.postIngestThreadsMax = 12;
@@ -176,6 +207,16 @@ TEST_CASE("ConfigResolver applies one typed tuning snapshot for startup and relo
     CHECK((resolved.controlIntervalMs == 250));
     CHECK((resolved.postIngestThreadsMax == 12));
     CHECK((resolved.topologyAlgorithm == "multiscale"));
+    CHECK((resolved.provenance.at("tuning.target_cpu_percent") ==
+           "config:tuning.target_cpu_percent"));
+    CHECK((resolved.provenance.at("tuning.post_ingest.total_concurrent") ==
+           "config:tuning.post_ingest.total_concurrent"));
+    CHECK((TuneAdvisor::postIngestTotalConcurrent() == 12u));
+    CHECK((TuneAdvisor::postIngestRpcQueueMax() == 333u));
+    CHECK((TuneAdvisor::postIngestRpcMaxPerBatch() == 7u));
+    CHECK((TuneAdvisor::ipcTimeoutMs() == 4321u));
+    CHECK((TuneAdvisor::streamChunkTimeoutMs() == 9876u));
+    CHECK((TuneAdvisor::memoryWarningThreshold() == Catch::Approx(0.77)));
 
     sections["tuning"] = {{"target_cpu_percent", "-1"},
                           {"post_ingest_capacity", "-2"},
@@ -193,6 +234,46 @@ TEST_CASE("ConfigResolver applies one typed tuning snapshot for startup and relo
     CHECK((rejected.ingestStoreBatchSize == 32));
     CHECK((rejected.controlIntervalMs == 500));
     CHECK((rejected.postIngestCoalesceMs == 4));
+    TuneAdvisor::setPostIngestTotalConcurrent(0);
+    TuneAdvisor::setPostIngestRpcQueueMax(0);
+    TuneAdvisor::setPostIngestRpcMaxPerBatch(0);
+    TuneAdvisor::setIpcTimeoutMs(0);
+    TuneAdvisor::setStreamChunkTimeoutMs(0);
+    TuneAdvisor::setMemoryWarningThreshold(0.0);
+}
+
+TEST_CASE("Typed post-ingest configuration outranks the compatibility environment",
+          "[daemon][components][config][tuning][precedence][catch2]") {
+    EnvGuard compatibility{"YAMS_POST_INGEST_TOTAL_CONCURRENT", "3"};
+    TuneAdvisor::setPostIngestTotalConcurrent(0);
+    ConfigResolver::ConfigSections sections;
+    sections["tuning.post_ingest"] = {{"total_concurrent", "12"}};
+
+    const auto resolved = ConfigResolver::applyRuntimeTuning(sections, {});
+
+    CHECK((TuneAdvisor::postIngestTotalConcurrent() == 12u));
+    CHECK((resolved.provenance.at("tuning.post_ingest.total_concurrent") ==
+           "config:tuning.post_ingest.total_concurrent"));
+    TuneAdvisor::setPostIngestTotalConcurrent(0);
+}
+
+TEST_CASE("ConfigResolver applies typed search maintenance policy with provenance",
+          "[daemon][components][config][search][catch2]") {
+    ConfigResolver::ConfigSections sections;
+    sections["search"] = {{"automatic_rebuilds", "false"}};
+    DaemonConfig config;
+
+    ConfigResolver::applySearchMaintenance(sections, config);
+
+    REQUIRE(config.searchMaintenance.automaticRebuildsEnabled.has_value());
+    CHECK_FALSE(*config.searchMaintenance.automaticRebuildsEnabled);
+    CHECK((config.searchMaintenance.automaticRebuildsSource == "config:search.automatic_rebuilds"));
+
+    sections["search"]["automatic_rebuilds"] = "invalid";
+    DaemonConfig invalid;
+    ConfigResolver::applySearchMaintenance(sections, invalid);
+    CHECK_FALSE(invalid.searchMaintenance.automaticRebuildsEnabled.has_value());
+    CHECK(invalid.searchMaintenance.automaticRebuildsSource.empty());
 }
 
 TEST_CASE("ConfigResolver::resolveEmbeddingChunkingPolicy defaults are embedding-safe",

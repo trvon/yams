@@ -20,6 +20,7 @@
 #include <mutex>
 #include <optional>
 #include <thread>
+#include <vector>
 #include <yams/compat/thread_stop_compat.h>
 //
 
@@ -66,6 +67,14 @@ struct DaemonConfig {
 
     // Immutable startup safeguards consumed by EmbeddingService.
     EmbeddingServiceConfig embeddingService;
+
+    // Search maintenance is resolved once at ServiceManager construction. A missing typed value
+    // preserves the installed YAMS_DISABLE_SEARCH_REBUILDS compatibility overlay; explicit typed
+    // values outrank ambient process state.
+    struct SearchMaintenancePolicy {
+        std::optional<bool> automaticRebuildsEnabled;
+        std::string automaticRebuildsSource;
+    } searchMaintenance;
 
     // Typed runtime instrumentation profile. The "memory" profile suppresses
     // opportunistic startup maintenance that creates large transient allocator
@@ -173,6 +182,8 @@ public:
     mutable std::mutex metricsMutex_;
     // Protects mutable config fields updated after startup (currently tuning reload state).
     mutable std::mutex configMutex_;
+    // Serializes parse, aggregate TuneAdvisor publication, config replacement, and status refresh.
+    std::mutex tuningReloadMutex_;
     std::shared_ptr<DaemonMetrics> metrics_;
     // Integrated socket server (replaces external yams-socket-server)
     std::unique_ptr<SocketServer> socketServer_;
@@ -204,9 +215,15 @@ public:
     std::thread shutdownThread_;
     std::atomic<bool> shutdownThreadActive_{false};
 
+    struct RuntimeEnvironmentLease {
+        std::string value;
+        std::uint64_t generation{0};
+    };
+
     int tuningProfileOverrideBeforeStart_{0};
     bool tuningProfileOverrideSnapshotActive_{false};
     std::map<std::string, std::optional<std::string>> runtimeEnvironmentBeforeStart_;
+    std::map<std::string, RuntimeEnvironmentLease> runtimeEnvironmentLeases_;
 
     bool modelPreloadSkipped_{false};
     std::chrono::steady_clock::time_point repairBusySince_{};
@@ -230,6 +247,7 @@ public:
     void snapshotTuningProfileForRuntime();
     void restoreTuningProfileOverrideSnapshot() noexcept;
     void snapshotRuntimeEnvironment();
+    void leaseRuntimeEnvironment(const char* name, const std::string& value);
     void restoreRuntimeEnvironment() noexcept;
 
     // Set a hook that will be called each iteration of runLoop() to check for signals

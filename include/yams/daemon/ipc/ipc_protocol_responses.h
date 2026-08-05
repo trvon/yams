@@ -1111,6 +1111,9 @@ struct StatusResponse {
     std::string searchTuningState;  // e.g., "SMALL_CODE", "SCIENTIFIC", "MIXED"
     std::string searchTuningReason; // Human-readable explanation of state selection
     std::map<std::string, double> searchTuningParams; // e.g., {"textWeight": 0.55, ...}
+    bool searchAutomaticRebuildsEnabled{true};
+    std::string searchAutomaticRebuildsSource;
+    std::map<std::string, std::string> runtimeTuning;
 
     // ResourceGovernor metrics (memory pressure management)
     uint64_t governorRssBytes{0};     // Current process RSS
@@ -1221,6 +1224,10 @@ struct StatusResponse {
 
         // Maintenance phase (appended; older clients tolerate missing tail fields)
         ser << maintenancePhase << static_cast<uint64_t>(maintenancePhaseElapsedMs);
+
+        // Effective search-maintenance and runtime tuning policy (appended; older clients tolerate
+        // missing tail fields).
+        ser << searchAutomaticRebuildsEnabled << searchAutomaticRebuildsSource << runtimeTuning;
     }
 
     template <typename Deserializer>
@@ -1628,6 +1635,16 @@ struct StatusResponse {
         auto maintenanceElapsedRes = deser.template read<uint64_t>();
         if (maintenanceElapsedRes)
             res.maintenancePhaseElapsedMs = maintenanceElapsedRes.value();
+
+        auto automaticRebuildsRes = deser.template read<bool>();
+        if (automaticRebuildsRes)
+            res.searchAutomaticRebuildsEnabled = automaticRebuildsRes.value();
+        auto automaticRebuildsSourceRes = deser.template read<std::string>();
+        if (automaticRebuildsSourceRes)
+            res.searchAutomaticRebuildsSource = std::move(automaticRebuildsSourceRes.value());
+        auto runtimeTuningRes = deser.readStringMap();
+        if (runtimeTuningRes)
+            res.runtimeTuning = std::move(runtimeTuningRes.value());
 
         return res;
     }

@@ -159,9 +159,12 @@ int main(int argc, char* argv[]) {
     // Install fatal handlers as early as possible
     setup_fatal_handlers();
 
-    // Set YAMS_IN_DAEMON=1 to signal we're running inside the daemon process
-    // This prevents EmbeddingGenerator from trying to connect back to us via IPC
-    setenv("YAMS_IN_DAEMON", "1", 1); // NOLINT(concurrency-mt-unsafe): pre-thread startup
+    // Set YAMS_IN_DAEMON=1 to signal we're running inside the daemon process. This compatibility
+    // marker is published through the shared boundary before worker threads start.
+    if (!yams::config::set_environment("YAMS_IN_DAEMON", "1")) {
+        std::fputs("Failed to publish daemon process identity\n", stderr);
+        return 1;
+    }
 
     yams::daemon::DaemonConfig config;
     std::string configPath;
@@ -474,6 +477,7 @@ int main(int argc, char* argv[]) {
 
             config.tuning =
                 yams::daemon::ConfigResolver::applyRuntimeTuning(tomlConfig, config.tuning);
+            yams::daemon::ConfigResolver::applySearchMaintenance(tomlConfig, config);
 
             // Honor [embeddings].enable=false: hard-disable model provider regardless of [daemon]
             // This prevents startup from waiting on embedding services when embeddings are
@@ -817,8 +821,10 @@ int main(int argc, char* argv[]) {
 
     // Let managed service launches tell the shutdown path not to force an
     // out-of-band process exit from the request-handling thread.
-    // NOLINTNEXTLINE(concurrency-mt-unsafe): before daemon threads start
-    setenv("YAMS_DAEMON_FOREGROUND", foreground ? "1" : "0", 1);
+    if (!yams::config::set_environment("YAMS_DAEMON_FOREGROUND", foreground ? "1" : "0")) {
+        spdlog::error("Failed to publish daemon foreground lifecycle policy");
+        return 1;
+    }
 
     // Daemonize if not running in foreground
     if (!foreground) {

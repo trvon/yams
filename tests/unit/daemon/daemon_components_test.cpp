@@ -85,6 +85,19 @@ TEST_CASE("LifecycleComponent test safe-instance guard overrides production aggr
     CHECK_FALSE(LifecycleComponent::testingAggressiveModeEnabled());
 }
 
+TEST_CASE("SearchEngineManager snapshots topology compatibility policy once",
+          "[daemon][search][config][topology][snapshot]") {
+    yams::test::ScopedEnvVar canonicalConfig{"YAMS_CONFIG", std::nullopt};
+    yams::test::ScopedEnvVar compatibilityConfig{"YAMS_CONFIG_PATH", std::nullopt};
+    yams::test::ScopedEnvVar maxClusters{"YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS", std::string{"3"}};
+
+    SearchEngineManager manager;
+    maxClusters.set("7");
+
+    REQUIRE(manager.topologyMaxClustersSnapshot().has_value());
+    CHECK((*manager.topologyMaxClustersSnapshot() == 3));
+}
+
 TEST_CASE("SearchEngineManager runtime executor is isolated from unavailable shared workers",
           "[daemon][search][executor][liveness]") {
     constexpr std::size_t kRequestConcurrency = 8;

@@ -207,6 +207,33 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon restores compatibility path environment"
     CHECK((yams::config::getenv_copy("YAMS_IN_DAEMON") == "before"));
 }
 
+TEST_CASE_METHOD(DaemonFixture, "Daemon environment lease preserves newer writers",
+                 "[daemon][lifecycle][environment][ownership]") {
+    yams::test::ScopedEnvVar socket{"YAMS_DAEMON_SOCKET", std::string{"/before/socket.sock"}};
+
+    daemon_ = std::make_unique<YamsDaemon>(config_);
+    REQUIRE((yams::config::getenv_copy("YAMS_DAEMON_SOCKET") == config_.socketPath.string()));
+
+    socket.set("/newer/owner.sock");
+    daemon_.reset();
+
+    CHECK((yams::config::getenv_copy("YAMS_DAEMON_SOCKET") == "/newer/owner.sock"));
+}
+
+TEST_CASE_METHOD(DaemonFixture, "Daemon environment lease detects same-value newer writers",
+                 "[daemon][lifecycle][environment][ownership]") {
+    yams::test::ScopedEnvVar socket{"YAMS_DAEMON_SOCKET", std::string{"/before/socket.sock"}};
+
+    daemon_ = std::make_unique<YamsDaemon>(config_);
+    const auto installed = config_.socketPath.string();
+    REQUIRE((yams::config::getenv_copy("YAMS_DAEMON_SOCKET") == installed));
+
+    socket.set(installed);
+    daemon_.reset();
+
+    CHECK((yams::config::getenv_copy("YAMS_DAEMON_SOCKET") == installed));
+}
+
 TEST_CASE_METHOD(DaemonFixture, "Daemon tuning reload preserves unspecified values",
                  "[daemon][tuning][reload]") {
     SKIP_ON_WINDOWS();

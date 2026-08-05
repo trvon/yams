@@ -5,6 +5,7 @@
 #include <map>
 #include <mutex>
 #include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
 
 #include <spdlog/spdlog.h>
@@ -26,6 +27,11 @@
 #include <windows.h>
 #else
 #include <unistd.h> // For geteuid(), getpid(), getuid()
+#if defined(__APPLE__)
+#include <crt_externs.h>
+#else
+extern char** environ;
+#endif
 #endif
 
 namespace yams::config {
@@ -36,6 +42,24 @@ std::mutex& processEnvironmentMutex() {
     // alive until process exit rather than depending on cross-translation-unit destruction order.
     static auto* mutex = new std::mutex();
     return *mutex;
+}
+
+std::unordered_map<std::string, std::uint64_t>& processEnvironmentGenerations() {
+    static auto* generations = new std::unordered_map<std::string, std::uint64_t>();
+    return *generations;
+}
+
+bool mutateEnvironmentLocked(const char* key, const char* value) noexcept {
+#ifdef _WIN32
+    return _putenv_s(key, value != nullptr ? value : "") == 0;
+#else
+    if (value != nullptr) {
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): caller holds processEnvironmentMutex().
+        return ::setenv(key, value, 1) == 0;
+    }
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): caller holds processEnvironmentMutex().
+    return ::unsetenv(key) == 0;
+#endif
 }
 
 void warnEnvironmentOnce(const std::string& message) {
@@ -116,24 +140,89 @@ std::optional<std::string> getenv_nonempty(std::string_view key) {
     return value && !value->empty() ? value : std::nullopt;
 }
 
+std::map<std::string, std::string> snapshot_environment_prefix(std::string_view prefix) {
+    std::map<std::string, std::string> snapshot;
+    std::lock_guard lock(processEnvironmentMutex());
+    const auto append = [&](std::string_view entry) {
+        const auto separator = entry.find('=');
+        if (separator == std::string_view::npos) {
+            return;
+        }
+        const auto name = entry.substr(0, separator);
+        if (name.starts_with(prefix)) {
+            snapshot.emplace(name, entry.substr(separator + 1));
+        }
+    };
+
+#ifdef _WIN32
+    char* environment = GetEnvironmentStringsA();
+    if (environment == nullptr) {
+        return snapshot;
+    }
+    for (const char* entry = environment; *entry != '\0'; entry += std::strlen(entry) + 1) {
+        append(entry);
+    }
+    FreeEnvironmentStringsA(environment);
+#else
+#ifdef __APPLE__
+    char** environment = *_NSGetEnviron();
+#else
+    char** environment = ::environ;
+#endif
+    if (environment != nullptr) {
+        for (char** entry = environment; *entry != nullptr; ++entry) {
+            append(*entry);
+        }
+    }
+#endif
+    return snapshot;
+}
+
 bool set_environment(const char* key, const char* value) noexcept {
+    return set_environment_owned(key, value).has_value();
+}
+
+std::optional<std::uint64_t> set_environment_owned(const char* key, const char* value) noexcept {
     if (key == nullptr || *key == '\0') {
-        return false;
+        return std::nullopt;
     }
     try {
         std::lock_guard lock(processEnvironmentMutex());
-#ifdef _WIN32
-        return _putenv_s(key, value != nullptr ? value : "") == 0;
-#else
-        if (value != nullptr) {
-            // NOLINTNEXTLINE(concurrency-mt-unsafe): serialized by processEnvironmentMutex().
-            return ::setenv(key, value, 1) == 0;
+        auto& generation = processEnvironmentGenerations()[key];
+        if (generation == std::numeric_limits<std::uint64_t>::max() ||
+            !mutateEnvironmentLocked(key, value)) {
+            return std::nullopt;
         }
-        // NOLINTNEXTLINE(concurrency-mt-unsafe): serialized by processEnvironmentMutex().
-        return ::unsetenv(key) == 0;
-#endif
+        return ++generation;
     } catch (...) {
-        return false;
+        return std::nullopt;
+    }
+}
+
+EnvironmentRestoreResult
+restore_environment_if_owned(const char* key, std::string_view installedValue,
+                             std::uint64_t installedGeneration,
+                             const std::optional<std::string>& value) noexcept {
+    if (key == nullptr || *key == '\0') {
+        return EnvironmentRestoreResult::Error;
+    }
+    try {
+        std::lock_guard lock(processEnvironmentMutex());
+        const auto generation = processEnvironmentGenerations().find(key);
+        const char* raw = std::getenv(key); // NOLINT(concurrency-mt-unsafe): boundary lock held.
+        if (generation == processEnvironmentGenerations().end() ||
+            generation->second != installedGeneration || raw == nullptr ||
+            std::string_view(raw) != installedValue) {
+            return EnvironmentRestoreResult::OwnershipLost;
+        }
+        if (generation->second == std::numeric_limits<std::uint64_t>::max() ||
+            !mutateEnvironmentLocked(key, value ? value->c_str() : nullptr)) {
+            return EnvironmentRestoreResult::Error;
+        }
+        ++generation->second;
+        return EnvironmentRestoreResult::Restored;
+    } catch (...) {
+        return EnvironmentRestoreResult::Error;
     }
 }
 

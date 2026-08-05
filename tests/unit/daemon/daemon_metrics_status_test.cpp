@@ -6686,6 +6686,29 @@ TEST_CASE("RequestDispatcher: status refreshes cold snapshot without retry hint"
     CHECK(status.retryAfterMs == 0);
 }
 
+TEST_CASE("RequestDispatcher: status reports effective search maintenance provenance",
+          "[daemon][status][search][config]") {
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig config;
+    config.dataDir = makeTempDir("yams_status_search_maintenance_");
+    config.searchMaintenance.automaticRebuildsEnabled = false;
+    config.searchMaintenance.automaticRebuildsSource = "typed:test";
+    ServiceManager services(config, state, lifecycleFsm);
+    DaemonMetrics metrics(nullptr, &state, &services, services.getWorkCoordinator());
+    RequestDispatcher dispatcher(nullptr, &services, &state, &metrics);
+
+    const auto response = dispatchRequest(dispatcher, Request{StatusRequest{}});
+    REQUIRE(std::holds_alternative<StatusResponse>(response));
+    const auto& status = std::get<StatusResponse>(response);
+    CHECK_FALSE(status.searchAutomaticRebuildsEnabled);
+    CHECK((status.searchAutomaticRebuildsSource == "typed:test"));
+    CHECK(status.runtimeTuning.contains("ipc.timeout_ms"));
+    CHECK(status.runtimeTuning.contains("ipc.timeout_ms.source"));
+    CHECK(status.runtimeTuning.contains("post_ingest.total_concurrent"));
+    CHECK(status.runtimeTuning.contains("resource.memory_budget_bytes"));
+}
+
 TEST_CASE("RequestDispatcher: cold status still reports active repair work",
           "[daemon][status][freshness]") {
     StateComponent state;
@@ -6800,6 +6823,31 @@ TEST_CASE("StatusResponse: maintenance phase fields round-trip",
     CHECK(decoded.databasePhaseElapsedMs == 11);
     CHECK(decoded.maintenancePhase == "salvaging");
     CHECK(decoded.maintenancePhaseElapsedMs == 222);
+}
+
+TEST_CASE("StatusResponse: search maintenance provenance round-trips",
+          "[daemon][status][protocol][search][config]") {
+    StatusResponse status{};
+    status.searchAutomaticRebuildsEnabled = false;
+    status.searchAutomaticRebuildsSource = "compatibility-environment:YAMS_DISABLE_SEARCH_REBUILDS";
+    status.runtimeTuning = {{"ipc.timeout_ms", "4321"},
+                            {"ipc.timeout_ms.source", "config:tuning.ipc.timeout_ms"}};
+
+    Message message{};
+    message.payload = Response{std::in_place_type<StatusResponse>, status};
+
+    const auto encoded = ProtoSerializer::encode_payload(message);
+    REQUIRE(encoded.has_value());
+    const auto decodedMessage = ProtoSerializer::decode_payload(encoded.value());
+    REQUIRE(decodedMessage.has_value());
+    const auto& response = std::get<Response>(decodedMessage.value().payload);
+    REQUIRE(std::holds_alternative<StatusResponse>(response));
+    const auto& decoded = std::get<StatusResponse>(response);
+    CHECK_FALSE(decoded.searchAutomaticRebuildsEnabled);
+    CHECK((decoded.searchAutomaticRebuildsSource ==
+           "compatibility-environment:YAMS_DISABLE_SEARCH_REBUILDS"));
+    CHECK((decoded.runtimeTuning.at("ipc.timeout_ms") == "4321"));
+    CHECK((decoded.runtimeTuning.at("ipc.timeout_ms.source") == "config:tuning.ipc.timeout_ms"));
 }
 
 TEST_CASE("StatusResponse: freshness requestCounts keys round-trip",

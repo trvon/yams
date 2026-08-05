@@ -70,16 +70,6 @@
 #include <fcntl.h>
 #include <io.h>
 #include <windows.h>
-// Windows implementation of setenv
-inline int setenv(const char* name, const char* value, int overwrite) {
-    if (!overwrite) {
-        size_t envsize = 0;
-        const int errcode = getenv_s(&envsize, NULL, 0, name);
-        if (errcode || envsize)
-            return errcode;
-    }
-    return _putenv_s(name, value);
-}
 #elif !defined(YAMS_WASI)
 #include <poll.h>
 #include <unistd.h>

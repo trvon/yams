@@ -417,6 +417,13 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
     for (const auto& [k, v] : snap.initProgress)
         res.initProgress[k] = v;
 
+    if (serviceManager) {
+        const auto& policy = serviceManager->getConfig().searchMaintenance;
+        res.searchAutomaticRebuildsEnabled = policy.automaticRebuildsEnabled.value_or(true);
+        res.searchAutomaticRebuildsSource = policy.automaticRebuildsSource;
+        res.runtimeTuning = serviceManager->getRuntimeTuningStatus();
+    }
+
     if (includeExtendedStatus) {
         res.dataDir = snap.dataDir;
         res.contentStoreRoot = snap.contentStoreRoot;

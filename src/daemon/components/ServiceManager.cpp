@@ -298,9 +298,45 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                                                      [this]() { return getVectorDatabase(); }}),
       lifecycleFsm_(lifecycleFsm) {
     spdlog::debug("[ServiceManager] Constructor start");
-    config_.pluginDirStrict = ConfigResolver::resolvePluginDirStrict(config_.pluginDirStrict);
-    tuningConfig_ = config_.tuning;
-    ingestStoreBatchSize_.store(tuningConfig_.ingestStoreBatchSize, std::memory_order_relaxed);
+    {
+        [[maybe_unused]] auto publication = TuneAdvisor::beginConfiguredOverridePublication();
+        if (tuningLifecycleLease_.ownsInitialization()) {
+            TuneAdvisor::refreshCompatibilityEnvironmentSnapshot();
+        }
+        config_.pluginDirStrict = ConfigResolver::resolvePluginDirStrict(config_.pluginDirStrict);
+
+        auto& searchMaintenance = config_.searchMaintenance;
+        if (!searchMaintenance.automaticRebuildsEnabled.has_value()) {
+            const auto compatibilityDisable =
+                yams::config::read_env_bool("YAMS_DISABLE_SEARCH_REBUILDS");
+            if (compatibilityDisable.value.has_value()) {
+                searchMaintenance.automaticRebuildsEnabled = !*compatibilityDisable.value;
+                searchMaintenance.automaticRebuildsSource =
+                    "compatibility-environment:YAMS_DISABLE_SEARCH_REBUILDS";
+            } else {
+                searchMaintenance.automaticRebuildsEnabled = true;
+                searchMaintenance.automaticRebuildsSource = "default";
+            }
+        } else if (searchMaintenance.automaticRebuildsSource.empty()) {
+            searchMaintenance.automaticRebuildsSource = "typed:daemon-config";
+        }
+        spdlog::info("[ServiceManager] Search automatic rebuilds: {} (source={})",
+                     *searchMaintenance.automaticRebuildsEnabled,
+                     searchMaintenance.automaticRebuildsSource);
+
+        tuningConfig_ = config_.tuning;
+        if (!tuningConfig_.tuneAdvisorOverridesResolved) {
+            if (tuningLifecycleLease_.ownsInitialization()) {
+                [[maybe_unused]] auto update = TuneAdvisor::beginConfiguredOverrideUpdate();
+                TuneAdvisor::resetConfiguredOverrides();
+            }
+            tuningConfig_.tuneAdvisorOverridesResolved = true;
+        }
+        ingestStoreBatchSize_.store(tuningConfig_.ingestStoreBatchSize, std::memory_order_relaxed);
+        snapshotRuntimeTuningSources();
+        refreshRuntimeTuningStatus();
+        tuningLifecycleLease_.commitInitialization();
+    }
 
     {
         auto enginePolicy = ConfigResolver::resolveTopologyEnginePolicy();
@@ -737,15 +773,103 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
                                                                      std::move(checkpointDeps));
             spdlog::debug("[ServiceManager] CheckpointManager created");
 
-            // Create SearchComponent for corpus monitoring and auto-rebuild
-            searchComponent_ = std::make_unique<SearchComponent>(*this, state_);
-            spdlog::debug("[ServiceManager] SearchComponent created");
+            // Create SearchComponent for corpus monitoring and auto-rebuild.
+            SearchComponent::Config searchConfig;
+            searchConfig.automaticRebuildsEnabled =
+                *config_.searchMaintenance.automaticRebuildsEnabled;
+            searchComponent_ = std::make_unique<SearchComponent>(*this, state_, searchConfig);
+            spdlog::debug("[ServiceManager] SearchComponent created (automatic_rebuilds={})",
+                          searchConfig.automaticRebuildsEnabled);
         } catch (const std::exception& e) {
             spdlog::warn("[ServiceManager] Failed to create extracted managers: {}", e.what());
         }
     } catch (const std::exception& e) {
         spdlog::warn("Exception during ServiceManager constructor setup: {}", e.what());
     }
+}
+
+void ServiceManager::snapshotRuntimeTuningSources() {
+    static constexpr std::pair<std::string_view, const char*> kCompatibilitySources[] = {
+        {"tuning.ipc.timeout_ms", "YAMS_IPC_TIMEOUT_MS"},
+        {"tuning.ipc.stream_chunk_timeout_ms", "YAMS_STREAM_CHUNK_TIMEOUT_MS"},
+        {"tuning.backpressure_read_pause_ms", "YAMS_BACKPRESSURE_READ_PAUSE_MS"},
+        {"tuning.post_ingest_capacity", "YAMS_POST_INGEST_QUEUE_MAX"},
+        {"tuning.post_ingest.total_concurrent", "YAMS_POST_INGEST_TOTAL_CONCURRENT"},
+        {"tuning.post_ingest.batch_size", "YAMS_POST_INGEST_BATCH_SIZE"},
+        {"tuning.post_ingest.rpc_queue_max", "YAMS_POST_INGEST_RPC_QUEUE_MAX"},
+        {"tuning.post_ingest.rpc_max_per_batch", "YAMS_POST_INGEST_RPC_MAX_PER_BATCH"},
+        {"tuning.resource.enabled", "YAMS_ENABLE_RESOURCE_GOVERNOR"},
+        {"tuning.resource.admission_control", "YAMS_ADMISSION_CONTROL"},
+        {"tuning.resource.memory_budget_bytes", "YAMS_MEMORY_BUDGET_BYTES"},
+        {"tuning.resource.memory_warning_threshold", "YAMS_MEMORY_WARNING_PCT"},
+        {"tuning.resource.memory_critical_threshold", "YAMS_MEMORY_CRITICAL_PCT"},
+        {"tuning.resource.memory_emergency_threshold", "YAMS_MEMORY_EMERGENCY_PCT"},
+        {"tuning.resource.memory_hysteresis_ms", "YAMS_MEMORY_HYSTERESIS_MS"},
+        {"tuning.resource.cpu_hysteresis_ms", "YAMS_CPU_LEVEL_HYSTERESIS_MS"},
+    };
+    for (const auto& [configKey, environmentKey] : kCompatibilitySources) {
+        if (!tuningConfig_.provenance.contains(std::string(configKey)) &&
+            yams::config::getenv_optional(environmentKey).has_value()) {
+            tuningConfig_.provenance.emplace(configKey, std::string{"compatibility-environment:"} +
+                                                            environmentKey);
+        }
+    }
+}
+
+void ServiceManager::refreshRuntimeTuningStatus() {
+    const auto tuning = getTuningConfig();
+    std::map<std::string, std::string> nextStatus;
+    const auto sourceFor = [&](std::string_view configKey) -> std::string {
+        if (const auto source = tuning.provenance.find(std::string(configKey));
+            source != tuning.provenance.end()) {
+            return source->second;
+        }
+        return "default";
+    };
+    const auto put = [&](std::string key, auto value, std::string_view configKey) {
+        nextStatus.insert_or_assign(key, std::to_string(value));
+        nextStatus.insert_or_assign(key + ".source", sourceFor(configKey));
+    };
+
+    TuneAdvisor::readConfiguredOverridesSnapshot([&] {
+        nextStatus.clear();
+        put("ipc.timeout_ms", TuneAdvisor::ipcTimeoutMs(), "tuning.ipc.timeout_ms");
+        put("ipc.stream_chunk_timeout_ms", TuneAdvisor::streamChunkTimeoutMs(),
+            "tuning.ipc.stream_chunk_timeout_ms");
+        put("ipc.backpressure_read_pause_ms", TuneAdvisor::backpressureReadPauseMs(),
+            "tuning.backpressure_read_pause_ms");
+        put("post_ingest.capacity", tuning.postIngestCapacity, "tuning.post_ingest_capacity");
+        put("post_ingest.total_concurrent", TuneAdvisor::postIngestTotalConcurrent(),
+            "tuning.post_ingest.total_concurrent");
+        put("post_ingest.batch_size", TuneAdvisor::postIngestBatchSize(),
+            "tuning.post_ingest.batch_size");
+        put("post_ingest.rpc_queue_max", TuneAdvisor::postIngestRpcQueueMax(),
+            "tuning.post_ingest.rpc_queue_max");
+        put("post_ingest.rpc_max_per_batch", TuneAdvisor::postIngestRpcMaxPerBatch(),
+            "tuning.post_ingest.rpc_max_per_batch");
+        put("resource.enabled", TuneAdvisor::enableResourceGovernor(), "tuning.resource.enabled");
+        put("resource.admission_control", TuneAdvisor::enableAdmissionControl(),
+            "tuning.resource.admission_control");
+        put("resource.memory_budget_bytes", TuneAdvisor::memoryBudgetBytes(),
+            "tuning.resource.memory_budget_bytes");
+        put("resource.memory_warning_threshold", TuneAdvisor::memoryWarningThreshold(),
+            "tuning.resource.memory_warning_threshold");
+        put("resource.memory_critical_threshold", TuneAdvisor::memoryCriticalThreshold(),
+            "tuning.resource.memory_critical_threshold");
+        put("resource.memory_emergency_threshold", TuneAdvisor::memoryEmergencyThreshold(),
+            "tuning.resource.memory_emergency_threshold");
+        put("resource.memory_hysteresis_ms", TuneAdvisor::memoryHysteresisMs(),
+            "tuning.resource.memory_hysteresis_ms");
+        put("resource.cpu_hysteresis_ms", TuneAdvisor::cpuLevelHysteresisMs(),
+            "tuning.resource.cpu_hysteresis_ms");
+        return true;
+    });
+
+    {
+        std::lock_guard<std::mutex> lock(runtimeTuningStatusMutex_);
+        runtimeTuningStatus_ = std::move(nextStatus);
+    }
+    ResourceGovernor::instance().refreshScalingCaps();
 }
 
 ServiceManager::~ServiceManager() {

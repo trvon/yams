@@ -798,9 +798,6 @@ bool SetupHarness(const IngestionBenchConfig& config) {
     if (const char* env = std::getenv("YAMS_BENCH_ENABLE_SEARCH_REBUILDS")) {
         enableRebuilds = (std::string(env) == "1");
     }
-    if (!enableRebuilds) {
-        g_environment.emplace_back("YAMS_DISABLE_SEARCH_REBUILDS", std::string{"1"});
-    }
 
     // Start daemon
     DaemonHarness::Options harnessOptions;
@@ -814,15 +811,20 @@ bool SetupHarness(const IngestionBenchConfig& config) {
                                                 "embedding_dim = 384\n"
                                                 "preferred_model = \"all-MiniLM-L6-v2\"\n";
     }
-    if (config.embedProfile != EmbedProfile::Default) {
-        const auto embedProfile = config.embedProfile;
-        harnessOptions.configureDaemon = [embedProfile](yams::daemon::DaemonConfig& daemonConfig) {
+    const auto embedProfile = config.embedProfile;
+    harnessOptions.configureDaemon = [embedProfile,
+                                      enableRebuilds](yams::daemon::DaemonConfig& daemonConfig) {
+        daemonConfig.searchMaintenance.automaticRebuildsEnabled = enableRebuilds;
+        daemonConfig.searchMaintenance.automaticRebuildsSource =
+            enableRebuilds ? "harness:YAMS_BENCH_ENABLE_SEARCH_REBUILDS"
+                           : "harness:large_scale_ingestion-default";
+        if (embedProfile != EmbedProfile::Default) {
             daemonConfig.embeddingService.coremlUnifiedConcurrency =
                 embedProfile == EmbedProfile::Balanced ? 2U : 1U;
             daemonConfig.embeddingService.coremlUnifiedConcurrencySource =
                 "harness:large_scale_ingestion:" + std::string(embedProfileName(embedProfile));
-        };
-    }
+        }
+    };
     if (config.enableEmbeddings) {
         const bool useMock = useMockEmbeddingsForBench();
         harnessOptions.useMockModelProvider = useMock;

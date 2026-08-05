@@ -18,14 +18,19 @@
 #include <atomic>
 #include <climits>
 #include <cmath>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/components/RepairTuning.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/metadata/db_lock_telemetry.h>
@@ -53,7 +58,7 @@ public:
             return Profile::Balanced;
         if (ov == 3)
             return Profile::Aggressive;
-        if (const char* s = std::getenv("YAMS_TUNING_PROFILE")) {
+        if (const char* s = compatibilityEnvironment("YAMS_TUNING_PROFILE")) {
             std::string v{s};
             for (auto& c : v)
                 c = static_cast<char>(std::tolower(c));
@@ -120,11 +125,257 @@ public:
     static uint32_t getEmbedMaxConcurrency() { return embedMaxConcurrency(); }
     static inline std::atomic<int> tuningProfileOverride_{0};
 
+    // Refresh every YAMS_* compatibility input as one lifecycle snapshot. Production getters use
+    // this immutable map instead of capturing individual keys on first use, so an ambient mutation
+    // cannot alter a not-yet-read knob midway through daemon startup.
+    static void refreshCompatibilityEnvironmentSnapshot() {
+#ifndef YAMS_TESTING
+        auto current = yams::config::snapshot_environment_prefix("YAMS_");
+        std::lock_guard lock(compatibilityEnvironmentSnapshotMutex());
+        compatibilityEnvironmentSnapshot() = std::move(current);
+        compatibilityEnvironmentSnapshotInitialized() = true;
+#endif
+    }
+
+    // Serializes process-wide value publication with the matching instance config/status update.
+    // The mutex is recursive so ConfigResolver's aggregate update can nest inside a daemon reload
+    // publication transaction on the same thread.
+    class ConfiguredOverridePublication {
+    public:
+        ConfiguredOverridePublication()
+            : lock_(TuneAdvisor::configuredOverridePublicationMutex()) {}
+        ConfiguredOverridePublication(const ConfiguredOverridePublication&) = delete;
+        ConfiguredOverridePublication& operator=(const ConfiguredOverridePublication&) = delete;
+
+    private:
+        std::unique_lock<std::recursive_mutex> lock_;
+    };
+
+    static ConfiguredOverridePublication beginConfiguredOverridePublication() {
+        return ConfiguredOverridePublication{};
+    }
+
+    // Serializes one ConfigResolver update and publishes an even sequence when all related atomics
+    // are installed. Readers that need a coherent multi-field policy use
+    // readConfiguredOverridesSnapshot() and retry if a reload overlaps their read.
+    class ConfiguredOverrideUpdate {
+    public:
+        ConfiguredOverrideUpdate()
+            : publicationLock_(TuneAdvisor::configuredOverridePublicationMutex()),
+              writeLock_(TuneAdvisor::configuredOverrideWriteMutex()) {
+            TuneAdvisor::configuredOverrideSequence_.fetch_add(1, std::memory_order_acq_rel);
+        }
+        ~ConfiguredOverrideUpdate() {
+            TuneAdvisor::configuredOverrideSequence_.fetch_add(1, std::memory_order_release);
+        }
+
+        ConfiguredOverrideUpdate(const ConfiguredOverrideUpdate&) = delete;
+        ConfiguredOverrideUpdate& operator=(const ConfiguredOverrideUpdate&) = delete;
+
+    private:
+        std::unique_lock<std::recursive_mutex> publicationLock_;
+        std::unique_lock<std::mutex> writeLock_;
+    };
+
+    static ConfiguredOverrideUpdate beginConfiguredOverrideUpdate() {
+        return ConfiguredOverrideUpdate{};
+    }
+
+    // Process-wide TuneAdvisor compatibility remains transitional authority. Concurrent embedded
+    // construction waits for the primary lifecycle to commit initialization. If the primary
+    // constructor fails before commit, one waiter takes ownership and initializes instead.
+    class ConfiguredOverrideLifecycleLease {
+    public:
+        ConfiguredOverrideLifecycleLease() {
+            std::unique_lock lock(TuneAdvisor::configuredOverrideLifecycleMutex());
+            TuneAdvisor::configuredOverrideLifecycleCv().wait(
+                lock, [] { return !TuneAdvisor::configuredOverrideLifecycleInitializing(); });
+            auto& count = TuneAdvisor::configuredOverrideLifecycleCount();
+            primary_ = count == 0;
+            if (primary_) {
+                TuneAdvisor::configuredOverrideLifecycleInitializing() = true;
+            }
+            ++count;
+        }
+        ~ConfiguredOverrideLifecycleLease() {
+            std::lock_guard lock(TuneAdvisor::configuredOverrideLifecycleMutex());
+            auto& count = TuneAdvisor::configuredOverrideLifecycleCount();
+            if (count > 0) {
+                --count;
+            }
+            if (primary_ && !committed_) {
+                TuneAdvisor::configuredOverrideLifecycleInitializing() = false;
+                TuneAdvisor::configuredOverrideLifecycleCv().notify_all();
+            }
+        }
+
+        ConfiguredOverrideLifecycleLease(const ConfiguredOverrideLifecycleLease&) = delete;
+        ConfiguredOverrideLifecycleLease&
+        operator=(const ConfiguredOverrideLifecycleLease&) = delete;
+
+        [[nodiscard]] bool ownsInitialization() const noexcept { return primary_; }
+        void commitInitialization() noexcept {
+            if (!primary_ || committed_) {
+                return;
+            }
+            std::lock_guard lock(TuneAdvisor::configuredOverrideLifecycleMutex());
+            committed_ = true;
+            TuneAdvisor::configuredOverrideLifecycleInitializing() = false;
+            TuneAdvisor::configuredOverrideLifecycleCv().notify_all();
+        }
+
+    private:
+        bool primary_{false};
+        bool committed_{false};
+    };
+
+    static std::uint64_t configuredOverridesVersion() noexcept {
+        return configuredOverrideSequence_.load(std::memory_order_acquire);
+    }
+
+    template <typename Reader> static auto readConfiguredOverridesSnapshot(Reader reader) {
+        for (;;) {
+            const auto before = configuredOverridesVersion();
+            if ((before & 1U) != 0U) {
+                std::this_thread::yield();
+                continue;
+            }
+            auto result = reader();
+            const auto after = configuredOverridesVersion();
+            if (before == after && (after & 1U) == 0U) {
+                return result;
+            }
+        }
+    }
+
+    // Start a fresh typed-config lifecycle without inheriting overrides installed while resolving
+    // an earlier daemon in the same process. Dynamic caps and runtime observations are deliberately
+    // excluded: this resets only fields written by ConfigResolver::applyRuntimeTuning().
+    static void resetConfiguredOverrides() noexcept {
+        tuningProfileOverride_.store(0, std::memory_order_relaxed);
+        backpressureReadPauseMsOverride_.store(0, std::memory_order_relaxed);
+        workerPollMsOverride_.store(0, std::memory_order_relaxed);
+        workerPollMsPinned_.store(false, std::memory_order_relaxed);
+        idleCpuPctOverride_.store(-1.0, std::memory_order_relaxed);
+        idleMuxLowBytesOverride_.store(0, std::memory_order_relaxed);
+        idleShrinkHoldMsOverride_.store(0, std::memory_order_relaxed);
+        poolCooldownMsOverride_.store(0, std::memory_order_relaxed);
+        poolScaleStepOverride_.store(0, std::memory_order_relaxed);
+        poolMinSizeIpcOverride_.store(0, std::memory_order_relaxed);
+        poolMaxSizeIpcOverride_.store(0, std::memory_order_relaxed);
+        poolMinSizeIpcIoOverride_.store(0, std::memory_order_relaxed);
+        poolMaxSizeIpcIoOverride_.store(0, std::memory_order_relaxed);
+        ioConnPerThreadOverride_.store(0, std::memory_order_relaxed);
+        postIngestThreads_.store(0, std::memory_order_relaxed);
+        postIngestQueueMaxOverride_.store(0, std::memory_order_relaxed);
+        listInflightLimitOverride_.store(0, std::memory_order_relaxed);
+        listAdmissionWaitMsOverride_.store(0, std::memory_order_relaxed);
+        grepInflightLimitOverride_.store(0, std::memory_order_relaxed);
+        grepAdmissionWaitMsOverride_.store(0, std::memory_order_relaxed);
+        useInternalBusRepair_.store(true, std::memory_order_relaxed);
+        useInternalBusPostIngest_.store(true, std::memory_order_relaxed);
+        ipcTimeoutMsOverride_.store(0, std::memory_order_relaxed);
+        streamChunkTimeoutMsOverride_.store(0, std::memory_order_relaxed);
+        enableResourceGovernorOverride_.store(-1, std::memory_order_relaxed);
+        enableAdmissionControlOverride_.store(-1, std::memory_order_relaxed);
+        governorWarningScalePctOverride_.store(0, std::memory_order_relaxed);
+        memoryBudgetBytesOverride_.store(0, std::memory_order_relaxed);
+        memoryWarningPctOverride_.store(0.0, std::memory_order_relaxed);
+        memoryCriticalPctOverride_.store(0.0, std::memory_order_relaxed);
+        memoryEmergencyPctOverride_.store(0.0, std::memory_order_relaxed);
+        memoryHysteresisMsOverride_.store(0, std::memory_order_relaxed);
+        cpuLevelHysteresisMsOverride_.store(0, std::memory_order_relaxed);
+        postIngestRpcQueueMaxOverride_.store(0, std::memory_order_relaxed);
+        postIngestRpcMaxPerBatchOverride_.store(0, std::memory_order_relaxed);
+        postIngestTotalConcurrentOverride_.store(0, std::memory_order_relaxed);
+        postExtractionConcurrentOverride_.store(0, std::memory_order_relaxed);
+        postKgConcurrentOverride_.store(0, std::memory_order_relaxed);
+        postSymbolConcurrentOverride_.store(0, std::memory_order_relaxed);
+        postEntityConcurrentOverride_.store(0, std::memory_order_relaxed);
+        postTitleConcurrentOverride_.store(0, std::memory_order_relaxed);
+        postEmbedConcurrentOverride_.store(0, std::memory_order_relaxed);
+        postIngestBatchSizeOverride_.store(0, std::memory_order_relaxed);
+        enableGradientLimitersOverride_.store(-1, std::memory_order_relaxed);
+        gradientSmoothingAlphaOverride_.store(0.0, std::memory_order_relaxed);
+        gradientLongAlphaOverride_.store(0.0, std::memory_order_relaxed);
+        gradientWarmupSamplesOverride_.store(0, std::memory_order_relaxed);
+        gradientToleranceOverride_.store(0.0, std::memory_order_relaxed);
+        gradientInitialLimitOverride_.store(0.0, std::memory_order_relaxed);
+        gradientMinLimitOverride_.store(0.0, std::memory_order_relaxed);
+        gradientMaxLimitOverride_.store(0.0, std::memory_order_relaxed);
+    }
+
 private:
+    static std::recursive_mutex& configuredOverridePublicationMutex() {
+        static std::recursive_mutex mutex;
+        return mutex;
+    }
+    static std::mutex& configuredOverrideWriteMutex() {
+        static std::mutex mutex;
+        return mutex;
+    }
+    static std::mutex& configuredOverrideLifecycleMutex() {
+        static std::mutex mutex;
+        return mutex;
+    }
+    static std::condition_variable& configuredOverrideLifecycleCv() {
+        static std::condition_variable cv;
+        return cv;
+    }
+    static bool& configuredOverrideLifecycleInitializing() {
+        static bool initializing = false;
+        return initializing;
+    }
+    static std::size_t& configuredOverrideLifecycleCount() {
+        static std::size_t count = 0;
+        return count;
+    }
+    static inline std::atomic<std::uint64_t> configuredOverrideSequence_{0};
+
     static void ignoreInvalidEnvParseFailure() noexcept {}
 
+    static std::mutex& compatibilityEnvironmentSnapshotMutex() {
+        static auto* mutex = new std::mutex();
+        return *mutex;
+    }
+
+    static std::map<std::string, std::string>& compatibilityEnvironmentSnapshot() {
+        static auto* snapshot = new std::map<std::string, std::string>();
+        return *snapshot;
+    }
+
+    static bool& compatibilityEnvironmentSnapshotInitialized() {
+        static auto* initialized = new bool(false);
+        return *initialized;
+    }
+
+    static const char* compatibilityEnvironment(const char* name) {
+        thread_local std::optional<std::string> copiedValue;
+#ifdef YAMS_TESTING
+        copiedValue = yams::config::getenv_optional(name);
+#else
+        std::unique_lock lock(compatibilityEnvironmentSnapshotMutex());
+        if (!compatibilityEnvironmentSnapshotInitialized()) {
+            // Keep one lock order: environment boundary first, compatibility snapshot second.
+            // refreshCompatibilityEnvironmentSnapshot() uses the same order.
+            lock.unlock();
+            auto current = yams::config::snapshot_environment_prefix("YAMS_");
+            lock.lock();
+            if (!compatibilityEnvironmentSnapshotInitialized()) {
+                compatibilityEnvironmentSnapshot() = std::move(current);
+                compatibilityEnvironmentSnapshotInitialized() = true;
+            }
+        }
+        const auto value = compatibilityEnvironmentSnapshot().find(name);
+        copiedValue = value == compatibilityEnvironmentSnapshot().end()
+                          ? std::nullopt
+                          : std::optional<std::string>{value->second};
+#endif
+        return copiedValue ? copiedValue->c_str() : nullptr;
+    }
+
     static std::optional<bool> parseExplicitBoolEnvNow(const char* name) {
-        if (const char* s = std::getenv(name)) {
+        if (const char* s = compatibilityEnvironment(name)) {
             std::string v{s};
             std::transform(v.begin(), v.end(), v.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -138,7 +389,7 @@ private:
 
     static std::optional<uint32_t> parseBoundedUintEnvNow(const char* name, uint32_t minValue,
                                                           uint32_t maxValue) {
-        if (const char* s = std::getenv(name)) {
+        if (const char* s = compatibilityEnvironment(name)) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= minValue && v <= maxValue)
@@ -152,7 +403,7 @@ private:
 
     static std::optional<uint64_t> parseBoundedUint64EnvNow(const char* name, uint64_t minValue,
                                                             uint64_t maxValue) {
-        if (const char* s = std::getenv(name)) {
+        if (const char* s = compatibilityEnvironment(name)) {
             try {
                 uint64_t v = static_cast<uint64_t>(std::stoull(s));
                 if (v >= minValue && v <= maxValue)
@@ -165,7 +416,7 @@ private:
     }
 
     static std::optional<int> parseBoundedIntEnvNow(const char* name, int minValue, int maxValue) {
-        if (const char* s = std::getenv(name)) {
+        if (const char* s = compatibilityEnvironment(name)) {
             try {
                 int v = std::stoi(s);
                 if (v >= minValue && v <= maxValue)
@@ -222,7 +473,7 @@ private:
 
     static std::optional<double> parseBoundedDoubleEnvNow(const char* name, double minValue,
                                                           double maxValue, double scale = 1.0) {
-        if (const char* s = std::getenv(name)) {
+        if (const char* s = compatibilityEnvironment(name)) {
             try {
                 double v = std::stod(s) * scale;
                 if (v >= minValue && v <= maxValue)
@@ -236,40 +487,7 @@ private:
 
     static std::optional<uint32_t> postStageConcurrentEnvOverride(const char* env,
                                                                   uint32_t maxCap) {
-#ifdef YAMS_TESTING
         return parseBoundedUintEnvNow(env, 1u, maxCap);
-#else
-        if (std::strcmp(env, "YAMS_POST_EXTRACTION_CONCURRENT") == 0) {
-            static const auto cached =
-                parseBoundedUintEnvNow("YAMS_POST_EXTRACTION_CONCURRENT", 1u, 64u);
-            return cached ? std::optional<uint32_t>(std::min(*cached, maxCap)) : std::nullopt;
-        }
-        if (std::strcmp(env, "YAMS_POST_KG_CONCURRENT") == 0) {
-            static const auto cached = parseBoundedUintEnvNow("YAMS_POST_KG_CONCURRENT", 1u, 64u);
-            return cached ? std::optional<uint32_t>(std::min(*cached, maxCap)) : std::nullopt;
-        }
-        if (std::strcmp(env, "YAMS_POST_SYMBOL_CONCURRENT") == 0) {
-            static const auto cached =
-                parseBoundedUintEnvNow("YAMS_POST_SYMBOL_CONCURRENT", 1u, 32u);
-            return cached ? std::optional<uint32_t>(std::min(*cached, maxCap)) : std::nullopt;
-        }
-        if (std::strcmp(env, "YAMS_POST_ENTITY_CONCURRENT") == 0) {
-            static const auto cached =
-                parseBoundedUintEnvNow("YAMS_POST_ENTITY_CONCURRENT", 1u, 16u);
-            return cached ? std::optional<uint32_t>(std::min(*cached, maxCap)) : std::nullopt;
-        }
-        if (std::strcmp(env, "YAMS_POST_TITLE_CONCURRENT") == 0) {
-            static const auto cached =
-                parseBoundedUintEnvNow("YAMS_POST_TITLE_CONCURRENT", 1u, 16u);
-            return cached ? std::optional<uint32_t>(std::min(*cached, maxCap)) : std::nullopt;
-        }
-        if (std::strcmp(env, "YAMS_POST_EMBED_CONCURRENT") == 0) {
-            static const auto cached =
-                parseBoundedUintEnvNow("YAMS_POST_EMBED_CONCURRENT", 1u, 32u);
-            return cached ? std::optional<uint32_t>(std::min(*cached, maxCap)) : std::nullopt;
-        }
-        return std::nullopt;
-#endif
     }
 
 public:
@@ -284,11 +502,7 @@ public:
         double ov = cpuHighPct_.load(std::memory_order_relaxed);
         if (ov > 0.0)
             return ov;
-#ifdef YAMS_TESTING
         auto envValue = parseBoundedDoubleEnvNow("YAMS_CPU_HIGH_PCT", 10.0, 100.0);
-#else
-        static const auto envValue = parseBoundedDoubleEnvNow("YAMS_CPU_HIGH_PCT", 10.0, 100.0);
-#endif
         if (envValue)
             return *envValue;
         return 50.0 + profileScale() * 35.0;
@@ -306,12 +520,7 @@ public:
     /// Default 40% (up from 25%) to avoid false Critical during ONNX inference.
     /// Environment: YAMS_CPU_CRITICAL_GAP_PCT (10-50)
     static double cpuCriticalGapPercent() {
-#ifdef YAMS_TESTING
         auto envValue = parseBoundedDoubleEnvNow("YAMS_CPU_CRITICAL_GAP_PCT", 10.0, 50.0);
-#else
-        static const auto envValue =
-            parseBoundedDoubleEnvNow("YAMS_CPU_CRITICAL_GAP_PCT", 10.0, 50.0);
-#endif
         if (envValue)
             return *envValue;
         return 40.0;
@@ -324,24 +533,14 @@ public:
     // - YAMS_CPU_ADMIT_LOW_HOLD_MS  (0..60000) default 500ms
     static uint32_t cpuAdmissionHighHoldMs() {
         uint32_t def = 250;
-#ifdef YAMS_TESTING
         auto envValue = parseBoundedUintEnvNow("YAMS_CPU_ADMIT_HIGH_HOLD_MS", 0u, 60000u);
-#else
-        static const auto envValue =
-            parseBoundedUintEnvNow("YAMS_CPU_ADMIT_HIGH_HOLD_MS", 0u, 60000u);
-#endif
         if (envValue)
             return *envValue;
         return def;
     }
     static uint32_t cpuAdmissionLowHoldMs() {
         uint32_t def = 500;
-#ifdef YAMS_TESTING
         auto envValue = parseBoundedUintEnvNow("YAMS_CPU_ADMIT_LOW_HOLD_MS", 0u, 60000u);
-#else
-        static const auto envValue =
-            parseBoundedUintEnvNow("YAMS_CPU_ADMIT_LOW_HOLD_MS", 0u, 60000u);
-#endif
         if (envValue)
             return *envValue;
         return def;
@@ -371,11 +570,7 @@ public:
         std::size_t ov = embedDocCap_.load(std::memory_order_relaxed);
         if (ov != 0)
             return ov;
-#ifdef YAMS_TESTING
         auto envValue = parseBoundedUint64EnvNow("YAMS_EMBED_DOC_CAP", 1u, 4096u);
-#else
-        static const auto envValue = parseBoundedUint64EnvNow("YAMS_EMBED_DOC_CAP", 1u, 4096u);
-#endif
         if (envValue)
             return static_cast<std::size_t>(*envValue);
         return 0;
@@ -388,11 +583,7 @@ public:
         std::size_t ov = embedJobDocCap_.load(std::memory_order_relaxed);
         if (ov != 0)
             return ov;
-#ifdef YAMS_TESTING
         auto envValue = parseBoundedUint64EnvNow("YAMS_EMBED_JOB_DOC_CAP", 1u, 4096u);
-#else
-        static const auto envValue = parseBoundedUint64EnvNow("YAMS_EMBED_JOB_DOC_CAP", 1u, 4096u);
-#endif
         if (envValue)
             return static_cast<std::size_t>(*envValue);
         return 0;
@@ -402,7 +593,7 @@ public:
     // Chunk size for IPC streaming (bytes). Default 512 KiB.
     static uint32_t chunkSize() {
         uint32_t def = 512u * 1024u;
-        if (const char* cs = std::getenv("YAMS_CHUNK_SIZE")) {
+        if (const char* cs = compatibilityEnvironment("YAMS_CHUNK_SIZE")) {
             try {
                 auto v = static_cast<uint64_t>(std::stoull(cs));
                 if (v >= 4ull * 1024ull && v <= 8ull * 1024ull * 1024ull)
@@ -420,7 +611,7 @@ public:
             return static_cast<uint32_t>(snap->writerBudgetBytesPerTurn);
         }
         uint32_t def = 3072u * 1024u; // 3 MiB
-        if (const char* wb = std::getenv("YAMS_WRITER_BUDGET_BYTES")) {
+        if (const char* wb = compatibilityEnvironment("YAMS_WRITER_BUDGET_BYTES")) {
             try {
                 auto v = static_cast<uint64_t>(std::stoull(wb));
                 if (v >= 64ull * 1024ull && v <= 64ull * 1024ull * 1024ull)
@@ -439,7 +630,7 @@ public:
         if (auto snap = TuningSnapshotRegistry::instance().get()) {
             return snap->serverMaxInflightPerConn;
         }
-        if (const char* s = std::getenv("YAMS_SERVER_MAX_INFLIGHT")) {
+        if (const char* s = compatibilityEnvironment("YAMS_SERVER_MAX_INFLIGHT")) {
             try {
                 std::size_t v = static_cast<std::size_t>(std::stoul(s));
                 if (v > 0)
@@ -456,7 +647,7 @@ public:
         if (auto snap = TuningSnapshotRegistry::instance().get()) {
             return snap->serverQueueFramesCap;
         }
-        if (const char* s = std::getenv("YAMS_SERVER_QUEUE_FRAMES_CAP")) {
+        if (const char* s = compatibilityEnvironment("YAMS_SERVER_QUEUE_FRAMES_CAP")) {
             try {
                 std::size_t v = static_cast<std::size_t>(std::stoul(s));
                 if (v > 0)
@@ -473,7 +664,7 @@ public:
         if (auto snap = TuningSnapshotRegistry::instance().get()) {
             return snap->serverQueueBytesCap;
         }
-        if (const char* s = std::getenv("YAMS_SERVER_QUEUE_BYTES_CAP")) {
+        if (const char* s = compatibilityEnvironment("YAMS_SERVER_QUEUE_BYTES_CAP")) {
             try {
                 std::size_t v = static_cast<std::size_t>(std::stoul(s));
                 if (v >= 1024)
@@ -491,7 +682,7 @@ public:
         if (auto snap = TuningSnapshotRegistry::instance().get()) {
             return snap->serverWriterBudgetBytesPerTurn;
         }
-        if (const char* s = std::getenv("YAMS_SERVER_WRITER_BUDGET_BYTES")) {
+        if (const char* s = compatibilityEnvironment("YAMS_SERVER_WRITER_BUDGET_BYTES")) {
             try {
                 std::size_t v = static_cast<std::size_t>(std::stoul(s));
                 if (v >= 4096)
@@ -510,7 +701,7 @@ public:
             return snap->serverWriterBudgetMaxBytesPerTurn;
         }
         std::size_t def = 8ull * 1024ull * 1024ull;
-        if (const char* mb = std::getenv("YAMS_SERVER_WRITER_BUDGET_MAX")) {
+        if (const char* mb = compatibilityEnvironment("YAMS_SERVER_WRITER_BUDGET_MAX")) {
             try {
                 auto v = static_cast<std::size_t>(std::stoul(mb));
                 if (v >= 4096)
@@ -525,7 +716,7 @@ public:
     // Suggested maximum worker queue depth before backpressure (0=auto). Default auto scales with
     // profile.
     static uint64_t maxWorkerQueue(size_t workerThreads) {
-        if (const char* s = std::getenv("YAMS_MAX_WORKER_QUEUE")) {
+        if (const char* s = compatibilityEnvironment("YAMS_MAX_WORKER_QUEUE")) {
             try {
                 return static_cast<uint64_t>(std::stoull(s));
             } catch (const std::exception&) {
@@ -555,7 +746,7 @@ public:
         uint64_t def = static_cast<uint64_t>(std::llround(static_cast<double>(kBase) * scale));
         if (def < 64ull * 1024ull * 1024ull)
             def = 64ull * 1024ull * 1024ull;
-        if (const char* s = std::getenv("YAMS_MAX_MUX_BYTES")) {
+        if (const char* s = compatibilityEnvironment("YAMS_MAX_MUX_BYTES")) {
             try {
                 return static_cast<uint64_t>(std::stoull(s));
             } catch (const std::exception&) {
@@ -567,7 +758,7 @@ public:
 
     // Suggested max active connections. Default 0 = unlimited.
     static uint64_t maxActiveConn() {
-        if (const char* s = std::getenv("YAMS_MAX_ACTIVE_CONN")) {
+        if (const char* s = compatibilityEnvironment("YAMS_MAX_ACTIVE_CONN")) {
             try {
                 return static_cast<uint64_t>(std::stoull(s));
             } catch (const std::exception&) {
@@ -597,7 +788,7 @@ public:
     // Max repair batch size per cycle.
     // Profile-scaled: Efficient=24, Balanced=32, Aggressive=48
     static uint32_t repairMaxBatch() {
-        if (const char* s = std::getenv("YAMS_REPAIR_MAX_BATCH")) {
+        if (const char* s = compatibilityEnvironment("YAMS_REPAIR_MAX_BATCH")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v > 0 && v <= 1000)
@@ -616,7 +807,7 @@ public:
     // Profile-scaled: Efficient=25, Balanced=62, Aggressive=100
     // Smaller batches reduce startup load. Normal operation uses repairMaxBatch().
     static uint32_t repairStartupBatchSize() {
-        if (const char* s = std::getenv("YAMS_REPAIR_STARTUP_BATCH")) {
+        if (const char* s = compatibilityEnvironment("YAMS_REPAIR_STARTUP_BATCH")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v > 0 && v <= 1000)
@@ -643,7 +834,7 @@ public:
             def = 2;
         }
 
-        if (const char* s = std::getenv("YAMS_REPAIR_TOKENS_IDLE")) {
+        if (const char* s = compatibilityEnvironment("YAMS_REPAIR_TOKENS_IDLE")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 return v;
@@ -661,11 +852,7 @@ public:
             def = 1;
         }
 
-#ifdef YAMS_TESTING
         auto envValue = parseBoundedUintEnvNow("YAMS_REPAIR_TOKENS_BUSY", 0u, 256u);
-#else
-        static const auto envValue = parseBoundedUintEnvNow("YAMS_REPAIR_TOKENS_BUSY", 0u, 256u);
-#endif
         if (envValue)
             return *envValue;
         return def;
@@ -673,12 +860,7 @@ public:
     // Threshold of active connections to consider the daemon busy. Default 1.
     static uint32_t repairBusyConnThreshold() {
         uint32_t def = 1;
-#ifdef YAMS_TESTING
         auto envValue = parseBoundedUintEnvNow("YAMS_REPAIR_BUSY_CONN_THRESHOLD", 0u, 1024u);
-#else
-        static const auto envValue =
-            parseBoundedUintEnvNow("YAMS_REPAIR_BUSY_CONN_THRESHOLD", 0u, 1024u);
-#endif
         if (envValue)
             return *envValue;
         return def;
@@ -687,7 +869,7 @@ public:
     // Max allowed repair batches per second (rate limiter). Default 1.
     static uint32_t repairMaxBatchesPerSec() {
         uint32_t def = 1;
-        if (const char* s = std::getenv("YAMS_REPAIR_MAX_BATCHES_PER_SEC")) {
+        if (const char* s = compatibilityEnvironment("YAMS_REPAIR_MAX_BATCHES_PER_SEC")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v <= 1000)
@@ -702,7 +884,7 @@ public:
     // Orphan scan interval (hours). Default 6h. Range 1-48h.
     static uint32_t orphanScanIntervalHours() {
         uint32_t def = 6;
-        if (const char* s = std::getenv("YAMS_ORPHAN_SCAN_INTERVAL_HOURS")) {
+        if (const char* s = compatibilityEnvironment("YAMS_ORPHAN_SCAN_INTERVAL_HOURS")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 48)
@@ -720,7 +902,7 @@ public:
     // Auto-repair tick scheduling (tiered). Set to 0 to disable a tier.
     static uint32_t repairAutoInitialDelayMinutes() {
         uint32_t def = 10;
-        if (const char* s = std::getenv("YAMS_REPAIR_AUTO_INITIAL_DELAY_MIN")) {
+        if (const char* s = compatibilityEnvironment("YAMS_REPAIR_AUTO_INITIAL_DELAY_MIN")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v <= 1440)
@@ -734,7 +916,7 @@ public:
 
     static uint32_t repairAutoFastMinutes() {
         uint32_t def = 30;
-        if (const char* s = std::getenv("YAMS_REPAIR_AUTO_FAST_MIN")) {
+        if (const char* s = compatibilityEnvironment("YAMS_REPAIR_AUTO_FAST_MIN")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v <= 1440)
@@ -748,7 +930,7 @@ public:
 
     static uint32_t repairAutoWarmHours() {
         uint32_t def = 6;
-        if (const char* s = std::getenv("YAMS_REPAIR_AUTO_WARM_HOURS")) {
+        if (const char* s = compatibilityEnvironment("YAMS_REPAIR_AUTO_WARM_HOURS")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v <= 168)
@@ -762,7 +944,7 @@ public:
 
     static uint32_t repairAutoColdHours() {
         uint32_t def = 168;
-        if (const char* s = std::getenv("YAMS_REPAIR_AUTO_COLD_HOURS")) {
+        if (const char* s = compatibilityEnvironment("YAMS_REPAIR_AUTO_COLD_HOURS")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v <= 720)
@@ -778,7 +960,7 @@ public:
     // Gives time for daemon to fully initialize before processing FTS5 jobs.
     static uint32_t fts5StartupDelayMs() {
         uint32_t def = 2000;
-        if (const char* s = std::getenv("YAMS_FTS5_STARTUP_DELAY_MS")) {
+        if (const char* s = compatibilityEnvironment("YAMS_FTS5_STARTUP_DELAY_MS")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v <= 60000)
@@ -794,7 +976,7 @@ public:
     // Higher value reduces startup load. Normal operation uses 10ms.
     static uint32_t fts5StartupThrottleMs() {
         uint32_t def = 100;
-        if (const char* s = std::getenv("YAMS_FTS5_STARTUP_THROTTLE_MS")) {
+        if (const char* s = compatibilityEnvironment("YAMS_FTS5_STARTUP_THROTTLE_MS")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 10 && v <= 1000)
@@ -809,7 +991,7 @@ public:
     // Metrics snapshot cache window (ms). Default 250 ms.
     static uint32_t metricsCacheMs() {
         uint32_t def = 250;
-        if (const char* s = std::getenv("YAMS_METRICS_CACHE_MS")) {
+        if (const char* s = compatibilityEnvironment("YAMS_METRICS_CACHE_MS")) {
             try {
                 return static_cast<uint32_t>(std::stoul(s));
             } catch (const std::exception&) {
@@ -823,7 +1005,7 @@ public:
     // Global CPU budget percent (10..100). Defaults adapt to profile posture.
     static uint32_t cpuBudgetPercent() {
         uint32_t def = static_cast<uint32_t>(40.0 + profileScale() * 20.0);
-        if (const char* s = std::getenv("YAMS_CPU_BUDGET_PERCENT")) {
+        if (const char* s = compatibilityEnvironment("YAMS_CPU_BUDGET_PERCENT")) {
             try {
                 int v = std::stoi(s);
                 if (v >= 10 && v <= 100)
@@ -837,7 +1019,7 @@ public:
 
     // Absolute hard cap across subsystems (0 = no cap). Env: YAMS_MAX_THREADS
     static uint32_t maxThreadsOverall() {
-        if (const char* s = std::getenv("YAMS_MAX_THREADS")) {
+        if (const char* s = compatibilityEnvironment("YAMS_MAX_THREADS")) {
             try {
                 int v = std::stoi(s);
                 if (v >= 1 && v <= 1024)
@@ -910,7 +1092,7 @@ public:
         uint32_t ov = workCoordinatorThreadsOverride_.load(std::memory_order_relaxed);
         if (ov != 0)
             return ov;
-        if (const char* s = std::getenv("YAMS_WORK_COORDINATOR_THREADS")) {
+        if (const char* s = compatibilityEnvironment("YAMS_WORK_COORDINATOR_THREADS")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 512)
@@ -959,7 +1141,7 @@ public:
 
     // Embedding max concurrency (global). Env YAMS_EMBED_MAX_CONCURRENCY wins; else budgeted 25%.
     static uint32_t embedMaxConcurrencyBase() {
-        if (const char* s = std::getenv("YAMS_EMBED_MAX_CONCURRENCY")) {
+        if (const char* s = compatibilityEnvironment("YAMS_EMBED_MAX_CONCURRENCY")) {
             try {
                 int v = std::stoi(s);
                 if (v >= 1 && v <= 1024)
@@ -996,7 +1178,7 @@ public:
         if (configured != 0)
             return configured;
         // 2) Environment variable override for quick experiments
-        if (const char* s = std::getenv("YAMS_POST_INGEST_THREADS")) {
+        if (const char* s = compatibilityEnvironment("YAMS_POST_INGEST_THREADS")) {
             try {
                 int v = std::stoi(s);
                 if (v >= 1 && v <= 64)
@@ -1016,7 +1198,7 @@ public:
         uint32_t ov = postIngestQueueMaxOverride_.load(std::memory_order_relaxed);
         if (ov != 0)
             return ov;
-        if (const char* s = std::getenv("YAMS_POST_INGEST_QUEUE_MAX")) {
+        if (const char* s = compatibilityEnvironment("YAMS_POST_INGEST_QUEUE_MAX")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 10 && v <= 1'000'000)
@@ -1037,7 +1219,7 @@ public:
         uint32_t ov = postIngestRpcQueueMaxOverride_.load(std::memory_order_relaxed);
         if (ov != 0)
             return ov;
-        if (const char* s = std::getenv("YAMS_POST_INGEST_RPC_QUEUE_MAX")) {
+        if (const char* s = compatibilityEnvironment("YAMS_POST_INGEST_RPC_QUEUE_MAX")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 10 && v <= 1'000'000)
@@ -1058,7 +1240,7 @@ public:
         uint32_t ov = postIngestRpcMaxPerBatchOverride_.load(std::memory_order_relaxed);
         if (ov != 0)
             return ov;
-        if (const char* s = std::getenv("YAMS_POST_INGEST_RPC_MAX_PER_BATCH")) {
+        if (const char* s = compatibilityEnvironment("YAMS_POST_INGEST_RPC_MAX_PER_BATCH")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 1024)
@@ -1068,6 +1250,9 @@ public:
             }
         }
         return 4;
+    }
+    static void setPostIngestRpcMaxPerBatch(uint32_t value) {
+        postIngestRpcMaxPerBatchOverride_.store(value, std::memory_order_relaxed);
     }
     // Post-ingest batching size. Env override: YAMS_POST_INGEST_BATCH_SIZE.
     // This is a cap: partial batches still dispatch after the bounded coalesce window.
@@ -1086,12 +1271,7 @@ public:
             embedCap = 64;
         }
         baseBatchSize = std::min({baseBatchSize, embedCap, 256u});
-#ifdef YAMS_TESTING
         auto envValue = parseBoundedUintEnvNow("YAMS_POST_INGEST_BATCH_SIZE", 1u, 256u);
-#else
-        static const auto envValue =
-            parseBoundedUintEnvNow("YAMS_POST_INGEST_BATCH_SIZE", 1u, 256u);
-#endif
         if (envValue)
             baseBatchSize = *envValue;
 
@@ -1120,6 +1300,9 @@ public:
         return readUint32Override(ipcTimeoutMsOverride_, "YAMS_IPC_TIMEOUT_MS", 15000u, 500u,
                                   600000u);
     }
+    static void setIpcTimeoutMs(uint32_t value) {
+        ipcTimeoutMsOverride_.store(value, std::memory_order_relaxed);
+    }
     // Timeout for streaming chunk production (ms). When nonzero, a streaming
     // response will be failed with a Timeout error if next_chunk() exceeds this
     // limit. Default 30000ms; env: YAMS_STREAM_CHUNK_TIMEOUT_MS. Range clamp
@@ -1127,6 +1310,9 @@ public:
     static uint32_t streamChunkTimeoutMs() {
         return readUint32Override(streamChunkTimeoutMsOverride_, "YAMS_STREAM_CHUNK_TIMEOUT_MS",
                                   30000u, 1000u, 600000u);
+    }
+    static void setStreamChunkTimeoutMs(uint32_t value) {
+        streamChunkTimeoutMsOverride_.store(value, std::memory_order_relaxed);
     }
     // -------- New centralized tuning getters (env-driven) --------
     // Backpressure read pause when receiver is backpressured (ms). Default 10.
@@ -1400,7 +1586,7 @@ public:
         if (ov != 0)
             return ov;
         uint32_t def = 8;
-        if (const char* s = std::getenv("YAMS_IO_CONN_PER_THREAD")) {
+        if (const char* s = compatibilityEnvironment("YAMS_IO_CONN_PER_THREAD")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 1024)
@@ -1419,7 +1605,7 @@ public:
         int ov = enableParallelIngestOverride_.load(std::memory_order_relaxed);
         if (ov >= 0)
             return ov > 0;
-        if (const char* s = std::getenv("YAMS_ENABLE_PARALLEL_INGEST")) {
+        if (const char* s = compatibilityEnvironment("YAMS_ENABLE_PARALLEL_INGEST")) {
             std::string v{s};
             std::transform(v.begin(), v.end(), v.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -1437,7 +1623,7 @@ public:
         uint32_t ov = maxIngestWorkersOverride_.load(std::memory_order_relaxed);
         if (ov > 0)
             return ov;
-        if (const char* s = std::getenv("YAMS_INDEXING_WORKERS_MAX")) {
+        if (const char* s = compatibilityEnvironment("YAMS_INDEXING_WORKERS_MAX")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1)
@@ -1456,7 +1642,7 @@ public:
         uint32_t ov = storagePoolSizeOverride_.load(std::memory_order_relaxed);
         if (ov > 0)
             return ov;
-        if (const char* s = std::getenv("YAMS_STORAGE_POOL_SIZE")) {
+        if (const char* s = compatibilityEnvironment("YAMS_STORAGE_POOL_SIZE")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1)
@@ -1475,7 +1661,7 @@ public:
         uint32_t ov = ingestBacklogPerWorkerOverride_.load(std::memory_order_relaxed);
         if (ov > 0)
             return ov;
-        if (const char* s = std::getenv("YAMS_INGEST_BACKLOG_PER_WORKER")) {
+        if (const char* s = compatibilityEnvironment("YAMS_INGEST_BACKLOG_PER_WORKER")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1)
@@ -1506,7 +1692,7 @@ public:
         uint32_t ov = ioThreadCountOverride_.load(std::memory_order_relaxed);
         if (ov > 0)
             return ov;
-        if (const char* s = std::getenv("YAMS_IO_THREADS")) {
+        if (const char* s = compatibilityEnvironment("YAMS_IO_THREADS")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 16)
@@ -1524,7 +1710,7 @@ public:
         int32_t ov = connectionLifetimeSecondsOverride_.load(std::memory_order_relaxed);
         if (ov >= 0)
             return static_cast<uint32_t>(ov);
-        if (const char* s = std::getenv("YAMS_CONNECTION_LIFETIME_S")) {
+        if (const char* s = compatibilityEnvironment("YAMS_CONNECTION_LIFETIME_S")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v <= 86400)
@@ -1549,7 +1735,7 @@ public:
         uint32_t ov = maxIdleTimeoutsOverride_.load(std::memory_order_relaxed);
         if (ov > 0)
             return ov;
-        if (const char* s = std::getenv("YAMS_MAX_IDLE_TIMEOUTS")) {
+        if (const char* s = compatibilityEnvironment("YAMS_MAX_IDLE_TIMEOUTS")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 100)
@@ -1564,7 +1750,7 @@ public:
         uint32_t ov = checkpointIntervalSecondsOverride_.load(std::memory_order_relaxed);
         if (ov > 0)
             return ov;
-        if (const char* s = std::getenv("YAMS_CHECKPOINT_INTERVAL_SECONDS")) {
+        if (const char* s = compatibilityEnvironment("YAMS_CHECKPOINT_INTERVAL_SECONDS")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 10 && v <= 3600)
@@ -1579,7 +1765,7 @@ public:
         uint32_t ov = checkpointInsertThresholdOverride_.load(std::memory_order_relaxed);
         if (ov > 0)
             return ov;
-        if (const char* s = std::getenv("YAMS_CHECKPOINT_INSERT_THRESHOLD")) {
+        if (const char* s = compatibilityEnvironment("YAMS_CHECKPOINT_INSERT_THRESHOLD")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 100000)
@@ -1594,7 +1780,7 @@ public:
         int ov = enableHotzoneCheckpointOverride_.load(std::memory_order_relaxed);
         if (ov >= 0)
             return ov > 0;
-        if (const char* s = std::getenv("YAMS_ENABLE_HOTZONE_PERSISTENCE")) {
+        if (const char* s = compatibilityEnvironment("YAMS_ENABLE_HOTZONE_PERSISTENCE")) {
             std::string v{s};
             std::transform(v.begin(), v.end(), v.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -1641,12 +1827,7 @@ public:
         uint32_t ov = postIngestTotalConcurrentOverride_.load(std::memory_order_relaxed);
         if (ov > 0)
             return ov;
-#ifdef YAMS_TESTING
         auto envValue = parseBoundedUintEnvNow("YAMS_POST_INGEST_TOTAL_CONCURRENT", 1u, 256u);
-#else
-        static const auto envValue =
-            parseBoundedUintEnvNow("YAMS_POST_INGEST_TOTAL_CONCURRENT", 1u, 256u);
-#endif
         if (envValue)
             return *envValue;
         uint32_t hw = daemonThreadCapacity(hardwareConcurrency());
@@ -1839,7 +2020,7 @@ public:
         uint32_t ov = onnxSessionsPerModelOverride_.load(std::memory_order_relaxed);
         if (ov > 0)
             return ov;
-        if (const char* s = std::getenv("YAMS_ONNX_SESSIONS_PER_MODEL")) {
+        if (const char* s = compatibilityEnvironment("YAMS_ONNX_SESSIONS_PER_MODEL")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 32)
@@ -1868,7 +2049,7 @@ public:
         uint32_t ov = embedChannelCapacityOverride_.load(std::memory_order_relaxed);
         if (ov > 0)
             return ov;
-        if (const char* val = std::getenv("YAMS_EMBED_CHANNEL_CAPACITY")) {
+        if (const char* val = compatibilityEnvironment("YAMS_EMBED_CHANNEL_CAPACITY")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(val));
                 if (v >= 256 && v <= 65536)
@@ -1891,7 +2072,7 @@ public:
             return ov;
 
         uint32_t base = 4096;
-        if (const char* s = std::getenv("YAMS_STORE_DOCUMENT_CHANNEL_CAPACITY")) {
+        if (const char* s = compatibilityEnvironment("YAMS_STORE_DOCUMENT_CHANNEL_CAPACITY")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 64 && v <= 1'000'000)
@@ -1902,7 +2083,7 @@ public:
         }
 
         bool correctnessMode = true;
-        if (const char* s = std::getenv("YAMS_INGEST_CORRECTNESS_MODE")) {
+        if (const char* s = compatibilityEnvironment("YAMS_INGEST_CORRECTNESS_MODE")) {
             std::string v(s);
             std::transform(v.begin(), v.end(), v.begin(),
                            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -1936,7 +2117,7 @@ public:
     /// When recent lock errors exceed this, TuningManager reduces KG/embed concurrency
     /// Environment: YAMS_DB_LOCK_THRESHOLD
     static uint32_t dbLockErrorThreshold() {
-        if (const char* s = std::getenv("YAMS_DB_LOCK_THRESHOLD")) {
+        if (const char* s = compatibilityEnvironment("YAMS_DB_LOCK_THRESHOLD")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 100)
@@ -1968,8 +2149,10 @@ public:
     /// postIngestBudgetedConcurrency(), which is expensive. When you need all 6
     /// values in the same tick, use this method instead.
     static PostIngestBudget postIngestBudgetAll(bool includeDynamicCaps) {
-        auto b = postIngestBudgetedConcurrency(includeDynamicCaps);
-        return PostIngestBudget{b.extraction, b.kg, b.symbol, b.entity, b.title, b.embed};
+        return readConfiguredOverridesSnapshot([includeDynamicCaps] {
+            auto b = postIngestBudgetedConcurrency(includeDynamicCaps);
+            return PostIngestBudget{b.extraction, b.kg, b.symbol, b.entity, b.title, b.embed};
+        });
     }
 
 #ifdef YAMS_TESTING
@@ -1989,7 +2172,7 @@ public:
 
     /// Compute post-ingest budget in a single call (avoids 6x redundant computation)
     static TestBudget testing_postIngestBudget(bool includeDynamicCaps) {
-        auto b = postIngestBudgetedConcurrency(includeDynamicCaps);
+        const auto b = postIngestBudgetAll(includeDynamicCaps);
         return TestBudget{b.extraction, b.kg, b.symbol, b.entity, b.title, b.embed};
     }
 #endif
@@ -2373,11 +2556,7 @@ public:
         int ov = enableResourceGovernorOverride_.load(std::memory_order_relaxed);
         if (ov >= 0)
             return ov > 0;
-#ifdef YAMS_TESTING
         auto envValue = parseExplicitBoolEnvNow("YAMS_ENABLE_RESOURCE_GOVERNOR");
-#else
-        static const auto envValue = parseExplicitBoolEnvNow("YAMS_ENABLE_RESOURCE_GOVERNOR");
-#endif
         if (envValue)
             return *envValue;
         return true;
@@ -2398,11 +2577,7 @@ public:
         int ov = enableAdmissionControlOverride_.load(std::memory_order_relaxed);
         if (ov >= 0)
             return ov > 0;
-#ifdef YAMS_TESTING
         auto envValue = parseExplicitBoolEnvNow("YAMS_ADMISSION_CONTROL");
-#else
-        static const auto envValue = parseExplicitBoolEnvNow("YAMS_ADMISSION_CONTROL");
-#endif
         if (envValue)
             return *envValue;
         return true;
@@ -2418,7 +2593,7 @@ public:
         uint32_t ov = governorWarningScalePctOverride_.load(std::memory_order_relaxed);
         if (ov >= 10 && ov <= 100)
             return ov;
-        if (const char* s = std::getenv("YAMS_GOV_WARNING_SCALE_PCT")) {
+        if (const char* s = compatibilityEnvironment("YAMS_GOV_WARNING_SCALE_PCT")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 10 && v <= 100)
@@ -2451,13 +2626,8 @@ public:
         uint64_t ov = memoryBudgetBytesOverride_.load(std::memory_order_relaxed);
         if (ov > 0)
             return ov;
-#ifdef YAMS_TESTING
         auto envValue = parseBoundedUint64EnvNow("YAMS_MEMORY_BUDGET_BYTES",
                                                  64ull * 1024ull * 1024ull, ULLONG_MAX);
-#else
-        static const auto envValue = parseBoundedUint64EnvNow(
-            "YAMS_MEMORY_BUDGET_BYTES", 64ull * 1024ull * 1024ull, ULLONG_MAX);
-#endif
         if (envValue)
             return *envValue;
         return autoMemoryBudgetBytes(detectSystemMemory());
@@ -2475,12 +2645,7 @@ public:
         double ov = memoryWarningPctOverride_.load(std::memory_order_relaxed);
         if (ov > 0.0)
             return ov;
-#ifdef YAMS_TESTING
         auto envValue = parseBoundedDoubleEnvNow("YAMS_MEMORY_WARNING_PCT", 0.5, 0.99, 0.01);
-#else
-        static const auto envValue =
-            parseBoundedDoubleEnvNow("YAMS_MEMORY_WARNING_PCT", 0.5, 0.99, 0.01);
-#endif
         if (envValue)
             return *envValue;
         return 0.70 + profileScale() * 0.10;
@@ -2498,12 +2663,7 @@ public:
         double ov = memoryCriticalPctOverride_.load(std::memory_order_relaxed);
         if (ov > 0.0)
             return ov;
-#ifdef YAMS_TESTING
         auto envValue = parseBoundedDoubleEnvNow("YAMS_MEMORY_CRITICAL_PCT", 0.5, 0.99, 0.01);
-#else
-        static const auto envValue =
-            parseBoundedDoubleEnvNow("YAMS_MEMORY_CRITICAL_PCT", 0.5, 0.99, 0.01);
-#endif
         if (envValue)
             return *envValue;
         return 0.85 + profileScale() * 0.07;
@@ -2521,12 +2681,7 @@ public:
         double ov = memoryEmergencyPctOverride_.load(std::memory_order_relaxed);
         if (ov > 0.0)
             return ov;
-#ifdef YAMS_TESTING
         auto envValue = parseBoundedDoubleEnvNow("YAMS_MEMORY_EMERGENCY_PCT", 0.5, 0.99, 0.01);
-#else
-        static const auto envValue =
-            parseBoundedDoubleEnvNow("YAMS_MEMORY_EMERGENCY_PCT", 0.5, 0.99, 0.01);
-#endif
         if (envValue)
             return *envValue;
         return 0.92 + profileScale() * 0.05;
@@ -2542,12 +2697,7 @@ public:
         uint32_t ov = memoryHysteresisMsOverride_.load(std::memory_order_relaxed);
         if (ov > 0)
             return ov;
-#ifdef YAMS_TESTING
         auto envValue = parseBoundedUintEnvNow("YAMS_MEMORY_HYSTERESIS_MS", 10u, 10000u);
-#else
-        static const auto envValue =
-            parseBoundedUintEnvNow("YAMS_MEMORY_HYSTERESIS_MS", 10u, 10000u);
-#endif
         if (envValue)
             return *envValue;
         return 500; // 500ms default
@@ -2560,12 +2710,7 @@ public:
         uint32_t ov = cpuLevelHysteresisMsOverride_.load(std::memory_order_relaxed);
         if (ov > 0)
             return ov;
-#ifdef YAMS_TESTING
         auto envValue = parseBoundedUintEnvNow("YAMS_CPU_LEVEL_HYSTERESIS_MS", 10u, 10000u);
-#else
-        static const auto envValue =
-            parseBoundedUintEnvNow("YAMS_CPU_LEVEL_HYSTERESIS_MS", 10u, 10000u);
-#endif
         if (envValue)
             return *envValue;
         return 150;
@@ -2580,7 +2725,7 @@ public:
         uint32_t ov = modelEvictionCooldownMsOverride_.load(std::memory_order_relaxed);
         if (ov > 0)
             return ov;
-        if (const char* s = std::getenv("YAMS_MODEL_EVICTION_COOLDOWN_MS")) {
+        if (const char* s = compatibilityEnvironment("YAMS_MODEL_EVICTION_COOLDOWN_MS")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 100 && v <= 10000)
@@ -2620,7 +2765,7 @@ public:
         double ov = gradientSmoothingAlphaOverride_.load(std::memory_order_relaxed);
         if (ov > 0.0)
             return ov;
-        if (const char* s = std::getenv("YAMS_GRADIENT_SMOOTHING_ALPHA")) {
+        if (const char* s = compatibilityEnvironment("YAMS_GRADIENT_SMOOTHING_ALPHA")) {
             try {
                 double v = std::stod(s);
                 if (v >= 0.01 && v <= 0.99)
@@ -2642,7 +2787,7 @@ public:
         double ov = gradientLongAlphaOverride_.load(std::memory_order_relaxed);
         if (ov > 0.0)
             return ov;
-        if (const char* s = std::getenv("YAMS_GRADIENT_LONG_ALPHA")) {
+        if (const char* s = compatibilityEnvironment("YAMS_GRADIENT_LONG_ALPHA")) {
             try {
                 double v = std::stod(s);
                 if (v >= 0.01 && v <= 0.5)
@@ -2664,7 +2809,7 @@ public:
         uint32_t ov = gradientWarmupSamplesOverride_.load(std::memory_order_relaxed);
         if (ov > 0)
             return ov;
-        if (const char* s = std::getenv("YAMS_GRADIENT_WARMUP_SAMPLES")) {
+        if (const char* s = compatibilityEnvironment("YAMS_GRADIENT_WARMUP_SAMPLES")) {
             try {
                 uint32_t v = static_cast<uint32_t>(std::stoul(s));
                 if (v >= 1 && v <= 100)
@@ -2686,7 +2831,7 @@ public:
         double ov = gradientToleranceOverride_.load(std::memory_order_relaxed);
         if (ov > 0.0)
             return ov;
-        if (const char* s = std::getenv("YAMS_GRADIENT_TOLERANCE")) {
+        if (const char* s = compatibilityEnvironment("YAMS_GRADIENT_TOLERANCE")) {
             try {
                 double v = std::stod(s);
                 if (v >= 1.0 && v <= 5.0)
@@ -2708,7 +2853,7 @@ public:
         double ov = gradientInitialLimitOverride_.load(std::memory_order_relaxed);
         if (ov > 0.0)
             return ov;
-        if (const char* s = std::getenv("YAMS_GRADIENT_INITIAL_LIMIT")) {
+        if (const char* s = compatibilityEnvironment("YAMS_GRADIENT_INITIAL_LIMIT")) {
             try {
                 double v = std::stod(s);
                 if (v >= 1.0 && v <= 128.0)
@@ -2730,7 +2875,7 @@ public:
         double ov = gradientMinLimitOverride_.load(std::memory_order_relaxed);
         if (ov > 0.0)
             return ov;
-        if (const char* s = std::getenv("YAMS_GRADIENT_MIN_LIMIT")) {
+        if (const char* s = compatibilityEnvironment("YAMS_GRADIENT_MIN_LIMIT")) {
             try {
                 double v = std::stod(s);
                 if (v >= 0.0 && v <= 64.0)
@@ -2752,7 +2897,7 @@ public:
         double ov = gradientMaxLimitOverride_.load(std::memory_order_relaxed);
         if (ov > 0.0)
             return ov;
-        if (const char* s = std::getenv("YAMS_GRADIENT_MAX_LIMIT")) {
+        if (const char* s = compatibilityEnvironment("YAMS_GRADIENT_MAX_LIMIT")) {
             try {
                 double v = std::stod(s);
                 if (v >= 1.0 && v <= 256.0)
@@ -2908,7 +3053,7 @@ public:
         double ov = modelEvictWarningOverride_.load(std::memory_order_relaxed);
         if (ov > 0.0)
             return ov;
-        if (const char* s = std::getenv("YAMS_MODEL_EVICT_WARNING_THRESHOLD")) {
+        if (const char* s = compatibilityEnvironment("YAMS_MODEL_EVICT_WARNING_THRESHOLD")) {
             try {
                 double v = std::stod(s);
                 if (v > 0.0 && v < 1.0)
@@ -2938,7 +3083,7 @@ public:
         double ov = modelEvictCriticalOverride_.load(std::memory_order_relaxed);
         if (ov > 0.0)
             return ov;
-        if (const char* s = std::getenv("YAMS_MODEL_EVICT_CRITICAL_THRESHOLD")) {
+        if (const char* s = compatibilityEnvironment("YAMS_MODEL_EVICT_CRITICAL_THRESHOLD")) {
             try {
                 double v = std::stod(s);
                 if (v > 0.0 && v < 1.0)
@@ -2968,7 +3113,7 @@ public:
         double ov = modelEvictEmergencyOverride_.load(std::memory_order_relaxed);
         if (ov > 0.0)
             return ov;
-        if (const char* s = std::getenv("YAMS_MODEL_EVICT_EMERGENCY_THRESHOLD")) {
+        if (const char* s = compatibilityEnvironment("YAMS_MODEL_EVICT_EMERGENCY_THRESHOLD")) {
             try {
                 double v = std::stod(s);
                 if (v > 0.0 && v < 1.0)

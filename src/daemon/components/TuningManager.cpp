@@ -1404,25 +1404,28 @@ bool TuningManager::tick_once() {
     // Publish a precomputed tuning snapshot for hot-path consumers
     try {
         auto s = std::make_shared<TuningSnapshot>();
-        s->workerPollMs = TuneAdvisor::workerPollMs();
-        s->backpressureReadPauseMs = TuneAdvisor::backpressureReadPauseMs();
-        s->daemonIdle = daemonIdle;
-        s->idleCpuPct = TuneAdvisor::idleCpuThresholdPercent();
-        s->idleMuxLowBytes = TuneAdvisor::idleMuxLowBytes();
-        s->idleShrinkHoldMs = TuneAdvisor::idleShrinkHoldMs();
-        s->poolScaleStep = TuneAdvisor::poolScaleStep();
-        s->poolCooldownMs = TuneAdvisor::poolCooldownMs();
-        s->poolIpcMin = TuneAdvisor::poolMinSizeIpc();
-        s->poolIpcMax = TuneAdvisor::poolMaxSizeIpc();
-        s->poolIoMin = TuneAdvisor::poolMinSizeIpcIo();
-        s->poolIoMax = TuneAdvisor::poolMaxSizeIpcIo();
-        s->writerBudgetBytesPerTurn = writerBudget;
+        (void)TuneAdvisor::readConfiguredOverridesSnapshot([&] {
+            s->workerPollMs = TuneAdvisor::workerPollMs();
+            s->backpressureReadPauseMs = TuneAdvisor::backpressureReadPauseMs();
+            s->daemonIdle = daemonIdle;
+            s->idleCpuPct = TuneAdvisor::idleCpuThresholdPercent();
+            s->idleMuxLowBytes = TuneAdvisor::idleMuxLowBytes();
+            s->idleShrinkHoldMs = TuneAdvisor::idleShrinkHoldMs();
+            s->poolScaleStep = TuneAdvisor::poolScaleStep();
+            s->poolCooldownMs = TuneAdvisor::poolCooldownMs();
+            s->poolIpcMin = TuneAdvisor::poolMinSizeIpc();
+            s->poolIpcMax = TuneAdvisor::poolMaxSizeIpc();
+            s->poolIoMin = TuneAdvisor::poolMinSizeIpcIo();
+            s->poolIoMax = TuneAdvisor::poolMaxSizeIpcIo();
+            s->writerBudgetBytesPerTurn = writerBudget;
 
-        s->serverMaxInflightPerConn = TuneAdvisor::serverMaxInflightPerConn();
-        s->serverQueueFramesCap = TuneAdvisor::serverQueueFramesCap();
-        s->serverQueueBytesCap = TuneAdvisor::serverQueueBytesCap();
-        s->serverWriterBudgetBytesPerTurn = TuneAdvisor::serverWriterBudgetBytesPerTurn();
-        s->serverWriterBudgetMaxBytesPerTurn = TuneAdvisor::serverWriterBudgetMaxBytesPerTurn();
+            s->serverMaxInflightPerConn = TuneAdvisor::serverMaxInflightPerConn();
+            s->serverQueueFramesCap = TuneAdvisor::serverQueueFramesCap();
+            s->serverQueueBytesCap = TuneAdvisor::serverQueueBytesCap();
+            s->serverWriterBudgetBytesPerTurn = TuneAdvisor::serverWriterBudgetBytesPerTurn();
+            s->serverWriterBudgetMaxBytesPerTurn = TuneAdvisor::serverWriterBudgetMaxBytesPerTurn();
+            return true;
+        });
 
         const auto repairBacklog = state_->stats.repairQueueDepth.load(std::memory_order_relaxed);
         const auto holdHints = computeRepairHoldHints(govSnap.level, repairBacklog);

@@ -33,6 +33,9 @@ struct ClientConfig {
     std::filesystem::path proxySocketPath;
     std::filesystem::path pidFile;
     std::filesystem::path dataDir;
+    std::filesystem::path daemonBinary;
+    std::filesystem::path configPath;
+    std::string logLevel;
     std::chrono::milliseconds connectTimeout{1000};
     std::chrono::milliseconds headerTimeout{30000};
     std::chrono::milliseconds bodyTimeout{60000};
@@ -400,10 +403,6 @@ public:
 
     // Start daemon if not running
     static Result<void> startDaemon(const ClientConfig& config = {});
-
-    // Helper method to set environment variables for timeouts
-    static void setTimeoutEnvVars(std::chrono::milliseconds headerTimeout,
-                                  std::chrono::milliseconds bodyTimeout);
 
     // Path resolution helper (matches daemon's path resolution)
     static std::filesystem::path resolveSocketPath();

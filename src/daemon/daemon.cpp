@@ -127,18 +127,38 @@ void YamsDaemon::restoreTuningProfileOverrideSnapshot() noexcept {
 
 void YamsDaemon::snapshotRuntimeEnvironment() {
     runtimeEnvironmentBeforeStart_.clear();
+    runtimeEnvironmentLeases_.clear();
     for (const char* name : {"YAMS_IN_DAEMON", "YAMS_STORAGE", "YAMS_DATA_DIR", "YAMS_CONFIG",
                              "YAMS_CONFIG_PATH", "YAMS_DAEMON_SOCKET"}) {
         runtimeEnvironmentBeforeStart_.emplace(name, yams::config::getenv_optional(name));
     }
 }
 
+void YamsDaemon::leaseRuntimeEnvironment(const char* name, const std::string& value) {
+    const auto generation = yams::config::set_environment_owned(name, value.c_str());
+    if (!generation.has_value()) {
+        throw std::runtime_error(std::string{"YamsDaemon failed to lease environment key "} + name);
+    }
+    runtimeEnvironmentLeases_.insert_or_assign(
+        name, RuntimeEnvironmentLease{.value = value, .generation = *generation});
+}
+
 void YamsDaemon::restoreRuntimeEnvironment() noexcept {
     for (const auto& [name, value] : runtimeEnvironmentBeforeStart_) {
-        if (!yams::config::set_environment(name.c_str(), value ? value->c_str() : nullptr)) {
+        const auto lease = runtimeEnvironmentLeases_.find(name);
+        if (lease == runtimeEnvironmentLeases_.end()) {
+            continue;
+        }
+        const auto result = yams::config::restore_environment_if_owned(
+            name.c_str(), lease->second.value, lease->second.generation, value);
+        if (result == yams::config::EnvironmentRestoreResult::OwnershipLost) {
+            std::fprintf(stderr, "YamsDaemon left newer environment owner unchanged for key %s\n",
+                         name.c_str());
+        } else if (result == yams::config::EnvironmentRestoreResult::Error) {
             std::fputs("YamsDaemon failed to restore runtime environment\n", stderr);
         }
     }
+    runtimeEnvironmentLeases_.clear();
     runtimeEnvironmentBeforeStart_.clear();
 }
 
@@ -176,19 +196,19 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config)
 
     // Normalize compatibility aliases before constructing dependent components. Their
     // constructors perform ordinary config/path lookups and must observe this resolved snapshot.
-    (void)yams::config::set_environment("YAMS_IN_DAEMON", "1");
+    leaseRuntimeEnvironment("YAMS_IN_DAEMON", "1");
     if (!config_.dataDir.empty()) {
-        (void)yams::config::set_environment("YAMS_STORAGE", config_.dataDir.c_str());
-        (void)yams::config::set_environment("YAMS_DATA_DIR", config_.dataDir.c_str());
+        leaseRuntimeEnvironment("YAMS_STORAGE", config_.dataDir.string());
+        leaseRuntimeEnvironment("YAMS_DATA_DIR", config_.dataDir.string());
         spdlog::debug("Seeded data path aliases='{}'", config_.dataDir.string());
     }
     if (!config_.configFilePath.empty()) {
-        (void)yams::config::set_environment("YAMS_CONFIG", config_.configFilePath.c_str());
-        (void)yams::config::set_environment("YAMS_CONFIG_PATH", config_.configFilePath.c_str());
+        leaseRuntimeEnvironment("YAMS_CONFIG", config_.configFilePath.string());
+        leaseRuntimeEnvironment("YAMS_CONFIG_PATH", config_.configFilePath.string());
         spdlog::debug("Seeded config path aliases='{}'", config_.configFilePath.string());
     }
     if (!config_.socketPath.empty()) {
-        (void)yams::config::set_environment("YAMS_DAEMON_SOCKET", config_.socketPath.c_str());
+        leaseRuntimeEnvironment("YAMS_DAEMON_SOCKET", config_.socketPath.string());
         spdlog::debug("Seeded YAMS_DAEMON_SOCKET='{}'", config_.socketPath.string());
     }
 
@@ -1388,6 +1408,8 @@ std::shared_ptr<yams::vector::EmbeddingGenerator> YamsDaemon::_test_getEmbedding
 namespace yams::daemon {
 
 void YamsDaemon::reloadTuningConfig() {
+    std::lock_guard<std::mutex> reloadLock(tuningReloadMutex_);
+    [[maybe_unused]] auto publication = TuneAdvisor::beginConfiguredOverridePublication();
     std::filesystem::path configFilePath;
     TuningConfig currentTuning;
     {

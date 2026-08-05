@@ -2105,6 +2105,25 @@ if catch2_dep.found()
     install: false,
   )
 
+  tune_advisor_environment_snapshot_exe = executable(
+    'tune_advisor_environment_snapshot',
+    files('unit/daemon/tune_advisor_environment_snapshot_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [
+      catch2_dep,
+      catch2_main_dep,
+      dependency('threads'),
+      dependency('yams_config'),
+      dependency('spdlog'),
+    ],
+    cpp_args: test_cpp_noerror_args,
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  test('tune_advisor_environment_snapshot', tune_advisor_environment_snapshot_exe,
+    timeout: 30,
+  )
+
   config_reader_link_smoke_exe = executable('config_reader_link_smoke',
     files('unit/config/config_reader_link_smoke.cpp'),
     include_directories: incs,

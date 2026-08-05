@@ -4,9 +4,9 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 
 #include "../../common/test_helpers_catch2.h"
 
@@ -251,8 +251,36 @@ TEST_CASE("ResourceGovernor Warning caps honor configurable scale percent",
     CHECK(warning70.ingestWorkers == expectedScaled(normal.ingestWorkers, 70u));
     CHECK(warning70.searchConcurrency == expectedScaled(normal.searchConcurrency, 70u));
 
+    governor.testing_setPressureState(ResourcePressureLevel::Warning,
+                                      std::chrono::steady_clock::now());
+    TuneAdvisor::setGovernorWarningScalePercent(80u);
+    governor.refreshScalingCaps();
+    auto refreshed = governor.getScalingCaps();
+    CHECK(refreshed.ingestWorkers == expectedScaled(normal.ingestWorkers, 80u));
+    CHECK(refreshed.searchConcurrency == expectedScaled(normal.searchConcurrency, 80u));
+
+    governor.testing_setPressureState(ResourcePressureLevel::Normal,
+                                      std::chrono::steady_clock::now());
     governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
     TuneAdvisor::resetGovernorWarningScalePercentOverride();
+}
+
+TEST_CASE("ResourceGovernor tuning refresh preserves raw Emergency caps during startup grace",
+          "[daemon][governance][catch2][reload]") {
+    auto& governor = ResourceGovernor::instance();
+    governor.testing_setPressureState(ResourcePressureLevel::Emergency,
+                                      std::chrono::steady_clock::now());
+
+    governor.refreshScalingCaps();
+    const auto emergency = governor.getScalingCaps();
+    CHECK_FALSE(emergency.allowNewIngest);
+    CHECK_FALSE(emergency.allowModelLoads);
+    CHECK((emergency.extractionConcurrency == 0));
+    CHECK((emergency.embedConcurrency == 0));
+
+    governor.testing_setPressureState(ResourcePressureLevel::Normal,
+                                      std::chrono::steady_clock::now());
+    governor.testing_updateScalingCaps(ResourcePressureLevel::Normal);
 }
 
 TEST_CASE("ResourceGovernor de-escalation hysteresis differentiates CPU and memory pressure",
