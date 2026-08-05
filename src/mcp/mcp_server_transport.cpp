@@ -114,9 +114,11 @@ void MCPServer::sendResponse(const nlohmann::json& message) {
 
     constexpr size_t kDefaultMaxPayloadBytes = 64ULL * 1024;
     size_t maxPayloadBytes = kDefaultMaxPayloadBytes;
+#if !defined(YAMS_WASI)
     if (const auto configured = yams::config::read_env_size("YAMS_MCP_MAX_OUTPUT_BYTES").value) {
         maxPayloadBytes = std::max<size_t>(4096, *configured);
     }
+#endif
 
     if (payload.size() > maxPayloadBytes && message.is_object()) {
         nlohmann::json adjusted = message;
@@ -344,8 +346,10 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
     // Initialize the tool registry with modern handlers
     initializeToolRegistry();
 
-    // Set default handshake behavior from environment variables
+    // Set default handshake behavior from environment variables when the platform provides the
+    // normal configuration layer. The minimal WASI profile retains the constructor defaults.
     enableYamsExtensions_ = true;
+#if !defined(YAMS_WASI)
     if (const auto value = yams::config::read_env_bool("YAMS_DISABLE_EXTENSIONS").value) {
         enableYamsExtensions_ = !*value;
     }
@@ -356,6 +360,7 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
     if (const auto value = yams::config::read_env_bool("YAMS_MCP_LIMIT_DUP_CONTENT").value) {
         limitToolResultDup_ = *value;
     }
+#endif
 
     // Initialize outbound strand for serialized writes.
     // For WASI builds we don't have the daemon global IO context.
@@ -369,6 +374,7 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
 #endif
     }
 
+#if !defined(YAMS_WASI)
     // Resolve prompts directory (file-backed templates).
     try {
         const auto runtimePaths = yams::config::resolve_runtime_paths();
@@ -402,12 +408,11 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
     } catch (...) {
         spdlog::debug("MCP prompt directory resolution failed with unknown error");
     }
+#endif
 }
 
+#if !defined(YAMS_WASI)
 Result<void> MCPServer::ensureDaemonClient() {
-#if defined(YAMS_WASI)
-    return Error{ErrorCode::NotSupported, "Daemon client not available on WASI"};
-#else
     if (testEnsureDaemonClientHook_) {
         auto hookResult = testEnsureDaemonClientHook_(daemon_client_config_);
         if (!hookResult) {
@@ -427,7 +432,6 @@ Result<void> MCPServer::ensureDaemonClient() {
     }
 
     return Result<void>();
-#endif
 }
 
 Result<yams::daemon::DaemonClient*> MCPServer::requireDaemonClient() {
@@ -439,10 +443,6 @@ Result<yams::daemon::DaemonClient*> MCPServer::requireDaemonClient() {
 
 boost::asio::awaitable<Result<std::optional<yams::daemon::StatusResponse>>>
 MCPServer::fetchDaemonStatus(DaemonStatusFetchMode mode) {
-#if defined(YAMS_WASI)
-    (void)mode;
-    co_return Error{ErrorCode::NotSupported, "Daemon status not available on WASI"};
-#else
     if (auto ensure = ensureDaemonClient(); !ensure) {
         if (mode == DaemonStatusFetchMode::BestEffort) {
             co_return std::optional<yams::daemon::StatusResponse>{};
@@ -459,8 +459,8 @@ MCPServer::fetchDaemonStatus(DaemonStatusFetchMode mode) {
     }
 
     co_return std::optional<yams::daemon::StatusResponse>{std::move(sres.value())};
-#endif
 }
+#endif
 
 MCPServer::~MCPServer() {
     stop();

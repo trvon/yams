@@ -14,8 +14,9 @@ fs = import('fs')
 cpp = meson.get_compiler('cpp')
 
 wasi_enabled = get_option('wasi')
+wasi_cpp_args = []
 if wasi_enabled
-  add_project_arguments('-DYAMS_WASI=1', language: 'cpp')
+  wasi_cpp_args += '-DYAMS_WASI=1'
 endif
 
 _yams_include_dir = join_paths(meson.current_source_dir(), 'include')
@@ -778,6 +779,7 @@ if wasi_enabled
 
   if get_option('build-mcp-server')
     subdir('src/mcp')
+    subdir('tests/wasi')
   endif
 else
   # Core libraries (ordered by dependency)

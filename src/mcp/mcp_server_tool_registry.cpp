@@ -93,6 +93,7 @@ void MCPServer::initializeToolRegistry() {
                                       .destructiveHint = false,
                                       .idempotentHint = true,
                                       .openWorldHint = false};
+#if !defined(YAMS_WASI)
     ToolAnnotation addAnnotation{.readOnlyHint = false,
                                  .destructiveHint = false,
                                  .idempotentHint = false,
@@ -109,6 +110,7 @@ void MCPServer::initializeToolRegistry() {
                                      .destructiveHint = false,
                                      .idempotentHint = false,
                                      .openWorldHint = false};
+#endif
 
     // Non-daemon tool used for protocol feature validation.
     // This stays fully in-process so unit tests can exercise tool result shaping
@@ -161,9 +163,7 @@ void MCPServer::initializeToolRegistry() {
                  {"description", "Include verbose metrics"},
                  {"default", false}}}}}},
         "Get status for the in-process WASI MCP server", "Get Status", readOnlyAnnotation);
-    return;
-#endif
-
+#else
     // Always register standard MCP tools
     toolRegistry_->registerRawTool(
         "search",
@@ -1093,5 +1093,6 @@ void MCPServer::initializeToolRegistry() {
         // Transfer ownership: keep fullRegistry alive as internalRegistry_ for dispatch
         internalRegistry_ = std::move(fullRegistry);
     }
+#endif
 }
 } // namespace yams::mcp

@@ -88,6 +88,7 @@ inline int setenv(const char* name, const char* value, int overwrite) {
 namespace yams::mcp {
 
 namespace {
+#if !defined(YAMS_WASI)
 json makeSnapshotJson(const yams::daemon::SnapshotInfo& snap) {
     return json{{"id", snap.id},
                 {"label", snap.label},
@@ -139,7 +140,6 @@ bool containsNormalizedToken(std::string_view haystack, std::string_view needle)
     return paddedHaystack.find(paddedNeedle) != std::string::npos;
 }
 
-#if !defined(YAMS_WASI)
 struct SuggestContextSuppressionState {
     std::unordered_set<std::string> snapshotIds;
     std::unordered_set<std::string> resultIds;
@@ -366,6 +366,7 @@ void MCPServer::recordEarlyFeatureUse() {
 /* Removed misplaced logging/setLevel block (should reside inside MCPServer::handleRequest)
  */
 
+#if !defined(YAMS_WASI)
 boost::asio::awaitable<Result<MCPGetByNameResponse>>
 MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
     // Path-first resolution: if explicit path provided or name includes a subpath,
@@ -437,7 +438,7 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
             out.path = std::move(gr.path);
             out.mimeType = std::move(gr.mimeType);
             if (!gr.content.empty()) {
-                constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024;
+                constexpr std::size_t MAX_BYTES = std::size_t{1} * 1024 * 1024;
                 out.content = gr.content.size() <= MAX_BYTES ? std::move(gr.content)
                                                              : gr.content.substr(0, MAX_BYTES);
             }
@@ -469,7 +470,7 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
         out.path = std::move(gr.path);
         out.mimeType = std::move(gr.mimeType);
         if (!gr.content.empty()) {
-            constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024;
+            constexpr std::size_t MAX_BYTES = std::size_t{1} * 1024 * 1024;
             out.content = gr.content.size() <= MAX_BYTES ? std::move(gr.content)
                                                          : gr.content.substr(0, MAX_BYTES);
         }
@@ -570,6 +571,7 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
             try {
                 stem = std::filesystem::path(req.name).stem().string();
             } catch (...) {
+                spdlog::debug("Unable to derive document-name stem for '{}'", req.name);
             }
             lr = tryList(std::string("%/") + stem + "%");
         }
@@ -598,7 +600,7 @@ MCPServer::handleGetByName(const MCPGetByNameRequest& req) {
     out.path = std::move(gr.path);
     out.mimeType = std::move(gr.mimeType);
     if (!gr.content.empty()) {
-        constexpr std::size_t MAX_BYTES = 1 * 1024 * 1024;
+        constexpr std::size_t MAX_BYTES = std::size_t{1} * 1024 * 1024;
         out.content = gr.content.size() <= MAX_BYTES ? std::move(gr.content)
                                                      : gr.content.substr(0, MAX_BYTES);
     }
@@ -1022,6 +1024,7 @@ MCPServer::handleListSnapshots(const MCPListSnapshotsRequest& req) {
     }
     co_return response;
 }
+#endif
 
 boost::asio::awaitable<Result<MCPSuggestContextResponse>>
 MCPServer::handleSuggestContext(const MCPSuggestContextRequest& req) {

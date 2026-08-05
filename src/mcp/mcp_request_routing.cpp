@@ -117,8 +117,13 @@ MCPServer::dispatchCoreMethod(const json& id, const std::string& method, const j
     }
 
     if (method == "resources/read") {
+#if defined(YAMS_WASI)
+        return MessageResult{
+            Error{ErrorCode::NotSupported, "Resources are not supported on WASI build"}};
+#else
         std::string uri = params.value("uri", "");
         return MessageResult{createResponse(id, readResource(uri))};
+#endif
     }
 
     if (method == "prompts/list") {
@@ -126,9 +131,14 @@ MCPServer::dispatchCoreMethod(const json& id, const std::string& method, const j
     }
 
     if (method == "prompts/get") {
+#if defined(YAMS_WASI)
+        return MessageResult{
+            Error{ErrorCode::NotSupported, "Prompts are not supported on WASI build"}};
+#else
         std::string name = params.value("name", "");
         json args = params.value("arguments", json::object());
         return MessageResult{handlePromptGet(id, name, args)};
+#endif
     }
 
     if (method == "logging/setLevel") {
