@@ -24,6 +24,8 @@
 
 #include <yams/vector/document_chunker.h>
 
+#include "../../../common/test_helpers_catch2.h"
+
 using namespace yams::daemon;
 using Catch::Matchers::ContainsSubstring;
 
@@ -91,40 +93,16 @@ public:
     ProfileGuard& operator=(const ProfileGuard&) = delete;
 };
 
-struct EnvGuard {
-    std::string name;
-    std::optional<std::string> originalValue;
+using EnvGuard = yams::test::ScopedEnvVar;
 
-    explicit EnvGuard(const std::string& envName, const std::string& newValue) : name(envName) {
-        if (const char* orig = std::getenv(name.c_str())) {
-            originalValue = orig;
-        }
-#ifdef _WIN32
-        _putenv_s(name.c_str(), newValue.c_str());
-#else
-        setenv(name.c_str(), newValue.c_str(), 1);
-#endif
+std::vector<EnvGuard> unsetEnvironment(std::initializer_list<const char*> names) {
+    std::vector<EnvGuard> guards;
+    guards.reserve(names.size());
+    for (const char* name : names) {
+        guards.emplace_back(name, std::nullopt);
     }
-
-    ~EnvGuard() {
-        if (originalValue) {
-#ifdef _WIN32
-            _putenv_s(name.c_str(), originalValue->c_str());
-#else
-            setenv(name.c_str(), originalValue->c_str(), 1);
-#endif
-        } else {
-#ifdef _WIN32
-            _putenv_s(name.c_str(), "");
-#else
-            unsetenv(name.c_str());
-#endif
-        }
-    }
-
-    EnvGuard(const EnvGuard&) = delete;
-    EnvGuard& operator=(const EnvGuard&) = delete;
-};
+    return guards;
+}
 
 } // namespace
 
@@ -1128,12 +1106,10 @@ TEST_CASE_METHOD(ConfigResolverFixture,
 log_level = "info"
 )");
         EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
-        for (auto* env :
-             {"YAMS_SIMEON_NGRAM_MODE", "YAMS_SIMEON_NGRAM_MIN", "YAMS_SIMEON_NGRAM_MAX",
-              "YAMS_SIMEON_SKETCH_DIM", "YAMS_SIMEON_OUTPUT_DIM", "YAMS_SIMEON_PROJECTION",
-              "YAMS_SIMEON_PQ_BYTES"}) {
-            unsetenv(env);
-        }
+        auto cleared = unsetEnvironment({"YAMS_SIMEON_NGRAM_MODE", "YAMS_SIMEON_NGRAM_MIN",
+                                         "YAMS_SIMEON_NGRAM_MAX", "YAMS_SIMEON_SKETCH_DIM",
+                                         "YAMS_SIMEON_OUTPUT_DIM", "YAMS_SIMEON_PROJECTION",
+                                         "YAMS_SIMEON_PQ_BYTES"});
         auto policy = ConfigResolver::resolveSimeonEncoderPolicy();
         CHECK_FALSE(policy.ngramMode.has_value());
         CHECK_FALSE(policy.ngramMin.has_value());
@@ -1158,12 +1134,10 @@ l2_normalize = true
 pq_bytes = 64
 )");
         EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
-        for (auto* env :
-             {"YAMS_SIMEON_NGRAM_MODE", "YAMS_SIMEON_NGRAM_MIN", "YAMS_SIMEON_NGRAM_MAX",
-              "YAMS_SIMEON_SKETCH_DIM", "YAMS_SIMEON_OUTPUT_DIM", "YAMS_SIMEON_PROJECTION",
-              "YAMS_SIMEON_PQ_BYTES"}) {
-            unsetenv(env);
-        }
+        auto cleared = unsetEnvironment({"YAMS_SIMEON_NGRAM_MODE", "YAMS_SIMEON_NGRAM_MIN",
+                                         "YAMS_SIMEON_NGRAM_MAX", "YAMS_SIMEON_SKETCH_DIM",
+                                         "YAMS_SIMEON_OUTPUT_DIM", "YAMS_SIMEON_PROJECTION",
+                                         "YAMS_SIMEON_PQ_BYTES"});
         auto policy = ConfigResolver::resolveSimeonEncoderPolicy();
         REQUIRE(policy.ngramMode.has_value());
         CHECK((*policy.ngramMode == "char_and_word"));
@@ -1214,10 +1188,9 @@ TEST_CASE_METHOD(ConfigResolverFixture,
 log_level = "info"
 )");
         EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
-        for (auto* env : {"YAMS_SIMEON_BM25_ENABLED", "YAMS_SIMEON_BM25_VARIANT",
-                          "YAMS_SIMEON_BM25_SUBWORD_GAMMA", "YAMS_SIMEON_BM25_MAX_CORPUS_DOCS"}) {
-            unsetenv(env);
-        }
+        auto cleared = unsetEnvironment({"YAMS_SIMEON_BM25_ENABLED", "YAMS_SIMEON_BM25_VARIANT",
+                                         "YAMS_SIMEON_BM25_SUBWORD_GAMMA",
+                                         "YAMS_SIMEON_BM25_MAX_CORPUS_DOCS"});
         auto policy = ConfigResolver::resolveSimeonBm25Policy();
         CHECK_FALSE(policy.enabled.has_value());
         CHECK_FALSE(policy.variant.has_value());
@@ -1234,10 +1207,9 @@ subword_gamma = 5.0
 max_corpus_docs = 200000
 )");
         EnvGuard cfg("YAMS_CONFIG_PATH", configPath.string());
-        for (auto* env : {"YAMS_SIMEON_BM25_ENABLED", "YAMS_SIMEON_BM25_VARIANT",
-                          "YAMS_SIMEON_BM25_SUBWORD_GAMMA", "YAMS_SIMEON_BM25_MAX_CORPUS_DOCS"}) {
-            unsetenv(env);
-        }
+        auto cleared = unsetEnvironment({"YAMS_SIMEON_BM25_ENABLED", "YAMS_SIMEON_BM25_VARIANT",
+                                         "YAMS_SIMEON_BM25_SUBWORD_GAMMA",
+                                         "YAMS_SIMEON_BM25_MAX_CORPUS_DOCS"});
         auto policy = ConfigResolver::resolveSimeonBm25Policy();
         REQUIRE(policy.enabled.has_value());
         CHECK(*policy.enabled);

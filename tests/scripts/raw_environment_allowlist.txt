@@ -1,0 +1,56 @@
+# Reviewed first-party raw environment mutations. New sites fail the policy gate.
+# Task #71 owns migration of compatibility/process writes unless noted otherwise.
+include/yams/compat/unistd.h:14:raw-env/setenv # Windows POSIX compatibility shim
+include/yams/compat/unistd.h:17:raw-env/_putenv_s # Windows POSIX compatibility shim
+include/yams/compat/unistd.h:20:raw-env/unsetenv # Windows POSIX compatibility shim
+include/yams/compat/unistd.h:21:raw-env/_putenv_s # Windows POSIX compatibility shim
+plugins/onnx/onnx_gpu_provider.h:120:raw-env/_putenv_s # ONNX provider environment default-if-unset compatibility
+plugins/onnx/onnx_gpu_provider.h:122:raw-env/setenv # ONNX provider environment default-if-unset compatibility
+src/cli/commands/daemon_command.cpp:117:raw-env/setenv # Windows compatibility wrapper; migrate under task 71
+src/cli/commands/daemon_command.cpp:125:raw-env/_putenv_s # Windows compatibility wrapper; migrate under task 71
+src/cli/commands/daemon_command.cpp:1072:raw-env/setenv # Daemon launch compatibility environment; migrate under task 71
+src/cli/commands/daemon_command.cpp:1076:raw-env/setenv # Daemon launch compatibility environment; migrate under task 71
+src/cli/commands/daemon_command.cpp:1080:raw-env/setenv # Daemon launch compatibility environment; migrate under task 71
+src/cli/commands/daemon_command.cpp:1144:raw-env/setenv # Daemon launch compatibility environment; migrate under task 71
+src/cli/commands/daemon_command.cpp:1147:raw-env/setenv # Daemon launch compatibility environment; migrate under task 71
+src/cli/commands/daemon_command.cpp:1150:raw-env/setenv # Daemon launch compatibility environment; migrate under task 71
+src/cli/commands/daemon_command.cpp:1512:raw-env/setenv # CLI debug compatibility toggle; migrate under task 71
+src/cli/commands/daemon_command.cpp:1779:raw-env/setenv # CLI debug compatibility toggle; migrate under task 71
+src/cli/commands/daemon_command.cpp:2344:raw-env/setenv # CLI debug compatibility toggle; migrate under task 71
+src/cli/commands/doctor_command.cpp:93:raw-env/setenv # Windows compatibility wrapper; migrate under task 71
+src/cli/commands/doctor_command.cpp:101:raw-env/_putenv_s # Windows compatibility wrapper; migrate under task 71
+src/cli/commands/doctor_command.cpp:103:raw-env/unsetenv # Windows compatibility wrapper; migrate under task 71
+src/cli/commands/doctor_command.cpp:104:raw-env/_putenv_s # Windows compatibility wrapper; migrate under task 71
+src/cli/commands/doctor_command.cpp:463:raw-env/setenv # Doctor compatibility default-if-unset; migrate under task 71
+src/cli/commands/search_command.cpp:1215:raw-env/setenv # Search client data-path compatibility; migrate under task 71
+src/cli/commands/search_command.cpp:1217:raw-env/setenv # Search client data-path compatibility; migrate under task 71
+src/daemon/client/daemon_client.cpp:1219:raw-env/_putenv_s # Client timeout compatibility write; migrate under task 71
+src/daemon/client/daemon_client.cpp:1220:raw-env/_putenv_s # Client timeout compatibility write; migrate under task 71
+src/daemon/client/daemon_client.cpp:1222:raw-env/setenv # Client timeout compatibility write; migrate under task 71
+src/daemon/client/daemon_client.cpp:1223:raw-env/setenv # Client timeout compatibility write; migrate under task 71
+src/daemon/client/daemon_client.cpp:2173:raw-env/SetEnvironmentVariableW # Windows child daemon data-path environment construction
+src/daemon/client/daemon_client.cpp:2174:raw-env/SetEnvironmentVariableW # Windows child daemon data-path environment construction
+src/daemon/client/daemon_client.cpp:2177:raw-env/SetEnvironmentVariableW # Windows child daemon socket environment construction
+src/daemon/client/daemon_client.cpp:2243:raw-env/setenv # Child daemon data-path environment construction
+src/daemon/client/daemon_client.cpp:2245:raw-env/setenv # Child daemon data-path environment construction
+src/daemon/client/daemon_client.cpp:2285:raw-env/setenv # Child daemon socket environment construction
+src/daemon/daemon_main.cpp:164:raw-env/setenv # Pre-thread daemon process marker
+src/daemon/daemon_main.cpp:821:raw-env/setenv # Pre-thread foreground process marker
+src/extraction/plugin_process.cpp:282:raw-env/setenv # Child plugin process environment construction
+src/mcp/mcp_server.cpp:74:raw-env/setenv # Windows compatibility wrapper; migrate under task 71
+src/mcp/mcp_server.cpp:81:raw-env/_putenv_s # Windows compatibility wrapper; migrate under task 71
+src/mcp/mcp_server_handlers.cpp:69:raw-env/setenv # Windows compatibility wrapper; migrate under task 71
+src/mcp/mcp_server_handlers.cpp:76:raw-env/_putenv_s # Windows compatibility wrapper; migrate under task 71
+src/mcp/mcp_server_tool_registry.cpp:72:raw-env/setenv # Windows compatibility wrapper; migrate under task 71
+src/mcp/mcp_server_tool_registry.cpp:79:raw-env/_putenv_s # Windows compatibility wrapper; migrate under task 71
+src/mcp/mcp_server_transport.cpp:72:raw-env/setenv # Windows compatibility wrapper; migrate under task 71
+src/mcp/mcp_server_transport.cpp:79:raw-env/_putenv_s # Windows compatibility wrapper; migrate under task 71
+tools/fuzzing/fuzz_plugin_abi_mount.cpp:55:raw-env/setenv # Single-process fuzz harness setup
+tools/fuzzing/fuzz_plugin_abi_negotiation.cpp:51:raw-env/setenv # Single-process fuzz harness setup
+tools/yams-cli/main.cpp:39:raw-env/setenv # Pre-thread one-shot executable marker
+tools/yams-cli/main.cpp:41:raw-env/_putenv_s # Pre-thread one-shot executable marker
+tools/yams-mcp/main.cpp:19:raw-env/setenv # Windows compatibility wrapper; migrate under task 71
+tools/yams-mcp/main.cpp:27:raw-env/_putenv_s # Windows compatibility wrapper; migrate under task 71
+tools/yams-mcp/main.cpp:117:raw-env/setenv # Pre-thread MCP list mode marker
+tools/yams-mcp/main.cpp:120:raw-env/setenv # Pre-thread MCP grep mode marker
+tools/yams-mcp/main.cpp:123:raw-env/setenv # Pre-thread MCP retrieval mode marker

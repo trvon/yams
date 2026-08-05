@@ -4,7 +4,6 @@
 #pragma once
 
 #include <chrono>
-#include <cstdlib>
 #include <filesystem>
 #include <random>
 #include <stdexcept>
@@ -13,13 +12,14 @@
 
 #include "../../include/yams/metadata/database.h"
 #include "../../include/yams/metadata/migration.h"
+#include <yams/config/config_helpers.h>
 
 namespace yams::test {
 
 inline std::filesystem::path make_temp_sqlite_path(std::string_view prefix = "yams_test_") {
     namespace fs = std::filesystem;
-    const char* env = std::getenv("YAMS_TEST_TMPDIR");
-    const auto base = (env && *env) ? fs::path(env) : fs::temp_directory_path();
+    const auto environment = yams::config::getenv_nonempty("YAMS_TEST_TMPDIR");
+    const auto base = environment ? fs::path(*environment) : fs::temp_directory_path();
     std::error_code ec;
     fs::create_directories(base, ec);
 

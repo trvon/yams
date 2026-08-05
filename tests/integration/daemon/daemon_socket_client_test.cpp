@@ -38,39 +38,7 @@ using namespace yams::test;
 using namespace std::chrono_literals;
 
 namespace {
-class EnvGuard {
-public:
-    EnvGuard(const std::string& envName, const std::string& newValue) : name_(envName) {
-        if (const char* orig = std::getenv(name_.c_str())) {
-            originalValue_ = orig;
-        }
-#ifdef _WIN32
-        _putenv_s(name_.c_str(), newValue.c_str());
-#else
-        setenv(name_.c_str(), newValue.c_str(), 1);
-#endif
-    }
-
-    ~EnvGuard() {
-        if (originalValue_) {
-#ifdef _WIN32
-            _putenv_s(name_.c_str(), originalValue_->c_str());
-#else
-            setenv(name_.c_str(), originalValue_->c_str(), 1);
-#endif
-        } else {
-#ifdef _WIN32
-            _putenv_s(name_.c_str(), "");
-#else
-            unsetenv(name_.c_str());
-#endif
-        }
-    }
-
-private:
-    std::string name_;
-    std::optional<std::string> originalValue_;
-};
+using EnvGuard = yams::test::ScopedEnvVar;
 
 class StubModelProvider : public yams::daemon::IModelProvider {
 public:
@@ -1289,7 +1257,9 @@ TEST_CASE("Daemon client prune request execution", "[daemon][socket][requests][p
 
     AddDocumentRequest signatureReq;
     signatureReq.name = "dispatcher_coverage_binary";
-    signatureReq.content = std::string("\x7F" "ELF", 4);
+    signatureReq.content = std::string("\x7F"
+                                       "ELF",
+                                       4);
     auto signatureResult = yams::cli::run_sync(client.streamingAddDocument(signatureReq), 10s);
 
     REQUIRE(signatureResult.has_value());

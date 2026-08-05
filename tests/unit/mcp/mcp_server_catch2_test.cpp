@@ -12,36 +12,10 @@
 #include <unordered_set>
 #include <vector>
 
-#ifdef _WIN32
-#include <cstdlib>
-#include <windows.h>
-
-static int setenv(const char* name, const char* value, int overwrite) {
-    if (!name || !value) {
-        return -1;
-    }
-
-    if (!overwrite) {
-        DWORD existing = GetEnvironmentVariableA(name, nullptr, 0);
-        if (existing != 0) {
-            return 0;
-        }
-    }
-
-    return _putenv_s(name, value);
-}
-
-static int unsetenv(const char* name) {
-    if (!name) {
-        return -1;
-    }
-
-    return _putenv_s(name, "");
-}
-#endif
-
 #include <nlohmann/json.hpp>
 #include <yams/mcp/mcp_server.h>
+
+#include "../../common/test_helpers_catch2.h"
 
 using namespace yams::mcp;
 using json = nlohmann::json;
@@ -755,8 +729,8 @@ TEST_CASE("MCP Server - strict protocol mode rejects unsupported version",
     auto transport = std::make_unique<NullTransport>();
     auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
-    // Enable strict protocol mode via environment variable
-    setenv("YAMS_MCP_STRICT_PROTOCOL", "1", 1);
+    // Enable strict protocol mode via environment variable.
+    yams::test::ScopedEnvVar strictProtocol{"YAMS_MCP_STRICT_PROTOCOL", std::string{"1"}};
 
     // Create a new server with strict mode enabled
     auto strictServer = std::make_shared<yams::mcp::MCPServer>(std::make_unique<NullTransport>());
@@ -776,9 +750,6 @@ TEST_CASE("MCP Server - strict protocol mode rejects unsupported version",
     // Should return an error
     REQUIRE(result.contains("error"));
     CHECK(result["error"]["code"] == -32901); // kErrUnsupportedProtocolVersion
-
-    // Clean up
-    unsetenv("YAMS_MCP_STRICT_PROTOCOL");
 }
 
 TEST_CASE("MCP Server - uses latest version when protocolVersion not specified",

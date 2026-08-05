@@ -27,6 +27,7 @@
 #include <yams/daemon/daemon.h>
 
 #include "common/fixture_manager.h"
+#include "common/test_helpers_catch2.h"
 #include "service_manager_test_helper.h"
 
 // Windows daemon tests are currently unstable - ServiceManager async initialization
@@ -90,15 +91,12 @@ public:
         testDir_ = fs::temp_directory_path() / ("post_ingest_test_" + pid + "_" + timestamp);
         fs::create_directories(testDir_);
 
-        // Set YAMS_STORAGE environment variable
-        setenv("YAMS_STORAGE", testDir_.string().c_str(), 1);
-
-        // Keep all daemon/session state inside the temp test directory.
-        // This prevents any accidental scans/config reads from the repo and
-        // keeps tests hermetic.
-        setenv("XDG_DATA_HOME", testDir_.string().c_str(), 1);
-        setenv("XDG_STATE_HOME", testDir_.string().c_str(), 1);
-        setenv("HOME", testDir_.string().c_str(), 1);
+        // Keep all daemon/session state inside the temp test directory and restore the exact host
+        // values after every fixture.
+        environment_.emplace_back("YAMS_STORAGE", testDir_.string());
+        environment_.emplace_back("XDG_DATA_HOME", testDir_.string());
+        environment_.emplace_back("XDG_STATE_HOME", testDir_.string());
+        environment_.emplace_back("HOME", testDir_.string());
 
         fixtureManager_ = std::make_shared<yams::test::FixtureManager>(testDir_);
     }
@@ -136,6 +134,7 @@ public:
 
     void cleanupTestEnvironment() {
         fixtureManager_.reset();
+        environment_.clear();
         if (fs::exists(testDir_)) {
             fs::remove_all(testDir_);
         }
@@ -233,6 +232,7 @@ public:
 
     fs::path testDir_;
     std::shared_ptr<yams::test::FixtureManager> fixtureManager_;
+    std::vector<yams::test::ScopedEnvVar> environment_;
 
     DaemonConfig config_;
     std::unique_ptr<StateComponent> state_;

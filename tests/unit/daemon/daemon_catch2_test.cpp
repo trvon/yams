@@ -54,6 +54,7 @@ struct DaemonFixture {
     std::unique_ptr<YamsDaemon> daemon_;
     fs::path runtime_root_;
     std::thread runLoopThread_;
+    std::vector<yams::test::ScopedEnvVar> environment_;
 
     DaemonFixture() {
 #ifdef _WIN32
@@ -74,8 +75,8 @@ struct DaemonFixture {
 
         // When ABI plugins are disabled, no model provider can be adopted,
         // so disable the requirement to avoid init failure.
-        if (const char* v = std::getenv("YAMS_DISABLE_ABI_PLUGINS");
-            v && std::string_view(v) == "1") {
+        if (const auto value = yams::config::getenv_nonempty("YAMS_DISABLE_ABI_PLUGINS");
+            value && *value == "1") {
             config_.enableModelProvider = false;
         } else {
             config_.enableModelProvider = true;
@@ -84,18 +85,18 @@ struct DaemonFixture {
         config_.modelPoolConfig.lazyLoading = true;
         config_.modelPoolConfig.preloadModels.clear();
 
-        ::setenv("YAMS_DB_OPEN_TIMEOUT_MS", "1500", 1);
-        ::setenv("YAMS_DB_MIGRATE_TIMEOUT_MS", "2000", 1);
-        ::setenv("YAMS_SEARCH_BUILD_TIMEOUT_MS", "1500", 1);
-        ::setenv("YAMS_DISABLE_VECTORS", "1", 1);
-        ::setenv("YAMS_DISABLE_SESSION_WATCHER", "1", 1);
+        environment_.emplace_back("YAMS_DB_OPEN_TIMEOUT_MS", std::string{"1500"});
+        environment_.emplace_back("YAMS_DB_MIGRATE_TIMEOUT_MS", std::string{"2000"});
+        environment_.emplace_back("YAMS_SEARCH_BUILD_TIMEOUT_MS", std::string{"1500"});
+        environment_.emplace_back("YAMS_DISABLE_VECTORS", std::string{"1"});
+        environment_.emplace_back("YAMS_DISABLE_SESSION_WATCHER", std::string{"1"});
 
         std::error_code se;
         fs::create_directories(config_.dataDir, se);
 
-        ::setenv("YAMS_RUNTIME_DIR", runtime_root_.string().c_str(), 1);
-        ::setenv("YAMS_SOCKET_PATH", config_.socketPath.string().c_str(), 1);
-        ::setenv("YAMS_PID_FILE", config_.pidFile.string().c_str(), 1);
+        environment_.emplace_back("YAMS_RUNTIME_DIR", runtime_root_.string());
+        environment_.emplace_back("YAMS_SOCKET_PATH", config_.socketPath.string());
+        environment_.emplace_back("YAMS_PID_FILE", config_.pidFile.string());
     }
 
     ~DaemonFixture() {

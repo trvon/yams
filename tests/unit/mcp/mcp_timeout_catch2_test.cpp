@@ -16,13 +16,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
-#ifdef _WIN32
-#include <process.h>
-static int setenv(const char* name, const char* value, int overwrite) {
-    return _putenv_s(name, value);
-}
-#endif
-
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -39,6 +32,8 @@ static int setenv(const char* name, const char* value, int overwrite) {
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/mcp/mcp_server.h>
 #include <yams/mcp/tool_registry.h>
+
+#include "../../common/test_helpers_catch2.h"
 
 using namespace std::chrono_literals;
 using json = nlohmann::json;
@@ -102,8 +97,8 @@ TEST_CASE("MCP server default daemon timeouts are now reasonable",
 
 TEST_CASE("callTool returns error promptly when daemon unreachable",
           "[mcp][timeout][gap][fastfail]") {
-    setenv("YAMS_ENABLE_LOCAL_MCP_DISCOVERY", "0", 1);
-    setenv("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1", 1);
+    yams::test::ScopedEnvVar discovery{"YAMS_ENABLE_LOCAL_MCP_DISCOVERY", std::string{"0"}};
+    yams::test::ScopedEnvVar autoStart{"YAMS_CLI_DISABLE_DAEMON_AUTOSTART", std::string{"1"}};
 
     auto transport = std::make_unique<NullTransport>();
     auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
@@ -112,7 +107,7 @@ TEST_CASE("callTool returns error promptly when daemon unreachable",
         std::filesystem::temp_directory_path() /
         ("yams-mcp-fastfail-" +
          std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".sock");
-    setenv("YAMS_DAEMON_SOCKET_PATH", socketPath.string().c_str(), 1);
+    yams::test::ScopedEnvVar socketEnvironment{"YAMS_DAEMON_SOCKET_PATH", socketPath.string()};
 
     yams::daemon::ClientConfig cfg;
     cfg.autoStart = false;
@@ -164,8 +159,8 @@ TEST_CASE("callTool returns error promptly when daemon unreachable",
 
 TEST_CASE("processMessage returns promptly for tools/call when daemon down",
           "[mcp][timeout][gap][processmessage]") {
-    setenv("YAMS_ENABLE_LOCAL_MCP_DISCOVERY", "0", 1);
-    setenv("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1", 1);
+    yams::test::ScopedEnvVar discovery{"YAMS_ENABLE_LOCAL_MCP_DISCOVERY", std::string{"0"}};
+    yams::test::ScopedEnvVar autoStart{"YAMS_CLI_DISABLE_DAEMON_AUTOSTART", std::string{"1"}};
 
     auto transport = std::make_unique<NullTransport>();
     auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
@@ -174,7 +169,7 @@ TEST_CASE("processMessage returns promptly for tools/call when daemon down",
         std::filesystem::temp_directory_path() /
         ("yams-mcp-procm-" +
          std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".sock");
-    setenv("YAMS_DAEMON_SOCKET_PATH", socketPath.string().c_str(), 1);
+    yams::test::ScopedEnvVar socketEnvironment{"YAMS_DAEMON_SOCKET_PATH", socketPath.string()};
 
     yams::daemon::ClientConfig cfg;
     cfg.autoStart = false;
@@ -215,8 +210,8 @@ TEST_CASE("processMessage returns promptly for tools/call when daemon down",
 
 TEST_CASE("consecutive callTool calls do not progressively slow down",
           "[mcp][timeout][sequential]") {
-    setenv("YAMS_ENABLE_LOCAL_MCP_DISCOVERY", "0", 1);
-    setenv("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1", 1);
+    yams::test::ScopedEnvVar discovery{"YAMS_ENABLE_LOCAL_MCP_DISCOVERY", std::string{"0"}};
+    yams::test::ScopedEnvVar autoStart{"YAMS_CLI_DISABLE_DAEMON_AUTOSTART", std::string{"1"}};
 
     auto transport = std::make_unique<NullTransport>();
     auto server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
@@ -225,7 +220,7 @@ TEST_CASE("consecutive callTool calls do not progressively slow down",
         std::filesystem::temp_directory_path() /
         ("yams-mcp-sequential-" +
          std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".sock");
-    setenv("YAMS_DAEMON_SOCKET_PATH", socketPath.string().c_str(), 1);
+    yams::test::ScopedEnvVar socketEnvironment{"YAMS_DAEMON_SOCKET_PATH", socketPath.string()};
 
     yams::daemon::ClientConfig cfg;
     cfg.autoStart = false;

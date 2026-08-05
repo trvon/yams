@@ -9,6 +9,8 @@
 #include <yams/compat/unistd.h>
 #include <yams/mcp/mcp_server.h>
 
+#include "../../common/test_helpers_catch2.h"
+
 using nlohmann::json;
 using yams::mcp::ITransport;
 using yams::mcp::MCPServer;
@@ -35,7 +37,7 @@ TEST_CASE("MCP DoctorFlags - Socket exists and connectable flags", "[mcp][doctor
         std::filesystem::temp_directory_path() / ("yams_doctor_" + std::to_string(::getpid()));
     std::filesystem::create_directories(tmp);
 #if !defined(_WIN32)
-    ::setenv("XDG_RUNTIME_DIR", tmp.c_str(), 1);
+    yams::test::ScopedEnvVar runtimeDirectory{"XDG_RUNTIME_DIR", tmp.string()};
 #endif
     auto t = std::make_unique<NullTransport>();
     MCPServer svr(std::move(t));

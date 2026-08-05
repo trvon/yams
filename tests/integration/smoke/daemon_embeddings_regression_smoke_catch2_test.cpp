@@ -20,6 +20,7 @@
 
 #include "common/fixture_manager.h"
 #include "common/search_corpus_presets.h"
+#include "common/test_helpers_catch2.h"
 
 #include <yams/app/services/document_ingestion_service.h>
 #include <yams/cli/cli_sync.h>
@@ -320,19 +321,10 @@ TEST_CASE("DaemonEmbeddingsRegressionSmoke.GeneratesVectorsForSearchCorpusPreset
         SKIP("Skipping smoke: environment forbids AF_UNIX bind (sandbox).");
     }
 
-#if defined(_WIN32)
-    _putenv_s("YAMS_DAEMON_KILL_OTHERS", "0");
-    _putenv_s("YAMS_DISABLE_VECTOR_DB", "0");
-#else
-    setenv("YAMS_DAEMON_KILL_OTHERS", "0", 1);
-    unsetenv("YAMS_DISABLE_VECTOR_DB");
-#endif
+    yams::test::ScopedEnvVar killOthers{"YAMS_DAEMON_KILL_OTHERS", std::string{"0"}};
+    yams::test::ScopedEnvVar vectorDatabase{"YAMS_DISABLE_VECTOR_DB", std::nullopt};
     // Skip content store stats queries that can race when embedding loads are slow.
-#if defined(_WIN32)
-    _putenv_s("YAMS_DISABLE_STORE_STATS", "1");
-#else
-    setenv("YAMS_DISABLE_STORE_STATS", "1", 1);
-#endif
+    yams::test::ScopedEnvVar storeStats{"YAMS_DISABLE_STORE_STATS", std::string{"1"}};
 
     const fs::path root = fs::temp_directory_path() / ("yams_embed_regression_" + unique_suffix());
     const fs::path dataDir = root / "data";
@@ -361,6 +353,7 @@ TEST_CASE("DaemonEmbeddingsRegressionSmoke.GeneratesVectorsForSearchCorpusPreset
     cfg.useMockModelProvider = useMockProvider;
     cfg.autoLoadPlugins = true;
     std::string resolvedModelsRoot;
+    std::optional<yams::test::ScopedEnvVar> modelsRootEnvironment;
     if (const char* modelsRoot = std::getenv("YAMS_MODELS_ROOT"); modelsRoot && *modelsRoot) {
         resolvedModelsRoot = modelsRoot;
     } else if (const char* home = std::getenv("HOME"); home && *home) {
@@ -373,9 +366,7 @@ TEST_CASE("DaemonEmbeddingsRegressionSmoke.GeneratesVectorsForSearchCorpusPreset
     }
     if (!resolvedModelsRoot.empty()) {
         cfg.modelPoolConfig.modelsRoot = resolvedModelsRoot;
-#if !defined(_WIN32)
-        ::setenv("YAMS_MODELS_ROOT", resolvedModelsRoot.c_str(), 1);
-#endif
+        modelsRootEnvironment.emplace("YAMS_MODELS_ROOT", resolvedModelsRoot);
     }
     cfg.modelPoolConfig.lazyLoading = false;
     cfg.modelPoolConfig.preloadModels = {"all-MiniLM-L6-v2"};

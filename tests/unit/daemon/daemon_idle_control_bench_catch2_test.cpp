@@ -14,6 +14,8 @@
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/daemon.h>
 
+#include "../../common/test_helpers_catch2.h"
+
 namespace fs = std::filesystem;
 using namespace std::chrono_literals;
 
@@ -40,8 +42,8 @@ bool waitFor(const std::function<bool()>& predicate, std::chrono::milliseconds t
 } // namespace
 
 TEST_CASE("DaemonBench: idle control wakeup remains responsive", "[daemon][.bench][.slow]") {
-    const char* enable = ::getenv("YAMS_ENABLE_DAEMON_IDLE_BENCH");
-    if (!enable || std::string_view(enable) != "1") {
+    const auto enable = yams::config::getenv_nonempty("YAMS_ENABLE_DAEMON_IDLE_BENCH");
+    if (!enable || *enable != "1") {
         SKIP("Bench disabled (set YAMS_ENABLE_DAEMON_IDLE_BENCH=1 to run)");
     }
 
@@ -58,10 +60,10 @@ TEST_CASE("DaemonBench: idle control wakeup remains responsive", "[daemon][.benc
     cfg.enableModelProvider = false;
     cfg.autoLoadPlugins = false;
 
-    ::setenv("YAMS_DB_OPEN_TIMEOUT_MS", "1000", 1);
-    ::setenv("YAMS_DB_MIGRATE_TIMEOUT_MS", "1500", 1);
-    ::setenv("YAMS_SEARCH_BUILD_TIMEOUT_MS", "1000", 1);
-    ::setenv("YAMS_DISABLE_VECTORS", "1", 1);
+    yams::test::ScopedEnvVar openTimeout{"YAMS_DB_OPEN_TIMEOUT_MS", std::string{"1000"}};
+    yams::test::ScopedEnvVar migrateTimeout{"YAMS_DB_MIGRATE_TIMEOUT_MS", std::string{"1500"}};
+    yams::test::ScopedEnvVar searchTimeout{"YAMS_SEARCH_BUILD_TIMEOUT_MS", std::string{"1000"}};
+    yams::test::ScopedEnvVar disableVectors{"YAMS_DISABLE_VECTORS", std::string{"1"}};
 
     std::error_code se;
     fs::create_directories(cfg.dataDir, se);

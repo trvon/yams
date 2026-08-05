@@ -7,6 +7,8 @@
 
 #include <yams/storage/storage_runtime_resolver.h>
 
+#include "../../common/test_helpers_catch2.h"
+
 namespace {
 
 class TempDir {
@@ -175,13 +177,8 @@ TEST_CASE("Storage runtime resolver validates temp credential mode requires R2 e
     TempDir td;
     const auto configPath = td.path() / "config.toml";
 
-#if defined(_WIN32)
-    _putenv_s("YAMS_R2_API_TOKEN", "");
-    _putenv_s("CLOUDFLARE_API_TOKEN", "");
-#else
-    setenv("YAMS_R2_API_TOKEN", "", 1);
-    setenv("CLOUDFLARE_API_TOKEN", "", 1);
-#endif
+    yams::test::ScopedEnvVar yamsToken{"YAMS_R2_API_TOKEN", std::string{}};
+    yams::test::ScopedEnvVar cloudflareToken{"CLOUDFLARE_API_TOKEN", std::string{}};
 
     {
         std::ofstream out(configPath);

@@ -32,6 +32,27 @@ _test_timeout_scale = _test_thread_sanitizer ? 10 : get_option('test-timeout-sca
 _test_timeout_cpp_arg = '-DYAMS_TEST_TIMEOUT_SCALE=' + _test_timeout_scale.to_string()
 
 fs = import('fs')
+
+raw_environment_policy_script = files('scripts/check_raw_environment_calls.py')
+raw_environment_policy_tests = files('scripts/test_check_raw_environment_calls.py')
+raw_environment_allowlist = files('scripts/raw_environment_allowlist.txt')
+test('raw_environment_policy_unit',
+  python_exe,
+  args: [raw_environment_policy_tests],
+  suite: ['unit', 'policy', 'environment'],
+  timeout: 30,
+)
+test('raw_environment_policy',
+  python_exe,
+  args: [
+    raw_environment_policy_script,
+    '--root', meson.project_source_root(),
+    '--allowlist', raw_environment_allowlist,
+  ],
+  suite: ['unit', 'policy', 'environment'],
+  timeout: 30,
+)
+
 cli11_dep = cli11_resolved_dep
 if not cli11_dep.found()
   cli11_dep = declare_dependency()
@@ -2038,7 +2059,13 @@ if catch2_dep.found()
       'unit/config/environment_catch2_test.cpp',
     ),
     include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep, dependency('yams_config'), dependency('spdlog')],
+    dependencies: [
+      catch2_dep,
+      catch2_main_dep,
+      dependency('threads'),
+      dependency('yams_config'),
+      dependency('spdlog'),
+    ],
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
     build_rpath: ':'.join(_test_rpaths),
     install: false,
@@ -2608,6 +2635,13 @@ if catch2_dep.found()
 
   test('config_parse_utils', config_parse_utils_exe,
     suite: ['catch2', 'unit', 'config', 'parse'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('config_environment_random_order', config_parse_utils_exe,
+    suite: ['catch2', 'unit', 'config', 'environment', 'order'],
+    args: ['[config][environment]', '--order', 'rand', '--rng-seed', '66'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )

@@ -13,7 +13,6 @@
 #include <string>
 #include <thread>
 #include <vector>
-#include "test_async_helpers.h"
 #include <yams/compat/unistd.h>
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -22,6 +21,8 @@
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
+
+#include "../../common/test_helpers_catch2.h"
 
 // Windows daemon IPC tests are currently unstable due to socket shutdown race conditions
 // The daemon's connection handler coroutines crash during cleanup when sockets are forcibly closed
@@ -161,25 +162,18 @@ public:
         if (options_.isolateState) {
             originalCwd_ = std::filesystem::current_path();
             std::filesystem::current_path(root_);
-            originalXdgState_ = std::getenv("XDG_STATE_HOME") ? std::getenv("XDG_STATE_HOME") : "";
-            setenv("XDG_STATE_HOME", (root_ / "state").string().c_str(), 1);
+            xdgStateEnvironment_.emplace("XDG_STATE_HOME", (root_ / "state").string());
             std::filesystem::create_directories(root_ / "state" / "yams" / "sessions");
             isolateStateActive_ = true;
         }
 
         yams::daemon::DaemonConfig cfg;
         if (options_.configPath) {
-            previousYamsConfig_ = std::getenv("YAMS_CONFIG") ? std::getenv("YAMS_CONFIG") : "";
-            hadYamsConfig_ = std::getenv("YAMS_CONFIG") != nullptr;
-            previousYamsConfigPath_ =
-                std::getenv("YAMS_CONFIG_PATH") ? std::getenv("YAMS_CONFIG_PATH") : "";
-            hadYamsConfigPath_ = std::getenv("YAMS_CONFIG_PATH") != nullptr;
-            setenv("YAMS_CONFIG", options_.configPath->string().c_str(), 1);
+            configEnvironment_.emplace("YAMS_CONFIG", options_.configPath->string());
             // ConfigResolver policies use YAMS_CONFIG_PATH as their highest-priority
             // source. Keep it aligned with the explicit harness config so an ambient
             // developer config cannot silently change a benchmark/test arm.
-            setenv("YAMS_CONFIG_PATH", options_.configPath->string().c_str(), 1);
-            configEnvOwned_ = true;
+            configPathEnvironment_.emplace("YAMS_CONFIG_PATH", options_.configPath->string());
             cfg.configFilePath = *options_.configPath;
         }
         cfg.dataDir = data_;
@@ -300,7 +294,7 @@ public:
     }
 
     void stop() {
-        if (std::getenv("YAMS_TRACE_HARNESS_LIFETIME")) {
+        if (yams::config::getenv_optional("YAMS_TRACE_HARNESS_LIFETIME")) {
             std::fprintf(stderr, "[DaemonHarness::stop] enter daemon=%p runLoopJoinable=%d\n",
                          static_cast<void*>(daemon_.get()), runLoopThread_.joinable() ? 1 : 0);
             std::fflush(stderr);
@@ -343,24 +337,20 @@ public:
 
             // Reset GlobalIOContext to clean up threads and io_context state
             // This is critical for test isolation - without it, threads accumulate across test
-            // cases Temporarily unset YAMS_TESTING to allow reset() to actually work
-            const char* yams_testing_env = std::getenv("YAMS_TESTING");
-            const char* yams_safe_env = std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
-            std::string yams_testing = yams_testing_env ? yams_testing_env : "";
-            std::string yams_safe = yams_safe_env ? yams_safe_env : "";
-            if (yams_testing_env) {
-                unsetenv("YAMS_TESTING");
-            }
-            if (yams_safe_env) {
-                unsetenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
-            }
+            // cases. Temporarily unset test sentinels through the shared environment boundary so
+            // GlobalIOContext::reset() actually performs cleanup, then restore their exact prior
+            // values when the guards leave scope.
+            {
+                ScopedEnvVar testingEnvironment{"YAMS_TESTING", std::nullopt};
+                ScopedEnvVar safeEnvironment{"YAMS_TEST_SAFE_SINGLE_INSTANCE", std::nullopt};
 
-            // Reset the global client IO state BEFORE restarting threads.
-            // This closes ConnectionRegistry sockets and clears pools while the
-            // existing io_context is still alive, preventing stale client FDs
-            // from accumulating across harness cycles.
-            yams::daemon::GlobalIOContext::reset();
-            spdlog::info("[DaemonHarness] GlobalIOContext reset complete");
+                // Reset the global client IO state BEFORE restarting threads.
+                // This closes ConnectionRegistry sockets and clears pools while the
+                // existing io_context is still alive, preventing stale client FDs
+                // from accumulating across harness cycles.
+                yams::daemon::GlobalIOContext::reset();
+                spdlog::info("[DaemonHarness] GlobalIOContext reset complete");
+            }
 
             // Windows needs additional time before GlobalIOContext::reset()
             // Windows thread cleanup is slower than Unix
@@ -373,49 +363,22 @@ public:
             spdlog::info("[DaemonHarness] GlobalIOContext restart deferred");
 #endif
 
-            // Restore environment variables
-            if (yams_testing_env) {
-                setenv("YAMS_TESTING", yams_testing.c_str(), 1);
-            }
-            if (yams_safe_env) {
-                setenv("YAMS_TEST_SAFE_SINGLE_INSTANCE", yams_safe.c_str(), 1);
-            }
-
             if (isolateStateActive_) {
                 std::error_code ec;
                 if (!originalCwd_.empty()) {
                     std::filesystem::current_path(originalCwd_, ec);
                 }
-                if (originalXdgState_.empty()) {
-                    unsetenv("XDG_STATE_HOME");
-                } else {
-                    setenv("XDG_STATE_HOME", originalXdgState_.c_str(), 1);
-                }
+                xdgStateEnvironment_.reset();
                 isolateStateActive_ = false;
             }
 
-            if (configEnvOwned_) {
-                if (hadYamsConfig_) {
-                    setenv("YAMS_CONFIG", previousYamsConfig_.c_str(), 1);
-                } else {
-                    unsetenv("YAMS_CONFIG");
-                }
-                if (hadYamsConfigPath_) {
-                    setenv("YAMS_CONFIG_PATH", previousYamsConfigPath_.c_str(), 1);
-                } else {
-                    unsetenv("YAMS_CONFIG_PATH");
-                }
-                configEnvOwned_ = false;
-                hadYamsConfig_ = false;
-                hadYamsConfigPath_ = false;
-                previousYamsConfig_.clear();
-                previousYamsConfigPath_.clear();
-            }
+            configPathEnvironment_.reset();
+            configEnvironment_.reset();
 
             // Reset daemon so it can be recreated on next start()
             daemon_.reset();
 
-            if (std::getenv("YAMS_TRACE_HARNESS_LIFETIME")) {
+            if (yams::config::getenv_optional("YAMS_TRACE_HARNESS_LIFETIME")) {
                 std::fprintf(stderr, "[DaemonHarness::stop] exit daemon=%p runLoopJoinable=%d\n",
                              static_cast<void*>(daemon_.get()), runLoopThread_.joinable() ? 1 : 0);
                 std::fflush(stderr);
@@ -472,7 +435,10 @@ private:
                     auto sink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
                     auto logger = std::make_shared<spdlog::logger>("yams-test", sink);
                     spdlog::set_default_logger(logger);
+                } catch (const std::exception& error) {
+                    std::fprintf(stderr, "DaemonHarness logger setup failed: %s\n", error.what());
                 } catch (...) {
+                    std::fputs("DaemonHarness logger setup failed with an unknown error\n", stderr);
                 }
             }
             return true;
@@ -504,8 +470,8 @@ private:
                 boost::asio::local::stream_protocol::socket sock(io);
                 boost::system::error_code ec;
 
-                sock.connect(boost::asio::local::stream_protocol::endpoint(socketPath.string()),
-                             ec);
+                ec = sock.connect(
+                    boost::asio::local::stream_protocol::endpoint(socketPath.string()), ec);
                 if (!ec) {
                     sock.close();
                     return true;
@@ -540,14 +506,11 @@ private:
     std::thread runLoopThread_; // Background thread for runLoop
     std::filesystem::path root_, data_, sock_, pid_, log_;
     std::filesystem::path originalCwd_;
-    std::string originalXdgState_;
-    std::string previousYamsConfig_;
-    std::string previousYamsConfigPath_;
+    std::optional<ScopedEnvVar> xdgStateEnvironment_;
+    std::optional<ScopedEnvVar> configEnvironment_;
+    std::optional<ScopedEnvVar> configPathEnvironment_;
     bool isolateStateActive_ = false;
     bool externalDataDir_ = false;
-    bool configEnvOwned_ = false;
-    bool hadYamsConfig_ = false;
-    bool hadYamsConfigPath_ = false;
     Options options_;
 };
 

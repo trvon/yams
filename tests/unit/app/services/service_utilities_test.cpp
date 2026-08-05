@@ -4,6 +4,7 @@
 #include <fstream>
 #include <string>
 #include "../../../common/env_compat.h"
+#include "../../../common/test_helpers_catch2.h"
 #include <catch2/catch_test_macros.hpp>
 #include <yams/app/services/factory.hpp>
 #include <yams/app/services/list_input_resolver.hpp>
@@ -31,10 +32,8 @@ struct ScopedWorkingDirectory {
     }
 
     ~ScopedWorkingDirectory() {
-        try {
-            std::filesystem::current_path(original);
-        } catch (...) {
-        }
+        std::error_code error;
+        std::filesystem::current_path(original, error);
     }
 };
 } // namespace
@@ -42,7 +41,7 @@ struct ScopedWorkingDirectory {
 TEST_CASE("SessionService - Configuration and State", "[session][service][config]") {
     SECTION("Watch configuration roundtrip") {
         auto root = std::filesystem::temp_directory_path() / "yams_watch_rt";
-        setenv("XDG_STATE_HOME", root.string().c_str(), 1);
+        yams::test::ScopedEnvVar stateHome{"XDG_STATE_HOME", root.string()};
 
         AppContext ctx;
         auto svc = makeSessionService(&ctx);
@@ -54,12 +53,12 @@ TEST_CASE("SessionService - Configuration and State", "[session][service][config
         svc->setWatchIntervalMs(1500);
 
         CHECK(svc->watchEnabled());
-        CHECK(svc->watchIntervalMs() >= 1000u);
+        CHECK((svc->watchIntervalMs() >= 1000u));
     }
 
     SECTION("Session initialization and selectors") {
         auto root = createTempStateRoot();
-        setenv("XDG_STATE_HOME", root.string().c_str(), 1);
+        yams::test::ScopedEnvVar stateHome{"XDG_STATE_HOME", root.string()};
 
         AppContext ctx;
         auto svc = makeSessionService(&ctx);
@@ -67,7 +66,7 @@ TEST_CASE("SessionService - Configuration and State", "[session][service][config
 
         svc->init("unittest", "test session");
         REQUIRE(svc->current().has_value());
-        CHECK(svc->current().value() == "unittest");
+        CHECK((svc->current().value() == "unittest"));
 
         svc->addPathSelector("src/**/*.cpp", {"pinned"}, {});
         auto sels = svc->listPathSelectors("unittest");
@@ -83,7 +82,7 @@ TEST_CASE("SessionService - Configuration and State", "[session][service][config
             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
         auto root = std::filesystem::temp_directory_path() / ("yams_uuid_test_" + uniqueSuffix);
         std::filesystem::create_directories(root);
-        setenv("XDG_STATE_HOME", root.string().c_str(), 1);
+        yams::test::ScopedEnvVar stateHome{"XDG_STATE_HOME", root.string()};
 
         AppContext ctx;
         auto svc = makeSessionService(&ctx);
@@ -93,13 +92,13 @@ TEST_CASE("SessionService - Configuration and State", "[session][service][config
         auto info = svc->getSessionInfo("uuid-test");
         REQUIRE(info.has_value());
         CHECK_FALSE(info->uuid.empty());
-        CHECK(info->uuid.size() == 36);
-        CHECK(info->uuid.find('-') != std::string::npos);
+        CHECK((info->uuid.size() == 36));
+        CHECK((info->uuid.find('-') != std::string::npos));
     }
 
     SECTION("Materialized view listing") {
         auto root = createTempStateRoot();
-        setenv("XDG_STATE_HOME", root.string().c_str(), 1);
+        yams::test::ScopedEnvVar stateHome{"XDG_STATE_HOME", root.string()};
 
         AppContext ctx;
         auto svc = makeSessionService(&ctx);
@@ -132,8 +131,8 @@ TEST_CASE("Service Utils - Path Normalization", "[utils][service][paths]") {
 
             CHECK(result.changed);
             CHECK_FALSE(result.hasWildcards);
-            CHECK(fs::weakly_canonical(targetFile).string() == result.normalized);
-            CHECK(result.original == "./nested/../nested/file.txt");
+            CHECK((fs::weakly_canonical(targetFile).string() == result.normalized));
+            CHECK((result.original == "./nested/../nested/file.txt"));
         } // cwdScope destructor restores original CWD before cleanup
 
         std::error_code ec;
@@ -144,8 +143,8 @@ TEST_CASE("Service Utils - Path Normalization", "[utils][service][paths]") {
         NormalizedLookupPath result = normalizeLookupPath("docs/**/*.md");
 
         CHECK(result.hasWildcards);
-        CHECK(result.normalized.find("**") != std::string::npos);
-        CHECK(result.normalized.find("*.md") != std::string::npos);
+        CHECK((result.normalized.find("**") != std::string::npos));
+        CHECK((result.normalized.find("*.md") != std::string::npos));
     }
 
     SECTION("Leave dash literal untouched") {
@@ -153,7 +152,7 @@ TEST_CASE("Service Utils - Path Normalization", "[utils][service][paths]") {
 
         CHECK_FALSE(result.changed);
         CHECK_FALSE(result.hasWildcards);
-        CHECK(result.normalized == "-");
+        CHECK((result.normalized == "-"));
     }
 }
 
@@ -202,19 +201,19 @@ TEST_CASE("Path projection gives paths-only responses one shared contract",
         return path_projection::displayPath(item.path, item.fileName);
     });
 
-    REQUIRE(resp.paths.size() == 2);
-    CHECK(resp.paths[0] == "/tmp/a.cpp");
-    CHECK(resp.paths[1] == "b.cpp");
-    CHECK(resp.total == resp.paths.size());
-    CHECK(resp.results.empty());
+    REQUIRE((resp.paths.size() == 2));
+    CHECK((resp.paths[0] == "/tmp/a.cpp"));
+    CHECK((resp.paths[1] == "b.cpp"));
+    CHECK((resp.total == resp.paths.size()));
+    CHECK((resp.results.empty()));
 
     SearchResponse fuzzy;
     fuzzy.paths = {"/tmp/a.cpp", "/tmp/c.cpp"};
     path_projection::mergePathsOnly(resp, fuzzy, 2);
-    REQUIRE(resp.paths.size() == 2);
-    CHECK(resp.paths[0] == "/tmp/a.cpp");
-    CHECK(resp.paths[1] == "b.cpp");
-    CHECK(resp.total == 2);
+    REQUIRE((resp.paths.size() == 2));
+    CHECK((resp.paths[0] == "/tmp/a.cpp"));
+    CHECK((resp.paths[1] == "b.cpp"));
+    CHECK((resp.total == 2));
 }
 
 TEST_CASE("List input resolver classifies wildcards and directories", "[utils][service][list]") {
@@ -224,10 +223,10 @@ TEST_CASE("List input resolver classifies wildcards and directories", "[utils][s
     SECTION("Absolute wildcard path stays a pattern") {
         auto result = resolveNameToPatternIfLocalFile("/tmp/project/**/*");
 
-        CHECK(result.kind == ResolvedListInputKind::Pattern);
+        CHECK((result.kind == ResolvedListInputKind::Pattern));
         CHECK_FALSE(result.isLocalFile);
         CHECK_FALSE(result.isLocalDirectory);
-        CHECK(result.pattern.find("**") != std::string::npos);
+        CHECK((result.pattern.find("**") != std::string::npos));
     }
 
     SECTION("Existing directory resolves as local directory") {
@@ -239,11 +238,11 @@ TEST_CASE("List input resolver classifies wildcards and directories", "[utils][s
 
         auto result = resolveNameToPatternIfLocalFile((tempRoot / "nested").string());
 
-        CHECK(result.kind == ResolvedListInputKind::LocalDirectory);
+        CHECK((result.kind == ResolvedListInputKind::LocalDirectory));
         CHECK_FALSE(result.isLocalFile);
         CHECK(result.isLocalDirectory);
         REQUIRE(result.absPath.has_value());
-        CHECK(*result.absPath == fs::weakly_canonical(tempRoot / "nested").string());
+        CHECK((*result.absPath == fs::weakly_canonical(tempRoot / "nested").string()));
 
         std::error_code ec;
         fs::remove_all(tempRoot, ec);
@@ -255,7 +254,7 @@ TEST_CASE("DownloadService - Factory Construction", "[download][service][factory
         AppContext ctx;
         auto svc = makeDownloadService(ctx);
 
-        CHECK(svc != nullptr);
+        CHECK((svc != nullptr));
     }
 }
 
@@ -264,8 +263,8 @@ TEST_CASE("Service factory handles incomplete context", "[service][factory]") {
 
     auto bundle = makeServices(ctx);
 
-    CHECK(bundle.restore == nullptr);
-    CHECK(bundle.graph == nullptr);
+    CHECK((bundle.restore == nullptr));
+    CHECK((bundle.graph == nullptr));
     CHECK_FALSE(bundle.valid());
-    CHECK(makeGraphQueryService(ctx) == nullptr);
+    CHECK((makeGraphQueryService(ctx) == nullptr));
 }

@@ -4,52 +4,15 @@
 // Minimal unit covering degraded transition when no provider can be adopted.
 #include <catch2/catch_test_macros.hpp>
 
-#include <cstdlib>
-#include <optional>
-#include <string>
-
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/EmbeddingProviderFsm.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
 
+#include "../../common/test_helpers_catch2.h"
+
 using namespace yams::daemon;
-
-namespace {
-
-struct EnvGuard {
-    std::string name;
-    std::optional<std::string> originalValue;
-
-    EnvGuard(const std::string& envName, const std::string& newValue) : name(envName) {
-        if (const char* orig = std::getenv(name.c_str())) {
-            originalValue = orig;
-        }
-#ifdef _WIN32
-        _putenv_s(name.c_str(), newValue.c_str());
-#else
-        setenv(name.c_str(), newValue.c_str(), 1);
-#endif
-    }
-
-    ~EnvGuard() {
-        if (originalValue) {
-#ifdef _WIN32
-            _putenv_s(name.c_str(), originalValue->c_str());
-#else
-            setenv(name.c_str(), originalValue->c_str(), 1);
-#endif
-        } else {
-#ifdef _WIN32
-            _putenv_s(name.c_str(), "");
-#else
-            unsetenv(name.c_str());
-#endif
-        }
-    }
-};
-
-} // namespace
+using EnvGuard = yams::test::ScopedEnvVar;
 
 TEST_CASE("ServiceManager: degrades when no provider available", "[daemon]") {
     EnvGuard backendGuard("YAMS_EMBED_BACKEND", "daemon");

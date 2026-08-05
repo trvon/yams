@@ -88,6 +88,7 @@
 #include <benchmark/benchmark.h>
 
 #include "retrieval_benchmark_support.h"
+#include "tests/common/test_helpers_catch2.h"
 #include "tests/integration/daemon/test_daemon_harness.h"
 #include <yams/cli/cli_sync.h>
 #include <yams/cli/search_runner.h>
@@ -2160,40 +2161,14 @@ struct EnvSetting {
 class ScopedEnvOverrides {
 public:
     explicit ScopedEnvOverrides(const std::vector<EnvSetting>& overrides) {
-        previous_.reserve(overrides.size());
+        environment_.reserve(overrides.size());
         for (const auto& setting : overrides) {
-            PreviousValue pv;
-            pv.key = setting.key;
-            if (const char* existing = std::getenv(setting.key.c_str())) {
-                pv.value = std::string(existing);
-            }
-            previous_.push_back(pv);
-
-            if (setting.value.has_value()) {
-                (void)setenv(setting.key.c_str(), setting.value->c_str(), 1);
-            } else {
-                (void)unsetenv(setting.key.c_str());
-            }
-        }
-    }
-
-    ~ScopedEnvOverrides() {
-        for (const auto& previous : previous_) {
-            if (previous.value.has_value()) {
-                (void)setenv(previous.key.c_str(), previous.value->c_str(), 1);
-            } else {
-                (void)unsetenv(previous.key.c_str());
-            }
+            environment_.emplace_back(setting.key, setting.value);
         }
     }
 
 private:
-    struct PreviousValue {
-        std::string key;
-        std::optional<std::string> value;
-    };
-
-    std::vector<PreviousValue> previous_;
+    std::vector<yams::test::ScopedEnvVar> environment_;
 };
 
 struct OptimizationCandidate {

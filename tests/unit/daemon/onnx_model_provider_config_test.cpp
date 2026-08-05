@@ -11,14 +11,7 @@
 
 #include <yams/plugins/model_provider_v1.h>
 
-#ifdef _WIN32
-static int setenv(const char* name, const char* value, int /*overwrite*/) {
-    return _putenv_s(name, value);
-}
-static void unsetenv(const char* name) {
-    _putenv_s(name, "");
-}
-#endif
+#include "../../common/test_helpers_catch2.h"
 
 extern "C" {
 void yams_onnx_set_config_json(const char* json);
@@ -34,8 +27,9 @@ void yams_onnx_test_reset_runtime_loader();
 namespace yams::daemon::test {
 
 struct OnnxProviderConfigGuard {
+    yams::test::ScopedEnvVar testMode{"YAMS_TEST_MODE", std::string{"1"}};
+
     OnnxProviderConfigGuard() {
-        setenv("YAMS_TEST_MODE", "1", 1);
 #ifdef YAMS_TESTING
         yams_onnx_test_reset_runtime_loader();
 #endif
@@ -44,9 +38,7 @@ struct OnnxProviderConfigGuard {
     ~OnnxProviderConfigGuard() {
         yams_onnx_shutdown_provider();
         yams_onnx_set_config_json("{}");
-        unsetenv("YAMS_TEST_MODE");
 #ifdef YAMS_TESTING
-        unsetenv("YAMS_ONNX_RUNTIME_LIB");
         yams_onnx_test_reset_runtime_loader();
 #endif
     }
@@ -88,7 +80,8 @@ TEST_CASE("ONNX plugin: reports missing runtime without crashing", "[daemon]") {
 #else
     OnnxProviderConfigGuard guard;
 
-    setenv("YAMS_ONNX_RUNTIME_LIB", "/nonexistent/libonnxruntime.dylib", 1);
+    yams::test::ScopedEnvVar runtimeLibrary{"YAMS_ONNX_RUNTIME_LIB",
+                                            std::string{"/nonexistent/libonnxruntime.dylib"}};
     yams_onnx_test_reset_runtime_loader();
 
     auto* provider = yams_onnx_get_model_provider();

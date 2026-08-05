@@ -21,7 +21,6 @@
 #include <yams/mcp/mcp_server.h>
 
 #include "../../common/daemon_preflight.h"
-#include "../../common/env_compat.h"
 #include "../../common/fixture_manager.h"
 
 namespace {
@@ -31,8 +30,7 @@ namespace {
 #endif
 constexpr int kTestTimeoutScale = YAMS_TEST_TIMEOUT_SCALE;
 
-void clear_current_session_state() {
-    ::unsetenv("YAMS_SESSION_CURRENT");
+void close_current_session_state() {
     auto sessionSvc = yams::app::services::makeSessionService(nullptr);
     sessionSvc->close();
 }
@@ -41,6 +39,7 @@ void clear_current_session_state() {
 /// tests/common/daemon_test_fixture.h header that was deprecated in the
 /// Catch2 migration.
 struct LocalDaemonFixture {
+    yams::test::ScopedEnvVar currentSessionEnvironment_{"YAMS_SESSION_CURRENT", std::nullopt};
     std::filesystem::path root_;
     std::filesystem::path storageDir_;
     std::filesystem::path runtimeRoot_;
@@ -48,9 +47,10 @@ struct LocalDaemonFixture {
     std::unique_ptr<yams::test::FixtureManager> fixtures_;
     std::unique_ptr<yams::daemon::YamsDaemon> daemon_;
     std::thread runLoopThread_;
+    std::vector<yams::test::ScopedEnvVar> preflightEnvironment_;
 
     LocalDaemonFixture() {
-        clear_current_session_state();
+        close_current_session_state();
         auto unique = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
         root_ = std::filesystem::temp_directory_path() / ("yams_test_" + unique);
         storageDir_ = root_ / "storage";
@@ -66,21 +66,21 @@ struct LocalDaemonFixture {
 
         fixtures_ = std::make_unique<yams::test::FixtureManager>(root_ / "fixtures");
 
-        yams::test::harnesses::DaemonPreflight::ensure_environment({
+        preflightEnvironment_ = yams::test::harnesses::DaemonPreflight::ensure_environment({
             .runtime_dir = runtimeRoot_,
             .socket_name_prefix = "yams-test-",
             .kill_others = false,
         });
 
-        if (const char* s = std::getenv("YAMS_SOCKET_PATH")) {
-            socketPath_ = s;
+        if (const auto socket = yams::config::getenv_nonempty("YAMS_SOCKET_PATH")) {
+            socketPath_ = *socket;
         } else {
             socketPath_ = runtimeRoot_ / ("yams-test-" + std::to_string(::getpid()) + ".sock");
         }
     }
 
     ~LocalDaemonFixture() {
-        clear_current_session_state();
+        close_current_session_state();
         if (daemon_) {
             daemon_->stop();
             if (runLoopThread_.joinable()) {
@@ -98,9 +98,6 @@ struct LocalDaemonFixture {
             std::cerr << "Warning: Failed to cleanup test dir " << root_ << ": " << ec.message()
                       << std::endl;
         }
-
-        ::unsetenv("YAMS_SOCKET_PATH");
-        ::unsetenv("YAMS_DAEMON_SOCKET");
 
         yams::daemon::GlobalIOContext::reset();
         yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
@@ -317,15 +314,15 @@ TEST_CASE("MCPDoctorPositiveSmoke.DoctorReportsReadyWithLiveDaemon",
     fs::create_directories(runtimeRoot, ec);
 
     // Ensure a short socket path to avoid AF_UNIX sun_path limits
-    yams::test::harnesses::DaemonPreflight::ensure_environment({
+    auto preflightEnvironment = yams::test::harnesses::DaemonPreflight::ensure_environment({
         .runtime_dir = runtimeRoot,
         .socket_name_prefix = "yams-daemon-smoke-",
         .kill_others = false,
     });
 
     const fs::path socketPath = runtimeRoot / "yams-daemon.sock";
-    ::setenv("YAMS_SOCKET_PATH", socketPath.string().c_str(), 1);
-    ::setenv("YAMS_DAEMON_SOCKET", socketPath.string().c_str(), 1);
+    yams::test::ScopedEnvVar socketEnvironment{"YAMS_SOCKET_PATH", socketPath.string()};
+    yams::test::ScopedEnvVar daemonSocketEnvironment{"YAMS_DAEMON_SOCKET", socketPath.string()};
     yams::cli::cli_pool_reset_for_test();
 
     // Start the daemon
@@ -397,16 +394,12 @@ TEST_CASE("MCPDoctorPositiveSmoke.DoctorReportsReadyWithLiveDaemon",
 
 // Test fixture for MCP smoke tests with proper isolation
 struct MCPSmokeFixture {
-    MCPSmokeFixture() {
-        clear_current_session_state();
-        ::unsetenv("YAMS_SOCKET_PATH");
-        ::unsetenv("YAMS_DAEMON_SOCKET");
-    }
-    ~MCPSmokeFixture() {
-        clear_current_session_state();
-        ::unsetenv("YAMS_SOCKET_PATH");
-        ::unsetenv("YAMS_DAEMON_SOCKET");
-    }
+    yams::test::ScopedEnvVar currentSessionEnvironment{"YAMS_SESSION_CURRENT", std::nullopt};
+    yams::test::ScopedEnvVar socketEnvironment{"YAMS_SOCKET_PATH", std::nullopt};
+    yams::test::ScopedEnvVar daemonSocketEnvironment{"YAMS_DAEMON_SOCKET", std::nullopt};
+
+    MCPSmokeFixture() { close_current_session_state(); }
+    ~MCPSmokeFixture() { close_current_session_state(); }
 };
 
 // Basic success-shape sanity for a couple of tools (no crash, minimal structure).
@@ -441,11 +434,10 @@ TEST_CASE_METHOD(MCPSmokeFixture, "BasicToolSuccessShapes", "[smoke][mcpsmokefix
 // PBI028_PHASE3_MCP_DOCOPS
 // Doc ops round-trip via MCP with a live daemon (portable; uses short /tmp socket).
 struct MCPDocOpsFixture : public LocalDaemonFixture {
-    MCPDocOpsFixture() {
-        yams::cli::cli_pool_reset_for_test();
-        ::setenv("YAMS_SOCKET_PATH", socketPath().string().c_str(), 1);
-        ::setenv("YAMS_DAEMON_SOCKET", socketPath().string().c_str(), 1);
-    }
+    yams::test::ScopedEnvVar socketEnvironment{"YAMS_SOCKET_PATH", socketPath().string()};
+    yams::test::ScopedEnvVar daemonSocketEnvironment{"YAMS_DAEMON_SOCKET", socketPath().string()};
+
+    MCPDocOpsFixture() { yams::cli::cli_pool_reset_for_test(); }
 
     ~MCPDocOpsFixture() { stopDaemon(); }
 };
@@ -498,7 +490,7 @@ TEST_CASE_METHOD(MCPDocOpsFixture, "DocOpsRoundTrip", "[smoke][mcpdocopsfixture]
         blob = getRes["result"].dump();
     }
     REQUIRE_FALSE(blob.empty());
-    CHECK(blob.find("hello") != std::string::npos);
+    CHECK((blob.find("hello") != std::string::npos));
 
     // 4) update: add a tag, then list with that tag
     auto updRes = svr.callToolPublic(
@@ -724,10 +716,10 @@ TEST_CASE_METHOD(MCPDocOpsFixture, "SessionStartAloneDoesNotNarrowGrepResults",
     REQUIRE(grepSessionData->contains("match_count"));
 
     INFO(grepGlobal.dump());
-    CHECK((*grepGlobalData)["match_count"].get<int>() >= 2);
+    CHECK(((*grepGlobalData)["match_count"].get<int>() >= 2));
     INFO(grepSession.dump());
-    CHECK((*grepSessionData)["match_count"].get<int>() ==
-          (*grepGlobalData)["match_count"].get<int>());
+    CHECK(((*grepSessionData)["match_count"].get<int>() ==
+           (*grepGlobalData)["match_count"].get<int>()));
 }
 
 // Pagination and dry-run behaviors should be accepted and return structured JSON.
@@ -855,6 +847,6 @@ TEST_CASE_METHOD(MCPSmokeFixture, "Parity_UnreachableEnvelopeAndToolsListRespond
         svr.callToolPublic("search", json{{"query", "ping"}, {"limit", 1}, {"paths_only", true}});
     auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - start);
-    CHECK(elapsed.count() < 2500);
+    CHECK((elapsed.count() < 2500));
     REQUIRE(listRes.is_object());
 }

@@ -12,9 +12,7 @@
 #include <fstream>
 #include <future>
 #include <iostream>
-#include <map>
 #include <optional>
-#include <set>
 #include <thread>
 #include <vector>
 #include "../../common/test_helpers_catch2.h"
@@ -81,7 +79,7 @@ TEST_CASE("LifecycleComponent test safe-instance guard overrides production aggr
     CHECK_FALSE(LifecycleComponent::testingAggressiveModeEnabled());
 
     safeGuard.unset();
-    CHECK(LifecycleComponent::testingAggressiveModeEnabled());
+    CHECK((LifecycleComponent::testingAggressiveModeEnabled()));
 
     killOthers.set("0");
     CHECK_FALSE(LifecycleComponent::testingAggressiveModeEnabled());
@@ -110,12 +108,12 @@ TEST_CASE("SearchEngineManager runtime executor is isolated from unavailable sha
 
     const auto deadline = std::chrono::steady_clock::now() + 500ms;
     for (auto& future : searchWorkFutures) {
-        CHECK(future.wait_until(deadline) == std::future_status::ready);
+        CHECK((future.wait_until(deadline) == std::future_status::ready));
     }
-    CHECK(sharedWorkRan.load(std::memory_order_acquire) == 0);
+    CHECK((sharedWorkRan.load(std::memory_order_acquire) == 0));
 
     unavailableSharedContext.run();
-    CHECK(sharedWorkRan.load(std::memory_order_acquire) == kRequestConcurrency);
+    CHECK((sharedWorkRan.load(std::memory_order_acquire) == kRequestConcurrency));
 }
 
 std::string randomSuffix() {
@@ -193,10 +191,10 @@ TEST_CASE("SocketServer: Lifecycle management", "[daemon][components][socket]") 
         if (!first && isPermissionDenied(first)) {
             SKIP("UNIX domain sockets not permitted on this system");
         }
-        REQUIRE(first);
+        REQUIRE((first));
 
         auto stopped = server.stop();
-        REQUIRE(stopped);
+        REQUIRE((stopped));
 
         // Second start should work (stopping flag cleared)
         auto second = server.start();
@@ -206,9 +204,9 @@ TEST_CASE("SocketServer: Lifecycle management", "[daemon][components][socket]") 
         if (!second && isPermissionDenied(second)) {
             SKIP("UNIX domain sockets not permitted on this system");
         }
-        REQUIRE(second);
+        REQUIRE((second));
 
-        REQUIRE(server.stop());
+        REQUIRE((server.stop()));
 
         io.stop();
         io.join();
@@ -230,13 +228,13 @@ TEST_CASE("SocketServer: Lifecycle management", "[daemon][components][socket]") 
         if (!first && isPermissionDenied(first)) {
             SKIP("UNIX domain sockets not permitted on this system");
         }
-        REQUIRE(first);
+        REQUIRE((first));
 
         // Second start while running should fail gracefully
         auto second = server.start();
-        REQUIRE(!second); // Already running
+        REQUIRE((!second)); // Already running
 
-        REQUIRE(server.stop());
+        REQUIRE((server.stop()));
 
         io.stop();
         io.join();
@@ -258,7 +256,7 @@ TEST_CASE("SocketServer: main-socket admission ignores proxy connection load",
 
     StateComponent state;
     SocketServer server(config, nullptr, nullptr, nullptr, &state);
-    REQUIRE(server.resizeConnectionSlots(config.maxConnections));
+    REQUIRE((server.resizeConnectionSlots(config.maxConnections)));
 
     AddDocumentRequest addRequest;
     addRequest.path = "src";
@@ -267,28 +265,28 @@ TEST_CASE("SocketServer: main-socket admission ignores proxy connection load",
     SECTION("Main-socket write admission keys off main connections, not total connections") {
         server.testing_setConnectionCounts(/*mainActive=*/0, /*proxyActive=*/10);
 
-        CHECK(server.activeConnections() == 10);
-        CHECK(server.proxyActiveConnections() == 10);
-        CHECK(server.testing_mainSocketAdmissionVerdict(addRequest) ==
-              SocketAdmissionVerdict::admit);
+        CHECK((server.activeConnections() == 10));
+        CHECK((server.proxyActiveConnections() == 10));
+        CHECK((server.testing_mainSocketAdmissionVerdict(addRequest) ==
+               SocketAdmissionVerdict::admit));
         CHECK_FALSE(server.testing_mainSocketEmergencyGuardRejects());
-        CHECK(server.getSlotUtilization() == 0.0);
+        CHECK((server.getSlotUtilization() == 0.0));
         server.testing_setConnectionCounts(0, 0);
     }
 
     SECTION("Main-socket pressure still rejects once main connections cross the limit bands") {
         server.testing_setConnectionCounts(/*mainActive=*/10, /*proxyActive=*/0);
 
-        CHECK(server.testing_mainSocketAdmissionVerdict(addRequest) ==
-              SocketAdmissionVerdict::reject);
+        CHECK((server.testing_mainSocketAdmissionVerdict(addRequest) ==
+               SocketAdmissionVerdict::reject));
         server.testing_setConnectionCounts(0, 0);
     }
 
     SECTION("Control requests remain bypassed on the main socket") {
         server.testing_setConnectionCounts(/*mainActive=*/10, /*proxyActive=*/20);
 
-        CHECK(server.testing_mainSocketAdmissionVerdict(StatusRequest{}) ==
-              SocketAdmissionVerdict::bypass);
+        CHECK((server.testing_mainSocketAdmissionVerdict(StatusRequest{}) ==
+               SocketAdmissionVerdict::bypass));
         server.testing_setConnectionCounts(0, 0);
     }
 
@@ -299,7 +297,7 @@ TEST_CASE("SocketServer: main-socket admission ignores proxy connection load",
         CHECK_FALSE(server.testing_mainSocketEmergencyGuardRejects());
 
         server.testing_setConnectionCounts(/*mainActive=*/hardLimit, /*proxyActive=*/0);
-        CHECK(server.testing_mainSocketEmergencyGuardRejects());
+        CHECK((server.testing_mainSocketEmergencyGuardRejects()));
         server.testing_setConnectionCounts(0, 0);
     }
 }
@@ -314,21 +312,22 @@ TEST_CASE("Socket path resolution: Priority ordering", "[daemon][components][soc
     auto configDir = configBase / "yams";
     fs::create_directories(configDir);
 
-    // Save environment
-    ScopedEnvVar yamsSockGuard("YAMS_DAEMON_SOCKET");
-    ScopedEnvVar xdgRuntimeGuard("XDG_RUNTIME_DIR");
-    ScopedEnvVar xdgConfigGuard("XDG_CONFIG_HOME");
-    ScopedEnvVar homeGuard("HOME");
+    ScopedEnvVar yamsConfigGuard("YAMS_CONFIG", std::nullopt);
+    ScopedEnvVar yamsSockGuard("YAMS_DAEMON_SOCKET", std::nullopt);
+    ScopedEnvVar yamsSockCompatibilityGuard("YAMS_DAEMON_SOCKET_PATH", std::nullopt);
+    ScopedEnvVar xdgRuntimeGuard("XDG_RUNTIME_DIR", std::nullopt);
+    ScopedEnvVar xdgConfigGuard("XDG_CONFIG_HOME", configBase.string());
+    ScopedEnvVar homeGuard("HOME", tempDir.string());
 
     SECTION("Environment variable has highest priority") {
         auto testPath = "/tmp/custom-daemon.sock";
-        setenv("YAMS_DAEMON_SOCKET", testPath, 1);
+        yamsSockGuard.set(testPath);
 
         auto result = socket_utils::resolve_socket_path();
-        REQUIRE(result.string() == testPath);
+        REQUIRE((result.string() == testPath));
 
         auto resultConfigFirst = socket_utils::resolve_socket_path_config_first();
-        REQUIRE(resultConfigFirst.string() == testPath);
+        REQUIRE((resultConfigFirst.string() == testPath));
     }
 
 #ifndef _WIN32
@@ -338,27 +337,27 @@ TEST_CASE("Socket path resolution: Priority ordering", "[daemon][components][soc
             // This test specifically targets non-root behavior.
             SKIP("XDG_RUNTIME_DIR precedence test is for non-root users");
         }
-        unsetenv("YAMS_DAEMON_SOCKET");
+        yamsSockGuard.unset();
 
         auto xdgDir = tempDir / "runtime";
         fs::create_directories(xdgDir);
-        setenv("XDG_RUNTIME_DIR", xdgDir.string().c_str(), 1);
+        xdgRuntimeGuard.set(xdgDir.string());
 
         auto result = socket_utils::resolve_socket_path();
-        REQUIRE(result.parent_path() == xdgDir);
-        REQUIRE(result.filename() == "yams-daemon.sock");
+        REQUIRE((result.parent_path() == xdgDir));
+        REQUIRE((result.filename() == "yams-daemon.sock"));
     }
 
     SECTION("/tmp fallback for non-root when XDG not available") {
-        unsetenv("YAMS_DAEMON_SOCKET");
-        unsetenv("XDG_RUNTIME_DIR");
+        yamsSockGuard.unset();
+        xdgRuntimeGuard.unset();
 
         if (::geteuid() != 0) {
             auto result = socket_utils::resolve_socket_path();
-            REQUIRE(result.parent_path() == "/tmp");
+            REQUIRE((result.parent_path() == "/tmp"));
             // Socket name includes UID for non-root users
             auto uid = std::to_string(::getuid());
-            REQUIRE(result.filename() == "yams-daemon-" + uid + ".sock");
+            REQUIRE((result.filename() == "yams-daemon-" + uid + ".sock"));
         }
     }
 #endif // !_WIN32
@@ -376,9 +375,10 @@ TEST_CASE("Socket path resolution: Config file reading", "[daemon][components][s
 
     auto configFile = configDir / "config.toml";
 
-    ScopedEnvVar xdgConfigGuard("XDG_CONFIG_HOME");
-    ScopedEnvVar yamsConfigGuard("YAMS_CONFIG");
-    ScopedEnvVar yamsSockGuard("YAMS_DAEMON_SOCKET");
+    ScopedEnvVar xdgConfigGuard("XDG_CONFIG_HOME", configBase.string());
+    ScopedEnvVar yamsConfigGuard("YAMS_CONFIG", std::nullopt);
+    ScopedEnvVar yamsSockGuard("YAMS_DAEMON_SOCKET", std::nullopt);
+    ScopedEnvVar yamsSockCompatibilityGuard("YAMS_DAEMON_SOCKET_PATH", std::nullopt);
 
 #ifndef _WIN32
     SECTION("Explicit YAMS_CONFIG socket_path is used") {
@@ -388,11 +388,11 @@ TEST_CASE("Socket path resolution: Config file reading", "[daemon][components][s
         out << "socket_path = \"/opt/yams/explicit.sock\"\n";
         out.close();
 
-        setenv("YAMS_CONFIG", explicitConfig.string().c_str(), 1);
-        unsetenv("YAMS_DAEMON_SOCKET");
+        yamsConfigGuard.set(explicitConfig.string());
+        yamsSockGuard.unset();
 
         auto result = socket_utils::resolve_socket_path_config_first();
-        REQUIRE(result.string() == "/opt/yams/explicit.sock");
+        REQUIRE((result.string() == "/opt/yams/explicit.sock"));
     }
 
     SECTION("Config file socket_path is used") {
@@ -401,11 +401,11 @@ TEST_CASE("Socket path resolution: Config file reading", "[daemon][components][s
         out << "socket_path = \"/opt/yams/daemon.sock\"\n";
         out.close();
 
-        setenv("XDG_CONFIG_HOME", configBase.string().c_str(), 1);
-        unsetenv("YAMS_DAEMON_SOCKET");
+        xdgConfigGuard.set(configBase.string());
+        yamsSockGuard.unset();
 
         auto result = socket_utils::resolve_socket_path_config_first();
-        REQUIRE(result.string() == "/opt/yams/daemon.sock");
+        REQUIRE((result.string() == "/opt/yams/daemon.sock"));
     }
 #endif // !_WIN32
 
@@ -414,12 +414,12 @@ TEST_CASE("Socket path resolution: Config file reading", "[daemon][components][s
         out << "invalid toml content ][[\n";
         out.close();
 
-        setenv("XDG_CONFIG_HOME", configBase.string().c_str(), 1);
-        unsetenv("YAMS_DAEMON_SOCKET");
+        xdgConfigGuard.set(configBase.string());
+        yamsSockGuard.unset();
 
         // Should fall back to default resolution (doesn't crash)
         auto result = socket_utils::resolve_socket_path_config_first();
-        REQUIRE(!result.empty());
+        REQUIRE((!result.empty()));
     }
 
     // Cleanup
@@ -431,11 +431,11 @@ TEST_CASE("Socket path resolution: proxy path derived from main socket",
           "[daemon][components][socket][utils]") {
     const fs::path mainSocket{"/tmp/yams-daemon.sock"};
     const auto proxySocket = socket_utils::derive_proxy_socket_path(mainSocket);
-    REQUIRE(proxySocket == fs::path{"/tmp/yams-daemon.proxy.sock"});
+    REQUIRE((proxySocket == fs::path{"/tmp/yams-daemon.proxy.sock"}));
 
     const fs::path nestedSocket{"/run/user/1000/custom.sock"};
     const auto nestedProxy = socket_utils::derive_proxy_socket_path(nestedSocket);
-    REQUIRE(nestedProxy == fs::path{"/run/user/1000/custom.proxy.sock"});
+    REQUIRE((nestedProxy == fs::path{"/run/user/1000/custom.proxy.sock"}));
 }
 
 // =============================================================================
@@ -464,7 +464,7 @@ TEST_CASE("ResourcePool: Basic lifecycle", "[daemon][components][pool]") {
             [](const TestResource& r) { return r.isValid(); });
 
         std::this_thread::sleep_for(50ms); // Allow async creation
-        REQUIRE(TestResource::getCreationCount() >= static_cast<int>(config.minSize));
+        REQUIRE((TestResource::getCreationCount() >= static_cast<int>(config.minSize)));
     }
 
     TestResource::resetCounters();
@@ -482,10 +482,10 @@ TEST_CASE("ResourcePool: Basic lifecycle", "[daemon][components][pool]") {
 
         // Acquire resource (no ID parameter, timeout is optional)
         auto handleResult = pool->acquire();
-        REQUIRE(handleResult.has_value());
+        REQUIRE((handleResult.has_value()));
         auto& handle = handleResult.value();
-        REQUIRE(handle.isValid());
-        REQUIRE(handle->isValid());
+        REQUIRE((handle.isValid()));
+        REQUIRE((handle->isValid()));
 
         // Release by destroying handle (handle goes out of scope)
     }
@@ -506,7 +506,7 @@ TEST_CASE("ResourcePool: Basic lifecycle", "[daemon][components][pool]") {
         // Acquire and invalidate
         {
             auto handleResult = pool->acquire();
-            REQUIRE(handleResult.has_value());
+            REQUIRE((handleResult.has_value()));
             auto& handle = handleResult.value();
             handle->invalidate();
             // handle goes out of scope and releases
@@ -514,9 +514,9 @@ TEST_CASE("ResourcePool: Basic lifecycle", "[daemon][components][pool]") {
 
         // Next acquisition should get valid resource (invalid one discarded)
         auto handle2Result = pool->acquire();
-        REQUIRE(handle2Result.has_value());
+        REQUIRE((handle2Result.has_value()));
         auto& handle2 = handle2Result.value();
-        REQUIRE(handle2->isValid());
+        REQUIRE((handle2->isValid()));
     }
 }
 
@@ -562,8 +562,8 @@ TEST_CASE("ResourcePool: Concurrency", "[daemon][components][pool][concurrent]")
         }
 
         // All threads should successfully acquire resources
-        REQUIRE(successCount == 20);
-        REQUIRE(TestResource::getWorkCount() == 20);
+        REQUIRE((successCount == 20));
+        REQUIRE((TestResource::getWorkCount() == 20));
     }
 }
 
@@ -586,30 +586,30 @@ TEST_CASE("Daemon components: ResourceGovernor backpressure policy helpers",
 
     auto unchanged = governor.recommendConnectionSlotTarget(currentSlots, currentSlots, minSlots,
                                                             maxSlots, scaleStep, 3);
-    CHECK(unchanged == currentSlots);
+    CHECK((unchanged == currentSlots));
 
     auto shrunk =
         governor.recommendConnectionSlotTarget(currentSlots, 1, minSlots, maxSlots, scaleStep, 1);
-    CHECK(shrunk <= currentSlots);
-    CHECK(shrunk >= minSlots);
+    CHECK((shrunk <= currentSlots));
+    CHECK((shrunk >= minSlots));
 
     governor.reportDbLockContention(100, 10);
-    CHECK(governor.capKgConcurrencyForDbContention(8) <= 2);
-    CHECK(governor.capEmbedConcurrencyForDbContention(8) <= 1);
+    CHECK((governor.capKgConcurrencyForDbContention(8) <= 2));
+    CHECK((governor.capEmbedConcurrencyForDbContention(8) <= 1));
 
     governor.reportDbLockContention(0, 10);
-    CHECK(governor.capKgConcurrencyForDbContention(8) == 8);
-    CHECK(governor.capEmbedConcurrencyForDbContention(4) == 4);
+    CHECK((governor.capKgConcurrencyForDbContention(8) == 8));
+    CHECK((governor.capEmbedConcurrencyForDbContention(4) == 4));
 
     const auto retryBaseline = governor.recommendRetryAfterMs(0, 100, 0, 1024, 1, 100, 0, 100, 500);
     const auto retryOverloaded = governor.recommendRetryAfterMs(
-        200, 100, 4 * 1024 * 1024, 1024 * 1024, 200, 50, 100, 100, 500);
-    CHECK(retryOverloaded >= retryBaseline);
-    CHECK(retryOverloaded <= 5000);
+        200, 100, 4ULL * 1024 * 1024, 1024ULL * 1024, 200, 50, 100, 100, 500);
+    CHECK((retryOverloaded >= retryBaseline));
+    CHECK((retryOverloaded <= 5000));
 
     const auto pauseIdle = governor.recommendBackpressureReadPauseMs(100);
-    CHECK(pauseIdle >= 1);
-    CHECK(pauseIdle <= 5000);
+    CHECK((pauseIdle >= 1));
+    CHECK((pauseIdle <= 5000));
 
     // Leave singleton policy state neutral for subsequent tests.
     governor.reportDbLockContention(0, 1);

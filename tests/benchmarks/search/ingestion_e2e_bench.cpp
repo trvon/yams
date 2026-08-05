@@ -41,6 +41,7 @@
 #include <spdlog/spdlog.h>
 #include <fmt/ranges.h>
 
+#include "tests/common/test_helpers_catch2.h"
 #include "tests/integration/daemon/test_async_helpers.h"
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
@@ -70,6 +71,7 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
@@ -331,15 +333,28 @@ public:
         log_ = root_ / "bench.log";
     }
 
-    ~SimpleDaemonHarness() {
-        stop();
-        cleanup();
+    ~SimpleDaemonHarness() noexcept {
+        try {
+            stop();
+        } catch (...) {
+            std::fputs("SimpleDaemonHarness stop failed during teardown\n", stderr);
+        }
+        try {
+            cleanup();
+        } catch (...) {
+            std::fputs("SimpleDaemonHarness cleanup failed during teardown\n", stderr);
+        }
     }
 
     SimpleDaemonHarness(const SimpleDaemonHarness&) = delete;
     SimpleDaemonHarness& operator=(const SimpleDaemonHarness&) = delete;
 
     bool start() {
+        if (daemon_ || !savedEnvironment_.empty()) {
+            spdlog::error("SimpleDaemonHarness start called while a prior start is still active");
+            return false;
+        }
+
         // Save original working directory and change to temp dir
         // This prevents session auto-watch from indexing CWD
         originalCwd_ = fs::current_path();
@@ -486,30 +501,14 @@ public:
             spdlog::info("[SimpleDaemonHarness] Daemon stopped (running={}), resetting instance...",
                          daemon_->isRunning());
 
-            // Reset GlobalIOContext to clean up threads and io_context state
-            // Temporarily unset YAMS_TESTING to allow reset() to actually work
-            const auto yamsTesting = std::getenv("YAMS_TESTING")
-                                         ? std::optional<std::string>(std::getenv("YAMS_TESTING"))
-                                         : std::nullopt;
-            const auto yamsSafe =
-                std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE")
-                    ? std::optional<std::string>(std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE"))
-                    : std::nullopt;
-            if (yamsTesting) {
-                unsetenv("YAMS_TESTING");
-            }
-            if (yamsSafe) {
-                unsetenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
-            }
-
-            yams::daemon::GlobalIOContext::reset();
-            spdlog::info("[SimpleDaemonHarness] GlobalIOContext reset complete");
-
-            if (yamsTesting) {
-                setenv("YAMS_TESTING", yamsTesting->c_str(), 1);
-            }
-            if (yamsSafe) {
-                setenv("YAMS_TEST_SAFE_SINGLE_INSTANCE", yamsSafe->c_str(), 1);
+            // Reset GlobalIOContext with test sentinels temporarily unset through the shared
+            // environment boundary. The guards restore their exact prior state after reset.
+            {
+                yams::test::ScopedEnvVar testingEnvironment{"YAMS_TESTING", std::nullopt};
+                yams::test::ScopedEnvVar safeEnvironment{"YAMS_TEST_SAFE_SINGLE_INSTANCE",
+                                                         std::nullopt};
+                yams::daemon::GlobalIOContext::reset();
+                spdlog::info("[SimpleDaemonHarness] GlobalIOContext reset complete");
             }
 
             shutdownSucceeded_ = static_cast<bool>(stopResult) && !daemon_->isRunning();
@@ -551,32 +550,17 @@ private:
     }
 
     void saveAndSetEnvironment(const std::string& key, const fs::path& value) {
-        std::optional<std::string> previous;
-        if (const char* current = std::getenv(key.c_str())) {
-            previous = current;
-        }
-        savedEnvironment_.emplace_back(key, std::move(previous));
-        setenv(key.c_str(), value.string().c_str(), 1);
+        savedEnvironment_.emplace_back(key, value.string());
     }
 
     void saveAndUnsetEnvironment(const std::string& key) {
-        std::optional<std::string> previous;
-        if (const char* current = std::getenv(key.c_str())) {
-            previous = current;
-        }
-        savedEnvironment_.emplace_back(key, std::move(previous));
-        unsetenv(key.c_str());
+        savedEnvironment_.emplace_back(key, std::nullopt);
     }
 
     void restoreEnvironment() {
-        for (auto it = savedEnvironment_.rbegin(); it != savedEnvironment_.rend(); ++it) {
-            if (it->second) {
-                setenv(it->first.c_str(), it->second->c_str(), 1);
-            } else {
-                unsetenv(it->first.c_str());
-            }
+        while (!savedEnvironment_.empty()) {
+            savedEnvironment_.pop_back();
         }
-        savedEnvironment_.clear();
     }
 
     void cleanup() {
@@ -589,7 +573,7 @@ private:
     std::thread runLoopThread_;
     fs::path root_, data_, sock_, pid_, log_;
     fs::path originalCwd_;
-    std::vector<std::pair<std::string, std::optional<std::string>>> savedEnvironment_;
+    std::vector<yams::test::ScopedEnvVar> savedEnvironment_;
     bool glinerRequested_{false};
     bool pluginAutoloadEnabled_{false};
     bool shutdownSucceeded_{false};

@@ -137,22 +137,12 @@ private:
 
 int runCliCommand(const std::vector<std::string>& args,
                   const std::optional<std::filesystem::path>& socketPath = std::nullopt) {
-    const char* yamsTestingEnv = std::getenv("YAMS_TESTING");
-    const char* yamsSafeEnv = std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
-    std::optional<std::string> yamsTesting =
-        yamsTestingEnv ? std::make_optional(std::string(yamsTestingEnv)) : std::nullopt;
-    std::optional<std::string> yamsSafe =
-        yamsSafeEnv ? std::make_optional(std::string(yamsSafeEnv)) : std::nullopt;
+    ScopedEnvVar yamsTesting{"YAMS_TESTING", std::nullopt};
+    ScopedEnvVar yamsSafe{"YAMS_TEST_SAFE_SINGLE_INSTANCE", std::nullopt};
     std::optional<ScopedEnvVar> socketPathEnv;
     std::optional<ScopedEnvVar> disableAutoStartEnv;
     std::optional<ScopedEnvVar> embeddedSocketEnv;
 
-    if (yamsTesting) {
-        unsetenv("YAMS_TESTING");
-    }
-    if (yamsSafe) {
-        unsetenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
-    }
     if (socketPath) {
         socketPathEnv.emplace("YAMS_DAEMON_SOCKET_PATH", socketPath->string());
         disableAutoStartEnv.emplace("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1");
@@ -179,12 +169,6 @@ int runCliCommand(const std::vector<std::string>& args,
 #endif
     yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
     yams::daemon::GlobalIOContext::reset();
-    if (yamsTesting) {
-        setenv("YAMS_TESTING", yamsTesting->c_str(), 1);
-    }
-    if (yamsSafe) {
-        setenv("YAMS_TEST_SAFE_SINGLE_INSTANCE", yamsSafe->c_str(), 1);
-    }
     return rc;
 }
 

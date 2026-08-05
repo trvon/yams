@@ -10,6 +10,7 @@
 #include <thread>
 #include <vector>
 #include "../common/env_compat.h"
+#include "../common/test_helpers_catch2.h"
 #include "bench_utils.h"
 #include <yams/compat/unistd.h>
 #include <yams/daemon/daemon.h>
@@ -82,7 +83,7 @@ static bool isSocketPermissionDenied(const yams::Error& error) {
            message.find("Permission denied") != std::string_view::npos;
 }
 
-int main() {
+int runBenchmark() {
     const char* enable = std::getenv("YAMS_ENABLE_DAEMON_BENCH");
     if (!enable || std::string_view(enable) != "1") {
         std::cout << "Skipping daemon warm latency bench (set YAMS_ENABLE_DAEMON_BENCH=1)\n";
@@ -106,13 +107,13 @@ int main() {
         spdlog::set_level(spdlog::level::off);
     }
 
+    std::vector<yams::test::ScopedEnvVar> environment;
     if (minThreads) {
-        if (const char* workThreads = std::getenv("YAMS_WORK_COORDINATOR_THREADS");
-            !workThreads || !*workThreads) {
-            ::setenv("YAMS_WORK_COORDINATOR_THREADS", "1", 1);
+        if (!yams::config::getenv_nonempty("YAMS_WORK_COORDINATOR_THREADS")) {
+            environment.emplace_back("YAMS_WORK_COORDINATOR_THREADS", std::string{"1"});
         }
-        if (const char* ioThreads = std::getenv("YAMS_IO_THREADS"); !ioThreads || !*ioThreads) {
-            ::setenv("YAMS_IO_THREADS", "1", 1);
+        if (!yams::config::getenv_nonempty("YAMS_IO_THREADS")) {
+            environment.emplace_back("YAMS_IO_THREADS", std::string{"1"});
         }
     }
 
@@ -126,10 +127,10 @@ int main() {
     }
     std::cout << "\n";
 
-    ::setenv("YAMS_DB_OPEN_TIMEOUT_MS", "1000", 1);
-    ::setenv("YAMS_DB_MIGRATE_TIMEOUT_MS", "1500", 1);
-    ::setenv("YAMS_SEARCH_BUILD_TIMEOUT_MS", "1000", 1);
-    ::setenv("YAMS_DISABLE_VECTORS", "1", 1);
+    environment.emplace_back("YAMS_DB_OPEN_TIMEOUT_MS", std::string{"1000"});
+    environment.emplace_back("YAMS_DB_MIGRATE_TIMEOUT_MS", std::string{"1500"});
+    environment.emplace_back("YAMS_SEARCH_BUILD_TIMEOUT_MS", std::string{"1000"});
+    environment.emplace_back("YAMS_DISABLE_VECTORS", std::string{"1"});
 
     std::vector<TimingSample> samples;
     samples.reserve(static_cast<size_t>(iterations));
@@ -249,4 +250,16 @@ int main() {
               << " p90=" << percentileMs(stops, 90) << "\n";
 
     return 0;
+}
+
+int main() noexcept {
+    try {
+        return runBenchmark();
+    } catch (const std::exception& error) {
+        std::cerr << "Daemon warm latency benchmark failed: " << error.what() << '\n';
+        return 1;
+    } catch (...) {
+        std::cerr << "Daemon warm latency benchmark failed with an unknown exception\n";
+        return 1;
+    }
 }

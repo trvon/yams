@@ -10,6 +10,8 @@
 #include <yams/storage/s3_signer.h>
 #include <yams/storage/storage_backend.h>
 
+#include "../../common/test_helpers_catch2.h"
+
 using namespace yams::storage;
 
 TEST_CASE("S3Signer includes optional headers in signature and list",
@@ -98,11 +100,8 @@ TEST_CASE("S3Signer trims credential and region whitespace", "[storage][s3][sign
 
 TEST_CASE("S3Signer canonical request includes header separator newline",
           "[storage][s3][signer][regression][catch2]") {
-#if defined(_WIN32)
-    _putenv_s("YAMS_S3_SIGNER_FIXED_AMZ_DATE", "20250306T120000Z");
-#else
-    setenv("YAMS_S3_SIGNER_FIXED_AMZ_DATE", "20250306T120000Z", 1);
-#endif
+    yams::test::ScopedEnvVar fixedDate{"YAMS_S3_SIGNER_FIXED_AMZ_DATE",
+                                       std::string{"20250306T120000Z"}};
 
     BackendConfig cfg;
     cfg.region = "us-east-1";
@@ -141,12 +140,6 @@ TEST_CASE("S3Signer canonical request includes header separator newline",
 
     curl_slist_free_all(res.value());
     curl_easy_cleanup(curl);
-
-#if defined(_WIN32)
-    _putenv_s("YAMS_S3_SIGNER_FIXED_AMZ_DATE", "");
-#else
-    unsetenv("YAMS_S3_SIGNER_FIXED_AMZ_DATE");
-#endif
 }
 
 TEST_CASE("S3Signer rejects Cloudflare bearer token shape for R2 access key",

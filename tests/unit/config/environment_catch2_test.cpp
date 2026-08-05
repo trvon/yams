@@ -7,9 +7,15 @@
 
 #include "../../common/test_helpers_catch2.h"
 
+#include <algorithm>
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <optional>
+#include <random>
 #include <string>
+#include <thread>
+#include <vector>
 
 namespace {
 
@@ -83,6 +89,163 @@ TEST_CASE("typed environment readers distinguish unset valid and invalid values"
         CHECK((yams::config::getenv_optional("YAMS_TEST_SHARED_ENV") == "value"));
         REQUIRE(yams::config::set_environment("YAMS_TEST_SHARED_ENV", nullptr));
         CHECK_FALSE(yams::config::getenv_optional("YAMS_TEST_SHARED_ENV").has_value());
+    }
+}
+
+TEST_CASE("ScopedEnvVar restores prior values and preserves unset state",
+          "[config][environment][scoped-env]") {
+    const std::string key = "YAMS_TEST_SCOPED_ENV_RESTORE";
+    ScopedEnvVar hostRestore{key};
+
+    REQUIRE(yams::config::set_environment(key.c_str(), "before"));
+    {
+        ScopedEnvVar guard{key, std::string{"during"}};
+        CHECK((yams::config::getenv_optional(key) == "during"));
+    }
+    CHECK((yams::config::getenv_optional(key) == "before"));
+
+    REQUIRE(yams::config::set_environment(key.c_str(), nullptr));
+    {
+        ScopedEnvVar guard{key, std::string{"during"}};
+        CHECK((yams::config::getenv_optional(key) == "during"));
+    }
+    CHECK_FALSE(yams::config::getenv_optional(key).has_value());
+
+#ifndef _WIN32
+    REQUIRE(yams::config::set_environment(key.c_str(), ""));
+    REQUIRE(yams::config::getenv_optional(key).has_value());
+    {
+        ScopedEnvVar guard{key, std::string{"during"}};
+        CHECK((yams::config::getenv_optional(key) == "during"));
+    }
+    const auto restoredEmpty = yams::config::getenv_optional(key);
+    REQUIRE(restoredEmpty.has_value());
+    CHECK(restoredEmpty->empty());
+#endif
+}
+
+TEST_CASE("ScopedEnvVar move operations transfer sole restoration ownership",
+          "[config][environment][scoped-env][move]") {
+    const std::string firstKey = "YAMS_TEST_SCOPED_ENV_MOVE_FIRST";
+    const std::string secondKey = "YAMS_TEST_SCOPED_ENV_MOVE_SECOND";
+    ScopedEnvVar restoreFirst{firstKey};
+    ScopedEnvVar restoreSecond{secondKey};
+    REQUIRE(yams::config::set_environment(firstKey.c_str(), "base-first"));
+    REQUIRE(yams::config::set_environment(secondKey.c_str(), "base-second"));
+
+    SECTION("move construction leaves the source inactive") {
+        std::optional<ScopedEnvVar> source;
+        source.emplace(firstKey, std::string{"override-first"});
+        {
+            ScopedEnvVar destination{std::move(source.value())};
+            source.reset();
+            CHECK((yams::config::getenv_optional(firstKey) == "override-first"));
+        }
+        CHECK((yams::config::getenv_optional(firstKey) == "base-first"));
+    }
+
+    SECTION("move assignment restores the destination before adopting the source") {
+        std::optional<ScopedEnvVar> first;
+        std::optional<ScopedEnvVar> second;
+        first.emplace(firstKey, std::string{"override-first"});
+        second.emplace(secondKey, std::string{"override-second"});
+
+        *first = std::move(*second);
+        CHECK((yams::config::getenv_optional(firstKey) == "base-first"));
+        CHECK((yams::config::getenv_optional(secondKey) == "override-second"));
+
+        second.reset();
+        CHECK((yams::config::getenv_optional(secondKey) == "override-second"));
+        first.reset();
+        CHECK((yams::config::getenv_optional(secondKey) == "base-second"));
+    }
+}
+
+TEST_CASE("ScopedEnvVar restoration is independent of deterministic scenario order",
+          "[config][environment][scoped-env][order]") {
+    const std::string key = "YAMS_TEST_SCOPED_ENV_ORDER";
+    ScopedEnvVar hostRestore{key};
+    std::array<std::optional<std::string>, 4> baselines{std::nullopt, std::string{},
+                                                        std::string{"alpha"}, std::string{"beta"}};
+
+    for (const auto seed : {66U, 6601U, 6602U}) {
+        std::mt19937 random{seed};
+        std::shuffle(baselines.begin(), baselines.end(), random);
+        for (const auto& baseline : baselines) {
+            REQUIRE(
+                yams::config::set_environment(key.c_str(), baseline ? baseline->c_str() : nullptr));
+            {
+                ScopedEnvVar guard{key, std::string{"replacement"}};
+                guard.unset();
+                guard.set("replacement-again");
+            }
+            CHECK((yams::config::getenv_optional(key) == baseline));
+        }
+    }
+}
+
+TEST_CASE("config environment boundary serializes concurrent readers and writers",
+          "[config][environment][concurrent]") {
+    const std::string key = "YAMS_TEST_SCOPED_ENV_CONCURRENT";
+    const std::string first(512, 'a');
+    const std::string second(768, 'b');
+    ScopedEnvVar hostRestore{key, std::nullopt};
+    constexpr int kReaderCount = 4;
+    std::atomic<bool> start{false};
+    std::atomic<bool> done{false};
+    std::atomic<bool> valid{true};
+    std::array<std::atomic<std::size_t>, kReaderCount> reads{};
+
+    std::thread writer([&] {
+        while (!start.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        for (int iteration = 0; iteration < 2000; ++iteration) {
+            const char* value = (iteration % 4 == 0)   ? first.c_str()
+                                : (iteration % 4 == 1) ? second.c_str()
+                                : (iteration % 4 == 2) ? ""
+                                                       : nullptr;
+            if (!yams::config::set_environment(key.c_str(), value)) {
+                valid.store(false, std::memory_order_relaxed);
+                break;
+            }
+            if (iteration == 0) {
+                while (std::ranges::any_of(reads, [](const auto& count) {
+                    return count.load(std::memory_order_acquire) == 0;
+                })) {
+                    std::this_thread::yield();
+                }
+            }
+        }
+        done.store(true, std::memory_order_release);
+    });
+
+    std::vector<std::thread> readers;
+    readers.reserve(kReaderCount);
+    for (int index = 0; index < kReaderCount; ++index) {
+        readers.emplace_back([&, index] {
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            while (!done.load(std::memory_order_acquire)) {
+                const auto value = yams::config::getenv_optional(key);
+                reads[index].fetch_add(1, std::memory_order_release);
+                if (value && !value->empty() && *value != first && *value != second) {
+                    valid.store(false, std::memory_order_relaxed);
+                    return;
+                }
+            }
+        });
+    }
+
+    start.store(true, std::memory_order_release);
+    writer.join();
+    for (auto& reader : readers) {
+        reader.join();
+    }
+    CHECK(valid.load(std::memory_order_relaxed));
+    for (const auto& count : reads) {
+        CHECK((count.load(std::memory_order_relaxed) > 0));
     }
 }
 
