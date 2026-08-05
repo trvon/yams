@@ -25,6 +25,9 @@ struct EmbeddingConfig {
         OnnxRuntime, // ONNX Runtime embeddings via the daemon/plugin model provider path
     };
     Backend backend = Backend::Daemon; // Daemon-only embedding path
+    // Set when a higher-level ResolvedEmbeddingConfig already applied compatibility overlays.
+    // The default preserves the public constructor's historical ambient override behavior.
+    bool backend_is_resolved = false;
 
     enum class SimeonEncoderProfile {
         Configurable,

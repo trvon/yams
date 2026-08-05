@@ -1,9 +1,10 @@
 #include <yams/daemon/components/EmbeddingLifecycleManager.h>
 
+#include <yams/config/config_helpers.h>
+
 #include <algorithm>
 #include <charconv>
 #include <chrono>
-#include <cstdlib>
 #include <string_view>
 
 #include <spdlog/spdlog.h>
@@ -31,8 +32,8 @@ std::optional<int> parseInt(std::string_view raw) {
 
 int resolveEmbeddingLoadTimeoutMs(int requestedMs) {
     int timeoutMs = requestedMs > 0 ? requestedMs : 30000;
-    if (const char* env = std::getenv("YAMS_MODEL_LOAD_TIMEOUT_MS")) {
-        if (auto parsed = parseInt(env)) {
+    if (const auto environment = yams::config::getenv_nonempty("YAMS_MODEL_LOAD_TIMEOUT_MS")) {
+        if (auto parsed = parseInt(*environment)) {
             timeoutMs = *parsed;
         }
     }
@@ -229,8 +230,14 @@ EmbeddingLifecycleManager::ensureModelReadySync(const std::string& requestedMode
 }
 
 std::string EmbeddingLifecycleManager::resolvePreferredModel() const {
-    if (!deps_.config || !deps_.dataDir)
+    if (deps_.getEmbeddingConfig) {
+        if (const auto config = deps_.getEmbeddingConfig()) {
+            return config->preferredModel;
+        }
+    }
+    if (!deps_.config || !deps_.dataDir) {
         return {};
+    }
     return ConfigResolver::resolvePreferredModel(*deps_.config, *deps_.dataDir);
 }
 
@@ -249,8 +256,14 @@ std::size_t EmbeddingLifecycleManager::getEmbeddingDimension() const {
 }
 
 bool EmbeddingLifecycleManager::detectPreloadFlag() const {
-    if (!deps_.config)
+    if (deps_.getEmbeddingConfig) {
+        if (const auto config = deps_.getEmbeddingConfig()) {
+            return config->preloadOnStartup;
+        }
+    }
+    if (!deps_.config) {
         return false;
+    }
     return ConfigResolver::detectEmbeddingPreloadFlag(*deps_.config);
 }
 

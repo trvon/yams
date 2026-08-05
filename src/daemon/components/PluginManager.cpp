@@ -818,7 +818,9 @@ Result<size_t> PluginManager::autoloadPlugins() {
         bool skipAbiModelProviders = false;
         std::string inProcessBackend;
         {
-            auto backend = ConfigResolver::resolveEmbeddingBackend("auto");
+            const auto backend = deps_.resolveEmbeddingBackend
+                                     ? deps_.resolveEmbeddingBackend()
+                                     : ConfigResolver::resolveEmbeddingBackend("auto");
             if (backend != "auto" && backend != "daemon" && backend != "onnxruntime") {
                 const auto known = getRegisteredProviders();
                 if (std::find(known.begin(), known.end(), backend) != known.end()) {
@@ -1039,7 +1041,9 @@ Result<bool> PluginManager::adoptModelProvider(const std::string& preferredName)
             return true;
         };
 
-        const auto configuredBackend = ConfigResolver::resolveEmbeddingBackend("auto");
+        const auto configuredBackend = deps_.resolveEmbeddingBackend
+                                           ? deps_.resolveEmbeddingBackend()
+                                           : ConfigResolver::resolveEmbeddingBackend("auto");
         const bool onnxRuntimeBackendSelected = configuredBackend == "onnxruntime";
         const bool inProcessBackendSelected =
             configuredBackend != "auto" && configuredBackend != "daemon" &&

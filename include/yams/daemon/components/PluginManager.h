@@ -73,8 +73,9 @@ public:
         /// Resolved data directory
         std::filesystem::path dataDir;
 
-        /// Function to resolve preferred model name
+        /// Functions backed by the immutable daemon embedding snapshot.
         std::function<std::string()> resolvePreferredModel;
+        std::function<std::string()> resolveEmbeddingBackend;
 
         /// Optional: shared plugin host (if null, PluginManager creates its own)
         AbiPluginHost* sharedPluginHost{nullptr};

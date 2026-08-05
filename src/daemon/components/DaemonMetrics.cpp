@@ -2048,6 +2048,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
     // Embedding runtime details (best-effort)
     try {
         if (services_) {
+            const auto embeddingPolicy = services_->getResolvedEmbeddingConfig();
             auto provider = services_->getModelProvider();
             if (provider) {
                 try {
@@ -2066,8 +2067,12 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                         "[DaemonMetrics] best-effort metric probe failed with unknown exception");
                 }
             }
-            // Backend label and model details
+            // Backend label and model details. Before a provider is active, report the immutable
+            // startup policy instead of an unrelated ambient re-resolution.
             out.embeddingModel = services_->getEmbeddingModelName();
+            if (out.embeddingModel.empty() && embeddingPolicy) {
+                out.embeddingModel = embeddingPolicy->preferredModel;
+            }
             try {
                 auto prov = services_->getModelProvider();
                 if (prov && prov->isAvailable()) {
@@ -2103,11 +2108,14 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                         }
                     }
                 } else {
-                    out.embeddingBackend = "unknown";
+                    out.embeddingBackend = embeddingPolicy ? embeddingPolicy->backend : "unknown";
                 }
             } catch (...) {
                 spdlog::debug(
                     "[DaemonMetrics] best-effort metric probe failed with unknown exception");
+            }
+            if (out.embeddingDim == 0 && embeddingPolicy && embeddingPolicy->dimension) {
+                out.embeddingDim = static_cast<std::uint32_t>(*embeddingPolicy->dimension);
             }
         }
     } catch (...) {

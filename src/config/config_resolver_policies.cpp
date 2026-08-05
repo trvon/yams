@@ -42,6 +42,20 @@ std::optional<float> parseTomlFloat(const std::string& s) {
     return static_cast<float>(*parsed);
 }
 
+std::string normalizeEmbeddingBackend(std::string backend) {
+    for (auto& c : backend) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    if (backend == "onnx" || backend == "onnxruntime" || backend == "onnx-runtime" ||
+        backend == "ort" || backend == "local_onnx") {
+        return "onnxruntime";
+    }
+    if (backend == "hybrid" || backend == "local") {
+        return "daemon";
+    }
+    return backend;
+}
+
 } // namespace
 
 bool ConfigResolver::envTruthy(const char* value) {
@@ -66,21 +80,8 @@ ConfigResolver::parseSimpleTomlFlat(const std::filesystem::path& path) {
 }
 
 std::string ConfigResolver::resolveEmbeddingBackend(const std::string& defaultValue) {
-    auto normalize = [](std::string s) {
-        for (auto& c : s)
-            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        if (s == "onnx" || s == "onnxruntime" || s == "onnx-runtime" || s == "ort" ||
-            s == "local_onnx") {
-            return std::string("onnxruntime");
-        }
-        if (s == "hybrid" || s == "local") {
-            return std::string("daemon");
-        }
-        return s;
-    };
-
     if (auto envp = yams::config::getenv_copy("YAMS_EMBED_BACKEND"); !envp.empty()) {
-        return normalize(std::move(envp));
+        return normalizeEmbeddingBackend(std::move(envp));
     }
 
     try {
@@ -90,14 +91,14 @@ std::string ConfigResolver::resolveEmbeddingBackend(const std::string& defaultVa
             auto kv = yams::config::parse_simple_toml(cfgPath);
             auto it = kv.find("embeddings.backend");
             if (it != kv.end() && !it->second.empty()) {
-                return normalize(it->second);
+                return normalizeEmbeddingBackend(it->second);
             }
         }
     } catch (const std::exception& e) {
         spdlog::debug("Error reading config for embedding backend: {}", e.what());
     }
 
-    return normalize(defaultValue);
+    return normalizeEmbeddingBackend(defaultValue);
 }
 
 ConfigResolver::SimeonEncoderPolicy ConfigResolver::resolveSimeonEncoderPolicy() {
@@ -159,13 +160,32 @@ ConfigResolver::EmbeddingRuntimePolicy ConfigResolver::resolveEmbeddingRuntimePo
         namespace fs = std::filesystem;
         fs::path cfgPath = resolveDefaultConfigPath();
         if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            auto kv = yams::config::parse_simple_toml(cfgPath);
-            if (auto it = kv.find("embeddings.runtime.backend");
-                it != kv.end() && !it->second.empty())
-                policy.backend = it->second;
-            if (auto it = kv.find("embeddings.runtime.preferred_model");
-                it != kv.end() && !it->second.empty())
-                policy.preferredModel = it->second;
+            const auto kv = yams::config::parse_simple_toml(cfgPath);
+            const auto canonicalBackend = kv.find("embeddings.backend");
+            const auto compatibilityBackend = kv.find("embeddings.runtime.backend");
+            if (canonicalBackend != kv.end() && !canonicalBackend->second.empty()) {
+                policy.backend = normalizeEmbeddingBackend(canonicalBackend->second);
+                if (compatibilityBackend != kv.end() && !compatibilityBackend->second.empty() &&
+                    *policy.backend != normalizeEmbeddingBackend(compatibilityBackend->second)) {
+                    spdlog::warn("embeddings.backend overrides conflicting compatibility key "
+                                 "embeddings.runtime.backend");
+                }
+            } else if (compatibilityBackend != kv.end() && !compatibilityBackend->second.empty()) {
+                policy.backend = normalizeEmbeddingBackend(compatibilityBackend->second);
+            }
+
+            const auto canonicalModel = kv.find("embeddings.preferred_model");
+            const auto compatibilityModel = kv.find("embeddings.runtime.preferred_model");
+            if (canonicalModel != kv.end() && !canonicalModel->second.empty()) {
+                policy.preferredModel = canonicalModel->second;
+                if (compatibilityModel != kv.end() && !compatibilityModel->second.empty() &&
+                    *policy.preferredModel != compatibilityModel->second) {
+                    spdlog::warn("embeddings.preferred_model overrides conflicting compatibility "
+                                 "key embeddings.runtime.preferred_model");
+                }
+            } else if (compatibilityModel != kv.end() && !compatibilityModel->second.empty()) {
+                policy.preferredModel = compatibilityModel->second;
+            }
             if (auto it = kv.find("embeddings.runtime.batch_size"); it != kv.end())
                 if (auto v = parseTomlU32(it->second))
                     policy.batchSize = static_cast<std::size_t>(*v);
@@ -182,8 +202,9 @@ ConfigResolver::EmbeddingRuntimePolicy ConfigResolver::resolveEmbeddingRuntimePo
     }
 
     // Env overrides (preserve existing test/CI overlays)
-    if (auto v = yams::config::getenv_nonempty("YAMS_EMBED_BACKEND"))
-        policy.backend = std::move(v);
+    if (auto v = yams::config::getenv_nonempty("YAMS_EMBED_BACKEND")) {
+        policy.backend = normalizeEmbeddingBackend(std::move(*v));
+    }
     if (auto v = yams::config::getenv_nonempty("YAMS_PREFERRED_MODEL"))
         policy.preferredModel = std::move(v);
     if (auto v = yams::config::getenv_nonempty("YAMS_EMBED_BATCH")) {
@@ -206,6 +227,14 @@ ConfigResolver::EmbeddingRuntimePolicy ConfigResolver::resolveEmbeddingRuntimePo
         } catch (...) {
             spdlog::debug("config: failed to parse YAMS_REPAIR_LOCK_TIMEOUT_MS uint64");
         }
+    }
+
+    if (policy.backend && *policy.backend == "simeon" && policy.preferredModel &&
+        *policy.preferredModel != "simeon" && *policy.preferredModel != "simeon-default") {
+        spdlog::warn("model-free simeon backend ignores configured ONNX preferred model '{}'; "
+                     "using simeon-default",
+                     *policy.preferredModel);
+        policy.preferredModel = "simeon-default";
     }
 
     return policy;

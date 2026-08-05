@@ -56,6 +56,9 @@ public:
         /// Function to get embedding dimension from generator
         std::function<size_t()> getEmbeddingDimension;
 
+        /// Config/env fallback captured by the immutable daemon embedding snapshot.
+        std::function<std::optional<size_t>()> resolveConfiguredDimension;
+
         /// Suppress startup/search-index build work while profiling allocator overhead.
         bool suppressVectorIndexBuild{false};
     };

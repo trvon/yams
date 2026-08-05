@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <future>
 #include <memory>
@@ -55,6 +56,8 @@ template <typename T> void drainQueue(const std::shared_ptr<SpscQueue<T>>& q) {
 }
 
 struct ServiceManagerFixture {
+    yams::test::ScopedEnvVar disableSessionWatcher_{"YAMS_DISABLE_SESSION_WATCHER",
+                                                    std::optional<std::string>{"true"}};
     DaemonConfig config_;
     StateComponent state_;
     DaemonLifecycleFsm lifecycleFsm_;
@@ -71,6 +74,8 @@ struct ServiceManagerFixture {
         config_.socketPath = testDir_ / "daemon.sock";
         config_.pidFile = testDir_ / "daemon.pid";
         config_.logFile = testDir_ / "daemon.log";
+        config_.configFilePath = testDir_ / "config.toml";
+        std::ofstream(config_.configFilePath) << "# isolated repair-service test config\n";
         config_.autoLoadPlugins = false;
         config_.enableAutoRepair = false;
         fs::create_directories(config_.dataDir);

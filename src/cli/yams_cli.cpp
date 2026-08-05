@@ -16,6 +16,8 @@
 #include <yams/config/config_migration.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
+#include <yams/daemon/components/ConfigResolver.h>
+#include <yams/daemon/daemon.h>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/metadata/database.h>
@@ -27,7 +29,6 @@
 #include <yams/vector/dim_resolver.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/embedding_service.h>
-#include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
 #include <yams/version.hpp>
 // Error hints for actionable error messages
@@ -748,21 +749,7 @@ std::shared_ptr<daemon::IModelProvider> YamsCLI::getLocalModelProvider() {
 
     std::string preferredModel = embeddingModelName_;
     if (preferredModel.empty()) {
-        try {
-            auto cfgPath = getConfigPath();
-            if (fs::exists(cfgPath)) {
-                auto cfg = yams::config::parse_simple_toml(cfgPath);
-                auto it = cfg.find("embeddings.preferred_model");
-                if (it != cfg.end() && !it->second.empty()) {
-                    preferredModel = it->second;
-                }
-            }
-        } catch (...) {
-            spdlog::debug("Unable to read the preferred embedding model from config");
-        }
-    }
-    if (preferredModel.empty()) {
-        preferredModel = yams::config::getenv_copy("YAMS_PREFERRED_MODEL");
+        preferredModel = getEmbeddingPolicy().preferredModel;
     }
 
     auto tryAdoptProvider =
@@ -907,7 +894,7 @@ Result<void> YamsCLI::initializeStorage() {
         }
 
         if (storageDecision.value().activeDataDir != dataPath_) {
-            dataPath_ = storageDecision.value().activeDataDir;
+            setDataPath(storageDecision.value().activeDataDir);
         }
 
         if (storageDecision.value().fallbackTriggered) {
@@ -1039,55 +1026,10 @@ Result<void> YamsCLI::initializeStorage() {
 
         // Initialize vector support (dimension detection, embedding generator, vector database)
         try {
-            // Try to detect proper dimension from existing vectors or available models
-            size_t vectorDimension = 0; // 0 means "not yet determined"
-
-            // First, check if vectors.db exists and read stored dimension directly
-            fs::path vectorDbPath = dataPath_ / "vectors.db";
-            if (fs::exists(vectorDbPath)) {
-                try {
-                    vector::SqliteVecBackend be;
-                    if (be.initialize(vectorDbPath.string())) {
-                        (void)be.ensureVecLoaded();
-                        if (auto sdim = be.getStoredEmbeddingDimension()) {
-                            if (*sdim > 0)
-                                vectorDimension = *sdim;
-                        }
-                        be.close();
-                    }
-                } catch (const std::exception& e) {
-                    spdlog::debug("Could not read stored vector dimension: {}", e.what());
-                }
-            }
-
-            // If no stored dim was found, prefer config > env > generator > model heuristic
-            if (vectorDimension == 0) {
-                try {
-                    auto cfgPath = getConfigPath();
-                    if (fs::exists(cfgPath)) {
-                        auto cfg = yams::config::parse_simple_toml(cfgPath);
-                        auto it = cfg.find("embeddings.embedding_dim");
-                        if (it != cfg.end()) {
-                            try {
-                                vectorDimension = static_cast<size_t>(std::stoul(it->second));
-                            } catch (...) {
-                                spdlog::debug("Ignoring invalid embeddings.embedding_dim value");
-                            }
-                        }
-                    }
-                } catch (...) {
-                    spdlog::debug("Unable to read embedding dimension from config");
-                }
-            }
-            if (vectorDimension == 0) {
-                if (const auto envd = yams::config::getenv_copy("YAMS_EMBED_DIM"); !envd.empty()) {
-                    try {
-                        vectorDimension = static_cast<size_t>(std::stoul(envd));
-                    } catch (...) {
-                        spdlog::debug("Ignoring invalid YAMS_EMBED_DIM value");
-                    }
-                }
-            }
+            // Resolve embedding identity and persisted/configured dimension once for this CLI
+            // storage lifecycle. Subsequent generator/model probes only fill unresolved fields.
+            const auto& embeddingPolicy = getEmbeddingPolicy();
+            size_t vectorDimension = embeddingPolicy.dimension.value_or(0);
             if (vectorDimension == 0) {
                 try {
                     if (auto emb = getEmbeddingGenerator()) {
@@ -1103,22 +1045,8 @@ Result<void> YamsCLI::initializeStorage() {
             // If still unknown, detect from preferred model or available models
             fs::path modelsPath = dataPath_ / "models";
             if (vectorDimension == 0 && fs::exists(modelsPath)) {
-                // Check preferred model first
-                std::string preferredModel;
-                try {
-                    auto cfgPath = getConfigPath();
-                    if (fs::exists(cfgPath)) {
-                        auto cfg = yams::config::parse_simple_toml(cfgPath);
-                        auto it = cfg.find("embeddings.preferred_model");
-                        if (it != cfg.end() && !it->second.empty())
-                            preferredModel = it->second;
-                    }
-                } catch (...) {
-                    spdlog::debug("Unable to read preferred model while resolving dimension");
-                }
-                if (preferredModel.empty()) {
-                    preferredModel = yams::config::getenv_copy("YAMS_PREFERRED_MODEL");
-                }
+                // Check the lifecycle snapshot's preferred model first.
+                const std::string& preferredModel = embeddingPolicy.preferredModel;
 
                 // Try preferred model dimension from config.json or name heuristic
                 if (!preferredModel.empty() && fs::exists(modelsPath / preferredModel)) {
@@ -1175,24 +1103,10 @@ Result<void> YamsCLI::initializeStorage() {
 
                     // Check for specific models in priority order
                     std::string selectedModel;
-                    // 1) Preferred from config ([embeddings].preferred_model) or env
-                    try {
-                        std::string pref;
-                        auto cfgPath = getConfigPath();
-                        if (fs::exists(cfgPath)) {
-                            auto cfg = yams::config::parse_simple_toml(cfgPath);
-                            auto it = cfg.find("embeddings.preferred_model");
-                            if (it != cfg.end() && !it->second.empty())
-                                pref = it->second;
-                        }
-                        if (pref.empty()) {
-                            pref = yams::config::getenv_copy("YAMS_PREFERRED_MODEL");
-                        }
-                        if (!pref.empty() && fs::exists(modelsPath / pref / "model.onnx")) {
-                            selectedModel = pref;
-                        }
-                    } catch (...) {
-                        spdlog::debug("Unable to resolve preferred local embedding model");
+                    // 1) Preferred model from the lifecycle snapshot.
+                    if (!embeddingPolicy.preferredModel.empty() &&
+                        fs::exists(modelsPath / embeddingPolicy.preferredModel / "model.onnx")) {
+                        selectedModel = embeddingPolicy.preferredModel;
                     }
 
                     // 2) Known models (MiniLM/mpnet/nomic)
@@ -1238,8 +1152,12 @@ Result<void> YamsCLI::initializeStorage() {
                         embConfig.max_sequence_length = 512;
                         embConfig.normalize_embeddings = true;
 
-                        // Configure backend selection (daemon-only embedding path)
-                        embConfig.backend = vector::EmbeddingConfig::Backend::Daemon;
+                        // Configure backend from the lifecycle snapshot. The model-free path
+                        // normally has no ONNX model directory and is provided by the daemon.
+                        embConfig.backend = embeddingPolicy.isTrainingFree
+                                                ? vector::EmbeddingConfig::Backend::Simeon
+                                                : vector::EmbeddingConfig::Backend::Daemon;
+                        embConfig.backend_is_resolved = true;
 
                         // Additional daemon settings
                         embConfig.daemon_timeout = std::chrono::milliseconds(5000);
@@ -1290,7 +1208,7 @@ Result<void> YamsCLI::initializeStorage() {
             if (contentStore_ && metadataRepo_) {
                 try {
                     auto embeddingService = std::make_unique<vector::EmbeddingService>(
-                        contentStore_, metadataRepo_, dataPath_);
+                        contentStore_, metadataRepo_, dataPath_, embeddingPolicy_);
 
                     if (embeddingService->isAvailable()) {
                         // Trigger repair thread if there are missing embeddings
@@ -1539,6 +1457,20 @@ YamsCLI::CompressionConfig YamsCLI::loadCompressionConfig() const {
 fs::path YamsCLI::getConfigPath() const {
     // Use platform-specific config path (XDG_CONFIG_HOME on Unix, APPDATA on Windows)
     return yams::config::get_config_path();
+}
+
+const daemon::ResolvedEmbeddingConfig& YamsCLI::getResolvedEmbeddingConfig() {
+    return getEmbeddingPolicy();
+}
+
+const daemon::ResolvedEmbeddingConfig& YamsCLI::getEmbeddingPolicy() {
+    if (!embeddingPolicy_) {
+        daemon::DaemonConfig config;
+        config.configFilePath = getConfigPath();
+        embeddingPolicy_ = std::make_shared<const daemon::ResolvedEmbeddingConfig>(
+            daemon::ConfigResolver::resolveEmbeddingConfig(config, dataPath_));
+    }
+    return *embeddingPolicy_;
 }
 
 void YamsCLI::checkConfigMigration() {

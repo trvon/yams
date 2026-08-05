@@ -2201,6 +2201,12 @@ RequestHandler::stream_chunks(boost::asio::local::stream_protocol::socket& socke
                 try {
                     repairConfig.dataPath = sm->getResolvedDataDir();
                 } catch (...) {
+                    spdlog::debug("Embedding repair: resolved data directory unavailable");
+                }
+                if (const auto policy = sm->getResolvedEmbeddingConfig()) {
+                    repairConfig.preferredModel = policy->preferredModel;
+                    repairConfig.repairLockTimeoutMs = policy->runtime.repairLockTimeoutMs.value_or(
+                        repairConfig.repairLockTimeoutMs);
                 }
                 if (requestContext) {
                     repairConfig.cancelRequested = &requestContext->canceled;

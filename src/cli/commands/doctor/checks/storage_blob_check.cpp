@@ -4,6 +4,8 @@
 #include <yams/cli/yams_cli.h>
 #include <yams/metadata/database.h>
 
+#include <spdlog/spdlog.h>
+
 #include <filesystem>
 #include <iomanip>
 #include <set>
@@ -77,6 +79,7 @@ StorageBlobCheck::Result StorageBlobCheck::execute(const DoctorContext& ctx) {
                 }
             }
         } catch (...) {
+            spdlog::debug("Storage blob check: metadata document query failed");
         }
 
     // ── Detect orphaned storage objects (no corresponding metadata doc) ──
@@ -110,6 +113,7 @@ StorageBlobCheck::Result StorageBlobCheck::execute(const DoctorContext& ctx) {
                 }
             }
         } catch (...) {
+            spdlog::debug("Storage blob check: orphan reference query failed");
         }
     }
 

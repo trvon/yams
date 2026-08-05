@@ -1,3 +1,4 @@
+#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/extraction/extraction_util.h>
@@ -27,8 +28,9 @@
 namespace yams::repair {
 
 namespace {
-constexpr size_t kMaxTextForEmbeddingBytes = 1'000'000;               // 1MB (advisory)
-constexpr size_t kMaxTextToPersistInMetadataBytes = 16 * 1024 * 1024; // 16 MiB (best-effort)
+constexpr size_t kMaxTextForEmbeddingBytes = 1'000'000; // 1MB (advisory)
+constexpr size_t kMaxTextToPersistInMetadataBytes =
+    size_t{16} * 1024 * 1024; // 16 MiB (best-effort)
 
 bool isLikelyTextualMime(std::string_view mimeType) {
     return mimeType.starts_with("text/") || mimeType == "application/json" ||
@@ -97,7 +99,7 @@ public:
                         _write(fd_, stamp.data(), static_cast<unsigned int>(stamp.size()));
                         _lseek(fd_, 0, SEEK_SET);
                     } catch (...) {
-                        // Intentional best-effort path; keep the primary operation unaffected.
+                        spdlog::debug("Embedding repair: Windows lock diagnostic stamp failed");
                     }
                 }
             } else {
@@ -128,7 +130,7 @@ public:
                     (void)::write(fd_, stamp.data(), stamp.size());
                     (void)lseek(fd_, 0, SEEK_SET);
                 } catch (...) {
-                    // Intentional best-effort path; keep the primary operation unaffected.
+                    spdlog::debug("Embedding repair: POSIX lock diagnostic stamp failed");
                 }
             }
         }
@@ -234,7 +236,7 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
             return Error{ErrorCode::InvalidState, msg};
         }
     } catch (...) {
-        // Intentional best-effort path; keep the primary operation unaffected.
+        spdlog::debug("Embedding repair: existing vector dimension guard probe failed");
     }
 
     // Get documents to process
@@ -532,16 +534,9 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
 
             // Insert once per batch under a bounded advisory lock.
             const auto lockPath = config.dataPath / "vectors.db.lock";
-            auto now = std::chrono::steady_clock::now();
-            uint64_t timeout_ms = 10 * 60 * 1000ULL; // default 10 minutes
-            if (const char* env_ms = std::getenv("YAMS_REPAIR_LOCK_TIMEOUT_MS")) {
-                try {
-                    timeout_ms = std::stoull(std::string(env_ms));
-                } catch (...) {
-                    // Intentional best-effort path; keep the primary operation unaffected.
-                }
-            }
-            const auto deadline = now + std::chrono::milliseconds(timeout_ms);
+            const auto now = std::chrono::steady_clock::now();
+            const auto timeoutMs = std::max<std::uint64_t>(1, config.repairLockTimeoutMs);
+            const auto deadline = now + std::chrono::milliseconds(timeoutMs);
             uint64_t sleep_ms = 50;
             bool inserted = false;
             while (!inserted) {
@@ -731,10 +726,11 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
     auto provider = std::make_shared<GeneratorModelProvider>(embeddingGenerator);
     std::shared_ptr<daemon::IModelProvider> modelProvider = provider;
 
-    // Use a placeholder model name since EmbeddingGenerator doesn't expose it
-    std::string modelName = "default";
-    if (const char* env = std::getenv("YAMS_PREFERRED_MODEL")) {
-        modelName = env;
+    // Use the command-local effective policy when the caller did not select a model explicitly.
+    std::string modelName = config.preferredModel;
+    if (modelName.empty()) {
+        const auto runtimePolicy = daemon::ConfigResolver::resolveEmbeddingRuntimePolicy();
+        modelName = runtimePolicy.preferredModel.value_or("default");
     }
 
     return repairMissingEmbeddings(contentStore, metadataRepo, modelProvider, modelName, config,

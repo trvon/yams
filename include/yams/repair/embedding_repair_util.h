@@ -34,8 +34,9 @@ struct EmbeddingRepairStats {
 
 struct EmbeddingRepairConfig {
     size_t batchSize = 32;
+    std::uint64_t repairLockTimeoutMs = 10ULL * 60 * 1000;
     bool skipExisting = true;
-    std::string preferredModel; // Empty = auto-detect
+    std::string preferredModel; // Empty = effective embedding policy
     std::filesystem::path dataPath;
     bool verbose = false;
     // Optional cancellation flag (checked best-effort between operations)

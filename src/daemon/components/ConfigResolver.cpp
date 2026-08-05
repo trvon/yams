@@ -7,6 +7,7 @@
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/daemon.h>
+#include <yams/vector/dim_resolver.h>
 #include <yams/vector/sqlite_vec_backend.h>
 
 #include <nlohmann/json.hpp>
@@ -211,33 +212,7 @@ void ConfigResolver::writeVectorSentinel(const std::filesystem::path& dataDir, s
 }
 
 bool ConfigResolver::detectEmbeddingPreloadFlag(const DaemonConfig& config) {
-    bool flag = false;
-
-    // Config file precedence
-    std::filesystem::path cfgPath = config.configFilePath;
-    if (cfgPath.empty())
-        cfgPath = resolveDefaultConfigPath();
-    if (!cfgPath.empty()) {
-        try {
-            auto kv = yams::config::parse_simple_toml(cfgPath);
-            auto it = kv.find("embeddings.preload_on_startup");
-            if (it != kv.end()) {
-                std::string lower = it->second;
-                std::transform(lower.begin(), lower.end(), lower.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                flag = (lower == "1" || lower == "true" || lower == "yes" || lower == "on");
-            }
-        } catch (const std::exception& e) {
-            spdlog::debug("[Warmup] failed to read config for preload flag: {}", e.what());
-        }
-    }
-
-    // Environment override wins only when it is a valid boolean.
-    if (auto value = yams::config::read_env_bool("YAMS_EMBED_PRELOAD_ON_STARTUP").value) {
-        flag = *value;
-    }
-
-    return flag;
+    return resolveEmbeddingConfig(config, {}).preloadOnStartup;
 }
 
 ConfigResolver::EmbeddingSelectionPolicy ConfigResolver::resolveEmbeddingSelectionPolicy() {
@@ -512,212 +487,327 @@ ConfigResolver::EmbeddingDispatchPolicy ConfigResolver::resolveEmbeddingDispatch
 
 std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,
                                                   const std::filesystem::path& resolvedDataDir) {
-    std::string preferred;
-
-    // Returns true if the model name is acceptable as the preferred model for
-    // the currently-resolved embedding backend.  simeon sentinels are only
-    // valid when the backend is actually simeon (in-process, model-free).
-    auto acceptAsPreferred = [&](const std::string& model) -> bool {
-        if (model != "simeon-default" && model != "simeon")
-            return true;
-        if (resolveEmbeddingBackend("auto") == "simeon")
-            return true;
-        spdlog::debug("Model '{}' is a simeon sentinel but backend is not simeon; "
-                      "skipping",
-                      model);
-        return false;
-    };
-
-    if (auto configured = yams::config::getenv_nonempty("YAMS_PREFERRED_MODEL")) {
-        preferred = *configured;
-        spdlog::debug("Preferred model from environment: {}", preferred);
-        if (acceptAsPreferred(preferred))
-            return preferred;
-        preferred.clear();
-    }
-
-    try {
-        namespace fs = std::filesystem;
-        fs::path cfgPath =
-            !config.configFilePath.empty() ? config.configFilePath : resolveDefaultConfigPath();
-        if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            // Flat parse for explicit keys
-            auto kv = yams::config::parse_simple_toml(cfgPath);
-            auto it = kv.find("embeddings.preferred_model");
-            if (it != kv.end() && !it->second.empty()) {
-                preferred = it->second;
-                spdlog::debug("Preferred model from config: {}", preferred);
-                if (acceptAsPreferred(preferred))
-                    return preferred;
-                preferred.clear();
-            }
-
-            // daemon.models.preload_models -> take the first known value
-            auto preload = kv.find("daemon.models.preload_models");
-            if (preload != kv.end()) {
-                const auto& v = preload->second;
-                if (v.find("simeon-default") != std::string::npos) {
-                    preferred = "simeon-default";
-                } else if (v.find("embeddinggemma-300m") != std::string::npos) {
-                    preferred = "embeddinggemma-300m";
-                } else if (v.find("all-MiniLM-L6-v2") != std::string::npos) {
-                    preferred = "all-MiniLM-L6-v2";
-                } else if (v.find("all-mpnet-base-v2") != std::string::npos) {
-                    preferred = "all-mpnet-base-v2";
-                }
-                if (!preferred.empty()) {
-                    spdlog::debug("Preferred model from config preload list: {}", preferred);
-                    if (acceptAsPreferred(preferred))
-                        return preferred;
-                    preferred.clear();
-                }
-            }
-
-            // Fallback: scan lines to catch cases the flat parser misses
-            std::ifstream in(cfgPath);
-            std::string line;
-            auto trim = [](std::string& t) {
-                if (t.empty())
-                    return;
-                t.erase(0, t.find_first_not_of(" \t"));
-                auto p = t.find_last_not_of(" \t");
-                if (p != std::string::npos)
-                    t.erase(p + 1);
-            };
-
-            while (std::getline(in, line)) {
-                std::string l = line;
-                trim(l);
-                if (l.empty() || l[0] == '#')
-                    continue;
-
-                if (l.find("embeddings.preferred_model") != std::string::npos) {
-                    auto eq = l.find('=');
-                    if (eq != std::string::npos) {
-                        std::string v = l.substr(eq + 1);
-                        trim(v);
-                        if (!v.empty() && v.front() == '"' && v.back() == '"')
-                            v = v.substr(1, v.size() - 2);
-                        preferred = v;
-                    }
-                    if (!preferred.empty()) {
-                        spdlog::debug("Preferred model from config: {}", preferred);
-                        if (acceptAsPreferred(preferred))
-                            return preferred;
-                        preferred.clear();
-                    }
-                }
-                // daemon.models.preload_models -> take the first
-                if (l.find("daemon.models.preload_models") != std::string::npos) {
-                    auto eq = l.find('=');
-                    if (eq != std::string::npos) {
-                        std::string v = l.substr(eq + 1);
-                        trim(v);
-                        if (v.find("simeon-default") != std::string::npos) {
-                            preferred = "simeon-default";
-                        } else if (v.find("embeddinggemma-300m") != std::string::npos) {
-                            preferred = "embeddinggemma-300m";
-                        } else if (v.find("all-MiniLM-L6-v2") != std::string::npos) {
-                            preferred = "all-MiniLM-L6-v2";
-                        } else if (v.find("all-mpnet-base-v2") != std::string::npos) {
-                            preferred = "all-mpnet-base-v2";
-                        }
-                    }
-                    if (!preferred.empty()) {
-                        spdlog::debug("Preferred model from config preload list: {}", preferred);
-                        if (acceptAsPreferred(preferred))
-                            return preferred;
-                        preferred.clear();
-                    }
-                }
-            }
-        }
-    } catch (const std::exception& e) {
-        spdlog::debug("Error reading config for preferred model: {}", e.what());
-    }
-
-    // If simeon is the selected backend and nothing else named a preferred
-    // model above, return the simeon-default sentinel instead of scanning
-    // the ONNX models directory (which would pick an incompatible model).
-    if (resolveEmbeddingBackend("auto") == "simeon") {
-        spdlog::debug("Preferred model defaulted to simeon-default (backend=simeon)");
-        return "simeon-default";
-    }
-
-    try {
-        if (!resolvedDataDir.empty()) {
-            namespace fs = std::filesystem;
-            fs::path models = resolvedDataDir / "models";
-            std::error_code ec;
-            if (fs::exists(models, ec) && fs::is_directory(models, ec)) {
-                // Use the first available model with model.onnx
-                for (const auto& e : fs::directory_iterator(models, ec)) {
-                    if (e.is_directory() && fs::exists(e.path() / "model.onnx", ec)) {
-                        preferred = e.path().filename().string();
-                        spdlog::debug("Using first available model: {}", preferred);
-                        return preferred;
-                    }
-                }
-            }
-        }
-    } catch (const std::exception& e) {
-        spdlog::debug("Error auto-detecting models: {}", e.what());
-    }
-
-    return preferred;
+    return resolveEmbeddingConfig(config, resolvedDataDir).preferredModel;
 }
 
 ResolvedEmbeddingConfig
 ConfigResolver::resolveEmbeddingConfig(const DaemonConfig& config,
                                        const std::filesystem::path& resolvedDataDir) {
+    namespace fs = std::filesystem;
+
     ResolvedEmbeddingConfig result;
-    result.backend = resolveEmbeddingBackend("auto");
-    result.isTrainingFree = (result.backend == "simeon");
-    result.preferredModel = resolvePreferredModel(config, resolvedDataDir);
+    result.effectiveConfigPath =
+        !config.configFilePath.empty() ? config.configFilePath : resolveDefaultConfigPath();
 
-    auto isSimeonSentinel = [](const std::string& s) {
-        return s == "simeon-default" || s == "simeon";
-    };
-
-    if (result.isTrainingFree && !result.preferredModel.empty() &&
-        !isSimeonSentinel(result.preferredModel)) {
-        spdlog::warn("[ConfigResolver] backend '{}' is model-free but preferred_model '{}' "
-                     "is an ONNX model name; using 'simeon-default' instead",
-                     result.backend, result.preferredModel);
-        result.warnings.push_back(fmt::format(
-            "backend '{}' is model-free but preferred_model '{}' is an ONNX model name; "
-            "using 'simeon-default' instead",
-            result.backend, result.preferredModel));
-        result.preferredModel = "simeon-default";
+    std::map<std::string, std::string> values;
+    if (!result.effectiveConfigPath.empty()) {
+        try {
+            values = yams::config::parse_simple_toml(result.effectiveConfigPath);
+        } catch (const std::exception& error) {
+            result.warnings.push_back(fmt::format("unable to read embedding config '{}': {}",
+                                                  result.effectiveConfigPath.string(),
+                                                  error.what()));
+        }
     }
 
-    if (!result.isTrainingFree && isSimeonSentinel(result.preferredModel) &&
-        result.backend != "simeon") {
-        spdlog::warn("[ConfigResolver] preferred_model '{}' is a simeon sentinel but "
-                     "backend is '{}'; model may not be loadable",
-                     result.preferredModel, result.backend);
-        result.warnings.push_back(
-            fmt::format("preferred_model '{}' is a simeon sentinel but backend is '{}'; "
-                        "model may not be loadable",
-                        result.preferredModel, result.backend));
+    const auto configured = [&](std::string_view key) -> std::optional<std::string> {
+        const auto it = values.find(std::string(key));
+        if (it == values.end() || it->second.empty()) {
+            return std::nullopt;
+        }
+        return it->second;
+    };
+    const auto normalizeBackend = [](std::string backend) {
+        std::transform(backend.begin(), backend.end(), backend.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (backend == "onnx" || backend == "onnxruntime" || backend == "onnx-runtime" ||
+            backend == "ort" || backend == "local_onnx") {
+            return std::string{"onnxruntime"};
+        }
+        if (backend == "hybrid" || backend == "local") {
+            return std::string{"daemon"};
+        }
+        return backend;
+    };
+    const auto noteConflict = [&](std::string_view field, std::string_view authoritativeKey,
+                                  std::string_view authoritativeValue,
+                                  std::string_view compatibilityKey,
+                                  std::string_view compatibilityValue) {
+        if (authoritativeValue == compatibilityValue) {
+            return;
+        }
+        result.warnings.push_back(fmt::format(
+            "embedding {} conflict: {}='{}' overrides compatibility key {}='{}'", field,
+            authoritativeKey, authoritativeValue, compatibilityKey, compatibilityValue));
+    };
+
+    const auto canonicalBackend = configured("embeddings.backend");
+    const auto runtimeBackend = configured("embeddings.runtime.backend");
+    if (canonicalBackend && runtimeBackend) {
+        noteConflict("backend", "embeddings.backend", normalizeBackend(*canonicalBackend),
+                     "embeddings.runtime.backend", normalizeBackend(*runtimeBackend));
+    }
+    if (canonicalBackend) {
+        result.backend = normalizeBackend(*canonicalBackend);
+        result.provenance["backend"] = "config:embeddings.backend";
+    } else if (runtimeBackend) {
+        result.backend = normalizeBackend(*runtimeBackend);
+        result.provenance["backend"] = "config:embeddings.runtime.backend";
+    } else {
+        result.backend = "auto";
+        result.provenance["backend"] = "default:auto";
+    }
+    if (auto environmentBackend = yams::config::getenv_nonempty("YAMS_EMBED_BACKEND")) {
+        const auto normalized = normalizeBackend(*environmentBackend);
+        if (normalized != result.backend) {
+            noteConflict("backend", "YAMS_EMBED_BACKEND", normalized, result.provenance["backend"],
+                         result.backend);
+        }
+        result.backend = normalized;
+        result.provenance["backend"] = "environment:YAMS_EMBED_BACKEND";
+    }
+    result.isTrainingFree = result.backend == "simeon";
+
+    const auto canonicalModel = configured("embeddings.preferred_model");
+    const auto runtimeModel = configured("embeddings.runtime.preferred_model");
+    if (canonicalModel && runtimeModel) {
+        noteConflict("preferred model", "embeddings.preferred_model", *canonicalModel,
+                     "embeddings.runtime.preferred_model", *runtimeModel);
+    }
+    if (canonicalModel) {
+        result.preferredModel = *canonicalModel;
+        result.provenance["preferred_model"] = "config:embeddings.preferred_model";
+    } else if (runtimeModel) {
+        result.preferredModel = *runtimeModel;
+        result.provenance["preferred_model"] = "config:embeddings.runtime.preferred_model";
+    } else if (const auto preloadModels = configured("daemon.models.preload_models")) {
+        static constexpr std::string_view kKnownModels[] = {"simeon-default",
+                                                            "embeddinggemma-300m",
+                                                            "all-MiniLM-L6-v2",
+                                                            "all-mpnet-base-v2",
+                                                            "jina-embeddings-v2-small-en",
+                                                            "nomic-embed-text-v1",
+                                                            "bge-small-en-v1.5",
+                                                            "bge-base-en-v1.5"};
+        for (const auto model : kKnownModels) {
+            if (preloadModels->find(model) != std::string::npos) {
+                result.preferredModel = model;
+                result.provenance["preferred_model"] = "config:daemon.models.preload_models";
+                break;
+            }
+        }
+    }
+    if (auto environmentModel = yams::config::getenv_nonempty("YAMS_PREFERRED_MODEL")) {
+        if (!result.preferredModel.empty() && *environmentModel != result.preferredModel) {
+            noteConflict("preferred model", "YAMS_PREFERRED_MODEL", *environmentModel,
+                         result.provenance["preferred_model"], result.preferredModel);
+        }
+        result.preferredModel = *environmentModel;
+        result.provenance["preferred_model"] = "environment:YAMS_PREFERRED_MODEL";
+    }
+
+    if (result.preferredModel.empty() && result.isTrainingFree) {
+        result.preferredModel = "simeon-default";
+        result.provenance["preferred_model"] = "default:simeon-default";
+    }
+    const auto isSimeonSentinel = [](const std::string& model) {
+        return model == "simeon-default" || model == "simeon";
+    };
+    if (result.isTrainingFree && !result.preferredModel.empty() &&
+        !isSimeonSentinel(result.preferredModel)) {
+        const auto configuredModel = result.preferredModel;
+        const auto configuredProvenance = result.provenance["preferred_model"];
+        const auto warning = fmt::format(
+            "backend '{}' is model-free but preferred_model '{}' is an ONNX model name; "
+            "using 'simeon-default' instead",
+            result.backend, configuredModel);
+        spdlog::warn("[ConfigResolver] {}", warning);
+        result.warnings.push_back(warning);
+        result.preferredModel = "simeon-default";
+        result.provenance["preferred_model"] =
+            "normalization:simeon-backend(" + configuredProvenance + ")";
+    } else if (!result.isTrainingFree && isSimeonSentinel(result.preferredModel)) {
+        const auto rejectedModel = result.preferredModel;
+        const auto warning = fmt::format(
+            "preferred_model '{}' is a simeon sentinel but backend is '{}'; searching installed "
+            "models instead",
+            rejectedModel, result.backend);
+        spdlog::warn("[ConfigResolver] {}", warning);
+        result.warnings.push_back(warning);
+        result.preferredModel.clear();
+        result.provenance["preferred_model"] =
+            "rejected:simeon-sentinel(" + result.provenance["preferred_model"] + ")";
+    }
+
+    if (result.preferredModel.empty() && !resolvedDataDir.empty()) {
+        std::vector<std::string> availableModels;
+        std::error_code error;
+        const auto modelsDir = resolvedDataDir / "models";
+        if (fs::is_directory(modelsDir, error)) {
+            for (const auto& entry : fs::directory_iterator(modelsDir, error)) {
+                if (entry.is_directory(error) && fs::exists(entry.path() / "model.onnx", error)) {
+                    availableModels.push_back(entry.path().filename().string());
+                }
+            }
+        }
+        if (!availableModels.empty()) {
+            std::sort(availableModels.begin(), availableModels.end());
+            result.preferredModel = availableModels.front();
+            result.provenance["preferred_model"] = "data_directory:models";
+        }
+    }
+
+    if (const auto preload = configured("embeddings.preload_on_startup")) {
+        if (const auto parsed = parseBoolValue(*preload)) {
+            result.preloadOnStartup = *parsed;
+            result.provenance["preload"] = "config:embeddings.preload_on_startup";
+        } else {
+            result.warnings.push_back(fmt::format(
+                "invalid embeddings.preload_on_startup value '{}'; using false", *preload));
+        }
+    } else {
+        result.provenance["preload"] = "default:false";
+    }
+    if (const auto environmentPreload =
+            yams::config::read_env_bool("YAMS_EMBED_PRELOAD_ON_STARTUP").value) {
+        result.preloadOnStartup = *environmentPreload;
+        result.provenance["preload"] = "environment:YAMS_EMBED_PRELOAD_ON_STARTUP";
+    }
+
+    const auto applyRuntimeSize = [&](std::string_view key, std::optional<std::size_t>& target,
+                                      std::string_view provenanceKey) {
+        if (const auto raw = configured(key)) {
+            if (const auto parsed = parseSize(*raw)) {
+                target = parsed;
+                result.provenance[std::string(provenanceKey)] = "config:" + std::string(key);
+            } else {
+                result.warnings.push_back(
+                    fmt::format("invalid {} value '{}'; ignoring", key, *raw));
+            }
+        }
+    };
+    applyRuntimeSize("embeddings.runtime.batch_size", result.runtime.batchSize, "batch_size");
+    applyRuntimeSize("embeddings.runtime.batch_target", result.runtime.batchTarget, "batch_target");
+    if (const auto raw = configured("embeddings.runtime.repair_lock_timeout_ms")) {
+        if (const auto parsed = parseUnsignedIntegral<std::uint64_t>(*raw)) {
+            result.runtime.repairLockTimeoutMs = parsed;
+            result.provenance["repair_lock_timeout_ms"] =
+                "config:embeddings.runtime.repair_lock_timeout_ms";
+        } else {
+            result.warnings.push_back(fmt::format(
+                "invalid embeddings.runtime.repair_lock_timeout_ms value '{}'; ignoring", *raw));
+        }
+    }
+    if (const auto value = yams::config::read_env_size("YAMS_EMBED_BATCH").value) {
+        result.runtime.batchSize = value;
+        result.provenance["batch_size"] = "environment:YAMS_EMBED_BATCH";
+    }
+    if (const auto value = yams::config::read_env_size("YAMS_EMBED_BATCH_TARGET").value) {
+        result.runtime.batchTarget = value;
+        result.provenance["batch_target"] = "environment:YAMS_EMBED_BATCH_TARGET";
+    }
+    if (const auto value = yams::config::read_env_size("YAMS_REPAIR_LOCK_TIMEOUT_MS").value) {
+        result.runtime.repairLockTimeoutMs = static_cast<std::uint64_t>(*value);
+        result.provenance["repair_lock_timeout_ms"] = "environment:YAMS_REPAIR_LOCK_TIMEOUT_MS";
+    }
+
+    if (!resolvedDataDir.empty()) {
+        if (const auto databaseDimension = readDbEmbeddingDim(resolvedDataDir / "vectors.db")) {
+            result.dimension = databaseDimension;
+            result.dimensionSource = EmbeddingDimensionSource::ExistingDatabase;
+            result.provenance["dimension"] = "database:vectors.db";
+        } else if (const auto sentinelDimension = readVectorSentinelDim(resolvedDataDir)) {
+            result.dimension = sentinelDimension;
+            result.dimensionSource = EmbeddingDimensionSource::Sentinel;
+            result.provenance["dimension"] = "sentinel:vectors_sentinel.json";
+        }
+    }
+    if (!result.dimension) {
+        static constexpr std::string_view kDimensionKeys[] = {
+            "embeddings.embedding_dim", "vector_database.embedding_dim", "vector_index.dimension"};
+        std::optional<std::size_t> selectedDimension;
+        std::string selectedKey;
+        for (const auto key : kDimensionKeys) {
+            const auto raw = configured(key);
+            if (!raw) {
+                continue;
+            }
+            const auto parsed = parseSize(*raw);
+            if (!parsed || *parsed == 0) {
+                result.warnings.push_back(
+                    fmt::format("invalid {} value '{}'; ignoring", key, *raw));
+                continue;
+            }
+            if (!selectedDimension) {
+                selectedDimension = parsed;
+                selectedKey = key;
+            } else if (*selectedDimension != *parsed) {
+                noteConflict("dimension", selectedKey, std::to_string(*selectedDimension), key,
+                             std::to_string(*parsed));
+            }
+        }
+        if (!selectedDimension && result.isTrainingFree) {
+            if (const auto raw = configured("embeddings.simeon.output_dim")) {
+                if (const auto parsed = parseSize(*raw); parsed && *parsed > 0) {
+                    selectedDimension = parsed;
+                    selectedKey = "embeddings.simeon.output_dim";
+                }
+            }
+        }
+        if (selectedDimension) {
+            result.dimension = selectedDimension;
+            result.dimensionSource = EmbeddingDimensionSource::Config;
+            result.provenance["dimension"] = "config:" + selectedKey;
+        }
+    }
+    if (!result.dimension) {
+        if (const auto environmentDimension = yams::config::read_env_size("YAMS_EMBED_DIM").value;
+            environmentDimension && *environmentDimension > 0) {
+            result.dimension = environmentDimension;
+            result.dimensionSource = EmbeddingDimensionSource::Environment;
+            result.provenance["dimension"] = "environment:YAMS_EMBED_DIM";
+        }
+    }
+    if (!result.dimension && !resolvedDataDir.empty() && !result.preferredModel.empty()) {
+        const auto modelDirectory = resolvedDataDir / "models" / result.preferredModel;
+        if (const auto modelConfigDimension =
+                yams::vector::dimres::dim_from_model_config(modelDirectory)) {
+            result.dimension = modelConfigDimension;
+            result.dimensionSource = EmbeddingDimensionSource::ModelConfig;
+            result.provenance["dimension"] = "model_config:" + result.preferredModel;
+        } else if (const auto modelNameDimension =
+                       yams::vector::dimres::dim_from_model_name(result.preferredModel)) {
+            result.dimension = modelNameDimension;
+            result.dimensionSource = EmbeddingDimensionSource::ModelName;
+            result.provenance["dimension"] = "model_name:" + result.preferredModel;
+        }
+    }
+    if (!result.dimension) {
+        result.provenance["dimension"] = "unresolved";
     }
 
     if (result.backend == "onnxruntime" && !result.preferredModel.empty() &&
         !isSimeonSentinel(result.preferredModel) && !resolvedDataDir.empty()) {
-        namespace fs = std::filesystem;
-        fs::path modelPath = resolvedDataDir / "models" / result.preferredModel / "model.onnx";
-        std::error_code ec;
-        if (!fs::exists(modelPath, ec)) {
-            spdlog::warn("[ConfigResolver] backend 'onnxruntime' selected but model file "
-                         "not found: {} (download with: yams model --download {})",
-                         modelPath.string(), result.preferredModel);
-            result.warnings.push_back(
-                fmt::format("backend 'onnxruntime' selected but model file not found: {} "
-                            "(download with: yams model --download {})",
-                            modelPath.string(), result.preferredModel));
+        const auto modelPath = resolvedDataDir / "models" / result.preferredModel / "model.onnx";
+        std::error_code error;
+        if (!fs::exists(modelPath, error)) {
+            const auto warning = fmt::format(
+                "backend 'onnxruntime' selected but model file not found: {} (download with: yams "
+                "model --download {})",
+                modelPath.string(), result.preferredModel);
+            spdlog::warn("[ConfigResolver] {}", warning);
+            result.warnings.push_back(warning);
         }
     }
 
+    result.runtime.backend = result.backend;
+    if (!result.preferredModel.empty()) {
+        result.runtime.preferredModel = result.preferredModel;
+    }
+    result.policyIdentity =
+        fmt::format("{}:{}:{}", result.backend,
+                    result.preferredModel.empty() ? "unresolved" : result.preferredModel,
+                    result.dimension ? std::to_string(*result.dimension) : "unresolved");
     return result;
 }
 

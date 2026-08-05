@@ -295,7 +295,8 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
     // evidence is sparse.
     opts.config.enableWeakQueryFanoutBoost = false;
     {
-        const auto backend = ConfigResolver::resolveEmbeddingBackend();
+        const auto backend = embeddingBackend_.empty() ? ConfigResolver::resolveEmbeddingBackend()
+                                                       : embeddingBackend_;
         const auto bm25Policy = ConfigResolver::resolveSimeonBm25Policy();
         if (!enableSimeonLexicalBuild) {
             spdlog::warn("[simeon-lexical] async BM25 build suppressed by memory "

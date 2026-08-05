@@ -16,7 +16,7 @@ struct RefDbGuard {
     sqlite3* db_{nullptr};
     explicit RefDbGuard(const std::filesystem::path& dbPath) {
         int rc = sqlite3_open_v2(dbPath.string().c_str(), &db_,
-                                 SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, nullptr);
+                                 SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nullptr);
         if (rc != SQLITE_OK) {
             if (db_) {
                 sqlite3_close(db_);

@@ -123,7 +123,7 @@ struct FileLock {
                         _write(fd, stamp.data(), static_cast<unsigned int>(stamp.size()));
                         _lseek(fd, 0, SEEK_SET);
                     } catch (...) {
-                        // Intentional best-effort path; keep the primary operation unaffected.
+                        spdlog::debug("EmbeddingService: Windows lock diagnostic stamp failed");
                     }
                 }
             } else {
@@ -153,7 +153,7 @@ struct FileLock {
                     (void)::write(fd, stamp.data(), stamp.size());
                     (void)lseek(fd, 0, SEEK_SET);
                 } catch (...) {
-                    // Intentional best-effort path; keep the primary operation unaffected.
+                    spdlog::debug("EmbeddingService: POSIX lock diagnostic stamp failed");
                 }
             }
         }
@@ -191,11 +191,12 @@ std::unique_ptr<EmbeddingService> EmbeddingService::create(cli::YamsCLI* cli) {
     return nullptr;
 }
 
-EmbeddingService::EmbeddingService(std::shared_ptr<api::IContentStore> store,
-                                   std::shared_ptr<metadata::IMetadataRepository> metadataRepo,
-                                   std::filesystem::path dataPath)
+EmbeddingService::EmbeddingService(
+    std::shared_ptr<api::IContentStore> store,
+    std::shared_ptr<metadata::IMetadataRepository> metadataRepo, std::filesystem::path dataPath,
+    std::shared_ptr<const daemon::ResolvedEmbeddingConfig> embeddingPolicy)
     : store_(std::move(store)), metadataRepo_(std::move(metadataRepo)),
-      dataPath_(std::move(dataPath)) {}
+      dataPath_(std::move(dataPath)), embeddingPolicy_(std::move(embeddingPolicy)) {}
 
 bool EmbeddingService::isAvailable() const {
     return !getAvailableModels().empty();
@@ -328,7 +329,9 @@ void EmbeddingService::triggerRepairIfNeeded() {
         // Choose a model-aware default for dimension using centralized lookup
         auto models = getAvailableModels();
         std::string pick = models.empty() ? std::string() : models[0];
-        auto runtimePol = daemon::ConfigResolver::resolveEmbeddingRuntimePolicy();
+        const auto runtimePol = embeddingPolicy_
+                                    ? embeddingPolicy_->runtime
+                                    : daemon::ConfigResolver::resolveEmbeddingRuntimePolicy();
         if (runtimePol.preferredModel) {
             const auto& pm = *runtimePol.preferredModel;
             for (const auto& m : models) {
@@ -424,6 +427,9 @@ void EmbeddingService::runRepair(const yams::compat::stop_token& stopToken) {
     FileLock vlock(lockPath);
 
     spdlog::debug("Repair thread started");
+    const auto runtimePolicy = embeddingPolicy_
+                                   ? embeddingPolicy_->runtime
+                                   : daemon::ConfigResolver::resolveEmbeddingRuntimePolicy();
 
     try {
         // Initialize vector DB (create on first use if missing)
@@ -432,9 +438,8 @@ void EmbeddingService::runRepair(const yams::compat::stop_token& stopToken) {
         // Determine embedding dimension using centralized lookup
         auto models = getAvailableModels();
         std::string pick = models.empty() ? std::string() : models[0];
-        auto prefPol = daemon::ConfigResolver::resolveEmbeddingRuntimePolicy();
-        if (prefPol.preferredModel) {
-            const auto& pm = *prefPol.preferredModel;
+        if (runtimePolicy.preferredModel) {
+            const auto& pm = *runtimePolicy.preferredModel;
             for (const auto& m : models) {
                 if (m == pm) {
                     pick = m;
@@ -469,14 +474,14 @@ void EmbeddingService::runRepair(const yams::compat::stop_token& stopToken) {
                 }
             }
         } catch (...) {
-            // best-effort probe; continue with resolved dim
+            spdlog::debug("Repair thread: existing vector dimension probe failed");
         }
         vdbConfig.embedding_dim = repairDim;
         // Align schema only when missing; avoid dropping existing tables during repair
         try {
             (void)yams::integrity::ensureVectorSchemaAligned(dataPath_, repairDim, false);
         } catch (...) {
-            // best-effort; continue with DB init
+            spdlog::debug("Repair thread: vector schema alignment failed");
         }
         vdbConfig.create_if_missing = true;
 
@@ -518,8 +523,7 @@ void EmbeddingService::runRepair(const yams::compat::stop_token& stopToken) {
                      missingEmbeddings.size());
 
         // Process in batches
-        auto batchPol = daemon::ConfigResolver::resolveEmbeddingRuntimePolicy();
-        size_t batchSize = batchPol.batchSize.value_or(32);
+        size_t batchSize = runtimePolicy.batchSize.value_or(32);
         if (batchSize < 4)
             batchSize = 4;
         if (batchSize > 128)
@@ -567,6 +571,9 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
         return Error{ErrorCode::NotFound, "No embedding models available"};
     }
 
+    const auto runtimePolicy = embeddingPolicy_
+                                   ? embeddingPolicy_->runtime
+                                   : daemon::ConfigResolver::resolveEmbeddingRuntimePolicy();
     try {
         // 1. Configure embedding generation
         // Priority order:
@@ -575,9 +582,8 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
         // - all-MiniLM-L6-v2 (default efficient)
         // - first available as last resort
         std::string selectedModel = availableModels[0];
-        auto prefPol2 = daemon::ConfigResolver::resolveEmbeddingRuntimePolicy();
-        if (prefPol2.preferredModel) {
-            const auto& pm = *prefPol2.preferredModel;
+        if (runtimePolicy.preferredModel) {
+            const auto& pm = *runtimePolicy.preferredModel;
             for (const auto& m : availableModels) {
                 if (m == pm) {
                     selectedModel = m;
@@ -616,7 +622,7 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                     targetDbDim = probeDb->getConfig().embedding_dim;
                 }
             } catch (...) {
-                // Intentional best-effort path; keep the primary operation unaffected.
+                spdlog::debug("EmbeddingService: existing vector dimension probe failed");
             }
         }
 
@@ -667,9 +673,8 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
         embConfig.embedding_dim = provDim > 0 ? provDim : targetDbDim;
 
         embConfig.backend = vector::EmbeddingConfig::Backend::Daemon;
-        auto bePol = daemon::ConfigResolver::resolveEmbeddingRuntimePolicy();
-        if (bePol.backend) {
-            std::string s = *bePol.backend;
+        if (runtimePolicy.backend) {
+            std::string s = *runtimePolicy.backend;
             for (auto& c : s)
                 c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
             if (s == "simeon") {
@@ -694,6 +699,7 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                              s);
             }
         }
+        embConfig.backend_is_resolved = embeddingPolicy_ != nullptr;
 
         // 2. Initialize embedding generator
         auto embGenerator = std::make_unique<vector::EmbeddingGenerator>(embConfig);
@@ -733,6 +739,7 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
             try {
                 cfgDim = vectorDb->getConfig().embedding_dim;
             } catch (...) {
+                spdlog::debug("EmbeddingService: vector DB config dimension probe failed");
                 cfgDim = actualDim;
             }
             if (cfgDim != vdbConfig.embedding_dim) {
@@ -766,13 +773,12 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                 return Error{ErrorCode::InvalidState, ss.str()};
             }
         } catch (...) {
-            // Intentional best-effort path; keep the primary operation unaffected.
+            spdlog::debug("EmbeddingService: runtime/DB dimension guard probe failed");
         }
 
         // 4. Process documents using dynamic batching (use model-reported seq length)
 
-        auto advPol = daemon::ConfigResolver::resolveEmbeddingRuntimePolicy();
-        std::size_t advisoryDocCap = advPol.batchTarget.value_or(0);
+        std::size_t advisoryDocCap = runtimePolicy.batchTarget.value_or(0);
         DynamicBatcherConfig bcfg;
         bcfg.maxSequenceLengthTokens = modelMaxSeq;
         // TuneAdvisor-provided safety factor (env can still override via TuneAdvisor setters)
@@ -942,8 +948,8 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                     // Resolve lock file path for batch-serialized writes
                     fs::path lockPath = dataPath_ / "vectors.db.lock";
                     // Acquire short-lived DB lock per batch with bounded wait/backoff
-                    auto lockPol = daemon::ConfigResolver::resolveEmbeddingRuntimePolicy();
-                    uint64_t timeout_ms = lockPol.repairLockTimeoutMs.value_or(10ull * 60 * 1000);
+                    uint64_t timeout_ms =
+                        runtimePolicy.repairLockTimeoutMs.value_or(10ull * 60 * 1000);
                     auto deadline =
                         std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
                     uint64_t sleep_ms = 50;

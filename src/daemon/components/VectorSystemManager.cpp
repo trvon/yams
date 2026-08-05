@@ -205,24 +205,37 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
         }
     }
 
-    // 4. Config file / env (fallback only when model dimension unknown)
-    if (!dim) {
-        auto cfgPath = ConfigResolver::resolveDefaultConfigPath();
+    // 4. Immutable startup snapshot (config/env fallback only when runtime dimension is unknown).
+    if (!dim && deps_.resolveConfiguredDimension) {
+        try {
+            dim = deps_.resolveConfiguredDimension();
+            if (dim && *dim > 0) {
+                spdlog::info("[VectorInit] probe: resolved policy dim={}", *dim);
+            } else {
+                dim.reset();
+            }
+        } catch (...) {
+            spdlog::debug("[VectorInit] resolved embedding dimension callback failed");
+        }
+    }
+
+    // Standalone compatibility path for callers that do not inject a startup snapshot.
+    if (!dim && !deps_.resolveConfiguredDimension) {
+        const auto cfgPath = ConfigResolver::resolveDefaultConfigPath();
         if (!cfgPath.empty()) {
             try {
-                auto kv = yams::config::parse_simple_toml(cfgPath);
-                auto it = kv.find("embeddings.embedding_dim");
+                const auto kv = yams::config::parse_simple_toml(cfgPath);
+                const auto it = kv.find("embeddings.embedding_dim");
                 if (it != kv.end() && !it->second.empty()) {
-                    if (auto parsed = parseUnsigned<size_t>(it->second)) {
+                    if (const auto parsed = parseUnsigned<size_t>(it->second)) {
                         dim = parsed;
-                        spdlog::info("[VectorInit] probe: config dim={}", *dim);
+                        spdlog::info("[VectorInit] probe: compatibility config dim={}", *dim);
                     }
                 }
             } catch (...) {
-                spdlog::debug("[VectorInit] config embedding dim probe failed");
+                spdlog::debug("[VectorInit] compatibility config embedding dim probe failed");
             }
         }
-
         if (!dim) {
             dim = yams::config::read_env_size("YAMS_EMBED_DIM").value;
         }
@@ -255,7 +268,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
 
     // 6. Last resort: try YAMS_PREFERRED_MODEL env var directly for model name heuristic
     // This handles cases where resolvePreferredModel callback isn't ready yet
-    if (!dim) {
+    if (!dim && !deps_.resolvePreferredModel) {
         if (auto envModel = yams::config::getenv_optional("YAMS_PREFERRED_MODEL"); envModel) {
             std::string modelName(*envModel);
             if (!modelName.empty()) {
@@ -268,8 +281,8 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
         }
     }
 
-    // 7. Final fallback: check preload_models from config for model name heuristic
-    if (!dim) {
+    // 7. Standalone compatibility fallback when no preferred-model snapshot was injected.
+    if (!dim && !deps_.resolvePreferredModel) {
         auto cfgPath = ConfigResolver::resolveDefaultConfigPath();
         if (!cfgPath.empty()) {
             try {

@@ -16,6 +16,7 @@
 #include <yams/config/config_helpers.h>
 #include <yams/core/magic_numbers.hpp>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/model_provider.h>
@@ -263,9 +264,8 @@ public:
                 spdlog::debug("Unable to inspect loaded embedding models: unknown error");
             }
             if (targetModel.empty()) {
-                // Read from config or env
-                if (const auto preferred = yams::config::getenv_nonempty("YAMS_PREFERRED_MODEL"))
-                    targetModel = *preferred;
+                if (cli_)
+                    targetModel = cli_->getResolvedEmbeddingConfig().preferredModel;
                 if (targetModel.empty()) {
                     // Fallback: prefer common local models
                     if (cli_) {
@@ -1206,21 +1206,7 @@ void DoctorCommand::runVectorsFix() {
     std::string modelName;
     fs::path modelsPath = cli_->getDataPath() / "models";
 
-    // Check preferred model from env first
-    if (const auto preferred = yams::config::getenv_nonempty("YAMS_PREFERRED_MODEL")) {
-        modelName = *preferred;
-    }
-
-    // Then check config file
-    if (modelName.empty()) {
-        if (!configPath.empty()) {
-            auto config = yams::config::parse_simple_toml(configPath);
-            auto it = config.find("embeddings.preferred_model");
-            if (it != config.end() && !it->second.empty()) {
-                modelName = it->second;
-            }
-        }
-    }
+    modelName = cli_->getResolvedEmbeddingConfig().preferredModel;
 
     // If still no preference, find first installed model
     if (modelName.empty()) {

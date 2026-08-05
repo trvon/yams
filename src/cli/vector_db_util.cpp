@@ -2,16 +2,19 @@
 #include <yams/cli/yams_cli.h>
 #include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
+#include <yams/daemon/components/ConfigResolver.h>
+#include <yams/daemon/daemon.h>
 #include <yams/vector/dim_resolver.h>
 #include <yams/vector/embedding_generator.h>
 
+#include <sqlite3.h>
+#include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
 #include <array>
 #include <cstdlib>
 #include <ctime>
 #include <filesystem>
 #include <fstream>
-#include <nlohmann/json.hpp>
-#include <sqlite3.h>
 
 // Forward declare sqlite3_vec_init for vec0 module initialization
 extern "C" int sqlite3_vec_init(sqlite3* db, char** pzErrMsg, const sqlite3_api_routines* pApi);
@@ -66,7 +69,8 @@ std::optional<size_t> getDimensionFromDb(const fs::path& dbPath) {
                             try {
                                 result = static_cast<size_t>(std::stoul(num));
                             } catch (...) {
-                                // Parse error, leave as nullopt
+                                spdlog::debug("Unable to parse legacy vector DDL dimension '{}'",
+                                              num);
                             }
                         }
                     }
@@ -102,7 +106,8 @@ static std::optional<size_t> readDimensionFromConfigFile(const fs::path& configP
         if (j.contains("n_embd") && j["n_embd"].is_number())
             return j.value("n_embd", 0u);
     } catch (...) {
-        // Intentional best-effort path; keep the primary operation unaffected.
+        spdlog::debug("Unable to read embedding dimension config '{}': unknown error",
+                      configPath.string());
     }
     return std::nullopt;
 }
@@ -131,103 +136,62 @@ std::optional<size_t> getModelDimensionHeuristic(const std::string& modelName) {
 }
 
 DimensionResolution resolveEmbeddingDimension(YamsCLI* cli, const fs::path& dataPath) {
-    DimensionResolution result;
+    const auto policy = [&]() {
+        if (cli) {
+            return cli->getResolvedEmbeddingConfig();
+        }
+        yams::daemon::DaemonConfig daemonConfig;
+        daemonConfig.configFilePath = yams::config::get_config_path();
+        return yams::daemon::ConfigResolver::resolveEmbeddingConfig(daemonConfig, dataPath);
+    }();
 
-    // Priority 1: Existing DB schema
-    fs::path dbPath = dataPath / "vectors.db";
-    if (auto dbDim = getDimensionFromDb(dbPath)) {
-        result.dimension = *dbDim;
-        result.source = "db";
-        return result;
+    const auto sourceName = [](yams::daemon::EmbeddingDimensionSource source) {
+        switch (source) {
+            case yams::daemon::EmbeddingDimensionSource::ExistingDatabase:
+                return "db";
+            case yams::daemon::EmbeddingDimensionSource::Sentinel:
+                return "sentinel";
+            case yams::daemon::EmbeddingDimensionSource::Config:
+                return "config";
+            case yams::daemon::EmbeddingDimensionSource::Environment:
+                return "env";
+            case yams::daemon::EmbeddingDimensionSource::ModelConfig:
+                return "model_config";
+            case yams::daemon::EmbeddingDimensionSource::ModelName:
+                return "model";
+            case yams::daemon::EmbeddingDimensionSource::Unresolved:
+                return "unknown";
+        }
+        return "unknown";
+    };
+
+    const bool modelDerived =
+        policy.dimensionSource == yams::daemon::EmbeddingDimensionSource::ModelConfig ||
+        policy.dimensionSource == yams::daemon::EmbeddingDimensionSource::ModelName;
+    if (policy.dimension && !modelDerived) {
+        return DimensionResolution{*policy.dimension, sourceName(policy.dimensionSource)};
     }
 
-    // Priority 2: Config file
-    fs::path configPath = yams::config::get_config_path();
-    if (fs::exists(configPath)) {
-        auto dimConfig = yams::config::read_dimension_config(configPath);
-        if (dimConfig.embeddings) {
-            result.dimension = *dimConfig.embeddings;
-            result.source = "config";
-            return result;
-        }
-        if (dimConfig.vectorDb) {
-            result.dimension = *dimConfig.vectorDb;
-            result.source = "config";
-            return result;
-        }
-    }
-
-    // Priority 3: Environment variable
-    if (const char* envDim = std::getenv("YAMS_EMBED_DIM")) {
-        try {
-            result.dimension = static_cast<size_t>(std::stoul(envDim));
-            result.source = "env";
-            return result;
-        } catch (...) {
-            // Parse error, continue to next priority
-        }
-    }
-
-    // Priority 4: Embedding generator (if CLI available)
+    // A live generator remains authoritative over model-name/config heuristics.
     if (cli) {
         try {
-            auto emb = cli->getEmbeddingGenerator();
-            if (emb) {
-                size_t genDim = emb->getEmbeddingDimension();
-                if (genDim > 0) {
-                    result.dimension = genDim;
-                    result.source = "generator";
-                    return result;
+            if (const auto generator = cli->getEmbeddingGenerator()) {
+                const auto dimension = generator->getEmbeddingDimension();
+                if (dimension > 0) {
+                    return DimensionResolution{dimension, "generator"};
                 }
             }
+        } catch (const std::exception& error) {
+            spdlog::debug("CLI embedding generator dimension probe failed: {}", error.what());
         } catch (...) {
-            // Generator not available, continue
+            spdlog::debug("CLI embedding generator dimension probe failed: unknown error");
         }
     }
 
-    // Priority 5: Model name heuristic
-    std::string modelName;
-    if (const char* pref = std::getenv("YAMS_PREFERRED_MODEL")) {
-        modelName = pref;
+    if (policy.dimension) {
+        return DimensionResolution{*policy.dimension, sourceName(policy.dimensionSource)};
     }
-
-    if (modelName.empty()) {
-        // Check for installed models
-        fs::path modelsDir = dataPath / "models";
-        std::error_code ec;
-        if (fs::exists(modelsDir, ec) && fs::is_directory(modelsDir, ec)) {
-            for (const auto& entry : fs::directory_iterator(modelsDir, ec)) {
-                if (!entry.is_directory()) {
-                    continue;
-                }
-                if (fs::exists(entry.path() / "model.onnx", ec)) {
-                    modelName = entry.path().filename().string();
-                    break;
-                }
-            }
-        }
-    }
-
-    if (!modelName.empty()) {
-        // Try model config files first (most accurate)
-        if (auto cfgDim = getModelDimensionFromMetadata(dataPath, modelName)) {
-            result.dimension = *cfgDim;
-            result.source = "model_config";
-            return result;
-        }
-        // Fall back to name-based heuristic
-        if (auto modelDim = getModelDimensionHeuristic(modelName)) {
-            result.dimension = *modelDim;
-            result.source = "model";
-            return result;
-        }
-    }
-
-    // Priority 6: No fallback - return 0 to signal unknown dimension
-    // Caller must handle this case (e.g., query daemon or fail explicitly)
-    result.dimension = 0;
-    result.source = "unknown";
-    return result;
+    return DimensionResolution{0, "unknown"};
 }
 
 // ============================================================================
@@ -329,7 +293,7 @@ SchemaValidation validateVecSchema(const fs::path& dbPath) {
                         try {
                             result.dimension = static_cast<size_t>(std::stoul(num));
                         } catch (...) {
-                            // Parse error
+                            spdlog::debug("Unable to parse vec0 DDL dimension '{}'", num);
                         }
                     }
                 }
@@ -380,7 +344,8 @@ void writeVectorSentinel(const fs::path& dataDir, size_t dim) {
         std::ofstream out(sentinelPath);
         out << sentinel.dump(2);
     } catch (...) {
-        // Best effort, ignore errors
+        spdlog::debug("Unable to write vector sentinel under '{}': unknown error",
+                      dataDir.string());
     }
 }
 

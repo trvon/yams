@@ -292,7 +292,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
           [this]() -> std::shared_ptr<EmbeddingService> {
               return std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
           },
-          &config_, &resolvedDataDir_}),
+          &config_, &resolvedDataDir_, [this]() { return embeddingConfig_; }}),
       topologyManager_(TopologyManager::Dependencies{[this]() { return getMetadataRepo(); },
                                                      [this]() { return getKgStore(); },
                                                      [this]() { return getVectorDatabase(); }}),
@@ -674,6 +674,10 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             pluginDeps.lifecycleFsm = &lifecycleFsm_;
             pluginDeps.dataDir = config_.dataDir;
             pluginDeps.resolvePreferredModel = [this]() { return this->resolvePreferredModel(); };
+            pluginDeps.resolveEmbeddingBackend = [this]() {
+                const auto config = getResolvedEmbeddingConfig();
+                return config ? config->backend : std::string{"auto"};
+            };
             pluginDeps.sharedPluginHost = abiHost_.get();
             pluginManager_ = std::make_unique<PluginManager>(pluginDeps);
             if (auto initResult = pluginManager_->initialize(); !initResult) {
@@ -688,6 +692,10 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             vectorDeps.serviceFsm = &serviceFsm_;
             vectorDeps.resolvePreferredModel = [this]() { return this->resolvePreferredModel(); };
             vectorDeps.getEmbeddingDimension = [this]() { return this->getEmbeddingDimension(); };
+            vectorDeps.resolveConfiguredDimension = [this]() -> std::optional<size_t> {
+                const auto config = getResolvedEmbeddingConfig();
+                return config ? config->dimension : std::nullopt;
+            };
             vectorDeps.suppressVectorIndexBuild = config_.instrumentation.suppressVectorIndexBuild;
             vectorSystemManager_ = std::make_unique<VectorSystemManager>(vectorDeps);
             spdlog::debug("[ServiceManager] VectorSystemManager created");
@@ -810,9 +818,22 @@ ServiceManager::initializeImpl(const std::function<void()>& beforePoolConfigure)
 
     // Cross-validate embedding backend + preferred model at startup.
     // Emits spdlog warnings for mismatches (e.g. ONNX model under simeon).
-    embeddingConfig_ = ConfigResolver::resolveEmbeddingConfig(config_, resolvedDataDir_);
+    embeddingConfig_ = std::make_shared<const ResolvedEmbeddingConfig>(
+        ConfigResolver::resolveEmbeddingConfig(config_, resolvedDataDir_));
+    spdlog::info("Embedding policy resolved: identity={} config={} preload={} batch={} source={}",
+                 embeddingConfig_->policyIdentity,
+                 embeddingConfig_->effectiveConfigPath.empty()
+                     ? std::string{"<default>"}
+                     : embeddingConfig_->effectiveConfigPath.string(),
+                 embeddingConfig_->preloadOnStartup,
+                 embeddingConfig_->runtime.batchSize.value_or(0),
+                 embeddingConfig_->provenance.at("backend"));
+    for (const auto& warning : embeddingConfig_->warnings) {
+        spdlog::warn("Embedding policy: {}", warning);
+    }
 
-    // Wire the adaptive SearchTuner's state file so EWMA counters survive daemon restarts.
+    // Wire immutable embedding identity and adaptive tuner state before any search build.
+    searchEngineManager_.setEmbeddingBackend(embeddingConfig_->backend);
     searchEngineManager_.setTunerStatePath(resolvedDataDir_ / "tuner_state.json");
 
     // Initialize WALManager via DatabaseManager (owns lifecycle + metrics provider)

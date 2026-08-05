@@ -515,8 +515,11 @@ class EmbeddingGenerator::Impl {
 public:
     explicit Impl(const EmbeddingConfig& config) : config_(config) {
         auto effective = config.backend;
-        // Typed config + env override via ConfigResolver (preserves existing YAMS_EMBED_BACKEND)
-        auto runtimePolicy = daemon::ConfigResolver::resolveEmbeddingRuntimePolicy();
+        // Preserve ambient compatibility for direct callers, but never override a backend that
+        // was already resolved into the caller's immutable lifecycle snapshot.
+        auto runtimePolicy = config.backend_is_resolved
+                                 ? daemon::EmbeddingRuntimePolicy{}
+                                 : daemon::ConfigResolver::resolveEmbeddingRuntimePolicy();
         if (runtimePolicy.backend) {
             const auto& s = *runtimePolicy.backend;
             std::string lowered(s);

@@ -17,18 +17,44 @@ namespace yams::daemon {
 
 struct DaemonConfig; // Forward declaration
 
+/// Runtime operational knobs for the embedding pipeline. Compatibility env overlays are
+/// resolved once with the embedding identity instead of being re-read at each call site.
+struct EmbeddingRuntimePolicy {
+    std::optional<std::string> backend;
+    std::optional<std::string> preferredModel;
+    std::optional<std::size_t> batchSize;
+    std::optional<std::size_t> batchTarget;
+    std::optional<std::uint64_t> repairLockTimeoutMs;
+};
+
+enum class EmbeddingDimensionSource {
+    Unresolved,
+    ExistingDatabase,
+    Sentinel,
+    Config,
+    Environment,
+    ModelConfig,
+    ModelName,
+};
+
 /**
- * @brief Resolved embedding configuration with cross-validated backend and model.
+ * @brief Immutable-by-convention effective embedding configuration snapshot.
  *
- * Produced by ConfigResolver::resolveEmbeddingConfig() which validates
- * the backend + preferred_model pair and emits warnings for mismatches
- * (e.g. ONNX model name under model-free simeon backend).
+ * Produced from one config file parse and one environment snapshot. Consumers should retain
+ * this value for their lifecycle instead of re-reading ambient configuration.
  */
 struct ResolvedEmbeddingConfig {
-    std::string backend;               // canonical: "simeon"|"onnxruntime"|"daemon"|"mock"|"auto"
-    std::string preferredModel;        // validated, canonicalized (empty if unresolved)
-    bool isTrainingFree = false;       // true when backend does not load ONNX models (e.g. simeon)
-    std::vector<std::string> warnings; // config mismatches detected during resolution
+    std::string backend;
+    std::string preferredModel;
+    bool isTrainingFree{false};
+    bool preloadOnStartup{false};
+    std::optional<std::size_t> dimension;
+    EmbeddingDimensionSource dimensionSource{EmbeddingDimensionSource::Unresolved};
+    EmbeddingRuntimePolicy runtime;
+    std::filesystem::path effectiveConfigPath;
+    std::map<std::string, std::string> provenance;
+    std::string policyIdentity;
+    std::vector<std::string> warnings;
 };
 
 /**
@@ -217,16 +243,8 @@ public:
         std::uint64_t mslStackLogWarnBytes{2ULL * 1024ULL * 1024ULL * 1024ULL};
     };
 
-    /// Runtime operational knobs for the embedding pipeline. Replaces ad-hoc
-    /// YAMS_EMBED_* and YAMS_REPAIR_* env vars with typed config resolved
-    /// through the standard TOML + env-overlay path.
-    struct EmbeddingRuntimePolicy {
-        std::optional<std::string> backend;               // "simeon" | "daemon" | "onnx"
-        std::optional<std::string> preferredModel;        // model name override
-        std::optional<std::size_t> batchSize;             // max texts per batch
-        std::optional<std::size_t> batchTarget;           // adaptive batch token target
-        std::optional<std::uint64_t> repairLockTimeoutMs; // repair DB lock timeout (ms)
-    };
+    /// Installed compatibility name for the shared runtime portion of the effective snapshot.
+    using EmbeddingRuntimePolicy = yams::daemon::EmbeddingRuntimePolicy;
 
     ConfigResolver() = delete; // Static-only class
 

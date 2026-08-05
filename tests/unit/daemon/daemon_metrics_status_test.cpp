@@ -1030,6 +1030,43 @@ TEST_CASE("DaemonMetrics: Embedding provider status", "[daemon][metrics][embeddi
     }
 }
 
+TEST_CASE("DaemonMetrics reports effective embedding policy before provider adoption",
+          "[daemon][metrics][embedding][config][snapshot]") {
+    const auto dataDir = makeTempDir("yams_metrics_embed_policy_");
+    const auto configPath = yams::test::write_file(dataDir / "config.toml", R"toml(
+[embeddings]
+backend = "simeon"
+preferred_model = "simeon-default"
+embedding_dim = 1024
+preload_on_startup = false
+)toml");
+    yams::test::ScopedEnvVar configPathEnvironment{"YAMS_CONFIG_PATH", std::nullopt};
+    yams::test::ScopedEnvVar configEnvironment{"YAMS_CONFIG", std::nullopt};
+    yams::test::ScopedEnvVar backendEnvironment{"YAMS_EMBED_BACKEND", std::nullopt};
+    yams::test::ScopedEnvVar modelEnvironment{"YAMS_PREFERRED_MODEL", std::nullopt};
+    yams::test::ScopedEnvVar dimensionEnvironment{"YAMS_EMBED_DIM", std::nullopt};
+
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = dataDir;
+    cfg.configFilePath = configPath;
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    REQUIRE(svc.initialize().has_value());
+
+    DaemonMetrics metrics(nullptr, &state, &svc, svc.getWorkCoordinator());
+    const auto snapshot = metrics.getSnapshot();
+
+    REQUIRE((snapshot != nullptr));
+    CHECK((snapshot->embeddingBackend == "simeon"));
+    CHECK((snapshot->embeddingModel == "simeon-default"));
+    CHECK((snapshot->embeddingDim == 1024U));
+    const auto policy = svc.getResolvedEmbeddingConfig();
+    REQUIRE((policy != nullptr));
+    CHECK((policy->policyIdentity == "simeon:simeon-default:1024"));
+    CHECK((policy->effectiveConfigPath == configPath));
+}
+
 // =============================================================================
 // WAL Metrics Tests
 // =============================================================================

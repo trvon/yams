@@ -4,11 +4,12 @@
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
+#include <yams/daemon/components/ConfigResolver.h>
 
 #include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
 
 #include <sqlite3.h>
-#include <cstdlib>
 #include <filesystem>
 
 namespace yams::cli::doctor {
@@ -55,7 +56,9 @@ VectorFixRepair::Result VectorFixRepair::execute(const DoctorContext& ctx) {
                                     std::string num = ddl.substr(pos + 6, end - (pos + 6));
                                     try {
                                         dbDim = static_cast<size_t>(std::stoul(num));
-                                    } catch (...) {
+                                    } catch (const std::exception& error) {
+                                        spdlog::debug("Unable to parse legacy vector dimension: {}",
+                                                      error.what());
                                     }
                                 }
                             }
@@ -76,18 +79,8 @@ VectorFixRepair::Result VectorFixRepair::execute(const DoctorContext& ctx) {
 
     // Step 2: Find current model dimension
     std::optional<size_t> modelDim;
-    std::string modelName;
+    std::string modelName = cli_->getResolvedEmbeddingConfig().preferredModel;
     fs::path modelsPath = cli_->getDataPath() / "models";
-
-    if (const char* pref = std::getenv("YAMS_PREFERRED_MODEL"))
-        modelName = pref;
-
-    if (modelName.empty() && !configPath.empty()) {
-        auto config = ctx.parseToml();
-        auto it = config.find("embeddings.preferred_model");
-        if (it != config.end() && !it->second.empty())
-            modelName = it->second;
-    }
 
     if (modelName.empty()) {
         std::error_code ec;
@@ -106,7 +99,7 @@ VectorFixRepair::Result VectorFixRepair::execute(const DoctorContext& ctx) {
     auto getModelDim = [&](const std::string& name) -> std::optional<size_t> {
         auto dataPath = cli_ ? cli_->getDataPath() : yams::config::get_data_dir();
         if (auto metaDim = vecutil::getModelDimensionFromMetadata(dataPath, name))
-            return *metaDim;
+            return metaDim;
         return vecutil::getModelDimensionHeuristic(name);
     };
 

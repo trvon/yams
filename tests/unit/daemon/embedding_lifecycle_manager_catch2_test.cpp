@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <thread>
+#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/EmbeddingLifecycleManager.h>
 
 using namespace yams::daemon;
@@ -11,6 +12,7 @@ static EmbeddingLifecycleManager::Dependencies nullDeps() {
         [] { return std::shared_ptr<EmbeddingService>{}; },
         nullptr,
         nullptr,
+        {},
     };
 }
 
@@ -21,7 +23,7 @@ TEST_CASE("EmbeddingLifecycleManager initial state", "[daemon][embedding-lifecyc
     CHECK(mgr.adoptedPluginName().empty());
     CHECK_FALSE(mgr.isAutoOnAdd());
     CHECK_FALSE(mgr.preloadOnStartup());
-    CHECK(mgr.getEmbeddingDimension() == 0);
+    CHECK((mgr.getEmbeddingDimension() == 0));
 }
 
 TEST_CASE("EmbeddingLifecycleManager FSM starts Unavailable",
@@ -29,7 +31,7 @@ TEST_CASE("EmbeddingLifecycleManager FSM starts Unavailable",
     EmbeddingLifecycleManager mgr(nullDeps());
 
     auto snap = mgr.fsmSnapshot();
-    CHECK(snap.state == EmbeddingProviderState::Unavailable);
+    CHECK((snap.state == EmbeddingProviderState::Unavailable));
     CHECK_FALSE(mgr.isDegraded());
     CHECK_FALSE(mgr.isLoadingOrReady());
 }
@@ -38,7 +40,7 @@ TEST_CASE("EmbeddingLifecycleManager FSM transitions", "[daemon][embedding-lifec
     EmbeddingLifecycleManager mgr(nullDeps());
 
     mgr.fsm().dispatch(ProviderAdoptedEvent{"test-plugin"});
-    CHECK(mgr.fsmSnapshot().state == EmbeddingProviderState::ProviderAdopted);
+    CHECK((mgr.fsmSnapshot().state == EmbeddingProviderState::ProviderAdopted));
 
     mgr.fsm().dispatch(ModelLoadStartedEvent{"model-a"});
     CHECK(mgr.isLoadingOrReady());
@@ -46,8 +48,8 @@ TEST_CASE("EmbeddingLifecycleManager FSM transitions", "[daemon][embedding-lifec
     mgr.fsm().dispatch(ModelLoadedEvent{"model-a", 384});
     CHECK(mgr.isLoadingOrReady());
     auto snap = mgr.fsmSnapshot();
-    CHECK(snap.state == EmbeddingProviderState::ModelReady);
-    CHECK(snap.embeddingDimension == 384);
+    CHECK((snap.state == EmbeddingProviderState::ModelReady));
+    CHECK((snap.embeddingDimension == 384));
 }
 
 TEST_CASE("EmbeddingLifecycleManager model name and plugin name setters",
@@ -55,10 +57,10 @@ TEST_CASE("EmbeddingLifecycleManager model name and plugin name setters",
     EmbeddingLifecycleManager mgr(nullDeps());
 
     mgr.setModelName("bge-small");
-    CHECK(mgr.modelName() == "bge-small");
+    CHECK((mgr.modelName() == "bge-small"));
 
     mgr.setAdoptedPluginName("onnx-provider");
-    CHECK(mgr.adoptedPluginName() == "onnx-provider");
+    CHECK((mgr.adoptedPluginName() == "onnx-provider"));
 }
 
 TEST_CASE("EmbeddingLifecycleManager auto-on-add and preload flags",
@@ -78,18 +80,18 @@ TEST_CASE("EmbeddingLifecycleManager metrics return 0 with null service",
           "[daemon][embedding-lifecycle][catch2]") {
     EmbeddingLifecycleManager mgr(nullDeps());
 
-    CHECK(mgr.inFlightJobs() == 0);
-    CHECK(mgr.queuedJobs() == 0);
-    CHECK(mgr.activeInferSubBatches() == 0);
-    CHECK(mgr.inferOldestMs() == 0);
-    CHECK(mgr.inferStartedCount() == 0);
-    CHECK(mgr.inferCompletedCount() == 0);
-    CHECK(mgr.inferLastMs() == 0);
-    CHECK(mgr.inferMaxMs() == 0);
-    CHECK(mgr.inferWarnCount() == 0);
-    CHECK(mgr.semanticEdgesCreated() == 0);
-    CHECK(mgr.semanticDocsProcessed() == 0);
-    CHECK(mgr.semanticUpdateErrors() == 0);
+    CHECK((mgr.inFlightJobs() == 0));
+    CHECK((mgr.queuedJobs() == 0));
+    CHECK((mgr.activeInferSubBatches() == 0));
+    CHECK((mgr.inferOldestMs() == 0));
+    CHECK((mgr.inferStartedCount() == 0));
+    CHECK((mgr.inferCompletedCount() == 0));
+    CHECK((mgr.inferLastMs() == 0));
+    CHECK((mgr.inferMaxMs() == 0));
+    CHECK((mgr.inferWarnCount() == 0));
+    CHECK((mgr.semanticEdgesCreated() == 0));
+    CHECK((mgr.semanticDocsProcessed() == 0));
+    CHECK((mgr.semanticUpdateErrors() == 0));
 }
 
 TEST_CASE("EmbeddingLifecycleManager ensureModelReadySync fails without provider",
@@ -98,7 +100,7 @@ TEST_CASE("EmbeddingLifecycleManager ensureModelReadySync fails without provider
 
     auto result = mgr.ensureModelReadySync("test-model");
     CHECK_FALSE(result.has_value());
-    CHECK(result.error().code == yams::ErrorCode::InvalidState);
+    CHECK((result.error().code == yams::ErrorCode::InvalidState));
 }
 
 TEST_CASE("EmbeddingLifecycleManager resetWarmupState clears state",
@@ -108,8 +110,8 @@ TEST_CASE("EmbeddingLifecycleManager resetWarmupState clears state",
     mgr.setModelName("model-a");
     mgr.setAdoptedPluginName("plugin-a");
     mgr.resetWarmupState();
-    CHECK(mgr.modelName() == "model-a");
-    CHECK(mgr.adoptedPluginName() == "plugin-a");
+    CHECK((mgr.modelName() == "model-a"));
+    CHECK((mgr.adoptedPluginName() == "plugin-a"));
 }
 
 TEST_CASE("EmbeddingLifecycleManager resolvePreferredModel returns empty with null config",
@@ -122,4 +124,22 @@ TEST_CASE("EmbeddingLifecycleManager detectPreloadFlag returns false with null c
           "[daemon][embedding-lifecycle][catch2]") {
     EmbeddingLifecycleManager mgr(nullDeps());
     CHECK_FALSE(mgr.detectPreloadFlag());
+}
+
+TEST_CASE("EmbeddingLifecycleManager uses the immutable effective embedding snapshot",
+          "[daemon][embedding-lifecycle][config][snapshot][catch2]") {
+    ResolvedEmbeddingConfig mutableConfig;
+    mutableConfig.backend = "onnxruntime";
+    mutableConfig.preferredModel = "frozen-model";
+    mutableConfig.preloadOnStartup = true;
+    const auto snapshot = std::make_shared<const ResolvedEmbeddingConfig>(mutableConfig);
+
+    auto deps = nullDeps();
+    deps.getEmbeddingConfig = [snapshot] { return snapshot; };
+    EmbeddingLifecycleManager mgr(std::move(deps));
+
+    mutableConfig.preferredModel = "changed-after-snapshot";
+    mutableConfig.preloadOnStartup = false;
+    CHECK((mgr.resolvePreferredModel() == "frozen-model"));
+    CHECK(mgr.detectPreloadFlag());
 }

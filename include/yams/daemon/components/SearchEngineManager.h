@@ -157,6 +157,7 @@ public:
      * its EWMA state across daemon restarts. Must be called before buildEngine().
      */
     void setTunerStatePath(std::filesystem::path path) { tunerStatePath_ = std::move(path); }
+    void setEmbeddingBackend(std::string backend) { embeddingBackend_ = std::move(backend); }
 
     void noteLexicalDeltaQueued(std::size_t documentCount = 1);
     void noteLexicalDeltaQueuedHash(std::string hash);
@@ -202,6 +203,7 @@ private:
     std::deque<std::string> recentLexicalDeltaOrder_;
     std::unordered_set<std::string> recentLexicalDeltaSet_;
     std::filesystem::path tunerStatePath_;
+    std::string embeddingBackend_;
 
     // Search fanout and query embedding work must not share the ingestion/repair executor.
     // Blocking downstream backpressure can otherwise prevent the futures awaited by every

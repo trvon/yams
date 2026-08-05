@@ -65,8 +65,25 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager construction",
 
     SECTION("construction succeeds with valid dependencies") {
         VectorSystemManager mgr(deps);
-        CHECK(mgr.getName() == std::string("VectorSystemManager"));
+        CHECK((mgr.getName() == std::string("VectorSystemManager")));
     }
+}
+
+TEST_CASE_METHOD(VectorSystemManagerFixture,
+                 "VectorSystemManager uses injected embedding dimension snapshot",
+                 "[daemon][components][vector][config][snapshot][catch2]") {
+    yams::test::ScopedEnvVar ambientDimension{"YAMS_EMBED_DIM", "384"};
+    auto deps = makeDeps();
+    deps.getEmbeddingDimension = {};
+    deps.resolvePreferredModel = {};
+    deps.resolveConfiguredDimension = [] { return std::optional<size_t>{16U}; };
+
+    VectorSystemManager mgr(std::move(deps));
+    const auto result = mgr.initializeOnce(tempDir);
+
+    REQUIRE(result.has_value());
+    CHECK(result.value());
+    CHECK((mgr.getEmbeddingDimension() == 16U));
 }
 
 TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initialize/shutdown lifecycle",
@@ -119,8 +136,8 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
 
         // Both succeed but second one should indicate it didn't perform work
         if (result1.has_value() && result2.has_value()) {
-            CHECK(result1.value() == true);
-            CHECK(result2.value() == false);
+            CHECK((result1.value() == true));
+            CHECK((result2.value() == false));
         }
     }
 
@@ -162,11 +179,11 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
         auto lockPath = tempDir / "vectors.lock";
         int readyPipe[2] = {-1, -1};
         int releasePipe[2] = {-1, -1};
-        REQUIRE(::pipe(readyPipe) == 0);
-        REQUIRE(::pipe(releasePipe) == 0);
+        REQUIRE((::pipe(readyPipe) == 0));
+        REQUIRE((::pipe(releasePipe) == 0));
 
         pid_t child = ::fork();
-        REQUIRE(child >= 0);
+        REQUIRE((child >= 0));
 
         if (child == 0) {
             ::close(readyPipe[0]);
@@ -199,8 +216,8 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
         ::close(releasePipe[0]);
 
         char ready = 0;
-        REQUIRE(::read(readyPipe[0], &ready, 1) == 1);
-        REQUIRE(ready == '1');
+        REQUIRE((::read(readyPipe[0], &ready, 1) == 1));
+        REQUIRE((ready == '1'));
 
         auto result = mgr.initializeOnce(tempDir);
         CHECK(result.has_value());
@@ -210,14 +227,14 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
         CHECK_FALSE(mgr.wasInitAttempted());
 
         char release = '1';
-        REQUIRE(::write(releasePipe[1], &release, 1) == 1);
+        REQUIRE((::write(releasePipe[1], &release, 1) == 1));
         ::close(readyPipe[0]);
         ::close(releasePipe[1]);
 
         int status = 0;
-        REQUIRE(::waitpid(child, &status, 0) == child);
+        REQUIRE((::waitpid(child, &status, 0) == child));
         REQUIRE(WIFEXITED(status));
-        REQUIRE(WEXITSTATUS(status) == 0);
+        REQUIRE((WEXITSTATUS(status) == 0));
     }
 #endif
 
@@ -258,12 +275,12 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
 
         auto result = warmMgr.initializeOnce(tempDir);
         REQUIRE(result.has_value());
-        REQUIRE(warmMgr.getVectorDatabase() != nullptr);
+        REQUIRE((warmMgr.getVectorDatabase() != nullptr));
         CHECK(stateComponent->readiness.vectorDbReady.load());
         // VectorSystemManager now owns DB readiness only. Search-index readiness and any
         // background load/build work are managed asynchronously by VectorIndexCoordinator.
         CHECK_FALSE(stateComponent->readiness.vectorIndexReady.load());
-        CHECK(stateComponent->readiness.vectorIndexProgress.load() == 0);
+        CHECK((stateComponent->readiness.vectorIndexProgress.load() == 0));
 
         CHECK(warmMgr.getVectorDatabase()->hasReusablePersistedSearchIndex());
     }
@@ -305,10 +322,10 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
 
         auto result = warmMgr.initializeOnce(tempDir);
         REQUIRE(result.has_value());
-        REQUIRE(warmMgr.getVectorDatabase() != nullptr);
+        REQUIRE((warmMgr.getVectorDatabase() != nullptr));
         CHECK(stateComponent->readiness.vectorDbReady.load());
         CHECK_FALSE(stateComponent->readiness.vectorIndexReady.load());
-        CHECK(stateComponent->readiness.vectorIndexProgress.load() == 0);
+        CHECK((stateComponent->readiness.vectorIndexProgress.load() == 0));
 
         CHECK_FALSE(warmMgr.getVectorDatabase()->hasReusablePersistedSearchIndex());
     }
@@ -334,10 +351,10 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
 
         const auto result = configuredMgr.initializeOnce(tempDir);
         REQUIRE(result.has_value());
-        REQUIRE(configuredMgr.getVectorDatabase() != nullptr);
-        CHECK(configuredMgr.getVectorDatabase()->getConfig().search_engine ==
-              yams::vector::VectorSearchEngine::SimeonPqAdc);
-        CHECK(configuredMgr.getVectorDatabase()->getConfig().simeon_pq_rerank_factor == 7);
+        REQUIRE((configuredMgr.getVectorDatabase() != nullptr));
+        CHECK((configuredMgr.getVectorDatabase()->getConfig().search_engine ==
+               yams::vector::VectorSearchEngine::SimeonPqAdc));
+        CHECK((configuredMgr.getVectorDatabase()->getConfig().simeon_pq_rerank_factor == 7));
     }
 }
 
@@ -347,13 +364,13 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager accessors befo
     VectorSystemManager mgr(deps);
 
     SECTION("getVectorDatabase returns nullptr before init") {
-        CHECK(mgr.getVectorDatabase() == nullptr);
+        CHECK((mgr.getVectorDatabase() == nullptr));
     }
 
     // VectorIndexManager removed - SearchEngine uses VectorDatabase directly
 
     SECTION("getEmbeddingDimension returns 0 before init") {
-        CHECK(mgr.getEmbeddingDimension() == 0);
+        CHECK((mgr.getEmbeddingDimension() == 0));
     }
 }
 
@@ -366,5 +383,5 @@ TEST_CASE("VectorSystemManager getName returns component name",
     deps.getEmbeddingDimension = []() { return static_cast<size_t>(384); };
 
     VectorSystemManager mgr(deps);
-    CHECK(std::string(mgr.getName()) == "VectorSystemManager");
+    CHECK((std::string(mgr.getName()) == "VectorSystemManager"));
 }

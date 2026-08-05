@@ -163,6 +163,7 @@ TEST_CASE("EmbeddingGenerator maps onnxruntime env override to Daemon path", "[v
 TEST_CASE("EmbeddingGenerator maps OnnxRuntime config to Daemon path", "[vector][daemon]") {
     EmbeddingConfig cfg;
     cfg.backend = EmbeddingConfig::Backend::OnnxRuntime;
+    cfg.backend_is_resolved = true;
 
     EmbeddingGenerator gen(cfg);
     REQUIRE_THAT(gen.getBackendName(), StartsWith("Daemon"));
@@ -171,6 +172,7 @@ TEST_CASE("EmbeddingGenerator maps OnnxRuntime config to Daemon path", "[vector]
 TEST_CASE("EmbeddingGenerator maps legacy Hybrid config to Daemon path", "[vector][daemon]") {
     EmbeddingConfig cfg;
     cfg.backend = EmbeddingConfig::Backend::Hybrid;
+    cfg.backend_is_resolved = true;
 
     EmbeddingGenerator gen(cfg);
     REQUIRE_THAT(gen.getBackendName(), StartsWith("Daemon"));
@@ -179,6 +181,7 @@ TEST_CASE("EmbeddingGenerator maps legacy Hybrid config to Daemon path", "[vecto
 TEST_CASE("EmbeddingGenerator selects Daemon when configured directly", "[vector][daemon]") {
     EmbeddingConfig cfg;
     cfg.backend = EmbeddingConfig::Backend::Daemon;
+    cfg.backend_is_resolved = true;
 
     EmbeddingGenerator gen(cfg);
     REQUIRE_THAT(gen.getBackendName(), StartsWith("Daemon"));

@@ -555,6 +555,9 @@ public:
 
     // Expose resolved daemon configuration for components that need paths
     const DaemonConfig& getConfig() const { return config_; }
+    std::shared_ptr<const ResolvedEmbeddingConfig> getResolvedEmbeddingConfig() const {
+        return embeddingConfig_;
+    }
     const StateComponent& getState() const { return state_; }
     const std::filesystem::path& getResolvedDataDir() const { return resolvedDataDir_; }
     std::string getMetadataDatabasePath() const {
@@ -777,6 +780,7 @@ private:
     SearchAdmissionController searchAdmission_;
     IngestMetricsPublisher metricsPublisher_;
 
+    std::shared_ptr<const ResolvedEmbeddingConfig> embeddingConfig_;
     EmbeddingLifecycleManager embeddingLifecycle_;
 
     boost::asio::cancellation_signal shutdownSignal_;
@@ -792,7 +796,6 @@ private:
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> pluginStrand_;
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> modelStrand_;
     std::filesystem::path resolvedDataDir_;
-    ResolvedEmbeddingConfig embeddingConfig_;
     std::shared_ptr<yams::integrity::RepairManager> repairManager_;
     std::shared_ptr<PostIngestQueue> postIngest_;
     std::shared_ptr<EmbeddingService> embeddingService_;

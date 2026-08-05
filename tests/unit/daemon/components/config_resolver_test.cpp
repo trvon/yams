@@ -23,6 +23,7 @@
 #include <string>
 
 #include <yams/vector/document_chunker.h>
+#include <yams/vector/embedding_generator.h>
 
 #include "../../../common/test_helpers_catch2.h"
 
@@ -496,6 +497,202 @@ TEST_CASE_METHOD(ConfigResolverFixture,
         EnvGuard backendGuard("YAMS_EMBED_BACKEND", "daemon");
         CHECK((ConfigResolver::resolveEmbeddingBackend() == "daemon"));
     }
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver resolves one effective embedding snapshot from explicit config",
+                 "[daemon][components][config][embeddings][snapshot][catch2]") {
+    auto environment = unsetEnvironment({"YAMS_EMBED_BACKEND", "YAMS_PREFERRED_MODEL",
+                                         "YAMS_EMBED_PRELOAD_ON_STARTUP", "YAMS_EMBED_BATCH",
+                                         "YAMS_EMBED_BATCH_TARGET", "YAMS_REPAIR_LOCK_TIMEOUT_MS",
+                                         "YAMS_EMBED_DIM"});
+    const auto ambientPath = writeToml("ambient.toml", R"toml(
+[embeddings]
+backend = "simeon"
+preferred_model = "ambient-model"
+)toml");
+    EnvGuard ambientConfig{"YAMS_CONFIG_PATH", ambientPath.string()};
+
+    const auto explicitPath = writeToml("explicit.toml", R"toml(
+[embeddings]
+backend = "ONNX"
+preferred_model = "canonical-model"
+preload_on_startup = true
+embedding_dim = 768
+
+[embeddings.runtime]
+backend = "simeon"
+preferred_model = "legacy-model"
+batch_size = 24
+batch_target = 2048
+repair_lock_timeout_ms = 4321
+
+[daemon.models]
+preload_models = ["preload-model"]
+)toml");
+
+    DaemonConfig config;
+    config.configFilePath = explicitPath;
+    const auto resolved = ConfigResolver::resolveEmbeddingConfig(config, tempDir);
+
+    CHECK((resolved.backend == "onnxruntime"));
+    CHECK((resolved.preferredModel == "canonical-model"));
+    CHECK_FALSE(resolved.isTrainingFree);
+    CHECK(resolved.preloadOnStartup);
+    REQUIRE(resolved.dimension.has_value());
+    CHECK((*resolved.dimension == 768U));
+    CHECK((resolved.dimensionSource == EmbeddingDimensionSource::Config));
+    CHECK((resolved.effectiveConfigPath == explicitPath));
+    CHECK((resolved.provenance.at("backend") == "config:embeddings.backend"));
+    CHECK((resolved.provenance.at("preferred_model") == "config:embeddings.preferred_model"));
+    CHECK((resolved.provenance.at("dimension") == "config:embeddings.embedding_dim"));
+    CHECK((resolved.policyIdentity == "onnxruntime:canonical-model:768"));
+    REQUIRE(resolved.runtime.backend.has_value());
+    CHECK((*resolved.runtime.backend == "onnxruntime"));
+    REQUIRE(resolved.runtime.preferredModel.has_value());
+    CHECK((*resolved.runtime.preferredModel == "canonical-model"));
+    CHECK((resolved.runtime.batchSize == std::optional<std::size_t>{24U}));
+    CHECK((resolved.runtime.batchTarget == std::optional<std::size_t>{2048U}));
+    CHECK((resolved.runtime.repairLockTimeoutMs == std::optional<std::uint64_t>{4321U}));
+    CHECK((resolved.warnings.size() >= 2U));
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver embedding snapshot applies compatibility env overlays once",
+                 "[daemon][components][config][embeddings][snapshot][catch2]") {
+    const auto configPath = writeToml("config.toml", R"toml(
+[embeddings]
+backend = "onnxruntime"
+preferred_model = "configured-model"
+preload_on_startup = true
+embedding_dim = 384
+
+[embeddings.runtime]
+batch_size = 32
+batch_target = 4096
+repair_lock_timeout_ms = 60000
+)toml");
+    EnvGuard configEnvironment{"YAMS_CONFIG_PATH", configPath.string()};
+    EnvGuard backendEnvironment{"YAMS_EMBED_BACKEND", "SIMEON"};
+    EnvGuard modelEnvironment{"YAMS_PREFERRED_MODEL", "configured-model"};
+    EnvGuard preloadEnvironment{"YAMS_EMBED_PRELOAD_ON_STARTUP", "false"};
+    EnvGuard batchEnvironment{"YAMS_EMBED_BATCH", "7"};
+    EnvGuard targetEnvironment{"YAMS_EMBED_BATCH_TARGET", "99"};
+    EnvGuard lockEnvironment{"YAMS_REPAIR_LOCK_TIMEOUT_MS", "1234"};
+    EnvGuard dimensionEnvironment{"YAMS_EMBED_DIM", "1024"};
+
+    DaemonConfig config;
+    config.configFilePath = configPath;
+    const auto resolved = ConfigResolver::resolveEmbeddingConfig(config, tempDir);
+
+    CHECK((resolved.backend == "simeon"));
+    CHECK((resolved.preferredModel == "simeon-default"));
+    CHECK(resolved.isTrainingFree);
+    CHECK_FALSE(resolved.preloadOnStartup);
+    CHECK((resolved.dimension == std::optional<std::size_t>{384U}));
+    CHECK((resolved.dimensionSource == EmbeddingDimensionSource::Config));
+    CHECK((resolved.provenance.at("backend") == "environment:YAMS_EMBED_BACKEND"));
+    CHECK((resolved.provenance.at("preferred_model") ==
+           "normalization:simeon-backend(environment:YAMS_PREFERRED_MODEL)"));
+    CHECK((resolved.provenance.at("preload") == "environment:YAMS_EMBED_PRELOAD_ON_STARTUP"));
+    CHECK((resolved.runtime.batchSize == std::optional<std::size_t>{7U}));
+    CHECK((resolved.runtime.batchTarget == std::optional<std::size_t>{99U}));
+    CHECK((resolved.runtime.repairLockTimeoutMs == std::optional<std::uint64_t>{1234U}));
+    CHECK((resolved.policyIdentity == "simeon:simeon-default:384"));
+
+    const auto compatibilityPolicy = ConfigResolver::resolveEmbeddingRuntimePolicy();
+    CHECK((compatibilityPolicy.backend == std::optional<std::string>{"simeon"}));
+    CHECK((compatibilityPolicy.preferredModel == std::optional<std::string>{"simeon-default"}));
+    CHECK((compatibilityPolicy.batchSize == resolved.runtime.batchSize));
+    CHECK((compatibilityPolicy.batchTarget == resolved.runtime.batchTarget));
+    CHECK((compatibilityPolicy.repairLockTimeoutMs == resolved.runtime.repairLockTimeoutMs));
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver normalizes model identity before deriving dimension",
+                 "[daemon][components][config][embeddings][snapshot][catch2]") {
+    auto environment =
+        unsetEnvironment({"YAMS_EMBED_BACKEND", "YAMS_PREFERRED_MODEL", "YAMS_EMBED_DIM"});
+    const auto configPath = writeToml("normalized-model.toml", R"toml(
+[embeddings]
+backend = "simeon"
+preferred_model = "all-MiniLM-L6-v2"
+)toml");
+
+    DaemonConfig config;
+    config.configFilePath = configPath;
+    const auto resolved = ConfigResolver::resolveEmbeddingConfig(config, {});
+
+    CHECK((resolved.preferredModel == "simeon-default"));
+    CHECK_FALSE(resolved.dimension.has_value());
+    CHECK((resolved.dimensionSource == EmbeddingDimensionSource::Unresolved));
+    CHECK((resolved.provenance.at("preferred_model") ==
+           "normalization:simeon-backend(config:embeddings.preferred_model)"));
+    CHECK((resolved.policyIdentity == "simeon:simeon-default:unresolved"));
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver rejects a simeon sentinel for an ONNX backend",
+                 "[daemon][components][config][embeddings][snapshot][catch2]") {
+    auto environment = unsetEnvironment({"YAMS_EMBED_BACKEND", "YAMS_PREFERRED_MODEL"});
+    const auto configPath = writeToml("onnx-sentinel.toml", R"toml(
+[embeddings]
+backend = "onnxruntime"
+preferred_model = "simeon-default"
+)toml");
+    const auto modelDir = tempDir / "models" / "all-MiniLM-L6-v2";
+    std::filesystem::create_directories(modelDir);
+    std::ofstream(modelDir / "model.onnx") << "fixture";
+
+    DaemonConfig config;
+    config.configFilePath = configPath;
+    const auto resolved = ConfigResolver::resolveEmbeddingConfig(config, tempDir);
+
+    CHECK((resolved.backend == "onnxruntime"));
+    CHECK((resolved.preferredModel == "all-MiniLM-L6-v2"));
+    CHECK((resolved.dimension == std::optional<std::size_t>{384U}));
+    CHECK((resolved.provenance.at("preferred_model") == "data_directory:models"));
+    CHECK((resolved.policyIdentity == "onnxruntime:all-MiniLM-L6-v2:384"));
+    CHECK_FALSE(resolved.warnings.empty());
+}
+
+TEST_CASE("EmbeddingGenerator preserves a resolved backend against ambient changes",
+          "[daemon][components][config][embeddings][snapshot][catch2]") {
+    EnvGuard backendEnvironment{"YAMS_EMBED_BACKEND", "daemon"};
+
+    yams::vector::EmbeddingConfig config;
+    config.backend = yams::vector::EmbeddingConfig::Backend::Simeon;
+    config.backend_is_resolved = true;
+    config.embedding_dim = 128;
+
+    yams::vector::EmbeddingGenerator generator(config);
+    REQUIRE(generator.initialize());
+    CHECK((generator.getBackendName() == "Simeon"));
+    CHECK((generator.getEmbeddingDimension() == 128U));
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "ConfigResolver embedding snapshot records persisted dimension authority",
+                 "[daemon][components][config][embeddings][snapshot][catch2]") {
+    auto environment = unsetEnvironment({"YAMS_EMBED_BACKEND", "YAMS_PREFERRED_MODEL",
+                                         "YAMS_EMBED_PRELOAD_ON_STARTUP", "YAMS_EMBED_BATCH",
+                                         "YAMS_EMBED_BATCH_TARGET", "YAMS_REPAIR_LOCK_TIMEOUT_MS",
+                                         "YAMS_EMBED_DIM"});
+    const auto configPath = writeToml("config.toml", R"toml(
+[embeddings]
+backend = "simeon"
+embedding_dim = 384
+)toml");
+    ConfigResolver::writeVectorSentinel(tempDir, 1024, "embeddings", 1);
+
+    DaemonConfig config;
+    config.configFilePath = configPath;
+    const auto resolved = ConfigResolver::resolveEmbeddingConfig(config, tempDir);
+
+    CHECK((resolved.dimension == std::optional<std::size_t>{1024U}));
+    CHECK((resolved.dimensionSource == EmbeddingDimensionSource::Sentinel));
+    CHECK((resolved.provenance.at("dimension") == "sentinel:vectors_sentinel.json"));
+    CHECK((resolved.policyIdentity == "simeon:simeon-default:1024"));
 }
 
 TEST_CASE_METHOD(ConfigResolverFixture,

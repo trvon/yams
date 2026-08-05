@@ -21,7 +21,8 @@ class VectorDatabase;
 
 namespace yams::daemon {
 class IModelProvider;
-}
+struct ResolvedEmbeddingConfig;
+} // namespace yams::daemon
 
 namespace yams::cli {
 
@@ -88,6 +89,11 @@ public:
     const std::string& getEmbeddingModelName() const { return embeddingModelName_; }
 
     /**
+     * Get the immutable embedding policy captured for this CLI data-path lifecycle.
+     */
+    const daemon::ResolvedEmbeddingConfig& getResolvedEmbeddingConfig();
+
+    /**
      * Check if embedding generator already exists (without creating it)
      */
     bool hasEmbeddingGenerator() const { return embeddingGenerator_ != nullptr; }
@@ -119,7 +125,10 @@ public:
     /**
      * Set the data directory path
      */
-    void setDataPath(const std::filesystem::path& p) { dataPath_ = p; }
+    void setDataPath(const std::filesystem::path& p) {
+        dataPath_ = p;
+        embeddingPolicy_.reset();
+    }
 
     /**
      * Get verbose flag
@@ -207,6 +216,7 @@ private:
      * Get the config file path
      */
     std::filesystem::path getConfigPath() const;
+    const daemon::ResolvedEmbeddingConfig& getEmbeddingPolicy();
 
     /**
      * Check if config migration is needed and prompt user
@@ -243,6 +253,7 @@ private:
     std::shared_ptr<vector::VectorDatabase> vectorDatabase_;
     std::shared_ptr<vector::EmbeddingGenerator> embeddingGenerator_; // Unified embedding generator
     std::shared_ptr<daemon::IModelProvider> localModelProvider_;
+    std::shared_ptr<const daemon::ResolvedEmbeddingConfig> embeddingPolicy_;
 
     // App services context
     std::shared_ptr<app::services::AppContext> appContext_;
