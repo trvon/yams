@@ -39,8 +39,8 @@ protected:
     }
 
     size_t runIteration() override {
-        auto hash = hasher_->hash(data_);
-        return 1; // 1 hash operation
+        const auto hash = hasher_->hash(data_);
+        return hash.empty() ? 0 : 1;
     }
 
     void collectCustomMetrics(std::map<std::string, double>& metrics) override {
@@ -185,11 +185,19 @@ using yams::benchmark::ChunkingBenchmark;
 using yams::benchmark::CompressionBenchmark;
 using yams::benchmark::HashingBenchmark;
 using yams::benchmark::matchesAnyFilter;
-using yams::benchmark::parseBenchmarkArgs;
+using yams::benchmark::parseBenchConfig;
+using yams::benchmark::prepareBenchmarkRun;
 using yams::test::BenchmarkTracker;
 
 int main(int argc, char** argv) {
-    const auto cli = parseBenchmarkArgs(argc, argv);
+    auto cli = parseBenchConfig(argc, argv, "core_benchmarks");
+    if (!cli.outputFile) {
+        cli.outputFile = cli.outDir / "core_benchmarks.jsonl";
+    }
+    if (!prepareBenchmarkRun(cli)) {
+        std::cerr << "ERROR: unable to prepare benchmark run directory: " << cli.outDir << '\n';
+        return 2;
+    }
 
     BenchmarkBase::Config config;
     config.verbose = cli.verbose;
@@ -204,7 +212,7 @@ int main(int argc, char** argv) {
     std::error_code ec_mkdir;
     std::filesystem::create_directories(outDir, ec_mkdir);
     if (ec_mkdir) {
-        std::cerr << "WARNING: unable to create bench_results directory: " << ec_mkdir.message()
+        std::cerr << "WARNING: unable to create benchmark output directory: " << ec_mkdir.message()
                   << std::endl;
     }
     const std::filesystem::path suiteHistoryJson = outDir / "core_benchmarks.json";
@@ -237,7 +245,7 @@ int main(int argc, char** argv) {
         "Zstd_1MB_HighEntropy_L3", 1024 * 1024, "high_entropy", 3, config));
 
     for (auto& benchmark : benchmarks) {
-        if (!matchesAnyFilter(benchmark->name(), cli.filters)) {
+        if (!matchesAnyFilter(benchmark->name(), cli.filters, cli.exactFilters)) {
             continue;
         }
         auto result = benchmark->run();

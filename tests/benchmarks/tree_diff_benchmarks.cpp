@@ -707,15 +707,16 @@ private:
 
 // Main benchmark runner
 int main(int argc, char** argv) {
-    const auto cli = parseBenchmarkArgs(argc, argv);
-    auto hasFlag = [&](std::string_view flag) {
-        for (int i = 1; i < argc; ++i) {
-            if (argv[i] && flag == argv[i]) {
-                return true;
-            }
-        }
-        return false;
-    };
+    auto cli = parseBenchConfig(
+        argc, argv, "tree_diff_benchmarks",
+        yams::benchmark::BenchConfigDefaults{.warmupIterations = 5, .iterations = 20});
+    if (!cli.outputFile) {
+        cli.outputFile = cli.outDir / "tree_diff_benchmark_results.jsonl";
+    }
+    if (!prepareBenchmarkRun(cli)) {
+        std::cerr << "ERROR: unable to prepare benchmark run directory: " << cli.outDir << '\n';
+        return 2;
+    }
 
     std::cout << "=== PBI-043 Tree-Diff Benchmarks ===" << std::endl;
     std::cout << "Acceptance Criteria Validation:" << std::endl;
@@ -726,8 +727,8 @@ int main(int argc, char** argv) {
     std::cout << std::endl;
 
     BenchmarkBase::Config config;
-    config.warmup_iterations = hasFlag("--warmup") ? cli.warmupIterations : 5;
-    config.benchmark_iterations = hasFlag("--iterations") ? cli.iterations : 20;
+    config.warmup_iterations = cli.warmupIterations;
+    config.benchmark_iterations = cli.iterations;
     config.verbose = cli.verbose;
     config.track_memory = cli.trackMemory;
 
@@ -735,7 +736,7 @@ int main(int argc, char** argv) {
     std::error_code ec_mkdir;
     std::filesystem::create_directories(outDir, ec_mkdir);
     if (ec_mkdir) {
-        std::cerr << "WARNING: unable to create bench_results directory: " << ec_mkdir.message()
+        std::cerr << "WARNING: unable to create benchmark output directory: " << ec_mkdir.message()
                   << std::endl;
     }
 

@@ -1,7 +1,5 @@
-#include <algorithm>
 #include <filesystem>
 #include <memory>
-#include <random>
 #include <string>
 #include <vector>
 
@@ -101,12 +99,20 @@ protected:
 using yams::benchmark::archiveJsonFileBestEffort;
 using yams::benchmark::BenchmarkBase;
 using yams::benchmark::matchesAnyFilter;
-using yams::benchmark::parseBenchmarkArgs;
+using yams::benchmark::parseBenchConfig;
+using yams::benchmark::prepareBenchmarkRun;
 using yams::benchmark::SearchBenchmark;
 using yams::test::BenchmarkTracker;
 
 int main(int argc, char** argv) {
-    const auto cli = parseBenchmarkArgs(argc, argv);
+    auto cli = parseBenchConfig(argc, argv, "search_benchmarks");
+    if (!cli.outputFile) {
+        cli.outputFile = cli.outDir / "search_benchmarks.jsonl";
+    }
+    if (!prepareBenchmarkRun(cli)) {
+        std::cerr << "ERROR: unable to prepare benchmark run directory: " << cli.outDir << '\n';
+        return 2;
+    }
 
     BenchmarkBase::Config config;
     config.verbose = cli.verbose;
@@ -121,7 +127,7 @@ int main(int argc, char** argv) {
     std::error_code ec_mkdir;
     std::filesystem::create_directories(outDir, ec_mkdir);
     if (ec_mkdir) {
-        std::cerr << "WARNING: unable to create bench_results directory: " << ec_mkdir.message()
+        std::cerr << "WARNING: unable to create benchmark output directory: " << ec_mkdir.message()
                   << std::endl;
     }
     const std::filesystem::path suiteHistoryJson = outDir / "search_benchmarks.json";
@@ -146,7 +152,7 @@ int main(int argc, char** argv) {
         "FacetAggregation_1000", 1000, config));
 
     for (auto& benchmark : benchmarks) {
-        if (!matchesAnyFilter(benchmark->name(), cli.filters)) {
+        if (!matchesAnyFilter(benchmark->name(), cli.filters, cli.exactFilters)) {
             continue;
         }
         auto result = benchmark->run();

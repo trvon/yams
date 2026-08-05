@@ -3,12 +3,15 @@
 The tables below are the latest recorded snapshot of the **default system**
 (no experiment matrices). They were produced with an xplan harness that is now
 kept as optional, gitignored local tooling. Per-run detail:
-`build/benchmarks/<plan>/<stamp>/` (`REPORT.md`, `ablation.md`, `metrics.csv`).
+`build/benchmarks/<plan>/<timestamp>-<config-hash>/` (`run_manifest.json`, `REPORT.md`,
+`ablation.md`, `metrics.csv`). Tracked API/core/search/tree-diff benchmarks use the same default
+`build/benchmarks/<suite>/<timestamp>-<config-hash>/` layout and record effective CLI values,
+field-level sources, and execution provenance in `run_manifest.json`; `--out-dir` remains exact.
 
 | | |
 |--|--|
 | Local harness | `tests/benchmarks/xplan/` (optional; not distributed) |
-| Artifacts | `build/benchmarks/<plan>/<stamp>/` (gitignored) |
+| Artifacts | `build/benchmarks/<plan>/<timestamp>-<config-hash>/` (gitignored) |
 | Micro baselines (code) | `tests/benchmarks/baseline/*.json` |
 | Full Simeon ingestion oracle | [`ingestion_oracle.md`](ingestion_oracle.md) |
 
