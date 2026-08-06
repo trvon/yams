@@ -8,7 +8,10 @@
 #include <array>
 #include <filesystem>
 #include <fstream>
+#include <stdexcept>
 #include <string>
+#include <utility>
+#include <vector>
 
 using yams::test::isBenchmarkListArgument;
 using yams::test::normalizeBenchmarkListArguments;
@@ -69,14 +72,119 @@ TEST_CASE("BenchConfig defaults to a timestamp and config hash run directory",
     CHECK((custom.sources.at("iterations") == "default:20"));
 }
 
+TEST_CASE("BenchConfig rejects unknown and incomplete arguments",
+          "[benchmark][harness][config][arguments]") {
+    const auto parse = [](std::vector<std::string> storage) {
+        std::vector<char*> argv;
+        argv.reserve(storage.size());
+        for (auto& argument : storage) {
+            argv.push_back(argument.data());
+        }
+        return yams::benchmark::parseBenchConfig(static_cast<int>(argv.size()), argv.data(),
+                                                 "argument_contract");
+    };
+
+    const auto failureMessage = [&](std::vector<std::string> arguments) {
+        try {
+            (void)parse(std::move(arguments));
+        } catch (const std::runtime_error& error) {
+            return std::string{error.what()};
+        }
+        return std::string{};
+    };
+
+    CHECK(
+        (failureMessage({"bench", "--iteratons", "7"}) == "Unknown benchmark option: --iteratons"));
+    CHECK((failureMessage({"bench", "--iterations=7"}) ==
+           "Unknown benchmark option: --iterations=7"));
+    CHECK((failureMessage({"bench", "-x"}) == "Unknown benchmark option: -x"));
+    CHECK((failureMessage({"bench", "unexpected"}) ==
+           "Unexpected positional benchmark argument: unexpected"));
+    CHECK((failureMessage({"bench", "--output"}) == "Missing value for --output"));
+    CHECK((failureMessage({"bench", "--filter", "--quiet"}) == "Missing value for --filter"));
+    CHECK(
+        (failureMessage({"bench", "--iterations", "-1"}) == "Invalid value for --iterations: -1"));
+}
+
+TEST_CASE("BenchConfig preserves dash-prefixed string and path values",
+          "[benchmark][harness][config][arguments]") {
+    const auto root = fs::temp_directory_path() / "yams_bench_dash_argument_contract";
+    std::vector<std::string> storage{
+        "bench",    "--out-dir",      root.string(),   "--filter", "-named",
+        "--output", "-results.jsonl", "--archive-dir", "--",       "--archive-results"};
+    std::vector<char*> argv;
+    argv.reserve(storage.size());
+    for (auto& argument : storage) {
+        argv.push_back(argument.data());
+    }
+
+    const auto config = yams::benchmark::parseBenchConfig(static_cast<int>(argv.size()),
+                                                          argv.data(), "argument_contract");
+
+    CHECK((config.filters == std::vector<std::string>{"-named"}));
+    REQUIRE(config.outputFile.has_value());
+    CHECK((*config.outputFile == fs::path{"-results.jsonl"}));
+    CHECK((config.archiveDir == fs::path{"--archive-results"}));
+}
+
+TEST_CASE("BenchConfig accepts every documented consumer argument",
+          "[benchmark][harness][config][arguments]") {
+    const auto root = fs::temp_directory_path() / "yams_bench_argument_contract";
+    const auto output = root / "exact-results.jsonl";
+    const auto archive = root / "exact-archive";
+    std::vector<std::string> storage{
+        "bench",          "--warmup",       "4",           "--iterations", "9",
+        "--quiet",        "--verbose",      "--no-memory", "--filter",     "API",
+        "--exact-filter", "Hashing",        "--out-dir",   root.string(),  "--output",
+        output.string(),  "--seed",         "42",          "--no-archive", "--archive",
+        "--archive-dir",  archive.string(),
+    };
+    std::vector<char*> argv;
+    argv.reserve(storage.size());
+    for (auto& argument : storage) {
+        argv.push_back(argument.data());
+    }
+
+    const auto config = yams::benchmark::parseBenchConfig(static_cast<int>(argv.size()),
+                                                          argv.data(), "argument_contract");
+
+    CHECK((config.warmupIterations == 4));
+    CHECK((config.iterations == 9));
+    CHECK(config.verbose);
+    CHECK_FALSE(config.trackMemory);
+    CHECK((config.filters == std::vector<std::string>{"API"}));
+    CHECK((config.exactFilters == std::vector<std::string>{"Hashing"}));
+    CHECK((config.outDir == root));
+    REQUIRE(config.outputFile.has_value());
+    CHECK((*config.outputFile == output));
+    REQUIRE(config.seed.has_value());
+    CHECK((*config.seed == 42));
+    CHECK(config.archive);
+    CHECK((config.archiveDir == archive));
+    CHECK((config.sources.at("out_dir") == "cli:--out-dir"));
+    CHECK((config.sources.at("output_file") == "cli:--output"));
+    CHECK((config.sources.at("archive_dir") == "cli:--archive-dir"));
+}
+
 TEST_CASE("BenchConfig preserves explicit output and serializes effective provenance",
           "[benchmark][harness][config][manifest]") {
     const auto root = fs::temp_directory_path() / "yams_bench_config_contract";
     std::error_code ec;
     fs::remove_all(root, ec);
-    std::array<std::string, 7> storage{"bench",       "--iterations", "7", "--out-dir",
-                                       root.string(), "--seed",       "42"};
-    std::array<char*, 7> argv{};
+    const auto output = root / "exact-results.jsonl";
+    const auto archive = root / "exact-archive";
+    std::array<std::string, 11> storage{"bench",
+                                        "--iterations",
+                                        "7",
+                                        "--out-dir",
+                                        root.string(),
+                                        "--output",
+                                        output.string(),
+                                        "--archive-dir",
+                                        archive.string(),
+                                        "--seed",
+                                        "42"};
+    std::array<char*, 11> argv{};
     for (std::size_t index = 0; index < storage.size(); ++index) {
         argv[index] = storage[index].data();
     }
@@ -91,8 +199,13 @@ TEST_CASE("BenchConfig preserves explicit output and serializes effective proven
     CHECK((config.outDir == root));
     CHECK((config.iterations == 7));
     CHECK((config.seed == 42));
+    REQUIRE(config.outputFile.has_value());
+    CHECK((*config.outputFile == output));
+    CHECK((config.archiveDir == archive));
     CHECK((config.sources.at("iterations") == "cli:--iterations"));
     CHECK((config.sources.at("out_dir") == "cli:--out-dir"));
+    CHECK((config.sources.at("output_file") == "cli:--output"));
+    CHECK((config.sources.at("archive_dir") == "cli:--archive-dir"));
     const auto manifestPath = root / "run_manifest.json";
     REQUIRE(fs::is_regular_file(manifestPath));
     std::ifstream input{manifestPath};

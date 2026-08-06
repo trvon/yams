@@ -1,5 +1,6 @@
 #pragma once
 
+#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -10,6 +11,7 @@
 #include <iomanip>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <optional>
 #include <sstream>
@@ -183,17 +185,48 @@ inline BenchConfig parseBenchConfig(int argc, char** argv, std::string_view suit
                       {"archive_dir", "default:run-dir/archive"},
                       {"seed", "default:unset"}};
 
-    const auto toSize = [](const char* value) {
-        return static_cast<std::size_t>(std::stoull(std::string{value}));
+    const auto toUnsigned = [](const char* value, const char* flag) {
+        const std::string_view text{value};
+        std::uint64_t parsed = 0;
+        const auto [end, error] = std::from_chars(text.data(), text.data() + text.size(), parsed);
+        if (text.empty() || error != std::errc{} || end != text.data() + text.size()) {
+            throw std::runtime_error(std::string{"Invalid value for "} + flag + ": " +
+                                     std::string{text});
+        }
+        return parsed;
+    };
+    const auto toSize = [&](const char* value, const char* flag) {
+        const auto parsed = toUnsigned(value, flag);
+        if (parsed > std::numeric_limits<std::size_t>::max()) {
+            throw std::runtime_error(std::string{"Value out of range for "} + flag + ": " + value);
+        }
+        return static_cast<std::size_t>(parsed);
     };
     for (int index = 1; index < argc; ++index) {
-        const std::string argument = argv[index] ? argv[index] : "";
+        if (!argv[index]) {
+            throw std::runtime_error("Unexpected null benchmark argument");
+        }
+        const std::string argument = argv[index];
         if (argument == "--help" || argument == "-h") {
             printBenchmarkUsage(config.executable, defaults);
             std::exit(0);
         }
-        const auto needValue = [&](const char* flag) -> const char* {
+        const auto needValue = [&](const char* flag, bool numeric = false) -> const char* {
             if (index + 1 >= argc || !argv[index + 1]) {
+                throw std::runtime_error(std::string{"Missing value for "} + flag);
+            }
+            const std::string_view value{argv[index + 1]};
+            if (value.empty()) {
+                throw std::runtime_error(std::string{"Missing value for "} + flag);
+            }
+            if (!numeric && value == "--") {
+                if (index + 2 >= argc || !argv[index + 2] || argv[index + 2][0] == '\0') {
+                    throw std::runtime_error(std::string{"Missing value for "} + flag);
+                }
+                index += 2;
+                return argv[index];
+            }
+            if (!numeric && value.size() >= 2 && value[0] == '-' && value[1] == '-') {
                 throw std::runtime_error(std::string{"Missing value for "} + flag);
             }
             return argv[++index];
@@ -215,10 +248,10 @@ inline BenchConfig parseBenchConfig(int argc, char** argv, std::string_view suit
             config.archive = false;
             config.sources["archive"] = "cli:--no-archive";
         } else if (argument == "--warmup") {
-            config.warmupIterations = toSize(needValue("--warmup"));
+            config.warmupIterations = toSize(needValue("--warmup", true), "--warmup");
             config.sources["warmup_iterations"] = "cli:--warmup";
         } else if (argument == "--iterations") {
-            config.iterations = toSize(needValue("--iterations"));
+            config.iterations = toSize(needValue("--iterations", true), "--iterations");
             config.sources["iterations"] = "cli:--iterations";
         } else if (argument == "--filter") {
             config.filters.emplace_back(needValue("--filter"));
@@ -236,8 +269,12 @@ inline BenchConfig parseBenchConfig(int argc, char** argv, std::string_view suit
             config.archiveDir = std::filesystem::path{needValue("--archive-dir")};
             config.sources["archive_dir"] = "cli:--archive-dir";
         } else if (argument == "--seed") {
-            config.seed = std::stoull(std::string{needValue("--seed")});
+            config.seed = toUnsigned(needValue("--seed", true), "--seed");
             config.sources["seed"] = "cli:--seed";
+        } else if (argument.starts_with('-')) {
+            throw std::runtime_error("Unknown benchmark option: " + argument);
+        } else {
+            throw std::runtime_error("Unexpected positional benchmark argument: " + argument);
         }
     }
 
