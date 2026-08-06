@@ -100,12 +100,18 @@ Result<void> DatabaseManager::initialize() {
 void DatabaseManager::shutdown() {
     spdlog::debug("[DatabaseManager] Shutting down");
 
+    if (deps_.state) {
+        deps_.state->readiness.metadataRepoReady.store(false, std::memory_order_release);
+    }
     shutdownWal();
 
-    kgStore_.reset();
-    if (metadataRepo_) {
+    std::atomic_store_explicit(&kgStore_, std::shared_ptr<metadata::KnowledgeGraphStore>{},
+                               std::memory_order_release);
+    auto metadataRepo = std::atomic_exchange_explicit(
+        &metadataRepo_, std::shared_ptr<metadata::MetadataRepository>{}, std::memory_order_acq_rel);
+    if (metadataRepo) {
         try {
-            metadataRepo_->shutdown();
+            metadataRepo->shutdown();
         } catch (const std::exception& e) {
             spdlog::debug("[DatabaseManager] MetadataRepository shutdown failed: {}", e.what());
         } catch (...) {
@@ -113,7 +119,6 @@ void DatabaseManager::shutdown() {
                 "[DatabaseManager] MetadataRepository shutdown failed: unknown exception");
         }
     }
-    metadataRepo_.reset();
     std::shared_ptr<metadata::ConnectionPool> readPool;
     std::shared_ptr<metadata::ConnectionPool> writePool;
     {
@@ -163,9 +168,11 @@ void DatabaseManager::shutdown() {
     std::string dbPath;
     bool checkpointCompleted = false;
     bool cleanupMalformedSidecars = false;
-    if (database_ && database_->isOpen()) {
-        dbPath = database_->path();
-        auto checkpointResult = database_->execute("PRAGMA wal_checkpoint(TRUNCATE)");
+    auto database = std::atomic_exchange_explicit(&database_, std::shared_ptr<metadata::Database>{},
+                                                  std::memory_order_acq_rel);
+    if (database && database->isOpen()) {
+        dbPath = database->path();
+        auto checkpointResult = database->execute("PRAGMA wal_checkpoint(TRUNCATE)");
         if (!checkpointResult) {
             const auto message = checkpointResult.error().message;
             cleanupMalformedSidecars = message.find("malformed") != std::string::npos ||
@@ -178,9 +185,9 @@ void DatabaseManager::shutdown() {
         }
     }
 
-    if (database_) {
+    if (database) {
         try {
-            database_->close();
+            database->close();
         } catch (const std::exception& e) {
             checkpointCompleted = false;
             spdlog::debug("[DatabaseManager] database close failed: {}", e.what());
@@ -188,7 +195,6 @@ void DatabaseManager::shutdown() {
             checkpointCompleted = false;
             spdlog::debug("[DatabaseManager] database close failed: unknown exception");
         }
-        database_.reset();
     }
 
     if (!dbPath.empty() && checkpointCompleted && poolsQuiesced) {
@@ -243,19 +249,20 @@ void DatabaseManager::initializeWal(const std::filesystem::path& dataDir) {
     try {
         yams::wal::WALManager::Config walConfig;
         walConfig.walDirectory = dataDir / "wal";
-        walManager_ = std::make_shared<yams::wal::WALManager>(walConfig);
-        if (auto result = walManager_->initialize(); !result) {
+        auto walManager = std::make_shared<yams::wal::WALManager>(walConfig);
+        if (auto result = walManager->initialize(); !result) {
             spdlog::warn("[DatabaseManager] WALManager initialization failed: {}",
                          result.error().message);
-            walManager_.reset();
             return;
         }
+        std::atomic_store_explicit(&walManager_, walManager, std::memory_order_release);
         spdlog::info("[DatabaseManager] WALManager initialized");
-        attachWalManager(walManager_);
+        attachWalManager(std::move(walManager));
         spdlog::debug("[DatabaseManager] WALManager attached to metrics provider");
     } catch (const std::exception& e) {
         spdlog::warn("[DatabaseManager] WALManager initialization threw: {}", e.what());
-        walManager_.reset();
+        std::atomic_store_explicit(&walManager_, std::shared_ptr<yams::wal::WALManager>{},
+                                   std::memory_order_release);
     }
 }
 
@@ -276,11 +283,17 @@ void DatabaseManager::interruptPendingConnectionAcquiresForShutdown() {
 }
 
 void DatabaseManager::shutdownWal() {
-    if (!walManager_) {
+    auto walManager = std::atomic_exchange_explicit(
+        &walManager_, std::shared_ptr<yams::wal::WALManager>{}, std::memory_order_acq_rel);
+    if (auto provider =
+            std::atomic_load_explicit(&walMetricsProvider_, std::memory_order_acquire)) {
+        provider->setManager(nullptr);
+    }
+    if (!walManager) {
         return;
     }
     try {
-        auto result = walManager_->shutdown();
+        auto result = walManager->shutdown();
         if (!result) {
             spdlog::warn("[DatabaseManager] WALManager shutdown failed: {}",
                          result.error().message);
@@ -292,18 +305,25 @@ void DatabaseManager::shutdownWal() {
     } catch (...) {
         spdlog::warn("[DatabaseManager] WALManager shutdown threw unknown exception");
     }
-    walManager_.reset();
 }
 
 void DatabaseManager::attachWalManager(std::shared_ptr<yams::wal::WALManager> wal) {
-    if (!walMetricsProvider_) {
-        walMetricsProvider_ = std::make_shared<WalMetricsProvider>();
+    auto provider = std::atomic_load_explicit(&walMetricsProvider_, std::memory_order_acquire);
+    if (!provider) {
+        auto candidate = std::make_shared<WalMetricsProvider>();
+        candidate->setManager(wal);
+        if (std::atomic_compare_exchange_strong_explicit(&walMetricsProvider_, &provider, candidate,
+                                                         std::memory_order_release,
+                                                         std::memory_order_acquire)) {
+            return;
+        }
     }
-    walMetricsProvider_->setManager(std::move(wal));
+    provider->setManager(std::move(wal));
 }
 
 bool DatabaseManager::initializePools(const std::filesystem::path& dbPath) {
-    if (!database_) {
+    auto database = std::atomic_load_explicit(&database_, std::memory_order_acquire);
+    if (!database) {
         spdlog::warn("[DatabaseManager] Cannot init pools: database not open");
         return false;
     }
@@ -415,12 +435,14 @@ bool DatabaseManager::initializePools(const std::filesystem::path& dbPath) {
     auto repoRes = init::record_duration(
         std::string(readiness::kMetadataRepo),
         [&]() -> yams::Result<void> {
-            metadataRepo_ =
+            auto metadataRepo =
                 std::make_shared<metadata::MetadataRepository>(*writePool, readPoolSnap.get());
+            metadataRepo->initializeCounters();
+            std::atomic_store_explicit(&metadataRepo_, std::move(metadataRepo),
+                                       std::memory_order_release);
             if (deps_.state) {
                 deps_.state->readiness.metadataRepoReady = true;
             }
-            metadataRepo_->initializeCounters();
             spdlog::info("[DatabaseManager] Metadata repository initialized successfully");
             return yams::Result<void>();
         },

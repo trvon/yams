@@ -10,6 +10,7 @@
 #include <boost/system/error_code.hpp>
 
 #include <yams/app/services/document_ingestion_service.h>
+#include <yams/compat/thread_stop_compat.h>
 #include <yams/compat/unistd.h>
 #include <yams/daemon/daemon.h>
 
@@ -109,15 +110,18 @@ TEST_CASE_METHOD(DaemonIngestionReliabilitySmoke, "IngestRetriesUntilDaemonReady
     opts.noEmbeddings = true;
     opts.explicitDataDir = storageDir_;
     // Enable retries/backoff to survive transient startup window
-    opts.retries = 5;
-    opts.backoffMs = 100;
+    // Keep the retry window wider than instrumented daemon startup. Five 100ms retries cover only
+    // 3.1 seconds; eight 50ms retries cover 12.75 seconds while staying inside the service
+    // deadline.
+    opts.retries = 8;
+    opts.backoffMs = 50;
     opts.timeoutMs = 1500; // per-attempt timeout
     opts.verify = true;
 
     // Kick off ingestion on a background thread BEFORE the daemon is started
     std::promise<yams::Result<yams::daemon::AddDocumentResponse>> prom;
     auto fut = prom.get_future();
-    std::thread worker(
+    yams::compat::jthread worker(
         [&ing, &opts, p = std::move(prom)]() mutable { p.set_value(ing.addViaDaemon(opts)); });
 
     // Give the client a head start to encounter an initial connection failure
@@ -137,7 +141,18 @@ TEST_CASE_METHOD(DaemonIngestionReliabilitySmoke, "IngestRetriesUntilDaemonReady
     REQUIRE(started);
 
     // Start runLoop in background thread - REQUIRED for daemon to process requests
-    std::thread runLoopThread([&daemon]() { daemon.runLoop(); });
+    yams::compat::jthread runLoopThread([&daemon]() { daemon.runLoop(); });
+    struct DaemonStopGuard {
+        yams::daemon::YamsDaemon& daemon;
+        bool active{true};
+
+        ~DaemonStopGuard() {
+            if (active)
+                (void)daemon.stop();
+        }
+
+        void release() noexcept { active = false; }
+    } stopDaemon{daemon};
 
     // Wait for daemon to reach Ready state before allowing client requests to complete
     // Without this, the client might connect before services are fully initialized
@@ -162,6 +177,7 @@ TEST_CASE_METHOD(DaemonIngestionReliabilitySmoke, "IngestRetriesUntilDaemonReady
     CHECK_FALSE(addRes.value().hash.empty());
 
     // Shutdown daemon cleanly
-    daemon.stop();
+    (void)daemon.stop();
     runLoopThread.join();
+    stopDaemon.release();
 }

@@ -449,12 +449,14 @@ void TuningManager::configureOnnxConcurrencyRegistry() {
         computeOnnxSlotBudget(maxConcurrent, glinerReserved, embedReserved, rerankerReserved,
                               /*pressureCap=*/maxConcurrent, /*underPressure=*/false);
 
-    // Configure the registry
-    registry.setMaxSlots(slotBudget.maxSlots);
+    // Apply reserved lanes first, then the total. setReservedSlots() protects accounting by
+    // raising a too-small total, so publishing the total first can retain a prior lifecycle's
+    // larger reservation floor when a profile scales down.
     registry.setReservedSlots(OnnxLane::Gliner, slotBudget.glinerReserved);
     registry.setReservedSlots(OnnxLane::Embedding, slotBudget.embedReserved);
     registry.setReservedSlots(OnnxLane::Reranker, slotBudget.rerankerReserved);
     registry.setReservedSlots(OnnxLane::Other, 0);
+    registry.setMaxSlots(slotBudget.maxSlots);
 
     spdlog::info(
         "[TuningManager] Configured OnnxConcurrencyRegistry: maxSlots={}, reserved=[gliner={}, "
@@ -509,15 +511,16 @@ bool TuningManager::tick_once() {
     auto& governor = ResourceGovernor::instance();
     ResourceSnapshot govSnap = governor.tick(sm_);
 
+    // Publish static ONNX policy during the synchronous startup tick so Ready never exposes
+    // process-global values retained from an earlier lifecycle. Adaptive tuning remains gated.
+    if (!onnxRegistryConfigured_.exchange(true)) {
+        configureOnnxConcurrencyRegistry();
+    }
+
     // Don't perform adaptive tuning until services are at least partially ready,
     // to avoid acting on default pool configs.
     if (!state_->readiness.metadataRepoReady.load()) {
         return true; // Not ready yet → treat as idle
-    }
-
-    // Configure ONNX concurrency registry once on first tick
-    if (!onnxRegistryConfigured_.exchange(true)) {
-        configureOnnxConcurrencyRegistry();
     }
 
     // =========================================================================

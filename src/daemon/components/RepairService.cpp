@@ -328,10 +328,7 @@ RepairServiceContext makeRepairServiceContext(ServiceManager* services) {
     ctx.getModelProvider = [services] { return services->getModelProvider(); };
     ctx.getEmbeddingQueuedJobs = [services] { return services->getEmbeddingQueuedJobs(); };
     ctx.getEmbeddingInFlightJobs = [services] { return services->getEmbeddingInFlightJobs(); };
-    ctx.getContentExtractors =
-        [services]() -> const std::vector<std::shared_ptr<extraction::IContentExtractor>>& {
-        return services->getContentExtractors();
-    };
+    ctx.getContentExtractors = [services] { return services->getContentExtractors(); };
     ctx.getSymbolExtractors =
         [services]() -> const std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>>& {
         return services->getSymbolExtractors();
@@ -910,9 +907,9 @@ RepairService::detectMissingWork(const std::vector<std::string>& batch) {
         return result;
 
     const bool checkEmbeddings = !vectorsDisabledByEnv();
-    static const std::vector<std::shared_ptr<extraction::IContentExtractor>> kEmptyExtractors;
-    const auto& customExtractors =
-        ctx_.getContentExtractors ? ctx_.getContentExtractors() : kEmptyExtractors;
+    auto customExtractors = ctx_.getContentExtractors
+                                ? ctx_.getContentExtractors()
+                                : std::vector<std::shared_ptr<extraction::IContentExtractor>>{};
 
     std::vector<MissingWorkFlags> flags(batch.size());
     std::vector<std::exception_ptr> errors(batch.size());
@@ -2667,9 +2664,9 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
     auto* wc = ctx_.getWriteCoordinator ? ctx_.getWriteCoordinator() : nullptr;
     MetadataWriteFacade metaFacade(wc, meta.get());
 
-    static const std::vector<std::shared_ptr<extraction::IContentExtractor>> kEmptyExtractors;
-    const auto& customExtractors =
-        ctx_.getContentExtractors ? ctx_.getContentExtractors() : kEmptyExtractors;
+    auto customExtractors = ctx_.getContentExtractors
+                                ? ctx_.getContentExtractors()
+                                : std::vector<std::shared_ptr<extraction::IContentExtractor>>{};
 
     // Pre-load all FTS5 rowids so the incremental skip check below is O(1)
     // per document instead of one SQL round-trip each.

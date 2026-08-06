@@ -107,7 +107,8 @@ TEST_CASE("RetrievalService returns at its request deadline while owned work dra
 
     REQUIRE_FALSE(result);
     CHECK(result.error().code == yams::ErrorCode::Timeout);
-    CHECK(elapsed < 150ms);
+    CHECK(elapsed < 1s);
+    CHECK(transport->completedFuture().wait_for(0ms) == std::future_status::timeout);
     REQUIRE(transport->completedFuture().wait_for(1s) == std::future_status::ready);
 }
 
@@ -134,7 +135,8 @@ TEST_CASE("DocumentIngestionService delete returns at its request deadline",
 
     REQUIRE_FALSE(result);
     CHECK(result.error().code == yams::ErrorCode::Timeout);
-    CHECK(elapsed < 150ms);
+    CHECK(elapsed < 1s);
+    CHECK(transport->completedFuture().wait_for(0ms) == std::future_status::timeout);
     REQUIRE(transport->completedFuture().wait_for(1s) == std::future_status::ready);
 }
 

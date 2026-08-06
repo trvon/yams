@@ -132,7 +132,18 @@ void BackgroundTaskManager::cancelTrackedTimers() {
 
 void BackgroundTaskManager::waitForTrackedCoroutines() {
     std::unique_lock<std::mutex> lock(trackedCoroutineMutex_);
-    trackedCoroutineCv_.wait(lock, [this] { return trackedCoroutineCount_ == 0; });
+    while (trackedCoroutineCount_ != 0) {
+        if (trackedCoroutineCv_.wait_for(lock, std::chrono::milliseconds{100},
+                                         [this] { return trackedCoroutineCount_ == 0; })) {
+            break;
+        }
+
+        // A one-shot cancellation can run just before a coroutine arms its next wait. Re-post
+        // cancellation until every tracked coroutine has observed the stop request and exited.
+        lock.unlock();
+        cancelTrackedTimers();
+        lock.lock();
+    }
     trackedTimers_.clear();
 }
 
@@ -776,6 +787,10 @@ void BackgroundTaskManager::launchDocumentRetentionTask() {
                 auto timer =
                     std::make_shared<boost::asio::steady_timer>(boost::asio::make_strand(executor));
                 registerTrackedTimer(timer);
+                if (stopFlag->load(std::memory_order_acquire)) {
+                    co_return;
+                }
+
                 if (initialDelay.count() > 0 && !co_await coWaitForDelay(timer, initialDelay)) {
                     co_return;
                 }

@@ -15,6 +15,7 @@
 #include <string>
 #include <thread>
 
+#include "test_async_helpers.h"
 #include "test_daemon_harness.h"
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/metadata/database.h>

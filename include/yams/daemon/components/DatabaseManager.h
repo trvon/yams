@@ -83,7 +83,9 @@ public:
     // in initializePools() which is called by ServiceManager after DB open/migrate.
 
     // Accessors
-    std::shared_ptr<metadata::Database> getDatabase() const { return database_; }
+    std::shared_ptr<metadata::Database> getDatabase() const {
+        return std::atomic_load_explicit(&database_, std::memory_order_acquire);
+    }
     std::shared_ptr<metadata::ConnectionPool> getConnectionPool() const {
         std::lock_guard<std::mutex> lk(poolMutex_);
         return connectionPool_;
@@ -92,8 +94,12 @@ public:
         std::lock_guard<std::mutex> lk(poolMutex_);
         return readConnectionPool_;
     }
-    std::shared_ptr<metadata::MetadataRepository> getMetadataRepo() const { return metadataRepo_; }
-    std::shared_ptr<metadata::KnowledgeGraphStore> getKgStore() const { return kgStore_; }
+    std::shared_ptr<metadata::MetadataRepository> getMetadataRepo() const {
+        return std::atomic_load_explicit(&metadataRepo_, std::memory_order_acquire);
+    }
+    std::shared_ptr<metadata::KnowledgeGraphStore> getKgStore() const {
+        return std::atomic_load_explicit(&kgStore_, std::memory_order_acquire);
+    }
 
     /**
      * @brief Publish a ServiceManager-constructed KG store into DatabaseManager.
@@ -101,11 +107,11 @@ public:
      * shared write pool (outside initializeRepositories/initializePools).
      */
     void setKgStore(std::shared_ptr<metadata::KnowledgeGraphStore> store) {
-        kgStore_ = std::move(store);
+        std::atomic_store_explicit(&kgStore_, std::move(store), std::memory_order_release);
     }
 
     void setMetadataRepo(std::shared_ptr<metadata::MetadataRepository> repo) {
-        metadataRepo_ = std::move(repo);
+        std::atomic_store_explicit(&metadataRepo_, std::move(repo), std::memory_order_release);
     }
 
     /**
@@ -117,7 +123,7 @@ public:
      * constructed.
      */
     void setDatabase(std::shared_ptr<metadata::Database> database) {
-        database_ = std::move(database);
+        std::atomic_store_explicit(&database_, std::move(database), std::memory_order_release);
     }
 
     /** Allow clean shutdown to publish a reusable startup-integrity stamp. */
@@ -174,9 +180,11 @@ public:
      */
     void attachWalManager(std::shared_ptr<yams::wal::WALManager> wal);
 
-    std::shared_ptr<yams::wal::WALManager> getWalManager() const { return walManager_; }
+    std::shared_ptr<yams::wal::WALManager> getWalManager() const {
+        return std::atomic_load_explicit(&walManager_, std::memory_order_acquire);
+    }
     std::shared_ptr<WalMetricsProvider> getWalMetricsProvider() const {
-        return walMetricsProvider_;
+        return std::atomic_load_explicit(&walMetricsProvider_, std::memory_order_acquire);
     }
 
     /**
@@ -190,7 +198,7 @@ public:
     /**
      * @brief Check if database is ready for queries.
      */
-    bool isReady() const { return database_ != nullptr && metadataRepo_ != nullptr; }
+    bool isReady() const { return getDatabase() != nullptr && getMetadataRepo() != nullptr; }
 
     /**
      * @brief Database operation statistics.

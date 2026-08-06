@@ -151,8 +151,8 @@ else
   message('Google Benchmark not found; skipping large_scale_ingestion_bench')
 endif
 
-if benchmark_dep.found() and benchmark_main_dep.found()
-  storage_bench_deps = [test_deps, dependency('yams_benchmarks'), benchmark_main_dep] + tracy_deps + [benchmark_dep]
+if benchmark_dep.found()
+  storage_bench_deps = [test_deps, dependency('yams_benchmarks'), benchmark_dep] + tracy_deps
 
   storage_bench = executable('yams_storage_throughput_benchmarks',
     files('storage_throughput_bench.cpp'),
@@ -162,7 +162,7 @@ if benchmark_dep.found() and benchmark_main_dep.found()
     install: false,
   )
 else
-  message('Google Benchmark benchmark_main not found; skipping storage throughput benchmark')
+  message('Google Benchmark not found; skipping storage throughput benchmark')
 endif
 
 if benchmark_dep.found()

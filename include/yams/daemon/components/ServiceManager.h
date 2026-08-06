@@ -362,8 +362,8 @@ public:
         }
         refreshRuntimeTuningStatus();
     }
-    const std::vector<std::shared_ptr<yams::extraction::IContentExtractor>>&
-    getContentExtractors() const {
+    std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> getContentExtractors() const {
+        std::lock_guard lock(contentExtractorsMutex_);
         return contentExtractors_;
     }
     // Symbol extractors (ABI adapters) - delegate to PluginManager
@@ -577,12 +577,12 @@ public:
     // Expose resolved daemon configuration for components that need paths
     const DaemonConfig& getConfig() const { return config_; }
     std::shared_ptr<const ResolvedEmbeddingConfig> getResolvedEmbeddingConfig() const {
-        return embeddingConfig_;
+        return std::atomic_load_explicit(&embeddingConfig_, std::memory_order_acquire);
     }
     const StateComponent& getState() const { return state_; }
     const std::filesystem::path& getResolvedDataDir() const { return resolvedDataDir_; }
     std::string getMetadataDatabasePath() const {
-        auto db = database_;
+        auto db = std::atomic_load_explicit(&database_, std::memory_order_acquire);
         return db ? db->path() : std::string{};
     }
     std::string getVectorDatabasePath() const {
@@ -740,7 +740,9 @@ private:
     Result<std::filesystem::path> initializeDataDirAndContentStore();
     boost::asio::awaitable<bool> initializeMetadataDatabaseAt(const std::filesystem::path& dbPath,
                                                               yams::compat::stop_token token);
-    void finalizeDatabaseStartup(const std::filesystem::path& dbPath);
+    bool finalizeDatabaseStartup(const std::filesystem::path& dbPath,
+                                 const std::shared_ptr<metadata::Database>& database,
+                                 yams::compat::stop_token token);
     void runStartupSalvageIfNeeded(const std::filesystem::path& dbPath);
     void schedulePostStartupMaintenance(const std::filesystem::path& dbPath);
     void scheduleRecoveryArtifactCleanup(const std::filesystem::path& dbPath);
@@ -751,12 +753,15 @@ private:
     void setDatabasePhase(std::string_view phase);
     void setMaintenancePhase(std::string_view phase);
     void recoverStaleWalIfPresent(const std::filesystem::path& dbPath);
-    bool openDatabaseOnce(const std::filesystem::path& dbPath);
-    bool ensureDatabaseIntegrityOrRecover(const std::filesystem::path& dbPath);
+    bool openDatabaseOnce(const std::filesystem::path& dbPath,
+                          const std::shared_ptr<metadata::Database>& database);
+    bool ensureDatabaseIntegrityOrRecover(const std::filesystem::path& dbPath,
+                                          const std::shared_ptr<metadata::Database>& database);
     static bool shouldAutoVacuum(std::uint64_t databaseBytes, std::uint64_t pageCount,
                                  std::uint64_t freePageCount, std::uint64_t pageSize);
     void maybeAutoVacuumDatabase(const std::filesystem::path& dbPath);
-    bool openDatabaseBlocking(const std::filesystem::path& dbPath);
+    bool openDatabaseBlocking(const std::filesystem::path& dbPath,
+                              const std::shared_ptr<metadata::Database>& database);
 
     void stopBackgroundTaskManagerForShutdown();
     void stopSessionWatcherForShutdown();
@@ -777,9 +782,13 @@ private:
     void shutdownExtractedManagers();
     void releasePluginInfrastructure();
 
-    boost::asio::awaitable<bool> co_openDatabase(const std::filesystem::path& dbPath,
-                                                 int timeout_ms, yams::compat::stop_token token);
-    boost::asio::awaitable<bool> co_migrateDatabase(int timeout_ms, yams::compat::stop_token token);
+    boost::asio::awaitable<bool>
+    co_openDatabase(const std::filesystem::path& dbPath, int timeout_ms,
+                    yams::compat::stop_token token,
+                    const std::shared_ptr<metadata::Database>& database);
+    boost::asio::awaitable<bool>
+    co_migrateDatabase(int timeout_ms, yams::compat::stop_token token,
+                       const std::shared_ptr<metadata::Database>& database);
     bool detectEmbeddingPreloadFlag() const { return embeddingLifecycle_.detectPreloadFlag(); }
 
     // Declared first so the process-wide compatibility lease outlives all managed services.
@@ -828,6 +837,7 @@ private:
     std::shared_ptr<metadata::MetadataInsertWriter> metadataInsertWriter_;
     RepairServiceHost repairServiceHost_;
     TopologyManager topologyManager_;
+    mutable std::mutex contentExtractorsMutex_;
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors_;
     std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> symbolExtractors_;
     mutable std::mutex tuningConfigMutex_;
@@ -854,6 +864,9 @@ private:
     std::unique_ptr<PluginManager> pluginManager_;
     std::unique_ptr<VectorSystemManager> vectorSystemManager_;
     std::shared_ptr<VectorIndexCoordinator> vectorIndexCoordinator_;
+    // Serializes late async database finalization against shutdown/reset after a bounded
+    // async-init wait expires.
+    mutable std::mutex databaseManagerLifecycleMutex_;
     std::unique_ptr<DatabaseManager> databaseManager_;
 
     // Cached GLiNER query concept extraction function.

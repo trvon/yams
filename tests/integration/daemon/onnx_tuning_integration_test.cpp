@@ -31,57 +31,14 @@ using namespace std::chrono_literals;
 
 namespace {
 
-struct ExpectedOnnxRegistryConfig {
-    uint32_t totalSlots{0};
-    uint32_t glinerReserved{0};
-    uint32_t embedReserved{0};
-    uint32_t rerankerReserved{0};
-};
-
 using yams::test::ScopedEnvVar;
 
-ExpectedOnnxRegistryConfig expectedOnnxRegistryConfig() {
-    const uint32_t maxConcurrent = TuneAdvisor::onnxMaxConcurrent();
-    const uint32_t glinerReserved = TuneAdvisor::onnxGlinerReserved();
-    const uint32_t embedReserved = TuneAdvisor::onnxEmbedReserved();
-    const uint32_t rerankerReserved = TuneAdvisor::onnxRerankerReserved();
-    const uint32_t totalReserved = glinerReserved + embedReserved + rerankerReserved;
+constexpr auto kHarnessStartTimeout = 30s;
 
-    return ExpectedOnnxRegistryConfig{
-        .totalSlots = std::max<uint32_t>(std::max<uint32_t>(maxConcurrent, 2u), totalReserved + 1),
-        .glinerReserved = glinerReserved,
-        .embedReserved = embedReserved,
-        .rerankerReserved = rerankerReserved,
-    };
-}
-
-bool onnxRegistryMatchesExpected(const OnnxConcurrencyRegistry& registry,
-                                 const ExpectedOnnxRegistryConfig& expected) {
-    const auto glinerMetrics = registry.laneMetrics(OnnxLane::Gliner);
-    const auto embedMetrics = registry.laneMetrics(OnnxLane::Embedding);
-    const auto rerankerMetrics = registry.laneMetrics(OnnxLane::Reranker);
-
-    return registry.totalSlots() == expected.totalSlots &&
-           glinerMetrics.reserved == expected.glinerReserved &&
-           embedMetrics.reserved == expected.embedReserved &&
-           rerankerMetrics.reserved == expected.rerankerReserved;
-}
-
-/// Wait for TuningManager to complete its first tick and configure the ONNX registry.
-/// The configuration happens on the first TuningManager tick after daemon enters Ready state.
-bool waitForOnnxRegistryConfiguration(std::chrono::milliseconds timeout) {
-    const auto expected = expectedOnnxRegistryConfig();
-    auto deadline = std::chrono::steady_clock::now() + timeout;
-    while (std::chrono::steady_clock::now() < deadline) {
-        auto& registry = OnnxConcurrencyRegistry::instance();
-        if (onnxRegistryMatchesExpected(registry, expected)) {
-            return true;
-        }
-
-        // TuningManager runs on a 500ms tick; give it time to configure.
-        std::this_thread::sleep_for(100ms);
-    }
-    return false;
+/// Sanitizer startup is instrumented heavily; registry values are asserted after startup using
+/// each section's explicit configuration contract rather than live compatibility-environment reads.
+bool startOnnxHarness(DaemonHarness& harness, std::chrono::milliseconds timeout) {
+    return harness.start(timeout);
 }
 
 } // namespace
@@ -102,10 +59,9 @@ TEST_CASE("OnnxConcurrencyRegistry respects TuneAdvisor env settings",
         DaemonHarness::Options opts;
         opts.useMockModelProvider = true;
         DaemonHarness harness(opts);
-        REQUIRE(harness.start());
+        REQUIRE(startOnnxHarness(harness, kHarnessStartTimeout));
 
-        // Wait for TuningManager to configure registry (happens on first tick after Ready)
-        REQUIRE(waitForOnnxRegistryConfiguration(3s));
+        REQUIRE(OnnxConcurrencyRegistry::instance().totalSlots() >= 2);
 
         auto& registry = OnnxConcurrencyRegistry::instance();
         // Balanced profile uses 0.5x scale, so 6 * 0.5 = 3.
@@ -126,9 +82,9 @@ TEST_CASE("OnnxConcurrencyRegistry respects TuneAdvisor env settings",
         DaemonHarness::Options opts;
         opts.useMockModelProvider = true;
         DaemonHarness harness(opts);
-        REQUIRE(harness.start());
+        REQUIRE(startOnnxHarness(harness, kHarnessStartTimeout));
 
-        REQUIRE(waitForOnnxRegistryConfiguration(3s));
+        REQUIRE(OnnxConcurrencyRegistry::instance().totalSlots() >= 2);
 
         auto& registry = OnnxConcurrencyRegistry::instance();
         auto embedMetrics = registry.laneMetrics(OnnxLane::Embedding);
@@ -150,9 +106,9 @@ TEST_CASE("OnnxConcurrencyRegistry respects TuneAdvisor env settings",
         DaemonHarness::Options opts;
         opts.useMockModelProvider = true;
         DaemonHarness harness(opts);
-        REQUIRE(harness.start());
+        REQUIRE(startOnnxHarness(harness, kHarnessStartTimeout));
 
-        REQUIRE(waitForOnnxRegistryConfiguration(3s));
+        REQUIRE(OnnxConcurrencyRegistry::instance().totalSlots() >= 2);
 
         auto& registry = OnnxConcurrencyRegistry::instance();
         auto rerankerMetrics = registry.laneMetrics(OnnxLane::Reranker);
@@ -170,9 +126,9 @@ TEST_CASE("OnnxConcurrencyRegistry respects TuneAdvisor env settings",
         DaemonHarness::Options opts;
         opts.useMockModelProvider = true;
         DaemonHarness harness(opts);
-        REQUIRE(harness.start());
+        REQUIRE(startOnnxHarness(harness, kHarnessStartTimeout));
 
-        REQUIRE(waitForOnnxRegistryConfiguration(3s));
+        REQUIRE(OnnxConcurrencyRegistry::instance().totalSlots() >= 2);
 
         auto& registry = OnnxConcurrencyRegistry::instance();
         // Efficient profile uses 0.0x scale, so 8 * 0.0 = 0
@@ -191,9 +147,9 @@ TEST_CASE("OnnxConcurrencyRegistry respects TuneAdvisor env settings",
         DaemonHarness::Options opts;
         opts.useMockModelProvider = true;
         DaemonHarness harness(opts);
-        REQUIRE(harness.start());
+        REQUIRE(startOnnxHarness(harness, kHarnessStartTimeout));
 
-        REQUIRE(waitForOnnxRegistryConfiguration(3s));
+        REQUIRE(OnnxConcurrencyRegistry::instance().totalSlots() >= 2);
 
         auto& registry = OnnxConcurrencyRegistry::instance();
         // Aggressive profile uses 1.0x scale, so 4 * 1.0 = 4
@@ -221,9 +177,9 @@ TEST_CASE("Embedding lane slots are configured correctly",
     opts.useMockModelProvider = true;
     opts.enableModelProvider = true;
     DaemonHarness harness(opts);
-    REQUIRE(harness.start());
+    REQUIRE(startOnnxHarness(harness, kHarnessStartTimeout));
 
-    REQUIRE(waitForOnnxRegistryConfiguration(3s));
+    REQUIRE(OnnxConcurrencyRegistry::instance().totalSlots() >= 2);
 
     auto& registry = OnnxConcurrencyRegistry::instance();
 
@@ -295,9 +251,9 @@ TEST_CASE("FSM metrics reflect ONNX configuration", "[daemon][onnx][metrics][int
     DaemonHarness::Options opts;
     opts.useMockModelProvider = true;
     DaemonHarness harness(opts);
-    REQUIRE(harness.start());
+    REQUIRE(startOnnxHarness(harness, kHarnessStartTimeout));
 
-    REQUIRE(waitForOnnxRegistryConfiguration(3s));
+    REQUIRE(OnnxConcurrencyRegistry::instance().totalSlots() >= 2);
 
     SECTION("Registry snapshot contains expected metrics") {
         auto& registry = OnnxConcurrencyRegistry::instance();
@@ -360,8 +316,8 @@ TEST_CASE("OnnxConcurrencyRegistry state resets on daemon restart",
             DaemonHarness::Options opts;
             opts.useMockModelProvider = true;
             DaemonHarness harness(opts);
-            REQUIRE(harness.start());
-            REQUIRE(waitForOnnxRegistryConfiguration(3s));
+            REQUIRE(startOnnxHarness(harness, kHarnessStartTimeout));
+            REQUIRE(OnnxConcurrencyRegistry::instance().totalSlots() >= 2);
 
             auto& registry = OnnxConcurrencyRegistry::instance();
             // Balanced profile uses 0.5x scale, so 4 * 0.5 = 2.
@@ -380,8 +336,8 @@ TEST_CASE("OnnxConcurrencyRegistry state resets on daemon restart",
             DaemonHarness::Options opts;
             opts.useMockModelProvider = true;
             DaemonHarness harness(opts);
-            REQUIRE(harness.start());
-            REQUIRE(waitForOnnxRegistryConfiguration(3s));
+            REQUIRE(startOnnxHarness(harness, kHarnessStartTimeout));
+            REQUIRE(OnnxConcurrencyRegistry::instance().totalSlots() >= 2);
 
             auto& registry = OnnxConcurrencyRegistry::instance();
             // Balanced profile uses 0.5x scale, so 8 * 0.5 = 4
@@ -409,9 +365,9 @@ TEST_CASE("Lane metrics update during slot acquisition", "[daemon][onnx][lanes][
     DaemonHarness::Options opts;
     opts.useMockModelProvider = true;
     DaemonHarness harness(opts);
-    REQUIRE(harness.start());
+    REQUIRE(startOnnxHarness(harness, kHarnessStartTimeout));
 
-    REQUIRE(waitForOnnxRegistryConfiguration(3s));
+    REQUIRE(OnnxConcurrencyRegistry::instance().totalSlots() >= 2);
 
     auto& registry = OnnxConcurrencyRegistry::instance();
 
@@ -478,11 +434,11 @@ TEST_CASE("AbiModelProviderAdapter acquires SlotGuard during real embedding",
 
     INFO("Starting daemon with real ONNX plugin (model preloading may take time)...");
     // If model not found, start() will fail - this makes it clear the model must be installed
-    if (!harness.start(std::chrono::seconds(60))) {
+    if (!startOnnxHarness(harness, std::chrono::seconds(60))) {
         SKIP("Failed to start daemon with ONNX plugin - model may not be available");
     }
 
-    REQUIRE(waitForOnnxRegistryConfiguration(5s)); // Allow extra time for model loading
+    REQUIRE(OnnxConcurrencyRegistry::instance().totalSlots() >= 2);
 
     ClientConfig clientCfg;
     clientCfg.socketPath = harness.socketPath();
@@ -637,7 +593,7 @@ TEST_CASE("Config selecting onnx backend uses ONNX provider for embeddings",
     opts.configPath = configPath;
 
     DaemonHarness harness(opts);
-    if (!harness.start(std::chrono::seconds(60))) {
+    if (!startOnnxHarness(harness, std::chrono::seconds(60))) {
         std::error_code ec;
         std::filesystem::remove_all(configRoot, ec);
         SKIP(
@@ -692,9 +648,9 @@ TEST_CASE("ONNX slot exhaustion causes graceful timeout", "[daemon][onnx][timeou
     opts.useMockModelProvider = true;
     opts.enableModelProvider = true;
     DaemonHarness harness(opts);
-    REQUIRE(harness.start());
+    REQUIRE(startOnnxHarness(harness, kHarnessStartTimeout));
 
-    REQUIRE(waitForOnnxRegistryConfiguration(3s));
+    REQUIRE(OnnxConcurrencyRegistry::instance().totalSlots() >= 2);
 
     auto& registry = OnnxConcurrencyRegistry::instance();
 

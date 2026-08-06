@@ -91,3 +91,5 @@ BENCHMARK_DEFINE_F(StorageFixture, Retrieve)(benchmark::State& state) {
 BENCHMARK_REGISTER_F(StorageFixture, Retrieve)->Arg(1024)->Arg(65536)->Arg(1048576);
 
 } // namespace
+
+BENCHMARK_MAIN();

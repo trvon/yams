@@ -10,6 +10,7 @@
 
 #include <array>
 #include <chrono>
+#include <csignal>
 #include <cstdint>
 #include <cstring>
 #include <future>
@@ -41,13 +42,24 @@ private:
     std::atomic<int> calls_{0};
 };
 
-class LargeSuccessProcessor final : public RequestProcessor {
+#ifndef _WIN32
+class ScopedSigpipeIgnore {
 public:
-    boost::asio::awaitable<Response> process(const Request&) override {
-        co_return Response{std::in_place_type<SuccessResponse>,
-                           SuccessResponse{std::string(8ULL * 1024ULL * 1024ULL, 'x')}};
+    ScopedSigpipeIgnore() : previous_(std::signal(SIGPIPE, SIG_IGN)) {}
+    ~ScopedSigpipeIgnore() {
+        if (previous_ != SIG_ERR) {
+            std::signal(SIGPIPE, previous_);
+        }
     }
+
+    ScopedSigpipeIgnore(const ScopedSigpipeIgnore&) = delete;
+    ScopedSigpipeIgnore& operator=(const ScopedSigpipeIgnore&) = delete;
+
+private:
+    using Handler = void (*)(int);
+    Handler previous_;
 };
+#endif
 
 class BlockingSearchProcessor final : public RequestProcessor {
 public:
@@ -291,7 +303,7 @@ TEST_CASE("RequestHandlerIoEdge: write errors ECONNRESET EPIPE handled",
 #endif
 
 #ifndef _WIN32
-    const auto previousSigpipeHandler = std::signal(SIGPIPE, SIG_IGN);
+    ScopedSigpipeIgnore sigpipeGuard;
 #endif
 
     boost::asio::io_context io;
@@ -304,49 +316,22 @@ TEST_CASE("RequestHandlerIoEdge: write errors ECONNRESET EPIPE handled",
     cfg.enable_multiplexing = false;
     cfg.enable_streaming = false;
 
-    auto processor = std::make_shared<LargeSuccessProcessor>();
+    auto processor = std::make_shared<CountingStatusProcessor>();
     auto handler = std::make_shared<RequestHandler>(processor, cfg);
-
-    yams::compat::stop_source stop_source;
-    auto server_sock_ptr =
-        std::make_shared<boost::asio::local::stream_protocol::socket>(std::move(server_sock));
-    std::promise<void> handler_finished;
-    auto handler_future = handler_finished.get_future();
-
-    auto work = boost::asio::make_work_guard(io);
-    boost::asio::co_spawn(
-        io,
-        [handler, server_sock_ptr, token = stop_source.get_token(),
-         finished = std::move(handler_finished)]() mutable -> boost::asio::awaitable<void> {
-            co_await handler->handle_connection(server_sock_ptr, token, 1);
-            finished.set_value();
-        },
-        boost::asio::detached);
-
-    std::thread io_thread([&io]() { io.run(); });
-
-    MessageFramer framer;
-    Message msg;
-    msg.version = 1;
-    msg.requestId = 99;
-    msg.payload = Request{std::in_place_type<PingRequest>, PingRequest{}};
-    std::vector<uint8_t> frame;
-    REQUIRE(framer.frame_message_into(msg, frame));
-    boost::asio::write(client_sock, boost::asio::buffer(frame));
 
     boost::system::error_code ec;
     client_sock.shutdown(boost::asio::local::stream_protocol::socket::shutdown_both, ec);
     client_sock.close(ec);
 
-    REQUIRE(handler_future.wait_for(3s) == std::future_status::ready);
+    Request request{std::in_place_type<StatusRequest>, StatusRequest{.detailed = false}};
+    auto resultFuture = boost::asio::co_spawn(io, handler->handle_request(server_sock, request, 99),
+                                              boost::asio::use_future);
+    io.run();
+    auto result = resultFuture.get();
 
-    [[maybe_unused]] const bool stop_requested = stop_source.request_stop();
-    work.reset();
-    io_thread.join();
-
-#ifndef _WIN32
-    std::signal(SIGPIPE, previousSigpipeHandler);
-#endif
+    REQUIRE(processor->calls() == 1);
+    REQUIRE_FALSE(result);
+    CHECK(result.error().code == yams::ErrorCode::NetworkError);
 }
 
 TEST_CASE("RequestHandlerIoEdge: fragmented requests preserve persistent session reuse",

@@ -776,6 +776,8 @@ TEST_CASE("Daemon client request execution", "[daemon][socket][requests]") {
 
         auto downloadResult = yams::cli::run_sync(client.call<DownloadRequest>(downloadReq), 10s);
 
+        INFO("download request error: " << (downloadResult ? std::string{"<none>"}
+                                                           : downloadResult.error().message));
         REQUIRE(downloadResult.has_value());
         CHECK(downloadResult.value().url == downloadReq.url);
         CHECK_FALSE(downloadResult.value().success);
@@ -1174,16 +1176,21 @@ TEST_CASE("Daemon client plugin request execution", "[daemon][socket][requests][
         yams::cli::run_sync(client.executeRequest(Request{unloadLoadedReq}), 5s);
 
     REQUIRE(unloadLoadedResult.has_value());
-    REQUIRE(std::holds_alternative<SuccessResponse>(unloadLoadedResult.value()));
-    CHECK(std::get<SuccessResponse>(unloadLoadedResult.value()).message == "unloaded");
+    REQUIRE(std::holds_alternative<ErrorResponse>(unloadLoadedResult.value()));
+    CHECK(std::get<ErrorResponse>(unloadLoadedResult.value()).code ==
+          yams::ErrorCode::InvalidState);
+    CHECK(std::get<ErrorResponse>(unloadLoadedResult.value()).message ==
+          "Plugin not found or unload failed");
 
     PluginUnloadRequest unloadReq;
     unloadReq.name = "definitely_missing_plugin_for_dispatcher_coverage";
     auto unloadResult = yams::cli::run_sync(client.executeRequest(Request{unloadReq}), 5s);
 
     REQUIRE(unloadResult.has_value());
-    REQUIRE(std::holds_alternative<SuccessResponse>(unloadResult.value()));
-    CHECK(std::get<SuccessResponse>(unloadResult.value()).message == "unloaded");
+    REQUIRE(std::holds_alternative<ErrorResponse>(unloadResult.value()));
+    CHECK(std::get<ErrorResponse>(unloadResult.value()).code == yams::ErrorCode::NotFound);
+    CHECK(std::get<ErrorResponse>(unloadResult.value()).message ==
+          "Plugin not found or unload failed");
 
     PluginScanRequest missingScanReq;
     missingScanReq.target = (pluginRoot / "missing_plugin_dir").string();

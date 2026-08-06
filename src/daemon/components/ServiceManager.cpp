@@ -292,7 +292,7 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
           [this]() -> std::shared_ptr<EmbeddingService> {
               return std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
           },
-          &config_, &resolvedDataDir_, [this]() { return embeddingConfig_; }}),
+          &config_, &resolvedDataDir_, [this]() { return getResolvedEmbeddingConfig(); }}),
       topologyManager_(TopologyManager::Dependencies{[this]() { return getMetadataRepo(); },
                                                      [this]() { return getKgStore(); },
                                                      [this]() { return getVectorDatabase(); }}),
@@ -954,23 +954,25 @@ ServiceManager::initializeImpl(const std::function<void()>& beforePoolConfigure)
 
     // Cross-validate embedding backend + preferred model at startup.
     // Emits spdlog warnings for mismatches (e.g. ONNX model under simeon).
-    embeddingConfig_ = std::make_shared<const ResolvedEmbeddingConfig>(
+    auto resolvedEmbeddingConfig = std::make_shared<const ResolvedEmbeddingConfig>(
         ConfigResolver::resolveEmbeddingConfig(config_, resolvedDataDir_));
     spdlog::info("Embedding policy resolved: identity={} config={} preload={} batch={} source={}",
-                 embeddingConfig_->policyIdentity,
-                 embeddingConfig_->effectiveConfigPath.empty()
+                 resolvedEmbeddingConfig->policyIdentity,
+                 resolvedEmbeddingConfig->effectiveConfigPath.empty()
                      ? std::string{"<default>"}
-                     : embeddingConfig_->effectiveConfigPath.string(),
-                 embeddingConfig_->preloadOnStartup,
-                 embeddingConfig_->runtime.batchSize.value_or(0),
-                 embeddingConfig_->provenance.at("backend"));
-    for (const auto& warning : embeddingConfig_->warnings) {
+                     : resolvedEmbeddingConfig->effectiveConfigPath.string(),
+                 resolvedEmbeddingConfig->preloadOnStartup,
+                 resolvedEmbeddingConfig->runtime.batchSize.value_or(0),
+                 resolvedEmbeddingConfig->provenance.at("backend"));
+    for (const auto& warning : resolvedEmbeddingConfig->warnings) {
         spdlog::warn("Embedding policy: {}", warning);
     }
 
-    // Wire immutable embedding identity and adaptive tuner state before any search build.
-    searchEngineManager_.setEmbeddingBackend(embeddingConfig_->backend);
+    // Wire immutable embedding identity and adaptive tuner state before publishing the snapshot.
+    searchEngineManager_.setEmbeddingBackend(resolvedEmbeddingConfig->backend);
     searchEngineManager_.setTunerStatePath(resolvedDataDir_ / "tuner_state.json");
+    std::atomic_store_explicit(&embeddingConfig_, std::move(resolvedEmbeddingConfig),
+                               std::memory_order_release);
 
     // Initialize WALManager via DatabaseManager (owns lifecycle + metrics provider)
     if (databaseManager_) {
@@ -1345,7 +1347,10 @@ void ServiceManager::clearCachedServiceState() {
     storeGraphComponent(std::shared_ptr<GraphComponent>{});
     graphQueryServiceOverride_.reset();
     repairManager_.reset();
-    contentExtractors_.clear();
+    {
+        std::lock_guard lock(contentExtractorsMutex_);
+        contentExtractors_.clear();
+    }
     symbolExtractors_.clear();
     cachedQueryConceptExtractor_ = {};
     searchEngineManager_.clearEngine();
@@ -1353,6 +1358,7 @@ void ServiceManager::clearCachedServiceState() {
 }
 
 void ServiceManager::seedBuiltinContentExtractors() {
+    std::lock_guard lock(contentExtractorsMutex_);
     for (const auto& ext : contentExtractors_) {
         if (std::dynamic_pointer_cast<extraction::BuiltinTextContentExtractor>(ext)) {
             return;
@@ -1490,6 +1496,10 @@ void ServiceManager::shutdownRuntimeServices() {
 void ServiceManager::releaseDatabaseBackedState() {
     spdlog::info("[ServiceManager] Phase 6.9.5: Releasing repo/content holders before DB "
                  "shutdown");
+
+    // If the bounded async-init wait expired, finalization may still be returning from a slow
+    // synchronous phase. Serialize teardown so databaseManager_ cannot be reset underneath it.
+    std::lock_guard<std::mutex> lifecycleLock(databaseManagerLifecycleMutex_);
     shutdownMetadataRepositoryForShutdown();
 
     clearCachedServiceState();
@@ -1503,7 +1513,8 @@ void ServiceManager::releaseDatabaseBackedState() {
             databaseManager_.reset();
             spdlog::info("[ServiceManager] Phase 6.9.5: DatabaseManager reset");
         }
-        database_.reset();
+        std::atomic_store_explicit(&database_, std::shared_ptr<metadata::Database>{},
+                                   std::memory_order_release);
     } catch (...) {
         spdlog::warn("[ServiceManager] Phase 6.9.5: Exception resetting DatabaseManager");
     }
@@ -1564,23 +1575,32 @@ void ServiceManager::releasePluginInfrastructure() {
 }
 
 void ServiceManager::shutdown() {
-    // FSM-first guard: avoid duplicate shutdown
-    try {
-        auto ss = serviceFsm_.snapshot();
-        if (ss.state == ServiceManagerState::ShuttingDown ||
-            ss.state == ServiceManagerState::Stopped) {
+    {
+        // Linearize shutdown initiation with late async database finalization. If finalization
+        // already owns the lifecycle, it completes before shutdown begins; otherwise its
+        // cancellation checks observe shutdownInvoked_ before publishing database readiness.
+        std::lock_guard<std::mutex> lifecycleLock(databaseManagerLifecycleMutex_);
+
+        // Claim shutdown before consulting the reusable FSM. On daemon restart the FSM is reset
+        // before the previous ServiceManager's final reference is necessarily released; an
+        // already-drained manager must not dispatch ShutdownEvent into that fresh lifecycle.
+        if (shutdownInvoked_.exchange(true, std::memory_order_acq_rel)) {
+            spdlog::debug("ServiceManager: shutdown already invoked; skipping.");
             return;
         }
-        serviceFsm_.dispatch(ShutdownEvent{});
-    } catch (const std::exception& e) {
-        spdlog::debug("FSM dispatch failed for ShutdownEvent: {}", e.what());
-    } catch (...) {
-        spdlog::debug("FSM dispatch failed for ShutdownEvent: unknown error");
-    }
-    // Ensure shutdown is executed at most once to avoid double-free/use-after-free
-    if (shutdownInvoked_.exchange(true, std::memory_order_acq_rel)) {
-        spdlog::debug("ServiceManager: shutdown already invoked; skipping.");
-        return;
+
+        try {
+            auto ss = serviceFsm_.snapshot();
+            if (ss.state == ServiceManagerState::ShuttingDown ||
+                ss.state == ServiceManagerState::Stopped) {
+                return;
+            }
+            serviceFsm_.dispatch(ShutdownEvent{});
+        } catch (const std::exception& e) {
+            spdlog::debug("FSM dispatch failed for ShutdownEvent: {}", e.what());
+        } catch (...) {
+            spdlog::debug("FSM dispatch failed for ShutdownEvent: unknown error");
+        }
     }
 
     spdlog::info("[ServiceManager] Shutdown initiated");
@@ -1906,7 +1926,7 @@ Result<std::filesystem::path> ServiceManager::initializeDataDirAndContentStore()
 boost::asio::awaitable<bool>
 ServiceManager::initializeMetadataDatabaseAt(const std::filesystem::path& dbPath,
                                              yams::compat::stop_token token) {
-    database_ = std::make_shared<metadata::Database>();
+    auto database = std::make_shared<metadata::Database>();
     const int open_timeout = read_timeout_ms("YAMS_DB_OPEN_TIMEOUT_MS", 0, 0);
 
     if (token.stop_requested()) {
@@ -1921,7 +1941,7 @@ ServiceManager::initializeMetadataDatabaseAt(const std::filesystem::path& dbPath
     const bool dbOk = co_await init::await_record_duration(
         std::string(readiness::kDatabase),
         [&]() -> boost::asio::awaitable<bool> {
-            co_return co_await co_openDatabase(dbPath, open_timeout, token);
+            co_return co_await co_openDatabase(dbPath, open_timeout, token, database);
         },
         state_.initDurationsMs);
     writeBootstrapStatusFile(config_, state_, this);
@@ -1945,7 +1965,7 @@ ServiceManager::initializeMetadataDatabaseAt(const std::filesystem::path& dbPath
         migrationOk = co_await init::await_record_duration(
             "migrations",
             [&]() -> boost::asio::awaitable<bool> {
-                co_return co_await co_migrateDatabase(migrationTimeout, token);
+                co_return co_await co_migrateDatabase(migrationTimeout, token, database);
             },
             state_.initDurationsMs);
         if (migrationOk) {
@@ -1960,30 +1980,55 @@ ServiceManager::initializeMetadataDatabaseAt(const std::filesystem::path& dbPath
     }
     spdlog::info("[ServiceManager] Phase: Database Migrated.");
 
+    bool finalized = false;
     if (dbOk && migrationOk) {
-        finalizeDatabaseStartup(dbPath);
+        finalized = finalizeDatabaseStartup(dbPath, database, token);
     }
 
-    co_return dbOk&& migrationOk;
+    co_return dbOk && migrationOk && finalized;
 }
 
-void ServiceManager::finalizeDatabaseStartup(const std::filesystem::path& dbPath) {
-    if (databaseManager_) {
-        databaseManager_->setDatabase(database_);
-        databaseManager_->setIntegrityStampEligible(
-            databaseIntegrityStampEligible_.load(std::memory_order_acquire));
-        runStartupSalvageIfNeeded(dbPath);
-        const bool poolsOk = databaseManager_->initializePools(dbPath);
-        if (!poolsOk) {
-            databaseIntegrityStampEligible_.store(false, std::memory_order_release);
-            databaseManager_->setIntegrityStampEligible(false);
-            spdlog::warn("[ServiceManager] DatabaseManager pool initialization failed — degraded");
-        }
-        writeBootstrapStatusFile(config_, state_, this);
+bool ServiceManager::finalizeDatabaseStartup(const std::filesystem::path& dbPath,
+                                             const std::shared_ptr<metadata::Database>& database,
+                                             yams::compat::stop_token token) {
+    if (token.stop_requested() || shutdownInvoked_.load(std::memory_order_acquire)) {
+        return false;
     }
+
+    // A bounded async-init wait may expire during slow salvage or pool prewarming. Keep the
+    // manager alive and prevent teardown from entering DatabaseManager until finalization exits.
+    std::lock_guard<std::mutex> lifecycleLock(databaseManagerLifecycleMutex_);
+    if (token.stop_requested() || shutdownInvoked_.load(std::memory_order_acquire) ||
+        !databaseManager_) {
+        return false;
+    }
+
+    // Publish only after open, integrity checks, and migrations complete. Readers therefore
+    // never observe a Database while its externally visible path/state is still mutating.
+    std::atomic_store_explicit(&database_, database, std::memory_order_release);
+    databaseManager_->setDatabase(database);
+    databaseManager_->setIntegrityStampEligible(
+        databaseIntegrityStampEligible_.load(std::memory_order_acquire));
+    runStartupSalvageIfNeeded(dbPath);
+
+    if (token.stop_requested() || shutdownInvoked_.load(std::memory_order_acquire)) {
+        return false;
+    }
+
+    const bool poolsOk = databaseManager_->initializePools(dbPath);
+    if (!poolsOk) {
+        databaseIntegrityStampEligible_.store(false, std::memory_order_release);
+        databaseManager_->setIntegrityStampEligible(false);
+        spdlog::warn("[ServiceManager] DatabaseManager pool initialization failed — degraded");
+    }
+    writeBootstrapStatusFile(config_, state_, this);
     spdlog::info("[ServiceManager] Phase: DB Pool and Repo Initialized.");
 
+    if (token.stop_requested() || shutdownInvoked_.load(std::memory_order_acquire)) {
+        return false;
+    }
     schedulePostStartupMaintenance(dbPath);
+    return true;
 }
 
 void ServiceManager::runStartupSalvageIfNeeded(const std::filesystem::path& dbPath) {
@@ -2358,7 +2403,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                        ? static_cast<std::size_t>(tuning.postIngestCapacity)
                        : static_cast<std::size_t>(TA::postIngestQueueMax());
             newPostIngest = std::make_shared<PostIngestQueue>(
-                getContentStore(), getMetadataRepo(), contentExtractors_, getKgStore(),
+                getContentStore(), getMetadataRepo(), getContentExtractors(), getKgStore(),
                 loadGraphComponent(), workCoordinator_.get(), nullptr, qcap);
 
             try {
@@ -2596,15 +2641,20 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                     storeModelProvider(pmp);
                     embeddingLifecycle_.setModelName(pluginManager_->getEmbeddingModelName());
                 }
-                contentExtractors_.clear();
-                seedBuiltinContentExtractors();
+                std::vector<std::shared_ptr<extraction::IContentExtractor>> refreshedExtractors;
+                refreshedExtractors.push_back(
+                    std::make_shared<extraction::BuiltinTextContentExtractor>());
                 for (auto& ext : pluginManager_->getContentExtractors()) {
-                    contentExtractors_.push_back(ext);
+                    refreshedExtractors.push_back(ext);
+                }
+                {
+                    std::lock_guard lock(contentExtractorsMutex_);
+                    contentExtractors_ = refreshedExtractors;
                 }
                 auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
                 if (piq) {
-                    if (!contentExtractors_.empty()) {
-                        piq->setExtractors(contentExtractors_);
+                    if (!refreshedExtractors.empty()) {
+                        piq->setExtractors(refreshedExtractors);
                     }
                     std::unordered_map<std::string, std::string> extMap;
                     for (const auto& extractor : pluginManager_->getSymbolExtractors()) {
@@ -3382,8 +3432,9 @@ void ServiceManager::recoverStaleWalIfPresent(const std::filesystem::path& dbPat
     tempDb->close();
 }
 
-bool ServiceManager::openDatabaseOnce(const std::filesystem::path& dbPath) {
-    auto openR = database_->open(dbPath.string(), metadata::ConnectionMode::Create);
+bool ServiceManager::openDatabaseOnce(const std::filesystem::path& dbPath,
+                                      const std::shared_ptr<metadata::Database>& database) {
+    auto openR = database->open(dbPath.string(), metadata::ConnectionMode::Create);
     if (!openR) {
         spdlog::warn("Database open failed: {}", openR.error().message);
         return false;
@@ -3391,9 +3442,10 @@ bool ServiceManager::openDatabaseOnce(const std::filesystem::path& dbPath) {
     return true;
 }
 
-bool ServiceManager::ensureDatabaseIntegrityOrRecover(const std::filesystem::path& dbPath) {
+bool ServiceManager::ensureDatabaseIntegrityOrRecover(
+    const std::filesystem::path& dbPath, const std::shared_ptr<metadata::Database>& database) {
     databaseIntegrityStampEligible_.store(false, std::memory_order_release);
-    auto integrity = database_->checkIntegrity();
+    auto integrity = database->checkIntegrity();
     if (integrity) {
         databaseIntegrityStampEligible_.store(true, std::memory_order_release);
         return true;
@@ -3404,7 +3456,7 @@ bool ServiceManager::ensureDatabaseIntegrityOrRecover(const std::filesystem::pat
         spdlog::warn("[ServiceManager] Metadata DB integrity check could not run due to transient "
                      "SQLite contention: {}",
                      integrity.error().message);
-        database_->close();
+        database->close();
         return false;
     }
 
@@ -3430,7 +3482,7 @@ bool ServiceManager::ensureDatabaseIntegrityOrRecover(const std::filesystem::pat
 
     spdlog::error("[ServiceManager] Metadata DB integrity check failed: {}",
                   integrity.error().message);
-    database_->close();
+    database->close();
 
     auto recovery = quarantineAndRecreate(dbPath);
     if (!recovery) {
@@ -3451,7 +3503,7 @@ bool ServiceManager::ensureDatabaseIntegrityOrRecover(const std::filesystem::pat
         state_.readiness.databasePhaseSince = std::chrono::steady_clock::now();
     }
 
-    const bool reopened = openDatabaseOnce(dbPath);
+    const bool reopened = openDatabaseOnce(dbPath, database);
     databaseIntegrityStampEligible_.store(reopened, std::memory_order_release);
     return reopened;
 }
@@ -3604,7 +3656,8 @@ void ServiceManager::scheduleVacuumIfUseful(const std::filesystem::path& dbPath)
     });
 }
 
-bool ServiceManager::openDatabaseBlocking(const std::filesystem::path& dbPath) {
+bool ServiceManager::openDatabaseBlocking(const std::filesystem::path& dbPath,
+                                          const std::shared_ptr<metadata::Database>& database) {
     try {
         state_.readiness.databaseIntegrityFastPath.store(false, std::memory_order_release);
         databaseIntegrityStampEligible_.store(false, std::memory_order_release);
@@ -3619,12 +3672,12 @@ bool ServiceManager::openDatabaseBlocking(const std::filesystem::path& dbPath) {
         }
 
         // Phase B: open the database file.
-        if (!openDatabaseOnce(dbPath)) {
+        if (!openDatabaseOnce(dbPath, database)) {
             return false;
         }
         if (shutdownInvoked_.load(std::memory_order_acquire)) {
             spdlog::info("[ServiceManager] Shutdown requested; aborting DB open after open");
-            database_->close();
+            database->close();
             return false;
         }
 
@@ -3638,14 +3691,14 @@ bool ServiceManager::openDatabaseBlocking(const std::filesystem::path& dbPath) {
         } else {
             spdlog::info("[ServiceManager] Running full metadata integrity check: {}",
                          stampDecision.reason);
-            if (!ensureDatabaseIntegrityOrRecover(dbPath)) {
+            if (!ensureDatabaseIntegrityOrRecover(dbPath, database)) {
                 return false;
             }
         }
         if (shutdownInvoked_.load(std::memory_order_acquire)) {
             spdlog::info("[ServiceManager] Shutdown requested; aborting DB open after integrity "
                          "check");
-            database_->close();
+            database->close();
             return false;
         }
 
@@ -3661,9 +3714,10 @@ bool ServiceManager::openDatabaseBlocking(const std::filesystem::path& dbPath) {
     return false;
 }
 
-boost::asio::awaitable<bool> ServiceManager::co_openDatabase(const std::filesystem::path& dbPath,
-                                                             int /*timeout_ms*/,
-                                                             yams::compat::stop_token token) {
+boost::asio::awaitable<bool>
+ServiceManager::co_openDatabase(const std::filesystem::path& dbPath, int /*timeout_ms*/,
+                                yams::compat::stop_token token,
+                                const std::shared_ptr<metadata::Database>& database) {
     auto ex = co_await boost::asio::this_coro::executor;
 
     if (token.stop_requested())
@@ -3707,7 +3761,7 @@ boost::asio::awaitable<bool> ServiceManager::co_openDatabase(const std::filesyst
         boost::asio::detached);
 
     auto task = std::make_shared<std::packaged_task<bool()>>(
-        [this, dbPath]() { return openDatabaseBlocking(dbPath); });
+        [this, dbPath, database]() { return openDatabaseBlocking(dbPath, database); });
     auto future = task->get_future();
     boost::asio::post(blockingPool_->get_executor(), [task]() { (*task)(); });
 
@@ -3723,8 +3777,9 @@ boost::asio::awaitable<bool> ServiceManager::co_openDatabase(const std::filesyst
     co_return ok;
 }
 
-boost::asio::awaitable<bool> ServiceManager::co_migrateDatabase(int /*timeout_ms*/,
-                                                                yams::compat::stop_token token) {
+boost::asio::awaitable<bool>
+ServiceManager::co_migrateDatabase(int /*timeout_ms*/, yams::compat::stop_token token,
+                                   const std::shared_ptr<metadata::Database>& database) {
     auto ex = co_await boost::asio::this_coro::executor;
 
     if (token.stop_requested())
@@ -3734,7 +3789,7 @@ boost::asio::awaitable<bool> ServiceManager::co_migrateDatabase(int /*timeout_ms
         co_return false;
     }
 
-    auto mm = std::make_shared<metadata::MigrationManager>(*database_);
+    auto mm = std::make_shared<metadata::MigrationManager>(*database);
     auto initResult = mm->initialize();
     if (!initResult) {
         spdlog::error("[ServiceManager] Failed to initialize migration system: {}",
@@ -4222,7 +4277,7 @@ yams::app::services::AppContext ServiceManager::getAppContext() const {
     ctx.graphQueryService = graphQueryServiceOverride_
                                 ? graphQueryServiceOverride_
                                 : (graphComponent ? graphComponent->getQueryService() : nullptr);
-    ctx.contentExtractors = contentExtractors_;
+    ctx.contentExtractors = getContentExtractors();
 
     // Log vector capability status
     auto modelProvider = loadModelProvider();

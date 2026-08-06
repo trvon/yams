@@ -3542,6 +3542,7 @@ if catch2_dep.found()
   test('benchmark_invocation', catch2_benchmark_invocation_exe,
     suite: ['catch2', 'unit', 'benchmark', 'harness'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    workdir: meson.project_source_root(),
     timeout: 30
   )
 

@@ -449,15 +449,6 @@ public:
                         "list: socket transport unavailable; using in-process transport: {}",
                         prepared.plan.fallbackReason);
                 }
-                if (prepared.plan.resolvedMode == yams::daemon::ClientTransportMode::InProcess) {
-                    spdlog::info("list: socket-only client cannot service in-process plan; using "
-                                 "local services");
-                    if (spinner) {
-                        spinner->stop();
-                    }
-                    return executeWithServices(&spinner);
-                }
-
                 yams::app::services::RetrievalService rsvc;
                 auto res = rsvc.list(dreq, prepared.options);
                 if (res) {
@@ -470,6 +461,10 @@ public:
                 if (spinner) {
                     spinner->stop();
                 }
+                // A local fallback may open the same store. Release the prepared transport first
+                // so an embedded ServiceManager cannot retain conflicting database ownership.
+                prepared.options.transport.reset();
+                prepared.plan.config.transport.reset();
                 return yams::cli::detail::daemon_error_or_local_fallback(
                     res.error(), "list", [&]() { return executeWithServices(&spinner); });
             }
