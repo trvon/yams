@@ -136,12 +136,13 @@ TEST_CASE("postIngestTotalConcurrent scaling across core counts",
         HwGuard hwGuard(8);
         ProfileGuard profileGuard(TuneAdvisor::Profile::Balanced);
 
-        uint32_t budget = TuneAdvisor::postIngestTotalConcurrent();
+        setAllPostIngestStagesActive();
+        const uint32_t budget = TuneAdvisor::postIngestTotalConcurrent();
         INFO("hw=8 profile=Balanced budget=" << budget);
 
-        // Currently buggy: (8*20)/100=1, (8*15)/100=1, total=2+floor(1*0.5)=2
-        // After fix with round-up: (8*20+99)/100=2, (8*15+99)/100=2, total=2+floor(2*0.5)=3
-        CHECK(budget > 2);
+        // The active-stage floor must leave one slot per configured stage after reserving host
+        // threads. Direct TuneAdvisor tests publish their stage assumptions explicitly.
+        CHECK(budget >= 6);
     }
 
     SECTION("16-core Aggressive budget is substantially larger than 2-core Efficient") {
@@ -174,6 +175,81 @@ TEST_CASE("postIngestTotalConcurrent scaling across core counts",
 
 TEST_CASE("postIngestBudgetedConcurrency stage starvation",
           "[daemon][tune][allocation][starvation][catch2]") {
+    SECTION("New lifecycle allocates a two-slot budget only to published stages") {
+        resetPostIngestOverrides();
+        setAllPostIngestStagesActive();
+        TuneAdvisor::setPostIngestTotalConcurrent(2);
+
+        TuneAdvisor::ConfiguredOverrideLifecycleLease lifecycle;
+        REQUIRE(lifecycle.ownsInitialization());
+        lifecycle.commitInitialization();
+
+        TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Extraction, true);
+        TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::KnowledgeGraph, true);
+
+        const auto budget = TuneAdvisor::testing_postIngestBudget(false);
+        CHECK(budget.extraction == 1);
+        CHECK(budget.kg == 1);
+        CHECK(budget.symbol == 0);
+        CHECK(budget.entity == 0);
+        CHECK(budget.title == 0);
+        CHECK(budget.embed == 0);
+
+        resetPostIngestOverrides();
+    }
+
+    SECTION("Concurrent stage owners keep activity published until the last release") {
+        resetPostIngestOverrides();
+        setAllPostIngestStagesActive();
+
+        TuneAdvisor::ConfiguredOverrideLifecycleLease lifecycle;
+        REQUIRE(lifecycle.ownsInitialization());
+        lifecycle.commitInitialization();
+
+        const auto firstOwner =
+            TuneAdvisor::acquirePostIngestStageActivity(TuneAdvisor::PostIngestStage::Extraction);
+        const auto secondOwner =
+            TuneAdvisor::acquirePostIngestStageActivity(TuneAdvisor::PostIngestStage::Extraction);
+        CHECK((TuneAdvisor::postIngestStageActiveMask() & 1u) != 0u);
+
+        TuneAdvisor::releasePostIngestStageActivity(TuneAdvisor::PostIngestStage::Extraction,
+                                                    firstOwner);
+        CHECK((TuneAdvisor::postIngestStageActiveMask() & 1u) != 0u);
+        TuneAdvisor::releasePostIngestStageActivity(TuneAdvisor::PostIngestStage::Extraction,
+                                                    firstOwner);
+        CHECK((TuneAdvisor::postIngestStageActiveMask() & 1u) != 0u);
+
+        TuneAdvisor::releasePostIngestStageActivity(TuneAdvisor::PostIngestStage::Extraction,
+                                                    secondOwner);
+        CHECK((TuneAdvisor::postIngestStageActiveMask() & 1u) == 0u);
+    }
+
+    SECTION("Stale owners cannot clear activity from a newer lifecycle") {
+        resetPostIngestOverrides();
+        TuneAdvisor::PostIngestStageActivityToken staleOwner = 0;
+        {
+            TuneAdvisor::ConfiguredOverrideLifecycleLease firstLifecycle;
+            REQUIRE(firstLifecycle.ownsInitialization());
+            firstLifecycle.commitInitialization();
+            staleOwner = TuneAdvisor::acquirePostIngestStageActivity(
+                TuneAdvisor::PostIngestStage::KnowledgeGraph);
+        }
+
+        TuneAdvisor::ConfiguredOverrideLifecycleLease nextLifecycle;
+        REQUIRE(nextLifecycle.ownsInitialization());
+        nextLifecycle.commitInitialization();
+        const auto currentOwner = TuneAdvisor::acquirePostIngestStageActivity(
+            TuneAdvisor::PostIngestStage::KnowledgeGraph);
+
+        TuneAdvisor::releasePostIngestStageActivity(TuneAdvisor::PostIngestStage::KnowledgeGraph,
+                                                    staleOwner);
+        CHECK((TuneAdvisor::postIngestStageActiveMask() & (1u << 1u)) != 0u);
+
+        TuneAdvisor::releasePostIngestStageActivity(TuneAdvisor::PostIngestStage::KnowledgeGraph,
+                                                    currentOwner);
+        CHECK((TuneAdvisor::postIngestStageActiveMask() & (1u << 1u)) == 0u);
+    }
+
     SECTION("All 6 stages get at least 1 slot on 8-core Balanced (BUG 4 regression)") {
         resetPostIngestOverrides();
         setAllPostIngestStagesActive();

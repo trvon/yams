@@ -132,20 +132,15 @@ else
   )
 endif
 
-#Create a dependency object that includes the zpdf library
-#Use build_rpath for build - time, install_rpath handles installed location
+#Create a dependency object that includes the exact custom-target output. Meson recognizes
+#the shared/import-library suffix and passes this artifact to the linker while preserving its
+#generated-file edge. Avoid a separate -L/-l lookup: Meson resolves that to an absolute input
+#without a generating rule, which breaks a clean rebuild after the artifact is removed.
 if host_machine.system() == 'windows'
-#On Windows, link against the import library only(not the DLL)
-#Use sources to establish build dependency, but link via explicit path
-  zpdf_dep = declare_dependency(
-    link_args: [zpdf_build_dir / zpdf_import_lib_name],
-    sources: [zpdf_import_lib],  # Build dependency on just the import lib
-  )
+#On Windows, link against the import library only (not the DLL).
+  zpdf_dep = declare_dependency(sources: [zpdf_import_lib])
 else
-  zpdf_dep = declare_dependency(
-    link_args: ['-L' + zpdf_build_dir, '-lzpdf'],
-    sources: [zpdf_lib],  # This creates the build dependency
-  )
+  zpdf_dep = declare_dependency(sources: [zpdf_lib])
 endif
 
 #Compiler - specific flags for this plugin.

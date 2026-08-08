@@ -201,6 +201,20 @@ private:
     uint32_t prevExtraction_{0};
 };
 
+class PostIngestStageActivityGuard {
+public:
+    explicit PostIngestStageActivityGuard(TuneAdvisor::PostIngestStage stage)
+        : stage_(stage), token_(TuneAdvisor::acquirePostIngestStageActivity(stage)) {}
+    ~PostIngestStageActivityGuard() { TuneAdvisor::releasePostIngestStageActivity(stage_, token_); }
+
+    PostIngestStageActivityGuard(const PostIngestStageActivityGuard&) = delete;
+    PostIngestStageActivityGuard& operator=(const PostIngestStageActivityGuard&) = delete;
+
+private:
+    TuneAdvisor::PostIngestStage stage_;
+    TuneAdvisor::PostIngestStageActivityToken token_;
+};
+
 class WorkCoordinatorThreadsGuard {
 public:
     explicit WorkCoordinatorThreadsGuard(uint32_t threads)
@@ -839,6 +853,7 @@ TEST_CASE("PostIngestQueue: Batch uses batched metadata lookup and enqueues embe
     BusToggleGuard busGuard(false);
     drainPostIngestChannel();
     PostIngestBatchGuard batchGuard(4);
+    PostIngestStageActivityGuard embedActivity(TuneAdvisor::PostIngestStage::Embed);
 
     // Ensure embed chunking policy is exercised through the PostIngestQueue -> embed_jobs path.
     ScopedEnvVar chunkStrategy("YAMS_EMBED_CHUNK_STRATEGY", "fixed");
@@ -904,13 +919,16 @@ TEST_CASE("PostIngestQueue: Batch uses batched metadata lookup and enqueues embe
     }
 
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (queue->processed() < docs.size() && std::chrono::steady_clock::now() < deadline) {
+    while ((queue->processed() < docs.size() ||
+            queue->metricsSnapshot().batches.embedDocsEmitted < docs.size()) &&
+           std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
     REQUIRE((queue->processed() == docs.size()));
-    // Note: With parallel processing and caching, individual lookups may be used instead of batch
-    // The important thing is that all documents were processed successfully
+    REQUIRE((queue->metricsSnapshot().batches.embedDocsEmitted == docs.size()));
+    // Note: With parallel processing and caching, individual lookups may be used instead of batch.
+    // The dispatch metric is the completion barrier for the subsequent embed channel inspection.
 
     std::size_t jobCount = 0;
     std::size_t docsWithPreparedChunks = 0;

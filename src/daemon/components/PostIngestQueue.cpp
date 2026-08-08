@@ -326,13 +326,23 @@ PostIngestQueue::PostIngestQueue(
     if (meta_) {
         contentIndexWriter_ = std::make_unique<metadata::ContentIndexWriter>(meta_);
     }
-    refreshStageAvailability();
     initializeChannels();
     spdlog::info("[PostIngestQueue] Created (parallel processing via WorkCoordinator)");
+    try {
+        refreshStageAvailability();
+    } catch (...) {
+        for (std::size_t i = 0; i < kStageCount; ++i) {
+            publishStageActivity(i, false);
+        }
+        throw;
+    }
 }
 
 PostIngestQueue::~PostIngestQueue() {
     stop_.store(true, std::memory_order_release);
+    for (std::size_t i = 0; i < kStageCount; ++i) {
+        publishStageActivity(i, false);
+    }
     signalAllWakeTimers();
     notifyLifecycle();
 
@@ -580,11 +590,9 @@ void PostIngestQueue::stop() {
     stop_.exchange(true, std::memory_order_acq_rel);
     notifyLifecycle();
     signalAllWakeTimers();
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Extraction, false);
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::KnowledgeGraph, false);
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Symbol, false);
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Entity, false);
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Title, false);
+    for (std::size_t i = 0; i < kStageCount; ++i) {
+        publishStageActivity(i, false);
+    }
 
     spdlog::info("[PostIngestQueue] Stop requested");
 
@@ -648,11 +656,30 @@ static_assert(std::size(kTuneAdvisorStages) == 5,
               "kTuneAdvisorStages must stay in sync with PostIngestQueue::Stage");
 } // namespace
 
+void PostIngestQueue::publishStageActivity(std::size_t index, bool active) {
+    YAMS_PRECONDITION(index < kStageCount,
+                      "publishStageActivity requires a valid PostIngestQueue stage index");
+    std::lock_guard lock(stageActivityMutex_);
+    if (stageActivityPublished_[index] == active) {
+        return;
+    }
+    if (active) {
+        stageActivityTokens_[index] =
+            TuneAdvisor::acquirePostIngestStageActivity(kTuneAdvisorStages[index]);
+        stageActivityPublished_[index] = true;
+    } else {
+        TuneAdvisor::releasePostIngestStageActivity(kTuneAdvisorStages[index],
+                                                    stageActivityTokens_[index]);
+        stageActivityPublished_[index] = false;
+        stageActivityTokens_[index] = 0;
+    }
+}
+
 void PostIngestQueue::pauseStage(Stage stage) {
     const auto idx = static_cast<std::size_t>(stage);
     YAMS_PRECONDITION(idx < kStageCount, "pauseStage requires a valid PostIngestQueue::Stage");
     stagePaused_[idx].store(true, std::memory_order_release);
-    TuneAdvisor::setPostIngestStageActive(kTuneAdvisorStages[idx], false);
+    publishStageActivity(idx, false);
     spdlog::info("[PostIngestQueue] Paused {} stage", kStageNames[idx]);
 }
 
@@ -683,7 +710,7 @@ bool PostIngestQueue::isKnowledgeGraphEnabled() const {
 void PostIngestQueue::pauseAll() {
     for (std::size_t i = 0; i < kStageCount; ++i) {
         stagePaused_[i].store(true, std::memory_order_release);
-        TuneAdvisor::setPostIngestStageActive(kTuneAdvisorStages[i], false);
+        publishStageActivity(i, false);
     }
     spdlog::warn("[PostIngestQueue] All stages paused (emergency mode)");
 }
@@ -741,13 +768,12 @@ bool PostIngestQueue::hasTitleExtractor() const {
 
 void PostIngestQueue::refreshStageAvailability() {
     const bool extractionActive = !stagePaused_[0].load(std::memory_order_acquire);
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Extraction,
-                                          extractionActive);
+    publishStageActivity(0, extractionActive);
 
     const bool kgActive = graphComponent_ != nullptr &&
                           knowledgeGraphEnabled_.load(std::memory_order_acquire) &&
                           !stagePaused_[1].load(std::memory_order_acquire);
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::KnowledgeGraph, kgActive);
+    publishStageActivity(1, kgActive);
 
     bool symbolCapable = false;
     {
@@ -755,7 +781,7 @@ void PostIngestQueue::refreshStageAvailability() {
         symbolCapable = !symbolExtensionMap_.empty();
     }
     const bool symbolActive = symbolCapable && !stagePaused_[2].load(std::memory_order_acquire);
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Symbol, symbolActive);
+    publishStageActivity(2, symbolActive);
 
     bool entityCapable = false;
     {
@@ -763,11 +789,11 @@ void PostIngestQueue::refreshStageAvailability() {
         entityCapable = !entityProviders_.empty();
     }
     const bool entityActive = entityCapable && !stagePaused_[3].load(std::memory_order_acquire);
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Entity, entityActive);
+    publishStageActivity(3, entityActive);
 
     const bool titleActive =
         hasTitleExtractor() && !stagePaused_[4].load(std::memory_order_acquire);
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Title, titleActive);
+    publishStageActivity(4, titleActive);
 }
 
 void PostIngestQueue::logStageAvailabilitySnapshot() const {

@@ -1,6 +1,7 @@
 // Copyright (c) 2025 YAMS Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <yams/compat/thread_stop_compat.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
 #include <yams/metadata/metadata_repository.h>
@@ -563,7 +564,7 @@ TEST_CASE("batch content retries transient busy without duplicating logical effe
     auto releaseFuture = releaseLock.get_future();
     std::promise<Result<void>> lockerFinished;
     auto lockerFinishedFuture = lockerFinished.get_future();
-    std::jthread locker([&] {
+    yams::compat::jthread locker([&] {
         auto connection = lockerPool.acquire();
         if (!connection) {
             lockHeld.set_value(connection.error());
@@ -581,7 +582,7 @@ TEST_CASE("batch content retries transient busy without duplicating logical effe
     });
     REQUIRE(lockHeldFuture.get().has_value());
 
-    std::jthread releaser([&] {
+    yams::compat::jthread releaser([&] {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
         releaseLock.set_value();
     });

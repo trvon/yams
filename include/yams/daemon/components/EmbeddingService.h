@@ -169,6 +169,9 @@ private:
     std::function<void(const std::vector<std::string>&)> topologyRebuildRequester_;
 
     std::atomic<bool> stop_{false};
+    std::mutex stageActivityMutex_;
+    bool stageActivityPublished_{false};
+    std::uint64_t stageActivityToken_{0};
     std::atomic<std::size_t> processed_{0};
     std::atomic<std::size_t> failed_{0};
     std::atomic<std::size_t> inFlight_{0}; // PBI-05b: parallel job tracking

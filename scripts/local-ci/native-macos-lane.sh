@@ -160,6 +160,14 @@ run_ci() {
 		set -u
 	fi
 
+	if [ "${PROFILE}" = "tsan" ]; then
+		# Ninja does not notice when `clang++` resolves to a different Apple
+		# toolchain. Clean before every TSan build so objects and compiler-rt stay
+		# from one toolchain generation.
+		log "Cleaning ThreadSanitizer outputs before compilation"
+		meson compile -C "${YAMS_BUILD_DIR}" --clean
+	fi
+
 	if [ -n "${YAMS_MACOS_COMPILE_TARGETS:-}" ]; then
 		# shellcheck disable=SC2086
 		# Cap ninja jobs at 4 by default (override with YAMS_MACOS_NINJA_JOBS) so
@@ -210,7 +218,10 @@ if [ "${DRY_RUN}" -eq 1 ]; then
 fi
 
 set +e
-run_ci > >(tee "${LOG_FILE}") 2> >(tee -a "${LOG_FILE}" >&2)
+(
+	set -euo pipefail
+	run_ci
+) > >(tee "${LOG_FILE}") 2> >(tee -a "${LOG_FILE}" >&2)
 rc=$?
 set -e
 

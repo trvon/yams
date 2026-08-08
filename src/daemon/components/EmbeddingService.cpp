@@ -101,14 +101,33 @@ Result<void> EmbeddingService::initialize() {
 
 void EmbeddingService::start() {
     YAMS_ZONE_SCOPED_N("Embedding::start");
-    stop_.store(false);
     pollerRunning_.store(false, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(inferTrackerMutex_);
         activeInferSubBatches_.clear();
     }
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Embed, true);
-    coordinator_->spawnDetached(strand_, channelPoller());
+    {
+        std::lock_guard lock(stageActivityMutex_);
+        stop_.store(false, std::memory_order_release);
+        const bool acquiredActivity = !stageActivityPublished_;
+        if (acquiredActivity) {
+            stageActivityToken_ =
+                TuneAdvisor::acquirePostIngestStageActivity(TuneAdvisor::PostIngestStage::Embed);
+            stageActivityPublished_ = true;
+        }
+        try {
+            coordinator_->spawnDetached(strand_, channelPoller());
+        } catch (...) {
+            if (acquiredActivity) {
+                TuneAdvisor::releasePostIngestStageActivity(TuneAdvisor::PostIngestStage::Embed,
+                                                            stageActivityToken_);
+                stageActivityPublished_ = false;
+                stageActivityToken_ = 0;
+                stop_.store(true, std::memory_order_release);
+            }
+            throw;
+        }
+    }
     spdlog::info("EmbeddingService: started channel poller");
 }
 
@@ -190,10 +209,20 @@ void EmbeddingService::enqueueEmbeddingCompletion(std::vector<std::string> hashe
 
 void EmbeddingService::shutdown() {
     YAMS_ZONE_SCOPED_N("Embedding::shutdown");
-    if (stop_.exchange(true)) {
+    bool alreadyStopped = false;
+    {
+        std::lock_guard lock(stageActivityMutex_);
+        alreadyStopped = stop_.exchange(true, std::memory_order_acq_rel);
+        if (stageActivityPublished_) {
+            TuneAdvisor::releasePostIngestStageActivity(TuneAdvisor::PostIngestStage::Embed,
+                                                        stageActivityToken_);
+            stageActivityPublished_ = false;
+            stageActivityToken_ = 0;
+        }
+    }
+    if (alreadyStopped) {
         return;
     }
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Embed, false);
     spdlog::info("EmbeddingService: shutting down (processed={}, failed={}, inFlight={})",
                  processed_.load(), failed_.load(), inFlight_.load());
 

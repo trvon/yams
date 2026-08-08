@@ -6,6 +6,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <list>
 #include <memory>
@@ -485,6 +486,7 @@ private:
     void checkDrainAndSignal(); // Check if drained and signal corpus stats stale
     std::string deriveTitle(const std::string& text, const std::string& fileName,
                             const std::string& mimeType, const std::string& extension) const;
+    void publishStageActivity(std::size_t index, bool active);
     void refreshStageAvailability();
     void logStageAvailabilitySnapshot() const;
     void requeueMissedEntityExtractions();
@@ -504,6 +506,9 @@ private:
     // Per-stage arrays indexed by Stage enum (0..4)
     std::array<std::atomic<bool>, kStageCount> stageStarted_{};
     std::array<std::atomic<bool>, kStageCount> stagePaused_{};
+    std::mutex stageActivityMutex_;
+    std::array<bool, kStageCount> stageActivityPublished_{};
+    std::array<std::uint64_t, kStageCount> stageActivityTokens_{};
     std::array<std::atomic<std::size_t>, kStageCount> stageInFlight_{};
     std::atomic<bool> knowledgeGraphEnabled_{true};
     std::atomic<std::size_t> callbacksInFlight_{0};

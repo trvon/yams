@@ -5587,6 +5587,14 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
 
 TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches",
           "[daemon][plugin][dispatcher]") {
+    struct ReadyServiceFixture {
+        // ServiceManager keeps non-owning references to both dependencies. Member teardown is
+        // reverse declaration order, so the service shuts down before either dependency.
+        std::unique_ptr<StateComponent> state;
+        std::unique_ptr<DaemonLifecycleFsm> lifecycleFsm;
+        std::unique_ptr<ServiceManager> service;
+    };
+
     auto makeReadyService = [](bool configureExternalPlugin = false) {
         DaemonConfig cfg;
         cfg.dataDir = makeTempDir("yams_plugin_dispatcher_");
@@ -5603,7 +5611,7 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
         svc->__test_pluginScanComplete(0);
         REQUIRE(svc->getPluginHostFsmSnapshot().state == PluginHostState::Ready);
 
-        return std::tuple{std::move(state), std::move(lifecycleFsm), std::move(svc)};
+        return ReadyServiceFixture{std::move(state), std::move(lifecycleFsm), std::move(svc)};
     };
 
     SECTION("plugin handlers reject non-ready host state") {

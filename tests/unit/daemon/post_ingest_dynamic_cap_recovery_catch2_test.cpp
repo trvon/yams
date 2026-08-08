@@ -36,6 +36,13 @@ public:
 };
 
 void resetPostIngestOverridesAndCaps() {
+    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Extraction, true);
+    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::KnowledgeGraph, true);
+    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Symbol, true);
+    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Entity, true);
+    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Title, true);
+    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Embed, true);
+
     TuneAdvisor::setPostExtractionConcurrent(0);
     TuneAdvisor::setPostKgConcurrent(0);
     TuneAdvisor::setPostSymbolConcurrent(0);

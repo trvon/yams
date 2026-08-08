@@ -7,6 +7,7 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/resource/gpu_info.h>
 
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
@@ -39,6 +40,41 @@ public:
 };
 
 using yams::test::ScopedEnvVar;
+
+class PostIngestStageActivityGuard {
+public:
+    PostIngestStageActivityGuard() {
+        try {
+            for (; acquired_ < kStages.size(); ++acquired_) {
+                tokens_[acquired_] =
+                    TuneAdvisor::acquirePostIngestStageActivity(kStages[acquired_]);
+            }
+        } catch (...) {
+            releaseAcquired();
+            throw;
+        }
+    }
+    ~PostIngestStageActivityGuard() { releaseAcquired(); }
+
+    PostIngestStageActivityGuard(const PostIngestStageActivityGuard&) = delete;
+    PostIngestStageActivityGuard& operator=(const PostIngestStageActivityGuard&) = delete;
+
+private:
+    void releaseAcquired() noexcept {
+        while (acquired_ > 0) {
+            --acquired_;
+            TuneAdvisor::releasePostIngestStageActivity(kStages[acquired_], tokens_[acquired_]);
+        }
+    }
+
+    static constexpr std::array kStages{
+        TuneAdvisor::PostIngestStage::Extraction, TuneAdvisor::PostIngestStage::KnowledgeGraph,
+        TuneAdvisor::PostIngestStage::Symbol,     TuneAdvisor::PostIngestStage::Entity,
+        TuneAdvisor::PostIngestStage::Title,      TuneAdvisor::PostIngestStage::Embed,
+    };
+    std::array<TuneAdvisor::PostIngestStageActivityToken, kStages.size()> tokens_{};
+    std::size_t acquired_{0};
+};
 
 class HardwareGuard {
     unsigned prev_;
@@ -691,6 +727,7 @@ TEST_CASE("detectAppleSiliconGpu returns false on non-ARM64", "[daemon][gpu][cat
 
 TEST_CASE("PostIngestQueue methods are profile-aware", "[daemon][tune][advisor][catch2]") {
     resetEvictionOverrides();
+    PostIngestStageActivityGuard activeStages;
 
     auto setHardwareConcurrency = [](unsigned value) {
         yams::daemon::TuneAdvisor::setHardwareConcurrencyForTests(value);

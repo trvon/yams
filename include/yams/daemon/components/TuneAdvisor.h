@@ -221,6 +221,7 @@ public:
             primary_ = count == 0;
             if (primary_) {
                 TuneAdvisor::configuredOverrideLifecycleInitializing() = true;
+                TuneAdvisor::resetPostIngestRuntimeStateForNewLifecycle();
             }
             ++count;
         }
@@ -362,6 +363,36 @@ private:
     static std::size_t& configuredOverrideLifecycleCount() {
         static std::size_t count = 0;
         return count;
+    }
+    static std::mutex& postIngestStageActivityMutex() {
+        static std::mutex mutex;
+        return mutex;
+    }
+    static std::uint64_t& nextPostIngestStageActivityToken() {
+        static std::uint64_t token = 0;
+        return token;
+    }
+    static std::map<std::uint64_t, std::uint8_t>& livePostIngestStageActivityTokens() {
+        static std::map<std::uint64_t, std::uint8_t> tokens;
+        return tokens;
+    }
+    static void resetPostIngestRuntimeStateForNewLifecycle() noexcept {
+        {
+            std::lock_guard activityLock(postIngestStageActivityMutex());
+            livePostIngestStageActivityTokens().clear();
+            postIngestStageActiveMaskOverride_.store(0, std::memory_order_release);
+            for (auto& ownerCount : postIngestStageOwnerCounts_) {
+                ownerCount.store(0, std::memory_order_release);
+            }
+        }
+        beginDynamicCapWrite();
+        setPostExtractionConcurrentDynamicCap(UINT32_MAX);
+        setPostKgConcurrentDynamicCap(UINT32_MAX);
+        setPostSymbolConcurrentDynamicCap(UINT32_MAX);
+        setPostEntityConcurrentDynamicCap(UINT32_MAX);
+        setPostTitleConcurrentDynamicCap(UINT32_MAX);
+        setPostEmbedConcurrentDynamicCap(UINT32_MAX);
+        endDynamicCapWrite();
     }
     static inline std::atomic<std::uint64_t> configuredOverrideSequence_{0};
 
@@ -1835,21 +1866,50 @@ public:
         Title = 4,
         Embed = 5
     };
+    using PostIngestStageActivityToken = std::uint64_t;
 
     static void setPostIngestStageActive(PostIngestStage stage, bool active) {
         const uint32_t bit = 1u << static_cast<uint8_t>(stage);
-        uint32_t mask = postIngestStageActiveMaskOverride_.load(std::memory_order_relaxed);
         if (active) {
-            mask |= bit;
+            postIngestStageActiveMaskOverride_.fetch_or(bit, std::memory_order_release);
         } else {
-            mask &= ~bit;
+            postIngestStageActiveMaskOverride_.fetch_and(~bit, std::memory_order_release);
         }
-        postIngestStageActiveMaskOverride_.store(mask, std::memory_order_relaxed);
+    }
+    static PostIngestStageActivityToken acquirePostIngestStageActivity(PostIngestStage stage) {
+        std::lock_guard lock(postIngestStageActivityMutex());
+        auto& nextToken = nextPostIngestStageActivityToken();
+        auto& liveTokens = livePostIngestStageActivityTokens();
+        do {
+            ++nextToken;
+        } while (nextToken == 0 || liveTokens.contains(nextToken));
+        liveTokens.emplace(nextToken, static_cast<std::uint8_t>(stage));
+        postIngestStageOwnerCounts_[static_cast<std::size_t>(stage)].fetch_add(
+            1, std::memory_order_release);
+        return nextToken;
+    }
+    static void releasePostIngestStageActivity(PostIngestStage stage,
+                                               PostIngestStageActivityToken token) {
+        std::lock_guard lock(postIngestStageActivityMutex());
+        auto& liveTokens = livePostIngestStageActivityTokens();
+        const auto tokenIt = liveTokens.find(token);
+        if (tokenIt == liveTokens.end() || tokenIt->second != static_cast<std::uint8_t>(stage)) {
+            return;
+        }
+        liveTokens.erase(tokenIt);
+        auto& owners = postIngestStageOwnerCounts_[static_cast<std::size_t>(stage)];
+        const uint32_t current = owners.load(std::memory_order_relaxed);
+        if (current > 0) {
+            owners.store(current - 1, std::memory_order_release);
+        }
     }
     static uint32_t postIngestStageActiveMask() {
-        uint32_t mask = postIngestStageActiveMaskOverride_.load(std::memory_order_relaxed);
-        if (mask == 0)
-            return 0x3Fu;
+        uint32_t mask = postIngestStageActiveMaskOverride_.load(std::memory_order_acquire);
+        for (std::size_t i = 0; i < postIngestStageOwnerCounts_.size(); ++i) {
+            if (postIngestStageOwnerCounts_[i].load(std::memory_order_acquire) > 0) {
+                mask |= 1u << i;
+            }
+        }
         return mask;
     }
 
@@ -2006,8 +2066,8 @@ public:
     // Writer must call beginDynamicCapWrite() before and endDynamicCapWrite() after
     // storing all 6 DynamicCap atomics to prevent torn reads on the reader side.
     static void beginDynamicCapWrite() {
-        // Increment to odd — signals "write in progress"
-        dynamicCapSeq_.fetch_add(1, std::memory_order_release);
+        // Publish an odd sequence before any following relaxed cap stores.
+        dynamicCapSeq_.fetch_add(1, std::memory_order_acq_rel);
     }
     static void endDynamicCapWrite() {
         // Increment to even — signals "write complete"
@@ -2519,7 +2579,8 @@ private:
     static inline std::atomic<uint32_t> grepAdmissionWaitMsOverride_{0};
     static inline std::atomic<unsigned> hwCached_{0};
     static inline std::atomic<uint32_t> postIngestTotalConcurrentOverride_{0};
-    static inline std::atomic<uint32_t> postIngestStageActiveMaskOverride_{0x3Fu};
+    static inline std::atomic<uint32_t> postIngestStageActiveMaskOverride_{0};
+    static inline std::array<std::atomic<uint32_t>, 6> postIngestStageOwnerCounts_{};
     static inline std::atomic<uint32_t> postIngestQueueMaxOverride_{0};
     static inline std::atomic<uint32_t> postIngestBatchSizeOverride_{0};
     static inline std::atomic<uint32_t> postIngestRpcQueueMaxOverride_{0};

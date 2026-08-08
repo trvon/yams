@@ -1829,7 +1829,7 @@ TEST_CASE("ReferenceCounter init retries when the database is transiently locked
 
     // Hold a write lock on the database so the first init attempt must wait.
     sqlite3* blocker = nullptr;
-    REQUIRE(sqlite3_open(dbPath.c_str(), &blocker) == SQLITE_OK);
+    REQUIRE(sqlite3_open(dbPath.string().c_str(), &blocker) == SQLITE_OK);
     execSql(blocker, "BEGIN IMMEDIATE");
 
     // Release the lock shortly after init starts so the retry path is exercised.

@@ -32,7 +32,7 @@ TEST_CASE("applyDocTimeFilters filters on created time", "[cli][filter][time]") 
     CHECK(yams::cli::applyDocTimeFilters(doc, after));
 
     yams::cli::DocTimeFilters afterFuture;
-    afterFuture.createdAfter = "2999-01-01"; // future: doc fails
+    afterFuture.createdAfter = "2030-01-01"; // future: doc fails
     CHECK_FALSE(yams::cli::applyDocTimeFilters(doc, afterFuture));
 
     yams::cli::DocTimeFilters before;
@@ -40,7 +40,7 @@ TEST_CASE("applyDocTimeFilters filters on created time", "[cli][filter][time]") 
     CHECK_FALSE(yams::cli::applyDocTimeFilters(doc, before));
 
     yams::cli::DocTimeFilters beforeFuture;
-    beforeFuture.createdBefore = "2999-01-01"; // doc is older: passes
+    beforeFuture.createdBefore = "2030-01-01"; // doc is older: passes
     CHECK(yams::cli::applyDocTimeFilters(doc, beforeFuture));
 }
 
@@ -48,7 +48,7 @@ TEST_CASE("applyDocTimeFilters filters on modified and indexed time", "[cli][fil
     const auto doc = makeDoc(1'700'000'000, 1'700'000'000, 1'700'000'000);
 
     yams::cli::DocTimeFilters modified;
-    modified.modifiedAfter = "2999-01-01";
+    modified.modifiedAfter = "2030-01-01";
     CHECK_FALSE(yams::cli::applyDocTimeFilters(doc, modified));
 
     yams::cli::DocTimeFilters indexed;
