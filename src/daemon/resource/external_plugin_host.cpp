@@ -181,7 +181,7 @@ struct ExternalPluginHost::Impl {
             auto process = std::make_unique<extraction::PluginProcess>(std::move(proc_config));
             auto rpc_client = std::make_unique<extraction::JsonRpcClient>(*process);
 
-            auto result = rpc_client->call("handshake.manifest");
+            auto result = rpc_client->call("handshake.manifest", nullptr, config.defaultRpcTimeout);
             if (!result) {
                 return Error{ErrorCode::IOError,
                              "Failed to get manifest from plugin: " + file.string()};
@@ -190,7 +190,7 @@ struct ExternalPluginHost::Impl {
             desc = buildDescriptorFromManifest(result.value(), file);
 
             // Shutdown the temporary process
-            (void)rpc_client->call("plugin.shutdown");
+            (void)rpc_client->call("plugin.shutdown", nullptr, config.defaultRpcTimeout);
         }
 
         // Cache the result
@@ -278,7 +278,7 @@ struct ExternalPluginHost::Impl {
         auto rpc_client = std::make_unique<extraction::JsonRpcClient>(*process);
 
         // Handshake (required by plugin protocol)
-        if (!rpc_client->call("handshake.manifest")) {
+        if (!rpc_client->call("handshake.manifest", nullptr, config.defaultRpcTimeout)) {
             return Error{ErrorCode::IOError, "Handshake failed during load"};
         }
 
@@ -292,7 +292,7 @@ struct ExternalPluginHost::Impl {
             }
         }
 
-        if (!rpc_client->call("plugin.init", init_params)) {
+        if (!rpc_client->call("plugin.init", init_params, config.defaultRpcTimeout)) {
             return Error{ErrorCode::IOError, "Plugin init failed"};
         }
 
@@ -334,7 +334,8 @@ struct ExternalPluginHost::Impl {
 
         // Graceful shutdown via RPC
         if (instance->rpc_client) {
-            auto result = instance->rpc_client->call("plugin.shutdown");
+            auto result =
+                instance->rpc_client->call("plugin.shutdown", nullptr, config.defaultRpcTimeout);
             if (!result) {
                 spdlog::warn("Plugin '{}' shutdown RPC failed", name);
             }
@@ -415,9 +416,11 @@ struct ExternalPluginHost::Impl {
                     instance->rpc_client =
                         std::make_unique<extraction::JsonRpcClient>(*instance->process);
 
-                    auto handshake = instance->rpc_client->call("handshake.manifest");
+                    auto handshake = instance->rpc_client->call("handshake.manifest", nullptr,
+                                                                config.defaultRpcTimeout);
                     if (handshake) {
-                        auto init = instance->rpc_client->call("plugin.init");
+                        auto init = instance->rpc_client->call("plugin.init", nullptr,
+                                                               config.defaultRpcTimeout);
                         if (init) {
                             instance->healthy = true;
                             if (state_callback) {
@@ -440,7 +443,8 @@ struct ExternalPluginHost::Impl {
         }
 
         // Call health RPC
-        auto result = instance->rpc_client->call("plugin.health");
+        auto result =
+            instance->rpc_client->call("plugin.health", nullptr, config.defaultRpcTimeout);
         if (!result) {
             instance->healthy = false;
             return Error{ErrorCode::IOError, "Health check RPC failed"};
