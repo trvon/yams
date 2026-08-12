@@ -39,7 +39,9 @@ def read_allowlist(path: Path) -> set[str]:
 def production_environment_keys(root: Path) -> set[str]:
     keys: set[str] = set()
     for path in iter_sources(root):
-        keys.update(ENV_LITERAL_RE.findall(path.read_text(encoding="utf-8", errors="ignore")))
+        keys.update(
+            ENV_LITERAL_RE.findall(path.read_text(encoding="utf-8", errors="ignore"))
+        )
     return keys
 
 
@@ -75,11 +77,16 @@ def run(root: Path, environment_allowlist: Path, reader_allowlist: Path) -> int:
     ]
 
     if unknown_keys:
-        print("new production YAMS_* literals require typed-config review:", file=sys.stderr)
+        print(
+            "new production YAMS_* literals require typed-config review:",
+            file=sys.stderr,
+        )
         for key in unknown_keys:
             print(f"  {key}", file=sys.stderr)
     if unknown_readers:
-        print("new TOML reader definitions must use parse_simple_toml:", file=sys.stderr)
+        print(
+            "new TOML reader definitions must use parse_simple_toml:", file=sys.stderr
+        )
         for definition in unknown_readers:
             print(f"  {definition}", file=sys.stderr)
     if unknown_keys or unknown_readers:

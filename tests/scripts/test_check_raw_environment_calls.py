@@ -65,18 +65,18 @@ class RawEnvironmentPolicyTests(unittest.TestCase):
 
     def test_masks_comments_literals_and_unrelated_qualified_functions(self):
         findings = self.scan_source(
-            r'''
+            r"""
             // setenv("A", "1", 1);
             /* unsetenv("A"); */
             const char* ordinary = "putenv(A=1)";
             const char* raw = R"tag(clearenv())tag";
             fake::setenv("A", "1", 1);
-            '''
+            """
         )
         self.assertEqual(findings, [])
 
     def test_scans_objective_cpp_and_exempts_only_central_boundary(self):
-        self.assertEqual(len(self.scan_source('void f() { clearenv(); }', ".mm")), 1)
+        self.assertEqual(len(self.scan_source("void f() { clearenv(); }", ".mm")), 1)
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             boundary = root / POLICY.CENTRAL_BOUNDARY
@@ -104,7 +104,8 @@ class RawEnvironmentPolicyTests(unittest.TestCase):
             self.assertEqual(set(allowlist) - live_keys, {finding.allowlist_key})
 
             allowlist_path.write_text(
-                f"{finding.path}:{finding.line}:raw-env/{finding.name}\n", encoding="utf-8"
+                f"{finding.path}:{finding.line}:raw-env/{finding.name}\n",
+                encoding="utf-8",
             )
             with self.assertRaises(ValueError):
                 POLICY.load_allowlist(allowlist_path)

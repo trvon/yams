@@ -8,10 +8,10 @@
 #include <thread>
 #include <vector>
 
-#include "test_async_helpers.h"
-#include "test_daemon_harness.h"
 #include "../../common/env_compat.h"
 #include "../../common/test_helpers_catch2.h"
+#include "test_async_helpers.h"
+#include "test_daemon_harness.h"
 
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
