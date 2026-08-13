@@ -42,6 +42,9 @@ configuration_authority_policy_script = files('scripts/check_configuration_autho
 configuration_authority_policy_tests = files('scripts/test_check_configuration_authority.py')
 production_environment_keys = files('scripts/production_environment_keys.txt')
 configuration_reader_allowlist = files('scripts/configuration_reader_allowlist.txt')
+portability_policy_script = files('scripts/check_portability.py')
+portability_policy_tests = files('scripts/test_check_portability.py')
+portability_allowlist = files('scripts/portability_allowlist.txt')
 test('raw_environment_policy_unit',
   python_exe,
   args: [raw_environment_policy_tests],
@@ -85,6 +88,22 @@ test('configuration_authority_policy',
     '--reader-allowlist', configuration_reader_allowlist,
   ],
   suite: ['unit', 'policy', 'configuration'],
+  timeout: 30,
+)
+test('portability_policy_unit',
+  python_exe,
+  args: [portability_policy_tests],
+  suite: ['unit', 'policy', 'portability'],
+  timeout: 30,
+)
+test('portability_policy',
+  python_exe,
+  args: [
+    portability_policy_script,
+    '--root', meson.project_source_root(),
+    '--allowlist', portability_allowlist,
+  ],
+  suite: ['unit', 'policy', 'portability'],
   timeout: 30,
 )
 
