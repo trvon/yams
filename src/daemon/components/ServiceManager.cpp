@@ -66,8 +66,6 @@
 #include <yams/daemon/components/db_integrity_stamp.h>
 #include <yams/daemon/components/db_recovery.h>
 #include <yams/daemon/components/db_salvage.h>
-#include <yams/memory_sync/memory_sync_config.h>
-#include <yams/memory_sync/memory_sync_service.h>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/EmbeddingService.h>
 #include <yams/daemon/components/EntityGraphService.h>
@@ -87,6 +85,8 @@
 #include <yams/daemon/ipc/retrieval_session.h>
 #include <yams/daemon/metric_keys.h>
 #include <yams/daemon/shutdown_budget.h>
+#include <yams/memory_sync/memory_sync_config.h>
+#include <yams/memory_sync/memory_sync_service.h>
 #include <yams/topology/topology_factory.h>
 
 #include <yams/daemon/components/RepairService.h>

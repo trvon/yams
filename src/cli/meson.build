@@ -66,6 +66,7 @@ yams_cli_sources = [
   'commands/graph_command.cpp',
   'commands/diff_command.cpp',
   'commands/tune_command.cpp',
+  'commands/p2p_command.cpp',
 ]
 
 if get_option('build-mcp-server')
@@ -95,6 +96,8 @@ cli_deps = [
   dependency('yams_plugin_runtime'),
   dependency('yams_downloader'),
   dependency('yams_plugins_mgmt'),
+  dependency('yams_storage_engine'),
+  dependency('yams_crypto'),
   dependency('nlohmann_json'),
   dependency('spdlog'),
   dependency('OpenSSL'),
