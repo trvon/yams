@@ -623,7 +623,7 @@ TEST_CASE("WorkCoordinator shutdown behavior", "[daemon][work_coordinator][shutd
 }
 
 TEST_CASE("WorkCoordinator shutdown stress no stuck workers",
-          "[daemon][work_coordinator][shutdown][stress]") {
+          "[daemon][work_coordinator][shutdown][stress][slow]") {
     // Regression test: 12 workers, stop, verify all exit within 5s.
     // Reproduces the pre-existing shutdown race where 12 workers hung past 30s.
     constexpr int kWorkers = 12;

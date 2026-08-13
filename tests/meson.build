@@ -2920,6 +2920,17 @@ if catch2_dep.found()
 #Search tests
   test('hybrid_search', hybrid_search_exe,
     suite: ['catch2', 'unit', 'search', 'hybrid'],
+    args: ['~[slow]', '--allow-running-no-tests'],
+    env: {
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      'YAMS_DISABLE_VECTORS': '1',
+    },
+    timeout: 120
+  )
+
+  test('hybrid_search_slow', hybrid_search_exe,
+    suite: ['catch2', 'slow', 'search', 'hybrid'],
+    args: ['[slow]', '--allow-running-no-tests'],
     env: {
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
       'YAMS_DISABLE_VECTORS': '1',
@@ -3044,6 +3055,14 @@ if catch2_dep.found()
 
   test('daemon_background_processing', catch2_daemon_background_exe,
     suite: ['catch2', 'unit', 'daemon', 'background'],
+    args: ['~[slow]', '--allow-running-no-tests'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
+  test('daemon_background_processing_slow', catch2_daemon_background_exe,
+    suite: ['catch2', 'slow', 'daemon', 'background'],
+    args: ['[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
   )
@@ -3074,6 +3093,14 @@ if catch2_dep.found()
 
   test('work_coordinator', catch2_work_coordinator_exe,
     suite: ['catch2', 'unit', 'daemon', 'work-coordinator'],
+    args: ['~[slow]', '--allow-running-no-tests'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('work_coordinator_slow', catch2_work_coordinator_exe,
+    suite: ['catch2', 'slow', 'daemon', 'work-coordinator'],
+    args: ['[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
@@ -3159,6 +3186,15 @@ if catch2_dep.found()
 
   test('plugin_infrastructure', catch2_plugin_infrastructure_exe,
     suite: ['catch2', 'unit', 'daemon', 'plugin', 'infrastructure'],
+    args: ['~[slow]', '--allow-running-no-tests'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60,
+    is_parallel: false
+  )
+
+  test('plugin_infrastructure_slow', catch2_plugin_infrastructure_exe,
+    suite: ['catch2', 'slow', 'daemon', 'plugin', 'infrastructure'],
+    args: ['[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
     is_parallel: false
@@ -3587,6 +3623,14 @@ if catch2_dep.found()
 
   test('mcp_submodule', catch2_mcp_submodule_exe,
     suite: ['catch2', 'unit', 'mcp', 'yams-84g'],
+    args: ['~[slow]', '--allow-running-no-tests'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 180
+  )
+
+  test('mcp_submodule_slow', catch2_mcp_submodule_exe,
+    suite: ['catch2', 'slow', 'mcp', 'yams-84g'],
+    args: ['[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 180
   )

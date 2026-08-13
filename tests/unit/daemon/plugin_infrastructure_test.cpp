@@ -726,7 +726,7 @@ TEST_CASE("RequestDispatcher - Plugin Integration", "[plugin][dispatcher][integr
 #endif
 }
 
-TEST_CASE("Plugin Advanced Scenarios", "[plugin][advanced][stress]") {
+TEST_CASE("Plugin Advanced Scenarios", "[plugin][advanced][stress][slow]") {
 #ifdef TEST_ABI_PLUGIN_FILE
     SECTION("Concurrent trust operations") {
         PluginHostFixture fixture;

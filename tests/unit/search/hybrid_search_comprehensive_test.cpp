@@ -1726,7 +1726,7 @@ TEST_CASE("Concurrency - Same query different filters", "[search][concurrency][f
     REQUIRE(responses.size() == 4);
 }
 
-TEST_CASE("Concurrency - High load stress test", "[search][concurrency][stress]") {
+TEST_CASE("Concurrency - High load stress test", "[search][concurrency][stress][slow]") {
     SKIP_HYBRID_ON_WINDOWS();
     SearchServiceFixture fixture;
 

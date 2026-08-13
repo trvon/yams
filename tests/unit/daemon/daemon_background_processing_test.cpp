@@ -1219,7 +1219,7 @@ TEST_CASE("PostIngestQueue: full-channel enqueueBatch waits only log at debug",
 // =============================================================================
 
 TEST_CASE("PostIngestQueue: InternalEventBus integration and stress",
-          "[daemon][background][bus][stress]") {
+          "[daemon][background][bus][stress][slow]") {
     if (!isMpmcEnabled()) {
         SKIP("MPMC bus not enabled (set YAMS_INTERNAL_BUS_MPMC=1)");
     }

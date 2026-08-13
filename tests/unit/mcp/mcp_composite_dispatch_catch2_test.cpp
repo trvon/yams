@@ -826,7 +826,7 @@ TEST_CASE_METHOD(CompositeDispatchFixture,
 }
 
 TEST_CASE_METHOD(CompositeDispatchFixture, "execute - add router stress cases stay actionable",
-                 "[mcp][composite][execute][stress]") {
+                 "[mcp][composite][execute][stress][slow]") {
     const std::vector<json> seeds = {
         json::object(),
         json{{"path", "/tmp/one.txt"}},
@@ -921,7 +921,7 @@ TEST_CASE_METHOD(CompositeDispatchFixture, "composite errors do not duplicate Er
 
 TEST_CASE_METHOD(CompositeDispatchFixture,
                  "direct add and execute add stay aligned across stress cases",
-                 "[mcp][composite][execute][stress][parity]") {
+                 "[mcp][composite][execute][stress][slow][parity]") {
     const std::vector<json> seeds = {
         json::object(),
         json{{"path", "/tmp/one.txt"}},
