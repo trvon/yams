@@ -89,6 +89,44 @@ public:
         });
     }
 
+private:
+    // Handles the already-initialized path: update the tuning profile and offer the
+    // optional setup steps (GLiNER, reranker, grammars, skill, session) without re-running
+    // storage/key/vector initialization.
+    Result<void> handleAlreadyInitialized(const fs::path& dataPath, const fs::path& configPath) {
+        spdlog::info("YAMS is already initialized at {} (use --force to overwrite).",
+                     dataPath.string());
+
+        if (!nonInteractive_) {
+            tuningProfile_ = promptForTuningProfile();
+            auto writeOk = config::write_config_value(configPath, "tuning.profile", tuningProfile_);
+            if (!writeOk) {
+                spdlog::warn("Failed to update tuning.profile in config");
+            }
+        }
+
+        const auto preferredModel =
+            config::parse_config_value(configPath, "embeddings", "preferred_model");
+        const bool colbertPreferred = isColbertModelName(preferredModel);
+
+        maybeSetupGlinerModel(dataPath, configPath);
+        if (colbertPreferred) {
+            auto selected = maybeSetupRerankerModel(dataPath, configPath);
+            if (selected.empty()) {
+                updateColbertRerankingConfig(configPath);
+                spdlog::info("ColBERT preferred model detected; enabling MaxSim reranking via "
+                             "ONNX plugin");
+            }
+        } else {
+            (void)maybeSetupRerankerModel(dataPath, configPath);
+        }
+        maybeSetupGrammars(dataPath);
+        maybeSetupAgentSkill();
+        maybeBootstrapProjectSession();
+        return Result<void>();
+    }
+
+public:
     Result<void> execute() override {
         try {
             // Handle --auto flag: sets sensible defaults for containerized environments
@@ -137,40 +175,7 @@ public:
                 fs::exists(dbFile) && fs::exists(storageDir) && fs::exists(configPath);
 
             if (alreadyInitialized && !force_) {
-                spdlog::info("YAMS is already initialized at {} (use --force to overwrite).",
-                             dataPath.string());
-
-                if (!nonInteractive_) {
-                    tuningProfile_ = promptForTuningProfile();
-                    auto writeOk =
-                        config::write_config_value(configPath, "tuning.profile", tuningProfile_);
-                    if (!writeOk) {
-                        spdlog::warn("Failed to update tuning.profile in config");
-                    }
-                }
-
-                const auto preferredModel =
-                    config::parse_config_value(configPath, "embeddings", "preferred_model");
-                const bool colbertPreferred = isColbertModelName(preferredModel);
-
-                // Still offer GLiNER model, reranker model, grammar download, and skill install
-                // even if already initialized
-                maybeSetupGlinerModel(dataPath, configPath);
-                if (colbertPreferred) {
-                    auto selected = maybeSetupRerankerModel(dataPath, configPath);
-                    if (selected.empty()) {
-                        updateColbertRerankingConfig(configPath);
-                        spdlog::info(
-                            "ColBERT preferred model detected; enabling MaxSim reranking via "
-                            "ONNX plugin");
-                    }
-                } else {
-                    (void)maybeSetupRerankerModel(dataPath, configPath);
-                }
-                maybeSetupGrammars(dataPath);
-                maybeSetupAgentSkill();
-                maybeBootstrapProjectSession();
-                return Result<void>();
+                return handleAlreadyInitialized(dataPath, configPath);
             }
 
             // 4) Initialize storage (database + content store)
