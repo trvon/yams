@@ -1209,6 +1209,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_version_vector_exe = executable('catch2_version_vector',
+    files('unit/memory_sync/version_vector_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep, dependency('nlohmann_json')],
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
 #Storage submodule tests(StorageEngine, CompressedStorageEngine, ReferenceCounter, etc.)
 #Migrated from GTest as part of yams - 3s4 / yams - 8b9
   catch2_storage_submodule_exe = executable('catch2_storage_submodule',
@@ -3520,6 +3529,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'storage', 'backend'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
+  )
+
+  test('version_vector', catch2_version_vector_exe,
+    suite: ['catch2', 'unit', 'memory-sync'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
   )
 
   test('storage_submodule', catch2_storage_submodule_exe,
