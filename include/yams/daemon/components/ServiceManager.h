@@ -82,6 +82,9 @@ class MetadataRepository;
 namespace yams::integrity {
 class RepairManager;
 } // namespace yams::integrity
+namespace yams::memory_sync {
+class MemorySyncService;
+} // namespace yams::memory_sync
 namespace yams::search {
 class SearchEngine;
 class SearchEngineBuilder;
@@ -738,6 +741,7 @@ private:
     Result<void> initializeImpl(const std::function<void()>& beforePoolConfigure);
     Result<void> configureResourcePools(const std::function<void()>& beforeConfigure);
     Result<std::filesystem::path> initializeDataDirAndContentStore();
+    void initializeMemorySync(const std::filesystem::path& dataDir);
     boost::asio::awaitable<bool> initializeMetadataDatabaseAt(const std::filesystem::path& dbPath,
                                                               yams::compat::stop_token token);
     bool finalizeDatabaseStartup(const std::filesystem::path& dbPath,
@@ -868,6 +872,10 @@ private:
     // async-init wait expires.
     mutable std::mutex databaseManagerLifecycleMutex_;
     std::unique_ptr<DatabaseManager> databaseManager_;
+
+    // P2P memory-sync service (version-vector + LWW over a shared store).
+    // Started after storage/content-store init, stopped during shutdown.
+    std::unique_ptr<yams::memory_sync::MemorySyncService> memorySync_;
 
     // Cached GLiNER query concept extraction function.
     mutable search::EntityExtractionFunc cachedQueryConceptExtractor_;

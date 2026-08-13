@@ -66,6 +66,8 @@
 #include <yams/daemon/components/db_integrity_stamp.h>
 #include <yams/daemon/components/db_recovery.h>
 #include <yams/daemon/components/db_salvage.h>
+#include <yams/memory_sync/memory_sync_config.h>
+#include <yams/memory_sync/memory_sync_service.h>
 #include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/EmbeddingService.h>
 #include <yams/daemon/components/EntityGraphService.h>
@@ -1531,6 +1533,11 @@ void ServiceManager::releaseRemainingServiceState() {
     vectorIndexCoordinator_.reset();
 
     spdlog::info("[ServiceManager] Phase 8.4.5: Releasing async strands");
+    if (memorySync_) {
+        memorySync_->stop();
+        memorySync_.reset();
+        spdlog::info("[ServiceManager] Phase 8.4.0: memory_sync stopped");
+    }
     initStrand_.reset();
     pluginStrand_.reset();
     modelStrand_.reset();
@@ -1923,6 +1930,48 @@ Result<std::filesystem::path> ServiceManager::initializeDataDirAndContentStore()
     return dataDir;
 }
 
+void ServiceManager::initializeMemorySync(const std::filesystem::path& dataDir) {
+    const auto& policy = config_.memorySync;
+    if (!policy.enabled) {
+        return;
+    }
+
+    try {
+        yams::memory_sync::MemorySyncDaemonConfig cfg;
+        cfg.enabled = true;
+        cfg.nodeId = policy.nodeId;
+        cfg.backend = policy.backend;
+        cfg.syncIntervalMs = policy.syncIntervalMs;
+        cfg.path = policy.path;
+        if (cfg.backend == "filesystem" && !cfg.path.empty() &&
+            !std::filesystem::path(cfg.path).is_absolute()) {
+            cfg.path = (dataDir / cfg.path).string();
+        }
+
+        auto svc = yams::memory_sync::createMemorySyncService(cfg);
+        if (!svc) {
+            spdlog::warn("[ServiceManager] memory_sync service creation failed: {}",
+                         svc.error().message);
+            return;
+        }
+
+        auto service = std::move(svc.value());
+        if (auto r = service->start(); !r) {
+            spdlog::warn("[ServiceManager] memory_sync service failed to start: {}",
+                         r.error().message);
+            return;
+        }
+
+        memorySync_ = std::move(service);
+        spdlog::info("[ServiceManager] memory_sync started: backend={} node={}", cfg.backend,
+                     cfg.nodeId);
+    } catch (const std::exception& e) {
+        spdlog::warn("[ServiceManager] memory_sync initialization threw: {}", e.what());
+    } catch (...) {
+        spdlog::warn("[ServiceManager] memory_sync initialization threw (unknown)");
+    }
+}
+
 boost::asio::awaitable<bool>
 ServiceManager::initializeMetadataDatabaseAt(const std::filesystem::path& dbPath,
                                              yams::compat::stop_token token) {
@@ -2285,6 +2334,9 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
         co_return Error{dataDirResult.error().code, dataDirResult.error().message};
     }
     const auto dataDir = dataDirResult.value();
+
+    // Best-effort: P2P memory sync is opt-in and must not block daemon startup.
+    initializeMemorySync(dataDir);
 
     if (token.stop_requested())
         co_return Error{ErrorCode::OperationCancelled, "Shutdown requested"};

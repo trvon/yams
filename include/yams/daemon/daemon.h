@@ -116,6 +116,17 @@ struct DaemonConfig {
     } documentRetention;
 
     // Forward decls for GTEST-only accessors are below guarded by YAMS_TESTING
+    /// Opt-in P2P memory sync. Runs the version-vector + LWW sync loop against
+    /// a shared store (filesystem dir or s3/R2) so multiple daemons converge.
+    /// No YAMS_* env knobs.
+    struct MemorySyncPolicy {
+        bool enabled{false};
+        std::string nodeId{"default"};     // this daemon's writer identity
+        std::string backend{"filesystem"}; // "filesystem" | "s3"
+        std::string path;                  // filesystem dir or s3:// URL (relative -> dataDir)
+        std::uint32_t syncIntervalMs{5000};
+    } memorySync;
+
     struct DownloadPolicy {
         bool enable{false};                               // feature gate
         std::vector<std::string> allowedHosts{};          // exact or wildcard patterns
