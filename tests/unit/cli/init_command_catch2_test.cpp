@@ -17,6 +17,12 @@
 
 #include "../../common/test_helpers_catch2.h"
 
+namespace yams::cli {
+std::string formatLaterCommand(const std::string& command);
+std::string formatInitSummary(const std::filesystem::path& configPath,
+                              const std::filesystem::path& dataPath);
+} // namespace yams::cli
+
 namespace fs = std::filesystem;
 
 // =============================================================================
@@ -204,3 +210,21 @@ TEST_CASE("InitCommand - non-interactive print initializes temp storage", "[cli]
 // are deferred to integration tests due to complex env isolation requirements.
 // The model validation tests above cover the core init command logic.
 // =============================================================================
+
+TEST_CASE("InitCommand - post-setup guidance is formatted per branch", "[cli][init][catch2]") {
+    SECTION("later-command guidance") {
+        const auto text = yams::cli::formatLaterCommand("yams model download all-MiniLM-L6-v2");
+        CHECK(text.find("Later: yams model download all-MiniLM-L6-v2") != std::string::npos);
+    }
+
+    SECTION("ready summary guidance") {
+        const auto text = yams::cli::formatInitSummary("/tmp/cfg.toml", "/tmp/data");
+        CHECK(text.find("YAMS is ready") != std::string::npos);
+        CHECK(text.find("Config") != std::string::npos);
+        CHECK(text.find("/tmp/cfg.toml") != std::string::npos);
+        CHECK(text.find("Data") != std::string::npos);
+        CHECK(text.find("/tmp/data") != std::string::npos);
+        CHECK(text.find("Next") != std::string::npos);
+        CHECK(text.find("yams list | yams doctor") != std::string::npos);
+    }
+}

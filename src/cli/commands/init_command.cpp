@@ -54,6 +54,19 @@ using init_assets::GlinerModel;
 using init_assets::GrammarInfo;
 using init_assets::RerankerModel;
 
+// Post-setup guidance formatters (pure string builders, testable without stdout).
+std::string formatLaterCommand(const std::string& command) {
+    return "\nLater: " + command + "\n";
+}
+
+std::string formatInitSummary(const fs::path& configPath, const fs::path& dataPath) {
+    std::string out = "\n" + ui::status_ok("YAMS is ready") + "\n";
+    out += ui::key_value("Config", configPath.string()) + "\n";
+    out += ui::key_value("Data", dataPath.string()) + "\n";
+    out += ui::key_value("Next", "yams list | yams doctor") + "\n";
+    return out;
+}
+
 class InitCommand : public ICommand {
 public:
     std::string getName() const override { return "init"; }
@@ -418,14 +431,11 @@ private:
     }
 
     static void printLaterCommand(const std::string& command) {
-        std::cout << "\nLater: " << command << "\n";
+        std::cout << formatLaterCommand(command);
     }
 
     static void printInitSummary(const fs::path& configPath, const fs::path& dataPath) {
-        std::cout << "\n" << ui::status_ok("YAMS is ready") << "\n";
-        std::cout << ui::key_value("Config", configPath.string()) << "\n";
-        std::cout << ui::key_value("Data", dataPath.string()) << "\n";
-        std::cout << ui::key_value("Next", "yams list | yams doctor") << "\n";
+        std::cout << formatInitSummary(configPath, dataPath);
     }
 
     static std::string normalizeS3EndpointInput(std::string endpoint) {
