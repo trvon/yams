@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright 2026 YAMS Contributors
+
+[daemon]
+auto_load_plugins = false
+auto_repair = false
+
+[memory_sync]
+enabled = true
+node_id = "node-a"
+backend = "filesystem"
+path = "/mem"
+sync_interval_ms = 500
