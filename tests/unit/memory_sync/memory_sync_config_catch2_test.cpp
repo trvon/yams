@@ -65,6 +65,15 @@ TEST_CASE("createMemorySyncService rejects unknown backend", "[memory-sync][conf
     CHECK_FALSE(svc.has_value());
 }
 
+TEST_CASE("createMemorySyncService rejects s3 with a non-s3 URL", "[memory-sync][config]") {
+    MemorySyncDaemonConfig cfg;
+    cfg.enabled = true;
+    cfg.backend = "s3";
+    cfg.path = "/not/an/s3/url";
+    const auto svc = createMemorySyncService(cfg);
+    CHECK_FALSE(svc.has_value());
+}
+
 TEST_CASE("createMemorySyncService builds a working filesystem service", "[memory-sync][config]") {
     const auto dir = std::filesystem::temp_directory_path() /
                      ("yams-memory-sync-config-" +

@@ -86,8 +86,14 @@ createMemorySyncService(const MemorySyncDaemonConfig& config) {
         if (config.path.empty()) {
             return Error{ErrorCode::InvalidArgument, "memory_sync.path (s3:// URL) is required"};
         }
-        backendConfig.type = "s3";
-        backendConfig.url = config.path;
+        // Delegate to the URL parser so scheme detection, credentials in the
+        // authority, and query params (region, use_path_style, cache, timeout)
+        // all flow through the same path as the daemon's storage resolver.
+        backendConfig = storage::StorageBackendFactory::parseURL(config.path);
+        if (backendConfig.type != "s3") {
+            return Error{ErrorCode::InvalidArgument,
+                         "memory_sync.backend is s3 but path is not an s3:// URL: " + config.path};
+        }
         backend = storage::StorageBackendFactory::create(backendConfig);
         if (!backend) {
             return Error{ErrorCode::InvalidState, "failed to create s3 storage backend"};
