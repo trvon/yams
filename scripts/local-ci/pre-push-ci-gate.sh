@@ -134,6 +134,14 @@ if [ "${SELF_TEST}" -eq 1 ]; then
 	tsan_profile="self-test"
 fi
 
+# Host-agnostic compile-only cross-compile smoke. Skips cleanly when no cross
+# toolchain is installed; compiles a portability probe otherwise.
+if [ "${SELF_TEST}" -eq 1 ]; then
+	run_step "cross-compile-smoke" bash "${SCRIPT_DIR}/cross-compile-smoke.sh" --self-test
+else
+	run_step "cross-compile-smoke" bash "${SCRIPT_DIR}/cross-compile-smoke.sh"
+fi
+
 if [ "$(uname -s)" != "Darwin" ]; then
 	fail "host sanitizer pre-push gate currently requires a Darwin host"
 	FAILURES+=("host-sanitizer-unavailable (2)")
