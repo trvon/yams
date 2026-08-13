@@ -128,17 +128,57 @@ bool& ownedLeaseRestoreFailurePending() {
 }
 
 std::optional<std::string> environmentValueLocked(const char* key) {
+#ifdef _WIN32
+    // The CRT environment cannot hold an explicitly empty value: _putenv_s("KEY", "") removes
+    // the variable, so std::getenv cannot distinguish empty from unset. Read through the Win32
+    // environment instead. GetEnvironmentVariableA returns the required size (including the NUL)
+    // on a zero-size probe, 0 characters for an empty value, and ERROR_ENVVAR_NOT_FOUND when the
+    // variable is absent or vanishes between the probe and the copy.
+    DWORD required = GetEnvironmentVariableA(key, nullptr, 0);
+    if (required == 0) {
+        return std::nullopt;
+    }
+    std::string buffer;
+    for (;;) {
+        buffer.resize(required);
+        SetLastError(ERROR_SUCCESS);
+        const DWORD copied = GetEnvironmentVariableA(key, buffer.data(), required);
+        if (copied == 0) {
+            if (GetLastError() == ERROR_ENVVAR_NOT_FOUND) {
+                return std::nullopt;
+            }
+            buffer.clear();
+            return buffer; // explicitly empty value
+        }
+        if (copied < required) {
+            buffer.resize(copied);
+            return buffer;
+        }
+        required = copied; // value grew between probe and copy — retry with the reported size
+    }
+#else
     // NOLINTNEXTLINE(concurrency-mt-unsafe): caller holds processEnvironmentMutex().
     const char* raw = std::getenv(key);
     if (raw == nullptr) {
         return std::nullopt;
     }
     return std::string{raw};
+#endif
 }
 
 bool mutateEnvironmentLocked(const char* key, const char* value) noexcept {
 #ifdef _WIN32
-    return _putenv_s(key, value != nullptr ? value : "") == 0;
+    // Authoritative Win32 write: SetEnvironmentVariableA distinguishes NULL (remove) from ""
+    // (set empty), which the CRT environment cannot represent.
+    if (!SetEnvironmentVariableA(key, value)) {
+        return false;
+    }
+    // Best-effort CRT sync so legacy std::getenv readers (e.g. sandbox_detection,
+    // file_type_detector) stay coherent for representable values. _putenv_s removes on "" and
+    // returns EINVAL on NULL, so empty and unset both collapse to removal in the CRT table —
+    // matching those readers' treat-empty-as-unset semantics.
+    (void)_putenv_s(key, value != nullptr ? value : "");
+    return true;
 #else
     if (value != nullptr) {
         // NOLINTNEXTLINE(concurrency-mt-unsafe): caller holds processEnvironmentMutex().
@@ -215,11 +255,7 @@ ParsedEnvironmentValue<T> readTypedEnvironment(std::string_view key, std::string
 std::optional<std::string> getenv_optional(std::string_view key) {
     const std::string name(key);
     std::lock_guard lock(processEnvironmentMutex());
-    const char* raw = std::getenv(name.c_str()); // NOLINT(concurrency-mt-unsafe)
-    if (raw != nullptr) {
-        return std::string(raw);
-    }
-    return std::nullopt;
+    return environmentValueLocked(name.c_str());
 }
 
 std::optional<std::string> getenv_nonempty(std::string_view key) {
@@ -374,9 +410,8 @@ EnvironmentRestoreResult restore_environment_if_owned(const char* key,
             return EnvironmentRestoreResult::Released;
         }
 
-        // NOLINTNEXTLINE(concurrency-mt-unsafe): processEnvironmentMutex() is held.
-        const char* currentValue = std::getenv(key);
-        if (currentValue == nullptr || currentValue != lease->second.installedValue) {
+        const auto currentValue = environmentValueLocked(key);
+        if (!currentValue || *currentValue != lease->second.installedValue) {
             ownership.currentLease.reset();
             ownership.leases.clear();
             return EnvironmentRestoreResult::OwnershipLost;

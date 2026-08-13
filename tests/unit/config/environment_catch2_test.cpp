@@ -327,6 +327,36 @@ TEST_CASE("ScopedEnvVar restoration is independent of deterministic scenario ord
     }
 }
 
+TEST_CASE("environment boundary round-trips empty and unset values",
+          "[config][environment][scoped-env][empty]") {
+    const std::string key = "YAMS_TEST_SCOPED_ENV_EMPTY";
+    ScopedEnvVar hostRestore{key, std::nullopt};
+
+    REQUIRE(yams::config::set_environment(key.c_str(), nullptr));
+    CHECK_FALSE(yams::config::getenv_optional(key).has_value());
+
+    REQUIRE(yams::config::set_environment(key.c_str(), ""));
+    const auto emptyValue = yams::config::getenv_optional(key);
+    REQUIRE(emptyValue.has_value());
+    CHECK(emptyValue->empty());
+
+    REQUIRE(yams::config::set_environment(key.c_str(), nullptr));
+    CHECK_FALSE(yams::config::getenv_optional(key).has_value());
+
+    REQUIRE(yams::config::set_environment(key.c_str(), "alpha"));
+    CHECK(yams::config::getenv_optional(key) == std::string{"alpha"});
+
+    // A ScopedEnvVar guard restores an explicitly empty value instead of collapsing it to unset.
+    REQUIRE(yams::config::set_environment(key.c_str(), ""));
+    {
+        ScopedEnvVar guard{key, std::string{"replacement"}};
+        CHECK(yams::config::getenv_optional(key) == std::string{"replacement"});
+    }
+    const auto restoredEmpty = yams::config::getenv_optional(key);
+    REQUIRE(restoredEmpty.has_value());
+    CHECK(restoredEmpty->empty());
+}
+
 TEST_CASE("config environment boundary serializes concurrent readers and writers",
           "[config][environment][concurrent]") {
     const std::string key = "YAMS_TEST_SCOPED_ENV_CONCURRENT";
