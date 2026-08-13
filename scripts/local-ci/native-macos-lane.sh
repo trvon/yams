@@ -142,7 +142,37 @@ run_ci() {
 
 	conan profile detect --force
 
-	./setup.sh "${setup_args[@]}"
+	# Bounded retry around dependency resolution: a transient Conan network timeout
+	# (e.g. center2.conan.io read timeout) must not masquerade as a code failure.
+	setup_rc=1
+	for setup_attempt in 1 2 3; do
+		setup_network=0
+		setup_log="$(mktemp)"
+		if ./setup.sh "${setup_args[@]}" >"${setup_log}" 2>&1; then
+			setup_rc=0
+			cat "${setup_log}"
+			rm -f "${setup_log}"
+			break
+		fi
+		cat "${setup_log}"
+		if grep -qE 'ReadTimeoutError|Read timed out|Unable to connect|Failed to connect|Max retries exceeded|Connection.*(refused|reset|timed out)|NameResolution' "${setup_log}"; then
+			setup_network=1
+		fi
+		rm -f "${setup_log}"
+		if [ "${setup_network}" -eq 1 ] && [ "${setup_attempt}" -lt 3 ]; then
+			printf '[macos-lane] setup.sh transient network failure (attempt %s/3); retrying\n' "${setup_attempt}" >&2
+			sleep "$((setup_attempt * 10))"
+			continue
+		fi
+		break
+	done
+	if [ "${setup_rc}" -ne 0 ]; then
+		if [ "${setup_network}" -eq 1 ]; then
+			printf '[macos-lane] setup.sh network failure persisted; reporting infra-retry\n' >&2
+			exit 77
+		fi
+		return 1
+	fi
 
 	CONAN_BUILD_ENV=""
 	for candidate in \
@@ -229,6 +259,11 @@ if [ "${rc}" -eq 0 ]; then
 	echo "- Result: pass" >>"${SUMMARY}"
 	echo "- Log: ${LOG_FILE#"${REPO_ROOT}"/}" >>"${SUMMARY}"
 	ok "summary: ${SUMMARY#"${REPO_ROOT}"/}"
+elif [ "${rc}" -eq 77 ]; then
+	echo "- Result: infra-retry (transient network failure)" >>"${SUMMARY}"
+	echo "- Log: ${LOG_FILE#"${REPO_ROOT}"/}" >>"${SUMMARY}"
+	fail "native macOS lane infra-retry (${rc}); log: ${LOG_FILE}"
+	exit "${rc}"
 else
 	echo "- Result: fail (${rc})" >>"${SUMMARY}"
 	echo "- Log: ${LOG_FILE#"${REPO_ROOT}"/}" >>"${SUMMARY}"

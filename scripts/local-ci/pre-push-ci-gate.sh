@@ -111,6 +111,10 @@ run_step() {
 	if [ "${rc}" -eq 0 ]; then
 		ok "${name}"
 		record_summary "- Result: pass"
+	elif [ "${rc}" -eq 77 ]; then
+		fail "${name} infra-retry (${rc}); log: ${log_file}"
+		record_summary "- Result: infra-retry (transient network failure)"
+		FAILURES+=("${name} infra-retry (${rc})")
 	else
 		fail "${name} failed (${rc}); log: ${log_file}"
 		record_summary "- Result: fail (${rc})"
