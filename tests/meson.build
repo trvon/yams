@@ -1250,6 +1250,22 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_memory_sync_config_exe = executable('catch2_memory_sync_config',
+    files('unit/memory_sync/memory_sync_config_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [
+      catch2_dep,
+      catch2_main_dep,
+      dependency('nlohmann_json'),
+      dependency('yams_storage_engine'),
+      dependency('yams_crypto'),
+      dependency('yams_core'),
+    ],
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
 #Storage submodule tests(StorageEngine, CompressedStorageEngine, ReferenceCounter, etc.)
 #Migrated from GTest as part of yams - 3s4 / yams - 8b9
   catch2_storage_submodule_exe = executable('catch2_storage_submodule',
@@ -3576,6 +3592,12 @@ if catch2_dep.found()
   )
 
   test('memory_sync_service', catch2_memory_sync_service_exe,
+    suite: ['catch2', 'unit', 'memory-sync'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('memory_sync_config', catch2_memory_sync_config_exe,
     suite: ['catch2', 'unit', 'memory-sync'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
