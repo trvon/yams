@@ -33,6 +33,13 @@ public:
     /// Publish `content` under `logicalKey`. Stores the content-addressed blob and
     /// an index record stamped with this node's version vector and hybrid timestamp.
     Result<void> publish(std::string_view logicalKey, std::span<const std::byte> content) {
+        // Reconcile first so this node's version vector and logical clock resume from
+        // the last known state. Preserves causal ordering across fresh loop instances
+        // (e.g. a stateless CLI process publishing after a prior one).
+        if (auto reconciled = sync(); !reconciled) {
+            return reconciled.error();
+        }
+
         const std::string hash = hashContent(content);
 
         if (auto r = backend_->store(blobKey(hash), content); !r) {
