@@ -81,21 +81,55 @@ public:
 
     [[nodiscard]] std::filesystem::path clone(std::string_view prefix) const {
         auto target = make_temp_sqlite_path(prefix);
-        std::filesystem::copy_file(templatePath_, target,
-                                   std::filesystem::copy_options::overwrite_existing);
-        copyOptionalSidecar("-wal", target);
-        copyOptionalSidecar("-shm", target);
+        // VACUUM INTO produces a self-contained single-file copy, checkpointing any WAL in the
+        // template. Raw copy_file of the main file plus -wal/-shm sidecars is incorrect: the
+        // -shm is a derived shared-memory index that must be rebuilt on open, and a stale -shm
+        // corrupts WAL replay on Windows.
+        metadata::Database db;
+        auto openResult = db.open(templatePath_.string(), metadata::ConnectionMode::ReadWrite);
+        if (!openResult) {
+            throw std::runtime_error("failed to open metadata template db for clone: " +
+                                     openResult.error().message);
+        }
+        auto vacuumResult =
+            db.execute("VACUUM INTO '" + escapeSqlStringLiteral(target.string()) + "'");
+        db.close();
+        if (!vacuumResult) {
+            throw std::runtime_error("failed to clone metadata template db: " +
+                                     vacuumResult.error().message);
+        }
+        verifyCloneIntegrity(target);
         return target;
     }
 
 private:
-    void copyOptionalSidecar(const char* suffix, const std::filesystem::path& target) const {
-        const auto source = std::filesystem::path(templatePath_.string() + suffix);
-        if (!std::filesystem::exists(source)) {
-            return;
+    static std::string escapeSqlStringLiteral(const std::string& raw) {
+        std::string escaped;
+        escaped.reserve(raw.size() + 2);
+        for (const char c : raw) {
+            escaped.push_back(c);
+            if (c == '\'') {
+                escaped.push_back('\'');
+            }
         }
-        std::filesystem::copy_file(source, std::filesystem::path(target.string() + suffix),
-                                   std::filesystem::copy_options::overwrite_existing);
+        return escaped;
+    }
+
+    // Fail loudly if the clone is missing the KG schema, so a broken clone surfaces here with a
+    // clear message instead of an opaque "no such table" later in a test.
+    void verifyCloneIntegrity(const std::filesystem::path& target) const {
+        metadata::Database db;
+        auto openResult = db.open(target.string(), metadata::ConnectionMode::ReadWrite);
+        if (!openResult) {
+            throw std::runtime_error("failed to open cloned metadata db: " +
+                                     openResult.error().message);
+        }
+        auto probeResult = db.execute("SELECT 1 FROM kg_nodes LIMIT 0");
+        db.close();
+        if (!probeResult) {
+            throw std::runtime_error("cloned metadata db is missing the KG schema: " +
+                                     probeResult.error().message);
+        }
     }
 
     std::filesystem::path templatePath_;
