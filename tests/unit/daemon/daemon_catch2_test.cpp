@@ -5,7 +5,9 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -838,20 +840,32 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon does not terminate unverified data-dir l
     SKIP_ON_WINDOWS();
 
 #ifndef _WIN32
+    // Pre-compute fork-safe inputs in the parent: the child must not allocate
+    // (a fork in a multithreaded process can leave the malloc lock held by a
+    // vanished thread), so build the lock path here and format the payload with
+    // snprintf into a stack buffer in the child.
+    const std::string lockPathStr = (config_.dataDir / ".yams-lock").string();
+
     int readyPipe[2] = {-1, -1};
     REQUIRE(::pipe(readyPipe) == 0);
     const pid_t child = ::fork();
     REQUIRE(child >= 0);
     if (child == 0) {
         ::close(readyPipe[0]);
-        const auto lockPath = config_.dataDir / ".yams-lock";
-        const int lockFd = ::open(lockPath.c_str(), O_CREAT | O_RDWR, 0644);
+        const int lockFd = ::open(lockPathStr.c_str(), O_CREAT | O_RDWR, 0644);
         if (lockFd < 0 || ::flock(lockFd, LOCK_EX) != 0) {
+            const char failed = '2';
+            (void)::write(readyPipe[1], &failed, 1);
             _exit(2);
         }
-        const auto payload = json{{"pid", ::getpid()}, {"socket", "/tmp/not-a-daemon.sock"}}.dump();
-        (void)::ftruncate(lockFd, 0);
-        (void)::write(lockFd, payload.data(), payload.size());
+        char payload[128];
+        const int payloadLen = ::snprintf(payload, sizeof(payload),
+                                          "{\"pid\":%d,\"socket\":\"/tmp/not-a-daemon.sock\"}",
+                                          static_cast<int>(::getpid()));
+        if (payloadLen > 0 && static_cast<size_t>(payloadLen) < sizeof(payload)) {
+            (void)::ftruncate(lockFd, 0);
+            (void)::write(lockFd, payload, static_cast<size_t>(payloadLen));
+        }
         const char ready = '1';
         (void)::write(readyPipe[1], &ready, 1);
         for (;;) {
@@ -872,7 +886,12 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon does not terminate unverified data-dir l
     } childGuard{child, readyPipe[0]};
 
     char ready = 0;
-    REQUIRE(::read(readyPipe[0], &ready, 1) == 1);
+    ssize_t readyRead = -1;
+    do {
+        readyRead = ::read(readyPipe[0], &ready, 1);
+    } while (readyRead < 0 && errno == EINTR);
+    INFO("lock holder child status byte=" << static_cast<int>(ready) << " read=" << readyRead);
+    REQUIRE(readyRead == 1);
     REQUIRE(ready == '1');
 
     daemon_ = std::make_unique<YamsDaemon>(config_);
