@@ -127,6 +127,27 @@ struct FtsSurface {
     bool operator==(const FtsSurface&) const = default;
 };
 
+Result<std::string> getStoredExtractionStatus(ConnectionPool& pool, int64_t documentId) {
+    return pool.withConnection([&](Database& db) -> Result<std::string> {
+        auto statement = db.prepare("SELECT extraction_status FROM documents WHERE id = ?");
+        if (!statement) {
+            return statement.error();
+        }
+        auto bind = statement.value().bind(1, documentId);
+        if (!bind) {
+            return bind.error();
+        }
+        auto row = statement.value().step();
+        if (!row) {
+            return row.error();
+        }
+        if (!row.value()) {
+            return Error{ErrorCode::NotFound, "document status not found"};
+        }
+        return statement.value().getString(0);
+    });
+}
+
 Result<std::optional<FtsSurface>> getFtsSurface(ConnectionPool& pool, int64_t documentId) {
     return pool.withConnection([&](Database& db) -> Result<std::optional<FtsSurface>> {
         auto statement = db.prepare("SELECT content, title FROM documents_fts WHERE rowid = ?");
@@ -485,6 +506,8 @@ TEST_CASE("batch content successful status chunks match singleton execution",
     }
     CHECK((fix.repository_->getCachedExtractedCount() == kExpectedCommittedDocuments));
     CHECK((fix.repository_->getCachedIndexedCount() == kExpectedCommittedDocuments));
+    CHECK((getStoredExtractionStatus(*fix.pool_, chunkedIds.front()).value() == "success"));
+    CHECK((getStoredExtractionStatus(*fix.pool_, singletonIds.front()).value() == "success"));
 }
 
 TEST_CASE("batch content duplicate row and singleton execution are observably equivalent",

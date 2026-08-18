@@ -359,7 +359,7 @@ public:
             YAMS_TRY_UNWRAP(statusStmtResult, db.prepareCached(R"(
                     UPDATE documents
                     SET content_extracted = 1,
-                        extraction_status = 'Success',
+                        extraction_status = 'success',
                         extraction_error = NULL,
                         repair_status = 'completed',
                         repair_attempted_at = unixepoch(),
@@ -390,7 +390,7 @@ public:
                 std::string sql;
                 sql.reserve(placeholders.size() + 256);
                 sql += "UPDATE documents SET content_extracted = 1, ";
-                sql += "extraction_status = 'Success', extraction_error = NULL, ";
+                sql += "extraction_status = 'success', extraction_error = NULL, ";
                 sql += "repair_status = 'completed', repair_attempted_at = unixepoch(), ";
                 sql += "repair_attempts = repair_attempts + 1 WHERE id IN (";
                 sql += placeholders;
