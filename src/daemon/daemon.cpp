@@ -923,7 +923,7 @@ void YamsDaemon::runLoop() {
             auto rs = serviceManager_->getRepairServiceShared();
             spdlog::debug("[DaemonLoop] FSM state={}, enableAutoRepair={}, repairService_exists={}",
                           static_cast<int>(snap.state), config_.enableAutoRepair, (rs != nullptr));
-            if (snap.state == LifecycleState::Ready) {
+            if (snap.state == LifecycleState::Ready || snap.state == LifecycleState::Degraded) {
                 if (config_.enableAutoRepair && !rs) {
                     spdlog::info("[DaemonLoop] Starting RepairService...");
                     try {

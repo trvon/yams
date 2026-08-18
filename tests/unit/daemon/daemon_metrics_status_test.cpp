@@ -7210,6 +7210,10 @@ TEST_CASE("DaemonMetrics: WorkCoordinator metrics export", "[daemon][metrics][wo
         // ServiceManager creates WorkCoordinator with hardware_concurrency() workers
         REQUIRE(snap->workerThreads > 0);              // Should have workers (worker_threads)
         REQUIRE(snap->workCoordinatorRunning == true); // Should be running
+        REQUIRE(snap->workCoordinatorProgressProbesPosted > 0);
+        CHECK(snap->workCoordinatorProgressProbesCompleted <=
+              snap->workCoordinatorProgressProbesPosted);
+        CHECK(snap->vectorCheckpointPhase == 0); // VectorCheckpointPhase::Idle
     }
 }
 

@@ -34,6 +34,7 @@
 #include <yams/daemon/components/SocketServer.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/VectorIndexCoordinator.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
@@ -1563,9 +1564,26 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
     try {
         if (services_) {
             if (auto* wc = services_->getWorkCoordinator()) {
+                wc->requestProgressProbe();
                 auto wcStats = wc->getStats();
                 out.workCoordinatorActiveWorkers = wcStats.activeWorkers;
                 out.workCoordinatorRunning = wcStats.isRunning;
+                out.workCoordinatorProgressProbesPosted = wcStats.progressProbesPosted;
+                out.workCoordinatorProgressProbesCompleted = wcStats.progressProbesCompleted;
+                out.workCoordinatorProgressProbeInFlight = wcStats.progressProbeInFlight;
+                out.workCoordinatorLastProgressAgeMs = wcStats.lastProgressAgeMs;
+            }
+            if (auto coordinator = services_->getVectorIndexCoordinator()) {
+                const auto checkpoint = coordinator->checkpointSnapshot();
+                out.vectorCheckpointPhase = static_cast<uint8_t>(checkpoint.phase);
+                out.vectorCheckpointRequests = checkpoint.requests;
+                out.vectorCheckpointCoalesced = checkpoint.coalesced;
+                out.vectorCheckpointStarted = checkpoint.started;
+                out.vectorCheckpointCompleted = checkpoint.completed;
+                out.vectorCheckpointTimedOut = checkpoint.timedOut;
+                out.vectorCheckpointPostFailures = checkpoint.postFailures;
+                out.vectorCheckpointQueuedAgeMs = checkpoint.queuedAgeMs;
+                out.vectorCheckpointRunningAgeMs = checkpoint.runningAgeMs;
             }
         }
     } catch (...) {

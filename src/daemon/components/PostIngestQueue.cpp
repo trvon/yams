@@ -340,6 +340,7 @@ PostIngestQueue::PostIngestQueue(
 
 PostIngestQueue::~PostIngestQueue() {
     stop_.store(true, std::memory_order_release);
+    cancelPendingKgJobs(true, "destructor shutdown");
     for (std::size_t i = 0; i < kStageCount; ++i) {
         publishStageActivity(i, false);
     }
@@ -587,7 +588,13 @@ void PostIngestQueue::start() {
 }
 
 void PostIngestQueue::stop() {
-    stop_.exchange(true, std::memory_order_acq_rel);
+    {
+        // Share the KG admission lock so stop() has a strict boundary: an enqueue either
+        // linearizes before this store or observes stop_ and is rejected/accounted below.
+        std::lock_guard<std::mutex> lock(pendingKgMutex_);
+        stop_.store(true, std::memory_order_release);
+    }
+    cancelPendingKgJobs(true, "queue shutdown");
     notifyLifecycle();
     signalAllWakeTimers();
     for (std::size_t i = 0; i < kStageCount; ++i) {
@@ -698,9 +705,27 @@ bool PostIngestQueue::isStagePaused(Stage stage) const {
 }
 
 void PostIngestQueue::setKnowledgeGraphEnabled(bool enabled) {
-    knowledgeGraphEnabled_.store(enabled, std::memory_order_release);
+    std::size_t cancelled = 0;
+    {
+        // Serialize enablement changes with KG admission so that no producer can publish a job
+        // after disablement returns. Explicit disablement is outside the pipeline and therefore
+        // clears deferred jobs without recording pipeline drops.
+        std::lock_guard<std::mutex> lock(pendingKgMutex_);
+        knowledgeGraphEnabled_.store(enabled, std::memory_order_release);
+        if (!enabled) {
+            cancelled = pendingKgJobs_.size();
+            pendingKgJobs_.clear();
+        }
+    }
     refreshStageAvailability();
-    spdlog::info("[PostIngestQueue] KnowledgeGraph dispatch {}", enabled ? "enabled" : "disabled");
+    if (cancelled > 0) {
+        spdlog::info(
+            "[PostIngestQueue] KnowledgeGraph dispatch disabled (cancelled {} deferred jobs)",
+            cancelled);
+    } else {
+        spdlog::info("[PostIngestQueue] KnowledgeGraph dispatch {}",
+                     enabled ? "enabled" : "disabled");
+    }
 }
 
 bool PostIngestQueue::isKnowledgeGraphEnabled() const {
@@ -899,12 +924,17 @@ double PostIngestQueue::kgChannelFillRatio(std::size_t* depthOut, std::size_t* c
     }
 
     const std::size_t cap = std::max<std::size_t>(1u, ch->capacity());
-    const std::size_t depth = ch->size_approx();
+    std::size_t pending = 0;
+    {
+        std::lock_guard<std::mutex> lock(pendingKgMutex_);
+        pending = pendingKgJobs_.size();
+    }
+    const std::size_t depth = ch->size_approx() + pending;
     if (depthOut)
         *depthOut = depth;
     if (capacityOut)
         *capacityOut = cap;
-    return static_cast<double>(depth) / static_cast<double>(cap);
+    return std::min(1.0, static_cast<double>(depth) / static_cast<double>(cap));
 }
 
 std::size_t PostIngestQueue::adaptiveExtractionBatchSize(std::size_t baseBatchSize) const {
@@ -1035,6 +1065,7 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
         extractionWakeTimer);
     cfg.batchMode = true;
     cfg.batchLimiterPerTask = false;
+    cfg.admissionPausedFn = [this]() { return isKgChannelBackpressured(); };
     cfg.batchSizeFn = [this]() -> std::size_t {
         const std::size_t base = std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
         return adaptiveExtractionBatchSize(base);
@@ -1392,7 +1423,9 @@ void PostIngestQueue::dispatchNonEmbeddingStages(
 }
 
 std::size_t PostIngestQueue::kgQueueDepth() const {
-    return kgChannel_ ? kgChannel_->size_approx() : 0;
+    const std::size_t channelDepth = kgChannel_ ? kgChannel_->size_approx() : 0;
+    std::lock_guard<std::mutex> lock(pendingKgMutex_);
+    return channelDepth + pendingKgJobs_.size();
 }
 
 std::size_t PostIngestQueue::symbolQueueDepth() const {
@@ -1738,27 +1771,178 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
     job.contentBytes = std::move(contentBytes);
     job.enqueuedAt = std::chrono::steady_clock::now();
 
-    // A full KG channel is backpressure, not data loss. Retry in short bounded waits so
-    // shutdown and explicit KG disablement can cancel the dispatch. A temporary pause keeps
-    // the job alive until the KG poller resumes and creates capacity.
-    static constexpr auto kEnqueueRetry = std::chrono::milliseconds(10);
-    while (!stop_.load(std::memory_order_acquire) &&
-           knowledgeGraphEnabled_.load(std::memory_order_acquire)) {
-        if (channel->push_wait(job, kEnqueueRetry)) {
-            InternalEventBus::instance().incKgQueued();
-            TuningManager::notifyWakeup();
-            signalWakeTimer(Stage::KnowledgeGraph);
+    enqueueKgJob(std::move(job));
+}
+
+void PostIngestQueue::enqueueKgJob(InternalEventBus::KgJob job) {
+    bool queued = false;
+    {
+        // This lock also defines the disable boundary: once setKnowledgeGraphEnabled(false)
+        // returns, no producer can enqueue or account another KG job from an earlier admission.
+        std::lock_guard<std::mutex> lock(pendingKgMutex_);
+        if (stop_.load(std::memory_order_acquire)) {
+            InternalEventBus::instance().incKgDropped();
             return;
+        }
+        if (!knowledgeGraphEnabled_.load(std::memory_order_acquire)) {
+            return;
+        }
+        if (kgChannel_ && kgChannel_->try_push(job)) {
+            InternalEventBus::instance().incKgQueued();
+            queued = true;
+        } else {
+            // Keep full-channel backpressure off WorkCoordinator threads. One coroutine drains the
+            // pending FIFO as the KG poller creates capacity; producers only append and return.
+            pendingKgJobs_.push_back(std::move(job));
         }
     }
 
-    if (stop_.load(std::memory_order_acquire)) {
-        InternalEventBus::instance().incKgDropped();
-        spdlog::warn("[PostIngestQueue] KG dispatch cancelled during shutdown for {}",
-                     hash.substr(0, 12));
+    if (queued) {
+        TuningManager::notifyWakeup();
+        signalWakeTimer(Stage::KnowledgeGraph);
     } else {
-        spdlog::info("[PostIngestQueue] KG dispatch cancelled by explicit disablement for {}",
-                     hash.substr(0, 12));
+        schedulePendingKgDrain();
+    }
+}
+
+void PostIngestQueue::schedulePendingKgDrain() {
+    if (!coordinator_ || !coordinator_->isRunning()) {
+        const bool countAsDrop = knowledgeGraphEnabled_.load(std::memory_order_acquire);
+        cancelPendingKgJobs(countAsDrop, "KG drain scheduler unavailable");
+        return;
+    }
+
+    bool expected = false;
+    if (!pendingKgDrainScheduled_.compare_exchange_strong(expected, true,
+                                                          std::memory_order_acq_rel)) {
+        return;
+    }
+
+    callbacksInFlight_.fetch_add(1, std::memory_order_acq_rel);
+    try {
+        boost::asio::co_spawn(
+            coordinator_->getExecutor(), drainPendingKgJobs(), [this](std::exception_ptr error) {
+                pendingKgDrainScheduled_.store(false, std::memory_order_release);
+                if (error) {
+                    try {
+                        std::rethrow_exception(error);
+                    } catch (const std::exception& ex) {
+                        spdlog::error("[PostIngestQueue] pending KG drain failed: {}", ex.what());
+                    } catch (...) {
+                        spdlog::error(
+                            "[PostIngestQueue] pending KG drain failed with unknown exception");
+                    }
+                }
+
+                bool hasPending = false;
+                {
+                    std::lock_guard<std::mutex> lock(pendingKgMutex_);
+                    hasPending = !pendingKgJobs_.empty();
+                }
+                if (hasPending && !stop_.load(std::memory_order_acquire) &&
+                    knowledgeGraphEnabled_.load(std::memory_order_acquire)) {
+                    schedulePendingKgDrain();
+                }
+                // Publish callback completion while holding the lifecycle mutex. A destructor
+                // waiter cannot observe zero and destroy this object until the callback's final
+                // access to the mutex has completed.
+                {
+                    std::lock_guard<std::mutex> lock(lifecycleMutex_);
+                    callbacksInFlight_.fetch_sub(1, std::memory_order_acq_rel);
+                    lifecycleCv_.notify_all();
+                }
+            });
+    } catch (const std::exception& ex) {
+        pendingKgDrainScheduled_.store(false, std::memory_order_release);
+        cancelPendingKgJobs(knowledgeGraphEnabled_.load(std::memory_order_acquire),
+                            "KG drain scheduling failure");
+        callbacksInFlight_.fetch_sub(1, std::memory_order_acq_rel);
+        notifyLifecycle();
+        spdlog::error("[PostIngestQueue] failed to schedule pending KG drain: {}", ex.what());
+    } catch (...) {
+        pendingKgDrainScheduled_.store(false, std::memory_order_release);
+        cancelPendingKgJobs(knowledgeGraphEnabled_.load(std::memory_order_acquire),
+                            "KG drain scheduling failure");
+        callbacksInFlight_.fetch_sub(1, std::memory_order_acq_rel);
+        notifyLifecycle();
+    }
+}
+
+std::size_t PostIngestQueue::cancelPendingKgJobs(bool countAsDrop, const char* reason) noexcept {
+    std::size_t cancelled = 0;
+    {
+        std::lock_guard<std::mutex> lock(pendingKgMutex_);
+        cancelled = pendingKgJobs_.size();
+        pendingKgJobs_.clear();
+    }
+    if (countAsDrop) {
+        for (std::size_t i = 0; i < cancelled; ++i) {
+            InternalEventBus::instance().incKgDropped();
+        }
+    }
+    if (cancelled > 0) {
+        spdlog::warn("[PostIngestQueue] cancelled {} pending KG jobs (reason={}, counted_drop={})",
+                     cancelled, reason, countAsDrop);
+    }
+    return cancelled;
+}
+
+boost::asio::awaitable<void> PostIngestQueue::drainPendingKgJobs() {
+    boost::asio::steady_timer retryTimer(co_await boost::asio::this_coro::executor);
+    constexpr auto kRetryDelay = std::chrono::milliseconds(2);
+
+    for (;;) {
+        bool queued = false;
+        std::size_t cancelled = 0;
+        bool cancellationRequested = false;
+        bool cancelledByStop = false;
+        {
+            std::lock_guard<std::mutex> lock(pendingKgMutex_);
+            cancelledByStop = stop_.load(std::memory_order_acquire);
+            const bool disabled = !knowledgeGraphEnabled_.load(std::memory_order_acquire);
+            cancellationRequested = cancelledByStop || disabled;
+            if (cancellationRequested) {
+                cancelled = pendingKgJobs_.size();
+                pendingKgJobs_.clear();
+            } else if (pendingKgJobs_.empty()) {
+                co_return;
+            } else if (kgChannel_ && kgChannel_->try_push(pendingKgJobs_.front())) {
+                pendingKgJobs_.pop_front();
+                InternalEventBus::instance().incKgQueued();
+                queued = true;
+            }
+        }
+
+        if (cancellationRequested) {
+            if (cancelled > 0) {
+                if (cancelledByStop) {
+                    for (std::size_t i = 0; i < cancelled; ++i) {
+                        InternalEventBus::instance().incKgDropped();
+                    }
+                    spdlog::warn("[PostIngestQueue] cancelled {} pending KG jobs during shutdown",
+                                 cancelled);
+                } else {
+                    spdlog::info(
+                        "[PostIngestQueue] cancelled {} pending KG jobs after KG disablement",
+                        cancelled);
+                }
+            }
+            co_return;
+        }
+
+        if (queued) {
+            TuningManager::notifyWakeup();
+            signalWakeTimer(Stage::KnowledgeGraph);
+            continue;
+        }
+
+        retryTimer.expires_after(kRetryDelay);
+        boost::system::error_code error;
+        co_await retryTimer.async_wait(
+            boost::asio::redirect_error(boost::asio::use_awaitable, error));
+        if (error && error != boost::asio::error::operation_aborted) {
+            spdlog::warn("[PostIngestQueue] pending KG retry wait failed: {}", error.message());
+        }
     }
 }
 
@@ -3584,118 +3768,25 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         return result;
     };
 
-    // WriteCoordinator is set asynchronously after PIQ::start().  If it isn't
-    // ready yet, process directly without WriteCoordinator batching so that
-    // standalone tests and early-init phases can still complete task processing.
-    if (!writeCoordinator_) {
-        std::vector<PreparedMetadataEntry> allSuccesses;
-        std::vector<ExtractionFailure> allFailures;
-        allSuccesses.reserve(tasks.size());
-        allFailures.reserve(tasks.size() / static_cast<std::size_t>(10));
-
-        const auto prepareStart = std::chrono::steady_clock::now();
-        for (const auto& task : tasks) {
-            auto result = prepareTask(task);
-            if (std::holds_alternative<PreparedMetadataEntry>(result)) {
-                allSuccesses.push_back(std::get<PreparedMetadataEntry>(std::move(result)));
-            } else {
-                allFailures.push_back(std::get<ExtractionFailure>(std::move(result)));
-            }
-        }
-        recordTiming("prepare_metadata", prepareStart);
-
-        processed_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
-        failed_.fetch_add(allFailures.size(), std::memory_order_relaxed);
-        extractionSuccesses_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
-        extractionFailures_.fetch_add(allFailures.size(), std::memory_order_relaxed);
-        commitBatchResults(allSuccesses, allFailures);
-        dispatchSuccesses(allSuccesses);
-        return;
-    }
-
-    // Get current concurrency limits from TuneAdvisor
-    const auto batchPolicy = resolvePostIngestBatchPolicy();
-    const uint32_t maxWorkers = static_cast<uint32_t>(maxExtractionConcurrent());
-    if (shouldPrepareSequentially(maxWorkers, tasks.size(), batchPolicy)) {
-        // Sequential path: process tasks one by one
-        std::vector<PreparedMetadataEntry> allSuccesses;
-        std::vector<ExtractionFailure> allFailures;
-        allSuccesses.reserve(tasks.size());
-        allFailures.reserve(tasks.size() / static_cast<std::size_t>(10));
-
-        const auto prepareStart = std::chrono::steady_clock::now();
-        for (const auto& task : tasks) {
-            auto result = prepareTask(task);
-            if (std::holds_alternative<PreparedMetadataEntry>(result)) {
-                allSuccesses.push_back(std::get<PreparedMetadataEntry>(std::move(result)));
-            } else {
-                allFailures.push_back(std::get<ExtractionFailure>(std::move(result)));
-            }
-        }
-        recordTiming("prepare_metadata", prepareStart);
-
-        processed_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
-        failed_.fetch_add(allFailures.size(), std::memory_order_relaxed);
-        extractionSuccesses_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
-        extractionFailures_.fetch_add(allFailures.size(), std::memory_order_relaxed);
-        commitBatchResults(allSuccesses, allFailures);
-        dispatchSuccesses(allSuccesses);
-        return;
-    }
-
+    // pressureLimitedPoll already fans out independent batches across WorkCoordinator handlers.
+    // Preparing child chunks on the same executor and synchronously waiting for their futures can
+    // consume every worker with parents that are waiting for queued children. Keep each admitted
+    // batch self-contained so executor progress never depends on another handler from this pool.
     YAMS_ZONE_SCOPED_N("PostIngestQueue::processBatch");
-
-    // Invariant: in-flight work requires pending tasks
     YAMS_DCHECK(totalInFlight() == 0 || !tasks.empty(), "in-flight work without pending tasks");
-
-    using TaskResult = std::variant<PreparedMetadataEntry, ExtractionFailure>;
-    const std::size_t numChunks = std::min<std::size_t>(maxWorkers, tasks.size());
-    YAMS_ASSERT(numChunks > 0, "PostIngestQueue::processBatch requires at least one worker chunk");
-    const std::size_t chunkSize = (tasks.size() + numChunks - 1) / numChunks;
-    std::vector<std::future<std::vector<TaskResult>>> futures;
-    futures.reserve(numChunks);
-    auto executor = coordinator_->getExecutor();
-
-    const auto prepareStart = std::chrono::steady_clock::now();
-    for (std::size_t i = 0; i < tasks.size(); i += chunkSize) {
-        std::size_t end = std::min(i + chunkSize, tasks.size());
-        std::vector<InternalEventBus::PostIngestTask> chunk(tasks.begin() + i, tasks.begin() + end);
-        auto promise = std::make_shared<std::promise<std::vector<TaskResult>>>();
-        futures.push_back(promise->get_future());
-        boost::asio::post(
-            executor, [p = std::move(promise), chunk = std::move(chunk), prepareTask]() mutable {
-                try {
-                    std::vector<TaskResult> results;
-                    results.reserve(chunk.size());
-                    for (const auto& task : chunk) {
-                        results.push_back(prepareTask(task));
-                    }
-                    p->set_value(std::move(results));
-                } catch (...) {
-                    p->set_exception(std::current_exception());
-                }
-            });
-    }
 
     std::vector<PreparedMetadataEntry> allSuccesses;
     std::vector<ExtractionFailure> allFailures;
     allSuccesses.reserve(tasks.size());
-    allFailures.reserve(tasks.size() / 10);
+    allFailures.reserve(tasks.size() / static_cast<std::size_t>(10));
 
-    for (auto& future : futures) {
-        try {
-            auto results = future.get();
-            for (auto& variant : results) {
-                if (std::holds_alternative<PreparedMetadataEntry>(variant)) {
-                    allSuccesses.push_back(std::get<PreparedMetadataEntry>(std::move(variant)));
-                } else {
-                    allFailures.push_back(std::get<ExtractionFailure>(std::move(variant)));
-                }
-            }
-        } catch (const std::exception& e) {
-            spdlog::error("[PostIngestQueue] Chunk processing failed: {}", e.what());
-        } catch (...) {
-            spdlog::error("[PostIngestQueue] Chunk processing failed: unknown exception");
+    const auto prepareStart = std::chrono::steady_clock::now();
+    for (const auto& task : tasks) {
+        auto result = prepareTask(task);
+        if (std::holds_alternative<PreparedMetadataEntry>(result)) {
+            allSuccesses.push_back(std::get<PreparedMetadataEntry>(std::move(result)));
+        } else {
+            allFailures.push_back(std::get<ExtractionFailure>(std::move(result)));
         }
     }
     recordTiming("prepare_metadata", prepareStart);

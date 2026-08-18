@@ -38,6 +38,7 @@
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/metadata/connection_pool.h>
+#include <yams/metadata/database.h>
 #include <yams/topology/topology_metadata_store.h>
 
 #include <boost/asio/use_future.hpp>
@@ -1928,6 +1929,237 @@ TEST_CASE_METHOD(
     auto hasFtsAfter = meta->hasFtsEntry(docId);
     REQUIRE(hasFtsAfter.has_value());
     CHECK(hasFtsAfter.value());
+
+    sm->shutdown();
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "RepairService: legacy uppercase success with existing FTS5 is skipped",
+                 "[daemon][repair][fts5][regression][legacy-status]") {
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",
+                                            std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB",
+                                             std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING",
+                                              std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
+                                                std::optional<std::string>{"1"});
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    REQUIRE((sm->initialize()));
+    sm->startAsyncInit();
+    REQUIRE(waitForCoreServices(*sm));
+
+    auto meta = sm->getMetadataRepo();
+    auto store = sm->getContentStore();
+    REQUIRE((meta != nullptr));
+    REQUIRE((store != nullptr));
+
+    const std::string text = "already indexed legacy extraction result";
+    const auto textBytes = std::as_bytes(std::span<const char>(text.data(), text.size()));
+    auto storeRes = store->storeBytes(textBytes);
+    REQUIRE(storeRes.has_value());
+
+    metadata::DocumentInfo doc{};
+    doc.fileName = "legacy_success.txt";
+    doc.filePath = (config_.dataDir / doc.fileName).string();
+    doc.fileExtension = "txt";
+    doc.fileSize = static_cast<int64_t>(text.size());
+    doc.sha256Hash = storeRes.value().contentHash;
+    doc.mimeType = "text/plain";
+    const auto now =
+        std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+    doc.modifiedTime = now;
+    doc.indexedTime = now;
+
+    auto idRes = meta->insertDocument(doc);
+    REQUIRE(idRes.has_value());
+    const auto docId = idRes.value();
+    REQUIRE(meta->updateDocumentExtractionStatus(docId, true, metadata::ExtractionStatus::Success)
+                .has_value());
+
+    metadata::DocumentContent content;
+    content.documentId = docId;
+    content.contentText = text;
+    content.contentLength = static_cast<int64_t>(text.size());
+    content.extractionMethod = "test";
+    REQUIRE(meta->insertContent(content).has_value());
+    REQUIRE(meta->indexDocumentContent(docId, doc.fileName, text, doc.mimeType).has_value());
+    REQUIRE(meta->hasFtsEntry(docId).value());
+
+    // Older batch-ingestion paths persisted title-case `Success`. The repair reader must
+    // treat that spelling as successful, otherwise `repair --all` re-extracts and replaces
+    // every already-indexed legacy row.
+    metadata::Database legacyDb;
+    REQUIRE(
+        legacyDb.open((config_.dataDir / "yams.db").string(), metadata::ConnectionMode::ReadWrite));
+    REQUIRE(legacyDb
+                .execute("UPDATE documents SET extraction_status = 'Success' WHERE id = " +
+                         std::to_string(docId))
+                .has_value());
+    legacyDb.close();
+
+    RepairService::Config cfg;
+    cfg.enable = false;
+    RepairService repair(sm.get(), &state_, []() -> size_t { return 0; }, cfg);
+    RepairRequest req;
+    req.repairGraph = true;
+    req.repairFts5 = true;
+
+    const auto resp = repair.executeRepair(req, nullptr);
+    REQUIRE(findOperationResult(resp, "graph").has_value());
+    const auto ftsResult = findOperationResult(resp, "fts5");
+    REQUIRE(ftsResult.has_value());
+    CAPTURE(ftsResult->processed, ftsResult->succeeded, ftsResult->skipped);
+    CHECK((ftsResult->succeeded == 0u));
+    CHECK((ftsResult->skipped >= 1u));
+
+    // A second graph -> FTS5 pass proves repair remains resumable and the daemon-owned
+    // repository stays usable after the historical row is skipped.
+    const auto resumed = repair.executeRepair(req, nullptr);
+    REQUIRE(findOperationResult(resumed, "graph").has_value());
+    const auto resumedFts = findOperationResult(resumed, "fts5");
+    REQUIRE(resumedFts.has_value());
+    CHECK((resumedFts->succeeded == 0u));
+    CHECK((resumedFts->skipped >= 1u));
+    REQUIRE(meta->hasFtsEntry(docId).has_value());
+    CHECK(meta->hasFtsEntry(docId).value());
+    CHECK(state_.readiness.metadataRepoReady.load(std::memory_order_relaxed));
+
+    // A contained metadata write failure must surface through RepairResponse instead of
+    // terminating the daemon or dropping the repository.
+    const std::string failingText = "synthetic repair write failure";
+    const auto failingBytes =
+        std::as_bytes(std::span<const char>(failingText.data(), failingText.size()));
+    auto failingStore = store->storeBytes(failingBytes);
+    REQUIRE(failingStore.has_value());
+    auto failingDoc = doc;
+    failingDoc.fileName = "repair_failure.txt";
+    failingDoc.filePath = (config_.dataDir / failingDoc.fileName).string();
+    failingDoc.fileSize = static_cast<int64_t>(failingText.size());
+    failingDoc.sha256Hash = failingStore.value().contentHash;
+    auto failingId = meta->insertDocument(failingDoc);
+    REQUIRE(failingId.has_value());
+
+    REQUIRE(
+        legacyDb.open((config_.dataDir / "yams.db").string(), metadata::ConnectionMode::ReadWrite));
+    REQUIRE(legacyDb
+                .execute("CREATE TRIGGER fail_repair_content BEFORE INSERT ON document_content "
+                         "WHEN NEW.document_id = " +
+                         std::to_string(failingId.value()) +
+                         " BEGIN SELECT RAISE(ABORT, 'synthetic repair failure'); END")
+                .has_value());
+    legacyDb.close();
+
+    RepairRequest failingReq;
+    failingReq.repairFts5 = true;
+    const auto failedRepair = repair.executeRepair(failingReq, nullptr);
+    CHECK_FALSE(failedRepair.success);
+    CHECK_FALSE(failedRepair.errors.empty());
+    const auto failedFts = findOperationResult(failedRepair, "fts5");
+    REQUIRE(failedFts.has_value());
+    CHECK((failedFts->failed >= 1u));
+    CHECK(meta->getDocument(failingId.value()).has_value());
+    CHECK(state_.readiness.metadataRepoReady.load(std::memory_order_relaxed));
+
+    sm->shutdown();
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "RepairService: corpus-scale legacy statuses skip across graph to FTS5",
+                 "[.][daemon][repair][fts5][stress][legacy-status]") {
+    yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",
+                                            std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB",
+                                             std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING",
+                                              std::optional<std::string>{"1"});
+    yams::test::ScopedEnvVar safeSingleInstance("YAMS_TEST_SAFE_SINGLE_INSTANCE",
+                                                std::optional<std::string>{"1"});
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    REQUIRE((sm->initialize()));
+    sm->startAsyncInit();
+    REQUIRE(waitForCoreServices(*sm));
+
+    auto meta = sm->getMetadataRepo();
+    auto store = sm->getContentStore();
+    REQUIRE((meta != nullptr));
+    REQUIRE((store != nullptr));
+
+    constexpr std::size_t kDocumentCount = 1024;
+    constexpr std::size_t kDocumentBytes = 64 * 1024;
+    std::vector<int64_t> documentIds;
+    documentIds.reserve(kDocumentCount);
+    const auto now =
+        std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now());
+
+    for (std::size_t index = 0; index < kDocumentCount; ++index) {
+        std::string text = "legacy stress document " + std::to_string(index) + " ";
+        text.resize(kDocumentBytes, static_cast<char>('a' + (index % 26)));
+        const auto bytes = std::as_bytes(std::span<const char>(text.data(), text.size()));
+        auto stored = store->storeBytes(bytes);
+        REQUIRE(stored.has_value());
+
+        metadata::DocumentInfo doc{};
+        doc.fileName = "legacy_stress_" + std::to_string(index) + ".txt";
+        doc.filePath = (config_.dataDir / doc.fileName).string();
+        doc.fileExtension = "txt";
+        doc.fileSize = static_cast<int64_t>(text.size());
+        doc.sha256Hash = stored.value().contentHash;
+        doc.mimeType = "text/plain";
+        doc.modifiedTime = now;
+        doc.indexedTime = now;
+        auto inserted = meta->insertDocument(doc);
+        REQUIRE(inserted.has_value());
+        documentIds.push_back(inserted.value());
+        REQUIRE(meta->updateDocumentExtractionStatus(inserted.value(), true,
+                                                     metadata::ExtractionStatus::Success)
+                    .has_value());
+
+        metadata::DocumentContent content;
+        content.documentId = inserted.value();
+        content.contentText = text;
+        content.contentLength = static_cast<int64_t>(text.size());
+        content.extractionMethod = "stress-setup";
+        REQUIRE(meta->insertContent(content).has_value());
+        REQUIRE(meta->indexDocumentContent(inserted.value(), doc.fileName, text, doc.mimeType)
+                    .has_value());
+    }
+
+    metadata::Database legacyDb;
+    REQUIRE(
+        legacyDb.open((config_.dataDir / "yams.db").string(), metadata::ConnectionMode::ReadWrite));
+    REQUIRE(legacyDb.execute("UPDATE documents SET extraction_status = 'Success'").has_value());
+    legacyDb.close();
+
+    std::vector<std::string> completedOperations;
+    RepairService::Config cfg;
+    cfg.enable = false;
+    cfg.maxBatch = 256;
+    RepairService repair(sm.get(), &state_, []() -> size_t { return 0; }, cfg);
+    RepairRequest req;
+    req.repairGraph = true;
+    req.repairFts5 = true;
+    const auto response =
+        repair.executeRepair(req, [&completedOperations](const RepairEvent& event) {
+            if (event.phase == "completed") {
+                completedOperations.push_back(event.operation);
+            }
+        });
+
+    REQUIRE(response.success);
+    REQUIRE((completedOperations.size() >= 2));
+    CHECK((completedOperations[0] == "graph"));
+    CHECK((completedOperations[1] == "fts5"));
+    const auto ftsResult = findOperationResult(response, "fts5");
+    REQUIRE(ftsResult.has_value());
+    CAPTURE(ftsResult->processed, ftsResult->succeeded, ftsResult->failed, ftsResult->skipped);
+    CHECK((ftsResult->processed == kDocumentCount));
+    CHECK((ftsResult->succeeded == 0u));
+    CHECK((ftsResult->failed == 0u));
+    CHECK((ftsResult->skipped == kDocumentCount));
+    CHECK(state_.readiness.metadataRepoReady.load(std::memory_order_relaxed));
 
     sm->shutdown();
 }

@@ -3,6 +3,7 @@
 #include <yams/config/config_helpers.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/profiling.h>
 #include <yams/vector/vector_database.h>
 
 #include <unordered_set>

@@ -184,7 +184,6 @@ void BackgroundTaskManager::start() {
     try {
         launchFts5JobConsumer();
         launchOrphanScanTask();
-        launchCheckpointTask();
         launchStorageGcTask();
         launchGraphPruneTask();
         launchDocumentRetentionTask();

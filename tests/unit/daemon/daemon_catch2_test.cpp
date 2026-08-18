@@ -179,6 +179,31 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon creation and destruction", "[daemon][lif
     REQUIRE_FALSE(daemon_->isRunning());
 }
 
+TEST_CASE_METHOD(DaemonFixture, "Daemon starts repair service while provider-degraded",
+                 "[daemon][lifecycle][repair]") {
+    SKIP_ON_WINDOWS();
+
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING", "1");
+    yams::test::ScopedEnvVar embeddingBackend("YAMS_EMBED_BACKEND", "daemon");
+    config_.enableModelProvider = true;
+    config_.modelProviderRequired = false;
+    config_.autoLoadPlugins = false;
+    daemon_ = std::make_unique<YamsDaemon>(config_);
+
+    auto startResult = daemon_->start();
+    if (!startResult && isSocketPermissionDenied(startResult.error())) {
+        SKIP("UNIX domain sockets not permitted");
+    }
+    REQUIRE(startResult);
+    startRunLoop();
+
+    REQUIRE(waitForCondition(5s, [&] {
+        return !daemon_->getState().readiness.modelProviderReady.load(std::memory_order_acquire);
+    }));
+    REQUIRE(waitForCondition(
+        2s, [&] { return daemon_->getServiceManager()->getRepairServiceShared() != nullptr; }));
+}
+
 TEST_CASE_METHOD(DaemonFixture, "Daemon restores compatibility path environment",
                  "[daemon][lifecycle][environment]") {
     yams::test::ScopedEnvVar storage("YAMS_STORAGE", "/before/storage");

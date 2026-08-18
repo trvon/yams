@@ -51,6 +51,36 @@ std::string randomSuffix() {
 
 } // namespace
 
+TEST_CASE("ConnectionRegistry shutdown closes idle sockets without terminal cancellation",
+          "[daemon][connection-pool][shutdown][unit]") {
+    boost::asio::io_context io;
+    auto workGuard = boost::asio::make_work_guard(io);
+    std::thread ioThread([&] { io.run(); });
+
+    TransportOptions opts;
+    opts.executor = io.get_executor();
+    auto conn = std::make_shared<AsioConnection>(opts);
+    conn->socket = std::make_unique<AsioConnection::socket_t>(conn->strand);
+    boost::system::error_code ec;
+    conn->socket->open(boost::asio::local::stream_protocol(), ec);
+    REQUIRE_FALSE(ec);
+
+    std::atomic<bool> terminalCancellation{false};
+    conn->cancellation_slot().assign([&](boost::asio::cancellation_type) {
+        terminalCancellation.store(true, std::memory_order_release);
+    });
+    ConnectionRegistry::instance().add(conn);
+
+    ConnectionRegistry::instance().closeAll();
+
+    CHECK_FALSE(terminalCancellation.load(std::memory_order_acquire));
+    CHECK_FALSE(conn->socket);
+
+    workGuard.reset();
+    io.stop();
+    ioThread.join();
+}
+
 TEST_CASE("AsioConnection socket close waits for the socket strand",
           "[daemon][connection-pool][strand][unit]") {
 #ifdef _WIN32

@@ -126,6 +126,9 @@ template <typename Task> struct PressureLimitedPollerConfig {
     std::atomic<std::size_t>* inFlightCounter = nullptr;
     std::function<GradientLimiter*()> getLimiterFn;
     std::function<std::size_t()> maxConcurrentFn;
+    // Optional downstream backpressure gate. When true, this poller leaves source tasks in their
+    // bounded channel instead of growing an auxiliary queue.
+    std::function<bool()> admissionPausedFn;
     std::function<bool(GradientLimiter*, const std::string&, const std::string&)> tryAcquireFn;
     std::function<void(const std::string&, bool)> completeJobFn;
     std::function<void()> checkDrainFn;
@@ -267,7 +270,8 @@ boost::asio::awaitable<void> pressureLimitedPoll(std::shared_ptr<SpscQueue<Task>
             std::size_t maxConcurrent = cfg.maxConcurrentFn();
             detail::applyPressureToLimit(maxConcurrent);
 
-            if (cfg.pauseFlag->load(std::memory_order_acquire) || maxConcurrent == 0) {
+            if (cfg.pauseFlag->load(std::memory_order_acquire) || maxConcurrent == 0 ||
+                (cfg.admissionPausedFn && cfg.admissionPausedFn())) {
                 timer.expires_after(detail::pollerMaxIdleDelay());
                 co_await timer.async_wait(boost::asio::use_awaitable);
                 continue;

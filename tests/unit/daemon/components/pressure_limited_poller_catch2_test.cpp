@@ -359,6 +359,77 @@ TEST_CASE("PressureLimitedPoller single-item path skips identities without a lim
     CHECK((completedCalls == 0));
 }
 
+TEST_CASE("PressureLimitedPoller leaves source work queued while downstream admission is paused",
+          "[daemon][poller][backpressure][catch2]") {
+    boost::asio::io_context ioc;
+    std::atomic<bool> stopFlag{false};
+    std::atomic<bool> startedFlag{false};
+    std::atomic<bool> pauseFlag{false};
+    std::atomic<bool> admissionPaused{true};
+    std::atomic<bool> wasActive{false};
+    std::atomic<std::size_t> inFlight{0};
+    std::mutex wakeMutex;
+    auto wakeTimer = std::make_shared<boost::asio::steady_timer>(ioc);
+    auto watchdog = std::make_shared<boost::asio::steady_timer>(ioc, 250ms);
+    auto channel = std::make_shared<SpscQueue<int>>(16);
+    REQUIRE(channel->try_push(9));
+
+    bool processedWhilePaused = false;
+    std::vector<int> observed;
+    PressureLimitedPollerConfig<int> cfg;
+    cfg.stageName = "test-downstream-backpressure";
+    cfg.stopFlag = &stopFlag;
+    cfg.startedFlag = &startedFlag;
+    cfg.pauseFlag = &pauseFlag;
+    cfg.wasActiveFlag = &wasActive;
+    cfg.inFlightCounter = &inFlight;
+    cfg.getLimiterFn = []() -> GradientLimiter* { return nullptr; };
+    cfg.maxConcurrentFn = []() -> std::size_t { return 1; };
+    cfg.admissionPausedFn = [&admissionPaused] {
+        return admissionPaused.load(std::memory_order_acquire);
+    };
+    cfg.tryAcquireFn = [](GradientLimiter*, const std::string&, const std::string&) {
+        return true;
+    };
+    cfg.completeJobFn = [](const std::string&, bool) {};
+    cfg.getHashFn = [](const int& task) { return std::to_string(task); };
+    cfg.processFn = [&observed, &processedWhilePaused, &admissionPaused, &stopFlag, &wakeTimer,
+                     &watchdog, &wakeMutex](int& task) {
+        processedWhilePaused = admissionPaused.load(std::memory_order_acquire);
+        observed.push_back(task);
+        stopFlag.store(true, std::memory_order_release);
+        watchdog->cancel();
+        std::lock_guard<std::mutex> lock(wakeMutex);
+        wakeTimer->cancel();
+    };
+    cfg.executor = ioc.get_executor();
+    cfg.enableCpuThrottling = false;
+    cfg.wakeTimer = wakeTimer;
+    cfg.wakeTimerMutex = &wakeMutex;
+
+    boost::asio::steady_timer releaseTimer(ioc, 10ms);
+    releaseTimer.async_wait([&admissionPaused](const boost::system::error_code& error) {
+        if (!error) {
+            admissionPaused.store(false, std::memory_order_release);
+        }
+    });
+    watchdog->async_wait(
+        [&stopFlag, &wakeTimer, &wakeMutex](const boost::system::error_code& error) {
+            if (!error) {
+                stopFlag.store(true, std::memory_order_release);
+                std::lock_guard<std::mutex> lock(wakeMutex);
+                wakeTimer->cancel();
+            }
+        });
+
+    boost::asio::co_spawn(ioc, pressureLimitedPoll<int>(channel, std::move(cfg)),
+                          boost::asio::detached);
+    ioc.run();
+
+    CHECK_FALSE(processedWhilePaused);
+    CHECK((observed == std::vector<int>{9}));
+}
+
 // ---------------------------------------------------------------------------
 // Capability-sleep shutdown (the Windows title-poller crash path)
 // ---------------------------------------------------------------------------

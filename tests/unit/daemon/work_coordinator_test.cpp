@@ -6,6 +6,7 @@
 #include <atomic>
 #include <chrono>
 #include <functional>
+#include <future>
 #include <mutex>
 #include <set>
 #include <thread>
@@ -178,6 +179,57 @@ TEST_CASE("WorkCoordinator work execution", "[daemon][work_coordinator][executio
         REQUIRE((all_done));
         REQUIRE((completed.load() == total_work));
     }
+}
+
+TEST_CASE("WorkCoordinator progress probe reports queued executor work",
+          "[daemon][work_coordinator][progress]") {
+    WorkCoordinator coordinator;
+    coordinator.start(1);
+
+    auto blockerStarted = std::make_shared<std::promise<void>>();
+    auto blockerStartedFuture = blockerStarted->get_future();
+    auto releaseBlocker = std::make_shared<std::promise<void>>();
+    auto releaseFuture = releaseBlocker->get_future().share();
+    boost::asio::post(coordinator.getExecutor(), [blockerStarted, releaseFuture] {
+        blockerStarted->set_value();
+        releaseFuture.wait();
+    });
+
+    REQUIRE(blockerStartedFuture.wait_for(1s) == std::future_status::ready);
+    const auto before = coordinator.getStats();
+    coordinator.requestProgressProbe();
+    const auto stalled = coordinator.getStats();
+
+    CHECK(stalled.progressProbeInFlight);
+    CHECK(stalled.progressProbesPosted >= before.progressProbesPosted);
+    CHECK(stalled.progressProbesCompleted == before.progressProbesCompleted);
+
+    releaseBlocker->set_value();
+    REQUIRE(wait_for_condition(1s, 2ms, [&] {
+        const auto recovered = coordinator.getStats();
+        return !recovered.progressProbeInFlight &&
+               recovered.progressProbesCompleted > before.progressProbesCompleted;
+    }));
+
+    const auto recovered = coordinator.getStats();
+    CHECK(recovered.progressProbesCompleted == recovered.progressProbesPosted);
+
+    coordinator.stop();
+    coordinator.join();
+}
+
+TEST_CASE("WorkCoordinator queued progress probe state outlives its coordinator",
+          "[daemon][work_coordinator][progress][lifetime]") {
+    std::shared_ptr<boost::asio::io_context> context;
+    {
+        WorkCoordinator coordinator;
+        context = coordinator.getIOContext();
+        coordinator.requestProgressProbe();
+        CHECK(coordinator.getStats().progressProbeInFlight);
+    }
+
+    REQUIRE(context);
+    CHECK(context->run() == 1);
 }
 
 TEST_CASE("WorkCoordinator async operations", "[daemon][work_coordinator][async]") {

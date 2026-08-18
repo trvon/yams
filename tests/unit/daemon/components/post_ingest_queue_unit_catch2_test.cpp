@@ -123,6 +123,23 @@ TEST_CASE("LruCache access refreshes position", "[daemon][post-ingest][cache][ca
 // PostIngestQueue Stage Constants
 // ============================================================================
 
+TEST_CASE("PostIngestQueue rejects and accounts KG admission after stop",
+          "[daemon][post-ingest][lifecycle][catch2]") {
+    PostIngestQueue queue{nullptr, nullptr, {}, nullptr, nullptr, nullptr, nullptr, 8};
+    queue.stop();
+
+    auto& bus = InternalEventBus::instance();
+    const auto queuedBefore = bus.kgQueued();
+    const auto droppedBefore = bus.kgDropped();
+    InternalEventBus::KgJob job;
+    job.hash = "after-stop";
+    queue.testing_enqueueKgJob(std::move(job));
+
+    CHECK(bus.kgQueued() == queuedBefore);
+    CHECK(bus.kgDropped() == droppedBefore + 1);
+    CHECK(queue.testing_pendingKgJobs() == 0);
+}
+
 TEST_CASE("PostIngestQueue stage constants", "[daemon][post-ingest][catch2]") {
     CHECK(PostIngestQueue::kStageCount == 5);
     CHECK(PostIngestQueue::kLimiterCount == 6);

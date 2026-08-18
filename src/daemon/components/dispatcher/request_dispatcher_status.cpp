@@ -285,6 +285,23 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
         if (serviceManager) {
             setVal(metrics::kWorkCoordinatorActive, snap.workCoordinatorActiveWorkers);
             setVal(metrics::kWorkCoordinatorRunning, snap.workCoordinatorRunning ? 1 : 0);
+            setVal(metrics::kWorkCoordinatorProgressProbesPosted,
+                   snap.workCoordinatorProgressProbesPosted);
+            setVal(metrics::kWorkCoordinatorProgressProbesCompleted,
+                   snap.workCoordinatorProgressProbesCompleted);
+            setVal(metrics::kWorkCoordinatorProgressProbeInFlight,
+                   snap.workCoordinatorProgressProbeInFlight ? 1 : 0);
+            setVal(metrics::kWorkCoordinatorLastProgressAgeMs,
+                   snap.workCoordinatorLastProgressAgeMs);
+            setVal(metrics::kVectorCheckpointPhase, snap.vectorCheckpointPhase);
+            setVal(metrics::kVectorCheckpointRequests, snap.vectorCheckpointRequests);
+            setVal(metrics::kVectorCheckpointCoalesced, snap.vectorCheckpointCoalesced);
+            setVal(metrics::kVectorCheckpointStarted, snap.vectorCheckpointStarted);
+            setVal(metrics::kVectorCheckpointCompleted, snap.vectorCheckpointCompleted);
+            setVal(metrics::kVectorCheckpointTimedOut, snap.vectorCheckpointTimedOut);
+            setVal(metrics::kVectorCheckpointPostFailures, snap.vectorCheckpointPostFailures);
+            setVal(metrics::kVectorCheckpointQueuedAgeMs, snap.vectorCheckpointQueuedAgeMs);
+            setVal(metrics::kVectorCheckpointRunningAgeMs, snap.vectorCheckpointRunningAgeMs);
         }
     } catch (...) {
     }

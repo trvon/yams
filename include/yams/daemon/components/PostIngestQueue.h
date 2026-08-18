@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <list>
 #include <memory>
@@ -417,6 +418,19 @@ public:
     [[nodiscard]] search::EntityExtractionFunc getTitleExtractor() const;
     [[nodiscard]] bool hasTitleExtractor() const;
 
+#ifdef YAMS_TESTING
+    void testing_deferKgJob(InternalEventBus::KgJob job) {
+        std::lock_guard<std::mutex> lock(pendingKgMutex_);
+        pendingKgJobs_.push_back(std::move(job));
+    }
+    void testing_schedulePendingKgDrain() { schedulePendingKgDrain(); }
+    void testing_enqueueKgJob(InternalEventBus::KgJob job) { enqueueKgJob(std::move(job)); }
+    [[nodiscard]] std::size_t testing_pendingKgJobs() const {
+        std::lock_guard<std::mutex> lock(pendingKgMutex_);
+        return pendingKgJobs_.size();
+    }
+#endif
+
 private:
     template <typename Job>
     PressureLimitedPollerConfig<Job> makePollerConfig(
@@ -449,6 +463,10 @@ private:
     void dispatchToKgChannel(const std::string& hash, int64_t docId, const std::string& filePath,
                              std::vector<std::string> tags,
                              std::shared_ptr<std::vector<std::byte>> contentBytes);
+    void enqueueKgJob(InternalEventBus::KgJob job);
+    void schedulePendingKgDrain();
+    boost::asio::awaitable<void> drainPendingKgJobs();
+    std::size_t cancelPendingKgJobs(bool countAsDrop, const char* reason) noexcept;
     void dispatchToSymbolChannel(const std::string& hash, int64_t docId,
                                  const std::string& filePath, const std::string& language,
                                  std::shared_ptr<std::vector<std::byte>> contentBytes);
@@ -541,8 +559,12 @@ private:
     }
 
     [[nodiscard]] bool shutdownQuiesced() const {
-        return allStagesStopped() && totalInFlight() == 0 &&
-               callbacksInFlight_.load(std::memory_order_acquire) == 0;
+        if (!allStagesStopped() || totalInFlight() != 0 ||
+            callbacksInFlight_.load(std::memory_order_acquire) != 0) {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(pendingKgMutex_);
+        return pendingKgJobs_.empty() && !pendingKgDrainScheduled_.load(std::memory_order_acquire);
     }
 
     mutable std::mutex lifecycleMutex_;
@@ -598,6 +620,9 @@ private:
     std::shared_ptr<SpscQueue<InternalEventBus::PostIngestTask>> postIngestChannel_;
     std::shared_ptr<SpscQueue<InternalEventBus::PostIngestTask>> postIngestRpcChannel_;
     std::shared_ptr<SpscQueue<InternalEventBus::KgJob>> kgChannel_;
+    mutable std::mutex pendingKgMutex_;
+    std::deque<InternalEventBus::KgJob> pendingKgJobs_;
+    std::atomic<bool> pendingKgDrainScheduled_{false};
     std::shared_ptr<SpscQueue<InternalEventBus::SymbolExtractionJob>> symbolChannel_;
     std::shared_ptr<SpscQueue<InternalEventBus::EntityExtractionJob>> entityChannel_;
     std::shared_ptr<SpscQueue<InternalEventBus::TitleExtractionJob>> titleChannel_;

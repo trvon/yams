@@ -83,6 +83,7 @@ namespace yams::daemon {
 class WorkCoordinator {
 private:
     struct DetachedCancellationState;
+    struct ProgressProbeState;
     struct DetachedCancellationRequest {
         std::shared_ptr<boost::asio::cancellation_signal> signal;
         boost::asio::any_io_executor executor;
@@ -222,9 +223,9 @@ public:
     [[nodiscard]] std::size_t getWorkerCount() const noexcept;
 
     /**
-     * @brief Get number of active workers currently executing work.
+     * @brief Get number of workers currently inside io_context::run().
      *
-     * @return Active worker count
+     * This is a liveness count, not the number of handlers actively executing.
      */
     [[nodiscard]] std::size_t getActiveWorkerCount() const noexcept {
         return activeWorkers_.load(std::memory_order_relaxed);
@@ -237,13 +238,21 @@ public:
         std::size_t workerCount{0};
         std::size_t activeWorkers{0};
         bool isRunning{false};
+        uint64_t progressProbesPosted{0};
+        uint64_t progressProbesCompleted{0};
+        bool progressProbeInFlight{false};
+        uint64_t lastProgressAgeMs{0};
     };
 
-    [[nodiscard]] Stats getStats() const noexcept {
-        return Stats{.workerCount = getWorkerCount(),
-                     .activeWorkers = getActiveWorkerCount(),
-                     .isRunning = isRunning()};
-    }
+    /**
+     * @brief Post one coalesced executor heartbeat.
+     *
+     * If the completion count stops advancing while a probe remains in flight, ready work is not
+     * being dispatched even though worker threads may still be inside io_context::run().
+     */
+    void requestProgressProbe() noexcept;
+
+    [[nodiscard]] Stats getStats() const noexcept;
 
     template <typename Executor, typename Awaitable>
     void spawnDetached(Executor&& executor, Awaitable&& awaitable) {
@@ -284,8 +293,12 @@ private:
     /// Flag to track if start() has been called
     bool started_ = false;
 
-    /// Count of workers currently executing io_context::run()
+    /// Count of workers currently inside io_context::run().
     std::atomic<std::size_t> activeWorkers_{0};
+
+    /// Coalesced executor heartbeat state used by daemon health metrics. Shared because a queued
+    /// probe can outlive the coordinator after last-resort worker abandonment.
+    std::shared_ptr<ProgressProbeState> progressProbeState_;
 
     /// Mutex for joinWithTimeout() condition variable
     std::mutex joinMutex_;

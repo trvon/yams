@@ -342,19 +342,9 @@ GlobalIOContext::~GlobalIOContext() noexcept {
     // Mark as destroyed FIRST to prevent restart() from trying to lock mutex
     destroyed_.store(true, std::memory_order_release);
 
-    // IMPORTANT: Close connections BEFORE stopping io_context
-    // Socket destructors need the reactor to properly deregister
-    try {
-        ConnectionRegistry::instance().closeAll();
-    } catch (...) {
-        log_noexcept_warning("[GlobalIOContext] closeAll threw during destruction");
-    }
-
-    try {
-        AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
-    } catch (...) {
-        log_noexcept_warning("[GlobalIOContext] shutdown_all threw during destruction");
-    }
+    // Process teardown must not invoke connection cancellation callbacks. One-shot clients may
+    // already have destroyed their coroutine state, while the registry still holds a live socket.
+    // The OS closes descriptors as the process exits; only stop and join the I/O workers here.
 
     // Now safe to stop the io_context
     try {

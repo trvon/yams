@@ -177,6 +177,25 @@ constexpr std::string_view kTuningAdmitStopThreshold = "tuning_admit_stop_thresh
 // WorkCoordinator metrics
 constexpr std::string_view kWorkCoordinatorActive = "work_coordinator_active";
 constexpr std::string_view kWorkCoordinatorRunning = "work_coordinator_running";
+constexpr std::string_view kWorkCoordinatorProgressProbesPosted =
+    "work_coordinator_progress_probes_posted";
+constexpr std::string_view kWorkCoordinatorProgressProbesCompleted =
+    "work_coordinator_progress_probes_completed";
+constexpr std::string_view kWorkCoordinatorProgressProbeInFlight =
+    "work_coordinator_progress_probe_in_flight";
+constexpr std::string_view kWorkCoordinatorLastProgressAgeMs =
+    "work_coordinator_last_progress_age_ms";
+
+// Vector checkpoint metrics
+constexpr std::string_view kVectorCheckpointPhase = "vector_checkpoint_phase";
+constexpr std::string_view kVectorCheckpointRequests = "vector_checkpoint_requests";
+constexpr std::string_view kVectorCheckpointCoalesced = "vector_checkpoint_coalesced";
+constexpr std::string_view kVectorCheckpointStarted = "vector_checkpoint_started";
+constexpr std::string_view kVectorCheckpointCompleted = "vector_checkpoint_completed";
+constexpr std::string_view kVectorCheckpointTimedOut = "vector_checkpoint_timed_out";
+constexpr std::string_view kVectorCheckpointPostFailures = "vector_checkpoint_post_failures";
+constexpr std::string_view kVectorCheckpointQueuedAgeMs = "vector_checkpoint_queued_age_ms";
+constexpr std::string_view kVectorCheckpointRunningAgeMs = "vector_checkpoint_running_age_ms";
 
 // Other request counts
 constexpr std::string_view kServiceFsmState = "service_fsm_state";

@@ -48,7 +48,9 @@
 namespace yams::daemon {
 
 ConnectionRegistry& ConnectionRegistry::instance() {
-    static auto* reg = new ConnectionRegistry();
+    // Deliberately process-lifetime. Static destruction can run after transport callback owners
+    // have gone away; destroying the registry then must not traverse connection state.
+    static ConnectionRegistry* const reg = new ConnectionRegistry();
     return *reg;
 }
 
@@ -61,9 +63,10 @@ void ConnectionRegistry::closeAll() {
     std::lock_guard<std::mutex> lk(mutex_);
     for (auto& weak : connections_) {
         if (auto conn = weak.lock()) {
-            // Use the connection's cancel() method to emit cancellation signals
-            // This notifies all pending coroutines before closing the socket
-            conn->cancel();
+            // Socket closure aborts pending I/O without invoking cancellation slots.
+            // A one-shot CLI can destroy those slots before GlobalIOContext teardown;
+            // emitting terminal cancellation then dereferences stale callback state.
+            conn->close();
         }
     }
     connections_.clear();
@@ -405,12 +408,17 @@ bool socket_looks_healthy_cached(AsioConnection& conn, std::chrono::steady_clock
 namespace {
 
 std::shared_mutex& registry_mutex() {
-    static auto* m = new std::shared_mutex();
-    return *m;
+    // The pool registry is explicitly drained by shutdown_all(). Its synchronization storage must
+    // remain valid through process teardown because late clients may still reach registry APIs.
+    static std::shared_mutex* const mutex = new std::shared_mutex();
+    return *mutex;
 }
 
 std::unordered_map<std::string, std::shared_ptr<AsioConnectionPool>>& registry_map() {
-    static auto* map = new std::unordered_map<std::string, std::shared_ptr<AsioConnectionPool>>();
+    // Deliberately process-lifetime: destroying shared pools from an atexit callback would invoke
+    // shutdown(), which emits cancellation into callback state whose static lifetime is unknown.
+    static auto* const map =
+        new std::unordered_map<std::string, std::shared_ptr<AsioConnectionPool>>();
     return *map;
 }
 

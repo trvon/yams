@@ -73,8 +73,13 @@ TEST_CASE("Metrics consistency: unique keys", "[unit][daemon][metrics]") {
         kTuningPostIngestCapacity, kTuningPostIngestThreadsMin, kTuningPostIngestThreadsMax,
         kTuningAdmitWarnThreshold, kTuningAdmitStopThreshold,
 
-        // WorkCoordinator
-        kWorkCoordinatorActive, kWorkCoordinatorRunning,
+        // WorkCoordinator and vector checkpoint
+        kWorkCoordinatorActive, kWorkCoordinatorRunning, kWorkCoordinatorProgressProbesPosted,
+        kWorkCoordinatorProgressProbesCompleted, kWorkCoordinatorProgressProbeInFlight,
+        kWorkCoordinatorLastProgressAgeMs, kVectorCheckpointPhase, kVectorCheckpointRequests,
+        kVectorCheckpointCoalesced, kVectorCheckpointStarted, kVectorCheckpointCompleted,
+        kVectorCheckpointTimedOut, kVectorCheckpointPostFailures, kVectorCheckpointQueuedAgeMs,
+        kVectorCheckpointRunningAgeMs,
 
         // State
         kServiceFsmState, kEmbeddingState, kPluginHostState,

@@ -311,6 +311,21 @@ struct MetricsSnapshot {
     // WorkCoordinator metrics
     std::size_t workCoordinatorActiveWorkers{0};
     bool workCoordinatorRunning{false};
+    uint64_t workCoordinatorProgressProbesPosted{0};
+    uint64_t workCoordinatorProgressProbesCompleted{0};
+    bool workCoordinatorProgressProbeInFlight{false};
+    uint64_t workCoordinatorLastProgressAgeMs{0};
+
+    // Vector checkpoint metrics
+    uint8_t vectorCheckpointPhase{0};
+    uint64_t vectorCheckpointRequests{0};
+    uint64_t vectorCheckpointCoalesced{0};
+    uint64_t vectorCheckpointStarted{0};
+    uint64_t vectorCheckpointCompleted{0};
+    uint64_t vectorCheckpointTimedOut{0};
+    uint64_t vectorCheckpointPostFailures{0};
+    uint64_t vectorCheckpointQueuedAgeMs{0};
+    uint64_t vectorCheckpointRunningAgeMs{0};
 
     // Stream metrics (from StreamMetricsRegistry)
     uint64_t streamTotal{0};
