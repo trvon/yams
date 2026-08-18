@@ -213,7 +213,16 @@ public:
         virtual ~WriteBatch() = default;
         virtual Result<std::int64_t> upsertNode(const KGNode& node) = 0;
         virtual Result<std::vector<std::int64_t>> upsertNodes(const std::vector<KGNode>& nodes) = 0;
+        /// Replace every mutable node field, including clearing absent optional values.
+        virtual Result<std::int64_t> replaceNodeExact(const KGNode& /*node*/) {
+            return Error{ErrorCode::NotImplemented,
+                         "Exact transactional node replacement is not implemented"};
+        }
         virtual Result<std::int64_t> addEdge(const KGEdge& edge) = 0;
+        virtual Result<void> removeEdgeById(std::int64_t /*edgeId*/) {
+            return Error{ErrorCode::NotImplemented,
+                         "Transactional edge removal is not implemented"};
+        }
         virtual Result<void> addEdgesUnique(const std::vector<KGEdge>& edges) = 0;
         virtual Result<void> addAliases(const std::vector<KGAlias>& aliases) = 0;
         virtual Result<void> addDocEntities(const std::vector<DocEntity>& entities) = 0;

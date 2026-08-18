@@ -611,6 +611,11 @@ public:
     Result<std::optional<DocumentInfo>> getDocument(int64_t id) override;
     Result<std::optional<DocumentInfo>> getDocumentByHash(const std::string& hash) override;
     Result<void> updateDocument(const DocumentInfo& info) override;
+    /// Replace one sync-selected document winner and its complete metadata map atomically.
+    /// The document row and metadata keys either commit together or remain unchanged.
+    Result<void>
+    replaceDocumentAndMetadata(const DocumentInfo& info,
+                               const std::vector<std::pair<std::string, MetadataValue>>& metadata);
     Result<void> deleteDocument(int64_t id) override;
     Result<size_t> deleteDocumentsBatch(const std::vector<int64_t>& ids) override;
     Result<size_t> updateDocumentsMimeBatch(

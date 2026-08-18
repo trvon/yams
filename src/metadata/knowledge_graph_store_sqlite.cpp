@@ -67,6 +67,17 @@ constexpr auto kKgNodeUpsertSql = R"(
       properties = COALESCE(excluded.properties, kg_nodes.properties)
 )";
 
+constexpr auto kKgNodeReplaceExactSql = R"(
+    INSERT INTO kg_nodes (node_key, label, type, created_time, updated_time, properties)
+    VALUES (?, ?, ?, ?, ?, ?)
+    ON CONFLICT(node_key) DO UPDATE SET
+      label = excluded.label,
+      type = excluded.type,
+      created_time = excluded.created_time,
+      updated_time = excluded.updated_time,
+      properties = excluded.properties
+)";
+
 constexpr auto kKgAliasUpsertSql = R"(
     INSERT INTO kg_aliases (node_id, alias, source, confidence) VALUES (?, ?, ?, ?)
     ON CONFLICT(node_id, alias) DO UPDATE SET
@@ -3067,6 +3078,25 @@ public:
         return selectKgNodeIdByKey(db, node.nodeKey);
     }
 
+    Result<std::int64_t> replaceNodeExact(const KGNode& node) override {
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        Database& db = **conn_;
+        auto stmtResult = db.prepareCached(kKgNodeReplaceExactSql);
+        if (!stmtResult) {
+            return stmtResult.error();
+        }
+        auto& stmt = *stmtResult.value();
+        if (auto bound = bindKgNodeUpsertParameters(stmt, node); !bound) {
+            return bound.error();
+        }
+        if (auto executed = stmt.execute(); !executed) {
+            return executed.error();
+        }
+        return selectKgNodeIdByKey(db, node.nodeKey);
+    }
+
     Result<std::vector<std::int64_t>> upsertNodes(const std::vector<KGNode>& nodes) override {
         std::vector<std::int64_t> ids;
         ids.reserve(nodes.size());
@@ -3117,6 +3147,26 @@ public:
         if (!ex)
             return ex.error();
         return db.lastInsertRowId();
+    }
+
+    Result<void> removeEdgeById(std::int64_t edgeId) override {
+        if (!transactionStarted_) {
+            return Error{ErrorCode::InvalidState, "Transaction not started"};
+        }
+        Database& db = **conn_;
+        auto stmtResult = db.prepare("DELETE FROM kg_edges WHERE id = ?");
+        if (!stmtResult) {
+            return stmtResult.error();
+        }
+        auto stmt = std::move(stmtResult).value();
+        if (auto bound = stmt.bind(1, edgeId); !bound) {
+            return bound.error();
+        }
+        if (auto executed = stmt.execute(); !executed) {
+            return executed.error();
+        }
+        edgeCountDelta_ -= std::max<std::int64_t>(0, db.changes());
+        return {};
     }
 
     Result<void> addEdgesUnique(const std::vector<KGEdge>& edges) override {

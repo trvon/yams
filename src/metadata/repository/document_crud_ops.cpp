@@ -260,11 +260,12 @@ Result<std::pair<int64_t, bool>> insertOrLookupDocumentRow(Database& db, const D
                                                            bool hasPathIndexing) {
     std::string sql = "INSERT OR IGNORE INTO documents (file_path, file_name, file_extension, "
                       "file_size, sha256_hash, mime_type, created_time, modified_time, "
-                      "indexed_time, content_extracted, extraction_status, extraction_error";
+                      "indexed_time, content_extracted, extraction_status, extraction_error, "
+                      "repair_status, repair_attempted_at, repair_attempts";
     if (hasPathIndexing) {
         sql += ", path_prefix, reverse_path, path_hash, parent_hash, path_depth";
     }
-    sql += ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
+    sql += ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?";
     if (hasPathIndexing) {
         sql += ", ?, ?, ?, ?, ?";
     }
@@ -278,14 +279,16 @@ Result<std::pair<int64_t, bool>> insertOrLookupDocumentRow(Database& db, const D
                               info.sha256Hash, info.mimeType, info.createdTime, info.modifiedTime,
                               info.indexedTime, info.contentExtracted ? 1 : 0,
                               ExtractionStatusUtils::toString(info.extractionStatus),
-                              info.extractionError, info.pathPrefix, info.reversePath,
-                              info.pathHash, info.parentHash, info.pathDepth));
+                              info.extractionError, RepairStatusUtils::toString(info.repairStatus),
+                              info.repairAttemptedAt, info.repairAttempts, info.pathPrefix,
+                              info.reversePath, info.pathHash, info.parentHash, info.pathDepth));
     } else {
         YAMS_TRY(stmt.bindAll(info.filePath, info.fileName, info.fileExtension, info.fileSize,
                               info.sha256Hash, info.mimeType, info.createdTime, info.modifiedTime,
                               info.indexedTime, info.contentExtracted ? 1 : 0,
                               ExtractionStatusUtils::toString(info.extractionStatus),
-                              info.extractionError));
+                              info.extractionError, RepairStatusUtils::toString(info.repairStatus),
+                              info.repairAttemptedAt, info.repairAttempts));
     }
 
     YAMS_TRY(stmt.execute());
@@ -946,6 +949,76 @@ Result<std::optional<DocumentInfo>> MetadataRepository::getDocumentByHash(const 
         });
 }
 
+// Sync winner replacement owns one SQLite transaction for row and metadata state.
+Result<void> MetadataRepository::replaceDocumentAndMetadata(
+    const DocumentInfo& info, const std::vector<std::pair<std::string, MetadataValue>>& metadata) {
+    std::string priorFilePath;
+    auto result = executeQuery<void>([&](Database& db) -> Result<void> {
+        YAMS_TRY(beginTransactionWithRetry(db));
+        bool committed = false;
+        auto rollback = scope_exit([&] {
+            if (!committed) {
+                rollbackIgnoringErrors(db);
+            }
+        });
+
+        YAMS_TRY_UNWRAP(priorStmt, db.prepare("SELECT file_path FROM documents WHERE id = ?"));
+        YAMS_TRY(priorStmt.bind(1, info.id));
+        YAMS_TRY_UNWRAP(hasPrior, priorStmt.step());
+        if (!hasPrior) {
+            return Error{ErrorCode::NotFound, "sync-selected document no longer exists"};
+        }
+        priorFilePath = priorStmt.getString(0);
+
+        YAMS_TRY_UNWRAP(updateStmt, db.prepare(R"(
+            UPDATE documents SET
+                file_path = ?, file_name = ?, file_extension = ?,
+                file_size = ?, sha256_hash = ?, mime_type = ?,
+                created_time = ?, modified_time = ?, indexed_time = ?,
+                content_extracted = ?, extraction_status = ?,
+                extraction_error = ?, repair_status = ?, repair_attempted_at = ?,
+                repair_attempts = ?, path_prefix = ?, reverse_path = ?,
+                path_hash = ?, parent_hash = ?, path_depth = ?
+            WHERE id = ?
+        )"));
+        YAMS_TRY(updateStmt.bindAll(
+            info.filePath, info.fileName, info.fileExtension, info.fileSize, info.sha256Hash,
+            info.mimeType, info.createdTime, info.modifiedTime, info.indexedTime,
+            info.contentExtracted ? 1 : 0, ExtractionStatusUtils::toString(info.extractionStatus),
+            info.extractionError, RepairStatusUtils::toString(info.repairStatus),
+            info.repairAttemptedAt, info.repairAttempts, info.pathPrefix, info.reversePath,
+            info.pathHash, info.parentHash, info.pathDepth, info.id));
+        YAMS_TRY(updateStmt.execute());
+
+        YAMS_TRY_UNWRAP(deleteStmt, db.prepare("DELETE FROM metadata WHERE document_id = ?"));
+        YAMS_TRY(deleteStmt.bind(1, info.id));
+        YAMS_TRY(deleteStmt.execute());
+
+        YAMS_TRY_UNWRAP(insertStmt, db.prepare("INSERT INTO metadata "
+                                               "(document_id, key, value, value_type) "
+                                               "VALUES (?, ?, ?, ?)"));
+        for (const auto& [key, value] : metadata) {
+            YAMS_TRY(insertStmt.reset());
+            YAMS_TRY(insertStmt.clearBindings());
+            YAMS_TRY(insertStmt.bindAll(info.id, key, value.value,
+                                        MetadataValueTypeUtils::toString(value.type)));
+            YAMS_TRY(insertStmt.execute());
+        }
+
+        YAMS_TRY(commitOrRollback(db));
+        committed = true;
+        return {};
+    });
+    if (!result) {
+        return result.error();
+    }
+
+    invalidatePathCache({priorFilePath, info.filePath});
+    signalCorpusStatsStale();
+    metadataChangeCounter_.fetch_add(1, std::memory_order_release);
+    return {};
+}
+
 Result<void> MetadataRepository::updateDocument(const DocumentInfo& info) {
     const auto cachedPathDepthMaxBeforeMutation =
         cachedPathDepthMax_.load(std::memory_order_relaxed);
@@ -981,18 +1054,20 @@ Result<void> MetadataRepository::updateDocument(const DocumentInfo& info) {
                 file_size = ?, sha256_hash = ?, mime_type = ?,
                 created_time = ?, modified_time = ?, indexed_time = ?,
                 content_extracted = ?, extraction_status = ?,
-                extraction_error = ?, path_prefix = ?, reverse_path = ?,
+                extraction_error = ?, repair_status = ?, repair_attempted_at = ?,
+                repair_attempts = ?, path_prefix = ?, reverse_path = ?,
                 path_hash = ?, parent_hash = ?, path_depth = ?
             WHERE id = ?
         )"));
 
         auto& stmt = *cachedStmt;
-        YAMS_TRY(stmt.bindAll(info.filePath, info.fileName, info.fileExtension, info.fileSize,
-                              info.sha256Hash, info.mimeType, info.createdTime, info.modifiedTime,
-                              info.indexedTime, info.contentExtracted ? 1 : 0,
-                              ExtractionStatusUtils::toString(info.extractionStatus),
-                              info.extractionError, info.pathPrefix, info.reversePath,
-                              info.pathHash, info.parentHash, info.pathDepth, info.id));
+        YAMS_TRY(stmt.bindAll(
+            info.filePath, info.fileName, info.fileExtension, info.fileSize, info.sha256Hash,
+            info.mimeType, info.createdTime, info.modifiedTime, info.indexedTime,
+            info.contentExtracted ? 1 : 0, ExtractionStatusUtils::toString(info.extractionStatus),
+            info.extractionError, RepairStatusUtils::toString(info.repairStatus),
+            info.repairAttemptedAt, info.repairAttempts, info.pathPrefix, info.reversePath,
+            info.pathHash, info.parentHash, info.pathDepth, info.id));
 
         YAMS_TRY(stmt.execute());
         if (db.changes() > 0) {
