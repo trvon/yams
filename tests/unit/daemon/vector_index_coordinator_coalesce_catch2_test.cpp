@@ -7,12 +7,15 @@
 //
 // Compile with -DYAMS_TESTING=1
 
-#include <catch2/catch_test_macros.hpp>
-#include <yams/daemon/components/VectorIndexCoordinator.h>
+#include <future>
+#include <thread>
+// pi-lens-ignore: fatal error
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/use_future.hpp>
-#include <future>
+#include <catch2/catch_test_macros.hpp>
+#include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/VectorIndexCoordinator.h>
 
 using namespace yams::daemon;
 
@@ -26,6 +29,68 @@ TEST_CASE("requestRebuild: single call advances epoch by 1", "[coordinator][coal
     io.run();
     REQUIRE_NOTHROW(f.get());
     REQUIRE(coord.testing_rebuildEpoch() == 1u);
+}
+
+TEST_CASE("failed rebuild remains not ready", "[coordinator][rebuild][error][readiness]") {
+    boost::asio::io_context io;
+    StateComponent state;
+    state.readiness.vectorIndexReady.store(true, std::memory_order_relaxed);
+    state.readiness.vectorIndexProgress.store(100, std::memory_order_relaxed);
+    VectorIndexCoordinator coord(io.get_executor(), nullptr, &state);
+
+    auto future = boost::asio::co_spawn(io, coord.requestRebuild(RebuildReason::Manual),
+                                        boost::asio::use_future);
+    io.run();
+
+    const auto result = future.get();
+    REQUIRE_FALSE(result.has_value());
+    const auto telemetry = coord.snapshot();
+    CHECK_FALSE(telemetry.ready);
+    CHECK_FALSE(telemetry.rebuilding);
+    CHECK(telemetry.progressPct == 0u);
+    CHECK_FALSE(state.readiness.vectorIndexReady.load(std::memory_order_relaxed));
+    CHECK(state.readiness.vectorIndexProgress.load(std::memory_order_relaxed) == 0u);
+}
+
+TEST_CASE("foreign-executor rebuild preserves failure when completion wins the race",
+          "[coordinator][rebuild][epoch][race]") {
+    boost::asio::io_context coordinatorIo;
+    const auto coordinatorWork = boost::asio::make_work_guard(coordinatorIo);
+    VectorIndexCoordinator coord(coordinatorIo.get_executor(), nullptr, nullptr);
+    std::atomic<bool> completionObservedDuringAdmission{false};
+    coord.testing_setAfterRebuildAdmission([&] {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+        while (coord.testing_rebuildEpoch() == 0u && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::yield();
+        }
+        completionObservedDuringAdmission.store(coord.testing_rebuildEpoch() == 1u,
+                                                std::memory_order_release);
+    });
+    std::jthread coordinatorRunner([&] { coordinatorIo.run(); });
+
+    boost::asio::io_context callerIo;
+    auto future = boost::asio::co_spawn(callerIo, coord.requestRebuild(RebuildReason::Manual),
+                                        boost::asio::use_future);
+    callerIo.run();
+
+    const auto result = future.get();
+    CHECK(completionObservedDuringAdmission.load(std::memory_order_acquire));
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == yams::ErrorCode::InvalidState);
+    coordinatorIo.stop();
+}
+
+TEST_CASE("requestRebuildBlocking propagates rebuild failure", "[coordinator][rebuild][error]") {
+    boost::asio::io_context io;
+    const auto work = boost::asio::make_work_guard(io);
+    VectorIndexCoordinator coord(io.get_executor(), nullptr, nullptr);
+    std::jthread runner([&] { io.run(); });
+
+    const auto result = coord.requestRebuildBlocking(RebuildReason::EmbeddingBatch);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == yams::ErrorCode::InvalidState);
+
+    io.stop();
 }
 
 TEST_CASE("requestRebuild: three concurrent Manual requests coalesce into one rebuild",
