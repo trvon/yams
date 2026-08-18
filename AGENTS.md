@@ -64,6 +64,10 @@ Keep physical-device claims separate and reproducible.
 - Naming: functions/vars `camelCase`; types `PascalCase`; constants
   `kPascalCase`; members trailing `_`; files `snake_case`.
 - `Result<T>` for fallible operations, explicit propagation.
+- Public/installable headers include other public YAMS headers through the canonical
+  `<yams/...>` include root. This validates installed-SDK layout and keeps includes
+  stable when headers move. Use quoted relative includes only for private,
+  non-installed implementation headers or explicit test/bootstrap exceptions.
 - Prefer `YAMS_HAS_*` gates from `include/yams/core/cpp23_features.hpp`.
 
 ## Engineering Quality Loop (C++)

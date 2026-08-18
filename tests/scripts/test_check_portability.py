@@ -99,6 +99,35 @@ class PortabilityPolicyTests(unittest.TestCase):
         )
         self.assertEqual(len(findings), 1)
 
+    def test_detects_analyzer_only_shims(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixtures = {
+                "include/yams/compat/core_types.h": "template <typename T> class Result {};\n",
+                "include/yams/compat/optional.h": "template <typename T> class Optional {};\n",
+                "include/yams/compat/catch2_test_macros.h": "#define REQUIRE(...) ((void)0)\n",
+                "include/yams/compat/boost_asio_core.h": (
+                    '#include "/opt/homebrew/opt/boost/include/boost/asio/awaitable.hpp"\n'
+                ),
+                "yams/core/types.h": '#include "../../include/yams/core/types.h"\n',
+            }
+            for relative, content in fixtures.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+
+            findings = POLICY.scan(root, ("include/yams", "yams"))
+            self.assertEqual(
+                {finding.rule for finding in findings},
+                {
+                    "analyzer-result-shim",
+                    "analyzer-optional-shim",
+                    "catch2-noop-shim",
+                    "absolute-include",
+                    "shadow-public-header",
+                },
+            )
+
     def test_exempts_only_central_boundary(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -112,7 +141,7 @@ class PortabilityPolicyTests(unittest.TestCase):
             root = Path(directory)
             source = root / "tests" / "sample.cpp"
             source.parent.mkdir(parents=True)
-            source.write_text('void f() { std::jthread w{[] {}}; }', encoding="utf-8")
+            source.write_text("void f() { std::jthread w{[] {}}; }", encoding="utf-8")
             finding = POLICY.scan(root, ("tests",))[0]
             allowlist_path = root / "allowlist.txt"
             allowlist_path.write_text(

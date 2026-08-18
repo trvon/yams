@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 SOURCE_SUFFIXES = {".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".m", ".mm"}
-DEFAULT_ROOTS = ("src", "include/yams", "plugins", "tools", "tests")
+DEFAULT_ROOTS = ("src", "include/yams", "plugins", "tools", "tests", "yams")
 EXCLUDED_PARTS = {"build", "builddir", "subprojects", "third_party", "vendor"}
 CENTRAL_BOUNDARY = "src/config/config_helpers.cpp"
 
@@ -34,6 +34,25 @@ RULES = {
         r"(?<![A-Za-z0-9_.>:])(?:(?:std\s*::|::)\s*)?(?P<name>getenv|_getenv|_wgetenv)\b"
     ),
 }
+
+ANALYZER_SHIM_RULES = {
+    "include/yams/compat/core_types.h": (
+        "analyzer-result-shim",
+        re.compile(r"\bclass\s+Result\b"),
+    ),
+    "include/yams/compat/optional.h": (
+        "analyzer-optional-shim",
+        re.compile(r"\bclass\s+Optional\b"),
+    ),
+    "include/yams/compat/catch2_test_macros.h": (
+        "catch2-noop-shim",
+        re.compile(r"^\s*#\s*define\s+(?:CHECK|REQUIRE|FAIL)\b", re.MULTILINE),
+    ),
+}
+ABSOLUTE_INCLUDE = re.compile(
+    r'^\s*#\s*include\s*[<"]/(?:opt/homebrew|usr/local)/', re.MULTILINE
+)
+SHADOW_PUBLIC_HEADER = "yams/core/types.h"
 
 
 @dataclass(frozen=True, order=True)
@@ -151,6 +170,28 @@ def scan(root: Path, roots: tuple[str, ...]) -> list[Finding]:
                 findings.append(
                     Finding(relative, line, match.start() - line_start + 1, rule)
                 )
+
+        shim_rule = ANALYZER_SHIM_RULES.get(relative)
+        if shim_rule is not None:
+            rule, pattern = shim_rule
+            for match in pattern.finditer(masked):
+                line = masked.count("\n", 0, match.start()) + 1
+                line_start = masked.rfind("\n", 0, match.start()) + 1
+                findings.append(
+                    Finding(relative, line, match.start() - line_start + 1, rule)
+                )
+
+        for match in ABSOLUTE_INCLUDE.finditer(text):
+            line = text.count("\n", 0, match.start()) + 1
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            findings.append(
+                Finding(
+                    relative, line, match.start() - line_start + 1, "absolute-include"
+                )
+            )
+
+        if relative == SHADOW_PUBLIC_HEADER:
+            findings.append(Finding(relative, 1, 1, "shadow-public-header"))
     return sorted(findings)
 
 
@@ -210,6 +251,11 @@ def main() -> int:
         "jthread": "yams::compat::jthread",
         "path-cstr": "path.string().c_str()",
         "env-read": "yams::config::getenv_optional()",
+        "analyzer-result-shim": "the canonical yams::Result implementation",
+        "analyzer-optional-shim": "std::optional",
+        "catch2-noop-shim": "real Catch2 assertions",
+        "absolute-include": "a dependency include supplied by the build model",
+        "shadow-public-header": "the canonical include/yams public header",
     }
     for finding in unapproved:
         print(

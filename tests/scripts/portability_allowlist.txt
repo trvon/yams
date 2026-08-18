@@ -164,8 +164,8 @@ src/daemon/client/sandbox_detection.cpp:45:portability/env-read # reviewed raw e
 src/daemon/client/sandbox_detection.cpp:74:portability/env-read # reviewed raw environment read
 src/daemon/client/sandbox_probe.cpp:54:portability/env-read # reviewed raw environment read
 src/daemon/client/sandbox_probe.cpp:60:portability/env-read # reviewed raw environment read
-src/daemon/components/DaemonMetrics.cpp:125:portability/env-read # reviewed raw environment read
-src/daemon/components/DaemonMetrics.cpp:1920:portability/env-read # reviewed raw environment read
+src/daemon/components/DaemonMetrics.cpp:126:portability/env-read # reviewed raw environment read
+src/daemon/components/DaemonMetrics.cpp:1938:portability/env-read # reviewed raw environment read
 src/daemon/components/EmbeddingService.cpp:426:portability/env-read # reviewed raw environment read
 src/daemon/components/EmbeddingService.cpp:435:portability/env-read # reviewed raw environment read
 src/daemon/components/EmbeddingService.cpp:585:portability/env-read # reviewed raw environment read
@@ -179,11 +179,11 @@ src/daemon/components/EmbeddingService.cpp:2544:portability/env-read # reviewed 
 src/daemon/components/EmbeddingService.cpp:2570:portability/env-read # reviewed raw environment read
 src/daemon/components/EmbeddingService.cpp:2589:portability/env-read # reviewed raw environment read
 src/daemon/components/EmbeddingService.cpp:2602:portability/env-read # reviewed raw environment read
-src/daemon/components/IngestService.cpp:78:portability/env-read # reviewed raw environment read
+src/daemon/components/IngestService.cpp:56:portability/env-read # reviewed raw environment read
 src/daemon/components/LifecycleComponent.cpp:808:portability/env-read # reviewed raw environment read
 src/daemon/components/LifecycleComponent.cpp:818:portability/env-read # reviewed raw environment read
-src/daemon/components/RequestDispatcher.cpp:397:portability/env-read # reviewed raw environment read
-src/daemon/components/RequestDispatcher.cpp:400:portability/env-read # reviewed raw environment read
+src/daemon/components/RequestDispatcher.cpp:466:portability/env-read # reviewed raw environment read
+src/daemon/components/RequestDispatcher.cpp:469:portability/env-read # reviewed raw environment read
 src/daemon/components/RequestExecutor.cpp:44:portability/env-read # reviewed raw environment read
 src/daemon/components/dispatcher/request_dispatcher_documents.cpp:626:portability/env-read # reviewed raw environment read
 src/daemon/components/dispatcher/request_dispatcher_documents.cpp:717:portability/env-read # reviewed raw environment read
@@ -220,8 +220,8 @@ src/storage/s3_signer.cpp:98:portability/env-read # reviewed raw environment rea
 src/storage/s3_signer.cpp:173:portability/env-read # reviewed raw environment read
 src/storage/s3_signer.cpp:174:portability/env-read # reviewed raw environment read
 src/storage/s3_signer.cpp:175:portability/env-read # reviewed raw environment read
-src/storage/storage_backend_factory.cpp:188:portability/env-read # reviewed raw environment read
-src/storage/storage_backend_factory.cpp:192:portability/env-read # reviewed raw environment read
+src/storage/storage_backend_factory.cpp:300:portability/env-read # reviewed raw environment read
+src/storage/storage_backend_factory.cpp:305:portability/env-read # reviewed raw environment read
 src/vector/sqlite_vec_backend.cpp:706:portability/path-cstr # std::string filename, not filesystem::path
 tests/benchmarks/beir_loader.h:68:portability/env-read # reviewed raw environment read
 tests/benchmarks/bench_utils.h:42:portability/env-read # reviewed raw environment read
@@ -500,8 +500,8 @@ tests/unit/cli/version_generated_header_catch2_test.cpp:60:portability/env-read 
 tests/unit/cli/version_generated_header_catch2_test.cpp:83:portability/env-read # reviewed raw environment read
 tests/unit/daemon/components/vector_system_manager_test.cpp:129:portability/env-read # reviewed raw environment read
 tests/unit/daemon/components/vector_system_manager_test.cpp:130:portability/env-read # reviewed raw environment read
-tests/unit/daemon/daemon_background_processing_test.cpp:679:portability/env-read # reviewed raw environment read
-tests/unit/daemon/daemon_catch2_test.cpp:1375:portability/env-read # reviewed raw environment read
+tests/unit/daemon/daemon_background_processing_test.cpp:678:portability/env-read # reviewed raw environment read
+tests/unit/daemon/daemon_catch2_test.cpp:1400:portability/env-read # reviewed raw environment read
 tests/unit/daemon/daemon_metrics_status_test.cpp:945:portability/env-read # reviewed raw environment read
 tests/unit/daemon/onnx_embedding_diagnostic_test.cpp:36:portability/env-read # reviewed raw environment read
 tests/unit/daemon/onnx_embedding_diagnostic_test.cpp:44:portability/env-read # reviewed raw environment read
@@ -513,6 +513,8 @@ tests/unit/daemon/onnx_model_pool_catch2_test.cpp:129:portability/env-read # rev
 tests/unit/daemon/onnx_plugin_harness_test.cpp:68:portability/env-read # reviewed raw environment read
 tests/unit/daemon/onnx_plugin_harness_test.cpp:286:portability/env-read # reviewed raw environment read
 tests/unit/daemon/onnx_plugin_harness_test.cpp:399:portability/env-read # reviewed raw environment read
+tests/unit/daemon/vector_index_coordinator_coalesce_catch2_test.cpp:69:portability/jthread # reviewed test-only or feature-guarded thread use
+tests/unit/daemon/vector_index_coordinator_coalesce_catch2_test.cpp:87:portability/jthread # reviewed test-only or feature-guarded thread use
 tests/unit/extraction/jsonrpc_client_test.cpp:12:portability/env-read # reviewed raw environment read
 tests/unit/extraction/plugin_process_launcher_test.cpp:45:portability/env-read # reviewed raw environment read
 tests/unit/extraction/plugin_process_launcher_test.cpp:58:portability/env-read # reviewed raw environment read
@@ -520,6 +522,7 @@ tests/unit/extraction/plugin_process_minimal_test.cpp:10:portability/env-read # 
 tests/unit/extraction/plugin_process_minimal_test.cpp:34:portability/env-read # reviewed raw environment read
 tests/unit/extraction/plugin_process_minimal_test.cpp:58:portability/env-read # reviewed raw environment read
 tests/unit/extraction/plugin_process_test.cpp:82:portability/env-read # reviewed raw environment read
+tests/unit/memory_sync/memory_sync_service_catch2_test.cpp:442:portability/jthread # reviewed test-only or feature-guarded thread use
 tests/unit/metadata/connection_pool_catch2_test.cpp:25:portability/env-read # reviewed raw environment read
 tests/unit/metadata/corpus_stats_catch2_test.cpp:43:portability/env-read # reviewed raw environment read
 tests/unit/metadata/database_catch2_test.cpp:21:portability/env-read # reviewed raw environment read
@@ -549,10 +552,10 @@ tests/unit/search/simeon_lexical_backend_catch2_test.cpp:26:portability/env-read
 tests/unit/topology/topology_baseline_catch2_test.cpp:64:portability/env-read # reviewed raw environment read
 tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:42:portability/env-read # reviewed raw environment read
 tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:48:portability/env-read # reviewed raw environment read
-tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:2426:portability/path-cstr # std::string filename, not filesystem::path
-tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:2488:portability/path-cstr # std::string filename, not filesystem::path
-tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:3018:portability/path-cstr # std::string filename, not filesystem::path
-tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:3066:portability/path-cstr # std::string filename, not filesystem::path
+tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:2460:portability/path-cstr # std::string filename, not filesystem::path
+tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:2522:portability/path-cstr # std::string filename, not filesystem::path
+tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:3052:portability/path-cstr # std::string filename, not filesystem::path
+tests/unit/vector/sqlite_vec_backend_comprehensive_catch2_test.cpp:3100:portability/path-cstr # std::string filename, not filesystem::path
 tests/unit/vector/sqlite_vec_backend_persistence_catch2_test.cpp:26:portability/env-read # reviewed raw environment read
 tests/unit/vector/sqlite_vec_backend_persistence_catch2_test.cpp:32:portability/env-read # reviewed raw environment read
 tests/unit/vector/vector_dimension_validation_catch2_test.cpp:21:portability/env-read # reviewed raw environment read
@@ -560,5 +563,7 @@ tests/unit/vector/vector_dimension_validation_catch2_test.cpp:27:portability/env
 tests/unit/vector/vector_schema_migration_vec0_catch2_test.cpp:27:portability/path-cstr # std::string filename, not filesystem::path
 tests/unit/vector/vector_smoke_catch2_test.cpp:31:portability/env-read # reviewed raw environment read
 tests/unit/vector/vector_smoke_catch2_test.cpp:37:portability/env-read # reviewed raw environment read
+tests/unit/vector/vector_sync_adapter_catch2_test.cpp:31:portability/env-read # reviewed raw environment read
+tests/unit/vector/vector_sync_adapter_catch2_test.cpp:37:portability/env-read # reviewed raw environment read
 tools/fuzzing/fuzz_plugin_abi_mount.cpp:18:portability/env-read # reviewed raw environment read
 tools/yams-cli/main.cpp:89:portability/env-read # reviewed raw environment read
