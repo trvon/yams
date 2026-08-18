@@ -424,40 +424,9 @@ int main(int argc, char* argv[]) {
                 }
             }
 
-            // [memory_sync] section: opt-in P2P memory sync over a shared store.
-            if (tomlConfig.find("memory_sync") != tomlConfig.end()) {
-                const auto& msSection = tomlConfig.at("memory_sync");
-                if (auto it = msSection.find("enabled"); it != msSection.end()) {
-                    config.memorySync.enabled = (it->second == "true");
-                }
-                if (auto it = msSection.find("node_id"); it != msSection.end()) {
-                    config.memorySync.nodeId = it->second;
-                }
-                if (auto it = msSection.find("backend"); it != msSection.end()) {
-                    config.memorySync.backend = it->second;
-                }
-                if (auto it = msSection.find("path"); it != msSection.end()) {
-                    config.memorySync.path = it->second;
-                }
-                try {
-                    if (auto it = msSection.find("sync_interval_ms"); it != msSection.end()) {
-                        config.memorySync.syncIntervalMs =
-                            static_cast<std::uint32_t>(std::stoul(it->second));
-                    }
-                } catch (const std::exception& e) {
-                    spdlog::warn("Config: failed to parse memory_sync.sync_interval_ms: {}",
-                                 e.what());
-                }
-                if (config.memorySync.enabled && config.memorySync.backend != "filesystem" &&
-                    config.memorySync.backend != "s3") {
-                    spdlog::warn("Config: disabling invalid memory_sync.backend '{}'",
-                                 config.memorySync.backend);
-                    config.memorySync.enabled = false;
-                }
-                if (config.memorySync.enabled && config.memorySync.path.empty()) {
-                    spdlog::warn("Config: disabling memory_sync with empty path");
-                    config.memorySync.enabled = false;
-                }
+            if (!yams::daemon::ConfigResolver::applyMemorySync(tomlConfig, config)) {
+                spdlog::error("Config: refusing to start with invalid [memory_sync] settings");
+                return 1;
             }
 
             // [plugins] section: trust list for ABI and external plugins

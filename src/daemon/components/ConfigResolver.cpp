@@ -7,6 +7,7 @@
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/daemon.h>
+#include <yams/memory_sync/memory_sync_config.h>
 #include <yams/vector/dim_resolver.h>
 #include <yams/vector/sqlite_vec_backend.h>
 
@@ -1596,6 +1597,167 @@ void ConfigResolver::applySearchMaintenance(const ConfigSections& sections, Daem
     }
     config.searchMaintenance.automaticRebuildsEnabled = parsed;
     config.searchMaintenance.automaticRebuildsSource = "config:search.automatic_rebuilds";
+}
+
+bool ConfigResolver::applyMemorySync(const ConfigSections& sections, DaemonConfig& config) {
+    const auto section = sections.find("memory_sync");
+    if (section == sections.end()) {
+        return true;
+    }
+
+    auto policy = config.memorySync;
+    if (const auto it = section->second.find("enabled"); it != section->second.end()) {
+        const auto enabled = parseBoolValue(it->second);
+        if (!enabled) {
+            spdlog::warn("Config: invalid memory_sync; enabled must be a boolean");
+            config.memorySync.enabled = false;
+            return false;
+        }
+        policy.enabled = *enabled;
+    }
+    if (const auto it = section->second.find("node_id"); it != section->second.end()) {
+        policy.nodeId = it->second;
+    }
+    if (const auto it = section->second.find("corpus_id"); it != section->second.end()) {
+        policy.corpusId = it->second;
+    }
+    if (const auto it = section->second.find("corpus_epoch"); it != section->second.end()) {
+        const auto epoch = parseUnsignedIntegral<std::uint64_t>(it->second);
+        if (!epoch || *epoch == 0) {
+            spdlog::warn("Config: invalid memory_sync; corpus_epoch must be positive");
+            config.memorySync.enabled = false;
+            return false;
+        }
+        policy.corpusEpoch = *epoch;
+    }
+    if (const auto it = section->second.find("backend"); it != section->second.end()) {
+        policy.backend = it->second;
+    }
+    if (const auto it = section->second.find("path"); it != section->second.end()) {
+        policy.path = it->second;
+    }
+    if (const auto it = section->second.find("mode"); it != section->second.end()) {
+        policy.mode = it->second;
+    }
+    if (const auto it = section->second.find("session_id"); it != section->second.end()) {
+        policy.sessionId = it->second;
+    }
+    if (const auto it = section->second.find("writer_auth_required"); it != section->second.end()) {
+        const auto required = parseBoolValue(it->second);
+        if (!required) {
+            spdlog::warn("Config: invalid memory_sync; writer_auth_required must be a boolean");
+            config.memorySync.enabled = false;
+            return false;
+        }
+        // pi-lens-ignore: clang:no_member -- daemon policy field is defined in daemon.h.
+        policy.writerAuthRequired = *required;
+    }
+    if (const auto it = section->second.find("writer_auth_manifest"); it != section->second.end()) {
+        // pi-lens-ignore: clang:no_member -- daemon policy field is defined in daemon.h.
+        policy.writerAuthManifestPath = it->second;
+    }
+    if (const auto it = section->second.find("temporary_session_ttl_ms");
+        it != section->second.end()) {
+        const auto ttl = parseUnsignedIntegral<std::uint32_t>(it->second);
+        if (!ttl) {
+            spdlog::warn("Config: invalid memory_sync; temporary_session_ttl_ms must be unsigned");
+            config.memorySync.enabled = false;
+            return false;
+        }
+        // pi-lens-ignore: clang:no_member
+        policy.temporarySessionTtlMs = *ttl;
+    }
+    if (const auto it = section->second.find("allow_legacy_unbound"); it != section->second.end()) {
+        const auto allowLegacy = parseBoolValue(it->second);
+        if (!allowLegacy) {
+            spdlog::warn("Config: invalid memory_sync; allow_legacy_unbound must be a boolean");
+            config.memorySync.enabled = false;
+            return false;
+        }
+        if (*allowLegacy) {
+            if (policy.mode != "persistent") {
+                spdlog::warn(
+                    "Config: invalid memory_sync; allow_legacy_unbound requires persistent mode");
+                config.memorySync.enabled = false;
+                return false;
+            }
+            policy.mode = "persistent-migration";
+        }
+    }
+    if (const auto it = section->second.find("sync_interval_ms"); it != section->second.end()) {
+        const auto interval = parseUnsignedIntegral<std::uint32_t>(it->second);
+        if (!interval || *interval == 0) {
+            spdlog::warn("Config: invalid memory_sync; sync_interval_ms must be greater than zero");
+            config.memorySync.enabled = false;
+            return false;
+        }
+        policy.syncIntervalMs = *interval;
+    }
+    const auto applyLimit = [&](std::string_view key, std::size_t& target) {
+        const auto it = section->second.find(std::string(key));
+        if (it == section->second.end()) {
+            return true;
+        }
+        const auto parsed = parseUnsignedIntegral<std::size_t>(it->second);
+        if (!parsed || *parsed == 0) {
+            spdlog::warn("Config: disabling memory_sync; {} must be greater than zero", key);
+            return false;
+        }
+        target = *parsed;
+        return true;
+    };
+    if (!applyLimit("max_index_objects_per_sync", policy.limits.maxIndexObjectsPerSync) ||
+        !applyLimit("max_envelope_bytes", policy.limits.maxEnvelopeBytes) ||
+        !applyLimit("max_value_bytes", policy.limits.maxValueBytes) ||
+        !applyLimit("max_merged_keys", policy.limits.maxMergedKeys) ||
+        !applyLimit("max_cache_bytes", policy.limits.maxCacheBytes) ||
+        !applyLimit("max_tracked_identities", policy.limits.maxTrackedIdentities)) {
+        config.memorySync.enabled = false;
+        return false;
+    }
+
+    if (!policy.enabled) {
+        config.memorySync = std::move(policy);
+        return true;
+    }
+    // pi-lens-ignore: clang:no_member -- daemon policy field is defined in daemon.h.
+    if (policy.writerAuthRequired && policy.mode == "persistent-migration") {
+        spdlog::warn("Config: disabling memory_sync; legacy migration cannot run with writer "
+                     "authentication");
+        policy.enabled = false;
+    } else if (policy.mode != "persistent" && policy.mode != "persistent-migration" &&
+               policy.mode != "temporary") {
+        spdlog::warn(
+            "Config: disabling memory_sync; mode must be persistent, persistent-migration, or "
+            "temporary");
+        policy.enabled = false;
+    } else if (policy.mode == "temporary" &&
+               !yams::memory_sync::isCanonicalSessionId(policy.sessionId)) {
+        spdlog::warn("Config: disabling temporary memory_sync; session_id is required");
+        policy.enabled = false;
+        // pi-lens-ignore: clang:no_member
+    } else if (policy.mode == "temporary" && policy.temporarySessionTtlMs != 0 &&
+               policy.temporarySessionTtlMs < policy.syncIntervalMs * 3ULL) {
+        spdlog::warn("Config: disabling temporary memory_sync; temporary_session_ttl_ms must be "
+                     "at least three sync intervals");
+        policy.enabled = false;
+    } else if (policy.backend != "filesystem" && policy.backend != "s3") {
+        spdlog::warn("Config: disabling invalid memory_sync.backend '{}'", policy.backend);
+        policy.enabled = false;
+    } else if (!yams::memory_sync::isCanonicalWriterUuid(policy.nodeId)) {
+        spdlog::warn("Config: disabling memory_sync; node_id must be a canonical UUID");
+        policy.enabled = false;
+    } else if (!yams::memory_sync::isCanonicalCorpusId(policy.corpusId) ||
+               policy.corpusEpoch == 0) {
+        spdlog::warn("Config: disabling memory_sync; corpus_id and corpus_epoch are required");
+        policy.enabled = false;
+    } else if (policy.path.empty()) {
+        spdlog::warn("Config: disabling memory_sync with empty path");
+        policy.enabled = false;
+    }
+    const bool valid = policy.enabled;
+    config.memorySync = std::move(policy);
+    return valid;
 }
 
 ConfigResolver::PostIngestCaps ConfigResolver::resolvePostIngestCaps() {

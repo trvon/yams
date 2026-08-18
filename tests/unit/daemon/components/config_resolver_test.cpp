@@ -1517,3 +1517,160 @@ msl_stack_log_warn_mb = 1536
         CHECK((policy.mslStackLogWarnBytes == 1536ULL * 1024ULL * 1024ULL));
     }
 }
+
+TEST_CASE("ConfigResolver applies typed memory-sync policy", "[daemon][config][memory-sync]") {
+    ConfigResolver::ConfigSections sections = {
+        {"memory_sync",
+         {{"enabled", "true"},
+          {"node_id", "123e4567-e89b-42d3-a456-426614174000"},
+          {"corpus_id", "corpus-a"},
+          {"corpus_epoch", "9"},
+          {"backend", "filesystem"},
+          {"path", "shared-memory"},
+          {"sync_interval_ms", "250"},
+          {"max_index_objects_per_sync", "17"},
+          {"max_envelope_bytes", "2048"},
+          {"max_value_bytes", "4096"},
+          {"max_merged_keys", "23"},
+          {"max_cache_bytes", "8192"},
+          {"max_tracked_identities", "31"},
+          {"mode", "temporary"},
+          {"session_id", "run-123"},
+          {"writer_auth_required", "true"},
+          {"writer_auth_manifest", "/secure/writers.json"}}},
+    };
+    DaemonConfig config;
+
+    ConfigResolver::applyMemorySync(sections, config);
+
+    CHECK(config.memorySync.enabled);
+    CHECK(config.memorySync.nodeId == "123e4567-e89b-42d3-a456-426614174000");
+    CHECK(config.memorySync.corpusId == "corpus-a");
+    CHECK(config.memorySync.corpusEpoch == 9);
+    CHECK(config.memorySync.backend == "filesystem");
+    CHECK(config.memorySync.path == "shared-memory");
+    CHECK(config.memorySync.syncIntervalMs == 250);
+    CHECK(config.memorySync.limits.maxIndexObjectsPerSync == 17);
+    CHECK(config.memorySync.limits.maxEnvelopeBytes == 2048);
+    CHECK(config.memorySync.limits.maxValueBytes == 4096);
+    CHECK(config.memorySync.limits.maxMergedKeys == 23);
+    CHECK(config.memorySync.limits.maxCacheBytes == 8192);
+    CHECK(config.memorySync.limits.maxTrackedIdentities == 31);
+    CHECK(config.memorySync.mode == "temporary");
+    CHECK(config.memorySync.sessionId == "run-123");
+    CHECK(config.memorySync.writerAuthRequired);
+    CHECK(config.memorySync.writerAuthManifestPath == "/secure/writers.json");
+}
+
+TEST_CASE("ConfigResolver exposes explicit legacy migration mode",
+          "[daemon][config][memory-sync]") {
+    ConfigResolver::ConfigSections sections = {
+        {"memory_sync",
+         {{"enabled", "true"},
+          {"node_id", "123e4567-e89b-42d3-a456-426614174000"},
+          {"corpus_id", "corpus-a"},
+          {"corpus_epoch", "9"},
+          {"backend", "filesystem"},
+          {"path", "shared-memory"},
+          {"allow_legacy_unbound", "true"}}},
+    };
+    DaemonConfig config;
+
+    ConfigResolver::applyMemorySync(sections, config);
+
+    CHECK(config.memorySync.enabled);
+    CHECK(config.memorySync.mode == "persistent-migration");
+}
+
+TEST_CASE("ConfigResolver rejects legacy migration for temporary mode",
+          "[daemon][config][memory-sync]") {
+    ConfigResolver::ConfigSections sections = {
+        {"memory_sync",
+         {{"enabled", "true"},
+          {"node_id", "123e4567-e89b-42d3-a456-426614174000"},
+          {"corpus_id", "corpus-a"},
+          {"corpus_epoch", "9"},
+          {"backend", "filesystem"},
+          {"path", "shared-memory"},
+          {"mode", "temporary"},
+          {"session_id", "run-123"},
+          {"allow_legacy_unbound", "true"}}},
+    };
+    DaemonConfig config;
+
+    CHECK_FALSE(ConfigResolver::applyMemorySync(sections, config));
+    CHECK_FALSE(config.memorySync.enabled);
+}
+
+TEST_CASE("ConfigResolver rejects writer authentication during legacy migration",
+          "[daemon][config][memory-sync][auth]") {
+    ConfigResolver::ConfigSections sections = {
+        {"memory_sync",
+         {{"enabled", "true"},
+          {"node_id", "123e4567-e89b-42d3-a456-426614174000"},
+          {"corpus_id", "corpus-a"},
+          {"corpus_epoch", "9"},
+          {"backend", "filesystem"},
+          {"path", "shared-memory"},
+          {"allow_legacy_unbound", "true"},
+          {"writer_auth_required", "true"},
+          {"writer_auth_manifest", "/secure/writers.json"}}},
+    };
+    DaemonConfig config;
+
+    CHECK_FALSE(ConfigResolver::applyMemorySync(sections, config));
+    CHECK_FALSE(config.memorySync.enabled);
+}
+
+TEST_CASE("ConfigResolver rejects malformed writer authentication flag",
+          "[daemon][config][memory-sync][auth]") {
+    ConfigResolver::ConfigSections sections = {
+        {"memory_sync", {{"enabled", "true"}, {"writer_auth_required", "sometimes"}}},
+    };
+    DaemonConfig config;
+
+    CHECK_FALSE(ConfigResolver::applyMemorySync(sections, config));
+    CHECK_FALSE(config.memorySync.enabled);
+}
+
+TEST_CASE("ConfigResolver bounds temporary session expiry",
+          "[daemon][config][memory-sync][temporary]") {
+    ConfigResolver::ConfigSections sections = {
+        {"memory_sync",
+         {{"enabled", "true"},
+          {"node_id", "123e4567-e89b-42d3-a456-426614174000"},
+          {"corpus_id", "corpus-a"},
+          {"corpus_epoch", "9"},
+          {"backend", "filesystem"},
+          {"path", "shared-memory"},
+          {"mode", "temporary"},
+          {"session_id", "run-123"},
+          {"sync_interval_ms", "100"},
+          {"temporary_session_ttl_ms", "300"}}},
+    };
+    DaemonConfig config;
+
+    ConfigResolver::applyMemorySync(sections, config);
+    REQUIRE(config.memorySync.enabled);
+    // pi-lens-ignore: clang:no_member
+    CHECK(config.memorySync.temporarySessionTtlMs == 300);
+
+    sections["memory_sync"]["temporary_session_ttl_ms"] = "299";
+    CHECK_FALSE(ConfigResolver::applyMemorySync(sections, config));
+    CHECK_FALSE(config.memorySync.enabled);
+}
+
+TEST_CASE("ConfigResolver rejects malformed opt-in memory sync", "[daemon][config][memory-sync]") {
+    ConfigResolver::ConfigSections sections = {
+        {"memory_sync",
+         {{"enabled", "true"},
+          {"node_id", "node-a"},
+          {"backend", "s3"},
+          {"path", "s3://bucket/memory"},
+          {"sync_interval_ms", "0"}}},
+    };
+    DaemonConfig config;
+
+    CHECK_FALSE(ConfigResolver::applyMemorySync(sections, config));
+    CHECK_FALSE(config.memorySync.enabled);
+}

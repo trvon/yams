@@ -2,8 +2,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
-#include <exception>
 #include <functional>
 #include <future>
 #include <limits>
@@ -179,6 +177,27 @@ public:
     std::shared_ptr<PostIngestQueue> getPostIngestQueue() const {
         return std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
     }
+
+    struct MemorySyncStatus {
+        bool started{false};
+        std::uint64_t records{0};
+        std::uint64_t quarantinedRecords{0};
+        std::uint64_t authFailures{0};
+        std::uint64_t successfulCycles{0};
+        std::uint64_t failedCycles{0};
+        std::uint64_t lastSuccessAgeMs{0};
+        std::string backend;
+        std::string nodeId;
+        std::string corpusId;
+        std::uint64_t corpusEpoch{0};
+        std::string mode;
+        std::string trustMode;
+    };
+    Result<void> publishMemorySync(const std::string& key, const std::string& value);
+    Result<void> deleteMemorySync(const std::string& key);
+    Result<std::string> readMemorySyncCached(const std::string& key) const;
+    Result<MemorySyncStatus> getMemorySyncStatus() const;
+
     struct SearchLoadMetrics {
         std::uint32_t active{0};
         std::uint32_t queued{0};
@@ -404,6 +423,18 @@ public:
     void __test_setWriteCoordinator(std::unique_ptr<WriteCoordinator> coordinator) {
         writeCoordinator_ = std::move(coordinator);
     }
+    yams::memory_sync::MemorySyncService* testingMemorySyncService() const noexcept {
+        return memorySync_.get();
+    }
+    void testingSetMemorySyncStageObserver(std::function<void(std::string_view)> observer) {
+        std::lock_guard<std::mutex> lock(memorySyncStageObserverMutex_);
+        memorySyncStageObserver_ = std::move(observer);
+    }
+    void testingApplyMemorySyncWinners() { applyMemorySyncWinners(); }
+    void testingPublishMemorySyncBackfill() { publishMemorySyncBackfill(); }
+    void testingSetMemorySyncBackfillItemBudget(std::size_t budget) {
+        memorySyncBackfillState_.itemBudgetPerCycle = std::max<std::size_t>(budget, 1);
+    }
     static bool __test_shouldStartSessionWatcher(std::string_view disableValue) {
         return shouldStartSessionWatcher(disableValue);
     }
@@ -550,7 +581,7 @@ public:
 
     RetrievalSessionManager* getRetrievalSessionManager() const { return retrievalSessions_.get(); }
 
-    CheckpointManager* getCheckpointManager() const { return checkpointManager_.get(); }
+    CheckpointManager* getCheckpointManager() const noexcept;
 
     // Get AppContext for app services
     app::services::AppContext getAppContext() const;
@@ -741,7 +772,12 @@ private:
     Result<void> initializeImpl(const std::function<void()>& beforePoolConfigure);
     Result<void> configureResourcePools(const std::function<void()>& beforeConfigure);
     Result<std::filesystem::path> initializeDataDirAndContentStore();
-    void initializeMemorySync(const std::filesystem::path& dataDir);
+    Result<void> initializeMemorySync(const std::filesystem::path& dataDir);
+    void configureMemorySyncApply();
+    void applyMemorySyncWinners() noexcept;
+    void publishMemorySyncBackfill() noexcept;
+    void notifyMemorySyncStage(std::string_view stage) noexcept;
+    Result<std::size_t> applyMemorySyncContentBlobs();
     boost::asio::awaitable<bool> initializeMetadataDatabaseAt(const std::filesystem::path& dbPath,
                                                               yams::compat::stop_token token);
     bool finalizeDatabaseStartup(const std::filesystem::path& dbPath,
@@ -876,6 +912,28 @@ private:
     // P2P memory-sync service (version-vector + LWW over a shared store).
     // Started after storage/content-store init, stopped during shutdown.
     std::unique_ptr<yams::memory_sync::MemorySyncService> memorySync_;
+    mutable std::mutex memorySyncStageObserverMutex_;
+    std::function<void(std::string_view)> memorySyncStageObserver_;
+    bool memorySyncVectorRebuildDirty_{false};
+    struct MemorySyncBackfillState {
+        enum class Domain { Documents, Vectors, Topology };
+
+        std::int64_t documentIdCursor{0};
+        std::string vectorDocumentHashCursor;
+        std::string vectorChunkIdCursor;
+        bool topologySnapshotInitialized{false};
+        std::vector<std::string> topologyNodeTypes;
+        std::size_t topologyTypeIndex{0};
+        std::unordered_map<std::string, std::size_t> topologyNodeOffsets;
+        std::size_t topologyEdgeOffset{0};
+        std::int64_t topologyNodeId{0};
+        std::string topologyNodeKey;
+        bool topologyNodeActive{false};
+        Domain nextDomain{Domain::Documents};
+        std::size_t itemBudgetPerCycle{256};
+        std::chrono::milliseconds timeBudgetPerCycle{100};
+    } memorySyncBackfillState_;
+    std::chrono::steady_clock::time_point nextMemorySyncBackfill_{};
 
     // Cached GLiNER query concept extraction function.
     mutable search::EntityExtractionFunc cachedQueryConceptExtractor_;

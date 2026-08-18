@@ -6,6 +6,7 @@
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuningConfig.h>
 #include <yams/daemon/resource/onnx_model_pool.h> // For DaemonConfig
+#include <yams/memory_sync/memory_sync.h>
 
 #include <atomic>
 #include <chrono>
@@ -121,10 +122,18 @@ struct DaemonConfig {
     /// No YAMS_* env knobs.
     struct MemorySyncPolicy {
         bool enabled{false};
-        std::string nodeId{"default"};     // this daemon's writer identity
+        std::string nodeId;                // explicit stable daemon writer UUID
+        std::string corpusId;              // stable replication-domain identifier
+        std::uint64_t corpusEpoch{0};      // incompatible reset/migration generation
         std::string backend{"filesystem"}; // "filesystem" | "s3"
         std::string path;                  // filesystem dir or s3:// URL (relative -> dataDir)
         std::uint32_t syncIntervalMs{5000};
+        memory_sync::MemorySyncLimits limits{};
+        std::string mode{"persistent"};
+        std::string sessionId;
+        std::uint32_t temporarySessionTtlMs{0};
+        bool writerAuthRequired{false};
+        std::string writerAuthManifestPath;
     } memorySync;
 
     struct DownloadPolicy {

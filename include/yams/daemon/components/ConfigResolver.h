@@ -261,6 +261,10 @@ public:
     /// is resolved later only when this typed value remains absent.
     static void applySearchMaintenance(const ConfigSections& sections, DaemonConfig& config);
 
+    /// Resolve the opt-in [memory_sync] policy once from typed TOML sections.
+    /// Returns false when an explicitly enabled policy is invalid.
+    static bool applyMemorySync(const ConfigSections& sections, DaemonConfig& config);
+
     /**
      * @brief Check if an environment variable value is "truthy".
      *

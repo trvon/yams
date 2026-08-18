@@ -1218,8 +1218,34 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_memory_sync_records_exe = executable('catch2_memory_sync_records',
+    files('unit/memory_sync/records_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep, dependency('nlohmann_json')],
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_memory_sync_exe = executable('catch2_memory_sync',
     files('unit/memory_sync/memory_sync_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [
+      catch2_dep,
+      catch2_main_dep,
+      dependency('nlohmann_json'),
+      dependency('OpenSSL'),
+      dependency('yams_storage_engine'),
+      dependency('yams_crypto'),
+      dependency('yams_core'),
+    ],
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_content_blob_sync_exe = executable('catch2_content_blob_sync',
+    files('unit/memory_sync/content_blob_sync_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [
       catch2_dep,
@@ -1702,6 +1728,15 @@ if catch2_dep.found()
     )
   endif
 
+  catch2_vector_sync_adapter_exe = executable('catch2_vector_sync_adapter',
+    files('unit/vector/vector_sync_adapter_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
 #Tokenizer Tests(Catch2) - HuggingFaceTokenizer WordPiece, Unigram, special token injection
 #Always - on : uses synthetic tokenizer.json files, no model downloads or sqlite - vec required.
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
@@ -1994,6 +2029,26 @@ if catch2_dep.found()
   catch2_metadata_content_transaction_exe = executable(
     'catch2_metadata_content_transaction',
     files('unit/metadata/metadata_content_transaction_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_metadata_sync_adapter_exe = executable(
+    'catch2_metadata_sync_adapter',
+    files('unit/metadata/metadata_sync_adapter_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_topology_sync_adapter_exe = executable(
+    'catch2_topology_sync_adapter',
+    files('unit/metadata/topology_sync_adapter_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -2691,6 +2746,18 @@ if catch2_dep.found()
 
   test('metadata_content_transaction', catch2_metadata_content_transaction_exe,
     suite: ['catch2', 'unit', 'metadata', 'repository', 'transaction'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
+  test('metadata_sync_adapter', catch2_metadata_sync_adapter_exe,
+    suite: ['catch2', 'unit', 'metadata', 'memory-sync'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
+  test('topology_sync_adapter', catch2_topology_sync_adapter_exe,
+    suite: ['catch2', 'unit', 'metadata', 'topology', 'memory-sync'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
   )
@@ -3601,7 +3668,19 @@ if catch2_dep.found()
     timeout: 60
   )
 
+  test('memory_sync_records', catch2_memory_sync_records_exe,
+    suite: ['catch2', 'unit', 'memory-sync'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
   test('memory_sync', catch2_memory_sync_exe,
+    suite: ['catch2', 'unit', 'memory-sync'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('content_blob_sync', catch2_content_blob_sync_exe,
     suite: ['catch2', 'unit', 'memory-sync'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
@@ -3806,6 +3885,12 @@ if catch2_dep.found()
       timeout: heavy_submodule_timeout
     )
   endif
+
+  test('vector_sync_adapter', catch2_vector_sync_adapter_exe,
+    suite: ['catch2', 'unit', 'vector', 'memory-sync'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
 
 #API submodule tests(content store, metadata API)
 #Migrated from GTest as part of yams - 3s4 / api

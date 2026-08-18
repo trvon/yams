@@ -85,9 +85,14 @@
 #include <yams/daemon/ipc/retrieval_session.h>
 #include <yams/daemon/metric_keys.h>
 #include <yams/daemon/shutdown_budget.h>
+#include <yams/memory_sync/content_blob_sync.h>
 #include <yams/memory_sync/memory_sync_config.h>
 #include <yams/memory_sync/memory_sync_service.h>
+#include <yams/memory_sync/records.h>
+#include <yams/metadata/metadata_sync_adapter.h>
+#include <yams/metadata/topology_sync_adapter.h>
 #include <yams/topology/topology_factory.h>
+#include <yams/vector/vector_sync_adapter.h>
 
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/resource/abi_content_extractor_adapter.h>
@@ -773,7 +778,8 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
 
             checkpointManager_ = std::make_unique<CheckpointManager>(std::move(checkpointConfig),
                                                                      std::move(checkpointDeps));
-            spdlog::debug("[ServiceManager] CheckpointManager created");
+            checkpointManager_->start();
+            spdlog::debug("[ServiceManager] CheckpointManager created and started");
 
             // Create SearchComponent for corpus monitoring and auto-rebuild.
             SearchComponent::Config searchConfig;
@@ -884,6 +890,10 @@ void ServiceManager::refreshRuntimeTuningStatus() {
         runtimeTuningStatus_ = std::move(nextStatus);
     }
     ResourceGovernor::instance().refreshScalingCaps();
+}
+
+CheckpointManager* ServiceManager::getCheckpointManager() const noexcept {
+    return checkpointManager_.get();
 }
 
 ServiceManager::~ServiceManager() {
@@ -1533,11 +1543,6 @@ void ServiceManager::releaseRemainingServiceState() {
     vectorIndexCoordinator_.reset();
 
     spdlog::info("[ServiceManager] Phase 8.4.5: Releasing async strands");
-    if (memorySync_) {
-        memorySync_->stop();
-        memorySync_.reset();
-        spdlog::info("[ServiceManager] Phase 8.4.0: memory_sync stopped");
-    }
     initStrand_.reset();
     pluginStrand_.reset();
     modelStrand_.reset();
@@ -1635,6 +1640,15 @@ void ServiceManager::shutdown() {
 
     stopBackgroundTaskManagerForShutdown();
     stopSessionWatcherForShutdown();
+
+    // memory_sync callbacks use WorkCoordinator-owned vector rebuilds and database-backed
+    // destinations. Stop and join the sync worker before either dependency starts teardown.
+    if (memorySync_) {
+        memorySync_->stop();
+        memorySync_.reset();
+        spdlog::info("[ServiceManager] Phase 1.9: memory_sync stopped before worker teardown");
+    }
+
     quiesceServicesBeforeWorkerShutdown(checkpointManagerHold);
     stopWorkCoordinatorForShutdown(checkpointManagerHold);
     shutdownRuntimeServices();
@@ -1930,45 +1944,558 @@ Result<std::filesystem::path> ServiceManager::initializeDataDirAndContentStore()
     return dataDir;
 }
 
-void ServiceManager::initializeMemorySync(const std::filesystem::path& dataDir) {
+Result<void> ServiceManager::publishMemorySync(const std::string& key, const std::string& value) {
+    if (!memorySync_) {
+        return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
+    }
+    auto namespacedKey = memory_sync::userLogicalKey(key);
+    if (!namespacedKey) {
+        return namespacedKey.error();
+    }
+    std::vector<std::byte> bytes;
+    bytes.reserve(value.size());
+    for (const unsigned char byte : value) {
+        bytes.push_back(static_cast<std::byte>(byte));
+    }
+    return memorySync_->publish(namespacedKey.value(), bytes);
+}
+
+Result<void> ServiceManager::deleteMemorySync(const std::string& key) {
+    if (!memorySync_) {
+        return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
+    }
+    auto namespacedKey = memory_sync::userLogicalKey(key);
+    if (!namespacedKey) {
+        return namespacedKey.error();
+    }
+    return memorySync_->erase(namespacedKey.value(), key);
+}
+
+Result<std::string> ServiceManager::readMemorySyncCached(const std::string& key) const {
+    if (!memorySync_) {
+        return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
+    }
+    auto namespacedKey = memory_sync::userLogicalKey(key);
+    if (!namespacedKey) {
+        return namespacedKey.error();
+    }
+    auto value = memorySync_->readCached(namespacedKey.value());
+    if (!value) {
+        return value.error();
+    }
+    const auto& bytes = value.value();
+    return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+}
+
+Result<ServiceManager::MemorySyncStatus> ServiceManager::getMemorySyncStatus() const {
+    if (!memorySync_) {
+        return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
+    }
+    return MemorySyncStatus{memorySync_->started(),
+                            memorySync_->mergedRecordCount(),
+                            memorySync_->quarantinedRecordCount(),
+                            memorySync_->authFailureCount(),
+                            memorySync_->successfulSyncCycles(),
+                            memorySync_->failedSyncCycles(),
+                            memorySync_->lastSuccessfulSyncAgeMs(),
+                            config_.memorySync.backend,
+                            config_.memorySync.nodeId,
+                            config_.memorySync.corpusId,
+                            config_.memorySync.corpusEpoch,
+                            config_.memorySync.mode,
+                            config_.memorySync.writerAuthRequired ? "authenticated-writers"
+                                                                  : "backend-acl"};
+}
+
+Result<std::size_t> ServiceManager::applyMemorySyncContentBlobs() {
+    if (!memorySync_) {
+        return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
+    }
+    auto contentStore = getContentStore();
+    if (!contentStore) {
+        return Error{ErrorCode::InvalidState, "content store is not available"};
+    }
+
+    auto merged = memorySync_->syncOnce();
+    if (!merged) {
+        return merged.error();
+    }
+
+    memory_sync::ContentBlobSyncAdapter adapter{*contentStore, *memorySync_};
+    const std::string prefix =
+        std::string(memory_sync::memoryStoreName(memory_sync::MemoryStore::ContentBlob)) + "/";
+    std::size_t applied = 0;
+    for (const auto& [key, envelope] : merged.value()) {
+        (void)envelope;
+        if (!key.starts_with(prefix)) {
+            continue;
+        }
+        const std::string_view hash{key.data() + prefix.size(), key.size() - prefix.size()};
+        if (!memory_sync::isSha256Digest(hash)) {
+            return Error{ErrorCode::InvalidData, "invalid content-blob memory-sync key"};
+        }
+        if (envelope.isTombstone()) {
+            auto removed = adapter.applyDelete(hash);
+            if (!removed) {
+                return removed.error();
+            }
+            applied += removed.value() ? 1 : 0;
+            continue;
+        }
+        auto exists = contentStore->exists(std::string(hash));
+        if (!exists) {
+            return exists.error();
+        }
+        if (exists.value()) {
+            continue;
+        }
+        if (auto stored = adapter.applyCached(hash); !stored) {
+            return stored.error();
+        }
+        ++applied;
+    }
+    return applied;
+}
+
+void ServiceManager::notifyMemorySyncStage(std::string_view stage) noexcept {
+    std::function<void(std::string_view)> observer;
+    {
+        std::lock_guard<std::mutex> lock(memorySyncStageObserverMutex_);
+        observer = memorySyncStageObserver_;
+    }
+    if (!observer) {
+        return;
+    }
+    try {
+        observer(stage);
+    } catch (...) {
+        spdlog::warn("[ServiceManager] memory_sync stage observer threw at {}", stage);
+    }
+}
+
+void ServiceManager::applyMemorySyncWinners() noexcept {
+    if (!memorySync_ || memorySync_->stopRequested()) {
+        return;
+    }
+    try {
+        if (auto result = applyMemorySyncContentBlobs(); !result) {
+            spdlog::warn("[ServiceManager] memory_sync content apply failed: {}",
+                         result.error().message);
+            return;
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("[ServiceManager] memory_sync content apply threw: {}", e.what());
+        return;
+    } catch (...) {
+        spdlog::warn("[ServiceManager] memory_sync content apply threw (unknown)");
+        return;
+    }
+    notifyMemorySyncStage("apply.after_content");
+
+    if (memorySync_->stopRequested()) {
+        return;
+    }
+    try {
+        if (auto repository = getMetadataRepo()) {
+            auto contentStore = getContentStore();
+            if (!contentStore) {
+                spdlog::warn("[ServiceManager] memory_sync metadata apply requires content store");
+                return;
+            }
+            metadata::MetadataSyncAdapter adapter{
+                *repository, *memorySync_, [contentStore](std::string_view hash) {
+                    return contentStore->exists(std::string(hash));
+                }};
+            if (auto result = adapter.apply(); !result) {
+                spdlog::warn("[ServiceManager] memory_sync metadata apply failed: {}",
+                             result.error().message);
+                return;
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("[ServiceManager] memory_sync metadata apply threw: {}", e.what());
+        return;
+    } catch (...) {
+        spdlog::warn("[ServiceManager] memory_sync metadata apply threw (unknown)");
+        return;
+    }
+    notifyMemorySyncStage("apply.after_metadata");
+
+    if (memorySync_->stopRequested()) {
+        return;
+    }
+    try {
+        if (auto vectorDatabase = getVectorDatabase()) {
+            auto contentStore = getContentStore();
+            if (!contentStore) {
+                spdlog::warn("[ServiceManager] memory_sync vector apply requires content store");
+                return;
+            }
+            vector::VectorSyncAdapter::RebuildCallback rebuild;
+            if (vectorIndexCoordinator_) {
+                rebuild = [coordinator = vectorIndexCoordinator_]() {
+                    return coordinator->requestRebuildBlocking(RebuildReason::EmbeddingBatch);
+                };
+            }
+            vector::VectorSyncAdapter adapter{*vectorDatabase, *memorySync_, std::move(rebuild),
+                                              &memorySyncVectorRebuildDirty_,
+                                              [contentStore](std::string_view hash) {
+                                                  return contentStore->exists(std::string(hash));
+                                              }};
+            if (auto result = adapter.apply(); !result) {
+                spdlog::warn("[ServiceManager] memory_sync vector apply failed: {}",
+                             result.error().message);
+                return;
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("[ServiceManager] memory_sync vector apply threw: {}", e.what());
+        return;
+    } catch (...) {
+        spdlog::warn("[ServiceManager] memory_sync vector apply threw (unknown)");
+        return;
+    }
+    notifyMemorySyncStage("apply.after_vector");
+
+    if (memorySync_->stopRequested()) {
+        return;
+    }
+    try {
+        if (auto kgStore = getKgStore()) {
+            metadata::TopologySyncAdapter adapter{*kgStore, *memorySync_};
+            if (auto result = adapter.apply(); !result) {
+                spdlog::warn("[ServiceManager] memory_sync topology apply failed: {}",
+                             result.error().message);
+                return;
+            }
+        }
+    } catch (const std::exception& e) {
+        spdlog::warn("[ServiceManager] memory_sync topology apply threw: {}", e.what());
+        return;
+    } catch (...) {
+        spdlog::warn("[ServiceManager] memory_sync topology apply threw (unknown)");
+        return;
+    }
+    notifyMemorySyncStage("apply.after_topology");
+
+    if (memorySync_->stopRequested()) {
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= nextMemorySyncBackfill_) {
+        nextMemorySyncBackfill_ = now + std::chrono::seconds{5};
+        publishMemorySyncBackfill();
+    }
+}
+
+void ServiceManager::publishMemorySyncBackfill() noexcept {
+    if (!memorySync_) {
+        return;
+    }
+
+    auto repository = getMetadataRepo();
+    auto contentStore = getContentStore();
+    auto vectorDatabase = getVectorDatabase();
+    auto kgStore = getKgStore();
+    auto& state = memorySyncBackfillState_;
+    std::size_t remainingItems = state.itemBudgetPerCycle;
+    const auto deadline = std::chrono::steady_clock::now() + state.timeBudgetPerCycle;
+    const auto shouldStop = [&] {
+        return !memorySync_ || memorySync_->stopRequested() || remainingItems == 0 ||
+               std::chrono::steady_clock::now() >= deadline;
+    };
+
+    std::size_t documentsPublished = 0;
+    std::size_t blobsPublished = 0;
+    std::size_t vectorsPublished = 0;
+    std::size_t nodesPublished = 0;
+    std::size_t edgesPublished = 0;
+
+    const auto publishDocument = [&]() -> bool {
+        if (!repository || !contentStore) {
+            return false;
+        }
+        metadata::DocumentQueryOptions options;
+        options.idGreaterThan = state.documentIdCursor;
+        options.limit = 1;
+        options.orderByIdAsc = true;
+        auto documents = repository->queryDocuments(options);
+        if (!documents) {
+            throw std::runtime_error(documents.error().message);
+        }
+        if (documents.value().empty()) {
+            return false;
+        }
+
+        const auto& document = documents.value().front();
+        auto metadataValues = repository->getAllMetadata(document.id);
+        if (!metadataValues) {
+            throw std::runtime_error(metadataValues.error().message);
+        }
+        std::vector<std::pair<std::string, metadata::MetadataValue>> tags;
+        tags.reserve(metadataValues.value().size());
+        for (const auto& [key, value] : metadataValues.value()) {
+            tags.emplace_back(key, value);
+        }
+
+        memory_sync::ContentBlobSyncAdapter contentAdapter{*contentStore, *memorySync_};
+        if (!document.sha256Hash.empty()) {
+            auto published = contentAdapter.publishExisting(document.sha256Hash);
+            if (!published) {
+                throw std::runtime_error(published.error().message);
+            }
+            blobsPublished += published.value() ? 1U : 0U;
+        }
+        metadata::MetadataSyncAdapter metadataAdapter{*repository, *memorySync_};
+        auto published = metadataAdapter.publish(document, tags);
+        if (!published) {
+            throw std::runtime_error(published.error().message);
+        }
+        state.documentIdCursor = std::max(state.documentIdCursor, document.id);
+        ++documentsPublished;
+        notifyMemorySyncStage("backfill.after_document");
+        return true;
+    };
+
+    const auto publishVector = [&]() -> bool {
+        if (!vectorDatabase) {
+            return false;
+        }
+        auto records = vectorDatabase->getVectorsPage(state.vectorDocumentHashCursor,
+                                                      state.vectorChunkIdCursor, 1);
+        if (!records) {
+            throw std::runtime_error(records.error().message);
+        }
+        if (records.value().empty()) {
+            return false;
+        }
+        const auto& record = records.value().front();
+        vector::VectorSyncAdapter adapter{*vectorDatabase, *memorySync_};
+        auto published = adapter.publish(record);
+        if (!published) {
+            throw std::runtime_error(published.error().message);
+        }
+        state.vectorDocumentHashCursor = record.document_hash;
+        state.vectorChunkIdCursor = record.chunk_id;
+        ++vectorsPublished;
+        notifyMemorySyncStage("backfill.after_vector");
+        return true;
+    };
+
+    const auto publishTopology = [&]() -> bool {
+        if (!kgStore) {
+            return false;
+        }
+        metadata::TopologySyncAdapter adapter{*kgStore, *memorySync_};
+        if (!state.topologySnapshotInitialized) {
+            auto nodeTypes = kgStore->getNodeTypeCounts();
+            if (!nodeTypes) {
+                throw std::runtime_error(nodeTypes.error().message);
+            }
+            state.topologyNodeTypes.reserve(nodeTypes.value().size());
+            for (const auto& [nodeType, count] : nodeTypes.value()) {
+                (void)count;
+                state.topologyNodeTypes.push_back(nodeType);
+            }
+            std::sort(state.topologyNodeTypes.begin(), state.topologyNodeTypes.end());
+            state.topologySnapshotInitialized = true;
+        }
+
+        while (!shouldStop()) {
+            if (state.topologyNodeActive) {
+                auto edges = kgStore->getEdgesFrom(state.topologyNodeId, std::nullopt, 1,
+                                                   state.topologyEdgeOffset);
+                if (!edges) {
+                    throw std::runtime_error(edges.error().message);
+                }
+                if (!edges.value().empty()) {
+                    const auto& edge = edges.value().front();
+                    auto target = kgStore->getNodeById(edge.dstNodeId);
+                    if (!target) {
+                        throw std::runtime_error(target.error().message);
+                    }
+                    ++state.topologyEdgeOffset;
+                    if (!target.value()) {
+                        continue;
+                    }
+                    auto published =
+                        adapter.publishEdge(state.topologyNodeKey, edge, target.value()->nodeKey);
+                    if (!published) {
+                        --state.topologyEdgeOffset;
+                        throw std::runtime_error(published.error().message);
+                    }
+                    ++edgesPublished;
+                    notifyMemorySyncStage("backfill.after_edge");
+                    return true;
+                }
+                state.topologyNodeActive = false;
+                state.topologyNodeId = 0;
+                state.topologyNodeKey.clear();
+                state.topologyEdgeOffset = 0;
+                ++state.topologyNodeOffsets[state.topologyNodeTypes[state.topologyTypeIndex]];
+            }
+
+            if (state.topologyTypeIndex >= state.topologyNodeTypes.size()) {
+                // Refresh the bounded type snapshot on the next cycle so node types created after
+                // startup become visible. Per-type offsets prevent replaying nodes already swept.
+                state.topologySnapshotInitialized = false;
+                state.topologyNodeTypes.clear();
+                state.topologyTypeIndex = 0;
+                return false;
+            }
+            const auto& nodeType = state.topologyNodeTypes[state.topologyTypeIndex];
+            auto nodes = kgStore->findNodesByType(nodeType, 1, state.topologyNodeOffsets[nodeType]);
+            if (!nodes) {
+                throw std::runtime_error(nodes.error().message);
+            }
+            if (nodes.value().empty()) {
+                ++state.topologyTypeIndex;
+                continue;
+            }
+
+            const auto& node = nodes.value().front();
+            auto published = adapter.publishNode(node);
+            if (!published) {
+                throw std::runtime_error(published.error().message);
+            }
+            state.topologyNodeId = node.id;
+            state.topologyNodeKey = node.nodeKey;
+            state.topologyNodeActive = true;
+            ++nodesPublished;
+            notifyMemorySyncStage("backfill.after_node");
+            return true;
+        }
+        return false;
+    };
+
+    const auto advanceDomain = [&] {
+        using Domain = MemorySyncBackfillState::Domain;
+        switch (state.nextDomain) {
+            case Domain::Documents:
+                state.nextDomain = Domain::Vectors;
+                break;
+            case Domain::Vectors:
+                state.nextDomain = Domain::Topology;
+                break;
+            case Domain::Topology:
+                state.nextDomain = Domain::Documents;
+                break;
+        }
+    };
+
+    std::size_t consecutiveEmptyDomains = 0;
+    while (!shouldStop() && consecutiveEmptyDomains < 3) {
+        const auto domain = state.nextDomain;
+        advanceDomain();
+        bool published = false;
+        try {
+            using Domain = MemorySyncBackfillState::Domain;
+            switch (domain) {
+                case Domain::Documents:
+                    published = publishDocument();
+                    break;
+                case Domain::Vectors:
+                    published = publishVector();
+                    break;
+                case Domain::Topology:
+                    published = publishTopology();
+                    break;
+            }
+        } catch (const std::exception& error) {
+            spdlog::warn("[ServiceManager] memory_sync backfill domain failed: {}", error.what());
+        } catch (...) {
+            spdlog::warn("[ServiceManager] memory_sync backfill domain failed (unknown)");
+        }
+
+        if (published) {
+            --remainingItems;
+            consecutiveEmptyDomains = 0;
+        } else {
+            ++consecutiveEmptyDomains;
+        }
+    }
+
+    spdlog::debug(
+        "[ServiceManager] memory_sync backfill scanned documents={} blobs={} vectors={} nodes={} "
+        "edges={}",
+        documentsPublished, blobsPublished, vectorsPublished, nodesPublished, edgesPublished);
+}
+
+void ServiceManager::configureMemorySyncApply() {
+    if (!memorySync_) {
+        return;
+    }
+    memorySync_->setAfterSyncCallback([this] { applyMemorySyncWinners(); });
+    spdlog::info("[ServiceManager] memory_sync apply path enabled");
+}
+
+Result<void> ServiceManager::initializeMemorySync(const std::filesystem::path& dataDir) {
     const auto& policy = config_.memorySync;
     if (!policy.enabled) {
-        return;
+        return Result<void>();
     }
 
     try {
         yams::memory_sync::MemorySyncDaemonConfig cfg;
         cfg.enabled = true;
         cfg.nodeId = policy.nodeId;
+        cfg.corpusId = policy.corpusId;
+        cfg.corpusEpoch = policy.corpusEpoch;
         cfg.backend = policy.backend;
         cfg.syncIntervalMs = policy.syncIntervalMs;
+        cfg.limits = policy.limits;
+        cfg.mode = policy.mode == "persistent-migration" ? "persistent" : policy.mode;
+        cfg.sessionId = policy.sessionId;
+        cfg.temporarySessionTtlMs = policy.temporarySessionTtlMs;
+        cfg.allowLegacyUnbound = policy.mode == "persistent-migration";
+        cfg.writerAuthRequired = policy.writerAuthRequired;
+        cfg.writerAuthManifestPath = policy.writerAuthManifestPath;
         cfg.path = policy.path;
         if (cfg.backend == "filesystem" && !cfg.path.empty() &&
             !std::filesystem::path(cfg.path).is_absolute()) {
             cfg.path = (dataDir / cfg.path).string();
         }
 
-        auto svc = yams::memory_sync::createMemorySyncService(cfg);
+        std::optional<yams::storage::BackendConfig> resolvedS3Config;
+        if (cfg.backend == "s3") {
+            auto storageDecision = yams::storage::resolveStorageBootstrapDecision(
+                config_.configFilePath, dataDir, std::string{"s3"});
+            if (!storageDecision) {
+                return Error{storageDecision.error().code,
+                             "memory_sync S3 credential resolution failed: " +
+                                 storageDecision.error().message};
+            }
+            if (!storageDecision.value().backendConfig) {
+                return Error{ErrorCode::InvalidState,
+                             "memory_sync S3 resolution returned no backend config"};
+            }
+            resolvedS3Config = *storageDecision.value().backendConfig;
+        }
+
+        auto svc = yams::memory_sync::createMemorySyncService(cfg, std::move(resolvedS3Config), [] {
+            return ResourceGovernor::instance().canAdmitWork();
+        });
         if (!svc) {
-            spdlog::warn("[ServiceManager] memory_sync service creation failed: {}",
-                         svc.error().message);
-            return;
+            return Error{svc.error().code,
+                         "memory_sync service creation failed: " + svc.error().message};
         }
 
         auto service = std::move(svc.value());
         if (auto r = service->start(); !r) {
-            spdlog::warn("[ServiceManager] memory_sync service failed to start: {}",
-                         r.error().message);
-            return;
+            return Error{r.error().code,
+                         "memory_sync service failed to start: " + r.error().message};
         }
 
         memorySync_ = std::move(service);
         spdlog::info("[ServiceManager] memory_sync started: backend={} node={}", cfg.backend,
                      cfg.nodeId);
+        return Result<void>();
     } catch (const std::exception& e) {
-        spdlog::warn("[ServiceManager] memory_sync initialization threw: {}", e.what());
+        return Error{ErrorCode::InternalError,
+                     std::string("memory_sync initialization threw: ") + e.what()};
     } catch (...) {
-        spdlog::warn("[ServiceManager] memory_sync initialization threw (unknown)");
+        return Error{ErrorCode::InternalError,
+                     "memory_sync initialization threw an unknown exception"};
     }
 }
 
@@ -2335,8 +2862,12 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     }
     const auto dataDir = dataDirResult.value();
 
-    // Best-effort: P2P memory sync is opt-in and must not block daemon startup.
-    initializeMemorySync(dataDir);
+    if (auto memorySyncResult = initializeMemorySync(dataDir); !memorySyncResult) {
+        const std::string message =
+            "Failed to initialize enabled memory sync: " + memorySyncResult.error().message;
+        spdlog::error("[ServiceManager] {}", message);
+        co_return Error{memorySyncResult.error().code, message};
+    }
 
     if (token.stop_requested())
         co_return Error{ErrorCode::OperationCancelled, "Shutdown requested"};
@@ -2955,6 +3486,10 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
             }
         }
     }
+
+    // All replicated destination stores are now initialized. Attach the ordered apply callback
+    // only at this point so the convergence worker cannot race database/vector/KG startup.
+    configureMemorySyncApply();
 
     // Full SearchEngine construction is non-critical. Metadata search is already available via
     // MetadataRepository, and RequestDispatcher falls back to metadata while searchEngineReady is
