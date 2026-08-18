@@ -3,11 +3,13 @@
 #include <functional>
 #include <map>
 #include <memory>
-#include <optional>
+#include <optional> // IWYU pragma: keep
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
 #include <yams/core/types.h>
 #include <yams/vector/vector_types.h>
 
@@ -58,6 +60,9 @@ public:
     getVectorsBatch(const std::vector<std::string>& chunk_ids) = 0;
     virtual Result<std::vector<VectorRecord>>
     getVectorsByDocument(const std::string& document_hash) = 0;
+    virtual Result<std::vector<VectorRecord>> getVectorsPage(std::string_view afterDocumentHash,
+                                                             std::string_view afterChunkId,
+                                                             std::size_t limit) = 0;
     virtual Result<std::unordered_map<std::string, VectorRecord>> getDocumentLevelVectorsAll() = 0;
     virtual Result<size_t>
     forEachDocumentLevelVector(const std::function<bool(VectorRecord&&)>& visitor) = 0;

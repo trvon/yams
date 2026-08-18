@@ -808,6 +808,40 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend hasEmbedding",
     CHECK((noResult.value() == false));
 }
 
+TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend pages vectors by stable cursor",
+                 "[vector][backend][paging][catch2]") {
+    skipIfNeeded();
+
+    SqliteVecBackend backend;
+    REQUIRE(backend.initialize(":memory:").has_value());
+    REQUIRE(backend.createTables(64).has_value());
+    for (const auto& [id, document] : std::vector<std::pair<std::string, std::string>>{
+             {"b2", "doc_b"}, {"a2", "doc_a"}, {"b1", "doc_b"}, {"a1", "doc_a"}}) {
+        REQUIRE(backend.insertVector(createVectorRecord(id, createEmbedding(64), document))
+                    .has_value());
+    }
+
+    auto first = backend.getVectorsPage("", "", 2);
+    REQUIRE(first.has_value());
+    REQUIRE(first.value().size() == 2);
+    CHECK(first.value()[0].document_hash == "doc_a");
+    CHECK(first.value()[0].chunk_id == "chunk_a1");
+    CHECK(first.value()[1].chunk_id == "chunk_a2");
+
+    auto second =
+        backend.getVectorsPage(first.value()[1].document_hash, first.value()[1].chunk_id, 2);
+    REQUIRE(second.has_value());
+    REQUIRE(second.value().size() == 2);
+    CHECK(second.value()[0].document_hash == "doc_b");
+    CHECK(second.value()[0].chunk_id == "chunk_b1");
+    CHECK(second.value()[1].chunk_id == "chunk_b2");
+
+    auto exhausted =
+        backend.getVectorsPage(second.value()[1].document_hash, second.value()[1].chunk_id, 2);
+    REQUIRE(exhausted.has_value());
+    CHECK(exhausted.value().empty());
+}
+
 // =============================================================================
 // Search Tests
 // =============================================================================

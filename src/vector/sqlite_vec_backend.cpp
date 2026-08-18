@@ -1766,6 +1766,54 @@ public:
         return results;
     }
 
+    Result<std::vector<VectorRecord>> getVectorsPage(std::string_view afterDocumentHash,
+                                                     std::string_view afterChunkId,
+                                                     std::size_t limit) {
+        if (limit == 0) {
+            return Error{ErrorCode::InvalidArgument, "vector page limit must be positive"};
+        }
+
+        std::shared_lock lock(mutex_);
+        if (!db_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        static constexpr const char* kSelectPage = R"sql(
+SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
+       start_offset, end_offset, metadata,
+       model_id, model_version, embedding_version, content_hash,
+       created_at, embedded_at, is_stale, level,
+       source_chunk_ids, parent_document_hash, child_document_hashes
+FROM vectors
+WHERE document_hash > ?1 OR (document_hash = ?1 AND chunk_id > ?2)
+ORDER BY document_hash ASC, chunk_id ASC
+LIMIT ?3
+)sql";
+
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, kSelectPage, -1, &stmt, nullptr) != SQLITE_OK) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string{"prepare getVectorsPage: "} + sqlite3_errmsg(db_)};
+        }
+        sqlite3_bind_text(stmt, 1, afterDocumentHash.data(),
+                          static_cast<int>(afterDocumentHash.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, afterChunkId.data(), static_cast<int>(afterChunkId.size()),
+                          SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 3, static_cast<sqlite3_int64>(limit));
+
+        std::vector<VectorRecord> results;
+        int rc = SQLITE_ROW;
+        while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+            results.push_back(recordFromStatement(stmt));
+        }
+        sqlite3_finalize(stmt);
+        if (rc != SQLITE_DONE) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string{"getVectorsPage iteration failed: "} + sqlite3_errmsg(db_)};
+        }
+        return results;
+    }
+
     Result<std::unordered_map<std::string, VectorRecord>> getDocumentLevelVectorsAll() {
         std::shared_lock lock(mutex_);
 
@@ -4723,6 +4771,12 @@ SqliteVecBackend::forEachDocumentLevelVector(const std::function<bool(VectorReco
 
 Result<bool> SqliteVecBackend::hasEmbedding(const std::string& document_hash) {
     return impl_->hasEmbedding(document_hash);
+}
+
+Result<std::vector<VectorRecord>>
+SqliteVecBackend::getVectorsPage(std::string_view afterDocumentHash, std::string_view afterChunkId,
+                                 std::size_t limit) {
+    return impl_->getVectorsPage(afterDocumentHash, afterChunkId, limit);
 }
 
 Result<std::unordered_set<std::string>> SqliteVecBackend::getEmbeddedDocumentHashes() {

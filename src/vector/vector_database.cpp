@@ -651,6 +651,16 @@ public:
         return std::move(result.value());
     }
 
+    Result<std::vector<VectorRecord>> getVectorsPage(std::string_view afterDocumentHash,
+                                                     std::string_view afterChunkId,
+                                                     std::size_t limit) const {
+        std::shared_lock<std::shared_mutex> lock(mutex_);
+        if (!initialized_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+        return backend_->getVectorsPage(afterDocumentHash, afterChunkId, limit);
+    }
+
     std::unordered_map<std::string, VectorRecord> getDocumentLevelVectorsAll() const {
         std::shared_lock<std::shared_mutex> lock(mutex_);
 
@@ -1457,6 +1467,13 @@ VectorDatabase::getVectorsByDocument(const std::string& document_hash) const {
     auto result = pImpl->getVectorsByDocument(document_hash);
     YAMS_PLOT("vector_db::get_vectors_by_document_count", static_cast<int64_t>(result.size()));
     return result;
+}
+
+Result<std::vector<VectorRecord>> VectorDatabase::getVectorsPage(std::string_view afterDocumentHash,
+                                                                 std::string_view afterChunkId,
+                                                                 std::size_t limit) const {
+    YAMS_ZONE_SCOPED_N("VectorDB::getVectorsPage");
+    return pImpl->getVectorsPage(afterDocumentHash, afterChunkId, limit);
 }
 
 std::unordered_map<std::string, VectorRecord> VectorDatabase::getDocumentLevelVectorsAll() const {

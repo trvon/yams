@@ -1,17 +1,17 @@
 #pragma once
 
-#include <yams/core/types.h>
-#include <yams/vector/vector_types.h>
-
 #include <chrono>
 #include <functional>
 #include <map>
 #include <memory>
-#include <optional>
+#include <optional> // IWYU pragma: keep
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#include <yams/core/types.h>
+#include <yams/vector/vector_types.h>
 
 namespace yams::vector {
 
@@ -58,6 +58,9 @@ public:
     std::map<std::string, VectorRecord>
     getVectorsBatch(const std::vector<std::string>& chunk_ids) const;
     std::vector<VectorRecord> getVectorsByDocument(const std::string& document_hash) const;
+    Result<std::vector<VectorRecord>> getVectorsPage(std::string_view afterDocumentHash,
+                                                     std::string_view afterChunkId,
+                                                     std::size_t limit) const;
     std::unordered_map<std::string, VectorRecord> getDocumentLevelVectorsAll() const;
     Result<size_t>
     forEachDocumentLevelVector(const std::function<bool(VectorRecord&&)>& visitor) const;
