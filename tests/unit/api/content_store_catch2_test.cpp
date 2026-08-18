@@ -3,8 +3,6 @@
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_floating_point.hpp>
-#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <yams/api/async_content_store.h>
 #include <yams/api/content_metadata.h>
@@ -848,6 +846,22 @@ TEST_CASE("ContentStore: Batch store commits references once before publishing m
     fs::remove_all(tempDir, ec);
 }
 
+TEST_CASE("ContentStore: Remove deletes directly stored small content",
+          "[api][content-store][remove][direct]") {
+    ContentStoreFixture fixture;
+    const std::string payload = "small direct payload";
+    const auto data = std::span<const std::byte>(reinterpret_cast<const std::byte*>(payload.data()),
+                                                 payload.size());
+    const auto stored = fixture.store_->storeBytes(data);
+    REQUIRE(stored.has_value());
+    REQUIRE(fixture.store_->exists(stored.value().contentHash).value());
+
+    const auto removed = fixture.store_->remove(stored.value().contentHash);
+    REQUIRE(removed.has_value());
+    CHECK(removed.value());
+    CHECK_FALSE(fixture.store_->exists(stored.value().contentHash).value());
+}
+
 TEST_CASE("ContentStore: Remove commits reference decrements through its transaction",
           "[api][content-store][remove][transaction]") {
     auto tempDir = makeTempDir("content_store_remove_transaction");
@@ -1026,7 +1040,7 @@ TEST_CASE("ContentStore: Progress reporting", "[api][content-store][progress]") 
     ContentStoreFixture fixture;
 
     SECTION("Progress callback invoked") {
-        std::string content(1024 * 1024, 'X'); // 1MB
+        std::string content(std::size_t{1024} * 1024, 'X'); // 1MB
         auto file = fixture.createTestFile("large.bin", content);
 
         std::atomic<int> progressCalls{0};
@@ -1668,7 +1682,7 @@ TEST_CASE("ContentStoreBuilder: Construction", "[api][builder]") {
         ContentStoreConfig config;
         config.storagePath =
             fs::temp_directory_path() / ("custom_test_" + std::to_string(std::random_device{}()));
-        config.chunkSize = 128 * 1024;
+        config.chunkSize = std::size_t{128} * 1024;
         config.enableCompression = true;
         config.compressionType = "zstd";
         config.compressionLevel = 5;
@@ -1756,7 +1770,8 @@ TEST_CASE("ContentStore: Edge cases", "[api][content-store][edge]") {
         std::mutex resultMutex;
         std::vector<std::string> hashes;
         std::vector<std::string> errors;
-        hashes.reserve(kThreadCount * kStoresPerThread);
+        hashes.reserve(static_cast<std::size_t>(kThreadCount) *
+                       static_cast<std::size_t>(kStoresPerThread));
 
         for (int i = 0; i < kThreadCount; ++i) {
             threads.emplace_back([&, i]() {

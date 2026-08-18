@@ -787,7 +787,44 @@ public:
         auto manifestHash = hash + ".manifest";
         auto manifestResult = storage_->retrieve(manifestHash);
         if (!manifestResult) {
-            return Result<bool>(false); // Not found
+            const auto errorCode = manifestResult.error().code;
+            const bool manifestMissing = errorCode == ErrorCode::FileNotFound ||
+                                         errorCode == ErrorCode::ChunkNotFound ||
+                                         errorCode == ErrorCode::NotFound;
+            if (!manifestMissing) {
+                if (errorCode == ErrorCode::InvalidArgument) {
+                    return Result<bool>(false);
+                }
+                return manifestResult.error();
+            }
+
+            // Small storeBytes() payloads are stored directly under their content hash.
+            // Require live metadata before taking this fallback: a chunked object's final
+            // manifest removal leaves zero-reference chunks for GC, and those chunks must
+            // not be mistaken for independently stored direct objects on a repeated remove.
+            {
+                std::shared_lock lock(metadataMutex_);
+                if (!metadataStore_.contains(hash)) {
+                    return Result<bool>(false);
+                }
+            }
+
+            auto directExists = storage_->exists(hash);
+            if (!directExists) {
+                return directExists.error();
+            }
+            if (!directExists.value()) {
+                return Result<bool>(false);
+            }
+            if (auto removed = storage_->remove(hash); !removed) {
+                return removed.error();
+            }
+            {
+                std::unique_lock lock(metadataMutex_);
+                metadataStore_.erase(hash);
+            }
+            updateStats(0, 0, 0, 0, 0, 0, 1);
+            return Result<bool>(true);
         }
 
         // Deserialize manifest
