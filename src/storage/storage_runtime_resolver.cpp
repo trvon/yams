@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <limits>
 #include <map>
 #include <mutex>
 #include <regex>
@@ -108,6 +109,9 @@ std::string stripBearerPrefix(std::string value) {
 }
 
 size_t writeResponse(char* ptr, size_t size, size_t nmemb, void* userdata) {
+    if (size != 0 && nmemb > std::numeric_limits<size_t>::max() / size) {
+        return 0;
+    }
     const size_t bytes = size * nmemb;
     if (!userdata || !ptr || bytes == 0) {
         return 0;
@@ -316,6 +320,10 @@ std::string getOrDefault(const std::map<std::string, std::string>& cfg, const st
 
 } // namespace
 
+std::size_t testingWriteResponse(char* ptr, std::size_t size, std::size_t nmemb, void* userdata) {
+    return writeResponse(ptr, size, nmemb, userdata);
+}
+
 Result<std::string> loadCloudflareApiTokenFromKeychain(std::string_view accountIdView) {
 #if defined(__APPLE__) && TARGET_OS_OSX
     const std::string accountId = trim(std::string(accountIdView));
@@ -485,13 +493,16 @@ const char* toString(RemoteFallbackPolicy policy) {
 
 Result<StorageBootstrapDecision>
 resolveStorageBootstrapDecision(const std::filesystem::path& configPath,
-                                const std::filesystem::path& requestedDataDir) {
+                                const std::filesystem::path& requestedDataDir,
+                                std::optional<std::string> engineOverride) {
     StorageBootstrapDecision decision;
     decision.requestedDataDir = requestedDataDir;
     decision.activeDataDir = requestedDataDir;
 
     const auto cfg = yams::config::parse_simple_toml(configPath);
-    std::string configuredEngine = toLower(getOrDefault(cfg, "storage.engine", "local"));
+    std::string configuredEngine = engineOverride
+                                       ? toLower(*engineOverride)
+                                       : toLower(getOrDefault(cfg, "storage.engine", "local"));
     if (configuredEngine.empty()) {
         configuredEngine = "local";
     }
@@ -526,8 +537,9 @@ resolveStorageBootstrapDecision(const std::filesystem::path& configPath,
     backendConfig.url = getOrDefault(cfg, "storage.s3.url", "");
     backendConfig.region = getOrDefault(cfg, "storage.s3.region", "us-east-1");
     backendConfig.usePathStyle = parseBool(getOrDefault(cfg, "storage.s3.use_path_style", "false"));
-    const auto endpointHost = normalizeS3Endpoint(getOrDefault(cfg, "storage.s3.endpoint", ""));
-    backendConfig.credentials["endpoint"] = endpointHost;
+    const auto endpointRaw = trim(getOrDefault(cfg, "storage.s3.endpoint", ""));
+    const auto endpointHost = normalizeS3Endpoint(endpointRaw);
+    backendConfig.credentials["endpoint"] = endpointRaw.empty() ? endpointHost : endpointRaw;
 
     auto failWithOrFallback = [&](const std::string& reason) -> Result<StorageBootstrapDecision> {
         if (decision.fallbackPolicy == RemoteFallbackPolicy::FallbackLocalIfConfigured &&
@@ -701,6 +713,8 @@ resolveStorageBootstrapDecision(const std::filesystem::path& configPath,
             backendConfig.credentials["session_token"] = sessionToken;
         }
     }
+
+    decision.backendConfig = backendConfig;
 
     auto backend = StorageBackendFactory::create(backendConfig);
     if (!backend) {
