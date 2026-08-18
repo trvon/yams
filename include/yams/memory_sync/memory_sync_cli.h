@@ -12,6 +12,7 @@
 #include <nlohmann/json.hpp>
 
 #include <yams/core/types.h>
+#include <yams/memory_sync/key_policy.h>
 #include <yams/memory_sync/memory_sync_service.h>
 
 namespace yams::memory_sync {
@@ -41,8 +42,11 @@ inline Result<std::string> publishValue(MemorySyncService& svc, std::string_view
                        reinterpret_cast<const std::byte*>(valueOrFile.data()) + valueOrFile.size());
     }
     // Empty valueOrFile publishes an empty blob (valid).
-
-    if (auto r = svc.publish(key, content); !r) {
+    auto namespacedKey = userLogicalKey(key);
+    if (!namespacedKey) {
+        return namespacedKey.error();
+    }
+    if (auto r = svc.publish(namespacedKey.value(), content); !r) {
         return r.error();
     }
 
@@ -64,7 +68,11 @@ inline Result<std::string> publishValue(MemorySyncService& svc, std::string_view
 /// Read the merged value for `key`. Returns the raw bytes (non-JSON) or a JSON
 /// object with key/size/value_hex (JSON, hex-encoded so arbitrary bytes are safe).
 inline Result<std::string> readValue(MemorySyncService& svc, std::string_view key, bool json) {
-    auto r = svc.read(key);
+    auto namespacedKey = userLogicalKey(key);
+    if (!namespacedKey) {
+        return namespacedKey.error();
+    }
+    auto r = svc.read(namespacedKey.value());
     if (!r) {
         return r.error();
     }
@@ -107,6 +115,7 @@ inline Result<std::string> statusSummary(MemorySyncService& svc, std::string_vie
         j["backend"] = backend;
         j["node_id"] = nodeId;
         j["records"] = count;
+        j["auth_failures"] = svc.authFailureCount();
         try {
             return j.dump(2);
         } catch (const std::exception& e) {
@@ -114,7 +123,8 @@ inline Result<std::string> statusSummary(MemorySyncService& svc, std::string_vie
         }
     }
     std::ostringstream oss;
-    oss << "backend=" << backend << " node_id=" << nodeId << " records=" << count;
+    oss << "backend=" << backend << " node_id=" << nodeId << " records=" << count
+        << " auth_failures=" << svc.authFailureCount();
     return oss.str();
 }
 

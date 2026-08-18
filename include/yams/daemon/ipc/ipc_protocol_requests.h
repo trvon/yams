@@ -1,8 +1,8 @@
 #pragma once
 
+#include "ipc_protocol_common.h"
 #include <yams/core/assert.hpp>
 #include <yams/core/checked_arithmetic.h>
-#include <yams/daemon/ipc/ipc_protocol_common.h>
 
 #include <atomic>
 #include <memory>
@@ -3328,6 +3328,39 @@ struct ListTreeDiffRequest {
     }
 };
 
+// Memory-sync operations are routed to the lifecycle-owned service. The value is
+// binary-safe and encoded as a protobuf bytes field by ProtoSerializer.
+enum class MemorySyncOperation : std::uint32_t { Publish = 0, Read = 1, Status = 2, Delete = 3 };
+
+struct MemorySyncRequest {
+    MemorySyncOperation operation{MemorySyncOperation::Status};
+    std::string key;
+    std::string value;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        ser << static_cast<std::uint32_t>(operation) << key << value;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<MemorySyncRequest> deserialize(Deserializer& deser) {
+        MemorySyncRequest request;
+        const auto operation = deser.template read<std::uint32_t>();
+        if (!operation) {
+            return operation.error();
+        }
+        if (operation.value() > static_cast<std::uint32_t>(MemorySyncOperation::Delete)) {
+            return Error{ErrorCode::InvalidArgument, "invalid memory sync operation"};
+        }
+        request.operation = static_cast<MemorySyncOperation>(operation.value());
+        YAMS_TRY(ipc_detail::readField(deser, request.key));
+        YAMS_TRY(ipc_detail::readField(deser, request.value));
+        return request;
+    }
+};
+
 // Forward declaration for batch request type (defined with the batch envelope types)
 struct BatchRequest;
 
@@ -3345,6 +3378,6 @@ using Request = std::variant<
     ListSnapshotsRequest, RestoreCollectionRequest, RestoreSnapshotRequest, GraphQueryRequest,
     GraphExploreRequest, GraphSymbolLookupRequest, GraphTraceRequest, GraphImpactRequest,
     GraphAffectedTestsRequest, GraphPathHistoryRequest, GraphRepairRequest, GraphValidateRequest,
-    KgIngestRequest, MetadataValueCountsRequest, BatchRequest, RepairRequest>;
+    KgIngestRequest, MetadataValueCountsRequest, MemorySyncRequest, BatchRequest, RepairRequest>;
 
 } // namespace yams::daemon

@@ -1193,6 +1193,38 @@ message RepairResponse {
   repeated RepairOperationResult operation_results = 7;
 }
 
+// Lifecycle-owned memory-sync control. `value` is bytes so publish/read remain
+// binary-safe for `yams p2p ... @file` without a UTF-8 conversion.
+message MemorySyncRequest {
+  enum Operation {
+    PUBLISH = 0;
+    READ = 1;
+    STATUS = 2;
+    DELETE = 3;
+  }
+  Operation operation = 1;
+  string key = 2;
+  bytes value = 3;
+}
+
+message MemorySyncResponse {
+  bool published = 1;
+  bool started = 2;
+  bytes value = 3;
+  uint64 records = 4;
+  string backend = 5;
+  string node_id = 6;
+  uint64 quarantined_records = 7;
+  uint64 auth_failures = 8;
+  uint64 successful_cycles = 9;
+  uint64 failed_cycles = 10;
+  uint64 last_success_age_ms = 11;
+  string corpus_id = 12;
+  uint64 corpus_epoch = 13;
+  string mode = 14;
+  string trust_mode = 15;
+}
+
 // ENVELOPE
 message Envelope {
   uint32 version = 1;
@@ -1263,6 +1295,7 @@ message Envelope {
     MetadataValueCountsRequest metadata_value_counts_request = 57;
     // Document repair request (RepairService)
     RepairRequest repair_request = 58;
+    MemorySyncRequest memory_sync_request = 64;
 
     // Responses
     SuccessResponse success_response = 100;
@@ -1332,6 +1365,7 @@ message Envelope {
     // Document repair responses + streaming event (RepairService)
     RepairResponse repair_response = 145;
     RepairEvent repair_event = 146;
+    MemorySyncResponse memory_sync_response = 157;
 
   }
 }

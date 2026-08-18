@@ -473,6 +473,8 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
             std::is_same<Req, CatRequest>,
             // Generic metadata value counts query (MCP client mode)
             std::is_same<Req, MetadataValueCountsRequest>,
+            // Lifecycle-owned memory sync control
+            std::is_same<Req, MemorySyncRequest>,
             // Document repair
             std::is_same<Req, RepairRequest>>,
         "Req must be a valid daemon Request alternative");

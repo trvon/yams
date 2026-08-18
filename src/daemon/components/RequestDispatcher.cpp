@@ -138,6 +138,7 @@ DEFINE_REQUEST_HANDLER(GraphRepairRequest, handleGraphRepairRequest);
 DEFINE_REQUEST_HANDLER(GraphValidateRequest, handleGraphValidateRequest);
 DEFINE_REQUEST_HANDLER(KgIngestRequest, handleKgIngestRequest);
 DEFINE_REQUEST_HANDLER(MetadataValueCountsRequest, handleMetadataValueCountsRequest);
+DEFINE_REQUEST_HANDLER(MemorySyncRequest, handleMemorySyncRequest);
 DEFINE_REQUEST_HANDLER(BatchRequest, handleBatchRequest);
 template <> struct RequestHandlerTraits<RepairRequest> {
     static boost::asio::awaitable<Response> handle(RequestDispatcher*, const RepairRequest&) {
@@ -159,6 +160,74 @@ RequestDispatcher::RequestDispatcher(IDaemonLifecycle* lifecycle, ServiceManager
 
 ServiceManager* RequestDispatcher::getServiceManager() const {
     return serviceManager_;
+}
+
+boost::asio::awaitable<Response>
+RequestDispatcher::handleMemorySyncRequest(const MemorySyncRequest& req) {
+    if (serviceManager_ == nullptr) {
+        co_return dispatch::makeErrorResponse(ErrorCode::NotInitialized,
+                                              "memory sync service manager is unavailable");
+    }
+
+    MemorySyncResponse response;
+    switch (req.operation) {
+        case MemorySyncOperation::Publish: {
+            auto published = co_await dispatch::offload_to_worker(
+                serviceManager_, [manager = serviceManager_, key = req.key, value = req.value] {
+                    return manager->publishMemorySync(key, value);
+                });
+            if (!published) {
+                co_return dispatch::makeErrorResponse(published.error().code,
+                                                      published.error().message);
+            }
+            response.published = true;
+            break;
+        }
+        case MemorySyncOperation::Read: {
+            auto value = serviceManager_->readMemorySyncCached(req.key);
+            if (!value) {
+                co_return dispatch::makeErrorResponse(value.error().code, value.error().message);
+            }
+            response.value = std::move(value.value());
+            break;
+        }
+        case MemorySyncOperation::Delete: {
+            auto deleted = co_await dispatch::offload_to_worker(
+                serviceManager_, [manager = serviceManager_, key = req.key] {
+                    return manager->deleteMemorySync(key);
+                });
+            if (!deleted) {
+                co_return dispatch::makeErrorResponse(deleted.error().code,
+                                                      deleted.error().message);
+            }
+            response.published = true;
+            break;
+        }
+        case MemorySyncOperation::Status:
+            break;
+        default:
+            co_return dispatch::makeErrorResponse(ErrorCode::InvalidArgument,
+                                                  "invalid memory sync operation");
+    }
+
+    auto status = serviceManager_->getMemorySyncStatus();
+    if (!status) {
+        co_return dispatch::makeErrorResponse(status.error().code, status.error().message);
+    }
+    response.started = status.value().started;
+    response.records = status.value().records;
+    response.quarantinedRecords = status.value().quarantinedRecords;
+    response.authFailures = status.value().authFailures;
+    response.successfulCycles = status.value().successfulCycles;
+    response.failedCycles = status.value().failedCycles;
+    response.lastSuccessAgeMs = status.value().lastSuccessAgeMs;
+    response.backend = std::move(status.value().backend);
+    response.nodeId = std::move(status.value().nodeId);
+    response.corpusId = std::move(status.value().corpusId);
+    response.corpusEpoch = status.value().corpusEpoch;
+    response.mode = std::move(status.value().mode);
+    response.trustMode = std::move(status.value().trustMode);
+    co_return response;
 }
 
 void RequestDispatcher::SearchAdmissionGuard::release() {

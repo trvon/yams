@@ -169,6 +169,9 @@ template <> struct ResponseOf<CatRequest> {
 template <> struct ResponseOf<MetadataValueCountsRequest> {
     using type = MetadataValueCountsResponse;
 };
+template <> struct ResponseOf<MemorySyncRequest> {
+    using type = MemorySyncResponse;
+};
 
 // Document repair (RepairService)
 template <> struct ResponseOf<RepairRequest> {

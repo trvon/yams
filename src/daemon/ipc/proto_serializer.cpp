@@ -1,4 +1,5 @@
 // Templated, trait-driven serializer to minimize if/else and ease extension
+// Use the in-tree protocol header even when a standalone analyzer omits Meson's include root.
 #include <yams/daemon/ipc/proto_serializer.h>
 
 #include <yams/common/utf8_utils.h>
@@ -25,6 +26,10 @@ namespace daemon {
 
 using Envelope = yams::daemon::ipc::Envelope;
 namespace pb = yams::daemon::ipc;
+
+static_assert(static_cast<int>(pb::MemorySyncRequest_Operation_Operation_MAX) >=
+                  static_cast<int>(MemorySyncOperation::Delete),
+              "protobuf MemorySyncRequest.Operation must preserve the C++ DELETE wire value");
 
 // (bindings inserted later, after ProtoBinding primary template)
 
@@ -160,6 +165,61 @@ template <> struct ProtoBinding<ErrorResponse> {
                                                 env.error().retry().reason()};
         }
         return er;
+    }
+};
+
+template <> struct ProtoBinding<MemorySyncRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kMemorySyncRequest;
+    static void set(Envelope& env, const MemorySyncRequest& request) {
+        auto* out = env.mutable_memory_sync_request();
+        out->set_operation(static_cast<pb::MemorySyncRequest_Operation>(request.operation));
+        out->set_key(yams::common::sanitizeUtf8(request.key));
+        out->set_value(request.value);
+    }
+    static MemorySyncRequest get(const Envelope& env) {
+        const auto& in = env.memory_sync_request();
+        return MemorySyncRequest{static_cast<MemorySyncOperation>(in.operation()), in.key(),
+                                 in.value()};
+    }
+};
+
+template <> struct ProtoBinding<MemorySyncResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kMemorySyncResponse;
+    static void set(Envelope& env, const MemorySyncResponse& response) {
+        auto* out = env.mutable_memory_sync_response();
+        out->set_published(response.published);
+        out->set_started(response.started);
+        out->set_value(response.value);
+        out->set_records(response.records);
+        out->set_quarantined_records(response.quarantinedRecords);
+        out->set_auth_failures(response.authFailures);
+        out->set_successful_cycles(response.successfulCycles);
+        out->set_failed_cycles(response.failedCycles);
+        out->set_last_success_age_ms(response.lastSuccessAgeMs);
+        out->set_backend(yams::common::sanitizeUtf8(response.backend));
+        out->set_node_id(yams::common::sanitizeUtf8(response.nodeId));
+        out->set_corpus_id(yams::common::sanitizeUtf8(response.corpusId));
+        out->set_corpus_epoch(response.corpusEpoch);
+        out->set_mode(yams::common::sanitizeUtf8(response.mode));
+        out->set_trust_mode(yams::common::sanitizeUtf8(response.trustMode));
+    }
+    static MemorySyncResponse get(const Envelope& env) {
+        const auto& in = env.memory_sync_response();
+        return MemorySyncResponse{in.published(),
+                                  in.started(),
+                                  in.value(),
+                                  in.records(),
+                                  in.quarantined_records(),
+                                  in.auth_failures(),
+                                  in.successful_cycles(),
+                                  in.failed_cycles(),
+                                  in.last_success_age_ms(),
+                                  in.backend(),
+                                  in.node_id(),
+                                  in.corpus_id(),
+                                  in.corpus_epoch(),
+                                  in.mode(),
+                                  in.trust_mode()};
     }
 };
 
@@ -4367,6 +4427,11 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
             m.payload = Request{std::move(v)};
             break;
         }
+        case Envelope::kMemorySyncRequest: {
+            auto v = ProtoBinding<MemorySyncRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
         case Envelope::kBatchRequest: {
             auto v = ProtoBinding<BatchRequest>::get(env);
             m.payload = Request{std::move(v)};
@@ -4587,6 +4652,11 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
         case Envelope::kMetadataValueCountsResponse: {
             auto v = ProtoBinding<MetadataValueCountsResponse>::get(env);
             m.payload = Response{std::in_place_type<MetadataValueCountsResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kMemorySyncResponse: {
+            auto v = ProtoBinding<MemorySyncResponse>::get(env);
+            m.payload = Response{std::in_place_type<MemorySyncResponse>, std::move(v)};
             break;
         }
         case Envelope::kBatchResponse: {

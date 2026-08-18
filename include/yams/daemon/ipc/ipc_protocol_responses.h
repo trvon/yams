@@ -4930,6 +4930,45 @@ struct RepairResponse {
     }
 };
 
+struct MemorySyncResponse {
+    bool published{false};
+    bool started{false};
+    std::string value;
+    std::uint64_t records{0};
+    std::uint64_t quarantinedRecords{0};
+    std::uint64_t authFailures{0};
+    std::uint64_t successfulCycles{0};
+    std::uint64_t failedCycles{0};
+    std::uint64_t lastSuccessAgeMs{0};
+    std::string backend;
+    std::string nodeId;
+    std::string corpusId;
+    std::uint64_t corpusEpoch{0};
+    std::string mode;
+    std::string trustMode;
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        // Keep the legacy binary field order stable. Protobuf carries the additive
+        // quarantine/auth counters; legacy binary peers observe their default values.
+        ser << published << started << value << records << backend << nodeId;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<MemorySyncResponse> deserialize(Deserializer& deser) {
+        MemorySyncResponse response;
+        YAMS_TRY(ipc_detail::readField(deser, response.published));
+        YAMS_TRY(ipc_detail::readField(deser, response.started));
+        YAMS_TRY(ipc_detail::readField(deser, response.value));
+        YAMS_TRY(ipc_detail::readField(deser, response.records));
+        YAMS_TRY(ipc_detail::readField(deser, response.backend));
+        YAMS_TRY(ipc_detail::readField(deser, response.nodeId));
+        return response;
+    }
+};
+
 // Forward declaration for batch response type
 struct BatchResponse;
 
@@ -4945,7 +4984,7 @@ using Response = std::variant<
     RestoreCollectionResponse, RestoreSnapshotResponse, GraphQueryResponse, GraphExploreResponse,
     GraphSymbolLookupResponse, GraphTraceResponse, GraphImpactResponse, GraphAffectedTestsResponse,
     GraphPathHistoryResponse, GraphRepairResponse, GraphValidateResponse, KgIngestResponse,
-    MetadataValueCountsResponse,
+    MetadataValueCountsResponse, MemorySyncResponse,
     // Batch response (Track B)
     BatchResponse,
     // Streaming events (progress/heartbeats)

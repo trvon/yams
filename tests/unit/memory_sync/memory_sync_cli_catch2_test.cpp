@@ -3,11 +3,13 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <cstring>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include <yams/memory_sync/memory_sync_cli.h>
 #include <yams/memory_sync/memory_sync_config.h>
@@ -20,7 +22,9 @@ namespace {
 std::unique_ptr<MemorySyncService> makeService(const std::filesystem::path& dir) {
     MemorySyncDaemonConfig cfg;
     cfg.enabled = true;
-    cfg.nodeId = "node-a";
+    cfg.nodeId = "123e4567-e89b-42d3-a456-426614174000";
+    cfg.corpusId = "cli-corpus";
+    cfg.corpusEpoch = 1;
     cfg.backend = "filesystem";
     cfg.path = dir.string();
     cfg.syncIntervalMs = 50;
@@ -58,6 +62,29 @@ TEST_CASE("p2p publish/read round-trips a literal value", "[memory-sync][cli]") 
     CHECK(rd.value() == "hello-world");
 }
 
+TEST_CASE("p2p generic keys are isolated from reserved namespaces", "[memory-sync][cli]") {
+    TempDir dir;
+    auto svc = makeService(dir.path);
+
+    for (const std::string_view key :
+         {"document/forged", "embedding/forged", "topology-node/forged", "content-blob/forged"}) {
+        CAPTURE(key);
+        const auto published = publishValue(*svc, key, "forged", /*json=*/false);
+        REQUIRE_FALSE(published.has_value());
+        CHECK(published.error().code == yams::ErrorCode::InvalidArgument);
+    }
+
+    REQUIRE(publishValue(*svc, "folder/item", "user-value", /*json=*/false).has_value());
+    const auto merged = svc->syncOnce();
+    REQUIRE(merged.has_value());
+    CHECK(merged.value().contains("user/folder%2Fitem"));
+    CHECK_FALSE(merged.value().contains("folder/item"));
+
+    const auto read = readValue(*svc, "folder/item", /*json=*/false);
+    REQUIRE(read.has_value());
+    CHECK(read.value() == "user-value");
+}
+
 TEST_CASE("p2p publish reads a @file value", "[memory-sync][cli]") {
     TempDir dir;
     auto svc = makeService(dir.path);
@@ -68,10 +95,10 @@ TEST_CASE("p2p publish reads a @file value", "[memory-sync][cli]") {
         out << "file-bytes";
     }
 
-    auto pub = publishValue(*svc, "blob", "@" + file.string(), /*json=*/false);
+    auto pub = publishValue(*svc, "payload", "@" + file.string(), /*json=*/false);
     REQUIRE(pub.has_value());
 
-    auto rd = readValue(*svc, "blob", /*json=*/false);
+    auto rd = readValue(*svc, "payload", /*json=*/false);
     REQUIRE(rd.has_value());
     CHECK(rd.value() == "file-bytes");
 }
@@ -109,10 +136,12 @@ TEST_CASE("p2p status reports backend + merged record count", "[memory-sync][cli
     CHECK(st.value().find("backend=filesystem") != std::string::npos);
     CHECK(st.value().find("node_id=node-a") != std::string::npos);
     CHECK(st.value().find("records=2") != std::string::npos);
+    CHECK(st.value().find("auth_failures=0") != std::string::npos);
 
     auto stJson = statusSummary(*svc, "filesystem", "node-a", /*json=*/true);
     REQUIRE(stJson.has_value());
     CHECK(stJson.value().find("\"records\": 2") != std::string::npos);
+    CHECK(stJson.value().find("\"auth_failures\": 0") != std::string::npos);
 }
 
 TEST_CASE("p2p read JSON hex-encodes binary bytes", "[memory-sync][cli]") {
@@ -121,7 +150,7 @@ TEST_CASE("p2p read JSON hex-encodes binary bytes", "[memory-sync][cli]") {
 
     // 0xff is invalid UTF-8 and would make nlohmann::json::dump throw if embedded raw.
     const std::vector<std::byte> binary = {std::byte{0xff}, std::byte{0x00}, std::byte{0x7f}};
-    REQUIRE(svc->publish("bin", binary).has_value());
+    REQUIRE(svc->publish("user/bin", binary).has_value());
 
     auto rd = readValue(*svc, "bin", /*json=*/true);
     REQUIRE(rd.has_value());

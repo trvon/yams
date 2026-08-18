@@ -1,5 +1,4 @@
 // ProtoSerializer roundtrip tests: encode → decode for top message types
-#include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -66,6 +65,68 @@ TEST_CASE("ProtoSerializer StatusRequest roundtrip", "[proto][serializer][status
 
     auto decoded = ProtoSerializer::decode_payload(std::span{encoded.value()});
     REQUIRE(decoded.has_value());
+}
+
+TEST_CASE("ProtoSerializer MemorySync request and response preserve binary values",
+          "[proto][serializer][memory-sync]") {
+    MemorySyncRequest request{MemorySyncOperation::Delete, "binary", std::string{"a\0b", 3}};
+    Message requestMessage{};
+    requestMessage.requestId = 90;
+    requestMessage.payload = Request{request};
+
+    auto encodedRequest = ProtoSerializer::encode_payload(requestMessage);
+    REQUIRE(encodedRequest.has_value());
+    auto decodedRequest = ProtoSerializer::decode_payload(std::span{encodedRequest.value()});
+    REQUIRE(decodedRequest.has_value());
+    const auto* roundTrippedRequest =
+        std::get_if<MemorySyncRequest>(&std::get<Request>(decodedRequest.value().payload));
+    REQUIRE(roundTrippedRequest != nullptr);
+    CHECK(roundTrippedRequest->operation == MemorySyncOperation::Delete);
+    CHECK(roundTrippedRequest->key == "binary");
+    CHECK(roundTrippedRequest->value == std::string{"a\0b", 3});
+
+    MemorySyncResponse response;
+    response.published = true;
+    response.started = true;
+    response.value = std::string{"x\0y", 3};
+    response.records = 4;
+    response.quarantinedRecords = 3;
+    response.authFailures = 2;
+    response.successfulCycles = 11;
+    response.failedCycles = 5;
+    response.lastSuccessAgeMs = 250;
+    response.backend = "filesystem";
+    response.nodeId = "node-a";
+    response.corpusId = "corpus-a";
+    response.corpusEpoch = 7;
+    response.mode = "persistent";
+    response.trustMode = "authenticated-writers";
+    Message responseMessage{};
+    responseMessage.requestId = 91;
+    responseMessage.payload = Response{response};
+
+    auto encodedResponse = ProtoSerializer::encode_payload(responseMessage);
+    REQUIRE(encodedResponse.has_value());
+    auto decodedResponse = ProtoSerializer::decode_payload(std::span{encodedResponse.value()});
+    REQUIRE(decodedResponse.has_value());
+    const auto* roundTrippedResponse =
+        std::get_if<MemorySyncResponse>(&std::get<Response>(decodedResponse.value().payload));
+    REQUIRE(roundTrippedResponse != nullptr);
+    CHECK(roundTrippedResponse->published);
+    CHECK(roundTrippedResponse->started);
+    CHECK(roundTrippedResponse->value == std::string{"x\0y", 3});
+    CHECK(roundTrippedResponse->records == 4);
+    CHECK(roundTrippedResponse->quarantinedRecords == 3);
+    CHECK(roundTrippedResponse->authFailures == 2);
+    CHECK(roundTrippedResponse->successfulCycles == 11);
+    CHECK(roundTrippedResponse->failedCycles == 5);
+    CHECK(roundTrippedResponse->lastSuccessAgeMs == 250);
+    CHECK(roundTrippedResponse->backend == "filesystem");
+    CHECK(roundTrippedResponse->nodeId == "node-a");
+    CHECK(roundTrippedResponse->corpusId == "corpus-a");
+    CHECK(roundTrippedResponse->corpusEpoch == 7);
+    CHECK(roundTrippedResponse->mode == "persistent");
+    CHECK(roundTrippedResponse->trustMode == "authenticated-writers");
 }
 
 TEST_CASE("ProtoSerializer GetRequest roundtrip", "[proto][serializer][get]") {

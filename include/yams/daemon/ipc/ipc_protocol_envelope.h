@@ -411,6 +411,8 @@ enum class MessageType : uint8_t {
     // Graph maintenance requests (PBI-009 Phase 4.3)
     GraphRepairRequest = 45,
     GraphValidateRequest = 46,
+    // Lifecycle-owned memory sync operations.
+    MemorySyncRequest = 78,
 
     // Responses
     SearchResponse = 128,
@@ -462,6 +464,7 @@ enum class MessageType : uint8_t {
     // Graph maintenance responses (PBI-009 Phase 4.3)
     GraphRepairResponse = 166,
     GraphValidateResponse = 167,
+    MemorySyncResponse = 183,
     // KG ingest (PBI-093 Phase 2)
     KgIngestRequest = 70,
     KgIngestResponse = 168,
