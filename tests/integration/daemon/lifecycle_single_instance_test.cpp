@@ -2,6 +2,7 @@
 // Validates that two daemons cannot share the same data-dir
 
 #define CATCH_CONFIG_MAIN
+// pi-lens-ignore: fatal error
 #include <spdlog/spdlog.h>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
@@ -61,6 +62,18 @@ bool waitForRepairService(const YamsDaemon& daemon, std::chrono::milliseconds ti
     }
     const auto* serviceManager = daemon.getServiceManager();
     return serviceManager && serviceManager->getRepairServiceShared();
+}
+
+bool waitForActiveConnections(const YamsDaemon& daemon, std::size_t count,
+                              std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (daemon.getState().stats.activeConnections.load(std::memory_order_acquire) >= count) {
+            return true;
+        }
+        std::this_thread::sleep_for(10ms);
+    }
+    return daemon.getState().stats.activeConnections.load(std::memory_order_acquire) >= count;
 }
 
 struct HeldConnection {
@@ -416,6 +429,7 @@ TEST_CASE("Repair lifecycle hysteresis does not leak across daemon instances",
 
         auto firstConnections = openHeldConnections(first.socketPath(), busyThreshold);
         REQUIRE((firstConnections.size() == busyThreshold));
+        REQUIRE(waitForActiveConnections(*first.daemon(), busyThreshold, 5s));
         auto firstRepairService = first.daemon()->getServiceManager()->getRepairServiceShared();
         REQUIRE(firstRepairService);
         firstRepairService->enqueueEmbeddingRepair(repairHashes);
@@ -432,6 +446,7 @@ TEST_CASE("Repair lifecycle hysteresis does not leak across daemon instances",
 
         auto secondConnections = openHeldConnections(second.socketPath(), busyThreshold);
         REQUIRE((secondConnections.size() == busyThreshold));
+        REQUIRE(waitForActiveConnections(*second.daemon(), busyThreshold, 5s));
         auto secondRepairService = second.daemon()->getServiceManager()->getRepairServiceShared();
         REQUIRE(secondRepairService);
         secondRepairService->enqueueEmbeddingRepair(repairHashes);
