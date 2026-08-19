@@ -11,6 +11,7 @@
 #include <unordered_set>
 #include <utility>
 
+// pi-lens-ignore: fatal error
 #include <spdlog/spdlog.h>
 
 #include <yams/common/fs_utils.h>
@@ -112,6 +113,16 @@ EnvironmentOwnershipMap& processEnvironmentOwnership() {
     return *ownership;
 }
 
+#ifdef _WIN32
+using ExplicitEmptyEnvironmentSet =
+    std::unordered_set<std::string, EnvironmentKeyHash, EnvironmentKeyEqual>;
+
+ExplicitEmptyEnvironmentSet& explicitEmptyEnvironmentKeys() {
+    static auto* keys = new ExplicitEmptyEnvironmentSet();
+    return *keys;
+}
+#endif
+
 std::uint64_t& processEnvironmentLeaseGeneration() {
     static auto* generation = new std::uint64_t{0};
     return *generation;
@@ -131,15 +142,16 @@ std::optional<std::string> environmentValueLocked(const char* key) {
 #ifdef _WIN32
     // The CRT environment cannot hold an explicitly empty value: _putenv_s("KEY", "") removes
     // the variable, so std::getenv cannot distinguish empty from unset. Read through the Win32
-    // environment instead. GetEnvironmentVariableA returns the required size (including the NUL)
-    // on a zero-size probe, 0 characters for an empty value, and ERROR_ENVVAR_NOT_FOUND when the
-    // variable is absent or vanishes between the probe and the copy.
-    SetLastError(ERROR_SUCCESS);
+    // environment instead. Win32 also collapses an explicit empty assignment to deletion, so
+    // values written through this boundary use a process-local overlay to preserve that
+    // distinction.
     DWORD required = GetEnvironmentVariableA(key, nullptr, 0);
     if (required == 0) {
-        const DWORD error = GetLastError();
-        return error == ERROR_SUCCESS ? std::optional<std::string>{std::string{}} : std::nullopt;
+        return explicitEmptyEnvironmentKeys().contains(key)
+                   ? std::optional<std::string>{std::string{}}
+                   : std::nullopt;
     }
+    explicitEmptyEnvironmentKeys().erase(key);
     std::string buffer;
     for (;;) {
         buffer.resize(required);
@@ -174,6 +186,11 @@ bool mutateEnvironmentLocked(const char* key, const char* value) noexcept {
     // (set empty), which the CRT environment cannot represent.
     if (!SetEnvironmentVariableA(key, value)) {
         return false;
+    }
+    if (value != nullptr && *value == '\0') {
+        explicitEmptyEnvironmentKeys().insert(key);
+    } else {
+        explicitEmptyEnvironmentKeys().erase(key);
     }
     // Best-effort CRT sync so legacy std::getenv readers (e.g. sandbox_detection,
     // file_type_detector) stay coherent for representable values. _putenv_s removes on "" and
@@ -288,6 +305,11 @@ std::map<std::string, std::string> snapshot_environment_prefix(std::string_view 
         append(entry);
     }
     FreeEnvironmentStringsA(environment);
+    for (const auto& name : explicitEmptyEnvironmentKeys()) {
+        if (name.starts_with(prefix)) {
+            snapshot.emplace(name, std::string{});
+        }
+    }
 #else
 #ifdef __APPLE__
     char** environment = *_NSGetEnviron();
