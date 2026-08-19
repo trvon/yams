@@ -2,6 +2,7 @@
 // Consolidates: SocketServer lifecycle, socket utils, resource pool
 // Covers: IPC infrastructure, socket path resolution, resource lifecycle management
 
+// pi-lens-ignore: fatal error
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
@@ -248,6 +249,37 @@ TEST_CASE("SocketServer: Lifecycle management", "[daemon][components][socket]") 
         REQUIRE((!second)); // Already running
 
         REQUIRE((server.stop()));
+
+        io.stop();
+        io.join();
+        coordinator.stop();
+        coordinator.join();
+    }
+
+    SECTION("Multi-threaded main and proxy accept shutdown is serialized") {
+        WorkCoordinator coordinator;
+        coordinator.start(2);
+        IOCoordinator io(IOCoordinator::Config{.num_threads = 4});
+        io.start();
+
+        auto proxyConfig = config;
+        proxyConfig.proxySocketPath = runtimeDir / "proxy.sock";
+        for (int iteration = 0; iteration < 16; ++iteration) {
+            SocketServer server(proxyConfig, &io, &coordinator, nullptr, &state);
+            auto started = server.start();
+            if (!started) {
+                UNSCOPED_INFO(started.error().message);
+            }
+            if (!started && isPermissionDenied(started)) {
+                SKIP("UNIX domain sockets not permitted on this system");
+            }
+            REQUIRE((started));
+
+            auto firstStop = std::async(std::launch::async, [&server] { return server.stop(); });
+            auto secondStop = std::async(std::launch::async, [&server] { return server.stop(); });
+            REQUIRE((firstStop.get()));
+            REQUIRE((secondStop.get()));
+        }
 
         io.stop();
         io.join();

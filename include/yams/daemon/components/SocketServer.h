@@ -1,10 +1,12 @@
 #pragma once
 
+// pi-lens-ignore: fatal error
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
+#include <boost/asio/strand.hpp>
 #include <yams/core/types.h>
 #include <yams/daemon/components/AdmissionPolicy.h>
 #include <yams/daemon/components/test_hooks.h>
@@ -19,7 +21,6 @@
 #include <mutex>
 #include <optional>
 #include <semaphore>
-#include <thread>
 #include <vector>
 #include <yams/compat/thread_stop_compat.h>
 
@@ -163,7 +164,9 @@ private:
     StateComponent* state_;
     mutable std::mutex dispatcherMutex_;
 
-    // Boost.ASIO components (use IOCoordinator's io_context)
+    // Boost.ASIO components (use IOCoordinator's io_context). All acceptor operations run on
+    // one strand because basic_socket_acceptor is not safe for concurrent shared-object access.
+    std::optional<boost::asio::strand<boost::asio::io_context::executor_type>> acceptorStrand_;
     std::unique_ptr<boost::asio::local::stream_protocol::acceptor> acceptor_;
     std::shared_ptr<AcceptLoopState> acceptLoopState_;
 
@@ -193,6 +196,7 @@ private:
     std::shared_ptr<std::atomic<std::size_t>> writerBudget_;
 
     // Lifecycle state
+    mutable std::mutex lifecycleMutex_;
     std::atomic<bool> running_{false};
     std::atomic<bool> stopping_{false};
 
