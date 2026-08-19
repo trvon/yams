@@ -5131,11 +5131,12 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         REQUIRE(fixture.repo->insertDocument(makeGraphDispatcherDocument(testPath, "hash-test"))
                     .has_value());
 
-        fixture.upsertNode("function:insideSource@" + sourcePath.string(), "insideSource",
+        fixture.upsertNode("function:insideSource@" + sourcePath.generic_string(), "insideSource",
                            "function");
-        fixture.upsertNode("function:insideHeader@" + includePath.string(), "insideHeader",
+        fixture.upsertNode("function:insideHeader@" + includePath.generic_string(), "insideHeader",
                            "function");
-        fixture.upsertNode("function:outsideTest@" + testPath.string(), "outsideTest", "function");
+        fixture.upsertNode("function:outsideTest@" + testPath.generic_string(), "outsideTest",
+                           "function");
 
         GraphQueryRequest firstPage;
         firstPage.listByType = true;

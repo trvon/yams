@@ -3530,9 +3530,7 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'connection-pool'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120,
-    is_parallel: false,
-#Test skips on Windows(Unix domain sockets not supported)
-    should_fail: host_machine.system() == 'windows'
+    is_parallel: false
   )
 
   test('asio_transport_exhaustion', catch2_asio_transport_exhaustion_exe,
