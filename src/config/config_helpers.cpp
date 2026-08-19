@@ -134,9 +134,11 @@ std::optional<std::string> environmentValueLocked(const char* key) {
     // environment instead. GetEnvironmentVariableA returns the required size (including the NUL)
     // on a zero-size probe, 0 characters for an empty value, and ERROR_ENVVAR_NOT_FOUND when the
     // variable is absent or vanishes between the probe and the copy.
+    SetLastError(ERROR_SUCCESS);
     DWORD required = GetEnvironmentVariableA(key, nullptr, 0);
     if (required == 0) {
-        return std::nullopt;
+        const DWORD error = GetLastError();
+        return error == ERROR_SUCCESS ? std::optional<std::string>{std::string{}} : std::nullopt;
     }
     std::string buffer;
     for (;;) {
@@ -436,6 +438,7 @@ void testing_fail_owned_environment_lease_after(std::size_t successfulLeases) no
         std::lock_guard lock(processEnvironmentMutex());
         ownedLeaseFailureCountdown() = successfulLeases;
     } catch (...) {
+        return;
     }
 }
 
@@ -444,6 +447,7 @@ void testing_fail_owned_environment_restore_once() noexcept {
         std::lock_guard lock(processEnvironmentMutex());
         ownedLeaseRestoreFailurePending() = true;
     } catch (...) {
+        return;
     }
 }
 
