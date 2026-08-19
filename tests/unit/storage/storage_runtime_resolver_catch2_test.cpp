@@ -167,6 +167,8 @@ TEST_CASE("Storage runtime resolver preserves explicit HTTP endpoint scheme",
         out << "access_key = \"test-access\"\n";
         out << "secret_key = \"test-secret\"\n";
         out << "use_path_style = true\n";
+        out << "fallback_policy = \"fallback_local_if_configured\"\n";
+        out << "fallback_local_data_dir = \"" << (td.path() / "fallback").string() << "\"\n";
     }
 
     const auto decision =

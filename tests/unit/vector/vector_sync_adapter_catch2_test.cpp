@@ -80,6 +80,11 @@ struct TempDirGuard {
 
 } // namespace
 
+TEST_CASE("vector sync adapter suite supports disabled-vector CI lanes",
+          "[vector][memory-sync][registration]") {
+    SUCCEED("The binary remains valid when behavior cases are intentionally skipped");
+}
+
 TEST_CASE("vector sync adapter converges an embedding from A to B",
           "[vector][memory-sync][exact-scan]") {
     const auto skip = skipReasonIfAny();

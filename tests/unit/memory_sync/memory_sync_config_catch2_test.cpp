@@ -183,7 +183,8 @@ TEST_CASE("authenticated writer manifest produces schema-v4 envelopes",
     REQUIRE(encoded.has_value());
     const auto envelope = nlohmann::json::parse(text(encoded.value()));
     CHECK(envelope.at("schemaVersion") == kAuthenticatedMemoryIndexSchemaVersion);
-    CHECK(envelope.at("signatureAlgorithm") == kMemoryIndexSignatureAlgorithm);
+    CHECK(envelope.at("signatureAlgorithm").get<std::string>() ==
+          std::string(kMemoryIndexSignatureAlgorithm));
     CHECK(envelope.at("signingKeyId") == "writer-v1");
     CHECK(envelope.at("signature").get<std::string>().size() == 128);
 

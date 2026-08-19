@@ -513,8 +513,6 @@ tests/unit/daemon/onnx_model_pool_catch2_test.cpp:129:portability/env-read # rev
 tests/unit/daemon/onnx_plugin_harness_test.cpp:68:portability/env-read # reviewed raw environment read
 tests/unit/daemon/onnx_plugin_harness_test.cpp:286:portability/env-read # reviewed raw environment read
 tests/unit/daemon/onnx_plugin_harness_test.cpp:399:portability/env-read # reviewed raw environment read
-tests/unit/daemon/vector_index_coordinator_coalesce_catch2_test.cpp:69:portability/jthread # reviewed test-only or feature-guarded thread use
-tests/unit/daemon/vector_index_coordinator_coalesce_catch2_test.cpp:87:portability/jthread # reviewed test-only or feature-guarded thread use
 tests/unit/extraction/jsonrpc_client_test.cpp:12:portability/env-read # reviewed raw environment read
 tests/unit/extraction/plugin_process_launcher_test.cpp:45:portability/env-read # reviewed raw environment read
 tests/unit/extraction/plugin_process_launcher_test.cpp:58:portability/env-read # reviewed raw environment read

@@ -14,6 +14,7 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/use_future.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <yams/compat/thread_stop_compat.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/VectorIndexCoordinator.h>
 
@@ -66,7 +67,7 @@ TEST_CASE("foreign-executor rebuild preserves failure when completion wins the r
         completionObservedDuringAdmission.store(coord.testing_rebuildEpoch() == 1u,
                                                 std::memory_order_release);
     });
-    std::jthread coordinatorRunner([&] { coordinatorIo.run(); });
+    yams::compat::jthread coordinatorRunner([&] { coordinatorIo.run(); });
 
     boost::asio::io_context callerIo;
     auto future = boost::asio::co_spawn(callerIo, coord.requestRebuild(RebuildReason::Manual),
@@ -84,7 +85,7 @@ TEST_CASE("requestRebuildBlocking propagates rebuild failure", "[coordinator][re
     boost::asio::io_context io;
     const auto work = boost::asio::make_work_guard(io);
     VectorIndexCoordinator coord(io.get_executor(), nullptr, nullptr);
-    std::jthread runner([&] { io.run(); });
+    yams::compat::jthread runner([&] { io.run(); });
 
     const auto result = coord.requestRebuildBlocking(RebuildReason::EmbeddingBatch);
     REQUIRE_FALSE(result.has_value());
