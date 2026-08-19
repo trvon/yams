@@ -37,7 +37,7 @@ std::filesystem::path tempDbPath(const char* prefix) {
 
 struct KGFixture {
     explicit KGFixture(const char* prefix) : dbPath(tempDbPath(prefix)) {
-        auto result = makeSqliteKnowledgeGraphStore(dbPath);
+        auto result = makeSqliteKnowledgeGraphStore(dbPath.string());
         REQUIRE(result.has_value());
         store = std::move(result.value());
     }

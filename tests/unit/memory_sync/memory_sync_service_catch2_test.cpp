@@ -13,6 +13,7 @@
 #include <thread>
 #include <vector>
 
+#include <yams/compat/thread_stop_compat.h>
 #include <yams/memory_sync/memory_sync_service.h>
 #include <yams/storage/storage_backend.h>
 
@@ -439,7 +440,7 @@ TEST_CASE("MemorySyncService concurrent lifecycle and status calls remain race-f
     TempDirGuard tmp;
     MemorySyncService service{makeBackend(tmp.path), MemorySyncConfig{"A", 10}};
     std::atomic<std::uint32_t> lifecycleFailures{0};
-    std::vector<std::jthread> callers;
+    std::vector<yams::compat::jthread> callers;
     for (int thread = 0; thread < 6; ++thread) {
         callers.emplace_back([&, thread] {
             for (int iteration = 0; iteration < 50; ++iteration) {

@@ -520,7 +520,6 @@ tests/unit/extraction/plugin_process_minimal_test.cpp:10:portability/env-read # 
 tests/unit/extraction/plugin_process_minimal_test.cpp:34:portability/env-read # reviewed raw environment read
 tests/unit/extraction/plugin_process_minimal_test.cpp:58:portability/env-read # reviewed raw environment read
 tests/unit/extraction/plugin_process_test.cpp:82:portability/env-read # reviewed raw environment read
-tests/unit/memory_sync/memory_sync_service_catch2_test.cpp:442:portability/jthread # reviewed test-only or feature-guarded thread use
 tests/unit/metadata/connection_pool_catch2_test.cpp:25:portability/env-read # reviewed raw environment read
 tests/unit/metadata/corpus_stats_catch2_test.cpp:43:portability/env-read # reviewed raw environment read
 tests/unit/metadata/database_catch2_test.cpp:21:portability/env-read # reviewed raw environment read
