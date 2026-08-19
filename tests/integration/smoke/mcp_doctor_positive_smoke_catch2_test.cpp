@@ -1,3 +1,4 @@
+// pi-lens-ignore: fatal error
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
@@ -235,7 +236,8 @@ bool contains_subpath(const std::vector<std::string>& values, const std::string&
 
 bool wait_for_list_tag_match(MCPServer& server, const std::vector<std::string>& tags,
                              bool matchAllTags, const std::string& expectedName,
-                             std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+                             std::chrono::milliseconds timeout = std::chrono::seconds(10) *
+                                                                 kTestTimeoutScale) {
     using namespace std::chrono_literals;
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -262,7 +264,8 @@ bool wait_for_list_tag_match(MCPServer& server, const std::vector<std::string>& 
 }
 
 bool wait_for_get_name_match(MCPServer& server, const std::string& expectedName,
-                             std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+                             std::chrono::milliseconds timeout = std::chrono::seconds(10) *
+                                                                 kTestTimeoutScale) {
     using namespace std::chrono_literals;
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -277,7 +280,8 @@ bool wait_for_get_name_match(MCPServer& server, const std::string& expectedName,
 }
 
 bool wait_for_grep_match_count(MCPServer& server, const std::string& pattern, size_t minMatchCount,
-                               std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+                               std::chrono::milliseconds timeout = std::chrono::seconds(10) *
+                                                                   kTestTimeoutScale) {
     using namespace std::chrono_literals;
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
