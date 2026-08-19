@@ -14,28 +14,28 @@ fi
 
 shopt -s nullglob || true
 if [[ "${GIT_REF:-}" == refs/tags/* ]]; then
-  if compgen -G "${REPO_DIR}/${BUILD_DIR}/*.deb" > /dev/null; then
+  if compgen -G "${REPO_DIR}/${BUILD_DIR}/*.deb" >/dev/null; then
     for f in "${REPO_DIR}/${BUILD_DIR}"/*.deb; do cp -v "$f" "${ART_DIR}/"; done
   fi
-  if compgen -G "${REPO_DIR}/${BUILD_DIR}/*.rpm" > /dev/null; then
+  if compgen -G "${REPO_DIR}/${BUILD_DIR}/*.rpm" >/dev/null; then
     for f in "${REPO_DIR}/${BUILD_DIR}"/*.rpm; do cp -v "$f" "${ART_DIR}/"; done
   fi
-  if ! compgen -G "${ART_DIR}/*" > /dev/null; then
+  if ! compgen -G "${ART_DIR}/*" >/dev/null; then
     for f in "${REPO_DIR}/${BUILD_DIR}"/yams-*-linux-x86_64.tar.gz; do cp -v "$f" "${ART_DIR}/"; done
   fi
 else
   for f in "${REPO_DIR}/${BUILD_DIR}"/yams-*-linux-x86_64.tar.gz; do cp -v "$f" "${ART_DIR}/"; done
 fi
 
-if compgen -G "${ART_DIR}/*.tar.gz" > /dev/null; then
+if compgen -G "${ART_DIR}/*.tar.gz" >/dev/null; then
   TARBALL=$(ls -1 "${ART_DIR}"/*.tar.gz | head -1)
   cp -v "$TARBALL" "${ART_DIR}/yams.tar.gz"
 fi
-if compgen -G "${ART_DIR}/*.deb" > /dev/null; then
+if compgen -G "${ART_DIR}/*.deb" >/dev/null; then
   DEB=$(ls -1 "${ART_DIR}"/*.deb | head -1)
   cp -v "$DEB" "${ART_DIR}/yams.deb"
 fi
-if compgen -G "${ART_DIR}/*.rpm" > /dev/null; then
+if compgen -G "${ART_DIR}/*.rpm" >/dev/null; then
   RPM=$(ls -1 "${ART_DIR}"/*.rpm | head -1)
   cp -v "$RPM" "${ART_DIR}/yams.rpm"
 fi
@@ -102,7 +102,7 @@ fi
 
 for f in yams.deb yams.rpm meson-logs.tar.gz testlog.txt meson-log.txt compile_commands.json; do
   if [ ! -f "${ART_DIR}/${f}" ]; then
-    echo "Not produced in this build." > "${ART_DIR}/${f}"
+    echo "Not produced in this build." >"${ART_DIR}/${f}"
   fi
 done
 
