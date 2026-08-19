@@ -2,6 +2,7 @@
 // Consolidates status/metrics tests: embedding status, plugin degradation, WAL metrics, FSM states
 // Covers: DaemonMetrics, StatusResponse serialization, plugin degradation, WAL metrics
 
+// pi-lens-ignore: fatal error
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 

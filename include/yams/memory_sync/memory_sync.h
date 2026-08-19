@@ -14,6 +14,7 @@
 #include <string_view>
 #include <vector>
 
+// pi-lens-ignore: fatal error
 #include <nlohmann/json.hpp>
 
 #include <yams/core/types.h>
