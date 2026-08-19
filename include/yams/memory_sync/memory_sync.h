@@ -586,7 +586,7 @@ private:
     }
 
     static std::string acknowledgementKey(std::string_view operationId, std::string_view peerId) {
-        return "ack/" + std::string(operationId) + "/" + std::string(peerId);
+        return "ack/" + escapeKeySegment(operationId) + "/" + escapeKeySegment(peerId);
     }
 
     static std::string blobKey(std::string_view hash) {

@@ -472,6 +472,9 @@ TEST_CASE("MemorySyncLoop garbage collects tombstones only after every configure
     REQUIRE(writer.publish("deleted-key", bytes("value")).has_value());
     REQUIRE(writer.erase("deleted-key").has_value());
     REQUIRE(peer.sync().has_value());
+    const auto peerAck = fixture.backend.exists("ack/writer%3A2/peer");
+    REQUIRE(peerAck.has_value());
+    CHECK(peerAck.value());
     REQUIRE(writer.sync().has_value());
     const auto collected =
         writer.collectTombstoneGarbage(std::numeric_limits<std::uint64_t>::max());
