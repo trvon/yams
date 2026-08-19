@@ -58,26 +58,21 @@ if [ "$(find "${ART_DIR}" -type f | wc -l | tr -d ' ')" -eq 0 ]; then
       bash "${REPO_DIR}/scripts/prune-runtime-install.sh" "${PRUNE_ROOT}"
     fi
 
-    TMP_STAGE_ROOT=$(mktemp -d)
-    trap 'rm -rf "${TMP_STAGE_ROOT}"' EXIT
     PREFIX_REL="${PRUNE_ROOT#"${STAGE_ROOT}/"}"
-    RUNTIME_ROOT="${TMP_STAGE_ROOT}/${PREFIX_REL}"
-    mkdir -p "${RUNTIME_ROOT}"
+    RUNTIME_PATHS=()
 
-    copy_dir_if_present() {
+    add_dir_if_present() {
       local rel="$1"
       if [ -d "${PRUNE_ROOT}/${rel}" ]; then
-        mkdir -p "$(dirname "${RUNTIME_ROOT}/${rel}")"
-        cp -a "${PRUNE_ROOT}/${rel}" "${RUNTIME_ROOT}/${rel}"
+        RUNTIME_PATHS+=("${PREFIX_REL}/${rel}")
       fi
     }
 
-    copy_runtime_libs() {
+    add_runtime_libs() {
       local libdir="$1"
       [ -d "${PRUNE_ROOT}/${libdir}" ] || return 0
       while IFS= read -r -d '' path; do
-        mkdir -p "${RUNTIME_ROOT}/${libdir}"
-        cp -a "$path" "${RUNTIME_ROOT}/${libdir}/"
+        RUNTIME_PATHS+=("${path#"${STAGE_ROOT}/"}")
       done < <(
         find "${PRUNE_ROOT}/${libdir}" -maxdepth 1 -type f \
           \( -name 'libyams*.so' -o -name 'libyams*.so.*' -o -name 'libyams*.dylib' \) \
@@ -85,17 +80,21 @@ if [ "$(find "${ART_DIR}" -type f | wc -l | tr -d ' ')" -eq 0 ]; then
       )
     }
 
-    copy_dir_if_present bin
-    copy_dir_if_present share/yams
-    copy_dir_if_present lib/yams/plugins
-    copy_dir_if_present lib64/yams/plugins
-    copy_runtime_libs lib
-    copy_runtime_libs lib64
+    add_dir_if_present bin
+    add_dir_if_present share/yams
+    add_dir_if_present lib/yams/plugins
+    add_dir_if_present lib64/yams/plugins
+    add_runtime_libs lib
+    add_runtime_libs lib64
 
-    tar -C "${TMP_STAGE_ROOT}" -czf "${ART_DIR}/yams.tar.gz" .
-    rm -rf "${TMP_STAGE_ROOT}"
-    trap - EXIT
-    ls -l "${ART_DIR}" || true
+    if [ "${#RUNTIME_PATHS[@]}" -gt 0 ]; then
+      # Archive directly from the staged install. Copying the runtime tree first can
+      # exhaust constrained SourceHut workers because plugins temporarily occupy twice the space.
+      tar -C "${STAGE_ROOT}" -czf "${ART_DIR}/yams.tar.gz" "${RUNTIME_PATHS[@]}"
+      ls -l "${ART_DIR}" || true
+    else
+      echo "WARNING: No runtime files found under ${PRUNE_ROOT}" >&2
+    fi
   else
     echo "WARNING: Stage dir ${STAGE_ROOT} missing; no artifacts to publish" >&2
   fi
