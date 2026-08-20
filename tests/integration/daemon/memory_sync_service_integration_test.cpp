@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright 2026 YAMS Contributors
 
+// pi-lens-ignore: fatal error
 #include <nlohmann/json.hpp>
 #include <catch2/catch_test_macros.hpp>
 
@@ -29,6 +30,16 @@
 using namespace std::chrono_literals;
 
 namespace {
+
+#ifndef YAMS_TEST_TIMEOUT_SCALE
+#define YAMS_TEST_TIMEOUT_SCALE 1
+#endif
+constexpr int kTestTimeoutScale = YAMS_TEST_TIMEOUT_SCALE;
+
+template <typename Rep, typename Period>
+constexpr auto scaledTimeout(std::chrono::duration<Rep, Period> timeout) {
+    return timeout * kTestTimeoutScale;
+}
 
 std::vector<std::byte> bytes(std::string_view value) {
     std::vector<std::byte> result(value.size());
@@ -159,7 +170,7 @@ sync_interval_ms = 25
         yams::memory_sync::MemorySyncConfig{"peer-node", 25, "integration-corpus", 1}};
     REQUIRE(peer.publish("convergence-key", bytes("from-peer")).has_value());
 
-    const auto deadline = std::chrono::steady_clock::now() + 3s;
+    const auto deadline = std::chrono::steady_clock::now() + scaledTimeout(3s);
     while (!daemonSync->testingHasMergedRecord("convergence-key") &&
            std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(10ms);
@@ -174,7 +185,7 @@ sync_interval_ms = 25
     const auto peerBlobHash = digest(peerBlob);
     REQUIRE(peer.publish("content-blob/" + peerBlobHash, peerBlob).has_value());
     bool peerBlobApplied = false;
-    const auto blobDeadline = std::chrono::steady_clock::now() + 3s;
+    const auto blobDeadline = std::chrono::steady_clock::now() + scaledTimeout(3s);
     while (!peerBlobApplied && std::chrono::steady_clock::now() < blobDeadline) {
         const auto exists = contentStore->exists(peerBlobHash);
         REQUIRE(exists.has_value());
@@ -208,7 +219,7 @@ sync_interval_ms = 25
     auto repository = serviceManager->getMetadataRepo();
     REQUIRE(repository != nullptr);
     std::optional<yams::metadata::DocumentInfo> replicated;
-    const auto applyDeadline = std::chrono::steady_clock::now() + 3s;
+    const auto applyDeadline = std::chrono::steady_clock::now() + scaledTimeout(3s);
     while (!replicated && std::chrono::steady_clock::now() < applyDeadline) {
         auto found = repository->getDocumentByHash(std::string(kDocumentHash));
         REQUIRE(found.has_value());
@@ -271,7 +282,7 @@ sync_interval_ms = 25
     bool blobPublished = false;
     bool topologyNodePublished = false;
     bool topologyEdgePublished = false;
-    const auto backfillDeadline = std::chrono::steady_clock::now() + 8s;
+    const auto backfillDeadline = std::chrono::steady_clock::now() + scaledTimeout(8s);
     while ((!documentPublished || !blobPublished || !topologyNodePublished ||
             !topologyEdgePublished) &&
            std::chrono::steady_clock::now() < backfillDeadline) {
@@ -296,7 +307,7 @@ sync_interval_ms = 25
     REQUIRE(peer.erase("content-blob/" + peerBlobHash, peerBlobHash).has_value());
     bool documentDeleted = false;
     bool blobDeleted = false;
-    const auto deleteDeadline = std::chrono::steady_clock::now() + 3s;
+    const auto deleteDeadline = std::chrono::steady_clock::now() + scaledTimeout(3s);
     while ((!documentDeleted || !blobDeleted) &&
            std::chrono::steady_clock::now() < deleteDeadline) {
         auto found = repository->getDocumentByHash(std::string(kDocumentHash));
@@ -740,7 +751,7 @@ auto_repair = false
         makeFilesystemBackend(sessionPath),
         yams::memory_sync::MemorySyncConfig{"peer-session", 25, "temporary-integration-corpus", 1}};
     REQUIRE(sameSession.publish("temporary-key", bytes("same-session")).has_value());
-    const auto convergenceDeadline = std::chrono::steady_clock::now() + 3s;
+    const auto convergenceDeadline = std::chrono::steady_clock::now() + scaledTimeout(3s);
     while (!daemonSync->testingHasMergedRecord("temporary-key") &&
            std::chrono::steady_clock::now() < convergenceDeadline) {
         std::this_thread::sleep_for(10ms);
