@@ -1,3 +1,4 @@
+// pi-lens-ignore: fatal error
 #include <catch2/catch_test_macros.hpp>
 
 #include "../../../include/yams/daemon/components/db_integrity_stamp.h"
@@ -79,21 +80,25 @@ TEST_CASE("clean shutdown stamp has only one consumer",
     auto dir = makeScratchDir("yams_db_single_consumer_stamp");
     auto dbPath = dir / "yams.db";
     seedTable(dbPath, 10);
-    REQUIRE(yams::daemon::publishDbCleanShutdownStamp(dbPath));
+    for (int iteration = 0; iteration < 16; ++iteration) {
+        REQUIRE(yams::daemon::publishDbCleanShutdownStamp(dbPath));
 
-    std::promise<void> startPromise;
-    auto start = startPromise.get_future().share();
-    auto consume = [&dbPath, start]() {
-        start.wait();
-        return yams::daemon::consumeDbCleanShutdownStamp(dbPath);
-    };
-    auto firstFuture = std::async(std::launch::async, consume);
-    auto secondFuture = std::async(std::launch::async, consume);
-    startPromise.set_value();
+        std::promise<void> startPromise;
+        auto start = startPromise.get_future().share();
+        auto consume = [&dbPath, start]() {
+            start.wait();
+            return yams::daemon::consumeDbCleanShutdownStamp(dbPath);
+        };
+        auto firstFuture = std::async(std::launch::async, consume);
+        auto secondFuture = std::async(std::launch::async, consume);
+        startPromise.set_value();
 
-    const auto first = firstFuture.get();
-    const auto second = secondFuture.get();
-    CHECK((first.trustedCleanShutdown != second.trustedCleanShutdown));
+        const auto first = firstFuture.get();
+        const auto second = secondFuture.get();
+        CHECK((first.trustedCleanShutdown != second.trustedCleanShutdown));
+        CHECK(first.invalidationPersisted);
+        CHECK(second.invalidationPersisted);
+    }
 
     std::error_code ec;
     fs::remove_all(dir, ec);

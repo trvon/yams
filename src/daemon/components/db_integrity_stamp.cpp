@@ -568,14 +568,10 @@ DbIntegrityStampDecision consumeDbCleanShutdownStamp(const std::string& dbPathSt
     }
 
     const auto record = readStamp(claimedStamp.path);
-    const auto invalidated = replaceAtomically(stampPath, serializeRecord(kInProgressState));
-    decision.invalidationPersisted = invalidated.has_value();
-    if (!decision.invalidationPersisted) {
-        decision.reason = "could not persist in-progress stamp";
-        std::error_code removeEc;
-        removePath(claimedStamp.path, removeEc);
-        return decision;
-    }
+    // The atomic rename is the single-consumer claim and the durable invalidation. Recreating an
+    // in-progress stamp at the canonical path would let another consumer claim that marker and
+    // race this consumer, causing both to reject an otherwise valid clean-shutdown proof.
+    decision.invalidationPersisted = true;
 
     std::error_code sidecarEc;
     decision.sidecarPresent = sqliteSidecarExists(dbPathString, sidecarEc);
