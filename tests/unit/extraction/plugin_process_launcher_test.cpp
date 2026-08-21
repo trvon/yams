@@ -9,6 +9,7 @@
  * it indicates a bug in the process spawning or I/O handling.
  */
 
+// pi-lens-ignore: fatal error
 #include <yams/extraction/plugin_process.hpp>
 
 #include <nlohmann/json.hpp>
@@ -380,24 +381,36 @@ TEST_CASE("PluginProcess launcher I/O timing", "[extraction][plugin][launcher]")
             json request = {{"jsonrpc", "2.0"}, {"id", i}, {"method", "handshake.manifest"}};
 
             process.write_stdin(to_bytes(request.dump() + "\n"));
-            std::this_thread::sleep_for(std::chrono::milliseconds{100});
 
-            auto data = process.read_stdout();
-            INFO("Request " << i << ": buffer size = " << data.size()
-                            << ", read_pos = " << read_pos);
+            // Poll for a complete response line instead of relying on a fixed sleep: under
+            // parallel CI load the plugin process can be starved past 100ms, leaving only a
+            // partial line (no '\n') so read_pos never advances and later requests parse the
+            // wrong response. Bounded deadline keeps the test deterministic and fast on the
+            // happy path.
+            bool gotLine = false;
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{5};
+            while (std::chrono::steady_clock::now() < deadline) {
+                auto data = process.read_stdout();
+                INFO("Request " << i << ": buffer size = " << data.size()
+                                << ", read_pos = " << read_pos);
+                if (data.size() > read_pos) {
+                    std::string_view remaining{
+                        reinterpret_cast<const char*>(data.data() + read_pos),
+                        data.size() - read_pos};
+                    size_t newline = remaining.find('\n');
+                    if (newline != std::string_view::npos) {
+                        std::string line{remaining.substr(0, newline)};
+                        read_pos += newline + 1;
 
-            if (data.size() > read_pos) {
-                std::string_view remaining{reinterpret_cast<const char*>(data.data() + read_pos),
-                                           data.size() - read_pos};
-                size_t newline = remaining.find('\n');
-                if (newline != std::string_view::npos) {
-                    std::string line{remaining.substr(0, newline)};
-                    read_pos += newline + 1;
-
-                    auto parsed = json::parse(line);
-                    CHECK((parsed["id"] == i));
+                        auto parsed = json::parse(line);
+                        CHECK((parsed["id"] == i));
+                        gotLine = true;
+                        break;
+                    }
                 }
+                std::this_thread::sleep_for(std::chrono::milliseconds{20});
             }
+            REQUIRE(gotLine);
         }
 
         process.terminate();
