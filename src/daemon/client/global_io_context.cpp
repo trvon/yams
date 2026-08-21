@@ -1,11 +1,12 @@
+#define YAMS_DAEMON_TEST_HOOKS_IMPL 1
 #include <algorithm>
-#include <array>
 #include <atomic>
 #include <cstdio>
 #include <memory>
 #include <new> // IWYU pragma: keep — placement new below constructs private GlobalIOContext
 #include <thread>
 
+// pi-lens-ignore: fatal error
 #include <boost/asio.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 
@@ -15,6 +16,7 @@
 #include <yams/daemon/client/asio_connection.h>
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/global_io_context.h>
+#undef YAMS_DAEMON_TEST_HOOKS_IMPL
 #include <yams/daemon/components/TuneAdvisor.h>
 
 namespace {
@@ -337,6 +339,14 @@ bool GlobalIOContext::is_destroyed() noexcept {
     }
     return g_global_io_context_ptr->destroyed_.load(std::memory_order_acquire);
 }
+
+#if YAMS_DAEMON_TEST_HOOKS_ENABLED
+void GlobalIOContext::testing_set_destroyed(bool destroyed) noexcept {
+    if (g_global_io_context_ptr) {
+        g_global_io_context_ptr->destroyed_.store(destroyed, std::memory_order_release);
+    }
+}
+#endif
 
 GlobalIOContext::~GlobalIOContext() noexcept {
     // Mark as destroyed FIRST to prevent restart() from trying to lock mutex

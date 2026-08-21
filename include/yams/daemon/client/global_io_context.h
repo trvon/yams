@@ -6,9 +6,11 @@
 #include <shared_mutex>
 #include <thread>
 #include <vector>
+// pi-lens-ignore: fatal error
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 #include <boost/asio/io_context.hpp>
+#include <yams/daemon/components/test_hooks.h>
 
 namespace yams::daemon {
 
@@ -37,6 +39,10 @@ public:
 
     /// Returns true if the singleton is being/has been destroyed (static destruction in progress)
     static bool is_destroyed() noexcept;
+
+#if YAMS_DAEMON_TEST_HOOKS_ENABLED
+    YAMS_DAEMON_TEST_HOOK static void testing_set_destroyed(bool destroyed) noexcept;
+#endif
 
 private:
     friend class GlobalIOContextInitializer;

@@ -1,5 +1,6 @@
 // AsioConnectionPool unit tests for stale socket detection
 
+// pi-lens-ignore: fatal error
 #include <catch2/catch_test_macros.hpp>
 
 #include <boost/asio/co_spawn.hpp>
@@ -158,6 +159,39 @@ TEST_CASE("AsioConnection close does not hang when its executor is already stopp
     }
 
     closeThread.join();
+    CHECK_FALSE(conn->socket);
+}
+
+TEST_CASE("AsioConnection bypasses a blocked strand during global teardown",
+          "[daemon][connection-pool][strand][shutdown][unit]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    TransportOptions opts;
+    auto conn = std::make_shared<AsioConnection>(opts);
+    conn->socket = std::make_unique<AsioConnection::socket_t>(conn->strand);
+    boost::system::error_code ec;
+    conn->socket->open(boost::asio::local::stream_protocol(), ec);
+    REQUIRE_FALSE(ec);
+
+    std::promise<void> blockerEntered;
+    std::promise<void> releaseBlocker;
+    auto releaseFuture = releaseBlocker.get_future();
+    boost::asio::post(conn->strand, [&] {
+        blockerEntered.set_value();
+        releaseFuture.wait();
+    });
+    REQUIRE(blockerEntered.get_future().wait_for(1s) == std::future_status::ready);
+
+    GlobalIOContext::testing_set_destroyed(true);
+    auto closeFuture = std::async(std::launch::async, [&] { conn->close(); });
+    const bool returnedDuringTeardown = closeFuture.wait_for(100ms) == std::future_status::ready;
+    GlobalIOContext::testing_set_destroyed(false);
+    releaseBlocker.set_value();
+    closeFuture.wait();
+
+    CHECK(returnedDuringTeardown);
     CHECK_FALSE(conn->socket);
 }
 
