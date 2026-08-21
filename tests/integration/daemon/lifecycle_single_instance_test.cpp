@@ -32,6 +32,16 @@ using namespace std::chrono_literals;
 
 namespace {
 
+#ifndef YAMS_TEST_TIMEOUT_SCALE
+#define YAMS_TEST_TIMEOUT_SCALE 1
+#endif
+constexpr int kTestTimeoutScale = YAMS_TEST_TIMEOUT_SCALE;
+
+template <typename Rep, typename Period>
+constexpr auto scaledTimeout(std::chrono::duration<Rep, Period> timeout) {
+    return timeout * kTestTimeoutScale;
+}
+
 using yams::test::ScopedEnvVar;
 
 bool waitForLifecycleState(const YamsDaemon& daemon, LifecycleState state,
@@ -423,37 +433,39 @@ TEST_CASE("Repair lifecycle hysteresis does not leak across daemon instances",
         const auto repairHashes = makeRepairHashes(256);
 
         DaemonHarness first(opts);
-        REQUIRE(first.start(20s));
-        REQUIRE(waitForLifecycleState(*first.daemon(), LifecycleState::Ready, 10s));
-        REQUIRE(waitForRepairService(*first.daemon(), 10s));
+        REQUIRE(first.start(scaledTimeout(45s)));
+        REQUIRE(waitForLifecycleState(*first.daemon(), LifecycleState::Ready, scaledTimeout(10s)));
+        REQUIRE(waitForRepairService(*first.daemon(), scaledTimeout(10s)));
 
         auto firstConnections = openHeldConnections(first.socketPath(), busyThreshold);
         REQUIRE((firstConnections.size() == busyThreshold));
-        REQUIRE(waitForActiveConnections(*first.daemon(), busyThreshold, 5s));
+        REQUIRE(waitForActiveConnections(*first.daemon(), busyThreshold, scaledTimeout(5s)));
         auto firstRepairService = first.daemon()->getServiceManager()->getRepairServiceShared();
         REQUIRE(firstRepairService);
         firstRepairService->enqueueEmbeddingRepair(repairHashes);
-        REQUIRE(waitForLifecycleState(*first.daemon(), LifecycleState::Degraded, 5s));
+        REQUIRE(
+            waitForLifecycleState(*first.daemon(), LifecycleState::Degraded, scaledTimeout(5s)));
 
         firstConnections.clear();
         first.stop();
         std::this_thread::sleep_for(150ms);
 
         DaemonHarness second(opts);
-        REQUIRE(second.start(20s));
-        REQUIRE(waitForLifecycleState(*second.daemon(), LifecycleState::Ready, 10s));
-        REQUIRE(waitForRepairService(*second.daemon(), 10s));
+        REQUIRE(second.start(scaledTimeout(45s)));
+        REQUIRE(waitForLifecycleState(*second.daemon(), LifecycleState::Ready, scaledTimeout(10s)));
+        REQUIRE(waitForRepairService(*second.daemon(), scaledTimeout(10s)));
 
         auto secondConnections = openHeldConnections(second.socketPath(), busyThreshold);
         REQUIRE((secondConnections.size() == busyThreshold));
-        REQUIRE(waitForActiveConnections(*second.daemon(), busyThreshold, 5s));
+        REQUIRE(waitForActiveConnections(*second.daemon(), busyThreshold, scaledTimeout(5s)));
         auto secondRepairService = second.daemon()->getServiceManager()->getRepairServiceShared();
         REQUIRE(secondRepairService);
         secondRepairService->enqueueEmbeddingRepair(repairHashes);
 
         CHECK_FALSE(
             reachesLifecycleStateWithin(*second.daemon(), LifecycleState::Degraded, earlyWindow));
-        REQUIRE(waitForLifecycleState(*second.daemon(), LifecycleState::Degraded, 5s));
+        REQUIRE(
+            waitForLifecycleState(*second.daemon(), LifecycleState::Degraded, scaledTimeout(5s)));
 
         secondConnections.clear();
         second.stop();

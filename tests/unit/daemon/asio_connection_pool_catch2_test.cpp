@@ -177,10 +177,12 @@ TEST_CASE("AsioConnection bypasses a blocked strand during global teardown",
 
     std::promise<void> blockerEntered;
     std::promise<void> releaseBlocker;
+    std::promise<void> blockerExited;
     auto releaseFuture = releaseBlocker.get_future();
     boost::asio::post(conn->strand, [&] {
         blockerEntered.set_value();
         releaseFuture.wait();
+        blockerExited.set_value();
     });
     REQUIRE(blockerEntered.get_future().wait_for(1s) == std::future_status::ready);
 
@@ -189,6 +191,9 @@ TEST_CASE("AsioConnection bypasses a blocked strand during global teardown",
     const bool returnedDuringTeardown = closeFuture.wait_for(100ms) == std::future_status::ready;
     GlobalIOContext::testing_set_destroyed(false);
     releaseBlocker.set_value();
+    // The strand task holds a reference to releaseFuture; wait until it actually finishes so the
+    // promises below are not destroyed while the io thread is still inside wait().
+    REQUIRE(blockerExited.get_future().wait_for(1s) == std::future_status::ready);
     closeFuture.wait();
 
     CHECK(returnedDuringTeardown);
