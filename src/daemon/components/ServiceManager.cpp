@@ -2487,8 +2487,12 @@ Result<void> ServiceManager::initializeMemorySync(const std::filesystem::path& d
         }
 
         memorySync_ = std::move(service);
-        spdlog::info("[ServiceManager] memory_sync started: backend={} node={}", cfg.backend,
-                     cfg.nodeId);
+        const std::string_view trust =
+            cfg.writerAuthRequired ? "authenticated-writers" : "backend-ACL-trusted";
+        spdlog::info("[ServiceManager] memory_sync started: backend={} mode={} corpus={} epoch={} "
+                     "node={} trust={} sync_interval_ms={} path={}",
+                     cfg.backend, cfg.mode, cfg.corpusId, cfg.corpusEpoch, cfg.nodeId, trust,
+                     cfg.syncIntervalMs, cfg.path);
         return Result<void>();
     } catch (const std::exception& e) {
         return Error{ErrorCode::InternalError,

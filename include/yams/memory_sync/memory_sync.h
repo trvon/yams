@@ -642,6 +642,7 @@ private:
 
     void quarantine(std::string_view key, std::string_view reason) {
         quarantined_[std::string(key)] = std::string(reason);
+        spdlog::debug("[memory_sync] quarantined {}: {}", key, reason);
     }
 
     void recordAuthFailure() noexcept {
