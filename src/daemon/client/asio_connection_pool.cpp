@@ -1,4 +1,5 @@
 #define YAMS_DAEMON_TEST_HOOKS_IMPL 1
+// pi-lens-ignore: fatal error
 #include <yams/daemon/client/asio_connection_pool.h>
 #undef YAMS_DAEMON_TEST_HOOKS_IMPL
 
@@ -123,6 +124,12 @@ async_connect_with_timeout(const TransportOptions& opts,
     if (cs.cancelled() != boost::asio::cancellation_type::none) {
         co_return Error{ErrorCode::OperationCancelled, "Operation cancelled"};
     }
+    // The coroutine's own cancellation slot: binding to it here (instead of the handler's
+    // associated slot, which is not available during async_initiate) lets a terminal
+    // cancellation resume this co_await with operation_aborted instead of destroying the
+    // suspended frame. Without this, cancelling a pending connect leaves the co_spawn future
+    // with no value (broken promise) and future::get() aborts under _GLIBCXX_ASSERTIONS.
+    auto connectCancelSlot = cs.slot();
 
     static constexpr bool trace = false;
     auto completion_executor = co_await this_coro::executor;
@@ -143,8 +150,8 @@ async_connect_with_timeout(const TransportOptions& opts,
 
     auto connect_result = co_await boost::asio::async_initiate<
         decltype(use_awaitable), void(std::exception_ptr, RaceResult)>(
-        [&socket, &endpoint, io_executor, completion_executor,
-         timeout = opts.requestTimeout](auto handler) mutable {
+        [&socket, &endpoint, io_executor, completion_executor, timeout = opts.requestTimeout,
+         connectCancelSlot](auto handler) mutable {
             auto completed = std::make_shared<std::atomic<bool>>(false);
             auto timer = std::make_shared<boost::asio::steady_timer>(io_executor);
             timer->expires_after(timeout);
@@ -153,6 +160,26 @@ async_connect_with_timeout(const TransportOptions& opts,
             auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
             auto completion_exec =
                 boost::asio::get_associated_executor(*handlerPtr, completion_executor);
+
+            // Bind the coroutine's cancellation slot so a terminal cancellation resumes this
+            // co_await with operation_aborted instead of destroying the suspended frame.
+            if (connectCancelSlot.is_connected()) {
+                connectCancelSlot.assign([completed, timer, handlerPtr, completion_exec](
+                                             boost::asio::cancellation_type type) mutable {
+                    if (type == boost::asio::cancellation_type::none) {
+                        return;
+                    }
+                    if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                        timer->cancel();
+                        boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
+                            std::move(h)(
+                                std::exception_ptr{},
+                                RaceResult(std::in_place_index<0>,
+                                           ConnectResult{boost::asio::error::operation_aborted}));
+                        });
+                    }
+                });
+            }
 
             timer->async_wait([completed, handlerPtr,
                                completion_exec](const boost::system::error_code& ec) mutable {
@@ -767,7 +794,15 @@ awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::create_co
                 auto exec = co_await this_coro::executor;
                 boost::asio::steady_timer timer(exec);
                 timer.expires_after(backoff);
-                co_await timer.async_wait(use_awaitable);
+                try {
+                    co_await timer.async_wait(use_awaitable);
+                } catch (const boost::system::system_error& e) {
+                    if (e.code() == boost::asio::error::operation_aborted) {
+                        co_return Error{ErrorCode::SystemShutdown,
+                                        "Connection pool shut down while connecting"};
+                    }
+                    throw;
+                }
                 if (shutdown_.load(std::memory_order_acquire)) {
                     co_return Error{ErrorCode::SystemShutdown,
                                     "Connection pool shut down while connecting"};
@@ -799,7 +834,15 @@ awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::create_co
             auto exec = co_await this_coro::executor;
             boost::asio::steady_timer timer(exec);
             timer.expires_after(backoff);
-            co_await timer.async_wait(use_awaitable);
+            try {
+                co_await timer.async_wait(use_awaitable);
+            } catch (const boost::system::system_error& e) {
+                if (e.code() == boost::asio::error::operation_aborted) {
+                    co_return Error{ErrorCode::SystemShutdown,
+                                    "Connection pool shut down while connecting"};
+                }
+                throw;
+            }
             if (shutdown_.load(std::memory_order_acquire)) {
                 co_return Error{ErrorCode::SystemShutdown,
                                 "Connection pool shut down while connecting"};
