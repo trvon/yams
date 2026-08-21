@@ -229,6 +229,24 @@ public:
         log->add_option("--level", logFilterLevel_,
                         "Filter by log level (trace, debug, info, warn, error)");
         log->callback([this]() { showLog(); });
+
+        // Install/uninstall systemd service (user scope by default when not root)
+        auto* install =
+            daemon->add_subcommand("install", "Install the YAMS daemon as a systemd service");
+        install->add_option("--socket", socketPath_, "Socket path for daemon communication");
+        install->add_option("--data-dir,--storage", dataDir_, "Data directory for daemon storage");
+        install->add_option("--config", startConfigPath_, "Path to daemon config file");
+        install->add_option("--daemon-binary", startDaemonBinary_,
+                            "Path to yams-daemon executable (override)");
+        install->add_flag("--user", installUserScope_,
+                          "Install as a user service (default when running as non-root)");
+        install->callback([this]() { installDaemonService(); });
+
+        auto* uninstall =
+            daemon->add_subcommand("uninstall", "Remove the systemd service and stop it");
+        uninstall->add_flag("--user", installUserScope_,
+                            "Target the user-scope service (default when non-root)");
+        uninstall->callback([this]() { uninstallDaemonService(); });
     }
 
     Result<void> execute() override {
@@ -3747,6 +3765,194 @@ private:
         }
     }
 
+    // ---- systemd service install/uninstall ----
+
+    static bool isRootUser() {
+#if defined(_WIN32)
+        return false;
+#else
+        return geteuid() == 0;
+#endif
+    }
+
+    std::string resolveDaemonBinaryForUnit() const {
+        namespace fs = std::filesystem;
+        if (!startDaemonBinary_.empty()) {
+            return startDaemonBinary_;
+        }
+        // Same candidate resolution as startDaemon: look next to the running CLI binary first.
+        std::string selfExe;
+#if !defined(_WIN32)
+        char buf[PATH_MAX] = {0};
+        ssize_t n = ::readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+        if (n > 0) {
+            buf[n] = '\0';
+            selfExe = buf;
+        }
+#endif
+        if (!selfExe.empty()) {
+            auto cliDir = fs::path(selfExe).parent_path();
+#ifdef _WIN32
+            std::vector<fs::path> candidates = {cliDir / "yams-daemon.exe",
+                                                cliDir.parent_path() / "yams-daemon.exe"};
+#else
+            std::vector<fs::path> candidates = {
+                cliDir / "yams-daemon", cliDir.parent_path() / "yams-daemon",
+                cliDir.parent_path() / "daemon" / "yams-daemon",
+                cliDir.parent_path().parent_path() / "daemon" / "yams-daemon"};
+#endif
+            for (const auto& p : candidates) {
+                std::error_code ec;
+                if (fs::exists(p, ec)) {
+                    return p.string();
+                }
+            }
+        }
+#ifdef _WIN32
+        return "yams-daemon.exe";
+#else
+        return "yams-daemon";
+#endif
+    }
+
+    static std::string shellQuote(const std::string& value) {
+        // Minimal single-quote escaping for the shell command we build below.
+        std::string out;
+        for (const char ch : value) {
+            if (ch == '\'') {
+                out += "'\\''";
+            } else {
+                out.push_back(ch);
+            }
+        }
+        return "'" + out + "'";
+    }
+
+    static std::string systemctlPath() {
+        return "systemctl"; // resolved through PATH by the shell
+    }
+
+    void installDaemonService() {
+        namespace fs = std::filesystem;
+        const bool userScope = installUserScope_ || !isRootUser();
+
+        const std::string binPath = resolveDaemonBinaryForUnit();
+        const std::string socketPath =
+            socketPath_.empty() ? resolveConfiguredSocketPath() : socketPath_;
+        const std::string dataDir = dataDir_.empty() ? cli_->getDataPath().string() : dataDir_;
+        const std::string configPath = startConfigPath_;
+
+        std::string home;
+        if (const auto h = yams::config::getenv_nonempty("HOME")) {
+            home = *h;
+        }
+        const fs::path unitDir =
+            userScope ? (home.empty() ? fs::path(".") / ".config" / "systemd" / "user"
+                                      : fs::path(home) / ".config" / "systemd" / "user")
+                      : fs::path("/etc/systemd/system");
+        const fs::path unitPath = unitDir / "yams-daemon.service";
+
+        std::ostringstream unit;
+        unit << "[Unit]\n"
+             << "Description=YAMS daemon\n"
+             << "After=network-online.target\n"
+             << "Wants=network-online.target\n\n"
+             << "[Service]\n"
+             << "Type=simple\n";
+        if (!configPath.empty()) {
+            unit << "Environment=YAMS_CONFIG=" << configPath << "\n"
+                 << "Environment=YAMS_CONFIG_PATH=" << configPath << "\n";
+        }
+        unit << "Environment=YAMS_DAEMON_SOCKET=" << socketPath << "\n"
+             << "Environment=YAMS_DATA_DIR=" << dataDir << "\n"
+             << "WorkingDirectory=" << dataDir << "\n"
+             << "ExecStart=" << binPath << " --foreground --data-dir " << dataDir << " --socket "
+             << socketPath;
+        if (!configPath.empty()) {
+            unit << " --config " << configPath;
+        }
+        unit << " --log-file " << dataDir << "/daemon.log --log-level info\n"
+             << "Restart=on-failure\n"
+             << "RestartSec=2\n";
+        if (userScope) {
+            unit << "NoNewPrivileges=true\n";
+        } else {
+            unit << "NoNewPrivileges=true\n"
+                 << "PrivateTmp=true\n"
+                 << "ProtectSystem=full\n"
+                 << "ProtectHome=true\n"
+                 << "ProtectKernelTunables=true\n"
+                 << "ProtectControlGroups=true\n"
+                 << "RestrictSUIDSGID=true\n";
+        }
+        unit << "\n[Install]\n"
+             << "WantedBy=" << (userScope ? "default.target" : "multi-user.target") << "\n";
+
+        std::error_code ec;
+        fs::create_directories(unitDir, ec);
+        if (ec) {
+            std::cerr << "[FAIL] Cannot create unit directory " << unitDir.string() << ": "
+                      << ec.message() << "\n";
+            std::exit(1);
+        }
+        {
+            std::ofstream out(unitPath, std::ios::trunc);
+            if (!out) {
+                std::cerr << "[FAIL] Cannot write " << unitPath.string() << "\n";
+                std::exit(1);
+            }
+            out << unit.str();
+        }
+        std::cout << "[OK] Wrote " << unitPath.string() << "\n";
+
+        const std::string ctl = systemctlPath();
+        const std::string scope = userScope ? " --user" : "";
+        const std::string reloadCmd = ctl + scope + " daemon-reload";
+        const std::string enableCmd = ctl + scope + " enable yams-daemon.service";
+        const std::string startCmd = ctl + scope + " start yams-daemon.service";
+        std::cout << "[INFO] Running: " << reloadCmd << "\n";
+        std::cout << "[INFO] Running: " << enableCmd << "\n";
+        std::cout << "[INFO] Running: " << startCmd << "\n";
+        (void)std::system((reloadCmd + " 2>&1").c_str());
+        (void)std::system((enableCmd + " 2>&1").c_str());
+        const int startRc = std::system((startCmd + " 2>&1").c_str());
+        if (startRc == 0) {
+            std::cout << "[OK] yams-daemon.service " << (userScope ? "(user)" : "(system)")
+                      << " enabled and started.\n";
+        } else {
+            std::cout << "[WARN] systemctl start returned " << startRc
+                      << "; review the unit with 'systemctl" << scope
+                      << " status yams-daemon.service' (log file: " << dataDir << "/daemon.log)\n";
+        }
+    }
+
+    void uninstallDaemonService() {
+        namespace fs = std::filesystem;
+        const bool userScope = installUserScope_ || !isRootUser();
+
+        std::string home;
+        if (const auto h = yams::config::getenv_nonempty("HOME")) {
+            home = *h;
+        }
+        const fs::path unitDir =
+            userScope ? (home.empty() ? fs::path(".") / ".config" / "systemd" / "user"
+                                      : fs::path(home) / ".config" / "systemd" / "user")
+                      : fs::path("/etc/systemd/system");
+        const fs::path unitPath = unitDir / "yams-daemon.service";
+
+        const std::string ctl = systemctlPath();
+        const std::string scope = userScope ? " --user" : "";
+        (void)std::system((ctl + scope + " stop yams-daemon.service 2>&1").c_str());
+        (void)std::system((ctl + scope + " disable yams-daemon.service 2>&1").c_str());
+        (void)std::system((ctl + scope + " daemon-reload 2>&1").c_str());
+        std::error_code ec;
+        if (fs::exists(unitPath, ec)) {
+            fs::remove(unitPath, ec);
+        }
+        std::cout << (fs::exists(unitPath, ec) ? "[WARN] Could not remove " : "[OK] Removed ")
+                  << unitPath.string() << "\n";
+    }
+
     // Options (empty = auto-resolve based on environment)
     std::string socketPath_;
     std::string pidFile_;
@@ -3757,6 +3963,7 @@ private:
     // Start-subcommand-only options
     bool startForeground_ = false;
     bool startRestart_ = false;
+    bool installUserScope_ = false; // yams daemon install/uninstall --user
     // --wait removed: start command no longer waits for readiness
     std::string startLogLevel_;
     std::string startConfigPath_;
