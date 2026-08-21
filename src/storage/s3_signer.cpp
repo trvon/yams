@@ -79,6 +79,7 @@ ParsedUrl parseUrl(const std::string& url) {
 }
 
 std::string formatAmzDate(std::string* outShortDate) {
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only test date override, allowlisted.
     if (const char* fixed = std::getenv("YAMS_S3_SIGNER_FIXED_AMZ_DATE")) {
         std::string ts = trimWhitespace(fixed);
         if (ts.size() >= 8) {
@@ -154,8 +155,11 @@ S3Signer::signRequest(CURL* curl, const BackendConfig& config, const std::string
     }
 
     if (accessKey.empty() || secretKey.empty()) {
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only AWS credential fallback, allowlisted.
         const char* ak = std::getenv("AWS_ACCESS_KEY_ID");
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only AWS credential fallback, allowlisted.
         const char* sk = std::getenv("AWS_SECRET_ACCESS_KEY");
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only AWS credential fallback, allowlisted.
         const char* st = std::getenv("AWS_SESSION_TOKEN");
         if (ak)
             accessKey = ak;
