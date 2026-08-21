@@ -1385,6 +1385,11 @@ template <> struct ProtoBinding<StatusResponse> {
             kv->set_key("data_dir");
             kv->set_value(r.dataDir);
         }
+        if (!r.logFile.empty()) {
+            auto* kv = o->add_request_counts();
+            kv->set_key("log_file");
+            kv->set_value(r.logFile);
+        }
         if (!r.metadataDbPath.empty()) {
             auto* kv = o->add_request_counts();
             kv->set_key("metadata_db_path");
@@ -1602,6 +1607,10 @@ template <> struct ProtoBinding<StatusResponse> {
             }
             if (kv.key() == "data_dir") {
                 r.dataDir = kv.value();
+                continue;
+            }
+            if (kv.key() == "log_file") {
+                r.logFile = kv.value();
                 continue;
             }
             if (kv.key() == "metadata_db_path") {

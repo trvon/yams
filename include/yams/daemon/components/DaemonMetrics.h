@@ -239,6 +239,7 @@ struct MetricsSnapshot {
 
     // Resolved data directory
     std::string dataDir;
+    std::string logFile; // live daemon log file path (empty when unknown)
     std::string metadataDbPath;
     std::string vectorDbPath;
 

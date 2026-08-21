@@ -129,6 +129,32 @@ TEST_CASE("ProtoSerializer MemorySync request and response preserve binary value
     CHECK(roundTrippedResponse->trustMode == "authenticated-writers");
 }
 
+TEST_CASE("ProtoSerializer StatusResponse preserves daemon log file path",
+          "[proto][serializer][status][daemon-log]") {
+    yams::daemon::StatusResponse response;
+    response.running = true;
+    response.ready = true;
+    response.version = "0.19.0";
+    response.overallStatus = "ready";
+    response.dataDir = "/tmp/yams-data";
+    response.logFile = "/tmp/yams-test-daemon.log";
+    response.requestsProcessed = 7;
+
+    Message message{};
+    message.requestId = 92;
+    message.payload = Response{response};
+
+    auto encoded = ProtoSerializer::encode_payload(message);
+    REQUIRE(encoded.has_value());
+    auto decoded = ProtoSerializer::decode_payload(std::span{encoded.value()});
+    REQUIRE(decoded.has_value());
+    const auto* roundTripped =
+        std::get_if<yams::daemon::StatusResponse>(&std::get<Response>(decoded.value().payload));
+    REQUIRE(roundTripped != nullptr);
+    CHECK(roundTripped->logFile == "/tmp/yams-test-daemon.log");
+    CHECK(roundTripped->dataDir == "/tmp/yams-data");
+}
+
 TEST_CASE("ProtoSerializer GetRequest roundtrip", "[proto][serializer][get]") {
     GetRequest req{};
     req.hash = "abc123def456";

@@ -615,6 +615,9 @@ public:
     }
     const StateComponent& getState() const { return state_; }
     const std::filesystem::path& getResolvedDataDir() const { return resolvedDataDir_; }
+
+    /// Resolved live daemon log file path (empty when the daemon was not configured with one).
+    const std::filesystem::path& getResolvedLogFilePath() const { return config_.logFile; }
     std::string getMetadataDatabasePath() const {
         auto db = std::atomic_load_explicit(&database_, std::memory_order_acquire);
         return db ? db->path() : std::string{};

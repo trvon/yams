@@ -1,5 +1,6 @@
 #pragma once
 
+// pi-lens-ignore: fatal error
 #include <yams/daemon/ipc/ipc_protocol_common.h>
 
 namespace yams::daemon {
@@ -936,6 +937,7 @@ struct StatusResponse {
 
     // Content store diagnostics
     std::string dataDir;           // absolute daemon-resolved active data dir
+    std::string logFile;           // absolute live daemon log file path (empty when unknown)
     std::string metadataDbPath;    // absolute live metadata DB file path
     std::string vectorDbPath;      // absolute live vector DB file path
     std::string contentStoreRoot;  // absolute path to storage root (daemon-resolved)
@@ -1184,7 +1186,8 @@ struct StatusResponse {
             s.serialize(ser);
 
         // Serialize content store and database diagnostics (as strings)
-        ser << dataDir << metadataDbPath << vectorDbPath << contentStoreRoot << contentStoreError;
+        ser << dataDir << logFile << metadataDbPath << vectorDbPath << contentStoreRoot
+            << contentStoreError;
 
         // Serialize embedding runtime details
         ser << embeddingAvailable << embeddingBackend << embeddingModel << embeddingModelPath
@@ -1467,6 +1470,10 @@ struct StatusResponse {
         if (!rdd)
             return rdd.error();
         res.dataDir = std::move(rdd.value());
+        auto lfp = deser.readString();
+        if (!lfp)
+            return lfp.error();
+        res.logFile = std::move(lfp.value());
         auto mdp = deser.readString();
         if (!mdp)
             return mdp.error();

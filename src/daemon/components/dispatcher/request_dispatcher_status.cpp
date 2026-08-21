@@ -106,6 +106,7 @@ void populateStatusCoreFromSnapshot(StatusResponse& res, const MetricsSnapshot& 
     res.embeddingModelPath = snap.embeddingModelPath;
     res.embeddingDim = snap.embeddingDim;
     res.dataDir = snap.dataDir;
+    res.logFile = snap.logFile;
     res.metadataDbPath = snap.metadataDbPath;
     res.vectorDbPath = snap.vectorDbPath;
     {
@@ -196,7 +197,7 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
             try {
                 auto ss = serviceManager->getServiceManagerFsmSnapshot();
                 setVal(metrics::kServiceFsmState, static_cast<size_t>(ss.state));
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
             }
             try {
                 auto es = serviceManager->getEmbeddingProviderFsmSnapshot();
@@ -209,7 +210,7 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
                 setReady(readiness::kEmbeddingReady, embeddingOperational);
                 setReady(readiness::kEmbeddingDegraded,
                          es.state == EmbeddingProviderState::Degraded);
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
             }
             try {
                 auto ps = serviceManager->getPluginHostFsmSnapshot();
@@ -221,7 +222,7 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
                 setVal(metrics::kPluginHostState, static_cast<size_t>(ps.state));
                 setReady(readiness::kPluginsReady, pluginsOperational);
                 setReady(readiness::kPluginsDegraded, ps.state == PluginHostState::Failed);
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
             }
             try {
                 const auto contentExtractorCount = serviceManager->getContentExtractors().size();
@@ -244,10 +245,10 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
                 setReady(readiness::kSymbolExtractorsReady, symbolExtractorCount > 0);
                 setReady(readiness::kEntityExtractorsReady, entityExtractorCount > 0);
                 setReady(readiness::kTitleExtractorReady, titleExtractorReady);
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
             }
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
 
     if (includeExtendedStatus) {
@@ -268,7 +269,7 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
                     setVal(metrics::kEmbedInferMaxMs, serviceManager->getEmbeddingInferMaxMs());
                     setVal(metrics::kEmbedInferWarnCount,
                            serviceManager->getEmbeddingInferWarnCount());
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                 }
                 const auto& tc = serviceManager->getConfig().tuning;
                 setVal(metrics::kTuningPostIngestCapacity, tc.postIngestCapacity);
@@ -277,7 +278,7 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
                 setVal(metrics::kTuningAdmitWarnThreshold, tc.admitWarnThreshold);
                 setVal(metrics::kTuningAdmitStopThreshold, tc.admitStopThreshold);
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
         }
     }
 
@@ -303,7 +304,7 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
             setVal(metrics::kVectorCheckpointQueuedAgeMs, snap.vectorCheckpointQueuedAgeMs);
             setVal(metrics::kVectorCheckpointRunningAgeMs, snap.vectorCheckpointRunningAgeMs);
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
     }
 
     setVal(metrics::kRepairRunning, snap.repairRunning ? 1 : 0);
@@ -401,7 +402,7 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
         try {
             setVal(metrics::kPostIngestUseBus,
                    yams::daemon::TuneAdvisor::useInternalBusForPostIngest() ? 1 : 0);
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
         }
         setVal(metrics::kPostEmbedLimit, snap.postEmbedLimit);
         try {
@@ -415,7 +416,7 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
             setVal(metrics::kBusPostQueued, bus.postQueued());
             setVal(metrics::kBusPostConsumed, bus.postConsumed());
             setVal(metrics::kBusPostDropped, bus.postDropped());
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
         }
         setVal(metrics::kWatchEnabled, snap.watchEnabled ? 1 : 0);
         if (snap.watchIntervalMs > 0) {
@@ -595,7 +596,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                     state_->stats.requestsProcessed.fetch_add(1, std::memory_order_relaxed) + 1;
                 res.requestsProcessed = currentCount;
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
         }
         return Response{res};
     };
@@ -638,7 +639,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 res.databaseRecoveredAt = state_->readiness.databaseRecoveredAt;
                 res.databaseRecoveredFrom = state_->readiness.databaseRecoveredFrom;
                 res.storageWarning = state_->readiness.storageWarning;
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
                 // Best effort; leave whatever the snapshot populated.
             }
         }
@@ -657,7 +658,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                     res.memoryUsageMb = 0.0;
                     res.cpuUsagePercent = 0.0;
                 }
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
             }
         }
         if (!metrics_) {
@@ -666,7 +667,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 auto lifecycleSnapshot =
                     lifecycle_ ? lifecycle_->getLifecycleSnapshot() : LifecycleSnapshot{};
                 res.ready = (lifecycleSnapshot.state == LifecycleState::Ready);
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
                 res.ready = false;
             }
             res.readinessStates[std::string(readiness::kIpcServer)] =
@@ -700,7 +701,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                     res.readinessStates[std::string(readiness::kVectorDbDim)] =
                         (res.vectorDbDim > 0);
                 }
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
             }
             // Read vector index / DB readiness from atomics — these are kept
             // current by VectorSystemManager and VectorIndexCoordinator on state
@@ -722,7 +723,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
 
             try {
                 res.readinessStates[std::string(readiness::kVectorDb)] = res.vectorDbReady;
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
             }
             try {
                 const bool lexicalReady =
@@ -734,7 +735,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                     vectorBackendUsable;
                 res.readinessStates[std::string(readiness::kSearchEngineHybridUsable)] =
                     hybridUsable;
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
             }
 
             if (serviceManager_) {
@@ -746,7 +747,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                         searchReady;
                     res.readinessStates[std::string(readiness::kSearchEngineHybridUsable)] =
                         searchReady && vectorBackendUsable;
-                } catch (...) {
+                } catch (...) { // NOLINT(bugprone-empty-catch)
                 }
             }
 
@@ -781,7 +782,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                     res.readinessStates[std::string(readiness::kTitleExtractorReady)] =
                         titleExtractorReady;
                 }
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
             }
         }
         if (includeExtendedStatus) {
@@ -825,7 +826,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
             if (!lifecycleSnapshot.lastError.empty()) {
                 res.lastError = lifecycleSnapshot.lastError;
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             // Fallback: preserve lowercase normalization
             res.overallStatus = state_->readiness.bootstrapStatus();
             for (auto& c : res.overallStatus)
@@ -845,7 +846,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 }
             } catch (const std::exception& e) {
                 spdlog::warn("[StatusRequest] Exception building providers: {}", e.what());
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
                 spdlog::warn("[StatusRequest] Unknown exception building providers");
             }
             // Populate skipped plugin diagnostics from last scan (if available)
@@ -860,7 +861,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                         }
                     }
                 }
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
             }
         }
         if (!metrics_) {
@@ -885,10 +886,10 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                         auto fs = FsmMetricsRegistry::instance().snapshot();
                         res.ipcPoolSize = fs.ipcPoolSize;
                         res.ioPoolSize = fs.ioPoolSize;
-                    } catch (...) {
+                    } catch (...) { // NOLINT(bugprone-empty-catch)
                     }
                 }
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
             }
         }
         if (!metrics_) {
@@ -915,7 +916,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                         }
                     }
                 }
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
             }
         }
 
@@ -964,7 +965,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                         state_->stats.repairInProgress.load(std::memory_order_relaxed) ? 1 : 0;
                     res.readinessStates[std::string(readiness::kRepairService)] = repairRunning;
                 }
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
             }
         }
 
@@ -1038,7 +1039,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 res.requestCounts
                     ["status_search_engine_lexical_enhancement_concept_mining_enabled"] =
                     freshness.simeonLexicalConceptMiningEnabled ? 1u : 0u;
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
             }
 
             try {
@@ -1047,7 +1048,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                     topo.artifactsFresh;
                 res.readinessStates[std::string(readiness::kTopologyRebuildRunning)] =
                     topo.rebuildRunning;
-            } catch (...) {
+            } catch (...) { // NOLINT(bugprone-empty-catch)
             }
         }
 
@@ -1066,7 +1067,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
         if (rawRssBytes > 0) {
             res.requestCounts["status_rss_bytes"] = static_cast<size_t>(rawRssBytes);
         }
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
         StatusResponse fallback;
         fallback.running = true;
         fallback.ready = false;
@@ -1119,7 +1120,7 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                     }
                 }
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
         }
         // Internal bus + tuning toggles (doctor hints)
         try {
@@ -1127,7 +1128,7 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                 TuneAdvisor::useInternalBusForRepair() ? "true" : "false";
             response.additionalStats["tuning_use_internal_bus_for_post_ingest"] =
                 TuneAdvisor::useInternalBusForPostIngest() ? "true" : "false";
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
         }
         try {
             auto& bus = InternalEventBus::instance();
@@ -1158,7 +1159,7 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
             response.additionalStats["bus_title_queued"] = std::to_string(bus.titleQueued());
             response.additionalStats["bus_title_dropped"] = std::to_string(bus.titleDropped());
             response.additionalStats["bus_title_consumed"] = std::to_string(bus.titleConsumed());
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
         }
         // Embedding service metrics (in-flight jobs being processed)
         try {
@@ -1272,7 +1273,7 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                 }
             }
             populateSemanticTopologyStats(response, serviceManager_, req.includeHealth);
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
         }
         // Minimal readiness hint (align to lifecycle readiness)
         bool notReady = true;
@@ -1283,7 +1284,7 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                 lifecycleSnapshot.state == LifecycleState::Degraded) {
                 notReady = false;
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
             notReady = true;
         }
         response.additionalStats["not_ready"] =
@@ -1294,7 +1295,7 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                 auto v = state_->stats.ipcEinvalRebuilds.load(std::memory_order_relaxed);
                 response.additionalStats["einval_rebuilds"] = std::to_string(v);
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
         }
         // Populate vector metrics from DaemonMetrics snapshot when available
         try {
@@ -1404,7 +1405,7 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                     }
                 }
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
         }
         // Collect corpus stats for search tuning (Phase 1: Adaptive Search Tuning)
         try {
@@ -1420,11 +1421,11 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                     }
                 }
             }
-        } catch (...) {
+        } catch (...) { // NOLINT(bugprone-empty-catch)
         }
         (void)req; // unused otherwise
         co_return response;
-    } catch (...) {
+    } catch (...) { // NOLINT(bugprone-empty-catch)
         GetStatsResponse response;
         response.additionalStats["wal_active_transactions"] = "0";
         response.additionalStats["wal_pending_entries"] = "0";

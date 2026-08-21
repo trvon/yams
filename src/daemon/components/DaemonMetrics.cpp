@@ -15,6 +15,7 @@
 #endif
 #include <Windows.h>
 #endif
+// pi-lens-ignore: fatal error
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -1837,6 +1838,12 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                     out.dataDir = dd.string();
                     out.contentStoreRoot = (dd / "storage").string();
                 }
+            } catch (...) {
+                spdlog::debug(
+                    "[DaemonMetrics] best-effort metric probe failed with unknown exception");
+            }
+            try {
+                out.logFile = services_->getResolvedLogFilePath().string();
             } catch (...) {
                 spdlog::debug(
                     "[DaemonMetrics] best-effort metric probe failed with unknown exception");

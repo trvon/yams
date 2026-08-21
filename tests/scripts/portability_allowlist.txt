@@ -164,8 +164,8 @@ src/daemon/client/sandbox_detection.cpp:45:portability/env-read # reviewed raw e
 src/daemon/client/sandbox_detection.cpp:74:portability/env-read # reviewed raw environment read
 src/daemon/client/sandbox_probe.cpp:54:portability/env-read # reviewed raw environment read
 src/daemon/client/sandbox_probe.cpp:60:portability/env-read # reviewed raw environment read
-src/daemon/components/DaemonMetrics.cpp:126:portability/env-read # reviewed raw environment read
-src/daemon/components/DaemonMetrics.cpp:1938:portability/env-read # reviewed raw environment read
+src/daemon/components/DaemonMetrics.cpp:127:portability/env-read # reviewed raw environment read
+src/daemon/components/DaemonMetrics.cpp:1945:portability/env-read # reviewed raw environment read
 src/daemon/components/EmbeddingService.cpp:426:portability/env-read # reviewed raw environment read
 src/daemon/components/EmbeddingService.cpp:435:portability/env-read # reviewed raw environment read
 src/daemon/components/EmbeddingService.cpp:585:portability/env-read # reviewed raw environment read
@@ -216,10 +216,10 @@ src/storage/reference_counter.cpp:227:portability/env-read # reviewed raw enviro
 src/storage/reference_db.cpp:43:portability/env-read # reviewed raw environment read
 src/storage/reference_db.cpp:231:portability/env-read # reviewed raw environment read
 src/storage/reference_db.cpp:372:portability/path-cstr # std::string filename, not filesystem::path
-src/storage/s3_signer.cpp:82:portability/env-read # reviewed raw environment read
-src/storage/s3_signer.cpp:157:portability/env-read # reviewed raw environment read
-src/storage/s3_signer.cpp:158:portability/env-read # reviewed raw environment read
+src/storage/s3_signer.cpp:83:portability/env-read # reviewed raw environment read
 src/storage/s3_signer.cpp:159:portability/env-read # reviewed raw environment read
+src/storage/s3_signer.cpp:161:portability/env-read # reviewed raw environment read
+src/storage/s3_signer.cpp:163:portability/env-read # reviewed raw environment read
 src/storage/storage_backend_factory.cpp:300:portability/env-read # reviewed raw environment read
 src/storage/storage_backend_factory.cpp:305:portability/env-read # reviewed raw environment read
 src/vector/sqlite_vec_backend.cpp:706:portability/path-cstr # std::string filename, not filesystem::path

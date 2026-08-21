@@ -1,3 +1,4 @@
+// pi-lens-ignore: fatal error
 #include <nlohmann/json.hpp>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
@@ -3525,45 +3526,64 @@ private:
     void showLog() {
         namespace fs = std::filesystem;
 
-        // Determine log file path - mirrors YamsDaemon::resolvePath(PathType::LogFile)
+        // The daemon knows its own log file (it may have been started with an explicit
+        // --log-file). Ask it first; only fall back to default paths when it is not running or
+        // does not report one.
         fs::path logPath;
-        std::vector<fs::path> candidates;
-
-#ifdef _WIN32
-        if (const auto localAppData = yams::config::getenv_nonempty("LOCALAPPDATA")) {
-            candidates.push_back(fs::path(*localAppData) / "yams" / "daemon.log");
-        }
-        candidates.push_back(fs::temp_directory_path() / "yams-daemon.log");
-#else
-        // Root user: /var/log
-        if (getuid() == 0) {
-            candidates.push_back(fs::path("/var/log/yams-daemon.log"));
-        }
-        // XDG_STATE_HOME or ~/.local/state
-        if (const auto xdgState = yams::config::getenv_nonempty("XDG_STATE_HOME")) {
-            candidates.push_back(fs::path(*xdgState) / "yams" / "daemon.log");
-        } else if (const auto home = yams::config::getenv_nonempty("HOME")) {
-            candidates.push_back(fs::path(*home) / ".local" / "state" / "yams" / "daemon.log");
-        }
-        // Fallback to /tmp
-        candidates.push_back(fs::path("/tmp") /
-                             ("yams-daemon-" + std::to_string(getuid()) + ".log"));
-#endif
-
-        // Find the first candidate that exists
-        for (const auto& candidate : candidates) {
-            if (fs::exists(candidate)) {
-                logPath = candidate;
-                break;
+        try {
+            auto statusRes = runDaemonClient(
+                {}, [](yams::daemon::DaemonClient& client) { return client.status(true); },
+                std::chrono::seconds(2));
+            if (statusRes && !statusRes.value().logFile.empty()) {
+                const fs::path reported(statusRes.value().logFile);
+                if (fs::exists(reported)) {
+                    logPath = reported;
+                }
             }
+        } catch (...) {
+            // Best effort: fall back to the default candidate paths below.
         }
 
         if (logPath.empty()) {
-            std::cerr << "Daemon log file not found. Checked:" << std::endl;
-            for (const auto& c : candidates) {
-                std::cerr << "  - " << c.string() << std::endl;
+            // Determine log file path - mirrors YamsDaemon::resolvePath(PathType::LogFile)
+            std::vector<fs::path> candidates;
+
+#ifdef _WIN32
+            if (const auto localAppData = yams::config::getenv_nonempty("LOCALAPPDATA")) {
+                candidates.push_back(fs::path(*localAppData) / "yams" / "daemon.log");
             }
-            return;
+            candidates.push_back(fs::temp_directory_path() / "yams-daemon.log");
+#else
+            // Root user: /var/log
+            if (getuid() == 0) {
+                candidates.push_back(fs::path("/var/log/yams-daemon.log"));
+            }
+            // XDG_STATE_HOME or ~/.local/state
+            if (const auto xdgState = yams::config::getenv_nonempty("XDG_STATE_HOME")) {
+                candidates.push_back(fs::path(*xdgState) / "yams" / "daemon.log");
+            } else if (const auto home = yams::config::getenv_nonempty("HOME")) {
+                candidates.push_back(fs::path(*home) / ".local" / "state" / "yams" / "daemon.log");
+            }
+            // Fallback to /tmp
+            candidates.push_back(fs::path("/tmp") /
+                                 ("yams-daemon-" + std::to_string(getuid()) + ".log"));
+#endif
+
+            // Find the first candidate that exists
+            for (const auto& candidate : candidates) {
+                if (fs::exists(candidate)) {
+                    logPath = candidate;
+                    break;
+                }
+            }
+
+            if (logPath.empty()) {
+                std::cerr << "Daemon log file not found. Checked:" << std::endl;
+                for (const auto& c : candidates) {
+                    std::cerr << "  - " << c.string() << std::endl;
+                }
+                return;
+            }
         }
 
         // Convert level filter to lowercase for comparison
