@@ -500,7 +500,7 @@ tests/unit/cli/version_generated_header_catch2_test.cpp:60:portability/env-read 
 tests/unit/cli/version_generated_header_catch2_test.cpp:83:portability/env-read # reviewed raw environment read
 tests/unit/daemon/components/vector_system_manager_test.cpp:129:portability/env-read # reviewed raw environment read
 tests/unit/daemon/components/vector_system_manager_test.cpp:130:portability/env-read # reviewed raw environment read
-tests/unit/daemon/daemon_background_processing_test.cpp:678:portability/env-read # reviewed raw environment read
+tests/unit/daemon/daemon_background_processing_test.cpp:679:portability/env-read # reviewed raw environment read
 tests/unit/daemon/daemon_catch2_test.cpp:1400:portability/env-read # reviewed raw environment read
 tests/unit/daemon/daemon_metrics_status_test.cpp:946:portability/env-read # reviewed raw environment read
 tests/unit/daemon/onnx_embedding_diagnostic_test.cpp:36:portability/env-read # reviewed raw environment read

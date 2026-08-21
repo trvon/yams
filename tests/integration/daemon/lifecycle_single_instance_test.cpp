@@ -414,7 +414,7 @@ TEST_CASE("Data-dir lock released on shutdown", "[daemon][lifecycle][single-inst
 }
 
 TEST_CASE("Repair lifecycle hysteresis does not leak across daemon instances",
-          "[daemon][lifecycle][repair-hysteresis]") {
+          "[daemon][lifecycle][repair-hysteresis][slow]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     ScopedEnvVar degradeGuard("YAMS_REPAIR_DEGRADE_HOLD_MS", "400");

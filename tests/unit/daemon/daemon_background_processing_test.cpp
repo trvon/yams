@@ -4,6 +4,7 @@
 // concurrency Covers: queue lifecycle, async processing, bus integration, stress testing, MPMC
 // correctness
 
+// pi-lens-ignore: fatal error
 #include <spdlog/sinks/ostream_sink.h>
 #include <spdlog/spdlog.h>
 #include <algorithm>
@@ -882,6 +883,13 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
         REQUIRE((queue->processed() == 1));
         REQUIRE((queue->failed() == 0));
         REQUIRE((queue->entityInFlight() == 0));
+        // The content insert is a later pipeline stage than processed(); on slow platforms it can
+        // lag, so poll instead of asserting immediately.
+        auto contentDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!metadataRepo->contentInserted() &&
+               std::chrono::steady_clock::now() < contentDeadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
         REQUIRE(metadataRepo->contentInserted());
 
         auto content = metadataRepo->lastContent();

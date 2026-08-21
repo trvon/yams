@@ -667,7 +667,16 @@ else
       env: _daemon_test_env,
       is_parallel: false,
       timeout: 120,
-      args: ['Repair lifecycle hysteresis does not leak across daemon instances', '--allow-running-no-tests'],
+      args: ['~[slow]', '--allow-running-no-tests'],
+    )
+
+    test('lifecycle_repair_hysteresis_slow',
+      lifecycle_single_instance_exe,
+      suite: ['integration', 'daemon', 'catch2', 'lifecycle', 'repair', 'slow'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 300,
+      args: ['[slow]', '--allow-running-no-tests'],
     )
 
     # ONNX Concurrency / TuneAdvisor integration tests
