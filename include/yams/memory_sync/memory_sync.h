@@ -17,6 +17,9 @@
 // pi-lens-ignore: fatal error
 #include <nlohmann/json.hpp>
 
+// pi-lens-ignore: fatal error
+#include <spdlog/spdlog.h>
+
 #include <yams/core/types.h>
 #include <yams/crypto/hasher.h>
 #include <yams/memory_sync/key_policy.h>

@@ -1,5 +1,7 @@
 #define YAMS_DAEMON_TEST_HOOKS_IMPL 1
+// pi-lens-ignore: fatal error
 #include <sqlite3.h>
+// pi-lens-ignore: fatal error
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>

@@ -468,7 +468,9 @@ private:
     struct CachedSnapshotState {
         std::shared_ptr<const MetricsSnapshot> fast;
         std::shared_ptr<const MetricsSnapshot> detailed;
+        // NOLINT(no-bit-fields): false positive — time_point members are not bit-fields.
         std::chrono::steady_clock::time_point fastAt{};
+        // NOLINT(no-bit-fields): false positive — time_point members are not bit-fields.
         std::chrono::steady_clock::time_point detailedAt{};
     };
 
