@@ -9,6 +9,7 @@
 #include <sstream>
 #include <string>
 
+// pi-lens-ignore: fatal error
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <CLI/CLI.hpp>
@@ -18,6 +19,7 @@
 #include <yams/cli/yams_cli.h>
 #include <yams/core/types.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/client/process_discovery.h>
 
 namespace yams::cli {
 
@@ -160,12 +162,21 @@ private:
             return Error{ErrorCode::NotInitialized, "CLI context unavailable"};
         }
         daemon::ClientConfig config;
-        config.socketPath = YamsCLI::resolveConfiguredDaemonSocketPath();
+        const auto configuredSocket = YamsCLI::resolveConfiguredDaemonSocketPath();
+        // Discover the live daemon socket (e.g. a packaged/systemd service running on a different
+        // socket than the per-user default) before giving up, matching `yams daemon status`.
+        const auto liveSocket = daemon::client::discoverLiveDaemonSocket(
+            configuredSocket, YamsCLI::resolveConfiguredDaemonPidFilePath(), true);
+        config.socketPath = liveSocket && !liveSocket->empty() ? *liveSocket : configuredSocket;
         config.autoStart = false;
         config.requestTimeout = std::chrono::seconds(5);
         if (!daemon::DaemonClient::isDaemonRunning(config.socketPath)) {
             return Error{ErrorCode::NotFound,
                          "daemon is not running on socket: " + config.socketPath.string()};
+        }
+        if (config.socketPath != configuredSocket) {
+            spdlog::info("Using live daemon socket '{}' instead of configured '{}'",
+                         config.socketPath.string(), configuredSocket.string());
         }
         auto leaseResult = acquire_cli_daemon_client_shared_with_policy(
             config, CliDaemonAccessPolicy::RequireSocket, 1, 1, config.requestTimeout);
