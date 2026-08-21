@@ -1993,6 +1993,9 @@ Result<ServiceManager::MemorySyncStatus> ServiceManager::getMemorySyncStatus() c
     if (!memorySync_) {
         return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
     }
+    for (const auto& [key, reason] : memorySync_->quarantinedReasons()) {
+        spdlog::debug("[memory_sync] quarantined {}: {}", key, reason);
+    }
     return MemorySyncStatus{memorySync_->started(),
                             memorySync_->mergedRecordCount(),
                             memorySync_->quarantinedRecordCount(),

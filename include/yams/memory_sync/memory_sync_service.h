@@ -16,6 +16,7 @@
 #include <string_view>
 #include <thread>
 
+// pi-lens-ignore: fatal error
 #include <yams/core/types.h>
 #include <yams/memory_sync/memory_sync.h>
 #include <yams/storage/storage_backend.h>
@@ -183,6 +184,11 @@ public:
     std::size_t quarantinedRecordCount() const noexcept {
         std::lock_guard<std::mutex> lock(loopMutex_);
         return loop_.quarantinedRecordCount();
+    }
+
+    std::map<std::string, std::string> quarantinedReasons() const {
+        std::lock_guard<std::mutex> lock(loopMutex_);
+        return loop_.quarantinedReasons();
     }
 
     std::size_t authFailureCount() const noexcept {

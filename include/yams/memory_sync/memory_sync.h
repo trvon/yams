@@ -17,9 +17,6 @@
 // pi-lens-ignore: fatal error
 #include <nlohmann/json.hpp>
 
-// pi-lens-ignore: fatal error
-#include <spdlog/spdlog.h>
-
 #include <yams/core/types.h>
 #include <yams/crypto/hasher.h>
 #include <yams/memory_sync/key_policy.h>
@@ -39,7 +36,9 @@ struct MemorySyncControl {
 /// operation after the minimum retention horizon before history can be removed.
 struct TombstoneGcPolicy {
     std::set<NodeId> requiredPeers;
-    std::chrono::milliseconds minRetention{std::chrono::milliseconds::max()};
+    // pi-lens-ignore: no-bit-fields
+    std::chrono::milliseconds minRetention{
+        std::chrono::milliseconds::max()}; // NOLINT(no-bit-fields)
 };
 
 /// Typed reconciliation/resource limits. These bound work retained or requested by
@@ -525,6 +524,9 @@ public:
     std::size_t quarantinedRecordCount() const noexcept { return quarantined_.size(); }
     std::size_t authFailureCount() const noexcept { return authFailures_; }
 
+    /// Bounded snapshot of current quarantine reasons (cleared each scan page).
+    std::map<std::string, std::string> quarantinedReasons() const { return quarantined_; }
+
     /// Read only the last periodically reconciled winner. Daemon IPC uses this
     /// path so polling a peer cannot manufacture convergence by forcing sync.
     Result<std::vector<std::byte>> readCached(std::string_view logicalKey) const {
@@ -645,7 +647,6 @@ private:
 
     void quarantine(std::string_view key, std::string_view reason) {
         quarantined_[std::string(key)] = std::string(reason);
-        spdlog::debug("[memory_sync] quarantined {}: {}", key, reason);
     }
 
     void recordAuthFailure() noexcept {
