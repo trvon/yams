@@ -1743,6 +1743,10 @@ private:
         const std::string configuredSocket = resolveConfiguredSocketPath();
         const std::string effectiveSocket =
             resolveSocketPathForLiveDaemon(configuredSocket, pidFile_, socketPath_.empty());
+        // When the operator explicitly points the CLI at a custom daemon instance (--socket or
+        // YAMS_DAEMON_SOCKET), a differing data directory is expected, not an accident.
+        const bool explicitCustomSocket =
+            !socketPath_.empty() || yams::config::getenv_nonempty("YAMS_DAEMON_SOCKET").has_value();
 
         if (detailed_) {
             // Enable client debug logging for ping/connect path
@@ -1998,10 +2002,20 @@ private:
                         k.ends_with("_degraded")) {
                         continue;
                     }
+                    const bool vectorDisabled = !s.vectorDbInitAttempted;
                     if (k == readiness::kVectorDb && s.vectorDbInitAttempted) {
                         continue;
                     }
                     if (k == readiness::kVectorDbReady || k == readiness::kVectorDbInitAttempted) {
+                        continue;
+                    }
+                    if (vectorDisabled &&
+                        (k == readiness::kVectorDb || k == readiness::kVectorDbDim ||
+                         k == readiness::kVectorIndex ||
+                         k == readiness::kVectorEmbeddingsAvailable ||
+                         k == readiness::kVectorScoringEnabled ||
+                         k == readiness::kSearchEngineVectorUsable ||
+                         k == readiness::kSearchEngineHybridUsable)) {
                         continue;
                     }
                     if (suppressDerivedIssue(k)) {
@@ -2208,13 +2222,21 @@ private:
                 auto it = s.readinessStates.find(std::string(readiness::kVectorIndex));
                 return it == s.readinessStates.end() ? true : it->second;
             }();
+            const bool vectorDisabled = !s.vectorDbInitAttempted;
             const std::string& vectorIndexEngine = s.vectorIndexEngine;
             const uint64_t vectorIndexProgress = [&]() -> uint64_t {
                 auto it = s.initProgress.find(std::string(readiness::kVectorIndex));
                 return it == s.initProgress.end() ? 0 : it->second;
             }();
 
-            if (topologyRebuildRunning || !vectorIndexReady) {
+            if (vectorDisabled) {
+                // Vectors are disabled by configuration (e.g. YAMS_DISABLE_VECTORS=1 or an
+                // empty vector config); this is intentional, not a rebuild failure.
+                overview.push_back(
+                    {"Vector Index", paintStatus(Severity::Good, "disabled"), "by configuration"});
+            }
+
+            if (topologyRebuildRunning || (!vectorDisabled && !vectorIndexReady)) {
                 std::vector<std::string> activity;
                 if (!vectorIndexReady) {
                     std::ostringstream label;
@@ -2262,7 +2284,7 @@ private:
             if (daemonUsesEphemeralData) {
                 dataDirWarnings.push_back("Daemon is serving a temporary data directory");
             }
-            if (dataDirMismatch) {
+            if (dataDirMismatch && !explicitCustomSocket) {
                 dataDirWarnings.push_back("Daemon data dir differs from current CLI/config");
             }
             if (!dataDirWarnings.empty()) {
@@ -2371,6 +2393,7 @@ private:
                 for (const auto& rd : readinessList) {
                     if (rd.issue) {
                         const std::string_view k{rd.key};
+                        const bool vectorDisabled = !status.vectorDbInitAttempted;
                         const bool skipReadinessLabel =
                             k == readiness::kSearchEngineBuildReasonInitial ||
                             k == readiness::kSearchEngineBuildReasonRebuild ||
@@ -2378,6 +2401,13 @@ private:
                             k == readiness::kVectorDbReady ||
                             k == readiness::kVectorDbInitAttempted ||
                             (k == readiness::kVectorDb && status.vectorDbInitAttempted) ||
+                            (vectorDisabled &&
+                             (k == readiness::kVectorDb || k == readiness::kVectorDbDim ||
+                              k == readiness::kVectorIndex ||
+                              k == readiness::kVectorEmbeddingsAvailable ||
+                              k == readiness::kVectorScoringEnabled ||
+                              k == readiness::kSearchEngineVectorUsable ||
+                              k == readiness::kSearchEngineHybridUsable)) ||
                             suppressDerivedWaiting(k);
                         if (!skipReadinessLabel)
                             waiting.push_back(rd.label);
@@ -2885,7 +2915,9 @@ private:
                     return it == status.initProgress.end() ? 0 : it->second;
                 }();
 
-                if (topologyRebuildRunning || !vectorIndexReady) {
+                const bool vectorDisabled = !status.vectorDbInitAttempted;
+
+                if (topologyRebuildRunning || (!vectorDisabled && !vectorIndexReady)) {
                     std::cout << "\n" << section_header("Maintenance") << "\n\n";
                     std::vector<Row> maintenanceRows;
 
@@ -2898,7 +2930,9 @@ private:
                     } else if (vectorIndexEngine == "hnsw_cosine") {
                         indexLabel = "HNSW Index";
                     }
-                    if (vectorIndexReady) {
+                    if (vectorDisabled) {
+                        indexState << "disabled (by configuration)";
+                    } else if (vectorIndexReady) {
                         indexState << "ready";
                     } else {
                         indexState << "rebuilding";
@@ -2908,7 +2942,9 @@ private:
                     }
                     maintenanceRows.push_back(
                         {indexLabel,
-                         paintStatus(vectorIndexReady ? Severity::Good : Severity::Warn,
+                         paintStatus(vectorDisabled
+                                         ? Severity::Good
+                                         : (vectorIndexReady ? Severity::Good : Severity::Warn),
                                      indexState.str()),
                          ""});
 
@@ -3104,7 +3140,7 @@ private:
                                      "Daemon is serving a temporary data directory"),
                          daemonDataDir->string()});
                 }
-                if (dataDirMismatch) {
+                if (dataDirMismatch && !explicitCustomSocket) {
                     dataDirWarningRows.push_back(
                         {"Data dir mismatch",
                          paintStatus(Severity::Warn,
@@ -3167,9 +3203,18 @@ private:
                     bool isBuildReason = lowerLabel.find("build reason") != std::string::npos;
                     bool isSimeonSteady = (isSimeonKey(rd.key) && !simeonActiveBuild) ||
                                           (isSimeonKey(rd.key) && searchEngineReady);
+                    // Vectors disabled by configuration: the vector DB, index, scoring, and
+                    // vector-dependent search gates are intentionally off, not unhealthy.
+                    const bool vectorGate =
+                        vectorDisabled &&
+                        (rd.key == readiness::kVectorIndex || rd.key == readiness::kVectorDbDim ||
+                         rd.key == readiness::kVectorEmbeddingsAvailable ||
+                         rd.key == readiness::kVectorScoringEnabled ||
+                         rd.key == readiness::kSearchEngineVectorUsable ||
+                         rd.key == readiness::kSearchEngineHybridUsable);
 
                     if (!isDegraded && !isAlreadyShown && !isBuildReason && !isSimeonSteady &&
-                        rd.issue && !suppressDetailedIssue(lowerLabel)) {
+                        !vectorGate && rd.issue && !suppressDetailedIssue(lowerLabel)) {
                         issueRows.push_back({rd.label, paintStatus(rd.severity, rd.text), ""});
                     }
                 }
