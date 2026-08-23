@@ -689,6 +689,41 @@ TEST_CASE("ContentStore: Memory operations", "[api][content-store][memory]") {
         CHECK(retrieved == content);
     }
 
+    SECTION("Retrieve directly stored bytes to a file") {
+        const std::string content = "direct memory payload";
+        const auto data = std::span<const std::byte>(
+            reinterpret_cast<const std::byte*>(content.data()), content.size());
+
+        auto stored = fixture.store_->storeBytes(data);
+        REQUIRE(stored.has_value());
+
+        const auto outputPath = fixture.testDir_ / "retrieved-memory.bin";
+        auto retrieved = fixture.store_->retrieve(stored.value().contentHash, outputPath);
+        REQUIRE(retrieved.has_value());
+        REQUIRE(fs::exists(outputPath));
+
+        std::ifstream input(outputPath, std::ios::binary);
+        const std::string output{std::istreambuf_iterator<char>{input},
+                                 std::istreambuf_iterator<char>{}};
+        CHECK(output == content);
+    }
+
+    SECTION("Direct retrieval reports close-time output failures") {
+#ifndef __linux__
+        SKIP("/dev/full close-time failure fixture is Linux-only");
+#else
+        const std::string content = "direct close failure";
+        const auto data = std::span<const std::byte>(
+            reinterpret_cast<const std::byte*>(content.data()), content.size());
+        auto stored = fixture.store_->storeBytes(data);
+        REQUIRE(stored.has_value());
+
+        auto retrieved = fixture.store_->retrieve(stored.value().contentHash, "/dev/full");
+        REQUIRE_FALSE(retrieved.has_value());
+        CHECK(retrieved.error().code == ErrorCode::WriteError);
+#endif
+    }
+
     SECTION("Store binary bytes with null characters") {
         std::vector<std::byte> data = {std::byte{0x00}, std::byte{0x01}, std::byte{0x00},
                                        std::byte{0xFF}, std::byte{0x00}, std::byte{0xFE}};

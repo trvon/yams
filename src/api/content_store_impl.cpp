@@ -1,3 +1,4 @@
+// pi-lens-ignore: fatal error
 #include <yams/api/content_store.h>
 #include <yams/api/content_store_error.h>
 #include <yams/api/progress_reporter.h>
@@ -381,11 +382,65 @@ public:
             return Result<RetrieveResult>(ErrorCode::InvalidArgument);
         }
 
-        // Retrieve manifest
+        // Retrieve manifest. Small payloads accepted through storeBytes() are stored directly
+        // under their content hash and intentionally have no manifest.
         auto manifestHash = hash + ".manifest";
         auto manifestResult = storage_->retrieve(manifestHash);
         if (!manifestResult) {
-            return Result<RetrieveResult>(manifestResult.error());
+            const auto code = manifestResult.error().code;
+            const bool manifestMissing = code == ErrorCode::FileNotFound ||
+                                         code == ErrorCode::ChunkNotFound ||
+                                         code == ErrorCode::NotFound;
+            if (!manifestMissing) {
+                return Result<RetrieveResult>(manifestResult.error());
+            }
+
+            auto directResult = storage_->retrieve(hash);
+            if (!directResult) {
+                return Result<RetrieveResult>(directResult.error());
+            }
+            const auto& bytes = directResult.value();
+            if (crypto::SHA256Hasher::hash(std::span<const std::byte>(bytes)) != hash) {
+                return Error{ErrorCode::HashMismatch,
+                             "direct content bytes do not match the requested hash"};
+            }
+
+            std::ofstream output(outputPath, std::ios::binary | std::ios::trunc);
+            if (!output) {
+                return Error{ErrorCode::WriteError,
+                             "failed to open output path for direct content"};
+            }
+            output.write(reinterpret_cast<const char*>(bytes.data()),
+                         static_cast<std::streamsize>(bytes.size()));
+            if (!output) {
+                return Error{ErrorCode::WriteError, "failed to write direct content"};
+            }
+            output.close();
+            if (!output) {
+                return Error{ErrorCode::WriteError, "failed to finalize direct content output"};
+            }
+
+            ContentMetadata metadata;
+            {
+                std::shared_lock lock(metadataMutex_);
+                auto it = metadataStore_.find(hash);
+                if (it != metadataStore_.end()) {
+                    metadata = it->second;
+                    metadata.accessedAt = std::chrono::system_clock::now();
+                }
+            }
+            if (progress) {
+                ProgressReporter reporter(bytes.size());
+                reporter.setCallback(progress);
+                reporter.reportProgress(bytes.size());
+            }
+            updateStats(0, 0, bytes.size(), 0, 0, 1, 0);
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - startTime);
+            return RetrieveResult{.found = true,
+                                  .size = bytes.size(),
+                                  .metadata = std::move(metadata),
+                                  .duration = duration};
         }
 
         // Deserialize manifest

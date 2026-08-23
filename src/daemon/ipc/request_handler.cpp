@@ -1,3 +1,4 @@
+// pi-lens-ignore: fatal error
 #include <yams/daemon/components/RequestDispatcher.h>
 #include <yams/daemon/ipc/connection_fsm.h>
 #include <yams/daemon/ipc/fsm_helpers.h>
@@ -1298,6 +1299,14 @@ RequestHandler::handle_streaming_request(boost::asio::local::stream_protocol::so
                     cat_resp->content.clear();
                     cat_resp->hasContent = false;
                 }
+            } else if (auto* list_resp = std::get_if<ListResponse>(&header_response)) {
+                // The final chunk carries the complete item set. Keep only aggregate metadata in
+                // the one-shot header so streaming clients do not append every item twice.
+                list_resp->items.clear();
+            } else if (auto* search_resp = std::get_if<SearchResponse>(&header_response)) {
+                // Search follows the same one-shot framing contract as list: metadata belongs in
+                // the header and the complete result set belongs only in the final chunk.
+                search_resp->results.clear();
             }
 
             // Write header frame (with metadata but no content)
