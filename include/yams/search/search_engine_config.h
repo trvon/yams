@@ -75,12 +75,15 @@ struct SearchEngineConfig {
         return "AUTO";
     }
 
-    float textWeight = 0.70f;
+    // xplan scifact + nfcorpus transfer gate (repeats=3): pure vector fusion at 0.30
+    // reduced quality and added latency. Keep graph-vector evidence while making lexical the
+    // primary product path; profile-specific configurations may still opt into pure vectors.
+    float textWeight = 1.00f;
     float simeonTextWeight = 0.15f;
     float graphTextWeight = 0.12f;
     float pathTreeWeight = 0.08f;
     float kgWeight = 0.04f;
-    float vectorWeight = 0.30f;
+    float vectorWeight = 0.00f;
     float graphVectorWeight = 0.08f;
     float vectorOnlyPenalty = 0.8f;
     float vectorOnlyThreshold = 0.90f;
