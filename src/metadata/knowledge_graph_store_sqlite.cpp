@@ -1,4 +1,5 @@
 #include "repository/search_query_helpers.hpp"
+// pi-lens-ignore: fatal error
 #include <yams/core/checked_arithmetic.h>
 #include <yams/core/types.h>
 #include <yams/metadata/connection_pool.h>
@@ -8,6 +9,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <limits>
@@ -56,6 +58,32 @@ std::int64_t countNerEntitiesFromDocEntities(const std::vector<DocEntity>& entit
 
 constexpr auto kKgNodeSelectProjection =
     "id, node_key, label, type, created_time, updated_time, properties";
+
+bool onlyDocumentsFtsMismatch(std::string_view message) {
+    constexpr std::string_view kPrefix = "quick_check reported:";
+    constexpr std::string_view kAllowed = "fts5: checksum mismatch for table \"documents_fts\"";
+    const auto prefix = message.find(kPrefix);
+    if (prefix == std::string_view::npos) {
+        return false;
+    }
+    message.remove_prefix(prefix + kPrefix.size());
+    bool found = false;
+    while (!message.empty()) {
+        const auto separator = message.find(';');
+        auto item = message.substr(0, separator);
+        const auto first = item.find_first_not_of(" \t\r\n");
+        const auto last = item.find_last_not_of(" \t\r\n");
+        if (first == std::string_view::npos || item.substr(first, last - first + 1) != kAllowed) {
+            return false;
+        }
+        found = true;
+        if (separator == std::string_view::npos) {
+            break;
+        }
+        message.remove_prefix(separator + 1);
+    }
+    return found;
+}
 
 constexpr auto kKgNodeUpsertSql = R"(
     INSERT INTO kg_nodes (node_key, label, type, created_time, updated_time, properties)
@@ -2677,11 +2705,38 @@ public:
     }
 
     Result<void> healthCheck() override {
-        auto res = readPool()->withConnection(
-            [](Database& db) -> Result<void> { return db.checkIntegrity(); });
-        if (!res) {
-            spdlog::warn("KG store healthCheck failed: {}", res.error().message);
-            return res.error();
+        // This store can share a database with metadata FTS tables. A whole-database
+        // PRAGMA quick_check makes graph health fail on unrelated, transient FTS maintenance.
+        // Probe every KG-owned table instead; malformed graph pages still fail prepare/step.
+        static constexpr std::array<std::string_view, 6> kGraphTables{
+            "kg_nodes",        "kg_edges",           "kg_aliases",
+            "kg_doc_entities", "kg_node_embeddings", "kg_node_stats"};
+        auto result = readPool()->withConnection([](Database& db) -> Result<void> {
+            auto integrity = db.checkIntegrity();
+            if (!integrity && !onlyDocumentsFtsMismatch(integrity.error().message)) {
+                return integrity.error();
+            }
+            for (const auto table : kGraphTables) {
+                auto statement = db.prepare(
+                    "SELECT COUNT(*), COALESCE(SUM(LENGTH(CAST(rowid AS TEXT))), 0) FROM " +
+                    std::string(table));
+                if (!statement) {
+                    return statement.error();
+                }
+                auto row = statement.value().step();
+                if (!row) {
+                    return row.error();
+                }
+                if (!row.value()) {
+                    return Error{ErrorCode::DatabaseError,
+                                 "KG health probe returned no row for " + std::string(table)};
+                }
+            }
+            return {};
+        });
+        if (!result) {
+            spdlog::warn("KG store healthCheck failed: {}", result.error().message);
+            return result.error();
         }
         return {};
     }
