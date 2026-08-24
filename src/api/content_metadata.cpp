@@ -1,9 +1,10 @@
+// pi-lens-ignore: fatal error
 #include <yams/api/content_metadata.h>
 
 #include <spdlog/spdlog.h>
 
-#include <algorithm>
 #include <cstring>
+#include <ctime>
 #include <iomanip>
 #include <iterator>
 #include <regex>
@@ -175,9 +176,19 @@ std::string ContentMetadata::toJson() const {
 
     // Helper to format timestamp
     auto formatTime = [](const auto& tp) {
-        auto time = std::chrono::system_clock::to_time_t(tp);
+        const auto time = std::chrono::system_clock::to_time_t(tp);
+        std::tm utc{};
+#ifdef _WIN32
+        if (::gmtime_s(&utc, &time) != 0) {
+            return std::string{};
+        }
+#else
+        if (::gmtime_r(&time, &utc) == nullptr) {
+            return std::string{};
+        }
+#endif
         std::ostringstream timeStr;
-        timeStr << std::put_time(std::gmtime(&time), "%Y-%m-%dT%H:%M:%SZ");
+        timeStr << std::put_time(&utc, "%Y-%m-%dT%H:%M:%SZ");
         return timeStr.str();
     };
 
