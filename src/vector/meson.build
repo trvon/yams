@@ -55,9 +55,9 @@ endif
 
 sqlite_vec_feature_cppargs = []
 
-#SIMD codegen flags for sqlite - vec - cpp only.These are applied per - TU to
-#the sqlite_vec_cpp sources so the rest of yams_vector(tokenizer,
-#chunker, etc.) is not locked into requiring AVX2 / dotprod at runtime.
+#SIMD codegen flags for sqlite - vec - cpp only. These are applied per-TU to
+#the sqlite_vec_cpp sources and isolated backend TU so the rest of yams_vector
+#(tokenizer, chunker, etc.) is not locked into requiring AVX2 / dotprod at runtime.
 vec_simd_cppargs = []
 
 #Enable SIMD for sqlite - vec - cpp when supported
@@ -78,19 +78,15 @@ int main() {
 ''', name: 'compiler target is ARM/ARM64')
 
 if target_is_x86
-  if cpp_comp.has_argument('-mavx') and cpp_comp.has_argument('-mfma')
-    sqlite_vec_feature_cppargs += ['-DSQLITE_VEC_ENABLE_AVX']
-    vec_simd_cppargs += ['-mavx', '-mfma']
-    if cpp_comp.has_argument('-mavx2')
-      sqlite_vec_feature_cppargs += ['-DSQLITE_VEC_ENABLE_AVX2']
-      vec_simd_cppargs += ['-mavx2']
-    endif
-  endif
-elif target_is_arm
-#NEON is baseline on aarch64; on 32 - bit arm it may depend on sub - arch
+  # Compiler support does not prove the deployment CPU supports AVX/FMA. Keep generic release
+  # binaries at the baseline ISA until sqlite-vec and all callers provide runtime dispatch.
+  message('x86 sqlite-vec SIMD: disabled pending runtime CPU dispatch')
+elif target_is_arm and host_cpu == 'aarch64'
+  # NEON is baseline on AArch64. DotProd is guaranteed on Apple Silicon but not generic Linux or
+  # Windows AArch64, so do not raise their deployment ISA from a compiler-only probe.
   sqlite_vec_feature_cppargs += ['-DSQLITE_VEC_ENABLE_NEON']
-#DotProd(ARMv8.2 +) : compile - test vdotq_s32; all Apple Silicon supports this
-  dotprod_test = '''
+  if host_machine.system() == 'darwin'
+    dotprod_test = '''
 #include <arm_neon.h>
   int main() {
     int8x16_t a = vdupq_n_s8(1);
@@ -100,9 +96,10 @@ elif target_is_arm
     return vgetq_lane_s32(c, 0);
   }
   '''
-  if cpp_comp.compiles(dotprod_test, args: ['-march=armv8.2-a+dotprod'], name: 'ARM DotProd (vdotq_s32)')
-    vec_simd_cppargs += ['-march=armv8.2-a+dotprod']
-    message('ARM DotProd: enabled for sqlite-vec-cpp')
+    if cpp_comp.compiles(dotprod_test, args: ['-march=armv8.2-a+dotprod'], name: 'Apple Silicon DotProd (vdotq_s32)')
+      vec_simd_cppargs += ['-march=armv8.2-a+dotprod']
+      message('Apple Silicon DotProd: enabled for sqlite-vec-cpp')
+    endif
   endif
 endif
 
@@ -127,10 +124,10 @@ srcs = [
 ]
 srcs += yams_embedding_simeon_srcs
 
-#Isolate SIMD - heavy sqlite - vec - cpp sources into their own static library so
-#- mavx / - mavx2 / - mfma / - march = armv8.2 - a + dotprod do not leak into the rest
-#of yams_vector.This keeps generic TUs buildable on older CPUs while still
-#enabling the fast int8 kernels inside sqlite - vec - cpp.
+#Isolate SIMD-heavy sqlite-vec-cpp sources into their own static library so
+#-mavx / -mavx2 / -mfma / -march=armv8.2-a+dotprod do not leak into the rest
+#of yams_vector. This keeps generic TUs buildable on older CPUs while still
+#enabling the fast sqlite-vec kernels.
 sqlite_vec_cpp_lib = []
 if sqlite_vec_cpp_src.length() > 0
   sqlite_vec_cpp_lib = static_library('yams_sqlite_vec_cpp',
@@ -192,7 +189,7 @@ simeon_retrieval_srcs = [
 #compiled in.
 simeon_simd_defines = []
 simeon_extra_libs = []
-if target_is_arm
+if target_is_arm and host_cpu == 'aarch64'
   simeon_simd_defines += '-DSIMEON_HAS_NEON=1'
   simeon_neon_lib = static_library('yams_simeon_neon',
     [join_paths(simeon_dir, 'src', 'arch', 'neon.cpp')],
@@ -202,17 +199,9 @@ if target_is_arm
   )
   simeon_extra_libs += simeon_neon_lib
 elif target_is_x86
-  if cpp_comp.has_argument('-mavx2') and cpp_comp.has_argument('-mfma')
-    simeon_simd_defines += '-DSIMEON_HAS_AVX2=1'
-    simeon_avx_args = ['-mavx2', '-mfma']
-    simeon_avx_lib = static_library('yams_simeon_avx2',
-      [join_paths(simeon_dir, 'src', 'arch', 'avx2.cpp')],
-      include_directories: simeon_inc,
-      cpp_args: simeon_avx_args + simeon_simd_defines,
-      install: false,
-    )
-    simeon_extra_libs += simeon_avx_lib
-  endif
+  # pq.cpp selects SIMEON_HAS_AVX2 at compile time instead of consulting active_simd_tier().
+  # Keep x86 scalar until every call site uses runtime CPUID dispatch.
+  message('x86 Simeon AVX2: disabled pending runtime CPU dispatch')
 endif
 
 simeon_common_lib = static_library('yams_simeon_common',
@@ -269,7 +258,9 @@ sqlite_vec_backend_lib = static_library('yams_sqlite_vec_backend',
   ['sqlite_vec_backend.cpp'],
   include_directories: [include_directories('../../include'), include_directories('.'), sqlite_vec_cpp_inc, simeon_inc],
   dependencies: deps_vec + vector_platform_deps,
-  cpp_args: vector_cppargs + simeon_simd_defines,
+  # This TU instantiates sqlite-vec's header-only HNSW distance templates, so it needs the same
+  # feature defines and codegen flags as the sqlite-vec implementation library.
+  cpp_args: vector_cppargs + sqlite_vec_feature_cppargs + vec_simd_cppargs + simeon_simd_defines,
   install: false,
 )
 
