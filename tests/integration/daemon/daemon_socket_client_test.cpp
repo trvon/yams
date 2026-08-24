@@ -2,6 +2,7 @@
 // Covers connection lifecycle, reconnection, timeouts, multiplexing, and error handling
 
 #define CATCH_CONFIG_MAIN
+// pi-lens-ignore: fatal error
 #include <catch2/catch_session.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -1383,7 +1384,10 @@ TEST_CASE("Daemon client graph maintenance request execution",
           "[daemon][socket][requests][graph]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
-    DaemonHarness harness;
+    DaemonHarness::Options options;
+    options.isolateConfig = true;
+    options.isolateState = true;
+    DaemonHarness harness{std::move(options)};
     startHarnessWithRetry(harness);
     std::this_thread::sleep_for(200ms);
 
@@ -1421,7 +1425,9 @@ TEST_CASE("Daemon client graph maintenance request execution",
     addReq.name = "graph_dispatcher_coverage.txt";
     addReq.content = "graph maintenance coverage content\n";
     addReq.tags = {"graph-coverage", "dispatcher"};
-    auto addResult = yams::cli::run_sync(client.streamingAddDocument(addReq), 10s);
+    addReq.waitForProcessing = true;
+    addReq.waitTimeoutSeconds = 10;
+    auto addResult = yams::cli::run_sync(client.streamingAddDocument(addReq), 15s);
 
     REQUIRE(addResult.has_value());
     REQUIRE_FALSE(addResult.value().hash.empty());
