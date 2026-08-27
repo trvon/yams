@@ -7,6 +7,7 @@
 #include <yams/crypto/hasher.h>
 #include <yams/manifest/manifest_manager.h>
 #include <yams/profiling.h>
+#include <yams/storage/disk_pressure.h>
 #include <yams/storage/reference_counter.h>
 #include <yams/storage/reference_counter_writer.h>
 #include <yams/storage/storage_engine.h>
@@ -147,10 +148,12 @@ public:
                  std::shared_ptr<chunking::IChunker> chunker,
                  std::shared_ptr<crypto::IHasher> hasher,
                  std::shared_ptr<manifest::IManifestManager> manifestManager,
-                 std::shared_ptr<storage::IReferenceCounter> refCounter, ContentStoreConfig config)
+                 std::shared_ptr<storage::IReferenceCounter> refCounter, ContentStoreConfig config,
+                 storage::DiskPressurePolicy diskPressure, storage::DiskSpaceProbe diskSpaceProbe)
         : storage_(std::move(storage)), chunker_(std::move(chunker)), hasher_(std::move(hasher)),
           manifestManager_(std::move(manifestManager)), refCounter_(std::move(refCounter)),
-          config_(std::move(config)) {
+          config_(std::move(config)), diskPressure_(diskPressure),
+          diskSpaceProbe_(std::move(diskSpaceProbe)) {
         if (auto concreteRefCounter =
                 std::dynamic_pointer_cast<storage::ReferenceCounter>(refCounter_)) {
             refWriter_ = std::make_unique<storage::RefCounterWriter>(std::move(concreteRefCounter));
@@ -1234,17 +1237,22 @@ public:
         // Check storage engine
         [[maybe_unused]] auto storageStats = storage_->getStats();
 
-        // Check available space
-        auto spaceInfo = std::filesystem::space(config_.storagePath);
-        uint64_t availableBytes = spaceInfo.available;
-        uint64_t totalBytes = spaceInfo.capacity;
-
-        constexpr uint64_t kCriticalFreeBytes = 100ULL * 1024ULL * 1024ULL;
-        if (availableBytes < kCriticalFreeBytes) { // Less than 100MB
-            status.errors.push_back("Critical: Less than 100MB storage available");
+        // Probe daemon-local capacity through the configured seam. This keeps tests deterministic
+        // and avoids confusing remote object-store capacity with the daemon's local filesystem.
+        auto diskPressure =
+            storage::inspectDiskPressure(config_.storagePath, diskPressure_, diskSpaceProbe_);
+        if (!diskPressure) {
+            status.errors.push_back("Unable to determine storage disk pressure: " +
+                                    diskPressure.error().message);
             status.isHealthy = false;
-        } else if (availableBytes < totalBytes * 0.1) { // Less than 10%
-            status.warnings.push_back("Warning: Less than 10% storage available");
+        } else if (diskPressure.value().level == storage::DiskPressureLevel::Emergency) {
+            status.errors.push_back("Critical: storage emergency reserve reached");
+            status.isHealthy = false;
+        } else if (diskPressure.value().level == storage::DiskPressureLevel::Warning) {
+            status.warnings.push_back("Warning: storage free space below configured threshold");
+        } else if (diskPressure.value().level == storage::DiskPressureLevel::Unknown) {
+            status.errors.push_back("Unable to classify storage disk pressure");
+            status.isHealthy = false;
         }
 
         // Check if storage path is accessible
@@ -1507,6 +1515,8 @@ private:
     std::shared_ptr<storage::IReferenceCounter> refCounter_;
     std::unique_ptr<storage::RefCounterWriter> refWriter_;
     ContentStoreConfig config_;
+    storage::DiskPressurePolicy diskPressure_{};
+    storage::DiskSpaceProbe diskSpaceProbe_;
 
     // Metadata storage (in-memory for now)
     mutable std::shared_mutex metadataMutex_;
@@ -1689,10 +1699,11 @@ std::unique_ptr<IContentStore> createContentStore(
     std::shared_ptr<storage::IStorageEngine> storage, std::shared_ptr<chunking::IChunker> chunker,
     std::shared_ptr<crypto::IHasher> hasher,
     std::shared_ptr<manifest::IManifestManager> manifestManager,
-    std::shared_ptr<storage::IReferenceCounter> refCounter, const ContentStoreConfig& config) {
+    std::shared_ptr<storage::IReferenceCounter> refCounter, const ContentStoreConfig& config,
+    const storage::DiskPressurePolicy& diskPressure, storage::DiskSpaceProbe diskSpaceProbe) {
     return std::make_unique<ContentStore>(std::move(storage), std::move(chunker), std::move(hasher),
-                                          std::move(manifestManager), std::move(refCounter),
-                                          config);
+                                          std::move(manifestManager), std::move(refCounter), config,
+                                          diskPressure, std::move(diskSpaceProbe));
 }
 
 } // namespace yams::api

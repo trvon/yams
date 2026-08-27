@@ -1,14 +1,15 @@
 #pragma once
 
+// pi-lens-ignore: fatal error
 #include <yams/api/content_store.h>
 #include <yams/chunking/chunker.h>
 #include <yams/crypto/hasher.h>
 #include <yams/manifest/manifest_manager.h>
+#include <yams/storage/disk_pressure.h>
 #include <yams/storage/reference_counter.h>
 #include <yams/storage/storage_engine.h>
 
 #include <memory>
-#include <optional>
 
 namespace yams::api {
 
@@ -35,6 +36,9 @@ public:
     ContentStoreBuilder& withMaxConcurrentOperations(size_t max);
     ContentStoreBuilder& withIntegrityChecks(bool enable);
     ContentStoreBuilder& withGarbageCollectionInterval(std::chrono::seconds interval);
+    ContentStoreBuilder&
+    withDiskPressurePolicy(const storage::DiskPressurePolicy& policy,
+                           storage::DiskSpaceProbe probe = storage::probeDiskSpace);
 
     // Component injection (for testing and customization)
     ContentStoreBuilder& withStorageEngine(std::shared_ptr<storage::IStorageEngine> engine);

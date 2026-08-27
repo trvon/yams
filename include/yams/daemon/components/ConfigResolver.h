@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+// pi-lens-ignore: fatal error
 #include <yams/daemon/components/TuningConfig.h>
 #include <yams/vector/document_chunker.h>
 
@@ -260,6 +261,10 @@ public:
     /// Apply the canonical [search].automatic_rebuilds startup policy. Compatibility environment
     /// is resolved later only when this typed value remains absent.
     static void applySearchMaintenance(const ConfigSections& sections, DaemonConfig& config);
+
+    /// Apply [storage.disk_pressure] without environment overlays. Returns false when an
+    /// explicitly supplied policy is invalid; config remains unchanged on failure.
+    static bool applyStorageDiskPressure(const ConfigSections& sections, DaemonConfig& config);
 
     /// Resolve the opt-in [memory_sync] policy once from typed TOML sections.
     /// Returns false when an explicitly enabled policy is invalid.

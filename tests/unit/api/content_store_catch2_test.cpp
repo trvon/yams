@@ -1462,6 +1462,72 @@ TEST_CASE("ContentStore: Health check", "[api][content-store][health]") {
     }
 }
 
+TEST_CASE("ContentStore classifies disk pressure through an injected probe",
+          "[api][content-store][health][disk-pressure]") {
+    const auto gib = 1024ULL * 1024ULL * 1024ULL;
+    const auto mib = 1024ULL * 1024ULL;
+    const auto makeProbe = [&](std::uint64_t availableBytes) -> storage::DiskSpaceProbe {
+        return [=](const fs::path&) {
+            return Result<storage::DiskSpaceSnapshot>(
+                storage::DiskSpaceSnapshot{10ULL * gib, availableBytes});
+        };
+    };
+    const auto makeStore = [&](std::uint64_t availableBytes) {
+        ContentStoreConfig config;
+        config.storagePath = fs::temp_directory_path() /
+                             ("yams_disk_pressure_" + std::to_string(std::random_device{}()));
+        ContentStoreBuilder builder;
+        builder.withConfig(config).withDiskPressurePolicy({}, makeProbe(availableBytes));
+        return builder.build();
+    };
+
+    const auto normalObservation = storage::inspectDiskPressure({}, {}, makeProbe(5ULL * gib));
+    REQUIRE(normalObservation.has_value());
+    CHECK(normalObservation.value().space.capacityBytes == 10ULL * gib);
+    CHECK(normalObservation.value().space.availableBytes == 5ULL * gib);
+    CHECK(normalObservation.value().level == storage::DiskPressureLevel::Normal);
+    auto normalStore = makeStore(5ULL * gib);
+    REQUIRE(normalStore.has_value());
+    CHECK(normalStore.value()->checkHealth().isHealthy);
+
+    const auto warningObservation = storage::inspectDiskPressure({}, {}, makeProbe(500ULL * mib));
+    REQUIRE(warningObservation.has_value());
+    CHECK(warningObservation.value().level == storage::DiskPressureLevel::Warning);
+    auto warningStore = makeStore(500ULL * mib);
+    REQUIRE(warningStore.has_value());
+    const auto warning = warningStore.value()->checkHealth();
+    CHECK(warning.isHealthy);
+    CHECK_FALSE(warning.warnings.empty());
+
+    const auto emergencyObservation = storage::inspectDiskPressure({}, {}, makeProbe(50ULL * mib));
+    REQUIRE(emergencyObservation.has_value());
+    CHECK(emergencyObservation.value().level == storage::DiskPressureLevel::Emergency);
+    auto emergencyStore = makeStore(50ULL * mib);
+    REQUIRE(emergencyStore.has_value());
+    const auto emergency = emergencyStore.value()->checkHealth();
+    CHECK_FALSE(emergency.isHealthy);
+    CHECK_FALSE(emergency.errors.empty());
+}
+
+TEST_CASE("ContentStore reports an unknown disk state when probing fails",
+          "[api][content-store][health][disk-pressure]") {
+    ContentStoreConfig config;
+    config.storagePath = fs::temp_directory_path() /
+                         ("yams_disk_pressure_error_" + std::to_string(std::random_device{}()));
+    storage::DiskSpaceProbe probe = [](const fs::path&) -> Result<storage::DiskSpaceSnapshot> {
+        return Error{ErrorCode::IOError, "scripted disk probe failure"};
+    };
+    CHECK_FALSE(storage::inspectDiskPressure(config.storagePath, {}, probe).has_value());
+
+    ContentStoreBuilder builder;
+    builder.withConfig(config).withDiskPressurePolicy({}, probe);
+    auto store = builder.build();
+    REQUIRE(store.has_value());
+    const auto health = store.value()->checkHealth();
+    CHECK_FALSE(health.isHealthy);
+    REQUIRE_FALSE(health.errors.empty());
+}
+
 TEST_CASE("ContentStore: Verify detects storage integrity issues",
           "[api][content-store][verify][integrity]") {
     ContentStoreFixture fixture;

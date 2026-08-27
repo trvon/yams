@@ -232,10 +232,13 @@ struct MetricsSnapshot {
     std::uint64_t vectorPhysicalBytes{0};   // vector DB + index files
     std::uint64_t logsTmpPhysicalBytes{0};  // logs + temp files under data dir
     std::uint64_t physicalTotalBytes{0};    // sum of above components
-    std::uint64_t volumeUsedBytes{0};       // statvfs/GetDiskFreeSpaceExW used bytes for the
-                                            // mount holding the data dir; instant fast-path
-                                            // populated every status tick (independent of the
-                                            // adaptive deep-walk TTL)
+    std::uint64_t volumeUsedBytes{0};       // statvfs/GetDiskFreeSpaceExW used bytes for the mount
+    std::uint64_t storageCapacityBytes{0};
+    std::uint64_t storageAvailableBytes{0};
+    std::uint64_t storageWriteAdmissionBytes{0};
+    std::uint64_t storageEmergencyReserveBytes{0};
+    std::uint32_t storageWarningFreePercentBp{0};
+    std::uint8_t storagePressureLevel{0}; // DiskPressureLevel code; unknown when zero.
 
     // Resolved data directory
     std::string dataDir;

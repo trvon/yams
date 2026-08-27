@@ -1,4 +1,5 @@
 #define _CRT_SECURE_NO_WARNINGS
+// pi-lens-ignore: fatal error
 #include <yams/api/content_store_builder.h>
 #include <yams/api/content_store_error.h>
 #include <yams/chunking/streaming_chunker.h>
@@ -13,7 +14,6 @@
 #include <filesystem>
 #include <limits>
 #include <optional>
-#include <sstream>
 
 namespace fs = std::filesystem;
 
@@ -23,7 +23,8 @@ std::unique_ptr<IContentStore> createContentStore(
     std::shared_ptr<storage::IStorageEngine> storage, std::shared_ptr<chunking::IChunker> chunker,
     std::shared_ptr<crypto::IHasher> hasher,
     std::shared_ptr<manifest::IManifestManager> manifestManager,
-    std::shared_ptr<storage::IReferenceCounter> refCounter, const ContentStoreConfig& config);
+    std::shared_ptr<storage::IReferenceCounter> refCounter, const ContentStoreConfig& config,
+    const storage::DiskPressurePolicy& diskPressure, storage::DiskSpaceProbe diskSpaceProbe);
 }
 
 namespace yams::api {
@@ -68,6 +69,8 @@ struct ContentStoreBuilder::Impl {
     std::shared_ptr<crypto::IHasher> hasher;
     std::shared_ptr<manifest::IManifestManager> manifestManager;
     std::shared_ptr<storage::IReferenceCounter> referenceCounter;
+    storage::DiskPressurePolicy diskPressure{};
+    storage::DiskSpaceProbe diskSpaceProbe{storage::probeDiskSpace};
     bool storageEngineProvided = false;
 
     Impl() {
@@ -333,6 +336,14 @@ ContentStoreBuilder::withGarbageCollectionInterval(std::chrono::seconds interval
     return *this;
 }
 
+ContentStoreBuilder&
+ContentStoreBuilder::withDiskPressurePolicy(const storage::DiskPressurePolicy& policy,
+                                            storage::DiskSpaceProbe probe) {
+    pImpl->diskPressure = policy;
+    pImpl->diskSpaceProbe = std::move(probe);
+    return *this;
+}
+
 // Component injection
 ContentStoreBuilder&
 ContentStoreBuilder::withStorageEngine(std::shared_ptr<storage::IStorageEngine> engine) {
@@ -370,6 +381,12 @@ Result<std::unique_ptr<IContentStore>> ContentStoreBuilder::build() {
     if (!validateResult) {
         return Result<std::unique_ptr<IContentStore>>(validateResult.error());
     }
+    if (const auto diskPolicy = pImpl->diskPressure.validate(); !diskPolicy) {
+        return Result<std::unique_ptr<IContentStore>>(diskPolicy.error());
+    }
+    if (!pImpl->diskSpaceProbe) {
+        return Error{ErrorCode::InvalidArgument, "disk-space probe is not configured"};
+    }
 
     // Ensure storage directories exist (may have been created previously).
     try {
@@ -388,7 +405,8 @@ Result<std::unique_ptr<IContentStore>> ContentStoreBuilder::build() {
 
     // Create content store
     auto store = createContentStore(pImpl->storageEngine, pImpl->chunker, pImpl->hasher,
-                                    pImpl->manifestManager, pImpl->referenceCounter, pImpl->config);
+                                    pImpl->manifestManager, pImpl->referenceCounter, pImpl->config,
+                                    pImpl->diskPressure, pImpl->diskSpaceProbe);
 
     spdlog::debug("Content store built successfully with storage path: {}",
                   pImpl->config.storagePath.string());

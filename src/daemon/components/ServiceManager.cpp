@@ -1908,16 +1908,21 @@ Result<std::filesystem::path> ServiceManager::initializeDataDirAndContentStore()
     auto storeRes = init::record_duration(
         std::string(readiness::kContentStore),
         [&]() -> yams::Result<StorePtr> {
+            yams::api::ContentStoreConfig storeConfig;
+            storeConfig.storagePath = storeRoot;
             if (storageDecision.value().storageEngineOverride) {
                 yams::api::ContentStoreBuilder builder;
-                builder.withStoragePath(storeRoot)
+                builder.withConfig(storeConfig)
+                    .withDiskPressurePolicy(config_.diskPressure)
                     .withStorageEngine(storageDecision.value().storageEngineOverride)
                     .withCompression(true)
                     .withDeduplication(true)
                     .withIntegrityChecks(true);
                 return builder.build();
             }
-            return yams::api::ContentStoreBuilder::createDefault(storeRoot);
+            yams::api::ContentStoreBuilder builder;
+            builder.withConfig(storeConfig).withDiskPressurePolicy(config_.diskPressure);
+            return builder.build();
         },
         state_.initDurationsMs);
     if (!storeRes) {

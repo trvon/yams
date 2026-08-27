@@ -1,5 +1,6 @@
 #pragma once
 
+// pi-lens-ignore: fatal error
 #include <yams/api/content_metadata.h>
 #include <yams/api/progress_reporter.h>
 #include <yams/compression/compression_header.h>

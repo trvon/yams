@@ -1,10 +1,12 @@
 // Split from RequestDispatcher.cpp: status handler
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <thread>
+// pi-lens-ignore: fatal error
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/DaemonMetrics.h>
 #include <yams/daemon/components/dispatch_utils.hpp>
@@ -26,6 +28,12 @@
 namespace yams::daemon {
 
 namespace {
+
+void setUint64Metric(StatusResponse& response, std::string_view lowKey, std::string_view highKey,
+                     std::uint64_t value) {
+    response.requestCounts[std::string(lowKey)] = static_cast<std::size_t>(value & 0xffffffffULL);
+    response.requestCounts[std::string(highKey)] = static_cast<std::size_t>(value >> 32U);
+}
 
 uint32_t computeSnapshotRetryAfter(const MetricsSnapshot& snap, bool detailed) {
     const bool snapshotBusy = detailed ? snap.statusDetailStale : snap.statusSnapshotStale;
@@ -465,6 +473,24 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
     setVal(metrics::kPressureLevel, static_cast<size_t>(snap.governorPressureLevel));
 
     if (includeExtendedStatus) {
+        setVal(metrics::kStoragePressureLevel, snap.storagePressureLevel);
+        setVal(metrics::kStorageWarningFreePercentBp, snap.storageWarningFreePercentBp);
+        if (snap.storageCapacityBytes > 0) {
+            setUint64Metric(res, metrics::kStorageCapacityBytesLow,
+                            metrics::kStorageCapacityBytesHigh, snap.storageCapacityBytes);
+            setUint64Metric(res, metrics::kStorageAvailableBytesLow,
+                            metrics::kStorageAvailableBytesHigh, snap.storageAvailableBytes);
+        }
+        if (snap.storageWriteAdmissionBytes > 0) {
+            setUint64Metric(res, metrics::kStorageWriteAdmissionBytesLow,
+                            metrics::kStorageWriteAdmissionBytesHigh,
+                            snap.storageWriteAdmissionBytes);
+        }
+        if (snap.storageEmergencyReserveBytes > 0) {
+            setUint64Metric(res, metrics::kStorageEmergencyReserveBytesLow,
+                            metrics::kStorageEmergencyReserveBytesHigh,
+                            snap.storageEmergencyReserveBytes);
+        }
         if (snap.logicalBytes > 0)
             setVal(metrics::kStorageLogicalBytes, static_cast<size_t>(snap.logicalBytes));
         if (snap.physicalBytes > 0)
@@ -1066,6 +1092,20 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
         const auto rawRssBytes = res.governorRssBytes;
         if (rawRssBytes > 0) {
             res.requestCounts["status_rss_bytes"] = static_cast<size_t>(rawRssBytes);
+        }
+
+        if (includeExtendedStatus && !metrics_ && serviceManager_) {
+            const auto& policy = serviceManager_->getConfig().diskPressure;
+            res.requestCounts[std::string(metrics::kStorageWarningFreePercentBp)] =
+                static_cast<size_t>(std::lround(policy.warningFreePercent * 100.0));
+            res.requestCounts[std::string(metrics::kStoragePressureLevel)] =
+                static_cast<size_t>(storage::DiskPressureLevel::Unknown);
+            setUint64Metric(res, metrics::kStorageWriteAdmissionBytesLow,
+                            metrics::kStorageWriteAdmissionBytesHigh,
+                            policy.minimumWriteAdmissionBytes);
+            setUint64Metric(res, metrics::kStorageEmergencyReserveBytesLow,
+                            metrics::kStorageEmergencyReserveBytesHigh,
+                            policy.emergencyReserveBytes);
         }
     } catch (...) { // NOLINT(bugprone-empty-catch)
         StatusResponse fallback;

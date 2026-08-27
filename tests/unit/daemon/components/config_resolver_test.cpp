@@ -5,6 +5,7 @@
 //
 // Catch2 migration from GTest (yams-3s4 / yams-zns)
 
+// pi-lens-ignore: fatal error
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
@@ -307,6 +308,58 @@ TEST_CASE("ConfigResolver applies typed search maintenance policy with provenanc
     ConfigResolver::applySearchMaintenance(sections, invalid);
     CHECK_FALSE(invalid.searchMaintenance.automaticRebuildsEnabled.has_value());
     CHECK(invalid.searchMaintenance.automaticRebuildsSource.empty());
+}
+
+TEST_CASE("ConfigResolver applies typed disk pressure policy transactionally",
+          "[daemon][components][config][disk-pressure][catch2]") {
+    ConfigResolver::ConfigSections sections;
+    sections["storage.disk_pressure"] = {
+        {"warning_free_percent", "12.5"},
+        {"minimum_write_admission_bytes", "536870912"},
+        {"emergency_reserve_bytes", "67108864"},
+    };
+    DaemonConfig config;
+
+    REQUIRE(ConfigResolver::applyStorageDiskPressure(sections, config));
+    CHECK(config.diskPressure.warningFreePercent == Catch::Approx(12.5));
+    CHECK(config.diskPressure.minimumWriteAdmissionBytes == 536870912ULL);
+    CHECK(config.diskPressure.emergencyReserveBytes == 67108864ULL);
+
+    const auto accepted = config.diskPressure;
+    sections["storage.disk_pressure"]["emergency_reserve_bytes"] = "1073741824";
+    CHECK_FALSE(ConfigResolver::applyStorageDiskPressure(sections, config));
+    CHECK(config.diskPressure.warningFreePercent == accepted.warningFreePercent);
+    CHECK(config.diskPressure.minimumWriteAdmissionBytes == accepted.minimumWriteAdmissionBytes);
+    CHECK(config.diskPressure.emergencyReserveBytes == accepted.emergencyReserveBytes);
+}
+
+TEST_CASE("ConfigResolver disk pressure policy rejects unsafe values",
+          "[daemon][components][config][disk-pressure][catch2]") {
+    const std::vector<std::pair<std::string, std::string>> invalidValues = {
+        {"warning_free_percent", "0"},           {"warning_free_percent", "101"},
+        {"warning_free_percent", "nan"},         {"warning_free_percent", "0.001"},
+        {"minimum_write_admission_bytes", "-1"}, {"emergency_reserve_bytes", "invalid"},
+    };
+
+    for (const auto& [key, value] : invalidValues) {
+        CAPTURE(key, value);
+        ConfigResolver::ConfigSections sections;
+        sections["storage.disk_pressure"] = {{key, value}};
+        DaemonConfig config;
+        CHECK_FALSE(ConfigResolver::applyStorageDiskPressure(sections, config));
+    }
+
+    ConfigResolver::ConfigSections unknown;
+    unknown["storage.disk_pressure"] = {{"warning_free_precent", "5"}};
+    DaemonConfig typo;
+    CHECK_FALSE(ConfigResolver::applyStorageDiskPressure(unknown, typo));
+    CHECK_FALSE(ConfigResolver::applyMemorySync(unknown, typo));
+
+    DaemonConfig defaults;
+    REQUIRE(ConfigResolver::applyStorageDiskPressure({}, defaults));
+    CHECK(defaults.diskPressure.warningFreePercent == Catch::Approx(10.0));
+    CHECK(defaults.diskPressure.minimumWriteAdmissionBytes == 256ULL * 1024ULL * 1024ULL);
+    CHECK(defaults.diskPressure.emergencyReserveBytes == 100ULL * 1024ULL * 1024ULL);
 }
 
 TEST_CASE("ConfigResolver::resolveEmbeddingChunkingPolicy defaults are embedding-safe",

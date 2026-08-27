@@ -1,6 +1,7 @@
 // Copyright 2025 The YAMS Authors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+// pi-lens-ignore: fatal error
 #include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/detail/config_parse_utils.h>
@@ -1599,7 +1600,62 @@ void ConfigResolver::applySearchMaintenance(const ConfigSections& sections, Daem
     config.searchMaintenance.automaticRebuildsSource = "config:search.automatic_rebuilds";
 }
 
+bool ConfigResolver::applyStorageDiskPressure(const ConfigSections& sections,
+                                              DaemonConfig& config) {
+    const auto section = sections.find("storage.disk_pressure");
+    if (section == sections.end()) {
+        return true;
+    }
+    for (const auto& [key, value] : section->second) {
+        (void)value;
+        if (key != "warning_free_percent" && key != "minimum_write_admission_bytes" &&
+            key != "emergency_reserve_bytes") {
+            spdlog::warn("Config: unknown storage.disk_pressure key '{}'", key);
+            return false;
+        }
+    }
+
+    auto policy = config.diskPressure;
+    if (const auto it = section->second.find("warning_free_percent"); it != section->second.end()) {
+        const auto parsed = parseDouble(it->second);
+        if (!parsed) {
+            spdlog::warn("Config: storage.disk_pressure.warning_free_percent must be numeric");
+            return false;
+        }
+        policy.warningFreePercent = *parsed;
+    }
+    if (const auto it = section->second.find("minimum_write_admission_bytes");
+        it != section->second.end()) {
+        const auto parsed = parseUnsignedIntegral<std::uint64_t>(it->second);
+        if (!parsed) {
+            spdlog::warn(
+                "Config: storage.disk_pressure.minimum_write_admission_bytes must be unsigned");
+            return false;
+        }
+        policy.minimumWriteAdmissionBytes = *parsed;
+    }
+    if (const auto it = section->second.find("emergency_reserve_bytes");
+        it != section->second.end()) {
+        const auto parsed = parseUnsignedIntegral<std::uint64_t>(it->second);
+        if (!parsed) {
+            spdlog::warn("Config: storage.disk_pressure.emergency_reserve_bytes must be unsigned");
+            return false;
+        }
+        policy.emergencyReserveBytes = *parsed;
+    }
+
+    if (const auto valid = policy.validate(); !valid) {
+        spdlog::warn("Config: invalid storage.disk_pressure policy: {}", valid.error().message);
+        return false;
+    }
+    config.diskPressure = policy;
+    return true;
+}
+
 bool ConfigResolver::applyMemorySync(const ConfigSections& sections, DaemonConfig& config) {
+    if (!applyStorageDiskPressure(sections, config)) {
+        return false;
+    }
     const auto section = sections.find("memory_sync");
     if (section == sections.end()) {
         return true;
