@@ -1204,6 +1204,8 @@ message MemorySyncRequest {
     CONNECT = 4;
     DISCONNECT = 5;
     PEERS = 6;
+    IDENTITY = 7;
+    ENROLL = 8;
   }
   Operation operation = 1;
   string key = 2;

@@ -3337,7 +3337,9 @@ enum class MemorySyncOperation : std::uint32_t {
     Delete = 3,
     Connect = 4,
     Disconnect = 5,
-    Peers = 6
+    Peers = 6,
+    Identity = 7,
+    Enroll = 8
 };
 
 struct MemorySyncRequest {
@@ -3359,7 +3361,7 @@ struct MemorySyncRequest {
         if (!operation) {
             return operation.error();
         }
-        if (operation.value() > static_cast<std::uint32_t>(MemorySyncOperation::Peers)) {
+        if (operation.value() > static_cast<std::uint32_t>(MemorySyncOperation::Enroll)) {
             return Error{ErrorCode::InvalidArgument, "invalid memory sync operation"};
         }
         request.operation = static_cast<MemorySyncOperation>(operation.value());

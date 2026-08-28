@@ -6,6 +6,7 @@
 
 // pi-lens-ignore: fatal error
 #include <yams/daemon/p2p/p2p_manager.h>
+#include <yams/daemon/p2p/p2p_transport.h>
 #include <yams/memory_sync/memory_sync_service.h>
 #include <yams/memory_sync/writer_auth.h>
 #include <yams/storage/storage_backend.h>
@@ -58,7 +59,8 @@ std::vector<std::byte> bytes(std::string_view text) {
 
 P2pManagerOptions options(std::string nodeId, const std::filesystem::path& root,
                           std::string privateKeyPem,
-                          std::chrono::milliseconds reconnectInterval = std::chrono::seconds(60)) {
+                          std::chrono::milliseconds reconnectInterval = std::chrono::seconds(60),
+                          bool allowFirstContact = true) {
     return P2pManagerOptions{.nodeId = std::move(nodeId),
                              .corpusId = "manager-corpus",
                              .corpusEpoch = 1,
@@ -66,7 +68,7 @@ P2pManagerOptions options(std::string nodeId, const std::filesystem::path& root,
                              .databasePath = root / "yams.db",
                              .listenHost = "127.0.0.1",
                              .listenPort = 0,
-                             .allowFirstContact = true,
+                             .allowFirstContact = allowFirstContact,
                              .maxPeers = 8,
                              .reconnectInterval = reconnectInterval,
                              .timeout = 3s};
@@ -98,6 +100,120 @@ TEST_CASE("P2P connection strings are strict and IPv6 aware", "[daemon][p2p][man
         CAPTURE(invalid);
         CHECK_FALSE(yams::daemon::p2p::parseP2pConnectionString(invalid).has_value());
     }
+}
+
+TEST_CASE("P2P manager defaults to rejecting first contact", "[daemon][p2p][security]") {
+    CHECK_FALSE(P2pManagerOptions{}.allowFirstContact);
+}
+
+TEST_CASE("P2P manager rejects unknown inbound peers before delta exchange",
+          "[daemon][p2p][manager][network][sqlite][security]") {
+    TempDir clientDir{"unknown-client"};
+    TempDir serverDir{"unknown-server"};
+    MemorySyncService clientService{backend(clientDir.path / "ops"),
+                                    MemorySyncConfig{"client-node", 60'000, "manager-corpus", 1}};
+    MemorySyncService serverService{backend(serverDir.path / "ops"),
+                                    MemorySyncConfig{"server-node", 60'000, "manager-corpus", 1}};
+    REQUIRE(clientService.syncFully().has_value());
+    REQUIRE(serverService.syncFully().has_value());
+    REQUIRE(clientService.publish("user/from-client", bytes("client-value")).has_value());
+    REQUIRE(serverService.publish("user/from-server", bytes("server-value")).has_value());
+
+    auto clientKey = yams::memory_sync::generateWriterKeyPair();
+    auto serverKey = yams::memory_sync::generateWriterKeyPair();
+    REQUIRE(clientKey.has_value());
+    REQUIRE(serverKey.has_value());
+    auto serverIdentity = yams::daemon::p2p::TlsIdentity::fromPrivateKeyPem(
+        "server-node", serverKey.value().privateKeyPem);
+    REQUIRE(serverIdentity.has_value());
+    const auto serverPin = serverIdentity.value().spkiPin();
+
+    auto client = P2pManager::create(
+        options("client-node", clientDir.path, clientKey.value().privateKeyPem, 60s, false),
+        clientService);
+    auto server = P2pManager::create(
+        options("server-node", serverDir.path, serverKey.value().privateKeyPem, 60s, false),
+        serverService);
+    REQUIRE(client.has_value());
+    REQUIRE(server.has_value());
+    REQUIRE(client.value()->enrollPeer("server-node", serverPin).has_value());
+    REQUIRE(client.value()->start().has_value());
+    REQUIRE(server.value()->start().has_value());
+
+    const std::string endpoint =
+        "127.0.0.1:" + std::to_string(server.value()->boundPort()) + "?pin=" + serverPin;
+    auto rejected = client.value()->connect(endpoint);
+    REQUIRE_FALSE(rejected.has_value());
+    CHECK_FALSE(serverService.readCached("user/from-client").has_value());
+    CHECK_FALSE(clientService.readCached("user/from-server").has_value());
+    auto serverPeers = server.value()->peers();
+    REQUIRE(serverPeers.has_value());
+    CHECK(serverPeers.value().empty());
+
+    client.value()->stop();
+    server.value()->stop();
+}
+
+TEST_CASE("P2P manager converges after mutual operator enrollment",
+          "[daemon][p2p][manager][network][sqlite][security]") {
+    TempDir clientDir{"enrolled-client"};
+    TempDir serverDir{"enrolled-server"};
+    MemorySyncService clientService{backend(clientDir.path / "ops"),
+                                    MemorySyncConfig{"client-node", 60'000, "manager-corpus", 1}};
+    MemorySyncService serverService{backend(serverDir.path / "ops"),
+                                    MemorySyncConfig{"server-node", 60'000, "manager-corpus", 1}};
+    REQUIRE(clientService.syncFully().has_value());
+    REQUIRE(serverService.syncFully().has_value());
+    REQUIRE(clientService.publish("user/from-client", bytes("client-value")).has_value());
+    REQUIRE(serverService.publish("user/from-server", bytes("server-value")).has_value());
+
+    auto clientKey = yams::memory_sync::generateWriterKeyPair();
+    auto serverKey = yams::memory_sync::generateWriterKeyPair();
+    REQUIRE(clientKey.has_value());
+    REQUIRE(serverKey.has_value());
+    auto clientIdentity = yams::daemon::p2p::TlsIdentity::fromPrivateKeyPem(
+        "client-node", clientKey.value().privateKeyPem);
+    auto serverIdentity = yams::daemon::p2p::TlsIdentity::fromPrivateKeyPem(
+        "server-node", serverKey.value().privateKeyPem);
+    REQUIRE(clientIdentity.has_value());
+    REQUIRE(serverIdentity.has_value());
+
+    auto client = P2pManager::create(
+        options("client-node", clientDir.path, clientKey.value().privateKeyPem, 60s, false),
+        clientService);
+    auto server = P2pManager::create(
+        options("server-node", serverDir.path, serverKey.value().privateKeyPem, 60s, false),
+        serverService);
+    REQUIRE(client.has_value());
+    REQUIRE(server.has_value());
+    REQUIRE(client.value()->start().has_value());
+    REQUIRE(server.value()->start().has_value());
+    REQUIRE(
+        client.value()->enrollPeer("server-node", serverIdentity.value().spkiPin()).has_value());
+    REQUIRE(
+        server.value()->enrollPeer("client-node", clientIdentity.value().spkiPin()).has_value());
+    auto localIdentity = client.value()->localIdentity();
+    REQUIRE(localIdentity.has_value());
+    CHECK(localIdentity.value().nodeId == "client-node");
+    CHECK(localIdentity.value().spkiPin == clientIdentity.value().spkiPin());
+
+    const std::string unpinnedEndpoint = "127.0.0.1:" + std::to_string(server.value()->boundPort());
+    auto unpinned = client.value()->connect(unpinnedEndpoint);
+    REQUIRE_FALSE(unpinned.has_value());
+    CHECK(unpinned.error().code == yams::ErrorCode::InvalidArgument);
+
+    const std::string endpoint = unpinnedEndpoint + "?pin=" + serverIdentity.value().spkiPin();
+    auto synced = client.value()->connect(endpoint);
+    REQUIRE(synced.has_value());
+    CHECK(clientService.readCached("user/from-server").has_value());
+    CHECK(serverService.readCached("user/from-client").has_value());
+    auto serverPeers = server.value()->peers();
+    REQUIRE(serverPeers.has_value());
+    REQUIRE(serverPeers.value().size() == 1);
+    CHECK(serverPeers.value().front().pinnedByOperator);
+
+    client.value()->stop();
+    server.value()->stop();
 }
 
 TEST_CASE("P2P manager connects, converges, and remembers peers",
@@ -171,8 +287,8 @@ TEST_CASE("P2P manager connects, converges, and remembers peers",
     server.value()->stop();
 }
 
-TEST_CASE("P2P manager resumes remembered peers after restart",
-          "[daemon][p2p][manager][network][sqlite][reconnect]") {
+TEST_CASE("P2P manager resumes operator-enrolled peers after restart",
+          "[daemon][p2p][manager][network][sqlite][reconnect][security]") {
     TempDir clientDir{"resume-client"};
     TempDir serverDir{"resume-server"};
     MemorySyncService clientService{backend(clientDir.path / "ops"),
@@ -185,24 +301,36 @@ TEST_CASE("P2P manager resumes remembered peers after restart",
     auto serverKey = yams::memory_sync::generateWriterKeyPair();
     REQUIRE(clientKey.has_value());
     REQUIRE(serverKey.has_value());
+    auto clientIdentity = yams::daemon::p2p::TlsIdentity::fromPrivateKeyPem(
+        "client-node", clientKey.value().privateKeyPem);
+    auto serverIdentity = yams::daemon::p2p::TlsIdentity::fromPrivateKeyPem(
+        "server-node", serverKey.value().privateKeyPem);
+    REQUIRE(clientIdentity.has_value());
+    REQUIRE(serverIdentity.has_value());
 
     auto server = P2pManager::create(
-        options("server-node", serverDir.path, serverKey.value().privateKeyPem), serverService);
+        options("server-node", serverDir.path, serverKey.value().privateKeyPem, 60s, false),
+        serverService);
     auto client = P2pManager::create(
-        options("client-node", clientDir.path, clientKey.value().privateKeyPem, 50ms),
+        options("client-node", clientDir.path, clientKey.value().privateKeyPem, 50ms, false),
         clientService);
     REQUIRE(server.has_value());
     REQUIRE(client.has_value());
     REQUIRE(server.value()->start().has_value());
     REQUIRE(client.value()->start().has_value());
-    const std::string endpoint = "127.0.0.1:" + std::to_string(server.value()->boundPort());
+    REQUIRE(
+        client.value()->enrollPeer("server-node", serverIdentity.value().spkiPin()).has_value());
+    REQUIRE(
+        server.value()->enrollPeer("client-node", clientIdentity.value().spkiPin()).has_value());
+    const std::string endpoint = "127.0.0.1:" + std::to_string(server.value()->boundPort()) +
+                                 "?pin=" + serverIdentity.value().spkiPin();
     REQUIRE(client.value()->connect(endpoint).has_value());
     client.value()->stop();
     client.value().reset();
 
     REQUIRE(serverService.publish("user/after-restart", bytes("resumed")).has_value());
     client = P2pManager::create(
-        options("client-node", clientDir.path, clientKey.value().privateKeyPem, 50ms),
+        options("client-node", clientDir.path, clientKey.value().privateKeyPem, 50ms, false),
         clientService);
     REQUIRE(client.has_value());
     REQUIRE(client.value()->start().has_value());

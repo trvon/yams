@@ -6,6 +6,7 @@
 
 #include "p2p_json.h"
 
+#include <limits>
 #include <string_view>
 #include <utility>
 
@@ -24,6 +25,7 @@ struct DeltaAcknowledgement {
 
 Result<void> validateOptions(const DeltaExchangeOptions& options) {
     if (options.maxDeltasPerBatch == 0 || options.maxBatches == 0 ||
+        options.maxDeltasPerSession == 0 || options.maxWireBytesPerSession == 0 ||
         options.timeout <= std::chrono::milliseconds::zero()) {
         return Error{ErrorCode::InvalidArgument, "invalid p2p delta exchange limits"};
     }
@@ -32,6 +34,52 @@ Result<void> validateOptions(const DeltaExchangeOptions& options) {
 
 Json batchJson(const memory_sync::MemoryDeltaBatch& batch) {
     return {{"type", "delta_batch"}, {"count", batch.deltas.size()}, {"has_more", batch.hasMore}};
+}
+
+Result<std::size_t> estimatedWireBytes(const memory_sync::MemoryDeltaBatch& batch) {
+    constexpr std::size_t kFramePrefixBytes = 4;
+    std::size_t total = batchJson(batch).dump().size() + kFramePrefixBytes;
+    for (const auto& delta : batch.deltas) {
+        Json recordJson;
+        try {
+            recordJson = {{"type", "delta_record"},
+                          {"logical_key", delta.logicalKey},
+                          {"record", delta.record},
+                          {"payload_size", delta.payload.size()}};
+        } catch (const std::exception& error) {
+            return Error{ErrorCode::SerializationError, error.what()};
+        }
+        const auto controlBytes = recordJson.dump().size() + kFramePrefixBytes;
+        const auto payloadBytes =
+            delta.payload.empty() ? 0 : delta.payload.size() + kFramePrefixBytes;
+        if (controlBytes > std::numeric_limits<std::size_t>::max() - total ||
+            payloadBytes > std::numeric_limits<std::size_t>::max() - total - controlBytes) {
+            return Error{ErrorCode::ResourceExhausted, "p2p delta wire size overflow"};
+        }
+        total += controlBytes + payloadBytes;
+    }
+    return total;
+}
+
+Result<void> admitBatch(const memory_sync::MemoryDeltaBatch& batch,
+                        const DeltaExchangeOptions& options, std::size_t acceptedDeltas,
+                        std::size_t acceptedBytes, std::size_t& batchBytes) {
+    if (acceptedDeltas > options.maxDeltasPerSession ||
+        batch.deltas.size() > options.maxDeltasPerSession - acceptedDeltas) {
+        return Error{ErrorCode::ResourceExhausted,
+                     "p2p delta exchange exceeded aggregate delta limit"};
+    }
+    auto estimated = estimatedWireBytes(batch);
+    if (!estimated) {
+        return estimated.error();
+    }
+    batchBytes = estimated.value();
+    if (acceptedBytes > options.maxWireBytesPerSession ||
+        batchBytes > options.maxWireBytesPerSession - acceptedBytes) {
+        return Error{ErrorCode::ResourceExhausted,
+                     "p2p delta exchange exceeded aggregate byte limit"};
+    }
+    return {};
 }
 
 Result<void> sendBatch(P2pConnection& connection, const memory_sync::MemoryDeltaBatch& batch,
@@ -85,8 +133,15 @@ Result<BatchHeader> parseBatchHeader(const Json& control, const DeltaExchangeOpt
     }
 }
 
-Result<memory_sync::MemoryDelta> receiveDeltaRecord(P2pConnection& connection,
-                                                    const DeltaExchangeOptions& options) {
+struct ReceivedDelta {
+    memory_sync::MemoryDelta delta;
+    std::size_t wireBytes{0};
+};
+
+Result<ReceivedDelta> receiveDeltaRecord(P2pConnection& connection,
+                                         const DeltaExchangeOptions& options,
+                                         std::size_t remainingBytes) {
+    constexpr std::size_t kFramePrefixBytes = 4;
     auto control = readJson(connection, options.timeout);
     if (!control) {
         return control.error();
@@ -109,23 +164,34 @@ Result<memory_sync::MemoryDelta> receiveDeltaRecord(P2pConnection& connection,
         (delta.record.isTombstone() && payloadSize != 0)) {
         return Error{ErrorCode::ValidationError, "p2p delta payload size is invalid"};
     }
-    if (payloadSize == 0) {
-        return delta;
+    const auto controlBytes = control.value().dump().size() + kFramePrefixBytes;
+    const auto payloadBytes = payloadSize == 0 ? 0 : payloadSize + kFramePrefixBytes;
+    if (controlBytes > remainingBytes || payloadBytes > remainingBytes - controlBytes) {
+        return Error{ErrorCode::ResourceExhausted,
+                     "p2p delta exchange exceeded aggregate byte limit"};
     }
-    auto payload = connection.readFrame(options.timeout, kP2pMaxValuePayloadBytes);
-    if (!payload) {
-        return payload.error();
+    if (payloadSize != 0) {
+        auto payload = connection.readFrame(options.timeout, kP2pMaxValuePayloadBytes);
+        if (!payload) {
+            return payload.error();
+        }
+        if (payload.value().size() != payloadSize) {
+            return Error{ErrorCode::ValidationError,
+                         "p2p delta payload length does not match its record"};
+        }
+        delta.payload = std::move(payload.value());
     }
-    if (payload.value().size() != payloadSize) {
-        return Error{ErrorCode::ValidationError,
-                     "p2p delta payload length does not match its record"};
-    }
-    delta.payload = std::move(payload.value());
-    return delta;
+    return ReceivedDelta{.delta = std::move(delta), .wireBytes = controlBytes + payloadBytes};
 }
 
-Result<memory_sync::MemoryDeltaBatch> receiveBatch(P2pConnection& connection,
-                                                   const DeltaExchangeOptions& options) {
+struct ReceivedBatch {
+    memory_sync::MemoryDeltaBatch batch;
+    std::size_t wireBytes{0};
+};
+
+Result<ReceivedBatch> receiveBatch(P2pConnection& connection, const DeltaExchangeOptions& options,
+                                   std::size_t remainingDeltas, std::size_t remainingBytes) {
+    constexpr std::size_t kFramePrefixBytes = 4;
     auto control = readJson(connection, options.timeout);
     if (!control) {
         return control.error();
@@ -134,17 +200,28 @@ Result<memory_sync::MemoryDeltaBatch> receiveBatch(P2pConnection& connection,
     if (!header) {
         return header.error();
     }
-    memory_sync::MemoryDeltaBatch batch;
-    batch.hasMore = header.value().hasMore;
-    batch.deltas.reserve(header.value().count);
+    const auto headerBytes = control.value().dump().size() + kFramePrefixBytes;
+    if (header.value().count > remainingDeltas) {
+        return Error{ErrorCode::ResourceExhausted,
+                     "p2p delta exchange exceeded aggregate delta limit"};
+    }
+    if (headerBytes > remainingBytes) {
+        return Error{ErrorCode::ResourceExhausted,
+                     "p2p delta exchange exceeded aggregate byte limit"};
+    }
+    ReceivedBatch received;
+    received.batch.hasMore = header.value().hasMore;
+    received.batch.deltas.reserve(header.value().count);
+    received.wireBytes = headerBytes;
     for (std::size_t index = 0; index < header.value().count; ++index) {
-        auto delta = receiveDeltaRecord(connection, options);
+        auto delta = receiveDeltaRecord(connection, options, remainingBytes - received.wireBytes);
         if (!delta) {
             return delta.error();
         }
-        batch.deltas.push_back(std::move(delta.value()));
+        received.wireBytes += delta.value().wireBytes;
+        received.batch.deltas.push_back(std::move(delta.value().delta));
     }
-    return batch;
+    return received;
 }
 
 Json acknowledgementJson(const memory_sync::DeltaApplyResult& result) {
@@ -182,16 +259,24 @@ Result<DeltaExchangeStats> sendAll(P2pConnection& connection,
                                    memory_sync::VersionVector peerVersion,
                                    const DeltaExchangeOptions& options) {
     DeltaExchangeStats stats;
+    std::size_t sessionBytes = 0;
     for (std::size_t batchIndex = 0; batchIndex < options.maxBatches; ++batchIndex) {
         auto batch = service.exportLocalDeltasAfter(peerVersion, options.maxDeltasPerBatch);
         if (!batch) {
             return batch.error();
+        }
+        std::size_t batchBytes = 0;
+        if (auto admitted =
+                admitBatch(batch.value(), options, stats.deltasSent, sessionBytes, batchBytes);
+            !admitted) {
+            return admitted.error();
         }
         if (auto sent = sendBatch(connection, batch.value(), options.timeout); !sent) {
             return sent.error();
         }
         ++stats.batchesSent;
         stats.deltasSent += batch.value().deltas.size();
+        sessionBytes += batchBytes;
         auto acknowledgement = receiveAcknowledgement(connection, options.timeout);
         if (!acknowledgement) {
             return acknowledgement.error();
@@ -216,20 +301,23 @@ Result<DeltaExchangeStats> receiveAll(P2pConnection& connection,
                                       std::string_view expectedPeerNodeId,
                                       const DeltaExchangeOptions& options) {
     DeltaExchangeStats stats;
+    std::size_t sessionBytes = 0;
     for (std::size_t batchIndex = 0; batchIndex < options.maxBatches; ++batchIndex) {
-        auto batch = receiveBatch(connection, options);
+        auto batch =
+            receiveBatch(connection, options, options.maxDeltasPerSession - stats.deltasReceived,
+                         options.maxWireBytesPerSession - sessionBytes);
         if (!batch) {
             return batch.error();
         }
-        const bool forgedOrigin =
-            std::ranges::any_of(batch.value().deltas, [&](const memory_sync::MemoryDelta& delta) {
+        const bool forgedOrigin = std::ranges::any_of(
+            batch.value().batch.deltas, [&](const memory_sync::MemoryDelta& delta) {
                 return delta.record.origin != expectedPeerNodeId;
             });
         if (forgedOrigin) {
             return Error{ErrorCode::Unauthorized,
                          "p2p delta origin does not match authenticated peer"};
         }
-        auto applied = service.applyDeltas(batch.value().deltas);
+        auto applied = service.applyDeltas(batch.value().batch.deltas);
         if (!applied) {
             return applied.error();
         }
@@ -240,10 +328,11 @@ Result<DeltaExchangeStats> receiveAll(P2pConnection& connection,
         }
         ++stats.batchesReceived;
         stats.deltasReceived += applied.value().received;
+        sessionBytes += batch.value().wireBytes;
         stats.merged += applied.value().merged;
         stats.replayed += applied.value().replayed;
         stats.quarantined += applied.value().quarantined.size();
-        if (!batch.value().hasMore) {
+        if (!batch.value().batch.hasMore) {
             return stats;
         }
     }

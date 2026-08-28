@@ -202,6 +202,8 @@ public:
     Result<MemorySyncStatus> getMemorySyncStatus() const;
     Result<p2p::P2pSyncResult> connectP2p(std::string_view connectionString);
     Result<void> disconnectP2p(std::string_view nodeId);
+    Result<void> enrollP2pPeer(std::string_view nodeId, std::string_view spkiPin);
+    Result<p2p::P2pLocalIdentity> getP2pIdentity() const;
     Result<std::vector<p2p::PeerRegistryRecord>> listP2pPeers() const;
     Result<void> publishMemorySyncDocumentDelete(std::string_view contentHash);
 

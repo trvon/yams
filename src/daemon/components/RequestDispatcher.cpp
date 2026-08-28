@@ -253,6 +253,33 @@ RequestDispatcher::handleMemorySyncRequest(const MemorySyncRequest& req) {
             response.value = rows.dump();
             break;
         }
+        case MemorySyncOperation::Identity: {
+            auto identity = serviceManager_->getP2pIdentity();
+            if (!identity) {
+                co_return dispatch::makeErrorResponse(identity.error().code,
+                                                      identity.error().message);
+            }
+            response.value = nlohmann::json{{"node_id", identity.value().nodeId},
+                                            {"spki_pin", identity.value().spkiPin}}
+                                 .dump();
+            break;
+        }
+        case MemorySyncOperation::Enroll: {
+            auto enrolled = co_await dispatch::offload_to_worker(
+                serviceManager_, [manager = serviceManager_, nodeId = req.key, pin = req.value] {
+                    return manager->enrollP2pPeer(nodeId, pin);
+                });
+            if (!enrolled) {
+                co_return dispatch::makeErrorResponse(enrolled.error().code,
+                                                      enrolled.error().message);
+            }
+            response.value = nlohmann::json{
+                {"node_id", req.key},
+                {"spki_pin", req.value},
+                {"pinned_by_operator",
+                 true}}.dump();
+            break;
+        }
         case MemorySyncOperation::Status:
             break;
         default:

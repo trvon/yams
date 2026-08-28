@@ -88,6 +88,30 @@ Result<nlohmann::json> parseControlPayload(const daemon::MemorySyncResponse& res
     }
 }
 
+Result<std::string> formatIdentity(const daemon::MemorySyncResponse& response, bool json) {
+    auto payload = parseControlPayload(response);
+    if (!payload) {
+        return payload.error();
+    }
+    if (json) {
+        return payload.value().dump(2);
+    }
+    return "Node ID: " + payload.value().value("node_id", std::string{}) +
+           "\nSPKI pin: " + payload.value().value("spki_pin", std::string{});
+}
+
+Result<std::string> formatEnroll(const daemon::MemorySyncResponse& response, bool json) {
+    auto payload = parseControlPayload(response);
+    if (!payload) {
+        return payload.error();
+    }
+    if (json) {
+        return payload.value().dump(2);
+    }
+    return "Enrolled " + payload.value().value("node_id", std::string{}) + " with SPKI pin " +
+           payload.value().value("spki_pin", std::string{});
+}
+
 Result<std::string> formatConnect(const daemon::MemorySyncResponse& response, bool json) {
     auto payload = parseControlPayload(response);
     if (!payload) {
@@ -201,6 +225,17 @@ public:
         auto* cmd = app.add_subcommand("p2p", getDescription());
         cmd->require_subcommand(1);
 
+        auto* identity = cmd->add_subcommand("identity", "Show the local node ID and SPKI pin");
+        identity->add_flag("--json", jsonOutput_, "Emit JSON");
+        identity->callback([this]() { failOn(runIdentity()); });
+
+        auto* enroll =
+            cmd->add_subcommand("enroll", "Approve a peer node ID and SPKI pin out of band");
+        enroll->add_option("node-id", enrollNodeId_, "Peer node id")->required();
+        enroll->add_option("spki-pin", enrollPin_, "Peer SHA-256 SPKI pin")->required();
+        enroll->add_flag("--json", jsonOutput_, "Emit JSON");
+        enroll->callback([this]() { failOn(runEnroll()); });
+
         auto* connect = cmd->add_subcommand("connect", "Connect and synchronize with a peer");
         connect
             ->add_option("connection", connectionString_,
@@ -280,6 +315,32 @@ private:
         auto lease = std::move(leaseResult.value().lease);
         return run_result((*lease)->call<daemon::MemorySyncRequest>(request),
                           config.requestTimeout);
+    }
+
+    Result<void> runIdentity() {
+        auto response = call({daemon::MemorySyncOperation::Identity, {}, {}});
+        if (!response) {
+            return response.error();
+        }
+        auto output = formatIdentity(response.value(), jsonOutput_);
+        if (!output) {
+            return output.error();
+        }
+        std::cout << output.value() << "\n";
+        return {};
+    }
+
+    Result<void> runEnroll() {
+        auto response = call({daemon::MemorySyncOperation::Enroll, enrollNodeId_, enrollPin_});
+        if (!response) {
+            return response.error();
+        }
+        auto output = formatEnroll(response.value(), jsonOutput_);
+        if (!output) {
+            return output.error();
+        }
+        std::cout << output.value() << "\n";
+        return {};
     }
 
     Result<void> runConnect() {
@@ -380,6 +441,8 @@ private:
     YamsCLI* cli_{nullptr};
     std::string connectionString_;
     std::string disconnectNodeId_;
+    std::string enrollNodeId_;
+    std::string enrollPin_;
     std::string publishKey_;
     std::string publishValue_;
     std::string deleteKey_;

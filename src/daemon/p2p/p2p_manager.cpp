@@ -168,27 +168,25 @@ public:
         if (!identity) {
             return identity.error();
         }
-        std::vector<std::string> allowedPins;
-        if (!options_.allowFirstContact) {
-            auto known = registry_->listPeers();
-            if (!known) {
-                return known.error();
-            }
-            allowedPins.reserve(known.value().size());
-            for (const auto& peer : known.value()) {
-                allowedPins.push_back(peer.spkiPin);
-            }
+        auto known = registry_->listPeers();
+        if (!known) {
+            return known.error();
         }
-        listener_ = std::make_unique<P2pListener>(P2pListener::Options{
-            .host = options_.listenHost,
-            .port = options_.listenPort,
-            .identity = std::move(identity.value()),
-            .allowedPeerPins = std::move(allowedPins),
-            // Registry trust is dynamic. TLS establishes encryption and proof-of-key; the
-            // application handshake rejects unknown or changed node->pin bindings before state.
-            .allowUnpinnedPeers = true,
-            .handshakeTimeout = options_.timeout,
-            .maxConcurrentSessions = 16});
+        std::vector<std::string> allowedPins;
+        allowedPins.reserve(known.value().size());
+        for (const auto& peer : known.value()) {
+            allowedPins.push_back(peer.spkiPin);
+        }
+        listener_ = std::make_unique<P2pListener>(
+            P2pListener::Options{.host = options_.listenHost,
+                                 .port = options_.listenPort,
+                                 .identity = std::move(identity.value()),
+                                 .allowedPeerPins = std::move(allowedPins),
+                                 // Unknown certificates reach the application handshake only under
+                                 // the explicit legacy first-contact compatibility policy.
+                                 .allowUnpinnedPeers = options_.allowFirstContact,
+                                 .handshakeTimeout = options_.timeout,
+                                 .maxConcurrentSessions = 16});
         listener_->setHandler(
             [this](P2pConnection connection) { handleInbound(std::move(connection)); });
         auto listening = listener_->start();
@@ -237,12 +235,38 @@ public:
         }
         for (const auto& peer : records.value()) {
             if (peer.nodeId == nodeId) {
+                if (!peer.remembered) {
+                    return {};
+                }
                 return registry_->updatePeerState(peer.nodeId, peer.corpusId, peer.corpusEpoch,
                                                   peer.lastSeenVersion, peer.lastConnectedMs,
                                                   peer.endpoint, false, peer.pinnedByOperator);
             }
         }
         return Error{ErrorCode::NotFound, "P2P peer is not registered"};
+    }
+
+    Result<void> enrollPeer(std::string_view nodeId, std::string_view spkiPin) {
+        auto normalized = normalizePeerSpkiPin(spkiPin);
+        if (!normalized) {
+            return normalized.error();
+        }
+        if (auto enrolled = registry_->enrollOperatorPeer(nodeId, normalized.value()); !enrolled) {
+            return enrolled.error();
+        }
+        std::lock_guard<std::mutex> lifecycleLock(lifecycleMutex_);
+        if (listener_) {
+            listener_->allowPeerPin(normalized.value());
+        }
+        return {};
+    }
+
+    Result<P2pLocalIdentity> localIdentity() const {
+        auto identity = TlsIdentity::fromPrivateKeyPem(options_.nodeId, options_.privateKeyPem);
+        if (!identity) {
+            return identity.error();
+        }
+        return P2pLocalIdentity{.nodeId = options_.nodeId, .spkiPin = identity.value().spkiPin()};
     }
 
     Result<std::vector<PeerRegistryRecord>> peers() const { return registry_->listPeers(); }
@@ -278,13 +302,14 @@ private:
             return identity.error();
         }
         const std::string pin = spec.peerPin.value_or(expectedPin.value_or(std::string{}));
-        auto connection = p2pConnect(P2pClientOptions{.host = spec.host,
-                                                      .port = spec.port,
-                                                      .identity = std::move(identity.value()),
-                                                      .expectedPeerPin = pin,
-                                                      .allowUnpinnedPeer = pin.empty(),
-                                                      .connectTimeout = options_.timeout,
-                                                      .handshakeTimeout = options_.timeout});
+        auto connection = p2pConnect(
+            P2pClientOptions{.host = spec.host,
+                             .port = spec.port,
+                             .identity = std::move(identity.value()),
+                             .expectedPeerPin = pin,
+                             .allowUnpinnedPeer = pin.empty() && options_.allowFirstContact,
+                             .connectTimeout = options_.timeout,
+                             .handshakeTimeout = options_.timeout});
         if (!connection) {
             return connection.error();
         }
@@ -454,6 +479,12 @@ Result<P2pSyncResult> P2pManager::connect(std::string_view connectionString) {
 }
 Result<void> P2pManager::disconnect(std::string_view nodeId) {
     return impl_->disconnect(nodeId);
+}
+Result<void> P2pManager::enrollPeer(std::string_view nodeId, std::string_view spkiPin) {
+    return impl_->enrollPeer(nodeId, spkiPin);
+}
+Result<P2pLocalIdentity> P2pManager::localIdentity() const {
+    return impl_->localIdentity();
 }
 Result<std::vector<PeerRegistryRecord>> P2pManager::peers() const {
     return impl_->peers();

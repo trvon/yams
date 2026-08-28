@@ -85,8 +85,9 @@ TEST_CASE("ProtoSerializer MemorySync request and response preserve binary value
     CHECK(roundTrippedRequest->key == "binary");
     CHECK(roundTrippedRequest->value == std::string{"a\0b", 3});
 
-    for (const auto operation : {MemorySyncOperation::Connect, MemorySyncOperation::Disconnect,
-                                 MemorySyncOperation::Peers}) {
+    for (const auto operation :
+         {MemorySyncOperation::Connect, MemorySyncOperation::Disconnect, MemorySyncOperation::Peers,
+          MemorySyncOperation::Identity, MemorySyncOperation::Enroll}) {
         request.operation = operation;
         requestMessage.payload = Request{request};
         encodedRequest = ProtoSerializer::encode_payload(requestMessage);

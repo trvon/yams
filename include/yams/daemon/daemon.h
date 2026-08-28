@@ -129,7 +129,7 @@ struct DaemonConfig {
         std::string transport{"direct"}; // "direct" | legacy "shared-store"
         std::string listen{"127.0.0.1:9721"};
         std::string identityKeyPath; // empty -> <dataDir>/p2p/identity.pem
-        bool allowFirstContact{true};
+        bool allowFirstContact{false};
         std::size_t maxPeers{1024};
         std::string backend{"filesystem"}; // shared-store only: "filesystem" | "s3"
         std::string path;                  // shared-store path; direct uses a daemon-local op store

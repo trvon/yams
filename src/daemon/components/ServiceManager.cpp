@@ -7,15 +7,19 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cerrno>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <string>
 #include <system_error>
 #include <unordered_map>
@@ -143,6 +147,10 @@ bool isEphemeralDataDir(const std::filesystem::path& path) {
            generic.rfind("/private/tmp/", 0) == 0;
 }
 
+std::string systemErrorMessage(int code) {
+    return std::error_code(code, std::generic_category()).message();
+}
+
 // Convenience alias for ConfigResolver timeouts
 inline int read_timeout_ms(const char* envName, int defaultMs, int minMs) {
     return yams::daemon::ConfigResolver::readTimeoutMs(envName, defaultMs, minMs);
@@ -188,7 +196,20 @@ inline void setOnnxShutdownMarker(bool enabled) {
 yams::Result<std::string> readProtectedP2pPrivateKey(const std::filesystem::path& keyPath) {
 #ifndef _WIN32
     std::error_code error;
-    const auto permissions = std::filesystem::status(keyPath, error).permissions();
+    const auto linkStatus = std::filesystem::symlink_status(keyPath, error);
+    if (error) {
+        return yams::Error{yams::ErrorCode::IOError,
+                           "cannot inspect P2P identity key: " + error.message()};
+    }
+    if (std::filesystem::is_symlink(linkStatus)) {
+        return yams::Error{yams::ErrorCode::Unauthorized,
+                           "P2P identity key must not be a symbolic link"};
+    }
+    if (!std::filesystem::is_regular_file(linkStatus)) {
+        return yams::Error{yams::ErrorCode::Unauthorized,
+                           "P2P identity key must be a regular file"};
+    }
+    const auto permissions = linkStatus.permissions();
     if (error) {
         return yams::Error{yams::ErrorCode::IOError,
                            "cannot inspect P2P identity key permissions: " + error.message()};
@@ -201,6 +222,102 @@ yams::Result<std::string> readProtectedP2pPrivateKey(const std::filesystem::path
     }
 #endif
     return yams::memory_sync::readWriterAuthFile(keyPath, std::size_t{64} * 1024);
+}
+
+yams::Result<void> writeExclusiveP2pPrivateKey(const std::filesystem::path& path,
+                                               std::string_view contents) {
+#ifdef _WIN32
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        const auto code = GetLastError();
+        return yams::Error{code == ERROR_FILE_EXISTS || code == ERROR_ALREADY_EXISTS
+                               ? yams::ErrorCode::ResourceBusy
+                               : yams::ErrorCode::IOError,
+                           "cannot exclusively create temporary P2P identity key"};
+    }
+    DWORD written = 0;
+    const bool writeOk =
+        contents.size() <= std::numeric_limits<DWORD>::max() &&
+        WriteFile(file, contents.data(), static_cast<DWORD>(contents.size()), &written, nullptr) &&
+        written == contents.size() && FlushFileBuffers(file);
+    const bool closeOk = CloseHandle(file);
+    if (!writeOk || !closeOk) {
+        std::error_code ignored;
+        std::filesystem::remove(path, ignored);
+        return yams::Error{yams::ErrorCode::WriteError, "cannot write P2P identity key"};
+    }
+#else
+    int flags = O_WRONLY | O_CREAT | O_EXCL;
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    const int file = ::open(path.c_str(), flags, S_IRUSR | S_IWUSR);
+    if (file < 0) {
+        const int openError = errno;
+        return yams::Error{openError == EEXIST ? yams::ErrorCode::ResourceBusy
+                                               : yams::ErrorCode::IOError,
+                           "cannot exclusively create temporary P2P identity key: " +
+                               systemErrorMessage(openError)};
+    }
+    std::size_t offset = 0;
+    while (offset < contents.size()) {
+        const auto written = ::write(file, contents.data() + offset, contents.size() - offset);
+        if (written < 0 && errno == EINTR) {
+            continue;
+        }
+        if (written <= 0) {
+            const auto message = systemErrorMessage(errno);
+            (void)::close(file);
+            std::error_code ignored;
+            std::filesystem::remove(path, ignored);
+            return yams::Error{yams::ErrorCode::WriteError,
+                               "cannot write P2P identity key: " + message};
+        }
+        offset += static_cast<std::size_t>(written);
+    }
+    const bool synced = ::fsync(file) == 0;
+    const bool closed = ::close(file) == 0;
+    if (!synced || !closed) {
+        std::error_code ignored;
+        std::filesystem::remove(path, ignored);
+        return yams::Error{yams::ErrorCode::WriteError, "cannot finalize P2P identity key"};
+    }
+#endif
+    return {};
+}
+
+yams::Result<bool> installP2pPrivateKey(const std::filesystem::path& temporary,
+                                        const std::filesystem::path& keyPath) {
+#ifdef _WIN32
+    if (MoveFileExW(temporary.c_str(), keyPath.c_str(), MOVEFILE_WRITE_THROUGH)) {
+        return true;
+    }
+    const auto code = GetLastError();
+    std::error_code ignored;
+    std::filesystem::remove(temporary, ignored);
+    if (code == ERROR_FILE_EXISTS || code == ERROR_ALREADY_EXISTS) {
+        return false;
+    }
+    return yams::Error{yams::ErrorCode::IOError, "cannot install P2P identity key"};
+#else
+    if (::link(temporary.c_str(), keyPath.c_str()) == 0) {
+        std::error_code ignored;
+        std::filesystem::remove(temporary, ignored);
+        return true;
+    }
+    const int installError = errno;
+    std::error_code ignored;
+    std::filesystem::remove(temporary, ignored);
+    if (installError == EEXIST) {
+        return false;
+    }
+    return yams::Error{yams::ErrorCode::IOError,
+                       "cannot install P2P identity key: " + systemErrorMessage(installError)};
+#endif
 }
 
 yams::Result<std::string> loadOrCreateP2pPrivateKey(const std::filesystem::path& keyPath) {
@@ -220,36 +337,30 @@ yams::Result<std::string> loadOrCreateP2pPrivateKey(const std::filesystem::path&
     if (!generated) {
         return generated.error();
     }
-    auto temporary = keyPath;
-    temporary += ".tmp." + std::to_string(static_cast<unsigned long long>(::getpid()));
-    {
-        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
-        if (!output) {
-            return yams::Error{yams::ErrorCode::IOError,
-                               "cannot create temporary P2P identity key"};
+    std::random_device random;
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        auto temporary = keyPath;
+        temporary += ".tmp." + std::to_string(static_cast<unsigned long long>(::getpid())) + "." +
+                     std::to_string(static_cast<unsigned long long>(random())) + "." +
+                     std::to_string(static_cast<unsigned long long>(random()));
+        auto written = writeExclusiveP2pPrivateKey(temporary, generated.value().privateKeyPem);
+        if (!written) {
+            if (written.error().code == yams::ErrorCode::ResourceBusy) {
+                continue;
+            }
+            return written.error();
         }
-        output.write(generated.value().privateKeyPem.data(),
-                     static_cast<std::streamsize>(generated.value().privateKeyPem.size()));
-        output.flush();
-        if (!output) {
-            std::filesystem::remove(temporary, error);
-            return yams::Error{yams::ErrorCode::IOError, "cannot write P2P identity key"};
+        auto installed = installP2pPrivateKey(temporary, keyPath);
+        if (!installed) {
+            return installed.error();
         }
+        if (!installed.value()) {
+            return readProtectedP2pPrivateKey(keyPath);
+        }
+        return std::move(generated.value().privateKeyPem);
     }
-    std::filesystem::permissions(
-        temporary, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-        std::filesystem::perm_options::replace, error);
-    if (error) {
-        std::filesystem::remove(temporary, error);
-        return yams::Error{yams::ErrorCode::IOError, "cannot protect P2P identity key permissions"};
-    }
-    std::filesystem::rename(temporary, keyPath, error);
-    if (error) {
-        std::filesystem::remove(temporary, error);
-        return yams::Error{yams::ErrorCode::IOError,
-                           "cannot install P2P identity key: " + error.message()};
-    }
-    return std::move(generated.value().privateKeyPem);
+    return yams::Error{yams::ErrorCode::ResourceBusy,
+                       "cannot allocate a unique temporary P2P identity key"};
 }
 
 yams::Result<std::string>
@@ -2140,7 +2251,8 @@ Result<ServiceManager::MemorySyncStatus> ServiceManager::getMemorySyncStatus() c
         config_.memorySync.corpusEpoch,
         config_.memorySync.mode,
         config_.memorySync.transport == "direct"
-            ? "mutual-tls-tofu"
+            ? (config_.memorySync.allowFirstContact ? "mutual-tls-legacy-tofu"
+                                                    : "mutual-tls-operator-pinned")
             : (config_.memorySync.writerAuthRequired ? "authenticated-writers" : "backend-acl"),
         peerCount};
 }
@@ -2157,6 +2269,20 @@ Result<void> ServiceManager::disconnectP2p(std::string_view nodeId) {
         return Error{ErrorCode::InvalidState, "direct P2P transport is not enabled"};
     }
     return p2pManager_->disconnect(nodeId);
+}
+
+Result<void> ServiceManager::enrollP2pPeer(std::string_view nodeId, std::string_view spkiPin) {
+    if (!p2pManager_) {
+        return Error{ErrorCode::InvalidState, "direct P2P transport is not enabled"};
+    }
+    return p2pManager_->enrollPeer(nodeId, spkiPin);
+}
+
+Result<p2p::P2pLocalIdentity> ServiceManager::getP2pIdentity() const {
+    if (!p2pManager_) {
+        return Error{ErrorCode::InvalidState, "direct P2P transport is not enabled"};
+    }
+    return p2pManager_->localIdentity();
 }
 
 Result<std::vector<p2p::PeerRegistryRecord>> ServiceManager::listP2pPeers() const {
@@ -2703,7 +2829,8 @@ Result<void> ServiceManager::initializeMemorySync(const std::filesystem::path& d
         memorySync_ = std::move(service);
         const std::string_view trust =
             policy.transport == "direct"
-                ? "mutual-tls-tofu"
+                ? (policy.allowFirstContact ? "mutual-tls-legacy-tofu"
+                                            : "mutual-tls-operator-pinned")
                 : (cfg.writerAuthRequired ? "authenticated-writers" : "backend-ACL-trusted");
         spdlog::info("[ServiceManager] memory_sync started: transport={} backend={} mode={} "
                      "corpus={} epoch={} node={} trust={} sync_interval_ms={} path={}",
@@ -2739,6 +2866,10 @@ Result<void> ServiceManager::initializeDirectP2p(const std::filesystem::path& da
     if (!synchronized) {
         return Error{synchronized.error().code,
                      "direct P2P local op-store recovery failed: " + synchronized.error().message};
+    }
+    if (policy.allowFirstContact) {
+        spdlog::warn("[ServiceManager] memory_sync.allow_first_contact=true permits unsolicited "
+                     "P2P peer enrollment; use operator-pinned enrollment instead");
     }
     auto manager = p2p::P2pManager::create(
         p2p::P2pManagerOptions{.nodeId = policy.nodeId,

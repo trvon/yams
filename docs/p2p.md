@@ -15,7 +15,7 @@ node_id = "123e4567-e89b-42d3-a456-426614174000"
 corpus_id = "team-memory"
 corpus_epoch = 1
 mode = "persistent"
-allow_first_contact = true
+allow_first_contact = false
 ```
 
 Requirements:
@@ -40,24 +40,35 @@ yams daemon status
 
 Use `yams daemon status -d` for corpus, identity, peer, counter, and failure details.
 
-## Connect peers
+## Enroll and connect peers
 
-From one node:
+Unknown inbound peers are rejected by default before application state or deltas are exchanged. On each node, obtain the local public identity:
 
 ```bash
-yams p2p connect host.example:9721
+yams p2p identity --json
+```
+
+Exchange each node's `node_id` and `spki_pin` through a separate trusted channel. Enroll node B on node A, and node A on node B:
+
+```bash
+yams p2p enroll <peer-node-id> <peer-sha256-spki-pin>
+```
+
+After both operators enroll the other identity, either node can initiate synchronization:
+
+```bash
+yams p2p connect "host.example:9721?pin=<peer-sha256-spki-pin>&remember=true"
 yams p2p peers
 yams p2p peers --json
 ```
 
-`connect` remembers the endpoint by default and retries it with bounded backoff after a disconnect or restart. Use a quoted connection string for options:
+`connect` remembers the endpoint by default and retries it with bounded backoff after a disconnect or restart. Use `remember=false` for a one-shot connection:
 
 ```bash
-yams p2p connect "host.example:9721?remember=false"
-yams p2p connect "host.example:9721?pin=<sha256-spki-pin>&remember=true"
+yams p2p connect "host.example:9721?pin=<peer-sha256-spki-pin>&remember=false"
 ```
 
-First contact uses TOFU when `allow_first_contact = true`. After the first connection, compare the peer's `spki_pin` from `yams p2p peers --json` through a separate trusted channel. Set `allow_first_contact = false` when every new peer must supply an operator-approved pin.
+Setting `allow_first_contact = true` explicitly restores legacy TOFU enrollment and emits a startup warning. It permits unsolicited peers to request enrollment and is not recommended for normal operation.
 
 Disconnect and disable automatic reconnect:
 

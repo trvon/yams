@@ -124,9 +124,24 @@ Result<void> PeerRegistry::initializeSchema() {
         return hasRemembered.error();
     }
     if (!hasRemembered.value()) {
-        return database_->execute(
-            "ALTER TABLE p2p_peers ADD COLUMN remembered INTEGER NOT NULL DEFAULT 0 "
-            "CHECK(remembered IN (0, 1))");
+        if (auto migrated = database_->execute(
+                "ALTER TABLE p2p_peers ADD COLUMN remembered INTEGER NOT NULL DEFAULT 0 "
+                "CHECK(remembered IN (0, 1))");
+            !migrated) {
+            return migrated.error();
+        }
+    }
+    auto hasOperatorPin = hasPeerColumn(*database_, "pinned_by_operator");
+    if (!hasOperatorPin) {
+        return hasOperatorPin.error();
+    }
+    if (!hasOperatorPin.value()) {
+        if (auto migrated = database_->execute(
+                "ALTER TABLE p2p_peers ADD COLUMN pinned_by_operator INTEGER NOT NULL DEFAULT 0 "
+                "CHECK(pinned_by_operator IN (0, 1))");
+            !migrated) {
+            return migrated.error();
+        }
     }
     return Result<void>();
 }
@@ -204,6 +219,54 @@ Result<PeerTrustDecision> PeerRegistry::verifyOrPin(std::string_view nodeId,
         return inserted.error();
     }
     return PeerTrustDecision{.firstContactPinned = true};
+}
+
+Result<void> PeerRegistry::enrollOperatorPeer(std::string_view nodeId, std::string_view spkiPin) {
+    if (nodeId.empty()) {
+        return Error{ErrorCode::InvalidArgument, "p2p enrollment node id is empty"};
+    }
+    auto normalized = normalizePeerSpkiPin(spkiPin);
+    if (!normalized) {
+        return normalized.error();
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto existing = findPinLocked(nodeId);
+    if (!existing) {
+        return existing.error();
+    }
+    if (existing.value()) {
+        if (*existing.value() != normalized.value()) {
+            return Error{ErrorCode::Unauthorized,
+                         "P2P peer pin replacement requires explicit removal"};
+        }
+        auto promoted =
+            database_->prepare("UPDATE p2p_peers SET pinned_by_operator = 1 WHERE node_id = ?");
+        if (!promoted) {
+            return promoted.error();
+        }
+        auto statement = std::move(promoted.value());
+        if (auto bound = statement.bind(1, nodeId); !bound) {
+            return bound.error();
+        }
+        return statement.execute();
+    }
+    auto count = peerCountLocked();
+    if (!count) {
+        return count.error();
+    }
+    if (count.value() >= maxPeers_) {
+        return Error{ErrorCode::ResourceExhausted, "p2p peer registry capacity reached"};
+    }
+    auto inserted = database_->prepare(
+        "INSERT INTO p2p_peers(node_id, spki_hash, pinned_by_operator) VALUES(?, ?, 1)");
+    if (!inserted) {
+        return inserted.error();
+    }
+    auto statement = std::move(inserted.value());
+    if (auto bound = statement.bindAll(nodeId, normalized.value()); !bound) {
+        return bound.error();
+    }
+    return statement.execute();
 }
 
 Result<void> PeerRegistry::updatePeerState(std::string_view nodeId, std::string_view corpusId,

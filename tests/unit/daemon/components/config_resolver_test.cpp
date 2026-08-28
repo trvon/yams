@@ -1563,6 +1563,12 @@ TEST_CASE("ConfigResolver applies typed memory-sync policy", "[daemon][config][m
     CHECK(config.memorySync.writerAuthManifestPath == "/secure/writers.json");
 }
 
+TEST_CASE("Direct P2P defaults to operator-approved first contact",
+          "[daemon][config][memory-sync][p2p][security]") {
+    DaemonConfig config;
+    CHECK_FALSE(config.memorySync.allowFirstContact);
+}
+
 TEST_CASE("ConfigResolver accepts direct P2P without a shared path",
           "[daemon][config][memory-sync][p2p]") {
     ConfigResolver::ConfigSections sections = {

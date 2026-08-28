@@ -28,7 +28,7 @@ using Envelope = yams::daemon::ipc::Envelope;
 namespace pb = yams::daemon::ipc;
 
 static_assert(static_cast<int>(pb::MemorySyncRequest_Operation_Operation_MAX) >=
-                  static_cast<int>(MemorySyncOperation::Peers),
+                  static_cast<int>(MemorySyncOperation::Enroll),
               "protobuf MemorySyncRequest.Operation must preserve all C++ wire values");
 
 // (bindings inserted later, after ProtoBinding primary template)

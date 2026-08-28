@@ -204,6 +204,45 @@ TEST_CASE("P2P TLS read deadline interrupts a stalled peer", "[daemon][p2p][tls]
     listener.stop();
 }
 
+TEST_CASE("P2P TLS listener reaps completed session workers while running",
+          "[daemon][p2p][tls][network][lifecycle]") {
+    auto serverKey = yams::memory_sync::generateWriterKeyPair();
+    auto clientKey = yams::memory_sync::generateWriterKeyPair();
+    REQUIRE(serverKey.has_value());
+    REQUIRE(clientKey.has_value());
+
+    auto serverIdentity = identity("server-node", serverKey.value());
+    const std::string serverPin = serverIdentity.spkiPin();
+    P2pListener listener(P2pListener::Options{.host = "127.0.0.1",
+                                              .port = 0,
+                                              .identity = std::move(serverIdentity),
+                                              .allowedPeerPins = {},
+                                              .allowUnpinnedPeers = true,
+                                              .handshakeTimeout = 2s,
+                                              .maxConcurrentSessions = 1});
+    listener.setHandler([](P2pConnection channel) { channel.close(); });
+    REQUIRE(listener.start().has_value());
+
+    constexpr std::size_t kSessionCount = 20;
+    for (std::size_t index = 0; index < kSessionCount; ++index) {
+        auto client = yams::daemon::p2p::p2pConnect(
+            P2pClientOptions{.host = "127.0.0.1",
+                             .port = listener.boundPort(),
+                             .identity = identity("client-node", clientKey.value()),
+                             .expectedPeerPin = serverPin,
+                             .connectTimeout = 2s,
+                             .handshakeTimeout = 2s});
+        REQUIRE(client.has_value());
+        auto closed = client.value().readFrame(2s);
+        REQUIRE_FALSE(closed.has_value());
+    }
+
+    CHECK(listener.acceptedCount() == kSessionCount);
+    CHECK(listener.retainedSessionCount() <= 2);
+    listener.stop();
+    CHECK(listener.retainedSessionCount() == 0);
+}
+
 TEST_CASE("P2P TLS listener rejects a mismatched client pin", "[daemon][p2p][tls][network]") {
     auto serverKey = yams::memory_sync::generateWriterKeyPair();
     auto clientKey = yams::memory_sync::generateWriterKeyPair();

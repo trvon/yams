@@ -532,6 +532,19 @@ public:
     /// to the local backend before becoming visible; replay is idempotent, recent
     /// operation forks are quarantined, and causal gaps/dependency gaps fail closed.
     Result<DeltaApplyResult> applyDeltas(std::span<const MemoryDelta> deltas) {
+        std::set<std::string> projectedKeys;
+        for (const auto& [key, record] : merged_) {
+            (void)record;
+            projectedKeys.insert(key);
+        }
+        for (const auto& delta : deltas) {
+            projectedKeys.insert(delta.logicalKey);
+            if (projectedKeys.size() > limits_.maxMergedKeys) {
+                return Error{ErrorCode::ResourceExhausted,
+                             "direct deltas exceed configured merged-key limit"};
+            }
+        }
+
         DeltaApplyResult result;
         result.received = deltas.size();
         quarantined_.clear();

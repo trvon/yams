@@ -14,6 +14,8 @@ namespace yams::daemon::p2p {
 struct DeltaExchangeOptions {
     std::size_t maxDeltasPerBatch{128};
     std::size_t maxBatches{4096};
+    std::size_t maxDeltasPerSession{1024};
+    std::size_t maxWireBytesPerSession{std::size_t{64} * 1024 * 1024};
     std::chrono::milliseconds timeout{std::chrono::seconds(10)};
 };
 

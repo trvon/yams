@@ -45,10 +45,15 @@ struct P2pManagerOptions {
     std::filesystem::path databasePath;
     std::string listenHost{"127.0.0.1"};
     std::uint16_t listenPort{0};
-    bool allowFirstContact{true};
+    bool allowFirstContact{false};
     std::size_t maxPeers{1024};
     std::chrono::milliseconds reconnectInterval{std::chrono::seconds(5)};
     std::chrono::milliseconds timeout{std::chrono::seconds(10)};
+};
+
+struct P2pLocalIdentity {
+    std::string nodeId;
+    std::string spkiPin;
 };
 
 struct P2pSyncResult {
@@ -76,6 +81,8 @@ public:
 
     Result<P2pSyncResult> connect(std::string_view connectionString);
     Result<void> disconnect(std::string_view nodeId);
+    Result<void> enrollPeer(std::string_view nodeId, std::string_view spkiPin);
+    Result<P2pLocalIdentity> localIdentity() const;
     Result<std::vector<PeerRegistryRecord>> peers() const;
 
 private:

@@ -1784,7 +1784,7 @@ private:
             {"Corpus", m.corpusId + " (epoch " + std::to_string(m.corpusEpoch) + ")", ""});
         rows.push_back({"Node", m.nodeId, ""});
         const bool strongTrust =
-            m.trustMode == "authenticated-writers" || m.trustMode == "mutual-tls-tofu";
+            m.trustMode == "authenticated-writers" || m.trustMode == "mutual-tls-operator-pinned";
         rows.push_back({"Trust",
                         severity_text(strongTrust ? Severity::Good : Severity::Warn, m.trustMode),
                         ""});

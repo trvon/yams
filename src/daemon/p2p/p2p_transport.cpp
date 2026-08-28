@@ -513,12 +513,19 @@ public:
     SessionHandler handler;
     boost::asio::io_context io;
     std::unique_ptr<Tcp::acceptor> acceptor;
+    struct SessionWorker {
+        std::thread thread;
+        std::shared_ptr<std::atomic<bool>> completed;
+    };
+
     std::thread acceptThread;
-    std::vector<std::thread> sessionThreads;
+    std::vector<SessionWorker> sessionWorkers;
+    std::atomic<std::size_t> retainedSessionCount{0};
     std::atomic<bool> running{false};
     std::atomic<std::uint64_t> accepted{0};
     std::atomic<std::size_t> activeCount{0};
     std::mutex lifecycleMutex;
+    std::mutex allowedPinsMutex;
     std::mutex sessionsMutex;
     std::set<std::shared_ptr<P2pConnection::Impl>,
              std::owner_less<std::shared_ptr<P2pConnection::Impl>>>
@@ -585,8 +592,23 @@ public:
         return {};
     }
 
+    void reapCompletedSessions() {
+        for (auto worker = sessionWorkers.begin(); worker != sessionWorkers.end();) {
+            if (!worker->completed->load(std::memory_order_acquire)) {
+                ++worker;
+                continue;
+            }
+            if (worker->thread.joinable()) {
+                worker->thread.join();
+            }
+            worker = sessionWorkers.erase(worker);
+            retainedSessionCount.fetch_sub(1, std::memory_order_relaxed);
+        }
+    }
+
     void acceptLoop() {
         while (running.load(std::memory_order_acquire)) {
+            reapCompletedSessions();
             if (activeCount.load(std::memory_order_acquire) >= options.maxConcurrentSessions) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
@@ -618,7 +640,14 @@ public:
                 std::lock_guard<std::mutex> lock(sessionsMutex);
                 activeSessions.insert(session);
             }
-            sessionThreads.emplace_back([this, session] { handleSession(session); });
+            auto completed = std::make_shared<std::atomic<bool>>(false);
+            sessionWorkers.push_back(
+                SessionWorker{.thread = std::thread([this, session, completed] {
+                                  handleSession(session);
+                                  completed->store(true, std::memory_order_release);
+                              }),
+                              .completed = std::move(completed)});
+            retainedSessionCount.fetch_add(1, std::memory_order_relaxed);
         }
     }
 
@@ -626,9 +655,13 @@ public:
         auto handshake =
             session->handshake(boost::asio::ssl::stream_base::server, options.handshakeTimeout);
         if (handshake) {
-            const bool explicitlyPinned =
-                std::find(options.allowedPeerPins.begin(), options.allowedPeerPins.end(),
-                          session->peerPin) != options.allowedPeerPins.end();
+            bool explicitlyPinned = false;
+            {
+                std::lock_guard<std::mutex> lock(allowedPinsMutex);
+                explicitlyPinned =
+                    std::find(options.allowedPeerPins.begin(), options.allowedPeerPins.end(),
+                              session->peerPin) != options.allowedPeerPins.end();
+            }
             if (!explicitlyPinned && !options.allowUnpinnedPeers) {
                 handshake = Error{ErrorCode::Unauthorized, "p2p peer pin is not allowed"};
             }
@@ -670,12 +703,13 @@ public:
         if (acceptThread.joinable()) {
             acceptThread.join();
         }
-        for (auto& thread : sessionThreads) {
-            if (thread.joinable()) {
-                thread.join();
+        for (auto& worker : sessionWorkers) {
+            if (worker.thread.joinable()) {
+                worker.thread.join();
             }
         }
-        sessionThreads.clear();
+        sessionWorkers.clear();
+        retainedSessionCount.store(0, std::memory_order_relaxed);
         acceptor.reset();
     }
 };
@@ -706,6 +740,21 @@ bool P2pListener::started() const noexcept {
 }
 std::uint64_t P2pListener::acceptedCount() const noexcept {
     return impl_ ? impl_->accepted.load(std::memory_order_relaxed) : 0;
+}
+// pi-lens-ignore: clang-diagnostic-error
+std::size_t P2pListener::retainedSessionCount() const noexcept {
+    return impl_ ? impl_->retainedSessionCount.load(std::memory_order_relaxed) : 0;
+}
+// pi-lens-ignore: clang-diagnostic-error
+void P2pListener::allowPeerPin(std::string spkiPin) {
+    if (!impl_) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(impl_->allowedPinsMutex);
+    if (std::find(impl_->options.allowedPeerPins.begin(), impl_->options.allowedPeerPins.end(),
+                  spkiPin) == impl_->options.allowedPeerPins.end()) {
+        impl_->options.allowedPeerPins.push_back(std::move(spkiPin));
+    }
 }
 void P2pListener::setHandler(SessionHandler handler) {
     if (impl_) {

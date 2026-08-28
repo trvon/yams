@@ -2,7 +2,12 @@
 // Migration: yams-3s4 (daemon unit tests)
 // Unit tests for ServiceManager component - construction, initialization, and service access
 
+// pi-lens-ignore: fatal error
 #include <catch2/catch_test_macros.hpp>
+
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/use_future.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -27,6 +32,7 @@
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/daemon.h>
+#include <yams/memory_sync/writer_auth.h>
 #include <yams/metadata/database.h>
 
 namespace fs = std::filesystem;
@@ -343,6 +349,46 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     CHECK((result.error().code == ErrorCode::IOError));
     CHECK((result.error().message.find("Failed to create data directory") != std::string::npos));
     CHECK((result.error().message.find(config_.dataDir.string()) != std::string::npos));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager rejects symbolic-link P2P identity keys",
+                 "[daemon][service_manager][p2p][security]") {
+#ifdef _WIN32
+    SKIP("symbolic-link permission semantics differ on Windows");
+#else
+    auto generated = memory_sync::generateWriterKeyPair();
+    REQUIRE(generated.has_value());
+    const auto victim = testDir_ / "victim.pem";
+    {
+        std::ofstream output(victim, std::ios::binary | std::ios::trunc);
+        REQUIRE(output.good());
+        output << generated.value().privateKeyPem;
+    }
+    fs::permissions(victim, fs::perms::owner_read | fs::perms::owner_write,
+                    fs::perm_options::replace);
+    const auto identity = testDir_ / "identity.pem";
+    fs::create_symlink(victim, identity);
+
+    config_.memorySync.enabled = true;
+    config_.memorySync.transport = "direct";
+    config_.memorySync.nodeId = "123e4567-e89b-42d3-a456-42661417400a";
+    config_.memorySync.corpusId = "identity-security-test";
+    config_.memorySync.corpusEpoch = 1;
+    config_.memorySync.identityKeyPath = identity.string();
+
+    ServiceManager manager(config_, state_, lifecycleFsm_);
+    REQUIRE(manager.initialize().has_value());
+    boost::asio::io_context io;
+    compat::stop_source stopSource;
+    auto future = boost::asio::co_spawn(
+        io, manager.initializeAsyncAwaitable(stopSource.get_token()), boost::asio::use_future);
+    io.run();
+    const auto initialized = future.get();
+    REQUIRE_FALSE(initialized.has_value());
+    CHECK(initialized.error().code == ErrorCode::Unauthorized);
+    CHECK(initialized.error().message.find("symbolic link") != std::string::npos);
+    CHECK(fs::is_symlink(fs::symlink_status(identity)));
+#endif
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture,

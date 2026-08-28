@@ -37,7 +37,7 @@ struct TempDatabase {
 
 } // namespace
 
-TEST_CASE("P2P peer registry migrates pre-endpoint schema", "[daemon][p2p][registry][sqlite]") {
+TEST_CASE("P2P peer registry migrates legacy trust schema", "[daemon][p2p][registry][sqlite]") {
     TempDatabase database{"migration"};
     {
         yams::metadata::Database legacy;
@@ -51,8 +51,7 @@ CREATE TABLE p2p_peers (
     corpus_id TEXT NOT NULL DEFAULT '',
     corpus_epoch INTEGER NOT NULL DEFAULT 0,
     last_seen_vv TEXT NOT NULL DEFAULT '{"counters_":{}}',
-    last_connected_ms INTEGER NOT NULL DEFAULT 0,
-    pinned_by_operator INTEGER NOT NULL DEFAULT 0
+    last_connected_ms INTEGER NOT NULL DEFAULT 0
 )
 )sql")
                     .has_value());
@@ -71,10 +70,37 @@ CREATE TABLE p2p_peers (
     REQUIRE(peers.value().size() == 1);
     CHECK(peers.value().front().endpoint.empty());
     CHECK_FALSE(peers.value().front().remembered);
+    CHECK_FALSE(peers.value().front().pinnedByOperator);
     yams::memory_sync::VersionVector version;
     REQUIRE(opened.value()
                 ->updatePeerState("legacy-peer", "corpus", 1, version, 7, "host:9721", true)
                 .has_value());
+}
+
+TEST_CASE("P2P peer registry persists operator enrollment",
+          "[daemon][p2p][registry][sqlite][security]") {
+    TempDatabase database{"operator-enrollment"};
+    auto opened = PeerRegistry::open(database.path, 1);
+    REQUIRE(opened.has_value());
+    auto& registry = *opened.value();
+    const std::string pin(64, 'a');
+
+    REQUIRE(registry.enrollOperatorPeer("peer-node", std::string(64, 'A')).has_value());
+    REQUIRE(registry.enrollOperatorPeer("peer-node", pin).has_value());
+    auto replacement = registry.enrollOperatorPeer("peer-node", std::string(64, 'b'));
+    REQUIRE_FALSE(replacement.has_value());
+    CHECK(replacement.error().code == yams::ErrorCode::Unauthorized);
+    auto full = registry.enrollOperatorPeer("other-node", std::string(64, 'c'));
+    REQUIRE_FALSE(full.has_value());
+    CHECK(full.error().code == yams::ErrorCode::ResourceExhausted);
+
+    auto peers = registry.listPeers();
+    REQUIRE(peers.has_value());
+    REQUIRE(peers.value().size() == 1);
+    CHECK(peers.value().front().nodeId == "peer-node");
+    CHECK(peers.value().front().spkiPin == pin);
+    CHECK(peers.value().front().pinnedByOperator);
+    CHECK_FALSE(peers.value().front().remembered);
 }
 
 TEST_CASE("P2P peer registry persists trust and causal state across restart",

@@ -149,7 +149,12 @@ public:
     bool started() const noexcept;
 
     /// Total connections accepted since start (for tests/telemetry).
-    std::uint64_t acceptedCount() const noexcept;
+    [[nodiscard]] std::uint64_t acceptedCount() const noexcept;
+    /// Session worker threads retained for joining. Completed workers are reaped while running.
+    [[nodiscard]] std::size_t retainedSessionCount() const noexcept;
+
+    /// Add an operator-approved peer pin for subsequent inbound TLS sessions.
+    void allowPeerPin(std::string spkiPin);
 
     /// Install the session handler (required before start()).
     void setHandler(SessionHandler handler);

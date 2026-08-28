@@ -1045,6 +1045,30 @@ TEST_CASE("direct memory delta export resumes from causal watermark",
     CHECK(reader.readCached("user/three").has_value());
 }
 
+TEST_CASE("direct memory deltas enforce the merged-key limit atomically",
+          "[memory-sync][direct-delta][limits]") {
+    BackendFixture writerFixture{"direct-delta-key-limit-writer"};
+    BackendFixture readerFixture{"direct-delta-key-limit-reader"};
+    MemorySyncLoop writer{writerFixture.backend, "writer", "direct-limit-corpus", 1};
+    MemorySyncLimits limits;
+    limits.maxMergedKeys = 1;
+    MemorySyncLoop reader{readerFixture.backend, "reader", "direct-limit-corpus", 1, false, limits};
+
+    REQUIRE(writer.publish("user/one", bytes("one")).has_value());
+    REQUIRE(writer.publish("user/two", bytes("two")).has_value());
+    auto batch = writer.exportLocalDeltasAfter({}, 2);
+    REQUIRE(batch.has_value());
+    REQUIRE(batch.value().deltas.size() == 2);
+
+    auto applied = reader.applyDeltas(batch.value().deltas);
+    REQUIRE_FALSE(applied.has_value());
+    CHECK(applied.error().code == yams::ErrorCode::ResourceExhausted);
+    CHECK(reader.currentVersion().empty());
+    CHECK(reader.mergedRecordCount() == 0);
+    CHECK_FALSE(reader.readCached("user/one").has_value());
+    CHECK_FALSE(reader.readCached("user/two").has_value());
+}
+
 TEST_CASE("direct memory deltas quarantine tampering and writer-operation forks",
           "[memory-sync][direct-delta][security]") {
     BackendFixture writerFixture{"direct-delta-security-writer"};

@@ -44,6 +44,8 @@ public:
 
     Result<PeerTrustDecision> verifyOrPin(std::string_view nodeId, std::string_view spkiPin,
                                           bool allowFirstContact) override;
+    /// Persist an operator-approved node/SPKI binding before any network exchange.
+    Result<void> enrollOperatorPeer(std::string_view nodeId, std::string_view spkiPin);
     [[nodiscard]] std::optional<std::string> pinnedPin(std::string_view nodeId) const override {
         std::lock_guard<std::mutex> lock(mutex_);
         auto pin = findPinLocked(nodeId);
