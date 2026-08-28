@@ -143,6 +143,47 @@ private:
     std::atomic<bool> cancelled_{false};
 };
 
+/// Blocks `listPage` while armed, releasing when unarmed. Used to prove IPC
+/// readers never wait on a slow reconciliation: publish first (unarmed), arm,
+/// start the worker, then assert readers return promptly from the committed
+/// snapshot while the worker is stuck mid-sync.
+class SlowListBackend final : public CountingBackend {
+public:
+    void arm() { armed_.store(true, std::memory_order_release); }
+
+    void releaseList() {
+        armed_.store(false, std::memory_order_release);
+        cv_.notify_all();
+    }
+
+    void waitUntilBlocked() const {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [this] { return blocked_.load(std::memory_order_acquire); });
+    }
+
+    yams::Result<yams::storage::ObjectListPage> listPage(std::string_view prefix,
+                                                         std::optional<std::string_view> cursor,
+                                                         std::size_t limit) const override {
+        if (armed_.load(std::memory_order_acquire)) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                blocked_.store(true, std::memory_order_release);
+            }
+            cv_.notify_all();
+            std::unique_lock<std::mutex> lock(mutex_);
+            cv_.wait(lock, [this] { return !armed_.load(std::memory_order_acquire); });
+            blocked_.store(false, std::memory_order_release);
+        }
+        return CountingBackend::listPage(prefix, cursor, limit);
+    }
+
+private:
+    mutable std::atomic<bool> armed_{false};
+    mutable std::atomic<bool> blocked_{false};
+    mutable std::mutex mutex_;
+    mutable std::condition_variable cv_;
+};
+
 std::unique_ptr<yams::storage::FilesystemBackend> makeBackend(const std::filesystem::path& dir) {
     yams::storage::BackendConfig config;
     config.type = "filesystem";
@@ -490,3 +531,43 @@ TEST_CASE("MemorySyncService periodic worker syncs without hanging", "[memory-sy
 }
 
 // NOLINTEND(bugprone-chained-comparison)
+
+TEST_CASE("MemorySyncService readers do not block on a slow reconciliation",
+          "[memory-sync][service]") {
+    TempDirGuard tmp;
+    auto backend = std::make_unique<SlowListBackend>();
+    yams::storage::BackendConfig config;
+    config.type = "filesystem";
+    config.localPath = tmp.path;
+    REQUIRE(backend->initialize(config).has_value());
+    auto* observed = backend.get();
+    MemorySyncService service{std::move(backend), MemorySyncConfig{"A", 5000}};
+
+    // Publish a value before arming the block so a committed snapshot exists.
+    // syncOnce commits the page so the key (and its hydrated blob) are in the
+    // reconciled state the snapshot is refreshed from.
+    REQUIRE(service.publish("user/k", bytes("v1")).has_value());
+    REQUIRE(service.syncOnce().has_value());
+
+    observed->arm();
+    REQUIRE(service.start().has_value());
+    observed->waitUntilBlocked();
+
+    // The worker is now stuck inside listPage (mid-reconciliation). IPC readers
+    // (status counts, cached reads) must return promptly from the last committed
+    // snapshot instead of waiting on the reconciliation lock.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    auto reader = std::async(std::launch::async, [&] {
+        return service.readCached("user/k").has_value() && service.mergedRecordCount() == 1 &&
+               service.quarantinedRecordCount() == 0;
+    });
+    CHECK(reader.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+    if (reader.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        CHECK(reader.get());
+    }
+    CHECK(std::chrono::steady_clock::now() < deadline);
+
+    observed->releaseList();
+    service.stop();
+    CHECK_FALSE(service.started());
+}

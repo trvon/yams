@@ -142,12 +142,20 @@ public:
 
     Result<void> publish(std::string_view key, std::span<const std::byte> content) {
         std::lock_guard<std::mutex> lock(loopMutex_);
-        return loop_.publish(key, content);
+        auto result = loop_.publish(key, content);
+        if (result) {
+            refreshCommittedState();
+        }
+        return result;
     }
 
     Result<void> erase(std::string_view key, std::string tombstonePayload = {}) {
         std::lock_guard<std::mutex> lock(loopMutex_);
-        return loop_.erase(key, std::move(tombstonePayload));
+        auto result = loop_.erase(key, std::move(tombstonePayload));
+        if (result) {
+            refreshCommittedState();
+        }
+        return result;
     }
 
     /// Publish only when the winning cached payload differs. This makes periodic
@@ -162,38 +170,60 @@ public:
         if (!published) {
             return published.error();
         }
+        refreshCommittedState();
         return true;
     }
 
     Result<std::vector<std::byte>> read(std::string_view key) {
         std::lock_guard<std::mutex> lock(loopMutex_);
-        return loop_.read(key);
+        auto result = loop_.read(key);
+        if (result) {
+            refreshCommittedState();
+        }
+        return result;
     }
 
     /// Return a value observed by the periodic worker without initiating sync.
+    /// Reads the committed snapshot, so a slow reconciliation (e.g. a remote
+    /// backend) can never stall IPC status or cached reads.
     Result<std::vector<std::byte>> readCached(std::string_view key) const {
-        std::lock_guard<std::mutex> lock(loopMutex_);
-        return loop_.readCached(key);
+        std::shared_ptr<const MemorySyncLoop::CommittedState> state = committedSnapshot();
+        if (!state) {
+            return Error{ErrorCode::NotFound, "memory sync has not reconciled"};
+        }
+        const auto it = state->merged.find(std::string(key));
+        if (it == state->merged.end()) {
+            return Error{ErrorCode::NotFound, "no memory record for key"};
+        }
+        if (it->second.isTombstone()) {
+            return Error{ErrorCode::NotFound, "memory record was deleted"};
+        }
+        const auto cached = state->cachedBlobs.find(it->second.entryHash);
+        if (cached == state->cachedBlobs.end()) {
+            return Error{ErrorCode::NotFound, "memory sync blob was not hydrated during sync"};
+        }
+        return cached->second;
     }
 
     std::size_t mergedRecordCount() const noexcept {
-        std::lock_guard<std::mutex> lock(loopMutex_);
-        return loop_.mergedRecordCount();
+        const auto state = committedSnapshot();
+        return state ? state->merged.size() : 0;
     }
 
     std::size_t quarantinedRecordCount() const noexcept {
-        std::lock_guard<std::mutex> lock(loopMutex_);
-        return loop_.quarantinedRecordCount();
+        const auto state = committedSnapshot();
+        return state ? state->quarantined.size() : 0;
     }
 
+    /// Bounded snapshot of current quarantine reasons (cleared each scan page).
     std::map<std::string, std::string> quarantinedReasons() const {
-        std::lock_guard<std::mutex> lock(loopMutex_);
-        return loop_.quarantinedReasons();
+        const auto state = committedSnapshot();
+        return state ? state->quarantined : std::map<std::string, std::string>{};
     }
 
     std::size_t authFailureCount() const noexcept {
-        std::lock_guard<std::mutex> lock(loopMutex_);
-        return loop_.authFailureCount();
+        const auto state = committedSnapshot();
+        return state ? state->authFailures : 0;
     }
 
     std::uint64_t successfulSyncCycles() const noexcept {
@@ -220,7 +250,11 @@ public:
             return *callbackSnapshot_;
         }
         std::lock_guard<std::mutex> lock(loopMutex_);
-        return loop_.sync();
+        auto result = loop_.sync();
+        if (result) {
+            refreshCommittedState();
+        }
+        return result;
     }
 
 #ifdef YAMS_TESTING
@@ -232,6 +266,22 @@ public:
 #endif
 
 private:
+    /// Immutable state published for IPC readers. Readers never take loopMutex_
+    /// (held for the whole reconciliation on slow backends), so a slow sync can
+    /// not stall status or cached reads; they consume this snapshot instead.
+    std::shared_ptr<const MemorySyncLoop::CommittedState> committedSnapshot() const {
+        std::lock_guard<std::mutex> lock(snapshotMutex_);
+        return committed_;
+    }
+
+    /// Refresh the committed snapshot from the loop. Callers must hold loopMutex_
+    /// so the loop state is quiescent while it is copied.
+    void refreshCommittedState() {
+        auto state = std::make_shared<MemorySyncLoop::CommittedState>(loop_.committedState());
+        std::lock_guard<std::mutex> lock(snapshotMutex_);
+        committed_ = std::move(state);
+    }
+
     void workerLoop() {
         workerIdHash_.store(std::hash<std::thread::id>{}(std::this_thread::get_id()),
                             std::memory_order_release);
@@ -241,6 +291,9 @@ private:
             try {
                 std::lock_guard<std::mutex> lock(loopMutex_);
                 snapshot = loop_.sync();
+                if (snapshot) {
+                    refreshCommittedState();
+                }
             } catch (const std::exception& e) {
                 snapshot = Error{ErrorCode::InternalError,
                                  std::string("memory sync reconciliation threw: ") + e.what()};
@@ -336,6 +389,8 @@ private:
     std::atomic<std::uint64_t> failedSyncCycles_{0};
     std::atomic<std::int64_t> lastSuccessfulSyncSteadyMs_{0};
     std::atomic<bool> namespaceCleaned_{false};
+    mutable std::mutex snapshotMutex_;
+    std::shared_ptr<const MemorySyncLoop::CommittedState> committed_;
 };
 
 } // namespace yams::memory_sync

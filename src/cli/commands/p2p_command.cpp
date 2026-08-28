@@ -16,6 +16,7 @@
 
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/core/types.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -83,15 +84,26 @@ Result<std::string> formatStatus(const daemon::MemorySyncResponse& response, boo
         return Error{ErrorCode::InvalidState, "memory sync service is not started"};
     }
     if (!json) {
-        return "backend=" + response.backend + " node_id=" + response.nodeId +
-               " corpus_id=" + response.corpusId +
-               " corpus_epoch=" + std::to_string(response.corpusEpoch) + " mode=" + response.mode +
-               " trust=" + response.trustMode + " records=" + std::to_string(response.records) +
-               " quarantined=" + std::to_string(response.quarantinedRecords) +
-               " auth_failures=" + std::to_string(response.authFailures) +
-               " successful_cycles=" + std::to_string(response.successfulCycles) +
-               " failed_cycles=" + std::to_string(response.failedCycles) +
-               " last_success_age_ms=" + std::to_string(response.lastSuccessAgeMs);
+        using yams::cli::ui::Severity;
+        using yams::cli::ui::severity_text;
+        auto health = [](bool bad) { return bad ? Severity::Warn : Severity::Good; };
+        std::ostringstream out;
+        out << "backend=" << response.backend << " node_id=" << response.nodeId
+            << " corpus_id=" << response.corpusId << " corpus_epoch=" << response.corpusEpoch
+            << " mode=" << response.mode << " trust=" << response.trustMode
+            << " records=" << response.records << " quarantined="
+            << severity_text(health(response.quarantinedRecords > 0),
+                             std::to_string(response.quarantinedRecords))
+            << " auth_failures="
+            << severity_text(health(response.authFailures > 0),
+                             std::to_string(response.authFailures))
+            << " successful_cycles=" << response.successfulCycles << " failed_cycles="
+            << severity_text(health(response.failedCycles > 0),
+                             std::to_string(response.failedCycles))
+            << " last_success_age_ms="
+            << severity_text(health(response.lastSuccessAgeMs > 60000),
+                             std::to_string(response.lastSuccessAgeMs));
+        return out.str();
     }
     nlohmann::json output;
     output["backend"] = response.backend;

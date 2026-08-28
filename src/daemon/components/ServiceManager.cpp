@@ -201,6 +201,16 @@ namespace yams::daemon {
 namespace {
 constexpr auto kTopologyOverlayRebuildMinAge = std::chrono::minutes(5);
 constexpr std::size_t kTopologyOverlayDirtyThreshold = 64;
+
+/// A document whose blob cannot be replicated because its stored content is
+/// unrecoverable (corrupt object manifest, digest mismatch, malformed stored
+/// bytes) is skipped permanently: retrying the same bytes cannot succeed. Any
+/// other failure (backend unreachable, resource limits, cancellation, identity
+/// misconfiguration) propagates so the document is retried on a later cycle.
+bool isUnrecoverableBlobFailure(yams::ErrorCode code) {
+    return code == yams::ErrorCode::ManifestInvalid || code == yams::ErrorCode::HashMismatch ||
+           code == yams::ErrorCode::InvalidData;
+}
 } // namespace
 
 using yams::Error;
@@ -2221,6 +2231,7 @@ void ServiceManager::publishMemorySyncBackfill() noexcept {
     std::size_t vectorsPublished = 0;
     std::size_t nodesPublished = 0;
     std::size_t edgesPublished = 0;
+    std::size_t skippedDocuments = 0;
 
     const auto publishDocument = [&]() -> bool {
         if (!repository || !contentStore) {
@@ -2253,6 +2264,19 @@ void ServiceManager::publishMemorySyncBackfill() noexcept {
         if (!document.sha256Hash.empty()) {
             auto published = contentAdapter.publishExisting(document.sha256Hash);
             if (!published) {
+                // A poisoned blob (corrupt manifest, digest mismatch, malformed stored bytes)
+                // can never publish; skip it so the backfill continues with the next document
+                // instead of wedging this domain on every cycle. Transient failures propagate
+                // so the document is retried later.
+                if (isUnrecoverableBlobFailure(published.error().code)) {
+                    spdlog::warn("[ServiceManager] memory_sync backfill skipping document {} "
+                                 "(blob {} unrecoverable): {}",
+                                 document.id, document.sha256Hash, published.error().message);
+                    state.documentIdCursor = std::max(state.documentIdCursor, document.id);
+                    ++skippedDocuments;
+                    notifyMemorySyncStage("backfill.skip_document");
+                    return true;
+                }
                 throw std::runtime_error(published.error().message);
             }
             blobsPublished += published.value() ? 1U : 0U;
@@ -2260,6 +2284,15 @@ void ServiceManager::publishMemorySyncBackfill() noexcept {
         metadata::MetadataSyncAdapter metadataAdapter{*repository, *memorySync_};
         auto published = metadataAdapter.publish(document, tags);
         if (!published) {
+            if (isUnrecoverableBlobFailure(published.error().code)) {
+                spdlog::warn("[ServiceManager] memory_sync backfill skipping document {} "
+                             "(record unrecoverable): {}",
+                             document.id, published.error().message);
+                state.documentIdCursor = std::max(state.documentIdCursor, document.id);
+                ++skippedDocuments;
+                notifyMemorySyncStage("backfill.skip_document");
+                return true;
+            }
             throw std::runtime_error(published.error().message);
         }
         state.documentIdCursor = std::max(state.documentIdCursor, document.id);
@@ -2428,8 +2461,9 @@ void ServiceManager::publishMemorySyncBackfill() noexcept {
 
     spdlog::debug(
         "[ServiceManager] memory_sync backfill scanned documents={} blobs={} vectors={} nodes={} "
-        "edges={}",
-        documentsPublished, blobsPublished, vectorsPublished, nodesPublished, edgesPublished);
+        "edges={} skipped={}",
+        documentsPublished, blobsPublished, vectorsPublished, nodesPublished, edgesPublished,
+        skippedDocuments);
 }
 
 void ServiceManager::configureMemorySyncApply() {

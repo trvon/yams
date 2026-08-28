@@ -524,6 +524,19 @@ public:
     std::size_t quarantinedRecordCount() const noexcept { return quarantined_.size(); }
     std::size_t authFailureCount() const noexcept { return authFailures_; }
 
+    /// Immutable copy of the reconciled state. IPC readers consume this instead
+    /// of the live maps so a slow reconciliation cannot block status/cached reads;
+    /// the owning service refreshes it at commit points while holding its lock.
+    struct CommittedState {
+        std::map<std::string, MemoryIndexRecord> merged;           // NOLINT(no-bit-fields)
+        std::map<std::string, std::vector<std::byte>> cachedBlobs; // NOLINT(no-bit-fields)
+        std::map<std::string, std::string> quarantined;            // NOLINT(no-bit-fields)
+        std::size_t authFailures{0};
+    };
+    [[nodiscard]] CommittedState committedState() const {
+        return CommittedState{merged_, cachedBlobs_, quarantined_, authFailures_};
+    }
+
     /// Bounded snapshot of current quarantine reasons (cleared each scan page).
     std::map<std::string, std::string> quarantinedReasons() const { return quarantined_; }
 

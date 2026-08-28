@@ -54,6 +54,99 @@ std::string digest(std::span<const std::byte> data) {
     return hasher.finalize();
 }
 
+/// Delegates every operation to the real daemon content store except
+/// `retrieveBytes` for one poisoned hash, which fails with the same
+/// manifest-corruption error the live backfill wedge produced. Used to prove
+/// the backfill skips an unrecoverable blob instead of wedging the document
+/// domain.
+class ManifestPoisonedContentStore final : public yams::api::IContentStore {
+public:
+    ManifestPoisonedContentStore(std::shared_ptr<yams::api::IContentStore> inner,
+                                 std::string poisonedHash)
+        : inner_(std::move(inner)), poisonedHash_(std::move(poisonedHash)) {}
+
+    yams::Result<yams::api::StoreResult> store(const std::filesystem::path& path,
+                                               const yams::api::ContentMetadata& metadata,
+                                               yams::api::ProgressCallback progress) override {
+        return inner_->store(path, metadata, std::move(progress));
+    }
+    yams::Result<yams::api::RetrieveResult>
+    retrieve(const std::string& hash, const std::filesystem::path& outputPath,
+             yams::api::ProgressCallback progress) override {
+        return inner_->retrieve(hash, outputPath, std::move(progress));
+    }
+    yams::Result<yams::api::StoreResult>
+    storeStream(std::istream& stream, const yams::api::ContentMetadata& metadata,
+                yams::api::ProgressCallback progress) override {
+        return inner_->storeStream(stream, metadata, std::move(progress));
+    }
+    yams::Result<yams::api::RetrieveResult>
+    retrieveStream(const std::string& hash, std::ostream& output,
+                   yams::api::ProgressCallback progress) override {
+        return inner_->retrieveStream(hash, output, std::move(progress));
+    }
+    yams::Result<yams::api::StoreResult>
+    storeBytes(std::span<const std::byte> data,
+               const yams::api::ContentMetadata& metadata) override {
+        return inner_->storeBytes(data, metadata);
+    }
+    yams::Result<std::vector<std::byte>> retrieveBytes(const std::string& hash) override {
+        if (hash == poisonedHash_) {
+            return yams::Error{yams::ErrorCode::ManifestInvalid, "test: poisoned content manifest"};
+        }
+        return inner_->retrieveBytes(hash);
+    }
+    yams::Result<std::vector<std::byte>> retrieveBytesPrefix(const std::string& hash,
+                                                             std::size_t maxBytes) override {
+        if (hash == poisonedHash_) {
+            return yams::Error{yams::ErrorCode::ManifestInvalid, "test: poisoned content manifest"};
+        }
+        return inner_->retrieveBytesPrefix(hash, maxBytes);
+    }
+    yams::Result<yams::api::IContentStore::RawContent>
+    retrieveRaw(const std::string& hash) override {
+        return inner_->retrieveRaw(hash);
+    }
+    std::future<yams::Result<yams::api::IContentStore::RawContent>>
+    retrieveRawAsync(const std::string& hash) override {
+        return inner_->retrieveRawAsync(hash);
+    }
+    yams::Result<bool> exists(const std::string& hash) const override {
+        return inner_->exists(hash);
+    }
+    yams::Result<bool> remove(const std::string& hash) override { return inner_->remove(hash); }
+    yams::Result<yams::api::ContentMetadata> getMetadata(const std::string& hash) const override {
+        return inner_->getMetadata(hash);
+    }
+    yams::Result<void> updateMetadata(const std::string& hash,
+                                      const yams::api::ContentMetadata& metadata) override {
+        return inner_->updateMetadata(hash, metadata);
+    }
+    std::vector<yams::Result<yams::api::StoreResult>>
+    storeBatch(const std::vector<std::filesystem::path>& paths,
+               const std::vector<yams::api::ContentMetadata>& metadata) override {
+        return inner_->storeBatch(paths, metadata);
+    }
+    std::vector<yams::Result<bool>> removeBatch(const std::vector<std::string>& hashes) override {
+        return inner_->removeBatch(hashes);
+    }
+    yams::api::ContentStoreStats getStats() const override { return inner_->getStats(); }
+    yams::api::HealthStatus checkHealth() const override { return inner_->checkHealth(); }
+    yams::Result<void> verify(yams::api::ProgressCallback progress) override {
+        return inner_->verify(std::move(progress));
+    }
+    yams::Result<void> compact(yams::api::ProgressCallback progress) override {
+        return inner_->compact(std::move(progress));
+    }
+    yams::Result<void> garbageCollect(yams::api::ProgressCallback progress) override {
+        return inner_->garbageCollect(std::move(progress));
+    }
+
+private:
+    std::shared_ptr<yams::api::IContentStore> inner_;
+    std::string poisonedHash_;
+};
+
 yams::test::DaemonHarness::Options makeMemorySyncHarnessOptions(std::string nodeId,
                                                                 std::string corpusId) {
     yams::test::DaemonHarness::Options options;
@@ -695,6 +788,62 @@ TEST_CASE("Daemon memory sync backfill budget resumes document cursor",
     serviceManager->testingPublishMemorySyncBackfill();
     REQUIRE(peer.syncOnce().has_value());
     CHECK(std::find(stages.begin(), stages.end(), "backfill.after_edge") != stages.end());
+
+    serviceManager->testingSetMemorySyncStageObserver({});
+    harness.stop();
+    CHECK(harness.shutdownSucceeded());
+}
+
+TEST_CASE("Daemon memory sync backfill skips a poisoned blob and continues",
+          "[integration][daemon][memory-sync][backfill]") {
+    auto options = makeMemorySyncHarnessOptions("123e4567-e89b-42d3-a456-426614174014",
+                                                "backfill-skip-corpus");
+    yams::test::DaemonHarness harness{std::move(options)};
+    REQUIRE(harness.start(30s));
+
+    auto* serviceManager = harness.daemon()->getServiceManager();
+    REQUIRE(serviceManager != nullptr);
+    auto repository = serviceManager->getMetadataRepo();
+    REQUIRE(repository != nullptr);
+
+    // Two documents; the first's blob is poisoned before the backfill runs.
+    std::vector<std::string> hashes;
+    std::vector<yams::metadata::BatchDocumentInsert> inserts;
+    for (int index = 0; index < 2; ++index) {
+        const auto payload = bytes("backfill-skip-" + std::to_string(index));
+        auto stored = serviceManager->getContentStore()->storeBytes(payload);
+        REQUIRE(stored.has_value());
+        hashes.push_back(stored.value().contentHash);
+        yams::metadata::BatchDocumentInsert item;
+        item.info.filePath = "/local/skip-" + std::to_string(index) + ".md";
+        item.info.fileName = "skip-" + std::to_string(index) + ".md";
+        item.info.fileExtension = ".md";
+        item.info.fileSize = static_cast<std::int64_t>(payload.size());
+        item.info.sha256Hash = stored.value().contentHash;
+        item.info.mimeType = "text/markdown";
+        inserts.push_back(std::move(item));
+    }
+    REQUIRE(repository->batchInsertDocumentsWithMetadata(inserts).has_value());
+
+    // Poison the first blob so its manifest is unrecoverable, then run backfill.
+    serviceManager->__test_setContentStore(std::make_shared<ManifestPoisonedContentStore>(
+        serviceManager->getContentStore(), hashes.front()));
+    std::vector<std::string> stages;
+    serviceManager->testingSetMemorySyncStageObserver(
+        [&](std::string_view stage) { stages.emplace_back(stage); });
+    serviceManager->testingPublishMemorySyncBackfill();
+
+    CHECK(std::find(stages.begin(), stages.end(), "backfill.skip_document") != stages.end());
+
+    // The poisoned document is never replicated; the backfill advances past it
+    // and publishes the next document instead of wedging the domain.
+    yams::memory_sync::MemorySyncService peer{
+        makeFilesystemBackend(harness.dataDir() / "shared-memory"),
+        yams::memory_sync::MemorySyncConfig{"backfill-skip-peer", 60'000, "backfill-skip-corpus",
+                                            1}};
+    REQUIRE(peer.syncOnce().has_value());
+    CHECK_FALSE(peer.readCached("document/" + hashes.front()).has_value());
+    CHECK(peer.readCached("document/" + hashes.back()).has_value());
 
     serviceManager->testingSetMemorySyncStageObserver({});
     harness.stop();
