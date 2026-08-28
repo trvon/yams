@@ -134,6 +134,9 @@ TEST_CASE("P2P hello binds TLS identities and exchanges causal watermarks",
     REQUIRE(serverConfig.localVersion.increment("server-node"));
     REQUIRE(clientConfig.localVersion.increment("client-node"));
     REQUIRE(clientConfig.localVersion.increment("client-node"));
+    serverConfig.localCommitments["server-node"] = {.counter = 3, .digest = std::string(64, 'a')};
+    clientConfig.localCommitments["client-node"] = {.counter = 2, .digest = std::string(64, 'b')};
+    clientConfig.localQuarantinedWriters.insert("retired-client-writer");
 
     InMemoryPeerTrustStore serverTrust;
     InMemoryPeerTrustStore clientTrust;
@@ -149,8 +152,150 @@ TEST_CASE("P2P hello binds TLS identities and exchanges causal watermarks",
     CHECK(pair.server.value().peerWatermark("client-node") == 2);
     CHECK(pair.client.value().peerVersion.get("server-node") == 3);
     CHECK(pair.server.value().peerVersion.get("client-node") == 2);
+    REQUIRE(pair.client.value().peerCommitments.contains("server-node"));
+    CHECK(pair.client.value().peerCommitments.at("server-node").counter == 3);
+    CHECK(pair.client.value().peerCommitments.at("server-node").digest == std::string(64, 'a'));
+    CHECK(pair.server.value().peerQuarantinedWriters.contains("retired-client-writer"));
     CHECK(clientTrust.pinnedPin("server-node") == pair.serverPin);
     CHECK(serverTrust.pinnedPin("client-node") == pair.clientPin);
+}
+
+TEST_CASE("P2P history comparison binds only the authenticated peer writer",
+          "[daemon][p2p][handshake][commitment]") {
+    yams::memory_sync::ReplicationState local;
+    REQUIRE(local.version.increment("peer-node"));
+    local.commitments["peer-node"] = {.counter = 1, .digest = std::string(64, 'a')};
+    local.commitments["unrelated"] = {.counter = 7, .digest = std::string(64, 'b')};
+
+    PeerHandshakeResult peer;
+    peer.peerNodeId = "peer-node";
+    REQUIRE(peer.peerVersion.increment("peer-node"));
+    peer.peerCommitments["peer-node"] = {.counter = 1, .digest = std::string(64, 'a')};
+    peer.peerCommitments["unrelated"] = {.counter = 7, .digest = std::string(64, 'c')};
+    auto unrelatedMismatch = yams::daemon::p2p::requiresPeerWriterQuarantine(local, peer);
+    REQUIRE(unrelatedMismatch.has_value());
+    CHECK_FALSE(unrelatedMismatch.value());
+
+    peer.peerCommitments["peer-node"].digest = std::string(64, 'd');
+    auto authenticatedMismatch = yams::daemon::p2p::requiresPeerWriterQuarantine(local, peer);
+    REQUIRE(authenticatedMismatch.has_value());
+    CHECK(authenticatedMismatch.value());
+
+    peer.peerCommitments.erase("peer-node");
+    auto missing = yams::daemon::p2p::requiresPeerWriterQuarantine(local, peer);
+    REQUIRE_FALSE(missing.has_value());
+    CHECK(missing.error().code == yams::ErrorCode::ValidationError);
+}
+
+TEST_CASE("P2P handshake verifies a nonzero authenticated writer prefix before exchange",
+          "[daemon][p2p][handshake][commitment][prefix]") {
+    auto serverConfig = config("server-node");
+    auto clientConfig = config("client-node");
+    REQUIRE(serverConfig.localVersion.increment("server-node"));
+    REQUIRE(serverConfig.localVersion.increment("server-node"));
+    serverConfig.localCommitments["server-node"] = {.counter = 2, .digest = std::string(64, 'b')};
+    serverConfig.resolveLocalCommitment =
+        [](std::uint64_t counter) -> yams::Result<yams::memory_sync::WriterHistoryCommitment> {
+        if (counter != 1) {
+            return yams::Error{yams::ErrorCode::InvalidState, "unexpected proof counter"};
+        }
+        return yams::memory_sync::WriterHistoryCommitment{.counter = 1,
+                                                          .digest = std::string(64, 'a')};
+    };
+    REQUIRE(clientConfig.localVersion.increment("server-node"));
+    clientConfig.localCommitments["server-node"] = {.counter = 1, .digest = std::string(64, 'a')};
+
+    InMemoryPeerTrustStore serverTrust;
+    InMemoryPeerTrustStore clientTrust;
+    auto pair = runHandshake(serverConfig, clientConfig, serverTrust, clientTrust);
+    REQUIRE(pair.client.has_value());
+    REQUIRE(pair.server.has_value());
+    CHECK(pair.client.value().peerPrefixVerified);
+    CHECK(pair.client.value().peerPrefixCounter == 1);
+    auto verified = yams::daemon::p2p::requiresPeerWriterQuarantine(
+        yams::memory_sync::ReplicationState{.version = clientConfig.localVersion,
+                                            .commitments = clientConfig.localCommitments},
+        pair.client.value());
+    REQUIRE(verified.has_value());
+    CHECK_FALSE(verified.value());
+}
+
+TEST_CASE("P2P handshake verifies an acceptor prefix of the connector writer",
+          "[daemon][p2p][handshake][commitment][prefix]") {
+    auto serverConfig = config("server-node");
+    auto clientConfig = config("client-node");
+    REQUIRE(clientConfig.localVersion.increment("client-node"));
+    REQUIRE(clientConfig.localVersion.increment("client-node"));
+    clientConfig.localCommitments["client-node"] = {.counter = 2, .digest = std::string(64, 'd')};
+    clientConfig.resolveLocalCommitment =
+        [](std::uint64_t counter) -> yams::Result<yams::memory_sync::WriterHistoryCommitment> {
+        if (counter != 1) {
+            return yams::Error{yams::ErrorCode::InvalidState, "unexpected proof counter"};
+        }
+        return yams::memory_sync::WriterHistoryCommitment{.counter = 1,
+                                                          .digest = std::string(64, 'c')};
+    };
+    REQUIRE(serverConfig.localVersion.increment("client-node"));
+    serverConfig.localCommitments["client-node"] = {.counter = 1, .digest = std::string(64, 'c')};
+
+    InMemoryPeerTrustStore serverTrust;
+    InMemoryPeerTrustStore clientTrust;
+    auto pair = runHandshake(serverConfig, clientConfig, serverTrust, clientTrust);
+    REQUIRE(pair.client.has_value());
+    REQUIRE(pair.server.has_value());
+    CHECK(pair.server.value().peerPrefixVerified);
+    CHECK(pair.server.value().peerPrefixMatches);
+    CHECK(pair.server.value().peerPrefixCounter == 1);
+}
+
+TEST_CASE("P2P handshake fails closed when writer prefix proof is unavailable",
+          "[daemon][p2p][handshake][commitment][prefix][security]") {
+    auto serverConfig = config("server-node");
+    auto clientConfig = config("client-node");
+    REQUIRE(serverConfig.localVersion.increment("server-node"));
+    serverConfig.localCommitments["server-node"] = {.counter = 1, .digest = std::string(64, 'a')};
+
+    SECTION("historical prefix cannot be derived") {
+        REQUIRE(serverConfig.localVersion.increment("server-node"));
+        serverConfig.localCommitments["server-node"] = {.counter = 2,
+                                                        .digest = std::string(64, 'b')};
+        REQUIRE(clientConfig.localVersion.increment("server-node"));
+        clientConfig.localCommitments["server-node"] = {.counter = 1,
+                                                        .digest = std::string(64, 'a')};
+    }
+    SECTION("peer claims history ahead of the authenticated writer") {
+        REQUIRE(clientConfig.localVersion.increment("server-node"));
+        REQUIRE(clientConfig.localVersion.increment("server-node"));
+        clientConfig.localCommitments["server-node"] = {.counter = 2,
+                                                        .digest = std::string(64, 'b')};
+    }
+
+    InMemoryPeerTrustStore serverTrust;
+    InMemoryPeerTrustStore clientTrust;
+    auto pair = runHandshake(serverConfig, clientConfig, serverTrust, clientTrust);
+    REQUIRE_FALSE(pair.client.has_value());
+    REQUIRE_FALSE(pair.server.has_value());
+    CHECK_FALSE(serverTrust.pinnedPin("client-node").has_value());
+    CHECK_FALSE(clientTrust.pinnedPin("server-node").has_value());
+}
+
+TEST_CASE("P2P handshake rejects unbounded local replication state",
+          "[daemon][p2p][handshake][commitment][limits]") {
+    auto serverConfig = config("server-node");
+    auto clientConfig = config("client-node");
+    for (std::size_t index = 0; index <= yams::daemon::p2p::kMaxP2pReplicationWriters; ++index) {
+        const auto writer = "writer-" + std::to_string(index);
+        REQUIRE(clientConfig.localVersion.increment(writer));
+        clientConfig.localCommitments[writer] = {.counter = 1, .digest = std::string(64, 'a')};
+    }
+
+    InMemoryPeerTrustStore serverTrust;
+    InMemoryPeerTrustStore clientTrust;
+    auto pair = runHandshake(serverConfig, clientConfig, serverTrust, clientTrust);
+    REQUIRE_FALSE(pair.client.has_value());
+    CHECK(pair.client.error().code == yams::ErrorCode::ResourceExhausted);
+    REQUIRE_FALSE(pair.server.has_value());
+    CHECK_FALSE(serverTrust.pinnedPin("client-node").has_value());
 }
 
 TEST_CASE("P2P hello rejects incompatible replication identities",

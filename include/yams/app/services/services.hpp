@@ -802,6 +802,9 @@ struct DeleteByNameRequest {
     bool keepRefs{false};  // retain CAS content while deleting corpus metadata/graph state
     bool recursive{false}; // delete directory contents recursively
     bool verbose{false};   // verbose output
+
+    // Optional durable-intent seam invoked for the exact resolved hash before destructive work.
+    std::function<Result<void>(std::string_view)> beforeDelete;
 };
 
 struct DeleteByNameResult {

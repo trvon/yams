@@ -133,6 +133,7 @@ public:
     }
 
     bool stopRequested() const noexcept { return stop_.load(std::memory_order_acquire); }
+    [[nodiscard]] const std::string& localNodeId() const noexcept { return config_.nodeId; }
 
     /// Called after a successful periodic reconciliation and after releasing loopMutex_.
     /// The callback may safely use this service's public read/sync methods.
@@ -142,19 +143,72 @@ public:
     }
 
     Result<void> publish(std::string_view key, std::span<const std::byte> content) {
-        std::lock_guard<std::mutex> lock(loopMutex_);
-        auto result = loop_.publish(key, content);
-        if (result) {
-            refreshCommittedState();
+        Result<void> result;
+        bool quarantineChanged = false;
+        {
+            std::lock_guard<std::mutex> lock(loopMutex_);
+            const auto generation = loop_.durableQuarantineGeneration();
+            result = loop_.publish(key, content);
+            quarantineChanged = generation != loop_.durableQuarantineGeneration();
+            if (result || quarantineChanged) {
+                refreshCommittedState();
+            }
+        }
+        if (quarantineChanged) {
+            invokeAfterSyncCallback();
         }
         return result;
     }
 
     Result<void> erase(std::string_view key, std::string tombstonePayload = {}) {
+        Result<void> result;
+        bool quarantineChanged = false;
+        {
+            std::lock_guard<std::mutex> lock(loopMutex_);
+            const auto generation = loop_.durableQuarantineGeneration();
+            result = loop_.erase(key, std::move(tombstonePayload));
+            quarantineChanged = generation != loop_.durableQuarantineGeneration();
+            if (result || quarantineChanged) {
+                refreshCommittedState();
+            }
+        }
+        if (quarantineChanged) {
+            invokeAfterSyncCallback();
+        }
+        return result;
+    }
+
+    Result<void> stageErase(std::string_view key, std::string tombstonePayload, bool ready = false,
+                            EraseReadinessProbe readinessProbe = EraseReadinessProbe::Explicit) {
         std::lock_guard<std::mutex> lock(loopMutex_);
-        auto result = loop_.erase(key, std::move(tombstonePayload));
-        if (result) {
-            refreshCommittedState();
+        return loop_.stageErase(key, std::move(tombstonePayload), ready, readinessProbe);
+    }
+
+    Result<std::vector<PendingEraseIntent>> pendingErases() {
+        std::lock_guard<std::mutex> lock(loopMutex_);
+        return loop_.pendingErases();
+    }
+
+    Result<void> cancelStagedErase(std::string_view key) {
+        std::lock_guard<std::mutex> lock(loopMutex_);
+        return loop_.cancelStagedErase(key);
+    }
+
+    Result<void> publishStagedErase(std::string_view key,
+                                    MemorySyncLoop::EraseReadyValidator validator = {}) {
+        Result<void> result;
+        bool quarantineChanged = false;
+        {
+            std::lock_guard<std::mutex> lock(loopMutex_);
+            const auto generation = loop_.durableQuarantineGeneration();
+            result = loop_.publishStagedErase(key, std::move(validator));
+            quarantineChanged = generation != loop_.durableQuarantineGeneration();
+            if (result || quarantineChanged) {
+                refreshCommittedState();
+            }
+        }
+        if (quarantineChanged) {
+            invokeAfterSyncCallback();
         }
         return result;
     }
@@ -162,24 +216,46 @@ public:
     /// Publish only when the winning cached payload differs. This makes periodic
     /// corpus backfill safe without creating a new causal envelope every cycle.
     Result<bool> publishIfChanged(std::string_view key, std::span<const std::byte> content) {
-        std::lock_guard<std::mutex> lock(loopMutex_);
-        auto cached = loop_.readCached(key);
-        if (cached && std::ranges::equal(cached.value(), content)) {
-            return false;
+        Result<bool> result;
+        bool quarantineChanged = false;
+        {
+            std::lock_guard<std::mutex> lock(loopMutex_);
+            auto cached = loop_.readCached(key);
+            if (cached && std::ranges::equal(cached.value(), content)) {
+                return false;
+            }
+            const auto generation = loop_.durableQuarantineGeneration();
+            auto published = loop_.publish(key, content);
+            quarantineChanged = generation != loop_.durableQuarantineGeneration();
+            if (!published) {
+                result = published.error();
+            } else {
+                result = true;
+            }
+            if (result || quarantineChanged) {
+                refreshCommittedState();
+            }
         }
-        auto published = loop_.publish(key, content);
-        if (!published) {
-            return published.error();
+        if (quarantineChanged) {
+            invokeAfterSyncCallback();
         }
-        refreshCommittedState();
-        return true;
+        return result;
     }
 
     Result<std::vector<std::byte>> read(std::string_view key) {
-        std::lock_guard<std::mutex> lock(loopMutex_);
-        auto result = loop_.read(key);
-        if (result) {
-            refreshCommittedState();
+        Result<std::vector<std::byte>> result;
+        bool quarantineChanged = false;
+        {
+            std::lock_guard<std::mutex> lock(loopMutex_);
+            const auto generation = loop_.durableQuarantineGeneration();
+            result = loop_.read(key);
+            quarantineChanged = generation != loop_.durableQuarantineGeneration();
+            if (result || quarantineChanged) {
+                refreshCommittedState();
+            }
+        }
+        if (quarantineChanged) {
+            invokeAfterSyncCallback();
         }
         return result;
     }
@@ -250,48 +326,98 @@ public:
         if (callbackOwner_ == this && callbackSnapshot_ != nullptr) {
             return *callbackSnapshot_;
         }
-        std::lock_guard<std::mutex> lock(loopMutex_);
-        auto result = loop_.sync();
-        if (result) {
-            refreshCommittedState();
-        }
-        return result;
-    }
-
-    Result<std::map<std::string, MemoryIndexRecord>> syncFully() {
-        std::lock_guard<std::mutex> lock(loopMutex_);
-        auto result = loop_.syncFully();
-        if (result) {
-            refreshCommittedState();
-        }
-        return result;
-    }
-
-    Result<MemoryDeltaBatch> exportLocalDeltasAfter(const VersionVector& peerVersion,
-                                                    std::size_t maxDeltas = 128) {
-        std::lock_guard<std::mutex> lock(loopMutex_);
-        return loop_.exportLocalDeltasAfter(peerVersion, maxDeltas);
-    }
-
-    Result<DeltaApplyResult> applyDeltas(std::span<const MemoryDelta> deltas) {
-        Result<DeltaApplyResult> result;
+        Result<std::map<std::string, MemoryIndexRecord>> result;
+        bool quarantineChanged = false;
         {
             std::lock_guard<std::mutex> lock(loopMutex_);
-            result = loop_.applyDeltas(deltas);
-            if (result) {
+            const auto generation = loop_.durableQuarantineGeneration();
+            result = loop_.sync();
+            quarantineChanged = generation != loop_.durableQuarantineGeneration();
+            if (result || quarantineChanged) {
                 refreshCommittedState();
             }
         }
-        if (result && result.value().merged != 0) {
+        if (quarantineChanged) {
             invokeAfterSyncCallback();
         }
         return result;
     }
 
-    VersionVector currentVersion() const {
-        const auto state = committedSnapshot();
-        return state ? state->version : VersionVector{};
+    Result<std::map<std::string, MemoryIndexRecord>> syncFully() {
+        Result<std::map<std::string, MemoryIndexRecord>> result;
+        bool quarantineChanged = false;
+        {
+            std::lock_guard<std::mutex> lock(loopMutex_);
+            const auto generation = loop_.durableQuarantineGeneration();
+            result = loop_.syncFully();
+            quarantineChanged = generation != loop_.durableQuarantineGeneration();
+            if (result || quarantineChanged) {
+                refreshCommittedState();
+            }
+        }
+        if (quarantineChanged) {
+            invokeAfterSyncCallback();
+        }
+        return result;
     }
+
+    Result<MemoryDeltaBatch> exportLocalDeltasAfter(
+        const VersionVector& peerVersion, std::size_t maxDeltas = 128,
+        std::uint64_t maxWriterCounter = std::numeric_limits<std::uint64_t>::max()) {
+        std::lock_guard<std::mutex> lock(loopMutex_);
+        return loop_.exportLocalDeltasAfter(peerVersion, maxDeltas, maxWriterCounter);
+    }
+
+    Result<DeltaApplyResult> applyDeltas(std::span<const MemoryDelta> deltas) {
+        Result<DeltaApplyResult> result;
+        bool quarantineChanged = false;
+        {
+            std::lock_guard<std::mutex> lock(loopMutex_);
+            const auto generation = loop_.durableQuarantineGeneration();
+            result = loop_.applyDeltas(deltas);
+            quarantineChanged = generation != loop_.durableQuarantineGeneration();
+            if (result || quarantineChanged) {
+                refreshCommittedState();
+            }
+        }
+        if ((result && result.value().merged != 0) || quarantineChanged) {
+            invokeAfterSyncCallback();
+        }
+        return result;
+    }
+
+    Result<bool> quarantineWriter(std::string_view writerId, std::string_view sourceNodeId) {
+        Result<bool> result;
+        {
+            std::lock_guard<std::mutex> lock(loopMutex_);
+            result = loop_.quarantineWriter(writerId, sourceNodeId);
+            if (result && result.value()) {
+                refreshCommittedState();
+            }
+        }
+        if (result && result.value()) {
+            invokeAfterSyncCallback();
+        }
+        return result;
+    }
+
+    ReplicationState replicationState() const {
+        const auto state = committedSnapshot();
+        return state ? state->replication : ReplicationState{};
+    }
+
+    Result<WriterHistoryCommitment> localHistoryCommitmentAt(std::uint64_t counter) {
+        std::lock_guard<std::mutex> lock(loopMutex_);
+        return loop_.localHistoryCommitmentAt(counter);
+    }
+
+    Result<void> validateHistoryExtension(std::span<const MemoryDelta> deltas,
+                                          const WriterHistoryCommitment& expectedFrontier) {
+        std::lock_guard<std::mutex> lock(loopMutex_);
+        return loop_.validateHistoryExtension(deltas, expectedFrontier);
+    }
+
+    VersionVector currentVersion() const { return replicationState().version; }
 
 #ifdef YAMS_TESTING
     /// Observe periodic reconciliation without triggering another sync cycle.
@@ -320,6 +446,12 @@ private:
 
     void invokeAfterSyncCallback(
         const std::map<std::string, MemoryIndexRecord>* snapshot = nullptr) noexcept {
+        std::map<std::string, MemoryIndexRecord> adapterSnapshot;
+        if (snapshot == nullptr) {
+            std::lock_guard<std::mutex> lock(loopMutex_);
+            adapterSnapshot = loop_.adapterState();
+            snapshot = &adapterSnapshot;
+        }
         std::function<void()> callback;
         {
             std::lock_guard<std::mutex> lock(callbackMutex_);
@@ -346,19 +478,33 @@ private:
         while (!stop_.load(std::memory_order_acquire)) {
             Result<std::map<std::string, MemoryIndexRecord>> snapshot =
                 Error{ErrorCode::InternalError, "memory sync did not reconcile"};
-            try {
+            bool quarantineChanged = false;
+            {
                 std::lock_guard<std::mutex> lock(loopMutex_);
-                snapshot = loop_.sync();
-                if (snapshot) {
+                const auto generation = loop_.durableQuarantineGeneration();
+                try {
+                    snapshot = loop_.sync();
+                    if (snapshot) {
+                        auto replayed = loop_.replayReadyErases();
+                        if (!replayed) {
+                            snapshot = replayed.error();
+                        } else if (replayed.value() != 0) {
+                            snapshot = loop_.syncFully();
+                        }
+                    }
+                } catch (const std::exception& e) {
+                    snapshot = Error{ErrorCode::InternalError,
+                                     std::string("memory sync reconciliation threw: ") + e.what()};
+                } catch (...) {
+                    snapshot = Error{ErrorCode::InternalError,
+                                     "memory sync reconciliation threw an unknown exception"};
+                }
+                quarantineChanged = generation != loop_.durableQuarantineGeneration();
+                if (snapshot || quarantineChanged) {
                     refreshCommittedState();
                 }
-            } catch (const std::exception& e) {
-                snapshot = Error{ErrorCode::InternalError,
-                                 std::string("memory sync reconciliation threw: ") + e.what()};
-            } catch (...) {
-                snapshot = Error{ErrorCode::InternalError,
-                                 "memory sync reconciliation threw an unknown exception"};
             }
+            bool callbackInvoked = false;
             if (snapshot) {
                 auto lease = refreshSessionLease();
                 if (!lease) {
@@ -372,10 +518,18 @@ private:
                             std::chrono::steady_clock::now().time_since_epoch())
                             .count(),
                         std::memory_order_release);
-                    invokeAfterSyncCallback(&snapshot.value());
+                    if (quarantineChanged) {
+                        invokeAfterSyncCallback();
+                    } else {
+                        invokeAfterSyncCallback(&snapshot.value());
+                    }
+                    callbackInvoked = true;
                 }
             } else {
                 failedSyncCycles_.fetch_add(1, std::memory_order_relaxed);
+            }
+            if (quarantineChanged && !callbackInvoked) {
+                invokeAfterSyncCallback();
             }
             std::unique_lock<std::mutex> sleepLock(sleepMutex_);
             sleepCv_.wait_for(sleepLock, std::chrono::milliseconds(config_.syncIntervalMs),

@@ -216,6 +216,72 @@ TEST_CASE("P2P manager converges after mutual operator enrollment",
     server.value()->stop();
 }
 
+TEST_CASE("P2P manager quarantines a mismatched nonzero writer prefix before payloads",
+          "[daemon][p2p][manager][network][security][commitment]") {
+    TempDir clientDir{"history-client"};
+    TempDir serverDir{"history-server"};
+    TempDir rogueDir{"history-rogue"};
+    MemorySyncService clientService{backend(clientDir.path / "ops"),
+                                    MemorySyncConfig{"client-node", 60'000, "manager-corpus", 1}};
+    MemorySyncService serverService{backend(serverDir.path / "ops"),
+                                    MemorySyncConfig{"server-node", 60'000, "manager-corpus", 1}};
+    MemorySyncService rogueWriter{backend(rogueDir.path / "ops"),
+                                  MemorySyncConfig{"server-node", 60'000, "manager-corpus", 1}};
+    REQUIRE(clientService.syncFully().has_value());
+    REQUIRE(serverService.syncFully().has_value());
+    REQUIRE(rogueWriter.syncFully().has_value());
+    REQUIRE(serverService.publish("user/history", bytes("canonical-first")).has_value());
+    REQUIRE(serverService.publish("user/latest", bytes("canonical-second")).has_value());
+    REQUIRE(rogueWriter.publish("user/history", bytes("forked")).has_value());
+    auto rogueDelta = rogueWriter.exportLocalDeltasAfter({});
+    REQUIRE(rogueDelta.has_value());
+    REQUIRE(clientService.applyDeltas(rogueDelta.value().deltas).has_value());
+    REQUIRE(clientService.currentVersion().get("server-node") == 1);
+    REQUIRE(serverService.currentVersion().get("server-node") == 2);
+
+    auto clientKey = yams::memory_sync::generateWriterKeyPair();
+    auto serverKey = yams::memory_sync::generateWriterKeyPair();
+    REQUIRE(clientKey.has_value());
+    REQUIRE(serverKey.has_value());
+    auto clientIdentity = yams::daemon::p2p::TlsIdentity::fromPrivateKeyPem(
+        "client-node", clientKey.value().privateKeyPem);
+    auto serverIdentity = yams::daemon::p2p::TlsIdentity::fromPrivateKeyPem(
+        "server-node", serverKey.value().privateKeyPem);
+    REQUIRE(clientIdentity.has_value());
+    REQUIRE(serverIdentity.has_value());
+
+    auto client = P2pManager::create(
+        options("client-node", clientDir.path, clientKey.value().privateKeyPem, 60s, false),
+        clientService);
+    auto server = P2pManager::create(
+        options("server-node", serverDir.path, serverKey.value().privateKeyPem, 60s, false),
+        serverService);
+    REQUIRE(client.has_value());
+    REQUIRE(server.has_value());
+    REQUIRE(
+        client.value()->enrollPeer("server-node", serverIdentity.value().spkiPin()).has_value());
+    REQUIRE(
+        server.value()->enrollPeer("client-node", clientIdentity.value().spkiPin()).has_value());
+    REQUIRE(client.value()->start().has_value());
+    REQUIRE(server.value()->start().has_value());
+
+    const std::string endpoint = "127.0.0.1:" + std::to_string(server.value()->boundPort()) +
+                                 "?pin=" + serverIdentity.value().spkiPin();
+    auto rejected = client.value()->connect(endpoint);
+    REQUIRE_FALSE(rejected.has_value());
+    CHECK(rejected.error().code == yams::ErrorCode::InvalidData);
+    CHECK(clientService.replicationState().quarantinedWriters.contains("server-node"));
+    CHECK_FALSE(clientService.readCached("user/history").has_value());
+
+    REQUIRE(clientService.publish("user/after-quarantine", bytes("must-not-send")).has_value());
+    auto repeated = client.value()->connect(endpoint);
+    REQUIRE_FALSE(repeated.has_value());
+    CHECK_FALSE(serverService.readCached("user/after-quarantine").has_value());
+
+    client.value()->stop();
+    server.value()->stop();
+}
+
 TEST_CASE("P2P manager connects, converges, and remembers peers",
           "[daemon][p2p][manager][network][sqlite]") {
     TempDir clientDir{"client"};

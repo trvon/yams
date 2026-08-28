@@ -91,7 +91,23 @@ public:
                 if (!document) {
                     return document.error();
                 }
-                if (document.value()) {
+                if (document.value() && envelope.origin == sync_.localNodeId()) {
+                    // A local tombstone whose exact commitment crossed the point of no return can
+                    // race a later local re-add. Preserve the present local row and publish it as
+                    // the causally-later value instead of deleting the newer local state.
+                    auto metadata = repository_.getAllMetadata(document.value()->id);
+                    if (!metadata) {
+                        return metadata.error();
+                    }
+                    std::vector<std::pair<std::string, MetadataValue>> tags;
+                    tags.reserve(metadata.value().size());
+                    for (const auto& [metadataKey, value] : metadata.value()) {
+                        tags.emplace_back(metadataKey, value);
+                    }
+                    if (auto republished = publish(*document.value(), tags); !republished) {
+                        return republished.error();
+                    }
+                } else if (document.value()) {
                     deletedIds.push_back(document.value()->id);
                 }
                 continue;

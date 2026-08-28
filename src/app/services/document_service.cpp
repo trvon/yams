@@ -985,6 +985,16 @@ private:
             resp.deleted.push_back(r);
             return;
         }
+        if (req.beforeDelete) {
+            auto staged = req.beforeDelete(target.hash);
+            if (!staged) {
+                r.deleted = false;
+                r.errorCode = staged.error().code;
+                r.error = "Failed to stage replicated deletion: " + staged.error().message;
+                resp.errors.push_back(r);
+                return;
+            }
+        }
 
         if (target.doc.has_value()) {
             // Content removal is the only non-transactional, failure-prone external op, so do it

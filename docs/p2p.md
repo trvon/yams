@@ -76,7 +76,9 @@ Disconnect and disable automatic reconnect:
 yams p2p disconnect <peer-node-id>
 ```
 
-Direct protocol v1 is full mesh: with three nodes, connect every pair. A node sends its own operations; it does not relay a third node's history.
+Direct protocol v2 is full mesh: with three nodes, connect every pair. A node sends its own operations; it does not relay a third node's history. The authenticated handshake exchanges bounded per-writer full-history commitments and proves the receiver's exact nonzero prefix before application deltas move. Incoming batches remain staged until their canonical envelope chain matches the handshake-frozen frontier. A mismatch durably quarantines the authenticated writer, removes its visible winners through adapter invalidations, and stops the session; operators must investigate or re-enroll a replacement corpus epoch rather than clearing protocol history manually.
+
+Local document deletion first writes a node/corpus-scoped durable outbox intent. If the daemon stops after local removal but before tombstone publication, restart probes the recorded metadata/content absence condition, prepares one exact signed tombstone envelope, and retries it idempotently. The outbox entry is removed only after the tombstone index and full-history commitment are durable; the tombstone itself remains retained until the configured replica acknowledgement policy permits collection.
 
 ## Verify corpus access
 

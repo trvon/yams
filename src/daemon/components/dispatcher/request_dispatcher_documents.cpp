@@ -1389,6 +1389,11 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
             serviceReq.keepRefs = req.keepRefs;
             serviceReq.recursive = req.recursive;
             serviceReq.verbose = req.verbose;
+            if (!req.dryRun) {
+                serviceReq.beforeDelete = [manager = serviceManager_](std::string_view hash) {
+                    return manager->stageMemorySyncDocumentDelete(hash);
+                };
+            }
             if (!req.directory.empty()) {
                 if (!req.recursive) {
                     co_return yams::daemon::dispatch::makeErrorResponse(

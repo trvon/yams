@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <future>
 #include <memory>
 #include <string>
@@ -80,14 +81,20 @@ TlsIdentity identity(std::string nodeId, const yams::memory_sync::WriterKeyPair&
     return std::move(result.value());
 }
 
-PeerHandshakeConfig handshakeConfig(std::string nodeId, const MemorySyncService& service,
+PeerHandshakeConfig handshakeConfig(std::string nodeId, MemorySyncService& service,
                                     bool allowFirstContact) {
-    return PeerHandshakeConfig{.nodeId = std::move(nodeId),
-                               .corpusId = "wire-delta-corpus",
-                               .corpusEpoch = 1,
-                               .localVersion = service.currentVersion(),
-                               .allowFirstContact = allowFirstContact,
-                               .timeout = 3s};
+    const auto state = service.replicationState();
+    return PeerHandshakeConfig{
+        .nodeId = std::move(nodeId),
+        .corpusId = "wire-delta-corpus",
+        .corpusEpoch = 1,
+        .localVersion = state.version,
+        .localCommitments = state.commitments,
+        .localQuarantinedWriters = state.quarantinedWriters,
+        .resolveLocalCommitment =
+            [&service](std::uint64_t counter) { return service.localHistoryCommitmentAt(counter); },
+        .allowFirstContact = allowFirstContact,
+        .timeout = 3s};
 }
 
 struct ExchangePair {
@@ -100,8 +107,10 @@ ExchangePair runExchange(MemorySyncService& clientService, MemorySyncService& se
                          const yams::memory_sync::WriterKeyPair& serverKey,
                          InMemoryPeerTrustStore& clientTrust, InMemoryPeerTrustStore& serverTrust,
                          bool allowFirstContact,
-                         DeltaExchangeOptions exchangeOptions = {
-                             .maxDeltasPerBatch = 2, .maxBatches = 16, .timeout = 3s}) {
+                         DeltaExchangeOptions exchangeOptions = {.maxDeltasPerBatch = 2,
+                                                                 .maxBatches = 16,
+                                                                 .timeout = 3s},
+                         std::function<void(PeerHandshakeConfig&)> mutateServerHandshake = {}) {
     auto clientIdentity = identity("client-node", clientKey);
     auto serverIdentity = identity("server-node", serverKey);
     P2pListener listener(P2pListener::Options{.host = "127.0.0.1",
@@ -113,7 +122,10 @@ ExchangePair runExchange(MemorySyncService& clientService, MemorySyncService& se
                                               .maxConcurrentSessions = 1});
     std::promise<yams::Result<DeltaExchangeStats>> serverDone;
     auto serverFuture = serverDone.get_future();
-    const auto serverHandshake = handshakeConfig("server-node", serverService, allowFirstContact);
+    auto serverHandshake = handshakeConfig("server-node", serverService, allowFirstContact);
+    if (mutateServerHandshake) {
+        mutateServerHandshake(serverHandshake);
+    }
     listener.setHandler([&](P2pConnection channel) {
         auto handshake =
             yams::daemon::p2p::acceptPeerHandshake(channel, serverHandshake, serverTrust);
@@ -362,6 +374,35 @@ TEST_CASE("direct P2P delta exchange enforces aggregate session limits",
     CHECK(serverService.currentVersion().empty());
     CHECK_FALSE(serverService.readCached("user/one").has_value());
     CHECK_FALSE(serverService.readCached("user/two").has_value());
+}
+
+TEST_CASE("direct P2P delta stages a false advertised frontier before visibility",
+          "[daemon][p2p][delta][network][commitment][security]") {
+    TempDir clientDir{"false-frontier-client"};
+    TempDir serverDir{"false-frontier-server"};
+    MemorySyncService clientService{
+        backend(clientDir.path), MemorySyncConfig{"client-node", 60'000, "wire-delta-corpus", 1}};
+    MemorySyncService serverService{
+        backend(serverDir.path), MemorySyncConfig{"server-node", 60'000, "wire-delta-corpus", 1}};
+    REQUIRE(serverService.publish("user/unverified", bytes("must-stay-staged")).has_value());
+    auto clientKey = yams::memory_sync::generateWriterKeyPair();
+    auto serverKey = yams::memory_sync::generateWriterKeyPair();
+    REQUIRE(clientKey.has_value());
+    REQUIRE(serverKey.has_value());
+
+    InMemoryPeerTrustStore clientTrust;
+    InMemoryPeerTrustStore serverTrust;
+    auto exchanged =
+        runExchange(clientService, serverService, clientKey.value(), serverKey.value(), clientTrust,
+                    serverTrust, true,
+                    DeltaExchangeOptions{.maxDeltasPerBatch = 2, .maxBatches = 16, .timeout = 3s},
+                    [](PeerHandshakeConfig& handshake) {
+                        handshake.localCommitments.at("server-node").digest = std::string(64, 'f');
+                    });
+    REQUIRE_FALSE(exchanged.client.has_value());
+    REQUIRE_FALSE(exchanged.server.has_value());
+    CHECK(clientService.replicationState().quarantinedWriters.contains("server-node"));
+    CHECK_FALSE(clientService.readCached("user/unverified").has_value());
 }
 
 TEST_CASE("direct P2P delta exchange converges offline corpora and resumes from watermarks",

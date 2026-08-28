@@ -53,7 +53,9 @@ public:
     yams::Result<yams::storage::ObjectListPage> listPage(std::string_view prefix,
                                                          std::optional<std::string_view> cursor,
                                                          std::size_t limit) const override {
-        listPageCalls.fetch_add(1, std::memory_order_relaxed);
+        if (prefix == "index/") {
+            listPageCalls.fetch_add(1, std::memory_order_relaxed);
+        }
         return backend_.listPage(prefix, cursor, limit);
     }
     yams::Result<::yams::StorageStats> getStats() const override { return backend_.getStats(); }
@@ -73,6 +75,26 @@ public:
 
 private:
     yams::storage::FilesystemBackend backend_;
+};
+
+class FailPrefixOnceBackend final : public CountingBackend {
+public:
+    void failNextStore(std::string prefix) {
+        failPrefix_ = std::move(prefix);
+        armed_.store(true, std::memory_order_release);
+    }
+
+    yams::Result<void> store(std::string_view key, std::span<const std::byte> data) override {
+        if (armed_.load(std::memory_order_acquire) && key.starts_with(failPrefix_) &&
+            armed_.exchange(false, std::memory_order_acq_rel)) {
+            return yams::Error{yams::ErrorCode::IOError, "injected prefix store failure"};
+        }
+        return CountingBackend::store(key, data);
+    }
+
+private:
+    std::atomic<bool> armed_{false};
+    std::string failPrefix_;
 };
 
 class ThrowOnceListBackend final : public CountingBackend {
@@ -246,6 +268,44 @@ TEST_CASE("MemorySyncService replicates user-record tombstones", "[memory-sync][
     REQUIRE(merged.has_value());
     CHECK(merged.value().at("user/key").isTombstone());
     CHECK_FALSE(reader.readCached("user/key").has_value());
+}
+
+TEST_CASE("MemorySyncService worker replays a retained ready erase",
+          "[memory-sync][service][tombstone][outbox]") {
+    TempDirGuard dir;
+    yams::storage::BackendConfig backendConfig;
+    backendConfig.type = "filesystem";
+    backendConfig.localPath = dir.path;
+    auto backend = std::make_unique<FailPrefixOnceBackend>();
+    auto* observed = backend.get();
+    REQUIRE(backend->initialize(backendConfig).has_value());
+    MemorySyncService service{std::move(backend),
+                              MemorySyncConfig{"writer", 10, "outbox-service-corpus", 1}};
+    REQUIRE(service.publish("user/key", bytes("value")).has_value());
+    observed->failNextStore("index/");
+    auto failed = service.erase("user/key", "key");
+    REQUIRE_FALSE(failed.has_value());
+    auto pending = service.pendingErases();
+    REQUIRE(pending.has_value());
+    REQUIRE(pending.value().size() == 1);
+    CHECK(pending.value().front().ready);
+    CHECK(pending.value().front().prepared);
+
+    REQUIRE(service.start().has_value());
+    bool drained = false;
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        auto retained = service.pendingErases();
+        REQUIRE(retained.has_value());
+        if (retained.value().empty()) {
+            drained = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{5});
+    }
+    service.stop();
+    REQUIRE(drained);
+    CHECK_FALSE(service.readCached("user/key").has_value());
+    CHECK(service.replicationState().commitments.at("writer").counter == 2);
 }
 
 TEST_CASE("MemorySyncService two nodes converge", "[memory-sync][service]") {
@@ -552,6 +612,43 @@ TEST_CASE("MemorySyncService direct delta apply invokes adapter callback after l
     CHECK(applied.value().merged == 1);
     CHECK(callbacks.load(std::memory_order_relaxed) == 1);
     CHECK(reader.readCached("user/key").has_value());
+}
+
+TEST_CASE("MemorySyncService publishes quarantine snapshot before adapter invalidation",
+          "[memory-sync][service][direct-delta][quarantine]") {
+    TempDirGuard writerDir;
+    TempDirGuard readerDir;
+    MemorySyncService writer{makeBackend(writerDir.path),
+                             MemorySyncConfig{"writer", 60'000, "quarantine-service", 1}};
+    MemorySyncService reader{makeBackend(readerDir.path),
+                             MemorySyncConfig{"reader", 60'000, "quarantine-service", 1}};
+    REQUIRE(writer.publish("user/key", bytes("value")).has_value());
+    auto deltas = writer.exportLocalDeltasAfter({});
+    REQUIRE(deltas.has_value());
+
+    REQUIRE(reader.applyDeltas(deltas.value().deltas).has_value());
+    std::atomic<std::size_t> callbacks{0};
+    reader.setAfterSyncCallback([&] {
+        CHECK(reader.replicationState().quarantinedWriters.contains("writer"));
+        CHECK_FALSE(reader.readCached("user/key").has_value());
+        auto adapterState = reader.syncOnce();
+        REQUIRE(adapterState.has_value());
+        REQUIRE(adapterState.value().contains("user/key"));
+        CHECK(adapterState.value().at("user/key").isTombstone());
+        callbacks.fetch_add(1, std::memory_order_relaxed);
+    });
+
+    auto quarantined = reader.quarantineWriter("writer", "reader");
+    REQUIRE(quarantined.has_value());
+    CHECK(quarantined.value());
+    CHECK(callbacks.load(std::memory_order_relaxed) == 1);
+    CHECK(reader.replicationState().quarantinedWriters.contains("writer"));
+    CHECK_FALSE(reader.readCached("user/key").has_value());
+
+    auto repeated = reader.quarantineWriter("writer", "reader");
+    REQUIRE(repeated.has_value());
+    CHECK_FALSE(repeated.value());
+    CHECK(callbacks.load(std::memory_order_relaxed) == 1);
 }
 
 TEST_CASE("MemorySyncService readers do not block on a slow reconciliation",

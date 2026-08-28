@@ -312,6 +312,37 @@ TEST_CASE("metadata sync adapter converges a committed document from A to B",
     CHECK_FALSE(afterRestart.value().has_value());
 }
 
+TEST_CASE("local committed tombstone preserves and republishes a later local re-add",
+          "[metadata][memory-sync][tombstone][ordering]") {
+    TempDirGuard temp;
+    RepoFixture repo("meta_sync_local_readd_");
+    MemorySyncService sync{makeBackend(temp.path / "sync"), MemorySyncConfig{"local", 50}};
+    MetadataSyncAdapter adapter{*repo.repository_, sync};
+    const auto info = makeDocument("/corpus/readded.md", std::string(kDocHash));
+    const std::vector<std::pair<std::string, MetadataValue>> tags = {
+        {"state", MetadataValue("readded")},
+    };
+    BatchDocumentInsert item;
+    item.info = info;
+    item.tags = tags;
+    std::vector<BatchDocumentInsert> inserts{item};
+    REQUIRE(repo.repository_->batchInsertDocumentsWithMetadata(inserts).has_value());
+    REQUIRE(adapter.publish(info, tags).has_value());
+    REQUIRE(adapter.publishDelete(info.sha256Hash).has_value());
+
+    auto applied = adapter.apply();
+    REQUIRE(applied.has_value());
+    CHECK(applied.value() == 0);
+    auto retained = repo.repository_->getDocumentByHash(info.sha256Hash);
+    REQUIRE(retained.has_value());
+    REQUIRE(retained.value().has_value());
+    auto merged = sync.syncOnce();
+    REQUIRE(merged.has_value());
+    REQUIRE(merged.value().contains("document/" + info.sha256Hash));
+    CHECK_FALSE(merged.value().at("document/" + info.sha256Hash).isTombstone());
+    CHECK(sync.replicationState().commitments.at("local").counter == 3);
+}
+
 TEST_CASE("metadata sync replacement rolls back document and tags together",
           "[metadata][memory-sync][transaction]") {
     TempDirGuard temp;

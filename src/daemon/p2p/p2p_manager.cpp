@@ -280,12 +280,39 @@ public:
 
 private:
     PeerHandshakeConfig handshakeConfig() const {
+        const auto state = service_.replicationState();
         return PeerHandshakeConfig{.nodeId = options_.nodeId,
                                    .corpusId = options_.corpusId,
                                    .corpusEpoch = options_.corpusEpoch,
-                                   .localVersion = service_.currentVersion(),
+                                   .localVersion = state.version,
+                                   .localCommitments = state.commitments,
+                                   .localQuarantinedWriters = state.quarantinedWriters,
+                                   .resolveLocalCommitment =
+                                       [this](std::uint64_t counter) {
+                                           return service_.localHistoryCommitmentAt(counter);
+                                       },
                                    .allowFirstContact = options_.allowFirstContact,
                                    .timeout = options_.timeout};
+    }
+
+    Result<void> enforcePeerHistory(const PeerHandshakeResult& peer) {
+        const auto localState = service_.replicationState();
+        if (localState.quarantinedWriters.contains(peer.peerNodeId)) {
+            return Error{ErrorCode::InvalidData, "peer writer is durably quarantined"};
+        }
+        auto mismatch = requiresPeerWriterQuarantine(localState, peer);
+        if (!mismatch) {
+            return mismatch.error();
+        }
+        if (!mismatch.value()) {
+            return {};
+        }
+        auto quarantined = service_.quarantineWriter(peer.peerNodeId, options_.nodeId);
+        if (!quarantined) {
+            return quarantined.error();
+        }
+        return Error{ErrorCode::InvalidData,
+                     "authenticated peer writer history commitment mismatch"};
     }
 
     Result<P2pSyncResult> connectSpec(const P2pConnectionSpec& spec,
@@ -322,12 +349,18 @@ private:
         if (expectedNode && handshake.value().peerNodeId != *expectedNode) {
             return Error{ErrorCode::Unauthorized, "P2P endpoint identity changed"};
         }
+        if (auto history = enforcePeerHistory(handshake.value()); !history) {
+            return history.error();
+        }
         auto exchanged = initiateDeltaExchange(connection.value(), service_, handshake.value(),
                                                DeltaExchangeOptions{.maxDeltasPerBatch = 128,
                                                                     .maxBatches = 4096,
                                                                     .timeout = options_.timeout});
         if (!exchanged) {
             return exchanged.error();
+        }
+        if (auto history = enforcePeerHistory(handshake.value()); !history) {
+            return history.error();
         }
         auto persisted = registry_->updatePeerState(handshake.value().peerNodeId, options_.corpusId,
                                                     options_.corpusEpoch, service_.currentVersion(),
@@ -349,11 +382,17 @@ private:
         if (!handshake) {
             return;
         }
+        if (auto history = enforcePeerHistory(handshake.value()); !history) {
+            return;
+        }
         auto exchanged = acceptDeltaExchange(connection, service_, handshake.value(),
                                              DeltaExchangeOptions{.maxDeltasPerBatch = 128,
                                                                   .maxBatches = 4096,
                                                                   .timeout = options_.timeout});
         if (!exchanged) {
+            return;
+        }
+        if (auto history = enforcePeerHistory(handshake.value()); !history) {
             return;
         }
         std::string endpoint;

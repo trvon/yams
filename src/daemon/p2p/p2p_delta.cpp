@@ -257,11 +257,13 @@ Result<DeltaAcknowledgement> receiveAcknowledgement(P2pConnection& connection,
 Result<DeltaExchangeStats> sendAll(P2pConnection& connection,
                                    memory_sync::MemorySyncService& service,
                                    memory_sync::VersionVector peerVersion,
+                                   std::uint64_t maxWriterCounter,
                                    const DeltaExchangeOptions& options) {
     DeltaExchangeStats stats;
     std::size_t sessionBytes = 0;
     for (std::size_t batchIndex = 0; batchIndex < options.maxBatches; ++batchIndex) {
-        auto batch = service.exportLocalDeltasAfter(peerVersion, options.maxDeltasPerBatch);
+        auto batch = service.exportLocalDeltasAfter(peerVersion, options.maxDeltasPerBatch,
+                                                    maxWriterCounter);
         if (!batch) {
             return batch.error();
         }
@@ -298,10 +300,13 @@ Result<DeltaExchangeStats> sendAll(P2pConnection& connection,
 
 Result<DeltaExchangeStats> receiveAll(P2pConnection& connection,
                                       memory_sync::MemorySyncService& service,
-                                      std::string_view expectedPeerNodeId,
+                                      const PeerHandshakeResult& handshake,
                                       const DeltaExchangeOptions& options) {
     DeltaExchangeStats stats;
     std::size_t sessionBytes = 0;
+    std::vector<memory_sync::MemoryDelta> staged;
+    staged.reserve(options.maxDeltasPerSession);
+    auto projectedVersion = service.currentVersion();
     for (std::size_t batchIndex = 0; batchIndex < options.maxBatches; ++batchIndex) {
         auto batch =
             receiveBatch(connection, options, options.maxDeltasPerSession - stats.deltasReceived,
@@ -311,13 +316,56 @@ Result<DeltaExchangeStats> receiveAll(P2pConnection& connection,
         }
         const bool forgedOrigin = std::ranges::any_of(
             batch.value().batch.deltas, [&](const memory_sync::MemoryDelta& delta) {
-                return delta.record.origin != expectedPeerNodeId;
+                return delta.record.origin != handshake.peerNodeId;
             });
         if (forgedOrigin) {
             return Error{ErrorCode::Unauthorized,
                          "p2p delta origin does not match authenticated peer"};
         }
-        auto applied = service.applyDeltas(batch.value().batch.deltas);
+        ++stats.batchesReceived;
+        stats.deltasReceived += batch.value().batch.deltas.size();
+        sessionBytes += batch.value().wireBytes;
+        for (auto& delta : batch.value().batch.deltas) {
+            projectedVersion.merge(delta.record.vv);
+            staged.push_back(std::move(delta));
+        }
+        if (batch.value().batch.hasMore) {
+            memory_sync::DeltaApplyResult stagedAck;
+            stagedAck.received = stats.deltasReceived;
+            stagedAck.version = projectedVersion;
+            if (auto acknowledged =
+                    writeJson(connection, acknowledgementJson(stagedAck), options.timeout);
+                !acknowledged) {
+                return acknowledged.error();
+            }
+            continue;
+        }
+        if (staged.empty()) {
+            memory_sync::DeltaApplyResult emptyAck;
+            emptyAck.version = projectedVersion;
+            if (auto acknowledged =
+                    writeJson(connection, acknowledgementJson(emptyAck), options.timeout);
+                !acknowledged) {
+                return acknowledged.error();
+            }
+            return stats;
+        }
+        const auto expected = handshake.peerCommitments.find(handshake.peerNodeId);
+        if (expected == handshake.peerCommitments.end() ||
+            expected->second.counter != handshake.peerVersion.get(handshake.peerNodeId)) {
+            return Error{ErrorCode::ValidationError,
+                         "authenticated peer frontier commitment is unavailable"};
+        }
+        auto validated = service.validateHistoryExtension(staged, expected->second);
+        if (!validated) {
+            auto quarantined =
+                service.quarantineWriter(handshake.peerNodeId, connection.localNodeId());
+            if (!quarantined) {
+                return quarantined.error();
+            }
+            return validated.error();
+        }
+        auto applied = service.applyDeltas(staged);
         if (!applied) {
             return applied.error();
         }
@@ -326,15 +374,10 @@ Result<DeltaExchangeStats> receiveAll(P2pConnection& connection,
             !acknowledged) {
             return acknowledged.error();
         }
-        ++stats.batchesReceived;
-        stats.deltasReceived += applied.value().received;
-        sessionBytes += batch.value().wireBytes;
         stats.merged += applied.value().merged;
         stats.replayed += applied.value().replayed;
         stats.quarantined += applied.value().quarantined.size();
-        if (!batch.value().batch.hasMore) {
-            return stats;
-        }
+        return stats;
     }
     return Error{ErrorCode::ResourceExhausted, "p2p delta exchange exceeded batch limit"};
 }
@@ -365,15 +408,32 @@ Result<DeltaExchangeStats> runDeltaExchange(P2pConnection& connection,
     if (auto valid = validateOptions(options); !valid) {
         return fail(valid.error());
     }
-    auto first = role == ExchangeRole::Initiator
-                     ? sendAll(connection, service, handshake.peerVersion, options)
-                     : receiveAll(connection, service, handshake.peerNodeId, options);
+    const auto localState = service.replicationState();
+    if (!handshake.peerPrefixVerified || !handshake.peerPrefixMatches ||
+        localState.quarantinedWriters.contains(handshake.peerNodeId)) {
+        return fail(Error{ErrorCode::InvalidData,
+                          "p2p delta exchange rejected unverified or quarantined peer history"});
+    }
+    auto quarantine = requiresPeerWriterQuarantine(localState, handshake);
+    if (!quarantine) {
+        return fail(quarantine.error());
+    }
+    if (quarantine.value()) {
+        return fail(
+            Error{ErrorCode::InvalidData, "p2p delta exchange rejected forked peer history"});
+    }
+    const auto localWriterCounter = handshake.localVersion.get(connection.localNodeId());
+    auto first =
+        role == ExchangeRole::Initiator
+            ? sendAll(connection, service, handshake.peerVersion, localWriterCounter, options)
+            : receiveAll(connection, service, handshake, options);
     if (!first) {
         return fail(first.error());
     }
-    auto second = role == ExchangeRole::Initiator
-                      ? receiveAll(connection, service, handshake.peerNodeId, options)
-                      : sendAll(connection, service, handshake.peerVersion, options);
+    auto second =
+        role == ExchangeRole::Initiator
+            ? receiveAll(connection, service, handshake, options)
+            : sendAll(connection, service, handshake.peerVersion, localWriterCounter, options);
     if (!second) {
         return fail(second.error());
     }

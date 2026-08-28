@@ -72,6 +72,10 @@ public:
     }
 
     yams::Result<void> store(std::string_view key, std::span<const std::byte> data) override {
+        if (!failNextStorePrefix_.empty() && key.starts_with(failNextStorePrefix_)) {
+            failNextStorePrefix_.clear();
+            return yams::Error{yams::ErrorCode::IOError, "injected store failure"};
+        }
         return backend_.store(key, data);
     }
 
@@ -89,7 +93,13 @@ public:
         return backend_.exists(key);
     }
 
-    yams::Result<void> remove(std::string_view key) override { return backend_.remove(key); }
+    yams::Result<void> remove(std::string_view key) override {
+        if (!failNextRemovePrefix_.empty() && key.starts_with(failNextRemovePrefix_)) {
+            failNextRemovePrefix_.clear();
+            return yams::Error{yams::ErrorCode::IOError, "injected remove failure"};
+        }
+        return backend_.remove(key);
+    }
 
     yams::Result<std::vector<std::string>> list(std::string_view prefix = "") const override {
         ++unboundedListCalls_;
@@ -130,6 +140,8 @@ public:
         blobRetrieveCalls_ = 0;
         blobExistsCalls_ = 0;
     }
+    void failNextStore(std::string prefix) { failNextStorePrefix_ = std::move(prefix); }
+    void failNextRemove(std::string prefix) { failNextRemovePrefix_ = std::move(prefix); }
 
 private:
     yams::storage::FilesystemBackend backend_;
@@ -139,6 +151,28 @@ private:
     mutable std::size_t unboundedListCalls_{0};
     mutable std::size_t largestPageRequested_{0};
     bool remote_{false};
+    std::string failNextStorePrefix_;
+    std::string failNextRemovePrefix_;
+};
+
+struct CountingBackendFixture {
+    explicit CountingBackendFixture(const std::string& name) {
+        dir = std::filesystem::temp_directory_path() /
+              ("yams-memory-sync-" + name + "-" +
+               std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(dir);
+        yams::storage::BackendConfig config;
+        config.type = "filesystem";
+        config.localPath = dir;
+        REQUIRE(backend.initialize(config).has_value());
+    }
+    ~CountingBackendFixture() {
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+    }
+
+    std::filesystem::path dir;
+    CountingFilesystemBackend backend;
 };
 
 struct BackendFixture {
@@ -245,6 +279,39 @@ TEST_CASE("MemorySyncLoop reads legacy envelopes alongside versioned records",
     REQUIRE(merged.has_value());
     CHECK(merged.value().contains("legacy-key"));
     CHECK(merged.value().contains("modern-key"));
+}
+
+TEST_CASE("incomplete migrated writer history rejects before creating a new operation",
+          "[memory-sync][sync-loop][commitment][migration]") {
+    BackendFixture fixture{"incomplete-history-migration"};
+    const auto payload = bytes("retained frontier");
+    const auto payloadHash = digest(payload);
+    REQUIRE(fixture.backend.store("blob/" + payloadHash, payload).has_value());
+    const nlohmann::json record = {
+        {"schemaVersion", 3},
+        {"entryHash", payloadHash},
+        {"ts", {{"physicalMs", 100}, {"logical", 1}, {"origin", "writer"}}},
+        {"origin", "writer"},
+        {"vv", {{"counters_", {{"writer", 7}}}}},
+        {"corpusId", "migration-corpus"},
+        {"corpusEpoch", 1},
+        {"logicalKey", "user/frontier"},
+        {"recordKind", "value"},
+        {"operationId", "writer:7"},
+    };
+    const auto envelope = jsonBytes(record);
+    REQUIRE(fixture.backend.store("index/user/frontier/" + digest(envelope), envelope).has_value());
+
+    MemorySyncLoop writer{fixture.backend, "writer", "migration-corpus", 1};
+    REQUIRE(writer.syncFully().has_value());
+    const auto before = fixture.backend.list("index/");
+    REQUIRE(before.has_value());
+    auto rejected = writer.publish("user/new", bytes("must-not-persist"));
+    REQUIRE_FALSE(rejected.has_value());
+    CHECK(rejected.error().code == yams::ErrorCode::InvalidState);
+    const auto after = fixture.backend.list("index/");
+    REQUIRE(after.has_value());
+    CHECK(after.value() == before.value());
 }
 
 TEST_CASE("MemorySyncLoop quarantines malformed legacy causal identity without throwing",
@@ -365,6 +432,12 @@ TEST_CASE("MemorySyncLoop fails closed on duplicate writer operation forks",
     REQUIRE(merged.has_value());
     CHECK_FALSE(merged.value().contains("forked-key"));
     CHECK(reader.quarantinedRecordCount() == 2);
+    CHECK(reader.writerQuarantined("duplicate-writer"));
+
+    MemorySyncLoop restarted{fixture.backend, "reader", "corpus-a", 1};
+    REQUIRE(restarted.syncFully().has_value());
+    CHECK(restarted.writerQuarantined("duplicate-writer"));
+    CHECK_FALSE(restarted.readCached("forked-key").has_value());
 }
 
 TEST_CASE("MemorySyncLoop keeps paged operation forks invisible until sweep completion",
@@ -461,6 +534,257 @@ TEST_CASE("MemorySyncLoop replicates causal tombstones across restart",
     const auto retained = fixture.backend.list("index/deleted-key/");
     REQUIRE(retained.has_value());
     CHECK(retained.value().size() == 2);
+}
+
+TEST_CASE("erase outbox retains an unready pre-delete intent across restart",
+          "[memory-sync][tombstone][outbox]") {
+    BackendFixture fixture{"erase-outbox-pending"};
+    {
+        MemorySyncLoop loop{fixture.backend, "writer"};
+        REQUIRE(loop.stageErase("document/" + std::string(64, 'a'), std::string(64, 'a'), false,
+                                EraseReadinessProbe::ContentAbsent)
+                    .has_value());
+        auto pending = loop.pendingErases();
+        REQUIRE(pending.has_value());
+        REQUIRE(pending.value().size() == 1);
+        CHECK(pending.value().front().readinessProbe == EraseReadinessProbe::ContentAbsent);
+        CHECK_FALSE(pending.value().front().ready);
+        CHECK_FALSE(pending.value().front().prepared);
+    }
+
+    MemorySyncLoop restarted{fixture.backend, "writer"};
+    auto pending = restarted.pendingErases();
+    REQUIRE(pending.has_value());
+    REQUIRE(pending.value().size() == 1);
+    CHECK(pending.value().front().readinessProbe == EraseReadinessProbe::ContentAbsent);
+    CHECK_FALSE(pending.value().front().ready);
+    REQUIRE(restarted.syncFully().has_value());
+    CHECK_FALSE(restarted.hasMergedRecord("document/" + std::string(64, 'a')));
+}
+
+TEST_CASE("malformed erase outbox entries fail closed without deletion",
+          "[memory-sync][tombstone][outbox][security]") {
+    BackendFixture fixture{"erase-outbox-malformed"};
+    MemorySyncLoop loop{fixture.backend, "writer"};
+    REQUIRE(loop.stageErase("user/key", "key", false).has_value());
+    auto keys = fixture.backend.list("outbox/erase-v1/");
+    REQUIRE(keys.has_value());
+    REQUIRE(keys.value().size() == 1);
+    auto encoded = fixture.backend.retrieve(keys.value().front());
+    REQUIRE(encoded.has_value());
+    auto json = nlohmann::json::parse(text(encoded.value()));
+    json["readiness_probe"] = "trust-me";
+    REQUIRE(fixture.backend.store(keys.value().front(), jsonBytes(json)).has_value());
+
+    auto pending = loop.pendingErases();
+    REQUIRE_FALSE(pending.has_value());
+    CHECK(pending.error().code == yams::ErrorCode::InvalidData);
+    auto retained = fixture.backend.exists(keys.value().front());
+    REQUIRE(retained.has_value());
+    CHECK(retained.value());
+}
+
+TEST_CASE("authenticated prepared erase binds its typed readiness probe",
+          "[memory-sync][tombstone][outbox][auth][security]") {
+    CountingBackendFixture fixture{"erase-outbox-auth"};
+    const auto key = generateWriterKey();
+    auto auth = writerAuth("writer", "writer-key", key,
+                           {TrustedWriterKey{"writer", "writer-key", key.publicPem, false}});
+    MemorySyncLoop loop{fixture.backend, "writer", "auth-corpus", 1, false, {}, {}, {}, auth};
+    REQUIRE(loop.stageErase("document/" + std::string(64, 'c'), std::string(64, 'c'), false,
+                            EraseReadinessProbe::MetadataAbsent)
+                .has_value());
+    fixture.backend.failNextStore("index/");
+    auto failed = loop.publishStagedErase("document/" + std::string(64, 'c'),
+                                          [] { return yams::Result<bool>{true}; });
+    REQUIRE_FALSE(failed.has_value());
+    auto keys = fixture.backend.list("outbox/erase-v1/");
+    REQUIRE(keys.has_value());
+    REQUIRE(keys.value().size() == 1);
+    auto encoded = fixture.backend.retrieve(keys.value().front());
+    REQUIRE(encoded.has_value());
+    auto json = nlohmann::json::parse(text(encoded.value()));
+    json.erase("authorization");
+    json["readiness_probe"] = "explicit";
+    REQUIRE(fixture.backend.store(keys.value().front(), jsonBytes(json)).has_value());
+
+    auto rejected = loop.pendingErases();
+    REQUIRE_FALSE(rejected.has_value());
+    CHECK(rejected.error().code == yams::ErrorCode::Unauthorized);
+    auto retained = fixture.backend.exists(keys.value().front());
+    REQUIRE(retained.has_value());
+    CHECK(retained.value());
+}
+
+TEST_CASE("typed erase validator can cancel a stale prepared tombstone",
+          "[memory-sync][tombstone][outbox][ordering]") {
+    BackendFixture fixture{"erase-outbox-stale"};
+    MemorySyncLoop loop{fixture.backend, "writer"};
+    REQUIRE(loop.stageErase("document/" + std::string(64, 'b'), std::string(64, 'b'), false,
+                            EraseReadinessProbe::MetadataAbsent)
+                .has_value());
+    bool sawPrepared = false;
+    auto cancelled = loop.publishStagedErase("document/" + std::string(64, 'b'), [&] {
+        auto pending = loop.pendingErases();
+        if (!pending) {
+            return yams::Result<bool>{pending.error()};
+        }
+        if (pending.value().size() != 1) {
+            return yams::Result<bool>{yams::Error{yams::ErrorCode::InvalidState,
+                                                  "prepared intent missing during validation"}};
+        }
+        sawPrepared = pending.value().front().ready && pending.value().front().prepared;
+        return yams::Result<bool>{false};
+    });
+    REQUIRE(cancelled.has_value());
+    CHECK(sawPrepared);
+    REQUIRE(loop.pendingErases().value().empty());
+    REQUIRE(loop.syncFully().has_value());
+    CHECK_FALSE(loop.hasMergedRecord("document/" + std::string(64, 'b')));
+    CHECK(loop.currentVersion().get("writer") == 0);
+}
+
+TEST_CASE("earlier prepared deletion blocks later writer operations",
+          "[memory-sync][tombstone][outbox][ordering]") {
+    CountingBackendFixture fixture{"erase-outbox-ordering"};
+    MemorySyncLoop loop{fixture.backend, "writer"};
+    REQUIRE(loop.stageErase("document/" + std::string(64, 'a'), std::string(64, 'a'), false,
+                            EraseReadinessProbe::MetadataAbsent)
+                .has_value());
+    fixture.backend.failNextStore("index/");
+    auto firstFailed = loop.publishStagedErase("document/" + std::string(64, 'a'),
+                                               [] { return yams::Result<bool>{true}; });
+    REQUIRE_FALSE(firstFailed.has_value());
+    REQUIRE(loop.stageErase("document/" + std::string(64, 'b'), std::string(64, 'b'), false,
+                            EraseReadinessProbe::MetadataAbsent)
+                .has_value());
+    auto secondBlocked = loop.publishStagedErase("document/" + std::string(64, 'b'),
+                                                 [] { return yams::Result<bool>{true}; });
+    REQUIRE_FALSE(secondBlocked.has_value());
+    CHECK(secondBlocked.error().code == yams::ErrorCode::InvalidState);
+    auto writeBlocked = loop.publish("user/later", bytes("later"));
+    REQUIRE_FALSE(writeBlocked.has_value());
+    CHECK(writeBlocked.error().code == yams::ErrorCode::InvalidState);
+
+    REQUIRE(loop.publishStagedErase("document/" + std::string(64, 'a'),
+                                    [] { return yams::Result<bool>{true}; })
+                .has_value());
+    REQUIRE(loop.publishStagedErase("document/" + std::string(64, 'b'),
+                                    [] { return yams::Result<bool>{true}; })
+                .has_value());
+    REQUIRE(loop.publish("user/later", bytes("later")).has_value());
+    CHECK(loop.replicationState().commitments.at("writer").counter == 3);
+}
+
+TEST_CASE("checkpoint failure cannot expose a tombstone before revalidation",
+          "[memory-sync][tombstone][outbox][ordering]") {
+    CountingBackendFixture fixture{"erase-outbox-checkpoint-failure"};
+    MemorySyncLoop loop{fixture.backend, "writer"};
+    REQUIRE(loop.publish("document/" + std::string(64, 'd'), bytes("still-present")).has_value());
+    REQUIRE(loop.stageErase("document/" + std::string(64, 'd'), std::string(64, 'd'), false,
+                            EraseReadinessProbe::MetadataAbsent)
+                .has_value());
+    fixture.backend.failNextStore("checkpoint/replication-state-v1/");
+    auto failed = loop.publishStagedErase("document/" + std::string(64, 'd'),
+                                          [] { return yams::Result<bool>{true}; });
+    REQUIRE_FALSE(failed.has_value());
+    auto index = fixture.backend.list("index/document/" + std::string(64, 'd') + "/");
+    REQUIRE(index.has_value());
+    CHECK(index.value().size() == 1);
+    CHECK(loop.replicationState().commitments.at("writer").counter == 1);
+
+    auto cancelled = loop.publishStagedErase("document/" + std::string(64, 'd'),
+                                             [] { return yams::Result<bool>{false}; });
+    REQUIRE(cancelled.has_value());
+    REQUIRE(loop.syncFully().has_value());
+    auto retained = loop.readCached("document/" + std::string(64, 'd'));
+    REQUIRE(retained.has_value());
+    CHECK(text(retained.value()) == "still-present");
+    CHECK(loop.replicationState().commitments.at("writer").counter == 1);
+    REQUIRE(loop.pendingErases().value().empty());
+}
+
+TEST_CASE("durable prepared commitment forces exact index completion",
+          "[memory-sync][tombstone][outbox][ordering]") {
+    CountingBackendFixture fixture{"erase-outbox-point-of-no-return"};
+    MemorySyncLoop loop{fixture.backend, "writer"};
+    REQUIRE(loop.publish("document/" + std::string(64, 'e'), bytes("value")).has_value());
+    REQUIRE(loop.stageErase("document/" + std::string(64, 'e'), std::string(64, 'e'), false,
+                            EraseReadinessProbe::MetadataAbsent)
+                .has_value());
+    fixture.backend.failNextStore("index/");
+    auto failed = loop.publishStagedErase("document/" + std::string(64, 'e'),
+                                          [] { return yams::Result<bool>{true}; });
+    REQUIRE_FALSE(failed.has_value());
+    CHECK(loop.replicationState().commitments.at("writer").counter == 2);
+    auto index = fixture.backend.list("index/document/" + std::string(64, 'e') + "/");
+    REQUIRE(index.has_value());
+    CHECK(index.value().size() == 1);
+
+    bool validatorCalled = false;
+    auto completed = loop.publishStagedErase("document/" + std::string(64, 'e'), [&] {
+        validatorCalled = true;
+        return yams::Result<bool>{false};
+    });
+    REQUIRE(completed.has_value());
+    CHECK_FALSE(validatorCalled);
+    REQUIRE(loop.syncFully().has_value());
+    CHECK_FALSE(loop.readCached("document/" + std::string(64, 'e')).has_value());
+    REQUIRE(loop.pendingErases().value().empty());
+}
+
+TEST_CASE("prepared erase replays after an index-store failure",
+          "[memory-sync][tombstone][outbox][replay]") {
+    CountingBackendFixture fixture{"erase-outbox-index-failure"};
+    MemorySyncLoop loop{fixture.backend, "writer"};
+    REQUIRE(loop.publish("user/key", bytes("value")).has_value());
+    REQUIRE(loop.stageErase("user/key", "key", true).has_value());
+    fixture.backend.failNextStore("index/");
+    auto failed = loop.publishStagedErase("user/key");
+    REQUIRE_FALSE(failed.has_value());
+    auto retained = loop.pendingErases();
+    REQUIRE(retained.has_value());
+    REQUIRE(retained.value().size() == 1);
+    CHECK(retained.value().front().ready);
+    CHECK(retained.value().front().prepared);
+
+    MemorySyncLoop restarted{fixture.backend, "writer"};
+    auto replayed = restarted.replayReadyErases();
+    REQUIRE(replayed.has_value());
+    CHECK(replayed.value() == 1);
+    REQUIRE(restarted.pendingErases().value().empty());
+    REQUIRE(restarted.syncFully().has_value());
+    CHECK_FALSE(restarted.readCached("user/key").has_value());
+    auto batch = restarted.exportLocalDeltasAfter({});
+    REQUIRE(batch.has_value());
+    CHECK(batch.value().deltas.size() == 2);
+    CHECK(batch.value().deltas.back().record.isTombstone());
+}
+
+TEST_CASE("erase outbox cleanup failure cannot mint a later tombstone",
+          "[memory-sync][tombstone][outbox][idempotent]") {
+    CountingBackendFixture fixture{"erase-outbox-remove-failure"};
+    MemorySyncLoop loop{fixture.backend, "writer"};
+    REQUIRE(loop.publish("user/key", bytes("value")).has_value());
+    REQUIRE(loop.stageErase("user/key", "key", true).has_value());
+    fixture.backend.failNextRemove("outbox/erase-v1/");
+    auto cleanupFailed = loop.publishStagedErase("user/key");
+    REQUIRE_FALSE(cleanupFailed.has_value());
+    auto retained = loop.pendingErases();
+    REQUIRE(retained.has_value());
+    REQUIRE(retained.value().size() == 1);
+    CHECK(retained.value().front().prepared);
+
+    MemorySyncLoop restarted{fixture.backend, "writer"};
+    auto replayed = restarted.replayReadyErases();
+    REQUIRE(replayed.has_value());
+    CHECK(replayed.value() == 1);
+    auto batch = restarted.exportLocalDeltasAfter({});
+    REQUIRE(batch.has_value());
+    REQUIRE(batch.value().deltas.size() == 2);
+    CHECK(batch.value().deltas.back().record.vv.get("writer") == 2);
+    CHECK(restarted.replicationState().commitments.at("writer").counter == 2);
+    REQUIRE(restarted.pendingErases().value().empty());
 }
 
 TEST_CASE("MemorySyncLoop garbage collects tombstones only after every configured peer acks",
@@ -1100,7 +1424,187 @@ TEST_CASE("direct memory deltas quarantine tampering and writer-operation forks"
     REQUIRE(forked.has_value());
     CHECK(forked.value().merged == 0);
     CHECK(forked.value().quarantined.size() == 1);
-    CHECK(text(reader.readCached("user/key").value()) == "original");
+    CHECK(reader.writerQuarantined("writer"));
+    CHECK_FALSE(reader.readCached("user/key").has_value());
+
+    MemorySyncLoop restarted{readerFixture.backend, "reader", "direct-security-corpus", 1};
+    REQUIRE(restarted.syncFully().has_value());
+    CHECK(restarted.writerQuarantined("writer"));
+    CHECK_FALSE(restarted.readCached("user/key").has_value());
+}
+
+TEST_CASE("writer history commitments cover complete ordered history and survive restart",
+          "[memory-sync][direct-delta][commitment][restart]") {
+    BackendFixture firstFixture{"direct-commitment-first"};
+    MemorySyncLoop first{firstFixture.backend, "writer", "commitment-corpus", 1};
+    REQUIRE(first.publish("user/history", bytes("first-history")).has_value());
+    const auto prefix = first.replicationState().commitments.at("writer");
+    REQUIRE(prefix.counter == 1);
+    REQUIRE(first.publish("user/frontier", bytes("same-frontier-value")).has_value());
+    REQUIRE(first.syncFully().has_value());
+    const auto firstState = first.replicationState();
+    REQUIRE(firstState.commitments.contains("writer"));
+    CHECK(firstState.commitments.at("writer").counter == 2);
+    CHECK(isSha256Digest(firstState.commitments.at("writer").digest));
+
+    MemorySyncLoop restarted{firstFixture.backend, "writer", "commitment-corpus", 1};
+    REQUIRE(restarted.syncFully().has_value());
+    CHECK(restarted.replicationState().commitments == firstState.commitments);
+    auto resolvedPrefix = restarted.localHistoryCommitmentAt(1);
+    REQUIRE(resolvedPrefix.has_value());
+    CHECK(resolvedPrefix.value() == prefix);
+
+    BackendFixture secondFixture{"direct-commitment-second"};
+    MemorySyncLoop second{secondFixture.backend, "writer", "commitment-corpus", 1};
+    REQUIRE(second.publish("user/history", bytes("different-history")).has_value());
+    REQUIRE(second.publish("user/frontier", bytes("same-frontier-value")).has_value());
+    REQUIRE(second.syncFully().has_value());
+    const auto secondState = second.replicationState();
+    REQUIRE(secondState.commitments.contains("writer"));
+    CHECK(secondState.commitments.at("writer").counter == 2);
+    CHECK(secondState.commitments.at("writer").digest !=
+          firstState.commitments.at("writer").digest);
+}
+
+TEST_CASE("staged deltas cannot exceed the handshake-frozen writer frontier",
+          "[memory-sync][direct-delta][commitment][security]") {
+    BackendFixture writerFixture{"direct-frozen-frontier-writer"};
+    BackendFixture readerFixture{"direct-frozen-frontier-reader"};
+    MemorySyncLoop writer{writerFixture.backend, "writer", "frozen-frontier-corpus", 1};
+    MemorySyncLoop reader{readerFixture.backend, "reader", "frozen-frontier-corpus", 1};
+    REQUIRE(writer.publish("user/one", bytes("one")).has_value());
+    const auto frozen = writer.replicationState().commitments.at("writer");
+    auto first = writer.exportLocalDeltasAfter({});
+    REQUIRE(first.has_value());
+    REQUIRE(reader.applyDeltas(first.value().deltas).has_value());
+    REQUIRE(writer.publish("user/two", bytes("two")).has_value());
+    auto later = writer.exportLocalDeltasAfter(reader.currentVersion());
+    REQUIRE(later.has_value());
+    REQUIRE(later.value().deltas.size() == 1);
+
+    auto rejected = reader.validateHistoryExtension(later.value().deltas, frozen);
+    REQUIRE_FALSE(rejected.has_value());
+    CHECK(rejected.error().code == yams::ErrorCode::InvalidData);
+    CHECK_FALSE(reader.readCached("user/two").has_value());
+}
+
+TEST_CASE("durable quarantine is not blocked by malformed adapter payload",
+          "[memory-sync][direct-delta][quarantine][security]") {
+    BackendFixture writerFixture{"direct-malformed-adapter-writer"};
+    BackendFixture readerFixture{"direct-malformed-adapter-reader"};
+    MemorySyncLoop writer{writerFixture.backend, "writer", "malformed-adapter-corpus", 1};
+    MemorySyncLoop reader{readerFixture.backend, "reader", "malformed-adapter-corpus", 1};
+    const std::string hash(64, 'a');
+    REQUIRE(writer.publish("document/" + hash, bytes("not-json")).has_value());
+    auto batch = writer.exportLocalDeltasAfter({});
+    REQUIRE(batch.has_value());
+    REQUIRE(reader.applyDeltas(batch.value().deltas).has_value());
+
+    auto quarantined = reader.quarantineWriter("writer", "reader");
+    REQUIRE(quarantined.has_value());
+    CHECK(quarantined.value());
+    CHECK(reader.writerQuarantined("writer"));
+    CHECK_FALSE(reader.readCached("document/" + hash).has_value());
+
+    MemorySyncLoop restarted{readerFixture.backend, "reader", "malformed-adapter-corpus", 1};
+    REQUIRE(restarted.syncFully().has_value());
+    CHECK(restarted.writerQuarantined("writer"));
+    CHECK_FALSE(restarted.readCached("document/" + hash).has_value());
+}
+
+TEST_CASE("direct writer quarantine removes winners and survives restart",
+          "[memory-sync][direct-delta][quarantine][restart]") {
+    BackendFixture writerFixture{"direct-quarantine-writer"};
+    BackendFixture readerFixture{"direct-quarantine-reader"};
+    MemorySyncLoop writer{writerFixture.backend, "writer", "quarantine-corpus", 1};
+    MemorySyncLoop reader{readerFixture.backend, "reader", "quarantine-corpus", 1};
+
+    REQUIRE(writer.publish("user/one", bytes("one")).has_value());
+    REQUIRE(writer.publish("user/two", bytes("two")).has_value());
+    auto batch = writer.exportLocalDeltasAfter({}, 8);
+    REQUIRE(batch.has_value());
+    REQUIRE(reader.applyDeltas(batch.value().deltas).has_value());
+    REQUIRE(reader.readCached("user/one").has_value());
+    REQUIRE(reader.readCached("user/two").has_value());
+
+    auto quarantined = reader.quarantineWriter("writer", "reader");
+    REQUIRE(quarantined.has_value());
+    CHECK(quarantined.value());
+    CHECK(reader.writerQuarantined("writer"));
+    CHECK_FALSE(reader.readCached("user/one").has_value());
+    CHECK_FALSE(reader.readCached("user/two").has_value());
+
+    MemorySyncLoop restarted{readerFixture.backend, "reader", "quarantine-corpus", 1};
+    REQUIRE(restarted.syncFully().has_value());
+    CHECK(restarted.writerQuarantined("writer"));
+    CHECK_FALSE(restarted.readCached("user/one").has_value());
+    CHECK_FALSE(restarted.readCached("user/two").has_value());
+    auto replayed = restarted.applyDeltas(batch.value().deltas);
+    REQUIRE(replayed.has_value());
+    CHECK(replayed.value().merged == 0);
+    CHECK(restarted.writerQuarantined("writer"));
+}
+
+TEST_CASE("replication checkpoints isolate concurrent local node state",
+          "[memory-sync][direct-delta][quarantine][commitment][restart]") {
+    BackendFixture fixture{"direct-checkpoint-node-isolation"};
+    MemorySyncLoop nodeA{fixture.backend, "node-a", "checkpoint-corpus", 1};
+    MemorySyncLoop nodeB{fixture.backend, "node-b", "checkpoint-corpus", 1};
+    REQUIRE(nodeA.quarantineWriter("forked-writer", "node-a").has_value());
+    REQUIRE(nodeB.publish("user/from-b", bytes("b")).has_value());
+
+    MemorySyncLoop restartedA{fixture.backend, "node-a", "checkpoint-corpus", 1};
+    REQUIRE(restartedA.syncFully().has_value());
+    CHECK(restartedA.writerQuarantined("forked-writer"));
+    MemorySyncLoop restartedB{fixture.backend, "node-b", "checkpoint-corpus", 1};
+    REQUIRE(restartedB.syncFully().has_value());
+    CHECK_FALSE(restartedB.writerQuarantined("forked-writer"));
+    CHECK(restartedB.replicationState().commitments.contains("node-b"));
+}
+
+TEST_CASE("replication checkpoint corruption fails closed",
+          "[memory-sync][direct-delta][quarantine][commitment][security]") {
+    BackendFixture fixture{"direct-checkpoint-corrupt"};
+    const auto checkpoint = jsonBytes(
+        {{"schema_version", 1},
+         {"corpus_id", "checkpoint-corpus"},
+         {"corpus_epoch", 1},
+         {"quarantined_writers", nlohmann::json::array()},
+         {"commitments", {{{"writer_id", "writer"}, {"counter", 1}, {"digest", "not-a-digest"}}}}});
+    const auto identity =
+        nlohmann::json::array({"yams-replication-state-v1", "checkpoint-corpus", 1, "reader"})
+            .dump();
+    const auto checkpointKey = "checkpoint/replication-state-v1/" + digest(bytes(identity));
+    REQUIRE(fixture.backend.store(checkpointKey, checkpoint).has_value());
+
+    MemorySyncLoop loop{fixture.backend, "reader", "checkpoint-corpus", 1};
+    auto synced = loop.syncFully();
+    REQUIRE_FALSE(synced.has_value());
+    CHECK(synced.error().code == yams::ErrorCode::InvalidData);
+    CHECK(loop.currentVersion().empty());
+    CHECK(loop.mergedRecordCount() == 0);
+}
+
+TEST_CASE("quarantined local writer cannot write or export",
+          "[memory-sync][direct-delta][quarantine][security]") {
+    BackendFixture fixture{"direct-own-quarantine"};
+    MemorySyncLoop writer{fixture.backend, "writer", "quarantine-corpus", 1};
+    REQUIRE(writer.publish("user/before", bytes("before")).has_value());
+
+    auto quarantined = writer.quarantineWriter("writer", "peer");
+    REQUIRE(quarantined.has_value());
+    CHECK(quarantined.value());
+    CHECK(writer.writerQuarantined("writer"));
+
+    auto published = writer.publish("user/after", bytes("after"));
+    REQUIRE_FALSE(published.has_value());
+    CHECK(published.error().code == yams::ErrorCode::InvalidState);
+    auto erased = writer.erase("user/before", "before");
+    REQUIRE_FALSE(erased.has_value());
+    CHECK(erased.error().code == yams::ErrorCode::InvalidState);
+    auto exported = writer.exportLocalDeltasAfter({});
+    REQUIRE_FALSE(exported.has_value());
+    CHECK(exported.error().code == yams::ErrorCode::InvalidState);
 }
 
 TEST_CASE("authenticated memory sync accepts explicit key rotation and rejects epoch replay",

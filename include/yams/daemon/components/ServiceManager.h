@@ -205,6 +205,7 @@ public:
     Result<void> enrollP2pPeer(std::string_view nodeId, std::string_view spkiPin);
     Result<p2p::P2pLocalIdentity> getP2pIdentity() const;
     Result<std::vector<p2p::PeerRegistryRecord>> listP2pPeers() const;
+    Result<void> stageMemorySyncDocumentDelete(std::string_view contentHash);
     Result<void> publishMemorySyncDocumentDelete(std::string_view contentHash);
 
     struct SearchLoadMetrics {
@@ -790,8 +791,11 @@ private:
     Result<std::filesystem::path> initializeDataDirAndContentStore();
     Result<void> initializeMemorySync(const std::filesystem::path& dataDir);
     Result<void> initializeDirectP2p(const std::filesystem::path& dataDir);
-    void configureMemorySyncApply();
+    Result<void> configureMemorySyncApply();
     void applyMemorySyncWinners() noexcept;
+    bool drainMemorySyncDocumentDeleteOutbox() noexcept;
+    Result<bool> memorySyncDeleteLocallyAbsent(std::string_view contentHash,
+                                               memory_sync::EraseReadinessProbe probe) const;
     void publishMemorySyncBackfill() noexcept;
     void notifyMemorySyncStage(std::string_view stage) noexcept;
     Result<std::size_t> applyMemorySyncContentBlobs();

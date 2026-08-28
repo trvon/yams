@@ -2292,17 +2292,67 @@ Result<std::vector<p2p::PeerRegistryRecord>> ServiceManager::listP2pPeers() cons
     return p2pManager_->peers();
 }
 
-Result<void> ServiceManager::publishMemorySyncDocumentDelete(std::string_view contentHash) {
+Result<void> ServiceManager::stageMemorySyncDocumentDelete(std::string_view contentHash) {
     if (!memorySync_) {
-        return Result<void>();
+        return {};
+    }
+    if (!memory_sync::isSha256Digest(contentHash)) {
+        return Error{ErrorCode::InvalidArgument,
+                     "metadata deletion requires a SHA-256 content hash"};
     }
     auto repository = getMetadataRepo();
     if (!repository) {
         return Error{ErrorCode::InvalidState,
                      "metadata repository is unavailable for replicated deletion"};
     }
-    metadata::MetadataSyncAdapter adapter{*repository, *memorySync_};
-    return adapter.publishDelete(contentHash);
+    auto document = repository->getDocumentByHash(std::string(contentHash));
+    if (!document) {
+        return document.error();
+    }
+    const std::string key =
+        std::string(memory_sync::memoryStoreName(memory_sync::MemoryStore::Document)) + "/" +
+        std::string(contentHash);
+    auto probe = memory_sync::EraseReadinessProbe::MetadataAbsent;
+    if (!document.value()) {
+        auto contentStore = getContentStore();
+        if (!contentStore) {
+            return Error{ErrorCode::InvalidState,
+                         "content store is unavailable for replicated deletion"};
+        }
+        auto exists = contentStore->exists(std::string(contentHash));
+        if (!exists) {
+            return exists.error();
+        }
+        if (!exists.value()) {
+            return Error{ErrorCode::NotFound,
+                         "cannot stage replicated deletion for absent content"};
+        }
+        probe = memory_sync::EraseReadinessProbe::ContentAbsent;
+    }
+    return memorySync_->stageErase(key, std::string(contentHash), false, probe);
+}
+
+Result<void> ServiceManager::publishMemorySyncDocumentDelete(std::string_view contentHash) {
+    if (!memorySync_) {
+        return {};
+    }
+    const std::string key =
+        std::string(memory_sync::memoryStoreName(memory_sync::MemoryStore::Document)) + "/" +
+        std::string(contentHash);
+    auto intents = memorySync_->pendingErases();
+    if (!intents) {
+        return intents.error();
+    }
+    const auto intent = std::ranges::find_if(
+        intents.value(), [&](const auto& candidate) { return candidate.logicalKey == key; });
+    if (intent != intents.value().end()) {
+        const auto probe = intent->readinessProbe;
+        return memorySync_->publishStagedErase(
+            key, [this, contentHash = std::string(contentHash), probe] {
+                return memorySyncDeleteLocallyAbsent(contentHash, probe);
+            });
+    }
+    return Error{ErrorCode::NotFound, "replicated deletion was not durably staged"};
 }
 
 Result<std::size_t> ServiceManager::applyMemorySyncContentBlobs() {
@@ -2371,8 +2421,102 @@ void ServiceManager::notifyMemorySyncStage(std::string_view stage) noexcept {
     }
 }
 
+Result<bool>
+ServiceManager::memorySyncDeleteLocallyAbsent(std::string_view contentHash,
+                                              memory_sync::EraseReadinessProbe probe) const {
+    if (probe == memory_sync::EraseReadinessProbe::MetadataAbsent) {
+        auto repository = getMetadataRepo();
+        if (!repository) {
+            return Error{ErrorCode::InvalidState, "metadata repository is unavailable"};
+        }
+        auto document = repository->getDocumentByHash(std::string(contentHash));
+        if (!document) {
+            return document.error();
+        }
+        return !document.value().has_value();
+    }
+    if (probe == memory_sync::EraseReadinessProbe::ContentAbsent) {
+        auto contentStore = getContentStore();
+        if (!contentStore) {
+            return Error{ErrorCode::InvalidState, "content store is unavailable"};
+        }
+        auto exists = contentStore->exists(std::string(contentHash));
+        if (!exists) {
+            return exists.error();
+        }
+        return !exists.value();
+    }
+    return Error{ErrorCode::InvalidArgument,
+                 "document delete outbox requires a typed absence probe"};
+}
+
+bool ServiceManager::drainMemorySyncDocumentDeleteOutbox() noexcept {
+    try {
+        auto intents = memorySync_->pendingErases();
+        if (!intents) {
+            spdlog::warn("[ServiceManager] memory_sync delete outbox scan failed: {}",
+                         intents.error().message);
+            return true;
+        }
+        const std::string prefix =
+            std::string(memory_sync::memoryStoreName(memory_sync::MemoryStore::Document)) + "/";
+        auto pending = std::move(intents.value());
+        std::ranges::sort(pending, [](const auto& lhs, const auto& rhs) {
+            const auto lhsCounter =
+                lhs.prepared ? lhs.preparedCounter : std::numeric_limits<std::uint64_t>::max();
+            const auto rhsCounter =
+                rhs.prepared ? rhs.preparedCounter : std::numeric_limits<std::uint64_t>::max();
+            return std::tuple{lhsCounter, lhs.logicalKey} < std::tuple{rhsCounter, rhs.logicalKey};
+        });
+        bool eligible = false;
+        for (const auto& intent : pending) {
+            if (!intent.logicalKey.starts_with(prefix) ||
+                !memory_sync::isSha256Digest(intent.tombstonePayload) ||
+                intent.logicalKey != prefix + intent.tombstonePayload) {
+                continue;
+            }
+            auto absent =
+                memorySyncDeleteLocallyAbsent(intent.tombstonePayload, intent.readinessProbe);
+            if (!absent) {
+                spdlog::warn("[ServiceManager] memory_sync delete outbox probe failed: {}",
+                             absent.error().message);
+                return true;
+            }
+            if (!absent.value()) {
+                if (intent.ready) {
+                    eligible = true;
+                    if (auto cancelled = memorySync_->cancelStagedErase(intent.logicalKey);
+                        !cancelled) {
+                        spdlog::warn("[ServiceManager] stale delete outbox cancellation failed: {}",
+                                     cancelled.error().message);
+                    }
+                }
+                continue;
+            }
+            eligible = true;
+            if (auto published = publishMemorySyncDocumentDelete(intent.tombstonePayload);
+                !published) {
+                spdlog::warn("[ServiceManager] memory_sync delete outbox retry failed: {}",
+                             published.error().message);
+            }
+        }
+        return eligible;
+    } catch (const std::exception& error) {
+        spdlog::warn("[ServiceManager] memory_sync delete outbox threw: {}", error.what());
+        return true;
+    } catch (...) {
+        spdlog::warn("[ServiceManager] memory_sync delete outbox threw (unknown)");
+        return true;
+    }
+}
+
 void ServiceManager::applyMemorySyncWinners() noexcept {
     if (!memorySync_ || memorySync_->stopRequested()) {
+        return;
+    }
+    // A pre-delete intent can survive a crash between local deletion and tombstone publication.
+    // Promote it only after local metadata is absent, then skip this stale callback snapshot.
+    if (drainMemorySyncDocumentDeleteOutbox()) {
         return;
     }
     try {
@@ -2760,12 +2904,20 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
     spdlog::warn("[ServiceManager] memory_sync backfill setup failed (unknown)");
 }
 
-void ServiceManager::configureMemorySyncApply() {
+Result<void> ServiceManager::configureMemorySyncApply() {
     if (!memorySync_) {
-        return;
+        return {};
     }
     memorySync_->setAfterSyncCallback([this] { applyMemorySyncWinners(); });
-    spdlog::info("[ServiceManager] memory_sync apply path enabled");
+    // Recover or revalidate durable local delete intents before the worker and direct-P2P
+    // listener can expose a checkpoint whose exact tombstone index is still incomplete.
+    (void)drainMemorySyncDocumentDeleteOutbox();
+    if (auto started = memorySync_->start(); !started) {
+        return Error{started.error().code,
+                     "memory_sync service failed to start: " + started.error().message};
+    }
+    spdlog::info("[ServiceManager] memory_sync apply path enabled and worker started");
+    return {};
 }
 
 Result<void> ServiceManager::initializeMemorySync(const std::filesystem::path& dataDir) {
@@ -2820,19 +2972,13 @@ Result<void> ServiceManager::initializeMemorySync(const std::filesystem::path& d
                          "memory_sync service creation failed: " + svc.error().message};
         }
 
-        auto service = std::move(svc.value());
-        if (auto r = service->start(); !r) {
-            return Error{r.error().code,
-                         "memory_sync service failed to start: " + r.error().message};
-        }
-
-        memorySync_ = std::move(service);
+        memorySync_ = std::move(svc.value());
         const std::string_view trust =
             policy.transport == "direct"
                 ? (policy.allowFirstContact ? "mutual-tls-legacy-tofu"
                                             : "mutual-tls-operator-pinned")
                 : (cfg.writerAuthRequired ? "authenticated-writers" : "backend-ACL-trusted");
-        spdlog::info("[ServiceManager] memory_sync started: transport={} backend={} mode={} "
+        spdlog::info("[ServiceManager] memory_sync configured: transport={} backend={} mode={} "
                      "corpus={} epoch={} node={} trust={} sync_interval_ms={} path={}",
                      policy.transport, cfg.backend, cfg.mode, cfg.corpusId, cfg.corpusEpoch,
                      cfg.nodeId, trust, cfg.syncIntervalMs, cfg.path);
@@ -3887,7 +4033,9 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
     // All replicated destination stores are now initialized. Attach the ordered apply callback
     // only at this point so the convergence worker cannot race database/vector/KG startup.
-    configureMemorySyncApply();
+    if (auto applyResult = configureMemorySyncApply(); !applyResult) {
+        co_return applyResult.error();
+    }
     if (auto p2pResult = initializeDirectP2p(dataDir); !p2pResult) {
         co_return Error{p2pResult.error().code,
                         "direct P2P initialization failed: " + p2pResult.error().message};
