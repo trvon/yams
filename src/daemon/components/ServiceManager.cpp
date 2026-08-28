@@ -5,6 +5,7 @@
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <cerrno>
@@ -23,7 +24,6 @@
 #include <string>
 #include <system_error>
 #include <unordered_map>
-#include <unordered_set>
 #include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
@@ -2292,7 +2292,8 @@ Result<std::vector<p2p::PeerRegistryRecord>> ServiceManager::listP2pPeers() cons
     return p2pManager_->peers();
 }
 
-Result<void> ServiceManager::stageMemorySyncDocumentDelete(std::string_view contentHash) {
+Result<void> ServiceManager::stageMemorySyncDocumentDelete(std::string_view contentHash,
+                                                           bool retainContent) {
     if (!memorySync_) {
         return {};
     }
@@ -2309,8 +2310,14 @@ Result<void> ServiceManager::stageMemorySyncDocumentDelete(std::string_view cont
     if (!document) {
         return document.error();
     }
-    const std::string key =
+    if (retainContent && !document.value()) {
+        return Error{ErrorCode::InvalidArgument, "retaining content requires an existing document"};
+    }
+    const std::string documentKey =
         std::string(memory_sync::memoryStoreName(memory_sync::MemoryStore::Document)) + "/" +
+        std::string(contentHash);
+    const std::string blobKey =
+        std::string(memory_sync::memoryStoreName(memory_sync::MemoryStore::ContentBlob)) + "/" +
         std::string(contentHash);
     auto probe = memory_sync::EraseReadinessProbe::MetadataAbsent;
     if (!document.value()) {
@@ -2329,30 +2336,80 @@ Result<void> ServiceManager::stageMemorySyncDocumentDelete(std::string_view cont
         }
         probe = memory_sync::EraseReadinessProbe::ContentAbsent;
     }
-    return memorySync_->stageErase(key, std::string(contentHash), false, probe);
+    if (retainContent) {
+        const std::array requests{
+            memory_sync::EraseStageRequest{documentKey, std::string(contentHash),
+                                           memory_sync::EraseReadinessProbe::MetadataAbsent}};
+        return memorySync_->stageErases(requests);
+    }
+
+    // Content bytes are independently addressable by hash, so standard deletion requires two
+    // durable intents. Reserve both bounded outbox slots before exposing either to the drainer.
+    const std::array requests{
+        memory_sync::EraseStageRequest{blobKey, std::string(contentHash),
+                                       memory_sync::EraseReadinessProbe::ContentAbsent},
+        memory_sync::EraseStageRequest{documentKey, std::string(contentHash), probe}};
+    return memorySync_->stageErases(requests);
 }
 
-Result<void> ServiceManager::publishMemorySyncDocumentDelete(std::string_view contentHash) {
+Result<void> ServiceManager::publishMemorySyncDocumentDelete(std::string_view contentHash,
+                                                             bool retainContent) {
     if (!memorySync_) {
         return {};
     }
-    const std::string key =
+    std::lock_guard<std::mutex> deleteLock(memorySyncDeleteOutboxMutex_);
+    notifyMemorySyncDeleteOutboxStage("delete_publish_locked");
+    const std::string documentKey =
         std::string(memory_sync::memoryStoreName(memory_sync::MemoryStore::Document)) + "/" +
+        std::string(contentHash);
+    const std::string blobKey =
+        std::string(memory_sync::memoryStoreName(memory_sync::MemoryStore::ContentBlob)) + "/" +
         std::string(contentHash);
     auto intents = memorySync_->pendingErases();
     if (!intents) {
         return intents.error();
     }
-    const auto intent = std::ranges::find_if(
-        intents.value(), [&](const auto& candidate) { return candidate.logicalKey == key; });
-    if (intent != intents.value().end()) {
+
+    bool found = false;
+    const std::vector<std::string> keys = retainContent
+                                              ? std::vector<std::string>{documentKey}
+                                              : std::vector<std::string>{blobKey, documentKey};
+    for (const auto& key : keys) {
+        const auto intent = std::ranges::find_if(
+            intents.value(), [&](const auto& candidate) { return candidate.logicalKey == key; });
+        if (intent == intents.value().end()) {
+            continue;
+        }
+        found = true;
         const auto probe = intent->readinessProbe;
-        return memorySync_->publishStagedErase(
-            key, [this, contentHash = std::string(contentHash), probe] {
-                return memorySyncDeleteLocallyAbsent(contentHash, probe);
-            });
+        if (auto published = memorySync_->publishStagedErase(
+                key, [this, contentHash = std::string(contentHash),
+                      probe] { return memorySyncDeleteLocallyAbsent(contentHash, probe); });
+            !published) {
+            if (published.error().code == ErrorCode::NotFound) {
+                auto refreshed = memorySync_->pendingErases();
+                if (!refreshed) {
+                    return refreshed.error();
+                }
+                const bool stillPending =
+                    std::ranges::any_of(refreshed.value(), [&](const auto& candidate) {
+                        return candidate.logicalKey == key;
+                    });
+                if (!stillPending && memorySync_->hasCommittedTombstone(key)) {
+                    continue;
+                }
+            }
+            return published.error();
+        }
     }
-    return Error{ErrorCode::NotFound, "replicated deletion was not durably staged"};
+    if (!found) {
+        if (memorySync_->hasCommittedTombstone(documentKey) &&
+            (retainContent || memorySync_->hasCommittedTombstone(blobKey))) {
+            return {};
+        }
+        return Error{ErrorCode::NotFound, "replicated deletion was not durably staged"};
+    }
+    return {};
 }
 
 Result<std::size_t> ServiceManager::applyMemorySyncContentBlobs() {
@@ -2421,6 +2478,22 @@ void ServiceManager::notifyMemorySyncStage(std::string_view stage) noexcept {
     }
 }
 
+void ServiceManager::notifyMemorySyncDeleteOutboxStage(std::string_view stage) noexcept {
+    std::function<void(std::string_view)> observer;
+    {
+        std::lock_guard<std::mutex> lock(memorySyncDeleteOutboxObserverMutex_);
+        observer = memorySyncDeleteOutboxObserver_;
+    }
+    if (!observer) {
+        return;
+    }
+    try {
+        observer(stage);
+    } catch (...) {
+        spdlog::warn("[ServiceManager] memory_sync delete outbox observer threw at {}", stage);
+    }
+}
+
 Result<bool>
 ServiceManager::memorySyncDeleteLocallyAbsent(std::string_view contentHash,
                                               memory_sync::EraseReadinessProbe probe) const {
@@ -2452,14 +2525,18 @@ ServiceManager::memorySyncDeleteLocallyAbsent(std::string_view contentHash,
 
 bool ServiceManager::drainMemorySyncDocumentDeleteOutbox() noexcept {
     try {
+        notifyMemorySyncDeleteOutboxStage("delete_drain_waiting");
+        std::lock_guard<std::mutex> deleteLock(memorySyncDeleteOutboxMutex_);
         auto intents = memorySync_->pendingErases();
         if (!intents) {
             spdlog::warn("[ServiceManager] memory_sync delete outbox scan failed: {}",
                          intents.error().message);
             return true;
         }
-        const std::string prefix =
+        const std::string documentPrefix =
             std::string(memory_sync::memoryStoreName(memory_sync::MemoryStore::Document)) + "/";
+        const std::string blobPrefix =
+            std::string(memory_sync::memoryStoreName(memory_sync::MemoryStore::ContentBlob)) + "/";
         auto pending = std::move(intents.value());
         std::ranges::sort(pending, [](const auto& lhs, const auto& rhs) {
             const auto lhsCounter =
@@ -2468,11 +2545,17 @@ bool ServiceManager::drainMemorySyncDocumentDeleteOutbox() noexcept {
                 rhs.prepared ? rhs.preparedCounter : std::numeric_limits<std::uint64_t>::max();
             return std::tuple{lhsCounter, lhs.logicalKey} < std::tuple{rhsCounter, rhs.logicalKey};
         });
+        const auto validDocumentIntent = [&](const auto& intent) {
+            return intent.logicalKey == documentPrefix + intent.tombstonePayload;
+        };
+        const auto validBlobIntent = [&](const auto& intent) {
+            return intent.logicalKey == blobPrefix + intent.tombstonePayload;
+        };
+
         bool eligible = false;
         for (const auto& intent : pending) {
-            if (!intent.logicalKey.starts_with(prefix) ||
-                !memory_sync::isSha256Digest(intent.tombstonePayload) ||
-                intent.logicalKey != prefix + intent.tombstonePayload) {
+            if (!memory_sync::isSha256Digest(intent.tombstonePayload) ||
+                (!validDocumentIntent(intent) && !validBlobIntent(intent))) {
                 continue;
             }
             auto absent =
@@ -2494,7 +2577,11 @@ bool ServiceManager::drainMemorySyncDocumentDeleteOutbox() noexcept {
                 continue;
             }
             eligible = true;
-            if (auto published = publishMemorySyncDocumentDelete(intent.tombstonePayload);
+            if (auto published = memorySync_->publishStagedErase(
+                    intent.logicalKey,
+                    [this, contentHash = intent.tombstonePayload, probe = intent.readinessProbe] {
+                        return memorySyncDeleteLocallyAbsent(contentHash, probe);
+                    });
                 !published) {
                 spdlog::warn("[ServiceManager] memory_sync delete outbox retry failed: {}",
                              published.error().message);

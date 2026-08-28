@@ -205,8 +205,10 @@ public:
     Result<void> enrollP2pPeer(std::string_view nodeId, std::string_view spkiPin);
     Result<p2p::P2pLocalIdentity> getP2pIdentity() const;
     Result<std::vector<p2p::PeerRegistryRecord>> listP2pPeers() const;
-    Result<void> stageMemorySyncDocumentDelete(std::string_view contentHash);
-    Result<void> publishMemorySyncDocumentDelete(std::string_view contentHash);
+    Result<void> stageMemorySyncDocumentDelete(std::string_view contentHash,
+                                               bool retainContent = false);
+    Result<void> publishMemorySyncDocumentDelete(std::string_view contentHash,
+                                                 bool retainContent = false);
 
     struct SearchLoadMetrics {
         std::uint32_t active{0};
@@ -443,6 +445,10 @@ public:
     void testingSetMemorySyncStageObserver(std::function<void(std::string_view)> observer) {
         std::lock_guard<std::mutex> lock(memorySyncStageObserverMutex_);
         memorySyncStageObserver_ = std::move(observer);
+    }
+    void testingSetMemorySyncDeleteOutboxObserver(std::function<void(std::string_view)> observer) {
+        std::lock_guard<std::mutex> lock(memorySyncDeleteOutboxObserverMutex_);
+        memorySyncDeleteOutboxObserver_ = std::move(observer);
     }
     void testingApplyMemorySyncWinners() { applyMemorySyncWinners(); }
     void testingPublishMemorySyncBackfill() { publishMemorySyncBackfill(); }
@@ -798,6 +804,7 @@ private:
                                                memory_sync::EraseReadinessProbe probe) const;
     void publishMemorySyncBackfill() noexcept;
     void notifyMemorySyncStage(std::string_view stage) noexcept;
+    void notifyMemorySyncDeleteOutboxStage(std::string_view stage) noexcept;
     Result<std::size_t> applyMemorySyncContentBlobs();
     boost::asio::awaitable<bool> initializeMetadataDatabaseAt(const std::filesystem::path& dbPath,
                                                               yams::compat::stop_token token);
@@ -934,6 +941,9 @@ private:
     // Started after storage/content-store init, stopped during shutdown.
     std::unique_ptr<yams::memory_sync::MemorySyncService> memorySync_;
     std::unique_ptr<yams::daemon::p2p::P2pManager> p2pManager_;
+    mutable std::mutex memorySyncDeleteOutboxMutex_;
+    mutable std::mutex memorySyncDeleteOutboxObserverMutex_;
+    std::function<void(std::string_view)> memorySyncDeleteOutboxObserver_;
     mutable std::mutex memorySyncStageObserverMutex_;
     std::function<void(std::string_view)> memorySyncStageObserver_;
     bool memorySyncVectorRebuildDirty_{false};

@@ -612,6 +612,14 @@ else
       timeout: 60,
       args: ['Daemon memory sync periodically converges and stops cleanly', '--allow-running-no-tests'],
     )
+    test('daemon_memory_sync_delete_integrity',
+      memory_sync_service_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 60,
+      args: ['Production document deletion also replicates content-byte deletion', '--allow-running-no-tests'],
+    )
     test('daemon_memory_sync_apply_stop',
       memory_sync_service_integration_exe,
       suite: ['integration', 'daemon', 'catch2', 'memory-sync'],

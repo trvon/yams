@@ -1390,8 +1390,9 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
             serviceReq.recursive = req.recursive;
             serviceReq.verbose = req.verbose;
             if (!req.dryRun) {
-                serviceReq.beforeDelete = [manager = serviceManager_](std::string_view hash) {
-                    return manager->stageMemorySyncDocumentDelete(hash);
+                serviceReq.beforeDelete = [manager = serviceManager_,
+                                           retainContent = req.keepRefs](std::string_view hash) {
+                    return manager->stageMemorySyncDocumentDelete(hash, retainContent);
                 };
             }
             if (!req.directory.empty()) {
@@ -1457,9 +1458,11 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
             if (!replicatedDeletes.empty()) {
                 auto published = co_await yams::daemon::dispatch::offload_to_worker(
                     serviceManager_,
-                    [manager = serviceManager_, hashes = std::move(replicatedDeletes)] {
+                    [manager = serviceManager_, hashes = std::move(replicatedDeletes),
+                     retainContent = req.keepRefs] {
                         for (const auto& hash : hashes) {
-                            if (auto result = manager->publishMemorySyncDocumentDelete(hash);
+                            if (auto result =
+                                    manager->publishMemorySyncDocumentDelete(hash, retainContent);
                                 !result) {
                                 return result;
                             }

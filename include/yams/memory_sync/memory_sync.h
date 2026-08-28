@@ -87,6 +87,13 @@ struct PendingEraseIntent {
     std::uint64_t preparedCounter{0};
 };
 
+/// One member of an all-or-rollback pre-delete staging batch.
+struct EraseStageRequest {
+    std::string logicalKey;
+    std::string tombstonePayload;
+    EraseReadinessProbe readinessProbe{EraseReadinessProbe::Explicit};
+};
+
 struct WriterHistoryCommitment {
     std::uint64_t counter{0};
     std::string digest;
@@ -244,6 +251,13 @@ public:
                 return {};
             }
         } else {
+            auto allIntents = loadEraseIntents();
+            if (!allIntents) {
+                return allIntents.error();
+            }
+            if (allIntents.value().size() >= limits_.maxMergedKeys) {
+                return Error{ErrorCode::ResourceExhausted, "durable erase outbox limit reached"};
+            }
             intent.logicalKey = logicalKey;
             intent.tombstonePayload = std::move(tombstonePayload);
             intent.readinessProbe = readinessProbe;
@@ -288,6 +302,79 @@ public:
         }
         intent.preparedCommitment = std::move(commitment.value());
         return storeEraseIntent(intent);
+    }
+
+    /// Reserve capacity for a related set of pre-delete intents before storing any member.
+    /// Backend failures roll back only intents newly created by this call.
+    Result<void> stageErases(std::span<const EraseStageRequest> requests) {
+        if (requests.empty()) {
+            return {};
+        }
+        auto existing = loadEraseIntents();
+        if (!existing) {
+            return existing.error();
+        }
+
+        std::set<std::string> existingKeys;
+        for (const auto& intent : existing.value()) {
+            existingKeys.insert(intent.logicalKey);
+        }
+        std::set<std::string> requestedKeys;
+        std::size_t newIntentCount = 0;
+        for (const auto& request : requests) {
+            if (auto valid = validateLogicalKey(request.logicalKey); !valid) {
+                return valid.error();
+            }
+            if (request.tombstonePayload.size() > limits_.maxEnvelopeBytes) {
+                return Error{ErrorCode::InvalidArgument,
+                             "memory sync tombstone payload exceeds envelope limit"};
+            }
+            if (!requestedKeys.insert(request.logicalKey).second) {
+                return Error{ErrorCode::InvalidArgument,
+                             "erase staging batch contains a duplicate logical key"};
+            }
+            const auto retained = std::ranges::find_if(existing.value(), [&](const auto& intent) {
+                return intent.logicalKey == request.logicalKey;
+            });
+            if (retained != existing.value().end() &&
+                (retained->tombstonePayload != request.tombstonePayload ||
+                 retained->readinessProbe != request.readinessProbe)) {
+                return Error{ErrorCode::InvalidState,
+                             "staged erase payload conflicts with retained intent"};
+            }
+            newIntentCount += existingKeys.contains(request.logicalKey) ? 0U : 1U;
+        }
+        if (existing.value().size() > limits_.maxMergedKeys ||
+            newIntentCount > limits_.maxMergedKeys - existing.value().size()) {
+            return Error{ErrorCode::ResourceExhausted,
+                         "erase staging batch exceeds the durable outbox limit"};
+        }
+
+        std::vector<std::string> newlyStored;
+        newlyStored.reserve(newIntentCount);
+        for (const auto& request : requests) {
+            auto staged = stageErase(request.logicalKey, request.tombstonePayload, false,
+                                     request.readinessProbe);
+            if (!staged) {
+                std::string rollbackFailure;
+                for (auto key = newlyStored.rbegin(); key != newlyStored.rend(); ++key) {
+                    if (auto cancelled = cancelStagedErase(*key); !cancelled) {
+                        rollbackFailure += rollbackFailure.empty() ? "" : "; ";
+                        rollbackFailure += *key + ": " + cancelled.error().message;
+                    }
+                }
+                if (!rollbackFailure.empty()) {
+                    return Error{staged.error().code,
+                                 staged.error().message +
+                                     "; batch rollback failed: " + rollbackFailure};
+                }
+                return staged.error();
+            }
+            if (!existingKeys.contains(request.logicalKey)) {
+                newlyStored.push_back(request.logicalKey);
+            }
+        }
+        return {};
     }
 
     Result<std::vector<PendingEraseIntent>> pendingErases() {
@@ -2150,6 +2237,13 @@ private:
         if (!intent.ready || !intent.record || !isSha256Digest(intent.recordHash)) {
             return Error{ErrorCode::InvalidState, "erase intent is not prepared"};
         }
+        const auto retainCommittedWinner = [&] {
+            const auto winner = merged_.find(intent.logicalKey);
+            if (winner == merged_.end() ||
+                resolveLww(*intent.record, winner->second) == LwwDecision::First) {
+                merged_[intent.logicalKey] = *intent.record;
+            }
+        };
         const auto operation = operations_.find(intent.record->operationId);
         if (operation != operations_.end()) {
             if (operation->second != std::pair{intent.recordHash, intent.logicalKey}) {
@@ -2162,6 +2256,7 @@ private:
                 return Error{ErrorCode::InvalidState,
                              "prepared erase index lacks a durable history commitment"};
             }
+            retainCommittedWinner();
             return backend_->remove(eraseOutboxKey(intent.logicalKey));
         }
         const auto prior = historyCommitments_.find(nodeId_);
@@ -2201,6 +2296,7 @@ private:
         operations_[intent.record->operationId] = {intent.recordHash, intent.logicalKey};
         version_.merge(intent.record->vv);
         logicalClock_ = std::max(logicalClock_, intent.record->ts.logical);
+        retainCommittedWinner();
         return backend_->remove(eraseOutboxKey(intent.logicalKey));
     }
 
