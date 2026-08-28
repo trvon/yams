@@ -191,7 +191,7 @@ src/daemon/components/dispatcher/request_dispatcher_documents.cpp:1707:portabili
 src/daemon/components/dispatcher/request_dispatcher_models.cpp:38:portability/env-read # reviewed raw environment read
 src/detection/file_type_detector.cpp:612:portability/env-read # reviewed raw environment read
 src/detection/file_type_detector.cpp:655:portability/env-read # reviewed raw environment read
-src/mcp/stdio_transport.cpp:77:portability/env-read # reviewed raw environment read
+src/mcp/stdio_transport.cpp:46:portability/env-read # reviewed raw environment read
 src/metadata/connection_pool.cpp:921:portability/jthread # feature-test guarded std::jthread
 src/metadata/database.cpp:29:portability/env-read # reviewed raw environment read
 src/metadata/database.cpp:473:portability/path-cstr # std::string filename, not filesystem::path

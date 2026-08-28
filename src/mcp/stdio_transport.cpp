@@ -17,8 +17,6 @@
 
 // Platform-specific includes for non-blocking I/O
 #if defined(_WIN32)
-#include <fcntl.h>
-#include <io.h>
 #include <windows.h>
 #elif !defined(YAMS_WASI)
 #include <poll.h>
@@ -40,38 +38,9 @@ void StdioTransport::sendAsync(json message) {
 void StdioTransport::writerLoop() { /* retired */ }
 
 StdioTransport::StdioTransport() {
-    // Ensure predictable stdio behavior. In tests, avoid changing global iostream
-    // configuration so that rdbuf redirection in unit tests works as expected.
-#ifndef YAMS_TESTING
-#ifdef _WIN32
-    // On Windows, keep sync_with_stdio(true) to ensure std::cin/cout stay synchronized
-    // with the underlying C stdio buffers and Windows handles. Disabling sync causes
-    // std::getline to block even when PeekNamedPipe shows data available, because
-    // the C++ stream buffer becomes disconnected from the Windows pipe state.
-    std::ios::sync_with_stdio(true);
-#else
-    std::ios::sync_with_stdio(false);
-#endif
-    std::cin.tie(nullptr);
-#endif
-
-    // Set stdin/stdout to binary mode on Windows to prevent CRLF translation
-#ifdef _WIN32
-    _setmode(_fileno(stdin), _O_BINARY);
-    _setmode(_fileno(stdout), _O_BINARY);
-    // Disable C-level buffering on stdout for Windows pipes - critical for MCP reliability.
-    // Without this, responses may be delayed in the CRT buffer causing client timeouts.
-    setvbuf(stdout, nullptr, _IONBF, 0);
-    // Also disable input buffering to ensure PeekNamedPipe state matches std::cin state
-    setvbuf(stdin, nullptr, _IONBF, 0);
-#endif
-
-    // MCP stdio transport: always use unbuffered output for immediate response delivery.
-    // On Windows pipes, buffered output can cause MCP client timeouts because responses
-    // may sit in the buffer even with explicit flush() calls. Always enable unitbuf for
-    // reliable real-time communication. stderr is also unbuffered for log visibility.
-    std::cout << std::unitbuf;
-    std::cerr << std::unitbuf;
+    // Process-global standard-stream configuration belongs to the executable entry point.
+    // A transport can be embedded with redirected streams, so construction must preserve
+    // the caller's stream buffers and synchronization policy.
 
     // Configure receive timeout from environment, enforce a sane minimum
     if (const char* env = std::getenv("YAMS_MCP_RECV_TIMEOUT_MS"); env && *env) {

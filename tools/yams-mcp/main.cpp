@@ -4,7 +4,9 @@
 
 #include <atomic>
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
+#include <iostream>
 #include <memory>
 #include <thread>
 
@@ -14,16 +16,38 @@
 #include <yams/mcp/mcp_server.h>
 
 #ifdef _WIN32
-#include <cstdlib>
+#include <fcntl.h>
+#include <io.h>
+
 #include <yams/platform/windows_init.h>
 #endif
 
+namespace {
+
 std::atomic<bool> g_running{true};
+
+void configureMcpStandardStreams() {
+#ifdef _WIN32
+    // Keep C and C++ streams synchronized on Windows so std::getline and pipe state agree.
+    std::ios::sync_with_stdio(true);
+    _setmode(_fileno(stdin), _O_BINARY);
+    _setmode(_fileno(stdout), _O_BINARY);
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    setvbuf(stdin, nullptr, _IONBF, 0);
+#else
+    std::ios::sync_with_stdio(false);
+#endif
+    std::cin.tie(nullptr);
+    std::cout << std::unitbuf;
+    std::cerr << std::unitbuf;
+}
 
 void signalHandler(int signal) {
     spdlog::info("Received signal {}, shutting down...", signal);
     g_running = false;
 }
+
+} // namespace
 
 int main(int argc, char* argv[]) {
     std::set_terminate([]() noexcept {
@@ -74,6 +98,7 @@ int main(int argc, char* argv[]) {
     app.add_option("--daemon-socket", daemon_socket, "Override daemon socket path")
         ->envname("YAMS_DAEMON_SOCKET");
     CLI11_PARSE(app, argc, argv);
+    configureMcpStandardStreams();
 
     try {
         std::vector<spdlog::sink_ptr> sinks;
