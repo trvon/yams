@@ -431,6 +431,24 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_p2p_transport_exe = executable('catch2_p2p_transport',
+    files('unit/daemon/p2p_transport_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_p2p_protocol_exe = executable('catch2_p2p_protocol',
+    files('unit/daemon/p2p_protocol_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_admission_policy_exe = executable('catch2_admission_policy',
     files('unit/daemon/admission_policy_catch2_test.cpp'),
     include_directories: incs,
@@ -3115,6 +3133,20 @@ if catch2_dep.found()
 
   test('daemon_components', catch2_daemon_components_exe,
     suite: ['catch2', 'unit', 'daemon', 'components'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60,
+    is_parallel: false
+  )
+
+  test('p2p_transport', catch2_p2p_transport_exe,
+    suite: ['catch2', 'unit', 'daemon', 'p2p', 'network'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60,
+    is_parallel: false
+  )
+
+  test('p2p_protocol', catch2_p2p_protocol_exe,
+    suite: ['catch2', 'unit', 'daemon', 'p2p', 'network'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
     is_parallel: false
