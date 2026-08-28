@@ -36,6 +36,7 @@ yams serve
 ## Reference
 
 - [Build from source](BUILD.md)
+- [P2P corpus sync](p2p.md)
 - [Benchmarks](benchmarks/)
 - [Runtime path authority](architecture/runtime-paths.md)
 - [Configuration reading boundaries](architecture/config-reading.md)
