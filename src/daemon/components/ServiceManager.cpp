@@ -2166,6 +2166,19 @@ Result<std::vector<p2p::PeerRegistryRecord>> ServiceManager::listP2pPeers() cons
     return p2pManager_->peers();
 }
 
+Result<void> ServiceManager::publishMemorySyncDocumentDelete(std::string_view contentHash) {
+    if (!memorySync_) {
+        return Result<void>();
+    }
+    auto repository = getMetadataRepo();
+    if (!repository) {
+        return Error{ErrorCode::InvalidState,
+                     "metadata repository is unavailable for replicated deletion"};
+    }
+    metadata::MetadataSyncAdapter adapter{*repository, *memorySync_};
+    return adapter.publishDelete(contentHash);
+}
+
 Result<std::size_t> ServiceManager::applyMemorySyncContentBlobs() {
     if (!memorySync_) {
         return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
@@ -2271,8 +2284,12 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
                 return;
             }
             metadata::MetadataSyncAdapter adapter{
-                *repository, *memorySync_, [contentStore](std::string_view hash) {
+                *repository, *memorySync_,
+                [contentStore](std::string_view hash) {
                     return contentStore->exists(std::string(hash));
+                },
+                [this](const metadata::DocumentInfo& document) {
+                    enqueuePostIngest(document.sha256Hash, document.mimeType);
                 }};
             if (auto result = adapter.apply(); !result) {
                 spdlog::warn("[ServiceManager] memory_sync metadata apply failed: {}",

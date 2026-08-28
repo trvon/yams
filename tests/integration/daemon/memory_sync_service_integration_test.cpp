@@ -906,6 +906,22 @@ TEST_CASE("Daemon direct deltas immediately hydrate content and metadata",
     CHECK(imported.value()->fileName == "direct.md");
     CHECK(imported.value()->sha256Hash == hash);
 
+    // Remote metadata is not enough for retrieval parity: applying a direct delta must enqueue
+    // the same extraction/FTS path used by a local add.
+    std::optional<yams::metadata::DocumentContent> indexedContent;
+    const auto searchDeadline = std::chrono::steady_clock::now() + scaledTimeout(3s);
+    while (std::chrono::steady_clock::now() < searchDeadline) {
+        auto content = repository->getContent(imported.value()->id);
+        REQUIRE(content.has_value());
+        if (content.value()) {
+            indexedContent = std::move(*content.value());
+            break;
+        }
+        std::this_thread::sleep_for(10ms);
+    }
+    REQUIRE(indexedContent.has_value());
+    CHECK(indexedContent->contentText.find("direct-delta-searchable-content") != std::string::npos);
+
     harness.stop();
     CHECK(harness.shutdownSucceeded());
 }

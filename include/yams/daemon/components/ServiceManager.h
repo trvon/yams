@@ -62,6 +62,7 @@
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/extraction/content_extractor.h>
+#include <yams/memory_sync/memory_sync_service.h>
 #include <yams/profiling.h>
 #include <yams/search/search_engine.h>
 #include <yams/search/search_execution_context.h>
@@ -202,6 +203,7 @@ public:
     Result<p2p::P2pSyncResult> connectP2p(std::string_view connectionString);
     Result<void> disconnectP2p(std::string_view nodeId);
     Result<std::vector<p2p::PeerRegistryRecord>> listP2pPeers() const;
+    Result<void> publishMemorySyncDocumentDelete(std::string_view contentHash);
 
     struct SearchLoadMetrics {
         std::uint32_t active{0};
@@ -430,6 +432,10 @@ public:
     }
     yams::memory_sync::MemorySyncService* testingMemorySyncService() const noexcept {
         return memorySync_.get();
+    }
+    void
+    testingSetMemorySyncService(std::unique_ptr<yams::memory_sync::MemorySyncService> service) {
+        memorySync_ = std::move(service);
     }
     void testingSetMemorySyncStageObserver(std::function<void(std::string_view)> observer) {
         std::lock_guard<std::mutex> lock(memorySyncStageObserverMutex_);

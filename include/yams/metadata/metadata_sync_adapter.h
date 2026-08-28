@@ -31,10 +31,12 @@ namespace yams::metadata {
 class MetadataSyncAdapter {
 public:
     using ContentExists = std::function<Result<bool>(std::string_view)>;
+    using AppliedObserver = std::function<void(const DocumentInfo&)>;
 
     MetadataSyncAdapter(MetadataRepository& repository, memory_sync::MemorySyncService& sync,
-                        ContentExists contentExists = {})
-        : repository_(repository), sync_(sync), contentExists_(std::move(contentExists)) {}
+                        ContentExists contentExists = {}, AppliedObserver appliedObserver = {})
+        : repository_(repository), sync_(sync), contentExists_(std::move(contentExists)),
+          appliedObserver_(std::move(appliedObserver)) {}
 
     /// Serialize a committed document (+tags) and publish it under `document/<hash>`.
     Result<void> publish(const DocumentInfo& info,
@@ -147,6 +149,9 @@ public:
                     return result.error();
                 }
                 ++applied;
+                if (appliedObserver_) {
+                    appliedObserver_(item.info);
+                }
                 continue;
             }
 
@@ -262,6 +267,7 @@ private:
     MetadataRepository& repository_;
     memory_sync::MemorySyncService& sync_;
     ContentExists contentExists_;
+    AppliedObserver appliedObserver_;
 };
 
 } // namespace yams::metadata
