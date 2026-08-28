@@ -368,6 +368,32 @@ public:
         return loop_.exportLocalDeltasAfter(peerVersion, maxDeltas, maxWriterCounter);
     }
 
+    Result<ColdBootstrapSnapshot> exportColdBootstrap(const ReplicationState& frozen,
+                                                      std::size_t maxRecords,
+                                                      std::size_t maxPayloadBytes) {
+        std::lock_guard<std::mutex> lock(loopMutex_);
+        return loop_.exportColdBootstrap(frozen, maxRecords, maxPayloadBytes);
+    }
+
+    Result<DeltaApplyResult> applyColdBootstrap(const ColdBootstrapSnapshot& snapshot,
+                                                std::string_view authenticatedWitness,
+                                                std::size_t maxRecords,
+                                                std::size_t maxPayloadBytes) {
+        Result<DeltaApplyResult> result;
+        {
+            std::lock_guard<std::mutex> lock(loopMutex_);
+            result = loop_.applyColdBootstrap(snapshot, authenticatedWitness, maxRecords,
+                                              maxPayloadBytes);
+            if (result) {
+                refreshCommittedState();
+            }
+        }
+        if (result && result.value().merged != 0) {
+            invokeAfterSyncCallback();
+        }
+        return result;
+    }
+
     Result<DeltaApplyResult> applyDeltas(std::span<const MemoryDelta> deltas) {
         Result<DeltaApplyResult> result;
         bool quarantineChanged = false;

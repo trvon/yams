@@ -26,6 +26,7 @@ struct DeltaAcknowledgement {
 Result<void> validateOptions(const DeltaExchangeOptions& options) {
     if (options.maxDeltasPerBatch == 0 || options.maxBatches == 0 ||
         options.maxDeltasPerSession == 0 || options.maxWireBytesPerSession == 0 ||
+        options.maxSnapshotRecords == 0 || options.maxSnapshotWireBytes == 0 ||
         options.timeout <= std::chrono::milliseconds::zero()) {
         return Error{ErrorCode::InvalidArgument, "invalid p2p delta exchange limits"};
     }
@@ -254,6 +255,258 @@ Result<DeltaAcknowledgement> receiveAcknowledgement(P2pConnection& connection,
     }
 }
 
+struct BootstrapPhaseResult {
+    DeltaExchangeStats stats;
+    memory_sync::VersionVector peerVersion;
+};
+
+Json commitmentArray(
+    const std::map<memory_sync::NodeId, memory_sync::WriterHistoryCommitment>& commitments) {
+    Json result = Json::array();
+    for (const auto& [writer, commitment] : commitments) {
+        result.push_back({{"writer_id", writer},
+                          {"counter", commitment.counter},
+                          {"digest", commitment.digest}});
+    }
+    return result;
+}
+
+Result<std::map<memory_sync::NodeId, memory_sync::WriterHistoryCommitment>>
+parseCommitments(const Json& entries) {
+    try {
+        if (!entries.is_array() || entries.size() > kMaxP2pReplicationWriters) {
+            return Error{ErrorCode::ValidationError,
+                         "cold bootstrap commitment list violates bounds"};
+        }
+        std::map<memory_sync::NodeId, memory_sync::WriterHistoryCommitment> result;
+        for (const auto& entry : entries) {
+            auto writer = entry.at("writer_id").get<std::string>();
+            memory_sync::WriterHistoryCommitment commitment{
+                .counter = entry.at("counter").get<std::uint64_t>(),
+                .digest = entry.at("digest").get<std::string>()};
+            if (writer.empty() || writer.size() > kMaxP2pIdentityBytes || commitment.counter == 0 ||
+                !memory_sync::isSha256Digest(commitment.digest) ||
+                !result.emplace(std::move(writer), std::move(commitment)).second) {
+                return Error{ErrorCode::ValidationError, "cold bootstrap commitment is invalid"};
+            }
+        }
+        return result;
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::ValidationError,
+                     std::string("invalid cold bootstrap commitments: ") + error.what()};
+    }
+}
+
+Result<BootstrapPhaseResult> sendBootstrapPhase(P2pConnection& connection,
+                                                memory_sync::MemorySyncService& service,
+                                                const PeerHandshakeResult& handshake,
+                                                const DeltaExchangeOptions& options) {
+    BootstrapPhaseResult result{.peerVersion = handshake.peerVersion};
+    const bool hasForeignWriter =
+        std::ranges::any_of(handshake.localVersion.counters(), [&](const auto& entry) {
+            return entry.first != connection.localNodeId() && entry.second != 0;
+        });
+    const bool offer = handshake.peerVersion.empty() && hasForeignWriter;
+    if (auto written = writeJson(
+            connection, Json{{"type", "replication_mode"}, {"mode", offer ? "snapshot" : "delta"}},
+            options.timeout);
+        !written) {
+        return written.error();
+    }
+    if (!offer) {
+        return result;
+    }
+    if (handshake.firstContactPinned) {
+        return Error{ErrorCode::Unauthorized,
+                     "cold bootstrap requires a previously operator-pinned peer"};
+    }
+    const auto current = service.replicationState();
+    memory_sync::ReplicationState frozen{.version = handshake.localVersion,
+                                         .commitments = current.commitments,
+                                         .quarantinedWriters = current.quarantinedWriters};
+    auto snapshot = service.exportColdBootstrap(frozen, options.maxSnapshotRecords,
+                                                options.maxSnapshotWireBytes);
+    if (!snapshot) {
+        return snapshot.error();
+    }
+    std::size_t payloadBytes = 0;
+    for (const auto& winner : snapshot.value().winners) {
+        if (payloadBytes > std::numeric_limits<std::size_t>::max() - winner.payload.size()) {
+            return Error{ErrorCode::ResourceExhausted, "cold bootstrap payload total overflow"};
+        }
+        payloadBytes += winner.payload.size();
+    }
+    const Json beginJson{{"type", "snapshot_begin"},
+                         {"witness", connection.localNodeId()},
+                         {"frontier", snapshot.value().frontier},
+                         {"commitments", commitmentArray(snapshot.value().commitments)},
+                         {"record_count", snapshot.value().winners.size()},
+                         {"payload_bytes", payloadBytes},
+                         {"root_digest", snapshot.value().rootDigest},
+                         {"witness_key_id", snapshot.value().witnessSignature.keyId},
+                         {"witness_algorithm", snapshot.value().witnessSignature.algorithm},
+                         {"witness_signature", snapshot.value().witnessSignature.signature}};
+    constexpr std::size_t kFramePrefixBytes = 4;
+    std::size_t wireBytes = beginJson.dump().size() + kFramePrefixBytes;
+    for (const auto& delta : snapshot.value().winners) {
+        memory_sync::MemoryDeltaBatch one{.deltas = {delta}};
+        auto estimated = estimatedWireBytes(one);
+        if (!estimated || wireBytes > options.maxSnapshotWireBytes ||
+            estimated.value() > options.maxSnapshotWireBytes - wireBytes) {
+            return Error{ErrorCode::ResourceExhausted,
+                         "cold bootstrap snapshot exceeds aggregate wire bound"};
+        }
+        wireBytes += estimated.value();
+    }
+    if (auto written = writeJson(connection, beginJson, options.timeout); !written) {
+        return written.error();
+    }
+    for (const auto& delta : snapshot.value().winners) {
+        memory_sync::MemoryDeltaBatch one{.deltas = {delta}};
+        if (auto sent = sendBatch(connection, one, options.timeout); !sent) {
+            return sent.error();
+        }
+    }
+    auto ack = readJson(connection, options.timeout);
+    if (!ack) {
+        return ack.error();
+    }
+    try {
+        if (!ack.value().is_object() ||
+            ack.value().value("type", std::string{}) != "snapshot_ack" ||
+            ack.value().at("root_digest").get<std::string>() != snapshot.value().rootDigest) {
+            return Error{ErrorCode::ValidationError, "cold bootstrap acknowledgement mismatch"};
+        }
+        const auto acknowledged = ack.value().at("vv").get<memory_sync::VersionVector>();
+        if (acknowledged.counters() != snapshot.value().frontier.counters()) {
+            return Error{ErrorCode::ValidationError,
+                         "cold bootstrap acknowledgement frontier mismatch"};
+        }
+        result.peerVersion = std::move(acknowledged);
+        result.stats.snapshotsSent = 1;
+        return result;
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::ValidationError,
+                     std::string("invalid cold bootstrap acknowledgement: ") + error.what()};
+    }
+}
+
+Result<BootstrapPhaseResult> receiveBootstrapPhase(P2pConnection& connection,
+                                                   memory_sync::MemorySyncService& service,
+                                                   const PeerHandshakeResult& handshake,
+                                                   const DeltaExchangeOptions& options) {
+    BootstrapPhaseResult result{.peerVersion = handshake.localVersion};
+    auto mode = readJson(connection, options.timeout);
+    if (!mode) {
+        return mode.error();
+    }
+    try {
+        if (!mode.value().is_object() ||
+            mode.value().value("type", std::string{}) != "replication_mode") {
+            return Error{ErrorCode::ValidationError, "missing p2p replication mode"};
+        }
+        const auto selected = mode.value().at("mode").get<std::string>();
+        if (selected == "delta") {
+            return result;
+        }
+        if (selected != "snapshot") {
+            return Error{ErrorCode::ValidationError, "unknown p2p replication mode"};
+        }
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::ValidationError,
+                     std::string("invalid p2p replication mode: ") + error.what()};
+    }
+    if (!handshake.localVersion.empty() || !service.currentVersion().empty() ||
+        handshake.firstContactPinned) {
+        return Error{ErrorCode::Unauthorized,
+                     "cold bootstrap requires a durable zero state and prior peer pin"};
+    }
+    auto begin = readJson(connection, options.timeout);
+    if (!begin) {
+        return begin.error();
+    }
+    try {
+        if (!begin.value().is_object() ||
+            begin.value().value("type", std::string{}) != "snapshot_begin" ||
+            begin.value().at("witness").get<std::string>() != handshake.peerNodeId) {
+            return Error{ErrorCode::Unauthorized, "cold bootstrap witness mismatch"};
+        }
+        auto frontier = begin.value().at("frontier").get<memory_sync::VersionVector>();
+        auto commitments = parseCommitments(begin.value().at("commitments"));
+        if (!commitments) {
+            return commitments.error();
+        }
+        const auto count = begin.value().at("record_count").get<std::size_t>();
+        const auto declaredPayload = begin.value().at("payload_bytes").get<std::size_t>();
+        const auto root = begin.value().at("root_digest").get<std::string>();
+        if (frontier.counters() != handshake.peerVersion.counters() ||
+            commitments.value() != handshake.peerCommitments ||
+            count > options.maxSnapshotRecords || declaredPayload > options.maxSnapshotWireBytes ||
+            !memory_sync::isSha256Digest(root)) {
+            return Error{ErrorCode::ValidationError,
+                         "cold bootstrap manifest differs from authenticated frontier"};
+        }
+        memory_sync::ColdBootstrapSnapshot snapshot{
+            .frontier = std::move(frontier),
+            .commitments = std::move(commitments.value()),
+            .rootDigest = root,
+            .witnessSignature = memory_sync::DetachedWriterSignature{
+                .writerId = handshake.peerNodeId,
+                .keyId = begin.value().at("witness_key_id").get<std::string>(),
+                .algorithm = begin.value().at("witness_algorithm").get<std::string>(),
+                .signature = begin.value().at("witness_signature").get<std::string>()}};
+        snapshot.winners.reserve(count);
+        constexpr std::size_t kFramePrefixBytes = 4;
+        std::size_t wireBytes = begin.value().dump().size() + kFramePrefixBytes;
+        if (wireBytes > options.maxSnapshotWireBytes) {
+            return Error{ErrorCode::ResourceExhausted,
+                         "cold bootstrap manifest exceeds aggregate wire bound"};
+        }
+        std::size_t payloadBytes = 0;
+        for (std::size_t index = 0; index < count; ++index) {
+            auto received =
+                receiveBatch(connection, options, 1, options.maxSnapshotWireBytes - wireBytes);
+            if (!received || received.value().batch.deltas.size() != 1 ||
+                received.value().batch.hasMore) {
+                return Error{ErrorCode::ValidationError,
+                             "cold bootstrap record framing is invalid"};
+            }
+            wireBytes += received.value().wireBytes;
+            const auto payloadSize = received.value().batch.deltas.front().payload.size();
+            if (payloadBytes > std::numeric_limits<std::size_t>::max() - payloadSize) {
+                return Error{ErrorCode::ResourceExhausted, "cold bootstrap payload total overflow"};
+            }
+            payloadBytes += payloadSize;
+            snapshot.winners.push_back(std::move(received.value().batch.deltas.front()));
+        }
+        if (payloadBytes != declaredPayload) {
+            return Error{ErrorCode::ValidationError,
+                         "cold bootstrap payload total differs from manifest"};
+        }
+        auto applied =
+            service.applyColdBootstrap(snapshot, handshake.peerNodeId, options.maxSnapshotRecords,
+                                       options.maxSnapshotWireBytes);
+        if (!applied) {
+            return applied.error();
+        }
+        if (auto written = writeJson(connection,
+                                     Json{{"type", "snapshot_ack"},
+                                          {"root_digest", root},
+                                          {"vv", applied.value().version}},
+                                     options.timeout);
+            !written) {
+            return written.error();
+        }
+        result.peerVersion = applied.value().version;
+        result.stats.snapshotsReceived = 1;
+        result.stats.merged = applied.value().merged;
+        return result;
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::ValidationError,
+                     std::string("invalid cold bootstrap manifest: ") + error.what()};
+    }
+}
+
 Result<DeltaExchangeStats> sendAll(P2pConnection& connection,
                                    memory_sync::MemorySyncService& service,
                                    memory_sync::VersionVector peerVersion,
@@ -391,6 +644,8 @@ DeltaExchangeStats combine(DeltaExchangeStats first, const DeltaExchangeStats& s
     first.replayed += second.replayed;
     first.quarantined += second.quarantined;
     first.peerQuarantined += second.peerQuarantined;
+    first.snapshotsSent += second.snapshotsSent;
+    first.snapshotsReceived += second.snapshotsReceived;
     return first;
 }
 
@@ -423,21 +678,52 @@ Result<DeltaExchangeStats> runDeltaExchange(P2pConnection& connection,
             Error{ErrorCode::InvalidData, "p2p delta exchange rejected forked peer history"});
     }
     const auto localWriterCounter = handshake.localVersion.get(connection.localNodeId());
-    auto first =
-        role == ExchangeRole::Initiator
-            ? sendAll(connection, service, handshake.peerVersion, localWriterCounter, options)
-            : receiveAll(connection, service, handshake, options);
-    if (!first) {
-        return fail(first.error());
+    DeltaExchangeStats total;
+    if (role == ExchangeRole::Initiator) {
+        auto bootstrapSent = sendBootstrapPhase(connection, service, handshake, options);
+        if (!bootstrapSent) {
+            return fail(bootstrapSent.error());
+        }
+        total = combine(total, bootstrapSent.value().stats);
+        auto sent = sendAll(connection, service, bootstrapSent.value().peerVersion,
+                            localWriterCounter, options);
+        if (!sent) {
+            return fail(sent.error());
+        }
+        total = combine(total, sent.value());
+        auto bootstrapReceived = receiveBootstrapPhase(connection, service, handshake, options);
+        if (!bootstrapReceived) {
+            return fail(bootstrapReceived.error());
+        }
+        total = combine(total, bootstrapReceived.value().stats);
+        auto received = receiveAll(connection, service, handshake, options);
+        if (!received) {
+            return fail(received.error());
+        }
+        return combine(total, received.value());
     }
-    auto second =
-        role == ExchangeRole::Initiator
-            ? receiveAll(connection, service, handshake, options)
-            : sendAll(connection, service, handshake.peerVersion, localWriterCounter, options);
-    if (!second) {
-        return fail(second.error());
+
+    auto bootstrapReceived = receiveBootstrapPhase(connection, service, handshake, options);
+    if (!bootstrapReceived) {
+        return fail(bootstrapReceived.error());
     }
-    return combine(first.value(), second.value());
+    total = combine(total, bootstrapReceived.value().stats);
+    auto received = receiveAll(connection, service, handshake, options);
+    if (!received) {
+        return fail(received.error());
+    }
+    total = combine(total, received.value());
+    auto bootstrapSent = sendBootstrapPhase(connection, service, handshake, options);
+    if (!bootstrapSent) {
+        return fail(bootstrapSent.error());
+    }
+    total = combine(total, bootstrapSent.value().stats);
+    auto sent = sendAll(connection, service, bootstrapSent.value().peerVersion, localWriterCounter,
+                        options);
+    if (!sent) {
+        return fail(sent.error());
+    }
+    return combine(total, sent.value());
 }
 
 } // namespace

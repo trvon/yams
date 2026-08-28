@@ -101,6 +101,17 @@ struct ReplicationState {
     std::set<NodeId> quarantinedWriters;
 };
 
+/// Authenticated direct-P2P zero-state snapshot. The serving peer is a witness for the exact
+/// frozen frontier; winner envelopes retain their original writer signatures.
+struct ColdBootstrapSnapshot {
+    VersionVector frontier;
+    // pi-lens-ignore: no-bit-fields
+    std::map<NodeId, WriterHistoryCommitment> commitments; // NOLINT(no-bit-fields)
+    std::vector<MemoryDelta> winners;
+    std::string rootDigest;
+    DetachedWriterSignature witnessSignature;
+};
+
 /// Backend-agnostic memory sync loop. Memory records are published as
 /// content-addressed blobs plus one version-vector-tagged index record per write;
 /// `sync()` lists the index, pulls records, and LWW-merges to a deterministic
@@ -421,6 +432,9 @@ public:
     Result<std::map<std::string, MemoryIndexRecord>> sync() {
         if (auto loaded = ensureDurableQuarantineLoaded(); !loaded) {
             return loaded.error();
+        }
+        if (auto recovered = recoverColdBootstrap(); !recovered) {
+            return recovered.error();
         }
         if (auto ready = beforeRemoteWork(); !ready) {
             return ready.error();
@@ -763,6 +777,161 @@ public:
             candidates.resize(maxDeltas);
         }
         return MemoryDeltaBatch{.deltas = std::move(candidates), .hasMore = hasMore};
+    }
+
+    /// Export the complete winner set at an exact handshake-frozen frontier. This is used only
+    /// for bounded authenticated zero-state bootstrap; normal replication remains writer-local.
+    Result<ColdBootstrapSnapshot> exportColdBootstrap(const ReplicationState& frozen,
+                                                      std::size_t maxRecords,
+                                                      std::size_t maxPayloadBytes) {
+        if (auto loaded = ensureDurableQuarantineLoaded(); !loaded) {
+            return loaded.error();
+        }
+        if (auto recovered = recoverColdBootstrap(); !recovered) {
+            return recovered.error();
+        }
+        if (maxRecords == 0 || maxPayloadBytes == 0 ||
+            frozen.version.counters() != version_.counters() ||
+            frozen.commitments != historyCommitments_ || !frozen.quarantinedWriters.empty() ||
+            !durableQuarantinedWriters_.empty() || merged_.size() > maxRecords ||
+            merged_.size() > limits_.maxMergedKeys) {
+            return Error{ErrorCode::InvalidState,
+                         "cold bootstrap frontier is unavailable or exceeds bounds"};
+        }
+        if (auto valid = validateFrontierCommitments(frozen.version, frozen.commitments); !valid) {
+            return valid.error();
+        }
+        ColdBootstrapSnapshot snapshot{.frontier = frozen.version,
+                                       .commitments = frozen.commitments};
+        std::size_t payloadBytes = 0;
+        snapshot.winners.reserve(merged_.size());
+        for (const auto& [logicalKey, record] : merged_) {
+            MemoryDelta delta{.logicalKey = logicalKey, .record = record};
+            if (!record.isTombstone()) {
+                auto payload = backend_->retrieve(blobKey(record.entryHash));
+                if (!payload) {
+                    return payload.error();
+                }
+                if (payload.value().size() > limits_.maxValueBytes ||
+                    payload.value().size() > maxPayloadBytes ||
+                    payloadBytes > maxPayloadBytes - payload.value().size() ||
+                    hashContent(payload.value()) != record.entryHash) {
+                    return Error{ErrorCode::ResourceExhausted,
+                                 "cold bootstrap payload exceeds bounds or failed integrity"};
+                }
+                payloadBytes += payload.value().size();
+                delta.payload = std::move(payload.value());
+            }
+            if (auto validated = validateBootstrapWinner(delta, frozen.version, frozen.commitments);
+                !validated) {
+                return validated.error();
+            }
+            snapshot.winners.push_back(std::move(delta));
+        }
+        snapshot.rootDigest = coldBootstrapRoot(snapshot);
+        if (!writerAuth_) {
+            return Error{ErrorCode::Unauthorized,
+                         "cold bootstrap requires an authenticated witness signer"};
+        }
+        auto signature = writerAuth_->signDigest("cold-bootstrap-v1", snapshot.rootDigest);
+        if (!signature) {
+            return signature.error();
+        }
+        snapshot.witnessSignature = std::move(signature.value());
+        return snapshot;
+    }
+
+    /// Install an authenticated peer-witnessed winner snapshot into a durably empty replica.
+    /// A prepared journal makes promotion idempotent across checkpoint/index/cleanup crashes.
+    Result<DeltaApplyResult> applyColdBootstrap(const ColdBootstrapSnapshot& snapshot,
+                                                std::string_view authenticatedWitness,
+                                                std::size_t maxRecords,
+                                                std::size_t maxPayloadBytes) {
+        if (authenticatedWitness.empty()) {
+            return Error{ErrorCode::Unauthorized, "cold bootstrap witness is empty"};
+        }
+        if (auto loaded = ensureDurableQuarantineLoaded(); !loaded) {
+            return loaded.error();
+        }
+        if (auto recovered = recoverColdBootstrap(); !recovered) {
+            return recovered.error();
+        }
+        if (!version_.empty() || !historyCommitments_.empty() || !merged_.empty() ||
+            !durableQuarantinedWriters_.empty()) {
+            return Error{ErrorCode::InvalidState, "cold bootstrap target is not durably empty"};
+        }
+        auto existingIndex = backend_->listPage("index/", std::nullopt, 1);
+        if (!existingIndex) {
+            return existingIndex.error();
+        }
+        auto pending = pendingErases();
+        if (!pending) {
+            return pending.error();
+        }
+        if (!existingIndex.value().keys.empty() || !pending.value().empty()) {
+            return Error{ErrorCode::InvalidState,
+                         "cold bootstrap target has durable operations or erase intents"};
+        }
+        if (snapshot.winners.size() > maxRecords ||
+            snapshot.winners.size() > limits_.maxMergedKeys ||
+            snapshot.rootDigest != coldBootstrapRoot(snapshot)) {
+            return Error{ErrorCode::InvalidData, "cold bootstrap manifest is invalid"};
+        }
+        if (!writerAuth_ || snapshot.witnessSignature.writerId != authenticatedWitness ||
+            !writerAuth_->verifyDigest(snapshot.witnessSignature, "cold-bootstrap-v1",
+                                       snapshot.rootDigest)) {
+            return Error{ErrorCode::Unauthorized, "cold bootstrap witness signature is invalid"};
+        }
+        if (auto valid = validateFrontierCommitments(snapshot.frontier, snapshot.commitments);
+            !valid) {
+            return valid.error();
+        }
+        std::set<std::string> logicalKeys;
+        std::set<std::string> operationIds;
+        std::size_t payloadBytes = 0;
+        for (const auto& delta : snapshot.winners) {
+            if (!logicalKeys.insert(delta.logicalKey).second ||
+                !operationIds.insert(delta.record.operationId).second) {
+                return Error{ErrorCode::InvalidData,
+                             "cold bootstrap contains duplicate key or operation identity"};
+            }
+            if (auto validated =
+                    validateBootstrapWinner(delta, snapshot.frontier, snapshot.commitments);
+                !validated) {
+                return validated.error();
+            }
+            if (delta.payload.size() > maxPayloadBytes ||
+                payloadBytes > maxPayloadBytes - delta.payload.size()) {
+                return Error{ErrorCode::ResourceExhausted,
+                             "cold bootstrap payload exceeds aggregate bound"};
+            }
+            payloadBytes += delta.payload.size();
+        }
+        if (payloadBytes > limits_.maxCacheBytes) {
+            return Error{ErrorCode::ResourceExhausted,
+                         "cold bootstrap payload exceeds resident cache bound"};
+        }
+
+        if (auto cleared = clearColdBootstrapStaging(); !cleared) {
+            return cleared.error();
+        }
+        for (std::size_t index = 0; index < snapshot.winners.size(); ++index) {
+            const auto& delta = snapshot.winners[index];
+            if (!delta.record.isTombstone()) {
+                if (auto stored = backend_->store(coldBootstrapPayloadKey(index), delta.payload);
+                    !stored) {
+                    return stored.error();
+                }
+            }
+            const auto recordBytes = serialize(delta.record);
+            if (auto staged = backend_->store(coldBootstrapEntryKey(index), recordBytes); !staged) {
+                return staged.error();
+            }
+        }
+        if (auto journal = persistColdBootstrapJournal(snapshot, authenticatedWitness); !journal) {
+            return journal.error();
+        }
+        return finalizeColdBootstrap(snapshot, authenticatedWitness);
     }
 
     /// Apply peer-delivered operations directly through the same causal/LWW
@@ -1138,6 +1307,338 @@ public:
     }
 
 private:
+    Result<void> validateFrontierCommitments(
+        const VersionVector& frontier,
+        const std::map<NodeId, WriterHistoryCommitment>& commitments) const {
+        if (frontier.empty() || commitments.empty() ||
+            commitments.size() > limits_.maxTrackedIdentities ||
+            frontier.counters().size() != commitments.size()) {
+            return Error{ErrorCode::InvalidData,
+                         "cold bootstrap frontier and commitments are incomplete"};
+        }
+        for (const auto& [writer, counter] : frontier.counters()) {
+            const auto commitment = commitments.find(writer);
+            if (writer.empty() || counter == 0 || commitment == commitments.end() ||
+                commitment->second.counter != counter ||
+                !isSha256Digest(commitment->second.digest)) {
+                return Error{ErrorCode::InvalidData,
+                             "cold bootstrap writer frontier is not committed"};
+            }
+        }
+        return {};
+    }
+
+    Result<void>
+    validateBootstrapWinner(const MemoryDelta& delta, const VersionVector& frontier,
+                            const std::map<NodeId, WriterHistoryCommitment>& commitments) {
+        if (delta.record.schemaVersion != kAuthenticatedMemoryIndexSchemaVersion) {
+            return Error{ErrorCode::Unauthorized,
+                         "cold bootstrap requires authenticated winner envelopes"};
+        }
+        auto validated = validateDirectDelta(delta);
+        if (!validated) {
+            return validated.error();
+        }
+        const auto writer = commitments.find(delta.record.origin);
+        if (writer == commitments.end() ||
+            delta.record.vv.get(delta.record.origin) > writer->second.counter) {
+            return Error{ErrorCode::InvalidData,
+                         "cold bootstrap winner exceeds its committed writer frontier"};
+        }
+        for (const auto& [dependency, counter] : delta.record.vv.counters()) {
+            if (counter == 0 || counter > frontier.get(dependency)) {
+                return Error{ErrorCode::InvalidData,
+                             "cold bootstrap winner exceeds the frozen causal frontier"};
+            }
+        }
+        return {};
+    }
+
+    std::string coldBootstrapRoot(const ColdBootstrapSnapshot& snapshot) const {
+        nlohmann::json commitmentJson = nlohmann::json::array();
+        for (const auto& [writer, commitment] : snapshot.commitments) {
+            commitmentJson.push_back({{"writer_id", writer},
+                                      {"counter", commitment.counter},
+                                      {"digest", commitment.digest}});
+        }
+        nlohmann::json winnerJson = nlohmann::json::array();
+        std::vector<const MemoryDelta*> ordered;
+        ordered.reserve(snapshot.winners.size());
+        for (const auto& winner : snapshot.winners) {
+            ordered.push_back(&winner);
+        }
+        std::ranges::sort(ordered, [](const MemoryDelta* lhs, const MemoryDelta* rhs) {
+            return lhs->logicalKey < rhs->logicalKey;
+        });
+        for (const auto* winner : ordered) {
+            const auto recordBytes = serialize(winner->record);
+            winnerJson.push_back(
+                {{"logical_key", winner->logicalKey},
+                 {"record_hash", hashContent(recordBytes)},
+                 {"payload_hash",
+                  winner->record.isTombstone() ? std::string{} : hashContent(winner->payload)},
+                 {"payload_size", winner->payload.size()}});
+        }
+        const std::string canonical = nlohmann::json{
+            {"domain", "yams-cold-bootstrap-v1"},
+            {"corpus_id", corpusId_},
+            {"corpus_epoch", corpusEpoch_},
+            {"frontier", snapshot.frontier},
+            {"commitments", std::move(commitmentJson)},
+            {"winners",
+             std::move(winnerJson)}}.dump();
+        return hashContent(std::span<const std::byte>{
+            reinterpret_cast<const std::byte*>(canonical.data()), canonical.size()});
+    }
+
+    std::string coldBootstrapPrefix() const {
+        const std::string scope = corpusId_ + ":" + std::to_string(corpusEpoch_) + ":" + nodeId_;
+        return "state/bootstrap/" +
+               hashContent(std::span<const std::byte>{
+                   reinterpret_cast<const std::byte*>(scope.data()), scope.size()}) +
+               "/";
+    }
+
+    std::string coldBootstrapJournalKey() const { return coldBootstrapPrefix() + "journal.json"; }
+
+    std::string coldBootstrapEntryKey(std::size_t index) const {
+        return coldBootstrapPrefix() + "entries/" + std::to_string(index) + ".json";
+    }
+
+    std::string coldBootstrapPayloadKey(std::size_t index) const {
+        return coldBootstrapPrefix() + "payloads/" + std::to_string(index) + ".bin";
+    }
+
+    Result<void> clearColdBootstrapStaging() {
+        std::optional<std::string> cursor;
+        std::size_t removed = 0;
+        const auto maxStaged =
+            limits_.maxMergedKeys > (std::numeric_limits<std::size_t>::max() - 1) / 2
+                ? std::numeric_limits<std::size_t>::max()
+                : limits_.maxMergedKeys * 2 + 1;
+        for (;;) {
+            auto listed =
+                backend_->listPage(coldBootstrapPrefix(),
+                                   cursor ? std::optional<std::string_view>{*cursor} : std::nullopt,
+                                   limits_.maxIndexObjectsPerSync);
+            if (!listed) {
+                return listed.error();
+            }
+            auto page = std::move(listed.value());
+            for (const auto& key : page.keys) {
+                if (++removed > maxStaged) {
+                    return Error{ErrorCode::ResourceExhausted,
+                                 "cold bootstrap staging exceeds cleanup bound"};
+                }
+                if (auto erased = backend_->remove(key); !erased) {
+                    return erased.error();
+                }
+            }
+            cursor = std::move(page.nextCursor);
+            if (!cursor) {
+                return {};
+            }
+        }
+    }
+
+    Result<void> clearColdBootstrapAfterCommit() {
+        if (auto removed = backend_->remove(coldBootstrapJournalKey()); !removed) {
+            return removed.error();
+        }
+        return clearColdBootstrapStaging();
+    }
+
+    Result<void> persistColdBootstrapJournal(const ColdBootstrapSnapshot& snapshot,
+                                             std::string_view witness) {
+        nlohmann::json commitments = nlohmann::json::array();
+        for (const auto& [writer, commitment] : snapshot.commitments) {
+            commitments.push_back({{"writer_id", writer},
+                                   {"counter", commitment.counter},
+                                   {"digest", commitment.digest}});
+        }
+        const auto encoded =
+            nlohmann::json{{"schema_version", 1},
+                           {"corpus_id", corpusId_},
+                           {"corpus_epoch", corpusEpoch_},
+                           {"witness", std::string(witness)},
+                           {"frontier", snapshot.frontier},
+                           {"commitments", std::move(commitments)},
+                           {"record_count", snapshot.winners.size()},
+                           {"root_digest", snapshot.rootDigest},
+                           {"witness_key_id", snapshot.witnessSignature.keyId},
+                           {"witness_algorithm", snapshot.witnessSignature.algorithm},
+                           {"witness_signature", snapshot.witnessSignature.signature}}
+                .dump();
+        if (encoded.size() > limits_.maxEnvelopeBytes) {
+            return Error{ErrorCode::ResourceExhausted,
+                         "cold bootstrap journal exceeds envelope bound"};
+        }
+        return backend_->store(
+            coldBootstrapJournalKey(),
+            std::span<const std::byte>{reinterpret_cast<const std::byte*>(encoded.data()),
+                                       encoded.size()});
+    }
+
+    Result<ColdBootstrapSnapshot> loadColdBootstrapJournal(std::string& witness) {
+        auto encoded = backend_->retrieve(coldBootstrapJournalKey());
+        if (!encoded) {
+            return encoded.error();
+        }
+        if (encoded.value().size() > limits_.maxEnvelopeBytes) {
+            return Error{ErrorCode::InvalidData, "cold bootstrap journal exceeds bound"};
+        }
+        try {
+            const std::string_view text(reinterpret_cast<const char*>(encoded.value().data()),
+                                        encoded.value().size());
+            const auto json = nlohmann::json::parse(text);
+            if (!json.is_object() || json.at("schema_version").get<std::uint32_t>() != 1 ||
+                json.at("corpus_id").get<std::string>() != corpusId_ ||
+                json.at("corpus_epoch").get<std::uint64_t>() != corpusEpoch_ ||
+                !json.at("commitments").is_array()) {
+                return Error{ErrorCode::InvalidData, "cold bootstrap journal identity is invalid"};
+            }
+            witness = json.at("witness").get<std::string>();
+            ColdBootstrapSnapshot snapshot;
+            snapshot.frontier = json.at("frontier").get<VersionVector>();
+            snapshot.rootDigest = json.at("root_digest").get<std::string>();
+            snapshot.witnessSignature = DetachedWriterSignature{
+                .writerId = witness,
+                .keyId = json.at("witness_key_id").get<std::string>(),
+                .algorithm = json.at("witness_algorithm").get<std::string>(),
+                .signature = json.at("witness_signature").get<std::string>()};
+            const auto recordCount = json.at("record_count").get<std::size_t>();
+            if (witness.empty() || !isSha256Digest(snapshot.rootDigest) ||
+                recordCount > limits_.maxMergedKeys) {
+                return Error{ErrorCode::InvalidData, "cold bootstrap journal violates bounds"};
+            }
+            for (const auto& entry : json.at("commitments")) {
+                const auto writer = entry.at("writer_id").get<std::string>();
+                WriterHistoryCommitment commitment{.counter =
+                                                       entry.at("counter").get<std::uint64_t>(),
+                                                   .digest = entry.at("digest").get<std::string>()};
+                if (writer.empty() || commitment.counter == 0 ||
+                    !isSha256Digest(commitment.digest) ||
+                    !snapshot.commitments.emplace(writer, std::move(commitment)).second) {
+                    return Error{ErrorCode::InvalidData,
+                                 "cold bootstrap journal commitment is invalid"};
+                }
+            }
+            snapshot.winners.reserve(recordCount);
+            for (std::size_t index = 0; index < recordCount; ++index) {
+                auto recordBytes = backend_->retrieve(coldBootstrapEntryKey(index));
+                if (!recordBytes || recordBytes.value().size() > limits_.maxEnvelopeBytes) {
+                    return Error{ErrorCode::InvalidData,
+                                 "cold bootstrap staged record is missing or oversized"};
+                }
+                auto record = deserialize(recordBytes.value());
+                if (!record) {
+                    return record.error();
+                }
+                MemoryDelta delta{.logicalKey = record.value().logicalKey,
+                                  .record = std::move(record.value())};
+                if (!delta.record.isTombstone()) {
+                    auto payload = backend_->retrieve(coldBootstrapPayloadKey(index));
+                    if (!payload) {
+                        return payload.error();
+                    }
+                    delta.payload = std::move(payload.value());
+                }
+                snapshot.winners.push_back(std::move(delta));
+            }
+            return snapshot;
+        } catch (const std::exception& error) {
+            return Error{ErrorCode::InvalidData,
+                         std::string("invalid cold bootstrap journal: ") + error.what()};
+        }
+    }
+
+    Result<DeltaApplyResult> finalizeColdBootstrap(const ColdBootstrapSnapshot& snapshot,
+                                                   std::string_view witness) {
+        if (witness.empty() || snapshot.witnessSignature.writerId != witness || !writerAuth_ ||
+            snapshot.rootDigest != coldBootstrapRoot(snapshot) ||
+            !writerAuth_->verifyDigest(snapshot.witnessSignature, "cold-bootstrap-v1",
+                                       snapshot.rootDigest)) {
+            return Error{ErrorCode::InvalidData,
+                         "cold bootstrap journal root or witness signature mismatch"};
+        }
+        for (const auto& delta : snapshot.winners) {
+            if (!delta.record.isTombstone()) {
+                if (auto stored = backend_->store(blobKey(delta.record.entryHash), delta.payload);
+                    !stored) {
+                    return stored.error();
+                }
+            }
+        }
+        if (auto persisted = persistReplicationCheckpoint(snapshot.commitments, {}); !persisted) {
+            return persisted.error();
+        }
+        for (const auto& delta : snapshot.winners) {
+            const auto recordBytes = serialize(delta.record);
+            const auto recordHash = hashContent(recordBytes);
+            if (auto stored = backend_->store(indexKey(delta.logicalKey, recordHash), recordBytes);
+                !stored) {
+                return stored.error();
+            }
+        }
+        historyCommitments_ = snapshot.commitments;
+        version_ = snapshot.frontier;
+        merged_.clear();
+        cachedBlobs_.clear();
+        cachedBytes_ = 0;
+        deltaOperations_.clear();
+        for (const auto& delta : snapshot.winners) {
+            merged_[delta.logicalKey] = delta.record;
+            auto validated = validateDirectDelta(delta);
+            if (!validated) {
+                return validated.error();
+            }
+            rememberDirectOperation(delta, validated.value());
+            if (!delta.record.isTombstone()) {
+                cachedBytes_ += delta.payload.size();
+                cachedBlobs_[delta.record.entryHash] = delta.payload;
+            }
+            logicalClock_ = std::max(logicalClock_, delta.record.ts.logical);
+        }
+        // Cleanup is not a correctness boundary. Remove the journal first so a crash cannot
+        // leave it referring to already-deleted staged entries; remaining entries are orphans.
+        (void)clearColdBootstrapAfterCommit();
+        return DeltaApplyResult{.received = snapshot.winners.size(),
+                                .merged = snapshot.winners.size(),
+                                .version = version_};
+    }
+
+    Result<void> recoverColdBootstrap() {
+        if (recoveringColdBootstrap_) {
+            return {};
+        }
+        auto exists = backend_->exists(coldBootstrapJournalKey());
+        if (!exists) {
+            return exists.error();
+        }
+        if (!exists.value()) {
+            return {};
+        }
+        recoveringColdBootstrap_ = true;
+        std::string witness;
+        auto snapshot = loadColdBootstrapJournal(witness);
+        if (!snapshot) {
+            recoveringColdBootstrap_ = false;
+            return snapshot.error();
+        }
+        if ((!historyCommitments_.empty() && historyCommitments_ != snapshot.value().commitments) ||
+            (!version_.empty() && version_.counters() != snapshot.value().frontier.counters())) {
+            recoveringColdBootstrap_ = false;
+            return Error{ErrorCode::InvalidData,
+                         "cold bootstrap journal conflicts with durable replication state"};
+        }
+        auto finalized = finalizeColdBootstrap(snapshot.value(), witness);
+        recoveringColdBootstrap_ = false;
+        if (!finalized) {
+            return finalized.error();
+        }
+        return {};
+    }
+
     Result<std::optional<MemoryDelta>> loadLocalDelta(const std::string& key,
                                                       const VersionVector& peerVersion) {
         const std::string logicalKey = logicalKeyFromIndexKey(key);
@@ -1813,7 +2314,7 @@ private:
 
     Result<void> ensureDurableQuarantineLoaded() {
         if (durableQuarantineLoaded_) {
-            return {};
+            return recoverColdBootstrap();
         }
         const auto checkpointKey = replicationCheckpointKey();
         auto exists = backend_->exists(checkpointKey);
@@ -1822,7 +2323,7 @@ private:
         }
         if (!exists.value()) {
             durableQuarantineLoaded_ = true;
-            return {};
+            return recoverColdBootstrap();
         }
         auto encoded = backend_->retrieve(checkpointKey);
         if (!encoded) {
@@ -1868,9 +2369,12 @@ private:
             }
             durableQuarantinedWriters_ = std::move(quarantined);
             historyCommitments_ = std::move(commitments);
+            for (const auto& [writer, commitment] : historyCommitments_) {
+                version_.observe(writer, commitment.counter);
+            }
             durableQuarantineLoaded_ = true;
             removeQuarantinedWinners();
-            return {};
+            return recoverColdBootstrap();
         } catch (const std::exception& error) {
             return Error{ErrorCode::InvalidData,
                          std::string("invalid replication checkpoint: ") + error.what()};
@@ -2300,6 +2804,7 @@ private:
     std::map<std::string, MemoryIndexRecord> quarantineInvalidations_;
     std::map<std::string, MemoryIndexRecord> quarantineInvalidationSources_;
     bool durableQuarantineLoaded_{false};
+    bool recoveringColdBootstrap_{false};
     std::uint64_t durableQuarantineGeneration_{0};
     std::size_t authFailures_{0};
 };

@@ -16,6 +16,8 @@ struct DeltaExchangeOptions {
     std::size_t maxBatches{4096};
     std::size_t maxDeltasPerSession{1024};
     std::size_t maxWireBytesPerSession{std::size_t{64} * 1024 * 1024};
+    std::size_t maxSnapshotRecords{1024};
+    std::size_t maxSnapshotWireBytes{std::size_t{64} * 1024 * 1024};
     std::chrono::milliseconds timeout{std::chrono::seconds(10)};
 };
 
@@ -28,6 +30,8 @@ struct DeltaExchangeStats {
     std::size_t replayed{0};
     std::size_t quarantined{0};
     std::size_t peerQuarantined{0};
+    std::size_t snapshotsSent{0};
+    std::size_t snapshotsReceived{0};
 };
 
 /// Client role: send all local deltas the peer lacks, then receive peer deltas.

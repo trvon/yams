@@ -75,6 +75,21 @@ std::unique_ptr<yams::storage::FilesystemBackend> backend(const std::filesystem:
     return result;
 }
 
+std::shared_ptr<const yams::memory_sync::WriterAuthenticator>
+writerAuth(std::string nodeId, std::string keyId, const yams::memory_sync::WriterKeyPair& keyPair,
+           std::vector<yams::memory_sync::TrustedWriterKey> trusted) {
+    yams::memory_sync::WriterAuthConfig config;
+    config.required = true;
+    config.localWriterId = std::move(nodeId);
+    config.localKeyId = std::move(keyId);
+    config.localPrivateKeyPem = keyPair.privateKeyPem;
+    config.trustedKeys = std::move(trusted);
+    auto result =
+        yams::memory_sync::WriterAuthenticator::create(std::move(config), "wire-delta-corpus", 1);
+    REQUIRE(result.has_value());
+    return result.value();
+}
+
 TlsIdentity identity(std::string nodeId, const yams::memory_sync::WriterKeyPair& keyPair) {
     auto result = TlsIdentity::fromPrivateKeyPem(std::move(nodeId), keyPair.privateKeyPem);
     REQUIRE(result.has_value());
@@ -161,6 +176,88 @@ ExchangePair runExchange(MemorySyncService& clientService, MemorySyncService& se
 
 } // namespace
 
+TEST_CASE("direct P2P cold bootstrap installs an authenticated multiwriter snapshot",
+          "[daemon][p2p][delta][cold-bootstrap][network][security]") {
+    TempDir clientDir{"cold-client"};
+    TempDir serverDir{"cold-server"};
+    auto clientKey = yams::memory_sync::generateWriterKeyPair();
+    auto serverKey = yams::memory_sync::generateWriterKeyPair();
+    auto foreignKey = yams::memory_sync::generateWriterKeyPair();
+    REQUIRE(clientKey.has_value());
+    REQUIRE(serverKey.has_value());
+    REQUIRE(foreignKey.has_value());
+    const std::vector<yams::memory_sync::TrustedWriterKey> trust = {
+        {"client-node", "client-v1", clientKey.value().publicKeyPem, false},
+        {"server-node", "server-v1", serverKey.value().publicKeyPem, false},
+        {"foreign-node", "foreign-v1", foreignKey.value().publicKeyPem, false},
+    };
+
+    auto foreignBackend = backend(serverDir.path);
+    yams::memory_sync::MemorySyncLoop foreign{
+        *foreignBackend,
+        "foreign-node",
+        "wire-delta-corpus",
+        1,
+        false,
+        {},
+        {},
+        {},
+        writerAuth("foreign-node", "foreign-v1", foreignKey.value(), trust)};
+    REQUIRE(foreign.publish("user/foreign", bytes("foreign-value")).has_value());
+
+    MemorySyncService serverService{
+        backend(serverDir.path),
+        MemorySyncConfig{"server-node",
+                         60'000,
+                         "wire-delta-corpus",
+                         1,
+                         {},
+                         false,
+                         writerAuth("server-node", "server-v1", serverKey.value(), trust)}};
+    REQUIRE(serverService.syncFully().has_value());
+    REQUIRE(serverService.publish("user/server", bytes("server-value")).has_value());
+    REQUIRE(serverService.syncFully().has_value());
+    MemorySyncService clientService{
+        backend(clientDir.path),
+        MemorySyncConfig{"client-node",
+                         60'000,
+                         "wire-delta-corpus",
+                         1,
+                         {},
+                         false,
+                         writerAuth("client-node", "client-v1", clientKey.value(), trust)}};
+
+    InMemoryPeerTrustStore clientTrust;
+    InMemoryPeerTrustStore serverTrust;
+    const auto refused = runExchange(clientService, serverService, clientKey.value(),
+                                     serverKey.value(), clientTrust, serverTrust, true);
+    CHECK_FALSE((refused.client.has_value() && refused.server.has_value()));
+    CHECK(clientService.currentVersion().empty());
+
+    // The failed TOFU session persisted pins. A fresh handshake can now use those explicit
+    // identities, but same-session first contact was never allowed to carry a snapshot.
+    const auto exchange = runExchange(clientService, serverService, clientKey.value(),
+                                      serverKey.value(), clientTrust, serverTrust, false);
+    REQUIRE(exchange.client.has_value());
+    REQUIRE(exchange.server.has_value());
+    CHECK(exchange.client.value().snapshotsReceived == 1);
+    CHECK(exchange.server.value().snapshotsSent == 1);
+    REQUIRE(clientService.readCached("user/foreign").has_value());
+    REQUIRE(clientService.readCached("user/server").has_value());
+    CHECK(text(clientService.readCached("user/foreign").value()) == "foreign-value");
+    CHECK(text(clientService.readCached("user/server").value()) == "server-value");
+    CHECK(clientService.currentVersion().counters() == serverService.currentVersion().counters());
+
+    REQUIRE(serverService.publish("user/continuation", bytes("after-snapshot")).has_value());
+    const auto continued = runExchange(clientService, serverService, clientKey.value(),
+                                       serverKey.value(), clientTrust, serverTrust, false);
+    REQUIRE(continued.client.has_value());
+    REQUIRE(continued.server.has_value());
+    CHECK(continued.client.value().snapshotsReceived == 0);
+    REQUIRE(clientService.readCached("user/continuation").has_value());
+    CHECK(text(clientService.readCached("user/continuation").value()) == "after-snapshot");
+}
+
 TEST_CASE("direct P2P delta exchange rejects origin not bound to TLS peer",
           "[daemon][p2p][delta][network][security]") {
     TempDir clientDir{"forged-client"};
@@ -225,12 +322,13 @@ TEST_CASE("direct P2P delta exchange rejects origin not bound to TLS peer",
     record.operationId = yams::memory_sync::makeOperationId(record.origin, 1);
     record.logicalKey = "user/forged";
     record.recordKind = std::string(yams::memory_sync::kMemoryValueRecordKind);
+    const nlohmann::json mode{{"type", "replication_mode"}, {"mode", "delta"}};
     const nlohmann::json batch{{"type", "delta_batch"}, {"count", 1}, {"has_more", false}};
     const nlohmann::json wireRecord{{"type", "delta_record"},
                                     {"logical_key", record.logicalKey},
                                     {"record", record},
                                     {"payload_size", payload.size()}};
-    for (const auto& json : {batch, wireRecord}) {
+    for (const auto& json : {mode, batch, wireRecord}) {
         const std::string encoded = json.dump();
         REQUIRE(
             channel.value()
@@ -279,6 +377,7 @@ TEST_CASE("direct P2P delta receiver rejects aggregate bytes before reading payl
     record.operationId = yams::memory_sync::makeOperationId(record.origin, 1);
     record.logicalKey = "user/oversized-session";
     record.recordKind = std::string(yams::memory_sync::kMemoryValueRecordKind);
+    const nlohmann::json mode{{"type", "replication_mode"}, {"mode", "delta"}};
     const nlohmann::json batch{{"type", "delta_batch"}, {"count", 1}, {"has_more", false}};
     const nlohmann::json wireRecord{{"type", "delta_record"},
                                     {"logical_key", record.logicalKey},
@@ -326,7 +425,7 @@ TEST_CASE("direct P2P delta receiver rejects aggregate bytes before reading payl
     auto handshake = yams::daemon::p2p::initiatePeerHandshake(
         channel.value(), handshakeConfig("client-node", clientService, true), clientTrust);
     REQUIRE(handshake.has_value());
-    for (const auto& json : {batch, wireRecord}) {
+    for (const auto& json : {mode, batch, wireRecord}) {
         const std::string encoded = json.dump();
         REQUIRE(
             channel.value()

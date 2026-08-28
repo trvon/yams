@@ -20,7 +20,7 @@
 
 namespace yams::daemon::p2p {
 
-inline constexpr std::uint32_t kP2pProtocolVersion = 2;
+inline constexpr std::uint32_t kP2pProtocolVersion = 3;
 inline constexpr std::uint32_t kP2pEnvelopeSchemaVersion =
     memory_sync::kAuthenticatedMemoryIndexSchemaVersion;
 inline constexpr std::size_t kMaxP2pReplicationWriters = 256;

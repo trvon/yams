@@ -1466,6 +1466,148 @@ TEST_CASE("writer history commitments cover complete ordered history and survive
           firstState.commitments.at("writer").digest);
 }
 
+TEST_CASE("authenticated cold bootstrap installs a bounded multiwriter snapshot and restarts",
+          "[memory-sync][cold-bootstrap][restart][security]") {
+    BackendFixture sourceFixture{"cold-bootstrap-source"};
+    BackendFixture targetFixture{"cold-bootstrap-target"};
+    const auto keyA = generateWriterKey();
+    const auto keyB = generateWriterKey();
+    const auto keyC = generateWriterKey();
+    const std::vector<TrustedWriterKey> trust = {
+        {"writer-a", "a-v1", keyA.publicPem, false},
+        {"writer-b", "b-v1", keyB.publicPem, false},
+        {"writer-c", "c-v1", keyC.publicPem, false},
+    };
+    MemorySyncLoop writerA{sourceFixture.backend,
+                           "writer-a",
+                           "auth-corpus",
+                           1,
+                           false,
+                           {},
+                           {},
+                           {},
+                           writerAuth("writer-a", "a-v1", keyA, trust)};
+    MemorySyncLoop writerB{sourceFixture.backend,
+                           "writer-b",
+                           "auth-corpus",
+                           1,
+                           false,
+                           {},
+                           {},
+                           {},
+                           writerAuth("writer-b", "b-v1", keyB, trust)};
+    REQUIRE(writerA.publish("user/a", bytes("from-a")).has_value());
+    REQUIRE(writerB.syncFully().has_value());
+    REQUIRE(writerB.publish("user/b", bytes("from-b")).has_value());
+    REQUIRE(writerA.syncFully().has_value());
+    const auto frozen = writerA.replicationState();
+    REQUIRE(frozen.version.get("writer-a") == 1);
+    REQUIRE(frozen.version.get("writer-b") == 1);
+    auto snapshot = writerA.exportColdBootstrap(frozen, 8, 1024);
+    REQUIRE(snapshot.has_value());
+    REQUIRE(snapshot.value().winners.size() == 2);
+
+    MemorySyncLoop target{targetFixture.backend,
+                          "writer-c",
+                          "auth-corpus",
+                          1,
+                          false,
+                          {},
+                          {},
+                          {},
+                          writerAuth("writer-c", "c-v1", keyC, trust)};
+    auto tampered = snapshot.value();
+    tampered.winners.front().payload.front() = std::byte{'x'};
+    auto rejected = target.applyColdBootstrap(tampered, "writer-a", 8, 1024);
+    REQUIRE_FALSE(rejected.has_value());
+    CHECK(rejected.error().code == yams::ErrorCode::InvalidData);
+    CHECK(target.currentVersion().empty());
+    CHECK(target.mergedRecordCount() == 0);
+
+    auto imported = target.applyColdBootstrap(snapshot.value(), "writer-a", 8, 1024);
+    REQUIRE(imported.has_value());
+    CHECK(imported.value().merged == 2);
+    CHECK(target.currentVersion().counters() == frozen.version.counters());
+    REQUIRE(target.readCached("user/a").has_value());
+    REQUIRE(target.readCached("user/b").has_value());
+
+    MemorySyncLoop restarted{targetFixture.backend,
+                             "writer-c",
+                             "auth-corpus",
+                             1,
+                             false,
+                             {},
+                             {},
+                             {},
+                             writerAuth("writer-c", "c-v1", keyC, trust)};
+    REQUIRE(restarted.syncFully().has_value());
+    CHECK(restarted.currentVersion().counters() == frozen.version.counters());
+    CHECK(restarted.replicationState().commitments == frozen.commitments);
+    REQUIRE(restarted.readCached("user/a").has_value());
+    REQUIRE(restarted.readCached("user/b").has_value());
+
+    auto second = restarted.applyColdBootstrap(snapshot.value(), "writer-a", 8, 1024);
+    REQUIRE_FALSE(second.has_value());
+    CHECK(second.error().code == yams::ErrorCode::InvalidState);
+}
+
+TEST_CASE("cold bootstrap journal completes after checkpoint failure and restart",
+          "[memory-sync][cold-bootstrap][restart][failure-injection]") {
+    BackendFixture sourceFixture{"cold-bootstrap-recovery-source"};
+    CountingBackendFixture targetFixture{"cold-bootstrap-recovery-target"};
+    const auto sourceKey = generateWriterKey();
+    const auto targetKey = generateWriterKey();
+    const std::vector<TrustedWriterKey> trust = {
+        {"source", "source-v1", sourceKey.publicPem, false},
+        {"target", "target-v1", targetKey.publicPem, false},
+    };
+    MemorySyncLoop source{sourceFixture.backend,
+                          "source",
+                          "auth-corpus",
+                          1,
+                          false,
+                          {},
+                          {},
+                          {},
+                          writerAuth("source", "source-v1", sourceKey, trust)};
+    REQUIRE(source.publish("user/recover", bytes("recover-me")).has_value());
+    REQUIRE(source.syncFully().has_value());
+    auto snapshot = source.exportColdBootstrap(source.replicationState(), 4, 1024);
+    REQUIRE(snapshot.has_value());
+
+    targetFixture.backend.failNextStore("checkpoint/replication-state-v1/");
+    {
+        MemorySyncLoop target{targetFixture.backend,
+                              "target",
+                              "auth-corpus",
+                              1,
+                              false,
+                              {},
+                              {},
+                              {},
+                              writerAuth("target", "target-v1", targetKey, trust)};
+        auto failed = target.applyColdBootstrap(snapshot.value(), "source", 4, 1024);
+        REQUIRE_FALSE(failed.has_value());
+        CHECK(failed.error().code == yams::ErrorCode::IOError);
+        CHECK(target.currentVersion().empty());
+        CHECK(target.mergedRecordCount() == 0);
+    }
+
+    MemorySyncLoop restarted{targetFixture.backend,
+                             "target",
+                             "auth-corpus",
+                             1,
+                             false,
+                             {},
+                             {},
+                             {},
+                             writerAuth("target", "target-v1", targetKey, trust)};
+    REQUIRE(restarted.syncFully().has_value());
+    CHECK(restarted.currentVersion().counters() == snapshot.value().frontier.counters());
+    REQUIRE(restarted.readCached("user/recover").has_value());
+    CHECK(text(restarted.readCached("user/recover").value()) == "recover-me");
+}
+
 TEST_CASE("staged deltas cannot exceed the handshake-frozen writer frontier",
           "[memory-sync][direct-delta][commitment][security]") {
     BackendFixture writerFixture{"direct-frozen-frontier-writer"};

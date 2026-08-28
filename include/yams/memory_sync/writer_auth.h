@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <yams/core/types.h>
@@ -28,6 +29,13 @@ struct WriterKeyPair {
 
 Result<WriterKeyPair> generateWriterKeyPair();
 
+struct DetachedWriterSignature {
+    NodeId writerId;
+    std::string keyId;
+    std::string algorithm;
+    std::string signature;
+};
+
 struct WriterAuthConfig {
     bool required{false};
     NodeId localWriterId;
@@ -46,6 +54,10 @@ public:
     bool required() const noexcept;
     Result<void> sign(MemoryIndexRecord& record) const;
     bool verify(const MemoryIndexRecord& record) const noexcept;
+    Result<DetachedWriterSignature> signDigest(std::string_view domain,
+                                               std::string_view digest) const;
+    bool verifyDigest(const DetachedWriterSignature& signature, std::string_view domain,
+                      std::string_view digest) const noexcept;
 
 private:
     struct Impl;
