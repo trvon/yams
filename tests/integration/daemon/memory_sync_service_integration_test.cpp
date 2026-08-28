@@ -161,6 +161,7 @@ yams::test::DaemonHarness::Options makeMemorySyncHarnessOptions(std::string node
         config.memorySync.nodeId = nodeId;
         config.memorySync.corpusId = corpusId;
         config.memorySync.corpusEpoch = 1;
+        config.memorySync.transport = "shared-store";
         config.memorySync.backend = "filesystem";
         config.memorySync.path = "shared-memory";
         config.memorySync.syncIntervalMs = 60'000;
@@ -203,6 +204,7 @@ TEST_CASE("Daemon refuses enabled memory sync when writer authentication cannot 
         config.memorySync.nodeId = "123e4567-e89b-42d3-a456-426614174099";
         config.memorySync.corpusId = "startup-failure-corpus";
         config.memorySync.corpusEpoch = 1;
+        config.memorySync.transport = "shared-store";
         config.memorySync.backend = "filesystem";
         config.memorySync.path = "shared-memory";
         config.memorySync.writerAuthRequired = true;
@@ -228,6 +230,7 @@ TEST_CASE("Daemon memory sync periodically converges and stops cleanly",
         config.memorySync.nodeId = "123e4567-e89b-42d3-a456-426614174000";
         config.memorySync.corpusId = "integration-corpus";
         config.memorySync.corpusEpoch = 1;
+        config.memorySync.transport = "shared-store";
         config.memorySync.backend = "filesystem";
         config.memorySync.path = "shared-memory";
         config.memorySync.syncIntervalMs = 25;
@@ -921,6 +924,7 @@ TEST_CASE("Daemon temporary memory sync converges inside one session and cleans 
         config.memorySync.nodeId = "123e4567-e89b-42d3-a456-426614174001";
         config.memorySync.corpusId = "temporary-integration-corpus";
         config.memorySync.corpusEpoch = 1;
+        config.memorySync.transport = "shared-store";
         config.memorySync.backend = "filesystem";
         config.memorySync.path = "shared-memory";
         config.memorySync.syncIntervalMs = 25;

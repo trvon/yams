@@ -5,6 +5,7 @@
 //
 // Catch2 migration from GTest (yams-3s4 / yams-zns)
 
+// pi-lens-ignore: fatal error
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
@@ -1560,6 +1561,49 @@ TEST_CASE("ConfigResolver applies typed memory-sync policy", "[daemon][config][m
     CHECK(config.memorySync.sessionId == "run-123");
     CHECK(config.memorySync.writerAuthRequired);
     CHECK(config.memorySync.writerAuthManifestPath == "/secure/writers.json");
+}
+
+TEST_CASE("ConfigResolver accepts direct P2P without a shared path",
+          "[daemon][config][memory-sync][p2p]") {
+    ConfigResolver::ConfigSections sections = {
+        {"memory_sync",
+         {{"enabled", "true"},
+          {"node_id", "123e4567-e89b-42d3-a456-426614174000"},
+          {"corpus_id", "corpus-a"},
+          {"corpus_epoch", "9"},
+          {"transport", "direct"},
+          {"listen", "0.0.0.0:9721"},
+          {"identity_key", "/secure/p2p.pem"},
+          {"allow_first_contact", "false"},
+          {"max_peers", "12"}}},
+    };
+    DaemonConfig config;
+
+    REQUIRE(ConfigResolver::applyMemorySync(sections, config));
+    CHECK(config.memorySync.enabled);
+    CHECK(config.memorySync.transport == "direct");
+    CHECK(config.memorySync.listen == "0.0.0.0:9721");
+    CHECK(config.memorySync.identityKeyPath == "/secure/p2p.pem");
+    CHECK_FALSE(config.memorySync.allowFirstContact);
+    CHECK(config.memorySync.maxPeers == 12);
+    CHECK(config.memorySync.path.empty());
+}
+
+TEST_CASE("ConfigResolver infers shared-store for legacy backend path",
+          "[daemon][config][memory-sync]") {
+    ConfigResolver::ConfigSections sections = {
+        {"memory_sync",
+         {{"enabled", "true"},
+          {"node_id", "123e4567-e89b-42d3-a456-426614174000"},
+          {"corpus_id", "corpus-a"},
+          {"corpus_epoch", "9"},
+          {"backend", "filesystem"},
+          {"path", "shared-memory"}}},
+    };
+    DaemonConfig config;
+
+    REQUIRE(ConfigResolver::applyMemorySync(sections, config));
+    CHECK(config.memorySync.transport == "shared-store");
 }
 
 TEST_CASE("ConfigResolver exposes explicit legacy migration mode",

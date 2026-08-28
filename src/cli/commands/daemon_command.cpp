@@ -1783,11 +1783,14 @@ private:
         rows.push_back(
             {"Corpus", m.corpusId + " (epoch " + std::to_string(m.corpusEpoch) + ")", ""});
         rows.push_back({"Node", m.nodeId, ""});
-        rows.push_back(
-            {"Trust",
-             severity_text(m.trustMode == "authenticated-writers" ? Severity::Good : Severity::Warn,
-                           m.trustMode),
-             ""});
+        const bool strongTrust =
+            m.trustMode == "authenticated-writers" || m.trustMode == "mutual-tls-tofu";
+        rows.push_back({"Trust",
+                        severity_text(strongTrust ? Severity::Good : Severity::Warn, m.trustMode),
+                        ""});
+        if (m.backend == "direct") {
+            rows.push_back({"Peers", std::to_string(m.peerCount), "yams p2p peers for details"});
+        }
         rows.push_back({"Records", std::to_string(m.records), ""});
         rows.push_back(
             {"Quarantined",

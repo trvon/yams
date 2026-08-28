@@ -182,8 +182,8 @@ src/daemon/components/EmbeddingService.cpp:2602:portability/env-read # reviewed 
 src/daemon/components/IngestService.cpp:56:portability/env-read # reviewed raw environment read
 src/daemon/components/LifecycleComponent.cpp:808:portability/env-read # reviewed raw environment read
 src/daemon/components/LifecycleComponent.cpp:818:portability/env-read # reviewed raw environment read
-src/daemon/components/RequestDispatcher.cpp:466:portability/env-read # reviewed raw environment read
-src/daemon/components/RequestDispatcher.cpp:469:portability/env-read # reviewed raw environment read
+src/daemon/components/RequestDispatcher.cpp:518:portability/env-read # reviewed raw environment read
+src/daemon/components/RequestDispatcher.cpp:521:portability/env-read # reviewed raw environment read
 src/daemon/components/RequestExecutor.cpp:44:portability/env-read # reviewed raw environment read
 src/daemon/components/dispatcher/request_dispatcher_documents.cpp:626:portability/env-read # reviewed raw environment read
 src/daemon/components/dispatcher/request_dispatcher_documents.cpp:717:portability/env-read # reviewed raw environment read

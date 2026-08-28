@@ -56,6 +56,7 @@
 #include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/retrieval_session.h>
+#include <yams/daemon/p2p/p2p_manager.h>
 #include <yams/daemon/resource/abi_entity_extractor_adapter.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/daemon/resource/external_plugin_host.h>
@@ -192,11 +193,15 @@ public:
         std::uint64_t corpusEpoch{0};
         std::string mode;
         std::string trustMode;
+        std::uint64_t peerCount{0};
     };
     Result<void> publishMemorySync(const std::string& key, const std::string& value);
     Result<void> deleteMemorySync(const std::string& key);
     Result<std::string> readMemorySyncCached(const std::string& key) const;
     Result<MemorySyncStatus> getMemorySyncStatus() const;
+    Result<p2p::P2pSyncResult> connectP2p(std::string_view connectionString);
+    Result<void> disconnectP2p(std::string_view nodeId);
+    Result<std::vector<p2p::PeerRegistryRecord>> listP2pPeers() const;
 
     struct SearchLoadMetrics {
         std::uint32_t active{0};
@@ -776,6 +781,7 @@ private:
     Result<void> configureResourcePools(const std::function<void()>& beforeConfigure);
     Result<std::filesystem::path> initializeDataDirAndContentStore();
     Result<void> initializeMemorySync(const std::filesystem::path& dataDir);
+    Result<void> initializeDirectP2p(const std::filesystem::path& dataDir);
     void configureMemorySyncApply();
     void applyMemorySyncWinners() noexcept;
     void publishMemorySyncBackfill() noexcept;
@@ -915,6 +921,7 @@ private:
     // P2P memory-sync service (version-vector + LWW over a shared store).
     // Started after storage/content-store init, stopped during shutdown.
     std::unique_ptr<yams::memory_sync::MemorySyncService> memorySync_;
+    std::unique_ptr<yams::daemon::p2p::P2pManager> p2pManager_;
     mutable std::mutex memorySyncStageObserverMutex_;
     std::function<void(std::string_view)> memorySyncStageObserver_;
     bool memorySyncVectorRebuildDirty_{false};

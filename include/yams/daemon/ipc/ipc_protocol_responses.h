@@ -4953,6 +4953,7 @@ struct MemorySyncResponse {
     std::uint64_t corpusEpoch{0};
     std::string mode;
     std::string trustMode;
+    std::uint64_t peerCount{0};
 
     template <typename Serializer>
     requires IsSerializer<Serializer>

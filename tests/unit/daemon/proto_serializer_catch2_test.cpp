@@ -85,6 +85,20 @@ TEST_CASE("ProtoSerializer MemorySync request and response preserve binary value
     CHECK(roundTrippedRequest->key == "binary");
     CHECK(roundTrippedRequest->value == std::string{"a\0b", 3});
 
+    for (const auto operation : {MemorySyncOperation::Connect, MemorySyncOperation::Disconnect,
+                                 MemorySyncOperation::Peers}) {
+        request.operation = operation;
+        requestMessage.payload = Request{request};
+        encodedRequest = ProtoSerializer::encode_payload(requestMessage);
+        REQUIRE(encodedRequest.has_value());
+        decodedRequest = ProtoSerializer::decode_payload(std::span{encodedRequest.value()});
+        REQUIRE(decodedRequest.has_value());
+        roundTrippedRequest =
+            std::get_if<MemorySyncRequest>(&std::get<Request>(decodedRequest.value().payload));
+        REQUIRE(roundTrippedRequest != nullptr);
+        CHECK(roundTrippedRequest->operation == operation);
+    }
+
     MemorySyncResponse response;
     response.published = true;
     response.started = true;
@@ -101,6 +115,7 @@ TEST_CASE("ProtoSerializer MemorySync request and response preserve binary value
     response.corpusEpoch = 7;
     response.mode = "persistent";
     response.trustMode = "authenticated-writers";
+    response.peerCount = 6;
     Message responseMessage{};
     responseMessage.requestId = 91;
     responseMessage.payload = Response{response};
@@ -127,6 +142,7 @@ TEST_CASE("ProtoSerializer MemorySync request and response preserve binary value
     CHECK(roundTrippedResponse->corpusEpoch == 7);
     CHECK(roundTrippedResponse->mode == "persistent");
     CHECK(roundTrippedResponse->trustMode == "authenticated-writers");
+    CHECK(roundTrippedResponse->peerCount == 6);
 }
 
 TEST_CASE("ProtoSerializer StatusResponse preserves daemon log file path",

@@ -37,6 +37,46 @@ struct TempDatabase {
 
 } // namespace
 
+TEST_CASE("P2P peer registry migrates pre-endpoint schema", "[daemon][p2p][registry][sqlite]") {
+    TempDatabase database{"migration"};
+    {
+        yams::metadata::Database legacy;
+        REQUIRE(legacy.open(database.path.string(), yams::metadata::ConnectionMode::Create)
+                    .has_value());
+        REQUIRE(legacy
+                    .execute(R"sql(
+CREATE TABLE p2p_peers (
+    node_id TEXT PRIMARY KEY NOT NULL,
+    spki_hash TEXT NOT NULL,
+    corpus_id TEXT NOT NULL DEFAULT '',
+    corpus_epoch INTEGER NOT NULL DEFAULT 0,
+    last_seen_vv TEXT NOT NULL DEFAULT '{"counters_":{}}',
+    last_connected_ms INTEGER NOT NULL DEFAULT 0,
+    pinned_by_operator INTEGER NOT NULL DEFAULT 0
+)
+)sql")
+                    .has_value());
+        auto insert =
+            legacy.prepare("INSERT INTO p2p_peers(node_id, spki_hash) VALUES('legacy-peer', ?)");
+        REQUIRE(insert.has_value());
+        auto statement = std::move(insert.value());
+        REQUIRE(statement.bind(1, std::string(64, 'a')).has_value());
+        REQUIRE(statement.execute().has_value());
+    }
+
+    auto opened = PeerRegistry::open(database.path, 8);
+    REQUIRE(opened.has_value());
+    auto peers = opened.value()->listPeers();
+    REQUIRE(peers.has_value());
+    REQUIRE(peers.value().size() == 1);
+    CHECK(peers.value().front().endpoint.empty());
+    CHECK_FALSE(peers.value().front().remembered);
+    yams::memory_sync::VersionVector version;
+    REQUIRE(opened.value()
+                ->updatePeerState("legacy-peer", "corpus", 1, version, 7, "host:9721", true)
+                .has_value());
+}
+
 TEST_CASE("P2P peer registry persists trust and causal state across restart",
           "[daemon][p2p][registry][sqlite]") {
     TempDatabase database{"restart"};
@@ -55,11 +95,17 @@ TEST_CASE("P2P peer registry persists trust and causal state across restart",
         auto first = registry.verifyOrPin("peer-node", std::string(64, 'A'), true);
         REQUIRE(first.has_value());
         CHECK(first.value().firstContactPinned);
-        REQUIRE(
-            registry.updatePeerState("peer-node", "corpus", 7, version, 123456, true).has_value());
+        auto firstUpdate =
+            registry.updatePeerState("peer-node", "corpus", 7, version, 123456, {}, false, true);
+        const std::string firstUpdateError =
+            firstUpdate ? std::string{} : firstUpdate.error().message;
+        INFO(firstUpdateError);
+        REQUIRE(firstUpdate.has_value());
         // A later non-operator update must not downgrade the pin source.
-        REQUIRE(
-            registry.updatePeerState("peer-node", "corpus", 7, version, 123999, false).has_value());
+        REQUIRE(registry
+                    .updatePeerState("peer-node", "corpus", 7, version, 123999,
+                                     "ghost.example:9721", true, false)
+                    .has_value());
     }
 
     auto reopened = PeerRegistry::open(database.path, 8);
@@ -83,6 +129,8 @@ TEST_CASE("P2P peer registry persists trust and causal state across restart",
     CHECK(peer.corpusEpoch == 7);
     CHECK(peer.lastSeenVersion.get("peer-node") == 2);
     CHECK(peer.lastConnectedMs == 123999);
+    CHECK(peer.endpoint == "ghost.example:9721");
+    CHECK(peer.remembered);
     CHECK(peer.pinnedByOperator);
 }
 

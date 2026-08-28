@@ -1,5 +1,6 @@
 #pragma once
 
+// pi-lens-ignore: fatal error
 #include <yams/core/types.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/embedding_service_config.h>
@@ -122,11 +123,16 @@ struct DaemonConfig {
     /// No YAMS_* env knobs.
     struct MemorySyncPolicy {
         bool enabled{false};
-        std::string nodeId;                // explicit stable daemon writer UUID
-        std::string corpusId;              // stable replication-domain identifier
-        std::uint64_t corpusEpoch{0};      // incompatible reset/migration generation
-        std::string backend{"filesystem"}; // "filesystem" | "s3"
-        std::string path;                  // filesystem dir or s3:// URL (relative -> dataDir)
+        std::string nodeId;              // explicit stable daemon writer UUID
+        std::string corpusId;            // stable replication-domain identifier
+        std::uint64_t corpusEpoch{0};    // incompatible reset/migration generation
+        std::string transport{"direct"}; // "direct" | legacy "shared-store"
+        std::string listen{"127.0.0.1:9721"};
+        std::string identityKeyPath; // empty -> <dataDir>/p2p/identity.pem
+        bool allowFirstContact{true};
+        std::size_t maxPeers{1024};
+        std::string backend{"filesystem"}; // shared-store only: "filesystem" | "s3"
+        std::string path;                  // shared-store path; direct uses a daemon-local op store
         std::uint32_t syncIntervalMs{5000};
         memory_sync::MemorySyncLimits limits{};
         std::string mode{"persistent"};

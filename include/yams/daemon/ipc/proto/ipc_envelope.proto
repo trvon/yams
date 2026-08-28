@@ -1201,6 +1201,9 @@ message MemorySyncRequest {
     READ = 1;
     STATUS = 2;
     DELETE = 3;
+    CONNECT = 4;
+    DISCONNECT = 5;
+    PEERS = 6;
   }
   Operation operation = 1;
   string key = 2;
@@ -1223,6 +1226,7 @@ message MemorySyncResponse {
   uint64 corpus_epoch = 13;
   string mode = 14;
   string trust_mode = 15;
+  uint64 peer_count = 16;
 }
 
 // ENVELOPE

@@ -185,6 +185,113 @@ inline void setOnnxShutdownMarker(bool enabled) {
     onnxShutdownMarker().store(enabled, std::memory_order_release);
 }
 
+yams::Result<std::string> readProtectedP2pPrivateKey(const std::filesystem::path& keyPath) {
+#ifndef _WIN32
+    std::error_code error;
+    const auto permissions = std::filesystem::status(keyPath, error).permissions();
+    if (error) {
+        return yams::Error{yams::ErrorCode::IOError,
+                           "cannot inspect P2P identity key permissions: " + error.message()};
+    }
+    constexpr auto insecure =
+        std::filesystem::perms::group_all | std::filesystem::perms::others_all;
+    if ((permissions & insecure) != std::filesystem::perms::none) {
+        return yams::Error{yams::ErrorCode::Unauthorized,
+                           "P2P identity key must not be accessible by group or others"};
+    }
+#endif
+    return yams::memory_sync::readWriterAuthFile(keyPath, std::size_t{64} * 1024);
+}
+
+yams::Result<std::string> loadOrCreateP2pPrivateKey(const std::filesystem::path& keyPath) {
+    std::error_code error;
+    if (std::filesystem::exists(keyPath, error)) {
+        return readProtectedP2pPrivateKey(keyPath);
+    }
+    if (error) {
+        return yams::Error{yams::ErrorCode::IOError,
+                           "cannot inspect P2P identity key: " + error.message()};
+    }
+    if (!yams::common::ensureDirectories(keyPath.parent_path(), error)) {
+        return yams::Error{yams::ErrorCode::IOError,
+                           "cannot create P2P identity directory: " + error.message()};
+    }
+    auto generated = yams::memory_sync::generateWriterKeyPair();
+    if (!generated) {
+        return generated.error();
+    }
+    auto temporary = keyPath;
+    temporary += ".tmp." + std::to_string(static_cast<unsigned long long>(::getpid()));
+    {
+        std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+        if (!output) {
+            return yams::Error{yams::ErrorCode::IOError,
+                               "cannot create temporary P2P identity key"};
+        }
+        output.write(generated.value().privateKeyPem.data(),
+                     static_cast<std::streamsize>(generated.value().privateKeyPem.size()));
+        output.flush();
+        if (!output) {
+            std::filesystem::remove(temporary, error);
+            return yams::Error{yams::ErrorCode::IOError, "cannot write P2P identity key"};
+        }
+    }
+    std::filesystem::permissions(
+        temporary, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+        std::filesystem::perm_options::replace, error);
+    if (error) {
+        std::filesystem::remove(temporary, error);
+        return yams::Error{yams::ErrorCode::IOError, "cannot protect P2P identity key permissions"};
+    }
+    std::filesystem::rename(temporary, keyPath, error);
+    if (error) {
+        std::filesystem::remove(temporary, error);
+        return yams::Error{yams::ErrorCode::IOError,
+                           "cannot install P2P identity key: " + error.message()};
+    }
+    return std::move(generated.value().privateKeyPem);
+}
+
+yams::Result<std::string>
+loadP2pPrivateKey(const yams::daemon::DaemonConfig::MemorySyncPolicy& policy,
+                  const std::filesystem::path& dataDir) {
+    if (!policy.identityKeyPath.empty()) {
+        const std::filesystem::path configured(policy.identityKeyPath);
+        return loadOrCreateP2pPrivateKey(configured.is_absolute() ? configured
+                                                                  : dataDir / configured);
+    }
+    if (!policy.writerAuthManifestPath.empty()) {
+        const std::filesystem::path manifestPath(policy.writerAuthManifestPath);
+        auto bytes = yams::memory_sync::readWriterAuthFile(manifestPath);
+        if (!bytes) {
+            return bytes.error();
+        }
+        try {
+            const auto manifest = nlohmann::json::parse(bytes.value());
+            if (manifest.at("schema_version").get<std::uint32_t>() != 1 ||
+                manifest.at("corpus_id").get<std::string>() != policy.corpusId ||
+                manifest.at("corpus_epoch").get<std::uint64_t>() != policy.corpusEpoch) {
+                return yams::Error{yams::ErrorCode::InvalidArgument,
+                                   "writer authentication manifest corpus or epoch mismatch"};
+            }
+            const auto& local = manifest.at("local_key");
+            if (local.at("writer_id").get<std::string>() != policy.nodeId) {
+                return yams::Error{yams::ErrorCode::InvalidArgument,
+                                   "writer authentication manifest local writer mismatch"};
+            }
+            std::filesystem::path keyPath(local.at("private_key_path").get<std::string>());
+            if (!keyPath.is_absolute()) {
+                keyPath = manifestPath.parent_path() / keyPath;
+            }
+            return readProtectedP2pPrivateKey(keyPath);
+        } catch (const std::exception&) {
+            return yams::Error{yams::ErrorCode::InvalidArgument,
+                               "writer authentication manifest is malformed"};
+        }
+    }
+    return loadOrCreateP2pPrivateKey(dataDir / "p2p" / "identity.pem");
+}
+
 std::uint64_t nowUnixMillis() {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                           std::chrono::system_clock::now().time_since_epoch())
@@ -1653,6 +1760,14 @@ void ServiceManager::shutdown() {
     stopBackgroundTaskManagerForShutdown();
     stopSessionWatcherForShutdown();
 
+    // Direct P2P sessions use memory_sync and the peer registry database. Stop and join the
+    // listener/reconnect worker before either dependency starts teardown.
+    if (p2pManager_) {
+        p2pManager_->stop();
+        p2pManager_.reset();
+        spdlog::info("[ServiceManager] Phase 1.8: direct P2P stopped");
+    }
+
     // memory_sync callbacks use WorkCoordinator-owned vector rebuilds and database-backed
     // destinations. Stop and join the sync worker before either dependency starts teardown.
     if (memorySync_) {
@@ -2003,20 +2118,52 @@ Result<ServiceManager::MemorySyncStatus> ServiceManager::getMemorySyncStatus() c
     if (!memorySync_) {
         return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
     }
-    return MemorySyncStatus{memorySync_->started(),
-                            memorySync_->mergedRecordCount(),
-                            memorySync_->quarantinedRecordCount(),
-                            memorySync_->authFailureCount(),
-                            memorySync_->successfulSyncCycles(),
-                            memorySync_->failedSyncCycles(),
-                            memorySync_->lastSuccessfulSyncAgeMs(),
-                            config_.memorySync.backend,
-                            config_.memorySync.nodeId,
-                            config_.memorySync.corpusId,
-                            config_.memorySync.corpusEpoch,
-                            config_.memorySync.mode,
-                            config_.memorySync.writerAuthRequired ? "authenticated-writers"
-                                                                  : "backend-acl"};
+    std::uint64_t peerCount = 0;
+    if (p2pManager_) {
+        auto peers = p2pManager_->peers();
+        if (!peers) {
+            return peers.error();
+        }
+        peerCount = peers.value().size();
+    }
+    return MemorySyncStatus{
+        memorySync_->started(),
+        memorySync_->mergedRecordCount(),
+        memorySync_->quarantinedRecordCount(),
+        memorySync_->authFailureCount(),
+        memorySync_->successfulSyncCycles(),
+        memorySync_->failedSyncCycles(),
+        memorySync_->lastSuccessfulSyncAgeMs(),
+        config_.memorySync.transport == "direct" ? "direct" : config_.memorySync.backend,
+        config_.memorySync.nodeId,
+        config_.memorySync.corpusId,
+        config_.memorySync.corpusEpoch,
+        config_.memorySync.mode,
+        config_.memorySync.transport == "direct"
+            ? "mutual-tls-tofu"
+            : (config_.memorySync.writerAuthRequired ? "authenticated-writers" : "backend-acl"),
+        peerCount};
+}
+
+Result<p2p::P2pSyncResult> ServiceManager::connectP2p(std::string_view connectionString) {
+    if (!p2pManager_) {
+        return Error{ErrorCode::InvalidState, "direct P2P transport is not enabled"};
+    }
+    return p2pManager_->connect(connectionString);
+}
+
+Result<void> ServiceManager::disconnectP2p(std::string_view nodeId) {
+    if (!p2pManager_) {
+        return Error{ErrorCode::InvalidState, "direct P2P transport is not enabled"};
+    }
+    return p2pManager_->disconnect(nodeId);
+}
+
+Result<std::vector<p2p::PeerRegistryRecord>> ServiceManager::listP2pPeers() const {
+    if (!p2pManager_) {
+        return Error{ErrorCode::InvalidState, "direct P2P transport is not enabled"};
+    }
+    return p2pManager_->peers();
 }
 
 Result<std::size_t> ServiceManager::applyMemorySyncContentBlobs() {
@@ -2209,7 +2356,7 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
     }
 }
 
-void ServiceManager::publishMemorySyncBackfill() noexcept {
+void ServiceManager::publishMemorySyncBackfill() noexcept try {
     if (!memorySync_) {
         return;
     }
@@ -2464,6 +2611,10 @@ void ServiceManager::publishMemorySyncBackfill() noexcept {
         "edges={} skipped={}",
         documentsPublished, blobsPublished, vectorsPublished, nodesPublished, edgesPublished,
         skippedDocuments);
+} catch (const std::exception& error) {
+    spdlog::warn("[ServiceManager] memory_sync backfill setup failed: {}", error.what());
+} catch (...) {
+    spdlog::warn("[ServiceManager] memory_sync backfill setup failed (unknown)");
 }
 
 void ServiceManager::configureMemorySyncApply() {
@@ -2486,7 +2637,7 @@ Result<void> ServiceManager::initializeMemorySync(const std::filesystem::path& d
         cfg.nodeId = policy.nodeId;
         cfg.corpusId = policy.corpusId;
         cfg.corpusEpoch = policy.corpusEpoch;
-        cfg.backend = policy.backend;
+        cfg.backend = policy.transport == "direct" ? "filesystem" : policy.backend;
         cfg.syncIntervalMs = policy.syncIntervalMs;
         cfg.limits = policy.limits;
         cfg.mode = policy.mode == "persistent-migration" ? "persistent" : policy.mode;
@@ -2495,14 +2646,15 @@ Result<void> ServiceManager::initializeMemorySync(const std::filesystem::path& d
         cfg.allowLegacyUnbound = policy.mode == "persistent-migration";
         cfg.writerAuthRequired = policy.writerAuthRequired;
         cfg.writerAuthManifestPath = policy.writerAuthManifestPath;
-        cfg.path = policy.path;
+        cfg.path =
+            policy.transport == "direct" ? (dataDir / "p2p" / "op-store").string() : policy.path;
         if (cfg.backend == "filesystem" && !cfg.path.empty() &&
             !std::filesystem::path(cfg.path).is_absolute()) {
             cfg.path = (dataDir / cfg.path).string();
         }
 
         std::optional<yams::storage::BackendConfig> resolvedS3Config;
-        if (cfg.backend == "s3") {
+        if (policy.transport == "shared-store" && cfg.backend == "s3") {
             auto storageDecision = yams::storage::resolveStorageBootstrapDecision(
                 config_.configFilePath, dataDir, std::string{"s3"});
             if (!storageDecision) {
@@ -2533,11 +2685,13 @@ Result<void> ServiceManager::initializeMemorySync(const std::filesystem::path& d
 
         memorySync_ = std::move(service);
         const std::string_view trust =
-            cfg.writerAuthRequired ? "authenticated-writers" : "backend-ACL-trusted";
-        spdlog::info("[ServiceManager] memory_sync started: backend={} mode={} corpus={} epoch={} "
-                     "node={} trust={} sync_interval_ms={} path={}",
-                     cfg.backend, cfg.mode, cfg.corpusId, cfg.corpusEpoch, cfg.nodeId, trust,
-                     cfg.syncIntervalMs, cfg.path);
+            policy.transport == "direct"
+                ? "mutual-tls-tofu"
+                : (cfg.writerAuthRequired ? "authenticated-writers" : "backend-ACL-trusted");
+        spdlog::info("[ServiceManager] memory_sync started: transport={} backend={} mode={} "
+                     "corpus={} epoch={} node={} trust={} sync_interval_ms={} path={}",
+                     policy.transport, cfg.backend, cfg.mode, cfg.corpusId, cfg.corpusEpoch,
+                     cfg.nodeId, trust, cfg.syncIntervalMs, cfg.path);
         return Result<void>();
     } catch (const std::exception& e) {
         return Error{ErrorCode::InternalError,
@@ -2546,6 +2700,53 @@ Result<void> ServiceManager::initializeMemorySync(const std::filesystem::path& d
         return Error{ErrorCode::InternalError,
                      "memory_sync initialization threw an unknown exception"};
     }
+}
+
+Result<void> ServiceManager::initializeDirectP2p(const std::filesystem::path& dataDir) {
+    const auto& policy = config_.memorySync;
+    if (!policy.enabled || policy.transport != "direct") {
+        return Result<void>();
+    }
+    if (!memorySync_) {
+        return Error{ErrorCode::InvalidState, "direct P2P requires memory sync service"};
+    }
+    auto listen = p2p::parseP2pConnectionString(policy.listen);
+    if (!listen) {
+        return Error{listen.error().code, "invalid memory_sync.listen: " + listen.error().message};
+    }
+    auto privateKey = loadP2pPrivateKey(policy, dataDir);
+    if (!privateKey) {
+        return privateKey.error();
+    }
+    auto synchronized = memorySync_->syncFully();
+    if (!synchronized) {
+        return Error{synchronized.error().code,
+                     "direct P2P local op-store recovery failed: " + synchronized.error().message};
+    }
+    auto manager = p2p::P2pManager::create(
+        p2p::P2pManagerOptions{.nodeId = policy.nodeId,
+                               .corpusId = policy.corpusId,
+                               .corpusEpoch = policy.corpusEpoch,
+                               .privateKeyPem = std::move(privateKey.value()),
+                               .databasePath = dataDir / "yams.db",
+                               .listenHost = listen.value().host,
+                               .listenPort = listen.value().port,
+                               .allowFirstContact = policy.allowFirstContact,
+                               .maxPeers = policy.maxPeers,
+                               .reconnectInterval =
+                                   std::chrono::milliseconds(policy.syncIntervalMs),
+                               .timeout = std::chrono::seconds(10)},
+        *memorySync_);
+    if (!manager) {
+        return manager.error();
+    }
+    if (auto started = manager.value()->start(); !started) {
+        return started.error();
+    }
+    spdlog::info("[ServiceManager] direct P2P listening on {}:{} with identity {}",
+                 listen.value().host, manager.value()->boundPort(), policy.nodeId);
+    p2pManager_ = std::move(manager.value());
+    return Result<void>();
 }
 
 boost::asio::awaitable<bool>
@@ -3539,6 +3740,10 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     // All replicated destination stores are now initialized. Attach the ordered apply callback
     // only at this point so the convergence worker cannot race database/vector/KG startup.
     configureMemorySyncApply();
+    if (auto p2pResult = initializeDirectP2p(dataDir); !p2pResult) {
+        co_return Error{p2pResult.error().code,
+                        "direct P2P initialization failed: " + p2pResult.error().message};
+    }
 
     // Full SearchEngine construction is non-critical. Metadata search is already available via
     // MetadataRepository, and RequestDispatcher falls back to metadata while searchEngineReady is

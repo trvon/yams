@@ -467,6 +467,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_p2p_manager_exe = executable('catch2_p2p_manager',
+    files('unit/daemon/p2p_manager_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_admission_policy_exe = executable('catch2_admission_policy',
     files('unit/daemon/admission_policy_catch2_test.cpp'),
     include_directories: incs,
@@ -3179,6 +3188,13 @@ if catch2_dep.found()
 
   test('peer_registry', catch2_peer_registry_exe,
     suite: ['catch2', 'unit', 'daemon', 'p2p', 'sqlite'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60,
+    is_parallel: false
+  )
+
+  test('p2p_manager', catch2_p2p_manager_exe,
+    suite: ['catch2', 'unit', 'daemon', 'p2p', 'network', 'sqlite'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
     is_parallel: false

@@ -25,6 +25,8 @@ struct PeerRegistryRecord {
     std::uint64_t corpusEpoch{0};
     memory_sync::VersionVector lastSeenVersion;
     std::int64_t lastConnectedMs{0};
+    std::string endpoint;
+    bool remembered{false};
     bool pinnedByOperator{false};
 };
 
@@ -51,7 +53,8 @@ public:
     Result<void> updatePeerState(std::string_view nodeId, std::string_view corpusId,
                                  std::uint64_t corpusEpoch,
                                  const memory_sync::VersionVector& lastSeenVersion,
-                                 std::int64_t lastConnectedMs, bool pinnedByOperator = false);
+                                 std::int64_t lastConnectedMs, std::string_view endpoint = {},
+                                 bool remembered = false, bool pinnedByOperator = false);
     Result<std::vector<PeerRegistryRecord>> listPeers() const;
     Result<void> removePeer(std::string_view nodeId);
 

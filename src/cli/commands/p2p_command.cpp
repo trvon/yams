@@ -79,6 +79,67 @@ Result<std::string> formatRead(std::string_view key, const std::string& value, b
     return output.dump(2);
 }
 
+Result<nlohmann::json> parseControlPayload(const daemon::MemorySyncResponse& response) {
+    try {
+        return nlohmann::json::parse(response.value);
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::SerializationError,
+                     std::string("daemon returned malformed P2P response: ") + error.what()};
+    }
+}
+
+Result<std::string> formatConnect(const daemon::MemorySyncResponse& response, bool json) {
+    auto payload = parseControlPayload(response);
+    if (!payload) {
+        return payload.error();
+    }
+    if (json) {
+        return payload.value().dump(2);
+    }
+    const auto& value = payload.value();
+    return "connected " + value.at("peer_node_id").get<std::string>() +
+           " (sent=" + std::to_string(value.value("deltas_sent", 0U)) +
+           ", received=" + std::to_string(value.value("deltas_received", 0U)) + ")";
+}
+
+Result<std::string> formatDisconnect(const daemon::MemorySyncResponse& response, bool json) {
+    auto payload = parseControlPayload(response);
+    if (!payload) {
+        return payload.error();
+    }
+    if (json) {
+        return payload.value().dump(2);
+    }
+    return "disconnected " + payload.value().at("node_id").get<std::string>();
+}
+
+Result<std::string> formatPeers(const daemon::MemorySyncResponse& response, bool json) {
+    auto payload = parseControlPayload(response);
+    if (!payload) {
+        return payload.error();
+    }
+    if (!payload.value().is_array()) {
+        return Error{ErrorCode::SerializationError, "daemon P2P peer response is not an array"};
+    }
+    if (json) {
+        return payload.value().dump(2);
+    }
+    if (payload.value().empty()) {
+        return std::string{"no peers"};
+    }
+    std::ostringstream out;
+    for (std::size_t index = 0; index < payload.value().size(); ++index) {
+        const auto& peer = payload.value().at(index);
+        if (index != 0) {
+            out << '\n';
+        }
+        out << peer.value("node_id", "<unknown>") << "  " << peer.value("endpoint", "<inbound>")
+            << "  remembered=" << (peer.value("remembered", false) ? "yes" : "no")
+            << "  last_connected_ms=" << peer.value("last_connected_ms", std::int64_t{0});
+    }
+    return out.str();
+}
+
 Result<std::string> formatStatus(const daemon::MemorySyncResponse& response, bool json) {
     if (!response.started) {
         return Error{ErrorCode::InvalidState, "memory sync service is not started"};
@@ -88,10 +149,11 @@ Result<std::string> formatStatus(const daemon::MemorySyncResponse& response, boo
         using yams::cli::ui::severity_text;
         auto health = [](bool bad) { return bad ? Severity::Warn : Severity::Good; };
         std::ostringstream out;
+        // pi-lens-ignore: clang:no_member -- additive response field is compiled by Meson.
         out << "backend=" << response.backend << " node_id=" << response.nodeId
             << " corpus_id=" << response.corpusId << " corpus_epoch=" << response.corpusEpoch
             << " mode=" << response.mode << " trust=" << response.trustMode
-            << " records=" << response.records << " quarantined="
+            << " peers=" << response.peerCount << " records=" << response.records << " quarantined="
             << severity_text(health(response.quarantinedRecords > 0),
                              std::to_string(response.quarantinedRecords))
             << " auth_failures="
@@ -118,6 +180,8 @@ Result<std::string> formatStatus(const daemon::MemorySyncResponse& response, boo
     output["corpus_epoch"] = response.corpusEpoch;
     output["mode"] = response.mode;
     output["trust"] = response.trustMode;
+    // pi-lens-ignore: clang:no_member -- additive response field is compiled by Meson.
+    output["peer_count"] = response.peerCount;
     output["started"] = response.started;
     return output.dump(2);
 }
@@ -129,13 +193,31 @@ public:
     std::string getName() const override { return "p2p"; }
 
     std::string getDescription() const override {
-        return "P2P memory sync: publish/read records through the running daemon";
+        return "Secure direct daemon-to-daemon corpus sync";
     }
 
     void registerCommand(CLI::App& app, YamsCLI* cli) override {
         cli_ = cli;
         auto* cmd = app.add_subcommand("p2p", getDescription());
         cmd->require_subcommand(1);
+
+        auto* connect = cmd->add_subcommand("connect", "Connect and synchronize with a peer");
+        connect
+            ->add_option("connection", connectionString_,
+                         "host:port or yams://host:port with optional query parameters")
+            ->required();
+        connect->add_flag("--json", jsonOutput_, "Emit JSON");
+        connect->callback([this]() { failOn(runConnect()); });
+
+        auto* disconnect =
+            cmd->add_subcommand("disconnect", "Disable automatic reconnect for a peer");
+        disconnect->add_option("node-id", disconnectNodeId_, "Peer node id")->required();
+        disconnect->add_flag("--json", jsonOutput_, "Emit JSON");
+        disconnect->callback([this]() { failOn(runDisconnect()); });
+
+        auto* peers = cmd->add_subcommand("peers", "List trusted peers and reconnect state");
+        peers->add_flag("--json", jsonOutput_, "Emit JSON");
+        peers->callback([this]() { failOn(runPeers()); });
 
         auto* publish = cmd->add_subcommand("publish", "Publish a value under a key");
         publish->add_option("key", publishKey_, "Logical key")->required();
@@ -181,7 +263,7 @@ private:
             configuredSocket, YamsCLI::resolveConfiguredDaemonPidFilePath(), true);
         config.socketPath = liveSocket && !liveSocket->empty() ? *liveSocket : configuredSocket;
         config.autoStart = false;
-        config.requestTimeout = std::chrono::seconds(5);
+        config.requestTimeout = std::chrono::seconds(30);
         if (!daemon::DaemonClient::isDaemonRunning(config.socketPath)) {
             return Error{ErrorCode::NotFound,
                          "daemon is not running on socket: " + config.socketPath.string()};
@@ -198,6 +280,45 @@ private:
         auto lease = std::move(leaseResult.value().lease);
         return run_result((*lease)->call<daemon::MemorySyncRequest>(request),
                           config.requestTimeout);
+    }
+
+    Result<void> runConnect() {
+        auto response = call({daemon::MemorySyncOperation::Connect, connectionString_, {}});
+        if (!response) {
+            return response.error();
+        }
+        auto output = formatConnect(response.value(), jsonOutput_);
+        if (!output) {
+            return output.error();
+        }
+        std::cout << output.value() << "\n";
+        return {};
+    }
+
+    Result<void> runDisconnect() {
+        auto response = call({daemon::MemorySyncOperation::Disconnect, disconnectNodeId_, {}});
+        if (!response) {
+            return response.error();
+        }
+        auto output = formatDisconnect(response.value(), jsonOutput_);
+        if (!output) {
+            return output.error();
+        }
+        std::cout << output.value() << "\n";
+        return {};
+    }
+
+    Result<void> runPeers() {
+        auto response = call({daemon::MemorySyncOperation::Peers, {}, {}});
+        if (!response) {
+            return response.error();
+        }
+        auto output = formatPeers(response.value(), jsonOutput_);
+        if (!output) {
+            return output.error();
+        }
+        std::cout << output.value() << "\n";
+        return {};
     }
 
     Result<void> runPublish() {
@@ -257,6 +378,8 @@ private:
     }
 
     YamsCLI* cli_{nullptr};
+    std::string connectionString_;
+    std::string disconnectNodeId_;
     std::string publishKey_;
     std::string publishValue_;
     std::string deleteKey_;

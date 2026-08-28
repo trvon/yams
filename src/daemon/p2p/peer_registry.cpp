@@ -22,6 +22,8 @@ CREATE TABLE IF NOT EXISTS p2p_peers (
     corpus_epoch INTEGER NOT NULL DEFAULT 0,
     last_seen_vv TEXT NOT NULL DEFAULT '{"counters_":{}}',
     last_connected_ms INTEGER NOT NULL DEFAULT 0,
+    endpoint TEXT NOT NULL DEFAULT '',
+    remembered INTEGER NOT NULL DEFAULT 0 CHECK(remembered IN (0, 1)),
     pinned_by_operator INTEGER NOT NULL DEFAULT 0 CHECK(pinned_by_operator IN (0, 1))
 )
 )sql";
@@ -40,6 +42,26 @@ Result<memory_sync::VersionVector> deserializeVersion(std::string_view encoded) 
     } catch (const std::exception& error) {
         return Error{ErrorCode::SerializationError,
                      std::string("invalid persisted peer version: ") + error.what()};
+    }
+}
+
+Result<bool> hasPeerColumn(metadata::Database& database, std::string_view columnName) {
+    auto prepared = database.prepare("PRAGMA table_info(p2p_peers)");
+    if (!prepared) {
+        return prepared.error();
+    }
+    auto statement = std::move(prepared.value());
+    for (;;) {
+        auto row = statement.step();
+        if (!row) {
+            return row.error();
+        }
+        if (!row.value()) {
+            return false;
+        }
+        if (statement.getString(1) == columnName) {
+            return true;
+        }
     }
 }
 
@@ -83,7 +105,30 @@ Result<std::unique_ptr<PeerRegistry>> PeerRegistry::open(const std::filesystem::
 
 Result<void> PeerRegistry::initializeSchema() {
     std::lock_guard<std::mutex> lock(mutex_);
-    return database_->execute(std::string(kCreatePeerRegistry));
+    if (auto created = database_->execute(std::string(kCreatePeerRegistry)); !created) {
+        return created.error();
+    }
+    auto hasEndpoint = hasPeerColumn(*database_, "endpoint");
+    if (!hasEndpoint) {
+        return hasEndpoint.error();
+    }
+    if (!hasEndpoint.value()) {
+        if (auto migrated = database_->execute(
+                "ALTER TABLE p2p_peers ADD COLUMN endpoint TEXT NOT NULL DEFAULT ''");
+            !migrated) {
+            return migrated.error();
+        }
+    }
+    auto hasRemembered = hasPeerColumn(*database_, "remembered");
+    if (!hasRemembered) {
+        return hasRemembered.error();
+    }
+    if (!hasRemembered.value()) {
+        return database_->execute(
+            "ALTER TABLE p2p_peers ADD COLUMN remembered INTEGER NOT NULL DEFAULT 0 "
+            "CHECK(remembered IN (0, 1))");
+    }
+    return Result<void>();
 }
 
 Result<std::optional<std::string>> PeerRegistry::findPinLocked(std::string_view nodeId) const {
@@ -164,7 +209,8 @@ Result<PeerTrustDecision> PeerRegistry::verifyOrPin(std::string_view nodeId,
 Result<void> PeerRegistry::updatePeerState(std::string_view nodeId, std::string_view corpusId,
                                            std::uint64_t corpusEpoch,
                                            const memory_sync::VersionVector& lastSeenVersion,
-                                           std::int64_t lastConnectedMs, bool pinnedByOperator) {
+                                           std::int64_t lastConnectedMs, std::string_view endpoint,
+                                           bool remembered, bool pinnedByOperator) {
     if (nodeId.empty() || corpusId.empty() || corpusEpoch == 0 ||
         corpusEpoch > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) ||
         lastConnectedMs < 0) {
@@ -185,16 +231,17 @@ Result<void> PeerRegistry::updatePeerState(std::string_view nodeId, std::string_
     auto prepared = database_->prepare(R"sql(
 UPDATE p2p_peers
 SET corpus_id = ?, corpus_epoch = ?, last_seen_vv = ?, last_connected_ms = ?,
-    pinned_by_operator = MAX(pinned_by_operator, ?)
+    endpoint = ?, remembered = ?, pinned_by_operator = MAX(pinned_by_operator, ?)
 WHERE node_id = ?
 )sql");
     if (!prepared) {
         return prepared.error();
     }
     auto statement = std::move(prepared.value());
+    const std::string endpointValue(endpoint);
     if (auto bound = statement.bindAll(corpusId, static_cast<std::int64_t>(corpusEpoch),
-                                       encodedVersion.value(), lastConnectedMs,
-                                       pinnedByOperator ? 1 : 0, nodeId);
+                                       encodedVersion.value(), lastConnectedMs, endpointValue,
+                                       remembered ? 1 : 0, pinnedByOperator ? 1 : 0, nodeId);
         !bound) {
         return bound.error();
     }
@@ -205,7 +252,7 @@ Result<std::vector<PeerRegistryRecord>> PeerRegistry::listPeers() const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto prepared = database_->prepare(R"sql(
 SELECT node_id, spki_hash, corpus_id, corpus_epoch, last_seen_vv,
-       last_connected_ms, pinned_by_operator
+       last_connected_ms, endpoint, remembered, pinned_by_operator
 FROM p2p_peers
 ORDER BY node_id
 )sql");
@@ -236,7 +283,9 @@ ORDER BY node_id
                                            .corpusEpoch = static_cast<std::uint64_t>(epoch),
                                            .lastSeenVersion = std::move(version.value()),
                                            .lastConnectedMs = statement.getInt64(5),
-                                           .pinnedByOperator = statement.getInt(6) != 0});
+                                           .endpoint = statement.getString(6),
+                                           .remembered = statement.getInt(7) != 0,
+                                           .pinnedByOperator = statement.getInt(8) != 0});
     }
 }
 
