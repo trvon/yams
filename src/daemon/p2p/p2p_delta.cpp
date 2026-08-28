@@ -24,9 +24,14 @@ struct DeltaAcknowledgement {
 };
 
 Result<void> validateOptions(const DeltaExchangeOptions& options) {
-    if (options.maxDeltasPerBatch == 0 || options.maxBatches == 0 ||
-        options.maxDeltasPerSession == 0 || options.maxWireBytesPerSession == 0 ||
-        options.maxSnapshotRecords == 0 || options.maxSnapshotWireBytes == 0 ||
+    constexpr std::size_t kMaxBatchesPerSession = 4096;
+    constexpr std::size_t kMaxWireBytes = std::size_t{64} * 1024 * 1024;
+    if (options.maxDeltasPerBatch == 0 || options.maxDeltasPerBatch > kMaxP2pWriterAdvance ||
+        options.maxBatches == 0 || options.maxBatches > kMaxBatchesPerSession ||
+        options.maxDeltasPerSession == 0 || options.maxDeltasPerSession > kMaxP2pWriterAdvance ||
+        options.maxWireBytesPerSession == 0 || options.maxWireBytesPerSession > kMaxWireBytes ||
+        options.maxSnapshotRecords == 0 || options.maxSnapshotRecords > kMaxP2pWriterAdvance ||
+        options.maxSnapshotWireBytes == 0 || options.maxSnapshotWireBytes > kMaxWireBytes ||
         options.timeout <= std::chrono::milliseconds::zero()) {
         return Error{ErrorCode::InvalidArgument, "invalid p2p delta exchange limits"};
     }
@@ -593,7 +598,28 @@ Result<DeltaExchangeStats> receiveAll(P2pConnection& connection,
             }
             continue;
         }
+        const auto expected = handshake.peerCommitments.find(handshake.peerNodeId);
+        const auto expectedCounter = handshake.peerVersion.get(handshake.peerNodeId);
         if (staged.empty()) {
+            const auto local = service.replicationState();
+            const auto localCommitment = local.commitments.find(handshake.peerNodeId);
+            const bool matches =
+                local.version.get(handshake.peerNodeId) == expectedCounter &&
+                (expectedCounter == 0 ? expected == handshake.peerCommitments.end() &&
+                                            localCommitment == local.commitments.end()
+                                      : expected != handshake.peerCommitments.end() &&
+                                            expected->second.counter == expectedCounter &&
+                                            localCommitment != local.commitments.end() &&
+                                            localCommitment->second == expected->second);
+            if (!matches) {
+                auto quarantined =
+                    service.quarantineWriter(handshake.peerNodeId, connection.localNodeId());
+                if (!quarantined) {
+                    return quarantined.error();
+                }
+                return Error{ErrorCode::ValidationError,
+                             "empty delta window does not match authenticated frontier"};
+            }
             memory_sync::DeltaApplyResult emptyAck;
             emptyAck.version = projectedVersion;
             if (auto acknowledged =
@@ -603,9 +629,8 @@ Result<DeltaExchangeStats> receiveAll(P2pConnection& connection,
             }
             return stats;
         }
-        const auto expected = handshake.peerCommitments.find(handshake.peerNodeId);
         if (expected == handshake.peerCommitments.end() ||
-            expected->second.counter != handshake.peerVersion.get(handshake.peerNodeId)) {
+            expected->second.counter != expectedCounter) {
             return Error{ErrorCode::ValidationError,
                          "authenticated peer frontier commitment is unavailable"};
         }

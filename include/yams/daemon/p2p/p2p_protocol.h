@@ -20,11 +20,13 @@
 
 namespace yams::daemon::p2p {
 
-inline constexpr std::uint32_t kP2pProtocolVersion = 3;
+inline constexpr std::uint32_t kP2pProtocolVersion = 4;
 inline constexpr std::uint32_t kP2pEnvelopeSchemaVersion =
     memory_sync::kAuthenticatedMemoryIndexSchemaVersion;
 inline constexpr std::size_t kMaxP2pReplicationWriters = 256;
 inline constexpr std::size_t kMaxP2pIdentityBytes = 256;
+inline constexpr std::size_t kMaxP2pWriterAdvance = 1024;
+inline constexpr std::size_t kMaxP2pWriterWindowBytes = std::size_t{64} * 1024 * 1024;
 
 struct PeerTrustDecision {
     bool firstContactPinned{false};
@@ -70,6 +72,12 @@ struct PeerHandshakeConfig {
     std::set<memory_sync::NodeId> localQuarantinedWriters;
     std::function<Result<memory_sync::WriterHistoryCommitment>(std::uint64_t)>
         resolveLocalCommitment;
+    std::function<Result<memory_sync::WriterHistoryCommitment>(std::uint64_t, std::size_t,
+                                                               std::size_t)>
+        resolveLocalWindow;
+    /// Negotiated caps for one handshake-frozen local-writer delta window.
+    std::size_t maxWriterAdvance{kMaxP2pWriterAdvance};
+    std::size_t maxWriterWindowBytes{kMaxP2pWriterWindowBytes};
     bool allowFirstContact{false};
     std::chrono::milliseconds timeout{std::chrono::seconds(5)};
 };

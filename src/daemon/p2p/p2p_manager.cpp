@@ -291,6 +291,12 @@ private:
                                        [this](std::uint64_t counter) {
                                            return service_.localHistoryCommitmentAt(counter);
                                        },
+                                   .resolveLocalWindow =
+                                       [this](std::uint64_t peerCounter, std::size_t maxRecords,
+                                              std::size_t maxWireBytes) {
+                                           return service_.localHistoryWindowAfter(
+                                               peerCounter, maxRecords, maxWireBytes);
+                                       },
                                    .allowFirstContact = options_.allowFirstContact,
                                    .timeout = options_.timeout};
     }
