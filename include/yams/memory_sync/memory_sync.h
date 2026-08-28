@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <functional>
 #include <map>
 #include <set>
@@ -52,6 +53,26 @@ struct MemorySyncLimits {
     std::size_t maxTrackedIdentities{8192};
 };
 
+struct MemoryDelta {
+    std::string logicalKey;
+    MemoryIndexRecord record;
+    // pi-lens-ignore: no-bit-fields
+    std::vector<std::byte> payload; // NOLINT(no-bit-fields) -- empty for tombstones
+};
+
+struct MemoryDeltaBatch {
+    std::vector<MemoryDelta> deltas;
+    bool hasMore{false};
+};
+
+struct DeltaApplyResult {
+    std::size_t received{0};
+    std::size_t merged{0};
+    std::size_t replayed{0};
+    std::map<std::string, std::string> quarantined;
+    VersionVector version;
+};
+
 /// Backend-agnostic memory sync loop. Memory records are published as
 /// content-addressed blobs plus one version-vector-tagged index record per write;
 /// `sync()` lists the index, pulls records, and LWW-merges to a deterministic
@@ -83,7 +104,7 @@ public:
         // Reconcile first so this node's version vector and logical clock resume from
         // the last known state. Preserves causal ordering across fresh loop instances
         // (e.g. a stateless CLI process publishing after a prior one).
-        if (auto reconciled = sync(); !reconciled) {
+        if (auto reconciled = reconcileBeforeWrite(); !reconciled) {
             return reconciled.error();
         }
 
@@ -146,7 +167,7 @@ public:
             return Error{ErrorCode::InvalidArgument,
                          "memory sync tombstone payload exceeds envelope limit"};
         }
-        if (auto reconciled = sync(); !reconciled) {
+        if (auto reconciled = reconcileBeforeWrite(); !reconciled) {
             return reconciled.error();
         }
         if (nodeId_.empty() || nodeId_ == "default" || corpusId_.empty() || corpusEpoch_ == 0) {
@@ -450,6 +471,112 @@ public:
         return merged_;
     }
 
+    /// Complete the current bounded sweep and return a full committed view.
+    /// Direct mode calls this against its local durable op store at startup.
+    Result<std::map<std::string, MemoryIndexRecord>> syncFully() {
+        for (;;) {
+            auto result = sync();
+            if (!result || scanCursor_.empty()) {
+                return result;
+            }
+        }
+    }
+
+    /// Export this writer's durable operations newer than the peer's causal
+    /// watermark. The backend is local in direct mode, so this replaces remote
+    /// shared-namespace scans with a bounded local op-store read.
+    Result<MemoryDeltaBatch> exportLocalDeltasAfter(const VersionVector& peerVersion,
+                                                    std::size_t maxDeltas = 128) {
+        if (maxDeltas == 0) {
+            return Error{ErrorCode::InvalidArgument, "direct delta batch size must be positive"};
+        }
+        std::vector<MemoryDelta> candidates;
+        std::optional<std::string> cursor;
+        for (;;) {
+            auto listed = backend_->listPage(
+                "index/", cursor ? std::optional<std::string_view>{*cursor} : std::nullopt,
+                limits_.maxIndexObjectsPerSync);
+            if (!listed) {
+                return listed.error();
+            }
+            auto page = std::move(listed.value());
+            for (const auto& key : page.keys) {
+                auto delta = loadLocalDelta(key, peerVersion);
+                if (!delta) {
+                    return delta.error();
+                }
+                if (delta.value()) {
+                    candidates.push_back(std::move(*delta.value()));
+                }
+            }
+            cursor = std::move(page.nextCursor);
+            if (!cursor) {
+                break;
+            }
+        }
+        std::ranges::sort(candidates, [](const MemoryDelta& lhs, const MemoryDelta& rhs) {
+            const auto leftCounter = lhs.record.vv.get(lhs.record.origin);
+            const auto rightCounter = rhs.record.vv.get(rhs.record.origin);
+            return std::tie(leftCounter, lhs.record.operationId) <
+                   std::tie(rightCounter, rhs.record.operationId);
+        });
+        const bool hasMore = candidates.size() > maxDeltas;
+        if (hasMore) {
+            candidates.resize(maxDeltas);
+        }
+        return MemoryDeltaBatch{.deltas = std::move(candidates), .hasMore = hasMore};
+    }
+
+    /// Apply peer-delivered operations directly through the same causal/LWW
+    /// state used by shared-store reconciliation. Valid operations are persisted
+    /// to the local backend before becoming visible; replay is idempotent, recent
+    /// operation forks are quarantined, and causal gaps/dependency gaps fail closed.
+    Result<DeltaApplyResult> applyDeltas(std::span<const MemoryDelta> deltas) {
+        DeltaApplyResult result;
+        result.received = deltas.size();
+        quarantined_.clear();
+        std::vector<const MemoryDelta*> ordered;
+        ordered.reserve(deltas.size());
+        for (const auto& delta : deltas) {
+            ordered.push_back(&delta);
+        }
+        std::ranges::sort(ordered, [](const MemoryDelta* lhs, const MemoryDelta* rhs) {
+            return std::tuple{lhs->record.origin, lhs->record.vv.get(lhs->record.origin)} <
+                   std::tuple{rhs->record.origin, rhs->record.vv.get(rhs->record.origin)};
+        });
+
+        for (const auto* delta : ordered) {
+            auto validated = validateDirectDelta(*delta);
+            if (!validated) {
+                quarantineDirectDelta(*delta, validated.error().message, result);
+                continue;
+            }
+            const auto decision = classifyDirectDelta(*delta, validated.value());
+            if (decision.action == DirectDeltaAction::Replay) {
+                ++result.replayed;
+                continue;
+            }
+            if (decision.action == DirectDeltaAction::Reject) {
+                quarantineDirectDelta(*delta, decision.reason, result);
+                continue;
+            }
+            auto plan = planDirectWinner(*delta);
+            if (!plan) {
+                quarantineDirectDelta(*delta, plan.error().message, result);
+                continue;
+            }
+            if (auto persisted = persistDirectDelta(*delta, validated.value()); !persisted) {
+                return persisted.error();
+            }
+            rememberDirectOperation(*delta, validated.value());
+            result.merged += commitDirectDelta(*delta, plan.value()) ? 1U : 0U;
+        }
+        result.version = version_;
+        return result;
+    }
+
+    [[nodiscard]] VersionVector currentVersion() const { return version_; }
+
     /// Collect tombstone history only when the complete configured replica set has
     /// acknowledged the exact delete operation and the retention horizon has elapsed.
     /// Empty replica sets disable collection. A history larger than one bounded page
@@ -459,13 +586,13 @@ public:
             return std::size_t{0};
         }
         std::size_t collected = 0;
-        for (auto it = merged_.begin(); it != merged_.end();) {
-            const auto& record = it->second;
+        for (auto tombstone = merged_.begin(); tombstone != merged_.end();) {
+            const auto& record = tombstone->second;
             const auto retentionMs = static_cast<std::uint64_t>(
                 std::max<std::chrono::milliseconds::rep>(0, tombstoneGc_.minRetention.count()));
             if (!record.isTombstone() || now < record.ts.physicalMs ||
                 now - record.ts.physicalMs < retentionMs) {
-                ++it;
+                ++tombstone;
                 continue;
             }
             bool fullyAcknowledged = true;
@@ -483,19 +610,19 @@ public:
                 }
             }
             if (!fullyAcknowledged) {
-                ++it;
+                ++tombstone;
                 continue;
             }
-            const std::string prefix = "index/" + it->first + "/";
+            const std::string prefix = "index/" + tombstone->first + "/";
             auto page = backend_->listPage(prefix, std::nullopt, limits_.maxIndexObjectsPerSync);
             if (!page) {
                 return page.error();
             }
             if (page.value().nextCursor) {
-                ++it;
+                ++tombstone;
                 continue;
             }
-            const auto tombstoneKey = indexKey(it->first, hashContent(serialize(record)));
+            const auto tombstoneKey = indexKey(tombstone->first, hashContent(serialize(record)));
             for (const auto& key : page.value().keys) {
                 if (key != tombstoneKey) {
                     if (auto removed = backend_->remove(key); !removed) {
@@ -512,7 +639,7 @@ public:
                     return removed.error();
                 }
             }
-            it = merged_.erase(it);
+            tombstone = merged_.erase(tombstone);
             ++collected;
         }
         return collected;
@@ -520,29 +647,41 @@ public:
 
     /// Return the number of records observed by the most recent reconciliation.
     /// This is intentionally side-effect free so status callers do not force sync.
-    std::size_t mergedRecordCount() const noexcept { return merged_.size(); }
-    std::size_t quarantinedRecordCount() const noexcept { return quarantined_.size(); }
-    std::size_t authFailureCount() const noexcept { return authFailures_; }
+    [[nodiscard]] std::size_t mergedRecordCount() const noexcept { return merged_.size(); }
+    [[nodiscard]] std::size_t quarantinedRecordCount() const noexcept {
+        return quarantined_.size();
+    }
+    [[nodiscard]] std::size_t authFailureCount() const noexcept { return authFailures_; }
 
     /// Immutable copy of the reconciled state. IPC readers consume this instead
     /// of the live maps so a slow reconciliation cannot block status/cached reads;
     /// the owning service refreshes it at commit points while holding its lock.
     struct CommittedState {
-        std::map<std::string, MemoryIndexRecord> merged;           // NOLINT(no-bit-fields)
+        // pi-lens-ignore: no-bit-fields
+        std::map<std::string, MemoryIndexRecord> merged; // NOLINT(no-bit-fields)
+        // pi-lens-ignore: no-bit-fields
         std::map<std::string, std::vector<std::byte>> cachedBlobs; // NOLINT(no-bit-fields)
-        std::map<std::string, std::string> quarantined;            // NOLINT(no-bit-fields)
+        // pi-lens-ignore: no-bit-fields
+        std::map<std::string, std::string> quarantined; // NOLINT(no-bit-fields)
         std::size_t authFailures{0};
+        VersionVector version;
     };
     [[nodiscard]] CommittedState committedState() const {
-        return CommittedState{merged_, cachedBlobs_, quarantined_, authFailures_};
+        return CommittedState{.merged = merged_,
+                              .cachedBlobs = cachedBlobs_,
+                              .quarantined = quarantined_,
+                              .authFailures = authFailures_,
+                              .version = version_};
     }
 
     /// Bounded snapshot of current quarantine reasons (cleared each scan page).
-    std::map<std::string, std::string> quarantinedReasons() const { return quarantined_; }
+    [[nodiscard]] std::map<std::string, std::string> quarantinedReasons() const {
+        return quarantined_;
+    }
 
     /// Read only the last periodically reconciled winner. Daemon IPC uses this
     /// path so polling a peer cannot manufacture convergence by forcing sync.
-    Result<std::vector<std::byte>> readCached(std::string_view logicalKey) const {
+    [[nodiscard]] Result<std::vector<std::byte>> readCached(std::string_view logicalKey) const {
         if (auto valid = validateLogicalKey(logicalKey); !valid) {
             return valid.error();
         }
@@ -562,10 +701,12 @@ public:
 
     /// Read the winning content for `logicalKey`. Re-syncs to stay current.
 #ifdef YAMS_TESTING
-    bool hasMergedRecord(std::string_view logicalKey) const {
+    [[nodiscard]] bool hasMergedRecord(std::string_view logicalKey) const {
         return merged_.contains(std::string(logicalKey));
     }
-    std::size_t testingCachedBlobCount() const noexcept { return cachedBlobs_.size(); }
+    [[nodiscard]] std::size_t testingCachedBlobCount() const noexcept {
+        return cachedBlobs_.size();
+    }
 #endif
 
     Result<std::vector<std::byte>> read(std::string_view logicalKey) {
@@ -580,6 +721,228 @@ public:
     }
 
 private:
+    Result<std::optional<MemoryDelta>> loadLocalDelta(const std::string& key,
+                                                      const VersionVector& peerVersion) {
+        const std::string logicalKey = logicalKeyFromIndexKey(key);
+        const std::string expectedRecordHash = recordHashFromIndexKey(key);
+        if (logicalKey.empty() || !isSha256Digest(expectedRecordHash)) {
+            return Error{ErrorCode::InvalidData, "invalid local direct-delta index key"};
+        }
+        auto fetched = backend_->retrieve(key);
+        if (!fetched) {
+            return fetched.error();
+        }
+        if (fetched.value().size() > limits_.maxEnvelopeBytes ||
+            hashContent(fetched.value()) != expectedRecordHash) {
+            return Error{ErrorCode::InvalidData,
+                         "local direct-delta envelope failed integrity validation"};
+        }
+        auto record = deserialize(fetched.value());
+        if (!record) {
+            return record.error();
+        }
+        if (record.value().origin != nodeId_ ||
+            record.value().vv.get(nodeId_) <= peerVersion.get(nodeId_)) {
+            return std::optional<MemoryDelta>{};
+        }
+        if (!record.value().hasValidIdentity(corpusId_, corpusEpoch_, logicalKey)) {
+            return Error{ErrorCode::InvalidData,
+                         "local direct-delta envelope has invalid causal identity"};
+        }
+        const bool authenticated =
+            record.value().schemaVersion == kAuthenticatedMemoryIndexSchemaVersion;
+        if ((authenticated || (writerAuth_ && writerAuth_->required())) &&
+            (!writerAuth_ || !writerAuth_->verify(record.value()))) {
+            return Error{ErrorCode::Unauthorized,
+                         "local direct-delta envelope failed writer authentication"};
+        }
+        std::vector<std::byte> payload;
+        if (!record.value().isTombstone()) {
+            auto blob = backend_->retrieve(blobKey(record.value().entryHash));
+            if (!blob) {
+                return blob.error();
+            }
+            if (blob.value().size() > limits_.maxValueBytes ||
+                hashContent(blob.value()) != record.value().entryHash) {
+                return Error{ErrorCode::HashMismatch,
+                             "local direct-delta payload failed integrity validation"};
+            }
+            payload = std::move(blob.value());
+        }
+        return std::optional<MemoryDelta>{MemoryDelta{.logicalKey = logicalKey,
+                                                      .record = std::move(record.value()),
+                                                      .payload = std::move(payload)}};
+    }
+
+    struct ValidatedDelta {
+        // pi-lens-ignore: no-bit-fields
+        std::vector<std::byte> recordBytes; // NOLINT(no-bit-fields)
+        std::string recordHash;
+        // pi-lens-ignore: no-bit-fields
+        std::pair<std::string, std::string> fingerprint; // NOLINT(no-bit-fields)
+    };
+
+    enum class DirectDeltaAction : std::uint8_t { Apply, Replay, Reject };
+    struct DirectDeltaDecision {
+        // pi-lens-ignore: no-bit-fields
+        DirectDeltaAction action{DirectDeltaAction::Reject}; // NOLINT(no-bit-fields)
+        std::string reason;
+    };
+
+    struct DirectWinnerPlan {
+        // pi-lens-ignore: no-bit-fields
+        bool becomesWinner{false}; // NOLINT(no-bit-fields)
+        std::optional<std::string> oldCachedHash;
+    };
+
+    Result<ValidatedDelta> validateDirectDelta(const MemoryDelta& delta) {
+        if (auto valid = validateLogicalKey(delta.logicalKey); !valid) {
+            return valid.error();
+        }
+        const auto& record = delta.record;
+        if (!record.hasValidIdentity(corpusId_, corpusEpoch_, delta.logicalKey)) {
+            return Error{ErrorCode::InvalidData, "direct delta has invalid causal identity"};
+        }
+        if (record.schemaVersion < kMemoryIndexSchemaVersion) {
+            return Error{ErrorCode::NotSupported, "direct delta schema is unsupported"};
+        }
+        const bool authenticated = record.schemaVersion == kAuthenticatedMemoryIndexSchemaVersion;
+        if ((authenticated || (writerAuth_ && writerAuth_->required())) &&
+            (!writerAuth_ || !writerAuth_->verify(record))) {
+            recordAuthFailure();
+            return Error{ErrorCode::Unauthorized, "direct delta writer authentication failed"};
+        }
+        const bool invalidPayload = record.isTombstone()
+                                        ? !delta.payload.empty()
+                                        : (delta.payload.size() > limits_.maxValueBytes ||
+                                           hashContent(delta.payload) != record.entryHash);
+        if (invalidPayload) {
+            return Error{ErrorCode::HashMismatch,
+                         "direct delta payload failed integrity validation"};
+        }
+        auto recordBytes = serialize(record);
+        if (recordBytes.size() > limits_.maxEnvelopeBytes) {
+            return Error{ErrorCode::InvalidData,
+                         "direct delta envelope exceeds configured size limit"};
+        }
+        const std::string recordHash = hashContent(recordBytes);
+        return ValidatedDelta{.recordBytes = std::move(recordBytes),
+                              .recordHash = recordHash,
+                              .fingerprint = {recordHash, delta.logicalKey}};
+    }
+
+    DirectDeltaDecision classifyDirectDelta(const MemoryDelta& delta,
+                                            const ValidatedDelta& validated) const {
+        const auto& record = delta.record;
+        const auto tracked = deltaOperations_.find(record.operationId);
+        if (tracked != deltaOperations_.end() && tracked->second != validated.fingerprint) {
+            return {DirectDeltaAction::Reject, "duplicate writer operation fork"};
+        }
+        const auto writerCounter = record.vv.get(record.origin);
+        const auto currentWriterCounter = version_.get(record.origin);
+        if (writerCounter <= currentWriterCounter) {
+            return {DirectDeltaAction::Replay, {}};
+        }
+        if (writerCounter != currentWriterCounter + 1) {
+            return {DirectDeltaAction::Reject, "direct delta has a causal writer gap"};
+        }
+        const bool missingDependency =
+            std::ranges::any_of(record.vv.counters(), [&](const auto& counter) {
+                return counter.first != record.origin &&
+                       counter.second > version_.get(counter.first);
+            });
+        return missingDependency
+                   ? DirectDeltaDecision{DirectDeltaAction::Reject,
+                                         "direct delta has an unresolved causal dependency"}
+                   : DirectDeltaDecision{DirectDeltaAction::Apply, {}};
+    }
+
+    Result<DirectWinnerPlan> planDirectWinner(const MemoryDelta& delta) const {
+        const auto winner = merged_.find(delta.logicalKey);
+        DirectWinnerPlan plan;
+        plan.becomesWinner = winner == merged_.end() ||
+                             resolveLww(delta.record, winner->second) == LwwDecision::First;
+        std::size_t projectedCacheBytes = cachedBytes_;
+        if (plan.becomesWinner && winner != merged_.end() && !winner->second.isTombstone() &&
+            winner->second.entryHash != delta.record.entryHash) {
+            const auto cached = cachedBlobs_.find(winner->second.entryHash);
+            const bool shared = std::ranges::any_of(merged_, [&](const auto& entry) {
+                return entry.first != delta.logicalKey &&
+                       entry.second.entryHash == winner->second.entryHash;
+            });
+            if (cached != cachedBlobs_.end() && !shared) {
+                projectedCacheBytes -= cached->second.size();
+                plan.oldCachedHash = winner->second.entryHash;
+            }
+        }
+        if (plan.becomesWinner && !delta.record.isTombstone() &&
+            !cachedBlobs_.contains(delta.record.entryHash)) {
+            projectedCacheBytes += delta.payload.size();
+        }
+        if (projectedCacheBytes > limits_.maxCacheBytes) {
+            return Error{ErrorCode::ResourceExhausted,
+                         "direct delta exceeds configured cache limit"};
+        }
+        return plan;
+    }
+
+    Result<void> persistDirectDelta(const MemoryDelta& delta, const ValidatedDelta& validated) {
+        if (!delta.record.isTombstone()) {
+            auto exists = backend_->exists(blobKey(delta.record.entryHash));
+            if (!exists) {
+                return exists.error();
+            }
+            if (!exists.value()) {
+                if (auto stored = backend_->store(blobKey(delta.record.entryHash), delta.payload);
+                    !stored) {
+                    return stored.error();
+                }
+            }
+        }
+        return backend_->store(indexKey(delta.logicalKey, validated.recordHash),
+                               validated.recordBytes);
+    }
+
+    void rememberDirectOperation(const MemoryDelta& delta, const ValidatedDelta& validated) {
+        if (deltaOperations_.contains(delta.record.operationId)) {
+            return;
+        }
+        if (deltaOperationOrder_.size() >= limits_.maxTrackedIdentities &&
+            !deltaOperationOrder_.empty()) {
+            deltaOperations_.erase(deltaOperationOrder_.front());
+            deltaOperationOrder_.pop_front();
+        }
+        deltaOperations_[delta.record.operationId] = validated.fingerprint;
+        deltaOperationOrder_.push_back(delta.record.operationId);
+    }
+
+    bool commitDirectDelta(const MemoryDelta& delta, const DirectWinnerPlan& plan) {
+        version_.merge(delta.record.vv);
+        if (!plan.becomesWinner) {
+            return false;
+        }
+        if (plan.oldCachedHash) {
+            const auto cached = cachedBlobs_.find(*plan.oldCachedHash);
+            if (cached != cachedBlobs_.end()) {
+                cachedBytes_ -= cached->second.size();
+                cachedBlobs_.erase(cached);
+            }
+        }
+        if (!delta.record.isTombstone() && !cachedBlobs_.contains(delta.record.entryHash)) {
+            cachedBytes_ += delta.payload.size();
+            cachedBlobs_[delta.record.entryHash] = delta.payload;
+        }
+        merged_[delta.logicalKey] = delta.record;
+        return true;
+    }
+
+    void quarantineDirectDelta(const MemoryDelta& delta, std::string reason,
+                               DeltaApplyResult& result) {
+        const std::string identity = delta.logicalKey + "#" + delta.record.operationId;
+        result.quarantined[identity] = reason;
+        quarantined_[identity] = std::move(reason);
+    }
+
     struct ScanCandidate {
         std::string indexKey;
         std::string logicalKey;
@@ -587,7 +950,16 @@ private:
         MemoryIndexRecord record;
     };
 
-    Result<void> beforeRemoteWork() const {
+    Result<void> reconcileBeforeWrite() {
+        if (!backend_->isRemote()) {
+            auto reconciled = syncFully();
+            return reconciled ? Result<void>{} : Result<void>{reconciled.error()};
+        }
+        auto reconciled = sync();
+        return reconciled ? Result<void>{} : Result<void>{reconciled.error()};
+    }
+
+    [[nodiscard]] Result<void> beforeRemoteWork() const {
         if (control_.isCancelled && control_.isCancelled()) {
             return Error{ErrorCode::OperationCancelled, "memory sync reconciliation cancelled"};
         }
@@ -663,8 +1035,9 @@ private:
     }
 
     void recordAuthFailure() noexcept {
-        authFailures_ = std::min(authFailures_ + (authFailures_ < limits_.maxTrackedIdentities),
-                                 limits_.maxTrackedIdentities);
+        if (authFailures_ < limits_.maxTrackedIdentities) {
+            ++authFailures_;
+        }
     }
 
     storage::IStorageBackend* backend_;
@@ -686,6 +1059,8 @@ private:
     std::map<std::string, std::pair<std::string, std::string>> vectorIdentities_;
     std::vector<ScanCandidate> scanCandidates_;
     std::set<std::string> forkedOperations_;
+    std::map<std::string, std::pair<std::string, std::string>> deltaOperations_;
+    std::deque<std::string> deltaOperationOrder_;
     std::map<std::string, std::string> quarantined_;
     std::size_t authFailures_{0};
 };

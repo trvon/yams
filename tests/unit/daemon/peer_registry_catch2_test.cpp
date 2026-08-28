@@ -1,0 +1,142 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright 2026 YAMS Contributors
+
+// pi-lens-ignore: fatal error
+#include <catch2/catch_test_macros.hpp>
+
+#include <yams/compat/thread_stop_compat.h>
+#include <yams/daemon/p2p/peer_registry.h>
+
+#include <atomic>
+#include <chrono>
+#include <filesystem>
+#include <latch>
+#include <memory>
+#include <string>
+#include <vector>
+
+using yams::daemon::p2p::PeerRegistry;
+
+namespace {
+
+struct TempDatabase {
+    explicit TempDatabase(std::string name) {
+        directory = std::filesystem::temp_directory_path() /
+                    ("yams-peer-registry-" + std::move(name) + "-" +
+                     std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::filesystem::create_directories(directory);
+        path = directory / "metadata.db";
+    }
+    ~TempDatabase() {
+        std::error_code error;
+        std::filesystem::remove_all(directory, error);
+    }
+    std::filesystem::path directory;
+    std::filesystem::path path;
+};
+
+} // namespace
+
+TEST_CASE("P2P peer registry persists trust and causal state across restart",
+          "[daemon][p2p][registry][sqlite]") {
+    TempDatabase database{"restart"};
+    const std::string pin(64, 'a');
+    yams::memory_sync::VersionVector version;
+    REQUIRE(version.increment("peer-node"));
+    REQUIRE(version.increment("peer-node"));
+
+    {
+        auto opened = PeerRegistry::open(database.path, 8);
+        REQUIRE(opened.has_value());
+        auto& registry = *opened.value();
+        auto unknown = registry.verifyOrPin("peer-node", pin, false);
+        REQUIRE_FALSE(unknown.has_value());
+        CHECK(unknown.error().code == yams::ErrorCode::Unauthorized);
+        auto first = registry.verifyOrPin("peer-node", std::string(64, 'A'), true);
+        REQUIRE(first.has_value());
+        CHECK(first.value().firstContactPinned);
+        REQUIRE(
+            registry.updatePeerState("peer-node", "corpus", 7, version, 123456, true).has_value());
+        // A later non-operator update must not downgrade the pin source.
+        REQUIRE(
+            registry.updatePeerState("peer-node", "corpus", 7, version, 123999, false).has_value());
+    }
+
+    auto reopened = PeerRegistry::open(database.path, 8);
+    REQUIRE(reopened.has_value());
+    auto& registry = *reopened.value();
+    CHECK(registry.pinnedPin("peer-node") == pin);
+    auto known = registry.verifyOrPin("peer-node", pin, false);
+    REQUIRE(known.has_value());
+    CHECK_FALSE(known.value().firstContactPinned);
+    auto changed = registry.verifyOrPin("peer-node", std::string(64, 'b'), true);
+    REQUIRE_FALSE(changed.has_value());
+    CHECK(changed.error().code == yams::ErrorCode::Unauthorized);
+
+    auto peers = registry.listPeers();
+    REQUIRE(peers.has_value());
+    REQUIRE(peers.value().size() == 1);
+    const auto& peer = peers.value().front();
+    CHECK(peer.nodeId == "peer-node");
+    CHECK(peer.spkiPin == pin);
+    CHECK(peer.corpusId == "corpus");
+    CHECK(peer.corpusEpoch == 7);
+    CHECK(peer.lastSeenVersion.get("peer-node") == 2);
+    CHECK(peer.lastConnectedMs == 123999);
+    CHECK(peer.pinnedByOperator);
+}
+
+TEST_CASE("P2P peer registry enforces capacity and supports removal",
+          "[daemon][p2p][registry][sqlite]") {
+    TempDatabase database{"capacity"};
+    auto opened = PeerRegistry::open(database.path, 2);
+    REQUIRE(opened.has_value());
+    auto& registry = *opened.value();
+    REQUIRE(registry.verifyOrPin("one", std::string(64, '1'), true).has_value());
+    REQUIRE(registry.verifyOrPin("two", std::string(64, '2'), true).has_value());
+    auto full = registry.verifyOrPin("three", std::string(64, '3'), true);
+    REQUIRE_FALSE(full.has_value());
+    CHECK(full.error().code == yams::ErrorCode::ResourceExhausted);
+
+    REQUIRE(registry.removePeer("one").has_value());
+    CHECK_FALSE(registry.pinnedPin("one").has_value());
+    REQUIRE(registry.verifyOrPin("three", std::string(64, '3'), true).has_value());
+    auto peers = registry.listPeers();
+    REQUIRE(peers.has_value());
+    CHECK(peers.value().size() == 2);
+}
+
+TEST_CASE("P2P peer registry serializes concurrent first contact",
+          "[daemon][p2p][registry][sqlite][concurrency]") {
+    TempDatabase database{"concurrency"};
+    auto opened = PeerRegistry::open(database.path, 8);
+    REQUIRE(opened.has_value());
+    auto& registry = *opened.value();
+    const std::string pin(64, 'c');
+    constexpr std::size_t kThreads = 8;
+    std::latch start(1);
+    std::atomic<std::size_t> successes{0};
+    std::atomic<std::size_t> firstContacts{0};
+    std::vector<yams::compat::jthread> workers;
+    workers.reserve(kThreads);
+    for (std::size_t index = 0; index < kThreads; ++index) {
+        workers.emplace_back([&] {
+            start.wait();
+            auto result = registry.verifyOrPin("shared-peer", pin, true);
+            if (result) {
+                successes.fetch_add(1, std::memory_order_relaxed);
+                if (result.value().firstContactPinned) {
+                    firstContacts.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        });
+    }
+    start.count_down();
+    workers.clear();
+
+    CHECK(successes.load(std::memory_order_relaxed) == kThreads);
+    CHECK(firstContacts.load(std::memory_order_relaxed) == 1);
+    auto peers = registry.listPeers();
+    REQUIRE(peers.has_value());
+    CHECK(peers.value().size() == 1);
+}

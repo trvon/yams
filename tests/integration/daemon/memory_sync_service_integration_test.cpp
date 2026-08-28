@@ -850,6 +850,63 @@ TEST_CASE("Daemon memory sync backfill skips a poisoned blob and continues",
     CHECK(harness.shutdownSucceeded());
 }
 
+TEST_CASE("Daemon direct deltas immediately hydrate content and metadata",
+          "[integration][daemon][memory-sync][direct-delta]") {
+    auto options =
+        makeMemorySyncHarnessOptions("123e4567-e89b-42d3-a456-426614174015", "direct-apply-corpus");
+    yams::test::DaemonHarness harness{std::move(options)};
+    REQUIRE(harness.start(30s));
+
+    auto* serviceManager = harness.daemon()->getServiceManager();
+    REQUIRE(serviceManager != nullptr);
+    auto* daemonSync = serviceManager->testingMemorySyncService();
+    REQUIRE(daemonSync != nullptr);
+    auto repository = serviceManager->getMetadataRepo();
+    auto contentStore = serviceManager->getContentStore();
+    REQUIRE(repository != nullptr);
+    REQUIRE(contentStore != nullptr);
+
+    yams::memory_sync::MemorySyncService peer{
+        makeFilesystemBackend(harness.dataDir() / "direct-peer-memory"),
+        yams::memory_sync::MemorySyncConfig{"direct-peer", 60'000, "direct-apply-corpus", 1}};
+    const auto payload = bytes("direct-delta-searchable-content");
+    const auto hash = digest(payload);
+    REQUIRE(peer.publish("content-blob/" + hash, payload).has_value());
+
+    yams::memory_sync::MetadataDocumentRecord remote;
+    remote.documentId = hash;
+    remote.filePath = "/peer/direct.md";
+    remote.fileName = "direct.md";
+    remote.fileExtension = ".md";
+    remote.fileSize = static_cast<std::int64_t>(payload.size());
+    remote.contentHash = hash;
+    remote.mimeType = "text/markdown";
+    remote.contentExtracted = true;
+    REQUIRE(peer.publish("document/" + hash, bytes(nlohmann::json(remote).dump())).has_value());
+
+    auto deltas = peer.exportLocalDeltasAfter({});
+    REQUIRE(deltas.has_value());
+    REQUIRE(deltas.value().deltas.size() == 2);
+    auto applied = daemonSync->applyDeltas(deltas.value().deltas);
+    REQUIRE(applied.has_value());
+    CHECK(applied.value().merged == 2);
+
+    auto contentExists = contentStore->exists(hash);
+    REQUIRE(contentExists.has_value());
+    CHECK(contentExists.value());
+    auto replicatedBytes = contentStore->retrieveBytes(hash);
+    REQUIRE(replicatedBytes.has_value());
+    CHECK(replicatedBytes.value() == payload);
+    auto imported = repository->getDocumentByHash(hash);
+    REQUIRE(imported.has_value());
+    REQUIRE(imported.value().has_value());
+    CHECK(imported.value()->fileName == "direct.md");
+    CHECK(imported.value()->sha256Hash == hash);
+
+    harness.stop();
+    CHECK(harness.shutdownSucceeded());
+}
+
 TEST_CASE("Daemon temporary memory sync converges inside one session and cleans only its namespace",
           "[integration][daemon][memory-sync][temporary]") {
     yams::test::DaemonHarness::Options options;

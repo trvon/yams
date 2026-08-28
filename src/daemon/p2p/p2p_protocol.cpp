@@ -4,18 +4,18 @@
 // pi-lens-ignore: fatal error
 #include <yams/daemon/p2p/p2p_protocol.h>
 
-// pi-lens-ignore: fatal error
-#include <nlohmann/json.hpp>
+#include "p2p_json.h"
 
 #include <cctype>
-#include <cstring>
 #include <utility>
 
 namespace yams::daemon::p2p {
 
 namespace {
 
-using Json = nlohmann::json;
+using detail::Json;
+using detail::readJson;
+using detail::writeJson;
 
 struct WireHello {
     std::uint32_t protocol{0};
@@ -40,34 +40,6 @@ Result<void> validateConfig(const PeerHandshakeConfig& config) {
         return Error{ErrorCode::InvalidArgument, "p2p handshake timeout must be positive"};
     }
     return {};
-}
-
-Result<void> writeJson(P2pConnection& connection, const Json& json,
-                       std::chrono::milliseconds timeout) {
-    std::string text;
-    try {
-        text = json.dump();
-    } catch (const std::exception& error) {
-        return Error{ErrorCode::SerializationError, error.what()};
-    }
-    return connection.writeFrame(
-        std::span<const std::byte>(reinterpret_cast<const std::byte*>(text.data()), text.size()),
-        timeout);
-}
-
-Result<Json> readJson(P2pConnection& connection, std::chrono::milliseconds timeout) {
-    auto frame = connection.readFrame(timeout);
-    if (!frame) {
-        return frame.error();
-    }
-    try {
-        const std::string_view text(reinterpret_cast<const char*>(frame.value().data()),
-                                    frame.value().size());
-        return Json::parse(text);
-    } catch (const std::exception& error) {
-        return Error{ErrorCode::SerializationError,
-                     std::string("invalid p2p handshake JSON: ") + error.what()};
-    }
 }
 
 Json helloJson(const PeerHandshakeConfig& config) {
@@ -154,19 +126,18 @@ Result<WireState> parseState(const Json& json) {
 
 Result<bool> preflightTrust(IPeerTrustStore& trustStore, std::string_view nodeId,
                             std::string_view spkiPin, bool allowFirstContact) {
-    const auto pinned = trustStore.pinnedPin(nodeId);
-    if (!pinned) {
-        if (!allowFirstContact) {
-            return Error{ErrorCode::Unauthorized,
-                         "p2p peer is unknown and first-contact trust is disabled"};
-        }
-        return true; // Defer first-contact pin commit until state validation succeeds.
-    }
     auto verified = trustStore.verifyOrPin(nodeId, spkiPin, false);
-    if (!verified) {
-        return verified.error();
+    if (verified) {
+        return false;
     }
-    return false;
+    if (verified.error().code != ErrorCode::Unauthorized) {
+        return verified.error(); // Storage/config failures always fail closed.
+    }
+    const auto pinned = trustStore.pinnedPin(nodeId);
+    if (pinned || !allowFirstContact) {
+        return verified.error(); // Existing mismatch or unknown peer without TOFU.
+    }
+    return true; // Defer first-contact pin commit until state validation succeeds.
 }
 
 Result<bool> validatePeerAndPreflightTrust(IPeerTrustStore& trustStore,
@@ -222,37 +193,81 @@ Result<PeerTrustDecision> finalizeTrust(IPeerTrustStore& trustStore,
     return commitTrust(trustStore, peerNodeId, connection.peerSpkiPin(), pendingFirstContact);
 }
 
+struct FinalizedPeerState {
+    WireState state;
+    PeerTrustDecision trust;
+};
+
+Result<FinalizedPeerState> readAndFinalizePeerState(P2pConnection& connection,
+                                                    const PeerHandshakeConfig& config,
+                                                    IPeerTrustStore& trustStore,
+                                                    const WireHello& peer,
+                                                    bool pendingFirstContact) {
+    auto state = readStateFrame(connection, config.timeout);
+    if (!state) {
+        return state.error();
+    }
+    auto trust = finalizeTrust(trustStore, connection, peer.nodeId, pendingFirstContact);
+    if (!trust) {
+        return trust.error();
+    }
+    return FinalizedPeerState{.state = std::move(state.value()), .trust = trust.value()};
+}
+
 } // namespace
 
-Result<PeerTrustDecision> InMemoryPeerTrustStore::verifyOrPin(std::string_view nodeId,
-                                                              std::string_view spkiPin,
-                                                              bool allowFirstContact) {
-    if (nodeId.empty() || !memory_sync::isSha256Digest(spkiPin)) {
-        return Error{ErrorCode::InvalidArgument, "p2p trust identity is invalid"};
+Result<std::string> normalizePeerSpkiPin(std::string_view spkiPin) {
+    if (!memory_sync::isSha256Digest(spkiPin)) {
+        return Error{ErrorCode::InvalidArgument, "p2p SPKI pin must be a SHA-256 digest"};
     }
     std::string normalizedPin(spkiPin);
     std::ranges::transform(normalizedPin, normalizedPin.begin(),
                            [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return normalizedPin;
+}
+
+Result<PeerTrustDecision> evaluatePeerPin(const std::optional<std::string>& existingPin,
+                                          std::string_view normalizedPin, bool allowFirstContact) {
+    if (!existingPin) {
+        return allowFirstContact
+                   ? Result<PeerTrustDecision>{PeerTrustDecision{.firstContactPinned = true}}
+                   : Result<PeerTrustDecision>{
+                         Error{ErrorCode::Unauthorized,
+                               "p2p peer is unknown and first-contact trust is disabled"}};
+    }
+    return *existingPin == normalizedPin
+               ? Result<PeerTrustDecision>{PeerTrustDecision{}}
+               : Result<PeerTrustDecision>{
+                     Error{ErrorCode::Unauthorized, "p2p peer certificate pin changed"}};
+}
+
+Result<PeerTrustDecision> InMemoryPeerTrustStore::verifyOrPin(std::string_view nodeId,
+                                                              std::string_view spkiPin,
+                                                              bool allowFirstContact) {
+    if (nodeId.empty()) {
+        return Error{ErrorCode::InvalidArgument, "p2p trust node id is empty"};
+    }
+    auto normalized = normalizePeerSpkiPin(spkiPin);
+    if (!normalized) {
+        return normalized.error();
+    }
+    const auto& normalizedPin = normalized.value();
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = pins_.find(std::string(nodeId));
-    if (found == pins_.end()) {
-        if (!allowFirstContact) {
-            return Error{ErrorCode::Unauthorized,
-                         "p2p peer is unknown and first-contact trust is disabled"};
-        }
+    const std::optional<std::string> existing =
+        found == pins_.end() ? std::nullopt : std::optional<std::string>{found->second};
+    auto decision = evaluatePeerPin(existing, normalizedPin, allowFirstContact);
+    if (decision && decision.value().firstContactPinned) {
         pins_.emplace(nodeId, normalizedPin);
-        return PeerTrustDecision{.firstContactPinned = true};
     }
-    if (found->second != normalizedPin) {
-        return Error{ErrorCode::Unauthorized, "p2p peer certificate pin changed"};
-    }
-    return PeerTrustDecision{.firstContactPinned = false};
+    return decision;
 }
 
 std::optional<std::string> InMemoryPeerTrustStore::pinnedPin(std::string_view nodeId) const {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = pins_.find(std::string(nodeId));
-    return found == pins_.end() ? std::nullopt : std::optional<std::string>{found->second};
+    return found == pins_.end() ? std::optional<std::string>{}
+                                : std::optional<std::string>{found->second};
 }
 
 std::uint64_t PeerHandshakeResult::peerWatermark(std::string_view writerId) const {
@@ -297,16 +312,13 @@ Result<PeerHandshakeResult> initiatePeerHandshake(P2pConnection& connection,
     if (auto written = writeJson(connection, stateJson(config), config.timeout); !written) {
         return fail(written.error());
     }
-    auto state = readStateFrame(connection, config.timeout);
-    if (!state) {
-        return fail(state.error());
+    auto finalized = readAndFinalizePeerState(connection, config, trustStore, peerHello.value(),
+                                              pendingTrust.value());
+    if (!finalized) {
+        return fail(finalized.error());
     }
-    auto trust =
-        finalizeTrust(trustStore, connection, peerHello.value().nodeId, pendingTrust.value());
-    if (!trust) {
-        return fail(trust.error());
-    }
-    return makeHandshakeResult(connection, std::move(state.value()), trust.value());
+    return makeHandshakeResult(connection, std::move(finalized.value().state),
+                               finalized.value().trust);
 }
 
 Result<PeerHandshakeResult> acceptPeerHandshake(P2pConnection& connection,
@@ -341,18 +353,16 @@ Result<PeerHandshakeResult> acceptPeerHandshake(P2pConnection& connection,
         !written) {
         return fail(written.error());
     }
-    auto state = readStateFrame(connection, config.timeout);
-    if (!state) {
-        return fail(state.error());
-    }
-    auto trust = finalizeTrust(trustStore, connection, hello.value().nodeId, pendingTrust.value());
-    if (!trust) {
-        return fail(trust.error());
+    auto finalized = readAndFinalizePeerState(connection, config, trustStore, hello.value(),
+                                              pendingTrust.value());
+    if (!finalized) {
+        return fail(finalized.error());
     }
     if (auto written = writeJson(connection, stateJson(config), config.timeout); !written) {
         return fail(written.error());
     }
-    return makeHandshakeResult(connection, std::move(state.value()), trust.value());
+    return makeHandshakeResult(connection, std::move(finalized.value().state),
+                               finalized.value().trust);
 }
 
 } // namespace yams::daemon::p2p

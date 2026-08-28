@@ -5,6 +5,7 @@
 
 #include <cstring>
 #include <filesystem>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -937,6 +938,145 @@ TEST_CASE("authenticated memory sync rejects invalid and revoked signatures",
         CHECK(reader.mergedRecordCount() == 0);
         CHECK(reader.authFailureCount() == 1);
     }
+}
+
+TEST_CASE("direct memory deltas apply, replay idempotently, and propagate tombstones",
+          "[memory-sync][direct-delta]") {
+    BackendFixture writerFixture{"direct-delta-writer"};
+    BackendFixture readerFixture{"direct-delta-reader"};
+    MemorySyncLoop writer{writerFixture.backend, "writer", "direct-corpus", 1};
+    MemorySyncLoop reader{readerFixture.backend, "reader", "direct-corpus", 1};
+
+    REQUIRE(writer.publish("user/key", bytes("v1")).has_value());
+    auto firstBatch = writer.exportLocalDeltasAfter({});
+    REQUIRE(firstBatch.has_value());
+    REQUIRE(firstBatch.value().deltas.size() == 1);
+    CHECK_FALSE(firstBatch.value().hasMore);
+
+    auto firstApply = reader.applyDeltas(firstBatch.value().deltas);
+    REQUIRE(firstApply.has_value());
+    CHECK(firstApply.value().merged == 1);
+    CHECK(firstApply.value().replayed == 0);
+    REQUIRE(reader.readCached("user/key").has_value());
+    CHECK(text(reader.readCached("user/key").value()) == "v1");
+
+    auto replay = reader.applyDeltas(firstBatch.value().deltas);
+    REQUIRE(replay.has_value());
+    CHECK(replay.value().merged == 0);
+    CHECK(replay.value().replayed == 1);
+
+    REQUIRE(writer.publish("user/key", bytes("v2")).has_value());
+    auto updateBatch = writer.exportLocalDeltasAfter(reader.currentVersion());
+    REQUIRE(updateBatch.has_value());
+    REQUIRE(updateBatch.value().deltas.size() == 1);
+    auto updated = reader.applyDeltas(updateBatch.value().deltas);
+    REQUIRE(updated.has_value());
+    CHECK(updated.value().merged == 1);
+    CHECK(text(reader.readCached("user/key").value()) == "v2");
+
+    REQUIRE(writer.publish("user/shared", bytes("v2")).has_value());
+    auto sharedBatch = writer.exportLocalDeltasAfter(reader.currentVersion());
+    REQUIRE(sharedBatch.has_value());
+    REQUIRE(reader.applyDeltas(sharedBatch.value().deltas).has_value());
+    CHECK(text(reader.readCached("user/shared").value()) == "v2");
+
+    REQUIRE(writer.erase("user/key", "key").has_value());
+    auto deleteBatch = writer.exportLocalDeltasAfter(reader.currentVersion());
+    REQUIRE(deleteBatch.has_value());
+    REQUIRE(deleteBatch.value().deltas.size() == 1);
+    auto deleted = reader.applyDeltas(deleteBatch.value().deltas);
+    REQUIRE(deleted.has_value());
+    CHECK(deleted.value().merged == 1);
+    CHECK_FALSE(reader.readCached("user/key").has_value());
+    REQUIRE(reader.readCached("user/shared").has_value());
+    CHECK(text(reader.readCached("user/shared").value()) == "v2");
+}
+
+TEST_CASE("direct local writer restores its causal counter across paged restart",
+          "[memory-sync][direct-delta][restart]") {
+    BackendFixture fixture{"direct-delta-restart"};
+    MemorySyncLimits limits;
+    limits.maxIndexObjectsPerSync = 2;
+    {
+        MemorySyncLoop writer{fixture.backend, "writer", "restart-corpus", 1, false, limits};
+        REQUIRE(writer.publish("user/one", bytes("one")).has_value());
+        REQUIRE(writer.publish("user/two", bytes("two")).has_value());
+        REQUIRE(writer.publish("user/three", bytes("three")).has_value());
+    }
+    MemorySyncLoop restarted{fixture.backend, "writer", "restart-corpus", 1, false, limits};
+    REQUIRE(restarted.publish("user/four", bytes("four")).has_value());
+    auto exported = restarted.exportLocalDeltasAfter({}, 8);
+    REQUIRE(exported.has_value());
+    REQUIRE(exported.value().deltas.size() == 4);
+    std::set<std::string> operationIds;
+    for (const auto& delta : exported.value().deltas) {
+        operationIds.insert(delta.record.operationId);
+    }
+    CHECK(operationIds.size() == 4);
+    CHECK(exported.value().deltas.back().record.vv.get("writer") == 4);
+}
+
+TEST_CASE("direct memory delta export resumes from causal watermark",
+          "[memory-sync][direct-delta]") {
+    BackendFixture writerFixture{"direct-delta-gap-writer"};
+    BackendFixture readerFixture{"direct-delta-gap-reader"};
+    MemorySyncLoop writer{writerFixture.backend, "writer", "direct-gap-corpus", 1};
+    MemorySyncLoop reader{readerFixture.backend, "reader", "direct-gap-corpus", 1};
+
+    REQUIRE(writer.publish("user/one", bytes("one")).has_value());
+    REQUIRE(writer.publish("user/two", bytes("two")).has_value());
+    REQUIRE(writer.publish("user/three", bytes("three")).has_value());
+
+    auto first = writer.exportLocalDeltasAfter({}, 2);
+    REQUIRE(first.has_value());
+    CHECK(first.value().deltas.size() == 2);
+    CHECK(first.value().hasMore);
+    REQUIRE(reader.applyDeltas(first.value().deltas).has_value());
+    CHECK(reader.currentVersion().get("writer") == 2);
+
+    auto second = writer.exportLocalDeltasAfter(reader.currentVersion(), 2);
+    REQUIRE(second.has_value());
+    CHECK(second.value().deltas.size() == 1);
+    CHECK_FALSE(second.value().hasMore);
+    REQUIRE(reader.applyDeltas(second.value().deltas).has_value());
+    CHECK(reader.currentVersion().get("writer") == 3);
+    CHECK(reader.readCached("user/one").has_value());
+    CHECK(reader.readCached("user/two").has_value());
+    CHECK(reader.readCached("user/three").has_value());
+}
+
+TEST_CASE("direct memory deltas quarantine tampering and writer-operation forks",
+          "[memory-sync][direct-delta][security]") {
+    BackendFixture writerFixture{"direct-delta-security-writer"};
+    BackendFixture readerFixture{"direct-delta-security-reader"};
+    MemorySyncLoop writer{writerFixture.backend, "writer", "direct-security-corpus", 1};
+    MemorySyncLoop reader{readerFixture.backend, "reader", "direct-security-corpus", 1};
+
+    REQUIRE(writer.publish("user/key", bytes("original")).has_value());
+    auto batch = writer.exportLocalDeltasAfter({});
+    REQUIRE(batch.has_value());
+    REQUIRE(batch.value().deltas.size() == 1);
+
+    auto tampered = batch.value().deltas;
+    tampered.front().payload.front() = std::byte{'x'};
+    auto rejected = reader.applyDeltas(tampered);
+    REQUIRE(rejected.has_value());
+    CHECK(rejected.value().merged == 0);
+    CHECK(rejected.value().quarantined.size() == 1);
+    CHECK(reader.currentVersion().empty());
+
+    auto applied = reader.applyDeltas(batch.value().deltas);
+    REQUIRE(applied.has_value());
+    CHECK(applied.value().merged == 1);
+
+    auto fork = batch.value().deltas;
+    fork.front().payload = bytes("forked");
+    fork.front().record.entryHash = digest(fork.front().payload);
+    auto forked = reader.applyDeltas(fork);
+    REQUIRE(forked.has_value());
+    CHECK(forked.value().merged == 0);
+    CHECK(forked.value().quarantined.size() == 1);
+    CHECK(text(reader.readCached("user/key").value()) == "original");
 }
 
 TEST_CASE("authenticated memory sync accepts explicit key rotation and rejects epoch replay",

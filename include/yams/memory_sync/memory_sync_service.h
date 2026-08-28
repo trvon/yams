@@ -60,8 +60,9 @@ public:
           sessionLeaseKey_(std::move(sessionLeaseKey)), config_(std::move(config)),
           loop_(*backend_, config_.nodeId, config_.corpusId, config_.corpusEpoch,
                 allowLegacyUnbound, config_.limits,
-                MemorySyncControl{[this] { return stop_.load(std::memory_order_acquire); },
-                                  std::move(canAdmitRemoteWork)},
+                MemorySyncControl{
+                    .isCancelled = [this] { return stop_.load(std::memory_order_acquire); },
+                    .canAdmitRemoteWork = std::move(canAdmitRemoteWork)},
                 {}, config_.writerAuth) {}
 
     ~MemorySyncService() { stop(); }
@@ -191,14 +192,14 @@ public:
         if (!state) {
             return Error{ErrorCode::NotFound, "memory sync has not reconciled"};
         }
-        const auto it = state->merged.find(std::string(key));
-        if (it == state->merged.end()) {
+        const auto record = state->merged.find(std::string(key));
+        if (record == state->merged.end()) {
             return Error{ErrorCode::NotFound, "no memory record for key"};
         }
-        if (it->second.isTombstone()) {
+        if (record->second.isTombstone()) {
             return Error{ErrorCode::NotFound, "memory record was deleted"};
         }
-        const auto cached = state->cachedBlobs.find(it->second.entryHash);
+        const auto cached = state->cachedBlobs.find(record->second.entryHash);
         if (cached == state->cachedBlobs.end()) {
             return Error{ErrorCode::NotFound, "memory sync blob was not hydrated during sync"};
         }
@@ -246,7 +247,7 @@ public:
     }
 
     Result<std::map<std::string, MemoryIndexRecord>> syncOnce() {
-        if (callbackOwner_ == this && callbackSnapshot_) {
+        if (callbackOwner_ == this && callbackSnapshot_ != nullptr) {
             return *callbackSnapshot_;
         }
         std::lock_guard<std::mutex> lock(loopMutex_);
@@ -255,6 +256,41 @@ public:
             refreshCommittedState();
         }
         return result;
+    }
+
+    Result<std::map<std::string, MemoryIndexRecord>> syncFully() {
+        std::lock_guard<std::mutex> lock(loopMutex_);
+        auto result = loop_.syncFully();
+        if (result) {
+            refreshCommittedState();
+        }
+        return result;
+    }
+
+    Result<MemoryDeltaBatch> exportLocalDeltasAfter(const VersionVector& peerVersion,
+                                                    std::size_t maxDeltas = 128) {
+        std::lock_guard<std::mutex> lock(loopMutex_);
+        return loop_.exportLocalDeltasAfter(peerVersion, maxDeltas);
+    }
+
+    Result<DeltaApplyResult> applyDeltas(std::span<const MemoryDelta> deltas) {
+        Result<DeltaApplyResult> result;
+        {
+            std::lock_guard<std::mutex> lock(loopMutex_);
+            result = loop_.applyDeltas(deltas);
+            if (result) {
+                refreshCommittedState();
+            }
+        }
+        if (result && result.value().merged != 0) {
+            invokeAfterSyncCallback();
+        }
+        return result;
+    }
+
+    VersionVector currentVersion() const {
+        const auto state = committedSnapshot();
+        return state ? state->version : VersionVector{};
     }
 
 #ifdef YAMS_TESTING
@@ -280,6 +316,28 @@ private:
         auto state = std::make_shared<MemorySyncLoop::CommittedState>(loop_.committedState());
         std::lock_guard<std::mutex> lock(snapshotMutex_);
         committed_ = std::move(state);
+    }
+
+    void invokeAfterSyncCallback(
+        const std::map<std::string, MemoryIndexRecord>* snapshot = nullptr) noexcept {
+        std::function<void()> callback;
+        {
+            std::lock_guard<std::mutex> lock(callbackMutex_);
+            callback = afterSyncCallback_;
+        }
+        if (!callback || stop_.load(std::memory_order_acquire)) {
+            return;
+        }
+        callbackOwner_ = snapshot != nullptr ? this : nullptr;
+        callbackSnapshot_ = snapshot;
+        try {
+            callback();
+        } catch (...) {
+            // Adapter failures are isolated from the convergence/session worker.
+            callbackFailures_.fetch_add(1, std::memory_order_relaxed);
+        }
+        callbackSnapshot_ = nullptr;
+        callbackOwner_ = nullptr;
     }
 
     void workerLoop() {
@@ -314,23 +372,7 @@ private:
                             std::chrono::steady_clock::now().time_since_epoch())
                             .count(),
                         std::memory_order_release);
-                    std::function<void()> callback;
-                    {
-                        std::lock_guard<std::mutex> lock(callbackMutex_);
-                        callback = afterSyncCallback_;
-                    }
-                    if (callback && !stop_.load(std::memory_order_acquire)) {
-                        callbackOwner_ = this;
-                        callbackSnapshot_ = &snapshot.value();
-                        try {
-                            callback();
-                        } catch (...) {
-                            // A consumer failure must not terminate the convergence worker.
-                            callbackFailures_.fetch_add(1, std::memory_order_relaxed);
-                        }
-                        callbackSnapshot_ = nullptr;
-                        callbackOwner_ = nullptr;
-                    }
+                    invokeAfterSyncCallback(&snapshot.value());
                 }
             } else {
                 failedSyncCycles_.fetch_add(1, std::memory_order_relaxed);

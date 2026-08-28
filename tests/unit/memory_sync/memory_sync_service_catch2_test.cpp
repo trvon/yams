@@ -532,6 +532,28 @@ TEST_CASE("MemorySyncService periodic worker syncs without hanging", "[memory-sy
 
 // NOLINTEND(bugprone-chained-comparison)
 
+TEST_CASE("MemorySyncService direct delta apply invokes adapter callback after lock release",
+          "[memory-sync][service][direct-delta]") {
+    TempDirGuard writerDir;
+    TempDirGuard readerDir;
+    MemorySyncService writer{makeBackend(writerDir.path),
+                             MemorySyncConfig{"writer", 60'000, "direct-service-corpus", 1}};
+    MemorySyncService reader{makeBackend(readerDir.path),
+                             MemorySyncConfig{"reader", 60'000, "direct-service-corpus", 1}};
+    REQUIRE(writer.publish("user/key", bytes("value")).has_value());
+    auto deltas = writer.exportLocalDeltasAfter({});
+    REQUIRE(deltas.has_value());
+    REQUIRE(deltas.value().deltas.size() == 1);
+
+    std::atomic<std::size_t> callbacks{0};
+    reader.setAfterSyncCallback([&] { callbacks.fetch_add(1, std::memory_order_relaxed); });
+    auto applied = reader.applyDeltas(deltas.value().deltas);
+    REQUIRE(applied.has_value());
+    CHECK(applied.value().merged == 1);
+    CHECK(callbacks.load(std::memory_order_relaxed) == 1);
+    CHECK(reader.readCached("user/key").has_value());
+}
+
 TEST_CASE("MemorySyncService readers do not block on a slow reconciliation",
           "[memory-sync][service]") {
     TempDirGuard tmp;

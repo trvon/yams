@@ -25,6 +25,12 @@ struct PeerTrustDecision {
     bool firstContactPinned{false};
 };
 
+/// Validate and lowercase a SHA-256 SPKI pin for stable storage/comparison.
+Result<std::string> normalizePeerSpkiPin(std::string_view spkiPin);
+/// Shared trust decision for in-memory and persistent stores.
+Result<PeerTrustDecision> evaluatePeerPin(const std::optional<std::string>& existingPin,
+                                          std::string_view normalizedPin, bool allowFirstContact);
+
 /// Trust-store seam. #43 uses InMemoryPeerTrustStore; #45 supplies persistent
 /// daemon metadata storage without changing handshake semantics.
 class IPeerTrustStore {
