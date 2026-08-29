@@ -20,6 +20,7 @@ namespace {
 
 using detail::Json;
 using detail::readJson;
+using detail::readJsonFrame;
 using detail::writeJson;
 
 struct DeltaAcknowledgement {
@@ -180,17 +181,17 @@ Result<ReceivedDelta> receiveDeltaRecord(P2pConnection& connection,
                                          const DeltaExchangeOptions& options,
                                          std::size_t remainingBytes) {
     constexpr std::size_t kFramePrefixBytes = 4;
-    auto control = readJson(connection, options.timeout);
+    auto control = readJsonFrame(connection, options.timeout);
     if (!control) {
         return control.error();
     }
-    auto parsed = parseDeltaRecordControl(control.value());
+    auto parsed = parseDeltaRecordControl(control.value().json);
     if (!parsed) {
         return parsed.error();
     }
     auto delta = std::move(parsed.value().delta);
     const auto payloadSize = parsed.value().payloadSize;
-    const auto controlBytes = control.value().dump().size() + kFramePrefixBytes;
+    const auto controlBytes = control.value().payloadBytes + kFramePrefixBytes;
     const auto payloadBytes = payloadSize == 0 ? 0 : payloadSize + kFramePrefixBytes;
     if (controlBytes > remainingBytes || payloadBytes > remainingBytes - controlBytes) {
         return Error{ErrorCode::ResourceExhausted,
@@ -218,15 +219,15 @@ struct ReceivedBatch {
 Result<ReceivedBatch> receiveBatch(P2pConnection& connection, const DeltaExchangeOptions& options,
                                    std::size_t remainingDeltas, std::size_t remainingBytes) {
     constexpr std::size_t kFramePrefixBytes = 4;
-    auto control = readJson(connection, options.timeout);
+    auto control = readJsonFrame(connection, options.timeout);
     if (!control) {
         return control.error();
     }
-    auto header = parseBatchHeader(control.value(), options);
+    auto header = parseBatchHeader(control.value().json, options);
     if (!header) {
         return header.error();
     }
-    const auto headerBytes = control.value().dump().size() + kFramePrefixBytes;
+    const auto headerBytes = control.value().payloadBytes + kFramePrefixBytes;
     if (header.value().count > remainingDeltas) {
         return Error{ErrorCode::ResourceExhausted,
                      "p2p delta exchange exceeded aggregate delta limit"};
@@ -558,11 +559,11 @@ Result<BootstrapPhaseResult> receiveBootstrapPhase(P2pConnection& connection,
                      "cold bootstrap requires a durable zero state and explicit operator "
                      "enrollment"};
     }
-    auto begin = readJson(connection, options.timeout);
+    auto begin = readJsonFrame(connection, options.timeout);
     if (!begin) {
         return begin.error();
     }
-    auto manifest = parseSnapshotBegin(begin.value(), options);
+    auto manifest = parseSnapshotBegin(begin.value().json, options);
     if (!manifest) {
         return manifest.error();
     }
@@ -585,7 +586,7 @@ Result<BootstrapPhaseResult> receiveBootstrapPhase(P2pConnection& connection,
             .witnessSignature = std::move(manifest.value().witnessSignature)};
         snapshot.winners.reserve(count);
         constexpr std::size_t kFramePrefixBytes = 4;
-        std::size_t wireBytes = begin.value().dump().size() + kFramePrefixBytes;
+        std::size_t wireBytes = begin.value().payloadBytes + kFramePrefixBytes;
         if (wireBytes > options.maxSnapshotWireBytes) {
             return Error{ErrorCode::ResourceExhausted,
                          "cold bootstrap manifest exceeds aggregate wire bound"};

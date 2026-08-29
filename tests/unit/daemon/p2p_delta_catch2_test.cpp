@@ -580,6 +580,109 @@ TEST_CASE("direct P2P delta receiver rejects aggregate bytes before reading payl
     listener.stop();
 }
 
+TEST_CASE("direct P2P delta receiver counts actual wire bytes including JSON padding",
+          "[daemon][p2p][delta][network][security]") {
+    TempDir clientDir{"padded-wire-client"};
+    TempDir serverDir{"padded-wire-server"};
+    MemorySyncService clientService{
+        backend(clientDir.path), MemorySyncConfig{"client-node", 60'000, "wire-delta-corpus", 1}};
+    MemorySyncService serverService{
+        backend(serverDir.path), MemorySyncConfig{"server-node", 60'000, "wire-delta-corpus", 1}};
+    auto clientKey = yams::memory_sync::generateWriterKeyPair();
+    auto serverKey = yams::memory_sync::generateWriterKeyPair();
+    REQUIRE(clientKey.has_value());
+    REQUIRE(serverKey.has_value());
+    auto clientIdentity = identity("client-node", clientKey.value());
+    auto serverIdentity = identity("server-node", serverKey.value());
+    const std::string serverPin = serverIdentity.spkiPin();
+    const std::string clientPin = clientIdentity.spkiPin();
+
+    const auto payload = bytes(std::string(64, 'x'));
+    yams::memory_sync::MemoryIndexRecord record;
+    record.entryHash = digest(payload);
+    record.origin = "client-node";
+    REQUIRE(record.vv.increment(record.origin));
+    record.corpusId = "wire-delta-corpus";
+    record.corpusEpoch = 1;
+    record.operationId = yams::memory_sync::makeOperationId(record.origin, 1);
+    record.logicalKey = "user/padded-wire";
+    record.recordKind = std::string(yams::memory_sync::kMemoryValueRecordKind);
+    const nlohmann::json mode{{"type", "replication_mode"}, {"mode", "delta"}};
+    const nlohmann::json batch{{"type", "delta_batch"}, {"count", 1}, {"has_more", false}};
+    const nlohmann::json wireRecord{{"type", "delta_record"},
+                                    {"logical_key", record.logicalKey},
+                                    {"record", record},
+                                    {"payload_size", payload.size()}};
+    std::string paddedRecord = wireRecord.dump();
+    paddedRecord.insert(paddedRecord.size() - 1, std::string(2048, ' '));
+
+    // Compact control frames fit this budget; the whitespace-padded record must not.
+    const auto byteLimit = batch.dump().size() + 4 + wireRecord.dump().size() + 4 + 256;
+
+    InMemoryPeerTrustStore clientTrust;
+    InMemoryPeerTrustStore serverTrust;
+    std::promise<yams::Result<DeltaExchangeStats>> serverDone;
+    auto serverFuture = serverDone.get_future();
+    P2pListener listener(P2pListener::Options{.host = "127.0.0.1",
+                                              .port = 0,
+                                              .identity = std::move(serverIdentity),
+                                              .allowedPeerPins = {clientPin},
+                                              .allowUnpinnedPeers = false,
+                                              .handshakeTimeout = 3s,
+                                              .maxConcurrentSessions = 1});
+    listener.setHandler([&](P2pConnection channel) {
+        auto handshake = yams::daemon::p2p::acceptPeerHandshake(
+            channel, handshakeConfig("server-node", serverService, true), serverTrust);
+        if (!handshake) {
+            serverDone.set_value(handshake.error());
+            return;
+        }
+        serverDone.set_value(yams::daemon::p2p::acceptDeltaExchange(
+            channel, serverService, handshake.value(),
+            DeltaExchangeOptions{.maxDeltasPerBatch = 2,
+                                 .maxBatches = 2,
+                                 .maxDeltasPerSession = 2,
+                                 .maxWireBytesPerSession = byteLimit,
+                                 .timeout = 3s}));
+    });
+    REQUIRE(listener.start().has_value());
+
+    auto channel =
+        yams::daemon::p2p::p2pConnect(P2pClientOptions{.host = "127.0.0.1",
+                                                       .port = listener.boundPort(),
+                                                       .identity = std::move(clientIdentity),
+                                                       .expectedPeerPin = serverPin,
+                                                       .allowUnpinnedPeer = false,
+                                                       .connectTimeout = 3s,
+                                                       .handshakeTimeout = 3s});
+    REQUIRE(channel.has_value());
+    auto handshake = yams::daemon::p2p::initiatePeerHandshake(
+        channel.value(), handshakeConfig("client-node", clientService, true), clientTrust);
+    REQUIRE(handshake.has_value());
+    for (const auto& json : {mode, batch}) {
+        const std::string encoded = json.dump();
+        REQUIRE(
+            channel.value()
+                .writeFrame(std::span<const std::byte>(
+                                reinterpret_cast<const std::byte*>(encoded.data()), encoded.size()),
+                            3s)
+                .has_value());
+    }
+    REQUIRE(channel.value()
+                .writeFrame(std::span<const std::byte>(
+                                reinterpret_cast<const std::byte*>(paddedRecord.data()),
+                                paddedRecord.size()),
+                            3s)
+                .has_value());
+
+    REQUIRE(serverFuture.wait_for(1s) == std::future_status::ready);
+    auto serverResult = serverFuture.get();
+    REQUIRE_FALSE(serverResult.has_value());
+    CHECK(serverResult.error().code == yams::ErrorCode::ResourceExhausted);
+    CHECK(serverService.currentVersion().empty());
+    listener.stop();
+}
+
 TEST_CASE("direct P2P delta exchange rejects options above protocol hard bounds",
           "[daemon][p2p][delta][network][limits]") {
     TempDir clientDir{"invalid-limits-client"};

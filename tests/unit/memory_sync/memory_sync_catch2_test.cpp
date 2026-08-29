@@ -222,6 +222,29 @@ TEST_CASE("MemorySyncLoop publish and read round-trips", "[memory-sync][sync-loo
     CHECK(text(value.value()) == "hello memory");
 }
 
+TEST_CASE("MemorySyncLoop applyDeltas honors the direct-ingress admission gate",
+          "[memory-sync][sync-loop][direct-delta][admission]") {
+    BackendFixture writerFixture{"admission-writer"};
+    BackendFixture readerFixture{"admission-reader"};
+    MemorySyncLoop writer{writerFixture.backend, "writer", "admission-corpus", 1};
+    MemorySyncLoop reader{readerFixture.backend,
+                          "reader",
+                          "admission-corpus",
+                          1,
+                          false,
+                          {},
+                          MemorySyncControl{.canAdmitRemoteWork = [] { return false; }}};
+
+    REQUIRE(writer.publish("user/key", bytes("value")).has_value());
+    auto deltas = writer.exportLocalDeltasAfter({});
+    REQUIRE(deltas.has_value());
+    REQUIRE_FALSE(deltas.value().deltas.empty());
+
+    const auto applied = reader.applyDeltas(deltas.value().deltas);
+    REQUIRE_FALSE(applied.has_value());
+    CHECK(applied.error().code == yams::ErrorCode::ResourceExhausted);
+}
+
 TEST_CASE("MemorySyncLoop rejects unsafe logical keys", "[memory-sync][sync-loop][security]") {
     BackendFixture fixture{"unsafe-keys"};
     MemorySyncLoop loop{fixture.backend, "A"};

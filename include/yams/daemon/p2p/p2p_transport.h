@@ -17,7 +17,11 @@
 namespace yams::daemon::p2p {
 
 /// Control-frame size cap (hello/state/delta envelopes) and value-payload cap.
-constexpr std::size_t kP2pMaxControlFrameBytes = std::size_t{64} * 1024;
+/// Sized for the worst-case authenticated `state` frame: 256 writers x 256-byte ids in the
+/// version vector, the `seen` watermark, 256 history commitments (id + counter + 64-hex digest),
+/// and the quarantined set total ~300 KB worst case; kept above that to stay stable as framing
+/// evolves without re-deriving the bound.
+constexpr std::size_t kP2pMaxControlFrameBytes = std::size_t{512} * 1024;
 constexpr std::size_t kP2pMaxValuePayloadBytes = std::size_t{16} * 1024 * 1024;
 constexpr std::size_t kP2pMaxConcurrentHandshakes = 64;
 constexpr std::size_t kP2pMaxConcurrentSessions = 64;

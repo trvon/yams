@@ -33,6 +33,11 @@ yams::Result<void> validateHandshakeJson(const nlohmann::json& json) {
         std::span<const std::byte>(reinterpret_cast<const std::byte*>(text.data()), text.size()));
 }
 
+yams::Result<void> validateHandshakeBytes(std::string_view text) {
+    return yams::daemon::p2p::detail::validateHandshakeControlFrame(
+        std::span<const std::byte>(reinterpret_cast<const std::byte*>(text.data()), text.size()));
+}
+
 TlsIdentity identity(std::string nodeId, const yams::memory_sync::WriterKeyPair& keyPair) {
     auto result = TlsIdentity::fromPrivateKeyPem(std::move(nodeId), keyPair.privateKeyPem);
     REQUIRE(result.has_value());
@@ -145,6 +150,20 @@ TEST_CASE("p2p handshake fuzz seam enforces protocol-v4 control bounds",
     oversized["node_id"] = std::string(yams::daemon::p2p::kMaxP2pIdentityBytes + 1, 'n');
     CHECK_FALSE(validateHandshakeJson(oversized).has_value());
     CHECK_FALSE(validateHandshakeJson(nlohmann::json{{"type", "unknown"}}).has_value());
+}
+
+TEST_CASE("p2p handshake control frame rejects excessive JSON nesting depth",
+          "[daemon][p2p][protocol][fuzz]") {
+    // A structurally valid hello whose unknown field is pathologically nested must be rejected by
+    // the depth bound rather than parsed (a pre-auth stack-exhaustion probe).
+    std::string deep =
+        "{\"type\":\"hello\",\"protocol\":4,\"schema_version\":4,\"node_id\":\"node-a\","
+        "\"corpus_id\":\"corpus\",\"corpus_epoch\":1,\"max_writer_advance\":32,"
+        "\"max_writer_window_bytes\":4096,\"nested\":";
+    deep.append(200, '[');
+    deep.append(200, ']');
+    deep += '}';
+    CHECK_FALSE(validateHandshakeBytes(deep).has_value());
 }
 
 TEST_CASE("P2P handshake freezes a bounded authenticated writer prefix",
