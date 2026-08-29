@@ -11,11 +11,13 @@
 #include <yams/memory_sync/writer_auth.h>
 #include <yams/storage/storage_backend.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <future>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <vector>
@@ -71,8 +73,15 @@ P2pManagerOptions options(std::string nodeId, const std::filesystem::path& root,
                              .allowFirstContact = allowFirstContact,
                              .maxPeers = 8,
                              .reconnectInterval = reconnectInterval,
-                             .timeout = 3s};
+                             .timeout = 3s,
+                             .sessionTimeout = 10s};
 }
+
+#if YAMS_DAEMON_TEST_HOOKS_ENABLED
+struct ReconnectLoopHookGuard {
+    ~ReconnectLoopHookGuard() { P2pManager::testing_setReconnectLoopHook({}); }
+};
+#endif
 
 } // namespace
 
@@ -104,7 +113,91 @@ TEST_CASE("P2P connection strings are strict and IPv6 aware", "[daemon][p2p][man
 
 TEST_CASE("P2P manager defaults to rejecting first contact", "[daemon][p2p][security]") {
     CHECK_FALSE(P2pManagerOptions{}.allowFirstContact);
+    CHECK(P2pManagerOptions{}.sessionTimeout > P2pManagerOptions{}.timeout);
 }
+
+TEST_CASE("P2P manager rejects reconnect intervals above the hard ceiling",
+          "[daemon][p2p][manager][capacity]") {
+    TempDir dir{"reconnect-limit"};
+    MemorySyncService service{backend(dir.path / "ops"),
+                              MemorySyncConfig{"node", 60'000, "manager-corpus", 1}};
+    REQUIRE(service.syncFully().has_value());
+    auto key = yams::memory_sync::generateWriterKeyPair();
+    REQUIRE(key.has_value());
+    auto managerOptions = options("node", dir.path, key.value().privateKeyPem);
+    managerOptions.reconnectInterval = yams::daemon::p2p::kP2pMaxReconnectInterval + 1ms;
+    auto manager = P2pManager::create(std::move(managerOptions), service);
+    REQUIRE_FALSE(manager.has_value());
+    CHECK(manager.error().code == yams::ErrorCode::InvalidArgument);
+}
+
+#if YAMS_DAEMON_TEST_HOOKS_ENABLED
+TEST_CASE("P2P manager contains reconnect-thread exceptions and continues",
+          "[daemon][p2p][manager][reconnect][lifecycle]") {
+    ReconnectLoopHookGuard guard;
+    std::atomic<unsigned> calls{0};
+    std::promise<void> recovered;
+    auto recoveredFuture = recovered.get_future();
+    std::atomic<bool> signalled{false};
+    P2pManager::testing_setReconnectLoopHook([&] {
+        if (calls.fetch_add(1, std::memory_order_relaxed) == 0) {
+            throw std::runtime_error("injected reconnect-loop failure");
+        }
+        if (!signalled.exchange(true, std::memory_order_relaxed)) {
+            recovered.set_value();
+        }
+    });
+
+    TempDir dir{"reconnect-exception"};
+    MemorySyncService service{backend(dir.path / "ops"),
+                              MemorySyncConfig{"node", 60'000, "manager-corpus", 1}};
+    REQUIRE(service.syncFully().has_value());
+    auto key = yams::memory_sync::generateWriterKeyPair();
+    REQUIRE(key.has_value());
+    auto manager =
+        P2pManager::create(options("node", dir.path, key.value().privateKeyPem, 10ms), service);
+    REQUIRE(manager.has_value());
+    REQUIRE(manager.value()->start().has_value());
+    REQUIRE(recoveredFuture.wait_for(2s) == std::future_status::ready);
+    CHECK(calls.load(std::memory_order_relaxed) >= 2);
+    manager.value()->stop();
+}
+
+TEST_CASE("P2P manager serializes concurrent stop callers",
+          "[daemon][p2p][manager][reconnect][lifecycle]") {
+    ReconnectLoopHookGuard guard;
+    std::promise<void> reconnectEntered;
+    auto reconnectEnteredFuture = reconnectEntered.get_future();
+    std::promise<void> releaseReconnect;
+    auto releaseReconnectFuture = releaseReconnect.get_future().share();
+    std::atomic<bool> signalled{false};
+    P2pManager::testing_setReconnectLoopHook([&] {
+        if (!signalled.exchange(true, std::memory_order_relaxed)) {
+            reconnectEntered.set_value();
+        }
+        releaseReconnectFuture.wait();
+    });
+
+    TempDir dir{"concurrent-stop"};
+    MemorySyncService service{backend(dir.path / "ops"),
+                              MemorySyncConfig{"node", 60'000, "manager-corpus", 1}};
+    REQUIRE(service.syncFully().has_value());
+    auto key = yams::memory_sync::generateWriterKeyPair();
+    REQUIRE(key.has_value());
+    auto manager =
+        P2pManager::create(options("node", dir.path, key.value().privateKeyPem, 10ms), service);
+    REQUIRE(manager.has_value());
+    REQUIRE(manager.value()->start().has_value());
+    REQUIRE(reconnectEnteredFuture.wait_for(1s) == std::future_status::ready);
+
+    auto firstStop = std::async(std::launch::async, [&] { manager.value()->stop(); });
+    auto secondStop = std::async(std::launch::async, [&] { manager.value()->stop(); });
+    releaseReconnect.set_value();
+    firstStop.get();
+    secondStop.get();
+    CHECK_FALSE(manager.value()->started());
+}
+#endif
 
 TEST_CASE("P2P manager rejects unknown inbound peers before delta exchange",
           "[daemon][p2p][manager][network][sqlite][security]") {

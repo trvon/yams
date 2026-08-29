@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright 2026 YAMS Contributors
 
+#define YAMS_DAEMON_TEST_HOOKS_IMPL 1
 #include <yams/daemon/p2p/p2p_transport.h>
+#undef YAMS_DAEMON_TEST_HOOKS_IMPL
 
 // pi-lens-ignore: fatal error
 #include <boost/asio/connect.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/tcp.hpp>
+#include <boost/asio/post.hpp>
 #include <boost/asio/read.hpp>
 #include <boost/asio/ssl.hpp>
 #include <boost/asio/steady_timer.hpp>
@@ -23,8 +26,10 @@
 #include <array>
 #include <atomic>
 #include <cstring>
+#include <exception>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <thread>
 #include <utility>
@@ -55,6 +60,55 @@ using Pkey = std::shared_ptr<EVP_PKEY>;
 using Cert = std::shared_ptr<X509>;
 using Tcp = boost::asio::ip::tcp;
 using TlsStream = boost::asio::ssl::stream<Tcp::socket>;
+
+std::mutex gAcceptLoopHookMutex;
+std::function<void()> gAcceptLoopHook;
+std::mutex gHandshakeStartedHookMutex;
+std::function<void()> gHandshakeStartedHook;
+std::mutex gAfterAcceptJoinHookMutex;
+std::function<void()> gAfterAcceptJoinHook;
+thread_local const void* gSessionWorkerOwner = nullptr;
+
+void invokeAcceptLoopHook() {
+    std::function<void()> hook;
+    {
+        std::lock_guard<std::mutex> lock(gAcceptLoopHookMutex);
+        hook = gAcceptLoopHook;
+    }
+    if (hook) {
+        hook();
+    }
+}
+
+void invokeHandshakeStartedHook() {
+    std::function<void()> hook;
+    {
+        std::lock_guard<std::mutex> lock(gHandshakeStartedHookMutex);
+        hook = gHandshakeStartedHook;
+    }
+    if (hook) {
+        hook();
+    }
+}
+
+void invokeAfterAcceptJoinHook() {
+    std::function<void()> hook;
+    {
+        std::lock_guard<std::mutex> lock(gAfterAcceptJoinHookMutex);
+        hook = gAfterAcceptJoinHook;
+    }
+    if (hook) {
+        hook();
+    }
+}
+
+bool validOperationTimeout(std::chrono::milliseconds timeout) {
+    return timeout > std::chrono::milliseconds::zero() && timeout <= kP2pMaxOperationTimeout;
+}
+
+bool validSessionTimeout(std::chrono::milliseconds timeout) {
+    return timeout > std::chrono::milliseconds::zero() && timeout <= kP2pMaxSessionTimeout;
+}
 
 Result<Pkey> loadPrivateKey(std::string_view pem) {
     auto* bio = BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size()));
@@ -305,7 +359,7 @@ std::string_view TlsIdentity::privateKeyPemForTransport() const {
     return impl_ ? std::string_view(impl_->privateKeyPem) : std::string_view{};
 }
 
-class P2pConnection::Impl {
+class P2pConnection::Impl : public std::enable_shared_from_this<P2pConnection::Impl> {
 public:
     Impl(boost::asio::ssl::context::method method, std::string nodeId)
         : context(method), localNodeId(std::move(nodeId)) {}
@@ -318,6 +372,9 @@ public:
     std::string peerCn;
     std::atomic<bool> closed{false};
     std::mutex operationMutex;
+    std::mutex socketStateMutex;
+    bool operationActive{false};
+    std::optional<std::chrono::steady_clock::time_point> sessionDeadline;
 
     Result<void> configure(const TlsIdentity& identity) {
         if (auto configured = configureMutualTls(context, identity); !configured) {
@@ -327,10 +384,92 @@ public:
         return {};
     }
 
+    void beginSession(std::chrono::milliseconds timeout) {
+        sessionDeadline = std::chrono::steady_clock::now() + timeout;
+    }
+
+    Result<std::chrono::milliseconds>
+    boundedOperationTimeout(std::chrono::milliseconds requested) const {
+        if (!validOperationTimeout(requested)) {
+            return Error{ErrorCode::InvalidArgument,
+                         "p2p operation timeout must be within supported bounds"};
+        }
+        if (!sessionDeadline) {
+            return requested;
+        }
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= *sessionDeadline) {
+            return Error{ErrorCode::Timeout, "p2p aggregate session deadline expired"};
+        }
+        auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(*sessionDeadline - now);
+        if (remaining <= std::chrono::milliseconds::zero()) {
+            remaining = std::chrono::milliseconds{1};
+        }
+        return std::min(requested, remaining);
+    }
+
+    Result<std::chrono::milliseconds>
+    boundedOperationUntil(std::chrono::steady_clock::time_point operationDeadline) const {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= operationDeadline) {
+            return Error{ErrorCode::Timeout, "p2p frame operation deadline expired"};
+        }
+        auto remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(operationDeadline - now);
+        if (remaining <= std::chrono::milliseconds::zero()) {
+            remaining = std::chrono::milliseconds{1};
+        }
+        return boundedOperationTimeout(remaining);
+    }
+
+    void closeSocketLocked() noexcept {
+        if (!stream) {
+            return;
+        }
+        boost::system::error_code ignored;
+        stream->next_layer().cancel(ignored);
+        stream->next_layer().close(ignored);
+    }
+
+    void finishOperation() noexcept {
+        std::lock_guard<std::mutex> lock(socketStateMutex);
+        operationActive = false;
+        if (closed.load(std::memory_order_acquire)) {
+            closeSocketLocked();
+        }
+    }
+
+    template <typename StartOperation>
+    TimedOperation runOperation(std::chrono::milliseconds timeout,
+                                StartOperation&& startOperation) {
+        {
+            std::lock_guard<std::mutex> lock(socketStateMutex);
+            if (closed.load(std::memory_order_acquire)) {
+                return TimedOperation{boost::asio::error::operation_aborted, false};
+            }
+            operationActive = true;
+        }
+        try {
+            auto operation = runTimed(io, stream->next_layer(), timeout,
+                                      std::forward<StartOperation>(startOperation));
+            finishOperation();
+            return operation;
+        } catch (...) {
+            finishOperation();
+            throw;
+        }
+    }
+
     Result<void> handshake(boost::asio::ssl::stream_base::handshake_type type,
                            std::chrono::milliseconds timeout) {
-        const auto operation = runTimed(io, stream->next_layer(), timeout, [&](auto completion) {
+        auto bounded = boundedOperationTimeout(timeout);
+        if (!bounded) {
+            return bounded.error();
+        }
+        const auto operation = runOperation(bounded.value(), [&](auto completion) {
             stream->async_handshake(type, std::move(completion));
+            invokeHandshakeStartedHook();
         });
         if (operation.error) {
             return transportError(operation, "p2p TLS handshake",
@@ -358,10 +497,14 @@ public:
         if (payload.size() > maxFrameBytes || payload.size() > UINT32_MAX) {
             return Error{ErrorCode::InvalidArgument, "p2p frame exceeds configured size limit"};
         }
+        auto bounded = boundedOperationTimeout(timeout);
+        if (!bounded) {
+            return bounded.error();
+        }
         const auto header = encodeLength(payload.size());
         std::array<boost::asio::const_buffer, 2> buffers{
             boost::asio::buffer(header), boost::asio::buffer(payload.data(), payload.size())};
-        const auto operation = runTimed(io, stream->next_layer(), timeout, [&](auto completion) {
+        const auto operation = runOperation(bounded.value(), [&](auto completion) {
             boost::asio::async_write(*stream, buffers, std::move(completion));
         });
         if (operation.error) {
@@ -377,8 +520,17 @@ public:
         if (closed.load(std::memory_order_acquire)) {
             return Error{ErrorCode::OperationCancelled, "p2p channel is closed"};
         }
+        if (!validOperationTimeout(timeout)) {
+            return Error{ErrorCode::InvalidArgument,
+                         "p2p frame timeout must be within supported bounds"};
+        }
+        const auto frameDeadline = std::chrono::steady_clock::now() + timeout;
+        auto bounded = boundedOperationUntil(frameDeadline);
+        if (!bounded) {
+            return bounded.error();
+        }
         std::array<std::byte, 4> header{};
-        auto operation = runTimed(io, stream->next_layer(), timeout, [&](auto completion) {
+        auto operation = runOperation(bounded.value(), [&](auto completion) {
             boost::asio::async_read(*stream, boost::asio::buffer(header), std::move(completion));
         });
         if (operation.error) {
@@ -394,7 +546,11 @@ public:
         if (payload.empty()) {
             return payload;
         }
-        operation = runTimed(io, stream->next_layer(), timeout, [&](auto completion) {
+        bounded = boundedOperationUntil(frameDeadline);
+        if (!bounded) {
+            return bounded.error();
+        }
+        operation = runOperation(bounded.value(), [&](auto completion) {
             boost::asio::async_read(*stream, boost::asio::buffer(payload), std::move(completion));
         });
         if (operation.error) {
@@ -408,12 +564,24 @@ public:
         if (closed.exchange(true, std::memory_order_acq_rel)) {
             return;
         }
-        boost::system::error_code ignored;
-        if (stream) {
-            // NOLINTNEXTLINE(bugprone-unused-return-value) -- noexcept best-effort shutdown.
-            stream->next_layer().cancel(ignored);
-            // NOLINTNEXTLINE(bugprone-unused-return-value) -- noexcept best-effort shutdown.
-            stream->next_layer().close(ignored);
+        std::lock_guard<std::mutex> lock(socketStateMutex);
+        if (!operationActive) {
+            closeSocketLocked();
+            return;
+        }
+        try {
+            const std::weak_ptr<Impl> weak = weak_from_this();
+            boost::asio::post(io, [weak] {
+                const auto self = weak.lock();
+                if (!self) {
+                    return;
+                }
+                std::lock_guard<std::mutex> stateLock(self->socketStateMutex);
+                self->closeSocketLocked();
+            });
+        } catch (...) {
+            // A failed cancellation enqueue must not escape a noexcept shutdown path. The active
+            // operation remains bounded by its operation and aggregate session deadlines.
         }
     }
 };
@@ -468,6 +636,11 @@ void P2pConnection::close() noexcept {
 }
 
 Result<P2pConnection> p2pConnect(P2pClientOptions options) {
+    if (!validOperationTimeout(options.connectTimeout) ||
+        !validOperationTimeout(options.handshakeTimeout) ||
+        !validSessionTimeout(options.sessionTimeout)) {
+        return Error{ErrorCode::InvalidArgument, "p2p timeouts exceed supported bounds"};
+    }
     if (options.expectedPeerPin.empty() && !options.allowUnpinnedPeer) {
         return Error{ErrorCode::InvalidArgument,
                      "p2p connect requires an expected peer pin or explicit TOFU opt-in"};
@@ -477,22 +650,55 @@ Result<P2pConnection> p2pConnect(P2pClientOptions options) {
     if (auto configured = impl->configure(options.identity); !configured) {
         return configured.error();
     }
+    const auto connectDeadline = std::chrono::steady_clock::now() + options.connectTimeout;
     Tcp::resolver resolver(impl->io);
+    boost::asio::steady_timer resolveTimer(impl->io);
     boost::system::error_code resolveError;
-    const auto endpoints =
-        resolver.resolve(options.host, std::to_string(options.port), resolveError);
-    if (resolveError) {
+    std::optional<Tcp::resolver::results_type> endpoints;
+    bool resolveTimedOut = false;
+    resolver.async_resolve(
+        options.host, std::to_string(options.port),
+        [&](const boost::system::error_code& error, Tcp::resolver::results_type results) {
+            resolveError = error;
+            if (!error) {
+                endpoints = std::move(results);
+            }
+            static_cast<void>(resolveTimer.cancel());
+        });
+    resolveTimer.expires_at(connectDeadline);
+    resolveTimer.async_wait([&](const boost::system::error_code& error) {
+        if (!error) {
+            resolveTimedOut = true;
+            resolver.cancel();
+        }
+    });
+    impl->io.restart();
+    impl->io.run();
+    if (resolveTimedOut) {
+        return Error{ErrorCode::Timeout, "p2p host resolution timed out"};
+    }
+    if (resolveError || !endpoints) {
         return Error{ErrorCode::NetworkError,
                      std::string("p2p host resolution failed: ") + resolveError.message()};
     }
-    const auto connection = runTimed(
-        impl->io, impl->stream->next_layer(), options.connectTimeout, [&](auto completion) {
-            boost::asio::async_connect(impl->stream->next_layer(), endpoints,
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= connectDeadline) {
+        return Error{ErrorCode::Timeout, "p2p connection deadline expired after resolution"};
+    }
+    auto connectRemaining =
+        std::chrono::duration_cast<std::chrono::milliseconds>(connectDeadline - now);
+    if (connectRemaining <= std::chrono::milliseconds::zero()) {
+        connectRemaining = std::chrono::milliseconds{1};
+    }
+    const auto connection =
+        runTimed(impl->io, impl->stream->next_layer(), connectRemaining, [&](auto completion) {
+            boost::asio::async_connect(impl->stream->next_layer(), *endpoints,
                                        std::move(completion));
         });
     if (connection.error) {
         return transportError(connection, "p2p connect");
     }
+    impl->beginSession(options.sessionTimeout);
     if (auto handshake =
             impl->handshake(boost::asio::ssl::stream_base::client, options.handshakeTimeout);
         !handshake) {
@@ -523,7 +729,9 @@ public:
     std::atomic<std::size_t> retainedSessionCount{0};
     std::atomic<bool> running{false};
     std::atomic<std::uint64_t> accepted{0};
-    std::atomic<std::size_t> activeCount{0};
+    std::atomic<std::size_t> preAuthCount{0};
+    std::atomic<std::size_t> authenticatedCount{0};
+    std::atomic<std::uint64_t> generation{0};
     std::mutex lifecycleMutex;
     std::mutex allowedPinsMutex;
     std::mutex sessionsMutex;
@@ -532,13 +740,37 @@ public:
         activeSessions;
 
     Result<void> start() {
+        try {
+            return startImpl();
+        } catch (const std::exception& error) {
+            stop();
+            return Error{ErrorCode::InternalError,
+                         std::string("p2p listener start threw: ") + error.what()};
+        } catch (...) {
+            stop();
+            return Error{ErrorCode::InternalError, "p2p listener start threw an unknown exception"};
+        }
+    }
+
+    Result<void> startImpl() {
         std::lock_guard<std::mutex> lock(lifecycleMutex);
         if (running.load(std::memory_order_acquire)) {
             return {};
         }
-        if (options.maxConcurrentSessions == 0) {
+        if (acceptThread.joinable()) {
+            return Error{ErrorCode::InvalidState,
+                         "p2p listener must be stopped after an accept-thread failure"};
+        }
+        if (options.maxConcurrentHandshakes == 0 || options.maxConcurrentSessions == 0 ||
+            options.maxConcurrentHandshakes > kP2pMaxConcurrentHandshakes ||
+            options.maxConcurrentSessions > kP2pMaxConcurrentSessions) {
             return Error{ErrorCode::InvalidArgument,
-                         "p2p listener requires at least one session slot"};
+                         "p2p listener capacities must be within supported bounds"};
+        }
+        if (!validOperationTimeout(options.handshakeTimeout) ||
+            !validSessionTimeout(options.sessionTimeout)) {
+            return Error{ErrorCode::InvalidArgument,
+                         "p2p listener timeouts exceed supported bounds"};
         }
         if (!handler) {
             return Error{ErrorCode::InvalidState,
@@ -586,9 +818,23 @@ public:
             return Error{ErrorCode::NetworkError,
                          "p2p listen failed to bind any resolved endpoint"};
         }
+        sessionWorkers.reserve(options.maxConcurrentHandshakes + options.maxConcurrentSessions);
         accepted.store(0, std::memory_order_relaxed);
+        preAuthCount.store(0, std::memory_order_relaxed);
+        authenticatedCount.store(0, std::memory_order_relaxed);
+        generation.fetch_add(1, std::memory_order_acq_rel);
         running.store(true, std::memory_order_release);
-        acceptThread = std::thread([this] { acceptLoop(); });
+        acceptThread = std::thread([this] {
+            try {
+                acceptLoop();
+            } catch (const std::exception& error) {
+                spdlog::error("[p2p] listener accept thread failed: {}", error.what());
+                running.store(false, std::memory_order_release);
+            } catch (...) {
+                spdlog::error("[p2p] listener accept thread failed with unknown exception");
+                running.store(false, std::memory_order_release);
+            }
+        });
         return {};
     }
 
@@ -608,8 +854,12 @@ public:
 
     void acceptLoop() {
         while (running.load(std::memory_order_acquire)) {
+            invokeAcceptLoopHook();
             reapCompletedSessions();
-            if (activeCount.load(std::memory_order_acquire) >= options.maxConcurrentSessions) {
+            const auto retainedLimit =
+                options.maxConcurrentHandshakes + options.maxConcurrentSessions;
+            if (sessionWorkers.size() >= retainedLimit ||
+                preAuthCount.load(std::memory_order_acquire) >= options.maxConcurrentHandshakes) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
@@ -635,7 +885,8 @@ public:
                 continue;
             }
             accepted.fetch_add(1, std::memory_order_relaxed);
-            activeCount.fetch_add(1, std::memory_order_relaxed);
+            preAuthCount.fetch_add(1, std::memory_order_relaxed);
+            session->beginSession(options.sessionTimeout);
             {
                 std::lock_guard<std::mutex> lock(sessionsMutex);
                 activeSessions.insert(session);
@@ -643,65 +894,134 @@ public:
             auto completed = std::make_shared<std::atomic<bool>>(false);
             sessionWorkers.push_back(
                 SessionWorker{.thread = std::thread([this, session, completed] {
-                                  handleSession(session);
-                                  completed->store(true, std::memory_order_release);
+                                  gSessionWorkerOwner = this;
+                                  handleSession(session, completed);
+                                  gSessionWorkerOwner = nullptr;
                               }),
                               .completed = std::move(completed)});
             retainedSessionCount.fetch_add(1, std::memory_order_relaxed);
         }
     }
 
-    void handleSession(const std::shared_ptr<P2pConnection::Impl>& session) {
-        auto handshake =
-            session->handshake(boost::asio::ssl::stream_base::server, options.handshakeTimeout);
-        if (handshake) {
-            bool explicitlyPinned = false;
-            {
-                std::lock_guard<std::mutex> lock(allowedPinsMutex);
-                explicitlyPinned =
-                    std::find(options.allowedPeerPins.begin(), options.allowedPeerPins.end(),
-                              session->peerPin) != options.allowedPeerPins.end();
-            }
-            if (!explicitlyPinned && !options.allowUnpinnedPeers) {
-                handshake = Error{ErrorCode::Unauthorized, "p2p peer pin is not allowed"};
+    bool tryAcquireAuthenticatedSlot() {
+        auto current = authenticatedCount.load(std::memory_order_acquire);
+        while (current < options.maxConcurrentSessions) {
+            if (authenticatedCount.compare_exchange_weak(
+                    current, current + 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
+                return true;
             }
         }
-        if (handshake && handler) {
-            try {
-                handler(P2pConnection(session));
-            } catch (...) {
-                spdlog::warn("[p2p] session handler threw");
+        return false;
+    }
+
+    void handleSession(const std::shared_ptr<P2pConnection::Impl>& session,
+                       const std::shared_ptr<std::atomic<bool>>& completed) noexcept {
+        bool inPreAuthPool = true;
+        bool inAuthenticatedPool = false;
+        try {
+            auto handshake =
+                session->handshake(boost::asio::ssl::stream_base::server, options.handshakeTimeout);
+            if (handshake) {
+                bool explicitlyPinned = false;
+                {
+                    std::lock_guard<std::mutex> lock(allowedPinsMutex);
+                    explicitlyPinned =
+                        std::find(options.allowedPeerPins.begin(), options.allowedPeerPins.end(),
+                                  session->peerPin) != options.allowedPeerPins.end();
+                }
+                if (!explicitlyPinned && !options.allowUnpinnedPeers) {
+                    handshake = Error{ErrorCode::Unauthorized, "p2p peer pin is not allowed"};
+                }
             }
-        } else if (!handshake) {
-            spdlog::debug("[p2p] session rejected: {}", handshake.error().message);
+            if (handshake && !tryAcquireAuthenticatedSlot()) {
+                handshake = Error{ErrorCode::ResourceBusy,
+                                  "p2p authenticated session capacity is exhausted"};
+            }
+            if (handshake) {
+                inAuthenticatedPool = true;
+                preAuthCount.fetch_sub(1, std::memory_order_acq_rel);
+                inPreAuthPool = false;
+                if (handler) {
+                    handler(P2pConnection(session));
+                }
+            } else {
+                spdlog::debug("[p2p] session rejected: {}", handshake.error().message);
+            }
+        } catch (const std::exception& error) {
+            spdlog::warn("[p2p] session thread contained exception: {}", error.what());
+        } catch (...) {
+            spdlog::warn("[p2p] session thread contained unknown exception");
         }
         session->close();
         {
             std::lock_guard<std::mutex> lock(sessionsMutex);
             activeSessions.erase(session);
         }
-        activeCount.fetch_sub(1, std::memory_order_relaxed);
+        // Publish completion before releasing either capacity counter. This keeps the number of
+        // retained workers within the pre-reserved handshake + authenticated-session bound.
+        completed->store(true, std::memory_order_release);
+        if (inAuthenticatedPool) {
+            authenticatedCount.fetch_sub(1, std::memory_order_acq_rel);
+        }
+        if (inPreAuthPool) {
+            preAuthCount.fetch_sub(1, std::memory_order_acq_rel);
+        }
+    }
+
+    void requestStop() noexcept {
+        running.store(false, std::memory_order_release);
+        if (acceptor) {
+            const auto stoppedGeneration = generation.load(std::memory_order_acquire);
+            try {
+                boost::asio::post(io, [this, stoppedGeneration] {
+                    if (generation.load(std::memory_order_acquire) != stoppedGeneration ||
+                        !acceptor) {
+                        return;
+                    }
+                    boost::system::error_code ignored;
+                    acceptor->cancel(ignored);
+                    acceptor->close(ignored);
+                });
+            } catch (...) {
+                // The accept loop normally drains this cancellation on its own io_context. If the
+                // enqueue itself fails, its next completion/error path remains exception-contained.
+            }
+        }
+        std::lock_guard<std::mutex> lock(sessionsMutex);
+        for (const auto& session : activeSessions) {
+            session->close();
+        }
     }
 
     void stop() noexcept {
-        std::unique_lock<std::mutex> lifecycleLock(lifecycleMutex);
-        running.store(false, std::memory_order_release);
-        if (acceptor) {
-            boost::system::error_code ignored;
-            // NOLINTNEXTLINE(bugprone-unused-return-value) -- noexcept best-effort shutdown.
-            acceptor->cancel(ignored);
-            // NOLINTNEXTLINE(bugprone-unused-return-value) -- noexcept best-effort shutdown.
-            acceptor->close(ignored);
+        if (gSessionWorkerOwner == this) {
+            // A worker cannot join itself. Request cancellation now; an external stop/destructor
+            // performs the join and final cleanup after this handler returns.
+            requestStop();
+            return;
         }
+        std::unique_lock<std::mutex> lifecycleLock(lifecycleMutex);
+        requestStop();
+        if (acceptThread.joinable()) {
+            acceptThread.join();
+        }
+        try {
+            invokeAfterAcceptJoinHook();
+        } catch (...) {
+            // Test instrumentation must never escape a noexcept lifecycle boundary.
+        }
+        // Close sessions accepted between the initial cancellation sweep and accept-loop exit.
         {
             std::lock_guard<std::mutex> lock(sessionsMutex);
             for (const auto& session : activeSessions) {
                 session->close();
             }
         }
-        lifecycleLock.unlock();
-        if (acceptThread.joinable()) {
-            acceptThread.join();
+        if (acceptor) {
+            boost::system::error_code ignored;
+            // The accept thread is joined, so direct teardown is now race-free.
+            acceptor->cancel(ignored);
+            acceptor->close(ignored);
         }
         for (auto& worker : sessionWorkers) {
             if (worker.thread.joinable()) {
@@ -710,6 +1030,12 @@ public:
         }
         sessionWorkers.clear();
         retainedSessionCount.store(0, std::memory_order_relaxed);
+        preAuthCount.store(0, std::memory_order_relaxed);
+        authenticatedCount.store(0, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lock(sessionsMutex);
+            activeSessions.clear();
+        }
         acceptor.reset();
     }
 };
@@ -745,6 +1071,12 @@ std::uint64_t P2pListener::acceptedCount() const noexcept {
 std::size_t P2pListener::retainedSessionCount() const noexcept {
     return impl_ ? impl_->retainedSessionCount.load(std::memory_order_relaxed) : 0;
 }
+std::size_t P2pListener::preAuthSessionCount() const noexcept {
+    return impl_ ? impl_->preAuthCount.load(std::memory_order_acquire) : 0;
+}
+std::size_t P2pListener::authenticatedSessionCount() const noexcept {
+    return impl_ ? impl_->authenticatedCount.load(std::memory_order_acquire) : 0;
+}
 // pi-lens-ignore: clang-diagnostic-error
 void P2pListener::allowPeerPin(std::string spkiPin) {
     if (!impl_) {
@@ -761,5 +1093,22 @@ void P2pListener::setHandler(SessionHandler handler) {
         impl_->handler = std::move(handler);
     }
 }
+
+#if YAMS_DAEMON_TEST_HOOKS_ENABLED
+void P2pListener::testing_setAcceptLoopHook(std::function<void()> hook) {
+    std::lock_guard<std::mutex> lock(gAcceptLoopHookMutex);
+    gAcceptLoopHook = std::move(hook);
+}
+
+void P2pListener::testing_setHandshakeStartedHook(std::function<void()> hook) {
+    std::lock_guard<std::mutex> lock(gHandshakeStartedHookMutex);
+    gHandshakeStartedHook = std::move(hook);
+}
+
+void P2pListener::testing_setAfterAcceptJoinHook(std::function<void()> hook) {
+    std::lock_guard<std::mutex> lock(gAfterAcceptJoinHookMutex);
+    gAfterAcceptJoinHook = std::move(hook);
+}
+#endif
 
 } // namespace yams::daemon::p2p
