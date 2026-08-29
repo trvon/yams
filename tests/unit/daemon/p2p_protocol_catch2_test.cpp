@@ -9,6 +9,8 @@
 #include <yams/daemon/p2p/p2p_protocol.h>
 #include <yams/memory_sync/writer_auth.h>
 
+#include "../../../src/daemon/p2p/p2p_fuzz.h"
+
 #include <chrono>
 #include <future>
 #include <string>
@@ -24,6 +26,12 @@ using yams::daemon::p2p::PeerHandshakeResult;
 using yams::daemon::p2p::TlsIdentity;
 
 namespace {
+
+yams::Result<void> validateHandshakeJson(const nlohmann::json& json) {
+    const auto text = json.dump();
+    return yams::daemon::p2p::detail::validateHandshakeControlFrame(
+        std::span<const std::byte>(reinterpret_cast<const std::byte*>(text.data()), text.size()));
+}
 
 TlsIdentity identity(std::string nodeId, const yams::memory_sync::WriterKeyPair& keyPair) {
     auto result = TlsIdentity::fromPrivateKeyPem(std::move(nodeId), keyPair.privateKeyPem);
@@ -116,6 +124,28 @@ PairResult runHandshake(PeerHandshakeConfig serverConfig, PeerHandshakeConfig cl
 }
 
 } // namespace
+
+TEST_CASE("p2p handshake fuzz seam enforces protocol-v4 control bounds",
+          "[daemon][p2p][protocol][fuzz]") {
+    const nlohmann::json hello{{"type", "hello"},
+                               {"protocol", yams::daemon::p2p::kP2pProtocolVersion},
+                               {"schema_version", yams::daemon::p2p::kP2pEnvelopeSchemaVersion},
+                               {"node_id", "node-a"},
+                               {"corpus_id", "corpus"},
+                               {"corpus_epoch", 1},
+                               {"max_writer_advance", 32},
+                               {"max_writer_window_bytes", 4096}};
+    CHECK(validateHandshakeJson(hello).has_value());
+
+    auto legacy = hello;
+    legacy["protocol"] = 3;
+    CHECK_FALSE(validateHandshakeJson(legacy).has_value());
+
+    auto oversized = hello;
+    oversized["node_id"] = std::string(yams::daemon::p2p::kMaxP2pIdentityBytes + 1, 'n');
+    CHECK_FALSE(validateHandshakeJson(oversized).has_value());
+    CHECK_FALSE(validateHandshakeJson(nlohmann::json{{"type", "unknown"}}).has_value());
+}
 
 TEST_CASE("P2P handshake freezes a bounded authenticated writer prefix",
           "[daemon][p2p][handshake][window][commitment]") {

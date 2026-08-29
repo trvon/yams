@@ -28,19 +28,22 @@ inline Result<void> writeJson(P2pConnection& connection, const Json& json,
     }
 }
 
-inline Result<Json> readJson(P2pConnection& connection, std::chrono::milliseconds timeout) {
-    auto frame = connection.readFrame(timeout);
-    if (!frame) {
-        return frame.error();
-    }
+inline Result<Json> parseJsonFrame(std::span<const std::byte> frame) {
     try {
-        const std::string_view text(reinterpret_cast<const char*>(frame.value().data()),
-                                    frame.value().size());
+        const std::string_view text(reinterpret_cast<const char*>(frame.data()), frame.size());
         return Json::parse(text);
     } catch (const std::exception& error) {
         return Error{ErrorCode::SerializationError,
                      std::string("invalid p2p JSON: ") + error.what()};
     }
+}
+
+inline Result<Json> readJson(P2pConnection& connection, std::chrono::milliseconds timeout) {
+    auto frame = connection.readFrame(timeout);
+    if (!frame) {
+        return frame.error();
+    }
+    return parseJsonFrame(frame.value());
 }
 
 } // namespace yams::daemon::p2p::detail

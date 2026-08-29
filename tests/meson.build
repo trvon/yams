@@ -3173,17 +3173,33 @@ if catch2_dep.found()
   )
 
   test('p2p_protocol', catch2_p2p_protocol_exe,
+    args: ['~[fuzz]'],
     suite: ['catch2', 'unit', 'daemon', 'p2p', 'network'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
     is_parallel: false
   )
 
+  test('p2p_protocol_fuzz_controls', catch2_p2p_protocol_exe,
+    args: ['[daemon][p2p][protocol][fuzz]'],
+    suite: ['catch2', 'unit', 'daemon', 'p2p', 'fuzz-smoke'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
+  )
+
   test('p2p_delta', catch2_p2p_delta_exe,
+    args: ['~[fuzz]'],
     suite: ['catch2', 'unit', 'daemon', 'p2p', 'network'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
     is_parallel: false
+  )
+
+  test('p2p_delta_fuzz_controls', catch2_p2p_delta_exe,
+    args: ['[daemon][p2p][delta][fuzz]'],
+    suite: ['catch2', 'unit', 'daemon', 'p2p', 'fuzz-smoke'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
   )
 
   test('p2p_delta_large_history', catch2_p2p_delta_exe,

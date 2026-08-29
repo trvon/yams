@@ -13,14 +13,14 @@ Usage: $0 <command> [args...]
 
 Commands:
     build                 Build Docker image with fuzzers
-    fuzz <target>         Run AFL++ fuzzer for target (e.g., ipc_protocol, ipc_roundtrip, proto_serializer)
+    fuzz <target>         Run AFL++ fuzzer (e.g., p2p_protocol, p2p_delta, ipc_protocol)
     exec <command>        Run a command inside the fuzzing container
     shell                 Open interactive shell in container
     clean                 Remove Docker image
 
 Examples:
   $0 build
-  $0 fuzz ipc_protocol
+  AFL_FUZZ_SECONDS=60 $0 fuzz p2p_protocol
   $0 shell
 EOF
     exit 1
@@ -48,17 +48,30 @@ cmd_fuzz() {
     local fuzzer_bin="/src/build/fuzzing/tools/fuzzing/fuzz_${target}"
     local corpus_dir="/fuzz/corpus/${target}"
     local findings_dir="/fuzz/findings/${target}"
+    local duration_args=()
+    if [[ -n "${AFL_FUZZ_SECONDS:-}" ]]; then
+        if [[ ! "${AFL_FUZZ_SECONDS}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "Error: AFL_FUZZ_SECONDS must be a positive integer"
+            exit 1
+        fi
+        duration_args=(-V "${AFL_FUZZ_SECONDS}")
+    fi
+    local tty_arg=""
+    if [[ -t 0 && -t 1 ]]; then
+        tty_arg="-it"
+    fi
 
     # Ensure mounted host directories exist for AFL input/output.
     mkdir -p "${PROJECT_ROOT}/data/fuzz/corpus/${target}"
     mkdir -p "${PROJECT_ROOT}/data/fuzz/findings/${target}"
 
     echo "Running AFL++ fuzzer for target: ${target}"
-    docker run --rm -ti \
+    docker run --rm ${tty_arg:+"${tty_arg}"} \
         -v "${PROJECT_ROOT}/data/fuzz:/fuzz" \
         -e AFL_AUTORESUME=1 \
         "${IMAGE_NAME}" \
-        afl-fuzz -S "${fuzzer_id}" -i "${corpus_dir}" -o "${findings_dir}" -m none "${fuzzer_bin}"
+        afl-fuzz -S "${fuzzer_id}" -i "${corpus_dir}" -o "${findings_dir}" -m none \
+        "${duration_args[@]}" "${fuzzer_bin}"
 }
 
 cmd_exec() {

@@ -4,6 +4,7 @@
 // pi-lens-ignore: fatal error
 #include <yams/daemon/p2p/p2p_protocol.h>
 
+#include "p2p_fuzz.h"
 #include "p2p_json.h"
 
 #include <algorithm>
@@ -554,6 +555,60 @@ Result<ValidatedHistoryProof> readAndValidatePeerHistoryProof(P2pConnection& con
 }
 
 } // namespace
+
+Result<void> detail::validateHandshakeControlFrame(std::span<const std::byte> frame) {
+    auto parsed = parseJsonFrame(frame);
+    if (!parsed) {
+        return parsed.error();
+    }
+    try {
+        const auto type = parsed.value().value("type", std::string{});
+        if (type == "hello" || type == "hello_ack") {
+            auto hello = parseHello(parsed.value(), type);
+            if (!hello) {
+                return hello.error();
+            }
+            if (hello.value().protocol != kP2pProtocolVersion ||
+                hello.value().schemaVersion != kP2pEnvelopeSchemaVersion) {
+                return Error{ErrorCode::NotSupported, "p2p protocol or schema version mismatch"};
+            }
+            if (hello.value().nodeId.empty() || hello.value().corpusId.empty() ||
+                hello.value().nodeId.size() > kMaxP2pIdentityBytes ||
+                hello.value().corpusId.size() > kMaxP2pIdentityBytes ||
+                hello.value().corpusEpoch == 0 || hello.value().maxWriterAdvance == 0 ||
+                hello.value().maxWriterAdvance > kMaxP2pWriterAdvance ||
+                hello.value().maxWriterWindowBytes == 0 ||
+                hello.value().maxWriterWindowBytes > kMaxP2pWriterWindowBytes) {
+                return Error{ErrorCode::ValidationError, "p2p hello violates protocol bounds"};
+            }
+            if (type == "hello_ack") {
+                (void)parsed.value().at("accepted").get<bool>();
+                const auto reason = parsed.value().value("reason", std::string{});
+                if (reason.size() > kMaxP2pIdentityBytes) {
+                    return Error{ErrorCode::ValidationError,
+                                 "p2p acknowledgement reason exceeds bound"};
+                }
+            }
+            return {};
+        }
+        if (type == "state") {
+            auto state = parseState(parsed.value());
+            return state ? Result<void>{} : Result<void>{state.error()};
+        }
+        if (type == "writer_window") {
+            auto frontier = parseWindowFrontier(parsed.value());
+            return frontier ? Result<void>{} : Result<void>{frontier.error()};
+        }
+        if (type == "history_proof") {
+            auto proof = parseHistoryProof(parsed.value());
+            return proof ? Result<void>{} : Result<void>{proof.error()};
+        }
+        return Error{ErrorCode::ValidationError, "unknown p2p handshake control message"};
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::ValidationError,
+                     std::string("invalid p2p handshake control message: ") + error.what()};
+    }
+}
 
 Result<std::string> normalizePeerSpkiPin(std::string_view spkiPin) {
     if (!memory_sync::isSha256Digest(spkiPin)) {

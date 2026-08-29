@@ -4,7 +4,11 @@
 // pi-lens-ignore: fatal error
 #include <yams/daemon/p2p/p2p_delta.h>
 
+#include "p2p_fuzz.h"
 #include "p2p_json.h"
+
+// pi-lens-ignore: fatal error
+#include <yams/memory_sync/key_policy.h>
 
 #include <limits>
 #include <string_view>
@@ -139,6 +143,34 @@ Result<BatchHeader> parseBatchHeader(const Json& control, const DeltaExchangeOpt
     }
 }
 
+struct DeltaRecordControl {
+    memory_sync::MemoryDelta delta;
+    std::size_t payloadSize{0};
+};
+
+Result<DeltaRecordControl> parseDeltaRecordControl(const Json& control) {
+    try {
+        if (!control.is_object() || control.value("type", std::string{}) != "delta_record") {
+            return Error{ErrorCode::ValidationError, "unexpected p2p delta record message"};
+        }
+        DeltaRecordControl parsed;
+        parsed.delta.logicalKey = control.at("logical_key").get<std::string>();
+        parsed.delta.record = control.at("record").get<memory_sync::MemoryIndexRecord>();
+        parsed.payloadSize = control.at("payload_size").get<std::size_t>();
+        if (parsed.delta.logicalKey.empty() ||
+            parsed.delta.logicalKey.size() > memory_sync::kMaxLogicalKeyBytes ||
+            parsed.payloadSize > kP2pMaxValuePayloadBytes ||
+            (parsed.delta.record.isTombstone() && parsed.payloadSize != 0)) {
+            return Error{ErrorCode::ValidationError,
+                         "p2p delta record control violates protocol bounds"};
+        }
+        return parsed;
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::ValidationError,
+                     std::string("invalid p2p delta record: ") + error.what()};
+    }
+}
+
 struct ReceivedDelta {
     memory_sync::MemoryDelta delta;
     std::size_t wireBytes{0};
@@ -152,24 +184,12 @@ Result<ReceivedDelta> receiveDeltaRecord(P2pConnection& connection,
     if (!control) {
         return control.error();
     }
-    memory_sync::MemoryDelta delta;
-    std::size_t payloadSize = 0;
-    try {
-        if (!control.value().is_object() ||
-            control.value().value("type", std::string{}) != "delta_record") {
-            return Error{ErrorCode::ValidationError, "unexpected p2p delta record message"};
-        }
-        delta.logicalKey = control.value().at("logical_key").get<std::string>();
-        delta.record = control.value().at("record").get<memory_sync::MemoryIndexRecord>();
-        payloadSize = control.value().at("payload_size").get<std::size_t>();
-    } catch (const std::exception& error) {
-        return Error{ErrorCode::ValidationError,
-                     std::string("invalid p2p delta record: ") + error.what()};
+    auto parsed = parseDeltaRecordControl(control.value());
+    if (!parsed) {
+        return parsed.error();
     }
-    if (payloadSize > kP2pMaxValuePayloadBytes ||
-        (delta.record.isTombstone() && payloadSize != 0)) {
-        return Error{ErrorCode::ValidationError, "p2p delta payload size is invalid"};
-    }
+    auto delta = std::move(parsed.value().delta);
+    const auto payloadSize = parsed.value().payloadSize;
     const auto controlBytes = control.value().dump().size() + kFramePrefixBytes;
     const auto payloadBytes = payloadSize == 0 ? 0 : payloadSize + kFramePrefixBytes;
     if (controlBytes > remainingBytes || payloadBytes > remainingBytes - controlBytes) {
@@ -239,25 +259,41 @@ Json acknowledgementJson(const memory_sync::DeltaApplyResult& result) {
             {"vv", result.version}};
 }
 
+Result<DeltaAcknowledgement> parseAcknowledgement(const Json& json) {
+    try {
+        if (!json.is_object() || json.value("type", std::string{}) != "delta_ack") {
+            return Error{ErrorCode::ValidationError, "unexpected p2p delta acknowledgement"};
+        }
+        const auto version = json.at("vv").get<memory_sync::VersionVector>();
+        const auto quarantined = json.at("quarantined").get<std::map<std::string, std::string>>();
+        if (version.counters().size() > kMaxP2pReplicationWriters ||
+            quarantined.size() > kMaxP2pReplicationWriters ||
+            std::ranges::any_of(version.counters(),
+                                [](const auto& entry) {
+                                    return entry.first.empty() ||
+                                           entry.first.size() > kMaxP2pIdentityBytes;
+                                }) ||
+            std::ranges::any_of(quarantined, [](const auto& entry) {
+                return entry.first.empty() || entry.first.size() > kMaxP2pIdentityBytes ||
+                       entry.second.size() > kMaxP2pIdentityBytes;
+            })) {
+            return Error{ErrorCode::ValidationError,
+                         "p2p delta acknowledgement violates writer bounds"};
+        }
+        return DeltaAcknowledgement{.version = version, .quarantined = quarantined.size()};
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::ValidationError,
+                     std::string("invalid p2p delta acknowledgement: ") + error.what()};
+    }
+}
+
 Result<DeltaAcknowledgement> receiveAcknowledgement(P2pConnection& connection,
                                                     std::chrono::milliseconds timeout) {
     auto json = readJson(connection, timeout);
     if (!json) {
         return json.error();
     }
-    try {
-        if (!json.value().is_object() || json.value().value("type", std::string{}) != "delta_ack") {
-            return Error{ErrorCode::ValidationError, "unexpected p2p delta acknowledgement"};
-        }
-        const auto quarantined =
-            json.value().at("quarantined").get<std::map<std::string, std::string>>();
-        return DeltaAcknowledgement{.version =
-                                        json.value().at("vv").get<memory_sync::VersionVector>(),
-                                    .quarantined = quarantined.size()};
-    } catch (const std::exception& error) {
-        return Error{ErrorCode::ValidationError,
-                     std::string("invalid p2p delta acknowledgement: ") + error.what()};
-    }
+    return parseAcknowledgement(json.value());
 }
 
 struct BootstrapPhaseResult {
@@ -299,6 +335,114 @@ parseCommitments(const Json& entries) {
     } catch (const std::exception& error) {
         return Error{ErrorCode::ValidationError,
                      std::string("invalid cold bootstrap commitments: ") + error.what()};
+    }
+}
+
+Result<std::string> parseReplicationMode(const Json& json) {
+    try {
+        if (!json.is_object() || json.value("type", std::string{}) != "replication_mode") {
+            return Error{ErrorCode::ValidationError, "missing p2p replication mode"};
+        }
+        auto mode = json.at("mode").get<std::string>();
+        if (mode != "delta" && mode != "snapshot") {
+            return Error{ErrorCode::ValidationError, "unknown p2p replication mode"};
+        }
+        return mode;
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::ValidationError,
+                     std::string("invalid p2p replication mode: ") + error.what()};
+    }
+}
+
+struct SnapshotBeginControl {
+    std::string witness;
+    memory_sync::VersionVector frontier;
+    std::map<memory_sync::NodeId, memory_sync::WriterHistoryCommitment> commitments;
+    std::size_t recordCount{0};
+    std::size_t payloadBytes{0};
+    std::string rootDigest;
+    memory_sync::DetachedWriterSignature witnessSignature;
+};
+
+Result<SnapshotBeginControl> parseSnapshotBegin(const Json& json,
+                                                const DeltaExchangeOptions& options) {
+    try {
+        if (!json.is_object() || json.value("type", std::string{}) != "snapshot_begin") {
+            return Error{ErrorCode::ValidationError, "missing cold bootstrap manifest"};
+        }
+        SnapshotBeginControl control;
+        control.witness = json.at("witness").get<std::string>();
+        control.frontier = json.at("frontier").get<memory_sync::VersionVector>();
+        auto commitments = parseCommitments(json.at("commitments"));
+        if (!commitments) {
+            return commitments.error();
+        }
+        control.commitments = std::move(commitments.value());
+        control.recordCount = json.at("record_count").get<std::size_t>();
+        control.payloadBytes = json.at("payload_bytes").get<std::size_t>();
+        control.rootDigest = json.at("root_digest").get<std::string>();
+        control.witnessSignature = memory_sync::DetachedWriterSignature{
+            .writerId = control.witness,
+            .keyId = json.at("witness_key_id").get<std::string>(),
+            .algorithm = json.at("witness_algorithm").get<std::string>(),
+            .signature = json.at("witness_signature").get<std::string>()};
+        if (control.witness.empty() || control.witness.size() > kMaxP2pIdentityBytes ||
+            control.frontier.counters().size() > kMaxP2pReplicationWriters ||
+            std::ranges::any_of(control.frontier.counters(),
+                                [](const auto& entry) {
+                                    return entry.first.empty() ||
+                                           entry.first.size() > kMaxP2pIdentityBytes;
+                                }) ||
+            control.recordCount > options.maxSnapshotRecords ||
+            control.payloadBytes > options.maxSnapshotWireBytes ||
+            !memory_sync::isSha256Digest(control.rootDigest) ||
+            control.witnessSignature.keyId.empty() ||
+            control.witnessSignature.keyId.size() > kMaxP2pIdentityBytes ||
+            control.witnessSignature.algorithm.empty() ||
+            control.witnessSignature.algorithm.size() > kMaxP2pIdentityBytes ||
+            control.witnessSignature.signature.empty() ||
+            control.witnessSignature.signature.size() > kMaxP2pIdentityBytes * 4) {
+            return Error{ErrorCode::ValidationError,
+                         "cold bootstrap manifest violates protocol bounds"};
+        }
+        for (const auto& [writer, commitment] : control.commitments) {
+            if (control.frontier.get(writer) != commitment.counter) {
+                return Error{ErrorCode::ValidationError,
+                             "cold bootstrap commitment differs from frontier"};
+            }
+        }
+        return control;
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::ValidationError,
+                     std::string("invalid cold bootstrap manifest: ") + error.what()};
+    }
+}
+
+struct SnapshotAcknowledgement {
+    std::string rootDigest;
+    memory_sync::VersionVector version;
+};
+
+Result<SnapshotAcknowledgement> parseSnapshotAcknowledgement(const Json& json) {
+    try {
+        if (!json.is_object() || json.value("type", std::string{}) != "snapshot_ack") {
+            return Error{ErrorCode::ValidationError, "unexpected cold bootstrap acknowledgement"};
+        }
+        SnapshotAcknowledgement acknowledgement{
+            .rootDigest = json.at("root_digest").get<std::string>(),
+            .version = json.at("vv").get<memory_sync::VersionVector>()};
+        if (!memory_sync::isSha256Digest(acknowledgement.rootDigest) ||
+            acknowledgement.version.counters().size() > kMaxP2pReplicationWriters ||
+            std::ranges::any_of(acknowledgement.version.counters(), [](const auto& entry) {
+                return entry.first.empty() || entry.first.size() > kMaxP2pIdentityBytes;
+            })) {
+            return Error{ErrorCode::ValidationError,
+                         "cold bootstrap acknowledgement violates protocol bounds"};
+        }
+        return acknowledgement;
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::ValidationError,
+                     std::string("invalid cold bootstrap acknowledgement: ") + error.what()};
     }
 }
 
@@ -376,24 +520,20 @@ Result<BootstrapPhaseResult> sendBootstrapPhase(P2pConnection& connection,
     if (!ack) {
         return ack.error();
     }
-    try {
-        if (!ack.value().is_object() ||
-            ack.value().value("type", std::string{}) != "snapshot_ack" ||
-            ack.value().at("root_digest").get<std::string>() != snapshot.value().rootDigest) {
-            return Error{ErrorCode::ValidationError, "cold bootstrap acknowledgement mismatch"};
-        }
-        const auto acknowledged = ack.value().at("vv").get<memory_sync::VersionVector>();
-        if (acknowledged.counters() != snapshot.value().frontier.counters()) {
-            return Error{ErrorCode::ValidationError,
-                         "cold bootstrap acknowledgement frontier mismatch"};
-        }
-        result.peerVersion = std::move(acknowledged);
-        result.stats.snapshotsSent = 1;
-        return result;
-    } catch (const std::exception& error) {
-        return Error{ErrorCode::ValidationError,
-                     std::string("invalid cold bootstrap acknowledgement: ") + error.what()};
+    auto acknowledged = parseSnapshotAcknowledgement(ack.value());
+    if (!acknowledged) {
+        return acknowledged.error();
     }
+    if (acknowledged.value().rootDigest != snapshot.value().rootDigest) {
+        return Error{ErrorCode::ValidationError, "cold bootstrap acknowledgement mismatch"};
+    }
+    if (acknowledged.value().version.counters() != snapshot.value().frontier.counters()) {
+        return Error{ErrorCode::ValidationError,
+                     "cold bootstrap acknowledgement frontier mismatch"};
+    }
+    result.peerVersion = std::move(acknowledged.value().version);
+    result.stats.snapshotsSent = 1;
+    return result;
 }
 
 Result<BootstrapPhaseResult> receiveBootstrapPhase(P2pConnection& connection,
@@ -405,21 +545,12 @@ Result<BootstrapPhaseResult> receiveBootstrapPhase(P2pConnection& connection,
     if (!mode) {
         return mode.error();
     }
-    try {
-        if (!mode.value().is_object() ||
-            mode.value().value("type", std::string{}) != "replication_mode") {
-            return Error{ErrorCode::ValidationError, "missing p2p replication mode"};
-        }
-        const auto selected = mode.value().at("mode").get<std::string>();
-        if (selected == "delta") {
-            return result;
-        }
-        if (selected != "snapshot") {
-            return Error{ErrorCode::ValidationError, "unknown p2p replication mode"};
-        }
-    } catch (const std::exception& error) {
-        return Error{ErrorCode::ValidationError,
-                     std::string("invalid p2p replication mode: ") + error.what()};
+    auto selectedMode = parseReplicationMode(mode.value());
+    if (!selectedMode) {
+        return selectedMode.error();
+    }
+    if (selectedMode.value() == "delta") {
+        return result;
     }
     if (!handshake.localVersion.empty() || !service.currentVersion().empty() ||
         !handshake.pinnedByOperator) {
@@ -431,36 +562,27 @@ Result<BootstrapPhaseResult> receiveBootstrapPhase(P2pConnection& connection,
     if (!begin) {
         return begin.error();
     }
+    auto manifest = parseSnapshotBegin(begin.value(), options);
+    if (!manifest) {
+        return manifest.error();
+    }
+    if (manifest.value().witness != handshake.peerNodeId) {
+        return Error{ErrorCode::Unauthorized, "cold bootstrap witness mismatch"};
+    }
+    if (manifest.value().frontier.counters() != handshake.peerVersion.counters() ||
+        manifest.value().commitments != handshake.peerCommitments) {
+        return Error{ErrorCode::ValidationError,
+                     "cold bootstrap manifest differs from authenticated frontier"};
+    }
     try {
-        if (!begin.value().is_object() ||
-            begin.value().value("type", std::string{}) != "snapshot_begin" ||
-            begin.value().at("witness").get<std::string>() != handshake.peerNodeId) {
-            return Error{ErrorCode::Unauthorized, "cold bootstrap witness mismatch"};
-        }
-        auto frontier = begin.value().at("frontier").get<memory_sync::VersionVector>();
-        auto commitments = parseCommitments(begin.value().at("commitments"));
-        if (!commitments) {
-            return commitments.error();
-        }
-        const auto count = begin.value().at("record_count").get<std::size_t>();
-        const auto declaredPayload = begin.value().at("payload_bytes").get<std::size_t>();
-        const auto root = begin.value().at("root_digest").get<std::string>();
-        if (frontier.counters() != handshake.peerVersion.counters() ||
-            commitments.value() != handshake.peerCommitments ||
-            count > options.maxSnapshotRecords || declaredPayload > options.maxSnapshotWireBytes ||
-            !memory_sync::isSha256Digest(root)) {
-            return Error{ErrorCode::ValidationError,
-                         "cold bootstrap manifest differs from authenticated frontier"};
-        }
+        const auto count = manifest.value().recordCount;
+        const auto declaredPayload = manifest.value().payloadBytes;
+        const auto root = manifest.value().rootDigest;
         memory_sync::ColdBootstrapSnapshot snapshot{
-            .frontier = std::move(frontier),
-            .commitments = std::move(commitments.value()),
+            .frontier = std::move(manifest.value().frontier),
+            .commitments = std::move(manifest.value().commitments),
             .rootDigest = root,
-            .witnessSignature = memory_sync::DetachedWriterSignature{
-                .writerId = handshake.peerNodeId,
-                .keyId = begin.value().at("witness_key_id").get<std::string>(),
-                .algorithm = begin.value().at("witness_algorithm").get<std::string>(),
-                .signature = begin.value().at("witness_signature").get<std::string>()}};
+            .witnessSignature = std::move(manifest.value().witnessSignature)};
         snapshot.winners.reserve(count);
         constexpr std::size_t kFramePrefixBytes = 4;
         std::size_t wireBytes = begin.value().dump().size() + kFramePrefixBytes;
@@ -753,6 +875,48 @@ Result<DeltaExchangeStats> runDeltaExchange(P2pConnection& connection,
 }
 
 } // namespace
+
+Result<void> detail::validateDeltaControlFrame(std::span<const std::byte> frame,
+                                               const DeltaExchangeOptions& options) {
+    if (auto validOptions = validateOptions(options); !validOptions) {
+        return validOptions.error();
+    }
+    auto parsed = parseJsonFrame(frame);
+    if (!parsed) {
+        return parsed.error();
+    }
+    try {
+        const auto type = parsed.value().value("type", std::string{});
+        if (type == "delta_batch") {
+            auto batch = parseBatchHeader(parsed.value(), options);
+            return batch ? Result<void>{} : Result<void>{batch.error()};
+        }
+        if (type == "delta_record") {
+            auto record = parseDeltaRecordControl(parsed.value());
+            return record ? Result<void>{} : Result<void>{record.error()};
+        }
+        if (type == "delta_ack") {
+            auto acknowledgement = parseAcknowledgement(parsed.value());
+            return acknowledgement ? Result<void>{} : Result<void>{acknowledgement.error()};
+        }
+        if (type == "replication_mode") {
+            auto mode = parseReplicationMode(parsed.value());
+            return mode ? Result<void>{} : Result<void>{mode.error()};
+        }
+        if (type == "snapshot_begin") {
+            auto manifest = parseSnapshotBegin(parsed.value(), options);
+            return manifest ? Result<void>{} : Result<void>{manifest.error()};
+        }
+        if (type == "snapshot_ack") {
+            auto acknowledgement = parseSnapshotAcknowledgement(parsed.value());
+            return acknowledgement ? Result<void>{} : Result<void>{acknowledgement.error()};
+        }
+        return Error{ErrorCode::ValidationError, "unknown p2p delta control message"};
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::ValidationError,
+                     std::string("invalid p2p delta control message: ") + error.what()};
+    }
+}
 
 Result<DeltaExchangeStats> initiateDeltaExchange(P2pConnection& connection,
                                                  memory_sync::MemorySyncService& service,
