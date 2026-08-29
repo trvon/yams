@@ -614,6 +614,422 @@ TEST_CASE("MemorySyncService direct delta apply invokes adapter callback after l
     CHECK(reader.readCached("user/key").has_value());
 }
 
+TEST_CASE("MemorySyncService serializes concurrent post-sync callbacks",
+          "[memory-sync][service][direct-delta][concurrency]") {
+    TempDirGuard writerADir;
+    TempDirGuard writerBDir;
+    TempDirGuard readerDir;
+    MemorySyncService writerA{makeBackend(writerADir.path),
+                              MemorySyncConfig{"writer-a", 60'000, "callback-corpus", 1}};
+    MemorySyncService writerB{makeBackend(writerBDir.path),
+                              MemorySyncConfig{"writer-b", 60'000, "callback-corpus", 1}};
+    MemorySyncService reader{makeBackend(readerDir.path),
+                             MemorySyncConfig{"reader", 60'000, "callback-corpus", 1}};
+    REQUIRE(writerA.publish("user/a", bytes("a")).has_value());
+    REQUIRE(writerB.publish("user/b", bytes("b")).has_value());
+    auto deltaA = writerA.exportLocalDeltasAfter({});
+    auto deltaB = writerB.exportLocalDeltasAfter({});
+    REQUIRE(deltaA.has_value());
+    REQUIRE(deltaB.has_value());
+
+    std::atomic<std::size_t> active{0};
+    std::atomic<std::size_t> maximumActive{0};
+    std::atomic<std::size_t> callbacks{0};
+    std::promise<void> firstEnteredPromise;
+    auto firstEntered = firstEnteredPromise.get_future();
+    std::promise<void> releaseFirstPromise;
+    auto releaseFirst = releaseFirstPromise.get_future().share();
+    reader.setAfterSyncCallback([&] {
+        const auto nowActive = active.fetch_add(1, std::memory_order_acq_rel) + 1;
+        auto observed = maximumActive.load(std::memory_order_acquire);
+        while (observed < nowActive && !maximumActive.compare_exchange_weak(
+                                           observed, nowActive, std::memory_order_acq_rel)) {
+        }
+        if (callbacks.fetch_add(1, std::memory_order_acq_rel) == 0) {
+            firstEnteredPromise.set_value();
+            releaseFirst.wait();
+        }
+        active.fetch_sub(1, std::memory_order_acq_rel);
+    });
+
+    auto first =
+        std::async(std::launch::async, [&] { return reader.applyDeltas(deltaA.value().deltas); });
+    REQUIRE(firstEntered.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    auto second =
+        std::async(std::launch::async, [&] { return reader.applyDeltas(deltaB.value().deltas); });
+
+    const auto mergedDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (reader.replicationState().version.get("writer-b") == 0 &&
+           std::chrono::steady_clock::now() < mergedDeadline) {
+        std::this_thread::yield();
+    }
+    REQUIRE(reader.replicationState().version.get("writer-b") == 1);
+    CHECK(second.wait_for(std::chrono::milliseconds(0)) == std::future_status::timeout);
+    CHECK(maximumActive.load(std::memory_order_acquire) == 1);
+
+    releaseFirstPromise.set_value();
+    REQUIRE(first.get().has_value());
+    REQUIRE(second.get().has_value());
+    CHECK(callbacks.load(std::memory_order_acquire) == 2);
+    CHECK(maximumActive.load(std::memory_order_acquire) == 1);
+}
+
+TEST_CASE("MemorySyncService callback stop does not join a worker waiting for serialization",
+          "[memory-sync][service][direct-delta][concurrency][stop]") {
+    TempDirGuard writerDir;
+    TempDirGuard readerDir;
+    MemorySyncService writer{makeBackend(writerDir.path),
+                             MemorySyncConfig{"writer", 60'000, "callback-stop-corpus", 1}};
+    MemorySyncService reader{makeBackend(readerDir.path),
+                             MemorySyncConfig{"reader", 1, "callback-stop-corpus", 1}};
+    REQUIRE(writer.publish("user/key", bytes("value")).has_value());
+    auto deltas = writer.exportLocalDeltasAfter({});
+    REQUIRE(deltas.has_value());
+
+    std::promise<void> callbackEnteredPromise;
+    auto callbackEntered = callbackEnteredPromise.get_future();
+    std::promise<void> allowStopPromise;
+    auto allowStop = allowStopPromise.get_future().share();
+    std::atomic<bool> first{true};
+    reader.setAfterSyncCallback([&] {
+        if (first.exchange(false, std::memory_order_acq_rel)) {
+            callbackEnteredPromise.set_value();
+            allowStop.wait();
+            reader.stop();
+        }
+    });
+
+    auto directApply =
+        std::async(std::launch::async, [&] { return reader.applyDeltas(deltas.value().deltas); });
+    REQUIRE(callbackEntered.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    REQUIRE(reader.start().has_value());
+    const auto workerDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (reader.successfulSyncCycles() == 0 &&
+           std::chrono::steady_clock::now() < workerDeadline) {
+        std::this_thread::yield();
+    }
+    REQUIRE(reader.successfulSyncCycles() > 0);
+
+    allowStopPromise.set_value();
+    REQUIRE(directApply.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    REQUIRE(directApply.get().has_value());
+    reader.stop();
+    CHECK_FALSE(reader.started());
+    REQUIRE(reader.start().has_value());
+    CHECK(reader.started());
+    reader.stop();
+    CHECK_FALSE(reader.started());
+}
+
+TEST_CASE("MemorySyncService serializes callbacks across service instances",
+          "[memory-sync][service][direct-delta][concurrency][cross-service]") {
+    TempDirGuard writerADir;
+    TempDirGuard writerBDir;
+    TempDirGuard readerADir;
+    TempDirGuard readerBDir;
+    MemorySyncService writerA{makeBackend(writerADir.path),
+                              MemorySyncConfig{"writer-a", 60'000, "global-callback-a", 1}};
+    MemorySyncService writerB{makeBackend(writerBDir.path),
+                              MemorySyncConfig{"writer-b", 60'000, "global-callback-b", 1}};
+    MemorySyncService readerA{makeBackend(readerADir.path),
+                              MemorySyncConfig{"reader-a", 60'000, "global-callback-a", 1}};
+    MemorySyncService readerB{makeBackend(readerBDir.path),
+                              MemorySyncConfig{"reader-b", 60'000, "global-callback-b", 1}};
+    REQUIRE(writerA.publish("user/a", bytes("a")).has_value());
+    REQUIRE(writerB.publish("user/b", bytes("b")).has_value());
+    auto deltaA = writerA.exportLocalDeltasAfter({});
+    auto deltaB = writerB.exportLocalDeltasAfter({});
+    REQUIRE(deltaA.has_value());
+    REQUIRE(deltaB.has_value());
+
+    std::atomic<std::size_t> active{0};
+    std::atomic<std::size_t> maximumActive{0};
+    std::atomic<std::size_t> callbacks{0};
+    std::promise<void> firstEnteredPromise;
+    auto firstEntered = firstEnteredPromise.get_future();
+    std::promise<void> releaseFirstPromise;
+    auto releaseFirst = releaseFirstPromise.get_future().share();
+    const auto callback = [&] {
+        const auto nowActive = active.fetch_add(1, std::memory_order_acq_rel) + 1;
+        auto observed = maximumActive.load(std::memory_order_acquire);
+        while (observed < nowActive && !maximumActive.compare_exchange_weak(
+                                           observed, nowActive, std::memory_order_acq_rel)) {
+        }
+        if (callbacks.fetch_add(1, std::memory_order_acq_rel) == 0) {
+            firstEnteredPromise.set_value();
+            releaseFirst.wait();
+        }
+        active.fetch_sub(1, std::memory_order_acq_rel);
+    };
+    readerA.setAfterSyncCallback(callback);
+    readerB.setAfterSyncCallback(callback);
+
+    auto first =
+        std::async(std::launch::async, [&] { return readerA.applyDeltas(deltaA.value().deltas); });
+    REQUIRE(firstEntered.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    auto second =
+        std::async(std::launch::async, [&] { return readerB.applyDeltas(deltaB.value().deltas); });
+    const auto mergedDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (readerB.replicationState().version.get("writer-b") == 0 &&
+           std::chrono::steady_clock::now() < mergedDeadline) {
+        std::this_thread::yield();
+    }
+    REQUIRE(readerB.replicationState().version.get("writer-b") == 1);
+    CHECK(second.wait_for(std::chrono::milliseconds(0)) == std::future_status::timeout);
+    CHECK(maximumActive.load(std::memory_order_acquire) == 1);
+
+    releaseFirstPromise.set_value();
+    REQUIRE(first.get().has_value());
+    REQUIRE(second.get().has_value());
+    CHECK(callbacks.load(std::memory_order_acquire) == 2);
+    CHECK(maximumActive.load(std::memory_order_acquire) == 1);
+}
+
+TEST_CASE("MemorySyncService refreshes queued callback snapshots after serialization",
+          "[memory-sync][service][direct-delta][concurrency][snapshot]") {
+    TempDirGuard writerADir;
+    TempDirGuard writerBDir;
+    TempDirGuard readerDir;
+    MemorySyncService writerA{makeBackend(writerADir.path),
+                              MemorySyncConfig{"writer-a", 60'000, "callback-snapshot", 1}};
+    MemorySyncService writerB{makeBackend(writerBDir.path),
+                              MemorySyncConfig{"writer-b", 60'000, "callback-snapshot", 1}};
+    MemorySyncService reader{makeBackend(readerDir.path),
+                             MemorySyncConfig{"reader", 1, "callback-snapshot", 1}};
+    REQUIRE(writerA.publish("user/a", bytes("a")).has_value());
+    REQUIRE(writerB.publish("user/b", bytes("b")).has_value());
+    auto deltaA = writerA.exportLocalDeltasAfter({});
+    auto deltaB = writerB.exportLocalDeltasAfter({});
+    REQUIRE(deltaA.has_value());
+    REQUIRE(deltaB.has_value());
+
+    std::atomic<std::size_t> callbacks{0};
+    std::atomic<bool> staleSnapshot{false};
+    std::promise<void> firstEnteredPromise;
+    auto firstEntered = firstEnteredPromise.get_future();
+    std::promise<void> releaseFirstPromise;
+    auto releaseFirst = releaseFirstPromise.get_future().share();
+    reader.setAfterSyncCallback([&] {
+        if (callbacks.fetch_add(1, std::memory_order_acq_rel) == 0) {
+            firstEnteredPromise.set_value();
+            releaseFirst.wait();
+            return;
+        }
+        auto snapshot = reader.syncOnce();
+        if (!snapshot || !snapshot.value().contains("user/b")) {
+            staleSnapshot.store(true, std::memory_order_release);
+        }
+    });
+
+    auto first =
+        std::async(std::launch::async, [&] { return reader.applyDeltas(deltaA.value().deltas); });
+    REQUIRE(firstEntered.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    REQUIRE(reader.start().has_value());
+    const auto workerDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (reader.successfulSyncCycles() == 0 &&
+           std::chrono::steady_clock::now() < workerDeadline) {
+        std::this_thread::yield();
+    }
+    REQUIRE(reader.successfulSyncCycles() > 0);
+
+    auto second =
+        std::async(std::launch::async, [&] { return reader.applyDeltas(deltaB.value().deltas); });
+    const auto mergeDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (reader.replicationState().version.get("writer-b") == 0 &&
+           std::chrono::steady_clock::now() < mergeDeadline) {
+        std::this_thread::yield();
+    }
+    REQUIRE(reader.replicationState().version.get("writer-b") == 1);
+    releaseFirstPromise.set_value();
+    REQUIRE(first.get().has_value());
+    REQUIRE(second.get().has_value());
+    const auto callbackDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (callbacks.load(std::memory_order_acquire) < 3 &&
+           std::chrono::steady_clock::now() < callbackDeadline) {
+        std::this_thread::yield();
+    }
+    REQUIRE(callbacks.load(std::memory_order_acquire) >= 3);
+    reader.stop();
+
+    CHECK(callbacks.load(std::memory_order_acquire) >= 3);
+    CHECK_FALSE(staleSnapshot.load(std::memory_order_acquire));
+}
+
+TEST_CASE("MemorySyncService stop drains an active direct-session callback",
+          "[memory-sync][service][direct-delta][concurrency][stop]") {
+    TempDirGuard writerDir;
+    TempDirGuard readerDir;
+    MemorySyncService writer{makeBackend(writerDir.path),
+                             MemorySyncConfig{"writer", 60'000, "callback-drain-corpus", 1}};
+    MemorySyncService reader{makeBackend(readerDir.path),
+                             MemorySyncConfig{"reader", 60'000, "callback-drain-corpus", 1}};
+    REQUIRE(writer.publish("user/key", bytes("value")).has_value());
+    auto deltas = writer.exportLocalDeltasAfter({});
+    REQUIRE(deltas.has_value());
+
+    std::promise<void> callbackEnteredPromise;
+    auto callbackEntered = callbackEnteredPromise.get_future();
+    std::promise<void> releaseCallbackPromise;
+    auto releaseCallback = releaseCallbackPromise.get_future().share();
+    std::atomic<bool> callbackObservedStopped{false};
+    reader.setAfterSyncCallback([&] {
+        callbackEnteredPromise.set_value();
+        releaseCallback.wait();
+        callbackObservedStopped.store(!reader.started(), std::memory_order_release);
+    });
+    auto directApply =
+        std::async(std::launch::async, [&] { return reader.applyDeltas(deltas.value().deltas); });
+    REQUIRE(callbackEntered.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    std::promise<void> stopStartedPromise;
+    auto stopStarted = stopStartedPromise.get_future();
+    auto stopped = std::async(std::launch::async, [&] {
+        stopStartedPromise.set_value();
+        reader.stop();
+    });
+    REQUIRE(stopStarted.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    CHECK(stopped.wait_for(std::chrono::milliseconds(100)) == std::future_status::timeout);
+
+    releaseCallbackPromise.set_value();
+    REQUIRE(directApply.get().has_value());
+    stopped.get();
+    CHECK(callbackObservedStopped.load(std::memory_order_acquire));
+    CHECK_FALSE(reader.started());
+}
+
+TEST_CASE("MemorySyncService can destroy another service from a callback",
+          "[memory-sync][service][direct-delta][concurrency][destruction]") {
+    TempDirGuard writerDir;
+    TempDirGuard readerADir;
+    TempDirGuard readerBDir;
+    MemorySyncService writer{makeBackend(writerDir.path),
+                             MemorySyncConfig{"writer", 60'000, "callback-destroy-a", 1}};
+    MemorySyncService readerA{makeBackend(readerADir.path),
+                              MemorySyncConfig{"reader-a", 60'000, "callback-destroy-a", 1}};
+    auto readerB = std::make_unique<MemorySyncService>(
+        makeBackend(readerBDir.path), MemorySyncConfig{"reader-b", 1, "callback-destroy-b", 1});
+    REQUIRE(writer.publish("user/key", bytes("value")).has_value());
+    auto deltas = writer.exportLocalDeltasAfter({});
+    REQUIRE(deltas.has_value());
+
+    std::promise<void> callbackEnteredPromise;
+    auto callbackEntered = callbackEnteredPromise.get_future();
+    std::promise<void> allowDestroyPromise;
+    auto allowDestroy = allowDestroyPromise.get_future().share();
+    readerA.setAfterSyncCallback([&] {
+        callbackEnteredPromise.set_value();
+        allowDestroy.wait();
+        readerB.reset();
+    });
+    auto apply =
+        std::async(std::launch::async, [&] { return readerA.applyDeltas(deltas.value().deltas); });
+    REQUIRE(callbackEntered.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    REQUIRE(readerB->start().has_value());
+    const auto workerDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (readerB->successfulSyncCycles() == 0 &&
+           std::chrono::steady_clock::now() < workerDeadline) {
+        std::this_thread::yield();
+    }
+    REQUIRE(readerB->successfulSyncCycles() > 0);
+
+    allowDestroyPromise.set_value();
+    REQUIRE(apply.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    REQUIRE(apply.get().has_value());
+    CHECK(readerB == nullptr);
+}
+
+TEST_CASE("MemorySyncService coalesces recursive post-sync callbacks",
+          "[memory-sync][service][direct-delta][concurrency][recursive]") {
+    TempDirGuard writerADir;
+    TempDirGuard writerBDir;
+    TempDirGuard readerDir;
+    MemorySyncService writerA{makeBackend(writerADir.path),
+                              MemorySyncConfig{"writer-a", 60'000, "recursive-corpus", 1}};
+    MemorySyncService writerB{makeBackend(writerBDir.path),
+                              MemorySyncConfig{"writer-b", 60'000, "recursive-corpus", 1}};
+    MemorySyncService reader{makeBackend(readerDir.path),
+                             MemorySyncConfig{"reader", 60'000, "recursive-corpus", 1}};
+    REQUIRE(writerA.publish("user/a", bytes("a")).has_value());
+    REQUIRE(writerB.publish("user/b", bytes("b")).has_value());
+    auto deltaA = writerA.exportLocalDeltasAfter({});
+    auto deltaB = writerB.exportLocalDeltasAfter({});
+    REQUIRE(deltaA.has_value());
+    REQUIRE(deltaB.has_value());
+    REQUIRE(reader.applyDeltas(deltaA.value().deltas).has_value());
+    REQUIRE(reader.applyDeltas(deltaB.value().deltas).has_value());
+
+    std::atomic<std::size_t> callbacks{0};
+    std::atomic<bool> nestedQuarantineSucceeded{false};
+    reader.setAfterSyncCallback([&] {
+        if (callbacks.fetch_add(1, std::memory_order_acq_rel) == 0) {
+            auto nested = reader.quarantineWriter("writer-b", "reader");
+            nestedQuarantineSucceeded.store(nested && nested.value(), std::memory_order_release);
+        }
+    });
+    auto quarantined = reader.quarantineWriter("writer-a", "reader");
+    REQUIRE(quarantined.has_value());
+    CHECK(quarantined.value());
+    CHECK(nestedQuarantineSucceeded.load(std::memory_order_acquire));
+    CHECK(callbacks.load(std::memory_order_acquire) == 2);
+    CHECK(reader.replicationState().quarantinedWriters.contains("writer-a"));
+    CHECK(reader.replicationState().quarantinedWriters.contains("writer-b"));
+}
+
+TEST_CASE("MemorySyncService preserves callback ownership across services",
+          "[memory-sync][service][direct-delta][concurrency][recursive]") {
+    TempDirGuard writerA1Dir;
+    TempDirGuard writerA2Dir;
+    TempDirGuard writerBDir;
+    TempDirGuard readerADir;
+    TempDirGuard readerBDir;
+    MemorySyncService writerA1{makeBackend(writerA1Dir.path),
+                               MemorySyncConfig{"writer-a1", 60'000, "cross-callback-a", 1}};
+    MemorySyncService writerA2{makeBackend(writerA2Dir.path),
+                               MemorySyncConfig{"writer-a2", 60'000, "cross-callback-a", 1}};
+    MemorySyncService writerB{makeBackend(writerBDir.path),
+                              MemorySyncConfig{"writer-b", 60'000, "cross-callback-b", 1}};
+    MemorySyncService readerA{makeBackend(readerADir.path),
+                              MemorySyncConfig{"reader-a", 60'000, "cross-callback-a", 1}};
+    MemorySyncService readerB{makeBackend(readerBDir.path),
+                              MemorySyncConfig{"reader-b", 60'000, "cross-callback-b", 1}};
+    REQUIRE(writerA1.publish("user/a1", bytes("a1")).has_value());
+    REQUIRE(writerA2.publish("user/a2", bytes("a2")).has_value());
+    REQUIRE(writerB.publish("user/b", bytes("b")).has_value());
+    auto deltaA1 = writerA1.exportLocalDeltasAfter({});
+    auto deltaA2 = writerA2.exportLocalDeltasAfter({});
+    auto deltaB = writerB.exportLocalDeltasAfter({});
+    REQUIRE(deltaA1.has_value());
+    REQUIRE(deltaA2.has_value());
+    REQUIRE(deltaB.has_value());
+    REQUIRE(readerA.applyDeltas(deltaA1.value().deltas).has_value());
+    REQUIRE(readerA.applyDeltas(deltaA2.value().deltas).has_value());
+    REQUIRE(readerB.applyDeltas(deltaB.value().deltas).has_value());
+
+    std::atomic<std::size_t> callbacksA{0};
+    std::atomic<std::size_t> callbacksB{0};
+    std::atomic<bool> nestedB{false};
+    std::atomic<bool> nestedA{false};
+    readerB.setAfterSyncCallback([&] {
+        if (callbacksB.fetch_add(1, std::memory_order_acq_rel) == 0) {
+            auto quarantineA = readerA.quarantineWriter("writer-a2", "reader-a");
+            nestedA.store(quarantineA && quarantineA.value(), std::memory_order_release);
+        }
+    });
+    readerA.setAfterSyncCallback([&] {
+        if (callbacksA.fetch_add(1, std::memory_order_acq_rel) == 0) {
+            auto quarantineB = readerB.quarantineWriter("writer-b", "reader-b");
+            nestedB.store(quarantineB && quarantineB.value(), std::memory_order_release);
+        }
+    });
+
+    auto quarantineA1 = readerA.quarantineWriter("writer-a1", "reader-a");
+    REQUIRE(quarantineA1.has_value());
+    CHECK(quarantineA1.value());
+    CHECK(nestedA.load(std::memory_order_acquire));
+    CHECK(nestedB.load(std::memory_order_acquire));
+    CHECK(callbacksA.load(std::memory_order_acquire) == 2);
+    CHECK(callbacksB.load(std::memory_order_acquire) == 1);
+}
+
 TEST_CASE("MemorySyncService publishes quarantine snapshot before adapter invalidation",
           "[memory-sync][service][direct-delta][quarantine]") {
     TempDirGuard writerDir;

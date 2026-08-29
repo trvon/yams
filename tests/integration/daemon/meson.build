@@ -628,6 +628,14 @@ else
       timeout: 60,
       args: ['Daemon memory sync stop during production apply prevents later adapters', '--allow-running-no-tests'],
     )
+    test('daemon_memory_sync_apply_serialization',
+      memory_sync_service_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 60,
+      args: ['Daemon serializes concurrent memory sync apply callbacks', '--allow-running-no-tests'],
+    )
     test('daemon_memory_sync_prerequisites',
       memory_sync_service_integration_exe,
       suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
