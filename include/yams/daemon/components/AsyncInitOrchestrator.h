@@ -11,7 +11,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <future>
+#include <mutex>
 
 namespace yams::daemon {
 namespace detail {
@@ -55,8 +57,13 @@ public:
     /// Attempt to transition to "started". Returns false if another thread
     /// already started the async init.
     bool tryStart() {
+        std::lock_guard lock(futureMutex_);
         bool expected = false;
-        return started_.compare_exchange_strong(expected, true, std::memory_order_acq_rel);
+        if (!started_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+            return false;
+        }
+        futureInstallationComplete_ = false;
+        return true;
     }
 
     /// Attempt to transition to "metadata warmup started". Returns true if
@@ -66,41 +73,74 @@ public:
     }
 
     /// Stop-token passed to the async init coroutine.
-    detail::AsyncInitStopToken getStopToken() { return stopSource_.get_token(); }
+    detail::AsyncInitStopToken getStopToken() {
+        std::lock_guard lock(futureMutex_);
+        return stopSource_.get_token();
+    }
 
     /// Store the future returned by co_spawn.
-    void setFuture(std::future<void> fut) { future_ = std::move(fut); }
+    void setFuture(std::future<void> fut) {
+        {
+            std::lock_guard lock(futureMutex_);
+            future_ = std::move(fut);
+            futureInstallationComplete_ = true;
+        }
+        futureInstalled_.notify_all();
+    }
+
+    /// Complete a start attempt that exited before spawning a coroutine.
+    void markFutureNotExpected() {
+        {
+            std::lock_guard lock(futureMutex_);
+            futureInstallationComplete_ = true;
+        }
+        futureInstalled_.notify_all();
+    }
 
     /// Reset lifecycle state so the daemon can be re-initialized after a
     /// restart. Does not affect an in-flight future — callers must drain it
     /// first via requestStopAndWait().
-    void resetForRestart() { stopSource_ = detail::AsyncInitStopSource{}; }
+    void resetForRestart() {
+        std::lock_guard waitLock(waitMutex_);
+        std::lock_guard lock(futureMutex_);
+        stopSource_ = detail::AsyncInitStopSource{};
+        started_.store(false, std::memory_order_release);
+        metadataWarmupStarted_.store(false, std::memory_order_release);
+        futureInstallationComplete_ = true;
+    }
 
     /// Request cancellation and wait up to `timeout` for the coroutine to
     /// complete. Safe to call when no future has been stored.
     /// Returns true if the coroutine finished (or was never started),
     /// false if the wait timed out.
     bool requestStopAndWait(std::chrono::milliseconds timeout) {
-        if (stopSource_.stop_possible()) {
-            stopSource_.request_stop();
+        std::lock_guard waitLock(waitMutex_);
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        std::future<void> future;
+        {
+            std::unique_lock lock(futureMutex_);
+            if (stopSource_.stop_possible()) {
+                stopSource_.request_stop();
+            }
+            if (!futureInstalled_.wait_until(lock, deadline,
+                                             [this] { return futureInstallationComplete_; })) {
+                return false;
+            }
+            if (!future_.valid()) {
+                return true;
+            }
+            future = std::move(future_);
         }
-        if (!future_.valid()) {
-            return true;
-        }
-        auto status = future_.wait_for(timeout);
-        if (status == std::future_status::timeout) {
+        if (future.wait_until(deadline) == std::future_status::timeout) {
+            std::lock_guard lock(futureMutex_);
+            future_ = std::move(future);
             return false;
         }
         try {
-            future_.get();
-        } catch (const std::exception&) {
-            future_ = std::future<void>();
-            return true;
+            future.get();
         } catch (...) {
-            future_ = std::future<void>();
-            return true;
+            // Async initialization failures are surfaced through service state.
         }
-        future_ = std::future<void>();
         return true;
     }
 
@@ -108,7 +148,11 @@ private:
     std::atomic<bool> started_{false};
     std::atomic<bool> metadataWarmupStarted_{false};
     detail::AsyncInitStopSource stopSource_;
+    std::mutex waitMutex_;
+    std::mutex futureMutex_;
+    std::condition_variable futureInstalled_;
     std::future<void> future_;
+    bool futureInstallationComplete_{true};
 };
 
 } // namespace yams::daemon

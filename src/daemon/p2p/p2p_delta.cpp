@@ -321,9 +321,9 @@ Result<BootstrapPhaseResult> sendBootstrapPhase(P2pConnection& connection,
     if (!offer) {
         return result;
     }
-    if (handshake.firstContactPinned) {
+    if (!handshake.pinnedByOperator) {
         return Error{ErrorCode::Unauthorized,
-                     "cold bootstrap requires a previously operator-pinned peer"};
+                     "cold bootstrap requires explicit operator enrollment"};
     }
     const auto current = service.replicationState();
     memory_sync::ReplicationState frozen{.version = handshake.localVersion,
@@ -422,9 +422,10 @@ Result<BootstrapPhaseResult> receiveBootstrapPhase(P2pConnection& connection,
                      std::string("invalid p2p replication mode: ") + error.what()};
     }
     if (!handshake.localVersion.empty() || !service.currentVersion().empty() ||
-        handshake.firstContactPinned) {
+        !handshake.pinnedByOperator) {
         return Error{ErrorCode::Unauthorized,
-                     "cold bootstrap requires a durable zero state and prior peer pin"};
+                     "cold bootstrap requires a durable zero state and explicit operator "
+                     "enrollment"};
     }
     auto begin = readJson(connection, options.timeout);
     if (!begin) {

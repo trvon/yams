@@ -36,6 +36,9 @@ fuzz_deps = [
   dependency('protobuf'),
   dependency('nlohmann_json'),
 ]
+if host_machine.system() == 'windows'
+  fuzz_deps += cpp.find_library('advapi32', required: true)
+endif
 
 # Seed generator (non-fuzzer utility)
 seedgen = executable('seedgen',

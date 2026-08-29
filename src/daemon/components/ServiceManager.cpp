@@ -24,17 +24,21 @@
 #include <string>
 #include <system_error>
 #include <unordered_map>
+#include <vector>
+#include <openssl/rand.h>
 #include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/config_migration.h>
 #include <yams/core/assert.hpp>
 
 #ifdef _WIN32
+#include <aclapi.h>
 #include <io.h>
 #include <windows.h>
 #define getpid _getpid
 #else
 #include <unistd.h>
+#include <sys/stat.h>
 #endif
 
 // Platform-specific malloc pressure relief for macOS
@@ -193,42 +197,303 @@ inline void setOnnxShutdownMarker(bool enabled) {
     onnxShutdownMarker().store(enabled, std::memory_order_release);
 }
 
-yams::Result<std::string> readProtectedP2pPrivateKey(const std::filesystem::path& keyPath) {
-#ifndef _WIN32
-    std::error_code error;
-    const auto linkStatus = std::filesystem::symlink_status(keyPath, error);
-    if (error) {
-        return yams::Error{yams::ErrorCode::IOError,
-                           "cannot inspect P2P identity key: " + error.message()};
+constexpr std::size_t kMaxP2pPrivateKeyBytes = std::size_t{64} * 1024;
+
+#ifdef _WIN32
+class WindowsTokenUser {
+public:
+    ~WindowsTokenUser() {
+        if (token_ != nullptr) {
+            CloseHandle(token_);
+        }
     }
-    if (std::filesystem::is_symlink(linkStatus)) {
+
+    WindowsTokenUser(const WindowsTokenUser&) = delete;
+    WindowsTokenUser& operator=(const WindowsTokenUser&) = delete;
+    WindowsTokenUser() = default;
+
+    yams::Result<void> initialize() {
+        if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token_)) {
+            if (GetLastError() != ERROR_NO_TOKEN ||
+                !OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token_)) {
+                return yams::Error{yams::ErrorCode::IOError,
+                                   "cannot open effective token for P2P identity key ACL"};
+            }
+        }
+        DWORD bytes = 0;
+        GetTokenInformation(token_, TokenUser, nullptr, 0, &bytes);
+        if (bytes == 0 || GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+            return yams::Error{yams::ErrorCode::IOError,
+                               "cannot size effective SID for P2P identity key ACL"};
+        }
+        user_.resize(bytes);
+        if (!GetTokenInformation(token_, TokenUser, user_.data(), bytes, &bytes)) {
+            return yams::Error{yams::ErrorCode::IOError,
+                               "cannot read effective SID for P2P identity key ACL"};
+        }
+        return {};
+    }
+
+    PSID sid() const { return reinterpret_cast<const TOKEN_USER*>(user_.data())->User.Sid; }
+
+private:
+    HANDLE token_{nullptr};
+    std::vector<std::byte> user_;
+};
+
+class WindowsOwnerOnlySecurity {
+public:
+    ~WindowsOwnerOnlySecurity() {
+        if (acl_ != nullptr) {
+            LocalFree(acl_);
+        }
+    }
+
+    WindowsOwnerOnlySecurity(const WindowsOwnerOnlySecurity&) = delete;
+    WindowsOwnerOnlySecurity& operator=(const WindowsOwnerOnlySecurity&) = delete;
+    WindowsOwnerOnlySecurity() = default;
+
+    yams::Result<SECURITY_ATTRIBUTES*> initialize() {
+        if (auto initialized = user_.initialize(); !initialized) {
+            return initialized.error();
+        }
+        EXPLICIT_ACCESSW access{};
+        access.grfAccessPermissions = GENERIC_ALL;
+        access.grfAccessMode = SET_ACCESS;
+        access.grfInheritance = NO_INHERITANCE;
+        BuildTrusteeWithSidW(&access.Trustee, user_.sid());
+        const auto aclResult = SetEntriesInAclW(1, &access, nullptr, &acl_);
+        if (aclResult != ERROR_SUCCESS) {
+            return yams::Error{yams::ErrorCode::IOError,
+                               "cannot build owner-only P2P identity key ACL"};
+        }
+        if (!InitializeSecurityDescriptor(&descriptor_, SECURITY_DESCRIPTOR_REVISION) ||
+            !SetSecurityDescriptorOwner(&descriptor_, user_.sid(), FALSE) ||
+            !SetSecurityDescriptorDacl(&descriptor_, TRUE, acl_, FALSE) ||
+            !SetSecurityDescriptorControl(&descriptor_, SE_DACL_PROTECTED, SE_DACL_PROTECTED)) {
+            return yams::Error{yams::ErrorCode::IOError,
+                               "cannot initialize owner-only P2P identity key ACL"};
+        }
+        attributes_.nLength = sizeof(attributes_);
+        attributes_.lpSecurityDescriptor = &descriptor_;
+        attributes_.bInheritHandle = FALSE;
+        return &attributes_;
+    }
+
+private:
+    WindowsTokenUser user_;
+    PACL acl_{nullptr};
+    SECURITY_DESCRIPTOR descriptor_{};
+    SECURITY_ATTRIBUTES attributes_{};
+};
+
+class WindowsHandle {
+public:
+    explicit WindowsHandle(HANDLE handle) : handle_(handle) {}
+    ~WindowsHandle() {
+        if (handle_ != INVALID_HANDLE_VALUE) {
+            CloseHandle(handle_);
+        }
+    }
+    WindowsHandle(const WindowsHandle&) = delete;
+    WindowsHandle& operator=(const WindowsHandle&) = delete;
+    HANDLE get() const { return handle_; }
+
+private:
+    HANDLE handle_{INVALID_HANDLE_VALUE};
+};
+
+yams::Result<std::string> readProtectedP2pFile(const std::filesystem::path& keyPath,
+                                               bool ownerOnlyRead, std::size_t maxBytes) {
+    WindowsHandle file(CreateFileW(keyPath.c_str(), GENERIC_READ | READ_CONTROL, 0, nullptr,
+                                   OPEN_EXISTING,
+                                   FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+    if (file.get() == INVALID_HANDLE_VALUE) {
+        return yams::Error{yams::ErrorCode::IOError, "cannot open P2P identity key"};
+    }
+    FILE_ATTRIBUTE_TAG_INFO attributes{};
+    if (!GetFileInformationByHandleEx(file.get(), FileAttributeTagInfo, &attributes,
+                                      sizeof(attributes)) ||
+        (attributes.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) !=
+            0 ||
+        GetFileType(file.get()) != FILE_TYPE_DISK) {
         return yams::Error{yams::ErrorCode::Unauthorized,
-                           "P2P identity key must not be a symbolic link"};
+                           "P2P identity key must be a non-reparse regular file"};
     }
-    if (!std::filesystem::is_regular_file(linkStatus)) {
+
+    WindowsTokenUser expectedUser;
+    if (auto initialized = expectedUser.initialize(); !initialized) {
+        return initialized.error();
+    }
+    PSID owner = nullptr;
+    PACL dacl = nullptr;
+    PSECURITY_DESCRIPTOR rawDescriptor = nullptr;
+    const auto status = GetSecurityInfo(file.get(), SE_FILE_OBJECT,
+                                        OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                                        &owner, nullptr, &dacl, nullptr, &rawDescriptor);
+    std::unique_ptr<void, decltype(&LocalFree)> descriptor(rawDescriptor, LocalFree);
+    if (status != ERROR_SUCCESS || owner == nullptr || dacl == nullptr ||
+        !EqualSid(owner, expectedUser.sid())) {
         return yams::Error{yams::ErrorCode::Unauthorized,
-                           "P2P identity key must be a regular file"};
+                           "P2P identity key must have an explicit effective-user-only ACL"};
     }
-    const auto permissions = linkStatus.permissions();
-    if (error) {
-        return yams::Error{yams::ErrorCode::IOError,
-                           "cannot inspect P2P identity key permissions: " + error.message()};
-    }
-    constexpr auto insecure =
-        std::filesystem::perms::group_all | std::filesystem::perms::others_all;
-    if ((permissions & insecure) != std::filesystem::perms::none) {
+    SECURITY_DESCRIPTOR_CONTROL control{};
+    DWORD revision = 0;
+    if (!GetSecurityDescriptorControl(rawDescriptor, &control, &revision) ||
+        (control & SE_DACL_PROTECTED) == 0) {
         return yams::Error{yams::ErrorCode::Unauthorized,
-                           "P2P identity key must not be accessible by group or others"};
+                           "P2P identity key ACL must be protected from inheritance"};
     }
+    ACL_SIZE_INFORMATION info{};
+    if (!GetAclInformation(dacl, &info, sizeof(info), AclSizeInformation)) {
+        return yams::Error{yams::ErrorCode::IOError, "cannot inspect P2P identity key ACL"};
+    }
+    bool ownerAllowed = false;
+    for (DWORD index = 0; index < info.AceCount; ++index) {
+        void* rawAce = nullptr;
+        if (!GetAce(dacl, index, &rawAce) || rawAce == nullptr) {
+            return yams::Error{yams::ErrorCode::IOError,
+                               "cannot inspect P2P identity key ACL entry"};
+        }
+        const auto* header = static_cast<const ACE_HEADER*>(rawAce);
+        if (header->AceType == ACCESS_ALLOWED_ACE_TYPE) {
+            constexpr std::size_t sidOffset = offsetof(ACCESS_ALLOWED_ACE, SidStart);
+            if (header->AceSize < sidOffset + sizeof(DWORD) ||
+                (header->AceFlags & INHERITED_ACE) != 0) {
+                return yams::Error{yams::ErrorCode::Unauthorized,
+                                   "P2P identity key ACL contains an unsafe allow entry"};
+            }
+            const auto* ace = static_cast<const ACCESS_ALLOWED_ACE*>(rawAce);
+            auto* sid = const_cast<DWORD*>(&ace->SidStart);
+            if (!IsValidSid(sid) || GetLengthSid(sid) > header->AceSize - sidOffset) {
+                return yams::Error{yams::ErrorCode::Unauthorized,
+                                   "P2P trust file ACL contains an invalid SID"};
+            }
+            const bool ownerSid = EqualSid(expectedUser.sid(), sid);
+            constexpr ACCESS_MASK readable =
+                GENERIC_ALL | GENERIC_READ | FILE_GENERIC_READ | FILE_READ_DATA | FILE_EXECUTE;
+            constexpr ACCESS_MASK writable = GENERIC_ALL | GENERIC_WRITE | FILE_GENERIC_WRITE |
+                                             FILE_WRITE_DATA | FILE_APPEND_DATA | FILE_WRITE_EA |
+                                             FILE_WRITE_ATTRIBUTES | FILE_DELETE_CHILD | DELETE |
+                                             WRITE_DAC | WRITE_OWNER;
+            if ((!ownerSid && ownerOnlyRead && ace->Mask != 0) ||
+                (!ownerSid && (ace->Mask & writable) != 0)) {
+                return yams::Error{yams::ErrorCode::Unauthorized,
+                                   "P2P trust file ACL grants unsafe external access"};
+            }
+            ownerAllowed = ownerAllowed || (ownerSid && (ace->Mask & readable) != 0);
+        } else if (header->AceType != ACCESS_DENIED_ACE_TYPE &&
+                   header->AceType != ACCESS_DENIED_OBJECT_ACE_TYPE &&
+                   header->AceType != ACCESS_DENIED_CALLBACK_ACE_TYPE &&
+                   header->AceType != ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE) {
+            return yams::Error{yams::ErrorCode::Unauthorized,
+                               "P2P identity key ACL contains an unsupported entry type"};
+        }
+    }
+    if (!ownerAllowed) {
+        return yams::Error{yams::ErrorCode::Unauthorized,
+                           "P2P identity key ACL does not grant effective-user read access"};
+    }
+
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(file.get(), &size) || size.QuadPart <= 0 ||
+        static_cast<unsigned long long>(size.QuadPart) > maxBytes) {
+        return yams::Error{yams::ErrorCode::InvalidArgument,
+                           "P2P identity key is empty or oversized"};
+    }
+    std::string content(static_cast<std::size_t>(size.QuadPart), '\0');
+    std::size_t offset = 0;
+    while (offset < content.size()) {
+        DWORD read = 0;
+        const auto remaining =
+            std::min<std::size_t>(content.size() - offset, std::numeric_limits<DWORD>::max());
+        if (!ReadFile(file.get(), content.data() + offset, static_cast<DWORD>(remaining), &read,
+                      nullptr) ||
+            read == 0) {
+            return yams::Error{yams::ErrorCode::IOError, "cannot read complete P2P identity key"};
+        }
+        offset += read;
+    }
+    return content;
+}
+#else
+yams::Result<std::string> readProtectedP2pFile(const std::filesystem::path& keyPath,
+                                               bool ownerOnlyRead, std::size_t maxBytes) {
+    int flags = O_RDONLY;
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
 #endif
-    return yams::memory_sync::readWriterAuthFile(keyPath, std::size_t{64} * 1024);
+#ifdef O_NOFOLLOW
+    flags |= O_NOFOLLOW;
+#endif
+    const int file = ::open(keyPath.c_str(), flags);
+    if (file < 0) {
+        const auto openError = errno;
+        return yams::Error{
+            openError == ELOOP ? yams::ErrorCode::Unauthorized : yams::ErrorCode::IOError,
+            openError == ELOOP ? "P2P identity key must not be a symbolic link"
+                               : "cannot open P2P identity key: " + systemErrorMessage(openError)};
+    }
+    const auto closeFile = [&] { (void)::close(file); };
+    struct stat info{};
+    if (::fstat(file, &info) != 0) {
+        const auto message = systemErrorMessage(errno);
+        closeFile();
+        return yams::Error{yams::ErrorCode::IOError, "cannot inspect P2P identity key: " + message};
+    }
+    const mode_t unsafePermissions = ownerOnlyRead ? mode_t{0077} : mode_t{0022};
+    if (!S_ISREG(info.st_mode) || info.st_uid != ::geteuid() ||
+        (info.st_mode & unsafePermissions) != 0) {
+        closeFile();
+        return yams::Error{yams::ErrorCode::Unauthorized,
+                           "P2P trust file must be an effective-user-owned regular file without "
+                           "unsafe permissions"};
+    }
+    if (info.st_size <= 0 ||
+        static_cast<std::uintmax_t>(info.st_size) > static_cast<std::uintmax_t>(maxBytes)) {
+        closeFile();
+        return yams::Error{yams::ErrorCode::InvalidArgument,
+                           "P2P identity key is empty or oversized"};
+    }
+    std::string content(static_cast<std::size_t>(info.st_size), '\0');
+    std::size_t offset = 0;
+    while (offset < content.size()) {
+        const auto read = ::read(file, content.data() + offset, content.size() - offset);
+        if (read < 0 && errno == EINTR) {
+            continue;
+        }
+        if (read <= 0) {
+            const auto message = systemErrorMessage(errno);
+            closeFile();
+            return yams::Error{yams::ErrorCode::IOError,
+                               "cannot read complete P2P identity key: " + message};
+        }
+        offset += static_cast<std::size_t>(read);
+    }
+    closeFile();
+    return content;
+}
+#endif
+
+yams::Result<std::string> readProtectedP2pPrivateKey(const std::filesystem::path& keyPath) {
+    return readProtectedP2pFile(keyPath, true, kMaxP2pPrivateKeyBytes);
+}
+
+yams::Result<std::string> readProtectedP2pTrustFile(const std::filesystem::path& path,
+                                                    std::size_t maxBytes) {
+    return readProtectedP2pFile(path, false, maxBytes);
 }
 
 yams::Result<void> writeExclusiveP2pPrivateKey(const std::filesystem::path& path,
                                                std::string_view contents) {
 #ifdef _WIN32
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
-                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    WindowsOwnerOnlySecurity security;
+    auto securityAttributes = security.initialize();
+    if (!securityAttributes) {
+        return securityAttributes.error();
+    }
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, securityAttributes.value(),
+                              CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
         const auto code = GetLastError();
         return yams::Error{code == ERROR_FILE_EXISTS || code == ERROR_ALREADY_EXISTS
@@ -373,7 +638,7 @@ loadP2pPrivateKey(const yams::daemon::DaemonConfig::MemorySyncPolicy& policy,
     }
     if (!policy.writerAuthManifestPath.empty()) {
         const std::filesystem::path manifestPath(policy.writerAuthManifestPath);
-        auto bytes = yams::memory_sync::readWriterAuthFile(manifestPath);
+        auto bytes = readProtectedP2pTrustFile(manifestPath, std::size_t{1024} * 1024);
         if (!bytes) {
             return bytes.error();
         }
@@ -403,6 +668,114 @@ loadP2pPrivateKey(const yams::daemon::DaemonConfig::MemorySyncPolicy& policy,
     return loadOrCreateP2pPrivateKey(dataDir / "p2p" / "identity.pem");
 }
 
+yams::Result<std::string> ensureAuthenticatedDirectStore(const std::filesystem::path& dataDir,
+                                                         std::string_view corpusId,
+                                                         std::uint64_t corpusEpoch) {
+    const auto p2pDirectory = dataDir / "p2p";
+    const auto operationStore = p2pDirectory / "op-store";
+    const auto marker = p2pDirectory / "authenticated-store-v1.json";
+    std::error_code error;
+    if (std::filesystem::exists(marker, error)) {
+        if (error) {
+            return yams::Error{yams::ErrorCode::IOError,
+                               "cannot inspect direct P2P authentication marker: " +
+                                   error.message()};
+        }
+        auto encoded = readProtectedP2pPrivateKey(marker);
+        if (!encoded) {
+            return encoded.error();
+        }
+        try {
+            const auto parsed = nlohmann::json::parse(encoded.value());
+            const auto storeGeneration = parsed.at("store_generation").get<std::string>();
+            const bool validGeneration =
+                storeGeneration.size() == 64 &&
+                std::ranges::all_of(storeGeneration, [](unsigned char ch) {
+                    return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
+                });
+            if (parsed.at("schema_version").get<std::uint32_t>() != 1 ||
+                parsed.at("corpus_id").get<std::string>() != corpusId ||
+                parsed.at("corpus_epoch").get<std::uint64_t>() != corpusEpoch || !validGeneration) {
+                return yams::Error{
+                    yams::ErrorCode::InvalidState,
+                    "direct P2P operation store authentication marker does not match corpus "
+                    "identity"};
+            }
+            return storeGeneration;
+        } catch (const std::exception&) {
+            return yams::Error{yams::ErrorCode::DataCorruption,
+                               "direct P2P operation store authentication marker is malformed"};
+        }
+    }
+    if (error) {
+        return yams::Error{yams::ErrorCode::IOError,
+                           "cannot inspect direct P2P authentication marker: " + error.message()};
+    }
+
+    if (std::filesystem::exists(operationStore, error)) {
+        if (error) {
+            return yams::Error{yams::ErrorCode::IOError,
+                               "cannot inspect direct P2P operation store: " + error.message()};
+        }
+        const auto operationStoreStatus = std::filesystem::symlink_status(operationStore, error);
+        if (error || !std::filesystem::is_directory(operationStoreStatus)) {
+            return yams::Error{yams::ErrorCode::InvalidState,
+                               "direct P2P operation store is not a trusted directory"};
+        }
+        std::filesystem::recursive_directory_iterator entry(operationStore, error);
+        const std::filesystem::recursive_directory_iterator end;
+        for (; !error && entry != end; entry.increment(error)) {
+            const auto status = entry->symlink_status(error);
+            if (error || !std::filesystem::is_directory(status)) {
+                return yams::Error{
+                    yams::ErrorCode::InvalidState,
+                    "direct P2P operation store has unsigned or provenance-unknown history; "
+                    "preserve it for audit, advance corpus_epoch, and bootstrap a fresh store"};
+            }
+        }
+        if (error) {
+            return yams::Error{yams::ErrorCode::IOError,
+                               "cannot scan direct P2P operation store: " + error.message()};
+        }
+    } else if (error) {
+        return yams::Error{yams::ErrorCode::IOError,
+                           "cannot inspect direct P2P operation store: " + error.message()};
+    }
+
+    std::filesystem::create_directories(p2pDirectory, error);
+    if (error) {
+        return yams::Error{yams::ErrorCode::IOError,
+                           "cannot create direct P2P state directory: " + error.message()};
+    }
+    std::array<unsigned char, 32> generationBytes{};
+    if (RAND_bytes(generationBytes.data(), static_cast<int>(generationBytes.size())) != 1) {
+        return yams::Error{yams::ErrorCode::InternalError,
+                           "cannot generate direct P2P store identity"};
+    }
+    static constexpr char kHex[] = "0123456789abcdef";
+    std::string storeGeneration;
+    storeGeneration.reserve(generationBytes.size() * 2);
+    for (const auto byte : generationBytes) {
+        storeGeneration.push_back(kHex[byte >> 4]);
+        storeGeneration.push_back(kHex[byte & 0x0f]);
+    }
+    const nlohmann::json content{{"schema_version", 1},
+                                 {"corpus_id", corpusId},
+                                 {"corpus_epoch", corpusEpoch},
+                                 {"store_generation", storeGeneration}};
+    const auto temporary = marker.string() + ".tmp-" + std::to_string(::getpid());
+    if (auto written = writeExclusiveP2pPrivateKey(temporary, content.dump()); !written) {
+        return written.error();
+    }
+    std::filesystem::rename(temporary, marker, error);
+    if (error) {
+        std::filesystem::remove(temporary, error);
+        return yams::Error{yams::ErrorCode::WriteError,
+                           "cannot install direct P2P authentication marker"};
+    }
+    return storeGeneration;
+}
+
 std::uint64_t nowUnixMillis() {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                           std::chrono::system_clock::now().time_since_epoch())
@@ -415,6 +788,17 @@ std::uint64_t nowUnixMillis() {
 #undef YAMS_DAEMON_TEST_HOOKS_IMPL
 
 namespace yams::daemon {
+
+Result<std::string>
+ServiceManager::__test_loadOrCreateP2pPrivateKey(const std::filesystem::path& keyPath) {
+    return loadOrCreateP2pPrivateKey(keyPath);
+}
+
+Result<void>
+ServiceManager::__test_writeProtectedP2pPrivateKey(const std::filesystem::path& keyPath,
+                                                   std::string_view contents) {
+    return writeExclusiveP2pPrivateKey(keyPath, contents);
+}
 
 namespace {
 constexpr auto kTopologyOverlayRebuildMinAge = std::chrono::minutes(5);
@@ -1286,6 +1670,7 @@ void ServiceManager::startAsyncInit(std::promise<void>* barrierPromise,
     }
 
     if (!workCoordinator_ || !workCoordinator_->isRunning()) {
+        asyncInit_.markFutureNotExpected();
         spdlog::error("ServiceManager: WorkCoordinator not ready, cannot start async init");
         if (barrierPromise) {
             barrierPromise->set_value();
@@ -1298,6 +1683,7 @@ void ServiceManager::startAsyncInit(std::promise<void>* barrierPromise,
     try {
         self = shared_from_this();
     } catch (const std::bad_weak_ptr& e) {
+        asyncInit_.markFutureNotExpected();
         spdlog::error(
             "ServiceManager: shared_from_this() failed - object not managed by shared_ptr: {}",
             e.what());
@@ -1308,63 +1694,83 @@ void ServiceManager::startAsyncInit(std::promise<void>* barrierPromise,
         return;
     }
 
-    boost::asio::post(
-        workCoordinator_->getExecutor(), [self, barrierPromise, signalBarrierOnStart]() {
-            spdlog::debug("ServiceManager: Async init sync point reached, spawning coroutine");
+    spdlog::debug("ServiceManager: Async init sync point reached, spawning coroutine");
 
-            self->asyncInit_.setFuture(boost::asio::co_spawn(
-                self->workCoordinator_->getExecutor(),
-                [self, barrierPromise, signalBarrierOnStart]() -> boost::asio::awaitable<void> {
-                    auto localSelf = self;
-                    auto localBarrierPromise = barrierPromise;
-                    const auto signalCompletion = [&]() {
-                        if (signalBarrierOnStart || !localBarrierPromise) {
-                            return;
-                        }
-                        try {
-                            localBarrierPromise->set_value();
-                        } catch (...) {
-                            spdlog::debug("ServiceManager: async init completion signal failed");
-                        }
-                    };
-
-                    spdlog::info("Starting async resource initialization (coroutine)...");
-
-                    if (signalBarrierOnStart && localBarrierPromise) {
-                        try {
-                            localBarrierPromise->set_value();
-                            spdlog::debug("ServiceManager: Async init barrier signaled");
-                        } catch (...) {
-                            spdlog::debug("ServiceManager: async init barrier signal failed");
-                        }
+    try {
+        self->asyncInit_.setFuture(boost::asio::co_spawn(
+            self->workCoordinator_->getExecutor(),
+            [self, barrierPromise, signalBarrierOnStart]() -> boost::asio::awaitable<void> {
+                auto localSelf = self;
+                auto localBarrierPromise = barrierPromise;
+                const auto signalCompletion = [&]() {
+                    if (signalBarrierOnStart || !localBarrierPromise) {
+                        return;
                     }
-
-                    auto token = localSelf->asyncInit_.getStopToken();
-
                     try {
-                        auto result = co_await localSelf->initializeAsyncAwaitable(token);
-
-                        if (!result) {
-                            spdlog::error("Async resource initialization failed: {}",
-                                          result.error().message);
-                            if (!token.stop_requested()) {
-                                localSelf->serviceFsm_.dispatch(
-                                    InitializationFailedEvent{result.error().message});
-                            }
-                        } else {
-                            spdlog::info("All daemon services initialized successfully");
-                        }
-                    } catch (const std::exception& e) {
-                        spdlog::error("Async resource initialization exception: {}", e.what());
-                        if (!token.stop_requested()) {
-                            localSelf->serviceFsm_.dispatch(InitializationFailedEvent{e.what()});
-                        }
+                        localBarrierPromise->set_value();
+                    } catch (...) {
+                        spdlog::debug("ServiceManager: async init completion signal failed");
                     }
+                };
 
-                    signalCompletion();
-                },
-                boost::asio::use_future));
-        });
+                spdlog::info("Starting async resource initialization (coroutine)...");
+
+                if (signalBarrierOnStart && localBarrierPromise) {
+                    try {
+                        localBarrierPromise->set_value();
+                        spdlog::debug("ServiceManager: Async init barrier signaled");
+                    } catch (...) {
+                        spdlog::debug("ServiceManager: async init barrier signal failed");
+                    }
+                }
+
+                auto token = localSelf->asyncInit_.getStopToken();
+
+                try {
+                    auto result = co_await localSelf->initializeAsyncAwaitable(token);
+
+                    if (!result) {
+                        spdlog::error("Async resource initialization failed: {}",
+                                      result.error().message);
+                        if (!token.stop_requested()) {
+                            localSelf->serviceFsm_.dispatch(
+                                InitializationFailedEvent{result.error().message});
+                        }
+                    } else {
+                        spdlog::info("All daemon services initialized successfully");
+                    }
+                } catch (const std::exception& e) {
+                    spdlog::error("Async resource initialization exception: {}", e.what());
+                    if (!token.stop_requested()) {
+                        localSelf->serviceFsm_.dispatch(InitializationFailedEvent{e.what()});
+                    }
+                }
+
+                signalCompletion();
+            },
+            boost::asio::use_future));
+    } catch (const std::exception& error) {
+        self->asyncInit_.markFutureNotExpected();
+        spdlog::error("Failed to spawn async resource initialization: {}", error.what());
+        if (barrierPromise) {
+            try {
+                barrierPromise->set_value();
+            } catch (...) {
+            }
+        }
+        self->serviceFsm_.dispatch(InitializationFailedEvent{error.what()});
+    } catch (...) {
+        self->asyncInit_.markFutureNotExpected();
+        spdlog::error("Failed to spawn async resource initialization");
+        if (barrierPromise) {
+            try {
+                barrierPromise->set_value();
+            } catch (...) {
+            }
+        }
+        self->serviceFsm_.dispatch(
+            InitializationFailedEvent{"failed to spawn async resource initialization"});
+    }
 }
 
 void ServiceManager::stopBackgroundTaskManagerForShutdown() {
@@ -3012,6 +3418,12 @@ Result<void> ServiceManager::initializeMemorySync(const std::filesystem::path& d
     if (!policy.enabled) {
         return Result<void>();
     }
+    if (policy.transport == "direct" &&
+        (!policy.writerAuthRequired || policy.writerAuthManifestPath.empty())) {
+        return Error{ErrorCode::InvalidArgument,
+                     "direct memory_sync requires writer_auth_required=true and a usable "
+                     "writer_auth_manifest for authenticated cold bootstrap"};
+    }
 
     try {
         yams::memory_sync::MemorySyncDaemonConfig cfg;
@@ -3035,6 +3447,15 @@ Result<void> ServiceManager::initializeMemorySync(const std::filesystem::path& d
             cfg.path = (dataDir / cfg.path).string();
         }
 
+        if (policy.transport == "direct") {
+            auto trustedStore =
+                ensureAuthenticatedDirectStore(dataDir, cfg.corpusId, cfg.corpusEpoch);
+            if (!trustedStore) {
+                return trustedStore.error();
+            }
+            cfg.controlScope = std::move(trustedStore.value());
+        }
+
         std::optional<yams::storage::BackendConfig> resolvedS3Config;
         if (policy.transport == "shared-store" && cfg.backend == "s3") {
             auto storageDecision = yams::storage::resolveStorageBootstrapDecision(
@@ -3051,9 +3472,15 @@ Result<void> ServiceManager::initializeMemorySync(const std::filesystem::path& d
             resolvedS3Config = *storageDecision.value().backendConfig;
         }
 
-        auto svc = yams::memory_sync::createMemorySyncService(cfg, std::move(resolvedS3Config), [] {
-            return ResourceGovernor::instance().canAdmitWork();
-        });
+        auto svc = yams::memory_sync::createMemorySyncService(
+            cfg, std::move(resolvedS3Config),
+            [] { return ResourceGovernor::instance().canAdmitWork(); },
+            policy.transport == "direct"
+                ? yams::memory_sync::WriterPrivateKeyReader{readProtectedP2pPrivateKey}
+                : yams::memory_sync::WriterPrivateKeyReader{},
+            policy.transport == "direct"
+                ? yams::memory_sync::WriterTrustFileReader{readProtectedP2pTrustFile}
+                : yams::memory_sync::WriterTrustFileReader{});
         if (!svc) {
             return Error{svc.error().code,
                          "memory_sync service creation failed: " + svc.error().message};
@@ -3099,6 +3526,11 @@ Result<void> ServiceManager::initializeDirectP2p(const std::filesystem::path& da
     if (!synchronized) {
         return Error{synchronized.error().code,
                      "direct P2P local op-store recovery failed: " + synchronized.error().message};
+    }
+    if (memorySync_->legacyUnauthenticatedHistoryObserved()) {
+        return Error{ErrorCode::InvalidState,
+                     "direct P2P operation store contains unsigned legacy history; preserve it "
+                     "for audit, advance corpus_epoch, and bootstrap a fresh store"};
     }
     if (policy.allowFirstContact) {
         spdlog::warn("[ServiceManager] memory_sync.allow_first_contact=true permits unsolicited "

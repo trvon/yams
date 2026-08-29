@@ -1569,8 +1569,8 @@ TEST_CASE("Direct P2P defaults to operator-approved first contact",
     CHECK_FALSE(config.memorySync.allowFirstContact);
 }
 
-TEST_CASE("ConfigResolver accepts direct P2P without a shared path",
-          "[daemon][config][memory-sync][p2p]") {
+TEST_CASE("ConfigResolver rejects direct P2P without usable writer authentication",
+          "[daemon][config][memory-sync][p2p][security]") {
     ConfigResolver::ConfigSections sections = {
         {"memory_sync",
          {{"enabled", "true"},
@@ -1585,14 +1585,36 @@ TEST_CASE("ConfigResolver accepts direct P2P without a shared path",
     };
     DaemonConfig config;
 
+    CHECK_FALSE(ConfigResolver::applyMemorySync(sections, config));
+    CHECK_FALSE(config.memorySync.enabled);
+}
+
+TEST_CASE("ConfigResolver accepts authenticated direct P2P without a shared path",
+          "[daemon][config][memory-sync][p2p][security]") {
+    ConfigResolver::ConfigSections sections = {
+        {"memory_sync",
+         {{"enabled", "true"},
+          {"node_id", "123e4567-e89b-42d3-a456-426614174000"},
+          {"corpus_id", "corpus-a"},
+          {"corpus_epoch", "9"},
+          {"transport", "direct"},
+          {"listen", "0.0.0.0:9721"},
+          {"allow_first_contact", "false"},
+          {"max_peers", "12"},
+          {"writer_auth_required", "true"},
+          {"writer_auth_manifest", "/secure/writers.json"}}},
+    };
+    DaemonConfig config;
+
     REQUIRE(ConfigResolver::applyMemorySync(sections, config));
     CHECK(config.memorySync.enabled);
     CHECK(config.memorySync.transport == "direct");
     CHECK(config.memorySync.listen == "0.0.0.0:9721");
-    CHECK(config.memorySync.identityKeyPath == "/secure/p2p.pem");
     CHECK_FALSE(config.memorySync.allowFirstContact);
     CHECK(config.memorySync.maxPeers == 12);
     CHECK(config.memorySync.path.empty());
+    CHECK(config.memorySync.writerAuthRequired);
+    CHECK(config.memorySync.writerAuthManifestPath == "/secure/writers.json");
 }
 
 TEST_CASE("ConfigResolver infers shared-store for legacy backend path",

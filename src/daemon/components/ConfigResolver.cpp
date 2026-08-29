@@ -1770,6 +1770,10 @@ bool ConfigResolver::applyMemorySync(const ConfigSections& sections, DaemonConfi
         } else if (policy.listen.empty()) {
             spdlog::warn("Config: disabling direct memory_sync with empty listen address");
             policy.enabled = false;
+        } else if (!policy.writerAuthRequired || policy.writerAuthManifestPath.empty()) {
+            spdlog::warn("Config: disabling direct memory_sync; writer_auth_required=true and "
+                         "writer_auth_manifest are required for authenticated cold bootstrap");
+            policy.enabled = false;
         }
     } else if (policy.writerAuthRequired && policy.mode == "persistent-migration") {
         spdlog::warn("Config: disabling memory_sync; legacy migration cannot run with writer "

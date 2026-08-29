@@ -11,6 +11,8 @@
 #include <yams/memory_sync/writer_auth.h>
 #include <yams/storage/storage_backend.h>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstring>
@@ -25,10 +27,49 @@
 using namespace std::chrono_literals;
 using yams::daemon::p2p::P2pManager;
 using yams::daemon::p2p::P2pManagerOptions;
-using yams::memory_sync::MemorySyncConfig;
 using yams::memory_sync::MemorySyncService;
 
 namespace {
+
+std::shared_ptr<const yams::memory_sync::WriterAuthenticator>
+testWriterAuthenticator(const std::string& writerId, const std::string& corpusId,
+                        std::uint64_t corpusEpoch) {
+    static const auto keys = [] {
+        auto generated = yams::memory_sync::generateWriterKeyPair();
+        if (!generated) {
+            throw std::runtime_error(generated.error().message);
+        }
+        return generated.value();
+    }();
+    yams::memory_sync::WriterAuthConfig config;
+    config.required = true;
+    config.localWriterId = writerId;
+    config.localKeyId = "manager-test-v1";
+    config.localPrivateKeyPem = keys.privateKeyPem;
+    for (const auto& trustedId :
+         std::array<std::string, 4>{"node", "client-node", "server-node", writerId}) {
+        if (std::ranges::none_of(config.trustedKeys, [&](const auto& trusted) {
+                return trusted.writerId == trustedId;
+            })) {
+            config.trustedKeys.push_back(yams::memory_sync::TrustedWriterKey{
+                trustedId, config.localKeyId, keys.publicKeyPem, false});
+        }
+    }
+    auto authenticator =
+        yams::memory_sync::WriterAuthenticator::create(std::move(config), corpusId, corpusEpoch);
+    if (!authenticator) {
+        throw std::runtime_error(authenticator.error().message);
+    }
+    return authenticator.value();
+}
+
+struct MemorySyncConfig : yams::memory_sync::MemorySyncConfig {
+    explicit MemorySyncConfig(std::string writerId, std::uint32_t intervalMs = 5000,
+                              std::string corpus = "local-test-corpus", std::uint64_t epoch = 1)
+        : yams::memory_sync::MemorySyncConfig(writerId, intervalMs, corpus, epoch, {}, false,
+                                              testWriterAuthenticator(writerId, corpus, epoch),
+                                              "manager-test-control-scope") {}
+};
 
 struct TempDir {
     explicit TempDir(std::string_view label) {
@@ -114,6 +155,37 @@ TEST_CASE("P2P connection strings are strict and IPv6 aware", "[daemon][p2p][man
 TEST_CASE("P2P manager defaults to rejecting first contact", "[daemon][p2p][security]") {
     CHECK_FALSE(P2pManagerOptions{}.allowFirstContact);
     CHECK(P2pManagerOptions{}.sessionTimeout > P2pManagerOptions{}.timeout);
+}
+
+TEST_CASE("P2P manager rejects unauthenticated memory sync services",
+          "[daemon][p2p][manager][security]") {
+    TempDir dir{"unauthenticated"};
+    MemorySyncService service{backend(dir.path / "ops"), yams::memory_sync::MemorySyncConfig{
+                                                             "node", 60'000, "manager-corpus", 1}};
+    REQUIRE(service.syncFully().has_value());
+    auto key = yams::memory_sync::generateWriterKeyPair();
+    REQUIRE(key.has_value());
+    auto manager =
+        P2pManager::create(options("node", dir.path, key.value().privateKeyPem), service);
+    REQUIRE_FALSE(manager.has_value());
+    CHECK(manager.error().code == yams::ErrorCode::InvalidArgument);
+}
+
+TEST_CASE("P2P manager requires full recovery and exact memory sync identity",
+          "[daemon][p2p][manager][security]") {
+    TempDir dir{"readiness"};
+    MemorySyncService service{backend(dir.path / "ops"),
+                              MemorySyncConfig{"node", 60'000, "manager-corpus", 1}};
+    auto key = yams::memory_sync::generateWriterKeyPair();
+    REQUIRE(key.has_value());
+    auto managerOptions = options("node", dir.path, key.value().privateKeyPem);
+    auto unrecovered = P2pManager::create(managerOptions, service);
+    REQUIRE_FALSE(unrecovered.has_value());
+    REQUIRE(service.syncFully().has_value());
+    managerOptions.corpusId = "different-corpus";
+    auto mismatched = P2pManager::create(managerOptions, service);
+    REQUIRE_FALSE(mismatched.has_value());
+    CHECK(mismatched.error().code == yams::ErrorCode::InvalidArgument);
 }
 
 TEST_CASE("P2P manager rejects reconnect intervals above the hard ceiling",

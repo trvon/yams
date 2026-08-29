@@ -30,6 +30,7 @@ inline constexpr std::size_t kMaxP2pWriterWindowBytes = std::size_t{64} * 1024 *
 
 struct PeerTrustDecision {
     bool firstContactPinned{false};
+    bool pinnedByOperator{false};
 };
 
 /// Validate and lowercase a SHA-256 SPKI pin for stable storage/comparison.
@@ -55,11 +56,14 @@ class InMemoryPeerTrustStore final : public IPeerTrustStore {
 public:
     Result<PeerTrustDecision> verifyOrPin(std::string_view nodeId, std::string_view spkiPin,
                                           bool allowFirstContact) override;
+    /// Test/in-process equivalent of explicit operator enrollment.
+    Result<void> enrollOperatorPeer(std::string_view nodeId, std::string_view spkiPin);
     [[nodiscard]] std::optional<std::string> pinnedPin(std::string_view nodeId) const override;
 
 private:
     mutable std::mutex mutex_;
     std::map<std::string, std::string> pins_;
+    std::set<std::string> operatorPinnedNodes_;
 };
 
 struct PeerHandshakeConfig {
@@ -96,6 +100,7 @@ struct PeerHandshakeResult {
     bool peerPrefixVerified{false};
     bool peerPrefixMatches{false};
     bool firstContactPinned{false};
+    bool pinnedByOperator{false};
 
     [[nodiscard]] std::uint64_t peerWatermark(std::string_view writerId) const;
 };
