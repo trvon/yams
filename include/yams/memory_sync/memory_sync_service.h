@@ -184,6 +184,11 @@ public:
         return loop_.stageErase(key, std::move(tombstonePayload), ready, readinessProbe);
     }
 
+    Result<void> stageErases(std::span<const EraseStageRequest> requests) {
+        std::lock_guard<std::mutex> lock(loopMutex_);
+        return loop_.stageErases(requests);
+    }
+
     Result<std::vector<PendingEraseIntent>> pendingErases() {
         std::lock_guard<std::mutex> lock(loopMutex_);
         return loop_.pendingErases();
@@ -280,6 +285,15 @@ public:
             return Error{ErrorCode::NotFound, "memory sync blob was not hydrated during sync"};
         }
         return cached->second;
+    }
+
+    [[nodiscard]] bool hasCommittedTombstone(std::string_view key) const noexcept {
+        const auto state = committedSnapshot();
+        if (!state) {
+            return false;
+        }
+        const auto record = state->merged.find(std::string(key));
+        return record != state->merged.end() && record->second.isTombstone();
     }
 
     std::size_t mergedRecordCount() const noexcept {

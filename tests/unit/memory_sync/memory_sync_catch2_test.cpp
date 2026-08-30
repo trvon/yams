@@ -3,6 +3,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
 #include <cstring>
 #include <filesystem>
 #include <set>
@@ -560,6 +561,39 @@ TEST_CASE("erase outbox retains an unready pre-delete intent across restart",
     CHECK_FALSE(pending.value().front().ready);
     REQUIRE(restarted.syncFully().has_value());
     CHECK_FALSE(restarted.hasMergedRecord("document/" + std::string(64, 'a')));
+}
+
+TEST_CASE("erase staging batches reserve bounded outbox capacity atomically",
+          "[memory-sync][tombstone][outbox][bounds]") {
+    BackendFixture fixture{"erase-outbox-batch-bounds"};
+    MemorySyncLimits limits;
+    limits.maxMergedKeys = 2;
+    MemorySyncLoop loop{fixture.backend, "writer", "local-test-corpus", 1, false, limits};
+    REQUIRE(loop.stageErase("user/existing", "existing", false).has_value());
+
+    const std::string hash(64, 'a');
+    const std::array batch{
+        EraseStageRequest{"content-blob/" + hash, hash, EraseReadinessProbe::ContentAbsent},
+        EraseStageRequest{"document/" + hash, hash, EraseReadinessProbe::MetadataAbsent}};
+    auto rejected = loop.stageErases(batch);
+    REQUIRE_FALSE(rejected.has_value());
+    CHECK(rejected.error().code == yams::ErrorCode::ResourceExhausted);
+
+    auto pending = loop.pendingErases();
+    REQUIRE(pending.has_value());
+    REQUIRE(pending.value().size() == 1);
+    CHECK(pending.value().front().logicalKey == "user/existing");
+
+    limits.maxMergedKeys = 3;
+    MemorySyncLoop expanded{fixture.backend, "writer", "local-test-corpus", 1, false, limits};
+    REQUIRE(expanded.stageErases(batch).has_value());
+    pending = expanded.pendingErases();
+    REQUIRE(pending.has_value());
+    CHECK(pending.value().size() == 3);
+    auto singleOverflow = expanded.stageErase("user/overflow", "overflow", false);
+    REQUIRE_FALSE(singleOverflow.has_value());
+    CHECK(singleOverflow.error().code == yams::ErrorCode::ResourceExhausted);
+    REQUIRE(expanded.pendingErases().value().size() == 3);
 }
 
 TEST_CASE("malformed erase outbox entries fail closed without deletion",

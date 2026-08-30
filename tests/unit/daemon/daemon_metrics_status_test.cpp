@@ -623,7 +623,7 @@ public:
                                                api::ProgressCallback) override {
         return ErrorCode::NotImplemented;
     }
-    Result<bool> exists(const std::string&) const override { return ErrorCode::NotImplemented; }
+    Result<bool> exists(const std::string& hash) const override { return blobs_.contains(hash); }
     Result<bool> remove(const std::string& hash) override {
         if (auto it = removeResults_.find(hash); it != removeResults_.end()) {
             return it->second;
@@ -2368,7 +2368,7 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         CHECK(lifecycle.removedHashes().front() == successDoc.sha256Hash);
     }
 
-    SECTION("delete publishes a durable document tombstone") {
+    SECTION("delete publishes durable document and content tombstones") {
         auto repo = std::make_shared<StubPruneMetadataRepository>();
         auto store = std::make_shared<StubContentStore>();
         const std::string hash(64, 'a');
@@ -2399,9 +2399,11 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         memory_sync::VersionVector empty;
         auto deltas = svc.testingMemorySyncService()->exportLocalDeltasAfter(empty, 4);
         REQUIRE(deltas.has_value());
-        REQUIRE(deltas.value().deltas.size() == 1);
-        CHECK(deltas.value().deltas.front().logicalKey == "document/" + hash);
-        CHECK(deltas.value().deltas.front().record.isTombstone());
+        REQUIRE(deltas.value().deltas.size() == 2);
+        CHECK(deltas.value().deltas[0].logicalKey == "content-blob/" + hash);
+        CHECK(deltas.value().deltas[0].record.isTombstone());
+        CHECK(deltas.value().deltas[1].logicalKey == "document/" + hash);
+        CHECK(deltas.value().deltas[1].record.isTombstone());
     }
 
     SECTION("delete reports missing content store") {
