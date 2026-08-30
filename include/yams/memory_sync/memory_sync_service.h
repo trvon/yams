@@ -74,23 +74,43 @@ public:
 
     /// Start the periodic sync worker (idempotent).
     Result<void> start() {
+        if (activeCallbackSnapshot() != nullptr) {
+            return Error{ErrorCode::InvalidState,
+                         "memory sync cannot restart from its active callback"};
+        }
         std::lock_guard<std::mutex> lifecycleLock(lifecycleMutex_);
+        const bool restarting = stop_.load(std::memory_order_acquire);
         if (worker_.joinable()) {
-            return {};
+            if (!stop_.load(std::memory_order_acquire)) {
+                return {};
+            }
+            try {
+                worker_.join();
+            } catch (const std::exception& e) {
+                return Error{ErrorCode::InternalError, e.what()};
+            }
+        }
+        std::unique_lock<std::recursive_mutex> callbackDrain(callbackExecutionMutex_,
+                                                             std::defer_lock);
+        if (restarting) {
+            callbackDrain.lock();
         }
         if (config_.syncIntervalMs == 0) {
             return Error{ErrorCode::InvalidArgument,
                          "memory_sync.syncIntervalMs must be greater than zero"};
         }
         backend_->resetCancel(); // A restarted worker receives a fresh cancellation generation.
+        callbackGeneration_.fetch_add(1, std::memory_order_acq_rel);
         stop_.store(false, std::memory_order_release);
         if (auto lease = refreshSessionLease(); !lease) {
             return lease.error();
         }
         namespaceCleaned_.store(false, std::memory_order_release);
+        workerRunning_.store(true, std::memory_order_release);
         try {
             worker_ = std::thread([this] { workerLoop(); });
         } catch (const std::exception& e) {
+            workerRunning_.store(false, std::memory_order_release);
             return Error{ErrorCode::InternalError, e.what()};
         }
         return {};
@@ -99,11 +119,15 @@ public:
     /// Stop the periodic worker and join (idempotent, noexcept).
     void stop() noexcept {
         stop_.store(true, std::memory_order_release);
+        callbackGeneration_.fetch_add(1, std::memory_order_acq_rel);
         backend_->requestCancel();
         sleepCv_.notify_all();
-        if (std::hash<std::thread::id>{}(std::this_thread::get_id()) ==
-            workerIdHash_.load(std::memory_order_acquire)) {
-            return; // The worker exits after the callback; a non-worker owner performs the join.
+        if (activeCallbackSnapshot() != nullptr ||
+            std::hash<std::thread::id>{}(std::this_thread::get_id()) ==
+                workerIdHash_.load(std::memory_order_acquire)) {
+            // A callback may own callbackExecutionMutex_ while the worker is waiting for it.
+            // Leave joining to a non-callback owner to avoid a stop/join lock cycle.
+            return;
         }
         std::lock_guard<std::mutex> lifecycleLock(lifecycleMutex_);
         // A concurrent start may have acquired the lifecycle lock after the first request.
@@ -117,6 +141,9 @@ public:
                 shutdownFailures_.fetch_add(1, std::memory_order_relaxed);
             }
         }
+        // Direct-session callbacks do not belong to worker_. Drain the active callback before
+        // releasing lifecycleMutex_. Generation checks discard callbacks queued before stop().
+        std::lock_guard<std::recursive_mutex> callbackDrain(callbackExecutionMutex_);
         if (config_.cleanupOwnedNamespaceOnStop && !namespaceCleaned_.exchange(true)) {
             backend_->resetCancel();
             if (!backend_->clear()) {
@@ -130,8 +157,8 @@ public:
     }
 
     bool started() const noexcept {
-        std::lock_guard<std::mutex> lifecycleLock(lifecycleMutex_);
-        return worker_.joinable() && !stop_.load(std::memory_order_acquire);
+        return workerRunning_.load(std::memory_order_acquire) &&
+               !stop_.load(std::memory_order_acquire);
     }
 
     bool stopRequested() const noexcept { return stop_.load(std::memory_order_acquire); }
@@ -354,8 +381,8 @@ public:
     }
 
     Result<std::map<std::string, MemoryIndexRecord>> syncOnce() {
-        if (callbackOwner_ == this && callbackSnapshot_ != nullptr) {
-            return *callbackSnapshot_;
+        if (const auto* callbackSnapshot = activeCallbackSnapshot()) {
+            return *callbackSnapshot;
         }
         Result<std::map<std::string, MemoryIndexRecord>> result;
         bool quarantineChanged = false;
@@ -500,6 +527,21 @@ public:
 #endif
 
 private:
+    struct CallbackContext {
+        const MemorySyncService* owner;
+        const std::map<std::string, MemoryIndexRecord>* snapshot;
+        CallbackContext* previous;
+    };
+
+    const std::map<std::string, MemoryIndexRecord>* activeCallbackSnapshot() const noexcept {
+        for (auto* context = callbackContext_; context != nullptr; context = context->previous) {
+            if (context->owner == this) {
+                return context->snapshot;
+            }
+        }
+        return nullptr;
+    }
+
     /// Immutable state published for IPC readers. Readers never take loopMutex_
     /// (held for the whole reconciliation on slow backends), so a slow sync can
     /// not stall status or cached reads; they consume this snapshot instead.
@@ -516,32 +558,53 @@ private:
         committed_ = std::move(state);
     }
 
-    void invokeAfterSyncCallback(
-        const std::map<std::string, MemoryIndexRecord>* snapshot = nullptr) noexcept {
-        std::map<std::string, MemoryIndexRecord> adapterSnapshot;
-        if (snapshot == nullptr) {
-            std::lock_guard<std::mutex> lock(loopMutex_);
-            adapterSnapshot = loop_.adapterState();
-            snapshot = &adapterSnapshot;
+    void invokeAfterSyncCallback() noexcept {
+        if (activeCallbackSnapshot() != nullptr) {
+            callbackPending_.store(true, std::memory_order_release);
+            return; // The outer callback coalesces recursive callback-side publications.
         }
-        std::function<void()> callback;
-        {
-            std::lock_guard<std::mutex> lock(callbackMutex_);
-            callback = afterSyncCallback_;
+        const auto callbackGeneration = callbackGeneration_.load(std::memory_order_acquire);
+        while (!callbackExecutionMutex_.try_lock()) {
+            if (stop_.load(std::memory_order_acquire) ||
+                callbackGeneration != callbackGeneration_.load(std::memory_order_acquire)) {
+                return;
+            }
+            std::this_thread::yield();
         }
-        if (!callback || stop_.load(std::memory_order_acquire)) {
+        std::unique_lock<std::recursive_mutex> executionLock(callbackExecutionMutex_,
+                                                             std::adopt_lock);
+        if (callbackGeneration != callbackGeneration_.load(std::memory_order_acquire)) {
             return;
         }
-        callbackOwner_ = snapshot != nullptr ? this : nullptr;
-        callbackSnapshot_ = snapshot;
-        try {
-            callback();
-        } catch (...) {
-            // Adapter failures are isolated from the convergence/session worker.
-            callbackFailures_.fetch_add(1, std::memory_order_relaxed);
+        for (;;) {
+            callbackPending_.store(false, std::memory_order_release);
+            std::function<void()> callback;
+            {
+                std::lock_guard<std::mutex> lock(callbackMutex_);
+                callback = afterSyncCallback_;
+            }
+            if (!callback || stop_.load(std::memory_order_acquire)) {
+                return;
+            }
+            std::map<std::string, MemoryIndexRecord> adapterSnapshot;
+            {
+                std::lock_guard<std::mutex> lock(loopMutex_);
+                adapterSnapshot = loop_.adapterState();
+            }
+            CallbackContext context{this, &adapterSnapshot, callbackContext_};
+            callbackContext_ = &context;
+            try {
+                callback();
+            } catch (...) {
+                // Adapter failures are isolated from the convergence/session worker.
+                callbackFailures_.fetch_add(1, std::memory_order_relaxed);
+            }
+            callbackContext_ = context.previous;
+            if (!callbackPending_.exchange(false, std::memory_order_acq_rel) ||
+                stop_.load(std::memory_order_acquire)) {
+                return;
+            }
         }
-        callbackSnapshot_ = nullptr;
-        callbackOwner_ = nullptr;
     }
 
     void workerLoop() {
@@ -594,11 +657,7 @@ private:
                             std::chrono::steady_clock::now().time_since_epoch())
                             .count(),
                         std::memory_order_release);
-                    if (quarantineChanged) {
-                        invokeAfterSyncCallback();
-                    } else {
-                        invokeAfterSyncCallback(&snapshot.value());
-                    }
+                    invokeAfterSyncCallback();
                     callbackInvoked = true;
                 }
             } else {
@@ -611,6 +670,7 @@ private:
             sleepCv_.wait_for(sleepLock, std::chrono::milliseconds(config_.syncIntervalMs),
                               [this] { return stop_.load(std::memory_order_acquire); });
         }
+        workerRunning_.store(false, std::memory_order_release);
         workerIdHash_.store(0, std::memory_order_release);
     }
 
@@ -643,17 +703,22 @@ private:
     MemorySyncLoop loop_;
     std::atomic<bool> stop_{false};
     std::thread worker_;
+    std::atomic<bool> workerRunning_{false};
     std::atomic<std::size_t> workerIdHash_{0};
     mutable std::mutex lifecycleMutex_;
     std::mutex sleepMutex_;
     std::condition_variable sleepCv_;
-    inline static thread_local const MemorySyncService* callbackOwner_{nullptr};
-    inline static thread_local const std::map<std::string, MemoryIndexRecord>* callbackSnapshot_{
-        nullptr};
+    inline static thread_local CallbackContext* callbackContext_{nullptr};
     // Serializes all MemorySyncLoop access (worker sync vs publish/read/syncOnce);
     // the loop keeps mutable version-vector/logical-clock/merged state.
     mutable std::mutex loopMutex_;
     mutable std::mutex callbackMutex_;
+    // Serialize adapter callbacks process-wide: callbacks are arbitrary and can call between
+    // services, so per-service locks permit an A↔B ABBA deadlock. Recursive acquisition permits
+    // same-thread A→B nesting while CallbackContext coalesces A→B→A re-entry.
+    inline static std::recursive_mutex callbackExecutionMutex_;
+    std::atomic<std::uint64_t> callbackGeneration_{0};
+    std::atomic<bool> callbackPending_{false};
     std::function<void()> afterSyncCallback_;
     std::atomic<std::uint64_t> callbackFailures_{0};
     std::atomic<std::uint64_t> shutdownFailures_{0};

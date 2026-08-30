@@ -453,7 +453,22 @@ public:
     void testingApplyMemorySyncWinners() { applyMemorySyncWinners(); }
     void testingPublishMemorySyncBackfill() { publishMemorySyncBackfill(); }
     void testingSetMemorySyncBackfillItemBudget(std::size_t budget) {
+        std::lock_guard<std::mutex> lock(memorySyncBackfillMutex_);
         memorySyncBackfillState_.itemBudgetPerCycle = std::max<std::size_t>(budget, 1);
+    }
+    bool testingMemorySyncApplyLockHeld() {
+        std::unique_lock<std::mutex> lock(memorySyncApplyMutex_, std::try_to_lock);
+        return !lock.owns_lock();
+    }
+    std::uint64_t testingMemorySyncApplyAttempts() const noexcept {
+        return memorySyncApplyAttempts_.load(std::memory_order_acquire);
+    }
+    bool testingMemorySyncBackfillLockHeld() {
+        std::unique_lock<std::mutex> lock(memorySyncBackfillMutex_, std::try_to_lock);
+        return !lock.owns_lock();
+    }
+    std::uint64_t testingMemorySyncBackfillAttempts() const noexcept {
+        return memorySyncBackfillAttempts_.load(std::memory_order_acquire);
     }
     static bool __test_shouldStartSessionWatcher(std::string_view disableValue) {
         return shouldStartSessionWatcher(disableValue);
@@ -951,6 +966,12 @@ private:
     std::function<void(std::string_view)> memorySyncDeleteOutboxObserver_;
     mutable std::mutex memorySyncStageObserverMutex_;
     std::function<void(std::string_view)> memorySyncStageObserver_;
+    // Direct sessions may finish concurrently. Serialize the daemon adapter pipeline and its
+    // vector rebuild state; backfill has a separate lock so focused maintenance calls are safe.
+    mutable std::mutex memorySyncApplyMutex_;
+    mutable std::mutex memorySyncBackfillMutex_;
+    std::atomic<std::uint64_t> memorySyncApplyAttempts_{0};
+    std::atomic<std::uint64_t> memorySyncBackfillAttempts_{0};
     bool memorySyncVectorRebuildDirty_{false};
     struct MemorySyncBackfillState {
         enum class Domain { Documents, Vectors, Topology };

@@ -3004,6 +3004,8 @@ bool ServiceManager::drainMemorySyncDocumentDeleteOutbox() noexcept {
 }
 
 void ServiceManager::applyMemorySyncWinners() noexcept {
+    memorySyncApplyAttempts_.fetch_add(1, std::memory_order_acq_rel);
+    std::lock_guard<std::mutex> applyLock(memorySyncApplyMutex_);
     if (!memorySync_ || memorySync_->stopRequested()) {
         return;
     }
@@ -3137,6 +3139,8 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
 }
 
 void ServiceManager::publishMemorySyncBackfill() noexcept try {
+    memorySyncBackfillAttempts_.fetch_add(1, std::memory_order_acq_rel);
+    std::lock_guard<std::mutex> backfillLock(memorySyncBackfillMutex_);
     if (!memorySync_) {
         return;
     }

@@ -721,6 +721,139 @@ TEST_CASE("Daemon memory sync stop during production apply prevents later adapte
     CHECK(harness.shutdownSucceeded());
 }
 
+TEST_CASE("Daemon serializes concurrent memory sync apply callbacks",
+          "[integration][daemon][memory-sync][apply-serialization]") {
+    auto options = makeMemorySyncHarnessOptions("123e4567-e89b-42d3-a456-426614174021",
+                                                "apply-serialization-corpus");
+    yams::test::DaemonHarness harness{std::move(options)};
+    REQUIRE(harness.start(30s));
+
+    auto* serviceManager = harness.daemon()->getServiceManager();
+    REQUIRE(serviceManager != nullptr);
+    auto* daemonSync = serviceManager->testingMemorySyncService();
+    REQUIRE(daemonSync != nullptr);
+    std::atomic<std::size_t> contentStages{0};
+    std::promise<void> firstEnteredPromise;
+    auto firstEntered = firstEnteredPromise.get_future();
+    std::promise<void> secondEnteredPromise;
+    auto secondEntered = secondEnteredPromise.get_future();
+    std::promise<void> releaseFirstPromise;
+    auto releaseFirst = releaseFirstPromise.get_future().share();
+    serviceManager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
+        if (stage != "apply.after_content") {
+            return;
+        }
+        if (contentStages.fetch_add(1, std::memory_order_acq_rel) == 0) {
+            firstEnteredPromise.set_value();
+            releaseFirst.wait();
+        } else {
+            secondEnteredPromise.set_value();
+        }
+    });
+
+    const auto applyAttemptsBefore = serviceManager->testingMemorySyncApplyAttempts();
+    auto first = std::async(std::launch::async,
+                            [serviceManager] { serviceManager->testingApplyMemorySyncWinners(); });
+    REQUIRE(firstEntered.wait_for(5s) == std::future_status::ready);
+    CHECK(serviceManager->testingMemorySyncApplyLockHeld());
+    auto second = std::async(std::launch::async,
+                             [serviceManager] { serviceManager->testingApplyMemorySyncWinners(); });
+    const auto secondApplyDeadline = std::chrono::steady_clock::now() + 5s;
+    while (serviceManager->testingMemorySyncApplyAttempts() < applyAttemptsBefore + 2 &&
+           std::chrono::steady_clock::now() < secondApplyDeadline) {
+        std::this_thread::yield();
+    }
+    REQUIRE(serviceManager->testingMemorySyncApplyAttempts() == applyAttemptsBefore + 2);
+    CHECK(contentStages.load(std::memory_order_acquire) == 1);
+
+    releaseFirstPromise.set_value();
+    first.get();
+    second.get();
+    CHECK(secondEntered.wait_for(5s) == std::future_status::ready);
+    CHECK(contentStages.load(std::memory_order_acquire) == 2);
+
+    auto repository = serviceManager->getMetadataRepo();
+    auto contentStore = serviceManager->getContentStore();
+    REQUIRE(repository != nullptr);
+    REQUIRE(contentStore != nullptr);
+    std::vector<std::string> hashes;
+    std::vector<yams::metadata::BatchDocumentInsert> inserts;
+    for (int index = 0; index < 2; ++index) {
+        const auto payload = bytes("serialized-backfill-" + std::to_string(index));
+        auto stored = contentStore->storeBytes(payload);
+        REQUIRE(stored.has_value());
+        hashes.push_back(stored.value().contentHash);
+        yams::metadata::BatchDocumentInsert item;
+        item.info.filePath = "/local/serialized-" + std::to_string(index) + ".md";
+        item.info.fileName = "serialized-" + std::to_string(index) + ".md";
+        item.info.fileExtension = ".md";
+        item.info.fileSize = static_cast<std::int64_t>(payload.size());
+        item.info.sha256Hash = stored.value().contentHash;
+        item.info.mimeType = "text/markdown";
+        inserts.push_back(std::move(item));
+    }
+    REQUIRE(repository->batchInsertDocumentsWithMetadata(inserts).has_value());
+    const auto writerCounterBeforeBackfill =
+        daemonSync->currentVersion().get("123e4567-e89b-42d3-a456-426614174021");
+    serviceManager->testingSetMemorySyncBackfillItemBudget(1);
+
+    std::atomic<std::size_t> backfillStages{0};
+    std::promise<void> firstBackfillEnteredPromise;
+    auto firstBackfillEntered = firstBackfillEnteredPromise.get_future();
+    std::promise<void> secondBackfillEnteredPromise;
+    auto secondBackfillEntered = secondBackfillEnteredPromise.get_future();
+    std::promise<void> releaseFirstBackfillPromise;
+    auto releaseFirstBackfill = releaseFirstBackfillPromise.get_future().share();
+    serviceManager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
+        if (!stage.starts_with("backfill.")) {
+            return;
+        }
+        if (backfillStages.fetch_add(1, std::memory_order_acq_rel) == 0) {
+            firstBackfillEnteredPromise.set_value();
+            releaseFirstBackfill.wait();
+        } else {
+            secondBackfillEnteredPromise.set_value();
+        }
+    });
+    const auto backfillAttemptsBefore = serviceManager->testingMemorySyncBackfillAttempts();
+    auto firstBackfill = std::async(std::launch::async, [serviceManager] {
+        serviceManager->testingPublishMemorySyncBackfill();
+    });
+    REQUIRE(firstBackfillEntered.wait_for(5s) == std::future_status::ready);
+    CHECK(serviceManager->testingMemorySyncBackfillLockHeld());
+    auto secondBackfill = std::async(std::launch::async, [serviceManager] {
+        serviceManager->testingPublishMemorySyncBackfill();
+    });
+    const auto secondBackfillDeadline = std::chrono::steady_clock::now() + 5s;
+    while (serviceManager->testingMemorySyncBackfillAttempts() < backfillAttemptsBefore + 2 &&
+           std::chrono::steady_clock::now() < secondBackfillDeadline) {
+        std::this_thread::yield();
+    }
+    REQUIRE(serviceManager->testingMemorySyncBackfillAttempts() == backfillAttemptsBefore + 2);
+    CHECK(backfillStages.load(std::memory_order_acquire) == 1);
+
+    releaseFirstBackfillPromise.set_value();
+    firstBackfill.get();
+    secondBackfill.get();
+    CHECK(secondBackfillEntered.wait_for(5s) == std::future_status::ready);
+    CHECK(backfillStages.load(std::memory_order_acquire) == 2);
+    serviceManager->testingSetMemorySyncStageObserver({});
+
+    yams::memory_sync::MemorySyncService peer{
+        makeFilesystemBackend(harness.dataDir() / "shared-memory"),
+        yams::memory_sync::MemorySyncConfig{"serialization-peer", 60'000,
+                                            "apply-serialization-corpus", 1}};
+    REQUIRE(peer.syncFully().has_value());
+    for (const auto& hash : hashes) {
+        CHECK(peer.readCached("document/" + hash).has_value());
+    }
+    CHECK(peer.currentVersion().get("123e4567-e89b-42d3-a456-426614174021") ==
+          writerCounterBeforeBackfill + 4);
+
+    harness.stop();
+    CHECK(harness.shutdownSucceeded());
+}
+
 TEST_CASE("Daemon memory sync prerequisite failures stop dependent adapters and retry",
           "[integration][daemon][memory-sync][prerequisite]") {
     auto options = makeMemorySyncHarnessOptions("123e4567-e89b-42d3-a456-426614174012",
