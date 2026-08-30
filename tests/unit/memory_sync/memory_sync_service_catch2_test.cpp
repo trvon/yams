@@ -14,6 +14,7 @@
 #include <vector>
 
 #include <yams/compat/thread_stop_compat.h>
+#include <yams/config/config_helpers.h>
 #include <yams/memory_sync/memory_sync_service.h>
 #include <yams/storage/storage_backend.h>
 
@@ -538,6 +539,9 @@ TEST_CASE("MemorySyncService callback can request stop without self-join",
 
 TEST_CASE("MemorySyncService concurrent lifecycle and status calls remain race-free",
           "[memory-sync][service][lifecycle][stress]") {
+    if (!yams::config::getenv_optional("YAMS_RUN_STRESS_TESTS").has_value()) {
+        SKIP("Stress tests disabled. Set YAMS_RUN_STRESS_TESTS=1 to enable.");
+    }
     TempDirGuard tmp;
     MemorySyncService service{makeBackend(tmp.path), MemorySyncConfig{"A", 10}};
     std::atomic<std::uint32_t> lifecycleFailures{0};

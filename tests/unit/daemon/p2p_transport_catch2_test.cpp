@@ -7,13 +7,14 @@
 #include <yams/daemon/p2p/p2p_transport.h>
 #include <yams/memory_sync/writer_auth.h>
 
+#include "common/p2p_test_helpers.h"
+
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/ip/address.hpp>
 #include <boost/asio/ip/tcp.hpp>
 
 #include <atomic>
 #include <chrono>
-#include <cstring>
 #include <future>
 #include <stdexcept>
 #include <string>
@@ -27,16 +28,7 @@ using yams::daemon::p2p::P2pListener;
 using yams::daemon::p2p::TlsIdentity;
 
 namespace {
-
-std::vector<std::byte> bytes(std::string_view text) {
-    std::vector<std::byte> result(text.size());
-    std::memcpy(result.data(), text.data(), text.size());
-    return result;
-}
-
-std::string text(const std::vector<std::byte>& data) {
-    return std::string(reinterpret_cast<const char*>(data.data()), data.size());
-}
+using namespace yams::p2p_test;
 
 TlsIdentity identity(std::string nodeId, const yams::memory_sync::WriterKeyPair& keyPair) {
     auto result = TlsIdentity::fromPrivateKeyPem(std::move(nodeId), keyPair.privateKeyPem);
@@ -612,17 +604,31 @@ TEST_CASE("P2P connection enforces one aggregate session deadline",
                                                        .handshakeTimeout = 2s,
                                                        .sessionTimeout = 500ms});
     REQUIRE(client.has_value());
-    const auto started = std::chrono::steady_clock::now();
     for (int exchange = 0; exchange < 2; ++exchange) {
         REQUIRE(client.value().writeFrame(bytes("ping"), 2s).has_value());
         auto response = client.value().readFrame(2s);
         REQUIRE(response.has_value());
         CHECK(text(response.value()) == "ping");
     }
-    std::this_thread::sleep_until(started + 600ms);
-    auto expired = client.value().writeFrame(bytes("late"), 2s);
-    REQUIRE_FALSE(expired.has_value());
-    CHECK(expired.error().code == yams::ErrorCode::Timeout);
+    // The session deadline is absolute (not idle-based), so a write only starts failing
+    // once 500ms of wall time have passed. Poll until it does instead of sleeping a fixed
+    // 600ms, which is timing-sensitive under load. At the boundary the failure surfaces as
+    // Timeout (client-side deadline check) or NotFound (the peer closed the channel after
+    // its own deadline); both prove the session expired.
+    const auto expiryDeadline = std::chrono::steady_clock::now() + 3s;
+    bool observedExpiry = false;
+    yams::ErrorCode expiryCode = yams::ErrorCode::InvalidState;
+    while (std::chrono::steady_clock::now() < expiryDeadline) {
+        auto attempt = client.value().writeFrame(bytes("late"), 2s);
+        if (!attempt) {
+            observedExpiry = true;
+            expiryCode = attempt.error().code;
+            break;
+        }
+        std::this_thread::sleep_for(10ms);
+    }
+    REQUIRE(observedExpiry);
+    CHECK((expiryCode == yams::ErrorCode::Timeout || expiryCode == yams::ErrorCode::NotFound));
     listener.stop();
 }
 

@@ -55,6 +55,7 @@ std::int64_t unixTimeMs() {
         .count();
 }
 
+#if YAMS_DAEMON_TEST_HOOKS_ENABLED
 std::mutex gReconnectLoopHookMutex;
 std::function<void()> gReconnectLoopHook;
 
@@ -68,6 +69,7 @@ void invokeReconnectLoopHook() {
         hook();
     }
 }
+#endif
 
 } // namespace
 
@@ -474,7 +476,9 @@ private:
             }
             waitLock.unlock();
             try {
+#if YAMS_DAEMON_TEST_HOOKS_ENABLED
                 invokeReconnectLoopHook();
+#endif
                 auto records = registry_->listPeers();
                 if (records) {
                     for (const auto& peer : records.value()) {
