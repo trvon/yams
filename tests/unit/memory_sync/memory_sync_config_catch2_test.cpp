@@ -188,7 +188,96 @@ TEST_CASE("authenticated writer manifest produces schema-v4 envelopes",
     CHECK(envelope.at("signingKeyId") == "writer-v1");
     CHECK(envelope.at("signature").get<std::string>().size() == 128);
 
-    service.value()->stop();
+    service.value().reset();
+    const auto checkpoints = inspect.list("checkpoint/");
+    REQUIRE(checkpoints.has_value());
+    REQUIRE(checkpoints.value().size() == 1);
+    auto checkpoint = inspect.retrieve(checkpoints.value().front());
+    REQUIRE(checkpoint.has_value());
+    auto forged = nlohmann::json::parse(text(checkpoint.value()));
+    forged["commitments"] = nlohmann::json::array();
+    REQUIRE(inspect.remove(checkpoints.value().front()).has_value());
+    REQUIRE(inspect.store(checkpoints.value().front(), bytes(forged.dump())).has_value());
+    auto rejected = createMemorySyncService(cfg);
+    REQUIRE(rejected.has_value());
+    auto recovered = rejected.value()->syncFully();
+    REQUIRE_FALSE(recovered.has_value());
+    CHECK(recovered.error().code == yams::ErrorCode::Unauthorized);
+
+    rejected.value().reset();
+    std::error_code error;
+    std::filesystem::remove_all(dir, error);
+}
+
+TEST_CASE("authenticated writer recovery reports legacy unsigned history",
+          "[memory-sync][config][auth][migration]") {
+    const auto dir = std::filesystem::temp_directory_path() /
+                     ("yams-memory-sync-auth-migration-" +
+                      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(dir);
+    writeWriterKeyPair(dir, "writer-v1");
+    constexpr std::string_view writerId = "123e4567-e89b-42d3-a456-426614174000";
+
+    MemorySyncDaemonConfig unsignedConfig;
+    unsignedConfig.enabled = true;
+    unsignedConfig.nodeId = std::string(writerId);
+    unsignedConfig.corpusId = "corpus-a";
+    unsignedConfig.corpusEpoch = 7;
+    unsignedConfig.path = (dir / "store").string();
+    auto unsignedService = createMemorySyncService(unsignedConfig);
+    REQUIRE(unsignedService.has_value());
+    REQUIRE(unsignedService.value()->publish("legacy", bytes("payload")).has_value());
+    unsignedService.value().reset();
+
+    yams::storage::FilesystemBackend inspect;
+    yams::storage::BackendConfig inspectConfig;
+    inspectConfig.type = "filesystem";
+    inspectConfig.localPath = unsignedConfig.path;
+    REQUIRE(inspect.initialize(inspectConfig).has_value());
+    auto checkpoints = inspect.list("checkpoint/");
+    REQUIRE(checkpoints.has_value());
+    REQUIRE_FALSE(checkpoints.value().empty());
+    const auto checkpoint = inspect.retrieve(checkpoints.value().front());
+    REQUIRE(checkpoint.has_value());
+    auto forgedCheckpoint = nlohmann::json::parse(text(checkpoint.value()));
+    forgedCheckpoint["authenticated_writers"] = true;
+    REQUIRE(inspect.remove(checkpoints.value().front()).has_value());
+    REQUIRE(inspect.store(checkpoints.value().front(), bytes(forgedCheckpoint.dump())).has_value());
+
+    const nlohmann::json manifest = {
+        {"schema_version", 1},
+        {"corpus_id", "corpus-a"},
+        {"corpus_epoch", 7},
+        {"local_key",
+         {{"writer_id", writerId}, {"key_id", "writer-v1"}, {"private_key_path", "writer-v1.pem"}}},
+        {"trusted_writers",
+         {{{"writer_id", writerId},
+           {"key_id", "writer-v1"},
+           {"public_key_path", "writer-v1.pub"},
+           {"revoked", false}}}},
+    };
+    const auto manifestPath = dir / "writers.json";
+    std::ofstream(manifestPath) << manifest.dump();
+
+    auto authenticatedConfig = unsignedConfig;
+    authenticatedConfig.writerAuthRequired = true;
+    authenticatedConfig.writerAuthManifestPath = manifestPath.string();
+    auto authenticatedService = createMemorySyncService(authenticatedConfig);
+    REQUIRE(authenticatedService.has_value());
+    const auto recovered = authenticatedService.value()->syncFully();
+    REQUIRE_FALSE(recovered.has_value());
+    CHECK(recovered.error().code == yams::ErrorCode::InvalidData);
+    CHECK_FALSE(authenticatedService.value()->directP2pReady(writerId, "corpus-a", 7));
+
+    for (const auto& key : checkpoints.value()) {
+        REQUIRE(inspect.remove(key).has_value());
+    }
+    REQUIRE(authenticatedService.value()->syncFully().has_value());
+    CHECK(authenticatedService.value()->legacyUnauthenticatedHistoryObserved());
+    CHECK_FALSE(authenticatedService.value()->directP2pReady(writerId, "corpus-a", 7));
+    CHECK_FALSE(authenticatedService.value()->readCached("legacy").has_value());
+
+    authenticatedService.value().reset();
     std::error_code error;
     std::filesystem::remove_all(dir, error);
 }

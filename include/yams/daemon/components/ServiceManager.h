@@ -56,11 +56,13 @@
 #include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/retrieval_session.h>
+#include <yams/daemon/p2p/p2p_manager.h>
 #include <yams/daemon/resource/abi_entity_extractor_adapter.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/extraction/content_extractor.h>
+#include <yams/memory_sync/memory_sync_service.h>
 #include <yams/profiling.h>
 #include <yams/search/search_engine.h>
 #include <yams/search/search_execution_context.h>
@@ -192,11 +194,22 @@ public:
         std::uint64_t corpusEpoch{0};
         std::string mode;
         std::string trustMode;
+        std::uint64_t peerCount{0};
     };
     Result<void> publishMemorySync(const std::string& key, const std::string& value);
     Result<void> deleteMemorySync(const std::string& key);
     Result<std::string> readMemorySyncCached(const std::string& key) const;
     Result<MemorySyncStatus> getMemorySyncStatus() const;
+    Result<p2p::P2pSyncResult> connectP2p(std::string_view connectionString);
+    Result<void> disconnectP2p(std::string_view nodeId);
+    Result<void> enrollP2pPeer(std::string_view nodeId, std::string_view spkiPin);
+    Result<void> forgetP2pPeer(std::string_view nodeId);
+    Result<p2p::P2pLocalIdentity> getP2pIdentity() const;
+    Result<std::vector<p2p::PeerRegistryRecord>> listP2pPeers() const;
+    Result<void> stageMemorySyncDocumentDelete(std::string_view contentHash,
+                                               bool retainContent = false);
+    Result<void> publishMemorySyncDocumentDelete(std::string_view contentHash,
+                                                 bool retainContent = false);
 
     struct SearchLoadMetrics {
         std::uint32_t active{0};
@@ -426,14 +439,37 @@ public:
     yams::memory_sync::MemorySyncService* testingMemorySyncService() const noexcept {
         return memorySync_.get();
     }
+    void
+    testingSetMemorySyncService(std::unique_ptr<yams::memory_sync::MemorySyncService> service) {
+        memorySync_ = std::move(service);
+    }
     void testingSetMemorySyncStageObserver(std::function<void(std::string_view)> observer) {
         std::lock_guard<std::mutex> lock(memorySyncStageObserverMutex_);
         memorySyncStageObserver_ = std::move(observer);
     }
+    void testingSetMemorySyncDeleteOutboxObserver(std::function<void(std::string_view)> observer) {
+        std::lock_guard<std::mutex> lock(memorySyncDeleteOutboxObserverMutex_);
+        memorySyncDeleteOutboxObserver_ = std::move(observer);
+    }
     void testingApplyMemorySyncWinners() { applyMemorySyncWinners(); }
     void testingPublishMemorySyncBackfill() { publishMemorySyncBackfill(); }
     void testingSetMemorySyncBackfillItemBudget(std::size_t budget) {
+        std::lock_guard<std::mutex> lock(memorySyncBackfillMutex_);
         memorySyncBackfillState_.itemBudgetPerCycle = std::max<std::size_t>(budget, 1);
+    }
+    bool testingMemorySyncApplyLockHeld() {
+        std::unique_lock<std::mutex> lock(memorySyncApplyMutex_, std::try_to_lock);
+        return !lock.owns_lock();
+    }
+    std::uint64_t testingMemorySyncApplyAttempts() const noexcept {
+        return memorySyncApplyAttempts_.load(std::memory_order_acquire);
+    }
+    bool testingMemorySyncBackfillLockHeld() {
+        std::unique_lock<std::mutex> lock(memorySyncBackfillMutex_, std::try_to_lock);
+        return !lock.owns_lock();
+    }
+    std::uint64_t testingMemorySyncBackfillAttempts() const noexcept {
+        return memorySyncBackfillAttempts_.load(std::memory_order_acquire);
     }
     static bool __test_shouldStartSessionWatcher(std::string_view disableValue) {
         return shouldStartSessionWatcher(disableValue);
@@ -709,6 +745,11 @@ public:
 #endif
 
 #if YAMS_DAEMON_TEST_HOOKS_ENABLED
+    YAMS_DAEMON_TEST_HOOK static Result<std::string>
+    __test_loadOrCreateP2pPrivateKey(const std::filesystem::path& keyPath);
+    YAMS_DAEMON_TEST_HOOK static Result<void>
+    __test_writeProtectedP2pPrivateKey(const std::filesystem::path& keyPath,
+                                       std::string_view contents);
     YAMS_DAEMON_TEST_HOOK void __test_setModelProviderDegraded(bool degraded,
                                                                const std::string& error = {});
 #endif
@@ -776,10 +817,15 @@ private:
     Result<void> configureResourcePools(const std::function<void()>& beforeConfigure);
     Result<std::filesystem::path> initializeDataDirAndContentStore();
     Result<void> initializeMemorySync(const std::filesystem::path& dataDir);
-    void configureMemorySyncApply();
+    Result<void> initializeDirectP2p(const std::filesystem::path& dataDir);
+    Result<void> configureMemorySyncApply();
     void applyMemorySyncWinners() noexcept;
+    bool drainMemorySyncDocumentDeleteOutbox() noexcept;
+    Result<bool> memorySyncDeleteLocallyAbsent(std::string_view contentHash,
+                                               memory_sync::EraseReadinessProbe probe) const;
     void publishMemorySyncBackfill() noexcept;
     void notifyMemorySyncStage(std::string_view stage) noexcept;
+    void notifyMemorySyncDeleteOutboxStage(std::string_view stage) noexcept;
     Result<std::size_t> applyMemorySyncContentBlobs();
     boost::asio::awaitable<bool> initializeMetadataDatabaseAt(const std::filesystem::path& dbPath,
                                                               yams::compat::stop_token token);
@@ -915,8 +961,18 @@ private:
     // P2P memory-sync service (version-vector + LWW over a shared store).
     // Started after storage/content-store init, stopped during shutdown.
     std::unique_ptr<yams::memory_sync::MemorySyncService> memorySync_;
+    std::unique_ptr<yams::daemon::p2p::P2pManager> p2pManager_;
+    mutable std::mutex memorySyncDeleteOutboxMutex_;
+    mutable std::mutex memorySyncDeleteOutboxObserverMutex_;
+    std::function<void(std::string_view)> memorySyncDeleteOutboxObserver_;
     mutable std::mutex memorySyncStageObserverMutex_;
     std::function<void(std::string_view)> memorySyncStageObserver_;
+    // Direct sessions may finish concurrently. Serialize the daemon adapter pipeline and its
+    // vector rebuild state; backfill has a separate lock so focused maintenance calls are safe.
+    mutable std::mutex memorySyncApplyMutex_;
+    mutable std::mutex memorySyncBackfillMutex_;
+    std::atomic<std::uint64_t> memorySyncApplyAttempts_{0};
+    std::atomic<std::uint64_t> memorySyncBackfillAttempts_{0};
     bool memorySyncVectorRebuildDirty_{false};
     struct MemorySyncBackfillState {
         enum class Domain { Documents, Vectors, Topology };

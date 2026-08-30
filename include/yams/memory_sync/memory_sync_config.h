@@ -69,6 +69,7 @@ struct MemorySyncDaemonConfig {
     bool allowLegacyUnbound{false};         /// one-time schema-v2 migration gate
     bool writerAuthRequired{false};         /// require schema-v4 Ed25519 envelopes
     std::string writerAuthManifestPath;     /// ACL-protected corpus/epoch key manifest
+    std::string controlScope;               /// authenticated local-store generation
 
     /// Parse `memory_sync.*` keys from a flat `section.key -> value` map.
     static MemorySyncDaemonConfig fromToml(const std::map<std::string, std::string>& flat) {
@@ -200,8 +201,15 @@ inline Result<std::string> readWriterAuthFile(const std::filesystem::path& path,
     return content;
 }
 
+using WriterPrivateKeyReader =
+    std::function<Result<std::string>(const std::filesystem::path& path)>;
+using WriterTrustFileReader =
+    std::function<Result<std::string>(const std::filesystem::path& path, std::size_t maxBytes)>;
+
 inline Result<std::shared_ptr<const WriterAuthenticator>>
-loadWriterAuthenticator(const MemorySyncDaemonConfig& config) {
+loadWriterAuthenticator(const MemorySyncDaemonConfig& config,
+                        const WriterPrivateKeyReader& privateKeyReader = {},
+                        const WriterTrustFileReader& trustFileReader = {}) {
     if (!config.writerAuthRequired) {
         return std::shared_ptr<const WriterAuthenticator>{};
     }
@@ -215,7 +223,8 @@ loadWriterAuthenticator(const MemorySyncDaemonConfig& config) {
     }
 
     const std::filesystem::path manifestPath(config.writerAuthManifestPath);
-    auto manifestBytes = readWriterAuthFile(manifestPath);
+    auto manifestBytes = trustFileReader ? trustFileReader(manifestPath, std::size_t{1024} * 1024)
+                                         : readWriterAuthFile(manifestPath);
     if (!manifestBytes) {
         return manifestBytes.error();
     }
@@ -242,8 +251,10 @@ loadWriterAuthenticator(const MemorySyncDaemonConfig& config) {
         auth.required = true;
         auth.localWriterId = config.nodeId;
         auth.localKeyId = local.at("key_id").get<std::string>();
-        auto privatePem = readWriterAuthFile(
-            resolve(local.at("private_key_path").get<std::string>()), std::size_t{64} * 1024);
+        const auto privateKeyPath = resolve(local.at("private_key_path").get<std::string>());
+        auto privatePem = privateKeyReader
+                              ? privateKeyReader(privateKeyPath)
+                              : readWriterAuthFile(privateKeyPath, std::size_t{64} * 1024);
         if (!privatePem) {
             return privatePem.error();
         }
@@ -257,8 +268,10 @@ loadWriterAuthenticator(const MemorySyncDaemonConfig& config) {
         }
         auth.trustedKeys.reserve(trusted.size());
         for (const auto& entry : trusted) {
-            auto publicPem = readWriterAuthFile(
-                resolve(entry.at("public_key_path").get<std::string>()), std::size_t{64} * 1024);
+            const auto publicKeyPath = resolve(entry.at("public_key_path").get<std::string>());
+            auto publicPem = trustFileReader
+                                 ? trustFileReader(publicKeyPath, std::size_t{64} * 1024)
+                                 : readWriterAuthFile(publicKeyPath, std::size_t{64} * 1024);
             if (!publicPem) {
                 return publicPem.error();
             }
@@ -278,7 +291,9 @@ loadWriterAuthenticator(const MemorySyncDaemonConfig& config) {
 inline Result<std::unique_ptr<MemorySyncService>>
 createMemorySyncService(const MemorySyncDaemonConfig& config,
                         std::optional<storage::BackendConfig> resolvedS3Config = std::nullopt,
-                        std::function<bool()> canAdmitRemoteWork = {}) {
+                        std::function<bool()> canAdmitRemoteWork = {},
+                        WriterPrivateKeyReader privateKeyReader = {},
+                        WriterTrustFileReader trustFileReader = {}) {
     if (!config.enabled) {
         return Error{ErrorCode::InvalidState, "memory_sync is disabled"};
     }
@@ -292,7 +307,7 @@ createMemorySyncService(const MemorySyncDaemonConfig& config,
                      "memory_sync.corpus_id and positive corpus_epoch are required"};
     }
 
-    auto writerAuth = loadWriterAuthenticator(config);
+    auto writerAuth = loadWriterAuthenticator(config, privateKeyReader, trustFileReader);
     if (!writerAuth) {
         return writerAuth.error();
     }
@@ -433,7 +448,8 @@ createMemorySyncService(const MemorySyncDaemonConfig& config,
     return std::make_unique<MemorySyncService>(
         std::move(backend),
         MemorySyncConfig{config.nodeId, config.syncIntervalMs, config.corpusId, config.corpusEpoch,
-                         config.limits, temporary, std::move(writerAuth.value())},
+                         config.limits, temporary, std::move(writerAuth.value()),
+                         config.controlScope},
         std::move(canAdmitRemoteWork), config.allowLegacyUnbound,
         std::move(sessionMaintenanceBackend), std::move(sessionLeaseKey));
 }

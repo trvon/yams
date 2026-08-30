@@ -31,10 +31,12 @@ namespace yams::metadata {
 class MetadataSyncAdapter {
 public:
     using ContentExists = std::function<Result<bool>(std::string_view)>;
+    using AppliedObserver = std::function<void(const DocumentInfo&)>;
 
     MetadataSyncAdapter(MetadataRepository& repository, memory_sync::MemorySyncService& sync,
-                        ContentExists contentExists = {})
-        : repository_(repository), sync_(sync), contentExists_(std::move(contentExists)) {}
+                        ContentExists contentExists = {}, AppliedObserver appliedObserver = {})
+        : repository_(repository), sync_(sync), contentExists_(std::move(contentExists)),
+          appliedObserver_(std::move(appliedObserver)) {}
 
     /// Serialize a committed document (+tags) and publish it under `document/<hash>`.
     Result<void> publish(const DocumentInfo& info,
@@ -89,7 +91,23 @@ public:
                 if (!document) {
                     return document.error();
                 }
-                if (document.value()) {
+                if (document.value() && envelope.origin == sync_.localNodeId()) {
+                    // A local tombstone whose exact commitment crossed the point of no return can
+                    // race a later local re-add. Preserve the present local row and publish it as
+                    // the causally-later value instead of deleting the newer local state.
+                    auto metadata = repository_.getAllMetadata(document.value()->id);
+                    if (!metadata) {
+                        return metadata.error();
+                    }
+                    std::vector<std::pair<std::string, MetadataValue>> tags;
+                    tags.reserve(metadata.value().size());
+                    for (const auto& [metadataKey, value] : metadata.value()) {
+                        tags.emplace_back(metadataKey, value);
+                    }
+                    if (auto republished = publish(*document.value(), tags); !republished) {
+                        return republished.error();
+                    }
+                } else if (document.value()) {
                     deletedIds.push_back(document.value()->id);
                 }
                 continue;
@@ -147,6 +165,9 @@ public:
                     return result.error();
                 }
                 ++applied;
+                if (appliedObserver_) {
+                    appliedObserver_(item.info);
+                }
                 continue;
             }
 
@@ -262,6 +283,7 @@ private:
     MetadataRepository& repository_;
     memory_sync::MemorySyncService& sync_;
     ContentExists contentExists_;
+    AppliedObserver appliedObserver_;
 };
 
 } // namespace yams::metadata

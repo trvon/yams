@@ -5,10 +5,12 @@
 #include <nlohmann/json.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -18,13 +20,16 @@
 
 #include <yams/api/content_store.h>
 #include <yams/crypto/hasher.h>
+#include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/memory_sync/memory_sync_service.h>
 #include <yams/memory_sync/records.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/storage/storage_backend.h>
 
+#include "test_async_helpers.h"
 #include "test_daemon_harness.h"
 
 using namespace std::chrono_literals;
@@ -54,6 +59,99 @@ std::string digest(std::span<const std::byte> data) {
     return hasher.finalize();
 }
 
+/// Delegates every operation to the real daemon content store except
+/// `retrieveBytes` for one poisoned hash, which fails with the same
+/// manifest-corruption error the live backfill wedge produced. Used to prove
+/// the backfill skips an unrecoverable blob instead of wedging the document
+/// domain.
+class ManifestPoisonedContentStore final : public yams::api::IContentStore {
+public:
+    ManifestPoisonedContentStore(std::shared_ptr<yams::api::IContentStore> inner,
+                                 std::string poisonedHash)
+        : inner_(std::move(inner)), poisonedHash_(std::move(poisonedHash)) {}
+
+    yams::Result<yams::api::StoreResult> store(const std::filesystem::path& path,
+                                               const yams::api::ContentMetadata& metadata,
+                                               yams::api::ProgressCallback progress) override {
+        return inner_->store(path, metadata, std::move(progress));
+    }
+    yams::Result<yams::api::RetrieveResult>
+    retrieve(const std::string& hash, const std::filesystem::path& outputPath,
+             yams::api::ProgressCallback progress) override {
+        return inner_->retrieve(hash, outputPath, std::move(progress));
+    }
+    yams::Result<yams::api::StoreResult>
+    storeStream(std::istream& stream, const yams::api::ContentMetadata& metadata,
+                yams::api::ProgressCallback progress) override {
+        return inner_->storeStream(stream, metadata, std::move(progress));
+    }
+    yams::Result<yams::api::RetrieveResult>
+    retrieveStream(const std::string& hash, std::ostream& output,
+                   yams::api::ProgressCallback progress) override {
+        return inner_->retrieveStream(hash, output, std::move(progress));
+    }
+    yams::Result<yams::api::StoreResult>
+    storeBytes(std::span<const std::byte> data,
+               const yams::api::ContentMetadata& metadata) override {
+        return inner_->storeBytes(data, metadata);
+    }
+    yams::Result<std::vector<std::byte>> retrieveBytes(const std::string& hash) override {
+        if (hash == poisonedHash_) {
+            return yams::Error{yams::ErrorCode::ManifestInvalid, "test: poisoned content manifest"};
+        }
+        return inner_->retrieveBytes(hash);
+    }
+    yams::Result<std::vector<std::byte>> retrieveBytesPrefix(const std::string& hash,
+                                                             std::size_t maxBytes) override {
+        if (hash == poisonedHash_) {
+            return yams::Error{yams::ErrorCode::ManifestInvalid, "test: poisoned content manifest"};
+        }
+        return inner_->retrieveBytesPrefix(hash, maxBytes);
+    }
+    yams::Result<yams::api::IContentStore::RawContent>
+    retrieveRaw(const std::string& hash) override {
+        return inner_->retrieveRaw(hash);
+    }
+    std::future<yams::Result<yams::api::IContentStore::RawContent>>
+    retrieveRawAsync(const std::string& hash) override {
+        return inner_->retrieveRawAsync(hash);
+    }
+    yams::Result<bool> exists(const std::string& hash) const override {
+        return inner_->exists(hash);
+    }
+    yams::Result<bool> remove(const std::string& hash) override { return inner_->remove(hash); }
+    yams::Result<yams::api::ContentMetadata> getMetadata(const std::string& hash) const override {
+        return inner_->getMetadata(hash);
+    }
+    yams::Result<void> updateMetadata(const std::string& hash,
+                                      const yams::api::ContentMetadata& metadata) override {
+        return inner_->updateMetadata(hash, metadata);
+    }
+    std::vector<yams::Result<yams::api::StoreResult>>
+    storeBatch(const std::vector<std::filesystem::path>& paths,
+               const std::vector<yams::api::ContentMetadata>& metadata) override {
+        return inner_->storeBatch(paths, metadata);
+    }
+    std::vector<yams::Result<bool>> removeBatch(const std::vector<std::string>& hashes) override {
+        return inner_->removeBatch(hashes);
+    }
+    yams::api::ContentStoreStats getStats() const override { return inner_->getStats(); }
+    yams::api::HealthStatus checkHealth() const override { return inner_->checkHealth(); }
+    yams::Result<void> verify(yams::api::ProgressCallback progress) override {
+        return inner_->verify(std::move(progress));
+    }
+    yams::Result<void> compact(yams::api::ProgressCallback progress) override {
+        return inner_->compact(std::move(progress));
+    }
+    yams::Result<void> garbageCollect(yams::api::ProgressCallback progress) override {
+        return inner_->garbageCollect(std::move(progress));
+    }
+
+private:
+    std::shared_ptr<yams::api::IContentStore> inner_;
+    std::string poisonedHash_;
+};
+
 yams::test::DaemonHarness::Options makeMemorySyncHarnessOptions(std::string nodeId,
                                                                 std::string corpusId) {
     yams::test::DaemonHarness::Options options;
@@ -68,6 +166,7 @@ yams::test::DaemonHarness::Options makeMemorySyncHarnessOptions(std::string node
         config.memorySync.nodeId = nodeId;
         config.memorySync.corpusId = corpusId;
         config.memorySync.corpusEpoch = 1;
+        config.memorySync.transport = "shared-store";
         config.memorySync.backend = "filesystem";
         config.memorySync.path = "shared-memory";
         config.memorySync.syncIntervalMs = 60'000;
@@ -110,6 +209,7 @@ TEST_CASE("Daemon refuses enabled memory sync when writer authentication cannot 
         config.memorySync.nodeId = "123e4567-e89b-42d3-a456-426614174099";
         config.memorySync.corpusId = "startup-failure-corpus";
         config.memorySync.corpusEpoch = 1;
+        config.memorySync.transport = "shared-store";
         config.memorySync.backend = "filesystem";
         config.memorySync.path = "shared-memory";
         config.memorySync.writerAuthRequired = true;
@@ -135,6 +235,7 @@ TEST_CASE("Daemon memory sync periodically converges and stops cleanly",
         config.memorySync.nodeId = "123e4567-e89b-42d3-a456-426614174000";
         config.memorySync.corpusId = "integration-corpus";
         config.memorySync.corpusEpoch = 1;
+        config.memorySync.transport = "shared-store";
         config.memorySync.backend = "filesystem";
         config.memorySync.path = "shared-memory";
         config.memorySync.syncIntervalMs = 25;
@@ -334,6 +435,233 @@ sync_interval_ms = 25
     CHECK(harness.shutdownSucceeded());
 }
 
+TEST_CASE("Production document deletion also replicates content-byte deletion",
+          "[integration][daemon][memory-sync][deletion]") {
+    auto options = makeMemorySyncHarnessOptions("123e4567-e89b-42d3-a456-426614174020",
+                                                "delete-integrity-corpus");
+    yams::test::DaemonHarness harness{std::move(options)};
+    REQUIRE(harness.start(30s));
+
+    auto* serviceManager = harness.daemon()->getServiceManager();
+    REQUIRE(serviceManager != nullptr);
+    auto* daemonSync = serviceManager->testingMemorySyncService();
+    REQUIRE(daemonSync != nullptr);
+    auto contentStore = serviceManager->getContentStore();
+    REQUIRE(contentStore != nullptr);
+    auto repository = serviceManager->getMetadataRepo();
+    REQUIRE(repository != nullptr);
+
+    const auto payload = bytes("production-delete-content");
+    auto stored = contentStore->storeBytes(payload);
+    REQUIRE(stored.has_value());
+    const auto& hash = stored.value().contentHash;
+
+    yams::metadata::BatchDocumentInsert insert;
+    insert.info.filePath = "/local/corpus/delete-me.md";
+    insert.info.fileName = "delete-me.md";
+    insert.info.fileExtension = ".md";
+    insert.info.fileSize = static_cast<std::int64_t>(payload.size());
+    insert.info.sha256Hash = hash;
+    insert.info.mimeType = "text/markdown";
+    std::vector<yams::metadata::BatchDocumentInsert> inserts;
+    inserts.push_back(std::move(insert));
+    REQUIRE(repository->batchInsertDocumentsWithMetadata(inserts).has_value());
+
+    yams::memory_sync::MetadataDocumentRecord record;
+    record.documentId = hash;
+    record.contentHash = hash;
+    record.filePath = "/local/corpus/delete-me.md";
+    record.fileName = "delete-me.md";
+    record.fileExtension = ".md";
+    record.fileSize = static_cast<std::int64_t>(payload.size());
+    record.mimeType = "text/markdown";
+    const std::string documentKey = "document/" + hash;
+    const std::string blobKey = "content-blob/" + hash;
+    const auto serialized = nlohmann::json(record).dump();
+    REQUIRE(daemonSync->publish(documentKey, bytes(serialized)).has_value());
+    REQUIRE(daemonSync->publish(blobKey, payload).has_value());
+
+    yams::memory_sync::MemorySyncService peer{
+        makeFilesystemBackend(harness.dataDir() / "shared-memory"),
+        yams::memory_sync::MemorySyncConfig{"delete-peer", 60'000, "delete-integrity-corpus", 1}};
+    REQUIRE(peer.syncOnce().has_value());
+    REQUIRE(peer.readCached(documentKey).has_value());
+    REQUIRE(peer.readCached(blobKey).has_value());
+
+    // Exercise the real IPC dispatcher, including its pre-delete staging and post-delete
+    // publication hooks.
+    yams::daemon::ClientConfig clientConfig;
+    clientConfig.socketPath = harness.socketPath();
+    clientConfig.connectTimeout = 5s;
+    clientConfig.requestTimeout = 10s;
+    clientConfig.autoStart = false;
+    yams::daemon::DaemonClient client{clientConfig};
+    REQUIRE(yams::cli::run_sync(client.connect(), 5s).has_value());
+    yams::daemon::DeleteRequest deleteRequest;
+    deleteRequest.hash = hash;
+    const auto writerCounterBeforeDelete =
+        peer.currentVersion().get("123e4567-e89b-42d3-a456-426614174020");
+    std::promise<void> publisherLockedPromise;
+    auto publisherLocked = publisherLockedPromise.get_future();
+    std::promise<void> drainerWaitingPromise;
+    auto drainerWaiting = drainerWaitingPromise.get_future();
+    std::promise<void> releasePublisherPromise;
+    auto releasePublisher = releasePublisherPromise.get_future().share();
+    std::atomic<bool> publisherSignalled{false};
+    std::atomic<bool> drainerSignalled{false};
+    serviceManager->testingSetMemorySyncDeleteOutboxObserver([&](std::string_view stage) {
+        if (stage == "delete_publish_locked" && !publisherSignalled.exchange(true)) {
+            publisherLockedPromise.set_value();
+            releasePublisher.wait();
+        } else if (stage == "delete_drain_waiting" && !drainerSignalled.exchange(true)) {
+            drainerWaitingPromise.set_value();
+        }
+    });
+    auto deleteCall = std::async(std::launch::async, [&] {
+        return yams::cli::run_sync(client.call<yams::daemon::DeleteRequest>(deleteRequest), 10s);
+    });
+    const auto publisherStatus = publisherLocked.wait_for(5s);
+    if (publisherStatus != std::future_status::ready) {
+        releasePublisherPromise.set_value();
+        FAIL("delete publisher did not reach the serialized outbox section");
+    }
+    auto competingDrainer = std::async(
+        std::launch::async, [serviceManager] { serviceManager->testingApplyMemorySyncWinners(); });
+    const auto drainerStatus = drainerWaiting.wait_for(5s);
+    releasePublisherPromise.set_value();
+    REQUIRE(drainerStatus == std::future_status::ready);
+    auto deleted = deleteCall.get();
+    competingDrainer.get();
+    serviceManager->testingSetMemorySyncDeleteOutboxObserver({});
+    REQUIRE(deleted.has_value());
+    CHECK(deleted.value().successCount == 1);
+    auto pendingErases = daemonSync->pendingErases();
+    REQUIRE(pendingErases.has_value());
+    CHECK(pendingErases.value().empty());
+    auto firstPublisher = std::async(std::launch::async, [serviceManager, hash] {
+        return serviceManager->publishMemorySyncDocumentDelete(hash);
+    });
+    auto secondPublisher = std::async(std::launch::async, [serviceManager, hash] {
+        return serviceManager->publishMemorySyncDocumentDelete(hash);
+    });
+    CHECK(firstPublisher.get().has_value());
+    CHECK(secondPublisher.get().has_value());
+
+    REQUIRE(peer.syncOnce().has_value());
+    CHECK_FALSE(peer.readCached(documentKey).has_value());
+    CHECK_FALSE(peer.readCached(blobKey).has_value());
+    CHECK(peer.currentVersion().get("123e4567-e89b-42d3-a456-426614174020") ==
+          writerCounterBeforeDelete + 2);
+
+    // --keep-refs carries its retain-content mode through durable staging and publication. Its
+    // document-only completion remains idempotent without inventing a content tombstone.
+    const auto retainedPayload = bytes("retained-production-content");
+    auto retainedStored = contentStore->storeBytes(retainedPayload);
+    REQUIRE(retainedStored.has_value());
+    const auto& retainedHash = retainedStored.value().contentHash;
+    yams::metadata::BatchDocumentInsert retainedInsert;
+    retainedInsert.info.filePath = "/local/corpus/retained.md";
+    retainedInsert.info.fileName = "retained.md";
+    retainedInsert.info.fileExtension = ".md";
+    retainedInsert.info.fileSize = static_cast<std::int64_t>(retainedPayload.size());
+    retainedInsert.info.sha256Hash = retainedHash;
+    retainedInsert.info.mimeType = "text/markdown";
+    std::vector<yams::metadata::BatchDocumentInsert> retainedInserts;
+    retainedInserts.push_back(std::move(retainedInsert));
+    REQUIRE(repository->batchInsertDocumentsWithMetadata(retainedInserts).has_value());
+
+    record.documentId = retainedHash;
+    record.contentHash = retainedHash;
+    record.filePath = "/local/corpus/retained.md";
+    record.fileName = "retained.md";
+    record.fileSize = static_cast<std::int64_t>(retainedPayload.size());
+    const std::string retainedDocumentKey = "document/" + retainedHash;
+    const std::string retainedBlobKey = "content-blob/" + retainedHash;
+    REQUIRE(
+        daemonSync->publish(retainedDocumentKey, bytes(nlohmann::json(record).dump())).has_value());
+    REQUIRE(daemonSync->publish(retainedBlobKey, retainedPayload).has_value());
+    REQUIRE(peer.syncOnce().has_value());
+    const auto writerCounterBeforeRetainedDelete =
+        peer.currentVersion().get("123e4567-e89b-42d3-a456-426614174020");
+
+    yams::daemon::DeleteRequest retainDeleteRequest;
+    retainDeleteRequest.hash = retainedHash;
+    retainDeleteRequest.keepRefs = true;
+    auto retainedDelete =
+        yams::cli::run_sync(client.call<yams::daemon::DeleteRequest>(retainDeleteRequest), 10s);
+    REQUIRE(retainedDelete.has_value());
+    CHECK(retainedDelete.value().successCount == 1);
+    auto retainedLocally = contentStore->exists(retainedHash);
+    REQUIRE(retainedLocally.has_value());
+    CHECK(retainedLocally.value());
+    REQUIRE(serviceManager->publishMemorySyncDocumentDelete(retainedHash, true).has_value());
+    REQUIRE(peer.syncOnce().has_value());
+    CHECK_FALSE(peer.readCached(retainedDocumentKey).has_value());
+    CHECK(peer.readCached(retainedBlobKey).has_value());
+    CHECK(peer.currentVersion().get("123e4567-e89b-42d3-a456-426614174020") ==
+          writerCounterBeforeRetainedDelete + 1);
+
+    // If local deletion is interrupted after removing bytes but before removing metadata, drain
+    // only the ready blob tombstone. The document intent must survive for a later metadata repair.
+    const auto interruptedPayload = bytes("interrupted-production-delete");
+    auto interruptedStored = contentStore->storeBytes(interruptedPayload);
+    REQUIRE(interruptedStored.has_value());
+    const auto& interruptedHash = interruptedStored.value().contentHash;
+    yams::metadata::BatchDocumentInsert interruptedInsert;
+    interruptedInsert.info.filePath = "/local/corpus/interrupted.md";
+    interruptedInsert.info.fileName = "interrupted.md";
+    interruptedInsert.info.fileExtension = ".md";
+    interruptedInsert.info.fileSize = static_cast<std::int64_t>(interruptedPayload.size());
+    interruptedInsert.info.sha256Hash = interruptedHash;
+    interruptedInsert.info.mimeType = "text/markdown";
+    std::vector<yams::metadata::BatchDocumentInsert> interruptedInserts;
+    interruptedInserts.push_back(std::move(interruptedInsert));
+    REQUIRE(repository->batchInsertDocumentsWithMetadata(interruptedInserts).has_value());
+
+    record.documentId = interruptedHash;
+    record.contentHash = interruptedHash;
+    record.filePath = "/local/corpus/interrupted.md";
+    record.fileName = "interrupted.md";
+    record.fileSize = static_cast<std::int64_t>(interruptedPayload.size());
+    const std::string interruptedDocumentKey = "document/" + interruptedHash;
+    const std::string interruptedBlobKey = "content-blob/" + interruptedHash;
+    REQUIRE(daemonSync->publish(interruptedDocumentKey, bytes(nlohmann::json(record).dump()))
+                .has_value());
+    REQUIRE(daemonSync->publish(interruptedBlobKey, interruptedPayload).has_value());
+    REQUIRE(peer.syncOnce().has_value());
+    REQUIRE(peer.readCached(interruptedDocumentKey).has_value());
+    REQUIRE(peer.readCached(interruptedBlobKey).has_value());
+
+    REQUIRE(serviceManager->stageMemorySyncDocumentDelete(interruptedHash).has_value());
+    auto removedBytes = contentStore->remove(interruptedHash);
+    REQUIRE(removedBytes.has_value());
+    REQUIRE(removedBytes.value());
+    serviceManager->testingApplyMemorySyncWinners();
+    REQUIRE(peer.syncOnce().has_value());
+    CHECK(peer.readCached(interruptedDocumentKey).has_value());
+    CHECK_FALSE(peer.readCached(interruptedBlobKey).has_value());
+    pendingErases = daemonSync->pendingErases();
+    REQUIRE(pendingErases.has_value());
+    CHECK(std::ranges::any_of(pendingErases.value(), [&](const auto& intent) {
+        return intent.logicalKey == interruptedDocumentKey;
+    }));
+    CHECK_FALSE(std::ranges::any_of(pendingErases.value(), [&](const auto& intent) {
+        return intent.logicalKey == interruptedBlobKey;
+    }));
+
+    auto interruptedDocument = repository->getDocumentByHash(interruptedHash);
+    REQUIRE(interruptedDocument.has_value());
+    REQUIRE(interruptedDocument.value().has_value());
+    REQUIRE(repository->deleteDocument(interruptedDocument.value()->id).has_value());
+    serviceManager->testingApplyMemorySyncWinners();
+    REQUIRE(peer.syncOnce().has_value());
+    CHECK_FALSE(peer.readCached(interruptedDocumentKey).has_value());
+    CHECK(daemonSync->pendingErases().value().empty());
+
+    harness.stop();
+    CHECK(harness.shutdownSucceeded());
+}
+
 TEST_CASE("Daemon memory sync stop during production apply prevents later adapters",
           "[integration][daemon][memory-sync][lifecycle]") {
     auto options = makeMemorySyncHarnessOptions("123e4567-e89b-42d3-a456-426614174010",
@@ -388,6 +716,139 @@ TEST_CASE("Daemon memory sync stop during production apply prevents later adapte
     const auto document = repository->getDocumentByHash(hash);
     REQUIRE(document.has_value());
     CHECK_FALSE(document.value().has_value());
+
+    harness.stop();
+    CHECK(harness.shutdownSucceeded());
+}
+
+TEST_CASE("Daemon serializes concurrent memory sync apply callbacks",
+          "[integration][daemon][memory-sync][apply-serialization]") {
+    auto options = makeMemorySyncHarnessOptions("123e4567-e89b-42d3-a456-426614174021",
+                                                "apply-serialization-corpus");
+    yams::test::DaemonHarness harness{std::move(options)};
+    REQUIRE(harness.start(30s));
+
+    auto* serviceManager = harness.daemon()->getServiceManager();
+    REQUIRE(serviceManager != nullptr);
+    auto* daemonSync = serviceManager->testingMemorySyncService();
+    REQUIRE(daemonSync != nullptr);
+    std::atomic<std::size_t> contentStages{0};
+    std::promise<void> firstEnteredPromise;
+    auto firstEntered = firstEnteredPromise.get_future();
+    std::promise<void> secondEnteredPromise;
+    auto secondEntered = secondEnteredPromise.get_future();
+    std::promise<void> releaseFirstPromise;
+    auto releaseFirst = releaseFirstPromise.get_future().share();
+    serviceManager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
+        if (stage != "apply.after_content") {
+            return;
+        }
+        if (contentStages.fetch_add(1, std::memory_order_acq_rel) == 0) {
+            firstEnteredPromise.set_value();
+            releaseFirst.wait();
+        } else {
+            secondEnteredPromise.set_value();
+        }
+    });
+
+    const auto applyAttemptsBefore = serviceManager->testingMemorySyncApplyAttempts();
+    auto first = std::async(std::launch::async,
+                            [serviceManager] { serviceManager->testingApplyMemorySyncWinners(); });
+    REQUIRE(firstEntered.wait_for(5s) == std::future_status::ready);
+    CHECK(serviceManager->testingMemorySyncApplyLockHeld());
+    auto second = std::async(std::launch::async,
+                             [serviceManager] { serviceManager->testingApplyMemorySyncWinners(); });
+    const auto secondApplyDeadline = std::chrono::steady_clock::now() + 5s;
+    while (serviceManager->testingMemorySyncApplyAttempts() < applyAttemptsBefore + 2 &&
+           std::chrono::steady_clock::now() < secondApplyDeadline) {
+        std::this_thread::yield();
+    }
+    REQUIRE(serviceManager->testingMemorySyncApplyAttempts() == applyAttemptsBefore + 2);
+    CHECK(contentStages.load(std::memory_order_acquire) == 1);
+
+    releaseFirstPromise.set_value();
+    first.get();
+    second.get();
+    CHECK(secondEntered.wait_for(5s) == std::future_status::ready);
+    CHECK(contentStages.load(std::memory_order_acquire) == 2);
+
+    auto repository = serviceManager->getMetadataRepo();
+    auto contentStore = serviceManager->getContentStore();
+    REQUIRE(repository != nullptr);
+    REQUIRE(contentStore != nullptr);
+    std::vector<std::string> hashes;
+    std::vector<yams::metadata::BatchDocumentInsert> inserts;
+    for (int index = 0; index < 2; ++index) {
+        const auto payload = bytes("serialized-backfill-" + std::to_string(index));
+        auto stored = contentStore->storeBytes(payload);
+        REQUIRE(stored.has_value());
+        hashes.push_back(stored.value().contentHash);
+        yams::metadata::BatchDocumentInsert item;
+        item.info.filePath = "/local/serialized-" + std::to_string(index) + ".md";
+        item.info.fileName = "serialized-" + std::to_string(index) + ".md";
+        item.info.fileExtension = ".md";
+        item.info.fileSize = static_cast<std::int64_t>(payload.size());
+        item.info.sha256Hash = stored.value().contentHash;
+        item.info.mimeType = "text/markdown";
+        inserts.push_back(std::move(item));
+    }
+    REQUIRE(repository->batchInsertDocumentsWithMetadata(inserts).has_value());
+    const auto writerCounterBeforeBackfill =
+        daemonSync->currentVersion().get("123e4567-e89b-42d3-a456-426614174021");
+    serviceManager->testingSetMemorySyncBackfillItemBudget(1);
+
+    std::atomic<std::size_t> backfillStages{0};
+    std::promise<void> firstBackfillEnteredPromise;
+    auto firstBackfillEntered = firstBackfillEnteredPromise.get_future();
+    std::promise<void> secondBackfillEnteredPromise;
+    auto secondBackfillEntered = secondBackfillEnteredPromise.get_future();
+    std::promise<void> releaseFirstBackfillPromise;
+    auto releaseFirstBackfill = releaseFirstBackfillPromise.get_future().share();
+    serviceManager->testingSetMemorySyncStageObserver([&](std::string_view stage) {
+        if (!stage.starts_with("backfill.")) {
+            return;
+        }
+        if (backfillStages.fetch_add(1, std::memory_order_acq_rel) == 0) {
+            firstBackfillEnteredPromise.set_value();
+            releaseFirstBackfill.wait();
+        } else {
+            secondBackfillEnteredPromise.set_value();
+        }
+    });
+    const auto backfillAttemptsBefore = serviceManager->testingMemorySyncBackfillAttempts();
+    auto firstBackfill = std::async(std::launch::async, [serviceManager] {
+        serviceManager->testingPublishMemorySyncBackfill();
+    });
+    REQUIRE(firstBackfillEntered.wait_for(5s) == std::future_status::ready);
+    CHECK(serviceManager->testingMemorySyncBackfillLockHeld());
+    auto secondBackfill = std::async(std::launch::async, [serviceManager] {
+        serviceManager->testingPublishMemorySyncBackfill();
+    });
+    const auto secondBackfillDeadline = std::chrono::steady_clock::now() + 5s;
+    while (serviceManager->testingMemorySyncBackfillAttempts() < backfillAttemptsBefore + 2 &&
+           std::chrono::steady_clock::now() < secondBackfillDeadline) {
+        std::this_thread::yield();
+    }
+    REQUIRE(serviceManager->testingMemorySyncBackfillAttempts() == backfillAttemptsBefore + 2);
+    CHECK(backfillStages.load(std::memory_order_acquire) == 1);
+
+    releaseFirstBackfillPromise.set_value();
+    firstBackfill.get();
+    secondBackfill.get();
+    CHECK(secondBackfillEntered.wait_for(5s) == std::future_status::ready);
+    CHECK(backfillStages.load(std::memory_order_acquire) == 2);
+    serviceManager->testingSetMemorySyncStageObserver({});
+
+    yams::memory_sync::MemorySyncService peer{
+        makeFilesystemBackend(harness.dataDir() / "shared-memory"),
+        yams::memory_sync::MemorySyncConfig{"serialization-peer", 60'000,
+                                            "apply-serialization-corpus", 1}};
+    REQUIRE(peer.syncFully().has_value());
+    for (const auto& hash : hashes) {
+        CHECK(peer.readCached("document/" + hash).has_value());
+    }
+    CHECK(peer.currentVersion().get("123e4567-e89b-42d3-a456-426614174021") ==
+          writerCounterBeforeBackfill + 4);
 
     harness.stop();
     CHECK(harness.shutdownSucceeded());
@@ -701,6 +1162,135 @@ TEST_CASE("Daemon memory sync backfill budget resumes document cursor",
     CHECK(harness.shutdownSucceeded());
 }
 
+TEST_CASE("Daemon memory sync backfill skips a poisoned blob and continues",
+          "[integration][daemon][memory-sync][backfill]") {
+    auto options = makeMemorySyncHarnessOptions("123e4567-e89b-42d3-a456-426614174014",
+                                                "backfill-skip-corpus");
+    yams::test::DaemonHarness harness{std::move(options)};
+    REQUIRE(harness.start(30s));
+
+    auto* serviceManager = harness.daemon()->getServiceManager();
+    REQUIRE(serviceManager != nullptr);
+    auto repository = serviceManager->getMetadataRepo();
+    REQUIRE(repository != nullptr);
+
+    // Two documents; the first's blob is poisoned before the backfill runs.
+    std::vector<std::string> hashes;
+    std::vector<yams::metadata::BatchDocumentInsert> inserts;
+    for (int index = 0; index < 2; ++index) {
+        const auto payload = bytes("backfill-skip-" + std::to_string(index));
+        auto stored = serviceManager->getContentStore()->storeBytes(payload);
+        REQUIRE(stored.has_value());
+        hashes.push_back(stored.value().contentHash);
+        yams::metadata::BatchDocumentInsert item;
+        item.info.filePath = "/local/skip-" + std::to_string(index) + ".md";
+        item.info.fileName = "skip-" + std::to_string(index) + ".md";
+        item.info.fileExtension = ".md";
+        item.info.fileSize = static_cast<std::int64_t>(payload.size());
+        item.info.sha256Hash = stored.value().contentHash;
+        item.info.mimeType = "text/markdown";
+        inserts.push_back(std::move(item));
+    }
+    REQUIRE(repository->batchInsertDocumentsWithMetadata(inserts).has_value());
+
+    // Poison the first blob so its manifest is unrecoverable, then run backfill.
+    serviceManager->__test_setContentStore(std::make_shared<ManifestPoisonedContentStore>(
+        serviceManager->getContentStore(), hashes.front()));
+    std::vector<std::string> stages;
+    serviceManager->testingSetMemorySyncStageObserver(
+        [&](std::string_view stage) { stages.emplace_back(stage); });
+    serviceManager->testingPublishMemorySyncBackfill();
+
+    CHECK(std::find(stages.begin(), stages.end(), "backfill.skip_document") != stages.end());
+
+    // The poisoned document is never replicated; the backfill advances past it
+    // and publishes the next document instead of wedging the domain.
+    yams::memory_sync::MemorySyncService peer{
+        makeFilesystemBackend(harness.dataDir() / "shared-memory"),
+        yams::memory_sync::MemorySyncConfig{"backfill-skip-peer", 60'000, "backfill-skip-corpus",
+                                            1}};
+    REQUIRE(peer.syncOnce().has_value());
+    CHECK_FALSE(peer.readCached("document/" + hashes.front()).has_value());
+    CHECK(peer.readCached("document/" + hashes.back()).has_value());
+
+    serviceManager->testingSetMemorySyncStageObserver({});
+    harness.stop();
+    CHECK(harness.shutdownSucceeded());
+}
+
+TEST_CASE("Daemon direct deltas immediately hydrate content and metadata",
+          "[integration][daemon][memory-sync][direct-delta]") {
+    auto options =
+        makeMemorySyncHarnessOptions("123e4567-e89b-42d3-a456-426614174015", "direct-apply-corpus");
+    yams::test::DaemonHarness harness{std::move(options)};
+    REQUIRE(harness.start(30s));
+
+    auto* serviceManager = harness.daemon()->getServiceManager();
+    REQUIRE(serviceManager != nullptr);
+    auto* daemonSync = serviceManager->testingMemorySyncService();
+    REQUIRE(daemonSync != nullptr);
+    auto repository = serviceManager->getMetadataRepo();
+    auto contentStore = serviceManager->getContentStore();
+    REQUIRE(repository != nullptr);
+    REQUIRE(contentStore != nullptr);
+
+    yams::memory_sync::MemorySyncService peer{
+        makeFilesystemBackend(harness.dataDir() / "direct-peer-memory"),
+        yams::memory_sync::MemorySyncConfig{"direct-peer", 60'000, "direct-apply-corpus", 1}};
+    const auto payload = bytes("direct-delta-searchable-content");
+    const auto hash = digest(payload);
+    REQUIRE(peer.publish("content-blob/" + hash, payload).has_value());
+
+    yams::memory_sync::MetadataDocumentRecord remote;
+    remote.documentId = hash;
+    remote.filePath = "/peer/direct.md";
+    remote.fileName = "direct.md";
+    remote.fileExtension = ".md";
+    remote.fileSize = static_cast<std::int64_t>(payload.size());
+    remote.contentHash = hash;
+    remote.mimeType = "text/markdown";
+    remote.contentExtracted = true;
+    REQUIRE(peer.publish("document/" + hash, bytes(nlohmann::json(remote).dump())).has_value());
+
+    auto deltas = peer.exportLocalDeltasAfter({});
+    REQUIRE(deltas.has_value());
+    REQUIRE(deltas.value().deltas.size() == 2);
+    auto applied = daemonSync->applyDeltas(deltas.value().deltas);
+    REQUIRE(applied.has_value());
+    CHECK(applied.value().merged == 2);
+
+    auto contentExists = contentStore->exists(hash);
+    REQUIRE(contentExists.has_value());
+    CHECK(contentExists.value());
+    auto replicatedBytes = contentStore->retrieveBytes(hash);
+    REQUIRE(replicatedBytes.has_value());
+    CHECK(replicatedBytes.value() == payload);
+    auto imported = repository->getDocumentByHash(hash);
+    REQUIRE(imported.has_value());
+    REQUIRE(imported.value().has_value());
+    CHECK(imported.value()->fileName == "direct.md");
+    CHECK(imported.value()->sha256Hash == hash);
+
+    // Remote metadata is not enough for retrieval parity: applying a direct delta must enqueue
+    // the same extraction/FTS path used by a local add.
+    std::optional<yams::metadata::DocumentContent> indexedContent;
+    const auto searchDeadline = std::chrono::steady_clock::now() + scaledTimeout(3s);
+    while (std::chrono::steady_clock::now() < searchDeadline) {
+        auto content = repository->getContent(imported.value()->id);
+        REQUIRE(content.has_value());
+        if (content.value()) {
+            indexedContent = std::move(*content.value());
+            break;
+        }
+        std::this_thread::sleep_for(10ms);
+    }
+    REQUIRE(indexedContent.has_value());
+    CHECK(indexedContent->contentText.find("direct-delta-searchable-content") != std::string::npos);
+
+    harness.stop();
+    CHECK(harness.shutdownSucceeded());
+}
+
 TEST_CASE("Daemon temporary memory sync converges inside one session and cleans only its namespace",
           "[integration][daemon][memory-sync][temporary]") {
     yams::test::DaemonHarness::Options options;
@@ -715,6 +1305,7 @@ TEST_CASE("Daemon temporary memory sync converges inside one session and cleans 
         config.memorySync.nodeId = "123e4567-e89b-42d3-a456-426614174001";
         config.memorySync.corpusId = "temporary-integration-corpus";
         config.memorySync.corpusEpoch = 1;
+        config.memorySync.transport = "shared-store";
         config.memorySync.backend = "filesystem";
         config.memorySync.path = "shared-memory";
         config.memorySync.syncIntervalMs = 25;

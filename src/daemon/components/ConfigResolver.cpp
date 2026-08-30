@@ -1662,6 +1662,7 @@ bool ConfigResolver::applyMemorySync(const ConfigSections& sections, DaemonConfi
     }
 
     auto policy = config.memorySync;
+    const bool transportSpecified = section->second.contains("transport");
     if (const auto it = section->second.find("enabled"); it != section->second.end()) {
         const auto enabled = parseBoolValue(it->second);
         if (!enabled) {
@@ -1686,11 +1687,42 @@ bool ConfigResolver::applyMemorySync(const ConfigSections& sections, DaemonConfi
         }
         policy.corpusEpoch = *epoch;
     }
+    if (const auto it = section->second.find("transport"); it != section->second.end()) {
+        policy.transport = it->second;
+    }
+    if (const auto it = section->second.find("listen"); it != section->second.end()) {
+        policy.listen = it->second;
+    }
+    if (const auto it = section->second.find("identity_key"); it != section->second.end()) {
+        policy.identityKeyPath = it->second;
+    }
+    if (const auto it = section->second.find("allow_first_contact"); it != section->second.end()) {
+        const auto allow = parseBoolValue(it->second);
+        if (!allow) {
+            spdlog::warn("Config: invalid memory_sync; allow_first_contact must be a boolean");
+            config.memorySync.enabled = false;
+            return false;
+        }
+        policy.allowFirstContact = *allow;
+    }
+    if (const auto it = section->second.find("max_peers"); it != section->second.end()) {
+        const auto maxPeers = parseUnsignedIntegral<std::size_t>(it->second);
+        if (!maxPeers || *maxPeers == 0) {
+            spdlog::warn("Config: invalid memory_sync; max_peers must be greater than zero");
+            config.memorySync.enabled = false;
+            return false;
+        }
+        policy.maxPeers = *maxPeers;
+    }
     if (const auto it = section->second.find("backend"); it != section->second.end()) {
         policy.backend = it->second;
     }
     if (const auto it = section->second.find("path"); it != section->second.end()) {
         policy.path = it->second;
+    }
+    if (!transportSpecified &&
+        (section->second.contains("backend") || section->second.contains("path"))) {
+        policy.transport = "shared-store";
     }
     if (const auto it = section->second.find("mode"); it != section->second.end()) {
         policy.mode = it->second;
@@ -1747,6 +1779,15 @@ bool ConfigResolver::applyMemorySync(const ConfigSections& sections, DaemonConfi
             config.memorySync.enabled = false;
             return false;
         }
+        // Direct transport reuses sync_interval_ms as the reconnect interval, which
+        // P2pManager::create bounds to p2p::kP2pMaxReconnectInterval (5 minutes). Reject here so a
+        // large value fails config resolution instead of aborting daemon startup later.
+        if (policy.transport == "direct" && *interval > 5 * 60 * 1000) {
+            spdlog::warn("Config: invalid memory_sync; sync_interval_ms exceeds the 5-minute "
+                         "direct reconnect ceiling");
+            config.memorySync.enabled = false;
+            return false;
+        }
         policy.syncIntervalMs = *interval;
     }
     const auto applyLimit = [&](std::string_view key, std::size_t& target) {
@@ -1776,8 +1817,29 @@ bool ConfigResolver::applyMemorySync(const ConfigSections& sections, DaemonConfi
         config.memorySync = std::move(policy);
         return true;
     }
-    // pi-lens-ignore: clang:no_member -- daemon policy field is defined in daemon.h.
-    if (policy.writerAuthRequired && policy.mode == "persistent-migration") {
+    if (policy.transport != "direct" && policy.transport != "shared-store") {
+        spdlog::warn("Config: disabling invalid memory_sync.transport '{}'", policy.transport);
+        policy.enabled = false;
+    } else if (!yams::memory_sync::isCanonicalWriterUuid(policy.nodeId)) {
+        spdlog::warn("Config: disabling memory_sync; node_id must be a canonical UUID");
+        policy.enabled = false;
+    } else if (!yams::memory_sync::isCanonicalCorpusId(policy.corpusId) ||
+               policy.corpusEpoch == 0) {
+        spdlog::warn("Config: disabling memory_sync; corpus_id and corpus_epoch are required");
+        policy.enabled = false;
+    } else if (policy.transport == "direct") {
+        if (policy.mode != "persistent") {
+            spdlog::warn("Config: disabling direct memory_sync; mode must be persistent");
+            policy.enabled = false;
+        } else if (policy.listen.empty()) {
+            spdlog::warn("Config: disabling direct memory_sync with empty listen address");
+            policy.enabled = false;
+        } else if (!policy.writerAuthRequired || policy.writerAuthManifestPath.empty()) {
+            spdlog::warn("Config: disabling direct memory_sync; writer_auth_required=true and "
+                         "writer_auth_manifest are required for authenticated cold bootstrap");
+            policy.enabled = false;
+        }
+    } else if (policy.writerAuthRequired && policy.mode == "persistent-migration") {
         spdlog::warn("Config: disabling memory_sync; legacy migration cannot run with writer "
                      "authentication");
         policy.enabled = false;
@@ -1791,7 +1853,6 @@ bool ConfigResolver::applyMemorySync(const ConfigSections& sections, DaemonConfi
                !yams::memory_sync::isCanonicalSessionId(policy.sessionId)) {
         spdlog::warn("Config: disabling temporary memory_sync; session_id is required");
         policy.enabled = false;
-        // pi-lens-ignore: clang:no_member
     } else if (policy.mode == "temporary" && policy.temporarySessionTtlMs != 0 &&
                policy.temporarySessionTtlMs < policy.syncIntervalMs * 3ULL) {
         spdlog::warn("Config: disabling temporary memory_sync; temporary_session_ttl_ms must be "
@@ -1800,15 +1861,8 @@ bool ConfigResolver::applyMemorySync(const ConfigSections& sections, DaemonConfi
     } else if (policy.backend != "filesystem" && policy.backend != "s3") {
         spdlog::warn("Config: disabling invalid memory_sync.backend '{}'", policy.backend);
         policy.enabled = false;
-    } else if (!yams::memory_sync::isCanonicalWriterUuid(policy.nodeId)) {
-        spdlog::warn("Config: disabling memory_sync; node_id must be a canonical UUID");
-        policy.enabled = false;
-    } else if (!yams::memory_sync::isCanonicalCorpusId(policy.corpusId) ||
-               policy.corpusEpoch == 0) {
-        spdlog::warn("Config: disabling memory_sync; corpus_id and corpus_epoch are required");
-        policy.enabled = false;
     } else if (policy.path.empty()) {
-        spdlog::warn("Config: disabling memory_sync with empty path");
+        spdlog::warn("Config: disabling shared-store memory_sync with empty path");
         policy.enabled = false;
     }
     const bool valid = policy.enabled;

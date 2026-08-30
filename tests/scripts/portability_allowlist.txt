@@ -119,7 +119,7 @@ plugins/symbol_extractor_treesitter/grammar_loader.cpp:411:portability/env-read 
 plugins/symbol_extractor_treesitter/grammar_loader.cpp:413:portability/env-read # reviewed raw environment read
 plugins/symbol_extractor_treesitter/plugin_api.cpp:28:portability/env-read # reviewed raw environment read
 plugins/symbol_extractor_treesitter/plugin_api.cpp:102:portability/env-read # reviewed raw environment read
-src/app/services/document_service.cpp:1197:portability/env-read # reviewed raw environment read
+src/app/services/document_service.cpp:1207:portability/env-read # reviewed raw environment read
 src/app/services/search_service.cpp:655:portability/env-read # reviewed raw environment read
 src/app/services/search_service.cpp:736:portability/env-read # reviewed raw environment read
 src/app/services/session_service.cpp:18:portability/env-read # reviewed raw environment read
@@ -182,12 +182,9 @@ src/daemon/components/EmbeddingService.cpp:2602:portability/env-read # reviewed 
 src/daemon/components/IngestService.cpp:56:portability/env-read # reviewed raw environment read
 src/daemon/components/LifecycleComponent.cpp:808:portability/env-read # reviewed raw environment read
 src/daemon/components/LifecycleComponent.cpp:818:portability/env-read # reviewed raw environment read
-src/daemon/components/RequestDispatcher.cpp:466:portability/env-read # reviewed raw environment read
-src/daemon/components/RequestDispatcher.cpp:469:portability/env-read # reviewed raw environment read
+src/daemon/components/RequestDispatcher.cpp:557:portability/env-read # reviewed raw environment read
+src/daemon/components/RequestDispatcher.cpp:560:portability/env-read # reviewed raw environment read
 src/daemon/components/RequestExecutor.cpp:44:portability/env-read # reviewed raw environment read
-src/daemon/components/dispatcher/request_dispatcher_documents.cpp:626:portability/env-read # reviewed raw environment read
-src/daemon/components/dispatcher/request_dispatcher_documents.cpp:717:portability/env-read # reviewed raw environment read
-src/daemon/components/dispatcher/request_dispatcher_documents.cpp:1707:portability/env-read # reviewed raw environment read
 src/daemon/components/dispatcher/request_dispatcher_models.cpp:38:portability/env-read # reviewed raw environment read
 src/detection/file_type_detector.cpp:612:portability/env-read # reviewed raw environment read
 src/detection/file_type_detector.cpp:655:portability/env-read # reviewed raw environment read
@@ -502,7 +499,7 @@ tests/unit/daemon/components/vector_system_manager_test.cpp:129:portability/env-
 tests/unit/daemon/components/vector_system_manager_test.cpp:130:portability/env-read # reviewed raw environment read
 tests/unit/daemon/daemon_background_processing_test.cpp:679:portability/env-read # reviewed raw environment read
 tests/unit/daemon/daemon_catch2_test.cpp:1400:portability/env-read # reviewed raw environment read
-tests/unit/daemon/daemon_metrics_status_test.cpp:946:portability/env-read # reviewed raw environment read
+tests/unit/daemon/daemon_metrics_status_test.cpp:948:portability/env-read # reviewed raw environment read
 tests/unit/daemon/onnx_embedding_diagnostic_test.cpp:36:portability/env-read # reviewed raw environment read
 tests/unit/daemon/onnx_embedding_diagnostic_test.cpp:44:portability/env-read # reviewed raw environment read
 tests/unit/daemon/onnx_embedding_diagnostic_test.cpp:52:portability/env-read # reviewed raw environment read

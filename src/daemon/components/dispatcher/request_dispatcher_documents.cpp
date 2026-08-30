@@ -1,5 +1,6 @@
 // Split from RequestDispatcher.cpp: document/search/grep/download/cancel handlers
 #define YAMS_DAEMON_TEST_HOOKS_IMPL 1
+// pi-lens-ignore: fatal error
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
@@ -21,6 +22,7 @@
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
 #include <yams/common/fs_utils.h>
+#include <yams/config/config_helpers.h>
 #include <yams/crypto/hasher.h>
 #include <yams/daemon/components/admission_control.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
@@ -623,12 +625,12 @@ void maybeThrowForcedDocumentsHashFailure() {
 }
 
 int envIntOrDefault(const char* name, int fallback, int minValue, int maxValue) {
-    const char* raw = std::getenv(name);
-    if (!raw || !*raw) {
+    const auto raw = yams::config::getenv_optional(name);
+    if (!raw || raw->empty()) {
         return fallback;
     }
     try {
-        int parsed = std::stoi(raw);
+        int parsed = std::stoi(*raw);
         return std::clamp(parsed, minValue, maxValue);
     } catch (...) {
         return fallback;
@@ -714,11 +716,11 @@ struct ReadySingleFileAddPlan {
 };
 
 bool envRequestsSyncSingleFileAdd() {
-    const char* envSync = std::getenv("YAMS_SYNC_SINGLE_FILE_ADD");
-    if (!envSync || !*envSync) {
+    const auto envSync = yams::config::getenv_optional("YAMS_SYNC_SINGLE_FILE_ADD");
+    if (!envSync || envSync->empty()) {
         return false;
     }
-    std::string value(envSync);
+    std::string value(*envSync);
     std::transform(value.begin(), value.end(), value.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return value == "1" || value == "true" || value == "yes" || value == "on";
@@ -807,7 +809,11 @@ ImmediateAddFingerprint computeImmediateAddFingerprint(const AddDocumentRequest&
             fingerprint.fileSize = beforeSize;
             fingerprint.lastWriteTimeNs = fileTimeNs(beforeMtime);
         }
+    } catch (const std::exception& error) {
+        spdlog::debug("[RequestDispatcher] immediate add fingerprint unavailable: {}",
+                      error.what());
     } catch (...) {
+        spdlog::debug("[RequestDispatcher] immediate add fingerprint unavailable");
     }
     return fingerprint;
 }
@@ -1383,6 +1389,12 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
             serviceReq.keepRefs = req.keepRefs;
             serviceReq.recursive = req.recursive;
             serviceReq.verbose = req.verbose;
+            if (!req.dryRun) {
+                serviceReq.beforeDelete = [manager = serviceManager_,
+                                           retainContent = req.keepRefs](std::string_view hash) {
+                    return manager->stageMemorySyncDocumentDelete(hash, retainContent);
+                };
+            }
             if (!req.directory.empty()) {
                 if (!req.recursive) {
                     co_return yams::daemon::dispatch::makeErrorResponse(
@@ -1408,6 +1420,7 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
             response.dryRun = serviceResp.dryRun;
             response.successCount = 0;
             response.failureCount = 0;
+            std::vector<std::string> replicatedDeletes;
             for (const auto& deleteResult : serviceResp.deleted) {
                 DeleteResponse::DeleteResult daemonResult;
                 daemonResult.name = deleteResult.name;
@@ -1419,6 +1432,9 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
                     response.successCount++;
                     if (lifecycle_ && !deleteResult.hash.empty()) {
                         lifecycle_->onDocumentRemoved(deleteResult.hash);
+                    }
+                    if (!response.dryRun && !deleteResult.hash.empty()) {
+                        replicatedDeletes.push_back(deleteResult.hash);
                     }
                 } else {
                     response.failureCount++;
@@ -1438,6 +1454,27 @@ boost::asio::awaitable<Response> RequestDispatcher::handleDeleteRequest(const De
             if (response.results.empty() && !response.dryRun) {
                 co_return yams::daemon::dispatch::makeErrorResponse(
                     ErrorCode::NotFound, "No documents found matching criteria");
+            }
+            if (!replicatedDeletes.empty()) {
+                auto published = co_await yams::daemon::dispatch::offload_to_worker(
+                    serviceManager_,
+                    [manager = serviceManager_, hashes = std::move(replicatedDeletes),
+                     retainContent = req.keepRefs] {
+                        for (const auto& hash : hashes) {
+                            if (auto result =
+                                    manager->publishMemorySyncDocumentDelete(hash, retainContent);
+                                !result) {
+                                return result;
+                            }
+                        }
+                        return Result<void>();
+                    });
+                if (!published) {
+                    co_return yams::daemon::dispatch::makeErrorResponse(
+                        published.error().code,
+                        "document deleted locally but tombstone publication failed: " +
+                            published.error().message);
+                }
             }
             co_return response;
         });
@@ -1704,8 +1741,8 @@ RequestDispatcher::handleDownloadRequest(const DownloadRequest& req) {
         "download", [this, req]() -> boost::asio::awaitable<Response> {
             auto policy = serviceManager_->getConfig().downloadPolicy;
             const auto dataDir = serviceManager_->getConfig().dataDir;
-            if (const char* v = std::getenv("YAMS_ENABLE_DAEMON_DOWNLOAD")) {
-                const auto enabled = lowercaseCopy(v);
+            if (const auto value = yams::config::getenv_optional("YAMS_ENABLE_DAEMON_DOWNLOAD")) {
+                const auto enabled = lowercaseCopy(*value);
                 if (enabled == "1" || enabled == "true") {
                     policy.enable = true;
                 }
@@ -1985,7 +2022,9 @@ RequestDispatcher::handleFileHistoryRequest(const FileHistoryRequest& req) {
                         value.type == metadata::MetadataValueType::String) {
                         try {
                             snapshotTimes[""] = std::stoll(value.asString());
-                        } catch (...) {
+                        } catch (const std::exception& error) {
+                            spdlog::debug("[FileHistory] invalid snapshot_time for doc {}: {}",
+                                          doc.id, error.what());
                         }
                         continue;
                     }
@@ -1993,7 +2032,9 @@ RequestDispatcher::handleFileHistoryRequest(const FileHistoryRequest& req) {
                         value.type == metadata::MetadataValueType::String) {
                         try {
                             snapshotTimes[key.substr(14)] = std::stoll(value.asString());
-                        } catch (...) {
+                        } catch (const std::exception& error) {
+                            spdlog::debug("[FileHistory] invalid {} for doc {}: {}", key, doc.id,
+                                          error.what());
                         }
                         continue;
                     }

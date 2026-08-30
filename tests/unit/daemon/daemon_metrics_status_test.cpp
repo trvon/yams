@@ -47,9 +47,11 @@
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
+#include <yams/memory_sync/memory_sync_service.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
+#include <yams/storage/storage_backend.h>
 #include <yams/vector/vector_database.h>
 #include <yams/version.hpp>
 
@@ -621,7 +623,7 @@ public:
                                                api::ProgressCallback) override {
         return ErrorCode::NotImplemented;
     }
-    Result<bool> exists(const std::string&) const override { return ErrorCode::NotImplemented; }
+    Result<bool> exists(const std::string& hash) const override { return blobs_.contains(hash); }
     Result<bool> remove(const std::string& hash) override {
         if (auto it = removeResults_.find(hash); it != removeResults_.end()) {
             return it->second;
@@ -2407,6 +2409,44 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         REQUIRE(deleteResp.results.size() == 2);
         CHECK(lifecycle.removedHashes().size() == 1);
         CHECK(lifecycle.removedHashes().front() == successDoc.sha256Hash);
+    }
+
+    SECTION("delete publishes durable document and content tombstones") {
+        auto repo = std::make_shared<StubPruneMetadataRepository>();
+        auto store = std::make_shared<StubContentStore>();
+        const std::string hash(64, 'a');
+        auto doc = makeDoc(23, "/tmp/delete/replicated.txt", hash);
+        repo->addDocument(doc);
+        store->setBlob(hash, "replicated");
+        svc.__test_setMetadataRepo(repo);
+        svc.__test_setContentStore(store);
+
+        storage::BackendConfig backendConfig;
+        backendConfig.type = "filesystem";
+        backendConfig.localPath = cfg.dataDir / "memory-sync";
+        auto backend = std::make_unique<storage::FilesystemBackend>();
+        REQUIRE(backend->initialize(backendConfig).has_value());
+        auto sync = std::make_unique<memory_sync::MemorySyncService>(
+            std::move(backend),
+            memory_sync::MemorySyncConfig{"delete-node", 60'000, "delete-corpus", 1});
+        REQUIRE(sync->syncFully().has_value());
+        svc.testingSetMemorySyncService(std::move(sync));
+
+        DeleteRequest req;
+        req.hash = hash;
+        req.force = true;
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<DeleteResponse>(resp));
+        CHECK(std::get<DeleteResponse>(resp).successCount == 1);
+        memory_sync::VersionVector empty;
+        auto deltas = svc.testingMemorySyncService()->exportLocalDeltasAfter(empty, 4);
+        REQUIRE(deltas.has_value());
+        REQUIRE(deltas.value().deltas.size() == 2);
+        CHECK(deltas.value().deltas[0].logicalKey == "content-blob/" + hash);
+        CHECK(deltas.value().deltas[0].record.isTombstone());
+        CHECK(deltas.value().deltas[1].logicalKey == "document/" + hash);
+        CHECK(deltas.value().deltas[1].record.isTombstone());
     }
 
     SECTION("delete reports missing content store") {

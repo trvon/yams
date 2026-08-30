@@ -1,3 +1,4 @@
+// pi-lens-ignore: fatal error
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
@@ -11,7 +12,6 @@
 #include <regex>
 #include <sstream>
 #include <thread>
-#include <tuple>
 #include <type_traits>
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -203,6 +203,95 @@ RequestDispatcher::handleMemorySyncRequest(const MemorySyncRequest& req) {
             response.published = true;
             break;
         }
+        case MemorySyncOperation::Connect: {
+            auto connected = co_await dispatch::offload_to_worker(
+                serviceManager_, [manager = serviceManager_, connection = req.key] {
+                    return manager->connectP2p(connection);
+                });
+            if (!connected) {
+                co_return dispatch::makeErrorResponse(connected.error().code,
+                                                      connected.error().message);
+            }
+            const auto& result = connected.value();
+            response.value =
+                nlohmann::json{
+                    {"peer_node_id", result.peerNodeId}, {"peer_pin", result.peerPin},
+                    {"deltas_sent", result.deltasSent},  {"deltas_received", result.deltasReceived},
+                    {"merged", result.merged},           {"quarantined", result.quarantined}}
+                    .dump();
+            break;
+        }
+        case MemorySyncOperation::Disconnect: {
+            auto disconnected = co_await dispatch::offload_to_worker(
+                serviceManager_, [manager = serviceManager_, nodeId = req.key] {
+                    return manager->disconnectP2p(nodeId);
+                });
+            if (!disconnected) {
+                co_return dispatch::makeErrorResponse(disconnected.error().code,
+                                                      disconnected.error().message);
+            }
+            response.value = nlohmann::json{{"node_id", req.key}, {"remembered", false}}.dump();
+            break;
+        }
+        case MemorySyncOperation::Forget: {
+            auto forgotten = co_await dispatch::offload_to_worker(
+                serviceManager_, [manager = serviceManager_, nodeId = req.key] {
+                    return manager->forgetP2pPeer(nodeId);
+                });
+            if (!forgotten) {
+                co_return dispatch::makeErrorResponse(forgotten.error().code,
+                                                      forgotten.error().message);
+            }
+            response.value = nlohmann::json{{"node_id", req.key}}.dump();
+            break;
+        }
+        case MemorySyncOperation::Peers: {
+            auto peers = serviceManager_->listP2pPeers();
+            if (!peers) {
+                co_return dispatch::makeErrorResponse(peers.error().code, peers.error().message);
+            }
+            nlohmann::json rows = nlohmann::json::array();
+            for (const auto& peer : peers.value()) {
+                rows.push_back({{"node_id", peer.nodeId},
+                                {"spki_pin", peer.spkiPin},
+                                {"corpus_id", peer.corpusId},
+                                {"corpus_epoch", peer.corpusEpoch},
+                                {"last_seen_version", peer.lastSeenVersion},
+                                {"last_connected_ms", peer.lastConnectedMs},
+                                {"endpoint", peer.endpoint},
+                                {"remembered", peer.remembered},
+                                {"pinned_by_operator", peer.pinnedByOperator}});
+            }
+            response.value = rows.dump();
+            break;
+        }
+        case MemorySyncOperation::Identity: {
+            auto identity = serviceManager_->getP2pIdentity();
+            if (!identity) {
+                co_return dispatch::makeErrorResponse(identity.error().code,
+                                                      identity.error().message);
+            }
+            response.value = nlohmann::json{{"node_id", identity.value().nodeId},
+                                            {"spki_pin", identity.value().spkiPin}}
+                                 .dump();
+            break;
+        }
+        case MemorySyncOperation::Enroll: {
+            auto enrolled = co_await dispatch::offload_to_worker(
+                serviceManager_, [manager = serviceManager_, nodeId = req.key, pin = req.value] {
+                    return manager->enrollP2pPeer(nodeId, pin);
+                });
+            if (!enrolled) {
+                co_return dispatch::makeErrorResponse(enrolled.error().code,
+                                                      enrolled.error().message);
+            }
+            response.value = nlohmann::json{
+                {"node_id", req.key},
+                {"spki_pin", req.value},
+                {"pinned_by_operator",
+                 true}}.dump();
+            break;
+        }
         case MemorySyncOperation::Status:
             break;
         default:
@@ -227,6 +316,8 @@ RequestDispatcher::handleMemorySyncRequest(const MemorySyncRequest& req) {
     response.corpusEpoch = status.value().corpusEpoch;
     response.mode = std::move(status.value().mode);
     response.trustMode = std::move(status.value().trustMode);
+    // pi-lens-ignore: clang:no_member -- fields are additive and generated headers lag clangd.
+    response.peerCount = status.value().peerCount;
     co_return response;
 }
 

@@ -55,6 +55,11 @@ if tracy_enabled
   message('Tracy profiling enabled for daemon')
 endif
 
+daemon_platform_deps = []
+if host_machine.system() == 'windows'
+  daemon_platform_deps += cpp.find_library('advapi32', required: true)
+endif
+
 daemon_testing_cpp_args = []
 if get_option('build-tests') or get_option('build-benchmarks')
   daemon_testing_cpp_args += [
@@ -72,6 +77,11 @@ yams_daemon_lib = static_library('yams_daemon',
     'daemon.cpp',
     'daemon_lifecycle.cpp',
     'embedded_service_host.cpp',
+    'p2p/p2p_transport.cpp',
+    'p2p/p2p_protocol.cpp',
+    'p2p/p2p_delta.cpp',
+    'p2p/peer_registry.cpp',
+    'p2p/p2p_manager.cpp',
     'components/BackgroundTaskManager.cpp',
     'components/CheckpointManager.cpp',
     'components/DaemonMetrics.cpp',
@@ -176,7 +186,7 @@ yams_daemon_lib = static_library('yams_daemon',
     nlohmann_json_dep,
     protobuf_dep,
     version_generated_dep,
-  ] + tracy_deps,
+  ] + tracy_deps + daemon_platform_deps,
   cpp_args: tracy_args + daemon_testing_cpp_args + (cpp.get_id() == 'msvc' ? ['/wd4100'] : ['-Wno-unused-parameter']),
   include_directories: [
     include_directories('../../include'),
@@ -189,7 +199,7 @@ yams_daemon_lib = static_library('yams_daemon',
 yams_daemon_dep = declare_dependency(
   link_with: yams_daemon_lib,
   include_directories: [include_directories('../../include'), generated_inc],
-  dependencies: [yams_daemon_client_dep, version_generated_dep],
+  dependencies: [yams_daemon_client_dep, version_generated_dep] + daemon_platform_deps,
 )
 
 meson.override_dependency('yams_daemon', yams_daemon_dep)

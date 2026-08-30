@@ -3330,7 +3330,18 @@ struct ListTreeDiffRequest {
 
 // Memory-sync operations are routed to the lifecycle-owned service. The value is
 // binary-safe and encoded as a protobuf bytes field by ProtoSerializer.
-enum class MemorySyncOperation : std::uint32_t { Publish = 0, Read = 1, Status = 2, Delete = 3 };
+enum class MemorySyncOperation : std::uint32_t {
+    Publish = 0,
+    Read = 1,
+    Status = 2,
+    Delete = 3,
+    Connect = 4,
+    Disconnect = 5,
+    Peers = 6,
+    Identity = 7,
+    Enroll = 8,
+    Forget = 9
+};
 
 struct MemorySyncRequest {
     MemorySyncOperation operation{MemorySyncOperation::Status};
@@ -3351,7 +3362,7 @@ struct MemorySyncRequest {
         if (!operation) {
             return operation.error();
         }
-        if (operation.value() > static_cast<std::uint32_t>(MemorySyncOperation::Delete)) {
+        if (operation.value() > static_cast<std::uint32_t>(MemorySyncOperation::Enroll)) {
             return Error{ErrorCode::InvalidArgument, "invalid memory sync operation"};
         }
         request.operation = static_cast<MemorySyncOperation>(operation.value());

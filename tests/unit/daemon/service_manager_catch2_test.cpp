@@ -2,7 +2,13 @@
 // Migration: yams-3s4 (daemon unit tests)
 // Unit tests for ServiceManager component - construction, initialization, and service access
 
+// pi-lens-ignore: fatal error
 #include <catch2/catch_test_macros.hpp>
+
+#include <nlohmann/json.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/use_future.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -14,6 +20,11 @@
 #include <stdexcept>
 #include <system_error>
 #include <thread>
+
+#ifdef _WIN32
+#include <aclapi.h>
+#include <windows.h>
+#endif
 
 #include "../../common/test_helpers_catch2.h"
 
@@ -27,6 +38,7 @@
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/daemon.h>
+#include <yams/memory_sync/writer_auth.h>
 #include <yams/metadata/database.h>
 
 namespace fs = std::filesystem;
@@ -221,6 +233,62 @@ private:
     std::shared_ptr<PluginHostLifecycleCounters> counters_;
 };
 
+fs::path writeProtectedWriterManifest(const fs::path& directory, std::string_view nodeId,
+                                      std::string_view corpusId, std::uint64_t corpusEpoch) {
+    auto keys = memory_sync::generateWriterKeyPair();
+    REQUIRE(keys.has_value());
+    const auto privateKey = directory / "writer-private.pem";
+    const auto publicKey = directory / "writer-public.pem";
+    REQUIRE(
+        ServiceManager::__test_writeProtectedP2pPrivateKey(privateKey, keys.value().privateKeyPem)
+            .has_value());
+    REQUIRE(ServiceManager::__test_writeProtectedP2pPrivateKey(publicKey, keys.value().publicKeyPem)
+                .has_value());
+    const auto manifest = directory / "writers.json";
+    const nlohmann::json content{
+        {"schema_version", 1},
+        {"corpus_id", corpusId},
+        {"corpus_epoch", corpusEpoch},
+        {"local_key",
+         {{"writer_id", nodeId},
+          {"key_id", "local-v1"},
+          {"private_key_path", privateKey.string()}}},
+        {"trusted_writers", nlohmann::json::array({{{"writer_id", nodeId},
+                                                    {"key_id", "local-v1"},
+                                                    {"public_key_path", publicKey.string()}}})}};
+    REQUIRE(
+        ServiceManager::__test_writeProtectedP2pPrivateKey(manifest, content.dump()).has_value());
+    return manifest;
+}
+
+void grantUntrustedKeyAccess(const fs::path& keyPath, bool writable) {
+#ifdef _WIN32
+    BYTE worldSid[SECURITY_MAX_SID_SIZE];
+    DWORD worldSidBytes = sizeof(worldSid);
+    REQUIRE(CreateWellKnownSid(WinWorldSid, nullptr, worldSid, &worldSidBytes));
+    PACL currentAcl = nullptr;
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    REQUIRE(GetNamedSecurityInfoW(const_cast<wchar_t*>(keyPath.c_str()), SE_FILE_OBJECT,
+                                  DACL_SECURITY_INFORMATION, nullptr, nullptr, &currentAcl, nullptr,
+                                  &descriptor) == ERROR_SUCCESS);
+    EXPLICIT_ACCESSW access{};
+    access.grfAccessPermissions = writable ? GENERIC_WRITE : GENERIC_READ;
+    access.grfAccessMode = GRANT_ACCESS;
+    access.grfInheritance = NO_INHERITANCE;
+    BuildTrusteeWithSidW(&access.Trustee, worldSid);
+    PACL broadenedAcl = nullptr;
+    REQUIRE(SetEntriesInAclW(1, &access, currentAcl, &broadenedAcl) == ERROR_SUCCESS);
+    REQUIRE(SetNamedSecurityInfoW(const_cast<wchar_t*>(keyPath.c_str()), SE_FILE_OBJECT,
+                                  DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                  nullptr, nullptr, broadenedAcl, nullptr) == ERROR_SUCCESS);
+    LocalFree(broadenedAcl);
+    LocalFree(descriptor);
+#else
+    fs::permissions(keyPath, writable ? fs::perms::group_write : fs::perms::group_read,
+                    fs::perm_options::add);
+#endif
+}
+
 } // namespace
 
 // Test fixture for ServiceManager tests
@@ -343,6 +411,232 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     CHECK((result.error().code == ErrorCode::IOError));
     CHECK((result.error().message.find("Failed to create data directory") != std::string::npos));
     CHECK((result.error().message.find(config_.dataDir.string()) != std::string::npos));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager rejects direct P2P without usable writer authentication",
+                 "[daemon][service_manager][p2p][security][config]") {
+    config_.memorySync.enabled = true;
+    config_.memorySync.transport = "direct";
+    config_.memorySync.nodeId = "123e4567-e89b-42d3-a456-42661417400a";
+    config_.memorySync.corpusId = "missing-writer-auth";
+    config_.memorySync.corpusEpoch = 1;
+
+    ServiceManager manager(config_, state_, lifecycleFsm_);
+    REQUIRE(manager.initialize().has_value());
+    boost::asio::io_context io;
+    compat::stop_source stopSource;
+    auto future = boost::asio::co_spawn(
+        io, manager.initializeAsyncAwaitable(stopSource.get_token()), boost::asio::use_future);
+    io.run();
+    const auto initialized = future.get();
+    REQUIRE_FALSE(initialized.has_value());
+    CHECK(initialized.error().code == ErrorCode::InvalidArgument);
+    CHECK(initialized.error().message.find("writer_auth_required=true") != std::string::npos);
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager rejects provenance-unknown direct operation stores",
+                 "[daemon][service_manager][p2p][security][migration]") {
+    const std::string nodeId = "123e4567-e89b-42d3-a456-42661417400a";
+    const std::string corpusId = "legacy-direct-store";
+    const auto manifest = writeProtectedWriterManifest(testDir_, nodeId, corpusId, 2);
+    const auto legacyObject = config_.dataDir / "p2p" / "op-store" / "legacy" / "record.json";
+    fs::create_directories(legacyObject.parent_path());
+    std::ofstream(legacyObject) << "unsigned-history";
+
+    config_.memorySync.enabled = true;
+    config_.memorySync.transport = "direct";
+    config_.memorySync.nodeId = nodeId;
+    config_.memorySync.corpusId = corpusId;
+    config_.memorySync.corpusEpoch = 2;
+    config_.memorySync.writerAuthRequired = true;
+    config_.memorySync.writerAuthManifestPath = manifest.string();
+
+    ServiceManager manager(config_, state_, lifecycleFsm_);
+    REQUIRE(manager.initialize().has_value());
+    boost::asio::io_context io;
+    compat::stop_source stopSource;
+    auto future = boost::asio::co_spawn(
+        io, manager.initializeAsyncAwaitable(stopSource.get_token()), boost::asio::use_future);
+    io.run();
+    const auto initialized = future.get();
+    REQUIRE_FALSE(initialized.has_value());
+    CHECK(initialized.error().code == ErrorCode::InvalidState);
+    CHECK(initialized.error().message.find("provenance-unknown") != std::string::npos);
+    CHECK(fs::exists(legacyObject));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager rejects symbolic-link P2P identity keys",
+                 "[daemon][service_manager][p2p][security]") {
+#ifdef _WIN32
+    SKIP("symbolic-link permission semantics differ on Windows");
+#else
+    auto generated = memory_sync::generateWriterKeyPair();
+    REQUIRE(generated.has_value());
+    const auto victim = testDir_ / "victim.pem";
+    {
+        std::ofstream output(victim, std::ios::binary | std::ios::trunc);
+        REQUIRE(output.good());
+        output << generated.value().privateKeyPem;
+    }
+    fs::permissions(victim, fs::perms::owner_read | fs::perms::owner_write,
+                    fs::perm_options::replace);
+    const auto publicKey = testDir_ / "identity.pub.pem";
+    {
+        std::ofstream output(publicKey, std::ios::binary | std::ios::trunc);
+        REQUIRE(output.good());
+        output << generated.value().publicKeyPem;
+    }
+    const auto manifest = testDir_ / "writers.json";
+    {
+        nlohmann::json content{
+            {"schema_version", 1},
+            {"corpus_id", "identity-security-test"},
+            {"corpus_epoch", 1},
+            {"local_key",
+             {{"writer_id", "123e4567-e89b-42d3-a456-42661417400a"},
+              {"key_id", "local-v1"},
+              {"private_key_path", victim.string()}}},
+            {"trusted_writers",
+             nlohmann::json::array({{{"writer_id", "123e4567-e89b-42d3-a456-42661417400a"},
+                                     {"key_id", "local-v1"},
+                                     {"public_key_path", publicKey.string()}}})}};
+        std::ofstream output(manifest, std::ios::binary | std::ios::trunc);
+        REQUIRE(output.good());
+        output << content.dump();
+    }
+    const auto identity = testDir_ / "identity.pem";
+    fs::create_symlink(victim, identity);
+
+    config_.memorySync.enabled = true;
+    config_.memorySync.transport = "direct";
+    config_.memorySync.nodeId = "123e4567-e89b-42d3-a456-42661417400a";
+    config_.memorySync.corpusId = "identity-security-test";
+    config_.memorySync.corpusEpoch = 1;
+    config_.memorySync.identityKeyPath = identity.string();
+    config_.memorySync.writerAuthRequired = true;
+    config_.memorySync.writerAuthManifestPath = manifest.string();
+
+    ServiceManager manager(config_, state_, lifecycleFsm_);
+    REQUIRE(manager.initialize().has_value());
+    boost::asio::io_context io;
+    compat::stop_source stopSource;
+    auto future = boost::asio::co_spawn(
+        io, manager.initializeAsyncAwaitable(stopSource.get_token()), boost::asio::use_future);
+    io.run();
+    const auto initialized = future.get();
+    REQUIRE_FALSE(initialized.has_value());
+    CHECK(initialized.error().code == ErrorCode::Unauthorized);
+    CHECK(initialized.error().message.find("symbolic link") != std::string::npos);
+    CHECK(fs::is_symlink(fs::symlink_status(identity)));
+#endif
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager rejects broadly accessible direct writer private keys",
+                 "[daemon][service_manager][p2p][security][platform]") {
+    const std::string nodeId = "123e4567-e89b-42d3-a456-42661417400a";
+    const std::string corpusId = "writer-key-security";
+    const auto manifest = writeProtectedWriterManifest(testDir_, nodeId, corpusId, 1);
+    const auto identity = testDir_ / "separate-identity.pem";
+    REQUIRE(ServiceManager::__test_loadOrCreateP2pPrivateKey(identity).has_value());
+    grantUntrustedKeyAccess(testDir_ / "writer-private.pem", false);
+
+    config_.memorySync.enabled = true;
+    config_.memorySync.transport = "direct";
+    config_.memorySync.nodeId = nodeId;
+    config_.memorySync.corpusId = corpusId;
+    config_.memorySync.corpusEpoch = 1;
+    config_.memorySync.identityKeyPath = identity.string();
+    config_.memorySync.writerAuthRequired = true;
+    config_.memorySync.writerAuthManifestPath = manifest.string();
+
+    ServiceManager manager(config_, state_, lifecycleFsm_);
+    REQUIRE(manager.initialize().has_value());
+    boost::asio::io_context io;
+    compat::stop_source stopSource;
+    auto future = boost::asio::co_spawn(
+        io, manager.initializeAsyncAwaitable(stopSource.get_token()), boost::asio::use_future);
+    io.run();
+    const auto initialized = future.get();
+    REQUIRE_FALSE(initialized.has_value());
+    CHECK(initialized.error().code == ErrorCode::Unauthorized);
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager rejects writable direct writer trust files",
+                 "[daemon][service_manager][p2p][security][platform]") {
+    const std::string nodeId = "123e4567-e89b-42d3-a456-42661417400a";
+    const std::string corpusId = "writer-trust-security";
+    const auto manifest = writeProtectedWriterManifest(testDir_, nodeId, corpusId, 1);
+    const auto identity = testDir_ / "trust-test-identity.pem";
+    REQUIRE(ServiceManager::__test_loadOrCreateP2pPrivateKey(identity).has_value());
+
+    SECTION("writable manifest") {
+        grantUntrustedKeyAccess(manifest, true);
+    }
+    SECTION("writable public key") {
+        grantUntrustedKeyAccess(testDir_ / "writer-public.pem", true);
+    }
+
+    config_.memorySync.enabled = true;
+    config_.memorySync.transport = "direct";
+    config_.memorySync.nodeId = nodeId;
+    config_.memorySync.corpusId = corpusId;
+    config_.memorySync.corpusEpoch = 1;
+    config_.memorySync.identityKeyPath = identity.string();
+    config_.memorySync.writerAuthRequired = true;
+    config_.memorySync.writerAuthManifestPath = manifest.string();
+
+    ServiceManager manager(config_, state_, lifecycleFsm_);
+    REQUIRE(manager.initialize().has_value());
+    boost::asio::io_context io;
+    compat::stop_source stopSource;
+    auto future = boost::asio::co_spawn(
+        io, manager.initializeAsyncAwaitable(stopSource.get_token()), boost::asio::use_future);
+    io.run();
+    const auto initialized = future.get();
+    REQUIRE_FALSE(initialized.has_value());
+    CHECK(initialized.error().code == ErrorCode::Unauthorized);
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager creates owner-only P2P identity keys and rejects broad access",
+                 "[daemon][service_manager][p2p][security][platform]") {
+    const auto identity = testDir_ / "generated-identity.pem";
+    auto created = ServiceManager::__test_loadOrCreateP2pPrivateKey(identity);
+    REQUIRE(created.has_value());
+    REQUIRE_FALSE(created.value().empty());
+    REQUIRE(ServiceManager::__test_loadOrCreateP2pPrivateKey(identity).has_value());
+
+    grantUntrustedKeyAccess(identity, false);
+
+    auto rejected = ServiceManager::__test_loadOrCreateP2pPrivateKey(identity);
+    REQUIRE_FALSE(rejected.has_value());
+    CHECK(rejected.error().code == ErrorCode::Unauthorized);
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager rejects inherited Windows P2P identity ACLs",
+                 "[daemon][service_manager][p2p][security][platform]") {
+#ifndef _WIN32
+    SKIP("Windows ACL-specific coverage");
+#else
+    const auto identity = testDir_ / "inherited-identity.pem";
+    REQUIRE(ServiceManager::__test_loadOrCreateP2pPrivateKey(identity).has_value());
+    PACL currentAcl = nullptr;
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    REQUIRE(GetNamedSecurityInfoW(const_cast<wchar_t*>(identity.c_str()), SE_FILE_OBJECT,
+                                  DACL_SECURITY_INFORMATION, nullptr, nullptr, &currentAcl, nullptr,
+                                  &descriptor) == ERROR_SUCCESS);
+    REQUIRE(SetNamedSecurityInfoW(const_cast<wchar_t*>(identity.c_str()), SE_FILE_OBJECT,
+                                  DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                                  nullptr, nullptr, currentAcl, nullptr) == ERROR_SUCCESS);
+    LocalFree(descriptor);
+    auto rejected = ServiceManager::__test_loadOrCreateP2pPrivateKey(identity);
+    REQUIRE_FALSE(rejected.has_value());
+    CHECK(rejected.error().code == ErrorCode::Unauthorized);
+#endif
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture,

@@ -1755,6 +1755,62 @@ private:
         }
     }
 
+    // Best-effort memory-sync (P2P) status section, rendered through the shared ui helpers.
+    // The fetch is bounded and failures are silent so a slow sync cycle never stalls daemon status.
+    void fetchAndRenderMemorySyncSection(const yams::daemon::ClientConfig& cfg) {
+        namespace ms = yams::daemon;
+        auto res = runDaemonClient(
+            cfg,
+            [](ms::DaemonClient& client) {
+                return client.template call<ms::MemorySyncRequest>(
+                    ms::MemorySyncRequest{ms::MemorySyncOperation::Status, {}, {}});
+            },
+            std::chrono::seconds(3));
+        if (!res || !res.value().started) {
+            return;
+        }
+        const auto& m = res.value();
+        using yams::cli::ui::format_duration;
+        using yams::cli::ui::render_rows;
+        using yams::cli::ui::Row;
+        using yams::cli::ui::section_header;
+        using yams::cli::ui::Severity;
+        using yams::cli::ui::severity_text;
+        auto health = [](bool bad) { return bad ? Severity::Warn : Severity::Good; };
+        std::vector<Row> rows;
+        rows.push_back({"Backend", m.backend, ""});
+        rows.push_back({"Mode", m.mode, ""});
+        rows.push_back(
+            {"Corpus", m.corpusId + " (epoch " + std::to_string(m.corpusEpoch) + ")", ""});
+        rows.push_back({"Node", m.nodeId, ""});
+        const bool strongTrust =
+            m.trustMode == "authenticated-writers" || m.trustMode == "mutual-tls-operator-pinned";
+        rows.push_back({"Trust",
+                        severity_text(strongTrust ? Severity::Good : Severity::Warn, m.trustMode),
+                        ""});
+        if (m.backend == "direct") {
+            rows.push_back({"Peers", std::to_string(m.peerCount), "yams p2p peers for details"});
+        }
+        rows.push_back({"Records", std::to_string(m.records), ""});
+        rows.push_back(
+            {"Quarantined",
+             severity_text(health(m.quarantinedRecords > 0), std::to_string(m.quarantinedRecords)),
+             m.quarantinedRecords > 0 ? "check daemon log for reasons" : ""});
+        rows.push_back({"Auth failures",
+                        severity_text(health(m.authFailures > 0), std::to_string(m.authFailures)),
+                        ""});
+        rows.push_back({"Sync cycles",
+                        std::to_string(m.successfulCycles) + " ok · " +
+                            std::to_string(m.failedCycles) + " failed",
+                        severity_text(health(m.failedCycles > 0), "")});
+        rows.push_back({"Last sync",
+                        severity_text(health(m.lastSuccessAgeMs > 60000),
+                                      format_duration(m.lastSuccessAgeMs / 1000) + " ago"),
+                        ""});
+        std::cout << "\n" << section_header("Memory Sync") << "\n\n";
+        render_rows(std::cout, rows);
+    }
+
     void showStatus() {
         pidFile_ = resolveConfiguredPidFilePath();
 
@@ -2297,6 +2353,9 @@ private:
             }
 
             render_rows(std::cout, overview);
+
+            // Memory sync (P2P) status, best-effort so a slow cycle never stalls the view.
+            fetchAndRenderMemorySyncSection(cfg);
 
             std::vector<std::string> dataDirWarnings;
             if (daemonUsesEphemeralData) {
@@ -3169,6 +3228,9 @@ private:
                     std::cout << "\n" << section_header("Data Directory Warnings") << "\n\n";
                     render_rows(std::cout, dataDirWarningRows);
                 }
+
+                // Memory sync (P2P) status, best-effort so a slow cycle never stalls the view.
+                fetchAndRenderMemorySyncSection(cfg);
 
                 // Only show Readiness section if there are issues or non-ready components
                 std::vector<Row> issueRows;

@@ -612,6 +612,14 @@ else
       timeout: 60,
       args: ['Daemon memory sync periodically converges and stops cleanly', '--allow-running-no-tests'],
     )
+    test('daemon_memory_sync_delete_integrity',
+      memory_sync_service_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 60,
+      args: ['Production document deletion also replicates content-byte deletion', '--allow-running-no-tests'],
+    )
     test('daemon_memory_sync_apply_stop',
       memory_sync_service_integration_exe,
       suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
@@ -619,6 +627,14 @@ else
       is_parallel: false,
       timeout: 60,
       args: ['Daemon memory sync stop during production apply prevents later adapters', '--allow-running-no-tests'],
+    )
+    test('daemon_memory_sync_apply_serialization',
+      memory_sync_service_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 60,
+      args: ['Daemon serializes concurrent memory sync apply callbacks', '--allow-running-no-tests'],
     )
     test('daemon_memory_sync_prerequisites',
       memory_sync_service_integration_exe,
@@ -651,6 +667,22 @@ else
       is_parallel: false,
       timeout: 60,
       args: ['Daemon memory sync backfill budget resumes document cursor', '--allow-running-no-tests'],
+    )
+    test('daemon_memory_sync_poisoned_blob',
+      memory_sync_service_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 60,
+      args: ['Daemon memory sync backfill skips a poisoned blob and continues', '--allow-running-no-tests'],
+    )
+    test('daemon_memory_sync_direct_delta_hydration',
+      memory_sync_service_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 60,
+      args: ['Daemon direct deltas immediately hydrate content and metadata', '--allow-running-no-tests'],
     )
     test('daemon_memory_sync_temporary',
       memory_sync_service_integration_exe,
