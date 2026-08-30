@@ -1544,13 +1544,19 @@ private:
         return {};
     }
 
-    std::string coldBootstrapRoot(const ColdBootstrapSnapshot& snapshot) const {
+    static nlohmann::json
+    commitmentsJson(const std::map<NodeId, WriterHistoryCommitment>& commitments) {
         nlohmann::json commitmentJson = nlohmann::json::array();
-        for (const auto& [writer, commitment] : snapshot.commitments) {
+        for (const auto& [writer, commitment] : commitments) {
             commitmentJson.push_back({{"writer_id", writer},
                                       {"counter", commitment.counter},
                                       {"digest", commitment.digest}});
         }
+        return commitmentJson;
+    }
+
+    std::string coldBootstrapRoot(const ColdBootstrapSnapshot& snapshot) const {
+        auto commitmentJson = commitmentsJson(snapshot.commitments);
         nlohmann::json winnerJson = nlohmann::json::array();
         std::vector<const MemoryDelta*> ordered;
         ordered.reserve(snapshot.winners.size());
@@ -3125,12 +3131,7 @@ private:
         for (const auto& [writer, source] : quarantinedWriters) {
             quarantineJson.push_back({{"writer_id", writer}, {"source_node_id", source}});
         }
-        nlohmann::json commitmentJson = nlohmann::json::array();
-        for (const auto& [writer, commitment] : commitments) {
-            commitmentJson.push_back({{"writer_id", writer},
-                                      {"counter", commitment.counter},
-                                      {"digest", commitment.digest}});
-        }
+        auto commitmentJson = commitmentsJson(commitments);
         auto artifact = nlohmann::json{{"schema_version", 1},
                                        {"corpus_id", corpusId_},
                                        {"corpus_epoch", corpusEpoch_},

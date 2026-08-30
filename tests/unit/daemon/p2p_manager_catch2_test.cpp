@@ -11,11 +11,10 @@
 #include <yams/memory_sync/writer_auth.h>
 #include <yams/storage/storage_backend.h>
 
-#include <algorithm>
-#include <array>
+#include "common/p2p_test_helpers.h"
+
 #include <atomic>
 #include <chrono>
-#include <cstring>
 #include <filesystem>
 #include <future>
 #include <memory>
@@ -30,31 +29,67 @@ using yams::daemon::p2p::P2pManagerOptions;
 using yams::memory_sync::MemorySyncService;
 
 namespace {
+using namespace yams::p2p_test;
+
+// Distinct key pair per writer identity so tests catch origin-binding regressions: a
+// record claiming origin "server-node" but signed with "client-node"'s key must fail
+// verification. The fixed set mirrors the writer ids used across these tests.
+struct TestWriterKeys {
+    yams::memory_sync::WriterKeyPair node;
+    yams::memory_sync::WriterKeyPair clientNode;
+    yams::memory_sync::WriterKeyPair serverNode;
+};
+
+const TestWriterKeys& testWriterKeys() {
+    static const TestWriterKeys keys = [] {
+        auto generate = [] {
+            auto generated = yams::memory_sync::generateWriterKeyPair();
+            if (!generated) {
+                throw std::runtime_error(generated.error().message);
+            }
+            return generated.value();
+        };
+        return TestWriterKeys{generate(), generate(), generate()};
+    }();
+    return keys;
+}
+
+const yams::memory_sync::WriterKeyPair* keyForWriter(const std::string& writerId) {
+    const auto& keys = testWriterKeys();
+    if (writerId == "node") {
+        return &keys.node;
+    }
+    if (writerId == "client-node") {
+        return &keys.clientNode;
+    }
+    if (writerId == "server-node") {
+        return &keys.serverNode;
+    }
+    return nullptr;
+}
 
 std::shared_ptr<const yams::memory_sync::WriterAuthenticator>
 testWriterAuthenticator(const std::string& writerId, const std::string& corpusId,
                         std::uint64_t corpusEpoch) {
-    static const auto keys = [] {
-        auto generated = yams::memory_sync::generateWriterKeyPair();
-        if (!generated) {
-            throw std::runtime_error(generated.error().message);
-        }
-        return generated.value();
-    }();
+    const auto& keys = testWriterKeys();
+    const auto* selfKey = keyForWriter(writerId);
+    if (selfKey == nullptr) {
+        throw std::runtime_error("test writer id not in the fixed test key set: " + writerId);
+    }
     yams::memory_sync::WriterAuthConfig config;
     config.required = true;
     config.localWriterId = writerId;
-    config.localKeyId = "manager-test-v1";
-    config.localPrivateKeyPem = keys.privateKeyPem;
-    for (const auto& trustedId :
-         std::array<std::string, 4>{"node", "client-node", "server-node", writerId}) {
-        if (std::ranges::none_of(config.trustedKeys, [&](const auto& trusted) {
-                return trusted.writerId == trustedId;
-            })) {
-            config.trustedKeys.push_back(yams::memory_sync::TrustedWriterKey{
-                trustedId, config.localKeyId, keys.publicKeyPem, false});
-        }
-    }
+    config.localKeyId = writerId + "-v1";
+    config.localPrivateKeyPem = selfKey->privateKeyPem;
+    // Trust every known writer with its own distinct key; each record's origin is bound to
+    // the key that signed it, so cross-writer forgery fails verification.
+    const auto trust = [&](const std::string& id, const yams::memory_sync::WriterKeyPair& key) {
+        config.trustedKeys.push_back(
+            yams::memory_sync::TrustedWriterKey{id, id + "-v1", key.publicKeyPem, false});
+    };
+    trust("node", keys.node);
+    trust("client-node", keys.clientNode);
+    trust("server-node", keys.serverNode);
     auto authenticator =
         yams::memory_sync::WriterAuthenticator::create(std::move(config), corpusId, corpusEpoch);
     if (!authenticator) {
@@ -71,32 +106,12 @@ struct MemorySyncConfig : yams::memory_sync::MemorySyncConfig {
                                               "manager-test-control-scope") {}
 };
 
-struct TempDir {
-    explicit TempDir(std::string_view label) {
-        path = std::filesystem::temp_directory_path() /
-               ("yams-p2p-manager-" + std::string(label) + "-" +
-                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-        std::filesystem::create_directories(path);
-    }
-    ~TempDir() {
-        std::error_code error;
-        std::filesystem::remove_all(path, error);
-    }
-    std::filesystem::path path;
-};
-
 std::unique_ptr<yams::storage::FilesystemBackend> backend(const std::filesystem::path& path) {
     yams::storage::BackendConfig config;
     config.type = "filesystem";
     config.localPath = path;
     auto result = std::make_unique<yams::storage::FilesystemBackend>();
     REQUIRE(result->initialize(config).has_value());
-    return result;
-}
-
-std::vector<std::byte> bytes(std::string_view text) {
-    std::vector<std::byte> result(text.size());
-    std::memcpy(result.data(), text.data(), text.size());
     return result;
 }
 

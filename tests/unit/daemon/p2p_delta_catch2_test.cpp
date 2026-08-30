@@ -13,9 +13,10 @@
 
 #include "../../../src/daemon/p2p/p2p_fuzz.h"
 
+#include "common/p2p_test_helpers.h"
+
 #include <algorithm>
 #include <chrono>
-#include <cstring>
 #include <filesystem>
 #include <functional>
 #include <future>
@@ -40,12 +41,7 @@ using yams::memory_sync::MemorySyncConfig;
 using yams::memory_sync::MemorySyncService;
 
 namespace {
-
-std::vector<std::byte> bytes(std::string_view text) {
-    std::vector<std::byte> result(text.size());
-    std::memcpy(result.data(), text.data(), text.size());
-    return result;
-}
+using namespace yams::p2p_test;
 
 yams::Result<void> validateDeltaJson(const nlohmann::json& json,
                                      const DeltaExchangeOptions& options = {}) {
@@ -56,30 +52,12 @@ yams::Result<void> validateDeltaJson(const nlohmann::json& json,
         options);
 }
 
-std::string text(const std::vector<std::byte>& data) {
-    return std::string(reinterpret_cast<const char*>(data.data()), data.size());
-}
-
 std::string digest(std::span<const std::byte> data) {
     yams::crypto::SHA256Hasher hasher;
     hasher.init();
     hasher.update(data);
     return hasher.finalize();
 }
-
-struct TempDir {
-    explicit TempDir(std::string name) {
-        path = std::filesystem::temp_directory_path() /
-               ("yams-p2p-delta-" + std::move(name) + "-" +
-                std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-        std::filesystem::create_directories(path);
-    }
-    ~TempDir() {
-        std::error_code error;
-        std::filesystem::remove_all(path, error);
-    }
-    std::filesystem::path path;
-};
 
 class InMemoryBackend final : public yams::storage::IStorageBackend {
 public:
