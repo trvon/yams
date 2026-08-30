@@ -243,6 +243,53 @@ TEST_CASE("P2P TLS listener and client mutually authenticate and exchange frames
     CHECK_FALSE(listener.started());
 }
 
+TEST_CASE("P2P control frames accept the worst-case authenticated state size",
+          "[daemon][p2p][tls][network]") {
+    auto serverKey = yams::memory_sync::generateWriterKeyPair();
+    auto clientKey = yams::memory_sync::generateWriterKeyPair();
+    REQUIRE(serverKey.has_value());
+    REQUIRE(clientKey.has_value());
+    auto serverIdentity = identity("server-node", serverKey.value());
+    auto clientIdentity = identity("client-node", clientKey.value());
+    const std::string serverPin = serverIdentity.spkiPin();
+    const std::string clientPin = clientIdentity.spkiPin();
+
+    P2pListener::Options listenerOptions{.host = "127.0.0.1",
+                                         .port = 0,
+                                         .identity = std::move(serverIdentity),
+                                         .allowedPeerPins = {clientPin},
+                                         .handshakeTimeout = 2s,
+                                         .maxConcurrentSessions = 1};
+    P2pListener listener(std::move(listenerOptions));
+    std::promise<std::size_t> serverDone;
+    auto serverFuture = serverDone.get_future();
+    listener.setHandler([&](P2pConnection channel) {
+        auto frame = channel.readFrame(5s);
+        serverDone.set_value(frame ? frame.value().size() : 0);
+    });
+    REQUIRE(listener.start().has_value());
+
+    auto client =
+        yams::daemon::p2p::p2pConnect(P2pClientOptions{.host = "127.0.0.1",
+                                                       .port = listener.boundPort(),
+                                                       .identity = std::move(clientIdentity),
+                                                       .expectedPeerPin = serverPin,
+                                                       .connectTimeout = 2s,
+                                                       .handshakeTimeout = 2s});
+    REQUIRE(client.has_value());
+
+    // Exceeds the previous 64 KiB control-frame cap; must round-trip against the worst-case
+    // authenticated state frame (256 writers x 256-byte ids ~300 KB).
+    constexpr std::size_t largeSize = 200 * 1024;
+    const std::vector<std::byte> largeFrame(largeSize, std::byte{'x'});
+    REQUIRE(client.value().writeFrame(largeFrame, 5s).has_value());
+    REQUIRE(serverFuture.wait_for(5s) == std::future_status::ready);
+    CHECK(serverFuture.get() == largeSize);
+
+    client.value().close();
+    listener.stop();
+}
+
 TEST_CASE("P2P TLS read deadline interrupts a stalled peer", "[daemon][p2p][tls][network]") {
     auto serverKey = yams::memory_sync::generateWriterKeyPair();
     auto clientKey = yams::memory_sync::generateWriterKeyPair();

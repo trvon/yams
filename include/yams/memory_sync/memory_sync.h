@@ -1054,6 +1054,9 @@ public:
     /// to the local backend before becoming visible; replay is idempotent, recent
     /// operation forks are quarantined, and causal gaps/dependency gaps fail closed.
     Result<DeltaApplyResult> applyDeltas(std::span<const MemoryDelta> deltas) {
+        if (auto admitted = beforeDirectIngress(); !admitted) {
+            return admitted.error();
+        }
         if (auto loaded = ensureDurableQuarantineLoaded(); !loaded) {
             return loaded.error();
         }
@@ -2486,6 +2489,20 @@ private:
         if (backend_->isRemote() && control_.canAdmitRemoteWork && !control_.canAdmitRemoteWork()) {
             return Error{ErrorCode::ResourceExhausted,
                          "memory sync remote work denied by resource governor"};
+        }
+        return {};
+    }
+
+    /// Direct-P2P ingress is remote work by definition even though it lands on a local backend,
+    /// so the resource-admission gate applies unconditionally here (unlike shared-store sync,
+    /// which gates on `backend_->isRemote()`).
+    [[nodiscard]] Result<void> beforeDirectIngress() const {
+        if (control_.isCancelled && control_.isCancelled()) {
+            return Error{ErrorCode::OperationCancelled, "memory sync direct ingress cancelled"};
+        }
+        if (control_.canAdmitRemoteWork && !control_.canAdmitRemoteWork()) {
+            return Error{ErrorCode::ResourceExhausted,
+                         "memory sync direct ingress denied by resource governor"};
         }
         return {};
     }
