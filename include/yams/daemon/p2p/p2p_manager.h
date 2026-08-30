@@ -5,11 +5,13 @@
 // pi-lens-ignore: fatal error
 #include <yams/core/types.h>
 // pi-lens-ignore: fatal error
+#include <yams/daemon/components/test_hooks.h>
 #include <yams/daemon/p2p/peer_registry.h>
 
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -21,6 +23,8 @@ class MemorySyncService;
 }
 
 namespace yams::daemon::p2p {
+
+constexpr auto kP2pMaxReconnectInterval = std::chrono::minutes(5);
 
 struct P2pConnectionSpec {
     std::string host;
@@ -49,6 +53,7 @@ struct P2pManagerOptions {
     std::size_t maxPeers{1024};
     std::chrono::milliseconds reconnectInterval{std::chrono::seconds(5)};
     std::chrono::milliseconds timeout{std::chrono::seconds(10)};
+    std::chrono::milliseconds sessionTimeout{std::chrono::seconds(30)};
 };
 
 struct P2pLocalIdentity {
@@ -84,6 +89,11 @@ public:
     Result<void> enrollPeer(std::string_view nodeId, std::string_view spkiPin);
     Result<P2pLocalIdentity> localIdentity() const;
     Result<std::vector<PeerRegistryRecord>> peers() const;
+
+#if YAMS_DAEMON_TEST_HOOKS_ENABLED
+    /// Inject a reconnect-loop action for deterministic thread-boundary tests.
+    YAMS_DAEMON_TEST_HOOK static void testing_setReconnectLoopHook(std::function<void()> hook);
+#endif
 
 private:
     class Impl;

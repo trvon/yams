@@ -3,6 +3,7 @@
 #pragma once
 
 #include <yams/core/types.h>
+#include <yams/daemon/components/test_hooks.h>
 
 #include <chrono>
 #include <cstdint>
@@ -18,6 +19,10 @@ namespace yams::daemon::p2p {
 /// Control-frame size cap (hello/state/delta envelopes) and value-payload cap.
 constexpr std::size_t kP2pMaxControlFrameBytes = std::size_t{64} * 1024;
 constexpr std::size_t kP2pMaxValuePayloadBytes = std::size_t{16} * 1024 * 1024;
+constexpr std::size_t kP2pMaxConcurrentHandshakes = 64;
+constexpr std::size_t kP2pMaxConcurrentSessions = 64;
+constexpr auto kP2pMaxOperationTimeout = std::chrono::minutes(1);
+constexpr auto kP2pMaxSessionTimeout = std::chrono::minutes(10);
 
 /// Ed25519 TLS identity. Derives a self-signed X.509 certificate from the
 /// existing schema-v4 writer keypair, so the memory-sync writer identity and
@@ -110,6 +115,9 @@ struct P2pClientOptions {
     bool allowUnpinnedPeer{false}; // explicit TOFU first-contact opt-in
     std::chrono::milliseconds connectTimeout{std::chrono::seconds(5)};
     std::chrono::milliseconds handshakeTimeout{std::chrono::seconds(5)};
+    /// One absolute deadline applied to TLS handshake and all framed I/O. Handler work between
+    /// I/O calls remains cooperative and must retain its own bounded local operations.
+    std::chrono::milliseconds sessionTimeout{std::chrono::seconds(30)};
 };
 
 Result<P2pConnection> p2pConnect(P2pClientOptions options);
@@ -118,8 +126,8 @@ Result<P2pConnection> p2pConnect(P2pClientOptions options);
 /// mutual handshake with a deadline, enforces allowed peer pins (or explicit
 /// first-contact TOFU opt-in), and dispatches each authenticated channel to `handler` on a
 /// per-session thread (bounded by maxConcurrentSessions). `stop()` closes the acceptor and all
-/// active sessions; session handlers are bounded by their read deadlines so shutdown joins
-/// promptly.
+/// active sessions. Transport I/O is deadline-bounded; handler-local work must cooperate with
+/// shutdown and retain its own operation bounds.
 class P2pListener {
 public:
     struct Options {
@@ -129,6 +137,12 @@ public:
         std::vector<std::string> allowedPeerPins;
         bool allowUnpinnedPeers{false}; // explicit TOFU first-contact opt-in
         std::chrono::milliseconds handshakeTimeout{std::chrono::seconds(5)};
+        /// One absolute deadline applied to TLS handshake and all framed I/O. Handler work between
+        /// I/O calls remains cooperative and must retain its own bounded local operations.
+        std::chrono::milliseconds sessionTimeout{std::chrono::seconds(30)};
+        /// TCP connections allowed to perform the unauthenticated TLS handshake.
+        std::size_t maxConcurrentHandshakes{32};
+        /// Mutually authenticated connections allowed into the session handler.
         std::size_t maxConcurrentSessions{16};
     };
 
@@ -152,12 +166,25 @@ public:
     [[nodiscard]] std::uint64_t acceptedCount() const noexcept;
     /// Session worker threads retained for joining. Completed workers are reaped while running.
     [[nodiscard]] std::size_t retainedSessionCount() const noexcept;
+    /// Connections currently consuming the bounded pre-authentication handshake pool.
+    [[nodiscard]] std::size_t preAuthSessionCount() const noexcept;
+    /// Mutually authenticated connections currently executing the session handler.
+    [[nodiscard]] std::size_t authenticatedSessionCount() const noexcept;
 
     /// Add an operator-approved peer pin for subsequent inbound TLS sessions.
     void allowPeerPin(std::string spkiPin);
 
     /// Install the session handler (required before start()).
     void setHandler(SessionHandler handler);
+
+#if YAMS_DAEMON_TEST_HOOKS_ENABLED
+    /// Inject an accept-loop action for deterministic thread-boundary tests.
+    YAMS_DAEMON_TEST_HOOK static void testing_setAcceptLoopHook(std::function<void()> hook);
+    /// Observe the point immediately after a TLS handshake operation is initiated.
+    YAMS_DAEMON_TEST_HOOK static void testing_setHandshakeStartedHook(std::function<void()> hook);
+    /// Observe external shutdown after the accept thread is joined and before worker joins.
+    YAMS_DAEMON_TEST_HOOK static void testing_setAfterAcceptJoinHook(std::function<void()> hook);
+#endif
 
     class Impl;
     explicit P2pListener(std::shared_ptr<Impl> impl);

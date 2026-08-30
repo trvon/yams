@@ -1,19 +1,25 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright 2026 YAMS Contributors
 
+#define YAMS_DAEMON_TEST_HOOKS_IMPL 1
 // pi-lens-ignore: fatal error
 #include <yams/daemon/p2p/p2p_manager.h>
+#undef YAMS_DAEMON_TEST_HOOKS_IMPL
 
 // pi-lens-ignore: fatal error
 #include <yams/daemon/p2p/p2p_delta.h>
+#include <yams/daemon/p2p/p2p_transport.h>
 // pi-lens-ignore: fatal error
 #include <yams/memory_sync/memory_sync_config.h>
 // pi-lens-ignore: fatal error
 #include <yams/memory_sync/memory_sync_service.h>
 
+#include <spdlog/spdlog.h>
+
 #include <atomic>
 #include <charconv>
 #include <condition_variable>
+#include <exception>
 #include <functional>
 #include <mutex>
 #include <set>
@@ -47,6 +53,20 @@ std::int64_t unixTimeMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
                std::chrono::system_clock::now().time_since_epoch())
         .count();
+}
+
+std::mutex gReconnectLoopHookMutex;
+std::function<void()> gReconnectLoopHook;
+
+void invokeReconnectLoopHook() {
+    std::function<void()> hook;
+    {
+        std::lock_guard<std::mutex> lock(gReconnectLoopHookMutex);
+        hook = gReconnectLoopHook;
+    }
+    if (hook) {
+        hook();
+    }
 }
 
 } // namespace
@@ -160,6 +180,19 @@ public:
     ~Impl() { stop(); }
 
     Result<void> start() {
+        try {
+            return startImpl();
+        } catch (const std::exception& error) {
+            stop();
+            return Error{ErrorCode::InternalError,
+                         std::string("p2p manager start threw: ") + error.what()};
+        } catch (...) {
+            stop();
+            return Error{ErrorCode::InternalError, "p2p manager start threw an unknown exception"};
+        }
+    }
+
+    Result<void> startImpl() {
         std::lock_guard<std::mutex> lifecycleLock(lifecycleMutex_);
         if (started_) {
             return Result<void>();
@@ -186,6 +219,8 @@ public:
                                  // the explicit legacy first-contact compatibility policy.
                                  .allowUnpinnedPeers = options_.allowFirstContact,
                                  .handshakeTimeout = options_.timeout,
+                                 .sessionTimeout = options_.sessionTimeout,
+                                 .maxConcurrentHandshakes = 32,
                                  .maxConcurrentSessions = 16});
         listener_->setHandler(
             [this](P2pConnection connection) { handleInbound(std::move(connection)); });
@@ -196,18 +231,24 @@ public:
         }
         stopRequested_ = false;
         started_ = true;
-        reconnectThread_ = std::thread([this] { reconnectLoop(); });
+        reconnectThread_ = std::thread([this] {
+            try {
+                reconnectLoop();
+            } catch (const std::exception& error) {
+                spdlog::error("[p2p] reconnect thread contained exception: {}", error.what());
+            } catch (...) {
+                spdlog::error("[p2p] reconnect thread contained unknown exception");
+            }
+        });
         return Result<void>();
     }
 
     void stop() noexcept {
-        {
-            std::lock_guard<std::mutex> lifecycleLock(lifecycleMutex_);
-            if (!started_) {
-                return;
-            }
-            stopRequested_ = true;
+        std::lock_guard<std::mutex> lifecycleLock(lifecycleMutex_);
+        if (!started_ && !listener_ && !reconnectThread_.joinable()) {
+            return;
         }
+        stopRequested_ = true;
         reconnectCv_.notify_all();
         if (listener_) {
             listener_->stop();
@@ -215,7 +256,6 @@ public:
         if (reconnectThread_.joinable()) {
             reconnectThread_.join();
         }
-        std::lock_guard<std::mutex> lifecycleLock(lifecycleMutex_);
         listener_.reset();
         started_ = false;
     }
@@ -342,7 +382,8 @@ private:
                              .expectedPeerPin = pin,
                              .allowUnpinnedPeer = pin.empty() && options_.allowFirstContact,
                              .connectTimeout = options_.timeout,
-                             .handshakeTimeout = options_.timeout});
+                             .handshakeTimeout = options_.timeout,
+                             .sessionTimeout = options_.sessionTimeout});
         if (!connection) {
             return connection.error();
         }
@@ -433,41 +474,48 @@ private:
                 break;
             }
             waitLock.unlock();
-            auto records = registry_->listPeers();
-            if (records) {
-                for (const auto& peer : records.value()) {
-                    if (stopRequested_ || !peer.remembered || peer.endpoint.empty()) {
-                        continue;
+            try {
+                invokeReconnectLoopHook();
+                auto records = registry_->listPeers();
+                if (records) {
+                    for (const auto& peer : records.value()) {
+                        if (stopRequested_ || !peer.remembered || peer.endpoint.empty()) {
+                            continue;
+                        }
+                        auto& retry = retries[peer.nodeId];
+                        const auto now = std::chrono::steady_clock::now();
+                        if (retry.nextAttempt > now) {
+                            continue;
+                        }
+                        auto spec = parseP2pConnectionString(peer.endpoint);
+                        if (!spec) {
+                            continue;
+                        }
+                        spec.value().remember = true;
+                        auto connected = connectSpec(spec.value(), peer.nodeId, peer.spkiPin);
+                        if (connected) {
+                            retries.erase(peer.nodeId);
+                            continue;
+                        }
+                        retry.failures = std::min(retry.failures + 1U, 6U);
+                        const auto multiplier = std::int64_t{1} << retry.failures;
+                        const std::chrono::milliseconds delay{options_.reconnectInterval.count() *
+                                                              multiplier};
+                        const auto jitterWindow =
+                            std::max<std::int64_t>(1, options_.reconnectInterval.count() / 4);
+                        const std::chrono::milliseconds jitter{
+                            static_cast<std::int64_t>(std::hash<std::string>{}(peer.nodeId) %
+                                                      static_cast<std::size_t>(jitterWindow))};
+                        retry.nextAttempt =
+                            now + std::min(delay + jitter,
+                                           std::chrono::duration_cast<std::chrono::milliseconds>(
+                                               std::chrono::minutes(5)));
                     }
-                    auto& retry = retries[peer.nodeId];
-                    const auto now = std::chrono::steady_clock::now();
-                    if (retry.nextAttempt > now) {
-                        continue;
-                    }
-                    auto spec = parseP2pConnectionString(peer.endpoint);
-                    if (!spec) {
-                        continue;
-                    }
-                    spec.value().remember = true;
-                    auto connected = connectSpec(spec.value(), peer.nodeId, peer.spkiPin);
-                    if (connected) {
-                        retries.erase(peer.nodeId);
-                        continue;
-                    }
-                    retry.failures = std::min(retry.failures + 1U, 6U);
-                    const auto multiplier = std::int64_t{1} << retry.failures;
-                    const std::chrono::milliseconds delay{options_.reconnectInterval.count() *
-                                                          multiplier};
-                    const auto jitterWindow =
-                        std::max<std::int64_t>(1, options_.reconnectInterval.count() / 4);
-                    const std::chrono::milliseconds jitter{
-                        static_cast<std::int64_t>(std::hash<std::string>{}(peer.nodeId) %
-                                                  static_cast<std::size_t>(jitterWindow))};
-                    retry.nextAttempt =
-                        now + std::min(delay + jitter,
-                                       std::chrono::duration_cast<std::chrono::milliseconds>(
-                                           std::chrono::minutes(5)));
                 }
+            } catch (const std::exception& error) {
+                spdlog::warn("[p2p] reconnect iteration contained exception: {}", error.what());
+            } catch (...) {
+                spdlog::warn("[p2p] reconnect iteration contained unknown exception");
             }
             waitLock.lock();
         }
@@ -490,7 +538,11 @@ Result<std::unique_ptr<P2pManager>> P2pManager::create(P2pManagerOptions options
     if (options.nodeId.empty() || !memory_sync::isCanonicalCorpusId(options.corpusId) ||
         options.corpusEpoch == 0 || options.privateKeyPem.empty() || options.databasePath.empty() ||
         options.reconnectInterval <= std::chrono::milliseconds::zero() ||
-        options.timeout <= std::chrono::milliseconds::zero()) {
+        options.reconnectInterval > kP2pMaxReconnectInterval ||
+        options.timeout <= std::chrono::milliseconds::zero() ||
+        options.timeout > kP2pMaxOperationTimeout ||
+        options.sessionTimeout <= std::chrono::milliseconds::zero() ||
+        options.sessionTimeout > kP2pMaxSessionTimeout) {
         return Error{ErrorCode::InvalidArgument, "invalid P2P manager configuration"};
     }
     auto identity = TlsIdentity::fromPrivateKeyPem(options.nodeId, options.privateKeyPem);
@@ -534,5 +586,12 @@ Result<P2pLocalIdentity> P2pManager::localIdentity() const {
 Result<std::vector<PeerRegistryRecord>> P2pManager::peers() const {
     return impl_->peers();
 }
+
+#if YAMS_DAEMON_TEST_HOOKS_ENABLED
+void P2pManager::testing_setReconnectLoopHook(std::function<void()> hook) {
+    std::lock_guard<std::mutex> lock(gReconnectLoopHookMutex);
+    gReconnectLoopHook = std::move(hook);
+}
+#endif
 
 } // namespace yams::daemon::p2p
