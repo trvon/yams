@@ -3339,7 +3339,8 @@ enum class MemorySyncOperation : std::uint32_t {
     Disconnect = 5,
     Peers = 6,
     Identity = 7,
-    Enroll = 8
+    Enroll = 8,
+    Forget = 9
 };
 
 struct MemorySyncRequest {

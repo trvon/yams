@@ -708,6 +708,17 @@ TEST_CASE("direct P2P delta exchange rejects options above protocol hard bounds"
                              .timeout = 3s});
     REQUIRE_FALSE(exchanged.client.has_value());
     CHECK(exchanged.client.error().code == yams::ErrorCode::InvalidArgument);
+
+    auto overTimeout = runExchange(
+        clientService, serverService, clientKey.value(), serverKey.value(), clientTrust,
+        serverTrust, true,
+        DeltaExchangeOptions{.maxDeltasPerBatch = 1,
+                             .maxBatches = 1,
+                             .maxDeltasPerSession = 1,
+                             .maxWireBytesPerSession = 1024,
+                             .timeout = yams::daemon::p2p::kP2pMaxOperationTimeout + 1ms});
+    REQUIRE_FALSE(overTimeout.client.has_value());
+    CHECK(overTimeout.client.error().code == yams::ErrorCode::InvalidArgument);
 }
 
 TEST_CASE("direct P2P delta exchange resumes across aggregate session limits",

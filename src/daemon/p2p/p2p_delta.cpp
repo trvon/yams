@@ -37,7 +37,8 @@ Result<void> validateOptions(const DeltaExchangeOptions& options) {
         options.maxWireBytesPerSession == 0 || options.maxWireBytesPerSession > kMaxWireBytes ||
         options.maxSnapshotRecords == 0 || options.maxSnapshotRecords > kMaxP2pWriterAdvance ||
         options.maxSnapshotWireBytes == 0 || options.maxSnapshotWireBytes > kMaxWireBytes ||
-        options.timeout <= std::chrono::milliseconds::zero()) {
+        options.timeout <= std::chrono::milliseconds::zero() ||
+        options.timeout > kP2pMaxOperationTimeout) {
         return Error{ErrorCode::InvalidArgument, "invalid p2p delta exchange limits"};
     }
     return {};

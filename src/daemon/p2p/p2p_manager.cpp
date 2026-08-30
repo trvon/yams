@@ -301,6 +301,8 @@ public:
         return {};
     }
 
+    Result<void> forget(std::string_view nodeId) { return registry_->removePeer(nodeId); }
+
     Result<P2pLocalIdentity> localIdentity() const {
         auto identity = TlsIdentity::fromPrivateKeyPem(options_.nodeId, options_.privateKeyPem);
         if (!identity) {
@@ -581,6 +583,9 @@ Result<void> P2pManager::disconnect(std::string_view nodeId) {
 }
 Result<void> P2pManager::enrollPeer(std::string_view nodeId, std::string_view spkiPin) {
     return impl_->enrollPeer(nodeId, spkiPin);
+}
+Result<void> P2pManager::forget(std::string_view nodeId) {
+    return impl_->forget(nodeId);
 }
 Result<P2pLocalIdentity> P2pManager::localIdentity() const {
     return impl_->localIdentity();

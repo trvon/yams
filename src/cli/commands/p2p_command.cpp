@@ -121,9 +121,9 @@ Result<std::string> formatConnect(const daemon::MemorySyncResponse& response, bo
         return payload.value().dump(2);
     }
     const auto& value = payload.value();
-    return "connected " + value.at("peer_node_id").get<std::string>() +
-           " (sent=" + std::to_string(value.value("deltas_sent", 0U)) +
-           ", received=" + std::to_string(value.value("deltas_received", 0U)) + ")";
+    return "connected " + value.value("peer_node_id", std::string{}) +
+           " (sent=" + std::to_string(value.value("deltas_sent", std::uint64_t{0})) +
+           ", received=" + std::to_string(value.value("deltas_received", std::uint64_t{0})) + ")";
 }
 
 Result<std::string> formatDisconnect(const daemon::MemorySyncResponse& response, bool json) {
@@ -134,7 +134,18 @@ Result<std::string> formatDisconnect(const daemon::MemorySyncResponse& response,
     if (json) {
         return payload.value().dump(2);
     }
-    return "disconnected " + payload.value().at("node_id").get<std::string>();
+    return "disconnected " + payload.value().value("node_id", std::string{});
+}
+
+Result<std::string> formatForget(const daemon::MemorySyncResponse& response, bool json) {
+    auto payload = parseControlPayload(response);
+    if (!payload) {
+        return payload.error();
+    }
+    if (json) {
+        return payload.value().dump(2);
+    }
+    return "forgot " + payload.value().value("node_id", std::string{});
 }
 
 Result<std::string> formatPeers(const daemon::MemorySyncResponse& response, bool json) {
@@ -169,26 +180,17 @@ Result<std::string> formatStatus(const daemon::MemorySyncResponse& response, boo
         return Error{ErrorCode::InvalidState, "memory sync service is not started"};
     }
     if (!json) {
-        using yams::cli::ui::Severity;
-        using yams::cli::ui::severity_text;
-        auto health = [](bool bad) { return bad ? Severity::Warn : Severity::Good; };
         std::ostringstream out;
         // pi-lens-ignore: clang:no_member -- additive response field is compiled by Meson.
         out << "backend=" << response.backend << " node_id=" << response.nodeId
             << " corpus_id=" << response.corpusId << " corpus_epoch=" << response.corpusEpoch
             << " mode=" << response.mode << " trust=" << response.trustMode
-            << " peers=" << response.peerCount << " records=" << response.records << " quarantined="
-            << severity_text(health(response.quarantinedRecords > 0),
-                             std::to_string(response.quarantinedRecords))
-            << " auth_failures="
-            << severity_text(health(response.authFailures > 0),
-                             std::to_string(response.authFailures))
-            << " successful_cycles=" << response.successfulCycles << " failed_cycles="
-            << severity_text(health(response.failedCycles > 0),
-                             std::to_string(response.failedCycles))
-            << " last_success_age_ms="
-            << severity_text(health(response.lastSuccessAgeMs > 60000),
-                             std::to_string(response.lastSuccessAgeMs));
+            << " peers=" << response.peerCount << " records=" << response.records
+            << " quarantined=" << response.quarantinedRecords
+            << " auth_failures=" << response.authFailures
+            << " successful_cycles=" << response.successfulCycles
+            << " failed_cycles=" << response.failedCycles
+            << " last_success_age_ms=" << response.lastSuccessAgeMs;
         return out.str();
     }
     nlohmann::json output;
@@ -249,6 +251,12 @@ public:
         disconnect->add_option("node-id", disconnectNodeId_, "Peer node id")->required();
         disconnect->add_flag("--json", jsonOutput_, "Emit JSON");
         disconnect->callback([this]() { failOn(runDisconnect()); });
+
+        auto* forget =
+            cmd->add_subcommand("forget", "Remove a peer's pinned identity (key rotation)");
+        forget->add_option("node-id", forgetNodeId_, "Peer node id")->required();
+        forget->add_flag("--json", jsonOutput_, "Emit JSON");
+        forget->callback([this]() { failOn(runForget()); });
 
         auto* peers = cmd->add_subcommand("peers", "List trusted peers and reconnect state");
         peers->add_flag("--json", jsonOutput_, "Emit JSON");
@@ -369,6 +377,19 @@ private:
         return {};
     }
 
+    Result<void> runForget() {
+        auto response = call({daemon::MemorySyncOperation::Forget, forgetNodeId_, {}});
+        if (!response) {
+            return response.error();
+        }
+        auto output = formatForget(response.value(), jsonOutput_);
+        if (!output) {
+            return output.error();
+        }
+        std::cout << output.value() << "\n";
+        return {};
+    }
+
     Result<void> runPeers() {
         auto response = call({daemon::MemorySyncOperation::Peers, {}, {}});
         if (!response) {
@@ -441,6 +462,7 @@ private:
     YamsCLI* cli_{nullptr};
     std::string connectionString_;
     std::string disconnectNodeId_;
+    std::string forgetNodeId_;
     std::string enrollNodeId_;
     std::string enrollPin_;
     std::string publishKey_;

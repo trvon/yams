@@ -203,6 +203,7 @@ public:
     Result<p2p::P2pSyncResult> connectP2p(std::string_view connectionString);
     Result<void> disconnectP2p(std::string_view nodeId);
     Result<void> enrollP2pPeer(std::string_view nodeId, std::string_view spkiPin);
+    Result<void> forgetP2pPeer(std::string_view nodeId);
     Result<p2p::P2pLocalIdentity> getP2pIdentity() const;
     Result<std::vector<p2p::PeerRegistryRecord>> listP2pPeers() const;
     Result<void> stageMemorySyncDocumentDelete(std::string_view contentHash,

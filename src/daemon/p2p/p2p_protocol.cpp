@@ -60,7 +60,8 @@ Result<void> validateConfig(const PeerHandshakeConfig& config) {
         return Error{ErrorCode::InvalidArgument,
                      "p2p handshake requires node, corpus, and epoch identity"};
     }
-    if (config.timeout <= std::chrono::milliseconds::zero() || config.maxWriterAdvance == 0 ||
+    if (config.timeout <= std::chrono::milliseconds::zero() ||
+        config.timeout > kP2pMaxOperationTimeout || config.maxWriterAdvance == 0 ||
         config.maxWriterAdvance > kMaxP2pWriterAdvance || config.maxWriterWindowBytes == 0 ||
         config.maxWriterWindowBytes > kMaxP2pWriterWindowBytes) {
         return Error{ErrorCode::InvalidArgument,

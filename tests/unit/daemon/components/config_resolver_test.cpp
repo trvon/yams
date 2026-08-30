@@ -1617,6 +1617,25 @@ TEST_CASE("ConfigResolver accepts authenticated direct P2P without a shared path
     CHECK(config.memorySync.writerAuthManifestPath == "/secure/writers.json");
 }
 
+TEST_CASE("ConfigResolver rejects direct P2P sync_interval_ms above the reconnect ceiling",
+          "[daemon][config][memory-sync][p2p][security]") {
+    ConfigResolver::ConfigSections sections = {
+        {"memory_sync",
+         {{"enabled", "true"},
+          {"node_id", "123e4567-e89b-42d3-a456-426614174000"},
+          {"corpus_id", "corpus-a"},
+          {"corpus_epoch", "9"},
+          {"transport", "direct"},
+          {"listen", "0.0.0.0:9721"},
+          {"sync_interval_ms", "300001"},
+          {"writer_auth_required", "true"},
+          {"writer_auth_manifest", "/secure/writers.json"}}},
+    };
+    DaemonConfig config;
+    CHECK_FALSE(ConfigResolver::applyMemorySync(sections, config));
+    CHECK_FALSE(config.memorySync.enabled);
+}
+
 TEST_CASE("ConfigResolver infers shared-store for legacy backend path",
           "[daemon][config][memory-sync]") {
     ConfigResolver::ConfigSections sections = {
