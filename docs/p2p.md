@@ -81,7 +81,11 @@ Restart both daemons after changing configuration, then confirm the compact stat
 yams daemon status
 ```
 
-Use `yams daemon status -d` for corpus, identity, peer, counter, and failure details.
+Use `yams daemon status -d` for corpus, identity, peer, counter, and failure details. Status is
+local activity and health telemetry, not a global convergence claim: `peer_count` includes the
+local peer registry, `successful_cycles` counts completed local reconciliation cycles, and a recent
+success does not prove that every enrolled peer is reachable or has the same frontier. Confirm
+convergence with explicit per-node corpus/frontier checks after the required full-mesh sessions.
 
 ## Enroll and connect peers
 
@@ -202,6 +206,26 @@ wrangler r2 bucket delete "$BUCKET"
 ```
 
 The smoke performs PUT, GET, HEAD, LIST, and DELETE. Do not put credentials or generated test configuration in git.
+
+## Fuzz direct protocol controls
+
+The direct-P2P fuzz targets exercise the production protocol-v4 handshake/state/history control
+parsers and bounded delta/bootstrap control parsers. Their deterministic seed corpus retains a protocol-v3 hello specifically
+to verify fail-closed exact-version rejection after the v4 upgrade:
+
+```bash
+tools/fuzzing/generate_corpus.sh
+tools/fuzzing/fuzz.sh build
+AFL_FUZZ_SECONDS=60 tools/fuzzing/fuzz.sh fuzz p2p_protocol
+AFL_FUZZ_SECONDS=60 tools/fuzzing/fuzz.sh fuzz p2p_delta
+```
+
+These parser harnesses do not replace deterministic TLS/session, payload-accounting, authenticated
+application, or restart tests. Bounded local fuzz runs are regression evidence, not
+release-readiness evidence. Promotion still requires exact protocol-v4 binaries on every endpoint; at least three isolated cold, warm,
+reconnect, and restart repeats; exact pre/post corpus equality; and captured latency, CPU, RSS,
+logical/wire-byte, and disk-I/O measurements. Existing protocol-v3 or host-contended profiles must
+not be reused for that gate.
 
 ## Troubleshooting
 

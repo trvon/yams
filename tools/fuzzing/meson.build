@@ -86,6 +86,29 @@ fuzz_ipc_protocol = executable('fuzz_ipc_protocol',
   build_by_default: true,
 )
 
+# Direct P2P protocol-v4 handshake/control fuzzer.
+# The corpus retains protocol-v3 seeds to continuously exercise exact-version rejection.
+fuzz_p2p_protocol = executable('fuzz_p2p_protocol',
+  'fuzz_p2p_protocol.cpp',
+  include_directories: include_directories('../../include'),
+  link_with: yams_daemon_lib,
+  dependencies: fuzz_deps,
+  cpp_args: fuzzer_args,
+  link_args: fuzzer_args,
+  build_by_default: true,
+)
+
+# Direct P2P delta/bootstrap control-message fuzzer.
+fuzz_p2p_delta = executable('fuzz_p2p_delta',
+  'fuzz_p2p_delta.cpp',
+  include_directories: include_directories('../../include'),
+  link_with: yams_daemon_lib,
+  dependencies: fuzz_deps,
+  cpp_args: fuzzer_args,
+  link_args: fuzzer_args,
+  build_by_default: true,
+)
+
 # AddDocumentRequest Fuzzer
 fuzz_add_document = executable('fuzz_add_document',
   'fuzz_add_document.cpp',

@@ -11,6 +11,8 @@
 #include <yams/memory_sync/writer_auth.h>
 #include <yams/storage/storage_backend.h>
 
+#include "../../../src/daemon/p2p/p2p_fuzz.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -43,6 +45,15 @@ std::vector<std::byte> bytes(std::string_view text) {
     std::vector<std::byte> result(text.size());
     std::memcpy(result.data(), text.data(), text.size());
     return result;
+}
+
+yams::Result<void> validateDeltaJson(const nlohmann::json& json,
+                                     const DeltaExchangeOptions& options = {}) {
+    const auto encoded = json.dump();
+    return yams::daemon::p2p::detail::validateDeltaControlFrame(
+        std::span<const std::byte>(reinterpret_cast<const std::byte*>(encoded.data()),
+                                   encoded.size()),
+        options);
 }
 
 std::string text(const std::vector<std::byte>& data) {
@@ -263,6 +274,35 @@ ExchangePair runExchange(MemorySyncService& clientService, MemorySyncService& se
 }
 
 } // namespace
+
+TEST_CASE("direct P2P delta fuzz seam enforces bounded control messages",
+          "[daemon][p2p][delta][fuzz]") {
+    CHECK(validateDeltaJson(
+              nlohmann::json{{"type", "delta_batch"}, {"count", 1}, {"has_more", false}})
+              .has_value());
+    CHECK(validateDeltaJson(nlohmann::json{{"type", "replication_mode"}, {"mode", "delta"}})
+              .has_value());
+    CHECK_FALSE(
+        validateDeltaJson(nlohmann::json{{"type", "delta_batch"}, {"count", 0}, {"has_more", true}})
+            .has_value());
+    CHECK_FALSE(
+        validateDeltaJson(nlohmann::json{{"type", "delta_record"}, {"payload_size", 1ULL << 40}})
+            .has_value());
+    nlohmann::json snapshot{{"type", "snapshot_begin"},
+                            {"witness", "node-a"},
+                            {"frontier", {{"counters_", nlohmann::json::object()}}},
+                            {"commitments", nlohmann::json::array()},
+                            {"record_count", 0},
+                            {"payload_bytes", 0},
+                            {"root_digest", std::string(64, '0')},
+                            {"witness_key_id", "node-a-v1"},
+                            {"witness_algorithm", "Ed25519"},
+                            {"witness_signature", "AA=="}};
+    CHECK(validateDeltaJson(snapshot).has_value());
+    snapshot["record_count"] = DeltaExchangeOptions{}.maxSnapshotRecords + 1;
+    CHECK_FALSE(validateDeltaJson(snapshot).has_value());
+    CHECK_FALSE(validateDeltaJson(nlohmann::json{{"type", "unknown"}}).has_value());
+}
 
 TEST_CASE("direct P2P cold bootstrap installs an authenticated multiwriter snapshot",
           "[daemon][p2p][delta][cold-bootstrap][network][security]") {
