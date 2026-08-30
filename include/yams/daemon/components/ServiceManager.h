@@ -858,6 +858,7 @@ private:
     quiesceServicesBeforeWorkerShutdown(std::unique_ptr<CheckpointManager>& checkpointManagerHold);
     void stopWorkCoordinatorForShutdown(std::unique_ptr<CheckpointManager>& checkpointManagerHold);
     void clearCachedServiceState();
+    void configureTopologyRuntime();
     void snapshotRuntimeTuningSources(TuningConfig& tuning, const TuningConfig* previous) const;
     void refreshRuntimeTuningStatus();
     void seedBuiltinContentExtractors();
