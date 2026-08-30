@@ -53,7 +53,9 @@ public:
     yams::Result<yams::storage::ObjectListPage> listPage(std::string_view prefix,
                                                          std::optional<std::string_view> cursor,
                                                          std::size_t limit) const override {
-        listPageCalls.fetch_add(1, std::memory_order_relaxed);
+        if (prefix == "index/") {
+            listPageCalls.fetch_add(1, std::memory_order_relaxed);
+        }
         return backend_.listPage(prefix, cursor, limit);
     }
     yams::Result<::yams::StorageStats> getStats() const override { return backend_.getStats(); }
@@ -73,6 +75,26 @@ public:
 
 private:
     yams::storage::FilesystemBackend backend_;
+};
+
+class FailPrefixOnceBackend final : public CountingBackend {
+public:
+    void failNextStore(std::string prefix) {
+        failPrefix_ = std::move(prefix);
+        armed_.store(true, std::memory_order_release);
+    }
+
+    yams::Result<void> store(std::string_view key, std::span<const std::byte> data) override {
+        if (armed_.load(std::memory_order_acquire) && key.starts_with(failPrefix_) &&
+            armed_.exchange(false, std::memory_order_acq_rel)) {
+            return yams::Error{yams::ErrorCode::IOError, "injected prefix store failure"};
+        }
+        return CountingBackend::store(key, data);
+    }
+
+private:
+    std::atomic<bool> armed_{false};
+    std::string failPrefix_;
 };
 
 class ThrowOnceListBackend final : public CountingBackend {
@@ -143,6 +165,47 @@ private:
     std::atomic<bool> cancelled_{false};
 };
 
+/// Blocks `listPage` while armed, releasing when unarmed. Used to prove IPC
+/// readers never wait on a slow reconciliation: publish first (unarmed), arm,
+/// start the worker, then assert readers return promptly from the committed
+/// snapshot while the worker is stuck mid-sync.
+class SlowListBackend final : public CountingBackend {
+public:
+    void arm() { armed_.store(true, std::memory_order_release); }
+
+    void releaseList() {
+        armed_.store(false, std::memory_order_release);
+        cv_.notify_all();
+    }
+
+    void waitUntilBlocked() const {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [this] { return blocked_.load(std::memory_order_acquire); });
+    }
+
+    yams::Result<yams::storage::ObjectListPage> listPage(std::string_view prefix,
+                                                         std::optional<std::string_view> cursor,
+                                                         std::size_t limit) const override {
+        if (armed_.load(std::memory_order_acquire)) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                blocked_.store(true, std::memory_order_release);
+            }
+            cv_.notify_all();
+            std::unique_lock<std::mutex> lock(mutex_);
+            cv_.wait(lock, [this] { return !armed_.load(std::memory_order_acquire); });
+            blocked_.store(false, std::memory_order_release);
+        }
+        return CountingBackend::listPage(prefix, cursor, limit);
+    }
+
+private:
+    mutable std::atomic<bool> armed_{false};
+    mutable std::atomic<bool> blocked_{false};
+    mutable std::mutex mutex_;
+    mutable std::condition_variable cv_;
+};
+
 std::unique_ptr<yams::storage::FilesystemBackend> makeBackend(const std::filesystem::path& dir) {
     yams::storage::BackendConfig config;
     config.type = "filesystem";
@@ -205,6 +268,44 @@ TEST_CASE("MemorySyncService replicates user-record tombstones", "[memory-sync][
     REQUIRE(merged.has_value());
     CHECK(merged.value().at("user/key").isTombstone());
     CHECK_FALSE(reader.readCached("user/key").has_value());
+}
+
+TEST_CASE("MemorySyncService worker replays a retained ready erase",
+          "[memory-sync][service][tombstone][outbox]") {
+    TempDirGuard dir;
+    yams::storage::BackendConfig backendConfig;
+    backendConfig.type = "filesystem";
+    backendConfig.localPath = dir.path;
+    auto backend = std::make_unique<FailPrefixOnceBackend>();
+    auto* observed = backend.get();
+    REQUIRE(backend->initialize(backendConfig).has_value());
+    MemorySyncService service{std::move(backend),
+                              MemorySyncConfig{"writer", 10, "outbox-service-corpus", 1}};
+    REQUIRE(service.publish("user/key", bytes("value")).has_value());
+    observed->failNextStore("index/");
+    auto failed = service.erase("user/key", "key");
+    REQUIRE_FALSE(failed.has_value());
+    auto pending = service.pendingErases();
+    REQUIRE(pending.has_value());
+    REQUIRE(pending.value().size() == 1);
+    CHECK(pending.value().front().ready);
+    CHECK(pending.value().front().prepared);
+
+    REQUIRE(service.start().has_value());
+    bool drained = false;
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        auto retained = service.pendingErases();
+        REQUIRE(retained.has_value());
+        if (retained.value().empty()) {
+            drained = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds{5});
+    }
+    service.stop();
+    REQUIRE(drained);
+    CHECK_FALSE(service.readCached("user/key").has_value());
+    CHECK(service.replicationState().commitments.at("writer").counter == 2);
 }
 
 TEST_CASE("MemorySyncService two nodes converge", "[memory-sync][service]") {
@@ -490,3 +591,102 @@ TEST_CASE("MemorySyncService periodic worker syncs without hanging", "[memory-sy
 }
 
 // NOLINTEND(bugprone-chained-comparison)
+
+TEST_CASE("MemorySyncService direct delta apply invokes adapter callback after lock release",
+          "[memory-sync][service][direct-delta]") {
+    TempDirGuard writerDir;
+    TempDirGuard readerDir;
+    MemorySyncService writer{makeBackend(writerDir.path),
+                             MemorySyncConfig{"writer", 60'000, "direct-service-corpus", 1}};
+    MemorySyncService reader{makeBackend(readerDir.path),
+                             MemorySyncConfig{"reader", 60'000, "direct-service-corpus", 1}};
+    REQUIRE(writer.publish("user/key", bytes("value")).has_value());
+    auto deltas = writer.exportLocalDeltasAfter({});
+    REQUIRE(deltas.has_value());
+    REQUIRE(deltas.value().deltas.size() == 1);
+
+    std::atomic<std::size_t> callbacks{0};
+    reader.setAfterSyncCallback([&] { callbacks.fetch_add(1, std::memory_order_relaxed); });
+    auto applied = reader.applyDeltas(deltas.value().deltas);
+    REQUIRE(applied.has_value());
+    CHECK(applied.value().merged == 1);
+    CHECK(callbacks.load(std::memory_order_relaxed) == 1);
+    CHECK(reader.readCached("user/key").has_value());
+}
+
+TEST_CASE("MemorySyncService publishes quarantine snapshot before adapter invalidation",
+          "[memory-sync][service][direct-delta][quarantine]") {
+    TempDirGuard writerDir;
+    TempDirGuard readerDir;
+    MemorySyncService writer{makeBackend(writerDir.path),
+                             MemorySyncConfig{"writer", 60'000, "quarantine-service", 1}};
+    MemorySyncService reader{makeBackend(readerDir.path),
+                             MemorySyncConfig{"reader", 60'000, "quarantine-service", 1}};
+    REQUIRE(writer.publish("user/key", bytes("value")).has_value());
+    auto deltas = writer.exportLocalDeltasAfter({});
+    REQUIRE(deltas.has_value());
+
+    REQUIRE(reader.applyDeltas(deltas.value().deltas).has_value());
+    std::atomic<std::size_t> callbacks{0};
+    reader.setAfterSyncCallback([&] {
+        CHECK(reader.replicationState().quarantinedWriters.contains("writer"));
+        CHECK_FALSE(reader.readCached("user/key").has_value());
+        auto adapterState = reader.syncOnce();
+        REQUIRE(adapterState.has_value());
+        REQUIRE(adapterState.value().contains("user/key"));
+        CHECK(adapterState.value().at("user/key").isTombstone());
+        callbacks.fetch_add(1, std::memory_order_relaxed);
+    });
+
+    auto quarantined = reader.quarantineWriter("writer", "reader");
+    REQUIRE(quarantined.has_value());
+    CHECK(quarantined.value());
+    CHECK(callbacks.load(std::memory_order_relaxed) == 1);
+    CHECK(reader.replicationState().quarantinedWriters.contains("writer"));
+    CHECK_FALSE(reader.readCached("user/key").has_value());
+
+    auto repeated = reader.quarantineWriter("writer", "reader");
+    REQUIRE(repeated.has_value());
+    CHECK_FALSE(repeated.value());
+    CHECK(callbacks.load(std::memory_order_relaxed) == 1);
+}
+
+TEST_CASE("MemorySyncService readers do not block on a slow reconciliation",
+          "[memory-sync][service]") {
+    TempDirGuard tmp;
+    auto backend = std::make_unique<SlowListBackend>();
+    yams::storage::BackendConfig config;
+    config.type = "filesystem";
+    config.localPath = tmp.path;
+    REQUIRE(backend->initialize(config).has_value());
+    auto* observed = backend.get();
+    MemorySyncService service{std::move(backend), MemorySyncConfig{"A", 5000}};
+
+    // Publish a value before arming the block so a committed snapshot exists.
+    // syncOnce commits the page so the key (and its hydrated blob) are in the
+    // reconciled state the snapshot is refreshed from.
+    REQUIRE(service.publish("user/k", bytes("v1")).has_value());
+    REQUIRE(service.syncOnce().has_value());
+
+    observed->arm();
+    REQUIRE(service.start().has_value());
+    observed->waitUntilBlocked();
+
+    // The worker is now stuck inside listPage (mid-reconciliation). IPC readers
+    // (status counts, cached reads) must return promptly from the last committed
+    // snapshot instead of waiting on the reconciliation lock.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    auto reader = std::async(std::launch::async, [&] {
+        return service.readCached("user/k").has_value() && service.mergedRecordCount() == 1 &&
+               service.quarantinedRecordCount() == 0;
+    });
+    CHECK(reader.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+    if (reader.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        CHECK(reader.get());
+    }
+    CHECK(std::chrono::steady_clock::now() < deadline);
+
+    observed->releaseList();
+    service.stop();
+    CHECK_FALSE(service.started());
+}

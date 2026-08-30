@@ -28,8 +28,8 @@ using Envelope = yams::daemon::ipc::Envelope;
 namespace pb = yams::daemon::ipc;
 
 static_assert(static_cast<int>(pb::MemorySyncRequest_Operation_Operation_MAX) >=
-                  static_cast<int>(MemorySyncOperation::Delete),
-              "protobuf MemorySyncRequest.Operation must preserve the C++ DELETE wire value");
+                  static_cast<int>(MemorySyncOperation::Enroll),
+              "protobuf MemorySyncRequest.Operation must preserve all C++ wire values");
 
 // (bindings inserted later, after ProtoBinding primary template)
 
@@ -202,6 +202,7 @@ template <> struct ProtoBinding<MemorySyncResponse> {
         out->set_corpus_epoch(response.corpusEpoch);
         out->set_mode(yams::common::sanitizeUtf8(response.mode));
         out->set_trust_mode(yams::common::sanitizeUtf8(response.trustMode));
+        out->set_peer_count(response.peerCount);
     }
     static MemorySyncResponse get(const Envelope& env) {
         const auto& in = env.memory_sync_response();
@@ -219,7 +220,8 @@ template <> struct ProtoBinding<MemorySyncResponse> {
                                   in.corpus_id(),
                                   in.corpus_epoch(),
                                   in.mode(),
-                                  in.trust_mode()};
+                                  in.trust_mode(),
+                                  in.peer_count()};
     }
 };
 

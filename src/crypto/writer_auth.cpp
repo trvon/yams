@@ -266,6 +266,74 @@ Result<void> WriterAuthenticator::sign(MemoryIndexRecord& record) const {
     return {};
 }
 
+Result<DetachedWriterSignature> WriterAuthenticator::signDigest(std::string_view domain,
+                                                                std::string_view digest) const {
+    if (!impl_->privateKey || domain.empty() || !isSha256Digest(digest)) {
+        return Error{ErrorCode::InvalidState, "detached writer signing input is invalid"};
+    }
+    const std::string canonical =
+        nlohmann::json::array({"yams-detached-writer-signature-v1", std::string(domain),
+                               impl_->corpusId, impl_->corpusEpoch, std::string(digest)})
+            .dump();
+    std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> context(EVP_MD_CTX_new(),
+                                                                    EVP_MD_CTX_free);
+    if (!context || EVP_DigestSignInit(context.get(), nullptr, nullptr, nullptr,
+                                       impl_->privateKey.get()) != 1) {
+        return Error{ErrorCode::InternalError, "failed to initialize detached signing"};
+    }
+    std::size_t signatureSize = 0;
+    if (EVP_DigestSign(context.get(), nullptr, &signatureSize,
+                       reinterpret_cast<const unsigned char*>(canonical.data()),
+                       canonical.size()) != 1 ||
+        signatureSize != 64) {
+        return Error{ErrorCode::InternalError, "failed to size detached signature"};
+    }
+    std::vector<unsigned char> signature(signatureSize);
+    if (EVP_DigestSign(context.get(), signature.data(), &signatureSize,
+                       reinterpret_cast<const unsigned char*>(canonical.data()),
+                       canonical.size()) != 1) {
+        return Error{ErrorCode::InternalError, "failed to create detached signature"};
+    }
+    signature.resize(signatureSize);
+    return DetachedWriterSignature{.writerId = impl_->localWriterId,
+                                   .keyId = impl_->localKeyId,
+                                   .algorithm = std::string(kMemoryIndexSignatureAlgorithm),
+                                   .signature = hexEncode(signature)};
+}
+
+bool WriterAuthenticator::verifyDigest(const DetachedWriterSignature& signature,
+                                       std::string_view domain,
+                                       std::string_view digest) const noexcept {
+    try {
+        if (domain.empty() || !isSha256Digest(digest) ||
+            signature.algorithm != kMemoryIndexSignatureAlgorithm) {
+            return false;
+        }
+        const auto trusted = impl_->trusted.find({signature.writerId, signature.keyId});
+        if (trusted == impl_->trusted.end() || trusted->second.revoked) {
+            return false;
+        }
+        const auto decoded = hexDecode(signature.signature);
+        if (decoded.size() != 64) {
+            return false;
+        }
+        const std::string canonical =
+            nlohmann::json::array({"yams-detached-writer-signature-v1", std::string(domain),
+                                   impl_->corpusId, impl_->corpusEpoch, std::string(digest)})
+                .dump();
+        std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)> context(EVP_MD_CTX_new(),
+                                                                        EVP_MD_CTX_free);
+        return context &&
+               EVP_DigestVerifyInit(context.get(), nullptr, nullptr, nullptr,
+                                    trusted->second.key.get()) == 1 &&
+               EVP_DigestVerify(context.get(), decoded.data(), decoded.size(),
+                                reinterpret_cast<const unsigned char*>(canonical.data()),
+                                canonical.size()) == 1;
+    } catch (...) {
+        return false;
+    }
+}
+
 bool WriterAuthenticator::verify(const MemoryIndexRecord& record) const noexcept {
     try {
         if (record.schemaVersion != kAuthenticatedMemoryIndexSchemaVersion ||

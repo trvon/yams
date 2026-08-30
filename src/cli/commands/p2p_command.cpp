@@ -16,6 +16,7 @@
 
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
 #include <yams/core/types.h>
 #include <yams/daemon/client/daemon_client.h>
@@ -78,20 +79,117 @@ Result<std::string> formatRead(std::string_view key, const std::string& value, b
     return output.dump(2);
 }
 
+Result<nlohmann::json> parseControlPayload(const daemon::MemorySyncResponse& response) {
+    try {
+        return nlohmann::json::parse(response.value);
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::SerializationError,
+                     std::string("daemon returned malformed P2P response: ") + error.what()};
+    }
+}
+
+Result<std::string> formatIdentity(const daemon::MemorySyncResponse& response, bool json) {
+    auto payload = parseControlPayload(response);
+    if (!payload) {
+        return payload.error();
+    }
+    if (json) {
+        return payload.value().dump(2);
+    }
+    return "Node ID: " + payload.value().value("node_id", std::string{}) +
+           "\nSPKI pin: " + payload.value().value("spki_pin", std::string{});
+}
+
+Result<std::string> formatEnroll(const daemon::MemorySyncResponse& response, bool json) {
+    auto payload = parseControlPayload(response);
+    if (!payload) {
+        return payload.error();
+    }
+    if (json) {
+        return payload.value().dump(2);
+    }
+    return "Enrolled " + payload.value().value("node_id", std::string{}) + " with SPKI pin " +
+           payload.value().value("spki_pin", std::string{});
+}
+
+Result<std::string> formatConnect(const daemon::MemorySyncResponse& response, bool json) {
+    auto payload = parseControlPayload(response);
+    if (!payload) {
+        return payload.error();
+    }
+    if (json) {
+        return payload.value().dump(2);
+    }
+    const auto& value = payload.value();
+    return "connected " + value.at("peer_node_id").get<std::string>() +
+           " (sent=" + std::to_string(value.value("deltas_sent", 0U)) +
+           ", received=" + std::to_string(value.value("deltas_received", 0U)) + ")";
+}
+
+Result<std::string> formatDisconnect(const daemon::MemorySyncResponse& response, bool json) {
+    auto payload = parseControlPayload(response);
+    if (!payload) {
+        return payload.error();
+    }
+    if (json) {
+        return payload.value().dump(2);
+    }
+    return "disconnected " + payload.value().at("node_id").get<std::string>();
+}
+
+Result<std::string> formatPeers(const daemon::MemorySyncResponse& response, bool json) {
+    auto payload = parseControlPayload(response);
+    if (!payload) {
+        return payload.error();
+    }
+    if (!payload.value().is_array()) {
+        return Error{ErrorCode::SerializationError, "daemon P2P peer response is not an array"};
+    }
+    if (json) {
+        return payload.value().dump(2);
+    }
+    if (payload.value().empty()) {
+        return std::string{"no peers"};
+    }
+    std::ostringstream out;
+    for (std::size_t index = 0; index < payload.value().size(); ++index) {
+        const auto& peer = payload.value().at(index);
+        if (index != 0) {
+            out << '\n';
+        }
+        out << peer.value("node_id", "<unknown>") << "  " << peer.value("endpoint", "<inbound>")
+            << "  remembered=" << (peer.value("remembered", false) ? "yes" : "no")
+            << "  last_connected_ms=" << peer.value("last_connected_ms", std::int64_t{0});
+    }
+    return out.str();
+}
+
 Result<std::string> formatStatus(const daemon::MemorySyncResponse& response, bool json) {
     if (!response.started) {
         return Error{ErrorCode::InvalidState, "memory sync service is not started"};
     }
     if (!json) {
-        return "backend=" + response.backend + " node_id=" + response.nodeId +
-               " corpus_id=" + response.corpusId +
-               " corpus_epoch=" + std::to_string(response.corpusEpoch) + " mode=" + response.mode +
-               " trust=" + response.trustMode + " records=" + std::to_string(response.records) +
-               " quarantined=" + std::to_string(response.quarantinedRecords) +
-               " auth_failures=" + std::to_string(response.authFailures) +
-               " successful_cycles=" + std::to_string(response.successfulCycles) +
-               " failed_cycles=" + std::to_string(response.failedCycles) +
-               " last_success_age_ms=" + std::to_string(response.lastSuccessAgeMs);
+        using yams::cli::ui::Severity;
+        using yams::cli::ui::severity_text;
+        auto health = [](bool bad) { return bad ? Severity::Warn : Severity::Good; };
+        std::ostringstream out;
+        // pi-lens-ignore: clang:no_member -- additive response field is compiled by Meson.
+        out << "backend=" << response.backend << " node_id=" << response.nodeId
+            << " corpus_id=" << response.corpusId << " corpus_epoch=" << response.corpusEpoch
+            << " mode=" << response.mode << " trust=" << response.trustMode
+            << " peers=" << response.peerCount << " records=" << response.records << " quarantined="
+            << severity_text(health(response.quarantinedRecords > 0),
+                             std::to_string(response.quarantinedRecords))
+            << " auth_failures="
+            << severity_text(health(response.authFailures > 0),
+                             std::to_string(response.authFailures))
+            << " successful_cycles=" << response.successfulCycles << " failed_cycles="
+            << severity_text(health(response.failedCycles > 0),
+                             std::to_string(response.failedCycles))
+            << " last_success_age_ms="
+            << severity_text(health(response.lastSuccessAgeMs > 60000),
+                             std::to_string(response.lastSuccessAgeMs));
+        return out.str();
     }
     nlohmann::json output;
     output["backend"] = response.backend;
@@ -106,6 +204,8 @@ Result<std::string> formatStatus(const daemon::MemorySyncResponse& response, boo
     output["corpus_epoch"] = response.corpusEpoch;
     output["mode"] = response.mode;
     output["trust"] = response.trustMode;
+    // pi-lens-ignore: clang:no_member -- additive response field is compiled by Meson.
+    output["peer_count"] = response.peerCount;
     output["started"] = response.started;
     return output.dump(2);
 }
@@ -117,13 +217,42 @@ public:
     std::string getName() const override { return "p2p"; }
 
     std::string getDescription() const override {
-        return "P2P memory sync: publish/read records through the running daemon";
+        return "Secure direct daemon-to-daemon corpus sync";
     }
 
     void registerCommand(CLI::App& app, YamsCLI* cli) override {
         cli_ = cli;
         auto* cmd = app.add_subcommand("p2p", getDescription());
         cmd->require_subcommand(1);
+
+        auto* identity = cmd->add_subcommand("identity", "Show the local node ID and SPKI pin");
+        identity->add_flag("--json", jsonOutput_, "Emit JSON");
+        identity->callback([this]() { failOn(runIdentity()); });
+
+        auto* enroll =
+            cmd->add_subcommand("enroll", "Approve a peer node ID and SPKI pin out of band");
+        enroll->add_option("node-id", enrollNodeId_, "Peer node id")->required();
+        enroll->add_option("spki-pin", enrollPin_, "Peer SHA-256 SPKI pin")->required();
+        enroll->add_flag("--json", jsonOutput_, "Emit JSON");
+        enroll->callback([this]() { failOn(runEnroll()); });
+
+        auto* connect = cmd->add_subcommand("connect", "Connect and synchronize with a peer");
+        connect
+            ->add_option("connection", connectionString_,
+                         "host:port or yams://host:port with optional query parameters")
+            ->required();
+        connect->add_flag("--json", jsonOutput_, "Emit JSON");
+        connect->callback([this]() { failOn(runConnect()); });
+
+        auto* disconnect =
+            cmd->add_subcommand("disconnect", "Disable automatic reconnect for a peer");
+        disconnect->add_option("node-id", disconnectNodeId_, "Peer node id")->required();
+        disconnect->add_flag("--json", jsonOutput_, "Emit JSON");
+        disconnect->callback([this]() { failOn(runDisconnect()); });
+
+        auto* peers = cmd->add_subcommand("peers", "List trusted peers and reconnect state");
+        peers->add_flag("--json", jsonOutput_, "Emit JSON");
+        peers->callback([this]() { failOn(runPeers()); });
 
         auto* publish = cmd->add_subcommand("publish", "Publish a value under a key");
         publish->add_option("key", publishKey_, "Logical key")->required();
@@ -169,7 +298,7 @@ private:
             configuredSocket, YamsCLI::resolveConfiguredDaemonPidFilePath(), true);
         config.socketPath = liveSocket && !liveSocket->empty() ? *liveSocket : configuredSocket;
         config.autoStart = false;
-        config.requestTimeout = std::chrono::seconds(5);
+        config.requestTimeout = std::chrono::seconds(30);
         if (!daemon::DaemonClient::isDaemonRunning(config.socketPath)) {
             return Error{ErrorCode::NotFound,
                          "daemon is not running on socket: " + config.socketPath.string()};
@@ -186,6 +315,71 @@ private:
         auto lease = std::move(leaseResult.value().lease);
         return run_result((*lease)->call<daemon::MemorySyncRequest>(request),
                           config.requestTimeout);
+    }
+
+    Result<void> runIdentity() {
+        auto response = call({daemon::MemorySyncOperation::Identity, {}, {}});
+        if (!response) {
+            return response.error();
+        }
+        auto output = formatIdentity(response.value(), jsonOutput_);
+        if (!output) {
+            return output.error();
+        }
+        std::cout << output.value() << "\n";
+        return {};
+    }
+
+    Result<void> runEnroll() {
+        auto response = call({daemon::MemorySyncOperation::Enroll, enrollNodeId_, enrollPin_});
+        if (!response) {
+            return response.error();
+        }
+        auto output = formatEnroll(response.value(), jsonOutput_);
+        if (!output) {
+            return output.error();
+        }
+        std::cout << output.value() << "\n";
+        return {};
+    }
+
+    Result<void> runConnect() {
+        auto response = call({daemon::MemorySyncOperation::Connect, connectionString_, {}});
+        if (!response) {
+            return response.error();
+        }
+        auto output = formatConnect(response.value(), jsonOutput_);
+        if (!output) {
+            return output.error();
+        }
+        std::cout << output.value() << "\n";
+        return {};
+    }
+
+    Result<void> runDisconnect() {
+        auto response = call({daemon::MemorySyncOperation::Disconnect, disconnectNodeId_, {}});
+        if (!response) {
+            return response.error();
+        }
+        auto output = formatDisconnect(response.value(), jsonOutput_);
+        if (!output) {
+            return output.error();
+        }
+        std::cout << output.value() << "\n";
+        return {};
+    }
+
+    Result<void> runPeers() {
+        auto response = call({daemon::MemorySyncOperation::Peers, {}, {}});
+        if (!response) {
+            return response.error();
+        }
+        auto output = formatPeers(response.value(), jsonOutput_);
+        if (!output) {
+            return output.error();
+        }
+        std::cout << output.value() << "\n";
+        return {};
     }
 
     Result<void> runPublish() {
@@ -245,6 +439,10 @@ private:
     }
 
     YamsCLI* cli_{nullptr};
+    std::string connectionString_;
+    std::string disconnectNodeId_;
+    std::string enrollNodeId_;
+    std::string enrollPin_;
     std::string publishKey_;
     std::string publishValue_;
     std::string deleteKey_;

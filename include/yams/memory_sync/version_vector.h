@@ -55,6 +55,13 @@ public:
         return true;
     }
 
+    /// Observe a durable writer frontier without replaying every preceding increment.
+    void observe(const NodeId& node, std::uint64_t counter) {
+        if (counter > get(node)) {
+            counters_[node] = counter;
+        }
+    }
+
     /// Element-wise max: keep the causal union of both histories.
     void merge(const VersionVector& other) {
         for (const auto& [node, count] : other.counters_) {

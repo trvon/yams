@@ -56,11 +56,13 @@
 #include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/retrieval_session.h>
+#include <yams/daemon/p2p/p2p_manager.h>
 #include <yams/daemon/resource/abi_entity_extractor_adapter.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/extraction/content_extractor.h>
+#include <yams/memory_sync/memory_sync_service.h>
 #include <yams/profiling.h>
 #include <yams/search/search_engine.h>
 #include <yams/search/search_execution_context.h>
@@ -192,11 +194,19 @@ public:
         std::uint64_t corpusEpoch{0};
         std::string mode;
         std::string trustMode;
+        std::uint64_t peerCount{0};
     };
     Result<void> publishMemorySync(const std::string& key, const std::string& value);
     Result<void> deleteMemorySync(const std::string& key);
     Result<std::string> readMemorySyncCached(const std::string& key) const;
     Result<MemorySyncStatus> getMemorySyncStatus() const;
+    Result<p2p::P2pSyncResult> connectP2p(std::string_view connectionString);
+    Result<void> disconnectP2p(std::string_view nodeId);
+    Result<void> enrollP2pPeer(std::string_view nodeId, std::string_view spkiPin);
+    Result<p2p::P2pLocalIdentity> getP2pIdentity() const;
+    Result<std::vector<p2p::PeerRegistryRecord>> listP2pPeers() const;
+    Result<void> stageMemorySyncDocumentDelete(std::string_view contentHash);
+    Result<void> publishMemorySyncDocumentDelete(std::string_view contentHash);
 
     struct SearchLoadMetrics {
         std::uint32_t active{0};
@@ -425,6 +435,10 @@ public:
     }
     yams::memory_sync::MemorySyncService* testingMemorySyncService() const noexcept {
         return memorySync_.get();
+    }
+    void
+    testingSetMemorySyncService(std::unique_ptr<yams::memory_sync::MemorySyncService> service) {
+        memorySync_ = std::move(service);
     }
     void testingSetMemorySyncStageObserver(std::function<void(std::string_view)> observer) {
         std::lock_guard<std::mutex> lock(memorySyncStageObserverMutex_);
@@ -776,8 +790,12 @@ private:
     Result<void> configureResourcePools(const std::function<void()>& beforeConfigure);
     Result<std::filesystem::path> initializeDataDirAndContentStore();
     Result<void> initializeMemorySync(const std::filesystem::path& dataDir);
-    void configureMemorySyncApply();
+    Result<void> initializeDirectP2p(const std::filesystem::path& dataDir);
+    Result<void> configureMemorySyncApply();
     void applyMemorySyncWinners() noexcept;
+    bool drainMemorySyncDocumentDeleteOutbox() noexcept;
+    Result<bool> memorySyncDeleteLocallyAbsent(std::string_view contentHash,
+                                               memory_sync::EraseReadinessProbe probe) const;
     void publishMemorySyncBackfill() noexcept;
     void notifyMemorySyncStage(std::string_view stage) noexcept;
     Result<std::size_t> applyMemorySyncContentBlobs();
@@ -915,6 +933,7 @@ private:
     // P2P memory-sync service (version-vector + LWW over a shared store).
     // Started after storage/content-store init, stopped during shutdown.
     std::unique_ptr<yams::memory_sync::MemorySyncService> memorySync_;
+    std::unique_ptr<yams::daemon::p2p::P2pManager> p2pManager_;
     mutable std::mutex memorySyncStageObserverMutex_;
     std::function<void(std::string_view)> memorySyncStageObserver_;
     bool memorySyncVectorRebuildDirty_{false};
