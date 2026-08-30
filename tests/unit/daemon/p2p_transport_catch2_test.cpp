@@ -39,7 +39,7 @@ TlsIdentity identity(std::string nodeId, const yams::memory_sync::WriterKeyPair&
 bool waitUntil(std::function<bool()> predicate, std::chrono::milliseconds timeout = 2s) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (!predicate() && std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::yield();
+        std::this_thread::sleep_for(1ms);
     }
     return predicate();
 }
