@@ -167,11 +167,19 @@ TEST_CASE("P2P peer trust store pins first contact and rejects key changes",
     auto first = trust.verifyOrPin("peer", firstPin, true);
     REQUIRE(first.has_value());
     CHECK(first.value().firstContactPinned);
+    CHECK_FALSE(first.value().pinnedByOperator);
     CHECK(trust.pinnedPin("peer") == firstPin);
 
     auto known = trust.verifyOrPin("peer", firstPin, false);
     REQUIRE(known.has_value());
     CHECK_FALSE(known.value().firstContactPinned);
+    CHECK_FALSE(known.value().pinnedByOperator);
+
+    REQUIRE(trust.enrollOperatorPeer("peer", firstPin).has_value());
+    auto enrolled = trust.verifyOrPin("peer", firstPin, false);
+    REQUIRE(enrolled.has_value());
+    CHECK_FALSE(enrolled.value().firstContactPinned);
+    CHECK(enrolled.value().pinnedByOperator);
 
     auto changed = trust.verifyOrPin("peer", changedPin, true);
     REQUIRE_FALSE(changed.has_value());
@@ -204,6 +212,8 @@ TEST_CASE("P2P hello binds TLS identities and exchanges causal watermarks",
     CHECK(pair.server.value().peerNodeId == "client-node");
     CHECK(pair.client.value().firstContactPinned);
     CHECK(pair.server.value().firstContactPinned);
+    CHECK_FALSE(pair.client.value().pinnedByOperator);
+    CHECK_FALSE(pair.server.value().pinnedByOperator);
     CHECK(pair.client.value().peerWatermark("server-node") == 3);
     CHECK(pair.server.value().peerWatermark("client-node") == 2);
     CHECK(pair.client.value().peerVersion.get("server-node") == 3);

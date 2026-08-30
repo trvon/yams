@@ -51,12 +51,14 @@ CREATE TABLE p2p_peers (
     corpus_id TEXT NOT NULL DEFAULT '',
     corpus_epoch INTEGER NOT NULL DEFAULT 0,
     last_seen_vv TEXT NOT NULL DEFAULT '{"counters_":{}}',
-    last_connected_ms INTEGER NOT NULL DEFAULT 0
+    last_connected_ms INTEGER NOT NULL DEFAULT 0,
+    pinned_by_operator INTEGER NOT NULL DEFAULT 0
 )
 )sql")
                     .has_value());
         auto insert =
-            legacy.prepare("INSERT INTO p2p_peers(node_id, spki_hash) VALUES('legacy-peer', ?)");
+            legacy.prepare("INSERT INTO p2p_peers(node_id, spki_hash, pinned_by_operator) "
+                           "VALUES('legacy-peer', ?, 1)");
         REQUIRE(insert.has_value());
         auto statement = std::move(insert.value());
         REQUIRE(statement.bind(1, std::string(64, 'a')).has_value());
@@ -71,6 +73,14 @@ CREATE TABLE p2p_peers (
     CHECK(peers.value().front().endpoint.empty());
     CHECK_FALSE(peers.value().front().remembered);
     CHECK_FALSE(peers.value().front().pinnedByOperator);
+    auto legacyTrust = opened.value()->verifyOrPin("legacy-peer", std::string(64, 'a'), false);
+    REQUIRE(legacyTrust.has_value());
+    CHECK_FALSE(legacyTrust.value().firstContactPinned);
+    CHECK_FALSE(legacyTrust.value().pinnedByOperator);
+    REQUIRE(opened.value()->enrollOperatorPeer("legacy-peer", std::string(64, 'a')).has_value());
+    auto reenrolled = opened.value()->verifyOrPin("legacy-peer", std::string(64, 'a'), false);
+    REQUIRE(reenrolled.has_value());
+    CHECK(reenrolled.value().pinnedByOperator);
     yams::memory_sync::VersionVector version;
     REQUIRE(opened.value()
                 ->updatePeerState("legacy-peer", "corpus", 1, version, 7, "host:9721", true)
@@ -101,6 +111,9 @@ TEST_CASE("P2P peer registry persists operator enrollment",
     CHECK(peers.value().front().spkiPin == pin);
     CHECK(peers.value().front().pinnedByOperator);
     CHECK_FALSE(peers.value().front().remembered);
+    auto trusted = registry.verifyOrPin("peer-node", pin, false);
+    REQUIRE(trusted.has_value());
+    CHECK(trusted.value().pinnedByOperator);
 }
 
 TEST_CASE("P2P peer registry persists trust and causal state across restart",
@@ -121,8 +134,13 @@ TEST_CASE("P2P peer registry persists trust and causal state across restart",
         auto first = registry.verifyOrPin("peer-node", std::string(64, 'A'), true);
         REQUIRE(first.has_value());
         CHECK(first.value().firstContactPinned);
+        CHECK_FALSE(first.value().pinnedByOperator);
+        REQUIRE(registry.enrollOperatorPeer("peer-node", pin).has_value());
+        auto promoted = registry.verifyOrPin("peer-node", pin, false);
+        REQUIRE(promoted.has_value());
+        CHECK(promoted.value().pinnedByOperator);
         auto firstUpdate =
-            registry.updatePeerState("peer-node", "corpus", 7, version, 123456, {}, false, true);
+            registry.updatePeerState("peer-node", "corpus", 7, version, 123456, {}, false);
         const std::string firstUpdateError =
             firstUpdate ? std::string{} : firstUpdate.error().message;
         INFO(firstUpdateError);
@@ -130,7 +148,7 @@ TEST_CASE("P2P peer registry persists trust and causal state across restart",
         // A later non-operator update must not downgrade the pin source.
         REQUIRE(registry
                     .updatePeerState("peer-node", "corpus", 7, version, 123999,
-                                     "ghost.example:9721", true, false)
+                                     "ghost.example:9721", true)
                     .has_value());
     }
 
@@ -141,6 +159,7 @@ TEST_CASE("P2P peer registry persists trust and causal state across restart",
     auto known = registry.verifyOrPin("peer-node", pin, false);
     REQUIRE(known.has_value());
     CHECK_FALSE(known.value().firstContactPinned);
+    CHECK(known.value().pinnedByOperator);
     auto changed = registry.verifyOrPin("peer-node", std::string(64, 'b'), true);
     REQUIRE_FALSE(changed.has_value());
     CHECK(changed.error().code == yams::ErrorCode::Unauthorized);

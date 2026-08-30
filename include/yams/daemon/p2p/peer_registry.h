@@ -56,7 +56,7 @@ public:
                                  std::uint64_t corpusEpoch,
                                  const memory_sync::VersionVector& lastSeenVersion,
                                  std::int64_t lastConnectedMs, std::string_view endpoint = {},
-                                 bool remembered = false, bool pinnedByOperator = false);
+                                 bool remembered = false);
     Result<std::vector<PeerRegistryRecord>> listPeers() const;
     Result<void> removePeer(std::string_view nodeId);
 
@@ -64,6 +64,7 @@ private:
     PeerRegistry(std::unique_ptr<metadata::Database> database, std::size_t maxPeers);
     Result<void> initializeSchema();
     Result<std::optional<std::string>> findPinLocked(std::string_view nodeId) const;
+    Result<bool> operatorPinnedLocked(std::string_view nodeId) const;
     Result<std::size_t> peerCountLocked() const;
 
     mutable std::mutex mutex_;

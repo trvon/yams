@@ -379,11 +379,11 @@ Result<WireState> validatePeerWindowFrontier(const PeerHandshakeConfig& config,
     return replaceWriterFrontier(peerState, frontier);
 }
 
-Result<bool> preflightTrust(IPeerTrustStore& trustStore, std::string_view nodeId,
-                            std::string_view spkiPin, bool allowFirstContact) {
+Result<PeerTrustDecision> preflightTrust(IPeerTrustStore& trustStore, std::string_view nodeId,
+                                         std::string_view spkiPin, bool allowFirstContact) {
     auto verified = trustStore.verifyOrPin(nodeId, spkiPin, false);
     if (verified) {
-        return false;
+        return verified.value();
     }
     if (verified.error().code != ErrorCode::Unauthorized) {
         return verified.error(); // Storage/config failures always fail closed.
@@ -392,13 +392,14 @@ Result<bool> preflightTrust(IPeerTrustStore& trustStore, std::string_view nodeId
     if (pinned || !allowFirstContact) {
         return verified.error(); // Existing mismatch or unknown peer without TOFU.
     }
-    return true; // Defer first-contact pin commit until state validation succeeds.
+    // Defer first-contact pin commit until state validation succeeds.
+    return PeerTrustDecision{.firstContactPinned = true, .pinnedByOperator = false};
 }
 
-Result<bool> validatePeerAndPreflightTrust(IPeerTrustStore& trustStore,
-                                           const P2pConnection& connection,
-                                           const PeerHandshakeConfig& local,
-                                           const WireHello& peer) {
+Result<PeerTrustDecision> validatePeerAndPreflightTrust(IPeerTrustStore& trustStore,
+                                                        const P2pConnection& connection,
+                                                        const PeerHandshakeConfig& local,
+                                                        const WireHello& peer) {
     if (auto valid = validatePeerHello(peer, local, connection); !valid) {
         return valid.error();
     }
@@ -407,9 +408,10 @@ Result<bool> validatePeerAndPreflightTrust(IPeerTrustStore& trustStore,
 }
 
 Result<PeerTrustDecision> commitTrust(IPeerTrustStore& trustStore, std::string_view nodeId,
-                                      std::string_view spkiPin, bool pendingFirstContact) {
-    if (!pendingFirstContact) {
-        return PeerTrustDecision{};
+                                      std::string_view spkiPin,
+                                      PeerTrustDecision preflightDecision) {
+    if (!preflightDecision.firstContactPinned) {
+        return preflightDecision;
     }
     return trustStore.verifyOrPin(nodeId, spkiPin, true);
 }
@@ -428,7 +430,8 @@ Result<PeerHandshakeResult> makeHandshakeResult(const P2pConnection& connection,
                                .peerPrefixCounter = proof.proof.counter,
                                .peerPrefixVerified = true,
                                .peerPrefixMatches = proof.matchesLocalPrefix,
-                               .firstContactPinned = trust.firstContactPinned};
+                               .firstContactPinned = trust.firstContactPinned,
+                               .pinnedByOperator = trust.pinnedByOperator};
 }
 
 Result<void> validateLocalHandshake(const P2pConnection& connection,
@@ -452,8 +455,9 @@ Result<WireState> readStateFrame(P2pConnection& connection, std::chrono::millise
 
 Result<PeerTrustDecision> finalizeTrust(IPeerTrustStore& trustStore,
                                         const P2pConnection& connection,
-                                        std::string_view peerNodeId, bool pendingFirstContact) {
-    return commitTrust(trustStore, peerNodeId, connection.peerSpkiPin(), pendingFirstContact);
+                                        std::string_view peerNodeId,
+                                        PeerTrustDecision preflightDecision) {
+    return commitTrust(trustStore, peerNodeId, connection.peerSpkiPin(), preflightDecision);
 }
 
 Json historyProofJson(const WireHistoryProof& proof) {
@@ -592,10 +596,34 @@ Result<PeerTrustDecision> InMemoryPeerTrustStore::verifyOrPin(std::string_view n
     const std::optional<std::string> existing =
         found == pins_.end() ? std::nullopt : std::optional<std::string>{found->second};
     auto decision = evaluatePeerPin(existing, normalizedPin, allowFirstContact);
-    if (decision && decision.value().firstContactPinned) {
+    if (!decision) {
+        return decision.error();
+    }
+    if (decision.value().firstContactPinned) {
         pins_.emplace(nodeId, normalizedPin);
+    } else {
+        decision.value().pinnedByOperator = operatorPinnedNodes_.contains(std::string(nodeId));
     }
     return decision;
+}
+
+Result<void> InMemoryPeerTrustStore::enrollOperatorPeer(std::string_view nodeId,
+                                                        std::string_view spkiPin) {
+    if (nodeId.empty()) {
+        return Error{ErrorCode::InvalidArgument, "p2p enrollment node id is empty"};
+    }
+    auto normalized = normalizePeerSpkiPin(spkiPin);
+    if (!normalized) {
+        return normalized.error();
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = pins_.find(std::string(nodeId));
+    if (found != pins_.end() && found->second != normalized.value()) {
+        return Error{ErrorCode::Unauthorized, "P2P peer pin replacement requires explicit removal"};
+    }
+    pins_.insert_or_assign(std::string(nodeId), normalized.value());
+    operatorPinnedNodes_.insert(std::string(nodeId));
+    return {};
 }
 
 std::optional<std::string> InMemoryPeerTrustStore::pinnedPin(std::string_view nodeId) const {
@@ -731,7 +759,7 @@ Result<PeerHandshakeResult> initiatePeerHandshake(P2pConnection& connection,
     if (!peerProof) {
         return fail(peerProof.error());
     }
-    if (!peerProof.value().matchesLocalPrefix && pendingTrust.value()) {
+    if (!peerProof.value().matchesLocalPrefix && pendingTrust.value().firstContactPinned) {
         return fail(
             Error{ErrorCode::Unauthorized, "first-contact peer failed writer prefix verification"});
     }
@@ -814,7 +842,7 @@ Result<PeerHandshakeResult> acceptPeerHandshake(P2pConnection& connection,
     if (!peerProof) {
         return fail(peerProof.error());
     }
-    if (!peerProof.value().matchesLocalPrefix && pendingTrust.value()) {
+    if (!peerProof.value().matchesLocalPrefix && pendingTrust.value().firstContactPinned) {
         return fail(
             Error{ErrorCode::Unauthorized, "first-contact peer failed writer prefix verification"});
     }

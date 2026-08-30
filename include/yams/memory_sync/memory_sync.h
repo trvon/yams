@@ -134,11 +134,14 @@ public:
                    std::string corpusId = "local-test-corpus", std::uint64_t corpusEpoch = 1,
                    bool allowLegacyUnbound = false, MemorySyncLimits limits = {},
                    MemorySyncControl control = {}, TombstoneGcPolicy tombstoneGc = {},
-                   std::shared_ptr<const WriterAuthenticator> writerAuth = {})
+                   std::shared_ptr<const WriterAuthenticator> writerAuth = {},
+                   std::string controlScope = {})
         : backend_(&backend), nodeId_(std::move(nodeId)), corpusId_(std::move(corpusId)),
           corpusEpoch_(corpusEpoch), allowLegacyUnbound_(allowLegacyUnbound), limits_(limits),
           control_(std::move(control)), tombstoneGc_(std::move(tombstoneGc)),
-          writerAuth_(std::move(writerAuth)) {}
+          writerAuth_(std::move(writerAuth)),
+          controlScope_(controlScope.empty() ? corpusId_ + ":" + std::to_string(corpusEpoch_)
+                                             : std::move(controlScope)) {}
 
     /// Publish `content` under `logicalKey`. Stores the content-addressed blob and
     /// an index record stamped with this node's version vector and hybrid timestamp.
@@ -596,6 +599,11 @@ public:
                 quarantine(key, record.error().message);
                 continue;
             }
+            const bool authenticationRequired = writerAuth_ && writerAuth_->required();
+            if (authenticationRequired &&
+                record.value().schemaVersion != kAuthenticatedMemoryIndexSchemaVersion) {
+                legacyUnauthenticatedHistory_ = true;
+            }
             std::string candidateRecordHash = expectedRecordHash;
             if (record.value().schemaVersion < kMemoryIndexSchemaVersion) {
                 if (!allowLegacyUnbound_ || (writerAuth_ && writerAuth_->required())) {
@@ -631,7 +639,6 @@ public:
             }
             const bool authenticatedSchema =
                 record.value().schemaVersion == kAuthenticatedMemoryIndexSchemaVersion;
-            const bool authenticationRequired = writerAuth_ && writerAuth_->required();
             if ((authenticatedSchema || authenticationRequired) &&
                 (!writerAuth_ || !writerAuth_->verify(record.value()))) {
                 recordAuthFailure();
@@ -1441,6 +1448,10 @@ public:
         return quarantined_;
     }
 
+    [[nodiscard]] bool legacyUnauthenticatedHistoryObserved() const noexcept {
+        return legacyUnauthenticatedHistory_;
+    }
+
     /// Read only the last periodically reconciled winner. Daemon IPC uses this
     /// path so polling a peer cannot manufacture convergence by forcing sync.
     [[nodiscard]] Result<std::vector<std::byte>> readCached(std::string_view logicalKey) const {
@@ -1632,19 +1643,22 @@ private:
                                    {"counter", commitment.counter},
                                    {"digest", commitment.digest}});
         }
-        const auto encoded =
-            nlohmann::json{{"schema_version", 1},
-                           {"corpus_id", corpusId_},
-                           {"corpus_epoch", corpusEpoch_},
-                           {"witness", std::string(witness)},
-                           {"frontier", snapshot.frontier},
-                           {"commitments", std::move(commitments)},
-                           {"record_count", snapshot.winners.size()},
-                           {"root_digest", snapshot.rootDigest},
-                           {"witness_key_id", snapshot.witnessSignature.keyId},
-                           {"witness_algorithm", snapshot.witnessSignature.algorithm},
-                           {"witness_signature", snapshot.witnessSignature.signature}}
-                .dump();
+        auto artifact = nlohmann::json{{"schema_version", 1},
+                                       {"corpus_id", corpusId_},
+                                       {"corpus_epoch", corpusEpoch_},
+                                       {"witness", std::string(witness)},
+                                       {"frontier", snapshot.frontier},
+                                       {"commitments", std::move(commitments)},
+                                       {"record_count", snapshot.winners.size()},
+                                       {"root_digest", snapshot.rootDigest},
+                                       {"witness_key_id", snapshot.witnessSignature.keyId},
+                                       {"witness_algorithm", snapshot.witnessSignature.algorithm},
+                                       {"witness_signature", snapshot.witnessSignature.signature}};
+        if (auto signedArtifact = signControlArtifact(artifact, "cold-bootstrap-journal-v1");
+            !signedArtifact) {
+            return signedArtifact.error();
+        }
+        const auto encoded = artifact.dump();
         if (encoded.size() > limits_.maxEnvelopeBytes) {
             return Error{ErrorCode::ResourceExhausted,
                          "cold bootstrap journal exceeds envelope bound"};
@@ -1667,6 +1681,10 @@ private:
             const std::string_view text(reinterpret_cast<const char*>(encoded.value().data()),
                                         encoded.value().size());
             const auto json = nlohmann::json::parse(text);
+            if (auto authenticated = verifyControlArtifact(json, "cold-bootstrap-journal-v1");
+                !authenticated) {
+                return authenticated.error();
+            }
             if (!json.is_object() || json.at("schema_version").get<std::uint32_t>() != 1 ||
                 json.at("corpus_id").get<std::string>() != corpusId_ ||
                 json.at("corpus_epoch").get<std::uint64_t>() != corpusEpoch_ ||
@@ -2523,6 +2541,70 @@ private:
         return text;
     }
 
+    Result<void> signControlArtifact(nlohmann::json& artifact, std::string_view domain) const {
+        const bool required = writerAuth_ && writerAuth_->required();
+        artifact["authenticated_writers"] = required;
+        artifact["control_scope"] = controlScope_;
+        artifact.erase("control_signature");
+        if (!required) {
+            return {};
+        }
+        const auto canonical = artifact.dump();
+        const auto digest = hashContent(std::span<const std::byte>{
+            reinterpret_cast<const std::byte*>(canonical.data()), canonical.size()});
+        auto signature = writerAuth_->signDigest(domain, digest);
+        if (!signature) {
+            return signature.error();
+        }
+        artifact["control_signature"] = {{"writer_id", signature.value().writerId},
+                                         {"key_id", signature.value().keyId},
+                                         {"algorithm", signature.value().algorithm},
+                                         {"signature", signature.value().signature}};
+        return {};
+    }
+
+    Result<void> verifyControlArtifact(const nlohmann::json& artifact, std::string_view domain,
+                                       bool requireLocalSigner = true) const {
+        const bool required = writerAuth_ && writerAuth_->required();
+        if (artifact.value("authenticated_writers", false) != required) {
+            return Error{ErrorCode::InvalidData,
+                         "control artifact writer-authentication mode mismatch"};
+        }
+        if (!required) {
+            return {};
+        }
+        if (controlScope_.empty() ||
+            artifact.value("control_scope", std::string{}) != controlScope_) {
+            return Error{ErrorCode::InvalidData,
+                         "control artifact writer-authentication scope mismatch"};
+        }
+        try {
+            const auto& encoded = artifact.at("control_signature");
+            DetachedWriterSignature signature{
+                .writerId = encoded.at("writer_id").get<std::string>(),
+                .keyId = encoded.at("key_id").get<std::string>(),
+                .algorithm = encoded.at("algorithm").get<std::string>(),
+                .signature = encoded.at("signature").get<std::string>()};
+            if (requireLocalSigner && signature.writerId != nodeId_) {
+                return Error{ErrorCode::Unauthorized,
+                             "control artifact was not signed by the local writer"};
+            }
+            auto unsignedArtifact = artifact;
+            unsignedArtifact.erase("control_signature");
+            const auto canonical = unsignedArtifact.dump();
+            const auto digest = hashContent(std::span<const std::byte>{
+                reinterpret_cast<const std::byte*>(canonical.data()), canonical.size()});
+            if (!writerAuth_->verifyDigest(signature, domain, digest)) {
+                return Error{ErrorCode::Unauthorized,
+                             "control artifact writer signature is invalid"};
+            }
+            return {};
+        } catch (const std::exception& error) {
+            return Error{ErrorCode::InvalidData,
+                         std::string("control artifact signature is malformed: ") + error.what()};
+        }
+    }
+
     std::string historyEntryKey(std::string_view writerId, std::uint64_t counter) const {
         return "history/counter-v1/" + historyScopeHash(writerId) + "/" + paddedCounter(counter);
     }
@@ -2549,14 +2631,20 @@ private:
             const std::string_view text(reinterpret_cast<const char*>(encoded.value().data()),
                                         encoded.value().size());
             const auto json = nlohmann::json::parse(text);
+            if (auto authenticated = verifyControlArtifact(json, "history-entry-v1", false);
+                !authenticated) {
+                return authenticated.error();
+            }
             HistoryEntry entry{.writerId = json.at("writer_id").get<std::string>(),
                                .counter = json.at("counter").get<std::uint64_t>(),
                                .logicalKey = json.at("logical_key").get<std::string>(),
                                .recordHash = json.at("record_hash").get<std::string>(),
                                .prefixDigest = json.at("prefix_digest").get<std::string>()};
-            if (json.at("schema_version").get<std::uint32_t>() != 1 || entry.writerId != writerId ||
-                entry.counter != counter || !isSha256Digest(entry.recordHash) ||
-                !isSha256Digest(entry.prefixDigest) ||
+            if (json.at("schema_version").get<std::uint32_t>() != 1 ||
+                json.value("authenticated_writers", false) !=
+                    (writerAuth_ && writerAuth_->required()) ||
+                entry.writerId != writerId || entry.counter != counter ||
+                !isSha256Digest(entry.recordHash) || !isSha256Digest(entry.prefixDigest) ||
                 !validateLogicalKey(entry.logicalKey).has_value()) {
                 return Error{ErrorCode::InvalidData, "writer counter entry is inconsistent"};
             }
@@ -2600,12 +2688,15 @@ private:
             }
             return {};
         }
-        const auto json = nlohmann::json{{"schema_version", 1},
-                                         {"writer_id", expected.writerId},
-                                         {"counter", expected.counter},
-                                         {"logical_key", expected.logicalKey},
-                                         {"record_hash", expected.recordHash},
-                                         {"prefix_digest", expected.prefixDigest}};
+        auto json = nlohmann::json{{"schema_version", 1},
+                                   {"writer_id", expected.writerId},
+                                   {"counter", expected.counter},
+                                   {"logical_key", expected.logicalKey},
+                                   {"record_hash", expected.recordHash},
+                                   {"prefix_digest", expected.prefixDigest}};
+        if (auto signedArtifact = signControlArtifact(json, "history-entry-v1"); !signedArtifact) {
+            return signedArtifact.error();
+        }
         const auto text = json.dump();
         if (text.size() > limits_.maxEnvelopeBytes) {
             return Error{ErrorCode::ResourceExhausted,
@@ -2618,12 +2709,17 @@ private:
 
     Result<void> storeHistoryMigrationState(std::string_view writerId,
                                             const HistoryMigrationState& state) {
-        const auto json = nlohmann::json{{"schema_version", 1},
-                                         {"phase", state.phase},
-                                         {"cursor", state.cursor},
-                                         {"target_counter", state.targetCounter},
-                                         {"next_counter", state.nextCounter},
-                                         {"prefix_digest", state.prefixDigest}};
+        auto json = nlohmann::json{{"schema_version", 1},
+                                   {"writer_id", writerId},
+                                   {"phase", state.phase},
+                                   {"cursor", state.cursor},
+                                   {"target_counter", state.targetCounter},
+                                   {"next_counter", state.nextCounter},
+                                   {"prefix_digest", state.prefixDigest}};
+        if (auto signedArtifact = signControlArtifact(json, "history-migration-state-v1");
+            !signedArtifact) {
+            return signedArtifact.error();
+        }
         const auto encoded = json.dump();
         return backend_->store(
             historyMigrationStateKey(writerId),
@@ -2648,6 +2744,11 @@ private:
             const std::string_view text(reinterpret_cast<const char*>(encoded.value().data()),
                                         encoded.value().size());
             const auto json = nlohmann::json::parse(text);
+            if (auto authenticated =
+                    verifyControlArtifact(json, "history-migration-state-v1", false);
+                !authenticated) {
+                return authenticated.error();
+            }
             HistoryMigrationState state{
                 .phase = json.at("phase").get<std::string>(),
                 .cursor = json.at("cursor").get<std::string>(),
@@ -2655,6 +2756,9 @@ private:
                 .nextCounter = json.at("next_counter").get<std::uint64_t>(),
                 .prefixDigest = json.at("prefix_digest").get<std::string>()};
             if (json.at("schema_version").get<std::uint32_t>() != 1 ||
+                json.at("writer_id").get<std::string>() != writerId ||
+                json.value("authenticated_writers", false) !=
+                    (writerAuth_ && writerAuth_->required()) ||
                 (state.phase != "scan" && state.phase != "finalize") || state.targetCounter == 0 ||
                 state.nextCounter == 0 ||
                 (state.nextCounter > 1 && !isSha256Digest(state.prefixDigest))) {
@@ -2673,11 +2777,15 @@ private:
         if (!exists) {
             return exists.error();
         }
-        const auto json = nlohmann::json{{"schema_version", 1},
-                                         {"writer_id", candidate.writerId},
-                                         {"counter", candidate.counter},
-                                         {"logical_key", candidate.logicalKey},
-                                         {"record_hash", candidate.recordHash}};
+        auto json = nlohmann::json{{"schema_version", 1},
+                                   {"writer_id", candidate.writerId},
+                                   {"counter", candidate.counter},
+                                   {"logical_key", candidate.logicalKey},
+                                   {"record_hash", candidate.recordHash}};
+        if (auto signedArtifact = signControlArtifact(json, "history-migration-candidate-v1");
+            !signedArtifact) {
+            return signedArtifact.error();
+        }
         const auto encoded = json.dump();
         if (exists.value()) {
             auto prior = backend_->retrieve(key);
@@ -2712,11 +2820,18 @@ private:
             const std::string_view text(reinterpret_cast<const char*>(encoded.value().data()),
                                         encoded.value().size());
             const auto json = nlohmann::json::parse(text);
+            if (auto authenticated =
+                    verifyControlArtifact(json, "history-migration-candidate-v1", false);
+                !authenticated) {
+                return authenticated.error();
+            }
             HistoryEntry candidate{.writerId = json.at("writer_id").get<std::string>(),
                                    .counter = json.at("counter").get<std::uint64_t>(),
                                    .logicalKey = json.at("logical_key").get<std::string>(),
                                    .recordHash = json.at("record_hash").get<std::string>()};
             if (json.at("schema_version").get<std::uint32_t>() != 1 ||
+                json.value("authenticated_writers", false) !=
+                    (writerAuth_ && writerAuth_->required()) ||
                 candidate.writerId != writerId || candidate.counter != counter ||
                 !isSha256Digest(candidate.recordHash) ||
                 !validateLogicalKey(candidate.logicalKey).has_value()) {
@@ -2937,6 +3052,10 @@ private:
             const std::string_view text(reinterpret_cast<const char*>(encoded.value().data()),
                                         encoded.value().size());
             const auto json = nlohmann::json::parse(text);
+            if (auto authenticated = verifyControlArtifact(json, "replication-checkpoint-v1");
+                !authenticated) {
+                return authenticated.error();
+            }
             if (json.at("schema_version").get<std::uint32_t>() != 1 ||
                 json.at("corpus_id").get<std::string>() != corpusId_ ||
                 json.at("corpus_epoch").get<std::uint64_t>() != corpusEpoch_ ||
@@ -2995,13 +3114,16 @@ private:
                                       {"counter", commitment.counter},
                                       {"digest", commitment.digest}});
         }
-        const std::string encoded = nlohmann::json{
-            {"schema_version", 1},
-            {"corpus_id", corpusId_},
-            {"corpus_epoch", corpusEpoch_},
-            {"quarantined_writers", std::move(quarantineJson)},
-            {"commitments",
-             std::move(commitmentJson)}}.dump();
+        auto artifact = nlohmann::json{{"schema_version", 1},
+                                       {"corpus_id", corpusId_},
+                                       {"corpus_epoch", corpusEpoch_},
+                                       {"quarantined_writers", std::move(quarantineJson)},
+                                       {"commitments", std::move(commitmentJson)}};
+        if (auto signedArtifact = signControlArtifact(artifact, "replication-checkpoint-v1");
+            !signedArtifact) {
+            return signedArtifact.error();
+        }
+        const std::string encoded = artifact.dump();
         if (encoded.size() > limits_.maxEnvelopeBytes) {
             return Error{ErrorCode::ResourceExhausted,
                          "replication checkpoint exceeds envelope limit"};
@@ -3359,6 +3481,7 @@ private:
     MemorySyncControl control_;
     TombstoneGcPolicy tombstoneGc_;
     std::shared_ptr<const WriterAuthenticator> writerAuth_;
+    std::string controlScope_;
     VersionVector version_;
     std::uint64_t logicalClock_{0};
     std::map<std::string, MemoryIndexRecord> merged_;
@@ -3380,6 +3503,7 @@ private:
     bool recoveringColdBootstrap_{false};
     std::uint64_t durableQuarantineGeneration_{0};
     std::size_t authFailures_{0};
+    bool legacyUnauthenticatedHistory_{false};
 };
 
 } // namespace yams::memory_sync

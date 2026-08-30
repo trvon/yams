@@ -34,15 +34,17 @@ struct MemorySyncConfig {
     MemorySyncLimits limits{};
     bool cleanupOwnedNamespaceOnStop{false};
     std::shared_ptr<const WriterAuthenticator> writerAuth; /// optional schema-v4 signer/verifier
+    std::string controlScope;                              /// authenticated local-store generation
 
     MemorySyncConfig() = default;
     explicit MemorySyncConfig(std::string writerId, std::uint32_t intervalMs = 5000,
                               std::string corpus = "local-test-corpus", std::uint64_t epoch = 1,
                               MemorySyncLimits resourceLimits = {}, bool cleanupOwned = false,
-                              std::shared_ptr<const WriterAuthenticator> auth = {})
+                              std::shared_ptr<const WriterAuthenticator> auth = {},
+                              std::string authenticatedControlScope = {})
         : nodeId(std::move(writerId)), syncIntervalMs(intervalMs), corpusId(std::move(corpus)),
           corpusEpoch(epoch), limits(resourceLimits), cleanupOwnedNamespaceOnStop(cleanupOwned),
-          writerAuth(std::move(auth)) {}
+          writerAuth(std::move(auth)), controlScope(std::move(authenticatedControlScope)) {}
 };
 
 /// Daemon-facing service that runs the memory-sync loop periodically and exposes
@@ -63,7 +65,7 @@ public:
                 MemorySyncControl{
                     .isCancelled = [this] { return stop_.load(std::memory_order_acquire); },
                     .canAdmitRemoteWork = std::move(canAdmitRemoteWork)},
-                {}, config_.writerAuth) {}
+                {}, config_.writerAuth, config_.controlScope) {}
 
     ~MemorySyncService() { stop(); }
 
@@ -134,6 +136,21 @@ public:
 
     bool stopRequested() const noexcept { return stop_.load(std::memory_order_acquire); }
     [[nodiscard]] const std::string& localNodeId() const noexcept { return config_.nodeId; }
+    [[nodiscard]] bool writerAuthenticationReady() const noexcept {
+        return config_.writerAuth && config_.writerAuth->required();
+    }
+    [[nodiscard]] bool directP2pReady(std::string_view nodeId, std::string_view corpusId,
+                                      std::uint64_t corpusEpoch) const noexcept {
+        return writerAuthenticationReady() && !config_.controlScope.empty() &&
+               fullRecoveryCompleted_.load(std::memory_order_acquire) &&
+               !legacyUnauthenticatedHistory_.load(std::memory_order_acquire) &&
+               config_.nodeId == nodeId && config_.corpusId == corpusId &&
+               config_.corpusEpoch == corpusEpoch;
+    }
+    [[nodiscard]] bool legacyUnauthenticatedHistoryObserved() const {
+        std::lock_guard<std::mutex> lock(loopMutex_);
+        return loop_.legacyUnauthenticatedHistoryObserved();
+    }
 
     /// Called after a successful periodic reconciliation and after releasing loopMutex_.
     /// The callback may safely use this service's public read/sync methods.
@@ -346,6 +363,10 @@ public:
             std::lock_guard<std::mutex> lock(loopMutex_);
             const auto generation = loop_.durableQuarantineGeneration();
             result = loop_.sync();
+            if (loop_.legacyUnauthenticatedHistoryObserved()) {
+                legacyUnauthenticatedHistory_.store(true, std::memory_order_release);
+                fullRecoveryCompleted_.store(false, std::memory_order_release);
+            }
             quarantineChanged = generation != loop_.durableQuarantineGeneration();
             if (result || quarantineChanged) {
                 refreshCommittedState();
@@ -364,6 +385,10 @@ public:
             std::lock_guard<std::mutex> lock(loopMutex_);
             const auto generation = loop_.durableQuarantineGeneration();
             result = loop_.syncFully();
+            const bool legacyHistory = loop_.legacyUnauthenticatedHistoryObserved();
+            legacyUnauthenticatedHistory_.store(legacyHistory, std::memory_order_release);
+            fullRecoveryCompleted_.store(result.has_value() && !legacyHistory,
+                                         std::memory_order_release);
             quarantineChanged = generation != loop_.durableQuarantineGeneration();
             if (result || quarantineChanged) {
                 refreshCommittedState();
@@ -546,6 +571,10 @@ private:
                     snapshot = Error{ErrorCode::InternalError,
                                      "memory sync reconciliation threw an unknown exception"};
                 }
+                if (loop_.legacyUnauthenticatedHistoryObserved()) {
+                    legacyUnauthenticatedHistory_.store(true, std::memory_order_release);
+                    fullRecoveryCompleted_.store(false, std::memory_order_release);
+                }
                 quarantineChanged = generation != loop_.durableQuarantineGeneration();
                 if (snapshot || quarantineChanged) {
                     refreshCommittedState();
@@ -632,6 +661,8 @@ private:
     std::atomic<std::uint64_t> failedSyncCycles_{0};
     std::atomic<std::int64_t> lastSuccessfulSyncSteadyMs_{0};
     std::atomic<bool> namespaceCleaned_{false};
+    std::atomic<bool> fullRecoveryCompleted_{false};
+    std::atomic<bool> legacyUnauthenticatedHistory_{false};
     mutable std::mutex snapshotMutex_;
     std::shared_ptr<const MemorySyncLoop::CommittedState> committed_;
 };

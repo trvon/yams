@@ -322,14 +322,23 @@ TEST_CASE("direct P2P cold bootstrap installs an authenticated multiwriter snaps
     CHECK_FALSE((refused.client.has_value() && refused.server.has_value()));
     CHECK(clientService.currentVersion().empty());
 
-    // The failed TOFU session persisted pins. A fresh handshake can now use those explicit
-    // identities, but same-session first contact was never allowed to carry a snapshot.
+    // A prior TOFU session remains legacy first-contact trust and must never become operator
+    // enrollment merely because a later handshake recognizes the same pin.
     const auto exchange = runExchange(clientService, serverService, clientKey.value(),
                                       serverKey.value(), clientTrust, serverTrust, false);
-    REQUIRE(exchange.client.has_value());
-    REQUIRE(exchange.server.has_value());
-    CHECK(exchange.client.value().snapshotsReceived == 1);
-    CHECK(exchange.server.value().snapshotsSent == 1);
+    CHECK_FALSE((exchange.client.has_value() && exchange.server.has_value()));
+    CHECK(clientService.currentVersion().empty());
+
+    const auto serverPin = identity("server-node", serverKey.value()).spkiPin();
+    const auto clientPin = identity("client-node", clientKey.value()).spkiPin();
+    REQUIRE(clientTrust.enrollOperatorPeer("server-node", serverPin).has_value());
+    REQUIRE(serverTrust.enrollOperatorPeer("client-node", clientPin).has_value());
+    const auto enrolled = runExchange(clientService, serverService, clientKey.value(),
+                                      serverKey.value(), clientTrust, serverTrust, false);
+    REQUIRE(enrolled.client.has_value());
+    REQUIRE(enrolled.server.has_value());
+    CHECK(enrolled.client.value().snapshotsReceived == 1);
+    CHECK(enrolled.server.value().snapshotsSent == 1);
     REQUIRE(clientService.readCached("user/foreign").has_value());
     REQUIRE(clientService.readCached("user/server").has_value());
     CHECK(text(clientService.readCached("user/foreign").value()) == "foreign-value");

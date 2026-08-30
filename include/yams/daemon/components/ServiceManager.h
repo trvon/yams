@@ -729,6 +729,11 @@ public:
 #endif
 
 #if YAMS_DAEMON_TEST_HOOKS_ENABLED
+    YAMS_DAEMON_TEST_HOOK static Result<std::string>
+    __test_loadOrCreateP2pPrivateKey(const std::filesystem::path& keyPath);
+    YAMS_DAEMON_TEST_HOOK static Result<void>
+    __test_writeProtectedP2pPrivateKey(const std::filesystem::path& keyPath,
+                                       std::string_view contents);
     YAMS_DAEMON_TEST_HOOK void __test_setModelProviderDegraded(bool degraded,
                                                                const std::string& error = {});
 #endif

@@ -280,7 +280,7 @@ public:
                 }
                 return registry_->updatePeerState(peer.nodeId, peer.corpusId, peer.corpusEpoch,
                                                   peer.lastSeenVersion, peer.lastConnectedMs,
-                                                  peer.endpoint, false, peer.pinnedByOperator);
+                                                  peer.endpoint, false);
             }
         }
         return Error{ErrorCode::NotFound, "P2P peer is not registered"};
@@ -411,8 +411,7 @@ private:
         }
         auto persisted = registry_->updatePeerState(handshake.value().peerNodeId, options_.corpusId,
                                                     options_.corpusEpoch, service_.currentVersion(),
-                                                    unixTimeMs(), spec.endpoint(), spec.remember,
-                                                    spec.peerPin.has_value());
+                                                    unixTimeMs(), spec.endpoint(), spec.remember);
         if (!persisted) {
             return persisted.error();
         }
@@ -444,21 +443,19 @@ private:
         }
         std::string endpoint;
         bool remembered = false;
-        bool operatorPin = false;
         auto records = registry_->listPeers();
         if (records) {
             for (const auto& peer : records.value()) {
                 if (peer.nodeId == handshake.value().peerNodeId) {
                     endpoint = peer.endpoint;
                     remembered = peer.remembered;
-                    operatorPin = peer.pinnedByOperator;
                     break;
                 }
             }
         }
         (void)registry_->updatePeerState(handshake.value().peerNodeId, options_.corpusId,
                                          options_.corpusEpoch, service_.currentVersion(),
-                                         unixTimeMs(), endpoint, remembered, operatorPin);
+                                         unixTimeMs(), endpoint, remembered);
     }
 
     void reconnectLoop() {
@@ -544,6 +541,11 @@ Result<std::unique_ptr<P2pManager>> P2pManager::create(P2pManagerOptions options
         options.sessionTimeout <= std::chrono::milliseconds::zero() ||
         options.sessionTimeout > kP2pMaxSessionTimeout) {
         return Error{ErrorCode::InvalidArgument, "invalid P2P manager configuration"};
+    }
+    if (!service.directP2pReady(options.nodeId, options.corpusId, options.corpusEpoch)) {
+        return Error{ErrorCode::InvalidArgument,
+                     "direct P2P requires a fully recovered writer-authenticated service with "
+                     "matching node, corpus, and epoch"};
     }
     auto identity = TlsIdentity::fromPrivateKeyPem(options.nodeId, options.privateKeyPem);
     if (!identity) {
