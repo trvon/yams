@@ -34,13 +34,13 @@ struct DeltaExchangeStats {
     std::size_t snapshotsReceived{0};
 };
 
-/// Client role: send all local deltas the peer lacks, then receive peer deltas.
+/// Client role: send one bounded local delta window, then receive one peer window.
 Result<DeltaExchangeStats> initiateDeltaExchange(P2pConnection& connection,
                                                  memory_sync::MemorySyncService& service,
                                                  const PeerHandshakeResult& handshake,
                                                  const DeltaExchangeOptions& options = {});
 
-/// Server role: receive client deltas, then send all local deltas the peer lacks.
+/// Server role: receive one bounded client window, then send one local window.
 Result<DeltaExchangeStats> acceptDeltaExchange(P2pConnection& connection,
                                                memory_sync::MemorySyncService& service,
                                                const PeerHandshakeResult& handshake,

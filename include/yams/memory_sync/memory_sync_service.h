@@ -451,6 +451,13 @@ public:
         return loop_.localHistoryCommitmentAt(counter);
     }
 
+    Result<WriterHistoryCommitment> localHistoryWindowAfter(std::uint64_t peerCounter,
+                                                            std::size_t maxRecords,
+                                                            std::size_t maxWireBytes) {
+        std::lock_guard<std::mutex> lock(loopMutex_);
+        return loop_.localHistoryWindowAfter(peerCounter, maxRecords, maxWireBytes);
+    }
+
     Result<void> validateHistoryExtension(std::span<const MemoryDelta> deltas,
                                           const WriterHistoryCommitment& expectedFrontier) {
         std::lock_guard<std::mutex> lock(loopMutex_);

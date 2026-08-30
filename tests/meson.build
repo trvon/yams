@@ -3186,6 +3186,14 @@ if catch2_dep.found()
     is_parallel: false
   )
 
+  test('p2p_delta_large_history', catch2_p2p_delta_exe,
+    args: ['direct P2P catch-up advances beyond 1024 retained operations'],
+    suite: ['catch2', 'slow', 'daemon', 'p2p', 'network'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 1200,
+    is_parallel: false
+  )
+
   test('peer_registry', catch2_peer_registry_exe,
     suite: ['catch2', 'unit', 'daemon', 'p2p', 'sqlite'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },

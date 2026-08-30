@@ -141,6 +141,11 @@ public:
         blobRetrieveCalls_ = 0;
         blobExistsCalls_ = 0;
     }
+    void resetListCalls() const {
+        listPageCalls_ = 0;
+        unboundedListCalls_ = 0;
+        largestPageRequested_ = 0;
+    }
     void failNextStore(std::string prefix) { failNextStorePrefix_ = std::move(prefix); }
     void failNextRemove(std::string prefix) { failNextRemovePrefix_ = std::move(prefix); }
 
@@ -650,14 +655,14 @@ TEST_CASE("authenticated prepared erase binds its typed readiness probe",
     CHECK(retained.value());
 }
 
-TEST_CASE("typed erase validator can cancel a stale prepared tombstone",
+TEST_CASE("typed erase validator cancels stale intent before reserving a writer counter",
           "[memory-sync][tombstone][outbox][ordering]") {
     BackendFixture fixture{"erase-outbox-stale"};
     MemorySyncLoop loop{fixture.backend, "writer"};
     REQUIRE(loop.stageErase("document/" + std::string(64, 'b'), std::string(64, 'b'), false,
                             EraseReadinessProbe::MetadataAbsent)
                 .has_value());
-    bool sawPrepared = false;
+    bool sawUnprepared = false;
     auto cancelled = loop.publishStagedErase("document/" + std::string(64, 'b'), [&] {
         auto pending = loop.pendingErases();
         if (!pending) {
@@ -667,11 +672,11 @@ TEST_CASE("typed erase validator can cancel a stale prepared tombstone",
             return yams::Result<bool>{yams::Error{yams::ErrorCode::InvalidState,
                                                   "prepared intent missing during validation"}};
         }
-        sawPrepared = pending.value().front().ready && pending.value().front().prepared;
+        sawUnprepared = !pending.value().front().ready && !pending.value().front().prepared;
         return yams::Result<bool>{false};
     });
     REQUIRE(cancelled.has_value());
-    CHECK(sawPrepared);
+    CHECK(sawUnprepared);
     REQUIRE(loop.pendingErases().value().empty());
     REQUIRE(loop.syncFully().has_value());
     CHECK_FALSE(loop.hasMergedRecord("document/" + std::string(64, 'b')));
@@ -729,13 +734,28 @@ TEST_CASE("checkpoint failure cannot expose a tombstone before revalidation",
 
     auto cancelled = loop.publishStagedErase("document/" + std::string(64, 'd'),
                                              [] { return yams::Result<bool>{false}; });
-    REQUIRE(cancelled.has_value());
+    REQUIRE_FALSE(cancelled.has_value());
+    CHECK(cancelled.error().code == yams::ErrorCode::ResourceBusy);
     REQUIRE(loop.syncFully().has_value());
     auto retained = loop.readCached("document/" + std::string(64, 'd'));
     REQUIRE(retained.has_value());
     CHECK(text(retained.value()) == "still-present");
     CHECK(loop.replicationState().commitments.at("writer").counter == 1);
+    REQUIRE(loop.pendingErases().value().size() == 1);
+
+    REQUIRE(loop.publishStagedErase("document/" + std::string(64, 'd'),
+                                    [] { return yams::Result<bool>{true}; })
+                .has_value());
     REQUIRE(loop.pendingErases().value().empty());
+    CHECK_FALSE(loop.readCached("document/" + std::string(64, 'd')).has_value());
+    REQUIRE(loop.publish("user/after-delete", bytes("next-counter")).has_value());
+    CHECK(loop.replicationState().commitments.at("writer").counter == 3);
+
+    MemorySyncLoop restarted{fixture.backend, "writer"};
+    auto exported = restarted.exportLocalDeltasAfter({}, 3);
+    REQUIRE(exported.has_value());
+    CHECK(exported.value().deltas.size() == 3);
+    CHECK(exported.value().deltas.back().logicalKey == "user/after-delete");
 }
 
 TEST_CASE("durable prepared commitment forces exact index completion",
@@ -1401,6 +1421,167 @@ TEST_CASE("direct memory delta export resumes from causal watermark",
     CHECK(reader.readCached("user/one").has_value());
     CHECK(reader.readCached("user/two").has_value());
     CHECK(reader.readCached("user/three").has_value());
+}
+
+TEST_CASE("bounded direct export reads only the requested writer-counter window",
+          "[memory-sync][direct-delta][limits][lazy-export]") {
+    CountingBackendFixture fixture{"direct-delta-lazy-export"};
+    MemorySyncLoop writer{fixture.backend, "writer", "direct-lazy-corpus", 1};
+    for (int index = 0; index < 64; ++index) {
+        REQUIRE(writer
+                    .publish("user/key-" + std::to_string(index),
+                             bytes("value-" + std::to_string(index)))
+                    .has_value());
+    }
+
+    fixture.backend.resetListCalls();
+    fixture.backend.resetBlobCalls();
+    auto first = writer.exportLocalDeltasAfter({}, 2);
+    REQUIRE(first.has_value());
+    CHECK(first.value().deltas.size() == 2);
+    CHECK(first.value().hasMore);
+    CHECK(fixture.backend.listPageCalls() == 0);
+    CHECK(fixture.backend.unboundedListCalls() == 0);
+    CHECK(fixture.backend.blobRetrieveCalls() == 2);
+}
+
+TEST_CASE("writer window selection hydrates only the wire-bounded prefix and one lookahead",
+          "[memory-sync][direct-delta][limits][wire-window]") {
+    CountingBackendFixture fixture{"direct-delta-wire-window"};
+    MemorySyncLoop writer{fixture.backend, "writer", "direct-wire-corpus", 1};
+    const std::string value(1200, 'x');
+    REQUIRE(writer.publish("user/one", bytes(value)).has_value());
+    REQUIRE(writer.publish("user/two", bytes(value)).has_value());
+    REQUIRE(writer.publish("user/three", bytes(value)).has_value());
+
+    fixture.backend.resetBlobCalls();
+    auto window = writer.localHistoryWindowAfter(0, 3, 2200);
+    REQUIRE(window.has_value());
+    CHECK(window.value().counter == 1);
+    CHECK(fixture.backend.blobRetrieveCalls() == 2);
+}
+
+TEST_CASE("historical writer commitments persist independently of identity limits",
+          "[memory-sync][direct-delta][commitment][restart][limits]") {
+    CountingBackendFixture fixture{"direct-history-prefix-index"};
+    MemorySyncLimits limits;
+    limits.maxTrackedIdentities = 1;
+    WriterHistoryCommitment middle;
+    {
+        MemorySyncLoop writer{fixture.backend, "writer", "prefix-index-corpus", 1, false, limits};
+        REQUIRE(writer.publish("user/one", bytes("one")).has_value());
+        REQUIRE(writer.publish("user/two", bytes("two")).has_value());
+        middle = writer.replicationState().commitments.at("writer");
+        REQUIRE(writer.publish("user/three", bytes("three")).has_value());
+    }
+
+    MemorySyncLoop restarted{fixture.backend, "writer", "prefix-index-corpus", 1, false, limits};
+    fixture.backend.resetListCalls();
+    auto resolved = restarted.localHistoryCommitmentAt(2);
+    REQUIRE(resolved.has_value());
+    CHECK(resolved.value() == middle);
+    CHECK(fixture.backend.listPageCalls() == 0);
+    CHECK(fixture.backend.unboundedListCalls() == 0);
+}
+
+TEST_CASE("legacy writer history migrates once into bounded counter entries",
+          "[memory-sync][direct-delta][commitment][migration][restart]") {
+    CountingBackendFixture fixture{"direct-history-prefix-migration"};
+    WriterHistoryCommitment firstPrefix;
+    {
+        MemorySyncLoop writer{fixture.backend, "writer", "prefix-migration-corpus", 1};
+        REQUIRE(writer.publish("user/one", bytes("one")).has_value());
+        firstPrefix = writer.replicationState().commitments.at("writer");
+        REQUIRE(writer.publish("user/two", bytes("two")).has_value());
+        REQUIRE(writer.publish("user/three", bytes("three")).has_value());
+    }
+    auto entries = fixture.backend.list("history/counter-v1/");
+    REQUIRE(entries.has_value());
+    REQUIRE(entries.value().size() == 3);
+    for (const auto& key : entries.value()) {
+        REQUIRE(fixture.backend.remove(key).has_value());
+    }
+
+    {
+        MemorySyncLoop upgraded{fixture.backend, "writer", "prefix-migration-corpus", 1};
+        REQUIRE(upgraded.publish("user/four", bytes("four")).has_value());
+    }
+
+    MemorySyncLoop restarted{fixture.backend, "writer", "prefix-migration-corpus", 1};
+    fixture.backend.resetListCalls();
+    auto exported = restarted.exportLocalDeltasAfter({}, 4);
+    REQUIRE(exported.has_value());
+    CHECK(exported.value().deltas.size() == 4);
+    CHECK(fixture.backend.listPageCalls() > 0);
+
+    fixture.backend.resetListCalls();
+    auto persisted = restarted.localHistoryCommitmentAt(1);
+    REQUIRE(persisted.has_value());
+    CHECK(persisted.value() == firstPrefix);
+    CHECK(fixture.backend.listPageCalls() == 0);
+}
+
+TEST_CASE("legacy writer history migration resumes across bounded restart attempts",
+          "[memory-sync][direct-delta][commitment][migration][restart][limits]") {
+    CountingBackendFixture fixture{"direct-history-resumable-migration"};
+    MemorySyncLimits limits;
+    limits.maxIndexObjectsPerSync = 2;
+    limits.maxHistoryMigrationObjects = 2;
+    {
+        MemorySyncLoop writer{fixture.backend, "writer", "resumable-migration-corpus", 1,
+                              false,           limits};
+        for (int index = 0; index < 5; ++index) {
+            REQUIRE(writer
+                        .publish("user/key-" + std::to_string(index),
+                                 bytes("value-" + std::to_string(index)))
+                        .has_value());
+        }
+    }
+    auto entries = fixture.backend.list("history/counter-v1/");
+    REQUIRE(entries.has_value());
+    for (const auto& key : entries.value()) {
+        REQUIRE(fixture.backend.remove(key).has_value());
+    }
+
+    bool completed = false;
+    std::size_t attempts = 0;
+    for (; attempts < 10 && !completed; ++attempts) {
+        MemorySyncLoop restarted{fixture.backend, "writer", "resumable-migration-corpus", 1,
+                                 false,           limits};
+        auto exported = restarted.exportLocalDeltasAfter({}, 5);
+        if (exported) {
+            CHECK(exported.value().deltas.size() == 5);
+            completed = true;
+        } else {
+            CHECK(exported.error().code == yams::ErrorCode::OperationInProgress);
+        }
+    }
+    CHECK(completed);
+    CHECK(attempts > 1);
+}
+
+TEST_CASE("legacy migration rejects an individually oversized envelope without livelock",
+          "[memory-sync][direct-delta][commitment][migration][limits]") {
+    CountingBackendFixture fixture{"direct-history-oversized-migration"};
+    {
+        MemorySyncLoop writer{fixture.backend, "writer", "oversized-migration-corpus", 1};
+        REQUIRE(writer.publish("user/one", bytes("one")).has_value());
+    }
+    auto entries = fixture.backend.list("history/counter-v1/");
+    REQUIRE(entries.has_value());
+    for (const auto& key : entries.value()) {
+        REQUIRE(fixture.backend.remove(key).has_value());
+    }
+
+    MemorySyncLimits limits;
+    limits.maxHistoryMigrationBytes = 1;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        MemorySyncLoop restarted{fixture.backend, "writer", "oversized-migration-corpus", 1,
+                                 false,           limits};
+        auto exported = restarted.exportLocalDeltasAfter({}, 1);
+        REQUIRE_FALSE(exported.has_value());
+        CHECK(exported.error().code == yams::ErrorCode::ResourceExhausted);
+    }
 }
 
 TEST_CASE("direct memory deltas enforce the merged-key limit atomically",

@@ -11,12 +11,16 @@
 #include <yams/memory_sync/writer_auth.h>
 #include <yams/storage/storage_backend.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <functional>
 #include <future>
+#include <limits>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -66,6 +70,75 @@ struct TempDir {
     std::filesystem::path path;
 };
 
+class InMemoryBackend final : public yams::storage::IStorageBackend {
+public:
+    yams::Result<void> initialize(const yams::storage::BackendConfig&) override { return {}; }
+
+    yams::Result<void> store(std::string_view key, std::span<const std::byte> data) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        objects_[std::string(key)] = std::vector<std::byte>(data.begin(), data.end());
+        return {};
+    }
+
+    yams::Result<std::vector<std::byte>> retrieve(std::string_view key) const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto found = objects_.find(std::string(key));
+        if (found == objects_.end()) {
+            return yams::Error{yams::ErrorCode::NotFound, "test object is absent"};
+        }
+        return found->second;
+    }
+
+    yams::Result<bool> exists(std::string_view key) const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return objects_.contains(std::string(key));
+    }
+
+    yams::Result<void> remove(std::string_view key) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        objects_.erase(std::string(key));
+        return {};
+    }
+
+    yams::Result<std::vector<std::string>> list(std::string_view prefix = "") const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::vector<std::string> result;
+        for (const auto& [key, _] : objects_) {
+            if (key.starts_with(prefix)) {
+                result.push_back(key);
+            }
+        }
+        return result;
+    }
+
+    yams::Result<yams::StorageStats> getStats() const override { return yams::StorageStats{}; }
+
+    std::future<yams::Result<void>> storeAsync(std::string_view key,
+                                               std::span<const std::byte> data) override {
+        auto ownedKey = std::string(key);
+        auto ownedData = std::vector<std::byte>(data.begin(), data.end());
+        return std::async(std::launch::deferred,
+                          [this, key = std::move(ownedKey), data = std::move(ownedData)] {
+                              return store(key, data);
+                          });
+    }
+
+    std::future<yams::Result<std::vector<std::byte>>>
+    retrieveAsync(std::string_view key) const override {
+        auto ownedKey = std::string(key);
+        return std::async(std::launch::deferred,
+                          [this, key = std::move(ownedKey)] { return retrieve(key); });
+    }
+
+    std::string getType() const override { return "test-memory"; }
+    bool isRemote() const override { return false; }
+    yams::Result<void> flush() override { return {}; }
+
+private:
+    mutable std::mutex mutex_;
+    std::map<std::string, std::vector<std::byte>> objects_;
+};
+
 std::unique_ptr<yams::storage::FilesystemBackend> backend(const std::filesystem::path& path) {
     yams::storage::BackendConfig config;
     config.type = "filesystem";
@@ -108,6 +181,11 @@ PeerHandshakeConfig handshakeConfig(std::string nodeId, MemorySyncService& servi
         .localQuarantinedWriters = state.quarantinedWriters,
         .resolveLocalCommitment =
             [&service](std::uint64_t counter) { return service.localHistoryCommitmentAt(counter); },
+        .resolveLocalWindow =
+            [&service](std::uint64_t peerCounter, std::size_t maxRecords,
+                       std::size_t maxWireBytes) {
+                return service.localHistoryWindowAfter(peerCounter, maxRecords, maxWireBytes);
+            },
         .allowFirstContact = allowFirstContact,
         .timeout = 3s};
 }
@@ -137,7 +215,15 @@ ExchangePair runExchange(MemorySyncService& clientService, MemorySyncService& se
                                               .maxConcurrentSessions = 1});
     std::promise<yams::Result<DeltaExchangeStats>> serverDone;
     auto serverFuture = serverDone.get_future();
+    const auto batchCapacity = exchangeOptions.maxBatches > exchangeOptions.maxDeltasPerSession /
+                                                                exchangeOptions.maxDeltasPerBatch
+                                   ? exchangeOptions.maxDeltasPerSession
+                                   : exchangeOptions.maxBatches * exchangeOptions.maxDeltasPerBatch;
+    const auto writerAdvance = std::min({exchangeOptions.maxDeltasPerSession, batchCapacity,
+                                         yams::daemon::p2p::kMaxP2pWriterAdvance});
     auto serverHandshake = handshakeConfig("server-node", serverService, allowFirstContact);
+    serverHandshake.maxWriterAdvance = writerAdvance;
+    serverHandshake.maxWriterWindowBytes = exchangeOptions.maxWireBytesPerSession;
     if (mutateServerHandshake) {
         mutateServerHandshake(serverHandshake);
     }
@@ -162,9 +248,11 @@ ExchangePair runExchange(MemorySyncService& clientService, MemorySyncService& se
                                                        .connectTimeout = 3s,
                                                        .handshakeTimeout = 3s});
     REQUIRE(channel.has_value());
-    auto clientHandshake = yams::daemon::p2p::initiatePeerHandshake(
-        channel.value(), handshakeConfig("client-node", clientService, allowFirstContact),
-        clientTrust);
+    auto clientConfig = handshakeConfig("client-node", clientService, allowFirstContact);
+    clientConfig.maxWriterAdvance = writerAdvance;
+    clientConfig.maxWriterWindowBytes = exchangeOptions.maxWireBytesPerSession;
+    auto clientHandshake =
+        yams::daemon::p2p::initiatePeerHandshake(channel.value(), clientConfig, clientTrust);
     REQUIRE(clientHandshake.has_value());
     auto clientResult = yams::daemon::p2p::initiateDeltaExchange(
         channel.value(), clientService, clientHandshake.value(), exchangeOptions);
@@ -443,8 +531,35 @@ TEST_CASE("direct P2P delta receiver rejects aggregate bytes before reading payl
     listener.stop();
 }
 
-TEST_CASE("direct P2P delta exchange enforces aggregate session limits",
-          "[daemon][p2p][delta][network][security]") {
+TEST_CASE("direct P2P delta exchange rejects options above protocol hard bounds",
+          "[daemon][p2p][delta][network][limits]") {
+    TempDir clientDir{"invalid-limits-client"};
+    TempDir serverDir{"invalid-limits-server"};
+    MemorySyncService clientService{
+        backend(clientDir.path), MemorySyncConfig{"client-node", 60'000, "wire-delta-corpus", 1}};
+    MemorySyncService serverService{
+        backend(serverDir.path), MemorySyncConfig{"server-node", 60'000, "wire-delta-corpus", 1}};
+    auto clientKey = yams::memory_sync::generateWriterKeyPair();
+    auto serverKey = yams::memory_sync::generateWriterKeyPair();
+    REQUIRE(clientKey.has_value());
+    REQUIRE(serverKey.has_value());
+
+    InMemoryPeerTrustStore clientTrust;
+    InMemoryPeerTrustStore serverTrust;
+    auto exchanged = runExchange(
+        clientService, serverService, clientKey.value(), serverKey.value(), clientTrust,
+        serverTrust, true,
+        DeltaExchangeOptions{.maxDeltasPerBatch = 1,
+                             .maxBatches = 1,
+                             .maxDeltasPerSession = std::numeric_limits<std::size_t>::max(),
+                             .maxWireBytesPerSession = 1024,
+                             .timeout = 3s});
+    REQUIRE_FALSE(exchanged.client.has_value());
+    CHECK(exchanged.client.error().code == yams::ErrorCode::InvalidArgument);
+}
+
+TEST_CASE("direct P2P delta exchange resumes across aggregate session limits",
+          "[daemon][p2p][delta][network][security][continuation]") {
     TempDir clientDir{"bounded-client"};
     TempDir serverDir{"bounded-server"};
     MemorySyncService clientService{
@@ -457,22 +572,120 @@ TEST_CASE("direct P2P delta exchange enforces aggregate session limits",
     REQUIRE(serverKey.has_value());
     REQUIRE(clientService.publish("user/one", bytes("one")).has_value());
     REQUIRE(clientService.publish("user/two", bytes("two")).has_value());
+    REQUIRE(clientService.publish("user/three", bytes("three")).has_value());
 
     InMemoryPeerTrustStore clientTrust;
     InMemoryPeerTrustStore serverTrust;
-    auto exchange = runExchange(clientService, serverService, clientKey.value(), serverKey.value(),
-                                clientTrust, serverTrust, true,
-                                DeltaExchangeOptions{.maxDeltasPerBatch = 2,
-                                                     .maxBatches = 2,
-                                                     .maxDeltasPerSession = 1,
-                                                     .maxWireBytesPerSession = 1024,
-                                                     .timeout = 3s});
+    const DeltaExchangeOptions options{.maxDeltasPerBatch = 2,
+                                       .maxBatches = 2,
+                                       .maxDeltasPerSession = 1,
+                                       .maxWireBytesPerSession = 2048,
+                                       .timeout = 3s};
 
-    REQUIRE_FALSE(exchange.client.has_value());
-    CHECK(exchange.client.error().code == yams::ErrorCode::ResourceExhausted);
-    CHECK(serverService.currentVersion().empty());
-    CHECK_FALSE(serverService.readCached("user/one").has_value());
-    CHECK_FALSE(serverService.readCached("user/two").has_value());
+    for (std::uint64_t expectedCounter = 1; expectedCounter <= 3; ++expectedCounter) {
+        auto exchange =
+            runExchange(clientService, serverService, clientKey.value(), serverKey.value(),
+                        clientTrust, serverTrust, expectedCounter == 1, options);
+        REQUIRE(exchange.client.has_value());
+        REQUIRE(exchange.server.has_value());
+        CHECK(exchange.client.value().deltasSent == 1);
+        CHECK(exchange.server.value().deltasReceived == 1);
+        CHECK(serverService.currentVersion().get("client-node") == expectedCounter);
+    }
+
+    REQUIRE(serverService.readCached("user/one").has_value());
+    REQUIRE(serverService.readCached("user/two").has_value());
+    REQUIRE(serverService.readCached("user/three").has_value());
+    auto converged = runExchange(clientService, serverService, clientKey.value(), serverKey.value(),
+                                 clientTrust, serverTrust, false, options);
+    REQUIRE(converged.client.has_value());
+    REQUIRE(converged.server.has_value());
+    CHECK(converged.client.value().deltasSent == 0);
+    CHECK(converged.server.value().deltasReceived == 0);
+}
+
+TEST_CASE("direct P2P catch-up advances beyond 1024 retained operations",
+          "[daemon][p2p][delta][network][continuation][large-history][.slow]") {
+    MemorySyncService clientService{
+        std::make_unique<InMemoryBackend>(),
+        MemorySyncConfig{"client-node", 60'000, "wire-delta-corpus", 1}};
+    MemorySyncService serverService{
+        std::make_unique<InMemoryBackend>(),
+        MemorySyncConfig{"server-node", 60'000, "wire-delta-corpus", 1}};
+    auto clientKey = yams::memory_sync::generateWriterKeyPair();
+    auto serverKey = yams::memory_sync::generateWriterKeyPair();
+    REQUIRE(clientKey.has_value());
+    REQUIRE(serverKey.has_value());
+    for (int index = 0; index < 1025; ++index) {
+        REQUIRE(
+            clientService
+                .publish("bulk/" + std::to_string(index), bytes("value-" + std::to_string(index)))
+                .has_value());
+    }
+
+    InMemoryPeerTrustStore clientTrust;
+    InMemoryPeerTrustStore serverTrust;
+    const DeltaExchangeOptions options{.maxDeltasPerBatch = 128,
+                                       .maxBatches = 8,
+                                       .maxDeltasPerSession = 1024,
+                                       .maxWireBytesPerSession = 8 * 1024 * 1024,
+                                       .timeout = 10s};
+    auto first = runExchange(clientService, serverService, clientKey.value(), serverKey.value(),
+                             clientTrust, serverTrust, true, options);
+    REQUIRE(first.client.has_value());
+    REQUIRE(first.server.has_value());
+    CHECK(first.client.value().deltasSent == 1024);
+    CHECK(serverService.currentVersion().get("client-node") == 1024);
+    CHECK_FALSE(serverService.readCached("bulk/1024").has_value());
+
+    auto resumed = runExchange(clientService, serverService, clientKey.value(), serverKey.value(),
+                               clientTrust, serverTrust, false, options);
+    REQUIRE(resumed.client.has_value());
+    REQUIRE(resumed.server.has_value());
+    CHECK(resumed.client.value().deltasSent == 1);
+    CHECK(serverService.currentVersion().get("client-node") == 1025);
+    REQUIRE(serverService.readCached("bulk/1024").has_value());
+}
+
+TEST_CASE("direct P2P bounded continuation survives receiver restart",
+          "[daemon][p2p][delta][network][continuation][restart]") {
+    TempDir clientDir{"restart-client"};
+    TempDir serverDir{"restart-server"};
+    MemorySyncService clientService{
+        backend(clientDir.path), MemorySyncConfig{"client-node", 60'000, "wire-delta-corpus", 1}};
+    auto serverService = std::make_unique<MemorySyncService>(
+        backend(serverDir.path), MemorySyncConfig{"server-node", 60'000, "wire-delta-corpus", 1});
+    auto clientKey = yams::memory_sync::generateWriterKeyPair();
+    auto serverKey = yams::memory_sync::generateWriterKeyPair();
+    REQUIRE(clientKey.has_value());
+    REQUIRE(serverKey.has_value());
+    REQUIRE(clientService.publish("user/one", bytes("one")).has_value());
+    REQUIRE(clientService.publish("user/two", bytes("two")).has_value());
+
+    InMemoryPeerTrustStore clientTrust;
+    InMemoryPeerTrustStore serverTrust;
+    const DeltaExchangeOptions options{.maxDeltasPerBatch = 1,
+                                       .maxBatches = 1,
+                                       .maxDeltasPerSession = 1,
+                                       .maxWireBytesPerSession = 2048,
+                                       .timeout = 3s};
+    auto first = runExchange(clientService, *serverService, clientKey.value(), serverKey.value(),
+                             clientTrust, serverTrust, true, options);
+    REQUIRE(first.client.has_value());
+    REQUIRE(first.server.has_value());
+    CHECK(serverService->currentVersion().get("client-node") == 1);
+
+    serverService.reset();
+    serverService = std::make_unique<MemorySyncService>(
+        backend(serverDir.path), MemorySyncConfig{"server-node", 60'000, "wire-delta-corpus", 1});
+    REQUIRE(serverService->syncFully().has_value());
+    auto resumed = runExchange(clientService, *serverService, clientKey.value(), serverKey.value(),
+                               clientTrust, serverTrust, false, options);
+    REQUIRE(resumed.client.has_value());
+    REQUIRE(resumed.server.has_value());
+    CHECK(serverService->currentVersion().get("client-node") == 2);
+    REQUIRE(serverService->readCached("user/one").has_value());
+    REQUIRE(serverService->readCached("user/two").has_value());
 }
 
 TEST_CASE("direct P2P delta stages a false advertised frontier before visibility",

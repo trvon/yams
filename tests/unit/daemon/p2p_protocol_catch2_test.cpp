@@ -41,6 +41,23 @@ PeerHandshakeConfig config(std::string nodeId, std::string corpusId = "shared-co
                                .timeout = 2s};
 }
 
+void enableCurrentWriterWindow(PeerHandshakeConfig& config) {
+    const auto counter = config.localVersion.get(config.nodeId);
+    if (counter == 0) {
+        return;
+    }
+    const auto commitment = config.localCommitments.at(config.nodeId);
+    config.resolveLocalWindow = [counter, commitment](std::uint64_t peerCounter,
+                                                      std::size_t maxRecords,
+                                                      std::size_t maxWireBytes) {
+        if (maxWireBytes == 0 || counter <= peerCounter || counter - peerCounter > maxRecords) {
+            return yams::Result<yams::memory_sync::WriterHistoryCommitment>{yams::Error{
+                yams::ErrorCode::ResourceExhausted, "test writer window exceeds bound"}};
+        }
+        return yams::Result<yams::memory_sync::WriterHistoryCommitment>{commitment};
+    };
+}
+
 struct PairResult {
     yams::Result<PeerHandshakeResult> client;
     yams::Result<PeerHandshakeResult> server;
@@ -100,6 +117,43 @@ PairResult runHandshake(PeerHandshakeConfig serverConfig, PeerHandshakeConfig cl
 
 } // namespace
 
+TEST_CASE("P2P handshake freezes a bounded authenticated writer prefix",
+          "[daemon][p2p][handshake][window][commitment]") {
+    auto serverConfig = config("server-node");
+    serverConfig.localVersion.observe("server-node", 5);
+    serverConfig.localCommitments["server-node"] =
+        yams::memory_sync::WriterHistoryCommitment{.counter = 5, .digest = std::string(64, 'f')};
+    serverConfig.resolveLocalCommitment = [](std::uint64_t counter) {
+        REQUIRE(counter == 2);
+        return yams::Result<yams::memory_sync::WriterHistoryCommitment>{
+            yams::memory_sync::WriterHistoryCommitment{.counter = counter,
+                                                       .digest = std::string(64, 'a')}};
+    };
+    serverConfig.resolveLocalWindow = [](std::uint64_t peerCounter, std::size_t maxRecords,
+                                         std::size_t maxWireBytes) {
+        REQUIRE(peerCounter == 0);
+        REQUIRE(maxRecords == 2);
+        REQUIRE(maxWireBytes > 0);
+        return yams::Result<yams::memory_sync::WriterHistoryCommitment>{
+            yams::memory_sync::WriterHistoryCommitment{.counter = 2,
+                                                       .digest = std::string(64, 'a')}};
+    };
+    serverConfig.maxWriterAdvance = 2;
+    auto clientConfig = config("client-node");
+    clientConfig.maxWriterAdvance = 2;
+
+    InMemoryPeerTrustStore serverTrust;
+    InMemoryPeerTrustStore clientTrust;
+    auto result = runHandshake(serverConfig, clientConfig, serverTrust, clientTrust);
+    REQUIRE(result.client.has_value());
+    REQUIRE(result.server.has_value());
+    CHECK(result.client.value().peerVersion.get("server-node") == 2);
+    REQUIRE(result.client.value().peerCommitments.contains("server-node"));
+    CHECK(result.client.value().peerCommitments.at("server-node").counter == 2);
+    CHECK(result.client.value().peerCommitments.at("server-node").digest == std::string(64, 'a'));
+    CHECK(result.server.value().localVersion.get("server-node") == 2);
+}
+
 TEST_CASE("P2P peer trust store pins first contact and rejects key changes",
           "[daemon][p2p][handshake][trust]") {
     InMemoryPeerTrustStore trust;
@@ -137,6 +191,8 @@ TEST_CASE("P2P hello binds TLS identities and exchanges causal watermarks",
     serverConfig.localCommitments["server-node"] = {.counter = 3, .digest = std::string(64, 'a')};
     clientConfig.localCommitments["client-node"] = {.counter = 2, .digest = std::string(64, 'b')};
     clientConfig.localQuarantinedWriters.insert("retired-client-writer");
+    enableCurrentWriterWindow(serverConfig);
+    enableCurrentWriterWindow(clientConfig);
 
     InMemoryPeerTrustStore serverTrust;
     InMemoryPeerTrustStore clientTrust;
@@ -204,6 +260,7 @@ TEST_CASE("P2P handshake verifies a nonzero authenticated writer prefix before e
     };
     REQUIRE(clientConfig.localVersion.increment("server-node"));
     clientConfig.localCommitments["server-node"] = {.counter = 1, .digest = std::string(64, 'a')};
+    enableCurrentWriterWindow(serverConfig);
 
     InMemoryPeerTrustStore serverTrust;
     InMemoryPeerTrustStore clientTrust;
@@ -237,6 +294,7 @@ TEST_CASE("P2P handshake verifies an acceptor prefix of the connector writer",
     };
     REQUIRE(serverConfig.localVersion.increment("client-node"));
     serverConfig.localCommitments["client-node"] = {.counter = 1, .digest = std::string(64, 'c')};
+    enableCurrentWriterWindow(clientConfig);
 
     InMemoryPeerTrustStore serverTrust;
     InMemoryPeerTrustStore clientTrust;
@@ -270,6 +328,7 @@ TEST_CASE("P2P handshake fails closed when writer prefix proof is unavailable",
                                                         .digest = std::string(64, 'b')};
     }
 
+    enableCurrentWriterWindow(serverConfig);
     InMemoryPeerTrustStore serverTrust;
     InMemoryPeerTrustStore clientTrust;
     auto pair = runHandshake(serverConfig, clientConfig, serverTrust, clientTrust);
@@ -383,9 +442,14 @@ TEST_CASE("P2P hello rejects unsupported wire protocol and schema versions",
                                                        .connectTimeout = 2s,
                                                        .handshakeTimeout = 2s});
     REQUIRE(channel.has_value());
-    const nlohmann::json hello{
-        {"type", "hello"},          {"protocol", protocol},         {"schema_version", schema},
-        {"node_id", "client-node"}, {"corpus_id", "shared-corpus"}, {"corpus_epoch", 1}};
+    const nlohmann::json hello{{"type", "hello"},
+                               {"protocol", protocol},
+                               {"schema_version", schema},
+                               {"node_id", "client-node"},
+                               {"corpus_id", "shared-corpus"},
+                               {"corpus_epoch", 1},
+                               {"max_writer_advance", 1024},
+                               {"max_writer_window_bytes", 64 * 1024 * 1024}};
     const std::string helloText = hello.dump();
     REQUIRE(
         channel.value()
@@ -450,7 +514,9 @@ TEST_CASE("P2P first contact is not pinned until state validation succeeds",
                                {"schema_version", yams::daemon::p2p::kP2pEnvelopeSchemaVersion},
                                {"node_id", "client-node"},
                                {"corpus_id", "shared-corpus"},
-                               {"corpus_epoch", 1}};
+                               {"corpus_epoch", 1},
+                               {"max_writer_advance", 1024},
+                               {"max_writer_window_bytes", 64 * 1024 * 1024}};
     const std::string helloText = hello.dump();
     REQUIRE(
         channel.value()

@@ -53,6 +53,10 @@ struct MemorySyncLimits {
     std::size_t maxMergedKeys{4096};
     std::size_t maxCacheBytes{std::size_t{64} * 1024 * 1024};
     std::size_t maxTrackedIdentities{8192};
+    /// Maximum legacy index objects inspected while building missing counter entries.
+    std::size_t maxHistoryMigrationObjects{8192};
+    /// Maximum legacy envelope bytes retained while rebuilding one writer's counter index.
+    std::size_t maxHistoryMigrationBytes{std::size_t{64} * 1024 * 1024};
 };
 
 struct MemoryDelta {
@@ -408,6 +412,17 @@ public:
             return Error{ErrorCode::NotFound, "staged erase intent is missing"};
         }
         auto intent = std::move(*loaded.value());
+        bool readinessValidated = false;
+        if (!intent.ready && validator) {
+            auto allowed = validator();
+            if (!allowed) {
+                return allowed.error();
+            }
+            if (!allowed.value()) {
+                return backend_->remove(eraseOutboxKey(logicalKey));
+            }
+            readinessValidated = true;
+        }
         if (!intent.ready) {
             if (auto reconciled = reconcileBeforeWrite(true); !reconciled) {
                 return reconciled.error();
@@ -458,13 +473,14 @@ public:
         const auto durable = historyCommitments_.find(nodeId_);
         const bool pointOfNoReturn =
             durable != historyCommitments_.end() && durable->second == intent.preparedCommitment;
-        if (validator && !pointOfNoReturn) {
+        if (validator && !pointOfNoReturn && !readinessValidated) {
             auto allowed = validator();
             if (!allowed) {
                 return allowed.error();
             }
             if (!allowed.value()) {
-                return backend_->remove(eraseOutboxKey(logicalKey));
+                return Error{ErrorCode::ResourceBusy,
+                             "prepared erase must commit before its counter can be reused"};
             }
         }
         return commitPreparedErase(intent);
@@ -490,6 +506,10 @@ public:
             // The full-history frontier already includes this exact operation. Cancellation is no
             // longer safe; finish its idempotent index publication instead.
             return commitPreparedErase(*intent.value());
+        }
+        if (intent.value()->record) {
+            return Error{ErrorCode::ResourceBusy,
+                         "prepared erase must commit before it can be removed"};
         }
         return backend_->remove(eraseOutboxKey(logicalKey));
     }
@@ -826,44 +846,45 @@ public:
         if (maxDeltas == 0) {
             return Error{ErrorCode::InvalidArgument, "direct delta batch size must be positive"};
         }
-        std::vector<MemoryDelta> candidates;
-        std::optional<std::string> cursor;
-        for (;;) {
-            auto listed = backend_->listPage(
-                "index/", cursor ? std::optional<std::string_view>{*cursor} : std::nullopt,
-                limits_.maxIndexObjectsPerSync);
-            if (!listed) {
-                return listed.error();
-            }
-            auto page = std::move(listed.value());
-            for (const auto& key : page.keys) {
-                auto delta = loadLocalDelta(key, peerVersion);
-                if (!delta) {
-                    return delta.error();
-                }
-                if (delta.value()) {
-                    candidates.push_back(std::move(*delta.value()));
-                }
-            }
-            cursor = std::move(page.nextCursor);
-            if (!cursor) {
-                break;
-            }
+        const auto durableCounter = std::min(version_.get(nodeId_), maxWriterCounter);
+        const auto peerCounter = peerVersion.get(nodeId_);
+        if (peerCounter >= durableCounter) {
+            return MemoryDeltaBatch{};
         }
-        std::erase_if(candidates, [&](const MemoryDelta& delta) {
-            return delta.record.vv.get(nodeId_) > maxWriterCounter;
-        });
-        std::ranges::sort(candidates, [](const MemoryDelta& lhs, const MemoryDelta& rhs) {
-            const auto leftCounter = lhs.record.vv.get(lhs.record.origin);
-            const auto rightCounter = rhs.record.vv.get(rhs.record.origin);
-            return std::tie(leftCounter, lhs.record.operationId) <
-                   std::tie(rightCounter, rhs.record.operationId);
-        });
-        const bool hasMore = candidates.size() > maxDeltas;
-        if (hasMore) {
-            candidates.resize(maxDeltas);
+        if (auto indexed = ensureHistoryEntries(nodeId_, durableCounter); !indexed) {
+            return indexed.error();
         }
-        return MemoryDeltaBatch{.deltas = std::move(candidates), .hasMore = hasMore};
+
+        std::vector<MemoryDelta> deltas;
+        const auto available = durableCounter - peerCounter;
+        const auto count = static_cast<std::size_t>(
+            std::min<std::uint64_t>(available, static_cast<std::uint64_t>(maxDeltas)));
+        deltas.reserve(count);
+        for (std::size_t offset = 1; offset <= count; ++offset) {
+            const auto counter = peerCounter + static_cast<std::uint64_t>(offset);
+            auto entry = loadHistoryEntry(nodeId_, counter);
+            if (!entry && entry.error().code == ErrorCode::NotFound) {
+                if (auto rebuilt = ensureHistoryEntries(nodeId_, durableCounter, true); !rebuilt) {
+                    return rebuilt.error();
+                }
+                entry = loadHistoryEntry(nodeId_, counter);
+            }
+            if (!entry) {
+                return entry.error();
+            }
+            auto delta = loadLocalDelta(
+                indexKey(entry.value().logicalKey, entry.value().recordHash), peerVersion);
+            if (!delta) {
+                return delta.error();
+            }
+            if (!delta.value() || delta.value()->record.vv.get(nodeId_) != counter) {
+                return Error{ErrorCode::InvalidState,
+                             "writer counter index does not resolve a contiguous delta"};
+            }
+            deltas.push_back(std::move(*delta.value()));
+        }
+        return MemoryDeltaBatch{.deltas = std::move(deltas),
+                                .hasMore = peerCounter + count < durableCounter};
     }
 
     /// Export the complete winner set at an exact handshake-frozen frontier. This is used only
@@ -1121,6 +1142,74 @@ public:
             return loaded.error();
         }
         return computeHistoryCommitmentAt(nodeId_, counter);
+    }
+
+    /// Select the largest contiguous local prefix that fits both negotiated record and wire
+    /// bounds. Only one payload is hydrated at a time; accepted payloads are not retained here.
+    Result<WriterHistoryCommitment> localHistoryWindowAfter(std::uint64_t peerCounter,
+                                                            std::size_t maxRecords,
+                                                            std::size_t maxWireBytes) {
+        if (maxRecords == 0 || maxWireBytes == 0) {
+            return Error{ErrorCode::InvalidArgument, "writer history window bound is zero"};
+        }
+        if (auto loaded = ensureDurableQuarantineLoaded(); !loaded) {
+            return loaded.error();
+        }
+        const auto durableCounter = version_.get(nodeId_);
+        if (peerCounter >= durableCounter) {
+            return Error{ErrorCode::InvalidArgument,
+                         "writer history window has no advancing operation"};
+        }
+        if (auto indexed = ensureHistoryEntries(nodeId_, durableCounter); !indexed) {
+            return indexed.error();
+        }
+        VersionVector peerVersion;
+        peerVersion.observe(nodeId_, peerCounter);
+        std::size_t admittedBytes = 0;
+        std::uint64_t endpoint = peerCounter;
+        const auto recordLimit = std::min<std::uint64_t>(durableCounter - peerCounter,
+                                                         static_cast<std::uint64_t>(maxRecords));
+        for (std::uint64_t offset = 1; offset <= recordLimit; ++offset) {
+            const auto counter = peerCounter + offset;
+            auto entry = loadHistoryEntry(nodeId_, counter);
+            if (!entry) {
+                return entry.error();
+            }
+            auto delta = loadLocalDelta(
+                indexKey(entry.value().logicalKey, entry.value().recordHash), peerVersion);
+            if (!delta) {
+                return delta.error();
+            }
+            if (!delta.value()) {
+                return Error{ErrorCode::InvalidState,
+                             "writer counter window does not resolve a durable delta"};
+            }
+            const auto control = nlohmann::json{{"type", "delta_record"},
+                                                {"logical_key", delta.value()->logicalKey},
+                                                {"record", delta.value()->record},
+                                                {"payload_size", delta.value()->payload.size()}}
+                                     .dump()
+                                     .size();
+            constexpr std::size_t kFramePrefixBytes = 4;
+            constexpr std::size_t kPerRecordBatchHeaderAllowance = 128;
+            const auto framing = 2 * kFramePrefixBytes + kPerRecordBatchHeaderAllowance;
+            if (control > std::numeric_limits<std::size_t>::max() - framing ||
+                control + framing >
+                    std::numeric_limits<std::size_t>::max() - delta.value()->payload.size()) {
+                return Error{ErrorCode::ResourceExhausted, "writer history wire estimate overflow"};
+            }
+            const auto estimated = control + framing + delta.value()->payload.size();
+            if (admittedBytes > maxWireBytes || estimated > maxWireBytes - admittedBytes) {
+                break;
+            }
+            admittedBytes += estimated;
+            endpoint = counter;
+        }
+        if (endpoint == peerCounter) {
+            return Error{ErrorCode::ResourceExhausted,
+                         "next writer operation exceeds negotiated wire window"};
+        }
+        return computeHistoryCommitmentAt(nodeId_, endpoint);
     }
 
     /// Validate a complete bounded incoming session against the authenticated writer's
@@ -1955,6 +2044,22 @@ private:
         MemoryIndexRecord record;
     };
 
+    struct HistoryEntry {
+        std::string writerId;
+        std::uint64_t counter{0};
+        std::string logicalKey;
+        std::string recordHash;
+        std::string prefixDigest;
+    };
+
+    struct HistoryMigrationState {
+        std::string phase{"scan"};
+        std::string cursor;
+        std::uint64_t targetCounter{0};
+        std::uint64_t nextCounter{1};
+        std::string prefixDigest;
+    };
+
     struct EraseIntentState {
         std::string logicalKey;
         std::string tombstonePayload;
@@ -2275,6 +2380,11 @@ private:
             }
             auto next = historyCommitments_;
             next[nodeId_] = intent.preparedCommitment;
+            if (auto indexed =
+                    storeHistoryEntry(*intent.record, intent.recordHash, intent.preparedCommitment);
+                !indexed) {
+                return indexed.error();
+            }
             if (auto persisted = persistReplicationCheckpoint(next, durableQuarantinedWriters_);
                 !persisted) {
                 return persisted.error();
@@ -2397,6 +2507,401 @@ private:
             return {};
         }
         return std::string(key.substr(slash + 1));
+    }
+
+    std::string historyScopeHash(std::string_view writerId) const {
+        const std::string scope = nlohmann::json::array({"yams-history-counter-index-v1", corpusId_,
+                                                         corpusEpoch_, std::string(writerId)})
+                                      .dump();
+        return hashContent(std::span<const std::byte>{
+            reinterpret_cast<const std::byte*>(scope.data()), scope.size()});
+    }
+
+    static std::string paddedCounter(std::uint64_t counter) {
+        auto text = std::to_string(counter);
+        text.insert(0, 20 - text.size(), '0');
+        return text;
+    }
+
+    std::string historyEntryKey(std::string_view writerId, std::uint64_t counter) const {
+        return "history/counter-v1/" + historyScopeHash(writerId) + "/" + paddedCounter(counter);
+    }
+
+    std::string historyMigrationStateKey(std::string_view writerId) const {
+        return "history/migration-v1/" + historyScopeHash(writerId) + "/state";
+    }
+
+    std::string historyMigrationCandidateKey(std::string_view writerId,
+                                             std::uint64_t counter) const {
+        return "history/migration-v1/" + historyScopeHash(writerId) + "/candidate/" +
+               paddedCounter(counter);
+    }
+
+    Result<HistoryEntry> loadHistoryEntry(std::string_view writerId, std::uint64_t counter) const {
+        auto encoded = backend_->retrieve(historyEntryKey(writerId, counter));
+        if (!encoded) {
+            return encoded.error();
+        }
+        if (encoded.value().size() > limits_.maxEnvelopeBytes) {
+            return Error{ErrorCode::InvalidData, "writer counter entry exceeds envelope limit"};
+        }
+        try {
+            const std::string_view text(reinterpret_cast<const char*>(encoded.value().data()),
+                                        encoded.value().size());
+            const auto json = nlohmann::json::parse(text);
+            HistoryEntry entry{.writerId = json.at("writer_id").get<std::string>(),
+                               .counter = json.at("counter").get<std::uint64_t>(),
+                               .logicalKey = json.at("logical_key").get<std::string>(),
+                               .recordHash = json.at("record_hash").get<std::string>(),
+                               .prefixDigest = json.at("prefix_digest").get<std::string>()};
+            if (json.at("schema_version").get<std::uint32_t>() != 1 || entry.writerId != writerId ||
+                entry.counter != counter || !isSha256Digest(entry.recordHash) ||
+                !isSha256Digest(entry.prefixDigest) ||
+                !validateLogicalKey(entry.logicalKey).has_value()) {
+                return Error{ErrorCode::InvalidData, "writer counter entry is inconsistent"};
+            }
+            return entry;
+        } catch (const std::exception& error) {
+            return Error{ErrorCode::InvalidData,
+                         std::string("invalid writer counter entry: ") + error.what()};
+        }
+    }
+
+    Result<void> storeHistoryEntry(const MemoryIndexRecord& record, std::string_view recordHash,
+                                   const WriterHistoryCommitment& commitment) {
+        const auto counter = record.vv.get(record.origin);
+        if (record.origin.empty() || counter == 0 || !isSha256Digest(recordHash) ||
+            commitment.counter != counter || !isSha256Digest(commitment.digest) ||
+            !validateLogicalKey(record.logicalKey).has_value()) {
+            return Error{ErrorCode::InvalidData, "writer counter entry source is invalid"};
+        }
+        HistoryEntry expected{.writerId = record.origin,
+                              .counter = counter,
+                              .logicalKey = record.logicalKey,
+                              .recordHash = std::string(recordHash),
+                              .prefixDigest = commitment.digest};
+        const auto key = historyEntryKey(record.origin, counter);
+        auto exists = backend_->exists(key);
+        if (!exists) {
+            return exists.error();
+        }
+        if (exists.value()) {
+            auto existing = loadHistoryEntry(record.origin, counter);
+            if (!existing) {
+                return existing.error();
+            }
+            if (existing.value().writerId != expected.writerId ||
+                existing.value().counter != expected.counter ||
+                existing.value().logicalKey != expected.logicalKey ||
+                existing.value().recordHash != expected.recordHash ||
+                existing.value().prefixDigest != expected.prefixDigest) {
+                return Error{ErrorCode::InvalidData,
+                             "writer counter entry conflicts with committed history"};
+            }
+            return {};
+        }
+        const auto json = nlohmann::json{{"schema_version", 1},
+                                         {"writer_id", expected.writerId},
+                                         {"counter", expected.counter},
+                                         {"logical_key", expected.logicalKey},
+                                         {"record_hash", expected.recordHash},
+                                         {"prefix_digest", expected.prefixDigest}};
+        const auto text = json.dump();
+        if (text.size() > limits_.maxEnvelopeBytes) {
+            return Error{ErrorCode::ResourceExhausted,
+                         "writer counter entry exceeds envelope limit"};
+        }
+        return backend_->store(
+            key, std::span<const std::byte>{reinterpret_cast<const std::byte*>(text.data()),
+                                            text.size()});
+    }
+
+    Result<void> storeHistoryMigrationState(std::string_view writerId,
+                                            const HistoryMigrationState& state) {
+        const auto json = nlohmann::json{{"schema_version", 1},
+                                         {"phase", state.phase},
+                                         {"cursor", state.cursor},
+                                         {"target_counter", state.targetCounter},
+                                         {"next_counter", state.nextCounter},
+                                         {"prefix_digest", state.prefixDigest}};
+        const auto encoded = json.dump();
+        return backend_->store(
+            historyMigrationStateKey(writerId),
+            std::span<const std::byte>{reinterpret_cast<const std::byte*>(encoded.data()),
+                                       encoded.size()});
+    }
+
+    Result<std::optional<HistoryMigrationState>>
+    loadHistoryMigrationState(std::string_view writerId) const {
+        auto exists = backend_->exists(historyMigrationStateKey(writerId));
+        if (!exists) {
+            return exists.error();
+        }
+        if (!exists.value()) {
+            return std::optional<HistoryMigrationState>{};
+        }
+        auto encoded = backend_->retrieve(historyMigrationStateKey(writerId));
+        if (!encoded) {
+            return encoded.error();
+        }
+        try {
+            const std::string_view text(reinterpret_cast<const char*>(encoded.value().data()),
+                                        encoded.value().size());
+            const auto json = nlohmann::json::parse(text);
+            HistoryMigrationState state{
+                .phase = json.at("phase").get<std::string>(),
+                .cursor = json.at("cursor").get<std::string>(),
+                .targetCounter = json.at("target_counter").get<std::uint64_t>(),
+                .nextCounter = json.at("next_counter").get<std::uint64_t>(),
+                .prefixDigest = json.at("prefix_digest").get<std::string>()};
+            if (json.at("schema_version").get<std::uint32_t>() != 1 ||
+                (state.phase != "scan" && state.phase != "finalize") || state.targetCounter == 0 ||
+                state.nextCounter == 0 ||
+                (state.nextCounter > 1 && !isSha256Digest(state.prefixDigest))) {
+                return Error{ErrorCode::InvalidData, "history migration state is invalid"};
+            }
+            return std::optional<HistoryMigrationState>{std::move(state)};
+        } catch (const std::exception& error) {
+            return Error{ErrorCode::InvalidData,
+                         std::string("invalid history migration state: ") + error.what()};
+        }
+    }
+
+    Result<void> storeHistoryMigrationCandidate(const HistoryEntry& candidate) {
+        const auto key = historyMigrationCandidateKey(candidate.writerId, candidate.counter);
+        auto exists = backend_->exists(key);
+        if (!exists) {
+            return exists.error();
+        }
+        const auto json = nlohmann::json{{"schema_version", 1},
+                                         {"writer_id", candidate.writerId},
+                                         {"counter", candidate.counter},
+                                         {"logical_key", candidate.logicalKey},
+                                         {"record_hash", candidate.recordHash}};
+        const auto encoded = json.dump();
+        if (exists.value()) {
+            auto prior = backend_->retrieve(key);
+            if (!prior) {
+                return prior.error();
+            }
+            try {
+                const std::string_view priorText(
+                    reinterpret_cast<const char*>(prior.value().data()), prior.value().size());
+                if (nlohmann::json::parse(priorText) != json) {
+                    return Error{ErrorCode::InvalidData,
+                                 "history migration found a writer counter fork"};
+                }
+                return {};
+            } catch (const std::exception& error) {
+                return Error{ErrorCode::InvalidData,
+                             std::string("invalid history migration candidate: ") + error.what()};
+            }
+        }
+        return backend_->store(
+            key, std::span<const std::byte>{reinterpret_cast<const std::byte*>(encoded.data()),
+                                            encoded.size()});
+    }
+
+    Result<HistoryEntry> loadHistoryMigrationCandidate(std::string_view writerId,
+                                                       std::uint64_t counter) const {
+        auto encoded = backend_->retrieve(historyMigrationCandidateKey(writerId, counter));
+        if (!encoded) {
+            return encoded.error();
+        }
+        try {
+            const std::string_view text(reinterpret_cast<const char*>(encoded.value().data()),
+                                        encoded.value().size());
+            const auto json = nlohmann::json::parse(text);
+            HistoryEntry candidate{.writerId = json.at("writer_id").get<std::string>(),
+                                   .counter = json.at("counter").get<std::uint64_t>(),
+                                   .logicalKey = json.at("logical_key").get<std::string>(),
+                                   .recordHash = json.at("record_hash").get<std::string>()};
+            if (json.at("schema_version").get<std::uint32_t>() != 1 ||
+                candidate.writerId != writerId || candidate.counter != counter ||
+                !isSha256Digest(candidate.recordHash) ||
+                !validateLogicalKey(candidate.logicalKey).has_value()) {
+                return Error{ErrorCode::InvalidData, "history migration candidate is inconsistent"};
+            }
+            return candidate;
+        } catch (const std::exception& error) {
+            return Error{ErrorCode::InvalidData,
+                         std::string("invalid history migration candidate: ") + error.what()};
+        }
+    }
+
+    Result<void> ensureHistoryEntries(std::string_view writerId, std::uint64_t targetCounter,
+                                      bool forceRebuild = false) {
+        if (targetCounter == 0) {
+            return {};
+        }
+        auto firstExists = backend_->exists(historyEntryKey(writerId, 1));
+        if (!firstExists) {
+            return firstExists.error();
+        }
+        auto lastExists = backend_->exists(historyEntryKey(writerId, targetCounter));
+        if (!lastExists) {
+            return lastExists.error();
+        }
+        if (!forceRebuild && firstExists.value() && lastExists.value()) {
+            return {};
+        }
+
+        auto loadedState = loadHistoryMigrationState(writerId);
+        if (!loadedState) {
+            return loadedState.error();
+        }
+        HistoryMigrationState state =
+            loadedState.value().value_or(HistoryMigrationState{.targetCounter = targetCounter});
+        if (state.phase == "scan") {
+            std::size_t observed = 0;
+            std::size_t scannedBytes = 0;
+            if (limits_.maxHistoryMigrationObjects == 0 || limits_.maxHistoryMigrationBytes == 0 ||
+                limits_.maxEnvelopeBytes == 0) {
+                return Error{ErrorCode::InvalidArgument,
+                             "writer history migration bounds must be positive"};
+            }
+            while (observed < limits_.maxHistoryMigrationObjects) {
+                const auto remaining = limits_.maxHistoryMigrationObjects - observed;
+                const auto remainingBytes = limits_.maxHistoryMigrationBytes - scannedBytes;
+                if (observed != 0 && remainingBytes < limits_.maxEnvelopeBytes) {
+                    if (auto saved = storeHistoryMigrationState(writerId, state); !saved) {
+                        return saved.error();
+                    }
+                    return Error{ErrorCode::OperationInProgress,
+                                 "writer history migration scan is continuing"};
+                }
+                const auto recordsByBytes =
+                    std::max<std::size_t>(1, remainingBytes / limits_.maxEnvelopeBytes);
+                const auto pageLimit =
+                    std::min({limits_.maxIndexObjectsPerSync, remaining, recordsByBytes});
+                auto listed = backend_->listPage(
+                    "index/",
+                    state.cursor.empty() ? std::nullopt
+                                         : std::optional<std::string_view>{state.cursor},
+                    pageLimit);
+                if (!listed) {
+                    return listed.error();
+                }
+                auto page = std::move(listed.value());
+                for (const auto& key : page.keys) {
+                    ++observed;
+                    const auto logicalKey = logicalKeyFromIndexKey(key);
+                    const auto recordHash = recordHashFromIndexKey(key);
+                    if (!logicalKey.empty() && isSha256Digest(recordHash)) {
+                        auto encoded = backend_->retrieve(key);
+                        if (encoded && encoded.value().size() <= limits_.maxEnvelopeBytes &&
+                            hashContent(encoded.value()) == recordHash) {
+                            if (encoded.value().size() > limits_.maxHistoryMigrationBytes) {
+                                return Error{ErrorCode::ResourceExhausted,
+                                             "one history envelope exceeds migration byte bound"};
+                            }
+                            scannedBytes += encoded.value().size();
+                            auto record = deserialize(encoded.value());
+                            if (record && record.value().origin == writerId &&
+                                record.value().hasValidIdentity(corpusId_, corpusEpoch_,
+                                                                logicalKey)) {
+                                const bool authenticated = record.value().schemaVersion ==
+                                                           kAuthenticatedMemoryIndexSchemaVersion;
+                                if ((!authenticated && !(writerAuth_ && writerAuth_->required())) ||
+                                    (writerAuth_ && writerAuth_->verify(record.value()))) {
+                                    const auto counter =
+                                        record.value().vv.get(std::string(writerId));
+                                    if (counter != 0 && counter <= state.targetCounter) {
+                                        if (auto stored = storeHistoryMigrationCandidate(
+                                                HistoryEntry{.writerId = std::string(writerId),
+                                                             .counter = counter,
+                                                             .logicalKey = logicalKey,
+                                                             .recordHash = recordHash});
+                                            !stored) {
+                                            return stored.error();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (!page.nextCursor) {
+                    state.phase = "finalize";
+                    state.cursor.clear();
+                    state.nextCounter = 1;
+                    state.prefixDigest.clear();
+                    break;
+                }
+                state.cursor = *page.nextCursor;
+            }
+            if (auto saved = storeHistoryMigrationState(writerId, state); !saved) {
+                return saved.error();
+            }
+            if (state.phase == "scan") {
+                return Error{ErrorCode::OperationInProgress,
+                             "writer history migration scan is continuing"};
+            }
+        }
+
+        if (state.nextCounter > 1) {
+            if (auto cleaned =
+                    backend_->remove(historyMigrationCandidateKey(writerId, state.nextCounter - 1));
+                !cleaned) {
+                return cleaned.error();
+            }
+        }
+        std::size_t finalized = 0;
+        WriterHistoryCommitment previous{.counter = state.nextCounter - 1,
+                                         .digest = state.prefixDigest};
+        while (state.nextCounter <= state.targetCounter &&
+               finalized < limits_.maxHistoryMigrationObjects) {
+            auto candidate = loadHistoryMigrationCandidate(writerId, state.nextCounter);
+            if (!candidate) {
+                return Error{ErrorCode::InvalidState,
+                             "writer history migration found an incomplete prefix"};
+            }
+            const WriterHistoryCommitment commitment{
+                .counter = state.nextCounter,
+                .digest = advanceHistory(writerId, previous, candidate.value().recordHash,
+                                         state.nextCounter)};
+            const auto durable = historyCommitments_.find(std::string(writerId));
+            if (state.nextCounter == state.targetCounter && durable != historyCommitments_.end() &&
+                durable->second.counter == state.targetCounter && durable->second != commitment) {
+                return Error{ErrorCode::HashMismatch,
+                             "writer history migration differs from durable commitment"};
+            }
+            MemoryIndexRecord record;
+            record.origin = writerId;
+            record.logicalKey = candidate.value().logicalKey;
+            record.vv.observe(std::string(writerId), state.nextCounter);
+            if (auto stored = storeHistoryEntry(record, candidate.value().recordHash, commitment);
+                !stored) {
+                return stored.error();
+            }
+            const auto completedCounter = state.nextCounter;
+            previous = commitment;
+            ++state.nextCounter;
+            state.prefixDigest = commitment.digest;
+            if (auto saved = storeHistoryMigrationState(writerId, state); !saved) {
+                return saved.error();
+            }
+            if (auto removed =
+                    backend_->remove(historyMigrationCandidateKey(writerId, completedCounter));
+                !removed) {
+                return removed.error();
+            }
+            ++finalized;
+        }
+        if (state.nextCounter <= state.targetCounter) {
+            if (auto saved = storeHistoryMigrationState(writerId, state); !saved) {
+                return saved.error();
+            }
+            return Error{ErrorCode::OperationInProgress,
+                         "writer history migration finalization is continuing"};
+        }
+        if (auto removed = backend_->remove(historyMigrationStateKey(writerId)); !removed) {
+            return removed.error();
+        }
+        return targetCounter == state.targetCounter
+                   ? Result<void>{}
+                   : Result<void>{Error{ErrorCode::OperationInProgress,
+                                        "writer history migration target advanced"}};
     }
 
     std::string replicationCheckpointKey() const {
@@ -2562,9 +3067,15 @@ private:
                 // equal-counter handshakes fail closed until bounded history/bootstrap repairs it.
                 continue;
             }
-            next[writer] = WriterHistoryCommitment{
+            const WriterHistoryCommitment commitment{
                 .counter = counter,
                 .digest = advanceHistory(writer, previous, candidate->recordHash, counter)};
+            if (auto indexed =
+                    storeHistoryEntry(candidate->record, candidate->recordHash, commitment);
+                !indexed) {
+                return indexed.error();
+            }
+            next[writer] = commitment;
         }
         for (const auto& [writer, _] : durableQuarantinedWriters_) {
             next.erase(writer);
@@ -2582,81 +3093,44 @@ private:
 
     Result<WriterHistoryCommitment> computeHistoryCommitmentAt(std::string_view writerId,
                                                                std::uint64_t targetCounter) {
-        if (targetCounter > limits_.maxTrackedIdentities) {
-            return Error{ErrorCode::ResourceExhausted,
-                         "requested history prefix exceeds configured proof bound"};
-        }
         const auto current = historyCommitments_.find(std::string(writerId));
-        if (current == historyCommitments_.end() || targetCounter > current->second.counter) {
+        if (current == historyCommitments_.end() || targetCounter == 0 ||
+            targetCounter > current->second.counter) {
             return Error{ErrorCode::InvalidState, "requested writer history prefix is unavailable"};
         }
         if (targetCounter == current->second.counter) {
             return current->second;
         }
-
-        std::map<std::uint64_t, std::string> recordHashes;
-        std::optional<std::string> cursor;
-        std::size_t observed = 0;
-        for (;;) {
-            auto listed = backend_->listPage(
-                "index/", cursor ? std::optional<std::string_view>{*cursor} : std::nullopt,
-                limits_.maxIndexObjectsPerSync);
-            if (!listed) {
-                return listed.error();
-            }
-            auto page = std::move(listed.value());
-            for (const auto& key : page.keys) {
-                if (++observed > limits_.maxTrackedIdentities) {
-                    return Error{ErrorCode::ResourceExhausted,
-                                 "history prefix proof scan exceeds configured bound"};
-                }
-                const auto logicalKey = logicalKeyFromIndexKey(key);
-                const auto expectedHash = recordHashFromIndexKey(key);
-                if (logicalKey.empty() || !isSha256Digest(expectedHash)) {
-                    continue;
-                }
-                auto encoded = backend_->retrieve(key);
-                if (!encoded || encoded.value().size() > limits_.maxEnvelopeBytes ||
-                    hashContent(encoded.value()) != expectedHash) {
-                    continue;
-                }
-                auto record = deserialize(encoded.value());
-                if (!record || record.value().origin != writerId ||
-                    !record.value().hasValidIdentity(corpusId_, corpusEpoch_, logicalKey)) {
-                    continue;
-                }
-                const bool authenticated =
-                    record.value().schemaVersion == kAuthenticatedMemoryIndexSchemaVersion;
-                if ((authenticated || (writerAuth_ && writerAuth_->required())) &&
-                    (!writerAuth_ || !writerAuth_->verify(record.value()))) {
-                    continue;
-                }
-                const auto counter = record.value().vv.get(std::string(writerId));
-                if (counter == 0 || counter > targetCounter) {
-                    continue;
-                }
-                const auto [entry, inserted] = recordHashes.emplace(counter, expectedHash);
-                if (!inserted && entry->second != expectedHash) {
-                    return Error{ErrorCode::InvalidData,
-                                 "writer history prefix contains a counter fork"};
-                }
-            }
-            cursor = std::move(page.nextCursor);
-            if (!cursor) {
-                break;
-            }
+        if (auto indexed = ensureHistoryEntries(writerId, targetCounter); !indexed) {
+            return indexed.error();
         }
-        WriterHistoryCommitment commitment;
-        for (std::uint64_t counter = 1; counter <= targetCounter; ++counter) {
-            const auto record = recordHashes.find(counter);
-            if (record == recordHashes.end()) {
-                return Error{ErrorCode::InvalidState, "writer history prefix is incomplete"};
-            }
-            commitment = WriterHistoryCommitment{
-                .counter = counter,
-                .digest = advanceHistory(writerId, commitment, record->second, counter)};
+        auto entry = loadHistoryEntry(writerId, targetCounter);
+        if (!entry) {
+            return entry.error();
         }
-        return commitment;
+        WriterHistoryCommitment previous;
+        if (targetCounter > 1) {
+            auto prior = loadHistoryEntry(writerId, targetCounter - 1);
+            if (!prior && prior.error().code == ErrorCode::NotFound) {
+                if (auto rebuilt = ensureHistoryEntries(writerId, targetCounter, true); !rebuilt) {
+                    return rebuilt.error();
+                }
+                prior = loadHistoryEntry(writerId, targetCounter - 1);
+            }
+            if (!prior) {
+                return prior.error();
+            }
+            previous = WriterHistoryCommitment{.counter = targetCounter - 1,
+                                               .digest = prior.value().prefixDigest};
+        }
+        const auto expected =
+            advanceHistory(writerId, previous, entry.value().recordHash, targetCounter);
+        if (expected != entry.value().prefixDigest) {
+            return Error{ErrorCode::HashMismatch,
+                         "writer counter entry does not extend its durable prefix"};
+        }
+        return WriterHistoryCommitment{.counter = targetCounter,
+                                       .digest = entry.value().prefixDigest};
     }
 
     Result<void> requireLocalHistoryCommitment() const {
@@ -2687,6 +3161,9 @@ private:
         }
         next[writer] = WriterHistoryCommitment{
             .counter = counter, .digest = advanceHistory(writer, previous, recordHash, counter)};
+        if (auto indexed = storeHistoryEntry(record, recordHash, next.at(writer)); !indexed) {
+            return indexed.error();
+        }
         if (auto persisted = persistReplicationCheckpoint(next, durableQuarantinedWriters_);
             !persisted) {
             return persisted.error();

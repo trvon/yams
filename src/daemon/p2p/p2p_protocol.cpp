@@ -24,6 +24,8 @@ struct WireHello {
     std::string nodeId;
     std::string corpusId;
     std::uint64_t corpusEpoch{0};
+    std::size_t maxWriterAdvance{0};
+    std::size_t maxWriterWindowBytes{0};
 };
 
 struct WireState {
@@ -31,6 +33,12 @@ struct WireState {
     std::map<memory_sync::NodeId, std::uint64_t> seen;
     std::map<memory_sync::NodeId, memory_sync::WriterHistoryCommitment> commitments;
     std::set<memory_sync::NodeId> quarantinedWriters;
+};
+
+struct WireWindowFrontier {
+    std::string writerId;
+    std::uint64_t counter{0};
+    std::string digest;
 };
 
 struct WireHistoryProof {
@@ -51,8 +59,15 @@ Result<void> validateConfig(const PeerHandshakeConfig& config) {
         return Error{ErrorCode::InvalidArgument,
                      "p2p handshake requires node, corpus, and epoch identity"};
     }
-    if (config.timeout <= std::chrono::milliseconds::zero()) {
-        return Error{ErrorCode::InvalidArgument, "p2p handshake timeout must be positive"};
+    if (config.timeout <= std::chrono::milliseconds::zero() || config.maxWriterAdvance == 0 ||
+        config.maxWriterAdvance > kMaxP2pWriterAdvance || config.maxWriterWindowBytes == 0 ||
+        config.maxWriterWindowBytes > kMaxP2pWriterWindowBytes) {
+        return Error{ErrorCode::InvalidArgument,
+                     "p2p handshake timeout or writer-window bound is invalid"};
+    }
+    if (config.localVersion.get(config.nodeId) != 0 && !config.resolveLocalWindow) {
+        return Error{ErrorCode::InvalidArgument,
+                     "p2p local writer requires a bounded window resolver"};
     }
     if (config.localVersion.counters().size() > kMaxP2pReplicationWriters ||
         config.localCommitments.size() > kMaxP2pReplicationWriters ||
@@ -75,7 +90,9 @@ Json helloJson(const PeerHandshakeConfig& config) {
             {"schema_version", kP2pEnvelopeSchemaVersion},
             {"node_id", config.nodeId},
             {"corpus_id", config.corpusId},
-            {"corpus_epoch", config.corpusEpoch}};
+            {"corpus_epoch", config.corpusEpoch},
+            {"max_writer_advance", config.maxWriterAdvance},
+            {"max_writer_window_bytes", config.maxWriterWindowBytes}};
 }
 
 Result<WireHello> parseHello(const Json& json, std::string_view expectedType) {
@@ -87,7 +104,10 @@ Result<WireHello> parseHello(const Json& json, std::string_view expectedType) {
                          .schemaVersion = json.at("schema_version").get<std::uint32_t>(),
                          .nodeId = json.at("node_id").get<std::string>(),
                          .corpusId = json.at("corpus_id").get<std::string>(),
-                         .corpusEpoch = json.at("corpus_epoch").get<std::uint64_t>()};
+                         .corpusEpoch = json.at("corpus_epoch").get<std::uint64_t>(),
+                         .maxWriterAdvance = json.at("max_writer_advance").get<std::size_t>(),
+                         .maxWriterWindowBytes =
+                             json.at("max_writer_window_bytes").get<std::size_t>()};
     } catch (const std::exception& error) {
         return Error{ErrorCode::ValidationError, std::string("invalid p2p hello: ") + error.what()};
     }
@@ -102,7 +122,9 @@ Result<void> validatePeerHello(const WireHello& peer, const PeerHandshakeConfig&
         return Error{ErrorCode::NotSupported, "p2p envelope schema version mismatch"};
     }
     if (peer.nodeId.empty() || peer.nodeId.size() > kMaxP2pIdentityBytes ||
-        peer.corpusId.size() > kMaxP2pIdentityBytes || peer.nodeId != connection.peerCertCn()) {
+        peer.corpusId.size() > kMaxP2pIdentityBytes || peer.nodeId != connection.peerCertCn() ||
+        peer.maxWriterAdvance == 0 || peer.maxWriterAdvance > kMaxP2pWriterAdvance ||
+        peer.maxWriterWindowBytes == 0 || peer.maxWriterWindowBytes > kMaxP2pWriterWindowBytes) {
         return Error{ErrorCode::Unauthorized, "p2p claimed node id does not match TLS certificate"};
     }
     if (peer.corpusId != local.corpusId) {
@@ -122,7 +144,9 @@ Json acknowledgementJson(const PeerHandshakeConfig& config, bool accepted,
               {"schema_version", kP2pEnvelopeSchemaVersion},
               {"node_id", config.nodeId},
               {"corpus_id", config.corpusId},
-              {"corpus_epoch", config.corpusEpoch}};
+              {"corpus_epoch", config.corpusEpoch},
+              {"max_writer_advance", config.maxWriterAdvance},
+              {"max_writer_window_bytes", config.maxWriterWindowBytes}};
     if (!reason.empty()) {
         json["reason"] = reason;
     }
@@ -194,6 +218,167 @@ Result<WireState> parseState(const Json& json) {
     }
 }
 
+Json windowFrontierJson(const WireWindowFrontier& frontier) {
+    return {{"type", "writer_window"},
+            {"writer_id", frontier.writerId},
+            {"counter", frontier.counter},
+            {"digest", frontier.digest}};
+}
+
+Result<WireWindowFrontier> parseWindowFrontier(const Json& json) {
+    try {
+        if (!json.is_object() || json.value("type", std::string{}) != "writer_window") {
+            return Error{ErrorCode::ValidationError, "unexpected p2p writer-window message type"};
+        }
+        WireWindowFrontier frontier{.writerId = json.at("writer_id").get<std::string>(),
+                                    .counter = json.at("counter").get<std::uint64_t>(),
+                                    .digest = json.at("digest").get<std::string>()};
+        if (frontier.writerId.empty() || frontier.writerId.size() > kMaxP2pIdentityBytes ||
+            (frontier.counter == 0 ? !frontier.digest.empty()
+                                   : !memory_sync::isSha256Digest(frontier.digest))) {
+            return Error{ErrorCode::ValidationError, "p2p writer-window frontier is invalid"};
+        }
+        return frontier;
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::ValidationError,
+                     std::string("invalid p2p writer-window frontier: ") + error.what()};
+    }
+}
+
+bool requiresFullBootstrapWindow(const WireState& source, const WireState& receiver,
+                                 std::string_view sourceNodeId) {
+    return receiver.version.empty() &&
+           std::ranges::any_of(source.version.counters(), [&](const auto& entry) {
+               return entry.first != sourceNodeId && entry.second != 0;
+           });
+}
+
+std::uint64_t boundedWriterCounter(std::uint64_t receiverCounter, std::uint64_t sourceCounter,
+                                   std::size_t maxAdvance, bool fullBootstrap) {
+    if (fullBootstrap || sourceCounter <= receiverCounter) {
+        return sourceCounter;
+    }
+    const auto remaining = sourceCounter - receiverCounter;
+    return remaining <= maxAdvance ? sourceCounter
+                                   : receiverCounter + static_cast<std::uint64_t>(maxAdvance);
+}
+
+Result<WireWindowFrontier> makeLocalWindowFrontier(const PeerHandshakeConfig& config,
+                                                   const WireState& peerState,
+                                                   const WireHello& peerHello) {
+    const auto localCounter = config.localVersion.get(config.nodeId);
+    const auto peerCounter = peerState.version.get(config.nodeId);
+    if (peerCounter > localCounter) {
+        return Error{ErrorCode::ValidationError,
+                     "peer writer watermark is ahead of authenticated local history"};
+    }
+    WireState localState{.version = config.localVersion,
+                         .seen = config.localVersion.counters(),
+                         .commitments = config.localCommitments,
+                         .quarantinedWriters = config.localQuarantinedWriters};
+    const bool fullBootstrap = requiresFullBootstrapWindow(localState, peerState, config.nodeId);
+    const auto negotiatedRecords = std::min(config.maxWriterAdvance, peerHello.maxWriterAdvance);
+    const auto negotiatedBytes =
+        std::min(config.maxWriterWindowBytes, peerHello.maxWriterWindowBytes);
+    auto counter =
+        boundedWriterCounter(peerCounter, localCounter, negotiatedRecords, fullBootstrap);
+    if (!fullBootstrap && counter > peerCounter) {
+        auto selected = config.resolveLocalWindow(peerCounter, negotiatedRecords, negotiatedBytes);
+        if (!selected) {
+            return selected.error();
+        }
+        if (selected.value().counter <= peerCounter || selected.value().counter > counter ||
+            !memory_sync::isSha256Digest(selected.value().digest)) {
+            return Error{ErrorCode::InvalidState,
+                         "local writer-window resolver violated negotiated bounds"};
+        }
+        counter = selected.value().counter;
+    }
+    if (counter == 0) {
+        return WireWindowFrontier{.writerId = config.nodeId};
+    }
+    memory_sync::WriterHistoryCommitment commitment;
+    if (counter == localCounter) {
+        const auto current = config.localCommitments.find(config.nodeId);
+        if (current == config.localCommitments.end()) {
+            return Error{ErrorCode::InvalidState,
+                         "local writer commitment is unavailable for bounded handshake"};
+        }
+        commitment = current->second;
+    } else {
+        if (!config.resolveLocalCommitment) {
+            return Error{ErrorCode::InvalidState,
+                         "historical writer commitment resolver is unavailable"};
+        }
+        auto resolved = config.resolveLocalCommitment(counter);
+        if (!resolved) {
+            return resolved.error();
+        }
+        commitment = std::move(resolved.value());
+    }
+    if (commitment.counter != counter || !memory_sync::isSha256Digest(commitment.digest)) {
+        return Error{ErrorCode::InvalidState, "bounded local writer commitment is inconsistent"};
+    }
+    return WireWindowFrontier{
+        .writerId = config.nodeId, .counter = counter, .digest = std::move(commitment.digest)};
+}
+
+WireState replaceWriterFrontier(WireState state, const WireWindowFrontier& frontier) {
+    memory_sync::VersionVector version;
+    for (const auto& [writer, counter] : state.version.counters()) {
+        if (writer != frontier.writerId) {
+            version.observe(writer, counter);
+        }
+    }
+    if (frontier.counter != 0) {
+        version.observe(frontier.writerId, frontier.counter);
+        state.commitments[frontier.writerId] = memory_sync::WriterHistoryCommitment{
+            .counter = frontier.counter, .digest = frontier.digest};
+    } else {
+        state.commitments.erase(frontier.writerId);
+    }
+    state.version = std::move(version);
+    state.seen = state.version.counters();
+    return state;
+}
+
+Result<WireState> validatePeerWindowFrontier(const PeerHandshakeConfig& config,
+                                             const WireState& peerState, const WireHello& peerHello,
+                                             const WireWindowFrontier& frontier) {
+    if (frontier.writerId != peerHello.nodeId) {
+        return Error{ErrorCode::Unauthorized, "p2p writer-window identity differs from TLS peer"};
+    }
+    const auto sourceCounter = peerState.version.get(peerHello.nodeId);
+    const auto receiverCounter = config.localVersion.get(peerHello.nodeId);
+    if (receiverCounter > sourceCounter) {
+        return Error{ErrorCode::ValidationError,
+                     "peer writer frontier rolls back local durable history"};
+    }
+    WireState receiver{.version = config.localVersion,
+                       .seen = config.localVersion.counters(),
+                       .commitments = config.localCommitments,
+                       .quarantinedWriters = config.localQuarantinedWriters};
+    const bool fullBootstrap = requiresFullBootstrapWindow(peerState, receiver, peerHello.nodeId);
+    const auto negotiatedRecords = std::min(config.maxWriterAdvance, peerHello.maxWriterAdvance);
+    const auto maximumCounter =
+        boundedWriterCounter(receiverCounter, sourceCounter, negotiatedRecords, fullBootstrap);
+    const bool exactRequired = fullBootstrap || sourceCounter <= receiverCounter;
+    if ((exactRequired && frontier.counter != maximumCounter) ||
+        (!exactRequired &&
+         (frontier.counter <= receiverCounter || frontier.counter > maximumCounter))) {
+        return Error{ErrorCode::ValidationError,
+                     "peer writer-window counter violates the negotiated bound"};
+    }
+    if (frontier.counter == sourceCounter && sourceCounter != 0) {
+        const auto full = peerState.commitments.find(peerHello.nodeId);
+        if (full == peerState.commitments.end() || full->second.digest != frontier.digest) {
+            return Error{ErrorCode::HashMismatch,
+                         "peer writer-window differs from its full frontier"};
+        }
+    }
+    return replaceWriterFrontier(peerState, frontier);
+}
+
 Result<bool> preflightTrust(IPeerTrustStore& trustStore, std::string_view nodeId,
                             std::string_view spkiPin, bool allowFirstContact) {
     auto verified = trustStore.verifyOrPin(nodeId, spkiPin, false);
@@ -230,16 +415,16 @@ Result<PeerTrustDecision> commitTrust(IPeerTrustStore& trustStore, std::string_v
 }
 
 Result<PeerHandshakeResult> makeHandshakeResult(const P2pConnection& connection,
-                                                const PeerHandshakeConfig& config, WireState state,
+                                                WireState localState, WireState peerState,
                                                 const ValidatedHistoryProof& proof,
                                                 PeerTrustDecision trust) {
     return PeerHandshakeResult{.peerNodeId = connection.peerCertCn(),
                                .peerSpkiPin = connection.peerSpkiPin(),
-                               .localVersion = config.localVersion,
-                               .peerVersion = std::move(state.version),
-                               .peerSeen = std::move(state.seen),
-                               .peerCommitments = std::move(state.commitments),
-                               .peerQuarantinedWriters = std::move(state.quarantinedWriters),
+                               .localVersion = std::move(localState.version),
+                               .peerVersion = std::move(peerState.version),
+                               .peerSeen = std::move(peerState.seen),
+                               .peerCommitments = std::move(peerState.commitments),
+                               .peerQuarantinedWriters = std::move(peerState.quarantinedWriters),
                                .peerPrefixCounter = proof.proof.counter,
                                .peerPrefixVerified = true,
                                .peerPrefixMatches = proof.matchesLocalPrefix,
@@ -507,6 +692,33 @@ Result<PeerHandshakeResult> initiatePeerHandshake(P2pConnection& connection,
     if (!peerState) {
         return fail(peerState.error());
     }
+    auto localWindow = makeLocalWindowFrontier(config, peerState.value(), peerHello.value());
+    if (!localWindow) {
+        return fail(localWindow.error());
+    }
+    if (auto written =
+            writeJson(connection, windowFrontierJson(localWindow.value()), config.timeout);
+        !written) {
+        return fail(written.error());
+    }
+    auto peerWindowJson = readJson(connection, config.timeout);
+    if (!peerWindowJson) {
+        return fail(peerWindowJson.error());
+    }
+    auto peerWindow = parseWindowFrontier(peerWindowJson.value());
+    if (!peerWindow) {
+        return fail(peerWindow.error());
+    }
+    auto boundedPeer = validatePeerWindowFrontier(config, peerState.value(), peerHello.value(),
+                                                  peerWindow.value());
+    if (!boundedPeer) {
+        return fail(boundedPeer.error());
+    }
+    WireState localState{.version = config.localVersion,
+                         .seen = config.localVersion.counters(),
+                         .commitments = config.localCommitments,
+                         .quarantinedWriters = config.localQuarantinedWriters};
+    auto boundedLocal = replaceWriterFrontier(std::move(localState), localWindow.value());
     auto localProof = makeLocalHistoryProof(config, peerState.value());
     if (!localProof) {
         return fail(localProof.error());
@@ -528,8 +740,8 @@ Result<PeerHandshakeResult> initiatePeerHandshake(P2pConnection& connection,
     if (!trust) {
         return fail(trust.error());
     }
-    return makeHandshakeResult(connection, config, std::move(peerState.value()), peerProof.value(),
-                               trust.value());
+    return makeHandshakeResult(connection, std::move(boundedLocal), std::move(boundedPeer.value()),
+                               peerProof.value(), trust.value());
 }
 
 Result<PeerHandshakeResult> acceptPeerHandshake(P2pConnection& connection,
@@ -571,6 +783,33 @@ Result<PeerHandshakeResult> acceptPeerHandshake(P2pConnection& connection,
     if (auto written = writeJson(connection, stateJson(config), config.timeout); !written) {
         return fail(written.error());
     }
+    auto peerWindowJson = readJson(connection, config.timeout);
+    if (!peerWindowJson) {
+        return fail(peerWindowJson.error());
+    }
+    auto peerWindow = parseWindowFrontier(peerWindowJson.value());
+    if (!peerWindow) {
+        return fail(peerWindow.error());
+    }
+    auto boundedPeer =
+        validatePeerWindowFrontier(config, peerState.value(), hello.value(), peerWindow.value());
+    if (!boundedPeer) {
+        return fail(boundedPeer.error());
+    }
+    auto localWindow = makeLocalWindowFrontier(config, peerState.value(), hello.value());
+    if (!localWindow) {
+        return fail(localWindow.error());
+    }
+    if (auto written =
+            writeJson(connection, windowFrontierJson(localWindow.value()), config.timeout);
+        !written) {
+        return fail(written.error());
+    }
+    WireState localState{.version = config.localVersion,
+                         .seen = config.localVersion.counters(),
+                         .commitments = config.localCommitments,
+                         .quarantinedWriters = config.localQuarantinedWriters};
+    auto boundedLocal = replaceWriterFrontier(std::move(localState), localWindow.value());
     auto peerProof = readAndValidatePeerHistoryProof(connection, config, hello.value().nodeId);
     if (!peerProof) {
         return fail(peerProof.error());
@@ -591,8 +830,8 @@ Result<PeerHandshakeResult> acceptPeerHandshake(P2pConnection& connection,
     if (!trust) {
         return fail(trust.error());
     }
-    return makeHandshakeResult(connection, config, std::move(peerState.value()), peerProof.value(),
-                               trust.value());
+    return makeHandshakeResult(connection, std::move(boundedLocal), std::move(boundedPeer.value()),
+                               peerProof.value(), trust.value());
 }
 
 } // namespace yams::daemon::p2p
