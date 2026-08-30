@@ -87,6 +87,7 @@ public:
     Result<P2pSyncResult> connect(std::string_view connectionString);
     Result<void> disconnect(std::string_view nodeId);
     Result<void> enrollPeer(std::string_view nodeId, std::string_view spkiPin);
+    Result<void> forget(std::string_view nodeId);
     Result<P2pLocalIdentity> localIdentity() const;
     Result<std::vector<PeerRegistryRecord>> peers() const;
 

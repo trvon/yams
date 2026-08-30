@@ -233,6 +233,18 @@ RequestDispatcher::handleMemorySyncRequest(const MemorySyncRequest& req) {
             response.value = nlohmann::json{{"node_id", req.key}, {"remembered", false}}.dump();
             break;
         }
+        case MemorySyncOperation::Forget: {
+            auto forgotten = co_await dispatch::offload_to_worker(
+                serviceManager_, [manager = serviceManager_, nodeId = req.key] {
+                    return manager->forgetP2pPeer(nodeId);
+                });
+            if (!forgotten) {
+                co_return dispatch::makeErrorResponse(forgotten.error().code,
+                                                      forgotten.error().message);
+            }
+            response.value = nlohmann::json{{"node_id", req.key}}.dump();
+            break;
+        }
         case MemorySyncOperation::Peers: {
             auto peers = serviceManager_->listP2pPeers();
             if (!peers) {

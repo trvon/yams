@@ -1724,6 +1724,15 @@ bool ConfigResolver::applyMemorySync(const ConfigSections& sections, DaemonConfi
             config.memorySync.enabled = false;
             return false;
         }
+        // Direct transport reuses sync_interval_ms as the reconnect interval, which
+        // P2pManager::create bounds to p2p::kP2pMaxReconnectInterval (5 minutes). Reject here so a
+        // large value fails config resolution instead of aborting daemon startup later.
+        if (policy.transport == "direct" && *interval > 5 * 60 * 1000) {
+            spdlog::warn("Config: invalid memory_sync; sync_interval_ms exceeds the 5-minute "
+                         "direct reconnect ceiling");
+            config.memorySync.enabled = false;
+            return false;
+        }
         policy.syncIntervalMs = *interval;
     }
     const auto applyLimit = [&](std::string_view key, std::size_t& target) {

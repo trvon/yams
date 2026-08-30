@@ -116,6 +116,33 @@ TEST_CASE("P2P peer registry persists operator enrollment",
     CHECK(trusted.value().pinnedByOperator);
 }
 
+TEST_CASE("P2P peer registry supports explicit key rotation via removal",
+          "[daemon][p2p][registry][sqlite][security]") {
+    TempDatabase database{"key-rotation"};
+    auto opened = PeerRegistry::open(database.path, 1);
+    REQUIRE(opened.has_value());
+    auto& registry = *opened.value();
+    const std::string firstPin(64, 'a');
+    const std::string rotatedPin(64, 'b');
+
+    REQUIRE(registry.enrollOperatorPeer("peer-node", firstPin).has_value());
+    auto replace = registry.enrollOperatorPeer("peer-node", rotatedPin);
+    REQUIRE_FALSE(replace.has_value());
+    CHECK(replace.error().code == yams::ErrorCode::Unauthorized);
+
+    REQUIRE(registry.removePeer("peer-node").has_value());
+    REQUIRE(registry.enrollOperatorPeer("peer-node", rotatedPin).has_value());
+
+    auto peers = registry.listPeers();
+    REQUIRE(peers.has_value());
+    REQUIRE(peers.value().size() == 1);
+    CHECK(peers.value().front().spkiPin == rotatedPin);
+    CHECK(peers.value().front().pinnedByOperator);
+    auto trusted = registry.verifyOrPin("peer-node", rotatedPin, false);
+    REQUIRE(trusted.has_value());
+    CHECK(trusted.value().pinnedByOperator);
+}
+
 TEST_CASE("P2P peer registry persists trust and causal state across restart",
           "[daemon][p2p][registry][sqlite]") {
     TempDatabase database{"restart"};

@@ -2638,10 +2638,14 @@ Result<ServiceManager::MemorySyncStatus> ServiceManager::getMemorySyncStatus() c
     std::uint64_t peerCount = 0;
     if (p2pManager_) {
         auto peers = p2pManager_->peers();
-        if (!peers) {
-            return peers.error();
+        if (peers) {
+            peerCount = peers.value().size();
+        } else {
+            // A transient peer-registry read failure must not fail the whole status IPC; degrade
+            // to peerCount=0 so the daemon stays observable while the registry recovers.
+            spdlog::warn("[ServiceManager] p2p peer registry read failed for status: {}",
+                         peers.error().message);
         }
-        peerCount = peers.value().size();
     }
     return MemorySyncStatus{
         memorySync_->started(),
@@ -2682,6 +2686,13 @@ Result<void> ServiceManager::enrollP2pPeer(std::string_view nodeId, std::string_
         return Error{ErrorCode::InvalidState, "direct P2P transport is not enabled"};
     }
     return p2pManager_->enrollPeer(nodeId, spkiPin);
+}
+
+Result<void> ServiceManager::forgetP2pPeer(std::string_view nodeId) {
+    if (!p2pManager_) {
+        return Error{ErrorCode::InvalidState, "direct P2P transport is not enabled"};
+    }
+    return p2pManager_->forget(nodeId);
 }
 
 Result<p2p::P2pLocalIdentity> ServiceManager::getP2pIdentity() const {
