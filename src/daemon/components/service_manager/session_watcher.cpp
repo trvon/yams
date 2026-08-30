@@ -1,4 +1,3 @@
-#define YAMS_DAEMON_TEST_HOOKS_IMPL 1
 #include <yams/daemon/components/ServiceManager.h>
 
 #include <algorithm>
@@ -26,8 +25,6 @@
 #include <yams/core/types.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/ipc/retrieval_session.h>
-
-#undef YAMS_DAEMON_TEST_HOOKS_IMPL
 
 namespace yams::daemon {
 
