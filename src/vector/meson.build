@@ -111,6 +111,7 @@ endif
 srcs = [
   'vector_database.cpp',
   'embedding_generator.cpp',
+  'embedding_daemon_backend.cpp',
   'embedding_service.cpp',
   'batch_metrics.cpp',
   'document_chunker.cpp',
