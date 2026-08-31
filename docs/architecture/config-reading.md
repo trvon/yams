@@ -29,6 +29,27 @@ the caller's environment at teardown. App services, CLI commands, MCP prompt/dow
 storage bootstrap, and content-store compression settings must not implement
 local line parsers or reconstruct XDG/Windows config paths.
 
+## Typed local disk-pressure policy
+
+Daemon-local storage pressure is configured only through typed TOML. It has no product
+environment overlay:
+
+```toml
+[storage.disk_pressure]
+warning_free_percent = 10.0
+minimum_write_admission_bytes = 268435456 # 256 MiB
+emergency_reserve_bytes = 104857600       # 100 MiB
+```
+
+The detailed status response reports local filesystem capacity, available bytes, the effective
+thresholds, and `normal`, `warning`, `emergency`, or `unknown` pressure. For an S3-backed content
+store these fields still describe the daemon's local filesystem; they do not claim to measure
+remote bucket capacity.
+
+This first policy slice is observational. Write admission, reserve-file release, urgent garbage
+collection, and safe P2P-history backpressure are separate hardening stages. Operators must not
+manually delete CAS, reference-database, or P2P operation-store files when space is low.
+
 ## Migration and schema operations
 
 `ConfigMigrator::parseTomlConfig()` remains separate for migration, schema

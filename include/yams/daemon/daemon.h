@@ -8,6 +8,7 @@
 #include <yams/daemon/components/TuningConfig.h>
 #include <yams/daemon/resource/onnx_model_pool.h> // For DaemonConfig
 #include <yams/memory_sync/memory_sync.h>
+#include <yams/storage/disk_pressure.h>
 
 #include <atomic>
 #include <chrono>
@@ -77,6 +78,9 @@ struct DaemonConfig {
         std::optional<bool> automaticRebuildsEnabled;
         std::string automaticRebuildsSource;
     } searchMaintenance;
+
+    // Daemon-local disk pressure policy. Resolved from [storage.disk_pressure]; no env overlays.
+    storage::DiskPressurePolicy diskPressure{};
 
     // Typed runtime instrumentation profile. The "memory" profile suppresses
     // opportunistic startup maintenance that creates large transient allocator

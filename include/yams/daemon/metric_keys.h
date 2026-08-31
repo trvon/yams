@@ -145,12 +145,23 @@ constexpr std::string_view kSnapshotPersisted = "snapshot_persisted";
 constexpr std::string_view kPostIngestDrained = "post_ingest_drained";
 constexpr std::string_view kIndexVisible = "index_visible";
 
-// Storage metrics
+// Storage and local disk-pressure metrics
 constexpr std::string_view kStorageLogicalBytes = "storage_logical_bytes";
 constexpr std::string_view kStoragePhysicalBytes = "storage_physical_bytes";
 constexpr std::string_view kStorageDocuments = "storage_documents";
 constexpr std::string_view kStorageSavedBytes = "storage_saved_bytes";
 constexpr std::string_view kStorageSavedPct = "storage_saved_pct";
+constexpr std::string_view kStorageCapacityBytesLow = "storage_capacity_bytes_low";
+constexpr std::string_view kStorageCapacityBytesHigh = "storage_capacity_bytes_high";
+constexpr std::string_view kStorageAvailableBytesLow = "storage_available_bytes_low";
+constexpr std::string_view kStorageAvailableBytesHigh = "storage_available_bytes_high";
+constexpr std::string_view kStoragePressureLevel = "storage_pressure_level";
+constexpr std::string_view kStorageWarningFreePercentBp = "storage_warning_free_percent_bp";
+constexpr std::string_view kStorageWriteAdmissionBytesLow = "storage_write_admission_bytes_low";
+constexpr std::string_view kStorageWriteAdmissionBytesHigh = "storage_write_admission_bytes_high";
+constexpr std::string_view kStorageEmergencyReserveBytesLow = "storage_emergency_reserve_bytes_low";
+constexpr std::string_view kStorageEmergencyReserveBytesHigh =
+    "storage_emergency_reserve_bytes_high";
 
 // Detailed storage breakdown
 constexpr std::string_view kCasPhysicalBytes = "cas_physical_bytes";

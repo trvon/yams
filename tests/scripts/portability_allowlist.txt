@@ -164,8 +164,8 @@ src/daemon/client/sandbox_detection.cpp:45:portability/env-read # reviewed raw e
 src/daemon/client/sandbox_detection.cpp:74:portability/env-read # reviewed raw environment read
 src/daemon/client/sandbox_probe.cpp:54:portability/env-read # reviewed raw environment read
 src/daemon/client/sandbox_probe.cpp:60:portability/env-read # reviewed raw environment read
-src/daemon/components/DaemonMetrics.cpp:127:portability/env-read # reviewed raw environment read
-src/daemon/components/DaemonMetrics.cpp:1945:portability/env-read # reviewed raw environment read
+src/daemon/components/DaemonMetrics.cpp:131:portability/env-read # reviewed raw environment read
+src/daemon/components/DaemonMetrics.cpp:1949:portability/env-read # reviewed raw environment read
 src/daemon/components/EmbeddingService.cpp:426:portability/env-read # reviewed raw environment read
 src/daemon/components/EmbeddingService.cpp:435:portability/env-read # reviewed raw environment read
 src/daemon/components/EmbeddingService.cpp:585:portability/env-read # reviewed raw environment read
@@ -188,7 +188,7 @@ src/daemon/components/RequestExecutor.cpp:44:portability/env-read # reviewed raw
 src/daemon/components/dispatcher/request_dispatcher_models.cpp:38:portability/env-read # reviewed raw environment read
 src/detection/file_type_detector.cpp:612:portability/env-read # reviewed raw environment read
 src/detection/file_type_detector.cpp:655:portability/env-read # reviewed raw environment read
-src/mcp/stdio_transport.cpp:77:portability/env-read # reviewed raw environment read
+src/mcp/stdio_transport.cpp:46:portability/env-read # reviewed raw environment read
 src/metadata/connection_pool.cpp:921:portability/jthread # feature-test guarded std::jthread
 src/metadata/database.cpp:29:portability/env-read # reviewed raw environment read
 src/metadata/database.cpp:473:portability/path-cstr # std::string filename, not filesystem::path
@@ -201,9 +201,9 @@ src/metadata/repository/search_query_helpers.cpp:293:portability/env-read # revi
 src/metadata/repository/search_query_helpers.cpp:480:portability/env-read # reviewed raw environment read
 src/metadata/versioning_util.cpp:101:portability/env-read # reviewed raw environment read
 src/plugins/plugin_repo_client.cpp:62:portability/env-read # reviewed raw environment read
-src/search/search_engine.cpp:377:portability/env-read # reviewed raw environment read
-src/search/search_engine.cpp:390:portability/env-read # reviewed raw environment read
-src/search/search_engine.cpp:3299:portability/env-read # reviewed raw environment read
+src/search/search_engine.cpp:378:portability/env-read # reviewed raw environment read
+src/search/search_engine.cpp:391:portability/env-read # reviewed raw environment read
+src/search/search_engine.cpp:3300:portability/env-read # reviewed raw environment read
 src/search/search_lexical_pipeline.cpp:605:portability/env-read # reviewed raw environment read
 src/storage/compressed_storage_engine.cpp:632:portability/env-read # reviewed raw environment read
 src/storage/object_storage_plugin_loader.cpp:126:portability/env-read # reviewed raw environment read
@@ -219,7 +219,7 @@ src/storage/s3_signer.cpp:161:portability/env-read # reviewed raw environment re
 src/storage/s3_signer.cpp:163:portability/env-read # reviewed raw environment read
 src/storage/storage_backend_factory.cpp:300:portability/env-read # reviewed raw environment read
 src/storage/storage_backend_factory.cpp:305:portability/env-read # reviewed raw environment read
-src/vector/sqlite_vec_backend.cpp:706:portability/path-cstr # std::string filename, not filesystem::path
+src/vector/sqlite_vec_backend.cpp:705:portability/path-cstr # std::string filename, not filesystem::path
 tests/benchmarks/beir_loader.h:68:portability/env-read # reviewed raw environment read
 tests/benchmarks/bench_utils.h:42:portability/env-read # reviewed raw environment read
 tests/benchmarks/bench_utils.h:56:portability/env-read # reviewed raw environment read
@@ -227,9 +227,9 @@ tests/benchmarks/daemon_warm_latency_main.cpp:34:portability/env-read # reviewed
 tests/benchmarks/daemon_warm_latency_main.cpp:87:portability/env-read # reviewed raw environment read
 tests/benchmarks/daemon_warm_latency_main.cpp:102:portability/env-read # reviewed raw environment read
 tests/benchmarks/hnsw_entity_search_bench.cpp:165:portability/env-read # reviewed raw environment read
-tests/benchmarks/ingestion_throughput_bench.cpp:577:portability/env-read # reviewed raw environment read
-tests/benchmarks/ingestion_throughput_bench.cpp:727:portability/env-read # reviewed raw environment read
-tests/benchmarks/ingestion_throughput_bench.cpp:776:portability/env-read # reviewed raw environment read
+tests/benchmarks/ingestion_throughput_bench.cpp:578:portability/env-read # reviewed raw environment read
+tests/benchmarks/ingestion_throughput_bench.cpp:728:portability/env-read # reviewed raw environment read
+tests/benchmarks/ingestion_throughput_bench.cpp:777:portability/env-read # reviewed raw environment read
 tests/benchmarks/large_scale_ingestion_bench.cpp:685:portability/env-read # reviewed raw environment read
 tests/benchmarks/large_scale_ingestion_bench.cpp:692:portability/env-read # reviewed raw environment read
 tests/benchmarks/large_scale_ingestion_bench.cpp:728:portability/env-read # reviewed raw environment read

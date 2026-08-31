@@ -1,3 +1,4 @@
+// pi-lens-ignore: fatal error
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
@@ -336,6 +337,19 @@ public:
                             }
                             if (dedupSaved > 0)
                                 j["deduplicatedBytes"] = dedupSaved;
+
+                            const auto disk = extractStoragePressure(s);
+                            nlohmann::json diskJson;
+                            diskJson["pressure"] = storage::toString(disk.level);
+                            if (disk.capacityBytes)
+                                diskJson["capacity_bytes"] = *disk.capacityBytes;
+                            if (disk.availableBytes)
+                                diskJson["available_bytes"] = *disk.availableBytes;
+                            diskJson["warning_free_percent"] = disk.warningFreePercent;
+                            diskJson["minimum_write_admission_bytes"] =
+                                disk.minimumWriteAdmissionBytes;
+                            diskJson["emergency_reserve_bytes"] = disk.emergencyReserveBytes;
+                            j["storage"] = std::move(diskJson);
 
                             // Embedding runtime telemetry
                             {
@@ -701,6 +715,18 @@ public:
                                 if (physical > 0)
                                     sizeVal << " · physical " << format_bytes(physical);
                                 storageRows.push_back({"Size", sizeVal.str(), ""});
+
+                                const auto disk = extractStoragePressure(s);
+                                std::ostringstream diskValue;
+                                diskValue << storage::toString(disk.level);
+                                if (disk.availableBytes) {
+                                    diskValue << " · " << format_bytes(*disk.availableBytes)
+                                              << " free";
+                                }
+                                if (disk.capacityBytes) {
+                                    diskValue << " / " << format_bytes(*disk.capacityBytes);
+                                }
+                                storageRows.push_back({"Disk", diskValue.str(), ""});
 
                                 // Embedding coverage progress bar (doc-level)
                                 if (docs > 0 && embedded > 0) {

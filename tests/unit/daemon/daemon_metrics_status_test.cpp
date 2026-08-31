@@ -1215,6 +1215,49 @@ TEST_CASE("RequestDispatcher: compact and detailed status agree on FSM readiness
     }
 }
 
+TEST_CASE("RequestDispatcher: detailed status includes disk pressure policy",
+          "[daemon][status][disk-pressure]") {
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_status_disk_pressure_");
+    cfg.diskPressure.warningFreePercent = 12.5;
+    cfg.diskPressure.minimumWriteAdmissionBytes = 512ULL * 1024ULL * 1024ULL;
+    cfg.diskPressure.emergencyReserveBytes = 64ULL * 1024ULL * 1024ULL;
+
+    YamsDaemon daemon(cfg);
+    DaemonLifecycleAdapter lifecycleAdapter(&daemon);
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    RequestDispatcher dispatcher(&lifecycleAdapter, &svc, &state);
+
+    auto fetch = [&](bool detailed) {
+        StatusRequest req;
+        req.detailed = detailed;
+        Request request = req;
+        boost::asio::io_context io;
+        auto future =
+            boost::asio::co_spawn(io, dispatcher.dispatch(request), boost::asio::use_future);
+        io.run();
+        const auto response = future.get();
+        REQUIRE(std::holds_alternative<StatusResponse>(response));
+        return std::get<StatusResponse>(response);
+    };
+
+    const auto compact = fetch(false);
+    CHECK_FALSE(compact.requestCounts.contains(std::string(metrics::kStoragePressureLevel)));
+
+    const auto detailed = fetch(true);
+    CHECK(detailed.requestCounts.at(std::string(metrics::kStoragePressureLevel)) ==
+          static_cast<std::size_t>(storage::DiskPressureLevel::Unknown));
+    CHECK(detailed.requestCounts.at(std::string(metrics::kStorageWarningFreePercentBp)) == 1250);
+    CHECK(detailed.requestCounts.at(std::string(metrics::kStorageWriteAdmissionBytesLow)) ==
+          512ULL * 1024ULL * 1024ULL);
+    CHECK(detailed.requestCounts.at(std::string(metrics::kStorageWriteAdmissionBytesHigh)) == 0);
+    CHECK(detailed.requestCounts.at(std::string(metrics::kStorageEmergencyReserveBytesLow)) ==
+          64ULL * 1024ULL * 1024ULL);
+    CHECK(detailed.requestCounts.at(std::string(metrics::kStorageEmergencyReserveBytesHigh)) == 0);
+}
+
 TEST_CASE("RequestDispatcher: status includes repair metrics and flags",
           "[daemon][status][repair]") {
     DaemonConfig cfg;

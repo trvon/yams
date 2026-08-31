@@ -1,7 +1,10 @@
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
+#if !defined(_WIN32) && !defined(__APPLE__)
+#include <fstream> // NOLINT(misc-include-cleaner) -- used by the POSIX /proc probes below.
+#endif
 #include <iomanip>
 #include <sstream>
 #ifndef _WIN32
@@ -43,6 +46,7 @@
 #include <yams/daemon/metric_keys.h>
 #include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 #include <yams/search/search_tuner.h>
+#include <yams/storage/disk_pressure.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
 #include <yams/version.hpp>
@@ -2008,6 +2012,19 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                     }
                     if (services_) {
                         dataDirForVolume = services_->getResolvedDataDir();
+                        const auto& policy = services_->getConfig().diskPressure;
+                        out.storageWriteAdmissionBytes = policy.minimumWriteAdmissionBytes;
+                        out.storageEmergencyReserveBytes = policy.emergencyReserveBytes;
+                        out.storageWarningFreePercentBp = static_cast<std::uint32_t>(
+                            std::lround(policy.warningFreePercent * 100.0));
+                        const auto observed = storage::inspectDiskPressure(
+                            dataDirForVolume / "storage", policy, storage::probeDiskSpace);
+                        if (observed) {
+                            out.storageCapacityBytes = observed.value().space.capacityBytes;
+                            out.storageAvailableBytes = observed.value().space.availableBytes;
+                            out.storagePressureLevel =
+                                static_cast<std::uint8_t>(observed.value().level);
+                        }
                     }
                     if (const auto volumeUsed = queryVolumeUsedBytes(dataDirForVolume)) {
                         out.volumeUsedBytes = volumeUsed;

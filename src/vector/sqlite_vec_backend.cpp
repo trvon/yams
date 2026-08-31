@@ -1,7 +1,6 @@
 #include <yams/config/config_helpers.h>
 #include <yams/core/assert.hpp>
 #include <yams/vector/sqlite_vec_backend.h>
-#include <yams/vector/vector_database.h>
 #include <yams/vector/vector_schema_migration.h>
 #include <yams/vector/vector_utils.h>
 
@@ -2908,7 +2907,7 @@ public:
             // Compute cosine similarity
             if (record.embedding.size() == query_embedding.size()) {
                 float similarity = static_cast<float>(
-                    VectorDatabase::computeCosineSimilarity(query_embedding, record.embedding));
+                    vector_utils::computeCosineSimilarity(query_embedding, record.embedding));
 
                 if (similarity >= params.similarity_threshold) {
                     record.relevance_score = similarity;
@@ -4073,8 +4072,8 @@ private:
             float similarity = approxScore;
             if (!record_opt->embedding.empty()) {
                 const auto rerankStart = std::chrono::steady_clock::now();
-                similarity = static_cast<float>(VectorDatabase::computeCosineSimilarity(
-                    query_embedding, record_opt->embedding));
+                similarity = static_cast<float>(
+                    vector_utils::computeCosineSimilarity(query_embedding, record_opt->embedding));
                 if (diagnostics != nullptr) {
                     ++diagnostics->exactDistanceEvaluations;
                     diagnostics->exactRerankNanoseconds += static_cast<std::uint64_t>(
@@ -4420,7 +4419,7 @@ WHERE embedding_dim = ?1
             }
 
             float similarity = static_cast<float>(
-                VectorDatabase::computeCosineSimilarity(query_embedding, record.embedding));
+                vector_utils::computeCosineSimilarity(query_embedding, record.embedding));
             if (similarity < similarity_threshold) {
                 continue;
             }
@@ -4553,7 +4552,7 @@ ORDER BY rowid
             }
 
             float similarity = static_cast<float>(
-                VectorDatabase::computeCosineSimilarity(query_embedding, record_opt->embedding));
+                vector_utils::computeCosineSimilarity(query_embedding, record_opt->embedding));
             if (similarity < similarity_threshold) {
                 continue;
             }
