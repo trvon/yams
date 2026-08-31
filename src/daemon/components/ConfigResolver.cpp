@@ -1653,9 +1653,6 @@ bool ConfigResolver::applyStorageDiskPressure(const ConfigSections& sections,
 }
 
 bool ConfigResolver::applyMemorySync(const ConfigSections& sections, DaemonConfig& config) {
-    if (!applyStorageDiskPressure(sections, config)) {
-        return false;
-    }
     const auto section = sections.find("memory_sync");
     if (section == sections.end()) {
         return true;
