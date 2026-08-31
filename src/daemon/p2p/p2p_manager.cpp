@@ -512,7 +512,7 @@ private:
                         retry.nextAttempt =
                             now + std::min(delay + jitter,
                                            std::chrono::duration_cast<std::chrono::milliseconds>(
-                                               std::chrono::minutes(5)));
+                                               kP2pMaxReconnectInterval));
                     }
                 }
             } catch (const std::exception& error) {
