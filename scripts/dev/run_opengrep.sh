@@ -72,7 +72,7 @@ if [[ "$ENGINE" == *opengrep* ]]; then
 		COMMON+=(--allow-rule-timeout-control)
 	fi
 	if grep -q -- '--semgrepignore-filename' <<<"$HELP"; then
-		COMMON+=(--semgrepignore-filename=.opengrepignore)
+		COMMON+=(--experimental --semgrepignore-filename=.opengrepignore)
 	fi
 fi
 

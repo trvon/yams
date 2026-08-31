@@ -100,6 +100,10 @@ ci_logs/
 bench_results/
 build/benchmarks/
 audit_artifacts/
+*.brick.json
+*.brick.html
+*.brick-contract.json
+/tests/benchmarks/brick/
 /docs/audits/
 /DIFFERENTIAL_REVIEW_REPORT.md
 tests/benchmarks/baseline/xplan_foundation_*.json
