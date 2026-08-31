@@ -325,6 +325,10 @@ yams::Result<std::string> readProtectedP2pFile(const std::filesystem::path& keyP
 }
 #endif
 
+} // namespace
+
+namespace yams::daemon::service_manager_detail {
+
 yams::Result<std::string> readProtectedP2pPrivateKey(const std::filesystem::path& keyPath) {
     return readProtectedP2pFile(keyPath, true, kMaxP2pPrivateKeyBytes);
 }
@@ -405,6 +409,10 @@ yams::Result<void> writeExclusiveP2pPrivateKey(const std::filesystem::path& path
     return {};
 }
 
+} // namespace yams::daemon::service_manager_detail
+
+namespace {
+
 yams::Result<bool> installP2pPrivateKey(const std::filesystem::path& temporary,
                                         const std::filesystem::path& keyPath) {
 #ifdef _WIN32
@@ -438,7 +446,7 @@ yams::Result<bool> installP2pPrivateKey(const std::filesystem::path& temporary,
 yams::Result<std::string> loadOrCreateP2pPrivateKey(const std::filesystem::path& keyPath) {
     std::error_code error;
     if (std::filesystem::exists(keyPath, error)) {
-        return readProtectedP2pPrivateKey(keyPath);
+        return yams::daemon::service_manager_detail::readProtectedP2pPrivateKey(keyPath);
     }
     if (error) {
         return yams::Error{yams::ErrorCode::IOError,
@@ -458,7 +466,8 @@ yams::Result<std::string> loadOrCreateP2pPrivateKey(const std::filesystem::path&
         temporary += ".tmp." + std::to_string(static_cast<unsigned long long>(::getpid())) + "." +
                      std::to_string(static_cast<unsigned long long>(random())) + "." +
                      std::to_string(static_cast<unsigned long long>(random()));
-        auto written = writeExclusiveP2pPrivateKey(temporary, generated.value().privateKeyPem);
+        auto written = yams::daemon::service_manager_detail::writeExclusiveP2pPrivateKey(
+            temporary, generated.value().privateKeyPem);
         if (!written) {
             if (written.error().code == yams::ErrorCode::ResourceBusy) {
                 continue;
@@ -470,7 +479,7 @@ yams::Result<std::string> loadOrCreateP2pPrivateKey(const std::filesystem::path&
             return installed.error();
         }
         if (!installed.value()) {
-            return readProtectedP2pPrivateKey(keyPath);
+            return yams::daemon::service_manager_detail::readProtectedP2pPrivateKey(keyPath);
         }
         return std::move(generated.value().privateKeyPem);
     }
@@ -488,7 +497,8 @@ loadP2pPrivateKey(const yams::daemon::DaemonConfig::MemorySyncPolicy& policy,
     }
     if (!policy.writerAuthManifestPath.empty()) {
         const std::filesystem::path manifestPath(policy.writerAuthManifestPath);
-        auto bytes = readProtectedP2pTrustFile(manifestPath, std::size_t{1024} * 1024);
+        auto bytes = yams::daemon::service_manager_detail::readProtectedP2pTrustFile(
+            manifestPath, std::size_t{1024} * 1024);
         if (!bytes) {
             return bytes.error();
         }
@@ -509,7 +519,7 @@ loadP2pPrivateKey(const yams::daemon::DaemonConfig::MemorySyncPolicy& policy,
             if (!keyPath.is_absolute()) {
                 keyPath = manifestPath.parent_path() / keyPath;
             }
-            return readProtectedP2pPrivateKey(keyPath);
+            return yams::daemon::service_manager_detail::readProtectedP2pPrivateKey(keyPath);
         } catch (const std::exception&) {
             return yams::Error{yams::ErrorCode::InvalidArgument,
                                "writer authentication manifest is malformed"};
@@ -531,7 +541,7 @@ yams::Result<std::string> ensureAuthenticatedDirectStore(const std::filesystem::
                                "cannot inspect direct P2P authentication marker: " +
                                    error.message()};
         }
-        auto encoded = readProtectedP2pPrivateKey(marker);
+        auto encoded = yams::daemon::service_manager_detail::readProtectedP2pPrivateKey(marker);
         if (!encoded) {
             return encoded.error();
         }
@@ -614,7 +624,9 @@ yams::Result<std::string> ensureAuthenticatedDirectStore(const std::filesystem::
                                  {"corpus_epoch", corpusEpoch},
                                  {"store_generation", storeGeneration}};
     const auto temporary = marker.string() + ".tmp-" + std::to_string(::getpid());
-    if (auto written = writeExclusiveP2pPrivateKey(temporary, content.dump()); !written) {
+    if (auto written = yams::daemon::service_manager_detail::writeExclusiveP2pPrivateKey(
+            temporary, content.dump());
+        !written) {
         return written.error();
     }
     std::filesystem::rename(temporary, marker, error);
@@ -642,7 +654,7 @@ ServiceManager::__test_loadOrCreateP2pPrivateKey(const std::filesystem::path& ke
 Result<void>
 ServiceManager::__test_writeProtectedP2pPrivateKey(const std::filesystem::path& keyPath,
                                                    std::string_view contents) {
-    return writeExclusiveP2pPrivateKey(keyPath, contents);
+    return yams::daemon::service_manager_detail::writeExclusiveP2pPrivateKey(keyPath, contents);
 }
 
 Result<p2p::P2pSyncResult> ServiceManager::connectP2p(std::string_view connectionString) {
