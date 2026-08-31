@@ -34,6 +34,7 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/metric_keys.h>
 #include <yams/daemon/resource/model_provider.h>
+#include <yams/vector/embedding_generator.h>
 #include <yams/vector/simeon_embedding_backend.h>
 
 #include <spdlog/spdlog.h>

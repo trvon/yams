@@ -35,6 +35,7 @@
 #include <yams/search/tuning_pipeline.h>
 #include <yams/topology/topology_baseline.h>
 #include <yams/topology/topology_metadata_store.h>
+#include <yams/vector/embedding_generator.h>
 #include <yams/vector/simeon_embedding_backend.h>
 #include <yams/vector/vector_database.h>
 
