@@ -17,10 +17,10 @@
 #include <thread>
 #include <utility>
 
+#include <spdlog/spdlog.h>
 #include <boost/asio/any_io_executor.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
-#include <spdlog/spdlog.h>
 
 #include <yams/common/utf8_utils.h>
 #include <yams/config/config_helpers.h>
@@ -42,17 +42,13 @@ class DaemonBackend;
 // Callers must ensure the supplied awaitable factory owns any state it touches because the
 // spawned coroutine may outlive the timeout return path.
 template <typename T, typename MakeAwaitable>
-static yams::Result<T> await_with_timeout(
-    MakeAwaitable&& make, std::chrono::milliseconds timeout,
-    const std::optional<boost::asio::any_io_executor>& executorOverride = std::nullopt) {
+static yams::Result<T> await_with_timeout(MakeAwaitable&& make, std::chrono::milliseconds timeout) {
     auto shared_promise = std::make_shared<std::promise<yams::Result<T>>>();
     auto fut = shared_promise->get_future();
     auto completed = std::make_shared<std::atomic<bool>>(false);
 
-    boost::asio::any_io_executor executor =
-        executorOverride ? *executorOverride : yams::daemon::GlobalIOContext::global_executor();
     boost::asio::co_spawn(
-        executor,
+        yams::daemon::GlobalIOContext::global_executor(),
         [state = shared_promise, completed,
          maker = std::forward<MakeAwaitable>(make)]() mutable -> boost::asio::awaitable<void> {
             try {
@@ -158,8 +154,7 @@ public:
             // on error)
             auto daemonClient = daemon_client_;
             auto st = await_with_timeout<yams::daemon::StatusResponse>(
-                [daemonClient]() { return daemonClient->status(); }, std::chrono::seconds(5),
-                config_.executorOverride);
+                [daemonClient]() { return daemonClient->status(); }, std::chrono::seconds(5));
             if (!st) {
                 // Downgrade to debug to avoid noisy warnings during CLI init paths.
                 // Search will gracefully fall back when daemon is unavailable/slow.
@@ -213,7 +208,7 @@ public:
                         req.preload = true;
                         auto lm = await_with_timeout<yams::daemon::ModelLoadResponse>(
                             [daemonClient, req]() { return daemonClient->loadModel(req); },
-                            preload_timeout, config_.executorOverride);
+                            preload_timeout);
                         if (!lm) {
                             spdlog::debug("Preload model in daemon did not complete: {}",
                                           lm.error().message);
@@ -291,7 +286,7 @@ public:
             auto daemonClient = daemon_client_;
             auto result = await_with_timeout<yams::daemon::EmbeddingResponse>(
                 [daemonClient, req]() { return daemonClient->generateEmbedding(req); },
-                config_.daemon_timeout, config_.executorOverride);
+                config_.daemon_timeout);
             if (!result) {
                 return Error{ErrorCode::NetworkError, result.error().message};
             }
@@ -381,23 +376,24 @@ public:
                                        [daemonClient, req]() {
                                            return daemonClient->streamingBatchEmbeddings(req);
                                        },
-                                       config_.daemon_timeout, config_.executorOverride)
+                                       config_.daemon_timeout)
                                  : await_with_timeout<yams::daemon::BatchEmbeddingResponse>(
                                        [daemonClient, req]() {
                                            return daemonClient->generateBatchEmbeddings(req);
                                        },
-                                       config_.daemon_timeout, config_.executorOverride);
+                                       config_.daemon_timeout);
                 if (result) {
                     maybeResponse = result.value();
                     break;
                 }
                 lastError = result.error();
-                spdlog::warn(
-                    "[Embedding][Daemon] Batch embeddings failed (code={}, msg='{}') on attempt {}",
-                    static_cast<int>(lastError.code), lastError.message, attempt);
-                // Retry on transient/network/timeout-like failures AND plugin/resource errors
-                // InternalError (code=17): transient plugin failures (e.g. ONNX model busy)
-                // ResourceExhausted: ONNX slot contention under concurrent load
+                spdlog::warn("[Embedding][Daemon] Batch embeddings failed (code={}, "
+                             "msg='{}') on attempt {}",
+                             static_cast<int>(lastError.code), lastError.message, attempt);
+                // Retry on transient/network/timeout-like failures AND
+                // plugin/resource errors InternalError (code=17): transient plugin
+                // failures (e.g. ONNX model busy) ResourceExhausted: ONNX slot
+                // contention under concurrent load
                 const bool canRetry = lastError.code == ErrorCode::Timeout ||
                                       lastError.code == ErrorCode::NetworkError ||
                                       lastError.code == ErrorCode::InvalidState ||

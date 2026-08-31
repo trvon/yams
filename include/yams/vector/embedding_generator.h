@@ -6,13 +6,10 @@
 #include <chrono>
 #include <concepts>
 #include <memory>
-#include <optional>
 #include <span>
 #include <string>
 #include <variant>
 #include <vector>
-
-#include <boost/asio/any_io_executor.hpp>
 
 namespace yams::vector {
 
@@ -31,12 +28,6 @@ struct EmbeddingConfig {
     // Set when a higher-level ResolvedEmbeddingConfig already applied compatibility overlays.
     // The default preserves the public constructor's historical ambient override behavior.
     bool backend_is_resolved = false;
-
-    // Optional executor override for the daemon async bridge (await_with_timeout).
-    // When absent, the bridge spawns coroutines on the daemon global IO context —
-    // the default. Injected so embedding generators can run on a caller-owned
-    // executor without depending on daemon globals.
-    std::optional<boost::asio::any_io_executor> executorOverride;
 
     enum class SimeonEncoderProfile {
         Configurable,
