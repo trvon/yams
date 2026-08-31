@@ -48,13 +48,17 @@ class DaemonBackend;
 // Callers must ensure the supplied awaitable factory owns any state it touches because the
 // spawned coroutine may outlive the timeout return path.
 template <typename T, typename MakeAwaitable>
-static yams::Result<T> await_with_timeout(MakeAwaitable&& make, std::chrono::milliseconds timeout) {
+static yams::Result<T> await_with_timeout(
+    MakeAwaitable&& make, std::chrono::milliseconds timeout,
+    const std::optional<boost::asio::any_io_executor>& executorOverride = std::nullopt) {
     auto shared_promise = std::make_shared<std::promise<yams::Result<T>>>();
     auto fut = shared_promise->get_future();
     auto completed = std::make_shared<std::atomic<bool>>(false);
 
+    boost::asio::any_io_executor executor =
+        executorOverride ? *executorOverride : yams::daemon::GlobalIOContext::global_executor();
     boost::asio::co_spawn(
-        yams::daemon::GlobalIOContext::global_executor(),
+        executor,
         [state = shared_promise, completed,
          maker = std::forward<MakeAwaitable>(make)]() mutable -> boost::asio::awaitable<void> {
             try {
@@ -160,7 +164,8 @@ public:
             // on error)
             auto daemonClient = daemon_client_;
             auto st = await_with_timeout<yams::daemon::StatusResponse>(
-                [daemonClient]() { return daemonClient->status(); }, std::chrono::seconds(5));
+                [daemonClient]() { return daemonClient->status(); }, std::chrono::seconds(5),
+                config_.executorOverride);
             if (!st) {
                 // Downgrade to debug to avoid noisy warnings during CLI init paths.
                 // Search will gracefully fall back when daemon is unavailable/slow.
@@ -214,7 +219,7 @@ public:
                         req.preload = true;
                         auto lm = await_with_timeout<yams::daemon::ModelLoadResponse>(
                             [daemonClient, req]() { return daemonClient->loadModel(req); },
-                            preload_timeout);
+                            preload_timeout, config_.executorOverride);
                         if (!lm) {
                             spdlog::debug("Preload model in daemon did not complete: {}",
                                           lm.error().message);
@@ -292,7 +297,7 @@ public:
             auto daemonClient = daemon_client_;
             auto result = await_with_timeout<yams::daemon::EmbeddingResponse>(
                 [daemonClient, req]() { return daemonClient->generateEmbedding(req); },
-                config_.daemon_timeout);
+                config_.daemon_timeout, config_.executorOverride);
             if (!result) {
                 return Error{ErrorCode::NetworkError, result.error().message};
             }
@@ -382,12 +387,12 @@ public:
                                        [daemonClient, req]() {
                                            return daemonClient->streamingBatchEmbeddings(req);
                                        },
-                                       config_.daemon_timeout)
+                                       config_.daemon_timeout, config_.executorOverride)
                                  : await_with_timeout<yams::daemon::BatchEmbeddingResponse>(
                                        [daemonClient, req]() {
                                            return daemonClient->generateBatchEmbeddings(req);
                                        },
-                                       config_.daemon_timeout);
+                                       config_.daemon_timeout, config_.executorOverride);
                 if (result) {
                     maybeResponse = result.value();
                     break;
