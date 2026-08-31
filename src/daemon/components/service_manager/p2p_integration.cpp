@@ -19,7 +19,6 @@
 
 #include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
-#include <openssl/rand.h>
 
 #include <yams/common/fs_utils.h>
 #include <yams/daemon/components/ResourceGovernor.h>
@@ -528,116 +527,6 @@ loadP2pPrivateKey(const yams::daemon::DaemonConfig::MemorySyncPolicy& policy,
     return loadOrCreateP2pPrivateKey(dataDir / "p2p" / "identity.pem");
 }
 
-yams::Result<std::string> ensureAuthenticatedDirectStore(const std::filesystem::path& dataDir,
-                                                         std::string_view corpusId,
-                                                         std::uint64_t corpusEpoch) {
-    const auto p2pDirectory = dataDir / "p2p";
-    const auto operationStore = p2pDirectory / "op-store";
-    const auto marker = p2pDirectory / "authenticated-store-v1.json";
-    std::error_code error;
-    if (std::filesystem::exists(marker, error)) {
-        if (error) {
-            return yams::Error{yams::ErrorCode::IOError,
-                               "cannot inspect direct P2P authentication marker: " +
-                                   error.message()};
-        }
-        auto encoded = yams::daemon::service_manager_detail::readProtectedP2pPrivateKey(marker);
-        if (!encoded) {
-            return encoded.error();
-        }
-        try {
-            const auto parsed = nlohmann::json::parse(encoded.value());
-            const auto storeGeneration = parsed.at("store_generation").get<std::string>();
-            const bool validGeneration =
-                storeGeneration.size() == 64 &&
-                std::ranges::all_of(storeGeneration, [](unsigned char ch) {
-                    return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
-                });
-            if (parsed.at("schema_version").get<std::uint32_t>() != 1 ||
-                parsed.at("corpus_id").get<std::string>() != corpusId ||
-                parsed.at("corpus_epoch").get<std::uint64_t>() != corpusEpoch || !validGeneration) {
-                return yams::Error{
-                    yams::ErrorCode::InvalidState,
-                    "direct P2P operation store authentication marker does not match corpus "
-                    "identity"};
-            }
-            return storeGeneration;
-        } catch (const std::exception&) {
-            return yams::Error{yams::ErrorCode::DataCorruption,
-                               "direct P2P operation store authentication marker is malformed"};
-        }
-    }
-    if (error) {
-        return yams::Error{yams::ErrorCode::IOError,
-                           "cannot inspect direct P2P authentication marker: " + error.message()};
-    }
-
-    if (std::filesystem::exists(operationStore, error)) {
-        if (error) {
-            return yams::Error{yams::ErrorCode::IOError,
-                               "cannot inspect direct P2P operation store: " + error.message()};
-        }
-        const auto operationStoreStatus = std::filesystem::symlink_status(operationStore, error);
-        if (error || !std::filesystem::is_directory(operationStoreStatus)) {
-            return yams::Error{yams::ErrorCode::InvalidState,
-                               "direct P2P operation store is not a trusted directory"};
-        }
-        std::filesystem::recursive_directory_iterator entry(operationStore, error);
-        const std::filesystem::recursive_directory_iterator end;
-        for (; !error && entry != end; entry.increment(error)) {
-            const auto status = entry->symlink_status(error);
-            if (error || !std::filesystem::is_directory(status)) {
-                return yams::Error{
-                    yams::ErrorCode::InvalidState,
-                    "direct P2P operation store has unsigned or provenance-unknown history; "
-                    "preserve it for audit, advance corpus_epoch, and bootstrap a fresh store"};
-            }
-        }
-        if (error) {
-            return yams::Error{yams::ErrorCode::IOError,
-                               "cannot scan direct P2P operation store: " + error.message()};
-        }
-    } else if (error) {
-        return yams::Error{yams::ErrorCode::IOError,
-                           "cannot inspect direct P2P operation store: " + error.message()};
-    }
-
-    std::filesystem::create_directories(p2pDirectory, error);
-    if (error) {
-        return yams::Error{yams::ErrorCode::IOError,
-                           "cannot create direct P2P state directory: " + error.message()};
-    }
-    std::array<unsigned char, 32> generationBytes{};
-    if (RAND_bytes(generationBytes.data(), static_cast<int>(generationBytes.size())) != 1) {
-        return yams::Error{yams::ErrorCode::InternalError,
-                           "cannot generate direct P2P store identity"};
-    }
-    static constexpr char kHex[] = "0123456789abcdef";
-    std::string storeGeneration;
-    storeGeneration.reserve(generationBytes.size() * 2);
-    for (const auto byte : generationBytes) {
-        storeGeneration.push_back(kHex[byte >> 4]);
-        storeGeneration.push_back(kHex[byte & 0x0f]);
-    }
-    const nlohmann::json content{{"schema_version", 1},
-                                 {"corpus_id", corpusId},
-                                 {"corpus_epoch", corpusEpoch},
-                                 {"store_generation", storeGeneration}};
-    const auto temporary = marker.string() + ".tmp-" + std::to_string(::getpid());
-    if (auto written = yams::daemon::service_manager_detail::writeExclusiveP2pPrivateKey(
-            temporary, content.dump());
-        !written) {
-        return written.error();
-    }
-    std::filesystem::rename(temporary, marker, error);
-    if (error) {
-        std::filesystem::remove(temporary, error);
-        return yams::Error{yams::ErrorCode::WriteError,
-                           "cannot install direct P2P authentication marker"};
-    }
-    return storeGeneration;
-}
-
 } // namespace
 
 namespace yams::daemon {
@@ -654,7 +543,7 @@ ServiceManager::__test_loadOrCreateP2pPrivateKey(const std::filesystem::path& ke
 Result<void>
 ServiceManager::__test_writeProtectedP2pPrivateKey(const std::filesystem::path& keyPath,
                                                    std::string_view contents) {
-    return yams::daemon::service_manager_detail::writeExclusiveP2pPrivateKey(keyPath, contents);
+    return service_manager_detail::writeExclusiveP2pPrivateKey(keyPath, contents);
 }
 
 Result<p2p::P2pSyncResult> ServiceManager::connectP2p(std::string_view connectionString) {
@@ -697,99 +586,6 @@ Result<std::vector<p2p::PeerRegistryRecord>> ServiceManager::listP2pPeers() cons
         return Error{ErrorCode::InvalidState, "direct P2P transport is not enabled"};
     }
     return p2pManager_->peers();
-}
-
-Result<void> ServiceManager::initializeMemorySync(const std::filesystem::path& dataDir) {
-    const auto& policy = config_.memorySync;
-    if (!policy.enabled) {
-        return Result<void>();
-    }
-    if (policy.transport == "direct" &&
-        (!policy.writerAuthRequired || policy.writerAuthManifestPath.empty())) {
-        return Error{ErrorCode::InvalidArgument,
-                     "direct memory_sync requires writer_auth_required=true and a usable "
-                     "writer_auth_manifest for authenticated cold bootstrap"};
-    }
-
-    try {
-        yams::memory_sync::MemorySyncDaemonConfig cfg;
-        cfg.enabled = true;
-        cfg.nodeId = policy.nodeId;
-        cfg.corpusId = policy.corpusId;
-        cfg.corpusEpoch = policy.corpusEpoch;
-        cfg.backend = policy.transport == "direct" ? "filesystem" : policy.backend;
-        cfg.syncIntervalMs = policy.syncIntervalMs;
-        cfg.limits = policy.limits;
-        cfg.mode = policy.mode == "persistent-migration" ? "persistent" : policy.mode;
-        cfg.sessionId = policy.sessionId;
-        cfg.temporarySessionTtlMs = policy.temporarySessionTtlMs;
-        cfg.allowLegacyUnbound = policy.mode == "persistent-migration";
-        cfg.writerAuthRequired = policy.writerAuthRequired;
-        cfg.writerAuthManifestPath = policy.writerAuthManifestPath;
-        cfg.path =
-            policy.transport == "direct" ? (dataDir / "p2p" / "op-store").string() : policy.path;
-        if (cfg.backend == "filesystem" && !cfg.path.empty() &&
-            !std::filesystem::path(cfg.path).is_absolute()) {
-            cfg.path = (dataDir / cfg.path).string();
-        }
-
-        if (policy.transport == "direct") {
-            auto trustedStore =
-                ensureAuthenticatedDirectStore(dataDir, cfg.corpusId, cfg.corpusEpoch);
-            if (!trustedStore) {
-                return trustedStore.error();
-            }
-            cfg.controlScope = std::move(trustedStore.value());
-        }
-
-        std::optional<yams::storage::BackendConfig> resolvedS3Config;
-        if (policy.transport == "shared-store" && cfg.backend == "s3") {
-            auto storageDecision = yams::storage::resolveStorageBootstrapDecision(
-                config_.configFilePath, dataDir, std::string{"s3"});
-            if (!storageDecision) {
-                return Error{storageDecision.error().code,
-                             "memory_sync S3 credential resolution failed: " +
-                                 storageDecision.error().message};
-            }
-            if (!storageDecision.value().backendConfig) {
-                return Error{ErrorCode::InvalidState,
-                             "memory_sync S3 resolution returned no backend config"};
-            }
-            resolvedS3Config = *storageDecision.value().backendConfig;
-        }
-
-        auto svc = yams::memory_sync::createMemorySyncService(
-            cfg, std::move(resolvedS3Config),
-            [] { return ResourceGovernor::instance().canAdmitWork(); },
-            policy.transport == "direct"
-                ? yams::memory_sync::WriterPrivateKeyReader{readProtectedP2pPrivateKey}
-                : yams::memory_sync::WriterPrivateKeyReader{},
-            policy.transport == "direct"
-                ? yams::memory_sync::WriterTrustFileReader{readProtectedP2pTrustFile}
-                : yams::memory_sync::WriterTrustFileReader{});
-        if (!svc) {
-            return Error{svc.error().code,
-                         "memory_sync service creation failed: " + svc.error().message};
-        }
-
-        memorySync_ = std::move(svc.value());
-        const std::string_view trust =
-            policy.transport == "direct"
-                ? (policy.allowFirstContact ? "mutual-tls-legacy-tofu"
-                                            : "mutual-tls-operator-pinned")
-                : (cfg.writerAuthRequired ? "authenticated-writers" : "backend-ACL-trusted");
-        spdlog::info("[ServiceManager] memory_sync configured: transport={} backend={} mode={} "
-                     "corpus={} epoch={} node={} trust={} sync_interval_ms={} path={}",
-                     policy.transport, cfg.backend, cfg.mode, cfg.corpusId, cfg.corpusEpoch,
-                     cfg.nodeId, trust, cfg.syncIntervalMs, cfg.path);
-        return Result<void>();
-    } catch (const std::exception& e) {
-        return Error{ErrorCode::InternalError,
-                     std::string("memory_sync initialization threw: ") + e.what()};
-    } catch (...) {
-        return Error{ErrorCode::InternalError,
-                     "memory_sync initialization threw an unknown exception"};
-    }
 }
 
 Result<void> ServiceManager::initializeDirectP2p(const std::filesystem::path& dataDir) {
