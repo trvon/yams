@@ -228,11 +228,17 @@ struct MetricsSnapshot {
     std::uint64_t casDedupSavedBytes{0};    // bytes avoided via dedup (duplicate chunks)
     std::uint64_t casCompressSavedBytes{0}; // bytes saved via compression (global monitor)
     std::uint64_t metadataPhysicalBytes{0}; // yams.db + WAL/SHM + refs.db
-    std::uint64_t indexPhysicalBytes{0};    // text/search index files (if externalized)
-    std::uint64_t vectorPhysicalBytes{0};   // vector DB + index files
-    std::uint64_t logsTmpPhysicalBytes{0};  // logs + temp files under data dir
-    std::uint64_t physicalTotalBytes{0};    // sum of above components
-    std::uint64_t volumeUsedBytes{0};       // statvfs/GetDiskFreeSpaceExW used bytes for the mount
+    // WAL data-system optics (detailed snapshot; best-effort from WalMetricsProvider)
+    std::uint64_t walActiveTransactions{0};
+    std::uint64_t walPendingEntries{0};
+    std::uint64_t walTotalEntries{0};
+    std::uint64_t walTotalBytes{0};
+    std::uint64_t walLogFileCount{0};
+    std::uint64_t indexPhysicalBytes{0};   // text/search index files (if externalized)
+    std::uint64_t vectorPhysicalBytes{0};  // vector DB + index files
+    std::uint64_t logsTmpPhysicalBytes{0}; // logs + temp files under data dir
+    std::uint64_t physicalTotalBytes{0};   // sum of above components
+    std::uint64_t volumeUsedBytes{0};      // statvfs/GetDiskFreeSpaceExW used bytes for the mount
     std::uint64_t storageCapacityBytes{0};
     std::uint64_t storageAvailableBytes{0};
     std::uint64_t storageWriteAdmissionBytes{0};

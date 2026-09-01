@@ -1391,6 +1391,7 @@ if catch2_dep.found()
     files(
       'unit/wal/wal_file_catch2_test.cpp',
       'unit/wal/wal_manager_catch2_test.cpp',
+      'unit/wal/wal_metrics_provider_catch2_test.cpp',
       'unit/wal/wal_recovery_catch2_test.cpp',
     ),
     include_directories: incs,

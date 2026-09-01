@@ -571,6 +571,12 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
             setVal(metrics::kSnapshotPersisted,
                    static_cast<size_t>(serviceManager->getSnapshotsPersistedCount()));
         }
+        // WAL data-system optics (detailed only): counters from WalMetricsProvider.
+        setVal(metrics::kWALActiveTransactions, static_cast<size_t>(snap.walActiveTransactions));
+        setVal(metrics::kWALPendingEntries, static_cast<size_t>(snap.walPendingEntries));
+        setVal(metrics::kWALTotalEntries, static_cast<size_t>(snap.walTotalEntries));
+        setVal(metrics::kWALTotalBytes, static_cast<size_t>(snap.walTotalBytes));
+        setVal(metrics::kWALLogFileCount, static_cast<size_t>(snap.walLogFileCount));
     }
 }
 

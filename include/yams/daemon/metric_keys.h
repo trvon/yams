@@ -174,6 +174,13 @@ constexpr std::string_view kVectorPhysicalBytes = "vector_physical_bytes";
 constexpr std::string_view kLogsTmpPhysicalBytes = "logs_tmp_physical_bytes";
 constexpr std::string_view kPhysicalTotalBytes = "physical_total_bytes";
 
+// WAL metrics (detailed optics for the write-ahead log data system)
+constexpr std::string_view kWALActiveTransactions = "wal_active_transactions";
+constexpr std::string_view kWALPendingEntries = "wal_pending_entries";
+constexpr std::string_view kWALTotalEntries = "wal_total_entries";
+constexpr std::string_view kWALTotalBytes = "wal_total_bytes";
+constexpr std::string_view kWALLogFileCount = "wal_log_file_count";
+
 // Session metrics
 constexpr std::string_view kWatchEnabled = "watch_enabled";
 constexpr std::string_view kWatchIntervalMs = "watch_interval_ms";

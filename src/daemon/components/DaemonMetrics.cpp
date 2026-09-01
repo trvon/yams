@@ -2321,6 +2321,18 @@ void DaemonMetrics::enrichDetailedSnapshot(MetricsSnapshot& out) const {
                     }
                 }
             }
+
+            // WAL data-system optics: surface WALManager counters that were previously
+            // collected but never exposed to any queryable surface (WalMetricsProvider was
+            // dead code). Cheap atomic reads; safe to run on the detailed path.
+            if (auto walProvider = services_->getWalMetricsProvider()) {
+                const auto walStats = walProvider->getStats();
+                out.walActiveTransactions = walStats.activeTransactions;
+                out.walPendingEntries = walStats.pendingEntries;
+                out.walTotalEntries = walStats.totalEntries;
+                out.walTotalBytes = walStats.totalBytes;
+                out.walLogFileCount = walStats.logFileCount;
+            }
         }
     } catch (...) {
         spdlog::debug("[DaemonMetrics] best-effort metric probe failed with unknown exception");

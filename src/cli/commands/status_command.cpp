@@ -169,6 +169,24 @@ public:
                                     j["diagnostics"] = std::move(diag);
                                 }
                             }
+                            {
+                                // WAL data-system optics (detailed): WALManager counters.
+                                nlohmann::json wal = nlohmann::json::object();
+                                const uint64_t walTx = getCount("wal_active_transactions");
+                                const uint64_t walPending = getCount("wal_pending_entries");
+                                const uint64_t walTotal = getCount("wal_total_entries");
+                                const uint64_t walBytes = getCount("wal_total_bytes");
+                                const uint64_t walLogs = getCount("wal_log_file_count");
+                                if (walTx > 0 || walPending > 0 || walTotal > 0 || walBytes > 0 ||
+                                    walLogs > 0) {
+                                    wal["active_transactions"] = walTx;
+                                    wal["pending_entries"] = walPending;
+                                    wal["total_entries"] = walTotal;
+                                    wal["total_bytes"] = walBytes;
+                                    wal["log_file_count"] = walLogs;
+                                    j["wal"] = std::move(wal);
+                                }
+                            }
                             if (s.retryAfterMs > 0)
                                 j["retryAfterMs"] = s.retryAfterMs;
                             j["statusSnapshotAgeMs"] = snapshotAgeMs;
