@@ -353,7 +353,10 @@ TEST_CASE("ConfigResolver disk pressure policy rejects unsafe values",
     unknown["storage.disk_pressure"] = {{"warning_free_precent", "5"}};
     DaemonConfig typo;
     CHECK_FALSE(ConfigResolver::applyStorageDiskPressure(unknown, typo));
-    CHECK_FALSE(ConfigResolver::applyMemorySync(unknown, typo));
+    // storage.disk_pressure is applied independently (rejected above); applyMemorySync
+    // is scoped to the memory_sync section only, so a section set without memory_sync
+    // entries is a no-op.
+    CHECK(ConfigResolver::applyMemorySync(unknown, typo));
 
     DaemonConfig defaults;
     REQUIRE(ConfigResolver::applyStorageDiskPressure({}, defaults));

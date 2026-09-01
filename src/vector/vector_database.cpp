@@ -1769,28 +1769,7 @@ bool VectorDatabase::isValidEmbedding(const std::vector<float>& embedding, size_
 
 double VectorDatabase::computeCosineSimilarity(const std::vector<float>& a,
                                                const std::vector<float>& b) {
-    if (a.size() != b.size()) {
-        return 0.0;
-    }
-
-    double dot_product = 0.0;
-    double norm_a = 0.0;
-    double norm_b = 0.0;
-
-    for (size_t i = 0; i < a.size(); ++i) {
-        dot_product += static_cast<double>(a[i]) * static_cast<double>(b[i]);
-        norm_a += static_cast<double>(a[i]) * static_cast<double>(a[i]);
-        norm_b += static_cast<double>(b[i]) * static_cast<double>(b[i]);
-    }
-
-    norm_a = std::sqrt(norm_a);
-    norm_b = std::sqrt(norm_b);
-
-    if (norm_a == 0.0 || norm_b == 0.0) {
-        return 0.0;
-    }
-
-    return dot_product / (norm_a * norm_b);
+    return vector_utils::computeCosineSimilarity(a, b);
 }
 
 // Factory function

@@ -2,8 +2,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
-#ifdef __linux__
-#include <fstream> // NOLINT(misc-include-cleaner) -- used by Linux /proc probes below.
+#if !defined(_WIN32) && !defined(__APPLE__)
+#include <fstream> // NOLINT(misc-include-cleaner) -- used by the POSIX /proc probes below.
 #endif
 #include <iomanip>
 #include <sstream>
