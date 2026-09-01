@@ -17,17 +17,12 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <random>
-#include <regex>
 #include <shared_mutex>
 #include <sstream>
 #include <string_view>
 #include <thread>
-#include <unordered_map>
 #include <yams/daemon/components/TuneAdvisor.h>
 
-// Include daemon client for DaemonBackend
-#include <yams/config/config_helpers.h>
 #include <yams/vector/simeon_embedding_backend.h>
 
 namespace yams::vector {
