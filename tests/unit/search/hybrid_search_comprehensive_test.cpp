@@ -13,9 +13,9 @@
  * components rather than mocks to validate end-to-end behavior.
  */
 
+#include "../../common/test_helpers_catch2.h"
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
-#include "../../common/test_helpers_catch2.h"
 
 #include <yams/compat/unistd.h>
 
@@ -282,6 +282,7 @@ private:
 
                 // Try to create embedding generator (may fail if ONNX not available)
                 yams::vector::EmbeddingConfig embCfg;
+                embCfg.backend_is_resolved = true;
                 embCfg.model_name = "all-MiniLM-L6-v2";
                 embCfg.embedding_dim = 384;
                 auto embGen = std::make_shared<yams::vector::EmbeddingGenerator>(embCfg);

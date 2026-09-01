@@ -24,7 +24,6 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
-#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 
 // Include daemon client for DaemonBackend
@@ -37,7 +36,6 @@ namespace yams::vector {
 // depends only on this factory and the IEmbeddingBackend seam.
 std::unique_ptr<IEmbeddingBackend> createDaemonBackend(const EmbeddingConfig& config);
 
-
 // Forward declarations
 
 // =============================================================================
@@ -47,30 +45,9 @@ std::unique_ptr<IEmbeddingBackend> createDaemonBackend(const EmbeddingConfig& co
 class EmbeddingGenerator::Impl {
 public:
     explicit Impl(const EmbeddingConfig& config) : config_(config) {
-        auto effective = config.backend;
-        // Preserve ambient compatibility for direct callers, but never override a backend that
-        // was already resolved into the caller's immutable lifecycle snapshot.
-        auto runtimePolicy = config.backend_is_resolved
-                                 ? daemon::EmbeddingRuntimePolicy{}
-                                 : daemon::ConfigResolver::resolveEmbeddingRuntimePolicy();
-        if (runtimePolicy.backend) {
-            const auto& s = *runtimePolicy.backend;
-            std::string lowered(s);
-            for (auto& c : lowered)
-                c = static_cast<char>(std::tolower(c));
-            if (lowered == "simeon") {
-                effective = EmbeddingConfig::Backend::Simeon;
-                config_.backend = effective;
-            } else if (lowered == "onnx" || lowered == "onnxruntime" || lowered == "onnx-runtime" ||
-                       lowered == "ort" || lowered == "local_onnx") {
-                effective = EmbeddingConfig::Backend::OnnxRuntime;
-                config_.backend = effective;
-            } else if (lowered == "daemon" || lowered == "hybrid" || lowered == "local") {
-                effective = EmbeddingConfig::Backend::Daemon;
-                config_.backend = effective;
-            }
-        }
-        switch (effective) {
+        // Backend policy belongs to the caller's resolved lifecycle snapshot. Keep this vector
+        // layer deterministic and independent of daemon configuration or ambient environment.
+        switch (config_.backend) {
             case EmbeddingConfig::Backend::Simeon:
                 backend_ = makeSimeonBackend(config_);
                 break;
@@ -275,6 +252,8 @@ public:
 private:
     // Global simple concurrency gate to prevent unbounded CPU oversubscription when plugins
     // implement embedding backends. Limits concurrent generate* calls across the process.
+    // TuneAdvisor intentionally remains the process-wide source: an instance-local snapshot
+    // cannot coordinate admission across generators and could oversubscribe the host.
     struct ConcurrencyGuard final {
         ConcurrencyGuard() { lock(); }
         ~ConcurrencyGuard() { unlock(); }
