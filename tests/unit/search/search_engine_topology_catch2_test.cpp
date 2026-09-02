@@ -2092,6 +2092,44 @@ TEST_CASE("rankGraphNeighborCandidates can weight support by query seed evidence
     CHECK(weighted.front() == "focused");
 }
 
+TEST_CASE("SearchEngine topology merge keeps graph-vector candidates behind baseline anchors",
+          "[search][topology][graph-vector][characterization][catch2]") {
+    using detail::AuxiliaryVectorCandidateBatch;
+
+    SearchEngineConfig config;
+    config.vectorMaxResults = 2;
+    config.graphExpansionVectorPenalty = 0.5F;
+    config.graphVectorRequireCorroboration = true;
+    config.graphVectorRequireTextAnchoring = true;
+    config.graphVectorRequireBaselineTextAnchoring = true;
+
+    std::vector<ComponentResult> components{
+        {.documentHash = "baseline-anchor", .score = 0.9F, .source = ComponentResult::Source::Text},
+        {.documentHash = "graph-anchor",
+         .score = 0.8F,
+         .source = ComponentResult::Source::GraphText},
+    };
+    std::vector<AuxiliaryVectorCandidateBatch> graphTerms{
+        {.query = "related",
+         .weight = 1.0F,
+         .candidates = {{.documentHash = "baseline-anchor", .score = 1.0F},
+                        {.documentHash = "graph-anchor", .score = 1.0F},
+                        {.documentHash = "unanchored", .score = 1.0F}}},
+    };
+
+    const auto merged = detail::mergeAuxiliaryVectorCandidates(std::move(components), {},
+                                                               std::move(graphTerms), config);
+
+    CHECK(merged.stats.graphVectorRawHitCount == 3U);
+    CHECK(merged.stats.graphVectorAddedNewCount == 1U);
+    CHECK(merged.stats.graphVectorBlockedUncorroboratedCount == 1U);
+    CHECK(merged.stats.graphVectorBlockedMissingBaselineTextAnchorCount == 1U);
+    REQUIRE(merged.components.size() == 3U);
+    CHECK(merged.components.back().documentHash == "baseline-anchor");
+    CHECK(merged.components.back().source == ComponentResult::Source::GraphVector);
+    CHECK(merged.components.back().score == Catch::Approx(0.5F));
+}
+
 TEST_CASE("Graph-neighbor trace separates stored relation from the selected cap",
           "[unit][search][topology][graph_neighbors][trace]") {
     TopologySearchFixture fix;

@@ -301,6 +301,173 @@ Result<std::vector<std::pair<std::string, std::int64_t>>> resolveMetadataDocumen
     return resolved;
 }
 
+AuxiliaryVectorMergeResult
+mergeAuxiliaryVectorCandidates(std::vector<ComponentResult> components,
+                               std::vector<AuxiliaryVectorCandidateBatch> subPhraseCandidates,
+                               std::vector<AuxiliaryVectorCandidateBatch> graphTermCandidates,
+                               const SearchEngineConfig& config) {
+    AuxiliaryVectorMergeResult out;
+    std::vector<ComponentResult> vectorResults;
+    std::vector<ComponentResult> graphVectorResults;
+    vectorResults.reserve(config.vectorMaxResults * 2);
+    graphVectorResults.reserve(config.vectorMaxResults * 2);
+    out.components.reserve(components.size());
+
+    std::unordered_map<std::string, std::size_t> bestVectorByHash;
+    std::unordered_map<std::string, std::size_t> bestGraphVectorByHash;
+    std::unordered_set<std::string> corroboratedHashes;
+    std::unordered_set<std::string> textAnchoredHashes;
+    std::unordered_set<std::string> baselineTextAnchoredHashes;
+    bestVectorByHash.reserve(config.vectorMaxResults * 2);
+    bestGraphVectorByHash.reserve(config.vectorMaxResults * 2);
+    corroboratedHashes.reserve(components.size() * 2);
+    textAnchoredHashes.reserve(components.size() * 2);
+    baselineTextAnchoredHashes.reserve(components.size() * 2);
+
+    for (auto& candidate : components) {
+        if (candidate.source == ComponentResult::Source::Vector ||
+            candidate.source == ComponentResult::Source::EntityVector) {
+            if (candidate.documentHash.empty()) {
+                continue;
+            }
+            ++out.stats.baseVectorCount;
+            corroboratedHashes.insert(candidate.documentHash);
+            const auto [it, inserted] =
+                bestVectorByHash.emplace(candidate.documentHash, vectorResults.size());
+            if (inserted) {
+                vectorResults.push_back(std::move(candidate));
+            } else if (candidate.score > vectorResults[it->second].score) {
+                vectorResults[it->second] = std::move(candidate);
+            }
+            continue;
+        }
+        if (candidate.source == ComponentResult::Source::GraphVector) {
+            if (candidate.documentHash.empty()) {
+                continue;
+            }
+            const auto [it, inserted] =
+                bestGraphVectorByHash.emplace(candidate.documentHash, graphVectorResults.size());
+            if (inserted) {
+                graphVectorResults.push_back(std::move(candidate));
+            } else if (candidate.score > graphVectorResults[it->second].score) {
+                graphVectorResults[it->second] = std::move(candidate);
+            }
+            continue;
+        }
+        if (!candidate.documentHash.empty()) {
+            if (isTextAnchoringComponent(candidate.source) ||
+                candidate.source == ComponentResult::Source::KnowledgeGraph) {
+                corroboratedHashes.insert(candidate.documentHash);
+            }
+            if (candidate.source == ComponentResult::Source::Text ||
+                candidate.source == ComponentResult::Source::SimeonText ||
+                candidate.source == ComponentResult::Source::GraphText ||
+                candidate.source == ComponentResult::Source::PathTree ||
+                candidate.source == ComponentResult::Source::KnowledgeGraph ||
+                candidate.source == ComponentResult::Source::Tag ||
+                candidate.source == ComponentResult::Source::Metadata ||
+                candidate.source == ComponentResult::Source::Symbol) {
+                textAnchoredHashes.insert(candidate.documentHash);
+            }
+            if (candidate.source == ComponentResult::Source::Text ||
+                candidate.source == ComponentResult::Source::SimeonText ||
+                candidate.source == ComponentResult::Source::PathTree ||
+                candidate.source == ComponentResult::Source::KnowledgeGraph ||
+                candidate.source == ComponentResult::Source::Symbol) {
+                baselineTextAnchoredHashes.insert(candidate.documentHash);
+            }
+        }
+        out.components.push_back(std::move(candidate));
+    }
+
+    const float decay = std::clamp(config.multiVectorScoreDecay, 0.1F, 1.0F);
+    for (std::size_t batchIndex = 0; batchIndex < subPhraseCandidates.size(); ++batchIndex) {
+        auto& batch = subPhraseCandidates[batchIndex];
+        out.stats.multiVectorRawHitCount += batch.candidates.size();
+        for (auto& candidate : batch.candidates) {
+            if (candidate.documentHash.empty()) {
+                continue;
+            }
+            candidate.score *= decay;
+            candidate.debugInfo["multi_vector_phrase"] = batch.query;
+            candidate.debugInfo["multi_vector_phrase_idx"] = std::to_string(batch.queryIndex);
+            const auto [it, inserted] =
+                bestVectorByHash.emplace(candidate.documentHash, vectorResults.size());
+            if (inserted) {
+                vectorResults.push_back(std::move(candidate));
+                ++out.stats.multiVectorAddedNewCount;
+                ++out.stats.multiVectorMergedCount;
+            } else if (candidate.score > vectorResults[it->second].score) {
+                vectorResults[it->second] = std::move(candidate);
+                ++out.stats.multiVectorReplacedBaseCount;
+                ++out.stats.multiVectorMergedCount;
+            }
+        }
+    }
+
+    const float graphPenalty = std::clamp(config.graphExpansionVectorPenalty, 0.1F, 1.0F);
+    for (std::size_t batchIndex = 0; batchIndex < graphTermCandidates.size(); ++batchIndex) {
+        auto& batch = graphTermCandidates[batchIndex];
+        out.stats.graphVectorRawHitCount += batch.candidates.size();
+        for (auto& candidate : batch.candidates) {
+            if (candidate.documentHash.empty()) {
+                continue;
+            }
+            if (config.graphVectorRequireCorroboration &&
+                !corroboratedHashes.contains(candidate.documentHash)) {
+                ++out.stats.graphVectorBlockedUncorroboratedCount;
+                continue;
+            }
+            if (config.graphVectorRequireTextAnchoring &&
+                !textAnchoredHashes.contains(candidate.documentHash)) {
+                ++out.stats.graphVectorBlockedMissingTextAnchorCount;
+                continue;
+            }
+            if (config.graphVectorRequireBaselineTextAnchoring &&
+                !baselineTextAnchoredHashes.contains(candidate.documentHash)) {
+                ++out.stats.graphVectorBlockedMissingBaselineTextAnchorCount;
+                continue;
+            }
+            candidate.source = ComponentResult::Source::GraphVector;
+            candidate.score *= graphPenalty * std::clamp(batch.weight, 0.2F, 1.0F);
+            candidate.debugInfo["graph_vector_term"] = batch.query;
+            candidate.debugInfo["graph_vector_term_idx"] = std::to_string(batch.queryIndex);
+            const auto [it, inserted] =
+                bestGraphVectorByHash.emplace(candidate.documentHash, graphVectorResults.size());
+            if (inserted) {
+                graphVectorResults.push_back(std::move(candidate));
+                ++out.stats.graphVectorAddedNewCount;
+            } else if (candidate.score > graphVectorResults[it->second].score) {
+                graphVectorResults[it->second] = std::move(candidate);
+                ++out.stats.graphVectorReplacedBaseCount;
+            }
+        }
+    }
+
+    const auto rankAndCap = [&](std::vector<ComponentResult>& results) {
+        std::sort(results.begin(), results.end(), [](const auto& lhs, const auto& rhs) {
+            if (lhs.score != rhs.score) {
+                return lhs.score > rhs.score;
+            }
+            return lhs.documentHash < rhs.documentHash;
+        });
+        if (results.size() > config.vectorMaxResults) {
+            results.resize(config.vectorMaxResults);
+        }
+        for (std::size_t rank = 0; rank < results.size(); ++rank) {
+            results[rank].rank = rank;
+        }
+    };
+    rankAndCap(vectorResults);
+    rankAndCap(graphVectorResults);
+
+    out.components.insert(out.components.end(), std::make_move_iterator(vectorResults.begin()),
+                          std::make_move_iterator(vectorResults.end()));
+    out.components.insert(out.components.end(), std::make_move_iterator(graphVectorResults.begin()),
+                          std::make_move_iterator(graphVectorResults.end()));
+    return out;
+}
+
 CandidateRescueMergeResult
 mergeVectorCandidateRescues(std::vector<ComponentResult> baseline,
                             std::vector<ComponentResult> expansion,

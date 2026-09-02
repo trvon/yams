@@ -60,6 +60,40 @@ struct RoutedVectorFilterResult {
     std::size_t removed{0};
 };
 
+struct AuxiliaryVectorCandidateBatch {
+    std::string query;
+    std::size_t queryIndex{0};
+    float weight{1.0F};
+    std::vector<ComponentResult> candidates;
+};
+
+struct AuxiliaryVectorMergeStats {
+    std::size_t baseVectorCount{0};
+    std::size_t multiVectorRawHitCount{0};
+    std::size_t multiVectorAddedNewCount{0};
+    std::size_t multiVectorReplacedBaseCount{0};
+    std::size_t multiVectorMergedCount{0};
+    std::size_t graphVectorRawHitCount{0};
+    std::size_t graphVectorAddedNewCount{0};
+    std::size_t graphVectorReplacedBaseCount{0};
+    std::size_t graphVectorBlockedUncorroboratedCount{0};
+    std::size_t graphVectorBlockedMissingTextAnchorCount{0};
+    std::size_t graphVectorBlockedMissingBaselineTextAnchorCount{0};
+};
+
+struct AuxiliaryVectorMergeResult {
+    std::vector<ComponentResult> components;
+    AuxiliaryVectorMergeStats stats;
+};
+
+/// Merge already-scored sub-phrase and graph-term vector candidates into component results.
+/// Embedding, vector queries, timing, tracing, exception handling, and I/O remain caller-owned.
+[[nodiscard]] AuxiliaryVectorMergeResult
+mergeAuxiliaryVectorCandidates(std::vector<ComponentResult> components,
+                               std::vector<AuxiliaryVectorCandidateBatch> subPhraseCandidates,
+                               std::vector<AuxiliaryVectorCandidateBatch> graphTermCandidates,
+                               const SearchEngineConfig& config);
+
 struct CandidateRescueMergeResult {
     std::vector<ComponentResult> results;
     std::vector<std::string> addedDocumentHashes;
