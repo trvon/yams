@@ -264,6 +264,13 @@ public:
         return InMemoryMetadata::queryDocuments(options);
     }
 
+    Result<std::vector<metadata::GrepCandidateProjection>>
+    queryDocumentsForGrepCandidates(const metadata::DocumentQueryOptions& options) override {
+        queryHadEmbeddingFilter_ = options.hasEmbedding.has_value();
+        queriedEmbeddingValue_ = options.hasEmbedding.value_or(false);
+        return metadata::IMetadataRepository::queryDocumentsForGrepCandidates(options);
+    }
+
     bool queryHadEmbeddingFilter() const { return queryHadEmbeddingFilter_; }
     bool queriedEmbeddingValue() const { return queriedEmbeddingValue_; }
 
