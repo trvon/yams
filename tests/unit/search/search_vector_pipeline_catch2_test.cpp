@@ -234,7 +234,7 @@ TEST_CASE("Vector pipeline merges auxiliary candidates with stable policy counte
     };
     std::vector<AuxiliaryVectorCandidateBatch> phrases{
         {.query = "first",
-         .candidates = {{.documentHash = "phrase-new", .score = 1.0F},
+         .candidates = {{.documentHash = "phrase-new", .score = 1.2F},
                         {.documentHash = "base-b", .score = 1.4F}}},
         {.query = "second",
          .candidates = {{.documentHash = "base-b", .score = 1.6F},
@@ -280,7 +280,7 @@ TEST_CASE("Vector pipeline merges auxiliary candidates with stable policy counte
     CHECK(baseB.score == Catch::Approx(0.8F));
     CHECK(baseB.debugInfo.at("multi_vector_phrase") == "second");
     CHECK(vectorsBegin[2].documentHash == "phrase-new");
-    CHECK(vectorsBegin[2].score == Catch::Approx(0.5F));
+    CHECK(vectorsBegin[2].score == Catch::Approx(0.6F));
     CHECK(vectorsBegin[2].rank == 2U);
     CHECK(vectorsBegin[3].documentHash == "anchor");
     CHECK(vectorsBegin[3].source == ComponentResult::Source::GraphVector);
