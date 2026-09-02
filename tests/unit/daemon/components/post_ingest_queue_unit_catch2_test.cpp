@@ -3,10 +3,14 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <string>
 #include <thread>
 
+#include <nlohmann/json.hpp>
+
+#include <yams/daemon/components/post_ingest_nl_graph_builder.h>
 #include <yams/daemon/components/PostIngestQueue.h>
 
 using namespace yams::daemon;
@@ -191,4 +195,190 @@ TEST_CASE("LruCache works with integer keys", "[daemon][post-ingest][cache][catc
     REQUIRE(result.has_value());
     CHECK(result.value().size() == 3);
     CHECK(result.value()[0] == "tag1");
+}
+
+namespace {
+yams::search::QueryConcept makeConcept(const std::string& text, const std::string& type,
+                                       float confidence, const std::string& source) {
+    const auto start = source.find(text);
+    REQUIRE(start != std::string::npos);
+    return {text, type, confidence, static_cast<std::uint32_t>(start),
+            static_cast<std::uint32_t>(start + text.size())};
+}
+
+const yams::metadata::KGNode& findNode(const DeferredKGBatch& batch, const std::string& key) {
+    const auto it = std::find_if(batch.nodes.begin(), batch.nodes.end(),
+                                 [&](const auto& node) { return node.nodeKey == key; });
+    REQUIRE(it != batch.nodes.end());
+    return *it;
+}
+
+const DeferredEdge& findEdge(const DeferredKGBatch& batch, const std::string& source,
+                             const std::string& target, const std::string& relation) {
+    const auto it =
+        std::find_if(batch.deferredEdges.begin(), batch.deferredEdges.end(), [&](const auto& edge) {
+            return edge.srcNodeKey == source && edge.dstNodeKey == target &&
+                   edge.relation == relation;
+        });
+    REQUIRE(it != batch.deferredEdges.end());
+    return *it;
+}
+
+std::vector<std::string> graphFingerprint(const DeferredKGBatch& batch) {
+    std::vector<std::string> fingerprint;
+    for (const auto& node : batch.nodes) {
+        fingerprint.push_back("node|" + node.nodeKey + "|" + node.label.value_or("") + "|" +
+                              node.type.value_or("") + "|" + node.properties.value_or(""));
+    }
+    for (const auto& edge : batch.deferredEdges) {
+        fingerprint.push_back("edge|" + edge.srcNodeKey + "|" + edge.dstNodeKey + "|" +
+                              edge.relation + "|" + std::to_string(edge.weight) + "|" +
+                              edge.properties.value_or(""));
+    }
+    for (const auto& alias : batch.aliases) {
+        fingerprint.push_back("alias|" + alias.alias + "|" + alias.source.value_or("") + "|" +
+                              std::to_string(alias.confidence));
+    }
+    for (const auto& entity : batch.deferredDocEntities) {
+        fingerprint.push_back("doc-entity|" + std::to_string(entity.documentId) + "|" +
+                              entity.entityText + "|" + entity.nodeKey + "|" +
+                              std::to_string(entity.startOffset) + "|" +
+                              std::to_string(entity.endOffset));
+    }
+    return fingerprint;
+}
+} // namespace
+
+TEST_CASE("Post-ingest NL graph builder preserves graph schema and metric deltas",
+          "[daemon][post-ingest][graph-builder][catch2]") {
+    const std::string text =
+        "TP53 response in lung cancer\nTP53 regulates apoptosis in epithelial cells. "
+        "Aspirin treatment reduced lung cancer progression.";
+    PostIngestNlGraphContext context{
+        .hash = "abc123",
+        .documentId = 42,
+        .textSnippet = text,
+        .fallbackTitle = "TP53 response in lung cancer",
+        .filePath = "papers/study.txt",
+        .language = std::string("e") + static_cast<char>(0xFF),
+        .titleConfidence = 0.9f,
+        .lastSeen = 123456,
+    };
+    std::vector<yams::search::QueryConcept> concepts{
+        makeConcept("lung cancer", "disease", 0.82f, text),
+        makeConcept("Aspirin", "drug", 0.88f, text),
+        makeConcept("TP53", "gene", 0.95f, text),
+    };
+
+    auto built = buildPostIngestNlGraph(context, concepts);
+    REQUIRE(built.batch);
+    const auto& batch = *built.batch;
+
+    CHECK(batch.sourceFile == context.filePath);
+    CHECK(batch.documentIdToDelete == 42);
+    const auto& docNode = findNode(batch, "doc:abc123");
+    CHECK(docNode.label == "papers/study.txt");
+    const auto docProperties = nlohmann::json::parse(*docNode.properties);
+    CHECK(docProperties["hash"] == "abc123");
+    CHECK(docProperties["path"] == "papers/study.txt");
+    CHECK(docProperties["language"] == "e?");
+    findNode(batch, "path:file:papers/study.txt");
+    findNode(batch, "segment:title:abc123");
+    findNode(batch, "segment:summary:abc123");
+    findNode(batch, "segment:body:abc123:1");
+    const auto& containsTitle =
+        findEdge(batch, "doc:abc123", "segment:title:abc123", "contains_segment");
+    CHECK(containsTitle.weight == 0.9f);
+    const auto containsProperties = nlohmann::json::parse(*containsTitle.properties);
+    CHECK(containsProperties["source"] == "gliner");
+    CHECK(containsProperties["region"] == "title");
+    CHECK(containsProperties["confidence"] == 0.9f);
+
+    const auto& gene = findNode(batch, "nl_entity:gene:tp53");
+    const auto geneProps = nlohmann::json::parse(*gene.properties);
+    CHECK(geneProps["entity_text"] == "TP53");
+    CHECK(geneProps["entity_type"] == "gene");
+    CHECK(geneProps["last_seen"] == 123456);
+
+    CHECK(std::any_of(batch.aliases.begin(), batch.aliases.end(), [](const auto& alias) {
+        return alias.alias == "tp53" && alias.source == "gliner.surface|nl_entity:gene:tp53" &&
+               alias.confidence == 0.95f;
+    }));
+    CHECK(std::any_of(
+        batch.deferredDocEntities.begin(), batch.deferredDocEntities.end(), [](const auto& entity) {
+            return entity.documentId == 42 && entity.entityText == "TP53" &&
+                   entity.nodeKey == "nl_entity:gene:tp53" && entity.extractor == "gliner_title_nl";
+        }));
+    CHECK(std::any_of(batch.deferredEdges.begin(), batch.deferredEdges.end(), [](const auto& edge) {
+        return edge.srcNodeKey == "nl_entity:gene:tp53" && edge.dstNodeKey == "doc:abc123" &&
+               edge.relation == "title_mentions" && edge.weight == 1.0f;
+    }));
+    CHECK(std::any_of(batch.deferredEdges.begin(), batch.deferredEdges.end(), [](const auto& edge) {
+        return edge.srcNodeKey == "nl_entity:drug:aspirin" &&
+               edge.relation == "mentioned_in_segment" &&
+               nlohmann::json::parse(*edge.properties)["region"] == "body_claim";
+    }));
+    const auto& primary = findEdge(batch, "nl_entity:gene:tp53", "doc:abc123", "primary_topic_of");
+    CHECK(primary.weight == 1.0f);
+    const auto primaryProperties = nlohmann::json::parse(*primary.properties);
+    CHECK(primaryProperties["title_overlap"] == true);
+    CHECK(primaryProperties["entity_type"] == "gene");
+    const auto& coMention = findEdge(batch, "nl_entity:gene:tp53", "nl_entity:disease:lung cancer",
+                                     "co_occurs_biomedical");
+    CHECK(coMention.weight > 0.69f);
+    CHECK(coMention.weight < 0.70f);
+    const auto coMentionProperties = nlohmann::json::parse(*coMention.properties);
+    CHECK(coMentionProperties["lhs_type"] == "gene");
+    CHECK(coMentionProperties["rhs_type"] == "disease");
+    CHECK(coMentionProperties["scope"] == "title");
+    CHECK(coMentionProperties["provenance"]["source"] == "gliner");
+
+    CHECK(built.metrics.segmentNodesCreated == 3);
+    CHECK(built.metrics.bodySegmentNodesCreated == 1);
+    CHECK(built.metrics.segmentEdgesCreated == 6);
+    CHECK(built.metrics.entitySegmentEdgesCreated == 3);
+    CHECK(built.metrics.bodyEntitySegmentEdgesCreated == 1);
+    CHECK(built.metrics.deferredDocEntitiesQueued == 3);
+    CHECK(built.metrics.entities == 3);
+    CHECK(built.metrics.highValueEntities == 3);
+    CHECK(built.metrics.primaryTopicEdges == 3);
+    CHECK(built.metrics.coMentionEdges == 3);
+}
+
+TEST_CASE("Post-ingest NL graph builder bounds edges and orders equal-confidence concepts",
+          "[daemon][post-ingest][graph-builder][catch2]") {
+    const std::string text =
+        "Topic overview\nGene0 Gene1 Gene2 Gene3 Gene4 Gene5 Gene6 Gene7 Gene8 Gene9 are linked "
+        "in this sufficiently long body claim.";
+    PostIngestNlGraphContext context{
+        .hash = "stable",
+        .documentId = 7,
+        .textSnippet = text,
+        .fallbackTitle = "Topic overview",
+        .filePath = "/tmp/stable.txt",
+        .language = "en",
+        .titleConfidence = std::nullopt,
+        .lastSeen = 99,
+    };
+    std::vector<yams::search::QueryConcept> concepts;
+    for (int i = 9; i >= 0; --i) {
+        concepts.push_back(makeConcept("Gene" + std::to_string(i), "gene", 0.9f, text));
+    }
+    auto reversed = concepts;
+    std::reverse(reversed.begin(), reversed.end());
+
+    auto first = buildPostIngestNlGraph(context, concepts);
+    auto second = buildPostIngestNlGraph(context, reversed);
+
+    CHECK(first.metrics.primaryTopicEdges == 3);
+    CHECK(first.metrics.coMentionEdges == 16);
+    REQUIRE(first.batch);
+    REQUIRE(second.batch);
+    CHECK(graphFingerprint(*first.batch) == graphFingerprint(*second.batch));
+
+    const auto firstEntity =
+        std::find_if(first.batch->nodes.begin(), first.batch->nodes.end(),
+                     [](const auto& node) { return node.nodeKey.starts_with("nl_entity:"); });
+    REQUIRE(firstEntity != first.batch->nodes.end());
+    CHECK(firstEntity->nodeKey == "nl_entity:gene:gene0");
 }

@@ -23,6 +23,7 @@
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/GraphComponent.h>
 #include <yams/daemon/components/InternalEventBus.h>
+#include <yams/daemon/components/post_ingest_nl_graph_builder.h>
 #include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -68,25 +69,6 @@ PostIngestBatchPolicy resolvePostIngestBatchPolicy() {
 }
 
 
-std::string normalizeGraphPath(const std::string& path) {
-    if (path.empty()) {
-        return {};
-    }
-    try {
-        auto derived = yams::metadata::computePathDerivedValues(path);
-        if (!derived.normalizedPath.empty()) {
-            return derived.normalizedPath;
-        }
-    } catch (const std::exception&) {
-        return path;
-    }
-    return path;
-}
-
-std::string makePathFileNodeKey(const std::string& path) {
-    return "path:file:" + normalizeGraphPath(path);
-}
-
 std::string normalizeEntityTextForKey(std::string_view text) {
     return yams::search::normalizeEntityTextForKey(text);
 }
@@ -97,104 +79,6 @@ std::string canonicalizeNlEntityType(std::string_view rawType, std::string_view 
 
 bool isLowValueNlEntity(std::string_view normalizedText, std::string_view normalizedType) {
     return yams::search::isLowValueEntityText(normalizedText, normalizedType);
-}
-
-bool isHighValueGraphType(std::string_view normalizedType) {
-    return normalizedType == "protein" || normalizedType == "gene" || normalizedType == "cell" ||
-           normalizedType == "disease" || normalizedType == "chemical" ||
-           normalizedType == "drug" || normalizedType == "pathway" ||
-           normalizedType == "biological_process" || normalizedType == "biomarker" ||
-           normalizedType == "anatomy" || normalizedType == "organism";
-}
-
-bool entityTextOverlapsTitle(std::string_view entityText, std::string_view titleText) {
-    const std::string normEntity = normalizeEntityTextForKey(entityText);
-    const std::string normTitle = normalizeEntityTextForKey(titleText);
-    if (normEntity.empty() || normTitle.empty()) {
-        return false;
-    }
-    return normTitle.find(normEntity) != std::string::npos ||
-           (normEntity.size() >= 4 && normEntity.find(normTitle) != std::string::npos);
-}
-
-struct TextSegmentWindow {
-    std::string text;
-    std::size_t startOffset = 0;
-    std::size_t endOffset = 0;
-};
-
-std::vector<TextSegmentWindow> buildBodyClaimSegments(std::string_view textSnippet,
-                                                      std::string_view titleText,
-                                                      std::size_t maxSegments = 3) {
-    std::vector<TextSegmentWindow> segments;
-    if (textSnippet.empty() || maxSegments == 0) {
-        return segments;
-    }
-
-    std::size_t start = 0;
-    if (!titleText.empty()) {
-        const std::string normTitle = normalizeEntityTextForKey(titleText);
-        const auto newline = textSnippet.find('\n');
-        if (newline != std::string_view::npos) {
-            const std::string firstLine = normalizeEntityTextForKey(textSnippet.substr(0, newline));
-            if (!firstLine.empty() && firstLine == normTitle) {
-                start = newline + 1;
-            }
-        }
-    }
-
-    auto flushSegment = [&](std::size_t segStart, std::size_t segEnd) {
-        if (segEnd <= segStart) {
-            return;
-        }
-        auto raw = std::string(textSnippet.substr(segStart, segEnd - segStart));
-        auto cleaned = yams::search::trimAndCollapseWhitespace(raw);
-        if (cleaned.size() < 24) {
-            return;
-        }
-        segments.push_back({std::move(cleaned), segStart, segEnd});
-    };
-
-    std::size_t sentenceStart = start;
-    std::size_t sentenceCount = 0;
-    for (std::size_t i = start; i < textSnippet.size() && segments.size() < maxSegments; ++i) {
-        const char c = textSnippet[i];
-        const bool boundary = (c == '.' || c == '!' || c == '?' || c == '\n');
-        if (!boundary) {
-            continue;
-        }
-        ++sentenceCount;
-        if (sentenceCount >= 2 || c == '\n') {
-            flushSegment(sentenceStart, i + 1);
-            sentenceStart = i + 1;
-            sentenceCount = 0;
-        }
-    }
-    if (segments.size() < maxSegments) {
-        flushSegment(sentenceStart, textSnippet.size());
-    }
-    return segments;
-}
-
-std::string coOccurrenceRelation(std::string_view lhsType, std::string_view rhsType) {
-    const bool lhsBio = isHighValueGraphType(lhsType);
-    const bool rhsBio = isHighValueGraphType(rhsType);
-    if (lhsBio && rhsBio) {
-        return "co_occurs_biomedical";
-    }
-    if ((lhsType == "protein" && rhsType == "cell") ||
-        (lhsType == "cell" && rhsType == "protein")) {
-        return "protein_cell_association";
-    }
-    if ((lhsType == "protein" && rhsType == "disease") ||
-        (lhsType == "disease" && rhsType == "protein")) {
-        return "protein_disease_association";
-    }
-    if ((lhsType == "drug" && rhsType == "disease") ||
-        (lhsType == "disease" && rhsType == "drug")) {
-        return "drug_disease_association";
-    }
-    return "co_mentioned_with";
 }
 
 bool isUsefulNlEntity(const search::QueryConcept& qc) {
@@ -223,53 +107,6 @@ bool isUsefulNlEntity(const search::QueryConcept& qc) {
         return false;
     }
     return true;
-}
-
-struct NlAliasVariant {
-    std::string text;
-    float confidence = 1.0f;
-    std::string sourceTag;
-};
-
-std::vector<NlAliasVariant> buildNlAliasVariants(const std::string& entityText,
-                                                 const std::string& entityType,
-                                                 float baseConfidence) {
-    std::vector<NlAliasVariant> variants;
-    std::unordered_set<std::string> seen;
-    const auto kind = yams::search::surfaceVariantKindForEntityType(entityType);
-
-    auto addVariant = [&](const std::string& value, float confScale, std::string sourceTag) {
-        std::string normalized = normalizeEntityTextForKey(value);
-        if (normalized.size() < 2) {
-            return;
-        }
-        if (!seen.insert(normalized).second) {
-            return;
-        }
-        float conf = std::clamp(baseConfidence * confScale, 0.05f, 1.0f);
-        variants.push_back(NlAliasVariant{std::move(normalized), conf, std::move(sourceTag)});
-    };
-
-    auto addGeneratedVariants = [&](const std::string& value, float primaryScale,
-                                    float secondaryScale, std::string primarySource,
-                                    std::string secondarySource) {
-        auto generated = yams::search::generateSurfaceVariants(value, kind, 8);
-        for (size_t i = 0; i < generated.size() && variants.size() < 8; ++i) {
-            addVariant(generated[i], i == 0 ? primaryScale : secondaryScale,
-                       i == 0 ? primarySource : secondarySource);
-        }
-    };
-
-    // Primary alias: full normalized entity text.
-    addGeneratedVariants(entityText, 1.0f, 0.72f, "surface", "variant");
-
-    // Type-qualified alias helps disambiguation for collisions.
-    if (!entityType.empty()) {
-        addGeneratedVariants(entityType + " " + entityText, 0.95f, 0.68f, "type_qualified",
-                             "type_qualified");
-    }
-
-    return variants;
 }
 
 // Check if GLiNER title extraction is disabled via environment variable
@@ -2660,18 +2497,19 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
             }
         }
 
-        std::vector<const search::QueryConcept*> nlEntities;
+        std::vector<search::QueryConcept> nlEntities;
         nlEntities.reserve(nlEntityByKey.size());
         for (const auto& [_, entityPtr] : nlEntityByKey) {
-            nlEntities.push_back(entityPtr);
+            nlEntities.push_back(*entityPtr);
         }
         std::sort(nlEntities.begin(), nlEntities.end(),
-                  [](const search::QueryConcept* a, const search::QueryConcept* b) {
-                      return a->confidence > b->confidence;
+                  [](const search::QueryConcept& a, const search::QueryConcept& b) {
+                      return a.confidence > b.confidence;
                   });
+        const auto nlEntityCount = nlEntities.size();
         if (!nlEntities.empty()) {
             titleNlDocsWithEntities_.fetch_add(1, std::memory_order_relaxed);
-            titleNlEntitiesExtracted_.fetch_add(nlEntities.size(), std::memory_order_relaxed);
+            titleNlEntitiesExtracted_.fetch_add(nlEntityCount, std::memory_order_relaxed);
         }
 
         // Update title if we found a good candidate
@@ -2703,481 +2541,56 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
 
         // Populate KG with NL entities if we have any and the write coordinator is available.
         if (!nlEntities.empty() && writeCoordinator_ && kg_) {
-            auto batch = std::make_unique<DeferredKGBatch>();
-            batch->nodes.reserve(nlEntities.size() + 6);
-            batch->deferredEdges.reserve(nlEntities.size() * 4 + 8);
-            batch->aliases.reserve(nlEntities.size() * 3);
-            const std::string normalizedFilePath = normalizeGraphPath(filePath);
-            batch->sourceFile = normalizedFilePath.empty() ? filePath : normalizedFilePath;
-
-            auto now = std::chrono::system_clock::now().time_since_epoch().count();
-
-            // Get document database ID for doc entities
-            std::optional<std::int64_t> documentDbId;
-            if (!hash.empty() && docId >= 0) {
-                documentDbId = docId;
-                batch->documentIdToDelete = documentDbId; // Delete old doc entities
-            }
-
-            // Build document context node
-            std::string docNodeKey;
-            if (!hash.empty()) {
-                docNodeKey = "doc:" + hash;
-
-                metadata::KGNode docNode;
-                docNode.nodeKey = docNodeKey;
-                docNode.label = common::sanitizeUtf8(filePath);
-                docNode.type = "document";
-                nlohmann::json docProps;
-                docProps["hash"] = hash;
-                docProps["path"] = common::sanitizeUtf8(batch->sourceFile);
-                docProps["language"] = common::sanitizeUtf8(language);
-                docNode.properties = docProps.dump();
-                batch->nodes.push_back(std::move(docNode));
-            }
-
-            // Build file context node
-            std::string fileNodeKey;
-            if (!filePath.empty()) {
-                fileNodeKey = makePathFileNodeKey(batch->sourceFile);
-
-                metadata::KGNode fileNode;
-                fileNode.nodeKey = fileNodeKey;
-                fileNode.label = common::sanitizeUtf8(batch->sourceFile);
-                fileNode.type = "file";
-                nlohmann::json fileProps;
-                fileProps["path"] = common::sanitizeUtf8(batch->sourceFile);
-                fileProps["language"] = common::sanitizeUtf8(language);
-                if (!batch->sourceFile.empty()) {
-                    fileProps["basename"] = common::sanitizeUtf8(
-                        std::filesystem::path(batch->sourceFile).filename().string());
-                }
-                if (!hash.empty()) {
-                    fileProps["current_hash"] = hash;
-                }
-                fileNode.properties = fileProps.dump();
-                batch->nodes.push_back(std::move(fileNode));
-            }
-
-            // Build entity nodes and edges
-            std::string targetNodeKey = !docNodeKey.empty() ? docNodeKey : fileNodeKey;
-            const std::string effectiveTitle = !fallbackTitle.empty() ? fallbackTitle : filePath;
-            std::string titleSegmentNodeKey;
-            std::string summarySegmentNodeKey;
-            struct SegmentRef {
-                std::string nodeKey;
-                std::string region;
-                std::size_t startOffset = 0;
-                std::size_t endOffset = 0;
+            const auto now = std::chrono::system_clock::now().time_since_epoch().count();
+            PostIngestNlGraphContext graphContext{
+                .hash = hash,
+                .documentId = docId,
+                .textSnippet = textSnippet,
+                .fallbackTitle = fallbackTitle,
+                .filePath = filePath,
+                .language = language,
+                .titleConfidence =
+                    bestTitle ? std::optional<float>{bestTitle->confidence} : std::nullopt,
+                .lastSeen = now,
             };
-            std::vector<SegmentRef> bodySegments;
+            auto graph = buildPostIngestNlGraph(graphContext, std::move(nlEntities));
+            const auto& deltas = graph.metrics;
+            segmentNodesCreated_.fetch_add(deltas.segmentNodesCreated, std::memory_order_relaxed);
+            segmentEdgesCreated_.fetch_add(deltas.segmentEdgesCreated, std::memory_order_relaxed);
+            entitySegmentEdgesCreated_.fetch_add(deltas.entitySegmentEdgesCreated,
+                                                 std::memory_order_relaxed);
+            bodySegmentNodesCreated_.fetch_add(deltas.bodySegmentNodesCreated,
+                                               std::memory_order_relaxed);
+            bodyEntitySegmentEdgesCreated_.fetch_add(deltas.bodyEntitySegmentEdgesCreated,
+                                                     std::memory_order_relaxed);
+            deferredDocEntitiesQueued_.fetch_add(deltas.deferredDocEntitiesQueued,
+                                                 std::memory_order_relaxed);
 
-            const auto addSegmentNode = [&](std::string segmentNodeKey, std::string label,
-                                            std::string segmentType, std::string region,
-                                            float confidence, std::size_t startOffset,
-                                            std::size_t endOffset) {
-                if (segmentNodeKey.empty() || label.empty()) {
-                    return;
-                }
-
-                metadata::KGNode segNode;
-                segNode.nodeKey = segmentNodeKey;
-                segNode.label = common::sanitizeUtf8(label);
-                segNode.type = segmentType;
-                nlohmann::json segProps;
-                segProps["segment_type"] = segmentType;
-                segProps["region"] = region;
-                segProps["confidence"] = confidence;
-                segProps["start_offset"] = startOffset;
-                segProps["end_offset"] = endOffset;
-                segProps["path"] = common::sanitizeUtf8(batch->sourceFile);
-                if (!hash.empty()) {
-                    segProps["snapshot_id"] = hash;
-                }
-                segNode.properties = segProps.dump();
-                batch->nodes.push_back(std::move(segNode));
-                segmentNodesCreated_.fetch_add(1, std::memory_order_relaxed);
-                if (region == "body_claim") {
-                    bodySegmentNodesCreated_.fetch_add(1, std::memory_order_relaxed);
-                }
-
-                if (!targetNodeKey.empty()) {
-                    DeferredEdge containsEdge;
-                    containsEdge.srcNodeKey = targetNodeKey;
-                    containsEdge.dstNodeKey = segmentNodeKey;
-                    containsEdge.relation = "contains_segment";
-                    containsEdge.weight = confidence;
-                    containsEdge.properties = nlohmann::json{
-                        {"source", "gliner"},
-                        {"region", region},
-                        {"confidence",
-                         confidence}}.dump();
-                    batch->deferredEdges.push_back(std::move(containsEdge));
-                    segmentEdgesCreated_.fetch_add(1, std::memory_order_relaxed);
-
-                    DeferredEdge segmentOfEdge;
-                    segmentOfEdge.srcNodeKey = std::move(segmentNodeKey);
-                    segmentOfEdge.dstNodeKey = targetNodeKey;
-                    segmentOfEdge.relation = "segment_of";
-                    segmentOfEdge.weight = confidence;
-                    segmentOfEdge.properties = nlohmann::json{
-                        {"source", "gliner"},
-                        {"region", region},
-                        {"confidence", confidence}}.dump();
-                    batch->deferredEdges.push_back(std::move(segmentOfEdge));
-                    segmentEdgesCreated_.fetch_add(1, std::memory_order_relaxed);
-                }
-            };
-
-            if (!hash.empty() && !effectiveTitle.empty()) {
-                titleSegmentNodeKey = "segment:title:" + hash;
-                const float titleConfidence =
-                    bestTitle ? std::clamp(bestTitle->confidence, 0.5f, 1.0f) : 0.75f;
-                addSegmentNode(titleSegmentNodeKey, effectiveTitle, "text_segment", "title",
-                               titleConfidence, 0, effectiveTitle.size());
-            }
-            if (!hash.empty() && !textSnippet.empty()) {
-                summarySegmentNodeKey = "segment:summary:" + hash;
-                addSegmentNode(summarySegmentNodeKey, textSnippet, "text_segment", "summary", 0.65f,
-                               0, textSnippet.size());
-
-                const auto claimSegments = buildBodyClaimSegments(textSnippet, effectiveTitle, 3);
-                for (std::size_t segIdx = 0; segIdx < claimSegments.size(); ++segIdx) {
-                    const std::string segmentNodeKey =
-                        "segment:body:" + hash + ":" + std::to_string(segIdx + 1);
-                    addSegmentNode(segmentNodeKey, claimSegments[segIdx].text, "text_segment",
-                                   "body_claim", 0.60f, claimSegments[segIdx].startOffset,
-                                   claimSegments[segIdx].endOffset);
-                    bodySegments.push_back({segmentNodeKey, "body_claim",
-                                            claimSegments[segIdx].startOffset,
-                                            claimSegments[segIdx].endOffset});
-                }
+            // Diagnostic: publish graph-construction statistics from the pure builder.
+            const auto nth = gs_processed_.fetch_add(1, std::memory_order_relaxed) + 1;
+            gs_totalEntities_ += deltas.entities;
+            gs_highValueEntities_ += deltas.highValueEntities;
+            gs_totalEdges_ += deltas.coMentionEdges;
+            gs_totalPrimaryTopicEdges_ += deltas.primaryTopicEdges;
+            if ((nth % 100) == 0 || nth == 1) {
+                spdlog::info(
+                    "[PIQ-graph] doc={}/{} entities={} high_value={} edges={} primary_topic={} "
+                    "(cumulative: docs={} entities={} hv={} edges={} primary={})",
+                    hash.substr(0, 12), nth, deltas.entities, deltas.highValueEntities,
+                    deltas.coMentionEdges, deltas.primaryTopicEdges, gs_processed_.load(),
+                    gs_totalEntities_.load(), gs_highValueEntities_.load(), gs_totalEdges_.load(),
+                    gs_totalPrimaryTopicEdges_.load());
             }
 
-            struct EntityRef {
-                std::string nodeKey;
-                std::string type;
-                std::string text;
-                float confidence{0.0f};
-                bool titleOverlap{false};
-                bool highValue{false};
-                int segmentIndex{-1};
-            };
-            std::vector<EntityRef> entityRefs;
-            entityRefs.reserve(nlEntities.size());
-
-            for (const auto* qc : nlEntities) {
-                std::string text = common::sanitizeUtf8(qc->text);
-                std::string type =
-                    common::sanitizeUtf8(canonicalizeNlEntityType(qc->type, qc->text));
-
-                // Normalize text for canonical matching
-                std::string normalizedText = normalizeEntityTextForKey(text);
-
-                std::string nodeKey = "nl_entity:" + type + ":" + normalizedText;
-
-                metadata::KGNode node;
-                node.nodeKey = nodeKey;
-                node.label = text;
-                node.type = type;
-
-                nlohmann::json props;
-                props["entity_text"] = text;
-                props["entity_type"] = type;
-                props["confidence"] = qc->confidence;
-                props["first_seen_file"] = common::sanitizeUtf8(filePath);
-                props["last_seen"] = now;
-                if (!hash.empty()) {
-                    props["first_seen_hash"] = hash;
-                }
-                node.properties = props.dump();
-                batch->nodes.push_back(std::move(node));
-                const bool titleOverlap = entityTextOverlapsTitle(text, effectiveTitle);
-                const bool highValue = isHighValueGraphType(type);
-                int segmentIndex = -1;
-                if (!titleOverlap) {
-                    for (std::size_t segIdx = 0; segIdx < bodySegments.size(); ++segIdx) {
-                        if (qc->startOffset < bodySegments[segIdx].endOffset &&
-                            qc->endOffset > bodySegments[segIdx].startOffset) {
-                            segmentIndex = static_cast<int>(segIdx);
-                            break;
-                        }
-                    }
-                }
-                entityRefs.push_back(EntityRef{nodeKey, type, text, qc->confidence, titleOverlap,
-                                               highValue, segmentIndex});
-
-                // Add aliases for query-time KG resolution. WriteCoordinator resolves nodeId from
-                // source when encoded as "source|nodeKey".
-                for (const auto& aliasVariant : buildNlAliasVariants(text, type, qc->confidence)) {
-                    metadata::KGAlias alias;
-                    alias.alias = aliasVariant.text;
-                    alias.source = std::string("gliner.") + aliasVariant.sourceTag + "|" + nodeKey;
-                    alias.confidence = aliasVariant.confidence;
-                    batch->aliases.push_back(std::move(alias));
-                }
-
-                // Add edge from entity to document/file
-                if (!targetNodeKey.empty()) {
-                    DeferredEdge edge;
-                    edge.srcNodeKey = nodeKey;
-                    edge.dstNodeKey = targetNodeKey;
-                    edge.relation = "mentioned_in";
-                    edge.weight = qc->confidence;
-
-                    nlohmann::json edgeProps;
-                    edgeProps["source"] = "gliner";
-                    edgeProps["confidence"] = qc->confidence;
-                    edgeProps["provenance"] =
-                        nlohmann::json{{"source", "gliner"}, {"confidence", qc->confidence}};
-                    if (!hash.empty()) {
-                        edgeProps["snapshot_id"] = hash;
-                    }
-                    edge.properties = edgeProps.dump();
-                    batch->deferredEdges.push_back(std::move(edge));
-
-                    if (titleOverlap) {
-                        DeferredEdge titleEdge;
-                        titleEdge.srcNodeKey = nodeKey;
-                        titleEdge.dstNodeKey = targetNodeKey;
-                        titleEdge.relation = "title_mentions";
-                        titleEdge.weight = std::min(1.0f, qc->confidence * 1.15f);
-
-                        nlohmann::json titleProps;
-                        titleProps["source"] = "gliner";
-                        titleProps["region"] = "title";
-                        titleProps["confidence"] = titleEdge.weight;
-                        if (!hash.empty()) {
-                            titleProps["snapshot_id"] = hash;
-                        }
-                        titleEdge.properties = titleProps.dump();
-                        batch->deferredEdges.push_back(std::move(titleEdge));
-                    }
-                }
-
-                if (titleOverlap && !titleSegmentNodeKey.empty()) {
-                    DeferredEdge segEdge;
-                    segEdge.srcNodeKey = nodeKey;
-                    segEdge.dstNodeKey = titleSegmentNodeKey;
-                    segEdge.relation = "mentioned_in_segment";
-                    segEdge.weight = std::min(1.0f, qc->confidence * 1.10f);
-                    segEdge.properties = nlohmann::json{
-                        {"source", "gliner"},
-                        {"region", "title"},
-                        {"confidence",
-                         segEdge.weight}}.dump();
-                    batch->deferredEdges.push_back(std::move(segEdge));
-                    entitySegmentEdgesCreated_.fetch_add(1, std::memory_order_relaxed);
-                } else if (segmentIndex >= 0 &&
-                           static_cast<std::size_t>(segmentIndex) < bodySegments.size()) {
-                    DeferredEdge segEdge;
-                    segEdge.srcNodeKey = nodeKey;
-                    segEdge.dstNodeKey = bodySegments[segmentIndex].nodeKey;
-                    segEdge.relation = "mentioned_in_segment";
-                    segEdge.weight = std::min(1.0f, qc->confidence * 1.05f);
-                    segEdge.properties = nlohmann::json{
-                        {"source", "gliner"},
-                        {"region", "body_claim"},
-                        {"confidence", segEdge.weight},
-                        {"segment_index",
-                         segmentIndex}}.dump();
-                    batch->deferredEdges.push_back(std::move(segEdge));
-                    entitySegmentEdgesCreated_.fetch_add(1, std::memory_order_relaxed);
-                    bodyEntitySegmentEdgesCreated_.fetch_add(1, std::memory_order_relaxed);
-                } else if (!summarySegmentNodeKey.empty()) {
-                    DeferredEdge segEdge;
-                    segEdge.srcNodeKey = nodeKey;
-                    segEdge.dstNodeKey = summarySegmentNodeKey;
-                    segEdge.relation = "mentioned_in_segment";
-                    segEdge.weight = qc->confidence;
-                    segEdge.properties = nlohmann::json{
-                        {"source", "gliner"},
-                        {"region", "summary"},
-                        {"confidence",
-                         qc->confidence}}.dump();
-                    batch->deferredEdges.push_back(std::move(segEdge));
-                    entitySegmentEdgesCreated_.fetch_add(1, std::memory_order_relaxed);
-                }
-
-                // Add doc entity reference
-                if (documentDbId.has_value()) {
-                    DeferredDocEntity docEnt;
-                    docEnt.documentId = documentDbId.value();
-                    docEnt.entityText = text;
-                    docEnt.nodeKey = nodeKey;
-                    docEnt.startOffset = qc->startOffset;
-                    docEnt.endOffset = qc->endOffset;
-                    docEnt.confidence = qc->confidence;
-                    docEnt.extractor = "gliner_title_nl";
-                    batch->deferredDocEntities.push_back(std::move(docEnt));
-                    deferredDocEntitiesQueued_.fetch_add(1, std::memory_order_relaxed);
-                }
-            }
-
-            std::stable_sort(entityRefs.begin(), entityRefs.end(),
-                             [](const EntityRef& a, const EntityRef& b) {
-                                 if (a.titleOverlap != b.titleOverlap) {
-                                     return a.titleOverlap > b.titleOverlap;
-                                 }
-                                 if (a.highValue != b.highValue) {
-                                     return a.highValue > b.highValue;
-                                 }
-                                 return a.confidence > b.confidence;
-                             });
-
-            // Add stronger document semantics for top title/high-value entities.
-            constexpr std::size_t kMaxPrimaryTopicEdges = 3;
-            std::size_t primaryTopicCount = 0;
-            for (const auto& ref : entityRefs) {
-                if (primaryTopicCount >= kMaxPrimaryTopicEdges) {
-                    break;
-                }
-                if (!ref.highValue) {
-                    continue;
-                }
-                if (!ref.titleOverlap && ref.confidence < 0.78f) {
-                    continue;
-                }
-                if (targetNodeKey.empty()) {
-                    break;
-                }
-
-                DeferredEdge primaryEdge;
-                primaryEdge.srcNodeKey = ref.nodeKey;
-                primaryEdge.dstNodeKey = targetNodeKey;
-                primaryEdge.relation = "primary_topic_of";
-                primaryEdge.weight =
-                    std::min(1.0f, ref.confidence * (ref.titleOverlap ? 1.20f : 1.05f));
-
-                nlohmann::json primaryProps;
-                primaryProps["source"] = "gliner";
-                primaryProps["confidence"] = primaryEdge.weight;
-                primaryProps["title_overlap"] = ref.titleOverlap;
-                primaryProps["entity_type"] = ref.type;
-                if (!hash.empty()) {
-                    primaryProps["snapshot_id"] = hash;
-                }
-                primaryEdge.properties = primaryProps.dump();
-                batch->deferredEdges.push_back(std::move(primaryEdge));
-                ++primaryTopicCount;
-            }
-
-            // Add bounded co-mention edges among strongest entities to enrich local graph
-            // structure without exploding edge count.
-            //
-            // Edge-creation policy:
-            // 1. Only create edges where at least one entity is a high-value biomedical type
-            //    (protein, gene, disease, drug, etc.). Skipping generic-NL-only pairs
-            //    (person/organization/location) dramatically reduces noise — the graph
-            //    reranker's composite score is dominated by entity entity-signal-weight,
-            //    and injecting low-relevance edges dilutes it.
-            // 2. Tighten edge weight scaling so that high-confidence biomedical co-occurrences
-            //    stand out against the noise floor. The confidence floor for a biomedical pair
-            //    is raised to 0.20 (from 0.10), and the per-edge weight floor for
-            //    non-biomedical pairs is 0.08. The base multiplier goes from 0.50→0.65 and
-            //    title-overlap boost from 0.75→0.85, so weights land in [0.08, 0.45] range
-            //    instead of the previous [0.05, 0.35].
-            // 3. Tighter edge budget: top-8 entities (was 12), max 16 edges (was 36). With
-            //    ~15 entities per SciFact doc this still covers the most important pairs while
-            //    cutting the total edge count by over 50%.
-            constexpr std::size_t kMaxCoMentionEntities = 8;
-            constexpr std::size_t kMaxCoMentionEdges = 16;
-            const std::size_t entityLimit = std::min(entityRefs.size(), kMaxCoMentionEntities);
-            std::size_t coMentionEdgeCount = 0;
-            for (std::size_t i = 0; i < entityLimit; ++i) {
-                for (std::size_t j = i + 1; j < entityLimit; ++j) {
-                    if (coMentionEdgeCount >= kMaxCoMentionEdges) {
-                        break;
-                    }
-
-                    // Skip edges where neither entity is a high-value biomedical type.
-                    // Generic NL types (person, organization, location) offer no useful
-                    // graph signal for scientific retrieval and only add noise.
-                    if (!entityRefs[i].highValue && !entityRefs[j].highValue) {
-                        continue;
-                    }
-
-                    DeferredEdge coEdge;
-                    coEdge.srcNodeKey = entityRefs[i].nodeKey;
-                    coEdge.dstNodeKey = entityRefs[j].nodeKey;
-                    coEdge.relation = coOccurrenceRelation(entityRefs[i].type, entityRefs[j].type);
-                    const bool bothHighValue = entityRefs[i].highValue && entityRefs[j].highValue;
-                    const float confidenceFloor = bothHighValue ? 0.20f : 0.08f;
-                    coEdge.weight = std::max(
-                        confidenceFloor,
-                        std::min(entityRefs[i].confidence, entityRefs[j].confidence) *
-                            ((entityRefs[i].titleOverlap || entityRefs[j].titleOverlap) ? 0.85f
-                                                                                        : 0.65f));
-
-                    nlohmann::json edgeProps;
-                    edgeProps["source"] = "gliner";
-                    edgeProps["confidence"] = coEdge.weight;
-                    edgeProps["lhs_type"] = entityRefs[i].type;
-                    edgeProps["rhs_type"] = entityRefs[j].type;
-                    edgeProps["title_overlap_pair"] =
-                        entityRefs[i].titleOverlap || entityRefs[j].titleOverlap;
-                    edgeProps["scope"] =
-                        (entityRefs[i].titleOverlap && entityRefs[j].titleOverlap)
-                            ? "title"
-                            : ((entityRefs[i].segmentIndex >= 0 &&
-                                entityRefs[i].segmentIndex == entityRefs[j].segmentIndex)
-                                   ? "body_segment"
-                                   : ((entityRefs[i].titleOverlap || entityRefs[j].titleOverlap)
-                                          ? "mixed"
-                                          : "summary"));
-                    if (entityRefs[i].segmentIndex >= 0 &&
-                        entityRefs[i].segmentIndex == entityRefs[j].segmentIndex) {
-                        edgeProps["segment_index"] = entityRefs[i].segmentIndex;
-                    }
-                    edgeProps["provenance"] =
-                        nlohmann::json{{"source", "gliner"}, {"confidence", coEdge.weight}};
-                    if (!hash.empty()) {
-                        edgeProps["snapshot_id"] = hash;
-                    }
-                    coEdge.properties = edgeProps.dump();
-                    batch->deferredEdges.push_back(std::move(coEdge));
-                    ++coMentionEdgeCount;
-                }
-                if (coMentionEdgeCount >= kMaxCoMentionEdges) {
-                    break;
-                }
-            }
-
-            // Diagnostic: log graph-construction statistics every 100 documents
-            // so we can trace entity extraction → edge creation → KG population.
-            {
-                const auto nth = gs_processed_.fetch_add(1, std::memory_order_relaxed) + 1;
-                gs_totalEntities_ += nlEntities.size();
-                gs_highValueEntities_ += static_cast<size_t>(
-                    std::count_if(entityRefs.begin(), entityRefs.end(),
-                                  [](const EntityRef& r) { return r.highValue; }));
-                gs_totalEdges_ += coMentionEdgeCount;
-                gs_totalPrimaryTopicEdges_ += primaryTopicCount;
-                if ((nth % 100) == 0 || nth == 1) {
-                    spdlog::info(
-                        "[PIQ-graph] doc={}/{} entities={} high_value={} edges={} primary_topic={} "
-                        "(cumulative: docs={} entities={} hv={} edges={} primary={})",
-                        hash.substr(0, 12), nth, nlEntities.size(),
-                        static_cast<size_t>(
-                            std::count_if(entityRefs.begin(), entityRefs.end(),
-                                          [](const EntityRef& r) { return r.highValue; })),
-                        coMentionEdgeCount, primaryTopicCount, gs_processed_.load(),
-                        gs_totalEntities_.load(), gs_highValueEntities_.load(),
-                        gs_totalEdges_.load(), gs_totalPrimaryTopicEdges_.load());
-                }
-            }
-
-            const auto deferredEntityCount = batch->deferredDocEntities.size();
+            const auto deferredEntityCount = graph.batch->deferredDocEntities.size();
             try {
-                if (writeCoordinator_) {
-                    auto source = "PostIngestQueue::nlEntityKg/" + batch->sourceFile;
-                    auto wb =
-                        makeWriteBatchFromDeferredKGBatch(std::move(batch), std::move(source));
-                    enqueueWithBackpressure(*writeCoordinator_, std::move(wb), "NL entity KG batch",
-                                            stop_);
-                }
+                auto source = "PostIngestQueue::nlEntityKg/" + graph.batch->sourceFile;
+                auto writeBatch =
+                    makeWriteBatchFromDeferredKGBatch(std::move(graph.batch), std::move(source));
+                enqueueWithBackpressure(*writeCoordinator_, std::move(writeBatch),
+                                        "NL entity KG batch", stop_);
                 spdlog::debug("[PostIngestQueue] Queued {} NL entities for KG from {}",
-                              nlEntities.size(), hash.substr(0, 12));
+                              deltas.entities, hash.substr(0, 12));
             } catch (const std::exception& e) {
                 deferredDocEntityQueueFailures_.fetch_add(deferredEntityCount,
                                                           std::memory_order_relaxed);
@@ -3188,7 +2601,7 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
         auto duration = std::chrono::steady_clock::now() - startTime;
         double ms = std::chrono::duration<double, std::milli>(duration).count();
         spdlog::info("[PostIngestQueue] Title+NL extraction for {} in {:.2f}ms (title={}, nl={})",
-                     hash.substr(0, 12), ms, bestTitle ? "yes" : "no", nlEntities.size());
+                     hash.substr(0, 12), ms, bestTitle ? "yes" : "no", nlEntityCount);
 
         InternalEventBus::instance().incTitleConsumed();
     } catch (const std::exception& e) {
