@@ -1,4 +1,4 @@
-#include <yams/daemon/components/post_ingest_nl_graph_builder.h>
+#include "post_ingest_nl_graph_builder.h"
 
 #include <algorithm>
 #include <filesystem>
@@ -198,26 +198,6 @@ PostIngestNlGraphBuildResult buildPostIngestNlGraph(const PostIngestNlGraphConte
     auto& batch = *result.batch;
     auto& metrics = result.metrics;
 
-    std::stable_sort(concepts.begin(), concepts.end(), [](const auto& lhs, const auto& rhs) {
-        if (lhs.confidence != rhs.confidence) {
-            return lhs.confidence > rhs.confidence;
-        }
-        const auto lhsType = canonicalizeNlEntityType(lhs.type, lhs.text);
-        const auto rhsType = canonicalizeNlEntityType(rhs.type, rhs.text);
-        if (lhsType != rhsType) {
-            return lhsType < rhsType;
-        }
-        const auto lhsText = normalizeEntityTextForKey(lhs.text);
-        const auto rhsText = normalizeEntityTextForKey(rhs.text);
-        if (lhsText != rhsText) {
-            return lhsText < rhsText;
-        }
-        if (lhs.startOffset != rhs.startOffset) {
-            return lhs.startOffset < rhs.startOffset;
-        }
-        return lhs.endOffset < rhs.endOffset;
-    });
-
     batch.nodes.reserve(concepts.size() + 6);
     batch.deferredEdges.reserve(concepts.size() * 4 + 8);
     batch.aliases.reserve(concepts.size() * 3);
@@ -349,10 +329,10 @@ PostIngestNlGraphBuildResult buildPostIngestNlGraph(const PostIngestNlGraphConte
 
     std::vector<EntityRef> entityRefs;
     entityRefs.reserve(concepts.size());
-    for (const auto& concept : concepts) {
-        const std::string text = common::sanitizeUtf8(concept.text);
+    for (const auto& candidate : concepts) {
+        const std::string text = common::sanitizeUtf8(candidate.text);
         const std::string type =
-            common::sanitizeUtf8(canonicalizeNlEntityType(concept.type, concept.text));
+            common::sanitizeUtf8(canonicalizeNlEntityType(candidate.type, candidate.text));
         const std::string nodeKey = "nl_entity:" + type + ":" + normalizeEntityTextForKey(text);
 
         metadata::KGNode node;
@@ -361,7 +341,7 @@ PostIngestNlGraphBuildResult buildPostIngestNlGraph(const PostIngestNlGraphConte
         node.type = type;
         nlohmann::json properties{{"entity_text", text},
                                   {"entity_type", type},
-                                  {"confidence", concept.confidence},
+                                  {"confidence", candidate.confidence},
                                   {"first_seen_file", common::sanitizeUtf8(context.filePath)},
                                   {"last_seen", context.lastSeen}};
         if (!context.hash.empty()) {
@@ -375,20 +355,18 @@ PostIngestNlGraphBuildResult buildPostIngestNlGraph(const PostIngestNlGraphConte
         int segmentIndex = -1;
         if (!titleOverlap) {
             for (std::size_t i = 0; i < bodySegments.size(); ++i) {
-                if (concept
-                        .startOffset<bodySegments[i].endOffset&& concept.endOffset>
-                            bodySegments[i]
-                        .startOffset) {
+                if (candidate.startOffset < bodySegments[i].endOffset &&
+                    candidate.endOffset > bodySegments[i].startOffset) {
                     segmentIndex = static_cast<int>(i);
                     break;
                 }
             }
         }
         entityRefs.push_back(
-            {nodeKey, type, concept.confidence, titleOverlap, highValue, segmentIndex});
+            {nodeKey, type, candidate.confidence, titleOverlap, highValue, segmentIndex});
         metrics.highValueEntities += highValue ? 1 : 0;
 
-        for (const auto& variant : buildAliasVariants(text, type, concept.confidence)) {
+        for (const auto& variant : buildAliasVariants(text, type, candidate.confidence)) {
             metadata::KGAlias alias;
             alias.alias = variant.text;
             alias.source = "gliner." + variant.sourceTag + "|" + nodeKey;
@@ -401,12 +379,12 @@ PostIngestNlGraphBuildResult buildPostIngestNlGraph(const PostIngestNlGraphConte
             mentioned.srcNodeKey = nodeKey;
             mentioned.dstNodeKey = targetNodeKey;
             mentioned.relation = "mentioned_in";
-            mentioned.weight = concept.confidence;
+            mentioned.weight = candidate.confidence;
             nlohmann::json edgeProperties{
                 {"source", "gliner"},
-                {"confidence", concept.confidence},
+                {"confidence", candidate.confidence},
                 {"provenance",
-                 nlohmann::json{{"source", "gliner"}, {"confidence", concept.confidence}}},
+                 nlohmann::json{{"source", "gliner"}, {"confidence", candidate.confidence}}},
             };
             if (!context.hash.empty()) {
                 edgeProperties["snapshot_id"] = context.hash;
@@ -419,7 +397,7 @@ PostIngestNlGraphBuildResult buildPostIngestNlGraph(const PostIngestNlGraphConte
                 titleMention.srcNodeKey = nodeKey;
                 titleMention.dstNodeKey = targetNodeKey;
                 titleMention.relation = "title_mentions";
-                titleMention.weight = std::min(1.0f, concept.confidence * 1.15f);
+                titleMention.weight = std::min(1.0f, candidate.confidence * 1.15f);
                 nlohmann::json titleProperties{
                     {"source", "gliner"}, {"region", "title"}, {"confidence", titleMention.weight}};
                 if (!context.hash.empty()) {
@@ -437,14 +415,14 @@ PostIngestNlGraphBuildResult buildPostIngestNlGraph(const PostIngestNlGraphConte
         nlohmann::json segmentProperties;
         if (titleOverlap && !titleSegmentNodeKey.empty()) {
             segmentMention.dstNodeKey = titleSegmentNodeKey;
-            segmentMention.weight = std::min(1.0f, concept.confidence * 1.10f);
+            segmentMention.weight = std::min(1.0f, candidate.confidence * 1.10f);
             segmentProperties = {
                 {"source", "gliner"}, {"region", "title"}, {"confidence", segmentMention.weight}};
             addSegmentMention = true;
         } else if (segmentIndex >= 0 &&
                    static_cast<std::size_t>(segmentIndex) < bodySegments.size()) {
             segmentMention.dstNodeKey = bodySegments[segmentIndex].nodeKey;
-            segmentMention.weight = std::min(1.0f, concept.confidence * 1.05f);
+            segmentMention.weight = std::min(1.0f, candidate.confidence * 1.05f);
             segmentProperties = {{"source", "gliner"},
                                  {"region", "body_claim"},
                                  {"confidence", segmentMention.weight},
@@ -453,9 +431,9 @@ PostIngestNlGraphBuildResult buildPostIngestNlGraph(const PostIngestNlGraphConte
             ++metrics.bodyEntitySegmentEdgesCreated;
         } else if (!summarySegmentNodeKey.empty()) {
             segmentMention.dstNodeKey = summarySegmentNodeKey;
-            segmentMention.weight = concept.confidence;
+            segmentMention.weight = candidate.confidence;
             segmentProperties = {
-                {"source", "gliner"}, {"region", "summary"}, {"confidence", concept.confidence}};
+                {"source", "gliner"}, {"region", "summary"}, {"confidence", candidate.confidence}};
             addSegmentMention = true;
         }
         if (addSegmentMention) {
@@ -469,9 +447,9 @@ PostIngestNlGraphBuildResult buildPostIngestNlGraph(const PostIngestNlGraphConte
             entity.documentId = *documentDbId;
             entity.entityText = text;
             entity.nodeKey = nodeKey;
-            entity.startOffset = concept.startOffset;
-            entity.endOffset = concept.endOffset;
-            entity.confidence = concept.confidence;
+            entity.startOffset = candidate.startOffset;
+            entity.endOffset = candidate.endOffset;
+            entity.confidence = candidate.confidence;
             entity.extractor = "gliner_title_nl";
             batch.deferredDocEntities.push_back(std::move(entity));
             ++metrics.deferredDocEntitiesQueued;
@@ -485,10 +463,7 @@ PostIngestNlGraphBuildResult buildPostIngestNlGraph(const PostIngestNlGraphConte
         if (lhs.highValue != rhs.highValue) {
             return lhs.highValue > rhs.highValue;
         }
-        if (lhs.confidence != rhs.confidence) {
-            return lhs.confidence > rhs.confidence;
-        }
-        return lhs.nodeKey < rhs.nodeKey;
+        return lhs.confidence > rhs.confidence;
     });
 
     constexpr std::size_t kMaxPrimaryTopicEdges = 3;

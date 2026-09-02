@@ -9,6 +9,7 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include "post_ingest_nl_graph_builder.h"
 #include <boost/asio.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -23,7 +24,6 @@
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/GraphComponent.h>
 #include <yams/daemon/components/InternalEventBus.h>
-#include <yams/daemon/components/post_ingest_nl_graph_builder.h>
 #include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -2497,15 +2497,21 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
             }
         }
 
-        std::vector<search::QueryConcept> nlEntities;
-        nlEntities.reserve(nlEntityByKey.size());
+        std::vector<const search::QueryConcept*> orderedNlEntities;
+        orderedNlEntities.reserve(nlEntityByKey.size());
         for (const auto& [_, entityPtr] : nlEntityByKey) {
-            nlEntities.push_back(*entityPtr);
+            orderedNlEntities.push_back(entityPtr);
         }
-        std::sort(nlEntities.begin(), nlEntities.end(),
-                  [](const search::QueryConcept& a, const search::QueryConcept& b) {
-                      return a.confidence > b.confidence;
+        std::sort(orderedNlEntities.begin(), orderedNlEntities.end(),
+                  [](const search::QueryConcept* a, const search::QueryConcept* b) {
+                      return a->confidence > b->confidence;
                   });
+
+        std::vector<search::QueryConcept> nlEntities;
+        nlEntities.reserve(orderedNlEntities.size());
+        for (const auto* entity : orderedNlEntities) {
+            nlEntities.push_back(*entity);
+        }
         const auto nlEntityCount = nlEntities.size();
         if (!nlEntities.empty()) {
             titleNlDocsWithEntities_.fetch_add(1, std::memory_order_relaxed);

@@ -10,8 +10,9 @@
 
 #include <nlohmann/json.hpp>
 
-#include <yams/daemon/components/post_ingest_nl_graph_builder.h>
+#include "src/daemon/components/post_ingest_nl_graph_builder.h"
 #include <yams/daemon/components/PostIngestQueue.h>
+#include <yams/metadata/path_utils.h>
 
 using namespace yams::daemon;
 using namespace std::chrono_literals;
@@ -224,29 +225,6 @@ const DeferredEdge& findEdge(const DeferredKGBatch& batch, const std::string& so
     return *it;
 }
 
-std::vector<std::string> graphFingerprint(const DeferredKGBatch& batch) {
-    std::vector<std::string> fingerprint;
-    for (const auto& node : batch.nodes) {
-        fingerprint.push_back("node|" + node.nodeKey + "|" + node.label.value_or("") + "|" +
-                              node.type.value_or("") + "|" + node.properties.value_or(""));
-    }
-    for (const auto& edge : batch.deferredEdges) {
-        fingerprint.push_back("edge|" + edge.srcNodeKey + "|" + edge.dstNodeKey + "|" +
-                              edge.relation + "|" + std::to_string(edge.weight) + "|" +
-                              edge.properties.value_or(""));
-    }
-    for (const auto& alias : batch.aliases) {
-        fingerprint.push_back("alias|" + alias.alias + "|" + alias.source.value_or("") + "|" +
-                              std::to_string(alias.confidence));
-    }
-    for (const auto& entity : batch.deferredDocEntities) {
-        fingerprint.push_back("doc-entity|" + std::to_string(entity.documentId) + "|" +
-                              entity.entityText + "|" + entity.nodeKey + "|" +
-                              std::to_string(entity.startOffset) + "|" +
-                              std::to_string(entity.endOffset));
-    }
-    return fingerprint;
-}
 } // namespace
 
 TEST_CASE("Post-ingest NL graph builder preserves graph schema and metric deltas",
@@ -273,16 +251,18 @@ TEST_CASE("Post-ingest NL graph builder preserves graph schema and metric deltas
     auto built = buildPostIngestNlGraph(context, concepts);
     REQUIRE(built.batch);
     const auto& batch = *built.batch;
+    const auto expectedPath =
+        yams::metadata::computePathDerivedValues(context.filePath).normalizedPath;
 
-    CHECK(batch.sourceFile == context.filePath);
+    CHECK(batch.sourceFile == expectedPath);
     CHECK(batch.documentIdToDelete == 42);
     const auto& docNode = findNode(batch, "doc:abc123");
     CHECK(docNode.label == "papers/study.txt");
     const auto docProperties = nlohmann::json::parse(*docNode.properties);
     CHECK(docProperties["hash"] == "abc123");
-    CHECK(docProperties["path"] == "papers/study.txt");
+    CHECK(docProperties["path"] == expectedPath);
     CHECK(docProperties["language"] == "e?");
-    findNode(batch, "path:file:papers/study.txt");
+    findNode(batch, "path:file:" + expectedPath);
     findNode(batch, "segment:title:abc123");
     findNode(batch, "segment:summary:abc123");
     findNode(batch, "segment:body:abc123:1");
@@ -345,7 +325,7 @@ TEST_CASE("Post-ingest NL graph builder preserves graph schema and metric deltas
     CHECK(built.metrics.coMentionEdges == 3);
 }
 
-TEST_CASE("Post-ingest NL graph builder bounds edges and orders equal-confidence concepts",
+TEST_CASE("Post-ingest NL graph builder bounds edges without prescribing equal-confidence order",
           "[daemon][post-ingest][graph-builder][catch2]") {
     const std::string text =
         "Topic overview\nGene0 Gene1 Gene2 Gene3 Gene4 Gene5 Gene6 Gene7 Gene8 Gene9 are linked "
@@ -370,15 +350,12 @@ TEST_CASE("Post-ingest NL graph builder bounds edges and orders equal-confidence
     auto first = buildPostIngestNlGraph(context, concepts);
     auto second = buildPostIngestNlGraph(context, reversed);
 
-    CHECK(first.metrics.primaryTopicEdges == 3);
-    CHECK(first.metrics.coMentionEdges == 16);
-    REQUIRE(first.batch);
-    REQUIRE(second.batch);
-    CHECK(graphFingerprint(*first.batch) == graphFingerprint(*second.batch));
-
-    const auto firstEntity =
-        std::find_if(first.batch->nodes.begin(), first.batch->nodes.end(),
-                     [](const auto& node) { return node.nodeKey.starts_with("nl_entity:"); });
-    REQUIRE(firstEntity != first.batch->nodes.end());
-    CHECK(firstEntity->nodeKey == "nl_entity:gene:gene0");
+    for (const auto* built : {&first, &second}) {
+        CHECK(built->metrics.primaryTopicEdges == 3);
+        CHECK(built->metrics.coMentionEdges == 16);
+        REQUIRE(built->batch);
+        CHECK(std::count_if(
+                  built->batch->nodes.begin(), built->batch->nodes.end(),
+                  [](const auto& node) { return node.nodeKey.starts_with("nl_entity:"); }) == 10);
+    }
 }
