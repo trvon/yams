@@ -55,17 +55,20 @@ void CheckpointManager::stop() {
         checkpointThread_.join();
     }
 
-    if (deps_.checkpointWalTruncate) {
+    const auto& shutdownCheckpoint =
+        deps_.checkpointWalTruncate ? deps_.checkpointWalTruncate : deps_.checkpointWal;
+    if (shutdownCheckpoint) {
+        const char* mode = deps_.checkpointWalTruncate ? "TRUNCATE" : "PASSIVE";
         try {
-            auto result = deps_.checkpointWalTruncate();
+            auto result = shutdownCheckpoint();
             if (result) {
-                spdlog::info("[CheckpointManager] Shutdown WAL checkpoint (TRUNCATE) completed");
+                spdlog::info("[CheckpointManager] Shutdown WAL checkpoint ({}) completed", mode);
             } else {
-                spdlog::warn("[CheckpointManager] Shutdown WAL TRUNCATE failed: {}",
+                spdlog::warn("[CheckpointManager] Shutdown WAL {} failed: {}", mode,
                              result.error().message);
             }
         } catch (const std::exception& e) {
-            spdlog::warn("[CheckpointManager] Shutdown WAL TRUNCATE threw: {}", e.what());
+            spdlog::warn("[CheckpointManager] Shutdown WAL {} threw: {}", mode, e.what());
         }
     }
 }
@@ -245,11 +248,7 @@ bool CheckpointManager::checkpointWal() {
                      *preSize / (1024ULL * 1024ULL), kTruncateWatermarkBytes / (1024ULL * 1024ULL));
     }
 
-    if (wantsTruncate) {
-        if (!deps_.checkpointWalTruncate) {
-            return true;
-        }
-
+    if (wantsTruncate && deps_.checkpointWalTruncate) {
         // ── TRUNCATE with retry (exclusive-lock contention is common under load) ──
         constexpr int kMaxRetries = 3;
         for (int attempt = 0; attempt < kMaxRetries; ++attempt) {

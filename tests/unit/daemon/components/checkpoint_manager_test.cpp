@@ -233,6 +233,23 @@ TEST_CASE_METHOD(CheckpointManagerFixture, "CheckpointManager routine checkpoint
     CHECK((recorder->truncateCalls == 0));
 }
 
+TEST_CASE_METHOD(CheckpointManagerFixture,
+                 "CheckpointManager watermark falls back to bound passive callback",
+                 "[daemon][components][checkpoint][catch2]") {
+    auto recorder = std::make_shared<WalCheckpointRecorder>();
+    constexpr std::uint64_t kWatermarkBytes = 256ULL * 1024ULL * 1024ULL;
+    createSparseFile(tempDir / "yams.db-wal", kWatermarkBytes + 1);
+    auto cfg = makeConfig();
+    auto deps = makeDeps();
+    deps.checkpointWal = [recorder]() { return recorder->checkpointWal(); };
+    CheckpointManager mgr(cfg, deps);
+
+    CHECK(mgr.checkpointNow());
+
+    CHECK((recorder->passiveCalls == 1));
+    CHECK((recorder->truncateCalls == 0));
+}
+
 TEST_CASE_METHOD(CheckpointManagerFixture, "CheckpointManager watermark checkpoint truncates WAL",
                  "[daemon][components][checkpoint][catch2]") {
     auto recorder = std::make_shared<WalCheckpointRecorder>();
@@ -247,6 +264,23 @@ TEST_CASE_METHOD(CheckpointManagerFixture, "CheckpointManager watermark checkpoi
 
     CHECK((recorder->passiveCalls == 0));
     CHECK((recorder->truncateCalls == 1));
+}
+
+TEST_CASE_METHOD(CheckpointManagerFixture,
+                 "CheckpointManager shutdown falls back to bound passive callback",
+                 "[daemon][components][checkpoint][catch2]") {
+    auto recorder = std::make_shared<WalCheckpointRecorder>();
+    auto cfg = makeConfig();
+    auto deps = makeDeps();
+    deps.checkpointWal = [recorder]() { return recorder->checkpointWal(); };
+    CheckpointManager mgr(cfg, deps);
+    mgr.start();
+    std::this_thread::sleep_for(50ms);
+
+    mgr.stop();
+
+    CHECK((recorder->passiveCalls == 1));
+    CHECK((recorder->truncateCalls == 0));
 }
 
 TEST_CASE_METHOD(CheckpointManagerFixture, "CheckpointManager shutdown truncates WAL",
