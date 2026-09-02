@@ -699,7 +699,9 @@ EmbeddingService::generateEmbeddingsInternal(const std::vector<std::string>& doc
                              s);
             }
         }
-        embConfig.backend_is_resolved = embeddingPolicy_ != nullptr;
+        // runtimePolicy above already applied either the lifecycle snapshot or the compatibility
+        // resolver. EmbeddingGenerator must not re-read ambient policy.
+        embConfig.backend_is_resolved = true;
 
         // 2. Initialize embedding generator
         auto embGenerator = std::make_unique<vector::EmbeddingGenerator>(embConfig);
