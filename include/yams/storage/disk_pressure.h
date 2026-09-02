@@ -89,7 +89,7 @@ probeDiskSpace(const std::filesystem::path& storagePath) {
     if (snapshot.capacityBytes == 0) {
         return DiskPressureLevel::Unknown;
     }
-    if (snapshot.availableBytes < policy.emergencyReserveBytes) {
+    if (snapshot.availableBytes <= policy.emergencyReserveBytes) {
         return DiskPressureLevel::Emergency;
     }
     const long double freePercent = (static_cast<long double>(snapshot.availableBytes) * 100.0L) /
