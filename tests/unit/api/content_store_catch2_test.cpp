@@ -1499,6 +1499,11 @@ TEST_CASE("ContentStore classifies disk pressure through an injected probe",
     CHECK(warning.isHealthy);
     CHECK_FALSE(warning.warnings.empty());
 
+    const auto reserveBoundaryObservation =
+        storage::inspectDiskPressure({}, {}, makeProbe(100ULL * mib));
+    REQUIRE(reserveBoundaryObservation.has_value());
+    CHECK(reserveBoundaryObservation.value().level == storage::DiskPressureLevel::Emergency);
+
     const auto emergencyObservation = storage::inspectDiskPressure({}, {}, makeProbe(50ULL * mib));
     REQUIRE(emergencyObservation.has_value());
     CHECK(emergencyObservation.value().level == storage::DiskPressureLevel::Emergency);

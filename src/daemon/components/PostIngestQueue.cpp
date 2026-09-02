@@ -67,10 +67,6 @@ PostIngestBatchPolicy resolvePostIngestBatchPolicy() {
     return {};
 }
 
-bool shouldPrepareSequentially(std::uint32_t maxWorkers, std::size_t taskCount,
-                               const PostIngestBatchPolicy& policy) {
-    return maxWorkers <= 1 || taskCount < policy.minParallelPrepareTasks;
-}
 
 std::string normalizeGraphPath(const std::string& path) {
     if (path.empty()) {
