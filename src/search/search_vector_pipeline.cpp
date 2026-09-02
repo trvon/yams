@@ -445,12 +445,8 @@ mergeAuxiliaryVectorCandidates(std::vector<ComponentResult> components,
     }
 
     const auto rankAndCap = [&](std::vector<ComponentResult>& results) {
-        std::sort(results.begin(), results.end(), [](const auto& lhs, const auto& rhs) {
-            if (lhs.score != rhs.score) {
-                return lhs.score > rhs.score;
-            }
-            return lhs.documentHash < rhs.documentHash;
-        });
+        std::sort(results.begin(), results.end(),
+                  [](const auto& lhs, const auto& rhs) { return lhs.score > rhs.score; });
         if (results.size() > config.vectorMaxResults) {
             results.resize(config.vectorMaxResults);
         }

@@ -2094,7 +2094,7 @@ TEST_CASE("rankGraphNeighborCandidates can weight support by query seed evidence
 
 TEST_CASE("SearchEngine topology merge keeps graph-vector candidates behind baseline anchors",
           "[search][topology][graph-vector][characterization][catch2]") {
-    using detail::AuxiliaryVectorCandidateBatch;
+    using yams::search::detail::AuxiliaryVectorCandidateBatch;
 
     SearchEngineConfig config;
     config.vectorMaxResults = 2;
@@ -2117,8 +2117,8 @@ TEST_CASE("SearchEngine topology merge keeps graph-vector candidates behind base
                         {.documentHash = "unanchored", .score = 1.0F}}},
     };
 
-    const auto merged = detail::mergeAuxiliaryVectorCandidates(std::move(components), {},
-                                                               std::move(graphTerms), config);
+    const auto merged = yams::search::detail::mergeAuxiliaryVectorCandidates(
+        std::move(components), {}, std::move(graphTerms), config);
 
     CHECK(merged.stats.graphVectorRawHitCount == 3U);
     CHECK(merged.stats.graphVectorAddedNewCount == 1U);
