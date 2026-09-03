@@ -47,6 +47,13 @@ portability_policy_tests = files('scripts/test_check_portability.py')
 portability_allowlist = files('scripts/portability_allowlist.txt')
 repository_metadata_policy_script = files('scripts/check_repository_metadata.py')
 forgejo_mirror_policy_script = files('scripts/check_forgejo_mirror_workflow.py')
+experimental_release_source_policy_script = files('scripts/check_experimental_release_source.py')
+test('experimental_release_source_policy',
+  python_exe,
+  args: [experimental_release_source_policy_script, '--root', meson.project_source_root()],
+  suite: ['unit', 'policy', 'release'],
+  timeout: 30,
+)
 test('forgejo_mirror_policy',
   python_exe,
   args: [forgejo_mirror_policy_script, '--root', meson.project_source_root()],

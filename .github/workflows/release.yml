@@ -27,8 +27,109 @@ permissions:
   contents: write
 
 jobs:
+  resolve-release:
+    name: Resolve immutable release source
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      source_ref: ${{ steps.source.outputs.source_ref }}
+      channel: ${{ steps.meta.outputs.channel }}
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      release_name: ${{ steps.meta.outputs.release_name }}
+      base_version: ${{ steps.meta.outputs.base_version }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+    steps:
+      - name: Resolve canonical source once
+        id: source
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          REQUESTED_CHANNEL: ${{ inputs.channel || 'nightly' }}
+        with:
+          script: |
+            const requestedChannel = process.env.REQUESTED_CHANNEL;
+            let channel = 'stable';
+            if (context.eventName === 'schedule') {
+              channel = 'nightly';
+            } else if (context.eventName === 'workflow_dispatch') {
+              channel = ['stable', 'weekly', 'nightly'].includes(requestedChannel)
+                ? requestedChannel
+                : 'nightly';
+            }
+            core.setOutput('channel', channel);
+
+            if (channel !== 'stable') {
+              const ref = await github.rest.git.getRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: 'heads/experimental',
+              });
+              core.setOutput('source_sha', ref.data.object.sha);
+              core.setOutput('source_ref', 'refs/heads/experimental');
+            } else {
+              core.setOutput('source_sha', context.sha);
+              core.setOutput('source_ref', context.ref);
+            }
+
+      - name: Checkout immutable source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          submodules: false
+          ref: ${{ steps.source.outputs.source_sha }}
+
+      - name: Resolve release metadata once
+        id: meta
+        env:
+          RESOLVED_CHANNEL: ${{ steps.source.outputs.channel }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SHORT_HASH=$(git rev-parse --short HEAD)
+          channel="$RESOLVED_CHANNEL"
+
+          if [ "$channel" = "stable" ]; then
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#yams-v}"
+            if [ "$VERSION" = "$TAG" ]; then
+              VERSION="${TAG#v}"
+            fi
+            TAG_OUT="$TAG"
+            RELEASE_NAME="YAMS ${VERSION}"
+          elif [ "$channel" = "nightly" ]; then
+            DATE_ISO=$(date -u +%Y-%m-%d)
+            DATE_COMPACT=$(date -u +%Y%m%d)
+            VERSION="nightly-${DATE_COMPACT}-${SHORT_HASH}"
+            TAG_OUT="nightly-${DATE_COMPACT}-${SHORT_HASH}"
+            RELEASE_NAME="YAMS Nightly ${DATE_ISO} (${SHORT_HASH})"
+          else
+            YEAR=$(date -u +%G)
+            WEEK=$(date -u +%V)
+            VERSION="weekly-${YEAR}w${WEEK}-${SHORT_HASH}"
+            TAG_OUT="$VERSION"
+            RELEASE_NAME="YAMS Weekly ${YEAR}-w${WEEK} (${SHORT_HASH})"
+          fi
+
+          BASE_NUMERIC_VERSION="$(git describe --tags --abbrev=0 --match='v*' 2>/dev/null || echo 0.0.0)"
+          BASE_NUMERIC_VERSION="${BASE_NUMERIC_VERSION#v}"
+
+          {
+            echo "channel=$channel"
+            echo "version=$VERSION"
+            echo "tag=$TAG_OUT"
+            echo "release_name=$RELEASE_NAME"
+            echo "base_version=$BASE_NUMERIC_VERSION"
+            if [ "$channel" = "stable" ]; then
+              echo "prerelease=false"
+            else
+              echo "prerelease=true"
+            fi
+          } >> "$GITHUB_OUTPUT"
+
   check-commits:
     name: Check for new commits (nightly only)
+    needs: resolve-release
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && github.actor != 'nektos/act'
     outputs:
@@ -72,32 +173,32 @@ jobs:
             }
             core.setOutput('last_release_sha', lastSha);
 
-            const headRef = await github.rest.git.getRef({
-              owner,
-              repo,
-              ref: 'heads/main',
-            });
-            const currentSha = headRef.data.object.sha;
+            const currentSha = '${{ needs.resolve-release.outputs.source_sha }}';
 
             if (lastSha !== currentSha) {
-              const compare = await github.rest.repos.compareCommits({
-                owner,
-                repo,
-                base: lastSha,
-                head: currentSha,
-              });
-              const total = compare.data.total_commits ?? 1;
               core.setOutput('has_new_commits', 'true');
-              core.info(`Found ${total} new commit(s) since last nightly (${tagName})`);
+              try {
+                const compare = await github.rest.repos.compareCommits({
+                  owner,
+                  repo,
+                  base: lastSha,
+                  head: currentSha,
+                });
+                const total = compare.data.total_commits ?? 1;
+                core.info(`Found ${total} new commit(s) since last nightly (${tagName})`);
+              } catch (error) {
+                core.info(`Release SHAs differ; comparison was unavailable: ${error.message}`);
+              }
             } else {
               core.setOutput('has_new_commits', 'false');
               core.info(`No new commits since last nightly release (${tagName}), skipping`);
             }
 
   warm:
-    needs: [check-commits]
+    needs: [resolve-release, check-commits]
     if: |
       always() &&
+      needs.resolve-release.result == 'success' &&
       github.actor != 'nektos/act' &&
       (needs.check-commits.result == 'skipped' || 
        needs.check-commits.outputs.has_new_commits == 'true' ||
@@ -107,12 +208,14 @@ jobs:
     with:
       build_type: Release
       enable_onnx: false
+      checkout_ref: ${{ needs.resolve-release.outputs.source_sha }}
 
   build-release:
     name: Build and Package (matrix)
-    needs: warm
+    needs: [resolve-release, warm]
     if: |
       always() &&
+      needs.resolve-release.result == 'success' &&
       (needs.warm.result == 'success' || needs.warm.result == 'skipped')
     strategy:
       fail-fast: false
@@ -167,10 +270,11 @@ jobs:
       STAGE_DIR: stage
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           submodules: false # Manual submodule init below (some use SSH URLs)
+          ref: ${{ needs.resolve-release.outputs.source_sha }}
       - name: Initialize required submodules
         shell: bash
         run: |
@@ -221,53 +325,12 @@ jobs:
           build_dir="build/pkg/arch-${arch_name}"
           meson_build_dir="${build_dir}/meson-${arch_name}"
 
-          event="${{ github.event_name }}"
-          input_channel="${{ inputs.channel || '' }}"
-          short_hash="$(git rev-parse --short HEAD)"
-
-          if [ "$event" = "push" ]; then
-            channel="stable"
-            version="${GITHUB_REF_NAME#yams-v}"
-            if [ "$version" = "$GITHUB_REF_NAME" ]; then
-              version="${GITHUB_REF_NAME#v}"
-            fi
-            git_ref_value="${{ github.ref }}"
-          elif [ "$event" = "workflow_dispatch" ] && [ -n "$input_channel" ]; then
-            case "$input_channel" in
-              stable)
-                channel="stable"
-                version="${GITHUB_REF_NAME#yams-v}"
-                if [ "$version" = "$GITHUB_REF_NAME" ]; then
-                  version="${GITHUB_REF_NAME#v}"
-                fi
-                git_ref_value="${{ github.ref }}"
-                ;;
-              weekly)
-                channel="weekly"
-                year="$(date -u +%G)"
-                week="$(date -u +%V)"
-                version="weekly-${year}w${week}-${short_hash}"
-                git_ref_value="refs/tags/v${version}"
-                ;;
-              *)
-                channel="nightly"
-                date_compact="$(date -u +%Y%m%d)"
-                version="nightly-${date_compact}-${short_hash}"
-                git_ref_value="refs/tags/v${version}"
-                ;;
-            esac
-          elif [ "$event" = "schedule" ]; then
-            channel="nightly"
-            date_compact="$(date -u +%Y%m%d)"
-            version="nightly-${date_compact}-${short_hash}"
-            git_ref_value="refs/tags/v${version}"
+          channel="${{ needs.resolve-release.outputs.channel }}"
+          version="${{ needs.resolve-release.outputs.version }}"
+          if [ "$channel" = "stable" ]; then
+            git_ref_value="${{ needs.resolve-release.outputs.source_ref }}"
           else
-            channel="stable"
-            version="${GITHUB_REF_NAME#yams-v}"
-            if [ "$version" = "$GITHUB_REF_NAME" ]; then
-              version="${GITHUB_REF_NAME#v}"
-            fi
-            git_ref_value="${{ github.ref }}"
+            git_ref_value="refs/tags/v${version}"
           fi
 
           echo "Arch release channel=${channel} version=${version} build_dir=${build_dir} meson_build_dir=${meson_build_dir}"
@@ -441,71 +504,19 @@ jobs:
           done
           echo "Stdlib flags sanitized for macOS (forcing -stdlib=libc++)."
 
-      - name: Determine release channel and version/tag
+      - name: Load resolved release metadata
         if: matrix.arch_container != true
         id: meta
         shell: bash
         run: |
-          set -euo pipefail
-
-          EVENT="${{ github.event_name }}"
-          INPUT_CHANNEL="${{ inputs.channel || '' }}"
-          SHORT_HASH=$(git rev-parse --short HEAD)
-
-          channel=""
-          if [ "$EVENT" = "push" ]; then
-            channel="stable"
-          elif [ "$EVENT" = "workflow_dispatch" ] && [ -n "$INPUT_CHANNEL" ]; then
-            case "$INPUT_CHANNEL" in
-              stable|weekly|nightly) channel="$INPUT_CHANNEL" ;;
-              *) channel="nightly" ;;
-            esac
-          elif [ "$EVENT" = "schedule" ]; then
-            channel="nightly"
-          else
-            channel="stable"
-          fi
-
-          # Derive version and tag
-          if [ "$channel" = "stable" ]; then
-            TAG="${GITHUB_REF_NAME}"
-            VERSION="${TAG#yams-v}"
-            if [ "$VERSION" = "$TAG" ]; then
-              VERSION="${TAG#v}"
-            fi
-            TAG_OUT="$TAG"
-            RELEASE_NAME="YAMS ${VERSION}"
-          elif [ "$channel" = "nightly" ]; then
-            DATE_ISO=$(date -u +%Y-%m-%d)
-            DATE_COMPACT=$(date -u +%Y%m%d)
-            VERSION="nightly-${DATE_COMPACT}-${SHORT_HASH}"
-            TAG_OUT="nightly-${DATE_COMPACT}-${SHORT_HASH}"
-            RELEASE_NAME="YAMS Nightly ${DATE_ISO} (${SHORT_HASH})"
-          else # weekly
-            YEAR=$(date -u +%G)   # ISO week-numbering year
-            WEEK=$(date -u +%V)   # ISO week number 01-53
-            VERSION="weekly-${YEAR}w${WEEK}-${SHORT_HASH}"
-            TAG_OUT="$VERSION"
-            RELEASE_NAME="YAMS Weekly ${YEAR}-w${WEEK} (${SHORT_HASH})"
-          fi
-
-          BASE_NUMERIC_VERSION="$(git describe --tags --abbrev=0 --match='v*' 2>/dev/null || echo 0.0.0)"
-          BASE_NUMERIC_VERSION="${BASE_NUMERIC_VERSION#v}"
-
           {
-            echo "channel=$channel"
-            echo "version=$VERSION"
-            echo "tag=$TAG_OUT"
-            echo "release_name=$RELEASE_NAME"
-            echo "base_version=$BASE_NUMERIC_VERSION"
-            if [ "$channel" = "stable" ]; then
-              echo "prerelease=false"
-            else
-              echo "prerelease=true"
-            fi
+            echo "channel=${{ needs.resolve-release.outputs.channel }}"
+            echo "version=${{ needs.resolve-release.outputs.version }}"
+            echo "tag=${{ needs.resolve-release.outputs.tag }}"
+            echo "release_name=${{ needs.resolve-release.outputs.release_name }}"
+            echo "base_version=${{ needs.resolve-release.outputs.base_version }}"
+            echo "prerelease=${{ needs.resolve-release.outputs.prerelease }}"
           } >> "$GITHUB_OUTPUT"
-
-          echo "Detected channel=$channel, version=$VERSION, tag=$TAG_OUT, name=$RELEASE_NAME"
 
       - name: Download CI benchmark artifacts (-yams, if available)
         if: github.event_name == 'workflow_run' && matrix.os == 'linux-hosted' && github.actor != 'nektos/act'
@@ -1376,11 +1387,15 @@ jobs:
 
   create-release:
     name: Create GitHub Release
-    needs: [check-commits, build-release]
+    needs: [resolve-release, check-commits, build-release]
     runs-on: ubuntu-latest
+    concurrency:
+      group: release-publish-${{ needs.resolve-release.outputs.channel }}-${{ needs.resolve-release.outputs.source_sha }}
+      cancel-in-progress: false
     # Skip release creation when: running under act, OR check-commits skipped release
     if: |
-      always() && !cancelled() && 
+      always() && !cancelled() &&
+      needs.resolve-release.result == 'success' &&
       github.actor != 'nektos/act' &&
       (needs.check-commits.result == 'skipped' || needs.check-commits.outputs.has_new_commits == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       needs.build-release.result == 'success'
@@ -1392,83 +1407,25 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
       tag: ${{ steps.meta.outputs.tag }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout immutable release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           submodules: false
-          repository: ${{ github.event.workflow_run.head_repository.full_name || github.repository }}
-          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          ref: ${{ needs.resolve-release.outputs.source_sha }}
 
-      - name: Determine release channel and version/tag
+      - name: Load resolved release metadata
         id: meta
         shell: bash
         run: |
-          set -euo pipefail
-
-          EVENT="${{ github.event_name }}"
-          INPUT_CHANNEL="${{ inputs.channel || '' }}"
-          SHORT_HASH=$(git rev-parse --short HEAD)
-
-          channel=""
-          if [ "$EVENT" = "push" ]; then
-            channel="stable"
-          elif [ "$EVENT" = "workflow_dispatch" ] && [ -n "$INPUT_CHANNEL" ]; then
-            case "$INPUT_CHANNEL" in
-              stable|weekly|nightly) channel="$INPUT_CHANNEL" ;;
-              *) channel="nightly" ;;
-            esac
-          elif [ "$EVENT" = "schedule" ]; then
-            channel="nightly"
-          else
-            channel="stable"
-          fi
-
-          # Derive version and tag
-          if [ "$channel" = "stable" ]; then
-            TAG="${GITHUB_REF_NAME}"
-            VERSION="${TAG#yams-v}"
-            if [ "$VERSION" = "$TAG" ]; then
-              VERSION="${TAG#v}"
-            fi
-            TAG_OUT="$TAG"
-            RELEASE_NAME="YAMS ${VERSION}"
-          elif [ "$channel" = "nightly" ]; then
-            DATE_ISO=$(date -u +%Y-%m-%d)
-            DATE_COMPACT=$(date -u +%Y%m%d)
-            VERSION="nightly-${DATE_COMPACT}-${SHORT_HASH}"
-            TAG_OUT="nightly-${DATE_COMPACT}-${SHORT_HASH}"
-            RELEASE_NAME="YAMS Nightly ${DATE_ISO} (${SHORT_HASH})"
-          else # weekly
-            YEAR=$(date -u +%G)   # ISO week-numbering year
-            WEEK=$(date -u +%V)   # ISO week number 01-53
-            VERSION="weekly-${YEAR}w${WEEK}-${SHORT_HASH}"
-            TAG_OUT="$VERSION"
-            RELEASE_NAME="YAMS Weekly ${YEAR}-w${WEEK} (${SHORT_HASH})"
-          fi
-
-          BASE_NUMERIC_VERSION="$(git describe --tags --abbrev=0 --match='v*' 2>/dev/null || echo 0.0.0)"
-          BASE_NUMERIC_VERSION="${BASE_NUMERIC_VERSION#v}"
-
           {
-            echo "channel=$channel"
-            echo "version=$VERSION"
-            echo "tag=$TAG_OUT"
-            echo "release_name=$RELEASE_NAME"
-            echo "base_version=$BASE_NUMERIC_VERSION"
-            if [ "$channel" = "stable" ]; then
-              echo "prerelease=false"
-            else
-              echo "prerelease=true"
-            fi
+            echo "channel=${{ needs.resolve-release.outputs.channel }}"
+            echo "version=${{ needs.resolve-release.outputs.version }}"
+            echo "tag=${{ needs.resolve-release.outputs.tag }}"
+            echo "release_name=${{ needs.resolve-release.outputs.release_name }}"
+            echo "base_version=${{ needs.resolve-release.outputs.base_version }}"
+            echo "prerelease=${{ needs.resolve-release.outputs.prerelease }}"
           } >> "$GITHUB_OUTPUT"
-
-          echo "Detected channel=$channel, version=$VERSION, tag=$TAG_OUT, name=$RELEASE_NAME"
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -2457,6 +2414,7 @@ jobs:
           files: assets/*
           draft: true
           prerelease: ${{ steps.meta.outputs.prerelease }}
+          target_commitish: ${{ needs.resolve-release.outputs.source_sha }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
