@@ -1,0 +1,123 @@
+name: Mirror source to Forgejo
+
+on:
+  push:
+    branches:
+      - main
+      - experimental
+    tags:
+      - "v[0-9]*"
+      - "yams-v[0-9]*"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Approved branch or release tag to reconcile
+        required: true
+        default: experimental
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: forgejo-source-mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    if: github.repository == 'trvon/yams'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out canonical repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Resolve approved source ref
+        id: source
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          REQUESTED_REF: ${{ inputs.ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            case "${REQUESTED_REF}" in
+              main|experimental)
+                source_ref="refs/heads/${REQUESTED_REF}"
+                ;;
+              v[0-9]*|yams-v[0-9]*)
+                source_ref="refs/tags/${REQUESTED_REF}"
+                ;;
+              *)
+                echo "Ref is outside the approved mirror allowlist: ${REQUESTED_REF}" >&2
+                exit 1
+                ;;
+            esac
+          else
+            source_ref="${EVENT_REF}"
+          fi
+
+          case "${source_ref}" in
+            refs/heads/main|refs/heads/experimental|refs/tags/v[0-9]*|refs/tags/yams-v[0-9]*) ;;
+            *)
+              echo "Resolved ref is outside the approved mirror allowlist: ${source_ref}" >&2
+              exit 1
+              ;;
+          esac
+
+          git fetch --no-tags origin "${source_ref}:refs/mirror/source"
+          expected_sha="$(git rev-parse refs/mirror/source)"
+          printf 'source_ref=%s\n' "${source_ref}" >>"${GITHUB_OUTPUT}"
+          printf 'expected_sha=%s\n' "${expected_sha}" >>"${GITHUB_OUTPUT}"
+
+      - name: Configure restricted Forgejo SSH identity
+        env:
+          MIRROR_SSH_KEY: ${{ secrets.FORGEJO_MIRROR_SSH_KEY }}
+          MIRROR_KNOWN_HOSTS: ${{ secrets.FORGEJO_MIRROR_KNOWN_HOSTS }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "${MIRROR_SSH_KEY}"
+          test -n "${MIRROR_KNOWN_HOSTS}"
+          umask 077
+          mkdir -p "${HOME}/.ssh"
+          printf '%s\n' "${MIRROR_SSH_KEY}" >"${HOME}/.ssh/forgejo_mirror"
+          printf '%s\n' "${MIRROR_KNOWN_HOSTS}" >"${HOME}/.ssh/known_hosts"
+          git config core.sshCommand \
+            "ssh -i ${HOME}/.ssh/forgejo_mirror -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+          git remote add forgejo ssh://git@git.trevon.dev:2222/trevon/yams.git
+
+      - name: Push one explicit ref
+        env:
+          SOURCE_REF: ${{ steps.source.outputs.source_ref }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push forgejo "refs/mirror/source:${SOURCE_REF}"
+
+      - name: Verify mirrored SHA
+        env:
+          SOURCE_REF: ${{ steps.source.outputs.source_ref }}
+          EXPECTED_SHA: ${{ steps.source.outputs.expected_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_sha="$(git ls-remote --exit-code forgejo "${SOURCE_REF}" | awk 'NR == 1 { print $1 }')"
+          if [[ "${actual_sha}" != "${EXPECTED_SHA}" ]]; then
+            echo "Forgejo verification failed for ${SOURCE_REF}" >&2
+            echo "expected=${EXPECTED_SHA}" >&2
+            echo "actual=${actual_sha}" >&2
+            exit 1
+          fi
+          echo "Verified ${SOURCE_REF} at ${EXPECTED_SHA}"
+
+      - name: Remove temporary key
+        if: always()
+        shell: bash
+        run: rm -f "${HOME}/.ssh/forgejo_mirror"

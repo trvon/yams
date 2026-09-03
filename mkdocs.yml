@@ -18,6 +18,8 @@ nav:
   - Benchmarks: benchmarks/index.md
   - Roadmap: roadmap.md
   - Newsletter: newsletter.md
+  - Operations:
+      - Source mirroring: source-mirroring.md
 
 theme:
   name: material
