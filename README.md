@@ -72,8 +72,8 @@ yams serve
 
 ## Project
 
-- SourceHut: <https://sr.ht/~trvon/yams/>
-- GitHub mirror: <https://github.com/trvon/yams>
+- GitHub: <https://github.com/trvon/yams>
+- Self-hosted mirror: <https://git.trevon.dev/trevon/yams>
 - Discord: <https://discord.gg/rTBmRHdTEc>
 - License: GPL-3.0-or-later
 
