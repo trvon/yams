@@ -22,16 +22,16 @@ tag. Use it to reconcile an allowed ref after a transient outage.
 
 ## Required secrets
 
-Configure these GitHub Actions secrets in the canonical repository:
+Configure this GitHub Actions secret in the canonical repository:
 
 - `FORGEJO_MIRROR_SSH_KEY`: private half of a dedicated Forgejo deploy key with
   write access only to `trevon/yams`.
-- `FORGEJO_MIRROR_KNOWN_HOSTS`: a pinned `known_hosts` entry for
-  `[git.trevon.dev]:2222`.
 
-Verify the Forgejo SSH host-key fingerprint out of band before storing the
-`known_hosts` entry. Do not generate trust dynamically inside the workflow.
-The deploy key must not be reused for package publication, administration, or
+The workflow currently disables SSH host-key verification, so possession of the
+deploy key authenticates GitHub Actions to Forgejo but the runner does not
+authenticate the Forgejo endpoint. This accepts DNS/network man-in-the-middle
+risk and should be replaced with a pinned host key if that risk changes. The
+deploy key must not be reused for package publication, administration, or
 another repository.
 
 ## Initial reconciliation
@@ -39,7 +39,7 @@ another repository.
 1. Compare the approved GitHub and Forgejo branch SHAs.
 2. Confirm the Forgejo branch is an ancestor of, or equal to, the canonical
    GitHub branch.
-3. Install the two secrets above.
+3. Install the deploy-key secret above.
 4. Dispatch one allowed branch at a time, starting with `main`.
 5. Confirm the workflow's post-push SHA verification succeeds.
 6. Reconcile approved release tags only after both branches are verified.

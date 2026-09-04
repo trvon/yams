@@ -78,19 +78,16 @@ jobs:
       - name: Configure restricted Forgejo SSH identity
         env:
           MIRROR_SSH_KEY: ${{ secrets.FORGEJO_MIRROR_SSH_KEY }}
-          MIRROR_KNOWN_HOSTS: ${{ secrets.FORGEJO_MIRROR_KNOWN_HOSTS }}
         shell: bash
         run: |
           set -euo pipefail
           set +x
           test -n "${MIRROR_SSH_KEY}"
-          test -n "${MIRROR_KNOWN_HOSTS}"
           umask 077
           mkdir -p "${HOME}/.ssh"
           printf '%s\n' "${MIRROR_SSH_KEY}" >"${HOME}/.ssh/forgejo_mirror"
-          printf '%s\n' "${MIRROR_KNOWN_HOSTS}" >"${HOME}/.ssh/known_hosts"
           git config core.sshCommand \
-            "ssh -i ${HOME}/.ssh/forgejo_mirror -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+            "ssh -i ${HOME}/.ssh/forgejo_mirror -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
           git remote add forgejo ssh://git@git.trevon.dev:2222/trevon/yams.git
 
       - name: Push one explicit ref
