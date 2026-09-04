@@ -123,9 +123,11 @@ jobs:
 
       - name: Publish validated channel to R2
         env:
-          STABLE_CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN || secrets.R2_SECRET_ACCESS_KEY }}
+          STABLE_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          STABLE_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           STABLE_CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          EXPERIMENTAL_CLOUDFLARE_API_TOKEN: ${{ secrets.EXPERIMENTAL_CLOUDFLARE_API_TOKEN }}
+          EXPERIMENTAL_R2_ACCESS_KEY_ID: ${{ secrets.EXPERIMENTAL_R2_ACCESS_KEY_ID }}
+          EXPERIMENTAL_R2_SECRET_ACCESS_KEY: ${{ secrets.EXPERIMENTAL_R2_SECRET_ACCESS_KEY }}
           EXPERIMENTAL_CLOUDFLARE_ACCOUNT_ID: ${{ secrets.EXPERIMENTAL_CLOUDFLARE_ACCOUNT_ID }}
           STABLE_GPG_PUBLIC_KEY_B64: ${{ secrets.GPG_PUBLIC_KEY_B64 || '' }}
           EXPERIMENTAL_GPG_PUBLIC_KEY_B64: ${{ secrets.EXPERIMENTAL_GPG_PUBLIC_KEY_B64 || '' }}
@@ -134,29 +136,27 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$REQUESTED_CHANNEL" = stable ]; then
-            CLOUDFLARE_API_TOKEN="$STABLE_CLOUDFLARE_API_TOKEN"
+            AWS_ACCESS_KEY_ID="$STABLE_R2_ACCESS_KEY_ID"
+            AWS_SECRET_ACCESS_KEY="$STABLE_R2_SECRET_ACCESS_KEY"
             CLOUDFLARE_ACCOUNT_ID="$STABLE_CLOUDFLARE_ACCOUNT_ID"
             GPG_PUBLIC_KEY_B64="$STABLE_GPG_PUBLIC_KEY_B64"
           else
-            CLOUDFLARE_API_TOKEN="$EXPERIMENTAL_CLOUDFLARE_API_TOKEN"
+            AWS_ACCESS_KEY_ID="$EXPERIMENTAL_R2_ACCESS_KEY_ID"
+            AWS_SECRET_ACCESS_KEY="$EXPERIMENTAL_R2_SECRET_ACCESS_KEY"
             CLOUDFLARE_ACCOUNT_ID="$EXPERIMENTAL_CLOUDFLARE_ACCOUNT_ID"
             GPG_PUBLIC_KEY_B64="$EXPERIMENTAL_GPG_PUBLIC_KEY_B64"
           fi
-          export CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID
-          unset STABLE_CLOUDFLARE_API_TOKEN STABLE_CLOUDFLARE_ACCOUNT_ID
-          unset EXPERIMENTAL_CLOUDFLARE_API_TOKEN EXPERIMENTAL_CLOUDFLARE_ACCOUNT_ID
+          export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+          unset STABLE_R2_ACCESS_KEY_ID STABLE_R2_SECRET_ACCESS_KEY
+          unset EXPERIMENTAL_R2_ACCESS_KEY_ID EXPERIMENTAL_R2_SECRET_ACCESS_KEY
+          unset STABLE_CLOUDFLARE_ACCOUNT_ID EXPERIMENTAL_CLOUDFLARE_ACCOUNT_ID
           unset STABLE_GPG_PUBLIC_KEY_B64 EXPERIMENTAL_GPG_PUBLIC_KEY_B64
-          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
-            echo "Missing channel-specific Cloudflare R2 authority" >&2
+          if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ] || \
+             [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "Missing channel-specific Cloudflare R2 S3 authority" >&2
             exit 1
           fi
-
-          WRANGLER_ROOT="${RUNNER_TEMP:-/tmp}/wrangler-cli"
-          WRANGLER_BIN="$WRANGLER_ROOT/node_modules/.bin/wrangler"
-          if [ ! -x "$WRANGLER_BIN" ]; then
-            npm install --prefix "$WRANGLER_ROOT" wrangler@4.69.0 >/dev/null
-          fi
-          "$WRANGLER_BIN" --version >&2
+          python3 -m pip install --disable-pip-version-check boto3==1.40.76 >/dev/null
 
           public_key_args=()
           if [ -n "$GPG_PUBLIC_KEY_B64" ]; then
@@ -170,6 +170,6 @@ jobs:
             --selected-run-id "${{ steps.resolve-run.outputs.run_id }}" \
             --selected-run-attempt "${{ steps.resolve-run.outputs.run_attempt }}" \
             --bucket yams-repository \
-            --wrangler "$WRANGLER_BIN" \
+            --endpoint-url "https://${CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com" \
             "${public_key_args[@]}"
           echo "Published $REQUESTED_CHANNEL without pruning any channel objects." >&2

@@ -8,8 +8,8 @@ import json
 import sys
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
-from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "scripts" / "ci" / "publish_repository.py"
@@ -30,13 +30,18 @@ class FakeStore:
         self.fail_on = fail_on
         self.puts: list[str] = []
 
-    def get(self, key: str) -> bytes | None:
-        return self.objects.get(key)
+    def sha256(self, key: str) -> str | None:
+        data = self.objects.get(key)
+        return None if data is None else publish_repository.sha256_bytes(data)
 
-    def put(self, key: str, source: Path, content_type: str) -> None:
+    def put(
+        self, key: str, source: Path, content_type: str, *, overwrite: bool
+    ) -> None:
         del content_type
         if key == self.fail_on:
             raise PublicationError(f"injected failure for {key}")
+        if key in self.objects and not overwrite:
+            raise PublicationError(f"immutable object appeared during upload: {key}")
         self.objects[key] = source.read_bytes()
         self.puts.append(key)
 
@@ -219,61 +224,54 @@ class RepositoryPublicationTests(unittest.TestCase):
         with self.assertRaisesRegex(PublicationError, "unsafe symlink"):
             self.plan("stable")
 
-    def test_wrangler_get_uses_remote_file_semantics(self) -> None:
-        result = publish_repository.subprocess.CompletedProcess(
-            args=[],
-            returncode=1,
-            stdout="",
-            stderr="The specified key does not exist",
-        )
-        store = publish_repository.WranglerObjectStore(Path("/wrangler"), "bucket")
-        with mock.patch.object(
-            publish_repository.subprocess, "run", return_value=result
-        ) as run:
-            self.assertIsNone(store.get("experimental/aptrepo/pkg.deb"))
+    def test_s3_sha256_streams_remote_body(self) -> None:
+        class Client:
+            def get_object(self, **kwargs):
+                self.arguments = kwargs
+                return {"Body": BytesIO(b"payload")}
 
-        command = run.call_args.args[0]
+        client = Client()
+        store = publish_repository.S3ObjectStore(client, "bucket")
         self.assertEqual(
-            command[:5],
-            [
-                "/wrangler",
-                "r2",
-                "object",
-                "get",
-                "bucket/experimental/aptrepo/pkg.deb",
-            ],
+            store.sha256("experimental/aptrepo/pkg.deb"),
+            publish_repository.sha256_bytes(b"payload"),
         )
-        self.assertIn("--remote", command)
-        self.assertIn("--file", command)
+        self.assertEqual(
+            client.arguments,
+            {"Bucket": "bucket", "Key": "experimental/aptrepo/pkg.deb"},
+        )
 
-    def test_wrangler_put_uses_noninteractive_remote_file_semantics(self) -> None:
+    def test_s3_mutable_put_allows_overwrite(self) -> None:
+        class Client:
+            def put_object(self, **kwargs):
+                self.body = kwargs.pop("Body").read()
+                self.arguments = kwargs
+
+        source = self.root / "Release"
+        source.write_bytes(b"metadata")
+        client = Client()
+        store = publish_repository.S3ObjectStore(client, "bucket")
+        store.put("aptrepo/Release", source, "text/plain", overwrite=True)
+        self.assertNotIn("IfNoneMatch", client.arguments)
+        self.assertEqual(client.body, b"metadata")
+
+    def test_s3_immutable_put_is_atomic_create_only(self) -> None:
+        class Client:
+            def put_object(self, **kwargs):
+                self.body = kwargs.pop("Body").read()
+                self.arguments = kwargs
+
         source = self.root / "payload.deb"
         source.write_bytes(b"payload")
-        result = publish_repository.subprocess.CompletedProcess(args=[], returncode=0)
-        store = publish_repository.WranglerObjectStore(Path("/wrangler"), "bucket")
-        with mock.patch.object(
-            publish_repository.subprocess, "run", return_value=result
-        ) as run:
-            store.put("aptrepo/payload.deb", source, "application/octet-stream")
-
-        command = run.call_args.args[0]
-        self.assertEqual(
-            command[:5],
-            [
-                "/wrangler",
-                "r2",
-                "object",
-                "put",
-                "bucket/aptrepo/payload.deb",
-            ],
-        )
-        self.assertIn("--remote", command)
-        self.assertEqual(command[command.index("--file") + 1], str(source))
-        self.assertEqual(
-            command[command.index("--content-type") + 1],
+        client = Client()
+        store = publish_repository.S3ObjectStore(client, "bucket")
+        store.put(
+            "aptrepo/payload.deb",
+            source,
             "application/octet-stream",
+            overwrite=False,
         )
-        self.assertIn("--force", command)
+        self.assertEqual(client.arguments["IfNoneMatch"], "*")
 
 
 if __name__ == "__main__":

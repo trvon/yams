@@ -5,23 +5,18 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib
 import json
 import os
 import re
-import subprocess
 import sys
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 RELEASE_CHANNELS = frozenset({"stable", "nightly", "weekly"})
 PACKAGE_SUFFIXES = (".deb", ".rpm", ".pkg.tar.zst")
 REPOSITORY_DIRS = ("aptrepo", "yumrepo", "archrepo")
-MISSING_OBJECT_RE = re.compile(
-    r"(?:404|object[^\n]*not found|key[^\n]*does not exist|specified key does not exist)",
-    re.IGNORECASE,
-)
 
 
 class PublicationError(RuntimeError):
@@ -46,11 +41,21 @@ class ValidatedManifest:
 
 
 class ObjectStore(Protocol):
-    def get(self, key: str) -> bytes | None:
-        raise NotImplementedError
+    def sha256(self, key: str) -> str | None:
+        return None
 
-    def put(self, key: str, source: Path, content_type: str) -> None:
-        raise NotImplementedError
+    def put(
+        self, key: str, source: Path, content_type: str, *, overwrite: bool
+    ) -> None:
+        return None
+
+
+class S3Client(Protocol):
+    def get_object(self, **kwargs: Any) -> dict[str, Any]:
+        return {}
+
+    def put_object(self, **kwargs: Any) -> dict[str, Any]:
+        return {}
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -256,9 +261,8 @@ def publish(plan: list[PublicationObject], store: ObjectStore) -> None:
             latest_seen = True
 
         if item.immutable:
-            existing = store.get(item.key)
-            if existing is not None:
-                existing_digest = sha256_bytes(existing)
+            existing_digest = store.sha256(item.key)
+            if existing_digest is not None:
                 source_digest = sha256_file(item.source)
                 if existing_digest == source_digest:
                     print(f"immutable object already matches; skipping {item.key}")
@@ -267,70 +271,83 @@ def publish(plan: list[PublicationObject], store: ObjectStore) -> None:
                     f"immutable object conflict for {item.key}: "
                     f"existing sha256={existing_digest}, source sha256={source_digest}"
                 )
-        store.put(item.key, item.source, item.content_type)
+        store.put(
+            item.key,
+            item.source,
+            item.content_type,
+            overwrite=not item.immutable,
+        )
 
     if not latest_seen:
         raise PublicationError("publication plan did not contain latest.json")
 
 
-class WranglerObjectStore:
-    def __init__(self, wrangler: Path, bucket: str) -> None:
-        self.wrangler = wrangler
+def _storage_error_code(error: Exception) -> str:
+    response = getattr(error, "response", None)
+    if not isinstance(response, dict):
+        return ""
+    details = response.get("Error", {})
+    metadata = response.get("ResponseMetadata", {})
+    code = details.get("Code") if isinstance(details, dict) else ""
+    status = metadata.get("HTTPStatusCode") if isinstance(metadata, dict) else ""
+    return str(code or status)
+
+
+class S3ObjectStore:
+    def __init__(self, client: S3Client, bucket: str) -> None:
+        self.client = client
         self.bucket = bucket
 
-    def _target(self, key: str) -> str:
-        return f"{self.bucket}/{key}"
-
-    def get(self, key: str) -> bytes | None:
-        with tempfile.NamedTemporaryFile(delete=False) as temporary:
-            output = Path(temporary.name)
+    def sha256(self, key: str) -> str | None:
         try:
-            result = subprocess.run(
-                [
-                    str(self.wrangler),
-                    "r2",
-                    "object",
-                    "get",
-                    self._target(key),
-                    "--remote",
-                    "--file",
-                    str(output),
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
-            )
-            if result.returncode == 0:
-                return output.read_bytes()
-            diagnostic = f"{result.stdout}\n{result.stderr}".strip()
-            if MISSING_OBJECT_RE.search(diagnostic):
+            response = self.client.get_object(Bucket=self.bucket, Key=key)
+        except Exception as error:
+            if _storage_error_code(error) in {"404", "NoSuchKey", "NotFound"}:
                 return None
             raise PublicationError(
-                f"failed to check immutable object {key!r}; refusing overwrite: {diagnostic}"
-            )
-        finally:
-            output.unlink(missing_ok=True)
+                f"failed to check immutable object {key!r}; refusing overwrite"
+            ) from error
 
-    def put(self, key: str, source: Path, content_type: str) -> None:
+        body = response.get("Body") if isinstance(response, dict) else None
+        if body is None or not hasattr(body, "read"):
+            raise PublicationError(f"R2 returned no body for immutable object {key!r}")
+        digest = hashlib.sha256()
+        try:
+            while chunk := body.read(1024 * 1024):
+                digest.update(chunk)
+        finally:
+            close = getattr(body, "close", None)
+            if callable(close):
+                close()
+        return digest.hexdigest()
+
+    def put(
+        self, key: str, source: Path, content_type: str, *, overwrite: bool
+    ) -> None:
         print(f"uploading {key}", file=sys.stderr)
-        result = subprocess.run(
-            [
-                str(self.wrangler),
-                "r2",
-                "object",
-                "put",
-                self._target(key),
-                "--remote",
-                "--file",
-                str(source),
-                "--content-type",
-                content_type,
-                "--force",
-            ],
-            check=False,
-        )
-        if result.returncode != 0:
-            raise PublicationError(f"R2 upload failed for {key}")
+        arguments = {
+            "Bucket": self.bucket,
+            "Key": key,
+            "ContentType": content_type,
+        }
+        if not overwrite:
+            arguments["IfNoneMatch"] = "*"
+        try:
+            with source.open("rb") as stream:
+                self.client.put_object(Body=stream, **arguments)
+        except Exception as error:
+            if not overwrite:
+                conflict_codes = {
+                    "409",
+                    "412",
+                    "ConditionalRequestConflict",
+                    "PreconditionFailed",
+                }
+                if _storage_error_code(error) in conflict_codes:
+                    raise PublicationError(
+                        f"immutable object appeared during upload: {key}"
+                    ) from error
+            raise PublicationError(f"R2 upload failed for {key}") from error
 
 
 def parse_args() -> argparse.Namespace:
@@ -343,7 +360,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--selected-run-id", type=int, required=True)
     parser.add_argument("--selected-run-attempt", type=int, required=True)
     parser.add_argument("--bucket", default="yams-repository")
-    parser.add_argument("--wrangler", type=Path, required=True)
+    parser.add_argument("--endpoint-url", required=True)
     parser.add_argument("--public-key", type=Path)
     parser.add_argument("--plan-only", action="store_true")
     return parser.parse_args()
@@ -376,11 +393,16 @@ def main() -> int:
                 )
             )
             return 0
-        if not os.environ.get("CLOUDFLARE_API_TOKEN") or not os.environ.get(
-            "CLOUDFLARE_ACCOUNT_ID"
+        if not os.environ.get("AWS_ACCESS_KEY_ID") or not os.environ.get(
+            "AWS_SECRET_ACCESS_KEY"
         ):
-            raise PublicationError("Cloudflare API token/account missing")
-        publish(plan, WranglerObjectStore(args.wrangler, args.bucket))
+            raise PublicationError("R2 S3 access key/secret missing")
+        try:
+            boto3 = importlib.import_module("boto3")
+        except ImportError as error:
+            raise PublicationError("boto3 is required for R2 publication") from error
+        client = boto3.client("s3", endpoint_url=args.endpoint_url, region_name="auto")
+        publish(plan, S3ObjectStore(client, args.bucket))
     except (OSError, PublicationError) as error:
         print(f"repository publication error: {error}", file=sys.stderr)
         return 2
