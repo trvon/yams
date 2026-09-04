@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -32,6 +33,14 @@ def resolve_source(scenario: Scenario) -> tuple[str, str]:
         else "nightly"
     )
     return source_sha, effective_channel
+
+
+def nightly_tag(date: str, source_sha: str) -> str:
+    if re.fullmatch(r"[0-9a-f]{40}", source_sha) is None:
+        raise ValueError("nightly tags require a full source SHA")
+    if re.fullmatch(r"[0-9]{8}", date) is None:
+        raise ValueError("nightly tags require a compact UTC date")
+    return f"experimental-nightly-{date}-{source_sha}"
 
 
 def scenario_failures() -> list[str]:
@@ -96,6 +105,17 @@ def scenario_failures() -> list[str]:
         failures.append("divergent histories must release when exact SHAs differ")
     if should_release("same", "same", compare_available=False):
         failures.append("equal release SHAs must not publish again")
+
+    source_sha = "a" * 40
+    if nightly_tag("20260101", source_sha) != (
+        "experimental-nightly-20260101-" + source_sha
+    ):
+        failures.append("nightly tag is not immutable")
+    try:
+        nightly_tag("20260101", "aaaaaaa")
+        failures.append("short SHA was accepted for an immutable nightly tag")
+    except ValueError:
+        pass
     return failures
 
 
@@ -120,6 +140,35 @@ def main() -> int:
         "cancel-in-progress: false",
         "if (lastSha !== currentSha)",
         "comparison was unavailable",
+        'TAG_OUT="experimental-nightly-${DATE_COMPACT}-${SOURCE_SHA}"',
+        "immutableNightly = /^experimental-nightly-[0-9]{8}-[0-9a-f]{40}$/",
+        "Nightly tag ${tagName} did not resolve safely to a commit",
+        "name: Require successful Tests run for exact experimental source",
+        "workflow_id: 'tests.yml'",
+        "run.status === 'completed'",
+        "run.conclusion === 'success'",
+        "run.head_sha === sourceSha",
+        "tests_run_id: ${{ steps.tests.outputs.tests_run_id }}",
+        "tests_run_attempt: ${{ steps.tests.outputs.tests_run_attempt }}",
+        "tests_run_url: ${{ steps.tests.outputs.tests_run_url }}",
+        "runs_on: ubuntu-24.04-arm",
+        "arch_name: x86_64",
+        "arch_name: aarch64",
+        "docker_platform: linux/amd64",
+        "docker_platform: linux/arm64",
+        "name: Inspect and install-validate Arch package natively",
+        'bash scripts/local-ci/package-validate.sh --only arch --arch "$ARCH_PKG_PATH"',
+        "name: Generate and validate release manifest (latest.json)",
+        "scripts/ci/generate_release_manifest.py",
+        '--source-sha "${{ needs.resolve-release.outputs.source_sha }}"',
+        '--tests-run-id "${{ needs.resolve-release.outputs.tests_run_id }}"',
+        '--tests-run-attempt "${{ needs.resolve-release.outputs.tests_run_attempt }}"',
+        "subject-checksums: assets/SHA256SUMS",
+        "uses: actions/attest@11bbd243972067817e9ed160cb123cab3601f436",
+        "predicate-type: https://yamsmemory.ai/attestations/release-source/v1",
+        "predicate-path: release-provenance.json",
+        "id-token: write",
+        "attestations: write",
     )
     required_warm = (
         "checkout_ref:",
@@ -142,6 +191,11 @@ def main() -> int:
         failures.append("nightly freshness must not resolve main")
     if release.count("DATE_COMPACT=$(date -u +%Y%m%d)") != 1:
         failures.append("nightly metadata must be derived exactly once")
+    if (
+        release.count('TAG_OUT="experimental-nightly-${DATE_COMPACT}-${SOURCE_SHA}"')
+        != 1
+    ):
+        failures.append("nightly tag must be derived exactly once from the full SHA")
     if release.count("YEAR=$(date -u +%G)") != 1:
         failures.append("weekly metadata must be derived exactly once")
     if release.count('VERSION="${TAG#yams-v}"') != 1:
@@ -150,6 +204,45 @@ def main() -> int:
         failures.append("base version must be derived exactly once")
     if "github.event.workflow_run.head_sha || github.ref" in release:
         failures.append("release checkout still permits mutable ref drift")
+
+    arch_x86 = release.find("- os: arch-linux-hosted-x86_64")
+    arch_arm = release.find("- os: arch-linux-hosted-aarch64")
+    upload = release.find("- name: Upload validated release artifacts")
+    arch_validation = release.find(
+        "- name: Inspect and install-validate Arch package natively"
+    )
+    linux_validation = release.find("- name: Validate Linux package install")
+    if min(arch_x86, arch_arm, arch_validation, linux_validation, upload) < 0:
+        failures.append("release package lane ordering controls are incomplete")
+    elif not (arch_x86 < arch_arm < arch_validation < linux_validation < upload):
+        failures.append("package validation must complete before artifact upload")
+
+    manifest = release.find("- name: Generate and validate release manifest")
+    attestation = release.find(
+        "- name: Attest validated release distributables to exact source"
+    )
+    draft_release = release.find("- name: Create or update GitHub Release")
+    publish_release = release.find("- name: Publish GitHub Release")
+    if min(manifest, attestation, draft_release, publish_release) < 0:
+        failures.append("manifest, attestation, or release publication step missing")
+    elif not (manifest < attestation < draft_release < publish_release):
+        failures.append(
+            "attestation must follow manifest and precede release publication"
+        )
+
+    create_release = release[release.find("  create-release:") :]
+    if create_release.count("id-token: write") != 1:
+        failures.append("create-release must own the only id-token:write grant")
+    if release[: release.find("  create-release:")].count("id-token: write") != 0:
+        failures.append("id-token:write must not be granted outside create-release")
+    if re.search(r"actions/attest(?:-build-provenance)?@(?:v|main|master)", release):
+        failures.append("provenance action must be pinned to a full commit SHA")
+    if "actions/attest-build-provenance@" in release:
+        failures.append(
+            "default event-SHA provenance must not describe experimental assets"
+        )
+    if re.search(r"\bqemu\b|emulat", release, re.IGNORECASE):
+        failures.append("Arch lanes must not claim or configure emulation")
 
     if failures:
         print("\n".join(failures))
