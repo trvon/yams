@@ -165,7 +165,7 @@ src/metadata/versioning_util.cpp:101:portability/env-read # reviewed raw environ
 src/plugins/plugin_repo_client.cpp:62:portability/env-read # reviewed raw environment read
 src/search/search_engine.cpp:378:portability/env-read # reviewed raw environment read
 src/search/search_engine.cpp:391:portability/env-read # reviewed raw environment read
-src/search/search_engine.cpp:3300:portability/env-read # reviewed raw environment read
+src/search/search_engine.cpp:3165:portability/env-read # reviewed raw environment read
 src/search/search_lexical_pipeline.cpp:605:portability/env-read # reviewed raw environment read
 src/storage/compressed_storage_engine.cpp:632:portability/env-read # reviewed raw environment read
 src/storage/object_storage_plugin_loader.cpp:126:portability/env-read # reviewed raw environment read

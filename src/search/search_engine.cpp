@@ -3051,8 +3051,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         graphVectorGeneratedTerms = graphTerms.size();
         size_t multiVecHits = 0;
         size_t baseVectorCount = 0;
-        std::vector<ComponentResult> mergedVectorResults;
-        std::vector<ComponentResult> mergedGraphVectorResults;
 
         if (!subPhrases.empty() || !graphTerms.empty()) {
             spdlog::debug("multi_vector: generated {} sub-phrases from query '{}'",
@@ -3060,83 +3058,10 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
             spdlog::debug("graph_vector: generated {} graph terms from query '{}'",
                           graphTerms.size(), query.substr(0, 60));
 
-            std::vector<ComponentResult> nonVectorResults;
-            nonVectorResults.reserve(allComponentResults.size());
-
-            std::unordered_map<std::string, size_t> bestVectorByHash;
-            bestVectorByHash.reserve(workingConfig.vectorMaxResults * 2);
-            std::unordered_map<std::string, size_t> bestGraphVectorByHash;
-            bestGraphVectorByHash.reserve(workingConfig.vectorMaxResults * 2);
-            std::unordered_set<std::string> graphVectorCorroboratedHashes;
-            graphVectorCorroboratedHashes.reserve(allComponentResults.size() * 2);
-            std::unordered_set<std::string> graphVectorTextAnchoredHashes;
-            graphVectorTextAnchoredHashes.reserve(allComponentResults.size() * 2);
-            std::unordered_set<std::string> graphVectorBaselineTextAnchoredHashes;
-            graphVectorBaselineTextAnchoredHashes.reserve(allComponentResults.size() * 2);
-
-            for (const auto& cr : allComponentResults) {
-                if (cr.source == ComponentResult::Source::Vector ||
-                    cr.source == ComponentResult::Source::EntityVector) {
-                    if (cr.documentHash.empty()) {
-                        continue;
-                    }
-
-                    ++baseVectorCount;
-                    graphVectorCorroboratedHashes.insert(cr.documentHash);
-                    auto it = bestVectorByHash.find(cr.documentHash);
-                    if (it == bestVectorByHash.end()) {
-                        bestVectorByHash.emplace(cr.documentHash, mergedVectorResults.size());
-                        mergedVectorResults.push_back(cr);
-                    } else if (cr.score > mergedVectorResults[it->second].score) {
-                        mergedVectorResults[it->second] = cr;
-                    }
-                    continue;
-                }
-                if (cr.source == ComponentResult::Source::GraphVector) {
-                    if (cr.documentHash.empty()) {
-                        continue;
-                    }
-                    auto it = bestGraphVectorByHash.find(cr.documentHash);
-                    if (it == bestGraphVectorByHash.end()) {
-                        bestGraphVectorByHash.emplace(cr.documentHash,
-                                                      mergedGraphVectorResults.size());
-                        mergedGraphVectorResults.push_back(cr);
-                    } else if (cr.score > mergedGraphVectorResults[it->second].score) {
-                        mergedGraphVectorResults[it->second] = cr;
-                    }
-                    continue;
-                }
-                {
-                    if (!cr.documentHash.empty()) {
-                        if (isTextAnchoringComponent(cr.source) ||
-                            cr.source == ComponentResult::Source::KnowledgeGraph) {
-                            graphVectorCorroboratedHashes.insert(cr.documentHash);
-                        }
-                        if (cr.source == ComponentResult::Source::Text ||
-                            cr.source == ComponentResult::Source::SimeonText ||
-                            cr.source == ComponentResult::Source::GraphText ||
-                            cr.source == ComponentResult::Source::PathTree ||
-                            cr.source == ComponentResult::Source::KnowledgeGraph ||
-                            cr.source == ComponentResult::Source::Tag ||
-                            cr.source == ComponentResult::Source::Metadata ||
-                            cr.source == ComponentResult::Source::Symbol) {
-                            graphVectorTextAnchoredHashes.insert(cr.documentHash);
-                        }
-                        if (cr.source == ComponentResult::Source::Text ||
-                            cr.source == ComponentResult::Source::SimeonText ||
-                            cr.source == ComponentResult::Source::PathTree ||
-                            cr.source == ComponentResult::Source::KnowledgeGraph ||
-                            cr.source == ComponentResult::Source::Symbol) {
-                            graphVectorBaselineTextAnchoredHashes.insert(cr.documentHash);
-                        }
-                    }
-                    nonVectorResults.push_back(cr);
-                }
-            }
-
-            const float decay = std::clamp(workingConfig.multiVectorScoreDecay, 0.1f, 1.0f);
-            const float graphPenalty =
-                std::clamp(workingConfig.graphExpansionVectorPenalty, 0.1f, 1.0f);
+            std::vector<detail::AuxiliaryVectorCandidateBatch> subPhraseCandidates;
+            subPhraseCandidates.reserve(subPhrases.size());
+            std::vector<detail::AuxiliaryVectorCandidateBatch> graphTermCandidates;
+            graphTermCandidates.reserve(graphTerms.size());
 
             for (size_t pi = 0; pi < subPhrases.size(); ++pi) {
                 try {
@@ -3150,30 +3075,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     if (!subResults || subResults.value().empty()) {
                         continue;
                     }
-                    multiVectorPhraseHits += subResults.value().size();
-
-                    for (const auto& rawResult : subResults.value()) {
-                        ComponentResult cr = rawResult;
-                        if (cr.documentHash.empty()) {
-                            continue;
-                        }
-
-                        cr.score *= decay;
-                        cr.debugInfo["multi_vector_phrase"] = subPhrases[pi];
-                        cr.debugInfo["multi_vector_phrase_idx"] = std::to_string(pi);
-
-                        auto it = bestVectorByHash.find(cr.documentHash);
-                        if (it == bestVectorByHash.end()) {
-                            bestVectorByHash.emplace(cr.documentHash, mergedVectorResults.size());
-                            mergedVectorResults.push_back(std::move(cr));
-                            ++multiVecHits;
-                            ++multiVectorAddedNewCount;
-                        } else if (cr.score > mergedVectorResults[it->second].score) {
-                            mergedVectorResults[it->second] = std::move(cr);
-                            ++multiVecHits;
-                            ++multiVectorReplacedBaseCount;
-                        }
-                    }
+                    subPhraseCandidates.push_back({.query = subPhrases[pi],
+                                                   .queryIndex = pi,
+                                                   .candidates = std::move(subResults.value())});
                 } catch (const std::exception& e) {
                     spdlog::warn("multi_vector: sub-phrase embedding failed for '{}': {}",
                                  subPhrases[pi], e.what());
@@ -3191,73 +3095,34 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                     if (!graphResults || graphResults.value().empty()) {
                         continue;
                     }
-                    graphVectorRawHitCount += graphResults.value().size();
-
-                    for (const auto& rawResult : graphResults.value()) {
-                        ComponentResult cr = rawResult;
-                        if (cr.documentHash.empty()) {
-                            continue;
-                        }
-                        if (workingConfig.graphVectorRequireCorroboration &&
-                            !graphVectorCorroboratedHashes.contains(cr.documentHash)) {
-                            ++graphVectorBlockedUncorroboratedCount;
-                            continue;
-                        }
-                        if (workingConfig.graphVectorRequireTextAnchoring &&
-                            !graphVectorTextAnchoredHashes.contains(cr.documentHash)) {
-                            ++graphVectorBlockedMissingTextAnchorCount;
-                            continue;
-                        }
-                        if (workingConfig.graphVectorRequireBaselineTextAnchoring &&
-                            !graphVectorBaselineTextAnchoredHashes.contains(cr.documentHash)) {
-                            ++graphVectorBlockedMissingBaselineTextAnchorCount;
-                            continue;
-                        }
-                        cr.source = ComponentResult::Source::GraphVector;
-                        cr.score *= (graphPenalty * std::clamp(graphTerms[gi].score, 0.2f, 1.0f));
-                        cr.debugInfo["graph_vector_term"] = graphTerms[gi].text;
-                        cr.debugInfo["graph_vector_term_idx"] = std::to_string(gi);
-
-                        auto it = bestGraphVectorByHash.find(cr.documentHash);
-                        if (it == bestGraphVectorByHash.end()) {
-                            bestGraphVectorByHash.emplace(cr.documentHash,
-                                                          mergedGraphVectorResults.size());
-                            mergedGraphVectorResults.push_back(std::move(cr));
-                            ++graphVectorAddedNewCount;
-                        } else if (cr.score > mergedGraphVectorResults[it->second].score) {
-                            mergedGraphVectorResults[it->second] = std::move(cr);
-                            ++graphVectorReplacedBaseCount;
-                        }
-                    }
+                    graphTermCandidates.push_back({.query = graphTerms[gi].text,
+                                                   .queryIndex = gi,
+                                                   .weight = graphTerms[gi].score,
+                                                   .candidates = std::move(graphResults.value())});
                 } catch (const std::exception& e) {
                     spdlog::warn("graph_vector: term embedding failed for '{}': {}",
                                  graphTerms[gi].text, e.what());
                 }
             }
 
-            std::sort(mergedVectorResults.begin(), mergedVectorResults.end(),
-                      [](const auto& a, const auto& b) { return a.score > b.score; });
-            if (mergedVectorResults.size() > workingConfig.vectorMaxResults) {
-                mergedVectorResults.resize(workingConfig.vectorMaxResults);
-            }
-            for (size_t i = 0; i < mergedVectorResults.size(); ++i) {
-                mergedVectorResults[i].rank = i;
-            }
-
-            std::sort(mergedGraphVectorResults.begin(), mergedGraphVectorResults.end(),
-                      [](const auto& a, const auto& b) { return a.score > b.score; });
-            if (mergedGraphVectorResults.size() > workingConfig.vectorMaxResults) {
-                mergedGraphVectorResults.resize(workingConfig.vectorMaxResults);
-            }
-            for (size_t i = 0; i < mergedGraphVectorResults.size(); ++i) {
-                mergedGraphVectorResults[i].rank = i;
-            }
-
-            allComponentResults = std::move(nonVectorResults);
-            allComponentResults.insert(allComponentResults.end(), mergedVectorResults.begin(),
-                                       mergedVectorResults.end());
-            allComponentResults.insert(allComponentResults.end(), mergedGraphVectorResults.begin(),
-                                       mergedGraphVectorResults.end());
+            auto merged = detail::mergeAuxiliaryVectorCandidates(
+                std::move(allComponentResults), std::move(subPhraseCandidates),
+                std::move(graphTermCandidates), workingConfig);
+            allComponentResults = std::move(merged.components);
+            baseVectorCount = merged.stats.baseVectorCount;
+            multiVectorPhraseHits = merged.stats.multiVectorRawHitCount;
+            multiVecHits = merged.stats.multiVectorMergedCount;
+            multiVectorAddedNewCount = merged.stats.multiVectorAddedNewCount;
+            multiVectorReplacedBaseCount = merged.stats.multiVectorReplacedBaseCount;
+            graphVectorRawHitCount = merged.stats.graphVectorRawHitCount;
+            graphVectorAddedNewCount = merged.stats.graphVectorAddedNewCount;
+            graphVectorReplacedBaseCount = merged.stats.graphVectorReplacedBaseCount;
+            graphVectorBlockedUncorroboratedCount =
+                merged.stats.graphVectorBlockedUncorroboratedCount;
+            graphVectorBlockedMissingTextAnchorCount =
+                merged.stats.graphVectorBlockedMissingTextAnchorCount;
+            graphVectorBlockedMissingBaselineTextAnchorCount =
+                merged.stats.graphVectorBlockedMissingBaselineTextAnchorCount;
         }
 
         auto mvEnd = std::chrono::steady_clock::now();

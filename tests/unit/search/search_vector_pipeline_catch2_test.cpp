@@ -212,3 +212,117 @@ TEST_CASE("Vector pipeline candidate rescue enriches an existing lexical candida
     CHECK(merged.results[1].debugInfo.at("candidate_rescue") == "1");
     CHECK(merged.results[1].debugInfo.at("candidate_rescue_kind") == "evidence");
 }
+
+TEST_CASE("Vector pipeline merges auxiliary candidates with stable policy counters",
+          "[search][vector][auxiliary][catch2]") {
+    using yams::search::ComponentResult;
+    using yams::search::detail::AuxiliaryVectorCandidateBatch;
+
+    SearchEngineConfig config;
+    config.vectorMaxResults = 3;
+    config.multiVectorScoreDecay = 0.5F;
+    config.graphExpansionVectorPenalty = 0.5F;
+    config.graphVectorRequireCorroboration = true;
+    config.graphVectorRequireTextAnchoring = true;
+    config.graphVectorRequireBaselineTextAnchoring = true;
+
+    std::vector<ComponentResult> components{
+        {.documentHash = "anchor", .score = 0.7F, .source = ComponentResult::Source::Text},
+        {.documentHash = "base-b", .score = 0.6F, .source = ComponentResult::Source::Vector},
+        {.documentHash = "base-a", .score = 0.6F, .source = ComponentResult::Source::Vector},
+        {.documentHash = "base-a", .score = 0.8F, .source = ComponentResult::Source::EntityVector},
+    };
+    std::vector<AuxiliaryVectorCandidateBatch> phrases{
+        {.query = "first",
+         .candidates = {{.documentHash = "phrase-new", .score = 1.2F},
+                        {.documentHash = "base-b", .score = 1.4F}}},
+        {.query = "second",
+         .candidates = {{.documentHash = "base-b", .score = 1.6F},
+                        {.documentHash = "tie-z", .score = 1.0F},
+                        {.documentHash = "tie-a", .score = 1.0F}}},
+    };
+    std::vector<AuxiliaryVectorCandidateBatch> graphTerms{
+        {.query = "blocked",
+         .weight = 1.0F,
+         .candidates = {{.documentHash = "uncorroborated", .score = 1.0F}}},
+        {.query = "allowed",
+         .weight = 0.8F,
+         .candidates = {{.documentHash = "anchor", .score = 1.0F},
+                        {.documentHash = "anchor", .score = 1.2F}}},
+    };
+
+    auto merged = yams::search::detail::mergeAuxiliaryVectorCandidates(
+        std::move(components), std::move(phrases), std::move(graphTerms), config);
+
+    CHECK(merged.stats.baseVectorCount == 3U);
+    CHECK(merged.stats.multiVectorRawHitCount == 5U);
+    CHECK(merged.stats.multiVectorAddedNewCount == 3U);
+    CHECK(merged.stats.multiVectorReplacedBaseCount == 2U);
+    CHECK(merged.stats.multiVectorMergedCount == 5U);
+    CHECK(merged.stats.graphVectorRawHitCount == 3U);
+    CHECK(merged.stats.graphVectorAddedNewCount == 1U);
+    CHECK(merged.stats.graphVectorReplacedBaseCount == 1U);
+    CHECK(merged.stats.graphVectorBlockedUncorroboratedCount == 1U);
+    CHECK(merged.stats.graphVectorBlockedMissingTextAnchorCount == 0U);
+    CHECK(merged.stats.graphVectorBlockedMissingBaselineTextAnchorCount == 0U);
+
+    REQUIRE(merged.components.size() == 5U);
+    CHECK(merged.components[0].source == ComponentResult::Source::Text);
+    const auto vectorsBegin = merged.components.begin() + 1;
+    REQUIRE(std::distance(vectorsBegin, merged.components.end()) == 4);
+    CHECK(((vectorsBegin[0].documentHash == "base-a" && vectorsBegin[1].documentHash == "base-b") ||
+           (vectorsBegin[0].documentHash == "base-b" && vectorsBegin[1].documentHash == "base-a")));
+    const auto& baseA =
+        vectorsBegin[vectorsBegin[0].documentHash == "base-a" ? std::size_t{0} : std::size_t{1}];
+    const auto& baseB =
+        vectorsBegin[vectorsBegin[0].documentHash == "base-b" ? std::size_t{0} : std::size_t{1}];
+    CHECK(baseA.score == Catch::Approx(0.8F));
+    CHECK(baseB.score == Catch::Approx(0.8F));
+    CHECK(baseB.debugInfo.at("multi_vector_phrase") == "second");
+    CHECK(vectorsBegin[2].documentHash == "phrase-new");
+    CHECK(vectorsBegin[2].score == Catch::Approx(0.6F));
+    CHECK(vectorsBegin[2].rank == 2U);
+    CHECK(vectorsBegin[3].documentHash == "anchor");
+    CHECK(vectorsBegin[3].source == ComponentResult::Source::GraphVector);
+    CHECK(vectorsBegin[3].score == Catch::Approx(0.48F));
+    CHECK(vectorsBegin[3].rank == 0U);
+    CHECK(vectorsBegin[3].debugInfo.at("graph_vector_term") == "allowed");
+}
+
+TEST_CASE("Vector pipeline applies graph gates independently without defining equal-score order",
+          "[search][vector][auxiliary][graph-gates][catch2]") {
+    using yams::search::ComponentResult;
+    using yams::search::detail::AuxiliaryVectorCandidateBatch;
+
+    SearchEngineConfig config;
+    config.vectorMaxResults = 4;
+    config.graphExpansionVectorPenalty = 1.0F;
+    config.graphVectorRequireCorroboration = false;
+    config.graphVectorRequireTextAnchoring = true;
+    config.graphVectorRequireBaselineTextAnchoring = true;
+
+    std::vector<ComponentResult> components{
+        {.documentHash = "graph-only", .score = 0.9F, .source = ComponentResult::Source::GraphText},
+        {.documentHash = "baseline", .score = 0.8F, .source = ComponentResult::Source::Text},
+        {.documentHash = "z", .score = 0.4F, .source = ComponentResult::Source::Vector},
+        {.documentHash = "a", .score = 0.4F, .source = ComponentResult::Source::Vector},
+    };
+    std::vector<AuxiliaryVectorCandidateBatch> graphTerms{
+        {.query = "term",
+         .weight = 1.0F,
+         .candidates = {{.documentHash = "missing-text", .score = 0.8F},
+                        {.documentHash = "graph-only", .score = 0.8F},
+                        {.documentHash = "baseline", .score = 0.8F}}},
+    };
+
+    auto merged = yams::search::detail::mergeAuxiliaryVectorCandidates(
+        std::move(components), {}, std::move(graphTerms), config);
+
+    CHECK(merged.stats.graphVectorBlockedMissingTextAnchorCount == 1U);
+    CHECK(merged.stats.graphVectorBlockedMissingBaselineTextAnchorCount == 1U);
+    CHECK(merged.stats.graphVectorAddedNewCount == 1U);
+    REQUIRE(merged.components.size() == 5U);
+    CHECK(((merged.components[2].documentHash == "a" && merged.components[3].documentHash == "z") ||
+           (merged.components[2].documentHash == "z" && merged.components[3].documentHash == "a")));
+    CHECK(merged.components[4].documentHash == "baseline");
+}
