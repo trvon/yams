@@ -22,6 +22,7 @@
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
+#include <yams/repair/embedding_repair_util.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
 
@@ -2904,52 +2905,21 @@ RepairService::generateMissingEmbeddingsAsync(const RepairRequest& req, const Pr
         progress(ev);
     }
 
-    metadata::DocumentQueryOptions queryOpts;
-    if (!req.force) {
-        queryOpts.hasEmbedding = false;
-    }
-    auto docs = meta->queryDocumentsForGrepCandidates(queryOpts);
-    if (!docs) {
+    auto candidateScanResult =
+        repair::selectEmbeddingRepairCandidates(*meta, req.includeMime, req.force);
+    if (!candidateScanResult) {
         result.message = "Failed to query";
         co_return result;
     }
-
-    auto isEmbeddable = [&req](const std::string& m) -> bool {
-        if (m.rfind("text/", 0) == 0)
-            return true;
-        if (m == "application/json" || m == "application/xml" || m == "application/x-yaml" ||
-            m == "application/yaml")
-            return true;
-        for (const auto& inc : req.includeMime) {
-            if (!inc.empty() && (m == inc || m.rfind(inc, 0) == 0))
-                return true;
-        }
-        return false;
-    };
-
-    std::vector<std::string> hashes;
-    size_t eligibleByMime = 0;
-    size_t eligibleByExtractedText = 0;
-    std::vector<std::string> excludedSamples;
-    for (const auto& d : docs.value()) {
-        const bool hasExtractedText = d.contentExtracted;
-        if (isEmbeddable(d.mimeType)) {
-            ++eligibleByMime;
-            hashes.push_back(d.sha256Hash);
-        } else if (hasExtractedText) {
-            ++eligibleByExtractedText;
-            hashes.push_back(d.sha256Hash);
-        } else if (excludedSamples.size() < 8) {
-            excludedSamples.push_back(d.filePath + " mime=" + d.mimeType +
-                                      " extracted=" + std::string(d.contentExtracted ? "1" : "0"));
-        }
-    }
+    auto candidateScan = std::move(candidateScanResult.value());
+    const auto& hashes = candidateScan.documentHashes;
 
     spdlog::info("RepairService::generateMissingEmbeddingsAsync candidates: scanned={} eligible={} "
                  "eligible_by_mime={} eligible_by_extracted_text={} excluded_samples=[{}] "
                  "force={} missing_only_query={}",
-                 docs.value().size(), hashes.size(), eligibleByMime, eligibleByExtractedText,
-                 excludedSamples.size(), req.force ? 1 : 0, req.force ? 0 : 1);
+                 candidateScan.documentsScanned, hashes.size(), candidateScan.eligibleByMime,
+                 candidateScan.eligibleByExtractedText, candidateScan.excludedSamples.size(),
+                 req.force ? 1 : 0, req.force ? 0 : 1);
 
     if (progress) {
         RepairEvent ev;
@@ -3097,52 +3067,21 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
         progress(ev);
     }
 
-    metadata::DocumentQueryOptions queryOpts;
-    if (!req.force) {
-        queryOpts.hasEmbedding = false;
-    }
-    auto docs = meta->queryDocumentsForGrepCandidates(queryOpts);
-    if (!docs) {
+    auto candidateScanResult =
+        repair::selectEmbeddingRepairCandidates(*meta, req.includeMime, req.force);
+    if (!candidateScanResult) {
         result.message = "Failed to query";
         return result;
     }
-
-    // Filter for embeddable MIME types
-    auto isEmbeddable = [&req](const std::string& m) -> bool {
-        if (m.rfind("text/", 0) == 0)
-            return true;
-        if (m == "application/json" || m == "application/xml" || m == "application/x-yaml" ||
-            m == "application/yaml")
-            return true;
-        for (const auto& inc : req.includeMime)
-            if (!inc.empty() && (m == inc || m.rfind(inc, 0) == 0))
-                return true;
-        return false;
-    };
-
-    std::vector<std::string> hashes;
-    size_t eligibleByMime = 0;
-    size_t eligibleByExtractedText = 0;
-    std::vector<std::string> excludedSamples;
-    for (const auto& d : docs.value()) {
-        const bool hasExtractedText = d.contentExtracted;
-        if (isEmbeddable(d.mimeType)) {
-            ++eligibleByMime;
-            hashes.push_back(d.sha256Hash);
-        } else if (hasExtractedText) {
-            ++eligibleByExtractedText;
-            hashes.push_back(d.sha256Hash);
-        } else if (excludedSamples.size() < 8) {
-            excludedSamples.push_back(d.filePath + " mime=" + d.mimeType +
-                                      " extracted=" + std::string(d.contentExtracted ? "1" : "0"));
-        }
-    }
+    auto candidateScan = std::move(candidateScanResult.value());
+    const auto& hashes = candidateScan.documentHashes;
 
     spdlog::info("RepairService::generateMissingEmbeddings candidates: scanned={} eligible={} "
                  "eligible_by_mime={} eligible_by_extracted_text={} excluded_samples=[{}] "
                  "force={} missing_only_query={}",
-                 docs.value().size(), hashes.size(), eligibleByMime, eligibleByExtractedText,
-                 excludedSamples.size(), req.force ? 1 : 0, req.force ? 0 : 1);
+                 candidateScan.documentsScanned, hashes.size(), candidateScan.eligibleByMime,
+                 candidateScan.eligibleByExtractedText, candidateScan.excludedSamples.size(),
+                 req.force ? 1 : 0, req.force ? 0 : 1);
 
     if (progress) {
         RepairEvent ev;

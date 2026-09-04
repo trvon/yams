@@ -43,6 +43,24 @@ struct EmbeddingRepairConfig {
     std::atomic<bool>* cancelRequested = nullptr;
 };
 
+struct EmbeddingRepairCandidateScan {
+    std::vector<std::string> documentHashes;
+    size_t documentsScanned = 0;
+    size_t eligibleByMime = 0;
+    size_t eligibleByExtractedText = 0;
+    std::vector<std::string> excludedSamples;
+};
+
+/**
+ * Select metadata documents eligible for embedding repair.
+ *
+ * Normal scans query only documents missing embeddings; force scans query all documents.
+ * Text-like MIME types, requested MIME prefixes, and documents with extracted content are eligible.
+ */
+Result<EmbeddingRepairCandidateScan>
+selectEmbeddingRepairCandidates(metadata::IMetadataRepository& metadataRepo,
+                                const std::vector<std::string>& includeMimePrefixes, bool force);
+
 class BulkIngestLease {
 public:
     BulkIngestLease() = default;

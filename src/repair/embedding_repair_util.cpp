@@ -10,6 +10,7 @@
 #include <yams/vector/vector_database.h>
 
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <ctime>
@@ -31,6 +32,21 @@ namespace {
 constexpr size_t kMaxTextForEmbeddingBytes = 1'000'000; // 1MB (advisory)
 constexpr size_t kMaxTextToPersistInMetadataBytes =
     size_t{16} * 1024 * 1024; // 16 MiB (best-effort)
+constexpr size_t kMaxEmbeddingRepairExcludedSamples = 8;
+
+bool isEmbeddingRepairMimeEligible(std::string_view mimeType,
+                                   const std::vector<std::string>& includeMimePrefixes) {
+    if (mimeType.starts_with("text/") || mimeType == "application/json" ||
+        mimeType == "application/xml" || mimeType == "application/x-yaml" ||
+        mimeType == "application/yaml") {
+        return true;
+    }
+
+    return std::any_of(includeMimePrefixes.begin(), includeMimePrefixes.end(),
+                       [mimeType](const std::string& prefix) {
+                           return !prefix.empty() && mimeType.starts_with(prefix);
+                       });
+}
 
 bool isLikelyTextualMime(std::string_view mimeType) {
     return mimeType.starts_with("text/") || mimeType == "application/json" ||
@@ -165,6 +181,42 @@ private:
     int fd_;
 };
 } // namespace
+
+Result<EmbeddingRepairCandidateScan>
+selectEmbeddingRepairCandidates(metadata::IMetadataRepository& metadataRepo,
+                                const std::vector<std::string>& includeMimePrefixes, bool force) {
+    metadata::DocumentQueryOptions queryOptions;
+    if (!force) {
+        queryOptions.hasEmbedding = false;
+    }
+
+    auto documents = metadataRepo.queryDocumentsForGrepCandidates(queryOptions);
+    if (!documents) {
+        return documents.error();
+    }
+
+    EmbeddingRepairCandidateScan scan;
+    scan.documentsScanned = documents.value().size();
+    scan.documentHashes.reserve(scan.documentsScanned);
+    scan.excludedSamples.reserve(
+        std::min(scan.documentsScanned, kMaxEmbeddingRepairExcludedSamples));
+
+    for (const auto& document : documents.value()) {
+        if (isEmbeddingRepairMimeEligible(document.mimeType, includeMimePrefixes)) {
+            ++scan.eligibleByMime;
+            scan.documentHashes.push_back(document.sha256Hash);
+        } else if (document.contentExtracted) {
+            ++scan.eligibleByExtractedText;
+            scan.documentHashes.push_back(document.sha256Hash);
+        } else if (scan.excludedSamples.size() < kMaxEmbeddingRepairExcludedSamples) {
+            scan.excludedSamples.push_back(
+                document.filePath + " mime=" + document.mimeType +
+                " extracted=" + std::string(document.contentExtracted ? "1" : "0"));
+        }
+    }
+
+    return scan;
+}
 
 Result<EmbeddingRepairStats>
 repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
