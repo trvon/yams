@@ -8,8 +8,6 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/daemon/components/CheckpointManager.h>
-#include <yams/metadata/connection_pool.h>
-#include <yams/metadata/metadata_repository.h>
 
 #include <boost/asio/io_context.hpp>
 
@@ -24,17 +22,13 @@ using namespace std::chrono_literals;
 
 namespace {
 
-class CountingMetadataRepository : public yams::metadata::MetadataRepository {
-public:
-    explicit CountingMetadataRepository(yams::metadata::ConnectionPool& pool)
-        : yams::metadata::MetadataRepository(pool) {}
-
-    yams::Result<void> checkpointWal() override {
+struct WalCheckpointRecorder {
+    yams::Result<void> checkpointWal() {
         ++passiveCalls;
         return {};
     }
 
-    yams::Result<void> checkpointWalTruncate() override {
+    yams::Result<void> checkpointWalTruncate() {
         ++truncateCalls;
         return {};
     }
@@ -42,6 +36,12 @@ public:
     int passiveCalls{0};
     int truncateCalls{0};
 };
+
+void bindWalCallbacks(CheckpointManager::Dependencies& deps,
+                      const std::shared_ptr<WalCheckpointRecorder>& recorder) {
+    deps.checkpointWal = [recorder]() { return recorder->checkpointWal(); };
+    deps.checkpointWalTruncate = [recorder]() { return recorder->checkpointWalTruncate(); };
+}
 
 void createSparseFile(const std::filesystem::path& path, std::uint64_t sizeBytes) {
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
@@ -207,70 +207,96 @@ TEST_CASE_METHOD(CheckpointManagerFixture, "CheckpointManager manual checkpoint"
     }
 }
 
-TEST_CASE_METHOD(CheckpointManagerFixture, "CheckpointManager routine checkpoint is passive",
+TEST_CASE_METHOD(CheckpointManagerFixture, "CheckpointManager missing WAL callbacks are a no-op",
                  "[daemon][components][checkpoint][catch2]") {
-    yams::metadata::ConnectionPoolConfig poolConfig;
-    poolConfig.minConnections = 1;
-    poolConfig.maxConnections = 1;
-    poolConfig.enableWAL = true;
-    yams::metadata::ConnectionPool pool((tempDir / "metadata.db").string(), poolConfig);
-    REQUIRE(pool.initialize().has_value());
-    CountingMetadataRepository repository(pool);
-
-    auto cfg = makeConfig();
-    auto deps = makeDeps();
-    deps.metadataRepository = &repository;
-    CheckpointManager mgr(cfg, deps);
-
-    CHECK(mgr.checkpointNow());
-
-    CHECK((repository.passiveCalls == 1));
-    CHECK((repository.truncateCalls == 0));
-}
-
-TEST_CASE_METHOD(CheckpointManagerFixture, "CheckpointManager watermark checkpoint truncates WAL",
-                 "[daemon][components][checkpoint][catch2]") {
-    yams::metadata::ConnectionPoolConfig poolConfig;
-    poolConfig.minConnections = 1;
-    poolConfig.maxConnections = 1;
-    poolConfig.enableWAL = true;
-    yams::metadata::ConnectionPool pool((tempDir / "metadata.db").string(), poolConfig);
-    REQUIRE(pool.initialize().has_value());
-    CountingMetadataRepository repository(pool);
-
     constexpr std::uint64_t kWatermarkBytes = 256ULL * 1024ULL * 1024ULL;
     createSparseFile(tempDir / "yams.db-wal", kWatermarkBytes + 1);
     auto cfg = makeConfig();
     auto deps = makeDeps();
-    deps.metadataRepository = &repository;
+    CheckpointManager mgr(cfg, deps);
+
+    CHECK(mgr.checkpointNow());
+    CHECK((mgr.checkpointErrorCount() == 0));
+}
+
+TEST_CASE_METHOD(CheckpointManagerFixture, "CheckpointManager routine checkpoint is passive",
+                 "[daemon][components][checkpoint][catch2]") {
+    auto recorder = std::make_shared<WalCheckpointRecorder>();
+    auto cfg = makeConfig();
+    auto deps = makeDeps();
+    bindWalCallbacks(deps, recorder);
     CheckpointManager mgr(cfg, deps);
 
     CHECK(mgr.checkpointNow());
 
-    CHECK((repository.passiveCalls == 0));
-    CHECK((repository.truncateCalls == 1));
+    CHECK((recorder->passiveCalls == 1));
+    CHECK((recorder->truncateCalls == 0));
 }
 
-TEST_CASE_METHOD(CheckpointManagerFixture, "CheckpointManager shutdown truncates WAL",
+TEST_CASE_METHOD(CheckpointManagerFixture,
+                 "CheckpointManager watermark falls back to bound passive callback",
                  "[daemon][components][checkpoint][catch2]") {
-    yams::metadata::ConnectionPoolConfig poolConfig;
-    poolConfig.minConnections = 1;
-    poolConfig.maxConnections = 1;
-    poolConfig.enableWAL = true;
-    yams::metadata::ConnectionPool pool((tempDir / "metadata.db").string(), poolConfig);
-    REQUIRE(pool.initialize().has_value());
-    CountingMetadataRepository repository(pool);
-
+    auto recorder = std::make_shared<WalCheckpointRecorder>();
+    constexpr std::uint64_t kWatermarkBytes = 256ULL * 1024ULL * 1024ULL;
+    createSparseFile(tempDir / "yams.db-wal", kWatermarkBytes + 1);
     auto cfg = makeConfig();
     auto deps = makeDeps();
-    deps.metadataRepository = &repository;
+    deps.checkpointWal = [recorder]() { return recorder->checkpointWal(); };
+    CheckpointManager mgr(cfg, deps);
+
+    CHECK(mgr.checkpointNow());
+
+    CHECK((recorder->passiveCalls == 1));
+    CHECK((recorder->truncateCalls == 0));
+}
+
+TEST_CASE_METHOD(CheckpointManagerFixture, "CheckpointManager watermark checkpoint truncates WAL",
+                 "[daemon][components][checkpoint][catch2]") {
+    auto recorder = std::make_shared<WalCheckpointRecorder>();
+    constexpr std::uint64_t kWatermarkBytes = 256ULL * 1024ULL * 1024ULL;
+    createSparseFile(tempDir / "yams.db-wal", kWatermarkBytes + 1);
+    auto cfg = makeConfig();
+    auto deps = makeDeps();
+    bindWalCallbacks(deps, recorder);
+    CheckpointManager mgr(cfg, deps);
+
+    CHECK(mgr.checkpointNow());
+
+    CHECK((recorder->passiveCalls == 0));
+    CHECK((recorder->truncateCalls == 1));
+}
+
+TEST_CASE_METHOD(CheckpointManagerFixture,
+                 "CheckpointManager shutdown falls back to bound passive callback",
+                 "[daemon][components][checkpoint][catch2]") {
+    auto recorder = std::make_shared<WalCheckpointRecorder>();
+    auto cfg = makeConfig();
+    auto deps = makeDeps();
+    deps.checkpointWal = [recorder]() { return recorder->checkpointWal(); };
     CheckpointManager mgr(cfg, deps);
     mgr.start();
     std::this_thread::sleep_for(50ms);
 
     mgr.stop();
 
-    CHECK((repository.truncateCalls == 1));
+    CHECK((recorder->passiveCalls == 1));
+    CHECK((recorder->truncateCalls == 0));
+}
+
+TEST_CASE_METHOD(CheckpointManagerFixture, "CheckpointManager shutdown truncates WAL",
+                 "[daemon][components][checkpoint][catch2]") {
+    auto recorder = std::make_shared<WalCheckpointRecorder>();
+    auto cfg = makeConfig();
+    auto deps = makeDeps();
+    bindWalCallbacks(deps, recorder);
+    CheckpointManager mgr(cfg, deps);
+    mgr.start();
+    std::this_thread::sleep_for(50ms);
+
+    mgr.stop();
+
+    CHECK((recorder->passiveCalls == 0));
+    CHECK((recorder->truncateCalls == 1));
 }
 
 TEST_CASE("CheckpointManager config defaults", "[daemon][components][checkpoint][catch2]") {

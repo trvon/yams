@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <yams/core/types.h>
+
 #include <boost/asio/any_io_executor.hpp>
 
 #include <atomic>
@@ -14,10 +16,6 @@
 #include <memory>
 #include <mutex>
 #include <thread>
-
-namespace yams::metadata {
-class MetadataRepository;
-}
 
 namespace yams::daemon {
 
@@ -49,7 +47,8 @@ public:
         VectorIndexCoordinator* vectorIndexCoordinator{nullptr};
         StateComponent* state{nullptr};
         search::HotzoneManager* hotzoneManager{nullptr};
-        metadata::MetadataRepository* metadataRepository{nullptr};
+        std::function<Result<void>()> checkpointWal;
+        std::function<Result<void>()> checkpointWalTruncate;
         boost::asio::any_io_executor executor;
         std::shared_ptr<std::atomic<bool>> stopRequested;
     };

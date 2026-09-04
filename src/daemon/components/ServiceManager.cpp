@@ -618,7 +618,14 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
             checkpointDeps.vectorIndexCoordinator = vectorIndexCoordinator_.get();
             checkpointDeps.state = &state_;
             checkpointDeps.hotzoneManager = nullptr;
-            checkpointDeps.metadataRepository = getMetadataRepo().get();
+            if (auto metadataRepository = getMetadataRepo()) {
+                checkpointDeps.checkpointWal = [metadataRepository]() {
+                    return metadataRepository->checkpointWal();
+                };
+                checkpointDeps.checkpointWalTruncate = [metadataRepository]() {
+                    return metadataRepository->checkpointWalTruncate();
+                };
+            }
             checkpointDeps.executor = workCoordinator_->getExecutor();
             checkpointDeps.stopRequested = std::make_shared<std::atomic<bool>>(false);
 
