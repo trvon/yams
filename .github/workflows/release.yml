@@ -27,8 +27,177 @@ permissions:
   contents: write
 
 jobs:
+  resolve-release:
+    name: Resolve immutable release source
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      source_ref: ${{ steps.source.outputs.source_ref }}
+      channel: ${{ steps.meta.outputs.channel }}
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      release_name: ${{ steps.meta.outputs.release_name }}
+      base_version: ${{ steps.meta.outputs.base_version }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+      tests_run_id: ${{ steps.tests.outputs.tests_run_id }}
+      tests_run_attempt: ${{ steps.tests.outputs.tests_run_attempt }}
+      tests_run_url: ${{ steps.tests.outputs.tests_run_url }}
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Resolve canonical source once
+        id: source
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          REQUESTED_CHANNEL: ${{ inputs.channel || 'nightly' }}
+        with:
+          script: |
+            const requestedChannel = process.env.REQUESTED_CHANNEL;
+            let channel = 'stable';
+            if (context.eventName === 'schedule') {
+              channel = 'nightly';
+            } else if (context.eventName === 'workflow_dispatch') {
+              channel = ['stable', 'weekly', 'nightly'].includes(requestedChannel)
+                ? requestedChannel
+                : 'nightly';
+            }
+            core.setOutput('channel', channel);
+
+            let sourceSha;
+            let sourceRef;
+            if (channel !== 'stable') {
+              const ref = await github.rest.git.getRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: 'heads/experimental',
+              });
+              sourceSha = ref.data.object.sha;
+              sourceRef = 'refs/heads/experimental';
+            } else {
+              sourceSha = context.sha;
+              sourceRef = context.ref;
+            }
+            if (!/^[0-9a-f]{40}$/.test(sourceSha)) {
+              core.setFailed(`Resolved source is not a full commit SHA: ${sourceSha}`);
+              return;
+            }
+            core.setOutput('source_sha', sourceSha);
+            core.setOutput('source_ref', sourceRef);
+
+      - name: Require successful Tests run for exact experimental source
+        id: tests
+        if: steps.source.outputs.channel != 'stable'
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.source_sha }}
+        with:
+          script: |
+            const sourceSha = process.env.SOURCE_SHA;
+            if (!/^[0-9a-f]{40}$/.test(sourceSha)) {
+              core.setFailed(`Refusing Tests lookup for invalid source SHA: ${sourceSha}`);
+              return;
+            }
+
+            const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'tests.yml',
+              head_sha: sourceSha,
+              status: 'completed',
+              per_page: 100,
+            });
+            const successful = runs
+              .filter((run) =>
+                run.name === 'Tests' &&
+                run.status === 'completed' &&
+                run.conclusion === 'success' &&
+                run.head_sha === sourceSha)
+              .sort((left, right) => right.id - left.id);
+            if (successful.length === 0) {
+              core.setFailed(
+                `No successful completed Tests workflow run has exact head_sha ${sourceSha}`,
+              );
+              return;
+            }
+
+            const run = successful[0];
+            if (!run.html_url || !run.html_url.endsWith(`/actions/runs/${run.id}`) ||
+                !Number.isInteger(run.run_attempt) || run.run_attempt < 1) {
+              core.setFailed(`Tests run ${run.id} returned incomplete immutable identity`);
+              return;
+            }
+            const attemptUrl = `${run.html_url}/attempts/${run.run_attempt}`;
+            core.info(`Using exact-sha Tests run ${run.id} attempt ${run.run_attempt}: ${attemptUrl}`);
+            core.setOutput('tests_run_id', String(run.id));
+            core.setOutput('tests_run_attempt', String(run.run_attempt));
+            core.setOutput('tests_run_url', attemptUrl);
+
+      - name: Checkout immutable source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          submodules: false
+          ref: ${{ steps.source.outputs.source_sha }}
+
+      - name: Resolve release metadata once
+        id: meta
+        env:
+          RESOLVED_CHANNEL: ${{ steps.source.outputs.channel }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SHORT_HASH=$(git rev-parse --short HEAD)
+          SOURCE_SHA=$(git rev-parse HEAD)
+          channel="$RESOLVED_CHANNEL"
+
+          if ! [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Resolved source is not a full commit SHA: $SOURCE_SHA" >&2
+            exit 1
+          fi
+
+          if [ "$channel" = "stable" ]; then
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#yams-v}"
+            if [ "$VERSION" = "$TAG" ]; then
+              VERSION="${TAG#v}"
+            fi
+            TAG_OUT="$TAG"
+            RELEASE_NAME="YAMS ${VERSION}"
+          elif [ "$channel" = "nightly" ]; then
+            DATE_ISO=$(date -u +%Y-%m-%d)
+            DATE_COMPACT=$(date -u +%Y%m%d)
+            VERSION="nightly-${DATE_COMPACT}-${SHORT_HASH}"
+            TAG_OUT="experimental-nightly-${DATE_COMPACT}-${SOURCE_SHA}"
+            RELEASE_NAME="YAMS Nightly ${DATE_ISO} (${SHORT_HASH})"
+          else
+            YEAR=$(date -u +%G)
+            WEEK=$(date -u +%V)
+            VERSION="weekly-${YEAR}w${WEEK}-${SHORT_HASH}"
+            TAG_OUT="$VERSION"
+            RELEASE_NAME="YAMS Weekly ${YEAR}-w${WEEK} (${SHORT_HASH})"
+          fi
+
+          BASE_NUMERIC_VERSION="$(git describe --tags --abbrev=0 --match='v*' 2>/dev/null || echo 0.0.0)"
+          BASE_NUMERIC_VERSION="${BASE_NUMERIC_VERSION#v}"
+
+          {
+            echo "channel=$channel"
+            echo "version=$VERSION"
+            echo "tag=$TAG_OUT"
+            echo "release_name=$RELEASE_NAME"
+            echo "base_version=$BASE_NUMERIC_VERSION"
+            if [ "$channel" = "stable" ]; then
+              echo "prerelease=false"
+            else
+              echo "prerelease=true"
+            fi
+          } >> "$GITHUB_OUTPUT"
+
   check-commits:
     name: Check for new commits (nightly only)
+    needs: resolve-release
     runs-on: ubuntu-latest
     if: github.event_name == 'schedule' && github.actor != 'nektos/act'
     outputs:
@@ -37,67 +206,80 @@ jobs:
     steps:
       - name: Check if there are new commits since last nightly release
         id: check
-        uses: actions/github-script@v7
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7
+        env:
+          SOURCE_SHA: ${{ needs.resolve-release.outputs.source_sha }}
         with:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
+            const currentSha = process.env.SOURCE_SHA;
+            if (!/^[0-9a-f]{40}$/.test(currentSha)) {
+              core.setFailed(`Invalid resolved source SHA: ${currentSha}`);
+              return;
+            }
+
             const releases = await github.paginate(github.rest.repos.listReleases, {
               owner,
               repo,
               per_page: 100,
             });
-            const latest = releases.find((r) => r.tag_name?.startsWith('nightly-'));
+            const immutableNightly = /^experimental-nightly-[0-9]{8}-[0-9a-f]{40}$/;
+            const legacyNightly = /^nightly-[0-9]{8}-[0-9a-f]{7,40}$/;
+            const latest = releases.find((release) =>
+              immutableNightly.test(release.tag_name ?? '') ||
+              legacyNightly.test(release.tag_name ?? ''));
             if (!latest) {
-              core.info('No previous nightly release found, will create one');
+              core.info('No previous valid nightly release found, will create one');
               core.setOutput('has_new_commits', 'true');
               core.setOutput('last_release_sha', 'none');
               return;
             }
 
             const tagName = latest.tag_name;
-            const tagRef = await github.rest.git.getRef({
+            let object = (await github.rest.git.getRef({
               owner,
               repo,
               ref: `tags/${tagName}`,
-            });
-            let lastSha = tagRef.data.object.sha;
-            if (tagRef.data.object.type === 'tag') {
-              const tagObj = await github.rest.git.getTag({
+            })).data.object;
+            for (let depth = 0; object.type === 'tag' && depth < 5; depth += 1) {
+              object = (await github.rest.git.getTag({
                 owner,
                 repo,
-                tag_sha: lastSha,
-              });
-              lastSha = tagObj.data.object.sha;
+                tag_sha: object.sha,
+              })).data.object;
             }
+            if (object.type !== 'commit' || !/^[0-9a-f]{40}$/.test(object.sha)) {
+              core.setFailed(`Nightly tag ${tagName} did not resolve safely to a commit`);
+              return;
+            }
+            const lastSha = object.sha;
             core.setOutput('last_release_sha', lastSha);
 
-            const headRef = await github.rest.git.getRef({
-              owner,
-              repo,
-              ref: 'heads/main',
-            });
-            const currentSha = headRef.data.object.sha;
-
             if (lastSha !== currentSha) {
-              const compare = await github.rest.repos.compareCommits({
-                owner,
-                repo,
-                base: lastSha,
-                head: currentSha,
-              });
-              const total = compare.data.total_commits ?? 1;
               core.setOutput('has_new_commits', 'true');
-              core.info(`Found ${total} new commit(s) since last nightly (${tagName})`);
+              try {
+                const compare = await github.rest.repos.compareCommits({
+                  owner,
+                  repo,
+                  base: lastSha,
+                  head: currentSha,
+                });
+                const total = compare.data.total_commits ?? 1;
+                core.info(`Found ${total} new commit(s) since last nightly (${tagName})`);
+              } catch (error) {
+                core.info(`Release SHAs differ; comparison was unavailable: ${error.message}`);
+              }
             } else {
               core.setOutput('has_new_commits', 'false');
               core.info(`No new commits since last nightly release (${tagName}), skipping`);
             }
 
   warm:
-    needs: [check-commits]
+    needs: [resolve-release, check-commits]
     if: |
       always() &&
+      needs.resolve-release.result == 'success' &&
       github.actor != 'nektos/act' &&
       (needs.check-commits.result == 'skipped' || 
        needs.check-commits.outputs.has_new_commits == 'true' ||
@@ -107,12 +289,14 @@ jobs:
     with:
       build_type: Release
       enable_onnx: false
+      checkout_ref: ${{ needs.resolve-release.outputs.source_sha }}
 
   build-release:
     name: Build and Package (matrix)
-    needs: warm
+    needs: [resolve-release, warm]
     if: |
       always() &&
+      needs.resolve-release.result == 'success' &&
       (needs.warm.result == 'success' || needs.warm.result == 'skipped')
     strategy:
       fail-fast: false
@@ -153,24 +337,39 @@ jobs:
             build_packages: true
             meson_args: ""
             hosted: true
-          - os: arch-linux-hosted
+          - os: arch-linux-hosted-x86_64
             runs_on: ubuntu-24.04
-            suffix: linux-x86_64
+            suffix: arch-x86_64
             packaging: pkg.tar.zst
             build_packages: true
             meson_args: ""
             hosted: false
             arch_container: true
+            arch_name: x86_64
+            expected_host_arch: x86_64
+            docker_platform: linux/amd64
+          - os: arch-linux-hosted-aarch64
+            runs_on: ubuntu-24.04-arm
+            suffix: arch-aarch64
+            packaging: pkg.tar.zst
+            build_packages: true
+            meson_args: ""
+            hosted: false
+            arch_container: true
+            arch_name: aarch64
+            expected_host_arch: aarch64
+            docker_platform: linux/arm64
     runs-on: ${{ matrix.runs_on }}
     env:
       BUILD_DIR: build/release
       STAGE_DIR: stage
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           submodules: false # Manual submodule init below (some use SSH URLs)
+          ref: ${{ needs.resolve-release.outputs.source_sha }}
       - name: Initialize required submodules
         shell: bash
         run: |
@@ -206,88 +405,52 @@ jobs:
         run: |
           echo "macos_only=true: skipping linux-hosted build-release job entry"
           exit 0
-      - name: Build Arch Linux (container-based)
+      - name: Build Arch Linux (native container platform)
         if: matrix.arch_container == true
         shell: bash
         run: |
           set -euo pipefail
 
-          case "${{ matrix.suffix }}" in
-            linux-x86_64) arch_name="x86_64" ;;
-            linux-arm64) arch_name="aarch64" ;;
-            *) echo "Unexpected Arch suffix: ${{ matrix.suffix }}" >&2; exit 1 ;;
+          arch_name="${{ matrix.arch_name }}"
+          expected_host_arch="${{ matrix.expected_host_arch }}"
+          docker_platform="${{ matrix.docker_platform }}"
+          host_arch="$(uname -m)"
+          if [ "$host_arch" != "$expected_host_arch" ]; then
+            echo "ERROR: Arch lane requires native host ${expected_host_arch}, got ${host_arch}" >&2
+            exit 1
+          fi
+
+          docker_arch="$(docker info --format '{{.Architecture}}')"
+          case "$docker_arch" in
+            amd64 | x86_64) docker_arch="x86_64" ;;
+            arm64 | aarch64) docker_arch="aarch64" ;;
+            *) echo "ERROR: unsupported Docker host architecture: $docker_arch" >&2; exit 1 ;;
           esac
+          if [ "$docker_arch" != "$expected_host_arch" ]; then
+            echo "ERROR: Docker host ${docker_arch} is not native ${expected_host_arch}" >&2
+            exit 1
+          fi
 
           build_dir="build/pkg/arch-${arch_name}"
           meson_build_dir="${build_dir}/meson-${arch_name}"
 
-          event="${{ github.event_name }}"
-          input_channel="${{ inputs.channel || '' }}"
-          short_hash="$(git rev-parse --short HEAD)"
-
-          if [ "$event" = "push" ]; then
-            channel="stable"
-            version="${GITHUB_REF_NAME#yams-v}"
-            if [ "$version" = "$GITHUB_REF_NAME" ]; then
-              version="${GITHUB_REF_NAME#v}"
-            fi
-            git_ref_value="${{ github.ref }}"
-          elif [ "$event" = "workflow_dispatch" ] && [ -n "$input_channel" ]; then
-            case "$input_channel" in
-              stable)
-                channel="stable"
-                version="${GITHUB_REF_NAME#yams-v}"
-                if [ "$version" = "$GITHUB_REF_NAME" ]; then
-                  version="${GITHUB_REF_NAME#v}"
-                fi
-                git_ref_value="${{ github.ref }}"
-                ;;
-              weekly)
-                channel="weekly"
-                year="$(date -u +%G)"
-                week="$(date -u +%V)"
-                version="weekly-${year}w${week}-${short_hash}"
-                git_ref_value="refs/tags/v${version}"
-                ;;
-              *)
-                channel="nightly"
-                date_compact="$(date -u +%Y%m%d)"
-                version="nightly-${date_compact}-${short_hash}"
-                git_ref_value="refs/tags/v${version}"
-                ;;
-            esac
-          elif [ "$event" = "schedule" ]; then
-            channel="nightly"
-            date_compact="$(date -u +%Y%m%d)"
-            version="nightly-${date_compact}-${short_hash}"
-            git_ref_value="refs/tags/v${version}"
+          channel="${{ needs.resolve-release.outputs.channel }}"
+          version="${{ needs.resolve-release.outputs.version }}"
+          if [ "$channel" = "stable" ]; then
+            git_ref_value="${{ needs.resolve-release.outputs.source_ref }}"
           else
-            channel="stable"
-            version="${GITHUB_REF_NAME#yams-v}"
-            if [ "$version" = "$GITHUB_REF_NAME" ]; then
-              version="${GITHUB_REF_NAME#v}"
-            fi
-            git_ref_value="${{ github.ref }}"
+            git_ref_value="refs/tags/v${version}"
           fi
 
-          echo "Arch release channel=${channel} version=${version} build_dir=${build_dir} meson_build_dir=${meson_build_dir}"
+          echo "Arch release channel=${channel} version=${version} host=${host_arch} platform=${docker_platform} build_dir=${build_dir} meson_build_dir=${meson_build_dir}"
 
-          case "${arch_name}" in
-            x86_64) docker_platform="linux/amd64" ;;
-            aarch64) docker_platform="linux/arm64" ;;
-            *) echo "Unexpected Arch architecture: ${arch_name}" >&2; exit 1 ;;
-          esac
-
-          # Build the Arch builder image (uses cached layers from docker/local-ci/arch-package.Dockerfile)
           docker build --platform "${docker_platform}" -t yams/ci-arch:latest -f docker/local-ci/arch-package.Dockerfile .
 
           mkdir -p "${build_dir}"
-
-          # Run the full Arch build inside the container
           docker run --rm \
             --platform "${docker_platform}" \
             -v "${GITHUB_WORKSPACE}:/workspace/yams" \
-            -v yams-arch-conan-cache:/root/.conan2 \
+            -v "yams-arch-conan-cache-${arch_name}:/root/.conan2" \
             -w /workspace \
             -e RELEASE_CHANNEL="${channel}" \
             -e GIT_REF="${git_ref_value}" \
@@ -298,18 +461,56 @@ jobs:
             yams/ci-arch:latest \
             bash -lc '/workspace/yams/scripts/build-arch-pkg.sh build'
 
-          if ls "${build_dir}"/yams-*.pkg.tar.zst >/dev/null 2>&1; then
-            cp -v "${build_dir}"/yams-*.pkg.tar.zst "${GITHUB_WORKSPACE}/"
-          else
-            echo "ERROR: no Arch package produced in ${build_dir}" >&2
+          shopt -s nullglob
+          packages=("${build_dir}"/yams-*-"${arch_name}".pkg.tar.zst)
+          shopt -u nullglob
+          if [ "${#packages[@]}" -ne 1 ]; then
+            echo "ERROR: expected exactly one ${arch_name} Arch package, found ${#packages[@]}" >&2
             exit 1
           fi
+          cp -v "${packages[0]}" "${GITHUB_WORKSPACE}/"
+          package_path="${GITHUB_WORKSPACE}/$(basename "${packages[0]}")"
 
           echo "Arch build complete. Artifacts in ${build_dir}:"
           find "${build_dir}" -maxdepth 4 -type f \( -name 'yams-*.pkg.tar.zst' -o -name 'yams.db' -o -name 'yams.files' \) -print
 
-          # Write BUILD_DIR for subsequent steps
-          echo "BUILD_DIR=${build_dir}" >> "${GITHUB_ENV}"
+          {
+            echo "BUILD_DIR=${build_dir}"
+            echo "ARCH_PKG_PATH=${package_path}"
+          } >> "${GITHUB_ENV}"
+
+      - name: Inspect and install-validate Arch package natively
+        if: matrix.arch_container == true
+        shell: bash
+        env:
+          ARCH_DOCKER_PLATFORM: ${{ matrix.docker_platform }}
+        run: |
+          set -euo pipefail
+          : "${ARCH_PKG_PATH:?ARCH_PKG_PATH not set}"
+          expected_arch="${{ matrix.arch_name }}"
+          expected_host_arch="${{ matrix.expected_host_arch }}"
+          if [ "$(uname -m)" != "$expected_host_arch" ]; then
+            echo "ERROR: refusing non-native Arch validation for ${expected_host_arch}" >&2
+            exit 1
+          fi
+
+          package_name="$(basename "$ARCH_PKG_PATH")"
+          package_info="$(docker run --rm \
+            --platform "${ARCH_DOCKER_PLATFORM}" \
+            -v "${GITHUB_WORKSPACE}:/workspace/yams:ro" \
+            -w /workspace/yams \
+            yams/ci-arch:latest \
+            bsdtar -xOf "$package_name" .PKGINFO)"
+          metadata_arch="$(printf '%s\n' "$package_info" | sed -n 's/^arch = //p')"
+          if [ "$metadata_arch" != "$expected_arch" ]; then
+            echo "ERROR: package metadata architecture ${metadata_arch:-missing} != ${expected_arch}" >&2
+            exit 1
+          fi
+          printf '%s\n' "$package_info" | grep -F 'pkgname = yams' >/dev/null
+          echo "Validated package metadata architecture: ${metadata_arch}"
+
+          chmod +x scripts/local-ci/package-validate.sh
+          bash scripts/local-ci/package-validate.sh --only arch --arch "$ARCH_PKG_PATH"
 
       - name: Skip remaining steps for Arch container builds
         if: matrix.arch_container == true
@@ -441,71 +642,19 @@ jobs:
           done
           echo "Stdlib flags sanitized for macOS (forcing -stdlib=libc++)."
 
-      - name: Determine release channel and version/tag
+      - name: Load resolved release metadata
         if: matrix.arch_container != true
         id: meta
         shell: bash
         run: |
-          set -euo pipefail
-
-          EVENT="${{ github.event_name }}"
-          INPUT_CHANNEL="${{ inputs.channel || '' }}"
-          SHORT_HASH=$(git rev-parse --short HEAD)
-
-          channel=""
-          if [ "$EVENT" = "push" ]; then
-            channel="stable"
-          elif [ "$EVENT" = "workflow_dispatch" ] && [ -n "$INPUT_CHANNEL" ]; then
-            case "$INPUT_CHANNEL" in
-              stable|weekly|nightly) channel="$INPUT_CHANNEL" ;;
-              *) channel="nightly" ;;
-            esac
-          elif [ "$EVENT" = "schedule" ]; then
-            channel="nightly"
-          else
-            channel="stable"
-          fi
-
-          # Derive version and tag
-          if [ "$channel" = "stable" ]; then
-            TAG="${GITHUB_REF_NAME}"
-            VERSION="${TAG#yams-v}"
-            if [ "$VERSION" = "$TAG" ]; then
-              VERSION="${TAG#v}"
-            fi
-            TAG_OUT="$TAG"
-            RELEASE_NAME="YAMS ${VERSION}"
-          elif [ "$channel" = "nightly" ]; then
-            DATE_ISO=$(date -u +%Y-%m-%d)
-            DATE_COMPACT=$(date -u +%Y%m%d)
-            VERSION="nightly-${DATE_COMPACT}-${SHORT_HASH}"
-            TAG_OUT="nightly-${DATE_COMPACT}-${SHORT_HASH}"
-            RELEASE_NAME="YAMS Nightly ${DATE_ISO} (${SHORT_HASH})"
-          else # weekly
-            YEAR=$(date -u +%G)   # ISO week-numbering year
-            WEEK=$(date -u +%V)   # ISO week number 01-53
-            VERSION="weekly-${YEAR}w${WEEK}-${SHORT_HASH}"
-            TAG_OUT="$VERSION"
-            RELEASE_NAME="YAMS Weekly ${YEAR}-w${WEEK} (${SHORT_HASH})"
-          fi
-
-          BASE_NUMERIC_VERSION="$(git describe --tags --abbrev=0 --match='v*' 2>/dev/null || echo 0.0.0)"
-          BASE_NUMERIC_VERSION="${BASE_NUMERIC_VERSION#v}"
-
           {
-            echo "channel=$channel"
-            echo "version=$VERSION"
-            echo "tag=$TAG_OUT"
-            echo "release_name=$RELEASE_NAME"
-            echo "base_version=$BASE_NUMERIC_VERSION"
-            if [ "$channel" = "stable" ]; then
-              echo "prerelease=false"
-            else
-              echo "prerelease=true"
-            fi
+            echo "channel=${{ needs.resolve-release.outputs.channel }}"
+            echo "version=${{ needs.resolve-release.outputs.version }}"
+            echo "tag=${{ needs.resolve-release.outputs.tag }}"
+            echo "release_name=${{ needs.resolve-release.outputs.release_name }}"
+            echo "base_version=${{ needs.resolve-release.outputs.base_version }}"
+            echo "prerelease=${{ needs.resolve-release.outputs.prerelease }}"
           } >> "$GITHUB_OUTPUT"
-
-          echo "Detected channel=$channel, version=$VERSION, tag=$TAG_OUT, name=$RELEASE_NAME"
 
       - name: Download CI benchmark artifacts (-yams, if available)
         if: github.event_name == 'workflow_run' && matrix.os == 'linux-hosted' && github.actor != 'nektos/act'
@@ -1292,8 +1441,8 @@ jobs:
         shell: bash
         run: |
           # Only generate once to avoid artifact name collision across matrix entries.
-          # Current matrix total: 6 artifacts (5 native platform builds + 1 Arch package container).
-          echo '{"total": 6}' > matrix.json
+          # Current matrix total: 7 artifacts (5 native platform builds + 2 native Arch lanes).
+          echo '{"total": 7}' > matrix.json
 
       - name: Upload matrix metadata
         if: matrix.os == 'linux-hosted' && matrix.suffix == 'linux-x86_64' && matrix.arch_container != true && github.actor != 'nektos/act'
@@ -1301,26 +1450,6 @@ jobs:
         with:
           name: matrix-meta
           path: matrix.json
-          retention-days: 1
-
-      - name: Upload Release Artifacts
-        if: github.actor != 'nektos/act'
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-${{ matrix.os }}-${{ matrix.suffix }}-files${{ github.run_attempt > 1 && format('-a{0}', github.run_attempt) || '' }}
-          path: |
-            yams-*.tar.gz
-            yams-*.zip
-            yams-*.msi
-            yams-*.msi.sha256
-            ${{ env.BUILD_DIR }}/release_summary.md
-            ${{ env.BUILD_DIR }}/bench_results/*.json
-            yams-*.deb
-            yams-*.rpm
-            yams-*.AppImage
-            yams-*.pkg
-            yams-*.pkg.tar.zst
-            winget-manifests/**
           retention-days: 1
 
       - name: Verify Linux package artifacts
@@ -1356,8 +1485,8 @@ jobs:
 
           host_arch="$(uname -m)"
           if [ "${host_arch}" != "${expected_arch}" ]; then
-            echo "Runner arch (${host_arch}) != package arch (${expected_arch}); cannot run native systemd lane. Skipping." >&2
-            exit 0
+            echo "ERROR: runner arch (${host_arch}) != package arch (${expected_arch})" >&2
+            exit 1
           fi
 
           deb="$(find . -maxdepth 1 -type f -name "yams-*linux-${expected_arch}.deb" -print -quit | sed 's#^\./##')"
@@ -1374,101 +1503,70 @@ jobs:
           chmod +x scripts/local-ci/package-validate.sh
           bash scripts/local-ci/package-validate.sh --only linux "${args[@]}"
 
+      - name: Upload validated release artifacts
+        if: github.actor != 'nektos/act'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.os }}-${{ matrix.suffix }}-files${{ github.run_attempt > 1 && format('-a{0}', github.run_attempt) || '' }}
+          path: |
+            yams-*.tar.gz
+            yams-*.zip
+            yams-*.msi
+            yams-*.msi.sha256
+            ${{ env.BUILD_DIR }}/release_summary.md
+            ${{ env.BUILD_DIR }}/bench_results/*.json
+            yams-*.deb
+            yams-*.rpm
+            yams-*.AppImage
+            yams-*.pkg
+            yams-*.pkg.tar.zst
+            winget-manifests/**
+          retention-days: 1
+          if-no-files-found: error
+
   create-release:
     name: Create GitHub Release
-    needs: [check-commits, build-release]
+    needs: [resolve-release, check-commits, build-release]
     runs-on: ubuntu-latest
+    concurrency:
+      group: release-publish-${{ needs.resolve-release.outputs.channel }}-${{ needs.resolve-release.outputs.source_sha }}
+      cancel-in-progress: false
     # Skip release creation when: running under act, OR check-commits skipped release
     if: |
-      always() && !cancelled() && 
+      always() && !cancelled() &&
+      needs.resolve-release.result == 'success' &&
       github.actor != 'nektos/act' &&
       (needs.check-commits.result == 'skipped' || needs.check-commits.outputs.has_new_commits == 'true' || github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       needs.build-release.result == 'success'
     permissions:
       contents: write
       actions: read
+      id-token: write
+      attestations: write
     outputs:
       channel: ${{ steps.meta.outputs.channel }}
       version: ${{ steps.meta.outputs.version }}
       tag: ${{ steps.meta.outputs.tag }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Checkout immutable release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           submodules: false
-          repository: ${{ github.event.workflow_run.head_repository.full_name || github.repository }}
-          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          ref: ${{ needs.resolve-release.outputs.source_sha }}
 
-      - name: Determine release channel and version/tag
+      - name: Load resolved release metadata
         id: meta
         shell: bash
         run: |
-          set -euo pipefail
-
-          EVENT="${{ github.event_name }}"
-          INPUT_CHANNEL="${{ inputs.channel || '' }}"
-          SHORT_HASH=$(git rev-parse --short HEAD)
-
-          channel=""
-          if [ "$EVENT" = "push" ]; then
-            channel="stable"
-          elif [ "$EVENT" = "workflow_dispatch" ] && [ -n "$INPUT_CHANNEL" ]; then
-            case "$INPUT_CHANNEL" in
-              stable|weekly|nightly) channel="$INPUT_CHANNEL" ;;
-              *) channel="nightly" ;;
-            esac
-          elif [ "$EVENT" = "schedule" ]; then
-            channel="nightly"
-          else
-            channel="stable"
-          fi
-
-          # Derive version and tag
-          if [ "$channel" = "stable" ]; then
-            TAG="${GITHUB_REF_NAME}"
-            VERSION="${TAG#yams-v}"
-            if [ "$VERSION" = "$TAG" ]; then
-              VERSION="${TAG#v}"
-            fi
-            TAG_OUT="$TAG"
-            RELEASE_NAME="YAMS ${VERSION}"
-          elif [ "$channel" = "nightly" ]; then
-            DATE_ISO=$(date -u +%Y-%m-%d)
-            DATE_COMPACT=$(date -u +%Y%m%d)
-            VERSION="nightly-${DATE_COMPACT}-${SHORT_HASH}"
-            TAG_OUT="nightly-${DATE_COMPACT}-${SHORT_HASH}"
-            RELEASE_NAME="YAMS Nightly ${DATE_ISO} (${SHORT_HASH})"
-          else # weekly
-            YEAR=$(date -u +%G)   # ISO week-numbering year
-            WEEK=$(date -u +%V)   # ISO week number 01-53
-            VERSION="weekly-${YEAR}w${WEEK}-${SHORT_HASH}"
-            TAG_OUT="$VERSION"
-            RELEASE_NAME="YAMS Weekly ${YEAR}-w${WEEK} (${SHORT_HASH})"
-          fi
-
-          BASE_NUMERIC_VERSION="$(git describe --tags --abbrev=0 --match='v*' 2>/dev/null || echo 0.0.0)"
-          BASE_NUMERIC_VERSION="${BASE_NUMERIC_VERSION#v}"
-
           {
-            echo "channel=$channel"
-            echo "version=$VERSION"
-            echo "tag=$TAG_OUT"
-            echo "release_name=$RELEASE_NAME"
-            echo "base_version=$BASE_NUMERIC_VERSION"
-            if [ "$channel" = "stable" ]; then
-              echo "prerelease=false"
-            else
-              echo "prerelease=true"
-            fi
+            echo "channel=${{ needs.resolve-release.outputs.channel }}"
+            echo "version=${{ needs.resolve-release.outputs.version }}"
+            echo "tag=${{ needs.resolve-release.outputs.tag }}"
+            echo "release_name=${{ needs.resolve-release.outputs.release_name }}"
+            echo "base_version=${{ needs.resolve-release.outputs.base_version }}"
+            echo "prerelease=${{ needs.resolve-release.outputs.prerelease }}"
           } >> "$GITHUB_OUTPUT"
-
-          echo "Detected channel=$channel, version=$VERSION, tag=$TAG_OUT, name=$RELEASE_NAME"
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -1489,16 +1587,27 @@ jobs:
           shopt -s nullglob
           rm -rf assets || true
           mkdir -p assets
-          # Collect all per-platform release artifacts
+          copy_unique_asset() {
+            local source="$1"
+            local destination
+            destination="assets/$(basename "$source")"
+            if [ -e "$destination" ]; then
+              echo "ERROR: duplicate release asset name: $(basename "$source")" >&2
+              exit 1
+            fi
+            cp -v "$source" "$destination"
+          }
+
+          # Collect all per-platform release artifacts without silently overwriting names.
           for dir in release-artifacts/release-*; do
             [ -d "$dir" ] || continue
             # Archives
             for file in "$dir"/*.tar.gz "$dir"/*.zip; do
-              cp -v "$file" assets/ 2>/dev/null || true
+              [ -f "$file" ] && copy_unique_asset "$file"
             done
             # Packages
             for file in "$dir"/*.deb "$dir"/*.rpm "$dir"/*.AppImage "$dir"/*.pkg.tar.zst "$dir"/*.msi; do
-              cp -v "$file" assets/ 2>/dev/null || true
+              [ -f "$file" ] && copy_unique_asset "$file"
             done
             # Arch repo metadata
             if [ -d "$dir/archrepo" ]; then
@@ -2232,34 +2341,67 @@ jobs:
           path: archrepo/
           retention-days: 7
 
-      - name: Generate latest manifest (latest.json)
+      - name: Generate and validate release manifest (latest.json)
         shell: bash
         run: |
           set -euo pipefail
-          VERSION="${{ steps.meta.outputs.version }}"
-          TAG="${{ steps.meta.outputs.tag }}"
-          CHANNEL="${{ steps.meta.outputs.channel }}"
-          DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          mkdir -p assets
-          cd assets
-          if [ ! -f SHA256SUMS ]; then
-            echo "Missing SHA256SUMS file in assets/; cannot build manifest" >&2
-            ls -al >&2 || true
-            exit 1
-          fi
-          # Build assets array JSON using awk (avoid jq dependency); trim trailing comma
-          ASSETS_JSON=$(awk '{printf "{\"name\":\"%s\",\"sha256\":\"%s\"},", $2, $1}' SHA256SUMS | sed 's/,$//')
-          cat > latest.json <<LJSON
-          {
-            "version": "${VERSION}",
-            "tag": "${TAG}",
-            "channel": "${CHANNEL}",
-            "published_at": "${DATE}",
-            "assets": [${ASSETS_JSON}]
-          }
-          LJSON
+          published_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          release_run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}"
+          python3 scripts/ci/generate_release_manifest.py \
+            --assets-dir assets \
+            --checksums assets/SHA256SUMS \
+            --output assets/latest.json \
+            --channel "${{ steps.meta.outputs.channel }}" \
+            --version "${{ steps.meta.outputs.version }}" \
+            --tag "${{ steps.meta.outputs.tag }}" \
+            --source-sha "${{ needs.resolve-release.outputs.source_sha }}" \
+            --source-ref "${{ needs.resolve-release.outputs.source_ref }}" \
+            --repository "${{ github.repository }}" \
+            --github-server-url "${{ github.server_url }}" \
+            --release-run-id "${{ github.run_id }}" \
+            --release-run-attempt "${{ github.run_attempt }}" \
+            --release-run-url "$release_run_url" \
+            --tests-run-id "${{ needs.resolve-release.outputs.tests_run_id }}" \
+            --tests-run-attempt "${{ needs.resolve-release.outputs.tests_run_attempt }}" \
+            --tests-run-url "${{ needs.resolve-release.outputs.tests_run_url }}" \
+            --ipc-protocol-header include/yams/daemon/ipc/ipc_protocol_envelope.h \
+            --p2p-protocol-header include/yams/daemon/p2p/p2p_protocol.h \
+            --published-at "$published_at"
+          python3 -m json.tool assets/latest.json >/dev/null
           echo "latest.json manifest (assets/latest.json):" >&2
-          sed 's/^/  /' latest.json >&2
+          sed 's/^/  /' assets/latest.json >&2
+
+      - name: Create exact-source provenance predicate
+        if: github.actor != 'nektos/act'
+        env:
+          SOURCE_SHA: ${{ needs.resolve-release.outputs.source_sha }}
+          SOURCE_REF: ${{ needs.resolve-release.outputs.source_ref }}
+          TESTS_RUN_ID: ${{ needs.resolve-release.outputs.tests_run_id }}
+          TESTS_RUN_ATTEMPT: ${{ needs.resolve-release.outputs.tests_run_attempt }}
+          TESTS_RUN_URL: ${{ needs.resolve-release.outputs.tests_run_url }}
+        shell: bash
+        run: |
+          jq -n \
+            --arg source_sha "$SOURCE_SHA" \
+            --arg source_ref "$SOURCE_REF" \
+            --arg release_run_id "$GITHUB_RUN_ID" \
+            --arg release_run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg tests_run_id "$TESTS_RUN_ID" \
+            --arg tests_run_attempt "$TESTS_RUN_ATTEMPT" \
+            --arg tests_run_url "$TESTS_RUN_URL" \
+            '{source_sha: $source_sha, source_ref: $source_ref,
+              release_workflow: {run_id: $release_run_id, attempt: $release_run_attempt},
+              tests_workflow: {run_id: $tests_run_id, attempt: $tests_run_attempt,
+                               url: $tests_run_url}}' \
+            > release-provenance.json
+
+      - name: Attest validated release distributables to exact source
+        if: github.actor != 'nektos/act'
+        uses: actions/attest@11bbd243972067817e9ed160cb123cab3601f436 # v2
+        with:
+          subject-checksums: assets/SHA256SUMS
+          predicate-type: https://yamsmemory.ai/attestations/release-source/v1
+          predicate-path: release-provenance.json
 
       - name: Check existing release (stable only)
         id: existing_release
@@ -2457,6 +2599,7 @@ jobs:
           files: assets/*
           draft: true
           prerelease: ${{ steps.meta.outputs.prerelease }}
+          target_commitish: ${{ needs.resolve-release.outputs.source_sha }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
