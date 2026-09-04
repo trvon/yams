@@ -49,10 +49,17 @@ repository_metadata_policy_script = files('scripts/check_repository_metadata.py'
 forgejo_mirror_policy_script = files('scripts/check_forgejo_mirror_workflow.py')
 experimental_release_source_policy_script = files('scripts/check_experimental_release_source.py')
 release_manifest_unit_tests = files('scripts/test_generate_release_manifest.py')
+repository_publication_unit_tests = files('scripts/test_publish_repository.py')
 test('release_manifest_unit',
   python_exe,
   args: [release_manifest_unit_tests],
   suite: ['unit', 'release'],
+  timeout: 30,
+)
+test('repository_publication_unit',
+  python_exe,
+  args: [repository_publication_unit_tests],
+  suite: ['unit', 'policy', 'release', 'repository'],
   timeout: 30,
 )
 test('experimental_release_source_policy',

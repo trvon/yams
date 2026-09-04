@@ -96,6 +96,21 @@ class ReleaseManifestTest(unittest.TestCase):
         self.assertIsNone(manifest["tests_workflow_run_id"])
         self.assertIsNone(manifest["tests_workflow_run_url"])
 
+    def test_rejects_unknown_release_channel(self) -> None:
+        with self.assertRaisesRegex(ValueError, "channel must be"):
+            self.build(channel="preview")
+
+    def test_rejects_channel_source_ref_mismatch(self) -> None:
+        with self.assertRaisesRegex(ValueError, "refs/heads/experimental"):
+            self.build(source_ref="refs/heads/main")
+        with self.assertRaisesRegex(ValueError, "immutable tag"):
+            self.build(
+                channel="stable",
+                version="1.2.3",
+                tag="v1.2.3",
+                source_ref="refs/tags/v1.2.2",
+            )
+
     def test_rejects_non_full_source_sha(self) -> None:
         with self.assertRaisesRegex(ValueError, "full 40-character source SHA"):
             self.build(source_sha="abc1234")
@@ -149,7 +164,7 @@ class ReleaseManifestTest(unittest.TestCase):
 
         extra.unlink()
         with self.assertRaisesRegex(ValueError, "mutable release tag"):
-            self.build(channel="stable", tag="latest")
+            self.build(channel="stable", tag="latest", source_ref="refs/tags/latest")
 
     def test_write_manifest_is_stable_json(self) -> None:
         output = self.assets_dir / "latest.json"

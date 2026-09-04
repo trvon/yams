@@ -154,10 +154,18 @@ def build_manifest(
     p2p_protocol_version: str | int,
     published_at: str,
 ) -> dict[str, object]:
+    if channel not in {"stable", "nightly", "weekly"}:
+        raise ValueError("channel must be stable, nightly, or weekly")
     if FULL_SHA_RE.fullmatch(source_sha) is None:
         raise ValueError("source_sha must be a full 40-character source SHA")
     if not source_ref.startswith("refs/"):
         raise ValueError("source_ref must be a full refs/... reference")
+    if channel == "stable" and source_ref != f"refs/tags/{tag}":
+        raise ValueError("stable manifest source_ref must match its immutable tag")
+    if channel != "stable" and source_ref != "refs/heads/experimental":
+        raise ValueError(
+            "non-stable manifest source_ref must be refs/heads/experimental"
+        )
     if channel == "nightly" and NIGHTLY_TAG_RE.fullmatch(tag) is None:
         raise ValueError(
             "nightly tag must match experimental-nightly-YYYYMMDD-<full source SHA>"

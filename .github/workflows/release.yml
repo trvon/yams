@@ -58,9 +58,11 @@ jobs:
             if (context.eventName === 'schedule') {
               channel = 'nightly';
             } else if (context.eventName === 'workflow_dispatch') {
-              channel = ['stable', 'weekly', 'nightly'].includes(requestedChannel)
-                ? requestedChannel
-                : 'nightly';
+              if (!['stable', 'weekly', 'nightly'].includes(requestedChannel)) {
+                core.setFailed(`Unsupported release channel: ${requestedChannel}`);
+                return;
+              }
+              channel = requestedChannel;
             }
             core.setOutput('channel', channel);
 
@@ -1654,14 +1656,27 @@ jobs:
             touch SHA256SUMS
           fi
 
-      - name: (Optional) Import GPG key and sign checksums
-        if: env.GPG_PRIVATE_KEY && env.GPG_PRIVATE_KEY != ''
+      - name: (Optional) Import channel GPG key and sign checksums
         env:
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY || '' }}
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE || '' }}
+          STABLE_GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY || '' }}
+          STABLE_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE || '' }}
+          EXPERIMENTAL_GPG_PRIVATE_KEY: ${{ secrets.EXPERIMENTAL_GPG_PRIVATE_KEY || '' }}
+          EXPERIMENTAL_GPG_PASSPHRASE: ${{ secrets.EXPERIMENTAL_GPG_PASSPHRASE || '' }}
         shell: bash
         run: |
           set -euo pipefail
+          if [ "${{ steps.meta.outputs.channel }}" = stable ]; then
+            GPG_PRIVATE_KEY="$STABLE_GPG_PRIVATE_KEY"
+            GPG_PASSPHRASE="$STABLE_GPG_PASSPHRASE"
+          else
+            GPG_PRIVATE_KEY="$EXPERIMENTAL_GPG_PRIVATE_KEY"
+            GPG_PASSPHRASE="$EXPERIMENTAL_GPG_PASSPHRASE"
+          fi
+          unset STABLE_GPG_PRIVATE_KEY STABLE_GPG_PASSPHRASE EXPERIMENTAL_GPG_PRIVATE_KEY EXPERIMENTAL_GPG_PASSPHRASE
+          if [ -z "$GPG_PRIVATE_KEY" ]; then
+            echo "No channel signing key configured; leaving SHA256SUMS unsigned" >&2
+            exit 0
+          fi
           cd assets
           echo "GPG key present: generating detached signature for SHA256SUMS" >&2
           echo "$GPG_PRIVATE_KEY" | base64 -d | gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" --import
@@ -2095,23 +2110,38 @@ jobs:
           fi
           popd >/dev/null
 
-      - name: Build APT repository metadata (stable only, linux .deb present)
-        if: steps.meta.outputs.channel == 'stable'
+      - name: Build APT repository metadata (linux .deb present)
         env:
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY || '' }}
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE || '' }}
+          STABLE_GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY || '' }}
+          STABLE_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE || '' }}
+          EXPERIMENTAL_GPG_PRIVATE_KEY: ${{ secrets.EXPERIMENTAL_GPG_PRIVATE_KEY || '' }}
+          EXPERIMENTAL_GPG_PASSPHRASE: ${{ secrets.EXPERIMENTAL_GPG_PASSPHRASE || '' }}
+          REPOSITORY_CHANNEL: ${{ steps.meta.outputs.channel == 'stable' && 'stable' || 'experimental' }}
+          REPOSITORY_VERSION: ${{ steps.meta.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
+          if [ "$REPOSITORY_CHANNEL" = stable ]; then
+            GPG_PRIVATE_KEY="$STABLE_GPG_PRIVATE_KEY"
+            GPG_PASSPHRASE="$STABLE_GPG_PASSPHRASE"
+          else
+            GPG_PRIVATE_KEY="$EXPERIMENTAL_GPG_PRIVATE_KEY"
+            GPG_PASSPHRASE="$EXPERIMENTAL_GPG_PASSPHRASE"
+          fi
+          unset STABLE_GPG_PRIVATE_KEY STABLE_GPG_PASSPHRASE EXPERIMENTAL_GPG_PRIVATE_KEY EXPERIMENTAL_GPG_PASSPHRASE
           # Require at least one .deb in assets
           if ! ls assets/*.deb >/dev/null 2>&1; then
             echo "No .deb found; skipping APT repo generation" >&2
             exit 0
           fi
           BASE_VERSION="${{ steps.meta.outputs.base_version }}"
+          PACKAGE_FILENAME_VERSION="$BASE_VERSION"
+          if [ "$REPOSITORY_CHANNEL" = experimental ]; then
+            PACKAGE_FILENAME_VERSION="$REPOSITORY_VERSION"
+          fi
           REPO_ROOT="aptrepo"
           POOL_DIR="$REPO_ROOT/pool/main/y/yams"
-          DIST=stable
+          DIST="$REPOSITORY_CHANNEL"
           COMPONENT=main
           mkdir -p "$POOL_DIR"
 
@@ -2123,11 +2153,11 @@ jobs:
             deb_name="$(basename "$deb")"
             case "$deb_name" in
               *-linux-x86_64.deb)
-                target_name="yams_${BASE_VERSION}_amd64.deb"
+                target_name="yams_${PACKAGE_FILENAME_VERSION}_amd64.deb"
                 seen_amd64=1
                 ;;
               *-linux-aarch64.deb|*-linux-arm64.deb)
-                target_name="yams_${BASE_VERSION}_arm64.deb"
+                target_name="yams_${PACKAGE_FILENAME_VERSION}_arm64.deb"
                 seen_arm64=1
                 ;;
               *)
@@ -2141,7 +2171,7 @@ jobs:
           ARCHES=()
           [ "$seen_amd64" -eq 1 ] && ARCHES+=(amd64)
           [ "$seen_arm64" -eq 1 ] && ARCHES+=(arm64)
-          if [ ${#ARCHES[@]} -eq 0 ]; then
+          if [ "${#ARCHES[@]}" -eq 0 ]; then
             echo "No recognized .deb package architectures found in assets; skipping APT metadata generation" >&2
             exit 0
           fi
@@ -2156,7 +2186,7 @@ jobs:
           mkdir -p "dists/$DIST/$COMPONENT"
 
           # Scan pool once, then split package stanzas per architecture.
-          dpkg-scanpackages --multiversion pool > dists/$DIST/$COMPONENT/Packages.all
+          dpkg-scanpackages --multiversion pool > "dists/$DIST/$COMPONENT/Packages.all"
           for ARCH in "${ARCHES[@]}"; do
             mkdir -p "dists/$DIST/$COMPONENT/binary-$ARCH"
             awk -v arch="$ARCH" '
@@ -2182,15 +2212,15 @@ jobs:
             for ARCH in "${ARCHES[@]}"; do
               for f in "$COMPONENT/binary-$ARCH/Packages" "$COMPONENT/binary-$ARCH/Packages.gz"; do
                 if [ -f "dists/$DIST/$f" ]; then
-                  hash=$(sha256sum "dists/$DIST/$f" | awk '{print $1}')
-                  size=$(stat --format='%s' "dists/$DIST/$f" 2>/dev/null || stat -f '%z' "dists/$DIST/$f")
+                  hash="$(sha256sum "dists/$DIST/$f" | awk '{print $1}')"
+                  size="$(stat --format='%s' "dists/$DIST/$f" 2>/dev/null || stat -f '%z' "dists/$DIST/$f")"
                   printf " %s %16d %s\n" "$hash" "$size" "$f"
                 fi
               done
             done
-          } > dists/$DIST/Release
+          } > "dists/$DIST/Release"
           if [ -z "${GPG_PRIVATE_KEY:-}" ]; then
-            echo "ERROR: Missing GPG_PRIVATE_KEY; refusing to publish unsigned stable APT metadata" >&2
+            echo "ERROR: Missing channel-specific GPG_PRIVATE_KEY; refusing unsigned APT metadata" >&2
             exit 1
           fi
           GPG_ARGS=(--batch --yes --pinentry-mode loopback)
@@ -2198,37 +2228,50 @@ jobs:
             GPG_ARGS+=(--passphrase "$GPG_PASSPHRASE")
           fi
           echo "$GPG_PRIVATE_KEY" | base64 -d | gpg "${GPG_ARGS[@]}" --import
-          gpg "${GPG_ARGS[@]}" -abs -o dists/$DIST/Release.gpg dists/$DIST/Release
-          gpg "${GPG_ARGS[@]}" --clearsign -o dists/$DIST/InRelease dists/$DIST/Release
+          gpg "${GPG_ARGS[@]}" -abs -o "dists/$DIST/Release.gpg" "dists/$DIST/Release"
+          gpg "${GPG_ARGS[@]}" --clearsign -o "dists/$DIST/InRelease" "dists/$DIST/Release"
           popd >/dev/null
           tree "$REPO_ROOT" || find "$REPO_ROOT" -maxdepth 4 -type f -print
+          if [ "$REPOSITORY_CHANNEL" = stable ]; then
+            repository_url="https://repo.yamsmemory.ai/aptrepo"
+            public_key_url="https://repo.yamsmemory.ai/gpg.key"
+          else
+            repository_url="https://repo.yamsmemory.ai/experimental/aptrepo"
+            public_key_url="https://repo.yamsmemory.ai/experimental/aptrepo/gpg.key"
+          fi
           printf '%s\n' \
             'Add this APT repo (signed):' \
-            '  curl -fsSL https://repo.yamsmemory.ai/gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/yams.gpg' \
-            '  echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/yams.gpg] https://repo.yamsmemory.ai/aptrepo stable main" | sudo tee /etc/apt/sources.list.d/yams.list' \
-            '  sudo apt-get update && sudo apt-get install yams' \
-            '' \
-            'If unsigned (temporary/testing):' \
-            '  echo "deb [arch=amd64,arm64 trusted=yes] https://repo.yamsmemory.ai/aptrepo stable main" | sudo tee /etc/apt/sources.list.d/yams.list' \
+            "  curl -fsSL $public_key_url | sudo gpg --dearmor -o /usr/share/keyrings/yams-$REPOSITORY_CHANNEL.gpg" \
+            "  echo \"deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/yams-$REPOSITORY_CHANNEL.gpg] $repository_url $REPOSITORY_CHANNEL main\" | sudo tee /etc/apt/sources.list.d/yams-$REPOSITORY_CHANNEL.list" \
             '  sudo apt-get update && sudo apt-get install yams' \
             > "$REPO_ROOT/USAGE.txt"
 
       - name: Upload APT repo artifact
-        if: steps.meta.outputs.channel == 'stable' && always()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: apt-repo
           path: aptrepo/
           retention-days: 7
 
-      - name: Build YUM repository metadata (stable only, rpm present)
-        if: steps.meta.outputs.channel == 'stable'
+      - name: Build YUM repository metadata (rpm present)
         env:
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY || '' }}
-          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE || '' }}
+          STABLE_GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY || '' }}
+          STABLE_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE || '' }}
+          EXPERIMENTAL_GPG_PRIVATE_KEY: ${{ secrets.EXPERIMENTAL_GPG_PRIVATE_KEY || '' }}
+          EXPERIMENTAL_GPG_PASSPHRASE: ${{ secrets.EXPERIMENTAL_GPG_PASSPHRASE || '' }}
+          REPOSITORY_PREFIX: ${{ steps.meta.outputs.channel == 'stable' && '' || 'experimental/' }}
         shell: bash
         run: |
           set -euo pipefail
+          if [ "${{ steps.meta.outputs.channel }}" = stable ]; then
+            GPG_PRIVATE_KEY="$STABLE_GPG_PRIVATE_KEY"
+            GPG_PASSPHRASE="$STABLE_GPG_PASSPHRASE"
+          else
+            GPG_PRIVATE_KEY="$EXPERIMENTAL_GPG_PRIVATE_KEY"
+            GPG_PASSPHRASE="$EXPERIMENTAL_GPG_PASSPHRASE"
+          fi
+          unset STABLE_GPG_PRIVATE_KEY STABLE_GPG_PASSPHRASE EXPERIMENTAL_GPG_PRIVATE_KEY EXPERIMENTAL_GPG_PASSPHRASE
           if ! ls assets/*.rpm >/dev/null 2>&1; then
             echo "No .rpm found; skipping YUM repo generation" >&2
             exit 0
@@ -2256,7 +2299,7 @@ jobs:
             '  sudo tee /etc/yum.repos.d/yams.repo <<REPO' \
             '  [yams]' \
             '  name=YAMS Repository' \
-            '  baseurl=https://repo.yamsmemory.ai/yumrepo/' \
+            "  baseurl=https://repo.yamsmemory.ai/${REPOSITORY_PREFIX}yumrepo/" \
             '  enabled=1' \
             '  gpgcheck=0' \
             '  repo_gpgcheck=0' \
@@ -2270,15 +2313,16 @@ jobs:
             > "$YUM_ROOT/USAGE.txt"
 
       - name: Upload YUM repo artifact
-        if: steps.meta.outputs.channel == 'stable' && always()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: yum-repo
           path: yumrepo/
           retention-days: 7
 
-      - name: Build Arch repository metadata (stable only, arch packages present)
-        if: steps.meta.outputs.channel == 'stable'
+      - name: Build Arch repository metadata (arch packages present)
+        env:
+          REPOSITORY_PREFIX: ${{ steps.meta.outputs.channel == 'stable' && '' || 'experimental/' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -2325,7 +2369,7 @@ jobs:
             '  sudo tee /etc/pacman.d/yams.conf <<REPO' \
             '  [yams]' \
             '  SigLevel = Optional TrustAll' \
-            "  Server = https://repo.yamsmemory.ai/archrepo/os/\$arch" \
+            "  Server = https://repo.yamsmemory.ai/${REPOSITORY_PREFIX}archrepo/os/\$arch" \
             '  REPO' \
             '' \
             'Then install:' \
@@ -2334,7 +2378,7 @@ jobs:
           tree "${ARCH_ROOT}" 2>/dev/null || find "${ARCH_ROOT}" -maxdepth 3 -type f -print
 
       - name: Upload Arch repo artifact
-        if: steps.meta.outputs.channel == 'stable' && always()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: arch-repo
@@ -2370,6 +2414,14 @@ jobs:
           python3 -m json.tool assets/latest.json >/dev/null
           echo "latest.json manifest (assets/latest.json):" >&2
           sed 's/^/  /' assets/latest.json >&2
+
+      - name: Upload trusted release manifest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-manifest
+          path: assets/latest.json
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Create exact-source provenance predicate
         if: github.actor != 'nektos/act'
@@ -2666,17 +2718,35 @@ jobs:
           verify_asset_url "$(basename "${arm64_candidates[0]}")"
           verify_asset_url "$(basename "${x86_64_candidates[0]}")"
 
-      - name: Publish APT/YUM/Arch/latest.json to R2 (stable only)
-        if: ${{ steps.meta.outputs.channel == 'stable' && github.actor != 'nektos/act' }}
+      - name: Publish channel package repositories to R2
+        if: ${{ github.actor != 'nektos/act' }}
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN || secrets.R2_SECRET_ACCESS_KEY }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          GPG_PUBLIC_KEY_B64: ${{ secrets.GPG_PUBLIC_KEY_B64 || '' }}
+          STABLE_CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN || secrets.R2_SECRET_ACCESS_KEY }}
+          STABLE_CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          EXPERIMENTAL_CLOUDFLARE_API_TOKEN: ${{ secrets.EXPERIMENTAL_CLOUDFLARE_API_TOKEN }}
+          EXPERIMENTAL_CLOUDFLARE_ACCOUNT_ID: ${{ secrets.EXPERIMENTAL_CLOUDFLARE_ACCOUNT_ID }}
+          STABLE_GPG_PUBLIC_KEY_B64: ${{ secrets.GPG_PUBLIC_KEY_B64 || '' }}
+          EXPERIMENTAL_GPG_PUBLIC_KEY_B64: ${{ secrets.EXPERIMENTAL_GPG_PUBLIC_KEY_B64 || '' }}
         shell: bash
         run: |
           set -euo pipefail
-          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
-            echo "Cloudflare API token/account missing; aborting R2 publish." >&2
+          if [ "${{ steps.meta.outputs.channel }}" = stable ]; then
+            PUBLICATION_CHANNEL=stable
+            CLOUDFLARE_API_TOKEN="$STABLE_CLOUDFLARE_API_TOKEN"
+            CLOUDFLARE_ACCOUNT_ID="$STABLE_CLOUDFLARE_ACCOUNT_ID"
+            GPG_PUBLIC_KEY_B64="$STABLE_GPG_PUBLIC_KEY_B64"
+          else
+            PUBLICATION_CHANNEL=experimental
+            CLOUDFLARE_API_TOKEN="$EXPERIMENTAL_CLOUDFLARE_API_TOKEN"
+            CLOUDFLARE_ACCOUNT_ID="$EXPERIMENTAL_CLOUDFLARE_ACCOUNT_ID"
+            GPG_PUBLIC_KEY_B64="$EXPERIMENTAL_GPG_PUBLIC_KEY_B64"
+          fi
+          export CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID
+          unset STABLE_CLOUDFLARE_API_TOKEN STABLE_CLOUDFLARE_ACCOUNT_ID
+          unset EXPERIMENTAL_CLOUDFLARE_API_TOKEN EXPERIMENTAL_CLOUDFLARE_ACCOUNT_ID
+          unset STABLE_GPG_PUBLIC_KEY_B64 EXPERIMENTAL_GPG_PUBLIC_KEY_B64
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "Missing channel-specific Cloudflare R2 authority" >&2
             exit 1
           fi
           WRANGLER_ROOT="${RUNNER_TEMP:-/tmp}/wrangler-cli"
@@ -2685,60 +2755,21 @@ jobs:
             npm install --prefix "$WRANGLER_ROOT" wrangler@4.69.0 >/dev/null
           fi
           "$WRANGLER_BIN" --version >&2
-          upload_file() {
-            local src="$1"; shift
-            local key="$1"; shift
-            local ct="application/octet-stream"
-            case "$key" in
-              *.json) ct="application/json" ;;
-              *.key) ct="text/plain" ;;
-              *.txt) ct="text/plain" ;;
-              *.xml) ct="application/xml" ;;
-              *.gz) ct="application/gzip" ;;
-              *.deb) ct="application/vnd.debian.binary-package" ;;
-              *.rpm) ct="application/x-rpm" ;;
-              *.pkg.tar.zst) ct="application/zstd" ;;
-              *.db|*.files) ct="application/gzip" ;;
-              *.asc) ct="application/pgp-signature" ;;
-            esac
-            echo "-- Upload $key" >&2
-            for attempt in 1 2 3 4 5; do
-              if "$WRANGLER_BIN" r2 object put "yams-repository/$key" \
-                --remote \
-                --file "$src" \
-                --content-type "$ct"; then
-                return 0
-              fi
-              if [ "$attempt" -eq 5 ]; then
-                echo "R2 upload failed after ${attempt} attempts: $key" >&2
-                return 1
-              fi
-              sleep $((attempt * 5))
-            done
-          }
-          if [ -n "${GPG_PUBLIC_KEY_B64:-}" ]; then
-            echo "$GPG_PUBLIC_KEY_B64" | base64 -d > gpg.key
-            upload_file gpg.key gpg.key
+          public_key_args=()
+          if [ -n "$GPG_PUBLIC_KEY_B64" ]; then
+            echo "$GPG_PUBLIC_KEY_B64" | base64 -d > channel-gpg.key
+            public_key_args=(--public-key channel-gpg.key)
           fi
-          if [ -d aptrepo ]; then
-            find aptrepo -type f -print0 | while IFS= read -r -d '' f; do
-              rel="${f#aptrepo/}"; upload_file "$f" "aptrepo/$rel";
-            done
-          fi
-          if [ -d yumrepo ]; then
-            find yumrepo -type f -print0 | while IFS= read -r -d '' f; do
-              rel="${f#yumrepo/}"; upload_file "$f" "yumrepo/$rel";
-            done
-          fi
-          if [ -d archrepo ]; then
-            find archrepo -type f -print0 | while IFS= read -r -d '' f; do
-              rel="${f#archrepo/}"; upload_file "$f" "archrepo/$rel";
-            done
-          fi
-          if [ -f assets/latest.json ]; then
-            upload_file assets/latest.json latest.json
-          fi
-          echo "R2 publish complete." >&2
+          python3 scripts/ci/publish_repository.py \
+            --repo-root . \
+            --manifest assets/latest.json \
+            --expected-channel "$PUBLICATION_CHANNEL" \
+            --selected-run-id "${{ github.run_id }}" \
+            --selected-run-attempt "${{ github.run_attempt }}" \
+            --bucket yams-repository \
+            --wrangler "$WRANGLER_BIN" \
+            "${public_key_args[@]}"
+          echo "R2 $PUBLICATION_CHANNEL publication complete; no objects were pruned." >&2
 
       - name: List release assets (post-upload)
         if: ${{ github.actor != 'nektos/act' }}
