@@ -29,6 +29,7 @@
 #include "../../common/test_helpers_catch2.h"
 
 #include "../../../include/yams/daemon/components/db_integrity_stamp.h"
+#include "../../../src/daemon/components/service_manager/bootstrap_status.h"
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/InternalEventBus.h>
@@ -47,6 +48,114 @@ using namespace yams::daemon;
 
 namespace yams::daemon::test {
 namespace {
+
+TEST_CASE("Bootstrap status snapshot preserves readiness schema and ETA values",
+          "[daemon][service_manager][status][eta]") {
+    using service_manager::BootstrapStatusData;
+
+    const auto start = std::chrono::steady_clock::time_point{std::chrono::seconds{100}};
+    const auto now = start + std::chrono::seconds{2};
+    BootstrapStatusData data;
+    data.dataDir = "/tmp/yams-data";
+    data.startTime = start;
+    data.readiness.ipcServerReady = true;
+    data.readiness.contentStoreReady = true;
+    data.readiness.vectorDbInitAttempted = true;
+    data.readiness.vectorDbReady = true;
+    data.readiness.vectorDbDim = 768;
+    data.readiness.searchProgress = 100;
+    data.readiness.vectorIndexProgress = 50;
+    data.readiness.modelLoadProgress = 25;
+    data.freshness = service_manager::BootstrapFreshnessSnapshot{
+        .simeonLexicalConfigured = true,
+        .simeonLexicalReady = false,
+        .simeonLexicalBuilding = true,
+        .simeonFragmentGeometryReady = false,
+    };
+    data.databaseRecoveredAt = "2026-01-02T03:04:05Z";
+    data.databaseRecoveredFrom = "/tmp/yams.db.corrupt";
+    data.databasePhase = "migrating";
+    data.databasePhaseSince = now - std::chrono::milliseconds{750};
+    data.maintenancePhase = "recovery_cleanup";
+    data.maintenancePhaseSince = now - std::chrono::milliseconds{250};
+    data.storageWarning = "slow storage";
+    data.initDurationsMs = {{"vector_index", 7000}, {"database", 1500}, {"plugins", 500}};
+
+    const auto status = service_manager::buildBootstrapStatusSnapshot(data, now);
+
+    CHECK_FALSE(status.at("ready").get<bool>());
+    CHECK(status.at("overall") == "initializing");
+    const auto& readiness = status.at("readiness");
+    CHECK(readiness.at("ipc_server") == true);
+    CHECK(readiness.at("content_store") == true);
+    CHECK(readiness.at("database") == false);
+    CHECK(readiness.at("metadata_repo") == false);
+    CHECK(readiness.at("search_engine") == false);
+    CHECK(readiness.at("model_provider") == false);
+    CHECK(readiness.at("vector_index") == false);
+    CHECK(readiness.at("plugins") == false);
+    CHECK(readiness.at("vector_db_init_attempted") == true);
+    CHECK(readiness.at("vector_db_ready") == true);
+    CHECK(readiness.at("vector_db_dim") == 768);
+    CHECK(readiness.at("search_engine_lexical_enhancement_configured") == true);
+    CHECK(readiness.at("search_engine_lexical_enhancement_ready") == false);
+    CHECK(readiness.at("search_engine_lexical_enhancement_building") == true);
+    CHECK(readiness.at("search_engine_fragment_geometry_ready") == false);
+    CHECK(status.at("search_engine_lexical_enhancement_state") == "building");
+    CHECK(status.at("database_recovered_at") == "2026-01-02T03:04:05Z");
+    CHECK(status.at("database_recovered_from") == "/tmp/yams.db.corrupt");
+    CHECK(status.at("database_phase") == "migrating");
+    CHECK(status.at("database_phase_elapsed_ms") == 750);
+    CHECK(status.at("maintenance_phase") == "recovery_cleanup");
+    CHECK(status.at("maintenance_phase_elapsed_ms") == 250);
+    CHECK(status.at("storage_warning") == "slow storage");
+    CHECK(status.at("progress").at("search_engine") == 100);
+    CHECK(status.at("progress").at("vector_index") == 50);
+    CHECK(status.at("progress").at("model_provider") == 25);
+    CHECK(status.at("eta_seconds").at("vector_index") == 5);
+    CHECK(status.at("eta_seconds").at("model_provider") == 18);
+    CHECK_FALSE(status.at("eta_seconds").contains("content_store"));
+    CHECK(status.at("durations_ms").at("database") == 1500);
+    CHECK(status.at("top_slowest").at(0).at("name") == "vector_index");
+    CHECK(status.at("top_slowest").at(0).at("elapsed_ms") == 7000);
+    CHECK(status.at("uptime_seconds") == 2);
+    CHECK(status.at("data_dir") == "/tmp/yams-data");
+}
+
+TEST_CASE("Bootstrap status throttles only pre-ready publication",
+          "[daemon][service_manager][status][throttle]") {
+    const auto previous = std::chrono::steady_clock::time_point{std::chrono::milliseconds{1000}};
+
+    CHECK_FALSE(service_manager::shouldPublishBootstrapStatus(
+        false, previous, previous + std::chrono::milliseconds{249}));
+    CHECK(service_manager::shouldPublishBootstrapStatus(false, previous,
+                                                        previous + std::chrono::milliseconds{250}));
+    CHECK(service_manager::shouldPublishBootstrapStatus(true, previous,
+                                                        previous + std::chrono::milliseconds{1}));
+    CHECK(service_manager::shouldPublishBootstrapStatus(
+        false, std::chrono::steady_clock::time_point{}, previous));
+}
+
+TEST_CASE("Bootstrap status snapshot publishes completed readiness immediately",
+          "[daemon][service_manager][status][ready]") {
+    service_manager::BootstrapStatusData data;
+    data.readiness.ipcServerReady = true;
+    data.readiness.contentStoreReady = true;
+    data.readiness.databaseReady = true;
+    data.readiness.metadataRepoReady = true;
+    data.readiness.searchEngineReady = true;
+    data.readiness.modelProviderReady = true;
+    data.readiness.vectorIndexReady = true;
+    data.readiness.pluginsReady = true;
+    data.freshness = service_manager::BootstrapFreshnessSnapshot{};
+
+    const auto status = service_manager::buildBootstrapStatusSnapshot(data, data.startTime);
+
+    CHECK(status.at("ready") == true);
+    CHECK(status.at("overall") == "ready");
+    CHECK(status.at("eta_seconds").empty());
+    CHECK(status.at("search_engine_lexical_enhancement_state") == "disabled");
+}
 
 fs::path metadataDbPath(const DaemonConfig& config) {
     return config.dataDir / "yams.db";

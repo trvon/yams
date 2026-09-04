@@ -1,8 +1,6 @@
 #define YAMS_DAEMON_TEST_HOOKS_IMPL 1
 // pi-lens-ignore: fatal error
 #include <sqlite3.h>
-// pi-lens-ignore: fatal error
-#include <nlohmann/json.hpp>
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <array>
@@ -46,6 +44,7 @@
 #endif
 
 #include "../../../include/yams/daemon/components/ServiceManager.h"
+#include "service_manager/bootstrap_status.h"
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -1554,186 +1553,60 @@ void ServiceManager::shutdown() {
     setOnnxShutdownMarker(false);
 }
 
-// Best-effort: write bootstrap status JSON so CLI can show progress before IPC is ready
-static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& cfg,
+static service_manager::BootstrapStatusData
+captureBootstrapStatusData(const yams::daemon::StateComponent& state,
+                           const yams::daemon::ServiceManager* serviceManager) {
+    service_manager::BootstrapStatusData data;
+    const auto& readiness = state.readiness;
+    data.readiness = {
+        .ipcServerReady = readiness.ipcServerReady.load(),
+        .contentStoreReady = readiness.contentStoreReady.load(),
+        .databaseReady = readiness.databaseReady.load(),
+        .metadataRepoReady = readiness.metadataRepoReady.load(),
+        .searchEngineReady = readiness.searchEngineReady.load(),
+        .modelProviderReady = readiness.modelProviderReady.load(),
+        .vectorIndexReady = readiness.vectorIndexReady.load(),
+        .pluginsReady = readiness.pluginsReady.load(),
+        .vectorDbInitAttempted = readiness.vectorDbInitAttempted.load(),
+        .vectorDbReady = readiness.vectorDbReady.load(),
+        .vectorDbDim = readiness.vectorDbDim.load(),
+        .searchProgress = readiness.searchProgress.load(),
+        .vectorIndexProgress = readiness.vectorIndexProgress.load(),
+        .modelLoadProgress = readiness.modelLoadProgress.load(),
+    };
+    if (serviceManager) {
+        const auto freshness = serviceManager->getIndexFreshnessSnapshot();
+        data.freshness = service_manager::BootstrapFreshnessSnapshot{
+            .simeonLexicalConfigured = freshness.simeonLexicalConfigured,
+            .simeonLexicalReady = freshness.simeonLexicalReady,
+            .simeonLexicalBuilding = freshness.simeonLexicalBuilding,
+            .simeonFragmentGeometryReady = freshness.simeonFragmentGeometryReady,
+        };
+    }
+    {
+        std::lock_guard<std::mutex> lock(readiness.recoveryMutex);
+        data.databaseRecoveredAt = readiness.databaseRecoveredAt;
+        data.databaseRecoveredFrom = readiness.databaseRecoveredFrom;
+        data.databasePhase = readiness.databasePhase;
+        data.databasePhaseSince = readiness.databasePhaseSince;
+        data.maintenancePhase = readiness.maintenancePhase;
+        data.maintenancePhaseSince = readiness.maintenancePhaseSince;
+        data.storageWarning = readiness.storageWarning;
+    }
+    data.initDurationsMs = state.initDurationsMs;
+    data.startTime = state.stats.startTime;
+    return data;
+}
+
+// Collect ServiceManager-owned freshness separately and pass only immutable status data to the
+// private bootstrap-status publisher.
+static void writeBootstrapStatusFile(const yams::daemon::DaemonConfig& config,
                                      const yams::daemon::StateComponent& state,
                                      const yams::daemon::ServiceManager* serviceManager = nullptr) {
-    static std::mutex sLastWriteMutex;
-    static std::chrono::steady_clock::time_point sLastWriteAt{};
-    {
-        const auto now = std::chrono::steady_clock::now();
-        std::lock_guard<std::mutex> lk(sLastWriteMutex);
-        const auto sinceLast =
-            std::chrono::duration_cast<std::chrono::milliseconds>(now - sLastWriteAt).count();
-        const bool ready = state.readiness.bootstrapReady();
-        if (!ready && sLastWriteAt.time_since_epoch().count() != 0 && sinceLast < 250) {
-            return;
-        }
-        sLastWriteAt = now;
-    }
     try {
-        namespace fs = std::filesystem;
-        auto runtimePaths = resolveServiceRuntimePaths(cfg);
-        if (!runtimePaths) {
-            spdlog::debug("[ServiceManager] Bootstrap path resolution failed: {}",
-                          runtimePaths.error().message);
-            return;
-        }
-        const fs::path& dir = runtimePaths.value().runtimeDir.value;
-        if (dir.empty())
-            return;
-        yams::common::ensureDirectories(dir);
-        fs::path path = dir / "yams-daemon.status.json";
-        nlohmann::json j;
-        j["ready"] = state.readiness.bootstrapReady();
-        // Normalize overall to lowercase for consistency with IPC lifecycle strings
-        {
-            std::string ov = state.readiness.bootstrapStatus();
-            for (auto& c : ov)
-                c = static_cast<char>(std::tolower(c));
-            j["overall"] = ov;
-        }
-        nlohmann::json rd;
-        rd[std::string(readiness::kIpcServer)] = state.readiness.ipcServerReady.load();
-        rd[std::string(readiness::kContentStore)] = state.readiness.contentStoreReady.load();
-        rd[std::string(readiness::kDatabase)] = state.readiness.databaseReady.load();
-        rd[std::string(readiness::kMetadataRepo)] = state.readiness.metadataRepoReady.load();
-        rd[std::string(readiness::kSearchEngine)] = state.readiness.searchEngineReady.load();
-        rd[std::string(readiness::kModelProvider)] = state.readiness.modelProviderReady.load();
-        rd[std::string(readiness::kVectorIndex)] = state.readiness.vectorIndexReady.load();
-        rd[std::string(readiness::kPlugins)] = state.readiness.pluginsReady.load();
-        // Extended vector DB readiness fields
-        rd[std::string(readiness::kVectorDbInitAttempted)] =
-            state.readiness.vectorDbInitAttempted.load();
-        rd[std::string(readiness::kVectorDbReady)] = state.readiness.vectorDbReady.load();
-        rd[std::string(readiness::kVectorDbDim)] = state.readiness.vectorDbDim.load();
-        if (serviceManager) {
-            const auto freshness = serviceManager->getIndexFreshnessSnapshot();
-            rd[std::string(readiness::kSearchEngineLexicalEnhancementConfigured)] =
-                freshness.simeonLexicalConfigured;
-            rd[std::string(readiness::kSearchEngineLexicalEnhancementReady)] =
-                freshness.simeonLexicalReady;
-            rd[std::string(readiness::kSearchEngineLexicalEnhancementBuilding)] =
-                freshness.simeonLexicalBuilding;
-            rd[std::string(readiness::kSearchEngineFragmentGeometryReady)] =
-                freshness.simeonFragmentGeometryReady;
-            if (!freshness.simeonLexicalConfigured) {
-                j["search_engine_lexical_enhancement_state"] = "disabled";
-            } else if (freshness.simeonLexicalBuilding) {
-                j["search_engine_lexical_enhancement_state"] = "building";
-            } else if (freshness.simeonLexicalReady) {
-                j["search_engine_lexical_enhancement_state"] = "ready";
-            } else {
-                j["search_engine_lexical_enhancement_state"] = "skipped";
-            }
-        }
-        j["readiness"] = rd;
-        {
-            std::lock_guard<std::mutex> lk(state.readiness.recoveryMutex);
-            if (!state.readiness.databaseRecoveredAt.empty()) {
-                j[std::string(status_keys::kDatabaseRecoveredAt)] =
-                    state.readiness.databaseRecoveredAt;
-                j[std::string(status_keys::kDatabaseRecoveredFrom)] =
-                    state.readiness.databaseRecoveredFrom;
-            }
-            if (!state.readiness.databasePhase.empty()) {
-                j[std::string(status_keys::kDatabasePhase)] = state.readiness.databasePhase;
-                if (state.readiness.databasePhaseSince.time_since_epoch().count() != 0) {
-                    auto elapsed =
-                        std::chrono::duration_cast<std::chrono::milliseconds>(
-                            std::chrono::steady_clock::now() - state.readiness.databasePhaseSince)
-                            .count();
-                    j[std::string(status_keys::kDatabasePhaseElapsedMs)] =
-                        static_cast<uint64_t>(elapsed);
-                }
-            }
-            if (!state.readiness.maintenancePhase.empty()) {
-                j[std::string(status_keys::kMaintenancePhase)] = state.readiness.maintenancePhase;
-                if (state.readiness.maintenancePhaseSince.time_since_epoch().count() != 0) {
-                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                       std::chrono::steady_clock::now() -
-                                       state.readiness.maintenancePhaseSince)
-                                       .count();
-                    j[std::string(status_keys::kMaintenancePhaseElapsedMs)] =
-                        static_cast<uint64_t>(elapsed);
-                }
-            }
-            if (!state.readiness.storageWarning.empty()) {
-                j[std::string(status_keys::kStorageWarning)] = state.readiness.storageWarning;
-            }
-        }
-        nlohmann::json pr;
-        pr[std::string(readiness::kSearchEngine)] = state.readiness.searchProgress.load();
-        pr[std::string(readiness::kVectorIndex)] = state.readiness.vectorIndexProgress.load();
-        pr[std::string(readiness::kModelProvider)] = state.readiness.modelLoadProgress.load();
-        j["progress"] = pr;
-        auto sec_since_start = std::chrono::duration_cast<std::chrono::seconds>(
-                                   std::chrono::steady_clock::now() - state.stats.startTime)
-                                   .count();
-        std::map<std::string, int> expected_s{
-            {std::string(readiness::kPlugins), 1},       {std::string(readiness::kContentStore), 2},
-            {std::string(readiness::kDatabase), 2},      {std::string(readiness::kMetadataRepo), 2},
-            {std::string(readiness::kVectorIndex), 3},   {std::string(readiness::kSearchEngine), 4},
-            {std::string(readiness::kModelProvider), 20}};
-        nlohmann::json eta;
-        auto add_eta = [&](const std::string& key, bool ready, int progress) {
-            if (ready)
-                return;
-            int exp = expected_s.count(key) ? expected_s[key] : 5;
-            try {
-                if (state.initDurationsMs.count(key)) {
-                    int hist = static_cast<int>((state.initDurationsMs.at(key) + 999) / 1000);
-                    if (hist > 0)
-                        exp = hist;
-                }
-            } catch (...) {
-                spdlog::debug("[ServiceManager] ETA history lookup failed for {}", key);
-            }
-            int remain_by_pct = ServiceManager::computeEtaRemaining(exp, progress);
-            int remain_by_elapsed = std::max(0, exp - static_cast<int>(sec_since_start));
-            int remain = std::max(remain_by_pct, remain_by_elapsed);
-            eta[key] = remain;
-        };
-        add_eta(std::string(readiness::kPlugins), state.readiness.pluginsReady.load(), 100);
-        add_eta(std::string(readiness::kContentStore), state.readiness.contentStoreReady.load(),
-                100);
-        add_eta(std::string(readiness::kDatabase), state.readiness.databaseReady.load(), 100);
-        add_eta(std::string(readiness::kMetadataRepo), state.readiness.metadataRepoReady.load(),
-                100);
-        add_eta(std::string(readiness::kVectorIndex), state.readiness.vectorIndexReady.load(),
-                state.readiness.vectorIndexProgress.load());
-        add_eta(std::string(readiness::kSearchEngine), state.readiness.searchEngineReady.load(),
-                state.readiness.searchProgress.load());
-        add_eta(std::string(readiness::kModelProvider), state.readiness.modelProviderReady.load(),
-                state.readiness.modelLoadProgress.load());
-        j["eta_seconds"] = std::move(eta);
-        if (!state.initDurationsMs.empty()) {
-            nlohmann::json dur;
-            for (const auto& [k, v] : state.initDurationsMs) {
-                dur[k] = v;
-            }
-            j["durations_ms"] = std::move(dur);
-            std::vector<std::pair<std::string, uint64_t>> items(state.initDurationsMs.begin(),
-                                                                state.initDurationsMs.end());
-            std::sort(items.begin(), items.end(),
-                      [](const auto& a, const auto& b) { return a.second > b.second; });
-            nlohmann::json top;
-            size_t count = std::min<size_t>(3, items.size());
-            for (size_t i = 0; i < count; ++i) {
-                nlohmann::json entry;
-                entry["name"] = items[i].first;
-                entry["elapsed_ms"] = items[i].second;
-                top.push_back(entry);
-            }
-            if (!top.empty())
-                j["top_slowest"] = std::move(top);
-        }
-        auto uptime = std::chrono::steady_clock::now() - state.stats.startTime;
-        j["uptime_seconds"] = std::chrono::duration_cast<std::chrono::seconds>(uptime).count();
-        j["data_dir"] = cfg.dataDir.string();
-        std::ofstream out(path);
-        if (out)
-            out << j.dump(2);
+        auto data = captureBootstrapStatusData(state, serviceManager);
+        data.dataDir = config.dataDir;
+        service_manager::writeBootstrapStatusFile(config, data);
     } catch (...) {
         spdlog::debug("[ServiceManager] Failed to write bootstrap status file");
     }
