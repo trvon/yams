@@ -1711,6 +1711,7 @@ if catch2_dep.found()
       'unit/cli/cli_test_cleanup_listener.cpp',
       'unit/cli/add_command_stdin_catch2_test.cpp',
       'unit/cli/command_registry_catch2_test.cpp',
+      'unit/cli/content_roundtrip_catch2_test.cpp',
       'unit/cli/completion_command_catch2_test.cpp',
       'unit/cli/delete_command_catch2_test.cpp',
       'unit/cli/download_command_catch2_test.cpp',
