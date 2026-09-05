@@ -114,6 +114,61 @@ DocumentInfo makeDocument(const std::string& path, const std::string& hash) {
 
 } // namespace
 
+TEST_CASE("metadata sync payload is independent of local derivation readiness",
+          "[metadata][memory-sync][freshness]") {
+    TempDirGuard temp;
+    RepoFixture repo("meta_sync_local_readiness_");
+    MemorySyncService writer{makeBackend(temp.path / "sync"), MemorySyncConfig{"A", 50}};
+    MetadataSyncAdapter adapter{*repo.repository_, writer};
+    auto info = makeDocument("/corpus/source.md", std::string(kDocHash));
+    REQUIRE(adapter.publish(info, {}).has_value());
+    REQUIRE(writer.syncOnce().has_value());
+    const auto completedPayload = writer.readCached("document/" + std::string(kDocHash));
+    REQUIRE(completedPayload.has_value());
+
+    info.contentExtracted = false;
+    info.extractionStatus = ExtractionStatus::Failed;
+    info.extractionError = "receiver-specific extractor failure";
+    info.repairStatus = RepairStatus::Failed;
+    info.repairAttempts = 12;
+    info.repairAttemptedAt = std::chrono::sys_seconds{std::chrono::seconds{2000}};
+    REQUIRE(adapter.publish(info, {}).has_value());
+    REQUIRE(writer.syncOnce().has_value());
+    const auto failedPayload = writer.readCached("document/" + std::string(kDocHash));
+    REQUIRE(failedPayload.has_value());
+    CHECK(failedPayload.value() == completedPayload.value());
+}
+
+TEST_CASE("legacy sender completion does not certify receiver indexes",
+          "[metadata][memory-sync][freshness]") {
+    TempDirGuard temp;
+    RepoFixture repo("meta_sync_legacy_readiness_");
+    MemorySyncService writer{makeBackend(temp.path / "sync"), MemorySyncConfig{"A", 50}};
+    MemorySyncService reader{makeBackend(temp.path / "sync"), MemorySyncConfig{"B", 50}};
+    MetadataSyncAdapter adapter{*repo.repository_, reader};
+    MetadataDocumentRecord record;
+    record.documentId = kDocHash;
+    record.contentHash = kDocHash;
+    record.filePath = "/corpus/legacy.md";
+    record.contentExtracted = true;
+    record.extractionStatus = static_cast<int>(ExtractionStatus::Success);
+    record.repairStatus = static_cast<int>(RepairStatus::Completed);
+    record.repairAttempts = 8;
+    record.repairAttemptedAt = 2000;
+    REQUIRE(
+        writer.publish("document/" + std::string(kDocHash), bytes(nlohmann::json(record).dump()))
+            .has_value());
+    REQUIRE(adapter.apply().has_value());
+    auto imported = repo.repository_->getDocumentByHash(std::string(kDocHash));
+    REQUIRE(imported.has_value());
+    REQUIRE(imported.value().has_value());
+    CHECK_FALSE(imported.value()->contentExtracted);
+    CHECK(imported.value()->extractionStatus == ExtractionStatus::Pending);
+    CHECK(imported.value()->repairStatus == RepairStatus::Pending);
+    CHECK(imported.value()->repairAttempts == 0);
+    CHECK(imported.value()->repairAttemptedAt.time_since_epoch().count() == 0);
+}
+
 TEST_CASE("metadata sync adapter rejects payload identity mismatches before mutation",
           "[metadata][memory-sync][identity]") {
     TempDirGuard temp;
@@ -244,8 +299,19 @@ TEST_CASE("metadata sync adapter converges a committed document from A to B",
     CHECK(after.value()->id > 0);
     CHECK(after.value()->filePath == info.filePath);
     CHECK(after.value()->mimeType == "text/markdown");
-    CHECK(after.value()->repairStatus == RepairStatus::Completed);
-    CHECK(after.value()->repairAttempts == 1);
+    CHECK_FALSE(after.value()->contentExtracted);
+    CHECK(after.value()->extractionStatus == ExtractionStatus::Pending);
+    CHECK(after.value()->repairStatus == RepairStatus::Pending);
+    CHECK(after.value()->repairAttempts == 0);
+
+    // Local derivation completion is not portable metadata. A remote winner must
+    // neither certify absent indexes nor overwrite successful local work.
+    auto locallyDerived = *after.value();
+    locallyDerived.contentExtracted = true;
+    locallyDerived.extractionStatus = ExtractionStatus::Success;
+    locallyDerived.repairStatus = RepairStatus::Completed;
+    locallyDerived.repairAttempts = 2;
+    REQUIRE(repoB.repository_->updateDocument(locallyDerived).has_value());
 
     auto stage = repoB.repository_->getMetadata(after.value()->id, "stage");
     REQUIRE(stage.has_value());
@@ -278,8 +344,11 @@ TEST_CASE("metadata sync adapter converges a committed document from A to B",
     REQUIRE(afterAgain.value().has_value());
     CHECK(afterAgain.value()->id == after.value()->id);
     CHECK(afterAgain.value()->filePath == updatedInfo.filePath);
-    CHECK(afterAgain.value()->extractionStatus == ExtractionStatus::Failed);
-    CHECK(afterAgain.value()->extractionError == "remote failure");
+    CHECK(afterAgain.value()->contentExtracted);
+    CHECK(afterAgain.value()->extractionStatus == ExtractionStatus::Success);
+    CHECK(afterAgain.value()->extractionError.empty());
+    CHECK(afterAgain.value()->repairStatus == RepairStatus::Completed);
+    CHECK(afterAgain.value()->repairAttempts == 2);
     const auto finalStage = repoB.repository_->getMetadata(afterAgain.value()->id, "stage");
     REQUIRE(finalStage.has_value());
     REQUIRE(finalStage.value().has_value());

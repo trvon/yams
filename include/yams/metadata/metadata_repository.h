@@ -613,6 +613,7 @@ public:
     Result<void> updateDocument(const DocumentInfo& info) override;
     /// Replace one sync-selected document winner and its complete metadata map atomically.
     /// The document row and metadata keys either commit together or remain unchanged.
+    /// Receiver-local extraction and repair status are preserved, not replicated.
     Result<void>
     replaceDocumentAndMetadata(const DocumentInfo& info,
                                const std::vector<std::pair<std::string, MetadataValue>>& metadata);
@@ -857,6 +858,15 @@ public:
                                         int maxPreviewChars);
 
     // Embedding status operations
+    /// Starts a new local attempt and invalidates previous readiness/tokens.
+    /// Call before reading the input snapshot. Recipe must identify the full derivation policy.
+    Result<EmbeddingDerivationToken> beginDocumentEmbeddingDerivation(const std::string& hash,
+                                                                      const std::string& recipe);
+    /// Returns false for stale, deleted, or already-completed attempts, without changing readiness.
+    Result<bool> completeDocumentEmbeddingDerivation(const EmbeddingDerivationToken& token,
+                                                     const std::string& modelId);
+    Result<std::unordered_map<std::string, EmbeddingDerivationState>>
+    batchGetDocumentEmbeddingDerivations(const std::vector<std::string>& hashes);
     Result<void> updateDocumentEmbeddingStatus(int64_t documentId, bool hasEmbedding,
                                                const std::string& modelId = "") override;
     Result<void> updateDocumentEmbeddingStatusByHash(const std::string& hash, bool hasEmbedding,

@@ -10,6 +10,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include "extraction_response.h"
 
 namespace yams::daemon {
 
@@ -183,6 +184,16 @@ bool PluginContentExtractorAdapter::supportsExternal(const std::string& mime,
 
 std::optional<std::string> PluginContentExtractorAdapter::extractExternal(
     const std::vector<std::byte>& bytes, const std::string& mime, const std::string& extension) {
+    auto result = extractExternalTextAndMetadata(bytes, mime, extension);
+    if (!result)
+        return std::nullopt;
+    return std::move(result->text);
+}
+
+std::optional<yams::extraction::ExtractedContent>
+PluginContentExtractorAdapter::extractExternalTextAndMetadata(const std::vector<std::byte>& bytes,
+                                                              const std::string& mime,
+                                                              const std::string& extension) {
     auto& ext = std::get<ExternalBackend>(backend_);
     if (!ext.host)
         return std::nullopt;
@@ -239,19 +250,9 @@ std::optional<std::string> PluginContentExtractorAdapter::extractExternal(
             return std::nullopt;
         }
 
-        // Extract text from response
-        if (resp.contains("text") && resp["text"].is_string()) {
-            auto text = resp["text"].get<std::string>();
+        if (auto content = decodeExtractionResponse(resp)) {
             spdlog::info("PluginContentExtractorAdapter[{}]: extraction succeeded ({} chars)",
-                         name_, text.size());
-            return text;
-        }
-
-        // Some extractors return content instead of text
-        if (resp.contains("content") && resp["content"].is_string()) {
-            auto content = resp["content"].get<std::string>();
-            spdlog::info("PluginContentExtractorAdapter[{}]: extraction succeeded ({} chars)",
-                         name_, content.size());
+                         name_, content->text.size());
             return content;
         }
 
@@ -272,16 +273,6 @@ bool PluginContentExtractorAdapter::isBusy() const {
         return false;
     }
     return true;
-}
-
-std::optional<yams::extraction::ExtractedContent>
-PluginContentExtractorAdapter::extractExternalTextAndMetadata(const std::vector<std::byte>& bytes,
-                                                              const std::string& mime,
-                                                              const std::string& extension) {
-    auto text = extractExternal(bytes, mime, extension);
-    if (!text || text->empty())
-        return std::nullopt;
-    return yams::extraction::ExtractedContent{std::move(*text), {}};
 }
 
 } // namespace yams::daemon

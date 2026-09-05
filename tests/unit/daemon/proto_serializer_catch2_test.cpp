@@ -11,6 +11,28 @@
 
 namespace yams::daemon::test {
 
+TEST_CASE("ProtoSerializer grep preserves immutable content identity",
+          "[proto][serializer][grep]") {
+    GrepResponse response;
+    GrepMatch indexed;
+    indexed.file = "evidence.txt";
+    indexed.hash = std::string(64, 'a');
+    response.matches.push_back(indexed);
+    GrepMatch legacy;
+    legacy.file = "unknown.txt";
+    response.matches.push_back(legacy);
+    Message message{};
+    message.payload = Response{response};
+    const auto encoded = ProtoSerializer::encode_payload(message);
+    REQUIRE(encoded);
+    const auto decoded = ProtoSerializer::decode_payload(std::span{encoded.value()});
+    REQUIRE(decoded);
+    const auto& result = std::get<GrepResponse>(std::get<Response>(decoded.value().payload));
+    REQUIRE(result.matches.size() == 2);
+    CHECK(result.matches[0].hash == indexed.hash);
+    CHECK(result.matches[1].hash.empty());
+}
+
 TEST_CASE("ProtoSerializer PingRequest roundtrip", "[proto][serializer][ping]") {
     PingRequest req{};
     req.timestamp = std::chrono::steady_clock::now();

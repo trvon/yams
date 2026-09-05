@@ -210,6 +210,27 @@ TEST_CASE("Simeon backend can generate direct top candidates",
     CHECK(top.value().candidates.front().score > 0.0F);
 }
 
+TEST_CASE("Simeon scores an expanded lexical request only once",
+          "[search][simeon][request-scores][catch2]") {
+    auto corpus = makeCorpus(kCorpus);
+    auto config = makeLexicalOnlyConfig();
+    config.enableLexicalExpansion = true;
+    config.lexicalExpansionMinHits = 100;
+    config.weakQueryMinTextHits = 100;
+    auto engine = makeEngine(corpus, config);
+    auto backend = std::make_unique<SimeonLexicalBackend>(SimeonLexicalBackend::Config{});
+    auto* scorer = backend.get();
+    engine->setSimeonLexicalBackend(std::move(backend));
+    REQUIRE(waitReady(*scorer, std::chrono::seconds(5)));
+    const auto before = scorer->scoreCalls();
+    SearchParams params;
+    params.limit = 10;
+    const auto result = engine->search("alpha beta", params);
+    REQUIRE(result.has_value());
+    REQUIRE_FALSE(result.value().empty());
+    CHECK(scorer->scoreCalls() - before == 1U);
+}
+
 TEST_CASE("SearchEngine uses direct Simeon candidates for weak FTS queries",
           "[search][simeon][integration][catch2]") {
     auto corpus = makeCorpus(kCorpus);

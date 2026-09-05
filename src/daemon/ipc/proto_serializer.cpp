@@ -2053,6 +2053,7 @@ template <> struct ProtoBinding<GrepResponse> {
             }
             m->set_match_type(match.matchType);
             m->set_confidence(match.confidence);
+            m->set_hash(match.hash);
         }
         o->set_total_matches(r.totalMatches);
         o->set_files_searched(r.filesSearched);
@@ -2083,6 +2084,7 @@ template <> struct ProtoBinding<GrepResponse> {
             }
             match.matchType = m.match_type();
             match.confidence = m.confidence();
+            match.hash = m.hash();
             r.matches.push_back(std::move(match));
         }
         r.totalMatches = i.total_matches();

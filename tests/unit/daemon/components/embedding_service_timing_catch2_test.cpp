@@ -6,6 +6,10 @@
 #include <string>
 #include <string_view>
 
+#include "../../../../src/daemon/components/embedding_derivation_policy.h"
+#include "../../../../src/daemon/components/embedding_input_selection.h"
+#include <yams/crypto/hasher.h>
+#include <yams/daemon/components/embed_preparer.h>
 #include <yams/daemon/components/EmbeddingService.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 
@@ -14,6 +18,73 @@
 using namespace std::chrono_literals;
 
 namespace yams::daemon {
+
+TEST_CASE("Prepared embedding payload binds the extracted text snapshot",
+          "[daemon][embedding][prepared-freshness]") {
+    ConfigResolver::EmbeddingChunkingPolicy policy;
+    ConfigResolver::EmbeddingSelectionPolicy selection;
+    auto chunker = vector::createChunker(policy.strategy, policy.config, nullptr);
+    REQUIRE(chunker);
+    embed::EmbedSourceDoc source{"revision", "First extracted text.", "file", "/file",
+                                 "text/plain"};
+    auto prepared = embed::prepareEmbedPreparedDoc(source, *chunker, selection);
+    REQUIRE(prepared);
+    prepared->preparationRecipe = embed::embeddingPreparationRecipe(policy, selection);
+    CHECK(embed::preparedEmbeddingMatches(*prepared, source.extractedText,
+                                          prepared->preparationRecipe));
+    CHECK_FALSE(embed::preparedEmbeddingMatches(*prepared, "Replacement extracted text.",
+                                                prepared->preparationRecipe));
+    CHECK_FALSE(embed::preparedEmbeddingMatches(*prepared, source.extractedText, "other-policy"));
+    prepared->sourceTextHash.clear();
+    CHECK_FALSE(embed::preparedEmbeddingMatches(*prepared, source.extractedText,
+                                                prepared->preparationRecipe));
+}
+
+TEST_CASE("Embedding derivation policy binds model identity and preparation parameters",
+          "[daemon][embedding][derivation-policy]") {
+    ConfigResolver::EmbeddingChunkingPolicy chunking;
+    ConfigResolver::EmbeddingSelectionPolicy selection;
+    const auto preparation = embed::embeddingPreparationRecipe(chunking, selection);
+    const auto recipe = embed::embeddingDerivationRecipe(preparation, "space", "v1", 384);
+    CHECK(recipe == embed::embeddingDerivationRecipe(preparation, "space", "v1", 384));
+    CHECK(recipe != embed::embeddingDerivationRecipe(preparation, "other-space", "v1", 384));
+    CHECK(recipe != embed::embeddingDerivationRecipe(preparation, "space", "v2", 384));
+    CHECK(recipe != embed::embeddingDerivationRecipe(preparation, "space", "v1", 768));
+    chunking.config.overlap_size++;
+    CHECK(preparation != embed::embeddingPreparationRecipe(chunking, selection));
+    chunking.config.overlap_size--;
+    selection.maxChunksPerDoc++;
+    CHECK(preparation != embed::embeddingPreparationRecipe(chunking, selection));
+}
+
+TEST_CASE("Embedding input selection falls back for empty prepared payloads",
+          "[daemon][embedding][input-selection]") {
+    InternalEventBus::EmbedJob job;
+    job.hashes = {"empty", "ready", "cold", "cold"};
+    InternalEventBus::EmbedPreparedDoc empty;
+    empty.hash = "empty";
+    InternalEventBus::EmbedPreparedDoc ready;
+    ready.hash = "ready";
+    ready.chunks.emplace_back();
+    job.preparedDocs = {empty, ready, ready};
+    const auto selected = embed::selectEmbeddingInputs(job);
+    REQUIRE(selected.preparedIndices == std::vector<std::size_t>{1});
+    CHECK(selected.gatherHashes == std::vector<std::string>{"empty", "cold"});
+}
+
+TEST_CASE("Embedding input selection prefers a valid duplicate over an empty payload",
+          "[daemon][embedding][input-selection]") {
+    InternalEventBus::EmbedJob job;
+    job.hashes = {"revision"};
+    InternalEventBus::EmbedPreparedDoc empty;
+    empty.hash = "revision";
+    auto ready = empty;
+    ready.chunks.emplace_back();
+    job.preparedDocs = {empty, ready};
+    const auto selected = embed::selectEmbeddingInputs(job);
+    CHECK(selected.preparedIndices == std::vector<std::size_t>{1});
+    CHECK(selected.gatherHashes.empty());
+}
 
 class EmbeddingServiceTimingTestAccess {
 public:
@@ -45,6 +116,18 @@ public:
 };
 
 } // namespace
+
+TEST_CASE("EmbeddingService shutdown before start leaves no deferred service access",
+          "[daemon][embedding][shutdown][never-started]") {
+    WorkCoordinator coordinator;
+    EmbeddingService service(nullptr, nullptr, &coordinator);
+    service.shutdown();
+    // Poll while service is still alive: the old shutdown queued a closure capturing it.
+    // A never-started service must leave no such handler for a later coordinator start.
+    CHECK(coordinator.getIOContext()->poll() == 0);
+    service.shutdown();
+    CHECK(coordinator.getIOContext()->poll() == 0);
+}
 
 TEST_CASE("EmbeddingService ignores benchmark environment in production policy",
           "[daemon][components][embedding][config][catch2]") {

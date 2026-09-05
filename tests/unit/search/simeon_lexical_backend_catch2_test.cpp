@@ -1,5 +1,6 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <chrono>
 #include <cmath>
@@ -117,6 +118,51 @@ TEST_CASE("SimeonLexicalBackend default config uses SabSmooth", "[search][simeon
     CHECK(cfg.fragment_geometry_pmi_sample_docs == 8192u);
     CHECK(cfg.fragment_geometry_pmi_sample_bytes == 32ULL * 1024ULL * 1024ULL);
     CHECK(cfg.concept_weight == 0.5f);
+}
+
+TEST_CASE("Simeon query sessions preserve scores and isolate queries and recipes",
+          "[search][simeon][request-scores][catch2]") {
+    auto corpus =
+        makeCorpus({{"a", "alpha alpha beta"}, {"b", "beta gamma"}, {"c", "gamma delta"}});
+    SimeonLexicalBackend::Config config;
+    config.strategy_router_enabled = GENERATE(false, true);
+    config.router_enabled = !config.strategy_router_enabled;
+    SimeonLexicalBackend backend(config);
+    REQUIRE(backend.buildAsync(corpus.repo).has_value());
+    REQUIRE(waitReady(backend, std::chrono::seconds(5)));
+    for (const auto& query : {"alpha", "gamma"}) {
+        for (const auto& arm : {"", "sab_smooth", "atire"}) {
+            const auto baseline = std::string_view(arm).empty()
+                                      ? (backend.hasStrategyRouter()
+                                             ? backend.scoreStrategyRouted(query, corpus.docIds)
+                                             : backend.scoreRouted(query, corpus.docIds))
+                                      : backend.scoreBanditRouted(query, arm, corpus.docIds);
+            REQUIRE(baseline.has_value());
+            const auto calls = backend.scoreCalls();
+            SimeonLexicalBackend::QuerySession session(backend, query, arm);
+            CHECK(backend.scoreCalls() == calls); // lazy, no work for unused sessions
+            const auto first = session.score(corpus.docIds);
+            REQUIRE(first.has_value());
+            CHECK(first.value().scores == baseline.value().scores);
+            CHECK(first.value().recipe_name == baseline.value().recipe_name);
+            const std::vector<std::int64_t> subset{corpus.docIds.back(), -1, corpus.docIds.front()};
+            const auto second = session.score(subset);
+            REQUIRE(second.has_value());
+            CHECK(second.value().scores == std::vector<float>{baseline.value().scores.back(), 0.0F,
+                                                              baseline.value().scores.front()});
+            REQUIRE(session.searchTop(2).has_value());
+            CHECK(backend.scoreCalls() == calls + 1);
+            // A second request reuses the thread-local bandit scratch. It must
+            // not alter scores retained by the first request.
+            SimeonLexicalBackend::QuerySession other(
+                backend, std::string_view(query) == "alpha" ? "gamma" : "alpha", arm);
+            REQUIRE(other.score(corpus.docIds).has_value());
+            const auto retained = session.score(corpus.docIds);
+            REQUIRE(retained.has_value());
+            CHECK(retained.value().scores == baseline.value().scores);
+            CHECK(backend.scoreCalls() == calls + 2);
+        }
+    }
 }
 
 TEST_CASE("SimeonLexicalBackend buildAsync flips ready on small corpus",

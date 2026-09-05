@@ -61,9 +61,11 @@ TEST_CASE(
         r.type = "hybrid";
         r.executionTimeMs = 7;
         r.paths = {"a.md", "b.md"};
-        MCPSearchResponse::Result ignored;
-        ignored.id = "ignored";
-        r.results.push_back(std::move(ignored));
+        MCPSearchResponse::Result reference;
+        reference.id = "reference";
+        reference.hash = std::string(64, 'a');
+        reference.snippet = "omitted in compact output";
+        r.results.push_back(std::move(reference));
 
         const auto j = r.toJson();
         CHECK(j["total"] == 3);
@@ -71,8 +73,12 @@ TEST_CASE(
         CHECK(j["execution_time_ms"] == 7);
         CHECK(j["paths"] == json::array({"a.md", "b.md"}));
 
-        // paths_only mode should return early without emitting results
-        CHECK_FALSE(j.contains("results"));
+        // Paths remain available, with compact identities but no snippet payload.
+        REQUIRE(j.at("results").size() == 1);
+        CHECK(j.at("results").at(0).at("hash") == std::string(64, 'a'));
+        CHECK(j.at("results").at(0).at("hydration").at("method") == "get");
+        CHECK_FALSE(j.at("results").at(0).contains("snippet"));
+        CHECK_FALSE(j.at("results").at(0).contains("score"));
     }
 
     {

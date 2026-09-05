@@ -950,6 +950,8 @@ Result<std::optional<DocumentInfo>> MetadataRepository::getDocumentByHash(const 
 }
 
 // Sync winner replacement owns one SQLite transaction for row and metadata state.
+// Do not update local derivation status: copying a pre-transaction snapshot here
+// could overwrite an extraction/repair completion racing the remote apply.
 Result<void> MetadataRepository::replaceDocumentAndMetadata(
     const DocumentInfo& info, const std::vector<std::pair<std::string, MetadataValue>>& metadata) {
     std::string priorFilePath;
@@ -975,19 +977,14 @@ Result<void> MetadataRepository::replaceDocumentAndMetadata(
                 file_path = ?, file_name = ?, file_extension = ?,
                 file_size = ?, sha256_hash = ?, mime_type = ?,
                 created_time = ?, modified_time = ?, indexed_time = ?,
-                content_extracted = ?, extraction_status = ?,
-                extraction_error = ?, repair_status = ?, repair_attempted_at = ?,
-                repair_attempts = ?, path_prefix = ?, reverse_path = ?,
+                path_prefix = ?, reverse_path = ?,
                 path_hash = ?, parent_hash = ?, path_depth = ?
             WHERE id = ?
         )"));
         YAMS_TRY(updateStmt.bindAll(
             info.filePath, info.fileName, info.fileExtension, info.fileSize, info.sha256Hash,
-            info.mimeType, info.createdTime, info.modifiedTime, info.indexedTime,
-            info.contentExtracted ? 1 : 0, ExtractionStatusUtils::toString(info.extractionStatus),
-            info.extractionError, RepairStatusUtils::toString(info.repairStatus),
-            info.repairAttemptedAt, info.repairAttempts, info.pathPrefix, info.reversePath,
-            info.pathHash, info.parentHash, info.pathDepth, info.id));
+            info.mimeType, info.createdTime, info.modifiedTime, info.indexedTime, info.pathPrefix,
+            info.reversePath, info.pathHash, info.parentHash, info.pathDepth, info.id));
         YAMS_TRY(updateStmt.execute());
 
         YAMS_TRY_UNWRAP(deleteStmt, db.prepare("DELETE FROM metadata WHERE document_id = ?"));

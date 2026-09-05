@@ -258,6 +258,46 @@ TEST_CASE("interrupted VACUUM does not emit SQL error log",
     db.close();
 }
 
+TEST_CASE("integrity checks support cancellation without poisoning the connection",
+          "[unit][metadata][integrity][cancellation]") {
+    Database db;
+    REQUIRE(db.open(":memory:", ConnectionMode::Memory));
+    REQUIRE(db.execute("CREATE TABLE t(id INTEGER PRIMARY KEY, payload TEXT)"));
+    REQUIRE(db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n "
+                       "WHERE x<2000) INSERT INTO t SELECT x, 'payload' FROM n"));
+
+    SECTION("already cancelled") {
+        const auto result = db.checkIntegrity([] { return true; });
+        REQUIRE_FALSE(result);
+        CHECK(result.error().code == ErrorCode::OperationCancelled);
+    }
+    SECTION("cancel during SQLite execution") {
+        int polls = 0;
+        const auto result = db.checkIntegrity([&] { return ++polls >= 3; });
+        REQUIRE_FALSE(result);
+        CHECK(polls >= 3);
+        CHECK(result.error().code == ErrorCode::OperationCancelled);
+    }
+    SECTION("external SQLite interruption is not corruption") {
+        sqlite3_progress_handler(db.rawHandle(), 1, [](void*) { return 1; }, nullptr);
+        const auto result = db.checkIntegrity();
+        sqlite3_progress_handler(db.rawHandle(), 0, nullptr, nullptr);
+        REQUIRE_FALSE(result);
+        CHECK(result.error().code == ErrorCode::OperationCancelled);
+    }
+    SECTION("cancellation also preserves FTS validation state") {
+        REQUIRE(db.execute("CREATE VIRTUAL TABLE search_text USING fts5(payload)"));
+        REQUIRE(db.execute("INSERT INTO search_text SELECT payload FROM t"));
+        int polls = 0;
+        const auto result = db.checkIntegrity([&] { return ++polls >= 3; });
+        REQUIRE_FALSE(result);
+        CHECK(result.error().code == ErrorCode::OperationCancelled);
+    }
+    // No dangling progress callback and no persistent interrupt after return.
+    REQUIRE(db.checkIntegrity());
+    CHECK(countRows(db) == 2000);
+}
+
 TEST_CASE("transient integrity message classification", "[unit][metadata][corruption]") {
     using yams::metadata::testing_isTransientIntegrityCheckMessage;
 

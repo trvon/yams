@@ -179,6 +179,9 @@ struct EntitySearchParams {
 /// Per-call backend work counters. A zero is meaningful only when its matching
 /// `*Observed` flag is true; ANN libraries do not always expose internal work.
 struct VectorSearchDiagnostics {
+    /// Number of samples merged by the search pipeline (zero for a backend sample).
+    size_t accumulatedSamples = 0;
+    size_t documentRefillAttempts = 0;
     bool usedAnn = false;
     bool usedExactScan = false;
     bool usedCandidateIndexCache = false;

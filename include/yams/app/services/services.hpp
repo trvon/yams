@@ -432,6 +432,7 @@ struct GrepFileResult {
     // Search method used for this file
     std::string searchMethod;      // how this file was searched
     bool wasSemanticSearch{false}; // true if semantic search was used
+    std::string hash;              // Immutable stored source revision, empty when unknown.
 };
 
 struct GrepResponse {

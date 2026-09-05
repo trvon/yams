@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <span>
 #include <unordered_set>
 #include <vector>
 
+#include <yams/crypto/hasher.h>
 #include <yams/vector/document_chunker.h>
 #include <yams/vector/vector_database.h>
 
@@ -71,6 +73,7 @@ prepareEmbedPreparedDoc(const EmbedSourceDoc& src, yams::vector::DocumentChunker
     doc.fileName = src.fileName;
     doc.filePath = src.filePath;
     doc.mimeType = src.mimeType;
+    doc.sourceTextHash = crypto::SHA256Hasher::hash(std::as_bytes(std::span(src.extractedText)));
 
     auto chunks = chunker.chunkDocument(src.extractedText, src.hash);
     if (chunks.empty()) {

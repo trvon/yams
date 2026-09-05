@@ -18,6 +18,7 @@
 #include <vector>
 
 #include <yams/core/types.h>
+#include <yams/memory_sync/corpus_scope.h>
 #include <yams/memory_sync/memory_sync_service.h>
 #include <yams/storage/storage_backend.h>
 
@@ -56,6 +57,7 @@ inline bool isCanonicalCorpusId(std::string_view value) {
 
 struct MemorySyncDaemonConfig {
     bool enabled{false};
+    CorpusScope corpusScope{CorpusScope::Personal};
     std::string nodeId;                     /// explicit stable daemon writer UUID
     std::string corpusId;                   /// stable replication-domain identifier
     std::uint64_t corpusEpoch{0};           /// incompatible reset/migration generation
@@ -80,6 +82,9 @@ struct MemorySyncDaemonConfig {
         };
         if (const auto* v = get("enabled")) {
             cfg.enabled = parseBool(*v);
+        }
+        if (const auto* v = get("corpus_scope")) {
+            cfg.corpusScope = parseCorpusScope(*v);
         }
         if (const auto* v = get("node_id")) {
             cfg.nodeId = *v;
@@ -296,6 +301,11 @@ createMemorySyncService(const MemorySyncDaemonConfig& config,
                         WriterTrustFileReader trustFileReader = {}) {
     if (!config.enabled) {
         return Error{ErrorCode::InvalidState, "memory_sync is disabled"};
+    }
+    if (config.corpusScope != CorpusScope::Shared) {
+        return Error{ErrorCode::InvalidArgument,
+                     "replication requires memory_sync.corpus_scope=shared; keep personal "
+                     "memory in a separate data directory"};
     }
 
     if (!isCanonicalWriterUuid(config.nodeId)) {

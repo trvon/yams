@@ -24,6 +24,9 @@ class VectorDatabase;
 
 namespace yams::search::detail {
 
+void mergeVectorSearchDiagnostics(vector::VectorSearchDiagnostics& total,
+                                  const vector::VectorSearchDiagnostics& sample);
+
 Result<std::vector<ComponentResult>>
 queryVectorIndexPipeline(const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
                          const std::shared_ptr<vector::VectorDatabase>& vectorDb,

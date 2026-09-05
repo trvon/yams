@@ -211,6 +211,7 @@ public:
         std::string symbolLanguage;
         bool shouldDispatchEntity = false;
         bool shouldDispatchTitle = false;
+        bool preserveTitle = false;
         bool shouldDispatchEmbed = true;
         std::string titleTextSnippet; // First N chars for async GLiNER title extraction
         std::vector<std::string> fallbackEntities; // ScientificAdapter entities for bulk write
@@ -479,11 +480,12 @@ private:
     void dispatchToTitleChannel(const std::string& hash, int64_t docId,
                                 const std::string& textSnippet, const std::string& fallbackTitle,
                                 const std::string& filePath, const std::string& language,
-                                const std::string& mimeType);
+                                const std::string& mimeType, bool preserveTitle);
     void processTitleExtractionStage(const std::string& hash, int64_t docId,
                                      const std::string& textSnippet,
                                      const std::string& fallbackTitle, const std::string& filePath,
-                                     const std::string& language, const std::string& mimeType);
+                                     const std::string& language, const std::string& mimeType,
+                                     bool preserveTitle);
     std::size_t resolveChannelCapacity() const;
     std::size_t boundedStageChannelCapacity(std::size_t defaultCap) const;
 

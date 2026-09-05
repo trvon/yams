@@ -655,16 +655,52 @@ Result<void> Database::execute(const std::string& sql) {
 }
 
 Result<void> Database::checkIntegrity() {
+    return checkIntegrity({});
+}
+
+Result<void> Database::checkIntegrity(const std::function<bool()>& shouldCancel) {
     if (!db_) {
         return Error{ErrorCode::InvalidState, "Database not open"};
+    }
+
+    struct ProgressGuard {
+        sqlite3* db;
+        const std::function<bool()>& predicate;
+        bool installed{false};
+
+        static int poll(void* context) noexcept {
+            auto& self = *static_cast<ProgressGuard*>(context);
+            try {
+                return self.predicate() ? 1 : 0;
+            } catch (...) {
+                // Never unwind through SQLite's C callback frames.
+                return 1;
+            }
+        }
+        ~ProgressGuard() {
+            if (installed) {
+                sqlite3_progress_handler(db, 0, nullptr, nullptr);
+            }
+        }
+    } progress{db_, shouldCancel};
+    if (shouldCancel) {
+        if (ProgressGuard::poll(&progress)) {
+            return Error{ErrorCode::OperationCancelled, "integrity check cancelled before scan"};
+        }
+        sqlite3_progress_handler(db_, 1000, &ProgressGuard::poll, &progress);
+        progress.installed = true;
     }
 
     sqlite3_busy_timeout(db_, 10000);
 
     sqlite3_stmt* stmt = nullptr;
     int rc = sqlite3_prepare_v2(db_, "PRAGMA quick_check", -1, &stmt, nullptr);
+    std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> statement(stmt, sqlite3_finalize);
     if (rc != SQLITE_OK) {
         std::string err = sqlite3_errmsg(db_);
+        if ((rc & 0xff) == SQLITE_INTERRUPT) {
+            return Error{ErrorCode::OperationCancelled, "quick_check prepare interrupted: " + err};
+        }
         if (is_sqlite_busy_or_locked(rc) || is_transient_integrity_check_message(err)) {
             return Error{ErrorCode::ResourceBusy, "quick_check prepare failed: " + err};
         }
@@ -693,10 +729,13 @@ Result<void> Database::checkIntegrity() {
             break;
         }
     }
-    sqlite3_finalize(stmt);
+    statement.reset();
 
     if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
         std::string err = sqlite3_errmsg(db_);
+        if ((rc & 0xff) == SQLITE_INTERRUPT) {
+            return Error{ErrorCode::OperationCancelled, "quick_check step interrupted: " + err};
+        }
         if (is_sqlite_busy_or_locked(rc) || is_transient_integrity_check_message(err)) {
             return Error{ErrorCode::ResourceBusy, "quick_check step failed: " + err};
         }
