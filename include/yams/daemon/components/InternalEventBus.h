@@ -331,9 +331,10 @@ public:
         std::string textSnippet;   // First N chars for GLiNER inference
         std::string fallbackTitle; // Filename to use if GLiNER fails
         // Additional context for NL entity KG population
-        std::string filePath; // For KG node creation
-        std::string language; // Language hint for extraction
-        std::string mimeType; // MIME type for content routing
+        std::string filePath;      // For KG node creation
+        std::string language;      // Language hint for extraction
+        std::string mimeType;      // MIME type for content routing
+        bool preserveTitle{false}; // Supplied metadata title must not be replaced by inference.
     };
     struct StoreDocumentTask {
         AddDocumentRequest request;

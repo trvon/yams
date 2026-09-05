@@ -1,4 +1,5 @@
 #include <nlohmann/json.hpp>
+#include "title_enrichment_policy.h"
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <atomic>
@@ -1249,8 +1250,8 @@ void PostIngestQueue::dispatchNonEmbeddingStages(
     if (plan.dispatchTitle) {
         const auto dispatchStart = std::chrono::steady_clock::now();
         dispatchToTitleChannel(prepared.hash, prepared.documentId, prepared.titleTextSnippet,
-                               prepared.fileName, prepared.filePath, prepared.language,
-                               prepared.mimeType);
+                               prepared.title, prepared.filePath, prepared.language,
+                               prepared.mimeType, prepared.preserveTitle);
         timings.titleDispatch.add(std::chrono::steady_clock::now() - dispatchStart);
     }
 }
@@ -1447,9 +1448,11 @@ PostIngestQueue::prepareMetadataEntry(
     // Title+NL extraction: single GLiNER call for both title and NL entities.
     // Skip for code files — GLiNER does not extract meaningful titles from
     // source code, and the deriveTitle heuristic already produces good results.
-    // Also skip when the plugin already provided a title (e.g. PDF metadata).
-    if (!isCodeFile && !pluginProvidedTitle && hasTitleExtractor() &&
-        !isGlinerTitleExtractionDisabled()) {
+    // A supplied title suppresses title replacement, not NL entity extraction.
+    const auto titlePlan = planTitleEnrichment(isCodeFile, pluginProvidedTitle, hasTitleExtractor(),
+                                               isGlinerTitleExtractionDisabled());
+    prepared.preserveTitle = titlePlan.preserveTitle;
+    if (titlePlan.dispatch) {
         prepared.shouldDispatchTitle = true;
         prepared.titleTextSnippet = prepared.extractedText.size() > kMaxGlinerChars
                                         ? prepared.extractedText.substr(0, kMaxGlinerChars)
@@ -2307,7 +2310,7 @@ void PostIngestQueue::dispatchToTitleChannel(const std::string& hash, int64_t do
                                              const std::string& fallbackTitle,
                                              const std::string& filePath,
                                              const std::string& language,
-                                             const std::string& mimeType) {
+                                             const std::string& mimeType, bool preserveTitle) {
     auto channel = titleChannel_;
 
     InternalEventBus::TitleExtractionJob job;
@@ -2318,6 +2321,7 @@ void PostIngestQueue::dispatchToTitleChannel(const std::string& hash, int64_t do
     job.filePath = filePath;
     job.language = language;
     job.mimeType = mimeType;
+    job.preserveTitle = preserveTitle;
 
     // Bounded retry absorbs the titlePoller warmup window (cap=0 until next
     // TuningManager tick) without changing steady-state drop behavior.
@@ -2377,16 +2381,14 @@ void PostIngestQueue::processTitleExtractionBatch(
     }
     for (auto& job : jobs) {
         processTitleExtractionStage(job.hash, job.documentId, job.textSnippet, job.fallbackTitle,
-                                    job.filePath, job.language, job.mimeType);
+                                    job.filePath, job.language, job.mimeType, job.preserveTitle);
     }
 }
 
-void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64_t docId,
-                                                  const std::string& textSnippet,
-                                                  const std::string& fallbackTitle,
-                                                  const std::string& filePath,
-                                                  const std::string& language,
-                                                  const std::string& /*mimeType*/) {
+void PostIngestQueue::processTitleExtractionStage(
+    const std::string& hash, int64_t docId, const std::string& textSnippet,
+    const std::string& fallbackTitle, const std::string& filePath, const std::string& language,
+    const std::string& /*mimeType*/, bool preserveTitle) {
     const auto stageStart = std::chrono::steady_clock::now();
     struct StageTimingGuard {
         PostIngestQueue* self;
@@ -2519,7 +2521,7 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
         }
 
         // Update title if we found a good candidate
-        if (bestTitle) {
+        if (bestTitle && !preserveTitle) {
             auto newTitle = yams::extraction::util::normalizeTitleCandidate(bestTitle->text);
             if (!newTitle.empty() && newTitle != fallbackTitle) {
                 if (meta_ && docId >= 0) {
