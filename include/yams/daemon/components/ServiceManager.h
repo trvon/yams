@@ -497,6 +497,11 @@ public:
                                         std::uint64_t freePageCount, std::uint64_t pageSize) {
         return shouldAutoVacuum(databaseBytes, pageCount, freePageCount, pageSize);
     }
+    bool
+    testingEnsureDatabaseIntegrityOrRecover(const std::filesystem::path& path,
+                                            const std::shared_ptr<metadata::Database>& database) {
+        return ensureDatabaseIntegrityOrRecover(path, database);
+    }
 #endif
 
     // Graph Component (PBI-009)

@@ -1312,6 +1312,29 @@ TEST_CASE_METHOD(ServiceManagerFixture,
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager preserves metadata when integrity validation cannot finish",
+                 "[daemon][service_manager][startup][integrity][cancellation]") {
+    const auto dbPath = metadataDbPath(config_);
+    seedMetadataDb(dbPath, "must-survive");
+    auto database = std::make_shared<metadata::Database>();
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+
+    SECTION("shutdown cancels validation without recovery") {
+        REQUIRE(database->open(dbPath.string(), metadata::ConnectionMode::ReadWrite));
+        sm->shutdown();
+    }
+    SECTION("an unavailable connection is not evidence of corruption") {
+        // The on-disk database is valid; the supplied connection is closed.
+    }
+
+    CHECK_FALSE(sm->testingEnsureDatabaseIntegrityOrRecover(dbPath, database));
+    database->close();
+    CHECK_FALSE(findQuarantinedFile(config_.dataDir).has_value());
+    CHECK(state_.readiness.databaseRecoveredFrom.empty());
+    CHECK(startupProbeRowCount(dbPath) == 1);
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
                  "ServiceManager records recovery provenance for corrupt metadata DB startup",
                  "[daemon][service_manager][startup][recovery]") {
     config_.enableModelProvider = false;

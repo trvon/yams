@@ -3047,7 +3047,17 @@ bool ServiceManager::openDatabaseOnce(const std::filesystem::path& dbPath,
 bool ServiceManager::ensureDatabaseIntegrityOrRecover(
     const std::filesystem::path& dbPath, const std::shared_ptr<metadata::Database>& database) {
     databaseIntegrityStampEligible_.store(false, std::memory_order_release);
-    auto integrity = database->checkIntegrity();
+    // This startup connection is owned by the blocking worker until validation
+    // finishes. Poll shutdown inside SQLite, rather than waiting until a potentially
+    // multi-minute scan completes while shutdown is joining this worker.
+    auto integrity = database->checkIntegrity(
+        [this] { return shutdownInvoked_.load(std::memory_order_acquire); });
+    if (shutdownInvoked_.load(std::memory_order_acquire) ||
+        (!integrity && integrity.error().code == ErrorCode::OperationCancelled)) {
+        spdlog::info("[ServiceManager] Metadata integrity check cancelled; preserving database");
+        database->close();
+        return false;
+    }
     if (integrity) {
         databaseIntegrityStampEligible_.store(true, std::memory_order_release);
         return true;
@@ -3085,6 +3095,12 @@ bool ServiceManager::ensureDatabaseIntegrityOrRecover(
     spdlog::error("[ServiceManager] Metadata DB integrity check failed: {}",
                   integrity.error().message);
     database->close();
+
+    // I/O errors, an unavailable connection, and other validation failures are not
+    // proof of corruption. Only confirmed structural corruption permits recovery.
+    if (integrity.error().code != ErrorCode::CorruptedData) {
+        return false;
+    }
 
     auto recovery = quarantineAndRecreate(dbPath);
     if (!recovery) {
