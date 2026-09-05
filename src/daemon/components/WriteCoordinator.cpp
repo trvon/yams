@@ -646,19 +646,27 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                             return;
                         } else if constexpr (std::is_same_v<T,
                                                             CompleteDocumentEmbeddingsByHashesOp>) {
-                            if (concrete.hashes.empty())
+                            if (!concrete.derivations.empty()) {
+                                r = applyMetadataOp(concrete);
+                                if (!r && !firstOpError) {
+                                    firstOpError = r.error();
+                                }
+                            } else {
+                                if (concrete.hashes.empty())
+                                    return;
+                                const auto key = batch->source + "\x1f" + concrete.modelName;
+                                auto& group = embeddingCompletionBySourceAndModel[key];
+                                if (group.source.empty()) {
+                                    group.source = batch->source;
+                                    group.modelName = concrete.modelName;
+                                }
+                                group.hashes.insert(
+                                    group.hashes.end(),
+                                    std::make_move_iterator(concrete.hashes.begin()),
+                                    std::make_move_iterator(concrete.hashes.end()));
+                                concrete.hashes.clear();
                                 return;
-                            const auto key = batch->source + "\x1f" + concrete.modelName;
-                            auto& group = embeddingCompletionBySourceAndModel[key];
-                            if (group.source.empty()) {
-                                group.source = batch->source;
-                                group.modelName = concrete.modelName;
                             }
-                            group.hashes.insert(group.hashes.end(),
-                                                std::make_move_iterator(concrete.hashes.begin()),
-                                                std::make_move_iterator(concrete.hashes.end()));
-                            concrete.hashes.clear();
-                            return;
                         } else {
                             return;
                         }
@@ -1299,6 +1307,25 @@ Result<void> WriteCoordinator::applyMetadataOp(UpdateEmbeddingStatusByHashesOp& 
 Result<void> WriteCoordinator::applyMetadataOp(CompleteDocumentEmbeddingsByHashesOp& op) {
     if (!meta_)
         return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
+    if (!op.derivations.empty()) {
+        if (!op.hashes.empty()) {
+            return Error{ErrorCode::InvalidArgument,
+                         "Embedding completion cannot mix legacy hashes and derivation tokens"};
+        }
+        metadata::MetadataOpScope opScope("wc_embedding_derivation_completion");
+        for (const auto& token : op.derivations) {
+            auto completed = meta_->completeDocumentEmbeddingDerivation(token, op.modelName);
+            if (!completed) {
+                return completed.error();
+            }
+            if (completed.value()) {
+                std::lock_guard<std::mutex> lock(statsMutex_);
+                ++stats_.embeddingStatusesUpdated;
+                ++stats_.repairStatusesUpdated;
+            }
+        }
+        return {};
+    }
     if (op.hashes.empty())
         return Result<void>();
     metadata::MetadataOpScope opScope("wc_embedding_completion_batch");

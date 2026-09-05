@@ -815,6 +815,202 @@ TEST_CASE("MetadataRepository: embedding completion commits embedding and repair
     CHECK((stats.value().embeddingCount == 1));
 }
 
+TEST_CASE("MetadataRepository fences superseded embedding derivations",
+          "[unit][metadata][embeddings][derivation]") {
+    MetadataRepositoryFixture fix;
+    const std::string hash = "derivation-hash";
+    auto inserted =
+        fix.repository_->insertDocument(makeDocumentWithPath("/tmp/derivation.txt", hash));
+    REQUIRE(inserted.has_value());
+    auto a = fix.repository_->beginDocumentEmbeddingDerivation(hash, "recipe-a");
+    REQUIRE(a.has_value());
+    auto b = fix.repository_->beginDocumentEmbeddingDerivation(hash, "recipe-b");
+    REQUIRE(b.has_value());
+    auto pendingStates = fix.repository_->batchGetDocumentEmbeddingDerivations({hash, "missing"});
+    REQUIRE(pendingStates.has_value());
+    REQUIRE(pendingStates.value().size() == 1);
+    CHECK_FALSE(pendingStates.value().at(hash).completed);
+    CHECK(pendingStates.value().at(hash).token.generation == b.value().generation);
+    CHECK(a.value().generation != b.value().generation);
+    auto tampered = b.value();
+    tampered.recipe = "wrong-recipe";
+    auto rejected = fix.repository_->completeDocumentEmbeddingDerivation(tampered, "wrong-model");
+    REQUIRE(rejected.has_value());
+    CHECK_FALSE(rejected.value());
+    auto stale = fix.repository_->completeDocumentEmbeddingDerivation(a.value(), "model-a");
+    REQUIRE(stale.has_value());
+    CHECK_FALSE(stale.value());
+    REQUIRE(fix.repository_->batchCompleteDocumentEmbeddingsByHashes({hash}, "legacy-model")
+                .has_value());
+    auto ready = fix.repository_->hasDocumentEmbeddingByHash(hash);
+    REQUIRE(ready.has_value());
+    CHECK_FALSE(ready.value());
+    auto current = fix.repository_->completeDocumentEmbeddingDerivation(b.value(), "model-b");
+    REQUIRE(current.has_value());
+    CHECK(current.value());
+    auto duplicate = fix.repository_->completeDocumentEmbeddingDerivation(b.value(), "model-b");
+    REQUIRE(duplicate.has_value());
+    CHECK_FALSE(duplicate.value());
+    auto status = getEmbeddingStatusRow(*fix.pool_, hash);
+    REQUIRE(status.has_value());
+    REQUIRE(status.value().has_value());
+    CHECK(status.value()->modelId == "model-b");
+    auto publishedStates = fix.repository_->batchGetDocumentEmbeddingDerivations({hash});
+    REQUIRE(publishedStates.has_value());
+    CHECK(publishedStates.value().at(hash).completed);
+    CHECK(publishedStates.value().at(hash).token.recipe == "recipe-b");
+    auto stats = fix.repository_->getCorpusStats();
+    REQUIRE(stats.has_value());
+    CHECK(stats.value().embeddingCount == 1);
+    auto next = fix.repository_->beginDocumentEmbeddingDerivation(hash, "recipe-b");
+    REQUIRE(next.has_value());
+    CHECK(next.value().generation != b.value().generation);
+    auto invalidated = fix.repository_->hasDocumentEmbeddingByHash(hash);
+    REQUIRE(invalidated.has_value());
+    CHECK_FALSE(invalidated.value());
+    auto nextStats = fix.repository_->getCorpusStats();
+    REQUIRE(nextStats.has_value());
+    CHECK(nextStats.value().embeddingCount == 0);
+}
+
+TEST_CASE("MetadataRepository invalidates derivation tokens on extracted input changes",
+          "[unit][metadata][embeddings][derivation]") {
+    MetadataRepositoryFixture fix;
+    const std::string hash = "derivation-content-hash";
+    auto inserted =
+        fix.repository_->insertDocument(makeDocumentWithPath("/tmp/derivation-content.txt", hash));
+    REQUIRE(inserted.has_value());
+    auto entry = makeBatchContentEntry(inserted.value(), "Title", "Original text");
+    REQUIRE(fix.repository_->batchInsertContentAndIndex({entry}).has_value());
+    auto token = fix.repository_->beginDocumentEmbeddingDerivation(hash, "recipe");
+    REQUIRE(token.has_value());
+    bool changed = true;
+    SECTION("changed text") {
+        entry.contentText = "New text";
+    }
+    SECTION("changed method") {
+        entry.extractionMethod += "-new";
+    }
+    SECTION("changed language") {
+        entry.language = "fr";
+    }
+    SECTION("identical content") {
+        changed = false;
+    }
+    REQUIRE(fix.repository_->batchInsertContentAndIndex({entry}).has_value());
+    auto completed = fix.repository_->completeDocumentEmbeddingDerivation(token.value(), "model");
+    REQUIRE(completed.has_value());
+    CHECK(completed.value() == !changed);
+    if (changed) {
+        REQUIRE(fix.repository_->batchCompleteDocumentEmbeddingsByHashes({hash}, "legacy-model")
+                    .has_value());
+        auto ready = fix.repository_->hasDocumentEmbeddingByHash(hash);
+        REQUIRE(ready.has_value());
+        CHECK_FALSE(ready.value());
+    }
+}
+
+TEST_CASE("MetadataRepository direct content writes invalidate pending derivations",
+          "[unit][metadata][embeddings][derivation]") {
+    MetadataRepositoryFixture fix;
+    const std::string hash = "direct-derivation-hash";
+    auto id =
+        fix.repository_->insertDocument(makeDocumentWithPath("/tmp/direct-derivation.txt", hash));
+    REQUIRE(id.has_value());
+    DocumentContent content;
+    content.documentId = id.value();
+    content.contentText = "original";
+    REQUIRE(fix.repository_->insertContent(content).has_value());
+    auto token = fix.repository_->beginDocumentEmbeddingDerivation(hash, "recipe");
+    REQUIRE(token.has_value());
+    SECTION("update") {
+        content.contentText = "changed";
+        REQUIRE(fix.repository_->updateContent(content).has_value());
+    }
+    SECTION("delete") {
+        REQUIRE(fix.repository_->deleteContent(id.value()).has_value());
+    }
+    SECTION("delete and reinsert identical content does not revive old token") {
+        REQUIRE(fix.repository_->deleteContent(id.value()).has_value());
+        REQUIRE(fix.repository_->insertContent(content).has_value());
+    }
+    auto completed = fix.repository_->completeDocumentEmbeddingDerivation(token.value(), "model");
+    REQUIRE(completed.has_value());
+    CHECK_FALSE(completed.value());
+}
+
+TEST_CASE("WriteCoordinator preserves derivation identities across completion batches",
+          "[unit][metadata][embeddings][derivation][write-coordinator]") {
+    MetadataRepositoryFixture fix;
+    const std::string hash = "queued-derivation-hash";
+    REQUIRE(
+        fix.repository_->insertDocument(makeDocumentWithPath("/tmp/queued-derivation.txt", hash))
+            .has_value());
+    auto old = fix.repository_->beginDocumentEmbeddingDerivation(hash, "old-recipe");
+    REQUIRE(old.has_value());
+    auto current = fix.repository_->beginDocumentEmbeddingDerivation(hash, "new-recipe");
+    REQUIRE(current.has_value());
+    boost::asio::io_context io;
+    auto repoRef =
+        std::shared_ptr<MetadataRepository>(fix.repository_.get(), [](MetadataRepository*) {});
+    yams::daemon::WriteCoordinator coordinator(io, {}, repoRef);
+    auto batch = std::make_unique<yams::daemon::WriteBatch>();
+    batch->source = "test/derivation-completion";
+    // New completion precedes a late old completion using the same model/grouping key.
+    batch->ops.emplace_back(
+        yams::daemon::CompleteDocumentEmbeddingsByHashesOp{{}, "model", {current.value()}});
+    batch->ops.emplace_back(
+        yams::daemon::CompleteDocumentEmbeddingsByHashesOp{{}, "model", {old.value()}});
+    coordinator.enqueue(std::move(batch));
+    coordinator.start();
+    auto runner = std::async(std::launch::async, [&] { io.run(); });
+    const auto flushed = coordinator.flush(std::chrono::seconds{5});
+    coordinator.shutdown();
+    io.stop();
+    runner.get();
+    REQUIRE(flushed.has_value());
+    CHECK(coordinator.getStats().embeddingStatusesUpdated == 1);
+    CHECK(coordinator.getStats().repairStatusesUpdated == 1);
+    auto ready = fix.repository_->hasDocumentEmbeddingByHash(hash);
+    REQUIRE(ready.has_value());
+    CHECK(ready.value());
+}
+
+TEST_CASE("MetadataRepository derivation completion rolls back and can be retried",
+          "[unit][metadata][embeddings][derivation]") {
+    MetadataRepositoryFixture fix;
+    const std::string hash = "derivation-rollback-hash";
+    REQUIRE(
+        fix.repository_->insertDocument(makeDocumentWithPath("/tmp/derivation-rollback.txt", hash))
+            .has_value());
+    REQUIRE_FALSE(fix.repository_->beginDocumentEmbeddingDerivation(hash, "").has_value());
+    REQUIRE_FALSE(
+        fix.repository_->beginDocumentEmbeddingDerivation("missing", "recipe").has_value());
+    auto token = fix.repository_->beginDocumentEmbeddingDerivation(hash, "recipe");
+    REQUIRE(token.has_value());
+    REQUIRE(fix.pool_
+                ->withConnection([](Database& db) -> Result<void> {
+                    return db.execute(R"(
+            CREATE TRIGGER reject_derivation_repair BEFORE UPDATE OF repair_status ON documents
+            BEGIN SELECT RAISE(ABORT, 'test derivation completion rollback'); END
+        )");
+                })
+                .has_value());
+    auto failed = fix.repository_->completeDocumentEmbeddingDerivation(token.value(), "model");
+    REQUIRE_FALSE(failed.has_value());
+    auto ready = fix.repository_->hasDocumentEmbeddingByHash(hash);
+    REQUIRE(ready.has_value());
+    CHECK_FALSE(ready.value());
+    REQUIRE(fix.pool_
+                ->withConnection([](Database& db) -> Result<void> {
+                    return db.execute("DROP TRIGGER reject_derivation_repair");
+                })
+                .has_value());
+    auto retried = fix.repository_->completeDocumentEmbeddingDerivation(token.value(), "model");
+    REQUIRE(retried.has_value());
+    CHECK(retried.value());
+}
+
 TEST_CASE("MetadataRepository: reconcile empty vector-backed hash set clears embedding ownership",
           "[unit][metadata][repository][embeddings]") {
     MetadataRepositoryFixture fix;

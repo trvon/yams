@@ -387,6 +387,8 @@ MetadataRepository::batchCompleteDocumentEmbeddingsByHashes(const std::vector<st
             FROM documents d
             LEFT JOIN document_embeddings_status des ON d.id = des.document_id
             WHERE d.sha256_hash = ?
+              AND NOT EXISTS (SELECT 1 FROM document_embedding_derivations a
+                              WHERE a.document_id = d.id)
         )"));
         YAMS_TRY_UNWRAP(embeddingStmt, db.prepareCached(R"(
             INSERT INTO document_embeddings_status
@@ -461,6 +463,169 @@ MetadataRepository::batchCompleteDocumentEmbeddingsByHashes(const std::vector<st
                 "metadata: embedded count must not exceed total document count after "
                 "embedding completion batch");
     return Result<void>();
+}
+
+Result<std::unordered_map<std::string, EmbeddingDerivationState>>
+MetadataRepository::batchGetDocumentEmbeddingDerivations(const std::vector<std::string>& hashes) {
+    using States = std::unordered_map<std::string, EmbeddingDerivationState>;
+    if (hashes.empty()) {
+        return States{};
+    }
+    return executeReadQuery<States>([&](Database& db) -> Result<States> {
+        States states;
+        constexpr std::size_t kChunkSize = 200;
+        for (std::size_t offset = 0; offset < hashes.size(); offset += kChunkSize) {
+            const auto count = std::min(kChunkSize, hashes.size() - offset);
+            std::string sql = R"(
+                SELECT d.sha256_hash, a.generation, a.recipe,
+                       a.completed AND COALESCE(s.has_embedding, 0)
+                FROM document_embedding_derivations a
+                JOIN documents d ON d.id = a.document_id
+                LEFT JOIN document_embeddings_status s ON s.document_id = d.id
+                WHERE d.sha256_hash IN (
+            )";
+            for (std::size_t i = 0; i < count; ++i) {
+                sql += i == 0 ? "?" : ",?";
+            }
+            sql += ')';
+            YAMS_TRY_UNWRAP(stmt, db.prepare(sql));
+            for (std::size_t i = 0; i < count; ++i) {
+                YAMS_TRY(stmt.bind(static_cast<int>(i + 1), hashes[offset + i]));
+            }
+            while (true) {
+                YAMS_TRY_UNWRAP(row, stmt.step());
+                if (!row) {
+                    break;
+                }
+                auto hash = stmt.getString(0);
+                states.emplace(
+                    hash, EmbeddingDerivationState{{hash, stmt.getString(1), stmt.getString(2)},
+                                                   stmt.getInt(3) != 0});
+            }
+        }
+        return states;
+    });
+}
+
+Result<EmbeddingDerivationToken>
+MetadataRepository::beginDocumentEmbeddingDerivation(const std::string& hash,
+                                                     const std::string& recipe) {
+    if (hash.empty() || recipe.empty()) {
+        return Error{ErrorCode::InvalidArgument, "Embedding derivation requires hash and recipe"};
+    }
+    auto result = executeQuery<std::pair<EmbeddingDerivationToken, bool>>(
+        [&](Database& db) -> Result<std::pair<EmbeddingDerivationToken, bool>> {
+            YAMS_TRY(beginTransaction(db));
+            auto rollback = scope_exit([&] { rollbackIgnoringErrors(db); });
+            YAMS_TRY_UNWRAP(doc, db.prepareCached(R"(
+                SELECT d.id, COALESCE(s.has_embedding, 0), lower(hex(randomblob(16)))
+                FROM documents d LEFT JOIN document_embeddings_status s ON s.document_id = d.id
+                WHERE d.sha256_hash = ?
+            )"));
+            YAMS_TRY(doc->bind(1, hash));
+            YAMS_TRY_UNWRAP(found, doc->step());
+            if (!found) {
+                return Error{ErrorCode::NotFound, "Embedding derivation document not found"};
+            }
+            const auto id = doc->getInt64(0);
+            const bool wasReady = doc->getInt(1) != 0;
+            EmbeddingDerivationToken token{hash, doc->getString(2), recipe};
+            YAMS_TRY_UNWRAP(attempt, db.prepareCached(R"(
+                INSERT INTO document_embedding_derivations(document_id, generation, recipe)
+                VALUES (?, ?, ?)
+                ON CONFLICT(document_id) DO UPDATE SET
+                    generation = excluded.generation, recipe = excluded.recipe, completed = 0
+            )"));
+            YAMS_TRY(attempt->bindAll(id, token.generation, recipe));
+            YAMS_TRY(attempt->execute());
+            YAMS_TRY_UNWRAP(status, db.prepareCached(R"(
+                UPDATE document_embeddings_status
+                SET has_embedding = 0, model_id = NULL, updated_at = unixepoch()
+                WHERE document_id = ?
+            )"));
+            YAMS_TRY(status->bind(1, id));
+            YAMS_TRY(status->execute());
+            YAMS_TRY(commitOrRollback(db));
+            rollback.dismiss();
+            return std::make_pair(std::move(token), wasReady);
+        });
+    if (!result) {
+        return result.error();
+    }
+    if (result.value().second) {
+        core::saturating_sub(cachedEmbeddedCount_, uint64_t{1});
+    }
+    signalCorpusStatsStale();
+    return std::move(result.value().first);
+}
+
+Result<bool>
+MetadataRepository::completeDocumentEmbeddingDerivation(const EmbeddingDerivationToken& token,
+                                                        const std::string& modelId) {
+    if (token.hash.empty() || token.generation.empty() || token.recipe.empty() || modelId.empty()) {
+        return Error{ErrorCode::InvalidArgument, "Embedding completion requires token and model"};
+    }
+    auto result =
+        executeQuery<std::pair<bool, bool>>([&](Database& db) -> Result<std::pair<bool, bool>> {
+            YAMS_TRY(beginTransaction(db));
+            auto rollback = scope_exit([&] { rollbackIgnoringErrors(db); });
+            YAMS_TRY_UNWRAP(doc, db.prepareCached(R"(
+                SELECT d.id, COALESCE(s.has_embedding, 0)
+                FROM documents d
+                JOIN document_embedding_derivations a ON a.document_id = d.id
+                LEFT JOIN document_embeddings_status s ON s.document_id = d.id
+                WHERE d.sha256_hash = ? AND a.generation = ? AND a.recipe = ? AND a.completed = 0
+            )"));
+            YAMS_TRY(doc->bindAll(token.hash, token.generation, token.recipe));
+            YAMS_TRY_UNWRAP(found, doc->step());
+            if (!found) {
+                return std::make_pair(false, false);
+            }
+            const auto id = doc->getInt64(0);
+            const bool wasReady = doc->getInt(1) != 0;
+            YAMS_TRY_UNWRAP(attempt, db.prepareCached(R"(
+                UPDATE document_embedding_derivations SET completed = 1
+                WHERE document_id = ? AND generation = ? AND recipe = ? AND completed = 0
+            )"));
+            YAMS_TRY(attempt->bindAll(id, token.generation, token.recipe));
+            YAMS_TRY(attempt->execute());
+            if (db.changes() != 1) {
+                return std::make_pair(false, false);
+            }
+            YAMS_TRY_UNWRAP(model, db.prepareCached(R"(
+                INSERT OR IGNORE INTO vector_models(model_id, model_name, embedding_dim)
+                VALUES (?, ?, 0)
+            )"));
+            YAMS_TRY(model->bindAll(modelId, modelId));
+            YAMS_TRY(model->execute());
+            YAMS_TRY_UNWRAP(status, db.prepareCached(R"(
+                INSERT INTO document_embeddings_status(document_id, has_embedding, model_id, updated_at)
+                VALUES (?, 1, ?, unixepoch())
+                ON CONFLICT(document_id) DO UPDATE SET
+                    has_embedding = 1, model_id = excluded.model_id, updated_at = excluded.updated_at
+            )"));
+            YAMS_TRY(status->bindAll(id, modelId));
+            YAMS_TRY(status->execute());
+            YAMS_TRY_UNWRAP(repair, db.prepareCached(R"(
+                UPDATE documents SET repair_status = 'completed', repair_attempted_at = unixepoch(),
+                    repair_attempts = repair_attempts + 1 WHERE id = ?
+            )"));
+            YAMS_TRY(repair->bind(1, id));
+            YAMS_TRY(repair->execute());
+            YAMS_TRY(commitOrRollback(db));
+            rollback.dismiss();
+            return std::make_pair(true, !wasReady);
+        });
+    if (!result) {
+        return result.error();
+    }
+    if (result.value().second) {
+        cachedEmbeddedCount_.fetch_add(1, std::memory_order_relaxed);
+    }
+    if (result.value().first) {
+        signalCorpusStatsStale();
+    }
+    return result.value().first;
 }
 
 Result<void> MetadataRepository::reconcileDocumentEmbeddingStatusByHashes(

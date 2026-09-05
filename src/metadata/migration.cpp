@@ -375,7 +375,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             createKgEdgesSemanticNeighborOrderIndex(),
             optimizeDocumentsPathFtsUpdateTrigger(),
             createSymbolMetadataTrigramFts(),
-            createDocumentGraphCleanupIndexes()};
+            createDocumentGraphCleanupIndexes(),
+            createEmbeddingDerivations()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -2897,6 +2898,50 @@ Migration YamsMetadataMigrations::createDocumentGraphCleanupIndexes() {
         DROP INDEX IF EXISTS idx_kg_nodes_document_hash;
     )";
 
+    return m;
+}
+
+Migration YamsMetadataMigrations::createEmbeddingDerivations() {
+    Migration m;
+    m.version = 38;
+    m.name = "Track local embedding derivation attempts";
+    m.created = std::chrono::system_clock::now();
+    m.upSQL = R"(
+        CREATE TABLE document_embedding_derivations (
+            document_id INTEGER PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE,
+            generation TEXT NOT NULL,
+            recipe TEXT NOT NULL,
+            completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1))
+        );
+        CREATE TRIGGER embedding_derivation_content_insert AFTER INSERT ON document_content
+        BEGIN
+            UPDATE document_embedding_derivations
+            SET generation = lower(hex(randomblob(16))), completed = 0
+            WHERE document_id = NEW.document_id;
+        END;
+        CREATE TRIGGER embedding_derivation_content_update AFTER UPDATE ON document_content
+        WHEN OLD.content_text IS NOT NEW.content_text
+          OR OLD.extraction_method IS NOT NEW.extraction_method
+          OR OLD.language IS NOT NEW.language
+          OR OLD.document_id IS NOT NEW.document_id
+        BEGIN
+            UPDATE document_embedding_derivations
+            SET generation = lower(hex(randomblob(16))), completed = 0
+            WHERE document_id IN (OLD.document_id, NEW.document_id);
+        END;
+        CREATE TRIGGER embedding_derivation_content_delete AFTER DELETE ON document_content
+        BEGIN
+            UPDATE document_embedding_derivations
+            SET generation = lower(hex(randomblob(16))), completed = 0
+            WHERE document_id = OLD.document_id;
+        END;
+    )";
+    m.downSQL = R"(
+        DROP TRIGGER IF EXISTS embedding_derivation_content_delete;
+        DROP TRIGGER IF EXISTS embedding_derivation_content_update;
+        DROP TRIGGER IF EXISTS embedding_derivation_content_insert;
+        DROP TABLE IF EXISTS document_embedding_derivations;
+    )";
     return m;
 }
 
