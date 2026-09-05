@@ -5,6 +5,7 @@
 
 #include <yams/common/utf8_utils.h>
 #include <yams/core/assert.hpp>
+#include <yams/core/atomic_utils.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/profiling.h>
 
@@ -36,6 +37,7 @@ public:
     struct Delta {
         uint64_t newlyExtracted{0};
         uint64_t newlyIndexed{0};
+        uint64_t invalidatedEmbeddings{0};
         uint64_t metadataWrites{0};
         std::vector<int64_t> indexedDocIds;
     };
@@ -255,6 +257,21 @@ public:
             )"));
         auto& contentStmt = *contentStmtResult;
 
+        // Compare the persisted input before replacing it, in the same transaction.
+        // This prevents skipExisting from reusing embeddings of an older extraction.
+        // It does not fence completion of an already-running embedding job.
+        YAMS_TRY_UNWRAP(invalidateStmtResult, db.prepareCached(R"(
+            UPDATE document_embeddings_status
+            SET has_embedding = 0, model_id = NULL, updated_at = unixepoch()
+            WHERE document_id = ? AND has_embedding = 1
+              AND NOT EXISTS (
+                SELECT 1 FROM document_content
+                WHERE document_id = document_embeddings_status.document_id
+                  AND content_text IS ? AND extraction_method IS ? AND language IS ?
+              )
+        )"));
+        auto& invalidateStmt = *invalidateStmtResult;
+
         std::optional<CachedStatement> ftsStmtOpt;
         if (hasFts5) {
             YAMS_TRY_UNWRAP(ftsStmtResult, db.prepareCached(R"(
@@ -290,6 +307,12 @@ public:
             {
                 YAMS_ZONE_SCOPED_N("MetadataRepo::batchContentUpsertContent");
                 const auto phaseStart = std::chrono::steady_clock::now();
+                YAMS_TRY(invalidateStmt.reset());
+                YAMS_TRY(invalidateStmt.clearBindings());
+                YAMS_TRY(invalidateStmt.bindAll(entry.documentId, entry.sanitizedContent,
+                                                entry.extractionMethod, entry.language));
+                YAMS_TRY(invalidateStmt.execute());
+                writes.delta.invalidatedEmbeddings += static_cast<uint64_t>(db.changes());
                 YAMS_TRY(contentStmt.reset());
                 YAMS_TRY(contentStmt.clearBindings());
                 YAMS_TRY(contentStmt.bindAll(entry.documentId, entry.sanitizedContent,
@@ -442,6 +465,9 @@ public:
         }
         if (delta.newlyIndexed > 0) {
             repository.cachedIndexedCount_.fetch_add(delta.newlyIndexed, std::memory_order_relaxed);
+        }
+        if (delta.invalidatedEmbeddings > 0) {
+            core::saturating_sub(repository.cachedEmbeddedCount_, delta.invalidatedEmbeddings);
         }
         if (delta.metadataWrites > 0) {
             repository.metadataChangeCounter_.fetch_add(delta.metadataWrites,

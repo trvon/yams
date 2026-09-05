@@ -3570,6 +3570,73 @@ TEST_CASE("batchInsertContentAndIndex persists extracted title metadata in the c
     CHECK((title.value()->value == "Extracted document title"));
 }
 
+TEST_CASE("batchInsertContentAndIndex invalidates embeddings only when extracted input changes",
+          "[unit][metadata-repo][batch-content][embedding-freshness]") {
+    MetadataRepositoryFixture fix;
+    const std::string hash = "content-freshness-hash";
+    auto inserted =
+        fix.repository_->insertDocument(makeDocumentWithPath("/tmp/content-freshness.txt", hash));
+    REQUIRE(inserted.has_value());
+    auto entry = makeBatchContentEntry(inserted.value(), "Title", "Original text");
+    REQUIRE(fix.repository_->batchInsertContentAndIndex({entry}).has_value());
+    REQUIRE(fix.repository_->batchCompleteDocumentEmbeddingsByHashes({hash}, "model").has_value());
+
+    bool unchanged = false;
+    bool rejectWrite = false;
+    SECTION("identical extraction preserves readiness") {
+        unchanged = true;
+    }
+    SECTION("changed text invalidates readiness") {
+        entry.contentText = "Replacement text";
+    }
+    SECTION("empty replacement invalidates readiness") {
+        entry.contentText.clear();
+    }
+    SECTION("title-only update preserves readiness") {
+        entry.title = "New display title";
+        unchanged = true;
+    }
+    SECTION("changed extraction method invalidates readiness") {
+        entry.extractionMethod += "-v2";
+    }
+    SECTION("changed language invalidates readiness") {
+        entry.language = "fr";
+    }
+    SECTION("failed content write rolls back readiness invalidation") {
+        entry.contentText = "Rejected replacement";
+        rejectWrite = true;
+        unchanged = true;
+        REQUIRE(fix.pool_
+                    ->withConnection([](Database& db) -> Result<void> {
+                        return db.execute(R"(
+                CREATE TRIGGER reject_content_update BEFORE UPDATE ON document_content
+                BEGIN SELECT RAISE(ABORT, 'test content rejection'); END
+            )");
+                    })
+                    .has_value());
+    }
+
+    // Duplicate entries must invalidate/count the embedding only once.
+    auto written = fix.repository_->batchInsertContentAndIndex({entry, entry});
+    REQUIRE(written.has_value() == !rejectWrite);
+    if (rejectWrite) {
+        auto content = fix.repository_->getContent(inserted.value());
+        REQUIRE(content.has_value());
+        REQUIRE(content.value().has_value());
+        CHECK(content.value()->contentText == "Original text");
+    }
+    auto ready = fix.repository_->hasDocumentEmbeddingByHash(hash);
+    REQUIRE(ready.has_value());
+    CHECK(ready.value() == unchanged);
+    auto status = getEmbeddingStatusRow(*fix.pool_, hash);
+    REQUIRE(status.has_value());
+    REQUIRE(status.value().has_value());
+    CHECK(status.value()->modelId.has_value() == unchanged);
+    auto stats = fix.repository_->getCorpusStats();
+    REQUIRE(stats.has_value());
+    CHECK(stats.value().embeddingCount == (unchanged ? 1 : 0));
+}
+
 TEST_CASE(
     "batchInsertContentAndIndex: duplicate document entries preserve per-entry repair attempts",
     "[unit][metadata-repo][batch-content][status-update][duplicates]") {
