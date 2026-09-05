@@ -6645,12 +6645,22 @@ struct BenchFixture {
                                               << parseFloatEnvOrDefault(envName, 0.0F) << "\n";
                                 }
                             };
-                            if (const char* fingerprint = std::getenv(
-                                    "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_FINGERPRINT");
-                                fingerprint && *fingerprint) {
-                                configOut << "route_calibration_fingerprint = \"" << fingerprint
-                                          << "\"\n";
-                            }
+                            const auto writeStringSetting = [&](const char* envName,
+                                                                const char* key) {
+                                if (const auto value = yams::config::getenv_optional(envName);
+                                    value && !value->empty()) {
+                                    configOut << key << " = " << nlohmann::json(*value).dump()
+                                              << "\n";
+                                }
+                            };
+                            writeStringSetting("YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_FINGERPRINT",
+                                               "route_calibration_fingerprint");
+                            writeStringSetting(
+                                "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_POLICY_FINGERPRINT",
+                                "route_calibration_policy_fingerprint");
+                            writeStringSetting(
+                                "YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_DATASET_IDENTITY",
+                                "route_calibration_dataset_identity");
                             writeSizeSetting("YAMS_BENCH_TOPOLOGY_ROUTE_CALIBRATION_QUERIES",
                                              "route_calibration_queries");
                             writeSizeSetting(

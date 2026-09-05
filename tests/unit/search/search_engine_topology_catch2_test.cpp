@@ -300,10 +300,15 @@ Result<SearchResponse> runTopologySearch(
 }
 
 void configureCertifiedTopologyRoute(SearchEngineConfig& config,
-                                     std::string constructionFingerprint,
+                                     const yams::topology::TopologyArtifactBatch& batch,
                                      std::size_t maxRowsVisited = 2) {
     config.topologyRouteRiskCalibration.constructionFingerprint =
-        std::move(constructionFingerprint);
+        topologyRoutingConstructionFingerprint(batch);
+    auto options = makeTopologyRoutingOptions(config, config.topologyRoutingMode, true, true);
+    options.maxDocs = 0; // PQ narrowing defers the document limit to vector selection.
+    config.topologyRouteRiskCalibration.routingPolicyFingerprint =
+        topologyRoutingPolicyFingerprint(topologyRoutingRepresentationFingerprint(batch), options);
+    config.topologyRouteRiskCalibration.datasetIdentity = "fixture-held-out-v1";
     config.topologyRouteRiskCalibration.calibrationQueries = 50;
     config.topologyRouteRiskCalibration.protectedCandidates = 100;
     config.topologyRouteRiskCalibration.missedProtectedCandidates = 0;
@@ -470,13 +475,12 @@ TEST_CASE("SearchEngine commits hard narrowing when every theorem certificate pa
     TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
     seedTopologyDocuments(fix);
     auto batch = buildTwoClusterTopologyBatch();
-    const auto constructionFingerprint = topologyRoutingConstructionFingerprint(batch);
     yams::topology::MetadataKgTopologyArtifactStore topologyStore(fix.repo, fix.kgStore);
     REQUIRE(topologyStore.storeBatch(batch).has_value());
 
     auto generator = makeFixedGenerator({0.0F, 1.0F});
     auto config = topologyRoutingTestConfig(true);
-    configureCertifiedTopologyRoute(config, constructionFingerprint);
+    configureCertifiedTopologyRoute(config, batch);
 
     auto response = runTopologySearch(fix, generator, config, 4, "omega");
     REQUIRE(response.has_value());
@@ -504,13 +508,12 @@ TEST_CASE("SearchEngine discards a trial route whose observed vector work exceed
     TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
     seedTopologyDocuments(fix);
     auto batch = buildTwoClusterTopologyBatch();
-    const auto constructionFingerprint = topologyRoutingConstructionFingerprint(batch);
     yams::topology::MetadataKgTopologyArtifactStore topologyStore(fix.repo, fix.kgStore);
     REQUIRE(topologyStore.storeBatch(batch).has_value());
 
     auto generator = makeFixedGenerator({0.0F, 1.0F});
     auto config = topologyRoutingTestConfig(true);
-    configureCertifiedTopologyRoute(config, constructionFingerprint, 1);
+    configureCertifiedTopologyRoute(config, batch, 1);
 
     auto response = runTopologySearch(fix, generator, config, 4, "omega");
     REQUIRE(response.has_value());
@@ -535,13 +538,12 @@ TEST_CASE("SearchEngine rejects a relation cover that cuts an observed protected
     REQUIRE(selectedChart != batch.clusters.end());
     REQUIRE(selectedChart->protectedPairCount > 0);
     selectedChart->preservedProtectedPairCount = 0;
-    const auto constructionFingerprint = topologyRoutingConstructionFingerprint(batch);
     yams::topology::MetadataKgTopologyArtifactStore topologyStore(fix.repo, fix.kgStore);
     REQUIRE(topologyStore.storeBatch(batch).has_value());
 
     auto generator = makeFixedGenerator({0.0F, 1.0F});
     auto config = topologyRoutingTestConfig(true);
-    configureCertifiedTopologyRoute(config, constructionFingerprint);
+    configureCertifiedTopologyRoute(config, batch);
 
     auto response = runTopologySearch(fix, generator, config, 4, "omega");
     REQUIRE(response.has_value());
@@ -564,7 +566,8 @@ TEST_CASE("SearchEngine rejects route calibration from a different topology cons
 
     auto generator = makeFixedGenerator({0.0F, 1.0F});
     auto config = topologyRoutingTestConfig(true);
-    configureCertifiedTopologyRoute(config, "different-construction");
+    configureCertifiedTopologyRoute(config, batch);
+    config.topologyRouteRiskCalibration.constructionFingerprint = "different-construction";
 
     auto response = runTopologySearch(fix, generator, config, 4, "omega");
     REQUIRE(response.has_value());
@@ -582,13 +585,12 @@ TEST_CASE("SearchEngine does not infer protected fiber representation from bound
     TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
     seedTopologyDocuments(fix);
     auto batch = buildTwoClusterTopologyBatch();
-    const auto constructionFingerprint = topologyRoutingConstructionFingerprint(batch);
     yams::topology::MetadataKgTopologyArtifactStore topologyStore(fix.repo, fix.kgStore);
     REQUIRE(topologyStore.storeBatch(batch).has_value());
 
     auto generator = makeFixedGenerator({0.0F, 1.0F});
     auto config = topologyRoutingTestConfig(true);
-    configureCertifiedTopologyRoute(config, constructionFingerprint);
+    configureCertifiedTopologyRoute(config, batch);
     config.topologyRouteRiskCalibration.missedProtectedCandidates = 1;
 
     auto response = runTopologySearch(fix, generator, config, 4, "omega");
@@ -1789,6 +1791,17 @@ TEST_CASE("Topology construction fingerprint excludes publication and routing re
     const auto experimentalIdentity = topologyRoutingConstructionFingerprint(experimental);
     REQUIRE(baselineIdentity.size() == 16);
     CHECK(experimentalIdentity == baselineIdentity);
+    const auto baselineRepresentations = topologyRoutingRepresentationFingerprint(baseline);
+    CHECK(topologyRoutingRepresentationFingerprint(experimental) != baselineRepresentations);
+    auto options = TopologyRoutingOptions{};
+    const auto policyIdentity = topologyRoutingPolicyFingerprint(baselineRepresentations, options);
+    options.collectGraphDiagnostics = true;
+    CHECK(topologyRoutingPolicyFingerprint(baselineRepresentations, options) == policyIdentity);
+    options.sparseDenseAlpha = 0.25F;
+    CHECK(topologyRoutingPolicyFingerprint(baselineRepresentations, options) != policyIdentity);
+    options = TopologyRoutingOptions{};
+    options.graphNeighborReciprocalOnly = false;
+    CHECK(topologyRoutingPolicyFingerprint(baselineRepresentations, options) != policyIdentity);
 
     experimental.embeddingSpaceIdentity = "test-space-v2";
     CHECK(topologyRoutingConstructionFingerprint(experimental) != baselineIdentity);
@@ -1820,6 +1833,10 @@ TEST_CASE("Topology routing refuses theorem admission across coordinate spaces",
     request.options.maxDocs = 0;
     request.options.collectRouteMembership = true;
     request.options.routeRiskCalibration.constructionFingerprint = constructionFingerprint;
+    request.options.routeRiskCalibration.routingPolicyFingerprint =
+        topologyRoutingPolicyFingerprint(topologyRoutingRepresentationFingerprint(batch),
+                                         request.options);
+    request.options.routeRiskCalibration.datasetIdentity = "fixture-held-out-v1";
     request.options.routeRiskCalibration.calibrationQueries = 50;
     request.options.routeRiskCalibration.protectedCandidates = 100;
     request.options.routeRiskCalibration.missedProtectedCandidates = 0;
@@ -1843,6 +1860,13 @@ TEST_CASE("Topology routing refuses theorem admission across coordinate spaces",
     const auto aligned = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
     CHECK(aligned.certificate.admission.coordinateSpaceAlignment ==
           TopologyProofObligationStatus::Satisfied);
+    CHECK(aligned.certificate.admission.routeRisk == TopologyProofObligationStatus::Satisfied);
+
+    // Counts from an older routing policy cannot certify a changed representative budget.
+    request.options.representativeLimit = 1;
+    const auto changedPolicy = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
+    CHECK(changedPolicy.certificate.admission.routeRisk ==
+          TopologyProofObligationStatus::Unavailable);
 }
 
 TEST_CASE("Topology snapshot cache rejects duplicate cluster identifiers",

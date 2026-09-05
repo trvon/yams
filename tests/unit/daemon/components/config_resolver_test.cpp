@@ -954,6 +954,8 @@ expansion_output_limit = 96
 graph_weighted_seed_ranking = true
 medoid_boost = 0.2
 route_calibration_fingerprint = "atlas-123"
+route_calibration_policy_fingerprint = "policy-456"
+route_calibration_dataset_identity = "held-out-split-v1"
 route_calibration_queries = 100
 route_calibration_protected_candidates = 250
 route_calibration_missed_protected_candidates = 2
@@ -998,6 +1000,8 @@ rrf_k = 33
     CHECK((*policy.medoidBoost > 0.19f));
     CHECK((*policy.medoidBoost < 0.21f));
     CHECK((*policy.routeCalibrationFingerprint == "atlas-123"));
+    CHECK(policy.routeCalibrationPolicyFingerprint == "policy-456");
+    CHECK(policy.routeCalibrationDatasetIdentity == "held-out-split-v1");
     CHECK((*policy.routeCalibrationQueries == 100U));
     CHECK((*policy.routeCalibrationProtectedCandidates == 250U));
     CHECK((*policy.routeCalibrationMissedProtectedCandidates == 2U));

@@ -883,6 +883,14 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
                 it != kv.end()) {
                 policy.routeCalibrationFingerprint = std::string(trimView(it->second));
             }
+            if (auto it = kv.find("search.topology.route_calibration_policy_fingerprint");
+                it != kv.end()) {
+                policy.routeCalibrationPolicyFingerprint = std::string(trimView(it->second));
+            }
+            if (auto it = kv.find("search.topology.route_calibration_dataset_identity");
+                it != kv.end()) {
+                policy.routeCalibrationDatasetIdentity = std::string(trimView(it->second));
+            }
             if (auto it = kv.find("search.topology.route_calibration_queries"); it != kv.end()) {
                 policy.routeCalibrationQueries = parseSize(it->second);
             }

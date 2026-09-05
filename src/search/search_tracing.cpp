@@ -367,6 +367,8 @@ void recordTopologyRoutingDebug(SearchResponse& response, const SearchEngineConf
         setDebug(debug, metrics::kTopologyEpoch, std::to_string(session.topologyEpoch));
         setDebug(debug, metrics::kTopologyConstructionFingerprint,
                  session.certificate.constructionFingerprint);
+        setDebug(debug, "topology_routing_policy_fingerprint",
+                 session.certificate.routingPolicyFingerprint);
     }
     if (session.loadAttempted) {
         auto& timing = response.componentTimingMicros;

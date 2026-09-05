@@ -515,6 +515,14 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
             opts.config.topologyRouteRiskCalibration.constructionFingerprint =
                 *tp.routeCalibrationFingerprint;
         }
+        if (tp.routeCalibrationPolicyFingerprint) {
+            opts.config.topologyRouteRiskCalibration.routingPolicyFingerprint =
+                *tp.routeCalibrationPolicyFingerprint;
+        }
+        if (tp.routeCalibrationDatasetIdentity) {
+            opts.config.topologyRouteRiskCalibration.datasetIdentity =
+                *tp.routeCalibrationDatasetIdentity;
+        }
         if (tp.routeCalibrationQueries) {
             opts.config.topologyRouteRiskCalibration.calibrationQueries =
                 *tp.routeCalibrationQueries;
