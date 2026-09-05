@@ -167,16 +167,16 @@ public:
             spdlog::warn("EmbeddedServiceHost background tasks failed to start: {}", e.what());
         }
 
-        std::promise<void> asyncInitCompletedPromise;
-        auto asyncInitCompletedFuture = asyncInitCompletedPromise.get_future();
-        serviceManager_->startAsyncInit(&asyncInitCompletedPromise, nullptr);
+        // Startup may return while initialization is still running. Wait on the
+        // ServiceManager-owned future, never lend a stack-local completion promise
+        // to a coroutine that can outlive this call.
+        serviceManager_->startAsyncInit();
 
         const auto initTimeoutSeconds = std::max(5, options_.initTimeoutSeconds);
         auto snap = serviceManager_->waitForServiceManagerTerminalState(initTimeoutSeconds);
         if (snap.state == ServiceManagerState::Ready) {
-            if (asyncInitCompletedFuture.valid() &&
-                asyncInitCompletedFuture.wait_for(std::chrono::seconds(initTimeoutSeconds)) ==
-                    std::future_status::timeout) {
+            if (!serviceManager_->waitForAsyncInitCompletion(
+                    std::chrono::seconds(initTimeoutSeconds))) {
                 lifecycleFsm_.dispatch(
                     FailureEvent{"Embedded ServiceManager async initialization timed out"});
                 return Error{ErrorCode::Timeout,

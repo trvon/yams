@@ -454,6 +454,28 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager construction succeeds",
     REQUIRE_NOTHROW(ServiceManager(config_, state_, lifecycleFsm_));
 }
 
+TEST_CASE("Async initialization completion wait survives caller timeout",
+          "[daemon][service_manager][async-completion]") {
+    AsyncInitOrchestrator init;
+    REQUIRE(init.tryStart());
+    const auto token = init.getStopToken();
+
+    // A caller may time out before co_spawn installs its future.
+    CHECK_FALSE(init.waitForCompletion(std::chrono::milliseconds(0)));
+    CHECK_FALSE(token.stop_requested());
+
+    std::promise<void> completion;
+    init.setFuture(completion.get_future());
+    CHECK_FALSE(init.waitForCompletion(std::chrono::milliseconds(0)));
+    CHECK_FALSE(token.stop_requested());
+
+    // The future remains owned by the orchestrator, not the timed-out caller.
+    completion.set_value();
+    CHECK(init.waitForCompletion(std::chrono::milliseconds(0)));
+    CHECK_FALSE(token.stop_requested());
+    CHECK(init.requestStopAndWait(std::chrono::milliseconds(0)));
+}
+
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager getName returns correct component name",
                  "[daemon][service_manager]") {
     ServiceManager sm(config_, state_, lifecycleFsm_);

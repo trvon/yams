@@ -131,6 +131,10 @@ public:
     void startAsyncInit(std::promise<void>* barrierPromise = nullptr,
                         std::atomic<bool>* barrierSet = nullptr);
 
+    bool waitForAsyncInitCompletion(std::chrono::milliseconds timeout) {
+        return asyncInit_.waitForCompletion(timeout);
+    }
+
     void shutdown() override;
 
     void prepareForRestart() {

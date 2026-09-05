@@ -114,12 +114,23 @@ public:
     /// Returns true if the coroutine finished (or was never started),
     /// false if the wait timed out.
     bool requestStopAndWait(std::chrono::milliseconds timeout) {
+        return waitForCompletionImpl(timeout, true);
+    }
+
+    /// Wait without requesting cancellation. A timeout preserves the owned future
+    /// so an embedded caller may return while initialization safely continues.
+    bool waitForCompletion(std::chrono::milliseconds timeout) {
+        return waitForCompletionImpl(timeout, false);
+    }
+
+private:
+    bool waitForCompletionImpl(std::chrono::milliseconds timeout, bool requestStop) {
         std::lock_guard waitLock(waitMutex_);
         const auto deadline = std::chrono::steady_clock::now() + timeout;
         std::future<void> future;
         {
             std::unique_lock lock(futureMutex_);
-            if (stopSource_.stop_possible()) {
+            if (requestStop && stopSource_.stop_possible()) {
                 stopSource_.request_stop();
             }
             if (!futureInstalled_.wait_until(lock, deadline,
