@@ -17,7 +17,8 @@ REQUIRED = (
     "FORGEJO_MIRROR_SSH_KEY",
     "StrictHostKeyChecking=no",
     "UserKnownHostsFile=/dev/null",
-    "ssh://git@ssh.git.trevon.dev:2222/trevon/yams.git",
+    "fetch-depth: 0",
+    "git remote add forgejo ssh://git@ssh.git.trevon.dev:2222/trevon/yams.git",
     'git push forgejo "refs/mirror/source:${SOURCE_REF}"',
     'git ls-remote --exit-code forgejo "${SOURCE_REF}"',
     '"${actual_sha}" != "${EXPECTED_SHA}"',
@@ -30,6 +31,7 @@ FORBIDDEN = (
     "git push " + "-f ",
     "git push " + "--delete",
     "ssh-keyscan",
+    "git remote add forgejo ssh://git@git.trevon.dev:2222/trevon/yams.git",
 )
 
 
