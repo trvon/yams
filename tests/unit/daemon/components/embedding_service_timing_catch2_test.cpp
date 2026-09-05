@@ -46,6 +46,18 @@ public:
 
 } // namespace
 
+TEST_CASE("EmbeddingService shutdown before start leaves no deferred service access",
+          "[daemon][embedding][shutdown][never-started]") {
+    WorkCoordinator coordinator;
+    EmbeddingService service(nullptr, nullptr, &coordinator);
+    service.shutdown();
+    // Poll while service is still alive: the old shutdown queued a closure capturing it.
+    // A never-started service must leave no such handler for a later coordinator start.
+    CHECK(coordinator.getIOContext()->poll() == 0);
+    service.shutdown();
+    CHECK(coordinator.getIOContext()->poll() == 0);
+}
+
 TEST_CASE("EmbeddingService ignores benchmark environment in production policy",
           "[daemon][components][embedding][config][catch2]") {
     yams::test::ScopedEnvVar benchmarkProfile{"YAMS_BENCH_EMBED_PROFILE", "balanced"};

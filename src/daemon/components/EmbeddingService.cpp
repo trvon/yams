@@ -210,9 +210,11 @@ void EmbeddingService::enqueueEmbeddingCompletion(std::vector<std::string> hashe
 void EmbeddingService::shutdown() {
     YAMS_ZONE_SCOPED_N("Embedding::shutdown");
     bool alreadyStopped = false;
+    bool hadPoller = false;
     {
         std::lock_guard lock(stageActivityMutex_);
         alreadyStopped = stop_.exchange(true, std::memory_order_acq_rel);
+        hadPoller = stageActivityPublished_;
         if (stageActivityPublished_) {
             TuneAdvisor::releasePostIngestStageActivity(TuneAdvisor::PostIngestStage::Embed,
                                                         stageActivityToken_);
@@ -229,42 +231,47 @@ void EmbeddingService::shutdown() {
     // Best-effort: clear queued jobs promptly so shutdown focuses on already-running work.
     // This runs on the service strand to avoid races with channelPoller's pendingJobs_ access.
     try {
-        std::promise<void> drainDone;
-        auto drainFuture = drainDone.get_future();
-        boost::asio::post(strand_, [this, done = std::move(drainDone)]() mutable {
-            std::size_t droppedDocs = 0;
-            std::size_t droppedJobs = 0;
-            try {
-                for (const auto& pending : pendingJobs_) {
-                    droppedDocs += pending.hashes.size();
-                    ++droppedJobs;
-                }
-                pendingJobs_.clear();
+        // Without start(), there is no strand-owned work to drain. In particular, do not
+        // leave a closure capturing this queued on a coordinator that may start later.
+        if (hadPoller) {
+            std::promise<void> drainDone;
+            auto drainFuture = drainDone.get_future();
+            boost::asio::post(strand_, [this, done = std::move(drainDone)]() mutable {
+                std::size_t droppedDocs = 0;
+                std::size_t droppedJobs = 0;
+                try {
+                    for (const auto& pending : pendingJobs_) {
+                        droppedDocs += pending.hashes.size();
+                        ++droppedJobs;
+                    }
+                    pendingJobs_.clear();
 
-                auto channel = std::atomic_load_explicit(&embedChannel_, std::memory_order_acquire);
-                InternalEventBus::EmbedJob queued;
-                while (channel && channel->try_pop(queued)) {
-                    droppedDocs += queued.hashes.size();
-                    ++droppedJobs;
-                }
+                    auto channel =
+                        std::atomic_load_explicit(&embedChannel_, std::memory_order_acquire);
+                    InternalEventBus::EmbedJob queued;
+                    while (channel && channel->try_pop(queued)) {
+                        droppedDocs += queued.hashes.size();
+                        ++droppedJobs;
+                    }
 
-                pendingApprox_.store(0, std::memory_order_relaxed);
-                if (droppedDocs > 0) {
-                    failed_.fetch_add(droppedDocs, std::memory_order_relaxed);
-                    InternalEventBus::instance().incEmbedDropped(droppedDocs);
-                    spdlog::info("EmbeddingService: dropped queued embed jobs={} "
-                                 "docs={} during shutdown",
-                                 droppedJobs, droppedDocs);
+                    pendingApprox_.store(0, std::memory_order_relaxed);
+                    if (droppedDocs > 0) {
+                        failed_.fetch_add(droppedDocs, std::memory_order_relaxed);
+                        InternalEventBus::instance().incEmbedDropped(droppedDocs);
+                        spdlog::info("EmbeddingService: dropped queued embed jobs={} "
+                                     "docs={} during shutdown",
+                                     droppedJobs, droppedDocs);
+                    }
+                } catch (...) {
                 }
-            } catch (...) {
-            }
-            lifecycleCv_.notify_all();
-            try {
-                done.set_value();
-            } catch (...) {
-            }
-        });
-        (void)drainFuture.wait_for(std::chrono::milliseconds(1500));
+                lifecycleCv_.notify_all();
+                try {
+                    done.set_value();
+                } catch (...) {
+                }
+            });
+            (void)drainFuture.wait_for(std::chrono::milliseconds(1500));
+        }
     } catch (...) {
     }
 
