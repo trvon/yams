@@ -32,6 +32,15 @@ _test_timeout_scale = _test_thread_sanitizer ? 10 : get_option('test-timeout-sca
 _test_timeout_cpp_arg = '-DYAMS_TEST_TIMEOUT_SCALE=' + _test_timeout_scale.to_string()
 
 fs = import('fs')
+
+release_candidate_unit_tests = files('scripts/test_validate_release_candidate.py')
+test('release_candidate_unit',
+  python_exe,
+  args: [release_candidate_unit_tests],
+  suite: ['unit', 'policy', 'release'],
+  timeout: 30,
+)
+
 cli11_dep = cli11_resolved_dep
 if not cli11_dep.found()
   cli11_dep = declare_dependency()
