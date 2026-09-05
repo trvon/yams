@@ -1,9 +1,12 @@
+#include "embedding_derivation_policy.h"
+#include "embedding_input_selection.h"
 #include <yams/daemon/components/EmbeddingService.h>
 #include <yams/daemon/components/WriteCoordinator.h>
 
 #include <spdlog/spdlog.h>
 #include <yams/config/config_helpers.h>
 #include <yams/core/assert.hpp>
+#include <yams/crypto/hasher.h>
 #include <yams/profiling.h>
 
 #include <algorithm>
@@ -1934,36 +1937,19 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     std::vector<std::string> failedGatherHashes;
     failedGatherHashes.reserve(job.hashes.size());
 
-    std::unordered_set<std::string> preparedHashes;
-    preparedHashes.reserve(job.preparedDocs.size());
-    for (auto& pd : job.preparedDocs) {
-        preparedHashes.insert(pd.hash);
-        if (job.skipExisting) {
-            auto hasEmbedRes = meta_->hasDocumentEmbeddingByHash(pd.hash);
-            if (hasEmbedRes && hasEmbedRes.value()) {
-                spdlog::debug(
-                    "EmbeddingService: skipExisting=true, already embedded (prepared): {}",
-                    pd.hash);
-                skipped++;
-                completedGatherHashes.push_back(pd.hash);
-                continue;
-            }
-        }
-
-        if (pd.chunks.empty()) {
-            // Malformed prepared payload; fall back to DB gather via hashes.
-            continue;
-        }
-
-        docsToEmbed.push_back({pd.hash, std::string{}, pd.fileName, pd.filePath, pd.mimeType});
-        preparedDocPtr.push_back(&pd);
-        docHasPreparedChunks.push_back(true);
+    const auto chunkPolicy = ConfigResolver::resolveEmbeddingChunkingPolicy();
+    const auto selectionCfg = ConfigResolver::resolveEmbeddingSelectionPolicy();
+    const auto preparationRecipe = embed::embeddingPreparationRecipe(chunkPolicy, selectionCfg);
+    const auto selectedInputs = embed::selectEmbeddingInputs(job);
+    std::vector<std::pair<std::string, InternalEventBus::EmbedPreparedDoc*>> inputs;
+    for (const auto index : selectedInputs.preparedIndices) {
+        auto& pd = job.preparedDocs[index];
+        inputs.emplace_back(pd.hash, &pd);
     }
-
-    for (const auto& hash : job.hashes) {
-        if (!job.preparedDocs.empty() && preparedHashes.find(hash) != preparedHashes.end()) {
-            continue;
-        }
+    for (const auto& hash : selectedInputs.gatherHashes) {
+        inputs.emplace_back(hash, nullptr);
+    }
+    for (const auto& [hash, prepared] : inputs) {
         try {
             auto docInfoRes = meta_->getDocumentByHash(hash);
             if (!docInfoRes || !docInfoRes.value().has_value()) {
@@ -1975,19 +1961,14 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
 
             const auto& docInfo = *docInfoRes.value();
 
-            // Check embedding status via metadata repository (separate DB, no VectorDatabase lock)
-            // This avoids mutex contention with EntityGraphService's insertEntityVectorsBatch
             if (job.skipExisting) {
-                auto hasEmbedRes = meta_->hasDocumentEmbeddingByHash(hash);
-                if (hasEmbedRes && hasEmbedRes.value()) {
-                    spdlog::debug("EmbeddingService: skipExisting=true, already embedded: {}",
-                                  hash);
+                auto existing = meta_->hasDocumentEmbeddingByHash(hash);
+                if (existing && existing.value()) {
                     skipped++;
                     completedGatherHashes.push_back(hash);
                     continue;
                 }
             }
-
             auto contentOpt = meta_->getContent(docInfo.id);
             if (!contentOpt || !contentOpt.value().has_value()) {
                 spdlog::debug("EmbeddingService: no content for document {}", hash);
@@ -2004,10 +1985,12 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
                 continue;
             }
 
-            docsToEmbed.push_back(
-                {hash, text, docInfo.fileName, docInfo.filePath, docInfo.mimeType});
-            preparedDocPtr.push_back(nullptr);
-            docHasPreparedChunks.push_back(false);
+            const bool usePrepared =
+                prepared && embed::preparedEmbeddingMatches(*prepared, text, preparationRecipe);
+            docsToEmbed.push_back({hash, usePrepared ? std::string{} : text, docInfo.fileName,
+                                   docInfo.filePath, docInfo.mimeType});
+            preparedDocPtr.push_back(usePrepared ? prepared : nullptr);
+            docHasPreparedChunks.push_back(usePrepared);
         } catch (const std::exception& e) {
             spdlog::error("EmbeddingService: exception gathering {}: {}", hash, e.what());
             failedGather++;
@@ -2098,7 +2081,6 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     std::vector<std::string> docPreviews;
     docPreviews.resize(docsToEmbed.size());
 
-    const auto chunkPolicy = ConfigResolver::resolveEmbeddingChunkingPolicy();
     auto strategy = chunkPolicy.strategy;
     const auto& ccfg = chunkPolicy.config;
     const bool chunkCfgOverridden = chunkPolicy.overridden;
@@ -2265,8 +2247,6 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         mon.detail = "chunked docs=" + std::to_string(docsToEmbed.size()) +
                      " chunks=" + std::to_string(allChunks.size());
     });
-
-    const auto selectionCfg = ConfigResolver::resolveEmbeddingSelectionPolicy();
 
     if (selectionCfg.mode != ConfigResolver::EmbeddingSelectionPolicy::Mode::Full &&
         !allChunks.empty()) {

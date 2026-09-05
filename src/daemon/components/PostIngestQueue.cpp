@@ -1,5 +1,6 @@
 #include <nlohmann/json.hpp>
 #include "title_enrichment_policy.h"
+#include "embedding_derivation_policy.h"
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <atomic>
@@ -68,7 +69,6 @@ struct PostIngestBatchPolicy {
 PostIngestBatchPolicy resolvePostIngestBatchPolicy() {
     return {};
 }
-
 
 std::string normalizeEntityTextForKey(std::string_view text) {
     return yams::search::normalizeEntityTextForKey(text);
@@ -3084,6 +3084,8 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         if (!preparedDoc) {
             return std::nullopt;
         }
+        preparedDoc->preparationRecipe =
+            embed::embeddingPreparationRecipe(chunkPolicy, selectionCfg);
 
         std::size_t payloadBytes = 0;
         for (const auto& chunk : preparedDoc->chunks) {

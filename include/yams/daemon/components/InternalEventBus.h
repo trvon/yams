@@ -254,6 +254,8 @@ public:
         std::string filePath;
         std::string mimeType;
         std::vector<EmbedPreparedChunk> chunks;
+        std::string sourceTextHash;
+        std::string preparationRecipe;
     };
 
     struct EmbedJobMonitor {
