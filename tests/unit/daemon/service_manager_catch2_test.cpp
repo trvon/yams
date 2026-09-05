@@ -522,10 +522,38 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     CHECK((result.error().message.find(config_.dataDir.string()) != std::string::npos));
 }
 
+TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager rejects replication of a personal corpus",
+                 "[daemon][service_manager][sharing][security][config]") {
+    config_.memorySync.enabled = true;
+    config_.memorySync.nodeId = "123e4567-e89b-42d3-a456-42661417400a";
+    config_.memorySync.corpusId = "personal-corpus";
+    config_.memorySync.corpusEpoch = 1;
+    config_.memorySync.path = (config_.dataDir / "forbidden-sync-store").string();
+    SECTION("direct") {
+        config_.memorySync.transport = "direct";
+    }
+    SECTION("shared store") {
+        config_.memorySync.transport = "shared-store";
+    }
+    ServiceManager manager(config_, state_, lifecycleFsm_);
+    REQUIRE(manager.initialize().has_value());
+    boost::asio::io_context io;
+    compat::stop_source stopSource;
+    auto future = boost::asio::co_spawn(
+        io, manager.initializeAsyncAwaitable(stopSource.get_token()), boost::asio::use_future);
+    io.run();
+    const auto initialized = future.get();
+    REQUIRE_FALSE(initialized.has_value());
+    CHECK(initialized.error().message.find("corpus_scope=shared") != std::string::npos);
+    CHECK_FALSE(fs::exists(config_.memorySync.path));
+    CHECK_FALSE(fs::exists(config_.dataDir / "p2p" / "op-store"));
+}
+
 TEST_CASE_METHOD(ServiceManagerFixture,
                  "ServiceManager rejects direct P2P without usable writer authentication",
                  "[daemon][service_manager][p2p][security][config]") {
     config_.memorySync.enabled = true;
+    config_.memorySync.corpusScope = yams::memory_sync::CorpusScope::Shared;
     config_.memorySync.transport = "direct";
     config_.memorySync.nodeId = "123e4567-e89b-42d3-a456-42661417400a";
     config_.memorySync.corpusId = "missing-writer-auth";
@@ -555,6 +583,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     std::ofstream(legacyObject) << "unsigned-history";
 
     config_.memorySync.enabled = true;
+    config_.memorySync.corpusScope = yams::memory_sync::CorpusScope::Shared;
     config_.memorySync.transport = "direct";
     config_.memorySync.nodeId = nodeId;
     config_.memorySync.corpusId = corpusId;
@@ -619,6 +648,7 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager rejects symbolic-link P2
     fs::create_symlink(victim, identity);
 
     config_.memorySync.enabled = true;
+    config_.memorySync.corpusScope = yams::memory_sync::CorpusScope::Shared;
     config_.memorySync.transport = "direct";
     config_.memorySync.nodeId = "123e4567-e89b-42d3-a456-42661417400a";
     config_.memorySync.corpusId = "identity-security-test";
@@ -653,6 +683,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     grantUntrustedKeyAccess(testDir_ / "writer-private.pem", false);
 
     config_.memorySync.enabled = true;
+    config_.memorySync.corpusScope = yams::memory_sync::CorpusScope::Shared;
     config_.memorySync.transport = "direct";
     config_.memorySync.nodeId = nodeId;
     config_.memorySync.corpusId = corpusId;
@@ -689,6 +720,7 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager rejects writable direct 
     }
 
     config_.memorySync.enabled = true;
+    config_.memorySync.corpusScope = yams::memory_sync::CorpusScope::Shared;
     config_.memorySync.transport = "direct";
     config_.memorySync.nodeId = nodeId;
     config_.memorySync.corpusId = corpusId;

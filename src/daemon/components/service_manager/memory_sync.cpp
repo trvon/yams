@@ -976,6 +976,11 @@ Result<void> ServiceManager::initializeMemorySync(const std::filesystem::path& d
     if (!policy.enabled) {
         return Result<void>();
     }
+    if (policy.corpusScope != memory_sync::CorpusScope::Shared) {
+        return Error{ErrorCode::InvalidArgument,
+                     "replication requires memory_sync.corpus_scope=shared; keep personal "
+                     "memory in a separate data directory"};
+    }
     if (policy.transport == "direct" &&
         (!policy.writerAuthRequired || policy.writerAuthManifestPath.empty())) {
         return Error{ErrorCode::InvalidArgument,
@@ -986,6 +991,7 @@ Result<void> ServiceManager::initializeMemorySync(const std::filesystem::path& d
     try {
         yams::memory_sync::MemorySyncDaemonConfig cfg;
         cfg.enabled = true;
+        cfg.corpusScope = policy.corpusScope;
         cfg.nodeId = policy.nodeId;
         cfg.corpusId = policy.corpusId;
         cfg.corpusEpoch = policy.corpusEpoch;

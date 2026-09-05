@@ -8,6 +8,7 @@
 #include <yams/daemon/components/TuningConfig.h>
 #include <yams/daemon/resource/onnx_model_pool.h> // For DaemonConfig
 #include <yams/memory_sync/memory_sync.h>
+#include <yams/memory_sync/corpus_scope.h>
 #include <yams/storage/disk_pressure.h>
 
 #include <atomic>
@@ -127,6 +128,7 @@ struct DaemonConfig {
     /// No YAMS_* env knobs.
     struct MemorySyncPolicy {
         bool enabled{false};
+        memory_sync::CorpusScope corpusScope{memory_sync::CorpusScope::Personal};
         std::string nodeId;              // explicit stable daemon writer UUID
         std::string corpusId;            // stable replication-domain identifier
         std::uint64_t corpusEpoch{0};    // incompatible reset/migration generation

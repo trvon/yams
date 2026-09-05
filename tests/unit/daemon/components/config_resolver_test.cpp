@@ -1580,6 +1580,7 @@ TEST_CASE("ConfigResolver applies typed memory-sync policy", "[daemon][config][m
          {{"enabled", "true"},
           {"node_id", "123e4567-e89b-42d3-a456-426614174000"},
           {"corpus_id", "corpus-a"},
+          {"corpus_scope", "shared"},
           {"corpus_epoch", "9"},
           {"backend", "filesystem"},
           {"path", "shared-memory"},
@@ -1618,6 +1619,28 @@ TEST_CASE("ConfigResolver applies typed memory-sync policy", "[daemon][config][m
     CHECK(config.memorySync.writerAuthManifestPath == "/secure/writers.json");
 }
 
+TEST_CASE("ConfigResolver requires explicit shared corpus scope for replication",
+          "[daemon][config][memory-sync][sharing]") {
+    ConfigResolver::ConfigSections sections = {
+        {"memory_sync",
+         {{"enabled", "true"},
+          {"transport", "shared-store"},
+          {"node_id", "123e4567-e89b-42d3-a456-426614174000"},
+          {"corpus_id", "corpus-a"},
+          {"corpus_epoch", "1"},
+          {"path", "shared-memory"}}},
+    };
+    DaemonConfig config;
+    CHECK_FALSE(ConfigResolver::applyMemorySync(sections, config));
+    CHECK_FALSE(config.memorySync.enabled);
+    sections["memory_sync"]["corpus_scope"] = "shared";
+    CHECK(ConfigResolver::applyMemorySync(sections, config));
+    CHECK(config.memorySync.enabled);
+    sections["memory_sync"]["corpus_scope"] = "personal";
+    CHECK_FALSE(ConfigResolver::applyMemorySync(sections, config));
+    CHECK_FALSE(config.memorySync.enabled);
+}
+
 TEST_CASE("Direct P2P defaults to operator-approved first contact",
           "[daemon][config][memory-sync][p2p][security]") {
     DaemonConfig config;
@@ -1631,6 +1654,7 @@ TEST_CASE("ConfigResolver rejects direct P2P without usable writer authenticatio
          {{"enabled", "true"},
           {"node_id", "123e4567-e89b-42d3-a456-426614174000"},
           {"corpus_id", "corpus-a"},
+          {"corpus_scope", "shared"},
           {"corpus_epoch", "9"},
           {"transport", "direct"},
           {"listen", "0.0.0.0:9721"},
@@ -1651,6 +1675,7 @@ TEST_CASE("ConfigResolver accepts authenticated direct P2P without a shared path
          {{"enabled", "true"},
           {"node_id", "123e4567-e89b-42d3-a456-426614174000"},
           {"corpus_id", "corpus-a"},
+          {"corpus_scope", "shared"},
           {"corpus_epoch", "9"},
           {"transport", "direct"},
           {"listen", "0.0.0.0:9721"},
@@ -1679,6 +1704,7 @@ TEST_CASE("ConfigResolver rejects direct P2P sync_interval_ms above the reconnec
          {{"enabled", "true"},
           {"node_id", "123e4567-e89b-42d3-a456-426614174000"},
           {"corpus_id", "corpus-a"},
+          {"corpus_scope", "shared"},
           {"corpus_epoch", "9"},
           {"transport", "direct"},
           {"listen", "0.0.0.0:9721"},
@@ -1698,6 +1724,7 @@ TEST_CASE("ConfigResolver infers shared-store for legacy backend path",
          {{"enabled", "true"},
           {"node_id", "123e4567-e89b-42d3-a456-426614174000"},
           {"corpus_id", "corpus-a"},
+          {"corpus_scope", "shared"},
           {"corpus_epoch", "9"},
           {"backend", "filesystem"},
           {"path", "shared-memory"}}},
@@ -1715,6 +1742,7 @@ TEST_CASE("ConfigResolver exposes explicit legacy migration mode",
          {{"enabled", "true"},
           {"node_id", "123e4567-e89b-42d3-a456-426614174000"},
           {"corpus_id", "corpus-a"},
+          {"corpus_scope", "shared"},
           {"corpus_epoch", "9"},
           {"backend", "filesystem"},
           {"path", "shared-memory"},
@@ -1735,6 +1763,7 @@ TEST_CASE("ConfigResolver rejects legacy migration for temporary mode",
          {{"enabled", "true"},
           {"node_id", "123e4567-e89b-42d3-a456-426614174000"},
           {"corpus_id", "corpus-a"},
+          {"corpus_scope", "shared"},
           {"corpus_epoch", "9"},
           {"backend", "filesystem"},
           {"path", "shared-memory"},
@@ -1755,6 +1784,7 @@ TEST_CASE("ConfigResolver rejects writer authentication during legacy migration"
          {{"enabled", "true"},
           {"node_id", "123e4567-e89b-42d3-a456-426614174000"},
           {"corpus_id", "corpus-a"},
+          {"corpus_scope", "shared"},
           {"corpus_epoch", "9"},
           {"backend", "filesystem"},
           {"path", "shared-memory"},
@@ -1786,6 +1816,7 @@ TEST_CASE("ConfigResolver bounds temporary session expiry",
          {{"enabled", "true"},
           {"node_id", "123e4567-e89b-42d3-a456-426614174000"},
           {"corpus_id", "corpus-a"},
+          {"corpus_scope", "shared"},
           {"corpus_epoch", "9"},
           {"backend", "filesystem"},
           {"path", "shared-memory"},
