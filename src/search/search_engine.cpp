@@ -1587,37 +1587,6 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                             vector::CandidateFilterMode candidateFilterMode =
                                                 vector::CandidateFilterMode::BackendDefault)
         -> Result<std::vector<ComponentResult>> {
-        const auto mergeDiagnostics = [](vector::VectorSearchDiagnostics& total,
-                                         const vector::VectorSearchDiagnostics& sample) {
-            total.usedAnn = total.usedAnn || sample.usedAnn;
-            total.usedExactScan = total.usedExactScan || sample.usedExactScan;
-            total.usedCandidateIndexCache =
-                total.usedCandidateIndexCache || sample.usedCandidateIndexCache;
-            total.collectVisitedDocumentHashes =
-                total.collectVisitedDocumentHashes || sample.collectVisitedDocumentHashes;
-            total.visitedDocumentHashes.insert(sample.visitedDocumentHashes.begin(),
-                                               sample.visitedDocumentHashes.end());
-            total.rowsVisitedObserved = total.rowsVisitedObserved || sample.rowsVisitedObserved;
-            total.exactDistanceEvaluationsObserved =
-                total.exactDistanceEvaluationsObserved || sample.exactDistanceEvaluationsObserved;
-            total.annCandidateBudgetObserved =
-                total.annCandidateBudgetObserved || sample.annCandidateBudgetObserved;
-            total.rowsVisited += sample.rowsVisited;
-            total.exactDistanceEvaluations += sample.exactDistanceEvaluations;
-            total.annCandidateBudget += sample.annCandidateBudget;
-            total.candidateLookupCount += sample.candidateLookupCount;
-            total.candidateIndexPayloadBytes =
-                std::max(total.candidateIndexPayloadBytes, sample.candidateIndexPayloadBytes);
-            total.materializedRows += sample.materializedRows;
-            total.returnedRows += sample.returnedRows;
-            total.candidateLookupNanoseconds += sample.candidateLookupNanoseconds;
-            total.candidateProjectionNanoseconds += sample.candidateProjectionNanoseconds;
-            total.pqLutNanoseconds += sample.pqLutNanoseconds;
-            total.adcScoringNanoseconds += sample.adcScoringNanoseconds;
-            total.topKSelectionNanoseconds += sample.topKSelectionNanoseconds;
-            total.resultMaterializationNanoseconds += sample.resultMaterializationNanoseconds;
-            total.exactRerankNanoseconds += sample.exactRerankNanoseconds;
-        };
         const auto runVectorQuery = [&](const SearchEngineConfig& config) {
             vector::VectorSearchDiagnostics sample;
             sample.collectVisitedDocumentHashes =
@@ -1627,7 +1596,7 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                                                  candidateFilterMode, &sample)
                               : queryVectorIndex(embedding, config, limit, &sample);
             if (diagnostics != nullptr) {
-                mergeDiagnostics(*diagnostics, sample);
+                detail::mergeVectorSearchDiagnostics(*diagnostics, sample);
             }
             return result;
         };
@@ -4382,6 +4351,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         std::to_string(graphDocExpansionFtsAddedCount);
     response.debugStats["graph_text_blocked_low_score_count"] =
         std::to_string(textExpansionStats.graphTextBlockedLowScoreCount);
+    response.debugStats["vector_document_refill_attempts"] =
+        std::to_string(vectorSearchDiagnostics.documentRefillAttempts);
     response.debugStats["simeon_direct_raw_hit_count"] =
         std::to_string(textExpansionStats.simeonDirectRawHitCount);
     response.debugStats["simeon_direct_added_count"] =

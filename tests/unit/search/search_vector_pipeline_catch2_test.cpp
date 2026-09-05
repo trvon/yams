@@ -1,3 +1,4 @@
+#include <cmath>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
@@ -109,6 +110,47 @@ TEST_CASE("Vector pipeline scores every admitted document before exact-control t
     CHECK(diagnostics.rowsVisited == 3U);
     CHECK(diagnostics.exactDistanceEvaluations == 3U);
     CHECK(diagnostics.returnedRows == 3U);
+
+    cfg.similarityThreshold = -1.0F;
+    yams::vector::VectorSearchDiagnostics refillWork;
+    const auto global = yams::search::detail::queryVectorIndexPipeline(
+        nullptr, vectorDb, {1.0F, 0.0F}, cfg, 2, &refillWork);
+    REQUIRE(global.has_value());
+    REQUIRE(global.value().size() == 2U);
+    CHECK(global.value()[1].documentHash == "rescued");
+    CHECK(refillWork.documentRefillAttempts == 1U);
+    CHECK(refillWork.accumulatedSamples == 2U);
+
+    cfg.chunkAggregation = SearchEngineConfig::ChunkAggregation::TOP_K_AVG;
+    cfg.chunkAggregationTopK = 2;
+    // Switching to document-complete scoring must also disable the per-chunk cutoff.
+    // Otherwise the lower chunk disappears before averaging and inflates the document score.
+    cfg.similarityThreshold = 0.999F;
+    const auto averaged = yams::search::detail::queryVectorIndexPipeline(
+        nullptr, vectorDb, {1.0F, 0.0F}, cfg, 2, routed,
+        yams::vector::CandidateFilterMode::DocumentTopK);
+    REQUIRE(averaged.has_value());
+    REQUIRE(averaged.value().size() == 2U);
+    const float secondChunk = 0.9F / std::sqrt(0.82F);
+    CHECK(averaged.value()[0].score == Catch::Approx((1.0F + secondChunk) / 2.0F));
+}
+
+TEST_CASE("Vector work remains unavailable when any merged sample is unobserved",
+          "[search][vector][topology][work][catch2]") {
+    using yams::search::detail::mergeVectorSearchDiagnostics;
+    yams::vector::VectorSearchDiagnostics known;
+    known.rowsVisitedObserved = known.exactDistanceEvaluationsObserved =
+        known.annCandidateBudgetObserved = true;
+    known.rowsVisited = 10;
+    yams::vector::VectorSearchDiagnostics total;
+    mergeVectorSearchDiagnostics(total, known);
+    CHECK(total.rowsVisitedObserved);
+    mergeVectorSearchDiagnostics(total, {});
+    CHECK_FALSE(total.rowsVisitedObserved);
+    mergeVectorSearchDiagnostics(total, known);
+    CHECK_FALSE(total.rowsVisitedObserved);
+    CHECK(total.rowsVisited == 20U);
+    CHECK(total.accumulatedSamples == 3U);
 }
 
 TEST_CASE("Vector pipeline filters global hits by routed membership with zero-overlap fallback",
