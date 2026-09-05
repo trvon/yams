@@ -40,6 +40,8 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/daemon.h>
 #include <yams/memory_sync/writer_auth.h>
+#include <yams/memory_sync/memory_sync_service.h>
+#include <yams/crypto/hasher.h>
 #include <yams/metadata/database.h>
 
 namespace fs = std::filesystem;
@@ -520,6 +522,56 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     CHECK((result.error().code == ErrorCode::IOError));
     CHECK((result.error().message.find("Failed to create data directory") != std::string::npos));
     CHECK((result.error().message.find(config_.dataDir.string()) != std::string::npos));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "Task record publication and reads validate immutable revision identity",
+                 "[daemon][service_manager][task-record]") {
+    storage::BackendConfig backendConfig;
+    backendConfig.localPath = config_.dataDir / "task-record-store";
+    auto backend = std::make_unique<storage::FilesystemBackend>();
+    REQUIRE(backend->initialize(backendConfig).has_value());
+    ServiceManager manager(config_, state_, lifecycleFsm_);
+    manager.testingSetMemorySyncService(std::make_unique<memory_sync::MemorySyncService>(
+        std::move(backend), memory_sync::MemorySyncConfig{"A", 50}));
+    auto* sync = manager.testingMemorySyncService();
+    const std::string taskId = "123e4567-e89b-42d3-a456-426614174000";
+    nlohmann::json record = {
+        {"schema", "yams.task-record/v1"},
+        {"task_id", taskId},
+        {"kind", "claim"},
+        {"owner", "agent-a"},
+        {"source_uri", "repo:src/search"},
+        {"source_revision", "git:9883a438"},
+        {"recorded_at_ms", 2000},
+        {"source_timestamp_ms", 1000},
+        {"supersedes", nlohmann::json::array()},
+        {"ownership_semantics", "record_only"},
+        {"body", "Investigating retrieval"},
+    };
+    const auto value = record.dump();
+    const auto hash = crypto::SHA256Hasher::hash(std::as_bytes(std::span(value)));
+    const auto key = "task-record/" + taskId + "/" + hash;
+    REQUIRE(manager.publishMemorySync(key, value).has_value());
+    REQUIRE(sync->syncOnce().has_value());
+    const auto hydrated = manager.readMemorySyncCached(key);
+    REQUIRE(hydrated.has_value());
+    CHECK(hydrated.value() == value);
+
+    record["body"] = "changed revision";
+    CHECK_FALSE(manager.publishMemorySync(key, record.dump()).has_value());
+    record["ownership_semantics"] = "acquired";
+    const auto acquired = record.dump();
+    const auto acquiredHash = crypto::SHA256Hasher::hash(std::as_bytes(std::span(acquired)));
+    CHECK_FALSE(manager.publishMemorySync("task-record/" + taskId + "/" + acquiredHash, acquired)
+                    .has_value());
+
+    // A remote/lower-level writer cannot bypass the typed read contract.
+    const auto namespaced = memory_sync::userLogicalKey(key);
+    REQUIRE(namespaced.has_value());
+    REQUIRE(sync->publish(namespaced.value(), std::as_bytes(std::span(acquired))).has_value());
+    REQUIRE(sync->syncOnce().has_value());
+    CHECK_FALSE(manager.readMemorySyncCached(key).has_value());
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager rejects replication of a personal corpus",

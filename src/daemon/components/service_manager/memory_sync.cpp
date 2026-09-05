@@ -37,6 +37,8 @@
 #include <yams/memory_sync/memory_sync_config.h>
 #include <yams/memory_sync/memory_sync_service.h>
 #include <yams/memory_sync/records.h>
+#include <yams/memory_sync/task_record.h>
+#include <yams/crypto/hasher.h>
 #include <yams/metadata/metadata_sync_adapter.h>
 #include <yams/metadata/topology_sync_adapter.h>
 #include <yams/storage/storage_runtime_resolver.h>
@@ -181,6 +183,12 @@ Result<void> ServiceManager::publishMemorySync(const std::string& key, const std
     if (!namespacedKey) {
         return namespacedKey.error();
     }
+    if (key.starts_with(memory_sync::kTaskRecordPrefix)) {
+        const auto hash = crypto::SHA256Hasher::hash(std::as_bytes(std::span(value)));
+        if (auto valid = memory_sync::validateTaskRecordPublication(key, value, hash); !valid) {
+            return valid.error();
+        }
+    }
     std::vector<std::byte> bytes;
     bytes.reserve(value.size());
     for (const unsigned char byte : value) {
@@ -213,7 +221,14 @@ Result<std::string> ServiceManager::readMemorySyncCached(const std::string& key)
         return value.error();
     }
     const auto& bytes = value.value();
-    return std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    std::string text(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    if (key.starts_with(memory_sync::kTaskRecordPrefix)) {
+        const auto hash = crypto::SHA256Hasher::hash(std::span<const std::byte>(bytes));
+        if (auto valid = memory_sync::validateTaskRecordPublication(key, text, hash); !valid) {
+            return Error{ErrorCode::InvalidData, valid.error().message};
+        }
+    }
+    return text;
 }
 
 Result<ServiceManager::MemorySyncStatus> ServiceManager::getMemorySyncStatus() const {
