@@ -1,0 +1,124 @@
+# yamllint disable rule:line-length
+name: Release Candidate
+
+"on":
+  push:
+    branches:
+      - experimental
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: release-candidate-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    name: Validate promotion and preview release
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.head_ref == 'experimental' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout immutable candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          submodules: false
+
+      - name: Resolve immutable promotion range
+        id: refs
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_SHA: ${{ github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
+        run: |
+          set -euo pipefail
+          git fetch --force origin main experimental --tags
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            base_sha="$PR_BASE_SHA"
+            candidate_sha="$PR_HEAD_SHA"
+          elif [ "$EVENT_NAME" = "push" ]; then
+            base_sha="$(git rev-parse origin/main)"
+            candidate_sha="$EVENT_SHA"
+          else
+            base_sha="$(git rev-parse origin/main)"
+            candidate_sha="$(git rev-parse origin/experimental)"
+          fi
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
+
+      - name: Validate release candidate invariants
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.refs.outputs.base_sha }}
+          CANDIDATE_SHA: ${{ steps.refs.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/validate_release_candidate.py \
+            --root . \
+            --base "$BASE_SHA" \
+            --candidate "$CANDIDATE_SHA" \
+            --json-output release-candidate.json \
+            --markdown-output release-candidate.md
+          cat release-candidate.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Prepare immutable local experimental branch
+        shell: bash
+        env:
+          CANDIDATE_SHA: ${{ steps.refs.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          git checkout --detach "$CANDIDATE_SHA"
+          git branch --force experimental "$CANDIDATE_SHA"
+
+      - name: Generate Release Please dry-run preview
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          npx --yes release-please@17.11.2 release-pr \
+            --repo-url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --target-branch=experimental \
+            --config-file=release-please-config.json \
+            --manifest-file=.release-please-manifest.json \
+            --token="$GITHUB_TOKEN" \
+            --local \
+            --local-path=. \
+            --dry-run 2>&1 | tee release-please-preview.log
+
+      - name: Add Release Please preview to summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Release Please dry-run"
+            echo
+            echo '```text'
+            sed -E 's/\x1B\[[0-9;]*[mK]//g' release-please-preview.log 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload release-candidate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-candidate-${{ steps.refs.outputs.candidate_sha }}
+          path: |
+            release-candidate.json
+            release-candidate.md
+            release-please-preview.log
+          if-no-files-found: error
+          retention-days: 14
