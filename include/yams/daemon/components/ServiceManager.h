@@ -131,6 +131,10 @@ public:
     void startAsyncInit(std::promise<void>* barrierPromise = nullptr,
                         std::atomic<bool>* barrierSet = nullptr);
 
+    bool waitForAsyncInitCompletion(std::chrono::milliseconds timeout) {
+        return asyncInit_.waitForCompletion(timeout);
+    }
+
     void shutdown() override;
 
     void prepareForRestart() {
@@ -492,6 +496,11 @@ public:
     static bool __test_shouldAutoVacuum(std::uint64_t databaseBytes, std::uint64_t pageCount,
                                         std::uint64_t freePageCount, std::uint64_t pageSize) {
         return shouldAutoVacuum(databaseBytes, pageCount, freePageCount, pageSize);
+    }
+    bool
+    testingEnsureDatabaseIntegrityOrRecover(const std::filesystem::path& path,
+                                            const std::shared_ptr<metadata::Database>& database) {
+        return ensureDatabaseIntegrityOrRecover(path, database);
     }
 #endif
 

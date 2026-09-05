@@ -230,6 +230,9 @@ struct SearchEngineConfig {
     /// observation count leaves route risk unavailable rather than treating it as zero loss.
     struct TopologyRouteRiskCalibration {
         std::string constructionFingerprint;
+        std::string routingPolicyFingerprint;
+        /// Identity of the held-out query dataset/split that produced these counts.
+        std::string datasetIdentity;
         size_t calibrationQueries = 0;
         size_t protectedCandidates = 0;
         size_t missedProtectedCandidates = 0;

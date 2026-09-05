@@ -163,6 +163,7 @@ yams::test::DaemonHarness::Options makeMemorySyncHarnessOptions(std::string node
     options.isolateState = true;
     options.configureDaemon = [nodeId, corpusId](yams::daemon::DaemonConfig& config) {
         config.memorySync.enabled = true;
+        config.memorySync.corpusScope = yams::memory_sync::CorpusScope::Shared;
         config.memorySync.nodeId = nodeId;
         config.memorySync.corpusId = corpusId;
         config.memorySync.corpusEpoch = 1;
@@ -177,6 +178,7 @@ yams::test::DaemonHarness::Options makeMemorySyncHarnessOptions(std::string node
          << "auto_repair = false\n\n"
          << "[memory_sync]\n"
          << "enabled = true\n"
+         << "corpus_scope = \"shared\"\n"
          << "node_id = \"" << nodeId << "\"\n"
          << "corpus_id = \"" << corpusId << "\"\n"
          << "corpus_epoch = 1\n"
@@ -206,6 +208,7 @@ TEST_CASE("Daemon refuses enabled memory sync when writer authentication cannot 
                                                 "startup-failure-corpus");
     options.configureDaemon = [](yams::daemon::DaemonConfig& config) {
         config.memorySync.enabled = true;
+        config.memorySync.corpusScope = yams::memory_sync::CorpusScope::Shared;
         config.memorySync.nodeId = "123e4567-e89b-42d3-a456-426614174099";
         config.memorySync.corpusId = "startup-failure-corpus";
         config.memorySync.corpusEpoch = 1;
@@ -232,6 +235,7 @@ TEST_CASE("Daemon memory sync periodically converges and stops cleanly",
     options.isolateState = true;
     options.configureDaemon = [](yams::daemon::DaemonConfig& config) {
         config.memorySync.enabled = true;
+        config.memorySync.corpusScope = yams::memory_sync::CorpusScope::Shared;
         config.memorySync.nodeId = "123e4567-e89b-42d3-a456-426614174000";
         config.memorySync.corpusId = "integration-corpus";
         config.memorySync.corpusEpoch = 1;
@@ -247,6 +251,7 @@ auto_repair = false
 
 [memory_sync]
 enabled = true
+corpus_scope = "shared"
 node_id = "123e4567-e89b-42d3-a456-426614174000"
 corpus_id = "integration-corpus"
 corpus_epoch = 1
@@ -1302,6 +1307,7 @@ TEST_CASE("Daemon temporary memory sync converges inside one session and cleans 
     options.isolateState = true;
     options.configureDaemon = [](yams::daemon::DaemonConfig& config) {
         config.memorySync.enabled = true;
+        config.memorySync.corpusScope = yams::memory_sync::CorpusScope::Shared;
         config.memorySync.nodeId = "123e4567-e89b-42d3-a456-426614174001";
         config.memorySync.corpusId = "temporary-integration-corpus";
         config.memorySync.corpusEpoch = 1;

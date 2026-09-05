@@ -728,6 +728,19 @@ TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
 TEST_CASE("DocumentService - Retrieval", "[document][service][retrieval]") {
     DocumentFixture fixture;
 
+    SECTION("Metadata lookup failures are not reported as missing documents") {
+        fixture.pool_->shutdown();
+        auto metadataResult = fixture.metadataRepo_->getDocumentByHash(fixture.testHash1_);
+        REQUIRE_FALSE(metadataResult);
+        RetrieveDocumentRequest request;
+        request.hash = fixture.testHash1_;
+        auto result = fixture.documentService_->retrieve(request);
+        REQUIRE_FALSE(result);
+        CHECK(result.error().code == metadataResult.error().code);
+        CHECK(result.error().message == metadataResult.error().message);
+        CHECK(result.error().code != ErrorCode::NotFound);
+    }
+
     SECTION("Retrieve document by hash") {
         REQUIRE_FALSE(fixture.testHash1_.empty());
 

@@ -121,6 +121,8 @@ public:
         std::optional<float> sparseDenseAlpha;
         std::optional<float> minRouteScore;
         std::optional<std::string> routeCalibrationFingerprint;
+        std::optional<std::string> routeCalibrationPolicyFingerprint;
+        std::optional<std::string> routeCalibrationDatasetIdentity;
         std::optional<std::size_t> routeCalibrationQueries;
         std::optional<std::size_t> routeCalibrationProtectedCandidates;
         std::optional<std::size_t> routeCalibrationMissedProtectedCandidates;
@@ -493,6 +495,8 @@ public:
      * - search.topology.sparse_dense_alpha = float in [0,1]
      * - search.topology.min_route_score = float
      * - search.topology.route_calibration_fingerprint = string
+     * - search.topology.route_calibration_policy_fingerprint = string
+     * - search.topology.route_calibration_dataset_identity = string
      * - search.topology.route_calibration_queries = int
      * - search.topology.route_calibration_protected_candidates = int
      * - search.topology.route_calibration_missed_protected_candidates = int

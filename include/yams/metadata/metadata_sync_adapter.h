@@ -198,11 +198,7 @@ private:
                lhs.fileExtension == rhs.fileExtension && lhs.fileSize == rhs.fileSize &&
                lhs.sha256Hash == rhs.sha256Hash && lhs.mimeType == rhs.mimeType &&
                lhs.createdTime == rhs.createdTime && lhs.modifiedTime == rhs.modifiedTime &&
-               lhs.indexedTime == rhs.indexedTime && lhs.contentExtracted == rhs.contentExtracted &&
-               lhs.extractionStatus == rhs.extractionStatus &&
-               lhs.extractionError == rhs.extractionError && lhs.repairStatus == rhs.repairStatus &&
-               lhs.repairAttemptedAt == rhs.repairAttemptedAt &&
-               lhs.repairAttempts == rhs.repairAttempts;
+               lhs.indexedTime == rhs.indexedTime;
     }
 
     static bool
@@ -232,12 +228,9 @@ private:
         record.createdTime = info.createdTime.time_since_epoch().count();
         record.modifiedTime = info.modifiedTime.time_since_epoch().count();
         record.indexedTime = info.indexedTime.time_since_epoch().count();
-        record.contentExtracted = info.contentExtracted;
-        record.extractionStatus = static_cast<std::int32_t>(info.extractionStatus);
-        record.extractionError = info.extractionError;
-        record.repairStatus = static_cast<std::int32_t>(info.repairStatus);
-        record.repairAttemptedAt = info.repairAttemptedAt.time_since_epoch().count();
-        record.repairAttempts = info.repairAttempts;
+        // Retain neutral legacy wire fields, not replica-local operational state.
+        // Otherwise two peers with different extractor availability repeatedly
+        // republish the same portable metadata with different payload hashes.
         for (const auto& [key, value] : tags) {
             record.metadata[key] = memory_sync::MetadataValueRecord{
                 .value = value.value,
@@ -258,13 +251,13 @@ private:
         item.info.setCreatedTime(record.createdTime);
         item.info.setModifiedTime(record.modifiedTime);
         item.info.setIndexedTime(record.indexedTime);
-        item.info.contentExtracted = record.contentExtracted;
-        item.info.extractionStatus = static_cast<ExtractionStatus>(record.extractionStatus);
-        item.info.extractionError = record.extractionError;
-        item.info.repairStatus = static_cast<RepairStatus>(record.repairStatus);
-        item.info.repairAttemptedAt =
-            std::chrono::sys_seconds{std::chrono::seconds{record.repairAttemptedAt}};
-        item.info.repairAttempts = record.repairAttempts;
+        // Sender readiness is not evidence of receiver-local content/FTS or repair
+        // completion. Keep the wire fields readable for compatibility, but new
+        // local documents must derive their own indexes. Existing local status is
+        // preserved atomically by replaceDocumentAndMetadata.
+        item.info.contentExtracted = false;
+        item.info.extractionStatus = ExtractionStatus::Pending;
+        item.info.repairStatus = RepairStatus::Pending;
         populatePathDerivedFields(item.info);
         for (const auto& [key, value] : record.metadata) {
             MetadataValue mv;

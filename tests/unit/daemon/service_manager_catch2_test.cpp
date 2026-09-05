@@ -40,6 +40,8 @@
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/daemon.h>
 #include <yams/memory_sync/writer_auth.h>
+#include <yams/memory_sync/memory_sync_service.h>
+#include <yams/crypto/hasher.h>
 #include <yams/metadata/database.h>
 
 namespace fs = std::filesystem;
@@ -452,6 +454,28 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager construction succeeds",
     REQUIRE_NOTHROW(ServiceManager(config_, state_, lifecycleFsm_));
 }
 
+TEST_CASE("Async initialization completion wait survives caller timeout",
+          "[daemon][service_manager][async-completion]") {
+    AsyncInitOrchestrator init;
+    REQUIRE(init.tryStart());
+    const auto token = init.getStopToken();
+
+    // A caller may time out before co_spawn installs its future.
+    CHECK_FALSE(init.waitForCompletion(std::chrono::milliseconds(0)));
+    CHECK_FALSE(token.stop_requested());
+
+    std::promise<void> completion;
+    init.setFuture(completion.get_future());
+    CHECK_FALSE(init.waitForCompletion(std::chrono::milliseconds(0)));
+    CHECK_FALSE(token.stop_requested());
+
+    // The future remains owned by the orchestrator, not the timed-out caller.
+    completion.set_value();
+    CHECK(init.waitForCompletion(std::chrono::milliseconds(0)));
+    CHECK_FALSE(token.stop_requested());
+    CHECK(init.requestStopAndWait(std::chrono::milliseconds(0)));
+}
+
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager getName returns correct component name",
                  "[daemon][service_manager]") {
     ServiceManager sm(config_, state_, lifecycleFsm_);
@@ -523,9 +547,87 @@ TEST_CASE_METHOD(ServiceManagerFixture,
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture,
+                 "Task record publication and reads validate immutable revision identity",
+                 "[daemon][service_manager][task-record]") {
+    storage::BackendConfig backendConfig;
+    backendConfig.localPath = config_.dataDir / "task-record-store";
+    auto backend = std::make_unique<storage::FilesystemBackend>();
+    REQUIRE(backend->initialize(backendConfig).has_value());
+    ServiceManager manager(config_, state_, lifecycleFsm_);
+    manager.testingSetMemorySyncService(std::make_unique<memory_sync::MemorySyncService>(
+        std::move(backend), memory_sync::MemorySyncConfig{"A", 50}));
+    auto* sync = manager.testingMemorySyncService();
+    const std::string taskId = "123e4567-e89b-42d3-a456-426614174000";
+    nlohmann::json record = {
+        {"schema", "yams.task-record/v1"},
+        {"task_id", taskId},
+        {"kind", "claim"},
+        {"owner", "agent-a"},
+        {"source_uri", "repo:src/search"},
+        {"source_revision", "git:9883a438"},
+        {"recorded_at_ms", 2000},
+        {"source_timestamp_ms", 1000},
+        {"supersedes", nlohmann::json::array()},
+        {"ownership_semantics", "record_only"},
+        {"body", "Investigating retrieval"},
+    };
+    const auto value = record.dump();
+    const auto hash = crypto::SHA256Hasher::hash(std::as_bytes(std::span(value)));
+    const auto key = "task-record/" + taskId + "/" + hash;
+    REQUIRE(manager.publishMemorySync(key, value).has_value());
+    REQUIRE(sync->syncOnce().has_value());
+    const auto hydrated = manager.readMemorySyncCached(key);
+    REQUIRE(hydrated.has_value());
+    CHECK(hydrated.value() == value);
+
+    record["body"] = "changed revision";
+    CHECK_FALSE(manager.publishMemorySync(key, record.dump()).has_value());
+    record["ownership_semantics"] = "acquired";
+    const auto acquired = record.dump();
+    const auto acquiredHash = crypto::SHA256Hasher::hash(std::as_bytes(std::span(acquired)));
+    CHECK_FALSE(manager.publishMemorySync("task-record/" + taskId + "/" + acquiredHash, acquired)
+                    .has_value());
+
+    // A remote/lower-level writer cannot bypass the typed read contract.
+    const auto namespaced = memory_sync::userLogicalKey(key);
+    REQUIRE(namespaced.has_value());
+    REQUIRE(sync->publish(namespaced.value(), std::as_bytes(std::span(acquired))).has_value());
+    REQUIRE(sync->syncOnce().has_value());
+    CHECK_FALSE(manager.readMemorySyncCached(key).has_value());
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager rejects replication of a personal corpus",
+                 "[daemon][service_manager][sharing][security][config]") {
+    config_.memorySync.enabled = true;
+    config_.memorySync.nodeId = "123e4567-e89b-42d3-a456-42661417400a";
+    config_.memorySync.corpusId = "personal-corpus";
+    config_.memorySync.corpusEpoch = 1;
+    config_.memorySync.path = (config_.dataDir / "forbidden-sync-store").string();
+    SECTION("direct") {
+        config_.memorySync.transport = "direct";
+    }
+    SECTION("shared store") {
+        config_.memorySync.transport = "shared-store";
+    }
+    ServiceManager manager(config_, state_, lifecycleFsm_);
+    REQUIRE(manager.initialize().has_value());
+    boost::asio::io_context io;
+    compat::stop_source stopSource;
+    auto future = boost::asio::co_spawn(
+        io, manager.initializeAsyncAwaitable(stopSource.get_token()), boost::asio::use_future);
+    io.run();
+    const auto initialized = future.get();
+    REQUIRE_FALSE(initialized.has_value());
+    CHECK(initialized.error().message.find("corpus_scope=shared") != std::string::npos);
+    CHECK_FALSE(fs::exists(config_.memorySync.path));
+    CHECK_FALSE(fs::exists(config_.dataDir / "p2p" / "op-store"));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
                  "ServiceManager rejects direct P2P without usable writer authentication",
                  "[daemon][service_manager][p2p][security][config]") {
     config_.memorySync.enabled = true;
+    config_.memorySync.corpusScope = yams::memory_sync::CorpusScope::Shared;
     config_.memorySync.transport = "direct";
     config_.memorySync.nodeId = "123e4567-e89b-42d3-a456-42661417400a";
     config_.memorySync.corpusId = "missing-writer-auth";
@@ -555,6 +657,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     std::ofstream(legacyObject) << "unsigned-history";
 
     config_.memorySync.enabled = true;
+    config_.memorySync.corpusScope = yams::memory_sync::CorpusScope::Shared;
     config_.memorySync.transport = "direct";
     config_.memorySync.nodeId = nodeId;
     config_.memorySync.corpusId = corpusId;
@@ -619,6 +722,7 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager rejects symbolic-link P2
     fs::create_symlink(victim, identity);
 
     config_.memorySync.enabled = true;
+    config_.memorySync.corpusScope = yams::memory_sync::CorpusScope::Shared;
     config_.memorySync.transport = "direct";
     config_.memorySync.nodeId = "123e4567-e89b-42d3-a456-42661417400a";
     config_.memorySync.corpusId = "identity-security-test";
@@ -653,6 +757,7 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     grantUntrustedKeyAccess(testDir_ / "writer-private.pem", false);
 
     config_.memorySync.enabled = true;
+    config_.memorySync.corpusScope = yams::memory_sync::CorpusScope::Shared;
     config_.memorySync.transport = "direct";
     config_.memorySync.nodeId = nodeId;
     config_.memorySync.corpusId = corpusId;
@@ -689,6 +794,7 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager rejects writable direct 
     }
 
     config_.memorySync.enabled = true;
+    config_.memorySync.corpusScope = yams::memory_sync::CorpusScope::Shared;
     config_.memorySync.transport = "direct";
     config_.memorySync.nodeId = nodeId;
     config_.memorySync.corpusId = corpusId;
@@ -1203,6 +1309,29 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     const auto nextStartup = consumeDbCleanShutdownStamp(dbPath);
     CHECK(nextStartup.trustedCleanShutdown);
     CHECK(nextStartup.invalidationPersisted);
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager preserves metadata when integrity validation cannot finish",
+                 "[daemon][service_manager][startup][integrity][cancellation]") {
+    const auto dbPath = metadataDbPath(config_);
+    seedMetadataDb(dbPath, "must-survive");
+    auto database = std::make_shared<metadata::Database>();
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+
+    SECTION("shutdown cancels validation without recovery") {
+        REQUIRE(database->open(dbPath.string(), metadata::ConnectionMode::ReadWrite));
+        sm->shutdown();
+    }
+    SECTION("an unavailable connection is not evidence of corruption") {
+        // The on-disk database is valid; the supplied connection is closed.
+    }
+
+    CHECK_FALSE(sm->testingEnsureDatabaseIntegrityOrRecover(dbPath, database));
+    database->close();
+    CHECK_FALSE(findQuarantinedFile(config_.dataDir).has_value());
+    CHECK(state_.readiness.databaseRecoveredFrom.empty());
+    CHECK(startupProbeRowCount(dbPath) == 1);
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture,

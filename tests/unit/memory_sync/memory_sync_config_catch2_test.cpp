@@ -94,11 +94,37 @@ TEST_CASE("MemorySyncDaemonConfig defaults to disabled", "[memory-sync][config]"
     CHECK(cfg.syncIntervalMs == 5000);
 }
 
+TEST_CASE("memory sync rejects personal or unknown corpus scope before opening a backend",
+          "[memory-sync][config][sharing]") {
+    for (const std::string scope : {"", "personal", "unknown"}) {
+        const auto path =
+            std::filesystem::temp_directory_path() /
+            ("yams-personal-scope-" +
+             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+        std::map<std::string, std::string> flat = {
+            {"memory_sync.enabled", "true"},
+            {"memory_sync.node_id", "123e4567-e89b-42d3-a456-426614174000"},
+            {"memory_sync.corpus_id", "personal-corpus"},
+            {"memory_sync.corpus_epoch", "1"},
+            {"memory_sync.path", path.string()},
+        };
+        if (!scope.empty()) {
+            flat["memory_sync.corpus_scope"] = scope;
+        }
+        auto service = createMemorySyncService(MemorySyncDaemonConfig::fromToml(flat));
+        CHECK_FALSE(service.has_value());
+        CHECK_FALSE(std::filesystem::exists(path));
+        service = yams::Error{yams::ErrorCode::InvalidState, "test cleanup"};
+        std::filesystem::remove_all(path);
+    }
+}
+
 TEST_CASE("createMemorySyncService rejects omitted or placeholder writer identity",
           "[memory-sync][config][identity]") {
     for (const std::string nodeId : {"", "default"}) {
         MemorySyncDaemonConfig cfg;
         cfg.enabled = true;
+        cfg.corpusScope = CorpusScope::Shared;
         cfg.nodeId = nodeId;
         cfg.corpusId = "corpus-a";
         cfg.corpusEpoch = 1;
@@ -115,6 +141,7 @@ TEST_CASE("createMemorySyncService requires UUID writer and corpus identity",
           "[memory-sync][config][identity]") {
     MemorySyncDaemonConfig cfg;
     cfg.enabled = true;
+    cfg.corpusScope = CorpusScope::Shared;
     cfg.nodeId = "node-a";
     cfg.backend = "filesystem";
     cfg.path = std::filesystem::temp_directory_path().string();
@@ -161,6 +188,7 @@ TEST_CASE("authenticated writer manifest produces schema-v4 envelopes",
 
     MemorySyncDaemonConfig cfg;
     cfg.enabled = true;
+    cfg.corpusScope = CorpusScope::Shared;
     cfg.nodeId = std::string(writerId);
     cfg.corpusId = "corpus-a";
     cfg.corpusEpoch = 7;
@@ -220,6 +248,7 @@ TEST_CASE("authenticated writer recovery reports legacy unsigned history",
 
     MemorySyncDaemonConfig unsignedConfig;
     unsignedConfig.enabled = true;
+    unsignedConfig.corpusScope = CorpusScope::Shared;
     unsignedConfig.nodeId = std::string(writerId);
     unsignedConfig.corpusId = "corpus-a";
     unsignedConfig.corpusEpoch = 7;
@@ -286,6 +315,7 @@ TEST_CASE("authenticated writer mode rejects legacy migration and manifest misma
           "[memory-sync][config][auth][migration]") {
     MemorySyncDaemonConfig cfg;
     cfg.enabled = true;
+    cfg.corpusScope = CorpusScope::Shared;
     cfg.nodeId = "123e4567-e89b-42d3-a456-426614174000";
     cfg.corpusId = "corpus-a";
     cfg.corpusEpoch = 1;
@@ -308,6 +338,7 @@ TEST_CASE("createMemorySyncService rejects disabled config", "[memory-sync][conf
 TEST_CASE("createMemorySyncService rejects unknown backend", "[memory-sync][config]") {
     MemorySyncDaemonConfig cfg;
     cfg.enabled = true;
+    cfg.corpusScope = CorpusScope::Shared;
     cfg.backend = "ftp";
     cfg.path = "ftp://example.com";
     const auto svc = createMemorySyncService(cfg);
@@ -336,6 +367,7 @@ TEST_CASE("memory sync S3 target overrides primary bucket while retaining creden
 TEST_CASE("createMemorySyncService rejects s3 with a non-s3 URL", "[memory-sync][config]") {
     MemorySyncDaemonConfig cfg;
     cfg.enabled = true;
+    cfg.corpusScope = CorpusScope::Shared;
     cfg.backend = "s3";
     cfg.path = "/not/an/s3/url";
     const auto svc = createMemorySyncService(cfg);
@@ -351,6 +383,7 @@ TEST_CASE("temporary memory sync owns and cleans only its session namespace",
 
     MemorySyncDaemonConfig persistent;
     persistent.enabled = true;
+    persistent.corpusScope = CorpusScope::Shared;
     persistent.nodeId = "123e4567-e89b-42d3-a456-426614174000";
     persistent.corpusId = "corpus-a";
     persistent.corpusEpoch = 1;
@@ -404,6 +437,7 @@ TEST_CASE("temporary memory sync collects bounded stale session leases",
 
     MemorySyncDaemonConfig temporary;
     temporary.enabled = true;
+    temporary.corpusScope = CorpusScope::Shared;
     temporary.nodeId = "123e4567-e89b-42d3-a456-426614174001";
     temporary.corpusId = "corpus-a";
     temporary.corpusEpoch = 1;
@@ -438,6 +472,7 @@ TEST_CASE("createMemorySyncService builds a working filesystem service", "[memor
 
     MemorySyncDaemonConfig cfg;
     cfg.enabled = true;
+    cfg.corpusScope = CorpusScope::Shared;
     cfg.nodeId = "123e4567-e89b-42d3-a456-426614174000";
     cfg.corpusId = "corpus-a";
     cfg.corpusEpoch = 1;

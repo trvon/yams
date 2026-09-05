@@ -219,6 +219,12 @@ TEST_CASE("InProcessTransport orders callbacks for unary requests",
         events.push_back(std::move(event));
     };
     yams::daemon::Request req = yams::daemon::StatusRequest{};
+    SECTION("Control response is delivered once") {}
+    SECTION("Non-control immediate error response is delivered once") {
+        yams::daemon::GetRequest get;
+        get.hash = std::string(64, 'f');
+        req = std::move(get);
+    }
 
     auto result = run_streaming(
         transport, req, [&](const yams::daemon::Response&) { recordEvent("header"); },

@@ -270,6 +270,9 @@ private:
 
     // Version 37: Index JSON properties used by document graph cleanup.
     static Migration createDocumentGraphCleanupIndexes();
+
+    // Version 38: Local embedding attempts, invalidated by extracted-input changes.
+    static Migration createEmbeddingDerivations();
 };
 
 /**

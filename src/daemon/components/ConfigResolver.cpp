@@ -883,6 +883,14 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
                 it != kv.end()) {
                 policy.routeCalibrationFingerprint = std::string(trimView(it->second));
             }
+            if (auto it = kv.find("search.topology.route_calibration_policy_fingerprint");
+                it != kv.end()) {
+                policy.routeCalibrationPolicyFingerprint = std::string(trimView(it->second));
+            }
+            if (auto it = kv.find("search.topology.route_calibration_dataset_identity");
+                it != kv.end()) {
+                policy.routeCalibrationDatasetIdentity = std::string(trimView(it->second));
+            }
             if (auto it = kv.find("search.topology.route_calibration_queries"); it != kv.end()) {
                 policy.routeCalibrationQueries = parseSize(it->second);
             }
@@ -1659,6 +1667,14 @@ bool ConfigResolver::applyMemorySync(const ConfigSections& sections, DaemonConfi
     }
 
     auto policy = config.memorySync;
+    if (const auto it = section->second.find("corpus_scope"); it != section->second.end()) {
+        policy.corpusScope = yams::memory_sync::parseCorpusScope(it->second);
+        if (policy.corpusScope == yams::memory_sync::CorpusScope::Invalid) {
+            spdlog::warn("Config: memory_sync.corpus_scope must be personal or shared");
+            config.memorySync.enabled = false;
+            return false;
+        }
+    }
     const bool transportSpecified = section->second.contains("transport");
     if (const auto it = section->second.find("enabled"); it != section->second.end()) {
         const auto enabled = parseBoolValue(it->second);
@@ -1813,6 +1829,13 @@ bool ConfigResolver::applyMemorySync(const ConfigSections& sections, DaemonConfi
     if (!policy.enabled) {
         config.memorySync = std::move(policy);
         return true;
+    }
+    if (policy.corpusScope != yams::memory_sync::CorpusScope::Shared) {
+        spdlog::warn("Config: replication requires memory_sync.corpus_scope=shared; keep "
+                     "personal memory in a separate data directory");
+        policy.enabled = false;
+        config.memorySync = std::move(policy);
+        return false;
     }
     if (policy.transport != "direct" && policy.transport != "shared-store") {
         spdlog::warn("Config: disabling invalid memory_sync.transport '{}'", policy.transport);

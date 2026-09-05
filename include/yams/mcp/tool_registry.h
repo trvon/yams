@@ -482,6 +482,7 @@ struct MCPGrepResponse {
         double confidence = 1.0;
         std::string matchId;
         size_t fileMatches = 0;
+        std::string hash;
     };
 
     std::string output;

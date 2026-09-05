@@ -1,8 +1,22 @@
+#include <algorithm>
 #include <yams/mcp/tool_registry.h>
 
 namespace yams::mcp {
 
 namespace {
+void addRetrievalReference(json& item, const std::string& hash) {
+    item["hash"] = hash.empty() ? json(nullptr) : json(hash);
+    item["hydration"] = nullptr;
+    if (hash.size() == 64 && std::all_of(hash.begin(), hash.end(), [](char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+        })) {
+        item["hydration"] = {{"method", "get"},
+                             {"hash", hash},
+                             {"include_content", true},
+                             {"scope", "current_corpus"}};
+    }
+}
+
 // Tolerant numeric parsing: accept number, numeric-like string; ignore empty string
 static int parse_int_tolerant(const json& j, const char* key, int def) {
     if (!j.contains(key) || j[key].is_null())
@@ -164,7 +178,8 @@ MCPSearchResponse MCPSearchResponse::fromJson(const json& j) {
         for (const auto& result : j["results"]) {
             MCPSearchResponse::Result r;
             r.id = result.value("id", std::string{});
-            r.hash = result.value("hash", std::string{});
+            if (auto hash = result.find("hash"); hash != result.end() && hash->is_string())
+                r.hash = hash->get<std::string>();
             r.title = result.value("title", std::string{});
             r.path = result.value("path", std::string{});
             r.score = result.value("score", 0.0f);
@@ -227,19 +242,21 @@ json MCPSearchResponse::toJson() const {
 
     if (pathsOnly || !paths.empty()) {
         j["paths"] = paths;
-        return j; // paths_only mode
     }
 
     json results_array = json::array();
     for (const auto& result : results) {
         json r;
         r["id"] = result.id;
-        if (!result.hash.empty())
-            r["hash"] = result.hash;
+        addRetrievalReference(r, result.hash);
         if (!result.title.empty())
             r["title"] = result.title;
         if (!result.path.empty())
             r["path"] = result.path;
+        if (pathsOnly || !paths.empty()) {
+            results_array.push_back(std::move(r));
+            continue;
+        }
         r["score"] = result.score;
         if (!result.snippet.empty())
             r["snippet"] = result.snippet;
@@ -378,6 +395,8 @@ MCPGrepResponse MCPGrepResponse::fromJson(const json& j) {
         for (const auto& m : j["matches"]) {
             MCPGrepResponse::Match gm;
             gm.file = m.value("file", std::string{});
+            if (m.contains("hash") && m["hash"].is_string())
+                gm.hash = m["hash"].get<std::string>();
             gm.lineNumber = m.value("line_number", size_t{0});
             gm.lineText = m.value("line_text", std::string{});
             detail::readStringArray(m, "context_before", gm.contextBefore);
@@ -421,6 +440,7 @@ json MCPGrepResponse::toJson() const {
                 jm["match_id"] = m.matchId;
             if (m.fileMatches > 0)
                 jm["file_matches"] = m.fileMatches;
+            addRetrievalReference(jm, m.hash);
             arr.push_back(std::move(jm));
         }
         j["matches"] = std::move(arr);

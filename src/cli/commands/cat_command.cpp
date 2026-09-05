@@ -39,9 +39,17 @@ public:
 
         auto* cmd = app.add_subcommand("cat", getDescription());
 
-        cmd->add_option("target", target_, "Document hash or path to display")
-            ->type_name("HASH|PATH")
-            ->required();
+        auto* selector = cmd->add_option_group("Content selector");
+        selector->require_option(1, 1);
+        selector->add_option("target", target_, "Document hash or path to display")
+            ->type_name("HASH|PATH");
+        selector->add_option("--hash", hash_, "Document hash or unambiguous hash prefix")
+            ->check(CLI::Validator(
+                [](const std::string& value) {
+                    return looksLikeHashPrefix(value) ? std::string{}
+                                                      : "Expected 6 to 64 hexadecimal characters";
+                },
+                "HASH"));
         // Disambiguation flags: select newest/oldest when multiple matches exist
         cmd->add_flag(
             "--latest", getLatest_,

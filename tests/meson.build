@@ -427,6 +427,26 @@ endif
 
 if catch2_dep.found()
 
+  catch2_retrieval_json_exe = executable('catch2_retrieval_json',
+    files('unit/cli/retrieval_json_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep, dependency('nlohmann_json')],
+    cpp_args: test_cpp_noerror_args,
+    install: false,
+  )
+  test('retrieval_json', catch2_retrieval_json_exe,
+    suite: ['catch2', 'unit', 'cli'], timeout: 30)
+
+  catch2_extraction_contracts_exe = executable('catch2_extraction_contracts',
+    files('unit/daemon/extraction_response_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep, dependency('nlohmann_json')],
+    cpp_args: test_cpp_noerror_args,
+    install: false,
+  )
+  test('extraction_contracts', catch2_extraction_contracts_exe,
+    suite: ['catch2', 'unit', 'daemon', 'extraction'], timeout: 30)
+
 #Daemon Test Suites(6 consolidated executables)
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
 
@@ -1701,6 +1721,7 @@ if catch2_dep.found()
       'unit/cli/cli_test_cleanup_listener.cpp',
       'unit/cli/add_command_stdin_catch2_test.cpp',
       'unit/cli/command_registry_catch2_test.cpp',
+      'unit/cli/content_roundtrip_catch2_test.cpp',
       'unit/cli/completion_command_catch2_test.cpp',
       'unit/cli/delete_command_catch2_test.cpp',
       'unit/cli/download_command_catch2_test.cpp',

@@ -40,6 +40,7 @@ struct TopologyCandidateStructureEvidence {
 struct TopologyRoutingSnapshot {
     std::shared_ptr<const yams::topology::TopologyArtifactBatch> artifacts;
     std::string constructionFingerprint;
+    std::string representationFingerprint;
     std::unordered_map<std::string, std::size_t> clustersById;
     std::unordered_map<std::string, std::size_t> membershipsByDocumentHash;
     yams::topology::ProtectedRelationCoverIndex protectedRelationCover;
@@ -92,6 +93,7 @@ struct TopologyRoutingOptions {
     bool weakTier1Query = false;
     std::size_t minClusters = 1;
     std::size_t maxClusters = 0;
+    std::size_t maxSeedDocuments = 32;
     std::size_t representativeLimit = 0;
     std::size_t denseAnnCandidateLimit = 0;
     float adaptiveProbeScoreGap = 0.0F;
@@ -222,6 +224,7 @@ topologyRouteActionToString(TopologyRouteAction action) noexcept {
 /// premises from raw routing state.
 struct TopologyRouteCertificate {
     std::string constructionFingerprint;
+    std::string routingPolicyFingerprint;
     std::string coordinateSpaceIdentity;
     std::vector<std::string> selectedCoverIds;
     std::vector<std::string> selectedProtectedRelationFiberIds;
@@ -346,6 +349,15 @@ validateTopologyArtifactBatchForRouting(const yams::topology::TopologyArtifactBa
 /// and the experimental routing representative set.
 [[nodiscard]] std::string
 topologyRoutingConstructionFingerprint(const yams::topology::TopologyArtifactBatch& batch);
+
+/// Cached per snapshot; includes ordered representative vectors as well as construction.
+[[nodiscard]] std::string
+topologyRoutingRepresentationFingerprint(const yams::topology::TopologyArtifactBatch& batch);
+
+/// Identity of the allowed-set selection policy; excludes query values and diagnostics.
+[[nodiscard]] std::string
+topologyRoutingPolicyFingerprint(std::string_view representationFingerprint,
+                                 const TopologyRoutingOptions& options);
 
 /// Rank pure graph-neighbor candidates from seed adjacency (testable without KG).
 /// `seedNeighbors[seedHash]` is a list of (neighborHash, score, reciprocal).

@@ -281,8 +281,7 @@ private:
             doc["title"] = item.title;
         if (!item.path.empty())
             doc["path"] = item.path;
-        if (showHash_ && !item.hash.empty())
-            doc["hash"] = item.hash;
+        addContentReference(doc, item.hash);
         doc["score"] = item.score;
         if (auto snippet = buildSnippet(item, 200))
             doc["snippet"] = *snippet;
@@ -1079,6 +1078,7 @@ public:
 
         try {
             invocationCwd_ = std::filesystem::current_path();
+            jsonOutput_ = jsonOutput_ || (cli_ && cli_->getJsonOutput());
             // Resolve base query from flags/stdin/file
             if (query_.empty()) {
                 if (!queryFile_.empty() && queryFile_ != "-") {
@@ -1369,6 +1369,7 @@ public:
     }
 
     boost::asio::awaitable<Result<void>> executeAsync() override {
+        jsonOutput_ = jsonOutput_ || (cli_ && cli_->getJsonOutput());
         const bool cliOneShot = yams::cli::cli_one_shot_enabled();
 
         // Build normalized arguments (copy of execute() preamble)

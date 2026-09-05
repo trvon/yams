@@ -407,6 +407,8 @@ bool loadRoutingSnapshot(const TopologyRoutingSessionRequest& request,
                             snapshot->artifacts->topologyEpoch == request.expectedTopologyEpoch;
     result.topologyEpoch = snapshot->artifacts->topologyEpoch;
     result.certificate.constructionFingerprint = snapshot->constructionFingerprint;
+    result.certificate.routingPolicyFingerprint =
+        topologyRoutingPolicyFingerprint(snapshot->representationFingerprint, request.options);
     result.certificate.coordinateSpaceIdentity = snapshot->artifacts->embeddingSpaceIdentity;
     if (!request.queryEmbedding.has_value()) {
         result.certificate.admission.coordinateSpaceAlignment =
@@ -869,7 +871,10 @@ void produceTopologyRouteAdmission(const std::vector<yams::topology::ClusterRout
     const bool calibrationObserved =
         !calibration.constructionFingerprint.empty() &&
         calibration.constructionFingerprint == result.certificate.constructionFingerprint &&
-        calibration.calibrationQueries > 0 && calibration.protectedCandidates > 0;
+        !calibration.routingPolicyFingerprint.empty() &&
+        calibration.routingPolicyFingerprint == result.certificate.routingPolicyFingerprint &&
+        !calibration.datasetIdentity.empty() && calibration.calibrationQueries > 0 &&
+        calibration.protectedCandidates > 0;
     if (!calibrationObserved) {
         result.certificate.admission.protectedFibersRepresented = Status::Unavailable;
         result.certificate.admission.routeRisk = Status::Unavailable;
@@ -1215,6 +1220,7 @@ makeTopologyRoutingOptions(const SearchEngineConfig& config,
         .weakTier1Query = weakTier1Query,
         .minClusters = config.topologyMinClusters,
         .maxClusters = config.topologyMaxClusters,
+        .maxSeedDocuments = config.topologyMaxSeedDocuments,
         .representativeLimit = config.topologyRoutingRepresentativeLimit,
         .denseAnnCandidateLimit = config.topologyRoutingAnnCandidateLimit,
         .adaptiveProbeScoreGap = config.topologyAdaptiveProbeScoreGap,
@@ -1457,6 +1463,57 @@ topologyRoutingConstructionFingerprint(const yams::topology::TopologyArtifactBat
     return fingerprintHex(hash);
 }
 
+std::string
+topologyRoutingRepresentationFingerprint(const yams::topology::TopologyArtifactBatch& batch) {
+    std::uint64_t hash = 14695981039346656037ULL;
+    fingerprintString(hash, "routing-representations-v1");
+    fingerprintString(hash, topologyRoutingConstructionFingerprint(batch));
+    std::vector<const yams::topology::ClusterArtifact*> clusters;
+    for (const auto& cluster : batch.clusters) {
+        clusters.push_back(&cluster);
+    }
+    std::ranges::sort(clusters, {}, [](const auto* cluster) { return cluster->clusterId; });
+    for (const auto* cluster : clusters) {
+        fingerprintString(hash, cluster->clusterId);
+        fingerprintIntegral(hash, cluster->routingRepresentatives.size());
+        // Order matters when a representative limit selects a prefix.
+        for (const auto& representative : cluster->routingRepresentatives) {
+            fingerprintString(hash, representative.documentHash);
+            fingerprintIntegral(hash, representative.embedding.size());
+            for (float value : representative.embedding) {
+                fingerprintFloat(hash, value);
+            }
+        }
+    }
+    return fingerprintHex(hash);
+}
+
+std::string topologyRoutingPolicyFingerprint(std::string_view representationFingerprint,
+                                             const TopologyRoutingOptions& options) {
+    std::uint64_t hash = 14695981039346656037ULL;
+    fingerprintString(hash, "routing-policy-v1");
+    fingerprintString(hash, representationFingerprint);
+    fingerprintIntegral(hash, static_cast<unsigned>(options.routingMode));
+    fingerprintIntegral(hash, static_cast<unsigned>(options.routeScoringMode));
+    fingerprintIntegral(hash, static_cast<unsigned>(options.expansionSource));
+    fingerprintIntegral(hash, static_cast<unsigned>(options.weakTier1Query));
+    fingerprintIntegral(hash, options.minClusters);
+    fingerprintIntegral(hash, options.maxClusters);
+    fingerprintIntegral(hash, options.maxSeedDocuments);
+    fingerprintIntegral(hash, options.representativeLimit);
+    fingerprintIntegral(hash, options.denseAnnCandidateLimit);
+    fingerprintIntegral(hash, options.maxDocs);
+    fingerprintFloat(hash, options.adaptiveProbeScoreGap);
+    fingerprintFloat(hash, options.narrowMinBoundaryMargin);
+    fingerprintFloat(hash, options.sparseDenseAlpha);
+    fingerprintFloat(hash, options.minRouteScore);
+    fingerprintIntegral(hash, static_cast<unsigned>(options.collectRouteMembership));
+    fingerprintFloat(hash, options.graphNeighborMinScore);
+    fingerprintIntegral(hash, static_cast<unsigned>(options.graphNeighborReciprocalOnly));
+    fingerprintIntegral(hash, static_cast<unsigned>(options.graphWeightedSeedRanking));
+    return fingerprintHex(hash);
+}
+
 TopologyRoutingSnapshotCache::TopologyRoutingSnapshotCache(TopologyRoutingSnapshotLoader loader)
     : loader_(std::move(loader)) {}
 
@@ -1500,6 +1557,8 @@ Result<TopologyRoutingSnapshotLookup> TopologyRoutingSnapshotCache::get(std::uin
     snapshot->artifacts = std::move(artifacts);
     snapshot->constructionFingerprint =
         topologyRoutingConstructionFingerprint(*snapshot->artifacts);
+    snapshot->representationFingerprint =
+        topologyRoutingRepresentationFingerprint(*snapshot->artifacts);
     snapshot->sparseRouteIndex = yams::topology::SparseGuidedClusterRouter::buildRouteIndex(
         *snapshot->artifacts, requireDenseAnnIndex);
     snapshot->denseAnnBuildAttempted = requireDenseAnnIndex;

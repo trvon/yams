@@ -303,14 +303,19 @@ public:
 
     /**
      * @brief Run PRAGMA quick_check; fails if SQLite reports corruption.
-     * Bounded ~ 10s by setting a busy timeout. Suitable for pre-flight on
-     * daemon startup before migrations run. Transient SQLite lock/busy failures
+     * Lock waits use a 10s busy timeout; this does NOT bound scan duration.
+     * Suitable for pre-flight before migrations. Transient SQLite lock/busy failures
      * return ErrorCode::ResourceBusy and must not be treated as corruption;
      * corruption reported via quick_check rows or SQLITE_CORRUPT/NOTADB returns
      * ErrorCode::CorruptedData. On read-only connections, FTS5 inverted-index
      * validation cannot run and those rows alone are treated as success.
      */
     Result<void> checkIntegrity();
+    // Exclusive connection use required. Temporarily owns the connection's progress
+    // handler (no other progress handler may be installed by the caller); the
+    // predicate must not access this connection. Interruption is not
+    // evidence of corruption. The handler is removed before this call returns.
+    Result<void> checkIntegrity(const std::function<bool()>& shouldCancel);
 
     /**
      * @brief Begin transaction

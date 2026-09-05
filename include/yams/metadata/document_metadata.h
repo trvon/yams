@@ -222,6 +222,18 @@ struct DocumentContent {
     std::string language;         ///< Detected language code
 };
 
+// Local derivation identity, not a distributed ownership/fencing token.
+struct EmbeddingDerivationToken {
+    std::string hash;
+    std::string generation;
+    std::string recipe;
+};
+
+struct EmbeddingDerivationState {
+    EmbeddingDerivationToken token;
+    bool completed = false;
+};
+
 /**
  * @brief Entry for batch content insertion and indexing.
  *

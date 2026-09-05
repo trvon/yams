@@ -8,9 +8,48 @@
 #include <algorithm>
 #include <functional>
 #include <limits>
+#include <type_traits>
 #include <unordered_map>
 
 namespace yams::search::detail {
+
+void mergeVectorSearchDiagnostics(vector::VectorSearchDiagnostics& total,
+                                  const vector::VectorSearchDiagnostics& sample) {
+    const bool first = total.accumulatedSamples == 0;
+    const auto add = [](auto& target, auto value) {
+        const auto maximum = std::numeric_limits<std::remove_reference_t<decltype(target)>>::max();
+        target = value > maximum - target ? maximum : target + value;
+    };
+    add(total.accumulatedSamples, std::max<size_t>(1, sample.accumulatedSamples));
+    add(total.documentRefillAttempts, sample.documentRefillAttempts);
+    total.usedAnn |= sample.usedAnn;
+    total.usedExactScan |= sample.usedExactScan;
+    total.usedCandidateIndexCache |= sample.usedCandidateIndexCache;
+    total.collectVisitedDocumentHashes |= sample.collectVisitedDocumentHashes;
+    total.visitedDocumentHashes.insert(sample.visitedDocumentHashes.begin(),
+                                       sample.visitedDocumentHashes.end());
+    total.rowsVisitedObserved = sample.rowsVisitedObserved && (first || total.rowsVisitedObserved);
+    total.exactDistanceEvaluationsObserved = sample.exactDistanceEvaluationsObserved &&
+                                             (first || total.exactDistanceEvaluationsObserved);
+    total.annCandidateBudgetObserved =
+        sample.annCandidateBudgetObserved && (first || total.annCandidateBudgetObserved);
+    add(total.rowsVisited, sample.rowsVisited);
+    add(total.exactDistanceEvaluations, sample.exactDistanceEvaluations);
+    add(total.annCandidateBudget, sample.annCandidateBudget);
+    add(total.candidateLookupCount, sample.candidateLookupCount);
+    total.candidateIndexPayloadBytes =
+        std::max(total.candidateIndexPayloadBytes, sample.candidateIndexPayloadBytes);
+    add(total.materializedRows, sample.materializedRows);
+    add(total.returnedRows, sample.returnedRows);
+    add(total.candidateLookupNanoseconds, sample.candidateLookupNanoseconds);
+    add(total.candidateProjectionNanoseconds, sample.candidateProjectionNanoseconds);
+    add(total.pqLutNanoseconds, sample.pqLutNanoseconds);
+    add(total.adcScoringNanoseconds, sample.adcScoringNanoseconds);
+    add(total.topKSelectionNanoseconds, sample.topKSelectionNanoseconds);
+    add(total.resultMaterializationNanoseconds, sample.resultMaterializationNanoseconds);
+    add(total.exactRerankNanoseconds, sample.exactRerankNanoseconds);
+}
+
 namespace {
 
 std::string truncateSearchSnippet(const std::string& content, size_t maxLen) {
@@ -201,7 +240,7 @@ queryVectorIndexImpl(const std::shared_ptr<yams::metadata::MetadataRepository>& 
     std::vector<ComponentResult> results;
     results.reserve(limit);
 
-    if (!vectorDb) {
+    if (!vectorDb || limit == 0) {
         return results;
     }
 
@@ -212,15 +251,55 @@ queryVectorIndexImpl(const std::shared_ptr<yams::metadata::MetadataRepository>& 
             candidateFilterMode == vector::CandidateFilterMode::ExactDocumentComplete
                 ? -1.0F
                 : config.similarityThreshold;
-        params.diagnostics = diagnostics;
         if (candidates != nullptr) {
             params.candidate_hashes = *candidates;
             params.candidate_filter_mode = candidateFilterMode;
+            // DocumentTopK's backend selection is MAX. Averaging needs all matching
+            // chunk scores before document truncation; the PQ path already exact-scores
+            // every allowed row in this mode, so bypass its redundant ADC selection.
+            if (candidateFilterMode == vector::CandidateFilterMode::DocumentTopK &&
+                config.chunkAggregation != SearchEngineConfig::ChunkAggregation::MAX) {
+                params.candidate_filter_mode = vector::CandidateFilterMode::ExactDocumentComplete;
+                params.similarity_threshold = -1.0F;
+            }
         }
 
-        auto vectorRecords = vectorDb->search(embedding, params);
+        const auto search = [&]() {
+            vector::VectorSearchDiagnostics sample;
+            sample.collectVisitedDocumentHashes =
+                diagnostics && diagnostics->collectVisitedDocumentHashes;
+            params.diagnostics = diagnostics ? &sample : nullptr;
+            auto records = vectorDb->search(embedding, params);
+            if (diagnostics) {
+                mergeVectorSearchDiagnostics(*diagnostics, sample);
+            }
+            return records;
+        };
+        auto vectorRecords = search();
+        const auto rawCount = vectorRecords.size();
         if (!vectorRecords.empty()) {
             vectorRecords = aggregateChunkVectorScores(vectorRecords, config, limit);
+        }
+        // One bounded refill, only when chunk crowding filled the raw request. Keep
+        // exact controls and explicit document-complete modes unchanged. This improves
+        // document fill; it does not claim exhaustive document ranking.
+        if (candidateFilterMode == vector::CandidateFilterMode::BackendDefault &&
+            rawCount == params.k && vectorRecords.size() < limit &&
+            rawCount > vectorRecords.size()) {
+            const size_t available = vectorDb->getVectorCount();
+            const size_t larger = params.k > std::numeric_limits<size_t>::max() / 2
+                                      ? std::numeric_limits<size_t>::max()
+                                      : params.k * 2;
+            if (const auto next = std::min(available, larger); next > params.k) {
+                params.k = next;
+                auto expanded = aggregateChunkVectorScores(search(), config, limit);
+                if (expanded.size() >= vectorRecords.size()) {
+                    vectorRecords = std::move(expanded);
+                }
+                if (diagnostics) {
+                    ++diagnostics->documentRefillAttempts;
+                }
+            }
         }
         if (vectorRecords.empty()) {
             return results;
