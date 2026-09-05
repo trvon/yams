@@ -88,7 +88,7 @@ jobs:
           printf '%s\n' "${MIRROR_SSH_KEY}" >"${HOME}/.ssh/forgejo_mirror"
           git config core.sshCommand \
             "ssh -i ${HOME}/.ssh/forgejo_mirror -o IdentitiesOnly=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
-          git remote add forgejo ssh://git@git.trevon.dev:2222/trevon/yams.git
+          git remote add forgejo ssh://git@ssh.git.trevon.dev:2222/trevon/yams.git
 
       - name: Push one explicit ref
         env:
