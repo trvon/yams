@@ -2048,7 +2048,10 @@ public:
         std::optional<metadata::DocumentInfo> foundDoc;
         if (ctx_.metadataRepo) {
             auto docResult = ctx_.metadataRepo->getDocumentByHash(resolvedHash);
-            if (docResult && docResult.value()) {
+            if (!docResult) {
+                return docResult.error();
+            }
+            if (docResult.value()) {
                 foundDoc = docResult.value();
             }
             if (!foundDoc) {
