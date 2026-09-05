@@ -613,6 +613,7 @@ public:
     Result<void> updateDocument(const DocumentInfo& info) override;
     /// Replace one sync-selected document winner and its complete metadata map atomically.
     /// The document row and metadata keys either commit together or remain unchanged.
+    /// Receiver-local extraction and repair status are preserved, not replicated.
     Result<void>
     replaceDocumentAndMetadata(const DocumentInfo& info,
                                const std::vector<std::pair<std::string, MetadataValue>>& metadata);
