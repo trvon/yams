@@ -31,7 +31,7 @@ FORBIDDEN = (
     "git push " + "-f ",
     "git push " + "--delete",
     "ssh-keyscan",
-    "git remote add forgejo ssh://git@git.trevon.dev:2222/trevon/yams.git",
+    "ssh://git@git.trevon.dev:2222/trevon/yams.git",
 )
 
 
