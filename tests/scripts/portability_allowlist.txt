@@ -108,8 +108,8 @@ src/cli/commands/model_command.cpp:1341:portability/env-read # reviewed raw envi
 src/cli/commands/model_command.cpp:1343:portability/env-read # reviewed raw environment read
 src/cli/commands/model_command.cpp:1344:portability/env-read # reviewed raw environment read
 src/cli/commands/repair_command.cpp:284:portability/env-read # reviewed raw environment read
-src/cli/commands/search_command.cpp:1054:portability/env-read # reviewed raw environment read
-src/cli/commands/search_command.cpp:1062:portability/env-read # reviewed raw environment read
+src/cli/commands/search_command.cpp:1053:portability/env-read # reviewed raw environment read
+src/cli/commands/search_command.cpp:1061:portability/env-read # reviewed raw environment read
 src/cli/commands/session_command.cpp:39:portability/env-read # reviewed raw environment read
 src/cli/commands/session_command.cpp:40:portability/env-read # reviewed raw environment read
 src/cli/commands/session_command.cpp:578:portability/env-read # reviewed raw environment read

@@ -2423,6 +2423,10 @@ struct GrepMatch {
     double confidence = 1.0;         // Match confidence (1.0 for regex, variable for semantic)
     std::string diff;
 
+    // Encoded as an additive protobuf field and a GrepResponse legacy trailer,
+    // preserving the layout of individual matches in the legacy wire format.
+    std::string hash;
+
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
@@ -2490,6 +2494,11 @@ struct GrepResponse {
             it.serialize(ser);
         ser << totalMatches << filesSearched << regexMatches << semanticMatches << executionTimeMs
             << queryInfo << searchStats << filesWith << filesWithout << pathsOnly;
+        std::vector<std::string> hashes;
+        hashes.reserve(matches.size());
+        for (const auto& match : matches)
+            hashes.push_back(match.hash);
+        ser << hashes;
     }
 
     template <typename Deserializer>
@@ -2549,6 +2558,13 @@ struct GrepResponse {
         auto pathsOnly_ = deser.readStringVector();
         if (pathsOnly_)
             r.pathsOnly = pathsOnly_.value();
+
+        // Older peers omit this trailer; their results retain unknown identity.
+        auto hashes = deser.readStringVector();
+        if (hashes && hashes.value().size() == r.matches.size()) {
+            for (size_t i = 0; i < r.matches.size(); ++i)
+                r.matches[i].hash = std::move(hashes.value()[i]);
+        }
 
         return r;
     }

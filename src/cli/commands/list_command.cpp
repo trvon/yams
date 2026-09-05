@@ -1,4 +1,5 @@
 #include <spdlog/spdlog.h>
+#include "file_history_json.h"
 #include <yams/app/services/factory.hpp>
 #include <yams/app/services/list_input_resolver.hpp>
 #include <yams/app/services/retrieval_service.h>
@@ -209,7 +210,7 @@ public:
         try {
             const bool cliOneShot = yams::cli::cli_one_shot_enabled();
 
-            if (jsonFlag_)
+            if (jsonFlag_ || (cli_ && cli_->getJsonOutput()))
                 format_ = "json";
             if (!metadataValuesRaw_.empty()) {
                 return listMetadataValues();
@@ -674,6 +675,11 @@ private:
             }
 
             const auto& history = response.value();
+
+            if (format_ == "json") {
+                std::cout << fileHistoryToJson(history).dump(2) << '\n';
+                return Result<void>();
+            }
 
             // Extract filename for display
             std::filesystem::path p(history.filepath);
@@ -1713,7 +1719,7 @@ private:
 
         for (const auto& doc : documents) {
             json d;
-            d["hash"] = doc.info.sha256Hash;
+            addContentReference(d, doc.info.sha256Hash);
             d["name"] = doc.info.fileName;
             d["path"] = doc.info.filePath;
             d["extension"] = doc.info.fileExtension;

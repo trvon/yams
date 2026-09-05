@@ -901,6 +901,7 @@ public:
 
                     GrepFileResult fileResult;
                     fileResult.file = doc.filePath;
+                    fileResult.hash = doc.sha256Hash;
                     fileResult.fileName = std::filesystem::path(doc.filePath).filename().string();
                     fileResult.matchCount = 0;
                     size_t ln_counter = 0;
@@ -1358,6 +1359,7 @@ public:
                                     continue;
                                 GrepFileResult fr;
                                 fr.file = path;
+                                fr.hash = r.document.sha256Hash;
                                 fr.fileName = std::filesystem::path(path).filename().string();
                                 GrepMatch gm;
                                 gm.matchType = "semantic";

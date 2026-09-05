@@ -381,8 +381,8 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
             out.paths.push_back(std::move(path));
         }
         out.total = out.paths.size();
-        sendProgress("search", 100.0, "done");
-        co_return out;
+        // Retain compact result identities alongside paths for JSON hydration.
+        // The serializer omits snippets and scores in this mode.
     }
     // Full result objects (with robust path fallback)
     auto parseMetaFloat = [](const std::map<std::string, std::string>& md,
@@ -455,7 +455,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
     }
     // Optional diff parity: when includeDiff=true and pathPattern is a local file, attach a
     // structured diff to the matching search result.
-    if (req.includeDiff && !req.pathPattern.empty()) {
+    if (!req.pathsOnly && req.includeDiff && !req.pathPattern.empty()) {
         auto resolved = yams::app::services::resolveNameToPatternIfLocalFile(req.pathPattern);
         if (resolved.isLocalFile && resolved.absPath.has_value()) {
             try {
@@ -682,10 +682,20 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
                 if (!p.empty()) {
                     oss_ << "[S] " << p << "\n";
                 }
+                MCPGrepResponse::Match match;
+                match.file = p;
+                if (const auto hash = item.metadata.find("hash"); hash != item.metadata.end()) {
+                    match.hash = hash->second;
+                }
+                match.lineText = item.snippet;
+                match.matchType = "semantic";
+                match.confidence = item.score;
+                early.matches.push_back(std::move(match));
             }
             early.output = oss_.str();
             early.matchCount = 0;
             early.fileCount = sr.results.size();
+            early.semanticMatches = early.matches.size();
             co_return early;
         }
         // If semantic burst failed, fall through to standard grep
@@ -756,6 +766,7 @@ MCPServer::handleSearchDocuments(const MCPSearchRequest& req) {
 
         MCPGrepResponse::Match sm;
         sm.file = m.file;
+        sm.hash = m.hash;
         sm.lineNumber = m.lineNumber;
         sm.lineText = m.line;
         sm.contextBefore = m.contextBefore;

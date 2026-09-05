@@ -427,6 +427,16 @@ endif
 
 if catch2_dep.found()
 
+  catch2_retrieval_json_exe = executable('catch2_retrieval_json',
+    files('unit/cli/retrieval_json_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep, dependency('nlohmann_json')],
+    cpp_args: test_cpp_noerror_args,
+    install: false,
+  )
+  test('retrieval_json', catch2_retrieval_json_exe,
+    suite: ['catch2', 'unit', 'cli'], timeout: 30)
+
 #Daemon Test Suites(6 consolidated executables)
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
 

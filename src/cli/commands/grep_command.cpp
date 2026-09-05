@@ -18,6 +18,7 @@
 #endif
 #include <vector>
 #include <yams/cli/command.h>
+#include <yams/cli/content_reference.h>
 #include <yams/cli/graph_helpers.h>
 #include <yams/cli/session_store.h>
 #include <yams/cli/ui_helpers.hpp>
@@ -502,6 +503,7 @@ public:
                         for (const auto& match : resp.matches) {
                             nlohmann::json m;
                             m["file"] = match.file;
+                            addContentReference(m, match.hash);
                             m["line_number"] = match.lineNumber;
                             m["line"] = match.line;
                             m["match_type"] = match.matchType;

@@ -539,6 +539,7 @@ message GrepMatch {
   repeated bytes context_after = 5;   // Changed from string to bytes
   string match_type = 6;
   double confidence = 7;
+  string hash = 8; // Immutable stored source revision; absent on older peers.
 }
 
 message GrepResponse {
