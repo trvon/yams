@@ -31,10 +31,10 @@ The mirror connects through the DNS-only SSH endpoint
 `ssh.git.trevon.dev:2222`; the browser-facing `git.trevon.dev` remains behind
 Cloudflare. The workflow currently disables SSH host-key verification, so
 possession of the deploy key authenticates GitHub Actions to Forgejo but the
-runner does not authenticate the Forgejo endpoint. This accepts DNS/network man-in-the-middle
-risk and should be replaced with a pinned host key if that risk changes. The
-deploy key must not be reused for package publication, administration, or
-another repository.
+runner does not authenticate the Forgejo endpoint. This accepts DNS/network
+man-in-the-middle risk and should be replaced with a pinned host key if that
+risk changes. The deploy key must not be reused for package publication,
+administration, or another repository.
 
 ## Initial reconciliation
 
