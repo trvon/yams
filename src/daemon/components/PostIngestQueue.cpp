@@ -1,6 +1,4 @@
 #include <nlohmann/json.hpp>
-#include "title_enrichment_policy.h"
-#include "embedding_derivation_policy.h"
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <atomic>
@@ -11,7 +9,9 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include "embedding_derivation_policy.h"
 #include "post_ingest_nl_graph_builder.h"
+#include "title_enrichment_policy.h"
 #include <boost/asio.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -1629,6 +1629,19 @@ void PostIngestQueue::enqueueKgJob(InternalEventBus::KgJob job) {
         } else {
             // Keep full-channel backpressure off WorkCoordinator threads. One coroutine drains the
             // pending FIFO as the KG poller creates capacity; producers only append and return.
+            // The FIFO is bounded: each entry can pin document bytes, so an unbounded overflow
+            // would turn a KG stall into unbounded ingest memory.
+            const std::size_t pendingCap = TuneAdvisor::postIngestPendingKgMax();
+            if (pendingKgJobs_.size() >= pendingCap) {
+                InternalEventBus::instance().incKgDropped();
+                const auto dropped = pendingKgDropped_.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (dropped == 1 || (dropped % 1000) == 0) {
+                    spdlog::warn("[PostIngestQueue] pending KG overflow full ({}), dropping job "
+                                 "for {} (dropped={})",
+                                 pendingCap, job.hash.substr(0, 12), dropped);
+                }
+                return;
+            }
             pendingKgJobs_.push_back(std::move(job));
         }
     }
