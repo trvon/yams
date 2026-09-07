@@ -41,6 +41,7 @@ if not get_option('wasi')
   yams_mcp_deps += dependency('yams_downloader')
   yams_mcp_deps += dependency('yams_config')
   yams_mcp_deps += dependency('yams_daemon_client')
+  yams_mcp_deps += dependency('yams_tune_advisor')
   yams_mcp_deps += dependency('OpenSSL')
 endif
 
