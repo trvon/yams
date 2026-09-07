@@ -25,6 +25,7 @@ std::unique_ptr<MemorySyncService> makeService(const std::filesystem::path& dir)
     cfg.nodeId = "123e4567-e89b-42d3-a456-426614174000";
     cfg.corpusId = "cli-corpus";
     cfg.corpusEpoch = 1;
+    cfg.corpusScope = CorpusScope::Shared; // replication requires an explicit shared scope
     cfg.backend = "filesystem";
     cfg.path = dir.string();
     cfg.syncIntervalMs = 50;
