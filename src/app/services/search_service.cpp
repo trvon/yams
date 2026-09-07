@@ -450,12 +450,13 @@ static std::string_view basenameView(std::string_view path) {
     return path.substr(pos + 1);
 }
 
-static double computePathMatchScore(const metadata::DocumentInfo& doc, const std::string& query,
-                                    bool wildcard) {
+// queryLower is the trimmed, lowercased query, computed once by the caller for the whole
+// candidate set rather than once per document.
+static double computePathMatchScore(const metadata::DocumentInfo& doc,
+                                    const std::string& queryLower, bool wildcard) {
     const std::string path = !doc.filePath.empty() ? doc.filePath : doc.fileName;
     const std::string pathLower = yams::common::asciiToLowerCopy(path);
     const std::string nameLower = yams::common::asciiToLowerCopy(doc.fileName);
-    const std::string queryLower = yams::common::asciiToLowerCopy(yams::common::trimCopy(query));
 
     if (queryLower.empty()) {
         return 0.01;
@@ -1535,6 +1536,8 @@ private:
         // Apply additional filters and shape results
         const auto tagsByDoc =
             co_await loadTagsForDocuments(ctx_.metadataRepo.get(), docs, req.tags, telemetry);
+        const std::string pathQueryLower =
+            yams::common::asciiToLowerCopy(yams::common::trimCopy(pathQuery));
         auto push_path = [&](const metadata::DocumentInfo& d) -> boost::asio::awaitable<void> {
             if (!req.extension.empty()) {
                 if (d.fileExtension != req.extension && d.fileExtension != ("." + req.extension))
@@ -1545,7 +1548,7 @@ private:
             if (!hasRequiredTags(tagsByDoc, d.id, req.tags, req.matchAllTags))
                 co_return;
             const std::string resolvedPath = !d.filePath.empty() ? d.filePath : d.fileName;
-            const double score = computePathMatchScore(d, pathQuery, wildcard);
+            const double score = computePathMatchScore(d, pathQueryLower, wildcard);
 
             if (req.pathsOnly) {
                 rankedPaths.emplace_back(resolvedPath, score);

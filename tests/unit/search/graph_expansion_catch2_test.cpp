@@ -188,3 +188,26 @@ TEST_CASE("Graph expansion term merge: no duplicates in result",
     }
     CHECK(existing.size() == 3); // alpha, beta, gamma
 }
+
+TEST_CASE("Graph expansion parses edge anchor properties once per distinct string",
+          "[search][graph-expansion][anchors]") {
+    const auto before = edgeAnchorParseCount();
+    const std::optional<std::string> anchored{R"({"region":"body_claim","scope":"body_segment"})"};
+    for (int i = 0; i < 100; ++i) {
+        const auto& hints = edgeAnchorHints(anchored);
+        CHECK(hints.region == "body_claim");
+        CHECK(hints.scope == "body_segment");
+    }
+    CHECK(edgeAnchorParseCount() - before == 1);
+
+    // Properties that cannot carry an anchor are never parsed at all.
+    const auto mid = edgeAnchorParseCount();
+    const std::optional<std::string> plain{R"({"weight":0.5,"offset":42})"};
+    CHECK(edgeAnchorHints(plain).region.empty());
+    CHECK(edgeAnchorHints(std::nullopt).scope.empty());
+    CHECK(edgeAnchorParseCount() == mid);
+
+    // Malformed JSON degrades to no hints instead of throwing.
+    const std::optional<std::string> broken{"{region: nope"};
+    CHECK(edgeAnchorHints(broken).region.empty());
+}

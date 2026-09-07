@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -32,6 +33,17 @@ struct GraphExpansionConfig {
 };
 
 std::vector<std::string> tokenizeKgQuery(std::string_view query);
+
+// Region/scope hints carried in an edge's JSON properties. The text is parsed only when it
+// can contain either key, and each distinct properties string is parsed once per thread
+// (bounded cache), instead of once per edge visit.
+struct EdgeAnchorHints {
+    std::string region;
+    std::string scope;
+};
+EdgeAnchorHints edgeAnchorHints(const std::optional<std::string>& properties);
+// Process-wide count of JSON parses performed by edgeAnchorHints (diagnostics; tests pin it).
+std::uint64_t edgeAnchorParseCount() noexcept;
 
 float graphNodeExpansionWeight(const std::optional<std::string>& typeOpt,
                                std::string_view labelView);
