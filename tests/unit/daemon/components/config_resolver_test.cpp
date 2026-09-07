@@ -276,6 +276,35 @@ TEST_CASE("ConfigResolver applies one typed tuning snapshot for startup and relo
     TuneAdvisor::setMemoryWarningThreshold(0.0);
 }
 
+TEST_CASE("ConfigResolver rejects 0 for [tuning] integer keys instead of ignoring it",
+          "[daemon][components][config][tuning][catch2]") {
+    // For the uint32 overrides 0 is the unset sentinel and below every minimum, so "= 0"
+    // cannot mean what the operator wrote and is reported, not swallowed. The two keys where
+    // 0 is a documented value (post_ingest_threads = auto, seeded by the migrator;
+    // connection_lifetime_s = no recycling) must stay silent and keep their provenance.
+    ConfigResolver::ConfigSections sections;
+    sections["tuning"] = {{"pool_ipc_min", "0"},
+                          {"worker_poll_ms", "0"},
+                          {"pool_ipc_max", "48"},
+                          {"post_ingest_threads", "0"},
+                          {"connection_lifetime_s", "0"}};
+    TuningConfig base;
+    const auto resolved = ConfigResolver::applyRuntimeTuning(sections, base);
+    CHECK((TuneAdvisor::poolMinSizeIpc() == 1u));
+    CHECK((TuneAdvisor::workerPollMs() == 150u));
+    CHECK((TuneAdvisor::poolMaxSizeIpc() == 48u));
+    CHECK((TuneAdvisor::connectionLifetimeSeconds() == 0u));
+    CHECK((resolved.provenance.count("tuning.pool_ipc_min") == 0));
+    CHECK((resolved.provenance.count("tuning.worker_poll_ms") == 0));
+    CHECK((resolved.provenance.at("tuning.pool_ipc_max") == "config:tuning.pool_ipc_max"));
+    CHECK((resolved.provenance.at("tuning.post_ingest_threads") ==
+           "config:tuning.post_ingest_threads"));
+    CHECK((resolved.provenance.at("tuning.connection_lifetime_s") ==
+           "config:tuning.connection_lifetime_s"));
+    sections["tuning"] = {};
+    (void)ConfigResolver::applyRuntimeTuning(sections, base);
+}
+
 TEST_CASE("ConfigResolver wires [tuning] keys for every setter that was env-only",
           "[daemon][components][config][tuning][catch2]") {
     ConfigResolver::ConfigSections sections;
