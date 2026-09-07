@@ -809,21 +809,22 @@ int Database::changes() const {
 }
 
 Result<bool> Database::tableExists(const std::string& table) {
-    auto stmtResult = prepare("SELECT COUNT(*) FROM sqlite_master "
-                              "WHERE type='table' AND name=?");
+    // Probed on hot paths (e.g. optional FTS tables per lookup); keep it cached.
+    auto stmtResult = prepareCached("SELECT COUNT(*) FROM sqlite_master "
+                                    "WHERE type='table' AND name=?");
     if (!stmtResult)
         return stmtResult.error();
 
-    Statement stmt = std::move(stmtResult).value();
-    auto bindResult = stmt.bind(1, table);
+    auto stmt = std::move(stmtResult).value();
+    auto bindResult = stmt->bind(1, table);
     if (!bindResult)
         return bindResult.error();
 
-    auto stepResult = stmt.step();
+    auto stepResult = stmt->step();
     if (!stepResult)
         return stepResult.error();
 
-    return stmt.getInt(0) > 0;
+    return stmt->getInt(0) > 0;
 }
 
 Result<bool> Database::hasFTS5() {
