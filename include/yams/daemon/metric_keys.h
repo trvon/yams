@@ -1,5 +1,7 @@
 #pragma once
 
+#include <array>
+#include <cstdint>
 #include <string_view>
 
 namespace yams::daemon::metrics {
@@ -266,6 +268,44 @@ constexpr std::string_view kRepairTotalBacklog = "repair_total_backlog";
 constexpr std::string_view kRepairProcessed = "repair_processed";
 constexpr std::string_view kRepairCurrentOperationCode = "repair_current_operation_code";
 constexpr std::string_view kRepairCurrentOperationElapsedMs = "repair_current_operation_elapsed_ms";
+
+// Wire codes published under kRepairCurrentOperationCode (0 = idle). The daemon and the CLI both
+// read this table, so an operation is named in exactly one place.
+struct RepairOperationCode {
+    uint64_t code;
+    std::string_view name;
+};
+inline constexpr std::array<RepairOperationCode, 13> kRepairOperationCodes = {{
+    {1, "stuck_docs"},
+    {2, "orphans"},
+    {3, "mime"},
+    {4, "downloads"},
+    {5, "path_tree"},
+    {6, "dedupe"},
+    {7, "chunks"},
+    {8, "block_refs"},
+    {9, "graph"},
+    {10, "fts5"},
+    {11, "embeddings"},
+    {12, "topology"},
+    {13, "optimize"},
+}};
+
+constexpr uint64_t repairOperationCodeForName(std::string_view name) noexcept {
+    for (const auto& entry : kRepairOperationCodes) {
+        if (entry.name == name)
+            return entry.code;
+    }
+    return 0;
+}
+
+constexpr std::string_view repairOperationNameForCode(uint64_t code) noexcept {
+    for (const auto& entry : kRepairOperationCodes) {
+        if (entry.code == code)
+            return entry.name;
+    }
+    return "";
+}
 
 // Topology rebuild telemetry
 constexpr std::string_view kTopologyRebuildRunning = "topology_rebuild_running";
