@@ -288,7 +288,14 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
       topologyManager_(TopologyManager::Dependencies{
           [this]() { return getMetadataRepo(); }, [this]() { return getKgStore(); },
           [this]() { return getVectorDatabase(); }, config_.embeddingService.semanticGraph}),
-      lifecycleFsm_(lifecycleFsm) {
+      lifecycleFsm_(lifecycleFsm),
+      memorySyncCoordinator_(MemorySyncCoordinator::Dependencies{
+          &config_, [this]() { return getContentStore(); }, [this]() { return getMetadataRepo(); },
+          [this]() { return getKgStore(); }, [this]() { return getVectorDatabase(); },
+          [this]() { return vectorIndexCoordinator_; }, [this]() { return p2pManager_.get(); },
+          [this](const std::string& hash, const std::string& mime) {
+              enqueuePostIngest(hash, mime);
+          }}) {
     spdlog::debug("[ServiceManager] Constructor start");
     {
         [[maybe_unused]] auto publication = TuneAdvisor::beginConfiguredOverridePublication();
@@ -1525,9 +1532,8 @@ void ServiceManager::shutdown() {
 
     // memory_sync callbacks use WorkCoordinator-owned vector rebuilds and database-backed
     // destinations. Stop and join the sync worker before either dependency starts teardown.
-    if (memorySync_) {
-        memorySync_->stop();
-        memorySync_.reset();
+    if (memorySyncCoordinator_.service()) {
+        memorySyncCoordinator_.shutdown();
         spdlog::info("[ServiceManager] Phase 1.9: memory_sync stopped before worker teardown");
     }
 
@@ -2068,7 +2074,8 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
     }
     const auto dataDir = dataDirResult.value();
 
-    if (auto memorySyncResult = initializeMemorySync(dataDir); !memorySyncResult) {
+    if (auto memorySyncResult = memorySyncCoordinator_.initializeMemorySync(dataDir);
+        !memorySyncResult) {
         const std::string message =
             "Failed to initialize enabled memory sync: " + memorySyncResult.error().message;
         spdlog::error("[ServiceManager] {}", message);
@@ -2695,7 +2702,7 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
 
     // All replicated destination stores are now initialized. Attach the ordered apply callback
     // only at this point so the convergence worker cannot race database/vector/KG startup.
-    if (auto applyResult = configureMemorySyncApply(); !applyResult) {
+    if (auto applyResult = memorySyncCoordinator_.configureMemorySyncApply(); !applyResult) {
         co_return applyResult.error();
     }
     if (auto p2pResult = initializeDirectP2p(dataDir); !p2pResult) {
@@ -4030,10 +4037,6 @@ bool ServiceManager::startEmbeddingWarmupIfConfigured() {
         boost::asio::detached);
     return true;
 }
-
-} // namespace yams::daemon
-
-namespace yams::daemon {
 
 // Start background task coroutines (EmbedJob/Fts5Job consumers, OrphanScan)
 // Must be called after shared_ptr construction so shared_from_this() works.

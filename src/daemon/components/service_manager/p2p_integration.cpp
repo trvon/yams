@@ -593,7 +593,8 @@ Result<void> ServiceManager::initializeDirectP2p(const std::filesystem::path& da
     if (!policy.enabled || policy.transport != "direct") {
         return Result<void>();
     }
-    if (!memorySync_) {
+    auto* memorySync = memorySyncCoordinator_.service();
+    if (!memorySync) {
         return Error{ErrorCode::InvalidState, "direct P2P requires memory sync service"};
     }
     auto listen = p2p::parseP2pConnectionString(policy.listen);
@@ -604,12 +605,12 @@ Result<void> ServiceManager::initializeDirectP2p(const std::filesystem::path& da
     if (!privateKey) {
         return privateKey.error();
     }
-    auto synchronized = memorySync_->syncFully();
+    auto synchronized = memorySync->syncFully();
     if (!synchronized) {
         return Error{synchronized.error().code,
                      "direct P2P local op-store recovery failed: " + synchronized.error().message};
     }
-    if (memorySync_->legacyUnauthenticatedHistoryObserved()) {
+    if (memorySync->legacyUnauthenticatedHistoryObserved()) {
         return Error{ErrorCode::InvalidState,
                      "direct P2P operation store contains unsigned legacy history; preserve it "
                      "for audit, advance corpus_epoch, and bootstrap a fresh store"};
@@ -631,7 +632,7 @@ Result<void> ServiceManager::initializeDirectP2p(const std::filesystem::path& da
                                .reconnectInterval =
                                    std::chrono::milliseconds(policy.syncIntervalMs),
                                .timeout = std::chrono::seconds(10)},
-        *memorySync_);
+        *memorySync);
     if (!manager) {
         return manager.error();
     }

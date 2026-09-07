@@ -1,3 +1,5 @@
+#include <yams/daemon/components/MemorySyncCoordinator.h>
+
 #include <yams/daemon/components/ServiceManager.h>
 
 #include <algorithm>
@@ -13,7 +15,7 @@
 
 #include <spdlog/spdlog.h>
 
-#include "p2p_protected_file.h"
+#include "service_manager/p2p_protected_file.h"
 
 #include <array>
 #include <optional>
@@ -30,6 +32,7 @@
 #include <unistd.h>
 #endif
 
+#include <yams/crypto/hasher.h>
 #include <yams/daemon/components/DatabaseManager.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/VectorIndexCoordinator.h>
@@ -38,7 +41,6 @@
 #include <yams/memory_sync/memory_sync_service.h>
 #include <yams/memory_sync/records.h>
 #include <yams/memory_sync/task_record.h>
-#include <yams/crypto/hasher.h>
 #include <yams/metadata/metadata_sync_adapter.h>
 #include <yams/metadata/topology_sync_adapter.h>
 #include <yams/storage/storage_runtime_resolver.h>
@@ -46,6 +48,16 @@
 #include <yams/vector/vector_sync_adapter.h>
 
 namespace yams::daemon {
+
+MemorySyncCoordinator::MemorySyncCoordinator(Dependencies deps)
+    : deps_(std::move(deps)), config_(*deps_.config) {}
+
+void MemorySyncCoordinator::shutdown() {
+    if (memorySync_) {
+        memorySync_->stop();
+        memorySync_.reset();
+    }
+}
 
 namespace {
 
@@ -175,7 +187,8 @@ using yams::Error;
 using yams::ErrorCode;
 using yams::Result;
 
-Result<void> ServiceManager::publishMemorySync(const std::string& key, const std::string& value) {
+Result<void> MemorySyncCoordinator::publishMemorySync(const std::string& key,
+                                                      const std::string& value) {
     if (!memorySync_) {
         return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
     }
@@ -197,7 +210,7 @@ Result<void> ServiceManager::publishMemorySync(const std::string& key, const std
     return memorySync_->publish(namespacedKey.value(), bytes);
 }
 
-Result<void> ServiceManager::deleteMemorySync(const std::string& key) {
+Result<void> MemorySyncCoordinator::deleteMemorySync(const std::string& key) {
     if (!memorySync_) {
         return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
     }
@@ -208,7 +221,7 @@ Result<void> ServiceManager::deleteMemorySync(const std::string& key) {
     return memorySync_->erase(namespacedKey.value(), key);
 }
 
-Result<std::string> ServiceManager::readMemorySyncCached(const std::string& key) const {
+Result<std::string> MemorySyncCoordinator::readMemorySyncCached(const std::string& key) const {
     if (!memorySync_) {
         return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
     }
@@ -231,13 +244,13 @@ Result<std::string> ServiceManager::readMemorySyncCached(const std::string& key)
     return text;
 }
 
-Result<ServiceManager::MemorySyncStatus> ServiceManager::getMemorySyncStatus() const {
+Result<MemorySyncCoordinator::MemorySyncStatus> MemorySyncCoordinator::getMemorySyncStatus() const {
     if (!memorySync_) {
         return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
     }
     std::uint64_t peerCount = 0;
-    if (p2pManager_) {
-        auto peers = p2pManager_->peers();
+    if (auto* p2pManager = deps_.getP2pManager ? deps_.getP2pManager() : nullptr) {
+        auto peers = p2pManager->peers();
         if (peers) {
             peerCount = peers.value().size();
         } else {
@@ -267,8 +280,8 @@ Result<ServiceManager::MemorySyncStatus> ServiceManager::getMemorySyncStatus() c
         peerCount};
 }
 
-Result<void> ServiceManager::stageMemorySyncDocumentDelete(std::string_view contentHash,
-                                                           bool retainContent) {
+Result<void> MemorySyncCoordinator::stageMemorySyncDocumentDelete(std::string_view contentHash,
+                                                                  bool retainContent) {
     if (!memorySync_) {
         return {};
     }
@@ -276,7 +289,7 @@ Result<void> ServiceManager::stageMemorySyncDocumentDelete(std::string_view cont
         return Error{ErrorCode::InvalidArgument,
                      "metadata deletion requires a SHA-256 content hash"};
     }
-    auto repository = getMetadataRepo();
+    auto repository = deps_.getMetadataRepo();
     if (!repository) {
         return Error{ErrorCode::InvalidState,
                      "metadata repository is unavailable for replicated deletion"};
@@ -296,7 +309,7 @@ Result<void> ServiceManager::stageMemorySyncDocumentDelete(std::string_view cont
         std::string(contentHash);
     auto probe = memory_sync::EraseReadinessProbe::MetadataAbsent;
     if (!document.value()) {
-        auto contentStore = getContentStore();
+        auto contentStore = deps_.getContentStore();
         if (!contentStore) {
             return Error{ErrorCode::InvalidState,
                          "content store is unavailable for replicated deletion"};
@@ -327,8 +340,8 @@ Result<void> ServiceManager::stageMemorySyncDocumentDelete(std::string_view cont
     return memorySync_->stageErases(requests);
 }
 
-Result<void> ServiceManager::publishMemorySyncDocumentDelete(std::string_view contentHash,
-                                                             bool retainContent) {
+Result<void> MemorySyncCoordinator::publishMemorySyncDocumentDelete(std::string_view contentHash,
+                                                                    bool retainContent) {
     if (!memorySync_) {
         return {};
     }
@@ -387,11 +400,11 @@ Result<void> ServiceManager::publishMemorySyncDocumentDelete(std::string_view co
     return {};
 }
 
-Result<std::size_t> ServiceManager::applyMemorySyncContentBlobs() {
+Result<std::size_t> MemorySyncCoordinator::applyMemorySyncContentBlobs() {
     if (!memorySync_) {
         return Error{ErrorCode::InvalidState, "memory sync service is not enabled"};
     }
-    auto contentStore = getContentStore();
+    auto contentStore = deps_.getContentStore();
     if (!contentStore) {
         return Error{ErrorCode::InvalidState, "content store is not available"};
     }
@@ -437,7 +450,7 @@ Result<std::size_t> ServiceManager::applyMemorySyncContentBlobs() {
     return applied;
 }
 
-void ServiceManager::notifyMemorySyncStage(std::string_view stage) noexcept {
+void MemorySyncCoordinator::notifyMemorySyncStage(std::string_view stage) noexcept {
     std::function<void(std::string_view)> observer;
     {
         std::lock_guard<std::mutex> lock(memorySyncStageObserverMutex_);
@@ -453,7 +466,7 @@ void ServiceManager::notifyMemorySyncStage(std::string_view stage) noexcept {
     }
 }
 
-void ServiceManager::notifyMemorySyncDeleteOutboxStage(std::string_view stage) noexcept {
+void MemorySyncCoordinator::notifyMemorySyncDeleteOutboxStage(std::string_view stage) noexcept {
     std::function<void(std::string_view)> observer;
     {
         std::lock_guard<std::mutex> lock(memorySyncDeleteOutboxObserverMutex_);
@@ -470,10 +483,10 @@ void ServiceManager::notifyMemorySyncDeleteOutboxStage(std::string_view stage) n
 }
 
 Result<bool>
-ServiceManager::memorySyncDeleteLocallyAbsent(std::string_view contentHash,
-                                              memory_sync::EraseReadinessProbe probe) const {
+MemorySyncCoordinator::memorySyncDeleteLocallyAbsent(std::string_view contentHash,
+                                                     memory_sync::EraseReadinessProbe probe) const {
     if (probe == memory_sync::EraseReadinessProbe::MetadataAbsent) {
-        auto repository = getMetadataRepo();
+        auto repository = deps_.getMetadataRepo();
         if (!repository) {
             return Error{ErrorCode::InvalidState, "metadata repository is unavailable"};
         }
@@ -484,7 +497,7 @@ ServiceManager::memorySyncDeleteLocallyAbsent(std::string_view contentHash,
         return !document.value().has_value();
     }
     if (probe == memory_sync::EraseReadinessProbe::ContentAbsent) {
-        auto contentStore = getContentStore();
+        auto contentStore = deps_.getContentStore();
         if (!contentStore) {
             return Error{ErrorCode::InvalidState, "content store is unavailable"};
         }
@@ -498,7 +511,7 @@ ServiceManager::memorySyncDeleteLocallyAbsent(std::string_view contentHash,
                  "document delete outbox requires a typed absence probe"};
 }
 
-bool ServiceManager::drainMemorySyncDocumentDeleteOutbox() noexcept {
+bool MemorySyncCoordinator::drainMemorySyncDocumentDeleteOutbox() noexcept {
     try {
         notifyMemorySyncDeleteOutboxStage("delete_drain_waiting");
         std::lock_guard<std::mutex> deleteLock(memorySyncDeleteOutboxMutex_);
@@ -572,7 +585,7 @@ bool ServiceManager::drainMemorySyncDocumentDeleteOutbox() noexcept {
     }
 }
 
-void ServiceManager::applyMemorySyncWinners() noexcept {
+void MemorySyncCoordinator::applyMemorySyncWinners() noexcept {
     memorySyncApplyAttempts_.fetch_add(1, std::memory_order_acq_rel);
     std::lock_guard<std::mutex> applyLock(memorySyncApplyMutex_);
     if (!memorySync_ || memorySync_->stopRequested()) {
@@ -611,8 +624,8 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         return;
     }
     try {
-        if (auto repository = getMetadataRepo()) {
-            auto contentStore = getContentStore();
+        if (auto repository = deps_.getMetadataRepo()) {
+            auto contentStore = deps_.getContentStore();
             if (!contentStore) {
                 spdlog::warn("[ServiceManager] memory_sync metadata apply requires content store");
                 return;
@@ -623,7 +636,7 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
                     return contentStore->exists(std::string(hash));
                 },
                 [this](const metadata::DocumentInfo& document) {
-                    enqueuePostIngest(document.sha256Hash, document.mimeType);
+                    deps_.enqueuePostIngest(document.sha256Hash, document.mimeType);
                 }};
             if (auto result = adapter.apply(); !result) {
                 spdlog::warn("[ServiceManager] memory_sync metadata apply failed: {}",
@@ -644,15 +657,15 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         return;
     }
     try {
-        if (auto vectorDatabase = getVectorDatabase()) {
-            auto contentStore = getContentStore();
+        if (auto vectorDatabase = deps_.getVectorDatabase()) {
+            auto contentStore = deps_.getContentStore();
             if (!contentStore) {
                 spdlog::warn("[ServiceManager] memory_sync vector apply requires content store");
                 return;
             }
             vector::VectorSyncAdapter::RebuildCallback rebuild;
-            if (vectorIndexCoordinator_) {
-                rebuild = [coordinator = vectorIndexCoordinator_]() {
+            if (deps_.getVectorIndexCoordinator()) {
+                rebuild = [coordinator = deps_.getVectorIndexCoordinator()]() {
                     return coordinator->requestRebuildBlocking(RebuildReason::EmbeddingBatch);
                 };
             }
@@ -680,7 +693,7 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
         return;
     }
     try {
-        if (auto kgStore = getKgStore()) {
+        if (auto kgStore = deps_.getKgStore()) {
             metadata::TopologySyncAdapter adapter{*kgStore, *memorySync_};
             if (auto result = adapter.apply(); !result) {
                 spdlog::warn("[ServiceManager] memory_sync topology apply failed: {}",
@@ -707,17 +720,17 @@ void ServiceManager::applyMemorySyncWinners() noexcept {
     }
 }
 
-void ServiceManager::publishMemorySyncBackfill() noexcept try {
+void MemorySyncCoordinator::publishMemorySyncBackfill() noexcept try {
     memorySyncBackfillAttempts_.fetch_add(1, std::memory_order_acq_rel);
     std::lock_guard<std::mutex> backfillLock(memorySyncBackfillMutex_);
     if (!memorySync_) {
         return;
     }
 
-    auto repository = getMetadataRepo();
-    auto contentStore = getContentStore();
-    auto vectorDatabase = getVectorDatabase();
-    auto kgStore = getKgStore();
+    auto repository = deps_.getMetadataRepo();
+    auto contentStore = deps_.getContentStore();
+    auto vectorDatabase = deps_.getVectorDatabase();
+    auto kgStore = deps_.getKgStore();
     auto& state = memorySyncBackfillState_;
     std::size_t remainingItems = state.itemBudgetPerCycle;
     const auto deadline = std::chrono::steady_clock::now() + state.timeBudgetPerCycle;
@@ -970,7 +983,7 @@ void ServiceManager::publishMemorySyncBackfill() noexcept try {
     spdlog::warn("[ServiceManager] memory_sync backfill setup failed (unknown)");
 }
 
-Result<void> ServiceManager::configureMemorySyncApply() {
+Result<void> MemorySyncCoordinator::configureMemorySyncApply() {
     if (!memorySync_) {
         return {};
     }
@@ -986,7 +999,7 @@ Result<void> ServiceManager::configureMemorySyncApply() {
     return {};
 }
 
-Result<void> ServiceManager::initializeMemorySync(const std::filesystem::path& dataDir) {
+Result<void> MemorySyncCoordinator::initializeMemorySync(const std::filesystem::path& dataDir) {
     const auto& policy = config_.memorySync;
     if (!policy.enabled) {
         return Result<void>();
