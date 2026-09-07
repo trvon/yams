@@ -140,11 +140,6 @@ SearchEnvironmentPins LegacySearchConfigEnvironment::applyTo(SearchEngineConfig&
         spdlog::info("SearchEngine simeonTextWeight overridden to {:.2f} via env (pinned)",
                      config.simeonTextWeight);
     }
-    if (auto graphTextWeight = getEnvFloat("YAMS_SEARCH_GRAPH_TEXT_WEIGHT")) {
-        config.graphTextWeight = *graphTextWeight;
-        spdlog::info("SearchEngine graphTextWeight overridden to {:.2f} via env",
-                     config.graphTextWeight);
-    }
     if (auto vectorWeight = getEnvFloat("YAMS_SEARCH_VECTOR_WEIGHT")) {
         config.vectorWeight = *vectorWeight;
         envVectorPinned = true;
@@ -162,11 +157,6 @@ SearchEnvironmentPins LegacySearchConfigEnvironment::applyTo(SearchEngineConfig&
         envKgPinned = true;
         spdlog::info("SearchEngine kgWeight overridden to {:.2f} via env (pinned)",
                      config.kgWeight);
-    }
-    if (auto graphVectorWeight = getEnvFloat("YAMS_SEARCH_GRAPH_VECTOR_WEIGHT")) {
-        config.graphVectorWeight = *graphVectorWeight;
-        spdlog::info("SearchEngine graphVectorWeight overridden to {:.2f} via env",
-                     config.graphVectorWeight);
     }
     if (auto rrfK = getEnvFloat("YAMS_SEARCH_RRF_K")) {
         config.rrfK = std::clamp(*rrfK, 1.0f, 200.0f);
@@ -192,30 +182,10 @@ SearchEnvironmentPins LegacySearchConfigEnvironment::applyTo(SearchEngineConfig&
         spdlog::info("SearchEngine strongVectorOnlyMinScore overridden to {:.3f} via env",
                      config.strongVectorOnlyMinScore);
     }
-    if (auto strongVectorOnlyTopRank = getEnvInt("YAMS_SEARCH_STRONG_VECTOR_ONLY_TOP_RANK")) {
-        config.strongVectorOnlyTopRank = static_cast<size_t>(std::max(0, *strongVectorOnlyTopRank));
-        spdlog::info("SearchEngine strongVectorOnlyTopRank overridden to {} via env",
-                     config.strongVectorOnlyTopRank);
-    }
     if (auto strongVectorOnlyPenalty = getEnvFloat("YAMS_SEARCH_STRONG_VECTOR_ONLY_PENALTY")) {
         config.strongVectorOnlyPenalty = std::clamp(*strongVectorOnlyPenalty, 0.0f, 1.0f);
         spdlog::info("SearchEngine strongVectorOnlyPenalty overridden to {:.3f} via env",
                      config.strongVectorOnlyPenalty);
-    }
-    if (auto nearMissReserve = getEnvInt("YAMS_SEARCH_VECTOR_ONLY_NEAR_MISS_RESERVE")) {
-        config.vectorOnlyNearMissReserve = static_cast<size_t>(std::max(0, *nearMissReserve));
-        spdlog::info("SearchEngine vectorOnlyNearMissReserve overridden to {} via env",
-                     config.vectorOnlyNearMissReserve);
-    }
-    if (auto nearMissSlack = getEnvFloat("YAMS_SEARCH_VECTOR_ONLY_NEAR_MISS_SLACK")) {
-        config.vectorOnlyNearMissSlack = std::clamp(*nearMissSlack, 0.0f, 1.0f);
-        spdlog::info("SearchEngine vectorOnlyNearMissSlack overridden to {:.3f} via env",
-                     config.vectorOnlyNearMissSlack);
-    }
-    if (auto nearMissPenalty = getEnvFloat("YAMS_SEARCH_VECTOR_ONLY_NEAR_MISS_PENALTY")) {
-        config.vectorOnlyNearMissPenalty = std::clamp(*nearMissPenalty, 0.0f, 1.0f);
-        spdlog::info("SearchEngine vectorOnlyNearMissPenalty overridden to {:.3f} via env",
-                     config.vectorOnlyNearMissPenalty);
     }
     if (auto conceptBoostWeight = getEnvFloat("YAMS_SEARCH_CONCEPT_BOOST_WEIGHT")) {
         config.conceptBoostWeight = std::clamp(*conceptBoostWeight, 0.0f, 1.0f);
@@ -244,21 +214,7 @@ SearchEnvironmentPins LegacySearchConfigEnvironment::applyTo(SearchEngineConfig&
                      SearchEngineConfig::navigationZoomLevelToString(config.zoomLevel));
     }
 
-    // Allow semantic rescue, rerank, and chunk aggregation overrides
-    if (auto slots = getEnvInt("YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS")) {
-        config.semanticRescueSlots = static_cast<size_t>(std::max(0, *slots));
-        spdlog::info("SearchEngine semanticRescueSlots overridden to {} via env",
-                     config.semanticRescueSlots);
-    }
-    if (auto minScore = getEnvFloat("YAMS_SEARCH_SEMANTIC_RESCUE_MIN_SCORE")) {
-        config.semanticRescueMinVectorScore = std::clamp(*minScore, 0.0f, 1.0f);
-        spdlog::info("SearchEngine semanticRescueMinVectorScore overridden to {:.3f} via env",
-                     config.semanticRescueMinVectorScore);
-    }
-    if (auto topK = getEnvInt("YAMS_SEARCH_RERANK_TOP_K")) {
-        config.rerankTopK = static_cast<size_t>(std::max(1, *topK));
-        spdlog::info("SearchEngine rerankTopK overridden to {} via env", config.rerankTopK);
-    }
+    // Allow chunk aggregation overrides
     if (auto aggEnv = getEnvString("YAMS_SEARCH_CHUNK_AGGREGATION")) {
         if (*aggEnv == "MAX" || *aggEnv == "max") {
             config.chunkAggregation = SearchEngineConfig::ChunkAggregation::MAX;
@@ -309,24 +265,6 @@ SearchEnvironmentPins LegacySearchConfigEnvironment::applyTo(SearchEngineConfig&
         config.enableIntentAdaptiveWeighting = *intentAdaptive;
         spdlog::info("SearchEngine enableIntentAdaptiveWeighting overridden to {} via env",
                      config.enableIntentAdaptiveWeighting);
-    }
-
-    if (auto lexicalExpansion = getEnvBool("YAMS_SEARCH_ENABLE_LEXICAL_EXPANSION")) {
-        config.enableLexicalExpansion = *lexicalExpansion;
-        spdlog::info("SearchEngine enableLexicalExpansion overridden to {} via env",
-                     config.enableLexicalExpansion);
-    }
-
-    if (auto lexicalMinHits = getEnvInt("YAMS_SEARCH_LEXICAL_EXPANSION_MIN_HITS")) {
-        config.lexicalExpansionMinHits = static_cast<size_t>(std::max(0, *lexicalMinHits));
-        spdlog::info("SearchEngine lexicalExpansionMinHits overridden to {} via env",
-                     config.lexicalExpansionMinHits);
-    }
-
-    if (auto lexicalPenalty = getEnvFloat("YAMS_SEARCH_LEXICAL_EXPANSION_PENALTY")) {
-        config.lexicalExpansionScorePenalty = std::clamp(*lexicalPenalty, 0.1f, 1.0f);
-        spdlog::info("SearchEngine lexicalExpansionScorePenalty overridden to {:.2f} via env",
-                     config.lexicalExpansionScorePenalty);
     }
 
     if (auto lexicalFloorTopN = getEnvInt("YAMS_SEARCH_LEXICAL_FLOOR_TOPN")) {
@@ -436,32 +374,6 @@ SearchEnvironmentPins LegacySearchConfigEnvironment::applyTo(SearchEngineConfig&
         spdlog::info("SearchEngine graphRerankMinSignal overridden to {:.3f} via env",
                      config.graphRerankMinSignal);
     }
-    if (auto graphCommunityWeight = getEnvFloat("YAMS_SEARCH_GRAPH_COMMUNITY_WEIGHT")) {
-        config.graphCommunityWeight = std::clamp(*graphCommunityWeight, 0.0f, 1.0f);
-        spdlog::info("SearchEngine graphCommunityWeight overridden to {:.3f} via env",
-                     config.graphCommunityWeight);
-    }
-    if (auto graphUseQueryConcepts = getEnvBool("YAMS_SEARCH_GRAPH_USE_QUERY_CONCEPTS")) {
-        config.graphUseQueryConcepts = *graphUseQueryConcepts;
-        spdlog::info("SearchEngine graphUseQueryConcepts overridden to {} via env",
-                     config.graphUseQueryConcepts);
-    }
-    if (auto graphFallbackTopSignal = getEnvBool("YAMS_SEARCH_GRAPH_FALLBACK_TOP_SIGNAL")) {
-        config.graphFallbackToTopSignal = *graphFallbackTopSignal;
-        spdlog::info("SearchEngine graphFallbackToTopSignal overridden to {} via env",
-                     config.graphFallbackToTopSignal);
-    }
-
-    if (auto graphNeighbors = getEnvInt("YAMS_SEARCH_GRAPH_MAX_NEIGHBORS")) {
-        config.graphMaxNeighbors = static_cast<size_t>(std::max(1, *graphNeighbors));
-        spdlog::info("SearchEngine graphMaxNeighbors overridden to {} via env",
-                     config.graphMaxNeighbors);
-    }
-
-    if (auto graphHops = getEnvInt("YAMS_SEARCH_GRAPH_MAX_HOPS")) {
-        config.graphMaxHops = static_cast<size_t>(std::clamp(*graphHops, 1, 5));
-        spdlog::info("SearchEngine graphMaxHops overridden to {} via env", config.graphMaxHops);
-    }
 
     if (auto graphBudgetMs = getEnvInt("YAMS_SEARCH_GRAPH_BUDGET_MS")) {
         config.graphScoringBudgetMs = std::max(0, *graphBudgetMs);
@@ -469,180 +381,10 @@ SearchEnvironmentPins LegacySearchConfigEnvironment::applyTo(SearchEngineConfig&
                      config.graphScoringBudgetMs);
     }
 
-    if (auto graphPaths = getEnvBool("YAMS_SEARCH_GRAPH_ENABLE_PATHS")) {
-        config.graphEnablePathEnumeration = *graphPaths;
-        spdlog::info("SearchEngine graphEnablePathEnumeration overridden to {} via env",
-                     config.graphEnablePathEnumeration);
-    }
-
-    if (auto graphMaxPaths = getEnvInt("YAMS_SEARCH_GRAPH_MAX_PATHS")) {
-        config.graphMaxPaths = static_cast<size_t>(std::max(1, *graphMaxPaths));
-        spdlog::info("SearchEngine graphMaxPaths overridden to {} via env", config.graphMaxPaths);
-    }
-
-    if (auto graphHopDecay = getEnvFloat("YAMS_SEARCH_GRAPH_HOP_DECAY")) {
-        config.graphHopDecay = std::clamp(*graphHopDecay, 0.0f, 1.0f);
-        spdlog::info("SearchEngine graphHopDecay overridden to {:.3f} via env",
-                     config.graphHopDecay);
-    }
-
-    if (auto tieredNarrow = getEnvBool("YAMS_SEARCH_TIERED_NARROW_VECTOR_SEARCH")) {
-        config.tieredNarrowVectorSearch = *tieredNarrow;
-        spdlog::info("SearchEngine tieredNarrowVectorSearch overridden to {} via env",
-                     config.tieredNarrowVectorSearch);
-    }
-
-    if (auto tieredMinCandidates = getEnvInt("YAMS_SEARCH_TIERED_MIN_CANDIDATES")) {
-        config.tieredMinCandidates = static_cast<size_t>(std::max(0, *tieredMinCandidates));
-        spdlog::info("SearchEngine tieredMinCandidates overridden to {} via env",
-                     config.tieredMinCandidates);
-    }
-
-    if (auto weakFanout = getEnvBool("YAMS_SEARCH_ENABLE_WEAK_QUERY_FANOUT_BOOST")) {
-        config.enableWeakQueryFanoutBoost = *weakFanout;
-        spdlog::info("SearchEngine enableWeakQueryFanoutBoost overridden to {} via env",
-                     config.enableWeakQueryFanoutBoost);
-    }
     if (auto weakVectorFanout = getEnvFloat("YAMS_SEARCH_WEAK_QUERY_VECTOR_FANOUT_MULTIPLIER")) {
         config.weakQueryVectorFanoutMultiplier = std::max(1.0f, *weakVectorFanout);
         spdlog::info("SearchEngine weakQueryVectorFanoutMultiplier overridden to {:.2f} via env",
                      config.weakQueryVectorFanoutMultiplier);
-    }
-    if (auto weakEntityFanout =
-            getEnvFloat("YAMS_SEARCH_WEAK_QUERY_ENTITY_VECTOR_FANOUT_MULTIPLIER")) {
-        config.weakQueryEntityVectorFanoutMultiplier = std::max(1.0f, *weakEntityFanout);
-        spdlog::info(
-            "SearchEngine weakQueryEntityVectorFanoutMultiplier overridden to {:.2f} via env",
-            config.weakQueryEntityVectorFanoutMultiplier);
-    }
-    if (auto bypassWarming = getEnvBool("YAMS_SEARCH_BYPASS_CORPUS_WARMING_GATE")) {
-        config.bypassCorpusWarmingGate = *bypassWarming;
-        spdlog::info("SearchEngine bypassCorpusWarmingGate overridden to {} via env",
-                     config.bypassCorpusWarmingGate);
-    }
-    if (auto evidenceRescueSlots = getEnvInt("YAMS_SEARCH_FUSION_EVIDENCE_RESCUE_SLOTS")) {
-        config.fusionEvidenceRescueSlots = static_cast<size_t>(std::max(0, *evidenceRescueSlots));
-        spdlog::info("SearchEngine fusionEvidenceRescueSlots overridden to {} via env",
-                     config.fusionEvidenceRescueSlots);
-    }
-    if (auto evidenceRescueMinScore = getEnvFloat("YAMS_SEARCH_FUSION_EVIDENCE_RESCUE_MIN_SCORE")) {
-        config.fusionEvidenceRescueMinScore = std::max(0.0f, *evidenceRescueMinScore);
-        spdlog::info("SearchEngine fusionEvidenceRescueMinScore overridden to {:.3f} via env",
-                     config.fusionEvidenceRescueMinScore);
-    }
-    if (auto topologyFusionRescueSlots = getEnvInt("YAMS_SEARCH_TOPOLOGY_FUSION_RESCUE_SLOTS")) {
-        config.topologyFusionRescueSlots =
-            static_cast<size_t>(std::max(0, *topologyFusionRescueSlots));
-        spdlog::info("SearchEngine topologyFusionRescueSlots overridden to {} via env",
-                     config.topologyFusionRescueSlots);
-    }
-    if (auto topologyFinalRescueSlots = getEnvInt("YAMS_SEARCH_TOPOLOGY_FINAL_RESCUE_SLOTS")) {
-        config.topologyFinalRescueSlots =
-            static_cast<size_t>(std::max(0, *topologyFinalRescueSlots));
-        spdlog::info("SearchEngine topologyFinalRescueSlots overridden to {} via env",
-                     config.topologyFinalRescueSlots);
-    }
-    if (auto graphQueryExpansion = getEnvBool("YAMS_SEARCH_ENABLE_GRAPH_QUERY_EXPANSION")) {
-        config.enableGraphQueryExpansion = *graphQueryExpansion;
-        spdlog::info("SearchEngine enableGraphQueryExpansion overridden to {} via env",
-                     config.enableGraphQueryExpansion);
-    }
-    if (auto graphExpansionMinHits = getEnvInt("YAMS_SEARCH_GRAPH_EXPANSION_MIN_HITS")) {
-        config.graphExpansionMinHits = static_cast<size_t>(std::max(0, *graphExpansionMinHits));
-        spdlog::info("SearchEngine graphExpansionMinHits overridden to {} via env",
-                     config.graphExpansionMinHits);
-    }
-    if (auto graphExpansionMaxTerms = getEnvInt("YAMS_SEARCH_GRAPH_EXPANSION_MAX_TERMS")) {
-        config.graphExpansionMaxTerms = static_cast<size_t>(std::max(0, *graphExpansionMaxTerms));
-        spdlog::info("SearchEngine graphExpansionMaxTerms overridden to {} via env",
-                     config.graphExpansionMaxTerms);
-    }
-    if (auto graphExpansionMaxSeeds = getEnvInt("YAMS_SEARCH_GRAPH_EXPANSION_MAX_SEEDS")) {
-        config.graphExpansionMaxSeeds = static_cast<size_t>(std::max(0, *graphExpansionMaxSeeds));
-        spdlog::info("SearchEngine graphExpansionMaxSeeds overridden to {} via env",
-                     config.graphExpansionMaxSeeds);
-    }
-    if (auto graphExpansionQueryNeighborK =
-            getEnvInt("YAMS_SEARCH_GRAPH_EXPANSION_QUERY_NEIGHBOR_K")) {
-        config.graphExpansionQueryNeighborK =
-            static_cast<size_t>(std::max(0, *graphExpansionQueryNeighborK));
-        spdlog::info("SearchEngine graphExpansionQueryNeighborK overridden to {} via env",
-                     config.graphExpansionQueryNeighborK);
-    }
-    if (auto graphExpansionQueryNeighborMinScore =
-            getEnvFloat("YAMS_SEARCH_GRAPH_EXPANSION_QUERY_NEIGHBOR_MIN_SCORE")) {
-        config.graphExpansionQueryNeighborMinScore =
-            std::clamp(*graphExpansionQueryNeighborMinScore, 0.0f, 1.0f);
-        spdlog::info(
-            "SearchEngine graphExpansionQueryNeighborMinScore overridden to {:.3f} via env",
-            config.graphExpansionQueryNeighborMinScore);
-    }
-    if (auto graphVectorRequireCorroboration =
-            getEnvBool("YAMS_SEARCH_GRAPH_VECTOR_REQUIRE_CORROBORATION")) {
-        config.graphVectorRequireCorroboration = *graphVectorRequireCorroboration;
-        spdlog::info("SearchEngine graphVectorRequireCorroboration overridden to {} via env",
-                     config.graphVectorRequireCorroboration);
-    }
-    if (auto graphVectorRequireTextAnchoring =
-            getEnvBool("YAMS_SEARCH_GRAPH_VECTOR_REQUIRE_TEXT_ANCHORING")) {
-        config.graphVectorRequireTextAnchoring = *graphVectorRequireTextAnchoring;
-        spdlog::info("SearchEngine graphVectorRequireTextAnchoring overridden to {} via env",
-                     config.graphVectorRequireTextAnchoring);
-    }
-    if (auto graphVectorRequireBaselineTextAnchoring =
-            getEnvBool("YAMS_SEARCH_GRAPH_VECTOR_REQUIRE_BASELINE_TEXT_ANCHORING")) {
-        config.graphVectorRequireBaselineTextAnchoring = *graphVectorRequireBaselineTextAnchoring;
-        spdlog::info(
-            "SearchEngine graphVectorRequireBaselineTextAnchoring overridden to {} via env",
-            config.graphVectorRequireBaselineTextAnchoring);
-    }
-    if (auto graphFusionWindowGuard = getEnvBool("YAMS_SEARCH_ENABLE_GRAPH_FUSION_WINDOW_GUARD")) {
-        config.enableGraphFusionWindowGuard = *graphFusionWindowGuard;
-        spdlog::info("SearchEngine enableGraphFusionWindowGuard overridden to {} via env",
-                     config.enableGraphFusionWindowGuard);
-    }
-    if (auto graphFusionGuardDepthMultiplier =
-            getEnvInt("YAMS_SEARCH_GRAPH_FUSION_GUARD_DEPTH_MULTIPLIER")) {
-        config.graphFusionGuardDepthMultiplier =
-            static_cast<size_t>(std::max(1, *graphFusionGuardDepthMultiplier));
-        spdlog::info("SearchEngine graphFusionGuardDepthMultiplier overridden to {} via env",
-                     config.graphFusionGuardDepthMultiplier);
-    }
-    if (auto graphMaxAddedInFusionWindow =
-            getEnvInt("YAMS_SEARCH_GRAPH_MAX_ADDED_IN_FUSION_WINDOW")) {
-        config.graphMaxAddedInFusionWindow =
-            static_cast<size_t>(std::max(0, *graphMaxAddedInFusionWindow));
-        spdlog::info("SearchEngine graphMaxAddedInFusionWindow overridden to {} via env",
-                     config.graphMaxAddedInFusionWindow);
-    }
-    if (auto graphTextMinAdmissionScore =
-            getEnvFloat("YAMS_SEARCH_GRAPH_TEXT_MIN_ADMISSION_SCORE")) {
-        config.graphTextMinAdmissionScore = std::max(0.0f, *graphTextMinAdmissionScore);
-        spdlog::info("SearchEngine graphTextMinAdmissionScore overridden to {:.4f} via env",
-                     config.graphTextMinAdmissionScore);
-    }
-    if (auto graphExpansionFtsPenalty = getEnvFloat("YAMS_SEARCH_GRAPH_EXPANSION_FTS_PENALTY")) {
-        config.graphExpansionFtsPenalty = std::clamp(*graphExpansionFtsPenalty, 0.1f, 1.0f);
-        spdlog::info("SearchEngine graphExpansionFtsPenalty overridden to {:.3f} via env",
-                     config.graphExpansionFtsPenalty);
-    }
-    if (auto graphExpansionVectorPenalty =
-            getEnvFloat("YAMS_SEARCH_GRAPH_EXPANSION_VECTOR_PENALTY")) {
-        config.graphExpansionVectorPenalty = std::clamp(*graphExpansionVectorPenalty, 0.1f, 1.0f);
-        spdlog::info("SearchEngine graphExpansionVectorPenalty overridden to {:.3f} via env",
-                     config.graphExpansionVectorPenalty);
-    }
-
-    if (auto weakMinTextHits = getEnvInt("YAMS_SEARCH_WEAK_QUERY_MIN_TEXT_HITS")) {
-        config.weakQueryMinTextHits = static_cast<size_t>(std::max(0, *weakMinTextHits));
-        spdlog::info("SearchEngine weakQueryMinTextHits overridden to {} via env",
-                     config.weakQueryMinTextHits);
-    }
-
-    if (auto weakMinTopText = getEnvFloat("YAMS_SEARCH_WEAK_QUERY_MIN_TOP_TEXT_SCORE")) {
-        config.weakQueryMinTopTextScore = std::clamp(*weakMinTopText, 0.0f, 1.0f);
-        spdlog::info("SearchEngine weakQueryMinTopTextScore overridden to {:.3f} via env",
-                     config.weakQueryMinTopTextScore);
     }
 
     // Multi-vector sub-phrase search overrides
