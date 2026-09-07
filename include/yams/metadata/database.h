@@ -423,7 +423,9 @@ private:
     mutable size_t cacheHits_{0};
     mutable size_t cacheMisses_{0};
     mutable size_t uncachedPrepares_{0};
-    static constexpr size_t kMaxCacheSize = 64; // Limit cache size
+    // 90 cached call sites share a connection when KG and repository work interleave; a
+    // small bound with first-found eviction would thrash them against each other.
+    static constexpr size_t kMaxCacheSize = 128;
 
     /**
      * @brief Return a statement to the cache after use
