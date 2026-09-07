@@ -149,7 +149,8 @@ private:
                                    std::string source);
     void enqueueEmbeddingStatusUpdate(std::vector<std::string> hashes, bool embedded,
                                       std::string modelName, std::string source);
-    void enqueueEmbeddingCompletion(std::vector<std::string> hashes, std::string modelName);
+    void enqueueEmbeddingCompletion(std::vector<metadata::EmbeddingDerivationToken> tokens,
+                                    std::string modelName);
 
     const EmbeddingServiceConfig config_;
     const EffectiveEmbeddingServiceConfig effectiveConfig_;
