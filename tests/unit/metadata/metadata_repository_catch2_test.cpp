@@ -5321,3 +5321,121 @@ TEST_CASE_METHOD(MetadataRepositoryFixture,
     CHECK((repository_->getKnowledgeGraphStore() == kgStore));
 }
 // NOLINTEND(bugprone-chained-comparison)
+
+TEST_CASE("MetadataRepository batch begin mints one derivation per document",
+          "[unit][metadata][embeddings][derivation]") {
+    MetadataRepositoryFixture fix;
+    std::vector<std::string> hashes;
+    for (int i = 0; i < 3; ++i) {
+        const auto hash = "batch-derivation-" + std::to_string(i);
+        auto inserted = fix.repository_->insertDocument(
+            makeDocumentWithPath("/tmp/batch-derivation-" + std::to_string(i) + ".txt", hash));
+        REQUIRE(inserted.has_value());
+        hashes.push_back(hash);
+    }
+    // The first document is already embedded; minting must reset its readiness.
+    REQUIRE(fix.repository_->batchCompleteDocumentEmbeddingsByHashes({hashes[0]}, "model-old")
+                .has_value());
+    hashes.push_back("batch-derivation-missing");
+
+    auto tokens = fix.repository_->batchBeginDocumentEmbeddingDerivations(hashes, "recipe");
+    REQUIRE(tokens.has_value());
+    REQUIRE(tokens.value().size() == 3);
+    for (std::size_t i = 0; i < 3; ++i) {
+        CHECK(tokens.value()[i].hash == hashes[i]);
+        CHECK(tokens.value()[i].recipe == "recipe");
+        CHECK_FALSE(tokens.value()[i].generation.empty());
+    }
+    auto ready = fix.repository_->hasDocumentEmbeddingByHash(hashes[0]);
+    REQUIRE(ready.has_value());
+    CHECK_FALSE(ready.value());
+    auto stats = fix.repository_->getCorpusStats();
+    REQUIRE(stats.has_value());
+    CHECK(stats.value().embeddingCount == 0);
+
+    auto states = fix.repository_->batchGetDocumentEmbeddingDerivations(hashes);
+    REQUIRE(states.has_value());
+    CHECK(states.value().size() == 3);
+    for (const auto& [hash, state] : states.value()) {
+        CHECK_FALSE(state.completed);
+    }
+}
+
+TEST_CASE("MetadataRepository batch complete publishes only current derivations",
+          "[unit][metadata][embeddings][derivation]") {
+    MetadataRepositoryFixture fix;
+    const std::string current = "batch-complete-current";
+    const std::string superseded = "batch-complete-superseded";
+    const std::string changed = "batch-complete-changed";
+    for (const auto& hash : {current, superseded, changed}) {
+        auto inserted =
+            fix.repository_->insertDocument(makeDocumentWithPath("/tmp/" + hash + ".txt", hash));
+        REQUIRE(inserted.has_value());
+        if (hash == changed) {
+            auto entry = makeBatchContentEntry(inserted.value(), "Title", "Original text");
+            REQUIRE(fix.repository_->batchInsertContentAndIndex({entry}).has_value());
+        }
+    }
+    auto tokens = fix.repository_->batchBeginDocumentEmbeddingDerivations(
+        {current, superseded, changed}, "recipe");
+    REQUIRE(tokens.has_value());
+    REQUIRE(tokens.value().size() == 3);
+
+    // A newer attempt supersedes the second token; new content invalidates the third.
+    REQUIRE(fix.repository_->beginDocumentEmbeddingDerivation(superseded, "recipe").has_value());
+    {
+        auto doc = fix.repository_->getDocumentByHash(changed);
+        REQUIRE(doc.has_value());
+        REQUIRE(doc.value().has_value());
+        auto entry = makeBatchContentEntry(doc.value()->id, "Title", "New text");
+        REQUIRE(fix.repository_->batchInsertContentAndIndex({entry}).has_value());
+    }
+
+    auto completed =
+        fix.repository_->batchCompleteDocumentEmbeddingDerivations(tokens.value(), "model-new");
+    REQUIRE(completed.has_value());
+    CHECK(completed.value() == 1);
+
+    auto ready = fix.repository_->hasDocumentEmbeddingByHash(current);
+    REQUIRE(ready.has_value());
+    CHECK(ready.value());
+    for (const auto& hash : {superseded, changed}) {
+        auto notReady = fix.repository_->hasDocumentEmbeddingByHash(hash);
+        REQUIRE(notReady.has_value());
+        CHECK_FALSE(notReady.value());
+    }
+    auto stats = fix.repository_->getCorpusStats();
+    REQUIRE(stats.has_value());
+    CHECK(stats.value().embeddingCount == 1);
+
+    // Completing the same tokens again is a no-op.
+    auto again =
+        fix.repository_->batchCompleteDocumentEmbeddingDerivations(tokens.value(), "model-new");
+    REQUIRE(again.has_value());
+    CHECK(again.value() == 0);
+}
+
+TEST_CASE("MetadataRepository reconcile keeps an open derivation unembedded",
+          "[unit][metadata][embeddings][derivation]") {
+    // Vector rows can exist for text that was superseded while its embed job ran. The
+    // startup reconcile must not flip such a document back to embedded.
+    MetadataRepositoryFixture fix;
+    const std::string hash = "reconcile-open-derivation";
+    REQUIRE(fix.repository_->insertDocument(makeDocumentWithPath("/tmp/reconcile-open.txt", hash))
+                .has_value());
+    auto tokens = fix.repository_->batchBeginDocumentEmbeddingDerivations({hash}, "recipe");
+    REQUIRE(tokens.has_value());
+    REQUIRE(tokens.value().size() == 1);
+
+    REQUIRE(fix.repository_->reconcileDocumentEmbeddingStatusByHashes({hash}, "model").has_value());
+    auto open = fix.repository_->hasDocumentEmbeddingByHash(hash);
+    REQUIRE(open.has_value());
+    CHECK_FALSE(open.value());
+
+    REQUIRE(fix.repository_->batchCompleteDocumentEmbeddingDerivations(tokens.value(), "model")
+                .has_value());
+    REQUIRE(fix.repository_->reconcileDocumentEmbeddingStatusByHashes({hash}, "model").has_value());
+    auto completed = fix.repository_->hasDocumentEmbeddingByHash(hash);
+    REQUIRE(completed.has_value());
+    CHECK(completed.value());
+}

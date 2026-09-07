@@ -1313,16 +1313,15 @@ Result<void> WriteCoordinator::applyMetadataOp(CompleteDocumentEmbeddingsByHashe
                          "Embedding completion cannot mix legacy hashes and derivation tokens"};
         }
         metadata::MetadataOpScope opScope("wc_embedding_derivation_completion");
-        for (const auto& token : op.derivations) {
-            auto completed = meta_->completeDocumentEmbeddingDerivation(token, op.modelName);
-            if (!completed) {
-                return completed.error();
-            }
-            if (completed.value()) {
-                std::lock_guard<std::mutex> lock(statsMutex_);
-                ++stats_.embeddingStatusesUpdated;
-                ++stats_.repairStatusesUpdated;
-            }
+        auto completed =
+            meta_->batchCompleteDocumentEmbeddingDerivations(op.derivations, op.modelName);
+        if (!completed) {
+            return completed.error();
+        }
+        if (completed.value() > 0) {
+            std::lock_guard<std::mutex> lock(statsMutex_);
+            stats_.embeddingStatusesUpdated += completed.value();
+            stats_.repairStatusesUpdated += completed.value();
         }
         return {};
     }

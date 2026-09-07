@@ -57,6 +57,20 @@ TEST_CASE("Embedding derivation policy binds model identity and preparation para
     CHECK(preparation != embed::embeddingPreparationRecipe(chunking, selection));
 }
 
+TEST_CASE("Embedding derivation ledger completes only minted hashes, once each",
+          "[daemon][embedding][derivation][catch2]") {
+    embed::EmbeddingDerivationLedger ledger;
+    ledger.adopt({{"a", "gen-a", "recipe"}, {"b", "gen-b", "recipe"}});
+
+    auto tokens = ledger.tokensFor({"b", "unknown", "a", "b"});
+    REQUIRE(tokens.size() == 2);
+    CHECK(tokens[0].hash == "b");
+    CHECK(tokens[0].generation == "gen-b");
+    CHECK(tokens[1].hash == "a");
+    CHECK(tokens[1].generation == "gen-a");
+    CHECK(ledger.tokensFor({"unknown"}).empty());
+}
+
 TEST_CASE("Embedding input selection falls back for empty prepared payloads",
           "[daemon][embedding][input-selection]") {
     InternalEventBus::EmbedJob job;
