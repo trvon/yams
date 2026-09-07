@@ -1702,6 +1702,8 @@ if catch2_dep.found()
     files(
       'unit/common/format_catch2_test.cpp',
       'unit/common/crc32_catch2_test.cpp',
+      'unit/common/hash_predicates_catch2_test.cpp',
+      'unit/common/path_alias_catch2_test.cpp',
       'unit/common/pattern_utils_catch2_test.cpp',
       'unit/common/string_utils_catch2_test.cpp',
       'unit/common/test_utils_catch2_test.cpp',

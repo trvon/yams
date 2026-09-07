@@ -6,6 +6,7 @@
 #include <yams/app/services/service_utils.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/simd_newline_scanner.hpp>
+#include <yams/common/fs_utils.h>
 #include <yams/common/string_utils.h>
 #include <yams/common/utf8_utils.h>
 #include <yams/config/config_helpers.h>
@@ -108,25 +109,7 @@ static std::string normalizePathForCompare(const std::string& path) {
     if (out.empty()) {
         out = fs.generic_string();
     }
-#if defined(__APPLE__)
-    // Canonicalize common macOS path aliases so comparisons/globs are consistent
-    auto canonApple = [](const std::string& s) -> std::string {
-        if (s.rfind("/private/var/", 0) == 0 || s == "/private/var")
-            return s; // already canonical
-        if (s.rfind("/private/tmp/", 0) == 0 || s == "/private/tmp")
-            return s; // already canonical
-        if (s.rfind("/var/", 0) == 0)
-            return std::string("/private") + s; // "/var/..." -> "/private/var/..."
-        if (s == "/var")
-            return std::string("/private/var");
-        if (s.rfind("/tmp/", 0) == 0)
-            return std::string("/private") + s; // "/tmp/..." -> "/private/tmp/..."
-        if (s == "/tmp")
-            return std::string("/private/tmp");
-        return s;
-    };
-    out = canonApple(out);
-#endif
+    out = yams::common::canonicalizeMacPathAlias(std::move(out));
 #if defined(_WIN32) || defined(__APPLE__)
     std::transform(out.begin(), out.end(), out.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -139,25 +122,7 @@ static std::string normalizeForGlobMatch(const std::string& value) {
 #if defined(_WIN32)
     std::replace(out.begin(), out.end(), '\\', '/');
 #endif
-#if defined(__APPLE__)
-    // Canonicalize macOS path aliases for consistent glob matching
-    auto canonApple = [](const std::string& s) -> std::string {
-        if (s.rfind("/private/var/", 0) == 0 || s == "/private/var")
-            return s;
-        if (s.rfind("/private/tmp/", 0) == 0 || s == "/private/tmp")
-            return s;
-        if (s.rfind("/var/", 0) == 0)
-            return std::string("/private") + s;
-        if (s == "/var")
-            return std::string("/private/var");
-        if (s.rfind("/tmp/", 0) == 0)
-            return std::string("/private") + s;
-        if (s == "/tmp")
-            return std::string("/private/tmp");
-        return s;
-    };
-    out = canonApple(out);
-#endif
+    out = yams::common::canonicalizeMacPathAlias(std::move(out));
 #if defined(_WIN32) || defined(__APPLE__)
     std::transform(out.begin(), out.end(), out.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
