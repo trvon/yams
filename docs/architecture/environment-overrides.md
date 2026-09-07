@@ -48,6 +48,14 @@ Named decisions from the tuning migration:
 - TuneAdvisor environment reads are routed through the shared boundary. Production resolves each
   legacy input once; explicit TOML setters outrank the compatibility snapshot. Test builds retain
   fresh reads so isolated compatibility tests can characterize aliases without cross-process setup.
+- `[tuning]` also carries typed keys for setters that were once reachable only through
+  `YAMS_*` overlays: `conn_slots_min`, `conn_slots_max`, `conn_slots_step`, `cpu_high_pct`,
+  `onnx_max_concurrent`, `onnx_gliner_reserved`, `onnx_embed_reserved`,
+  `onnx_reranker_reserved`, `onnx_sessions_per_model`, `model_evict_warning_threshold`,
+  `model_evict_critical_threshold`, `model_evict_emergency_threshold`,
+  `indexing_workers_max`, `store_document_channel_capacity`, `work_coordinator_threads`,
+  `embed_channel_capacity`, `connection_lifetime_s`. The matching environment names remain
+  deprecated compatibility inputs.
 - New typed product sections are `[tuning.ipc]` (`timeout_ms`,
   `stream_chunk_timeout_ms`), `[tuning.resource]` (`enabled`, `admission_control`, memory thresholds,
   budgets, and hysteresis), and `[tuning.post_ingest]` (stage concurrency, batch, RPC queue, and RPC
