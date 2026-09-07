@@ -41,6 +41,22 @@ test('release_candidate_unit',
   timeout: 30,
 )
 
+git_environment_isolation_tests = files('scripts/test_git_environment_isolation.py')
+test('git_environment_isolation_unit',
+  python_exe,
+  args: [git_environment_isolation_tests],
+  suite: ['unit', 'policy', 'release'],
+  timeout: 60,
+)
+
+promotion_reconciliation_tests = files('scripts/test_reconcile_promotion_pr.py')
+test('promotion_reconciliation',
+  python_exe,
+  args: [promotion_reconciliation_tests],
+  suite: ['unit', 'policy', 'release'],
+  timeout: 30,
+)
+
 cli11_dep = cli11_resolved_dep
 if not cli11_dep.found()
   cli11_dep = declare_dependency()

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -50,6 +51,8 @@ class ReleaseCandidateTests(unittest.TestCase):
         result = subprocess.run(
             ["git", *args],
             cwd=self.repo,
+            # Hooks export GIT_DIR even across cwd changes; never mutate the caller.
+            env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
             check=True,
             capture_output=True,
             text=True,
@@ -127,6 +130,13 @@ class ReleaseCandidateTests(unittest.TestCase):
             candidate_module.validate_candidate(
                 self.repo, stale_base, self.git("rev-parse", "HEAD")
             )
+
+    def test_workflow_uses_current_main_and_preserves_validation_failure(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-candidate.yml").read_text()
+        self.assertNotIn("PR_BASE_SHA", workflow)
+        self.assertIn('base_sha="$(git rev-parse origin/main)"', workflow)
+        self.assertIn("if-no-files-found: warn", workflow)
+        self.assertNotIn("continue-on-error:", workflow)
 
     def test_workflow_is_read_only_and_uses_pinned_release_please_dry_run(self) -> None:
         workflow = (ROOT / ".github/workflows/release-candidate.yml").read_text(
