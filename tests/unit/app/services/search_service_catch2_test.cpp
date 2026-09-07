@@ -4,6 +4,7 @@
 // Migrated from GTest: search_service_test.cpp
 // Full SearchService integration tests with DB lifecycle and async coroutines.
 
+#include "src/app/services/glob_matcher.h"
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
@@ -922,4 +923,24 @@ TEST_CASE("SearchService: extension facet telemetry is populated for local keywo
     REQUIRE(response.searchStats.contains("facet_approximate"));
     CHECK(response.searchStats.at("facet_approximate") == "false");
     CHECK(response.searchStats.at("budget_short_query") == "true");
+}
+
+TEST_CASE("GlobMatcher keeps the search service glob semantics", "[unit][services][glob]") {
+    using yams::app::services::GlobMatcher;
+    // '*' stays inside a segment, '**' crosses, '?' is one character, dots are literal.
+    CHECK(GlobMatcher("**/*.md").matches("docs/guide/intro.md"));
+    CHECK_FALSE(GlobMatcher("*.md").matches("docs/intro.md"));
+    CHECK(GlobMatcher("*.md").matches("intro.md"));
+    CHECK(GlobMatcher("src/**/main.cpp").matches("src/a/b/main.cpp"));
+    CHECK_FALSE(GlobMatcher("src/*/main.cpp").matches("src/a/b/main.cpp"));
+    CHECK(GlobMatcher("file?.txt").matches("file1.txt"));
+    CHECK_FALSE(GlobMatcher("a.b").matches("aXb"));
+    // Regex metacharacters in a glob are literal, so brackets never open a class.
+    CHECK(GlobMatcher("**/[x].md").matches("a/[x].md"));
+    CHECK_FALSE(GlobMatcher("[x].md").matches("x.md"));
+    // The compiled form is reused: matching many texts against one pattern stays correct.
+    const GlobMatcher shared("**/*.cpp");
+    for (int i = 0; i < 100; ++i) {
+        CHECK(shared.matches("src/" + std::to_string(i) + "/file.cpp"));
+    }
 }

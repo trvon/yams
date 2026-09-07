@@ -4,7 +4,10 @@
 #include "cross_rerank_internal.h"
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
+#include <string_view>
+#include <unordered_map>
 
 namespace yams::search::detail {
 
@@ -22,23 +25,15 @@ void appendRerankTextPart(std::string& out, const std::string& part) {
 
 } // namespace
 
-std::string buildCrossRerankText(const SearchResult& result,
-                                 const std::shared_ptr<metadata::MetadataRepository>& metadataRepo,
+std::string buildCrossRerankText(const SearchResult& result, std::string_view contentPreview,
                                  std::size_t textLimit) {
     std::string text;
     appendRerankTextPart(text, result.document.fileName);
     appendRerankTextPart(text, result.document.filePath);
     appendRerankTextPart(text, result.snippet);
-    if (metadataRepo && result.document.id > 0 && text.size() < textLimit) {
-        auto contentResult = metadataRepo->getContent(result.document.id);
-        if (contentResult && contentResult.value()) {
-            const auto& content = contentResult.value()->contentText;
-            if (!content.empty()) {
-                const size_t remaining =
-                    textLimit > text.size() ? textLimit - text.size() : size_t{0};
-                appendRerankTextPart(text, content.substr(0, remaining));
-            }
-        }
+    if (!contentPreview.empty() && text.size() < textLimit) {
+        const size_t remaining = textLimit > text.size() ? textLimit - text.size() : size_t{0};
+        appendRerankTextPart(text, std::string(contentPreview.substr(0, remaining)));
     }
     if (text.size() > textLimit) {
         text.resize(textLimit);
@@ -65,12 +60,34 @@ applyCrossRerank(std::vector<SearchResult>& results, const std::string& query,
     }
 
     const size_t textLimit = config.rerankSnippetMaxChars;
+    // One bounded preview query for the whole window; the previous per-result getContent()
+    // read every document's full text only to keep its first textLimit characters.
+    std::unordered_map<int64_t, std::string> previews;
+    if (metadataRepo) {
+        std::vector<int64_t> ids;
+        ids.reserve(window);
+        for (size_t i = 0; i < window; ++i) {
+            if (results[i].document.id > 0) {
+                ids.push_back(results[i].document.id);
+            }
+        }
+        if (!ids.empty()) {
+            if (auto fetched = metadataRepo->batchGetContentPreview(
+                    ids, static_cast<int>(std::min<std::size_t>(textLimit, INT_MAX)))) {
+                previews = std::move(fetched.value());
+            }
+        }
+    }
     std::vector<std::string> rerankTexts;
     rerankTexts.reserve(window);
     std::vector<double> originalScores;
     originalScores.reserve(window);
     for (size_t i = 0; i < window; ++i) {
-        rerankTexts.push_back(buildCrossRerankText(results[i], metadataRepo, textLimit));
+        std::string_view preview;
+        if (const auto it = previews.find(results[i].document.id); it != previews.end()) {
+            preview = it->second;
+        }
+        rerankTexts.push_back(buildCrossRerankText(results[i], preview, textLimit));
         originalScores.push_back(results[i].score);
     }
 

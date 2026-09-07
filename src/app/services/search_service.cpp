@@ -50,6 +50,7 @@
 #endif
 
 #include "yams/profiling.h"
+#include "glob_matcher.h"
 
 namespace yams::app::services {
 
@@ -306,43 +307,19 @@ void applyExtensionFacets(SearchResponse& resp) {
 }
 
 // Converts a glob pattern to a regex string.
-static std::string globToRegex(const std::string& glob) {
-    std::string regex_str;
-    regex_str.reserve(glob.size() * 2);
-    for (size_t i = 0; i < glob.size(); ++i) {
-        char c = glob[i];
-        if (c == '*') {
-            if (i + 1 < glob.size() && glob[i + 1] == '*') {
-                // '**' matches any sequence of characters, including path separators
-                regex_str += ".*";
-                i++; // consume second '*'
-            } else {
-                // '*' matches any sequence of characters except path separators
-                regex_str += "[^/]*";
-            }
-        } else if (c == '?') {
-            regex_str += ".";
-        } else if (c == '.' || c == '+' || c == '(' || c == ')' || c == '{' || c == '}' ||
-                   c == '[' || c == ']' || c == '^' || c == '|' || c == '\\') {
-            regex_str += '\\';
-            regex_str += c;
-        } else {
-            regex_str += c;
-        }
-    }
-    return regex_str;
-}
-
-// Robust glob matcher using regex, supporting '**'.
+// Glob matching compiled once per pattern. Path filters apply the same handful of
+// patterns to every candidate document, so the compiled form is cached per thread and
+// the cache is cleared if it ever grows past a small bound.
 static bool wildcardMatch(const std::string& text, const std::string& pattern) {
-    try {
-        std::regex re(globToRegex(pattern));
-        return std::regex_match(text, re);
-    } catch (const std::regex_error& e) {
-        spdlog::warn("Invalid glob pattern '{}' converted to regex: {}", pattern, e.what());
-        // Fallback to simple string contains for invalid patterns
-        return text.find(pattern) != std::string::npos;
+    thread_local std::unordered_map<std::string, GlobMatcher> matchers;
+    auto it = matchers.find(pattern);
+    if (it == matchers.end()) {
+        if (matchers.size() >= 256) {
+            matchers.clear();
+        }
+        it = matchers.emplace(pattern, GlobMatcher(pattern)).first;
     }
+    return it->second.matches(text);
 }
 
 // Heuristic: treat as path/filename when the query contains a separator
