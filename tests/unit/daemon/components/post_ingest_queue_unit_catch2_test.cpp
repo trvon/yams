@@ -12,6 +12,7 @@
 
 #include "src/daemon/components/post_ingest_nl_graph_builder.h"
 #include <yams/daemon/components/PostIngestQueue.h>
+#include <yams/daemon/resource/external_entity_provider_adapter.h>
 #include <yams/metadata/path_utils.h>
 
 using namespace yams::daemon;
@@ -143,6 +144,38 @@ TEST_CASE("PostIngestQueue rejects and accounts KG admission after stop",
     CHECK(bus.kgQueued() == queuedBefore);
     CHECK(bus.kgDropped() == droppedBefore + 1);
     CHECK(queue.testing_pendingKgJobs() == 0);
+}
+
+TEST_CASE("PostIngestQueue entity stage leaves the shared content buffer intact",
+          "[daemon][post-ingest][entity][catch2]") {
+    // dispatchNonEmbeddingStages hands one shared_ptr<vector<byte>> to the KG, symbol,
+    // and entity channels. Any consumer that moves out of it starves the others.
+    PostIngestQueue queue{nullptr, nullptr, {}, nullptr, nullptr, nullptr, nullptr, 8};
+    queue.stop();
+    auto provider = std::make_shared<ExternalEntityProviderAdapter>(
+        nullptr, "fake-entity-plugin", "fake.getEntities", std::vector<std::string>{".bin"});
+    queue.setEntityProviders({provider});
+
+    const std::string payload = "shared content bytes";
+    auto shared = std::make_shared<std::vector<std::byte>>(payload.size());
+    std::transform(payload.begin(), payload.end(), shared->begin(),
+                   [](char c) { return static_cast<std::byte>(c); });
+    const auto expectedSize = shared->size();
+
+    InternalEventBus::EntityExtractionJob first;
+    first.hash = "shared-buffer-hash";
+    first.documentId = 1;
+    first.filePath = "a.bin";
+    first.extension = ".bin";
+    first.contentBytes = shared;
+    InternalEventBus::EntityExtractionJob second = first;
+
+    std::vector<InternalEventBus::EntityExtractionJob> jobs;
+    jobs.push_back(std::move(first));
+    jobs.push_back(std::move(second));
+    queue.testing_processEntityExtractionBatch(std::move(jobs));
+
+    CHECK(shared->size() == expectedSize);
 }
 
 TEST_CASE("PostIngestQueue stage constants", "[daemon][post-ingest][catch2]") {
