@@ -1493,6 +1493,7 @@ if catch2_dep.found()
       'unit/search/kg_scorer_simple_catch2_test.cpp',
       'unit/search/lexical_scoring_catch2_test.cpp',
       'unit/search/simeon_lexical_backend_catch2_test.cpp',
+      'unit/search/simeon_score_materialize_catch2_test.cpp',
       'unit/search/search_engine_simeon_lexical_catch2_test.cpp',
       'unit/search/search_engine_topology_catch2_test.cpp',
       'unit/search/simeon_bandit_catch2_test.cpp',
