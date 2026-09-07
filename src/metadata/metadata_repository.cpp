@@ -4460,40 +4460,47 @@ MetadataRepository::batchGetDocumentTags(std::span<const int64_t> documentIds) {
         return std::unordered_map<int64_t, std::vector<std::string>>{};
     }
 
+    // One placeholder per id, chunked below SQLite's variable limit (999 on older builds)
+    // so an unbounded candidate set from a path pattern never fails the whole lookup.
+    constexpr std::size_t kMaxTagQueryIds = 500;
     return executeReadQuery<std::unordered_map<int64_t, std::vector<std::string>>>(
         [&](Database& db) -> Result<std::unordered_map<int64_t, std::vector<std::string>>> {
-            std::string query =
-                "SELECT document_id, key FROM metadata WHERE key LIKE 'tag:%' AND document_id IN (";
-            for (std::size_t i = 0; i < documentIds.size(); ++i) {
-                if (i)
-                    query += ",";
-                query += "?";
-            }
-            query += ") ORDER BY document_id, key";
-
-            auto stmtResult = db.prepare(query);
-            if (!stmtResult)
-                return stmtResult.error();
-
-            Statement stmt = std::move(stmtResult).value();
-            int bindIndex = 1;
-            for (auto id : documentIds) {
-                auto b = stmt.bind(bindIndex++, id);
-                if (!b)
-                    return b.error();
-            }
-
             std::unordered_map<int64_t, std::vector<std::string>> out;
-            while (true) {
-                auto stepResult = stmt.step();
-                if (!stepResult)
-                    return stepResult.error();
-                if (!stepResult.value())
-                    break;
+            for (std::size_t offset = 0; offset < documentIds.size(); offset += kMaxTagQueryIds) {
+                const auto chunk = documentIds.subspan(
+                    offset, std::min(kMaxTagQueryIds, documentIds.size() - offset));
+                std::string query = "SELECT document_id, key FROM metadata WHERE key LIKE 'tag:%' "
+                                    "AND document_id IN (";
+                for (std::size_t i = 0; i < chunk.size(); ++i) {
+                    if (i)
+                        query += ",";
+                    query += "?";
+                }
+                query += ") ORDER BY document_id, key";
 
-                std::string fullKey = stmt.getString(1);
-                if (fullKey.starts_with("tag:")) {
-                    out[stmt.getInt64(0)].push_back(fullKey.substr(4));
+                auto stmtResult = db.prepare(query);
+                if (!stmtResult)
+                    return stmtResult.error();
+
+                Statement stmt = std::move(stmtResult).value();
+                int bindIndex = 1;
+                for (auto id : chunk) {
+                    auto b = stmt.bind(bindIndex++, id);
+                    if (!b)
+                        return b.error();
+                }
+
+                while (true) {
+                    auto stepResult = stmt.step();
+                    if (!stepResult)
+                        return stepResult.error();
+                    if (!stepResult.value())
+                        break;
+
+                    std::string fullKey = stmt.getString(1);
+                    if (fullKey.starts_with("tag:")) {
+                        out[stmt.getInt64(0)].push_back(fullKey.substr(4));
+                    }
                 }
             }
 
