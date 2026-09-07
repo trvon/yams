@@ -1,0 +1,206 @@
+// Copyright (c) 2025 YAMS Contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+// Repair operation "mime" (wire code 3); see repair_operation.h.
+
+#include <yams/daemon/components/repair/repair_operation.h>
+
+#include "../repair_operation_support.h"
+#include "../repair_operations_internal.h"
+
+#include <spdlog/spdlog.h>
+#include <yams/core/repair_fsm.h>
+#include <yams/daemon/components/ConfigResolver.h>
+#include <yams/daemon/components/db_salvage.h>
+#include <yams/daemon/components/GraphComponent.h>
+#include <yams/daemon/components/InternalEventBus.h>
+#include <yams/daemon/components/MetadataWriteFacade.h>
+#include <yams/daemon/components/PostIngestQueue.h>
+#include <yams/daemon/components/ResourceGovernor.h>
+#include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/TuningManager.h>
+#include <yams/daemon/components/TuningSnapshot.h>
+#include <yams/daemon/components/VectorIndexCoordinator.h>
+#include <yams/daemon/components/WriteCoordinator.h>
+#include <yams/daemon/metric_keys.h>
+#include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
+#include <yams/detection/file_type_detector.h>
+#include <yams/extraction/content_extractor.h>
+#include <yams/extraction/extraction_util.h>
+#include <yams/integrity/repair_manager.h>
+#include <yams/metadata/document_metadata.h>
+#include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/query_helpers.h>
+#include <yams/profiling.h>
+#include <yams/repair/embedding_repair_util.h>
+#include <yams/vector/sqlite_vec_backend.h>
+#include <yams/vector/vector_database.h>
+
+#include <sqlite3.h>
+#include <boost/asio/awaitable.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/detached.hpp>
+#include <boost/asio/steady_timer.hpp>
+#include <boost/asio/this_coro.hpp>
+#include <boost/asio/thread_pool.hpp>
+
+#include <algorithm>
+#include <atomic>
+#include <cctype>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <span>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <unordered_set>
+
+namespace yams::daemon::repair {
+
+namespace {
+
+RepairOperationResult repairMimeTypes(OperationEnv& env, bool dryRun, bool verbose,
+                                      RepairService::ProgressFn progress) {
+    RepairOperationResult result;
+    result.operation = "mime";
+
+    auto meta = env.ctx.getMetadataRepo ? env.ctx.getMetadataRepo() : nullptr;
+    if (!meta) {
+        result.message = "Metadata not available";
+        return result;
+    }
+
+    auto* wc = env.ctx.getWriteCoordinator ? env.ctx.getWriteCoordinator() : nullptr;
+    MetadataWriteFacade metaFacade(wc, meta.get());
+
+    auto store = env.ctx.getContentStore ? env.ctx.getContentStore() : nullptr;
+    (void)detection::FileTypeDetector::initializeWithMagicNumbers();
+    auto& detector = detection::FileTypeDetector::instance();
+
+    constexpr int kBatchSize = 5000;
+    constexpr uint64_t kProgressStride = 100;
+    const auto emit = [&](std::string phase, uint64_t processed, const std::string& message) {
+        if (!progress)
+            return;
+        RepairEvent ev;
+        ev.phase = std::move(phase);
+        ev.operation = "mime";
+        ev.processed = processed;
+        ev.succeeded = result.succeeded;
+        ev.failed = result.failed;
+        ev.skipped = result.skipped;
+        ev.message = message;
+        progress(ev);
+    };
+
+    uint64_t totalScanned = 0;
+    uint64_t totalCandidates = 0;
+    int offset = 0;
+    while (true) {
+        metadata::DocumentQueryOptions opts;
+        opts.limit = kBatchSize;
+        opts.offset = offset;
+        auto batchResult = meta->queryDocuments(opts);
+        if (!batchResult) {
+            result.message = "Failed to query: " + batchResult.error().message;
+            return result;
+        }
+        const auto& batch = batchResult.value();
+        if (batch.empty())
+            break;
+
+        std::vector<std::pair<int64_t, std::string>> toRepair;
+        toRepair.reserve(batch.size());
+        for (const auto& doc : batch) {
+            ++totalScanned;
+            if (shouldRedetectMime(doc)) {
+                const auto detectedMime = bestEffortMimeForDocument(doc, store);
+                if (!detectedMime.empty() && detectedMime != doc.mimeType) {
+                    toRepair.push_back({doc.id, detectedMime});
+                    ++totalCandidates;
+                }
+            }
+            if (totalScanned % kProgressStride == 0) {
+                emit("repairing", totalScanned, "Scanning documents");
+            }
+        }
+
+        if (dryRun) {
+            result.skipped += toRepair.size();
+        } else {
+            for (auto& [id, mimeType] : toRepair) {
+                auto docResult = meta->getDocument(id);
+                if (!(docResult && docResult.value())) {
+                    result.failed++;
+                    continue;
+                }
+
+                auto doc = *docResult.value();
+                const bool oldWasText = detector.isTextMimeType(doc.mimeType);
+                const bool newIsText = detector.isTextMimeType(mimeType);
+                doc.mimeType = std::move(mimeType);
+
+                metadata::MetadataOpScope opScope("repair_mime_update");
+                if (meta->updateDocument(doc)) {
+                    if (oldWasText && !newIsText) {
+                        (void)meta->deleteContent(id);
+                        (void)meta->removeFromIndex(id);
+                        metaFacade.updateExtractionStatus(
+                            id, false, metadata::ExtractionStatus::Pending,
+                            "MIME repaired; stale text content cleared");
+                    }
+                    result.succeeded++;
+                } else {
+                    result.failed++;
+                }
+                if ((result.succeeded + result.failed) % kProgressStride == 0) {
+                    emit("repairing", totalScanned, "Repairing MIME types");
+                }
+            }
+        }
+
+        emit("repairing", totalScanned, "Processed batch");
+
+        if (static_cast<int>(batch.size()) < kBatchSize)
+            break;
+        offset += kBatchSize;
+    }
+
+    result.processed = totalScanned;
+
+    if (totalCandidates == 0) {
+        result.message = "All documents have valid MIME types";
+    } else if (dryRun) {
+        result.message = "Would repair " + std::to_string(result.skipped) + " MIME types";
+    } else {
+        result.message = "Repaired " + std::to_string(result.succeeded) + " MIME types";
+    }
+    metaFacade.flush();
+    return result;
+}
+
+class MimeTypesOperation final : public IRepairOperation {
+public:
+    std::string_view name() const noexcept override { return "mime"; }
+    std::uint64_t code() const noexcept override { return 3; }
+
+    RepairOperationResult run(OperationEnv& env, const RepairRequest& req,
+                              const RepairService::ProgressFn& progress,
+                              std::atomic<bool>* cancelRequested) override {
+        (void)cancelRequested;
+        return repairMimeTypes(env, req.dryRun, req.verbose, progress);
+    }
+};
+
+} // namespace
+
+std::unique_ptr<IRepairOperation> makeMimeTypesOperation() {
+    return std::make_unique<MimeTypesOperation>();
+}
+
+} // namespace yams::daemon::repair

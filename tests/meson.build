@@ -879,7 +879,10 @@ if catch2_dep.found()
   )
 
   catch2_repair_service_exe = executable('catch2_repair_service',
-    files('unit/daemon/repair_service_post_ingest_channel_catch2_test.cpp'),
+    files(
+      'unit/daemon/repair_service_post_ingest_channel_catch2_test.cpp',
+      'unit/daemon/repair_operation_registry_catch2_test.cpp',
+    ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
