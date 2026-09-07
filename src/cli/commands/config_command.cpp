@@ -1297,21 +1297,12 @@ private:
             if (auto it = config.find("search.reranker_model"); it != config.end()) {
                 rerankerModel = it->second;
             }
-            std::string rerankerPath;
-            if (auto it = config.find("search.reranker_model_path"); it != config.end()) {
-                rerankerPath = it->second;
-            }
             std::cout << ui::section_header("Reranker Configuration") << "\n";
             std::cout << "Backend: " << rerankerBackend << "\n";
             if (!rerankerModel.empty()) {
                 std::cout << "Model: " << rerankerModel << "\n";
             } else {
                 std::cout << "Model: (auto)\n";
-            }
-            if (!rerankerPath.empty()) {
-                std::cout << "Model path: " << rerankerPath << "\n";
-            } else {
-                std::cout << "Model path: (auto)\n";
             }
             std::cout << "\nCommands:\n";
             std::cout << "  yams config search reranker backend <simeon|onnx|colbert|auto>\n";

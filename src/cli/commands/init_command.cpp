@@ -1770,9 +1770,8 @@ private:
                 content.append("\n[search]\n");
             }
 
-            // Set reranker_backend, reranker_model and reranker_model_path in [search]
-            fs::path rerankerModelPath =
-                dataPath / "models" / "reranker" / selectedRerankerModel / "model.onnx";
+            // Set reranker_backend and reranker_model in [search]. The daemon resolves the
+            // model by name (ConfigResolver::resolveRerankerModel); no path key is read.
             auto secPos = content.find("[search]");
             if (secPos != std::string::npos) {
                 auto nextSec = content.find("\n[", secPos + 1);
@@ -1802,23 +1801,10 @@ private:
                     content.replace(namePos, lineEnd - namePos, modelNameLine);
                 }
 
-                // Add reranker_model_path
-                auto keyPos = content.find("reranker_model_path", secPos);
-                std::string modelPathLine = "reranker_model_path = \"" +
-                                            escapeTomlString(rerankerModelPath.string()) + "\"";
-                if (keyPos == std::string::npos || keyPos > rangeEnd) {
-                    content.insert(rangeEnd, modelPathLine + "\n");
-                } else {
-                    auto lineEnd = content.find('\n', keyPos);
-                    if (lineEnd == std::string::npos)
-                        lineEnd = content.size();
-                    content.replace(keyPos, lineEnd - keyPos, modelPathLine);
-                }
-
                 // Also enable reranking by default
                 auto enablePos = content.find("enable_reranking", secPos);
                 if (enablePos == std::string::npos || enablePos > rangeEnd) {
-                    // Find position after reranker_model_path (re-find since string changed)
+                    // Re-find the section since the string changed
                     secPos = content.find("[search]");
                     nextSec = content.find("\n[", secPos + 1);
                     rangeEnd = (nextSec == std::string::npos) ? content.size() : nextSec;
@@ -1829,7 +1815,7 @@ private:
             std::ofstream outCfg(configPath, std::ios::trunc);
             outCfg << content;
             outCfg.close();
-            spdlog::info("Configured [search].reranker_model_path");
+            spdlog::info("Configured [search].reranker_model");
         } catch (const std::exception& e) {
             spdlog::debug("Skipping reranker config write: {}", e.what());
         }
