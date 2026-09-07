@@ -1387,6 +1387,70 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
     applyUint32("list_admission_wait_ms", &TuneAdvisor::setListAdmissionWaitMs);
     applyUint32("grep_inflight_limit", &TuneAdvisor::setGrepInflightLimit);
     applyUint32("grep_admission_wait_ms", &TuneAdvisor::setGrepAdmissionWaitMs);
+    // Typed keys for setters that were previously reachable only through YAMS_* overlays.
+    applyUint32("conn_slots_min", &TuneAdvisor::setConnectionSlotsMin);
+    applyUint32("conn_slots_max", &TuneAdvisor::setConnectionSlotsMax);
+    applyUint32("conn_slots_step", &TuneAdvisor::setConnectionSlotsScaleStep);
+    // The setters below silently keep the default outside their ranges; check here so a
+    // rejected value is reported and never recorded as config provenance.
+    if (auto value = parseFloating(tuning, "tuning", "cpu_high_pct")) {
+        if (*value < 10.0 || *value > 100.0) {
+            spdlog::warn("Config: tuning.cpu_high_pct must be within [10, 100]; ignoring {}",
+                         *value);
+        } else {
+            TuneAdvisor::setCpuHighThresholdPercent(*value);
+            noteSource("tuning", "cpu_high_pct");
+        }
+    }
+    applyUint32("onnx_max_concurrent", &TuneAdvisor::setOnnxMaxConcurrent);
+    applyUint32("onnx_gliner_reserved", &TuneAdvisor::setOnnxGlinerReserved);
+    applyUint32("onnx_embed_reserved", &TuneAdvisor::setOnnxEmbedReserved);
+    applyUint32("onnx_reranker_reserved", &TuneAdvisor::setOnnxRerankerReserved);
+    applyUint32("onnx_sessions_per_model", &TuneAdvisor::setOnnxSessionsPerModel);
+    if (auto value = parseFloating(tuning, "tuning", "model_evict_warning_threshold")) {
+        if (*value <= 0.0 || *value >= 1.0) {
+            spdlog::warn(
+                "Config: tuning.model_evict_warning_threshold must be within (0, 1); ignoring {}",
+                *value);
+        } else {
+            TuneAdvisor::setModelEvictWarningThreshold(*value);
+            noteSource("tuning", "model_evict_warning_threshold");
+        }
+    }
+    if (auto value = parseFloating(tuning, "tuning", "model_evict_critical_threshold")) {
+        if (*value <= 0.0 || *value >= 1.0) {
+            spdlog::warn(
+                "Config: tuning.model_evict_critical_threshold must be within (0, 1); ignoring {}",
+                *value);
+        } else {
+            TuneAdvisor::setModelEvictCriticalThreshold(*value);
+            noteSource("tuning", "model_evict_critical_threshold");
+        }
+    }
+    if (auto value = parseFloating(tuning, "tuning", "model_evict_emergency_threshold")) {
+        if (*value <= 0.0 || *value >= 1.0) {
+            spdlog::warn(
+                "Config: tuning.model_evict_emergency_threshold must be within (0, 1); ignoring {}",
+                *value);
+        } else {
+            TuneAdvisor::setModelEvictEmergencyThreshold(*value);
+            noteSource("tuning", "model_evict_emergency_threshold");
+        }
+    }
+    applyUint32("indexing_workers_max", &TuneAdvisor::setMaxIngestWorkers);
+    applyUint32("store_document_channel_capacity", &TuneAdvisor::setStoreDocumentChannelCapacity);
+    applyUint32("work_coordinator_threads", &TuneAdvisor::setWorkCoordinatorThreads);
+    applyUint32("embed_channel_capacity", &TuneAdvisor::setEmbedChannelCapacity);
+    // 0 disables connection recycling and is a valid value here, unlike the uint32 knobs.
+    if (auto value = parseUint32(tuning, "tuning", "connection_lifetime_s")) {
+        if (*value > 86400) {
+            spdlog::warn("Config: tuning.connection_lifetime_s must be at most 86400; ignoring {}",
+                         *value);
+        } else {
+            TuneAdvisor::setConnectionLifetimeSeconds(*value);
+            noteSource("tuning", "connection_lifetime_s");
+        }
+    }
 
     if (auto value = parseBoolean(tuning, "tuning", "use_internal_bus_for_repair")) {
         TuneAdvisor::setUseInternalBusForRepair(*value);
