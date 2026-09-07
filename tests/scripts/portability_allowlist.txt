@@ -82,8 +82,8 @@ plugins/symbol_extractor_treesitter/grammar_loader.cpp:402:portability/env-read 
 plugins/symbol_extractor_treesitter/grammar_loader.cpp:411:portability/env-read # reviewed raw environment read
 plugins/symbol_extractor_treesitter/grammar_loader.cpp:413:portability/env-read # reviewed raw environment read
 src/app/services/document_service.cpp:1207:portability/env-read # reviewed raw environment read
-src/app/services/search_service.cpp:630:portability/env-read # reviewed raw environment read
-src/app/services/search_service.cpp:711:portability/env-read # reviewed raw environment read
+src/app/services/search_service.cpp:607:portability/env-read # reviewed raw environment read
+src/app/services/search_service.cpp:688:portability/env-read # reviewed raw environment read
 src/app/services/session_service.cpp:18:portability/env-read # reviewed raw environment read
 src/app/services/session_service.cpp:20:portability/env-read # reviewed raw environment read
 src/app/services/session_service.cpp:71:portability/env-read # reviewed raw environment read

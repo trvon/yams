@@ -852,7 +852,7 @@ public:
     batchGetContent(const std::vector<int64_t>& documentIds) override;
 
     // Batch fetch content previews for list/snippet hydration without reading full blobs.
-    Result<std::unordered_map<int64_t, std::string>>
+    virtual Result<std::unordered_map<int64_t, std::string>>
     batchGetContentPreview(const std::vector<int64_t>& documentIds, int maxChars, int maxDocs = 0);
 
     /// Batch fetch documents with content previews in a single JOIN query.
