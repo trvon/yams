@@ -5184,10 +5184,9 @@ struct BenchFixture {
             throw std::runtime_error("Vector topology-source seeding requires vector store");
         }
 
-        const std::size_t semanticTopK =
-            parseSizeEnv("YAMS_BENCH_SEED_SEMANTIC_TOPK", "YAMS_GRAPH_SEMANTIC_TOPK", 6);
-        const float semanticThreshold = parseFloatEnv("YAMS_BENCH_SEED_SEMANTIC_THRESHOLD",
-                                                      "YAMS_GRAPH_SEMANTIC_THRESHOLD", 0.30f);
+        const std::size_t semanticTopK = parseSizeEnv("YAMS_BENCH_SEED_SEMANTIC_TOPK", nullptr, 6);
+        const float semanticThreshold =
+            parseFloatEnv("YAMS_BENCH_SEED_SEMANTIC_THRESHOLD", nullptr, 0.30f);
         const float semanticWeightFloor =
             parseFloatEnv("YAMS_BENCH_SEED_SEMANTIC_WEIGHT_FLOOR", nullptr, 0.10f);
         const bool seedQrelCommunities = parseBoolEnv("YAMS_BENCH_SEED_QREL_COMMUNITIES", false) &&

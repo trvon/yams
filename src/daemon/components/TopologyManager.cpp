@@ -83,13 +83,14 @@ void applyConstructionPurityDefaults(topology::TopologyBuildConfig& buildConfig)
     buildConfig.reciprocalOnly = envBoolOr("YAMS_TOPOLOGY_RECIPROCAL_ONLY", true);
 }
 
-std::string computeCellIdentity() {
+std::string computeCellIdentity(const SemanticNeighborGraphConfig& semantic) {
     std::string identity;
     identity.reserve(128);
     identity.append("topk=");
-    identity.append(envOr("YAMS_GRAPH_SEMANTIC_TOPK", "default"));
+    identity.append(std::to_string(semantic.topK));
     identity.append(";thr=");
-    identity.append(envOr("YAMS_GRAPH_SEMANTIC_THRESHOLD", "default"));
+    identity.append(semantic.similarityThreshold ? std::to_string(*semantic.similarityThreshold)
+                                                 : std::string("default"));
     identity.append(";engine=");
     identity.append(envOr("YAMS_TOPOLOGY_ENGINE", "default"));
     identity.append(";reciprocal=");
@@ -280,7 +281,7 @@ TopologyManager::rebuildArtifacts(const std::string& reason, bool dryRun,
     } guard{rebuildRunning_};
 
     const auto startedAt = std::chrono::steady_clock::now();
-    const std::string cellIdentity = computeCellIdentity();
+    const std::string cellIdentity = computeCellIdentity(deps_.semanticGraph);
     {
         std::lock_guard<std::mutex> lock(telemetryMutex_);
         ++telemetry_.rebuildsTotal;

@@ -75,6 +75,7 @@
 #include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/init_utils.hpp>
 #include <yams/daemon/components/PluginManager.h>
+#include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/ResourceGovernor.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -83,13 +84,12 @@
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/retrieval_session.h>
 #include <yams/daemon/metric_keys.h>
-#include <yams/daemon/shutdown_budget.h>
-#include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/resource/abi_model_provider_adapter.h>
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/daemon/resource/simeon_model_provider.h>
+#include <yams/daemon/shutdown_budget.h>
 #include <yams/extraction/builtin_text_content_extractor.h>
 #include <yams/integrity/repair_manager.h>
 #include <yams/metadata/metadata_insert_writer.h>
@@ -285,9 +285,9 @@ ServiceManager::ServiceManager(const DaemonConfig& config, StateComponent& state
               return std::atomic_load_explicit(&embeddingService_, std::memory_order_acquire);
           },
           &config_, &resolvedDataDir_, [this]() { return getResolvedEmbeddingConfig(); }}),
-      topologyManager_(TopologyManager::Dependencies{[this]() { return getMetadataRepo(); },
-                                                     [this]() { return getKgStore(); },
-                                                     [this]() { return getVectorDatabase(); }}),
+      topologyManager_(TopologyManager::Dependencies{
+          [this]() { return getMetadataRepo(); }, [this]() { return getKgStore(); },
+          [this]() { return getVectorDatabase(); }, config_.embeddingService.semanticGraph}),
       lifecycleFsm_(lifecycleFsm) {
     spdlog::debug("[ServiceManager] Constructor start");
     {

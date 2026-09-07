@@ -2019,3 +2019,39 @@ TEST_CASE("ConfigResolver reports out-of-range values for the ranged [tuning] se
     sections["tuning"] = {};
     (void)ConfigResolver::applyRuntimeTuning(sections, base);
 }
+
+TEST_CASE("ConfigResolver applies the typed semantic graph policy",
+          "[daemon][components][config][semantic-graph][catch2]") {
+    ConfigResolver::ConfigSections sections;
+    DaemonConfig config;
+
+    SECTION("absent section keeps the defaults") {
+        REQUIRE(ConfigResolver::applyEmbeddingSemanticGraph(sections, config));
+        CHECK(config.embeddingService.semanticGraph.topK == 8);
+        CHECK_FALSE(config.embeddingService.semanticGraph.similarityThreshold.has_value());
+        CHECK(config.embeddingService.semanticGraph.useHnsw);
+    }
+
+    SECTION("explicit values are applied") {
+        sections["embeddings.semantic_graph"] = {
+            {"top_k", "12"}, {"similarity_threshold", "0.35"}, {"use_hnsw", "false"}};
+        REQUIRE(ConfigResolver::applyEmbeddingSemanticGraph(sections, config));
+        CHECK(config.embeddingService.semanticGraph.topK == 12);
+        REQUIRE(config.embeddingService.semanticGraph.similarityThreshold.has_value());
+        CHECK(*config.embeddingService.semanticGraph.similarityThreshold == Catch::Approx(0.35F));
+        CHECK_FALSE(config.embeddingService.semanticGraph.useHnsw);
+    }
+
+    SECTION("invalid values are rejected without touching the policy") {
+        sections["embeddings.semantic_graph"] = {{"top_k", "0"}};
+        CHECK_FALSE(ConfigResolver::applyEmbeddingSemanticGraph(sections, config));
+        sections["embeddings.semantic_graph"] = {{"similarity_threshold", "1.5"}};
+        CHECK_FALSE(ConfigResolver::applyEmbeddingSemanticGraph(sections, config));
+        sections["embeddings.semantic_graph"] = {{"use_hnsw", "maybe"}};
+        CHECK_FALSE(ConfigResolver::applyEmbeddingSemanticGraph(sections, config));
+        sections["embeddings.semantic_graph"] = {{"topk", "4"}};
+        CHECK_FALSE(ConfigResolver::applyEmbeddingSemanticGraph(sections, config));
+        CHECK(config.embeddingService.semanticGraph.topK == 8);
+        CHECK(config.embeddingService.semanticGraph.useHnsw);
+    }
+}
