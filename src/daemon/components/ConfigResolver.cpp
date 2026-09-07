@@ -817,6 +817,21 @@ ConfigResolver::resolveEmbeddingConfig(const DaemonConfig& config,
     return result;
 }
 
+ConfigResolver::EmbeddingRuntimePolicy ConfigResolver::resolveEmbeddingRuntimePolicy() {
+    // One resolver, one parse policy: project the typed resolution onto the compatibility
+    // shape that library callers without a DaemonConfig still consume.
+    DaemonConfig config;
+    const auto resolved = resolveEmbeddingConfig(config, {});
+    EmbeddingRuntimePolicy policy = resolved.runtime;
+    if (!resolved.backend.empty()) {
+        policy.backend = resolved.backend;
+    }
+    if (!resolved.preferredModel.empty()) {
+        policy.preferredModel = resolved.preferredModel;
+    }
+    return policy;
+}
+
 ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPolicy() {
     TopologyRoutingPolicy policy;
 
