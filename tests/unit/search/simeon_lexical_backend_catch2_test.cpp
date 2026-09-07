@@ -215,6 +215,50 @@ TEST_CASE("SimeonLexicalBackend chunks oversized docs before applying corpus byt
     CHECK(backend.doc_count() == 1u);
 }
 
+TEST_CASE("SimeonLexicalBackend concept mining honours the corpus byte budget",
+          "[search][simeon][concepts][catch2]") {
+    // 120 documents of ~4 KiB each. Chunking keeps the BM25 pass under 64 KiB of processed
+    // text, but concept mining used to re-read every raw document into memory at once.
+    // A strongly associated pair ("quantum entanglement") near the front of each document,
+    // so both the chunked BM25 pass and the raw concept pass see it, followed by a wide filler
+    // vocabulary whose bigrams carry no association.
+    std::vector<std::pair<std::string, std::string>> docs;
+    docs.reserve(120);
+    std::uint32_t lcg = 12345u;
+    for (int i = 0; i < 120; ++i) {
+        std::string text = "quantum entanglement quantum entanglement quantum entanglement ";
+        while (text.size() < 4096) {
+            lcg = lcg * 1664525u + 1013904223u;
+            text += "w" + std::to_string(lcg % 397) + " ";
+        }
+        docs.emplace_back("hash_concept_" + std::to_string(i), std::move(text));
+    }
+    auto corpus = makeCorpus(docs);
+
+    SimeonLexicalBackend::Config cfg;
+    cfg.concept_mining_enabled = true;
+    cfg.build_doc_chunk_bytes = 128;
+    cfg.build_doc_max_chunks = 2;
+    cfg.fragment_geometry_enabled = false;
+
+    SECTION("raw corpus over budget skips concept mining but keeps the index") {
+        cfg.max_corpus_bytes = 64ULL * 1024ULL;
+        SimeonLexicalBackend backend(cfg);
+        REQUIRE(backend.buildAsync(corpus.repo).has_value());
+        REQUIRE(waitReady(backend, std::chrono::seconds(30)));
+        CHECK(backend.doc_count() == 120u);
+        CHECK(backend.concept_count() == 0u);
+    }
+    SECTION("raw corpus within budget mines concepts") {
+        cfg.max_corpus_bytes = 4ULL * 1024ULL * 1024ULL;
+        SimeonLexicalBackend backend(cfg);
+        REQUIRE(backend.buildAsync(corpus.repo).has_value());
+        REQUIRE(waitReady(backend, std::chrono::seconds(30)));
+        CHECK(backend.doc_count() == 120u);
+        CHECK(backend.concept_count() > 0u);
+    }
+}
+
 TEST_CASE("SimeonLexicalBackend score returns one float per candidate",
           "[search][simeon][catch2]") {
     auto corpus = makeCorpus({
