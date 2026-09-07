@@ -6,7 +6,9 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 using Catch::Approx;
@@ -94,4 +96,82 @@ TEST_CASE("legacy search environment applies typed benchmark overrides",
     CHECK(static_cast<bool>(config.vectorMaxResults == 40));
     CHECK(pins.text);
     CHECK(pins.similarityThreshold);
+}
+
+namespace {
+
+// Overlays retired because nothing outside product code set, benched, or documented them
+// (tests/scripts/report_config_key_usage.py). Typed SearchEngineConfig fields remain the
+// only way to reach these levers.
+constexpr const char* kRetiredSearchOverlays[] = {
+    "YAMS_SEARCH_BYPASS_CORPUS_WARMING_GATE",
+    "YAMS_SEARCH_ENABLE_GRAPH_FUSION_WINDOW_GUARD",
+    "YAMS_SEARCH_ENABLE_GRAPH_QUERY_EXPANSION",
+    "YAMS_SEARCH_ENABLE_LEXICAL_EXPANSION",
+    "YAMS_SEARCH_ENABLE_WEAK_QUERY_FANOUT_BOOST",
+    "YAMS_SEARCH_FUSION_EVIDENCE_RESCUE_MIN_SCORE",
+    "YAMS_SEARCH_FUSION_EVIDENCE_RESCUE_SLOTS",
+    "YAMS_SEARCH_GRAPH_COMMUNITY_WEIGHT",
+    "YAMS_SEARCH_GRAPH_ENABLE_PATHS",
+    "YAMS_SEARCH_GRAPH_EXPANSION_FTS_PENALTY",
+    "YAMS_SEARCH_GRAPH_EXPANSION_MAX_SEEDS",
+    "YAMS_SEARCH_GRAPH_EXPANSION_MAX_TERMS",
+    "YAMS_SEARCH_GRAPH_EXPANSION_MIN_HITS",
+    "YAMS_SEARCH_GRAPH_EXPANSION_QUERY_NEIGHBOR_K",
+    "YAMS_SEARCH_GRAPH_EXPANSION_QUERY_NEIGHBOR_MIN_SCORE",
+    "YAMS_SEARCH_GRAPH_EXPANSION_VECTOR_PENALTY",
+    "YAMS_SEARCH_GRAPH_FALLBACK_TOP_SIGNAL",
+    "YAMS_SEARCH_GRAPH_FUSION_GUARD_DEPTH_MULTIPLIER",
+    "YAMS_SEARCH_GRAPH_HOP_DECAY",
+    "YAMS_SEARCH_GRAPH_MAX_ADDED_IN_FUSION_WINDOW",
+    "YAMS_SEARCH_GRAPH_MAX_HOPS",
+    "YAMS_SEARCH_GRAPH_MAX_NEIGHBORS",
+    "YAMS_SEARCH_GRAPH_MAX_PATHS",
+    "YAMS_SEARCH_GRAPH_TEXT_MIN_ADMISSION_SCORE",
+    "YAMS_SEARCH_GRAPH_TEXT_WEIGHT",
+    "YAMS_SEARCH_GRAPH_USE_QUERY_CONCEPTS",
+    "YAMS_SEARCH_GRAPH_VECTOR_REQUIRE_BASELINE_TEXT_ANCHORING",
+    "YAMS_SEARCH_GRAPH_VECTOR_REQUIRE_CORROBORATION",
+    "YAMS_SEARCH_GRAPH_VECTOR_REQUIRE_TEXT_ANCHORING",
+    "YAMS_SEARCH_GRAPH_VECTOR_WEIGHT",
+    "YAMS_SEARCH_LEXICAL_EXPANSION_MIN_HITS",
+    "YAMS_SEARCH_LEXICAL_EXPANSION_PENALTY",
+    "YAMS_SEARCH_RERANK_TOP_K",
+    "YAMS_SEARCH_SEMANTIC_RESCUE_MIN_SCORE",
+    "YAMS_SEARCH_STRONG_VECTOR_ONLY_TOP_RANK",
+    "YAMS_SEARCH_TIERED_MIN_CANDIDATES",
+    "YAMS_SEARCH_TIERED_NARROW_VECTOR_SEARCH",
+    "YAMS_SEARCH_TOPOLOGY_FINAL_RESCUE_SLOTS",
+    "YAMS_SEARCH_TOPOLOGY_FUSION_RESCUE_SLOTS",
+    "YAMS_SEARCH_VECTOR_ONLY_NEAR_MISS_PENALTY",
+    "YAMS_SEARCH_VECTOR_ONLY_NEAR_MISS_RESERVE",
+    "YAMS_SEARCH_VECTOR_ONLY_NEAR_MISS_SLACK",
+    "YAMS_SEARCH_WEAK_QUERY_ENTITY_VECTOR_FANOUT_MULTIPLIER",
+    "YAMS_SEARCH_WEAK_QUERY_MIN_TEXT_HITS",
+    "YAMS_SEARCH_WEAK_QUERY_MIN_TOP_TEXT_SCORE",
+};
+
+} // namespace
+
+TEST_CASE("legacy search environment never consults retired overlays",
+          "[search][config][environment][catch2]") {
+    std::unordered_map<std::string, int> requested;
+    const LegacySearchConfigEnvironment environment{
+        [&requested](std::string_view name) -> std::optional<std::string> {
+            ++requested[std::string{name}];
+            if (name == "YAMS_ENABLE_ENV_OVERRIDES") {
+                return std::string{"1"};
+            }
+            return std::nullopt;
+        }};
+    SearchEngineConfig config;
+    (void)environment.applyTo(config);
+
+    for (const char* key : kRetiredSearchOverlays) {
+        INFO(key);
+        CHECK(requested.count(key) == 0);
+    }
+    // One name, one read: the duplicated semantic-rescue block is gone.
+    CHECK(requested["YAMS_SEARCH_SEMANTIC_RESCUE_SLOTS"] == 1);
+    CHECK(requested["YAMS_SEARCH_RERANK_TOPK"] == 1);
 }
