@@ -81,9 +81,9 @@ plugins/symbol_extractor_treesitter/grammar_loader.cpp:399:portability/env-read 
 plugins/symbol_extractor_treesitter/grammar_loader.cpp:402:portability/env-read # reviewed raw environment read
 plugins/symbol_extractor_treesitter/grammar_loader.cpp:411:portability/env-read # reviewed raw environment read
 plugins/symbol_extractor_treesitter/grammar_loader.cpp:413:portability/env-read # reviewed raw environment read
-src/app/services/document_service.cpp:1207:portability/env-read # reviewed raw environment read
-src/app/services/search_service.cpp:612:portability/env-read # reviewed raw environment read
-src/app/services/search_service.cpp:693:portability/env-read # reviewed raw environment read
+src/app/services/document_service.cpp:1198:portability/env-read # reviewed raw environment read
+src/app/services/search_service.cpp:514:portability/env-read # reviewed raw environment read
+src/app/services/search_service.cpp:595:portability/env-read # reviewed raw environment read
 src/app/services/session_service.cpp:18:portability/env-read # reviewed raw environment read
 src/app/services/session_service.cpp:20:portability/env-read # reviewed raw environment read
 src/app/services/session_service.cpp:71:portability/env-read # reviewed raw environment read
@@ -163,9 +163,9 @@ src/metadata/repository/search_query_helpers.cpp:293:portability/env-read # revi
 src/metadata/repository/search_query_helpers.cpp:480:portability/env-read # reviewed raw environment read
 src/metadata/versioning_util.cpp:101:portability/env-read # reviewed raw environment read
 src/plugins/plugin_repo_client.cpp:62:portability/env-read # reviewed raw environment read
-src/search/search_engine.cpp:378:portability/env-read # reviewed raw environment read
-src/search/search_engine.cpp:391:portability/env-read # reviewed raw environment read
-src/search/search_engine.cpp:3134:portability/env-read # reviewed raw environment read
+src/search/search_engine.cpp:379:portability/env-read # reviewed raw environment read
+src/search/search_engine.cpp:392:portability/env-read # reviewed raw environment read
+src/search/search_engine.cpp:3102:portability/env-read # reviewed raw environment read
 src/search/search_lexical_pipeline.cpp:601:portability/env-read # reviewed raw environment read
 src/storage/compressed_storage_engine.cpp:632:portability/env-read # reviewed raw environment read
 src/storage/object_storage_plugin_loader.cpp:126:portability/env-read # reviewed raw environment read

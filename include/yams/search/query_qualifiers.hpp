@@ -24,8 +24,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <map>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 namespace yams::search {
@@ -51,6 +54,30 @@ struct ParsedQuery {
     std::string normalizedQuery;
     ExtractScope scope;
 };
+
+// Structured metadata filters written inline as key=value tokens ("task=alpha phase=done").
+// Shared by SearchService's keyword path and SearchEngine's metadata component so both agree
+// on what counts as a filter.
+struct StructuredMetadataQuery {
+    std::string residualQuery;                                // tokens that were not filters
+    std::vector<std::pair<std::string, std::string>> filters; // sorted by key, last value wins
+};
+
+// A token is a filter when it has exactly one '=', a non-empty key and value, and none of the
+// characters that mark quoting, grouping, or shell-like syntax.
+inline bool isStructuredMetadataToken(std::string_view token) {
+    const auto pos = token.find('=');
+    if (pos == std::string_view::npos || pos == 0 || pos + 1 >= token.size()) {
+        return false;
+    }
+    if (token.find('=', pos + 1) != std::string_view::npos) {
+        return false;
+    }
+    static constexpr std::string_view kDisallowed = "\"'()[]{}<>|&";
+    return token.find_first_of(kDisallowed) == std::string_view::npos;
+}
+
+inline StructuredMetadataQuery extractStructuredMetadataQuery(std::string_view query);
 
 namespace detail {
 
@@ -361,6 +388,38 @@ inline ParsedQuery parseQueryQualifiers(const std::string& raw) {
     }
 
     return ParsedQuery{std::move(normalized), std::move(scope)};
+}
+
+inline StructuredMetadataQuery extractStructuredMetadataQuery(std::string_view query) {
+    StructuredMetadataQuery parsed;
+    std::istringstream stream{std::string{query}};
+    std::vector<std::string> residualTokens;
+    std::map<std::string, std::string> dedupedFilters;
+    for (std::string token; stream >> token;) {
+        if (!isStructuredMetadataToken(token)) {
+            residualTokens.push_back(std::move(token));
+            continue;
+        }
+        const auto pos = token.find('=');
+        std::string key = detail::trim_copy(token.substr(0, pos));
+        std::string value = detail::trim_copy(token.substr(pos + 1));
+        if (key.empty() || value.empty()) {
+            residualTokens.push_back(std::move(token));
+            continue;
+        }
+        dedupedFilters[std::move(key)] = std::move(value);
+    }
+
+    for (const auto& [key, value] : dedupedFilters) {
+        parsed.filters.emplace_back(key, value);
+    }
+    for (std::size_t i = 0; i < residualTokens.size(); ++i) {
+        if (i > 0) {
+            parsed.residualQuery += ' ';
+        }
+        parsed.residualQuery += residualTokens[i];
+    }
+    return parsed;
 }
 
 } // namespace yams::search

@@ -55,9 +55,6 @@ namespace yams::app::services::utils {
 /// week") Returns Unix epoch seconds, or error if parsing fails
 Result<std::int64_t> parseTimeExpression(const std::string& timeExpr);
 
-/// Check if a string looks like a content hash (hex string, 8-64 chars)
-bool looksLikeHash(const std::string& str);
-
 /// Classify file type from MIME type and extension for enhanced filtering
 /// Returns: "text", "binary", "image", "document", "archive", "audio", "video", "executable"
 std::string classifyFileType(const std::string& mimeType, const std::string& extension);

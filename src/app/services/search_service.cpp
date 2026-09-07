@@ -10,6 +10,8 @@
 #include <yams/app/services/service_utils.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
+#include <yams/common/fs_utils.h>
+#include <yams/common/hash_predicates.h>
 #include <yams/common/string_utils.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/metadata/kg_relation_summary.h>
@@ -84,110 +86,6 @@ void annotateRecentLexicalDeltaHits(SearchResponse& resp,
         }
     }
     resp.searchStats["lexical_delta_recent_hits"] = std::to_string(recentHits);
-}
-
-// Returns true if s consists only of hex digits
-bool isHex(const std::string& s) {
-    return std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isxdigit(c) != 0; });
-}
-
-// Heuristic: treat as hash when it looks like a hex string of reasonable length (8-64)
-bool looksLikeHash(const std::string& s) {
-    if (s.size() < 8 || s.size() > 64)
-        return false;
-    return isHex(s);
-}
-
-static void appendMacPathAliases(std::vector<std::string>& patterns) {
-#if defined(__APPLE__)
-    if (patterns.empty()) {
-        return;
-    }
-
-    std::unordered_set<std::string> seen(patterns.begin(), patterns.end());
-    std::vector<std::string> aliases;
-    aliases.reserve(patterns.size());
-
-    for (const auto& pattern : patterns) {
-        std::string alias;
-        if (pattern == "/var") {
-            alias = "/private/var";
-        } else if (pattern.rfind("/var/", 0) == 0) {
-            alias = "/private" + pattern;
-        } else if (pattern == "/private/var") {
-            alias = "/var";
-        } else if (pattern.rfind("/private/var/", 0) == 0) {
-            alias = pattern.substr(std::string("/private").size());
-        }
-
-        if (!alias.empty() && seen.insert(alias).second) {
-            aliases.push_back(std::move(alias));
-        }
-    }
-
-    if (!aliases.empty()) {
-        patterns.insert(patterns.end(), aliases.begin(), aliases.end());
-    }
-#else
-    (void)patterns;
-#endif
-}
-
-// Helper function to escape regex special characters
-struct ParsedMetadataQuery {
-    std::string residualQuery;
-    std::vector<std::pair<std::string, std::string>> filters;
-};
-
-std::string trimAscii(std::string value) {
-    auto notSpace = [](unsigned char c) { return !std::isspace(c); };
-    value.erase(value.begin(), std::find_if(value.begin(), value.end(), notSpace));
-    value.erase(std::find_if(value.rbegin(), value.rend(), notSpace).base(), value.end());
-    return value;
-}
-
-bool isStructuredMetadataToken(std::string_view token) {
-    const auto pos = token.find('=');
-    if (pos == std::string_view::npos || pos == 0 || pos + 1 >= token.size()) {
-        return false;
-    }
-    if (token.find('=', pos + 1) != std::string_view::npos) {
-        return false;
-    }
-    static constexpr std::string_view kDisallowed = "\"'()[]{}<>|&";
-    return token.find_first_of(kDisallowed) == std::string_view::npos;
-}
-
-ParsedMetadataQuery extractStructuredMetadataQuery(std::string_view query) {
-    ParsedMetadataQuery parsed;
-    std::istringstream stream{std::string{query}};
-    std::vector<std::string> residualTokens;
-    std::map<std::string, std::string> dedupedFilters;
-    for (std::string token; stream >> token;) {
-        if (!isStructuredMetadataToken(token)) {
-            residualTokens.push_back(std::move(token));
-            continue;
-        }
-        const auto pos = token.find('=');
-        std::string key = trimAscii(token.substr(0, pos));
-        std::string value = trimAscii(token.substr(pos + 1));
-        if (key.empty() || value.empty()) {
-            residualTokens.push_back(std::move(token));
-            continue;
-        }
-        dedupedFilters[std::move(key)] = std::move(value);
-    }
-
-    for (const auto& [key, value] : dedupedFilters) {
-        parsed.filters.emplace_back(key, value);
-    }
-    for (std::size_t i = 0; i < residualTokens.size(); ++i) {
-        if (i > 0) {
-            parsed.residualQuery += ' ';
-        }
-        parsed.residualQuery += residualTokens[i];
-    }
-    return parsed;
 }
 
 std::size_t annotateResultRelations(std::vector<SearchItem>& results,
@@ -346,19 +244,19 @@ bool looksLikeHashQuery(const std::string& raw) {
     };
 
     if (auto v = stripPrefix("hash:"); !v.empty()) {
-        return looksLikeHash(yams::common::trimCopy(std::move(v)));
+        return yams::common::looksLikeHashQueryToken(yams::common::trimCopy(std::move(v)));
     }
     if (auto v = stripPrefix("sha1:"); !v.empty()) {
-        return looksLikeHash(yams::common::trimCopy(std::move(v)));
+        return yams::common::looksLikeHashQueryToken(yams::common::trimCopy(std::move(v)));
     }
     if (auto v = stripPrefix("sha256:"); !v.empty()) {
-        return looksLikeHash(yams::common::trimCopy(std::move(v)));
+        return yams::common::looksLikeHashQueryToken(yams::common::trimCopy(std::move(v)));
     }
     if (auto v = stripPrefix("md5:"); !v.empty()) {
-        return looksLikeHash(yams::common::trimCopy(std::move(v)));
+        return yams::common::looksLikeHashQueryToken(yams::common::trimCopy(std::move(v)));
     }
 
-    if (!looksLikeHash(trimmed))
+    if (!yams::common::looksLikeHashQueryToken(trimmed))
         return false;
 
     // Require at least 8 chars for hash prefix searches (matches looksLikeHash minimum).
@@ -386,16 +284,20 @@ std::optional<std::string> extractHashPrefix(const std::string& raw) {
     };
 
     if (auto v = stripPrefix("hash:"); !v.empty()) {
-        return looksLikeHash(v) ? std::optional<std::string>(v) : std::nullopt;
+        return yams::common::looksLikeHashQueryToken(v) ? std::optional<std::string>(v)
+                                                        : std::nullopt;
     }
     if (auto v = stripPrefix("sha1:"); !v.empty()) {
-        return looksLikeHash(v) ? std::optional<std::string>(v) : std::nullopt;
+        return yams::common::looksLikeHashQueryToken(v) ? std::optional<std::string>(v)
+                                                        : std::nullopt;
     }
     if (auto v = stripPrefix("sha256:"); !v.empty()) {
-        return looksLikeHash(v) ? std::optional<std::string>(v) : std::nullopt;
+        return yams::common::looksLikeHashQueryToken(v) ? std::optional<std::string>(v)
+                                                        : std::nullopt;
     }
     if (auto v = stripPrefix("md5:"); !v.empty()) {
-        return looksLikeHash(v) ? std::optional<std::string>(v) : std::nullopt;
+        return yams::common::looksLikeHashQueryToken(v) ? std::optional<std::string>(v)
+                                                        : std::nullopt;
     }
 
     if (looksLikeHashQuery(trimmed)) {
@@ -719,7 +621,7 @@ public:
         SearchRequest normalizedReq = req;
         normalizedReq.query = std::move(parsed.normalizedQuery);
         if (normalizedReq.type == "keyword") {
-            auto structured = extractStructuredMetadataQuery(normalizedReq.query);
+            auto structured = yams::search::extractStructuredMetadataQuery(normalizedReq.query);
             if (!structured.filters.empty()) {
                 normalizedReq.metadataFilters = std::move(structured.filters);
                 normalizedReq.query = std::move(structured.residualQuery);
@@ -775,7 +677,7 @@ public:
             normalizedReq.pathPatterns.insert(normalizedReq.pathPatterns.end(),
                                               scopePatterns.begin(), scopePatterns.end());
         }
-        appendMacPathAliases(normalizedReq.pathPatterns);
+        yams::common::appendMacPathAliases(normalizedReq.pathPatterns);
 
         if (normalizedReq.extension.empty() && !parsed.scope.ext.empty()) {
             normalizedReq.extension = parsed.scope.ext;
@@ -801,7 +703,7 @@ public:
 
         if (!normalizedReq.hash.empty()) {
             YAMS_ZONE_SCOPED_N("search_service::hash_lookup");
-            if (!looksLikeHash(normalizedReq.hash)) {
+            if (!yams::common::looksLikeHashQueryToken(normalizedReq.hash)) {
                 co_return Error{ErrorCode::InvalidArgument,
                                 "Invalid hash format (expected hex, 8-64 chars)"};
             }

@@ -20,6 +20,7 @@
 #include <yams/search/kg_scorer_simple.h>
 #include <yams/search/lexical_scoring.h>
 #include <yams/search/query_expansion.h>
+#include <yams/search/query_qualifiers.hpp>
 #include <yams/search/query_router.h>
 #include <yams/search/query_text_utils.h>
 #include <yams/search/search_execution_context.h>
@@ -996,39 +997,6 @@ std::vector<std::string> tokenizeQueryTerms(std::string_view query) {
         }
     }
     return terms;
-}
-
-std::vector<std::pair<std::string, std::string>>
-parseMetadataFiltersFromQuery(std::string_view query) {
-    std::vector<std::pair<std::string, std::string>> filters;
-    std::size_t pos = 0;
-    while (pos < query.size()) {
-        while (pos < query.size() && std::isspace(static_cast<unsigned char>(query[pos]))) {
-            ++pos;
-        }
-        const std::size_t keyStart = pos;
-        while (pos < query.size() && query[pos] != '=' &&
-               !std::isspace(static_cast<unsigned char>(query[pos]))) {
-            ++pos;
-        }
-        if (pos >= query.size() || query[pos] != '=' || pos == keyStart) {
-            while (pos < query.size() && !std::isspace(static_cast<unsigned char>(query[pos]))) {
-                ++pos;
-            }
-            continue;
-        }
-        std::string key(query.substr(keyStart, pos - keyStart));
-        ++pos; // '='
-        const std::size_t valueStart = pos;
-        while (pos < query.size() && !std::isspace(static_cast<unsigned char>(query[pos]))) {
-            ++pos;
-        }
-        if (pos > valueStart) {
-            filters.emplace_back(std::move(key),
-                                 std::string(query.substr(valueStart, pos - valueStart)));
-        }
-    }
-    return filters;
 }
 
 struct PathQuerySeed {
@@ -5397,7 +5365,7 @@ Result<std::vector<ComponentResult>> SearchEngine::Impl::queryMetadata(const std
     if (!metadataRepo_)
         return results;
 
-    const auto queryFilters = parseMetadataFiltersFromQuery(query);
+    const auto queryFilters = yams::search::extractStructuredMetadataQuery(query).filters;
     bool hasStructFilters = params.mimeType.has_value() || params.extension.has_value() ||
                             params.modifiedAfter.has_value() || params.modifiedBefore.has_value();
 
