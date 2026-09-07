@@ -1,0 +1,3195 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Bodies of MemorySyncLoop, moved out of the header (see memory_sync.h for the contract).
+#include <yams/memory_sync/memory_sync.h>
+
+namespace yams::memory_sync {
+
+Result<void> MemorySyncLoop::publish(std::string_view logicalKey,
+                                     std::span<const std::byte> content) {
+    if (auto valid = validateLogicalKey(logicalKey); !valid) {
+        return valid.error();
+    }
+    if (content.size() > limits_.maxValueBytes || content.size() > limits_.maxCacheBytes) {
+        return Error{ErrorCode::InvalidArgument,
+                     "memory sync value exceeds configured resident limit"};
+    }
+
+    // Reconcile first so this node's version vector and logical clock resume from
+    // the last known state. Preserves causal ordering across fresh loop instances
+    // (e.g. a stateless CLI process publishing after a prior one).
+    if (auto reconciled = reconcileBeforeWrite(); !reconciled) {
+        return reconciled.error();
+    }
+    if (writerQuarantined(nodeId_)) {
+        return Error{ErrorCode::InvalidState, "quarantined writer cannot publish"};
+    }
+    if (auto committed = requireLocalHistoryCommitment(); !committed) {
+        return committed.error();
+    }
+
+    const std::string hash = hashContent(content);
+    if (auto ready = beforeRemoteWork(); !ready) {
+        return ready.error();
+    }
+    const auto existingBlob = backend_->exists(blobKey(hash));
+    if (!existingBlob) {
+        return existingBlob.error();
+    }
+    if (!existingBlob.value()) {
+        if (auto r = backend_->store(blobKey(hash), content); !r) {
+            return r.error();
+        }
+    }
+    if (nodeId_.empty() || nodeId_ == "default" || corpusId_.empty() || corpusEpoch_ == 0) {
+        return Error{ErrorCode::InvalidArgument, "memory sync identity is not configured"};
+    }
+    if (!version_.increment(nodeId_)) {
+        return Error{ErrorCode::InvalidState, "memory sync writer counter exhausted"};
+    }
+    ++logicalClock_;
+
+    MemoryIndexRecord record;
+    record.entryHash = hash;
+    record.ts.physicalMs = nowMs();
+    record.ts.logical = logicalClock_;
+    record.origin = nodeId_;
+    record.vv = version_;
+    record.corpusId = corpusId_;
+    record.corpusEpoch = corpusEpoch_;
+    record.operationId = makeOperationId(nodeId_, version_.get(nodeId_));
+    record.logicalKey = logicalKey;
+    record.recordKind = std::string(kMemoryValueRecordKind);
+    if (writerAuth_) {
+        if (auto signedRecord = writerAuth_->sign(record); !signedRecord) {
+            return signedRecord.error();
+        }
+    }
+
+    const auto recordBytes = serialize(record);
+    const std::string recordHash = hashContent(recordBytes);
+    if (auto ready = beforeRemoteWork(); !ready) {
+        return ready.error();
+    }
+    if (auto r = backend_->store(indexKey(logicalKey, recordHash), recordBytes); !r) {
+        return r.error();
+    }
+    return commitRecordHistory(record, recordHash);
+}
+
+Result<void> MemorySyncLoop::erase(std::string_view logicalKey, std::string tombstonePayload) {
+    if (auto staged = stageErase(logicalKey, tombstonePayload, true); !staged) {
+        return staged.error();
+    }
+    return publishStagedErase(logicalKey);
+}
+
+Result<void> MemorySyncLoop::stageErase(std::string_view logicalKey, std::string tombstonePayload,
+                                        bool ready, EraseReadinessProbe readinessProbe) {
+    if (auto valid = validateLogicalKey(logicalKey); !valid) {
+        return valid.error();
+    }
+    if (tombstonePayload.size() > limits_.maxEnvelopeBytes) {
+        return Error{ErrorCode::InvalidArgument,
+                     "memory sync tombstone payload exceeds envelope limit"};
+    }
+    if (nodeId_.empty() || nodeId_ == "default" || corpusId_.empty() || corpusEpoch_ == 0) {
+        return Error{ErrorCode::InvalidArgument, "memory sync identity is not configured"};
+    }
+    auto existing = loadEraseIntent(logicalKey);
+    if (!existing) {
+        return existing.error();
+    }
+    EraseIntentState intent;
+    if (existing.value()) {
+        if (existing.value()->tombstonePayload != tombstonePayload ||
+            existing.value()->readinessProbe != readinessProbe) {
+            return Error{ErrorCode::InvalidState,
+                         "staged erase payload conflicts with retained intent"};
+        }
+        intent = std::move(*existing.value());
+        if (!ready || intent.ready) {
+            return {};
+        }
+    } else {
+        auto allIntents = loadEraseIntents();
+        if (!allIntents) {
+            return allIntents.error();
+        }
+        if (allIntents.value().size() >= limits_.maxMergedKeys) {
+            return Error{ErrorCode::ResourceExhausted, "durable erase outbox limit reached"};
+        }
+        intent.logicalKey = logicalKey;
+        intent.tombstonePayload = std::move(tombstonePayload);
+        intent.readinessProbe = readinessProbe;
+        if (!ready) {
+            if (writerAuth_) {
+                if (auto reconciled = reconcileBeforeWrite(); !reconciled) {
+                    return reconciled.error();
+                }
+                auto authorization = prepareEraseRecord(
+                    intent.logicalKey,
+                    eraseAuthorizationPayload(intent.tombstonePayload, readinessProbe));
+                if (!authorization) {
+                    return authorization.error();
+                }
+                intent.authorization = std::move(authorization.value());
+            }
+            return storeEraseIntent(intent);
+        }
+    }
+    if (auto reconciled = reconcileBeforeWrite(); !reconciled) {
+        return reconciled.error();
+    }
+    if (writerAuth_ && !intent.authorization) {
+        auto authorization =
+            prepareEraseRecord(intent.logicalKey, eraseAuthorizationPayload(intent.tombstonePayload,
+                                                                            intent.readinessProbe));
+        if (!authorization) {
+            return authorization.error();
+        }
+        intent.authorization = std::move(authorization.value());
+    }
+    auto prepared = prepareEraseRecord(intent.logicalKey, intent.tombstonePayload);
+    if (!prepared) {
+        return prepared.error();
+    }
+    intent.ready = true;
+    intent.record = std::move(prepared.value());
+    intent.recordHash = hashContent(serialize(*intent.record));
+    auto commitment = preparedEraseCommitment(*intent.record, intent.recordHash);
+    if (!commitment) {
+        return commitment.error();
+    }
+    intent.preparedCommitment = std::move(commitment.value());
+    return storeEraseIntent(intent);
+}
+
+Result<void> MemorySyncLoop::stageErases(std::span<const EraseStageRequest> requests) {
+    if (requests.empty()) {
+        return {};
+    }
+    auto existing = loadEraseIntents();
+    if (!existing) {
+        return existing.error();
+    }
+
+    std::set<std::string> existingKeys;
+    for (const auto& intent : existing.value()) {
+        existingKeys.insert(intent.logicalKey);
+    }
+    std::set<std::string> requestedKeys;
+    std::size_t newIntentCount = 0;
+    for (const auto& request : requests) {
+        if (auto valid = validateLogicalKey(request.logicalKey); !valid) {
+            return valid.error();
+        }
+        if (request.tombstonePayload.size() > limits_.maxEnvelopeBytes) {
+            return Error{ErrorCode::InvalidArgument,
+                         "memory sync tombstone payload exceeds envelope limit"};
+        }
+        if (!requestedKeys.insert(request.logicalKey).second) {
+            return Error{ErrorCode::InvalidArgument,
+                         "erase staging batch contains a duplicate logical key"};
+        }
+        const auto retained = std::ranges::find_if(existing.value(), [&](const auto& intent) {
+            return intent.logicalKey == request.logicalKey;
+        });
+        if (retained != existing.value().end() &&
+            (retained->tombstonePayload != request.tombstonePayload ||
+             retained->readinessProbe != request.readinessProbe)) {
+            return Error{ErrorCode::InvalidState,
+                         "staged erase payload conflicts with retained intent"};
+        }
+        newIntentCount += existingKeys.contains(request.logicalKey) ? 0U : 1U;
+    }
+    if (existing.value().size() > limits_.maxMergedKeys ||
+        newIntentCount > limits_.maxMergedKeys - existing.value().size()) {
+        return Error{ErrorCode::ResourceExhausted,
+                     "erase staging batch exceeds the durable outbox limit"};
+    }
+
+    std::vector<std::string> newlyStored;
+    newlyStored.reserve(newIntentCount);
+    for (const auto& request : requests) {
+        auto staged =
+            stageErase(request.logicalKey, request.tombstonePayload, false, request.readinessProbe);
+        if (!staged) {
+            std::string rollbackFailure;
+            for (auto key = newlyStored.rbegin(); key != newlyStored.rend(); ++key) {
+                if (auto cancelled = cancelStagedErase(*key); !cancelled) {
+                    rollbackFailure += rollbackFailure.empty() ? "" : "; ";
+                    rollbackFailure += *key + ": " + cancelled.error().message;
+                }
+            }
+            if (!rollbackFailure.empty()) {
+                return Error{staged.error().code,
+                             staged.error().message +
+                                 "; batch rollback failed: " + rollbackFailure};
+            }
+            return staged.error();
+        }
+        if (!existingKeys.contains(request.logicalKey)) {
+            newlyStored.push_back(request.logicalKey);
+        }
+    }
+    return {};
+}
+
+Result<std::vector<PendingEraseIntent>> MemorySyncLoop::pendingErases() {
+    auto loaded = loadEraseIntents();
+    if (!loaded) {
+        return loaded.error();
+    }
+    std::vector<PendingEraseIntent> pending;
+    pending.reserve(loaded.value().size());
+    for (const auto& intent : loaded.value()) {
+        pending.push_back(PendingEraseIntent{
+            .logicalKey = intent.logicalKey,
+            .tombstonePayload = intent.tombstonePayload,
+            .readinessProbe = intent.readinessProbe,
+            .ready = intent.ready,
+            .prepared = intent.record.has_value(),
+            .preparedCounter = intent.record ? intent.record->vv.get(nodeId_) : 0});
+    }
+    return pending;
+}
+
+Result<void> MemorySyncLoop::publishStagedErase(std::string_view logicalKey,
+                                                EraseReadyValidator validator) {
+    auto loaded = loadEraseIntent(logicalKey);
+    if (!loaded) {
+        return loaded.error();
+    }
+    if (!loaded.value()) {
+        return Error{ErrorCode::NotFound, "staged erase intent is missing"};
+    }
+    auto intent = std::move(*loaded.value());
+    bool readinessValidated = false;
+    if (!intent.ready && validator) {
+        auto allowed = validator();
+        if (!allowed) {
+            return allowed.error();
+        }
+        if (!allowed.value()) {
+            return backend_->remove(eraseOutboxKey(logicalKey));
+        }
+        readinessValidated = true;
+    }
+    if (!intent.ready) {
+        if (auto reconciled = reconcileBeforeWrite(true); !reconciled) {
+            return reconciled.error();
+        }
+        auto allIntents = loadEraseIntents();
+        if (!allIntents) {
+            return allIntents.error();
+        }
+        const bool earlierPrepared =
+            std::ranges::any_of(allIntents.value(), [&](const EraseIntentState& candidate) {
+                return candidate.logicalKey != intent.logicalKey && candidate.ready &&
+                       candidate.record.has_value();
+            });
+        if (earlierPrepared) {
+            return Error{ErrorCode::InvalidState,
+                         "an earlier prepared deletion must commit or cancel first"};
+        }
+        if (writerAuth_ && !intent.authorization) {
+            return Error{ErrorCode::Unauthorized,
+                         "erase intent lost its signed readiness authorization"};
+        }
+        auto prepared = prepareEraseRecord(intent.logicalKey, intent.tombstonePayload);
+        if (!prepared) {
+            return prepared.error();
+        }
+        intent.ready = true;
+        intent.record = std::move(prepared.value());
+        intent.recordHash = hashContent(serialize(*intent.record));
+        auto commitment = preparedEraseCommitment(*intent.record, intent.recordHash);
+        if (!commitment) {
+            return commitment.error();
+        }
+        intent.preparedCommitment = std::move(commitment.value());
+        if (auto stored = storeEraseIntent(intent); !stored) {
+            return stored.error();
+        }
+    } else if (auto reconciled = reconcileBeforeWrite(true); !reconciled) {
+        return reconciled.error();
+    }
+    auto retained = loadEraseIntent(logicalKey);
+    if (!retained) {
+        return retained.error();
+    }
+    if (!retained.value()) {
+        return {};
+    }
+    intent = std::move(*retained.value());
+    const auto durable = historyCommitments_.find(nodeId_);
+    const bool pointOfNoReturn =
+        durable != historyCommitments_.end() && durable->second == intent.preparedCommitment;
+    if (validator && !pointOfNoReturn && !readinessValidated) {
+        auto allowed = validator();
+        if (!allowed) {
+            return allowed.error();
+        }
+        if (!allowed.value()) {
+            return Error{ErrorCode::ResourceBusy,
+                         "prepared erase must commit before its counter can be reused"};
+        }
+    }
+    return commitPreparedErase(intent);
+}
+
+Result<void> MemorySyncLoop::cancelStagedErase(std::string_view logicalKey) {
+    if (auto loaded = ensureDurableQuarantineLoaded(); !loaded) {
+        return loaded.error();
+    }
+    auto intent = loadEraseIntent(logicalKey);
+    if (!intent) {
+        return intent.error();
+    }
+    if (!intent.value()) {
+        return {};
+    }
+    if (intent.value()->ready && !intent.value()->record) {
+        return Error{ErrorCode::InvalidState, "ready erase intent lacks prepared envelope"};
+    }
+    const auto durable = historyCommitments_.find(nodeId_);
+    if (intent.value()->record && durable != historyCommitments_.end() &&
+        durable->second == intent.value()->preparedCommitment) {
+        // The full-history frontier already includes this exact operation. Cancellation is no
+        // longer safe; finish its idempotent index publication instead.
+        return commitPreparedErase(*intent.value());
+    }
+    if (intent.value()->record) {
+        return Error{ErrorCode::ResourceBusy,
+                     "prepared erase must commit before it can be removed"};
+    }
+    return backend_->remove(eraseOutboxKey(logicalKey));
+}
+
+Result<std::size_t> MemorySyncLoop::replayReadyErases() {
+    auto before = loadEraseIntents();
+    if (!before) {
+        return before.error();
+    }
+    const auto ready = std::ranges::count_if(before.value(), [](const EraseIntentState& intent) {
+        return intent.ready && intent.readinessProbe == EraseReadinessProbe::Explicit;
+    });
+    if (ready == 0) {
+        return std::size_t{0};
+    }
+    if (auto replayed = reconcileBeforeWrite(true); !replayed) {
+        return replayed.error();
+    }
+    return static_cast<std::size_t>(ready);
+}
+
+Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::sync() {
+    if (auto loaded = ensureDurableQuarantineLoaded(); !loaded) {
+        return loaded.error();
+    }
+    if (auto recovered = recoverColdBootstrap(); !recovered) {
+        return recovered.error();
+    }
+    if (auto ready = beforeRemoteWork(); !ready) {
+        return ready.error();
+    }
+    auto listed = backend_->listPage(
+        "index/", scanCursor_.empty() ? std::nullopt : std::optional<std::string_view>{scanCursor_},
+        limits_.maxIndexObjectsPerSync);
+    if (!listed) {
+        return listed.error();
+    }
+
+    std::vector<ScanCandidate> pageCandidates;
+    quarantined_.clear();
+
+    auto page = std::move(listed.value());
+    auto keys = std::move(page.keys);
+    if (scanCursor_.empty()) {
+        operations_.clear();
+        vectorIdentities_.clear();
+        forkedOperations_.clear();
+        scanCandidates_.clear();
+    }
+    std::ranges::sort(keys);
+
+    for (auto keyIt = keys.begin(); keyIt != keys.end(); ++keyIt) {
+        const auto& key = *keyIt;
+        const std::string logicalKey = logicalKeyFromIndexKey(key);
+        const std::string expectedRecordHash = recordHashFromIndexKey(key);
+        if (logicalKey.empty() || !isSha256Digest(expectedRecordHash)) {
+            quarantine(key, "invalid index key shape");
+            continue;
+        }
+        if (auto ready = beforeRemoteWork(); !ready) {
+            return ready.error();
+        }
+        auto fetched = backend_->retrieve(key);
+        if (!fetched) {
+            quarantine(key, fetched.error().message);
+            continue;
+        }
+        if (fetched.value().size() > limits_.maxEnvelopeBytes) {
+            quarantine(key, "index envelope exceeds configured size limit");
+            continue;
+        }
+        if (hashContent(fetched.value()) != expectedRecordHash) {
+            quarantine(key, "index envelope digest mismatch");
+            continue;
+        }
+        auto record = deserialize(fetched.value());
+        if (!record) {
+            quarantine(key, record.error().message);
+            continue;
+        }
+        const bool authenticationRequired = writerAuth_ && writerAuth_->required();
+        if (authenticationRequired &&
+            record.value().schemaVersion != kAuthenticatedMemoryIndexSchemaVersion) {
+            legacyUnauthenticatedHistory_ = true;
+        }
+        std::string candidateRecordHash = expectedRecordHash;
+        if (record.value().schemaVersion < kMemoryIndexSchemaVersion) {
+            if (!allowLegacyUnbound_ || (writerAuth_ && writerAuth_->required())) {
+                quarantine(key, "legacy envelope lacks authenticated corpus binding");
+                continue;
+            }
+            if (record.value().origin.empty() ||
+                record.value().vv.get(record.value().origin) == 0) {
+                quarantine(key, "legacy envelope has invalid causal origin");
+                continue;
+            }
+            record.value().schemaVersion = kMemoryIndexSchemaVersion;
+            record.value().corpusId = corpusId_;
+            record.value().corpusEpoch = corpusEpoch_;
+            record.value().logicalKey = logicalKey;
+            record.value().recordKind = std::string(kMemoryValueRecordKind);
+            record.value().operationId = makeOperationId(
+                record.value().origin, record.value().vv.get(record.value().origin));
+            const auto upgradedBytes = serialize(record.value());
+            candidateRecordHash = hashContent(upgradedBytes);
+            const auto upgradedKey = indexKey(logicalKey, candidateRecordHash);
+            const auto upgradedExists = backend_->exists(upgradedKey);
+            if (!upgradedExists) {
+                quarantine(key, upgradedExists.error().message);
+                continue;
+            }
+            if (!upgradedExists.value()) {
+                if (auto upgraded = backend_->store(upgradedKey, upgradedBytes); !upgraded) {
+                    quarantine(key, upgraded.error().message);
+                    continue;
+                }
+            }
+        }
+        const bool authenticatedSchema =
+            record.value().schemaVersion == kAuthenticatedMemoryIndexSchemaVersion;
+        if ((authenticatedSchema || authenticationRequired) &&
+            (!writerAuth_ || !writerAuth_->verify(record.value()))) {
+            recordAuthFailure();
+            quarantine(key, "writer authentication failed");
+            continue;
+        }
+        if (!record.value().hasValidCausalIdentity(corpusId_, corpusEpoch_)) {
+            quarantine(key, "record identity does not match configured corpus or causal origin");
+            continue;
+        }
+
+        // Operation IDs are writer-global within a corpus epoch. Observe them
+        // before validating the index logical key so a copied envelope cannot
+        // leave the correctly placed sibling accepted as a valid operation.
+        if (!operations_.contains(record.value().operationId) &&
+            operations_.size() >= limits_.maxTrackedIdentities) {
+            quarantine(key, "operation identity tracking limit reached");
+            continue;
+        }
+        const auto [operation, inserted] = operations_.emplace(
+            record.value().operationId, std::pair{candidateRecordHash, logicalKey});
+        if (!inserted && operation->second != std::pair{candidateRecordHash, logicalKey}) {
+            forkedOperations_.insert(record.value().operationId);
+        }
+
+        if (!record.value().hasValidIdentity(corpusId_, corpusEpoch_, logicalKey)) {
+            quarantine(key, "record logical identity does not match its index key");
+            continue;
+        }
+        const std::string vectorIdentity = nlohmann::json(record.value().vv).dump();
+        if (!vectorIdentities_.contains(vectorIdentity) &&
+            vectorIdentities_.size() >= limits_.maxTrackedIdentities) {
+            quarantine(key, "vector identity tracking limit reached");
+            continue;
+        }
+        const auto [vector, vectorInserted] = vectorIdentities_.emplace(
+            vectorIdentity, std::pair{candidateRecordHash, record.value().operationId});
+        if (!vectorInserted && vector->second.first != candidateRecordHash) {
+            forkedOperations_.insert(vector->second.second);
+            forkedOperations_.insert(record.value().operationId);
+        }
+        pageCandidates.push_back(
+            ScanCandidate{key, logicalKey, candidateRecordHash, std::move(record.value())});
+    }
+
+    scanCandidates_.insert(scanCandidates_.end(), std::make_move_iterator(pageCandidates.begin()),
+                           std::make_move_iterator(pageCandidates.end()));
+    scanCursor_ = page.nextCursor.value_or(std::string{});
+    if (!scanCursor_.empty()) {
+        // A bounded page is not a complete security decision. Keep the last committed
+        // snapshot visible until the sweep has observed every operation/fork identity.
+        return merged_;
+    }
+
+    auto candidates = std::move(scanCandidates_);
+    scanCandidates_.clear();
+    for (const auto& candidate : candidates) {
+        if (writerQuarantined(candidate.record.origin)) {
+            if (auto captured =
+                    captureQuarantineInvalidation(candidate.logicalKey, candidate.record);
+                !captured) {
+                return captured.error();
+            }
+        }
+    }
+    if (auto committed = commitScannedHistory(candidates); !committed) {
+        return committed.error();
+    }
+    const auto previousMerged = merged_;
+    auto merged = merged_;
+    for (const auto& candidate : candidates) {
+        if (writerQuarantined(candidate.record.origin)) {
+            quarantine(candidate.indexKey, "writer is durably quarantined");
+            continue;
+        }
+        if (forkedOperations_.contains(candidate.record.operationId)) {
+            quarantine(candidate.indexKey, "duplicate writer operation fork");
+            continue;
+        }
+        version_.merge(candidate.record.vv);
+        const auto it = merged.find(candidate.logicalKey);
+        if (it == merged.end()) {
+            if (merged.size() >= limits_.maxMergedKeys) {
+                quarantine(candidate.indexKey, "merged key limit reached");
+                continue;
+            }
+            merged[candidate.logicalKey] = candidate.record;
+        } else if (resolveLww(candidate.record, it->second) == LwwDecision::First) {
+            merged[candidate.logicalKey] = candidate.record;
+        }
+    }
+
+    // Forks and durable writer quarantine invalidate earlier winners.
+    for (auto it = merged.begin(); it != merged.end();) {
+        if (writerQuarantined(it->second.origin) ||
+            forkedOperations_.contains(it->second.operationId)) {
+            it = merged.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    // Hydrate only selected winners. Historical losers never trigger blob reads.
+    for (auto it = merged.begin(); it != merged.end();) {
+        if (it->second.isTombstone()) {
+            ++it;
+            continue;
+        }
+        const auto& hash = it->second.entryHash;
+        if (cachedBlobs_.contains(hash)) {
+            ++it;
+            continue;
+        }
+        if (auto ready = beforeRemoteWork(); !ready) {
+            return ready.error();
+        }
+        auto blob = backend_->retrieve(blobKey(hash));
+        const auto previous = previousMerged.find(it->first);
+        auto oldCached = cachedBlobs_.end();
+        bool oldWinnerIsShared = false;
+        if (previous != previousMerged.end() && previous->second.entryHash != hash) {
+            oldCached = cachedBlobs_.find(previous->second.entryHash);
+            oldWinnerIsShared = std::ranges::any_of(merged, [&](const auto& entry) {
+                return entry.first != it->first &&
+                       entry.second.entryHash == previous->second.entryHash;
+            });
+        }
+        std::size_t projectedCacheBytes = cachedBytes_ + (blob ? blob.value().size() : 0);
+        if (oldCached != cachedBlobs_.end() && !oldWinnerIsShared) {
+            projectedCacheBytes -= oldCached->second.size();
+        }
+        const bool valid = blob && blob.value().size() <= limits_.maxValueBytes &&
+                           hashContent(blob.value()) == hash;
+        if (!valid || projectedCacheBytes > limits_.maxCacheBytes) {
+            quarantine("index/" + it->first,
+                       !blob ? blob.error().message
+                             : "winner blob exceeds configured size or cache limit");
+            if (previous != previousMerged.end() &&
+                cachedBlobs_.contains(previous->second.entryHash)) {
+                it->second = previous->second;
+                ++it;
+            } else {
+                it = merged.erase(it);
+            }
+            continue;
+        }
+        if (oldCached != cachedBlobs_.end() && !oldWinnerIsShared) {
+            cachedBytes_ -= oldCached->second.size();
+            cachedBlobs_.erase(oldCached);
+        }
+        cachedBytes_ += blob.value().size();
+        cachedBlobs_.emplace(hash, std::move(blob.value()));
+        ++it;
+    }
+
+    merged_ = std::move(merged);
+    for (const auto& [_, record] : merged_) {
+        if (record.isTombstone() && tombstoneGc_.requiredPeers.contains(nodeId_)) {
+            if (auto ready = beforeRemoteWork(); !ready) {
+                return ready.error();
+            }
+            if (auto acknowledged = backend_->store(acknowledgementKey(record.operationId, nodeId_),
+                                                    std::span<const std::byte>{});
+                !acknowledged) {
+                return acknowledged.error();
+            }
+        }
+    }
+    std::set<std::string> winningHashes;
+    for (const auto& [_, record] : merged_) {
+        if (!record.isTombstone()) {
+            winningHashes.insert(record.entryHash);
+        }
+    }
+    for (auto it = cachedBlobs_.begin(); it != cachedBlobs_.end();) {
+        if (!winningHashes.contains(it->first)) {
+            cachedBytes_ -= it->second.size();
+            it = cachedBlobs_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    return merged_;
+}
+
+Result<std::map<std::string, MemoryIndexRecord>> MemorySyncLoop::syncFully() {
+    for (;;) {
+        auto result = sync();
+        if (!result || scanCursor_.empty()) {
+            return result;
+        }
+    }
+}
+
+Result<MemoryDeltaBatch> MemorySyncLoop::exportLocalDeltasAfter(const VersionVector& peerVersion,
+                                                                std::size_t maxDeltas,
+                                                                std::uint64_t maxWriterCounter) {
+    if (auto loaded = ensureDurableQuarantineLoaded(); !loaded) {
+        return loaded.error();
+    }
+    if (writerQuarantined(nodeId_)) {
+        return Error{ErrorCode::InvalidState, "quarantined writer cannot export deltas"};
+    }
+    if (maxDeltas == 0) {
+        return Error{ErrorCode::InvalidArgument, "direct delta batch size must be positive"};
+    }
+    const auto durableCounter = std::min(version_.get(nodeId_), maxWriterCounter);
+    const auto peerCounter = peerVersion.get(nodeId_);
+    if (peerCounter >= durableCounter) {
+        return MemoryDeltaBatch{};
+    }
+    if (auto indexed = ensureHistoryEntries(nodeId_, durableCounter); !indexed) {
+        return indexed.error();
+    }
+
+    std::vector<MemoryDelta> deltas;
+    const auto available = durableCounter - peerCounter;
+    const auto count = static_cast<std::size_t>(
+        std::min<std::uint64_t>(available, static_cast<std::uint64_t>(maxDeltas)));
+    deltas.reserve(count);
+    for (std::size_t offset = 1; offset <= count; ++offset) {
+        const auto counter = peerCounter + static_cast<std::uint64_t>(offset);
+        auto entry = loadHistoryEntry(nodeId_, counter);
+        if (!entry && entry.error().code == ErrorCode::NotFound) {
+            if (auto rebuilt = ensureHistoryEntries(nodeId_, durableCounter, true); !rebuilt) {
+                return rebuilt.error();
+            }
+            entry = loadHistoryEntry(nodeId_, counter);
+        }
+        if (!entry) {
+            return entry.error();
+        }
+        auto delta = loadLocalDelta(indexKey(entry.value().logicalKey, entry.value().recordHash),
+                                    peerVersion);
+        if (!delta) {
+            return delta.error();
+        }
+        if (!delta.value() || delta.value()->record.vv.get(nodeId_) != counter) {
+            return Error{ErrorCode::InvalidState,
+                         "writer counter index does not resolve a contiguous delta"};
+        }
+        deltas.push_back(std::move(*delta.value()));
+    }
+    return MemoryDeltaBatch{.deltas = std::move(deltas),
+                            .hasMore = peerCounter + count < durableCounter};
+}
+
+Result<ColdBootstrapSnapshot> MemorySyncLoop::exportColdBootstrap(const ReplicationState& frozen,
+                                                                  std::size_t maxRecords,
+                                                                  std::size_t maxPayloadBytes) {
+    if (auto loaded = ensureDurableQuarantineLoaded(); !loaded) {
+        return loaded.error();
+    }
+    if (auto recovered = recoverColdBootstrap(); !recovered) {
+        return recovered.error();
+    }
+    if (maxRecords == 0 || maxPayloadBytes == 0 ||
+        frozen.version.counters() != version_.counters() ||
+        frozen.commitments != historyCommitments_ || !frozen.quarantinedWriters.empty() ||
+        !durableQuarantinedWriters_.empty() || merged_.size() > maxRecords ||
+        merged_.size() > limits_.maxMergedKeys) {
+        return Error{ErrorCode::InvalidState,
+                     "cold bootstrap frontier is unavailable or exceeds bounds"};
+    }
+    if (auto valid = validateFrontierCommitments(frozen.version, frozen.commitments); !valid) {
+        return valid.error();
+    }
+    ColdBootstrapSnapshot snapshot{.frontier = frozen.version, .commitments = frozen.commitments};
+    std::size_t payloadBytes = 0;
+    snapshot.winners.reserve(merged_.size());
+    for (const auto& [logicalKey, record] : merged_) {
+        MemoryDelta delta{.logicalKey = logicalKey, .record = record};
+        if (!record.isTombstone()) {
+            auto payload = backend_->retrieve(blobKey(record.entryHash));
+            if (!payload) {
+                return payload.error();
+            }
+            if (payload.value().size() > limits_.maxValueBytes ||
+                payload.value().size() > maxPayloadBytes ||
+                payloadBytes > maxPayloadBytes - payload.value().size() ||
+                hashContent(payload.value()) != record.entryHash) {
+                return Error{ErrorCode::ResourceExhausted,
+                             "cold bootstrap payload exceeds bounds or failed integrity"};
+            }
+            payloadBytes += payload.value().size();
+            delta.payload = std::move(payload.value());
+        }
+        if (auto validated = validateBootstrapWinner(delta, frozen.version, frozen.commitments);
+            !validated) {
+            return validated.error();
+        }
+        snapshot.winners.push_back(std::move(delta));
+    }
+    snapshot.rootDigest = coldBootstrapRoot(snapshot);
+    if (!writerAuth_) {
+        return Error{ErrorCode::Unauthorized,
+                     "cold bootstrap requires an authenticated witness signer"};
+    }
+    auto signature = writerAuth_->signDigest("cold-bootstrap-v1", snapshot.rootDigest);
+    if (!signature) {
+        return signature.error();
+    }
+    snapshot.witnessSignature = std::move(signature.value());
+    return snapshot;
+}
+
+Result<DeltaApplyResult> MemorySyncLoop::applyColdBootstrap(const ColdBootstrapSnapshot& snapshot,
+                                                            std::string_view authenticatedWitness,
+                                                            std::size_t maxRecords,
+                                                            std::size_t maxPayloadBytes) {
+    if (authenticatedWitness.empty()) {
+        return Error{ErrorCode::Unauthorized, "cold bootstrap witness is empty"};
+    }
+    if (auto loaded = ensureDurableQuarantineLoaded(); !loaded) {
+        return loaded.error();
+    }
+    if (auto recovered = recoverColdBootstrap(); !recovered) {
+        return recovered.error();
+    }
+    if (!version_.empty() || !historyCommitments_.empty() || !merged_.empty() ||
+        !durableQuarantinedWriters_.empty()) {
+        return Error{ErrorCode::InvalidState, "cold bootstrap target is not durably empty"};
+    }
+    auto existingIndex = backend_->listPage("index/", std::nullopt, 1);
+    if (!existingIndex) {
+        return existingIndex.error();
+    }
+    auto pending = pendingErases();
+    if (!pending) {
+        return pending.error();
+    }
+    if (!existingIndex.value().keys.empty() || !pending.value().empty()) {
+        return Error{ErrorCode::InvalidState,
+                     "cold bootstrap target has durable operations or erase intents"};
+    }
+    if (snapshot.winners.size() > maxRecords || snapshot.winners.size() > limits_.maxMergedKeys ||
+        snapshot.rootDigest != coldBootstrapRoot(snapshot)) {
+        return Error{ErrorCode::InvalidData, "cold bootstrap manifest is invalid"};
+    }
+    if (!writerAuth_ || snapshot.witnessSignature.writerId != authenticatedWitness ||
+        !writerAuth_->verifyDigest(snapshot.witnessSignature, "cold-bootstrap-v1",
+                                   snapshot.rootDigest)) {
+        return Error{ErrorCode::Unauthorized, "cold bootstrap witness signature is invalid"};
+    }
+    if (auto valid = validateFrontierCommitments(snapshot.frontier, snapshot.commitments); !valid) {
+        return valid.error();
+    }
+    std::set<std::string> logicalKeys;
+    std::set<std::string> operationIds;
+    std::size_t payloadBytes = 0;
+    for (const auto& delta : snapshot.winners) {
+        if (!logicalKeys.insert(delta.logicalKey).second ||
+            !operationIds.insert(delta.record.operationId).second) {
+            return Error{ErrorCode::InvalidData,
+                         "cold bootstrap contains duplicate key or operation identity"};
+        }
+        if (auto validated =
+                validateBootstrapWinner(delta, snapshot.frontier, snapshot.commitments);
+            !validated) {
+            return validated.error();
+        }
+        if (delta.payload.size() > maxPayloadBytes ||
+            payloadBytes > maxPayloadBytes - delta.payload.size()) {
+            return Error{ErrorCode::ResourceExhausted,
+                         "cold bootstrap payload exceeds aggregate bound"};
+        }
+        payloadBytes += delta.payload.size();
+    }
+    if (payloadBytes > limits_.maxCacheBytes) {
+        return Error{ErrorCode::ResourceExhausted,
+                     "cold bootstrap payload exceeds resident cache bound"};
+    }
+
+    if (auto cleared = clearColdBootstrapStaging(); !cleared) {
+        return cleared.error();
+    }
+    for (std::size_t index = 0; index < snapshot.winners.size(); ++index) {
+        const auto& delta = snapshot.winners[index];
+        if (!delta.record.isTombstone()) {
+            if (auto stored = backend_->store(coldBootstrapPayloadKey(index), delta.payload);
+                !stored) {
+                return stored.error();
+            }
+        }
+        const auto recordBytes = serialize(delta.record);
+        if (auto staged = backend_->store(coldBootstrapEntryKey(index), recordBytes); !staged) {
+            return staged.error();
+        }
+    }
+    if (auto journal = persistColdBootstrapJournal(snapshot, authenticatedWitness); !journal) {
+        return journal.error();
+    }
+    return finalizeColdBootstrap(snapshot, authenticatedWitness);
+}
+
+Result<DeltaApplyResult> MemorySyncLoop::applyDeltas(std::span<const MemoryDelta> deltas) {
+    if (auto admitted = beforeDirectIngress(); !admitted) {
+        return admitted.error();
+    }
+    if (auto loaded = ensureDurableQuarantineLoaded(); !loaded) {
+        return loaded.error();
+    }
+    std::set<std::string> projectedKeys;
+    for (const auto& [key, record] : merged_) {
+        (void)record;
+        projectedKeys.insert(key);
+    }
+    for (const auto& delta : deltas) {
+        projectedKeys.insert(delta.logicalKey);
+        if (projectedKeys.size() > limits_.maxMergedKeys) {
+            return Error{ErrorCode::ResourceExhausted,
+                         "direct deltas exceed configured merged-key limit"};
+        }
+    }
+
+    DeltaApplyResult result;
+    result.received = deltas.size();
+    quarantined_.clear();
+    std::vector<const MemoryDelta*> ordered;
+    ordered.reserve(deltas.size());
+    for (const auto& delta : deltas) {
+        ordered.push_back(&delta);
+    }
+    std::ranges::sort(ordered, [](const MemoryDelta* lhs, const MemoryDelta* rhs) {
+        return std::tuple{lhs->record.origin, lhs->record.vv.get(lhs->record.origin)} <
+               std::tuple{rhs->record.origin, rhs->record.vv.get(rhs->record.origin)};
+    });
+
+    for (const auto* delta : ordered) {
+        if (writerQuarantined(delta->record.origin)) {
+            result.quarantined[delta->record.operationId] = "writer is durably quarantined";
+            continue;
+        }
+        auto validated = validateDirectDelta(*delta);
+        if (!validated) {
+            quarantineDirectDelta(*delta, validated.error().message, result);
+            continue;
+        }
+        const auto decision = classifyDirectDelta(*delta, validated.value());
+        if (decision.action == DirectDeltaAction::Replay) {
+            ++result.replayed;
+            continue;
+        }
+        if (decision.action == DirectDeltaAction::Reject) {
+            if (decision.reason == "duplicate writer operation fork") {
+                auto durable = quarantineWriter(delta->record.origin, nodeId_);
+                if (!durable) {
+                    return durable.error();
+                }
+            }
+            quarantineDirectDelta(*delta, decision.reason, result);
+            continue;
+        }
+        auto plan = planDirectWinner(*delta);
+        if (!plan) {
+            quarantineDirectDelta(*delta, plan.error().message, result);
+            continue;
+        }
+        if (auto persisted = persistDirectDelta(*delta, validated.value()); !persisted) {
+            return persisted.error();
+        }
+        if (auto committed = commitDirectHistory(*delta, validated.value()); !committed) {
+            return committed.error();
+        }
+        rememberDirectOperation(*delta, validated.value());
+        result.merged += commitDirectDelta(*delta, plan.value()) ? 1U : 0U;
+    }
+    result.version = version_;
+    return result;
+}
+
+VersionVector MemorySyncLoop::currentVersion() const {
+    return version_;
+}
+
+ReplicationState MemorySyncLoop::replicationState() const {
+    std::set<NodeId> quarantined;
+    for (const auto& [writer, _] : durableQuarantinedWriters_) {
+        quarantined.insert(writer);
+    }
+    return ReplicationState{.version = version_,
+                            .commitments = historyCommitments_,
+                            .quarantinedWriters = std::move(quarantined)};
+}
+
+Result<WriterHistoryCommitment> MemorySyncLoop::localHistoryCommitmentAt(std::uint64_t counter) {
+    if (counter == 0) {
+        return Error{ErrorCode::InvalidArgument,
+                     "zero history prefix has no materialized commitment"};
+    }
+    if (auto loaded = ensureDurableQuarantineLoaded(); !loaded) {
+        return loaded.error();
+    }
+    return computeHistoryCommitmentAt(nodeId_, counter);
+}
+
+Result<WriterHistoryCommitment> MemorySyncLoop::localHistoryWindowAfter(std::uint64_t peerCounter,
+                                                                        std::size_t maxRecords,
+                                                                        std::size_t maxWireBytes) {
+    if (maxRecords == 0 || maxWireBytes == 0) {
+        return Error{ErrorCode::InvalidArgument, "writer history window bound is zero"};
+    }
+    if (auto loaded = ensureDurableQuarantineLoaded(); !loaded) {
+        return loaded.error();
+    }
+    const auto durableCounter = version_.get(nodeId_);
+    if (peerCounter >= durableCounter) {
+        return Error{ErrorCode::InvalidArgument,
+                     "writer history window has no advancing operation"};
+    }
+    if (auto indexed = ensureHistoryEntries(nodeId_, durableCounter); !indexed) {
+        return indexed.error();
+    }
+    VersionVector peerVersion;
+    peerVersion.observe(nodeId_, peerCounter);
+    std::size_t admittedBytes = 0;
+    std::uint64_t endpoint = peerCounter;
+    const auto recordLimit = std::min<std::uint64_t>(durableCounter - peerCounter,
+                                                     static_cast<std::uint64_t>(maxRecords));
+    for (std::uint64_t offset = 1; offset <= recordLimit; ++offset) {
+        const auto counter = peerCounter + offset;
+        auto entry = loadHistoryEntry(nodeId_, counter);
+        if (!entry) {
+            return entry.error();
+        }
+        auto delta = loadLocalDelta(indexKey(entry.value().logicalKey, entry.value().recordHash),
+                                    peerVersion);
+        if (!delta) {
+            return delta.error();
+        }
+        if (!delta.value()) {
+            return Error{ErrorCode::InvalidState,
+                         "writer counter window does not resolve a durable delta"};
+        }
+        const auto control = nlohmann::json{{"type", "delta_record"},
+                                            {"logical_key", delta.value()->logicalKey},
+                                            {"record", delta.value()->record},
+                                            {"payload_size", delta.value()->payload.size()}}
+                                 .dump()
+                                 .size();
+        constexpr std::size_t kFramePrefixBytes = 4;
+        constexpr std::size_t kPerRecordBatchHeaderAllowance = 128;
+        const auto framing = 2 * kFramePrefixBytes + kPerRecordBatchHeaderAllowance;
+        if (control > std::numeric_limits<std::size_t>::max() - framing ||
+            control + framing >
+                std::numeric_limits<std::size_t>::max() - delta.value()->payload.size()) {
+            return Error{ErrorCode::ResourceExhausted, "writer history wire estimate overflow"};
+        }
+        const auto estimated = control + framing + delta.value()->payload.size();
+        if (admittedBytes > maxWireBytes || estimated > maxWireBytes - admittedBytes) {
+            break;
+        }
+        admittedBytes += estimated;
+        endpoint = counter;
+    }
+    if (endpoint == peerCounter) {
+        return Error{ErrorCode::ResourceExhausted,
+                     "next writer operation exceeds negotiated wire window"};
+    }
+    return computeHistoryCommitmentAt(nodeId_, endpoint);
+}
+
+Result<void>
+MemorySyncLoop::validateHistoryExtension(std::span<const MemoryDelta> deltas,
+                                         const WriterHistoryCommitment& expectedFrontier) {
+    if (deltas.empty()) {
+        return Error{ErrorCode::InvalidArgument, "history extension is empty"};
+    }
+    if (auto loaded = ensureDurableQuarantineLoaded(); !loaded) {
+        return loaded.error();
+    }
+    const auto& writer = deltas.front().record.origin;
+    if (writer.empty() || writerQuarantined(writer) || !isSha256Digest(expectedFrontier.digest)) {
+        return Error{ErrorCode::InvalidState, "history extension writer or frontier is invalid"};
+    }
+    auto commitment = historyCommitments_.contains(writer) ? historyCommitments_.at(writer)
+                                                           : WriterHistoryCommitment{};
+    if (commitment.counter >= expectedFrontier.counter) {
+        const bool exceedsFrozenFrontier =
+            std::ranges::any_of(deltas, [&](const MemoryDelta& delta) {
+                return delta.record.vv.get(writer) > expectedFrontier.counter;
+            });
+        if (exceedsFrozenFrontier) {
+            return Error{ErrorCode::InvalidData,
+                         "staged delta exceeds handshake-frozen writer frontier"};
+        }
+        auto existing = computeHistoryCommitmentAt(writer, expectedFrontier.counter);
+        if (!existing) {
+            return existing.error();
+        }
+        return existing.value() == expectedFrontier
+                   ? Result<void>{}
+                   : Result<void>{
+                         Error{ErrorCode::HashMismatch,
+                               "existing writer history does not match advertised frontier"}};
+    }
+    std::vector<const MemoryDelta*> ordered;
+    ordered.reserve(deltas.size());
+    for (const auto& delta : deltas) {
+        if (delta.record.origin != writer) {
+            return Error{ErrorCode::Unauthorized, "history extension mixes authenticated writers"};
+        }
+        ordered.push_back(&delta);
+    }
+    std::ranges::sort(ordered, [&](const MemoryDelta* lhs, const MemoryDelta* rhs) {
+        return lhs->record.vv.get(writer) < rhs->record.vv.get(writer);
+    });
+    for (const auto* delta : ordered) {
+        auto validated = validateDirectDelta(*delta);
+        if (!validated) {
+            return validated.error();
+        }
+        const auto counter = delta->record.vv.get(writer);
+        if (counter != commitment.counter + 1) {
+            return Error{ErrorCode::InvalidData, "history extension is not contiguous"};
+        }
+        commitment = WriterHistoryCommitment{
+            .counter = counter,
+            .digest = advanceHistory(writer, commitment, validated.value().recordHash, counter)};
+    }
+    if (commitment != expectedFrontier) {
+        return Error{ErrorCode::HashMismatch,
+                     "history extension does not match advertised frontier"};
+    }
+    return {};
+}
+
+bool MemorySyncLoop::writerQuarantined(std::string_view writerId) const noexcept {
+    return durableQuarantinedWriters_.contains(std::string(writerId));
+}
+
+Result<bool> MemorySyncLoop::quarantineWriter(std::string_view writerId,
+                                              std::string_view sourceNodeId) {
+    if (writerId.empty() || sourceNodeId.empty()) {
+        return Error{ErrorCode::InvalidArgument, "writer quarantine identity is empty"};
+    }
+    if (auto loaded = ensureDurableQuarantineLoaded(); !loaded) {
+        return loaded.error();
+    }
+    if (writerQuarantined(writerId)) {
+        return false;
+    }
+    if (durableQuarantinedWriters_.size() >= limits_.maxTrackedIdentities) {
+        return Error{ErrorCode::ResourceExhausted, "writer quarantine limit reached"};
+    }
+    auto next = durableQuarantinedWriters_;
+    next.emplace(std::string(writerId), std::string(sourceNodeId));
+    auto invalidations = quarantineInvalidations_;
+    auto invalidationSources = quarantineInvalidationSources_;
+    for (const auto& [key, record] : merged_) {
+        if (record.origin != writerId) {
+            continue;
+        }
+        auto invalidation = makeQuarantineInvalidation(key, record);
+        if (invalidation) {
+            invalidations[key] = std::move(invalidation.value());
+            invalidationSources[key] = record;
+        }
+    }
+    if (auto persisted = persistReplicationCheckpoint(historyCommitments_, next); !persisted) {
+        return persisted.error();
+    }
+    durableQuarantinedWriters_ = std::move(next);
+    quarantineInvalidations_ = std::move(invalidations);
+    quarantineInvalidationSources_ = std::move(invalidationSources);
+    ++durableQuarantineGeneration_;
+    removeVisibleWinnersFrom(writerId);
+    return true;
+}
+
+Result<std::size_t> MemorySyncLoop::collectTombstoneGarbage(std::uint64_t now) {
+    if (tombstoneGc_.requiredPeers.empty()) {
+        return std::size_t{0};
+    }
+    std::size_t collected = 0;
+    for (auto tombstone = merged_.begin(); tombstone != merged_.end();) {
+        const auto& record = tombstone->second;
+        const auto retentionMs = static_cast<std::uint64_t>(
+            std::max<std::chrono::milliseconds::rep>(0, tombstoneGc_.minRetention.count()));
+        if (!record.isTombstone() || now < record.ts.physicalMs ||
+            now - record.ts.physicalMs < retentionMs) {
+            ++tombstone;
+            continue;
+        }
+        bool fullyAcknowledged = true;
+        for (const auto& peer : tombstoneGc_.requiredPeers) {
+            if (auto ready = beforeRemoteWork(); !ready) {
+                return ready.error();
+            }
+            const auto exists = backend_->exists(acknowledgementKey(record.operationId, peer));
+            if (!exists) {
+                return exists.error();
+            }
+            if (!exists.value()) {
+                fullyAcknowledged = false;
+                break;
+            }
+        }
+        if (!fullyAcknowledged) {
+            ++tombstone;
+            continue;
+        }
+        const std::string prefix = "index/" + tombstone->first + "/";
+        auto page = backend_->listPage(prefix, std::nullopt, limits_.maxIndexObjectsPerSync);
+        if (!page) {
+            return page.error();
+        }
+        if (page.value().nextCursor) {
+            ++tombstone;
+            continue;
+        }
+        const auto tombstoneKey = indexKey(tombstone->first, hashContent(serialize(record)));
+        for (const auto& key : page.value().keys) {
+            if (key != tombstoneKey) {
+                if (auto removed = backend_->remove(key); !removed) {
+                    return removed.error();
+                }
+            }
+        }
+        if (auto removed = backend_->remove(tombstoneKey); !removed) {
+            return removed.error();
+        }
+        for (const auto& peer : tombstoneGc_.requiredPeers) {
+            if (auto removed = backend_->remove(acknowledgementKey(record.operationId, peer));
+                !removed) {
+                return removed.error();
+            }
+        }
+        tombstone = merged_.erase(tombstone);
+        ++collected;
+    }
+    return collected;
+}
+
+std::size_t MemorySyncLoop::mergedRecordCount() const noexcept {
+    return merged_.size();
+}
+
+std::size_t MemorySyncLoop::quarantinedRecordCount() const noexcept {
+    return quarantined_.size();
+}
+
+std::size_t MemorySyncLoop::authFailureCount() const noexcept {
+    return authFailures_;
+}
+
+std::map<std::string, MemoryIndexRecord> MemorySyncLoop::adapterState() const {
+    auto state = merged_;
+    for (const auto& [key, tombstone] : quarantineInvalidations_) {
+        if (!state.contains(key)) {
+            state.emplace(key, tombstone);
+        }
+    }
+    return state;
+}
+
+MemorySyncLoop::CommittedState MemorySyncLoop::committedState() const {
+    return CommittedState{.merged = merged_,
+                          .cachedBlobs = cachedBlobs_,
+                          .quarantined = quarantined_,
+                          .authFailures = authFailures_,
+                          .replication = replicationState()};
+}
+
+std::map<std::string, std::string> MemorySyncLoop::quarantinedReasons() const {
+    return quarantined_;
+}
+
+bool MemorySyncLoop::legacyUnauthenticatedHistoryObserved() const noexcept {
+    return legacyUnauthenticatedHistory_;
+}
+
+Result<std::vector<std::byte>> MemorySyncLoop::readCached(std::string_view logicalKey) const {
+    if (auto valid = validateLogicalKey(logicalKey); !valid) {
+        return valid.error();
+    }
+    const auto it = merged_.find(std::string(logicalKey));
+    if (it == merged_.end()) {
+        return Error{ErrorCode::NotFound, "no memory record for key"};
+    }
+    if (it->second.isTombstone()) {
+        return Error{ErrorCode::NotFound, "memory record was deleted"};
+    }
+    const auto cached = cachedBlobs_.find(it->second.entryHash);
+    if (cached == cachedBlobs_.end()) {
+        return Error{ErrorCode::NotFound, "memory sync blob was not hydrated during sync"};
+    }
+    return cached->second;
+}
+
+Result<std::vector<std::byte>> MemorySyncLoop::read(std::string_view logicalKey) {
+    if (auto valid = validateLogicalKey(logicalKey); !valid) {
+        return valid.error();
+    }
+    auto merged = sync();
+    if (!merged) {
+        return merged.error();
+    }
+    return readCached(logicalKey);
+}
+
+Result<void> MemorySyncLoop::validateFrontierCommitments(
+    const VersionVector& frontier,
+    const std::map<NodeId, WriterHistoryCommitment>& commitments) const {
+    if (frontier.empty() || commitments.empty() ||
+        commitments.size() > limits_.maxTrackedIdentities ||
+        frontier.counters().size() != commitments.size()) {
+        return Error{ErrorCode::InvalidData,
+                     "cold bootstrap frontier and commitments are incomplete"};
+    }
+    for (const auto& [writer, counter] : frontier.counters()) {
+        const auto commitment = commitments.find(writer);
+        if (writer.empty() || counter == 0 || commitment == commitments.end() ||
+            commitment->second.counter != counter || !isSha256Digest(commitment->second.digest)) {
+            return Error{ErrorCode::InvalidData, "cold bootstrap writer frontier is not committed"};
+        }
+    }
+    return {};
+}
+
+Result<void> MemorySyncLoop::validateBootstrapWinner(
+    const MemoryDelta& delta, const VersionVector& frontier,
+    const std::map<NodeId, WriterHistoryCommitment>& commitments) {
+    if (delta.record.schemaVersion != kAuthenticatedMemoryIndexSchemaVersion) {
+        return Error{ErrorCode::Unauthorized,
+                     "cold bootstrap requires authenticated winner envelopes"};
+    }
+    auto validated = validateDirectDelta(delta);
+    if (!validated) {
+        return validated.error();
+    }
+    const auto writer = commitments.find(delta.record.origin);
+    if (writer == commitments.end() ||
+        delta.record.vv.get(delta.record.origin) > writer->second.counter) {
+        return Error{ErrorCode::InvalidData,
+                     "cold bootstrap winner exceeds its committed writer frontier"};
+    }
+    for (const auto& [dependency, counter] : delta.record.vv.counters()) {
+        if (counter == 0 || counter > frontier.get(dependency)) {
+            return Error{ErrorCode::InvalidData,
+                         "cold bootstrap winner exceeds the frozen causal frontier"};
+        }
+    }
+    return {};
+}
+
+nlohmann::json
+MemorySyncLoop::commitmentsJson(const std::map<NodeId, WriterHistoryCommitment>& commitments) {
+    nlohmann::json commitmentJson = nlohmann::json::array();
+    for (const auto& [writer, commitment] : commitments) {
+        commitmentJson.push_back({{"writer_id", writer},
+                                  {"counter", commitment.counter},
+                                  {"digest", commitment.digest}});
+    }
+    return commitmentJson;
+}
+
+std::string MemorySyncLoop::coldBootstrapRoot(const ColdBootstrapSnapshot& snapshot) const {
+    auto commitmentJson = commitmentsJson(snapshot.commitments);
+    nlohmann::json winnerJson = nlohmann::json::array();
+    std::vector<const MemoryDelta*> ordered;
+    ordered.reserve(snapshot.winners.size());
+    for (const auto& winner : snapshot.winners) {
+        ordered.push_back(&winner);
+    }
+    std::ranges::sort(ordered, [](const MemoryDelta* lhs, const MemoryDelta* rhs) {
+        return lhs->logicalKey < rhs->logicalKey;
+    });
+    for (const auto* winner : ordered) {
+        const auto recordBytes = serialize(winner->record);
+        winnerJson.push_back(
+            {{"logical_key", winner->logicalKey},
+             {"record_hash", hashContent(recordBytes)},
+             {"payload_hash",
+              winner->record.isTombstone() ? std::string{} : hashContent(winner->payload)},
+             {"payload_size", winner->payload.size()}});
+    }
+    const std::string canonical = nlohmann::json{
+        {"domain", "yams-cold-bootstrap-v1"},
+        {"corpus_id", corpusId_},
+        {"corpus_epoch", corpusEpoch_},
+        {"frontier", snapshot.frontier},
+        {"commitments", std::move(commitmentJson)},
+        {"winners",
+         std::move(winnerJson)}}.dump();
+    return hashContent(std::span<const std::byte>{
+        reinterpret_cast<const std::byte*>(canonical.data()), canonical.size()});
+}
+
+std::string MemorySyncLoop::coldBootstrapPrefix() const {
+    const std::string scope = corpusId_ + ":" + std::to_string(corpusEpoch_) + ":" + nodeId_;
+    return "state/bootstrap/" +
+           hashContent(std::span<const std::byte>{reinterpret_cast<const std::byte*>(scope.data()),
+                                                  scope.size()}) +
+           "/";
+}
+
+std::string MemorySyncLoop::coldBootstrapJournalKey() const {
+    return coldBootstrapPrefix() + "journal.json";
+}
+
+std::string MemorySyncLoop::coldBootstrapEntryKey(std::size_t index) const {
+    return coldBootstrapPrefix() + "entries/" + std::to_string(index) + ".json";
+}
+
+std::string MemorySyncLoop::coldBootstrapPayloadKey(std::size_t index) const {
+    return coldBootstrapPrefix() + "payloads/" + std::to_string(index) + ".bin";
+}
+
+Result<void> MemorySyncLoop::clearColdBootstrapStaging() {
+    std::optional<std::string> cursor;
+    std::size_t removed = 0;
+    const auto maxStaged = limits_.maxMergedKeys > (std::numeric_limits<std::size_t>::max() - 1) / 2
+                               ? std::numeric_limits<std::size_t>::max()
+                               : limits_.maxMergedKeys * 2 + 1;
+    for (;;) {
+        auto listed = backend_->listPage(
+            coldBootstrapPrefix(), cursor ? std::optional<std::string_view>{*cursor} : std::nullopt,
+            limits_.maxIndexObjectsPerSync);
+        if (!listed) {
+            return listed.error();
+        }
+        auto page = std::move(listed.value());
+        for (const auto& key : page.keys) {
+            if (++removed > maxStaged) {
+                return Error{ErrorCode::ResourceExhausted,
+                             "cold bootstrap staging exceeds cleanup bound"};
+            }
+            if (auto erased = backend_->remove(key); !erased) {
+                return erased.error();
+            }
+        }
+        cursor = std::move(page.nextCursor);
+        if (!cursor) {
+            return {};
+        }
+    }
+}
+
+Result<void> MemorySyncLoop::clearColdBootstrapAfterCommit() {
+    if (auto removed = backend_->remove(coldBootstrapJournalKey()); !removed) {
+        return removed.error();
+    }
+    return clearColdBootstrapStaging();
+}
+
+Result<void> MemorySyncLoop::persistColdBootstrapJournal(const ColdBootstrapSnapshot& snapshot,
+                                                         std::string_view witness) {
+    nlohmann::json commitments = nlohmann::json::array();
+    for (const auto& [writer, commitment] : snapshot.commitments) {
+        commitments.push_back({{"writer_id", writer},
+                               {"counter", commitment.counter},
+                               {"digest", commitment.digest}});
+    }
+    auto artifact = nlohmann::json{{"schema_version", 1},
+                                   {"corpus_id", corpusId_},
+                                   {"corpus_epoch", corpusEpoch_},
+                                   {"witness", std::string(witness)},
+                                   {"frontier", snapshot.frontier},
+                                   {"commitments", std::move(commitments)},
+                                   {"record_count", snapshot.winners.size()},
+                                   {"root_digest", snapshot.rootDigest},
+                                   {"witness_key_id", snapshot.witnessSignature.keyId},
+                                   {"witness_algorithm", snapshot.witnessSignature.algorithm},
+                                   {"witness_signature", snapshot.witnessSignature.signature}};
+    if (auto signedArtifact = signControlArtifact(artifact, "cold-bootstrap-journal-v1");
+        !signedArtifact) {
+        return signedArtifact.error();
+    }
+    const auto encoded = artifact.dump();
+    if (encoded.size() > limits_.maxEnvelopeBytes) {
+        return Error{ErrorCode::ResourceExhausted, "cold bootstrap journal exceeds envelope bound"};
+    }
+    return backend_->store(coldBootstrapJournalKey(),
+                           std::span<const std::byte>{
+                               reinterpret_cast<const std::byte*>(encoded.data()), encoded.size()});
+}
+
+Result<ColdBootstrapSnapshot> MemorySyncLoop::loadColdBootstrapJournal(std::string& witness) {
+    auto encoded = backend_->retrieve(coldBootstrapJournalKey());
+    if (!encoded) {
+        return encoded.error();
+    }
+    if (encoded.value().size() > limits_.maxEnvelopeBytes) {
+        return Error{ErrorCode::InvalidData, "cold bootstrap journal exceeds bound"};
+    }
+    try {
+        const std::string_view text(reinterpret_cast<const char*>(encoded.value().data()),
+                                    encoded.value().size());
+        const auto json = nlohmann::json::parse(text);
+        if (auto authenticated = verifyControlArtifact(json, "cold-bootstrap-journal-v1");
+            !authenticated) {
+            return authenticated.error();
+        }
+        if (!json.is_object() || json.at("schema_version").get<std::uint32_t>() != 1 ||
+            json.at("corpus_id").get<std::string>() != corpusId_ ||
+            json.at("corpus_epoch").get<std::uint64_t>() != corpusEpoch_ ||
+            !json.at("commitments").is_array()) {
+            return Error{ErrorCode::InvalidData, "cold bootstrap journal identity is invalid"};
+        }
+        witness = json.at("witness").get<std::string>();
+        ColdBootstrapSnapshot snapshot;
+        snapshot.frontier = json.at("frontier").get<VersionVector>();
+        snapshot.rootDigest = json.at("root_digest").get<std::string>();
+        snapshot.witnessSignature =
+            DetachedWriterSignature{.writerId = witness,
+                                    .keyId = json.at("witness_key_id").get<std::string>(),
+                                    .algorithm = json.at("witness_algorithm").get<std::string>(),
+                                    .signature = json.at("witness_signature").get<std::string>()};
+        const auto recordCount = json.at("record_count").get<std::size_t>();
+        if (witness.empty() || !isSha256Digest(snapshot.rootDigest) ||
+            recordCount > limits_.maxMergedKeys) {
+            return Error{ErrorCode::InvalidData, "cold bootstrap journal violates bounds"};
+        }
+        for (const auto& entry : json.at("commitments")) {
+            const auto writer = entry.at("writer_id").get<std::string>();
+            WriterHistoryCommitment commitment{.counter = entry.at("counter").get<std::uint64_t>(),
+                                               .digest = entry.at("digest").get<std::string>()};
+            if (writer.empty() || commitment.counter == 0 || !isSha256Digest(commitment.digest) ||
+                !snapshot.commitments.emplace(writer, std::move(commitment)).second) {
+                return Error{ErrorCode::InvalidData,
+                             "cold bootstrap journal commitment is invalid"};
+            }
+        }
+        snapshot.winners.reserve(recordCount);
+        for (std::size_t index = 0; index < recordCount; ++index) {
+            auto recordBytes = backend_->retrieve(coldBootstrapEntryKey(index));
+            if (!recordBytes || recordBytes.value().size() > limits_.maxEnvelopeBytes) {
+                return Error{ErrorCode::InvalidData,
+                             "cold bootstrap staged record is missing or oversized"};
+            }
+            auto record = deserialize(recordBytes.value());
+            if (!record) {
+                return record.error();
+            }
+            MemoryDelta delta{.logicalKey = record.value().logicalKey,
+                              .record = std::move(record.value())};
+            if (!delta.record.isTombstone()) {
+                auto payload = backend_->retrieve(coldBootstrapPayloadKey(index));
+                if (!payload) {
+                    return payload.error();
+                }
+                delta.payload = std::move(payload.value());
+            }
+            snapshot.winners.push_back(std::move(delta));
+        }
+        return snapshot;
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::InvalidData,
+                     std::string("invalid cold bootstrap journal: ") + error.what()};
+    }
+}
+
+Result<DeltaApplyResult>
+MemorySyncLoop::finalizeColdBootstrap(const ColdBootstrapSnapshot& snapshot,
+                                      std::string_view witness) {
+    if (witness.empty() || snapshot.witnessSignature.writerId != witness || !writerAuth_ ||
+        snapshot.rootDigest != coldBootstrapRoot(snapshot) ||
+        !writerAuth_->verifyDigest(snapshot.witnessSignature, "cold-bootstrap-v1",
+                                   snapshot.rootDigest)) {
+        return Error{ErrorCode::InvalidData,
+                     "cold bootstrap journal root or witness signature mismatch"};
+    }
+    for (const auto& delta : snapshot.winners) {
+        if (!delta.record.isTombstone()) {
+            if (auto stored = backend_->store(blobKey(delta.record.entryHash), delta.payload);
+                !stored) {
+                return stored.error();
+            }
+        }
+    }
+    if (auto persisted = persistReplicationCheckpoint(snapshot.commitments, {}); !persisted) {
+        return persisted.error();
+    }
+    for (const auto& delta : snapshot.winners) {
+        const auto recordBytes = serialize(delta.record);
+        const auto recordHash = hashContent(recordBytes);
+        if (auto stored = backend_->store(indexKey(delta.logicalKey, recordHash), recordBytes);
+            !stored) {
+            return stored.error();
+        }
+    }
+    historyCommitments_ = snapshot.commitments;
+    version_ = snapshot.frontier;
+    merged_.clear();
+    cachedBlobs_.clear();
+    cachedBytes_ = 0;
+    deltaOperations_.clear();
+    for (const auto& delta : snapshot.winners) {
+        merged_[delta.logicalKey] = delta.record;
+        auto validated = validateDirectDelta(delta);
+        if (!validated) {
+            return validated.error();
+        }
+        rememberDirectOperation(delta, validated.value());
+        if (!delta.record.isTombstone()) {
+            cachedBytes_ += delta.payload.size();
+            cachedBlobs_[delta.record.entryHash] = delta.payload;
+        }
+        logicalClock_ = std::max(logicalClock_, delta.record.ts.logical);
+    }
+    // Cleanup is not a correctness boundary. Remove the journal first so a crash cannot
+    // leave it referring to already-deleted staged entries; remaining entries are orphans.
+    (void)clearColdBootstrapAfterCommit();
+    return DeltaApplyResult{.received = snapshot.winners.size(),
+                            .merged = snapshot.winners.size(),
+                            .version = version_};
+}
+
+Result<void> MemorySyncLoop::recoverColdBootstrap() {
+    if (recoveringColdBootstrap_) {
+        return {};
+    }
+    auto exists = backend_->exists(coldBootstrapJournalKey());
+    if (!exists) {
+        return exists.error();
+    }
+    if (!exists.value()) {
+        return {};
+    }
+    recoveringColdBootstrap_ = true;
+    std::string witness;
+    auto snapshot = loadColdBootstrapJournal(witness);
+    if (!snapshot) {
+        recoveringColdBootstrap_ = false;
+        return snapshot.error();
+    }
+    if ((!historyCommitments_.empty() && historyCommitments_ != snapshot.value().commitments) ||
+        (!version_.empty() && version_.counters() != snapshot.value().frontier.counters())) {
+        recoveringColdBootstrap_ = false;
+        return Error{ErrorCode::InvalidData,
+                     "cold bootstrap journal conflicts with durable replication state"};
+    }
+    auto finalized = finalizeColdBootstrap(snapshot.value(), witness);
+    recoveringColdBootstrap_ = false;
+    if (!finalized) {
+        return finalized.error();
+    }
+    return {};
+}
+
+Result<std::optional<MemoryDelta>>
+MemorySyncLoop::loadLocalDelta(const std::string& key, const VersionVector& peerVersion) {
+    const std::string logicalKey = logicalKeyFromIndexKey(key);
+    const std::string expectedRecordHash = recordHashFromIndexKey(key);
+    if (logicalKey.empty() || !isSha256Digest(expectedRecordHash)) {
+        return Error{ErrorCode::InvalidData, "invalid local direct-delta index key"};
+    }
+    auto fetched = backend_->retrieve(key);
+    if (!fetched) {
+        return fetched.error();
+    }
+    if (fetched.value().size() > limits_.maxEnvelopeBytes ||
+        hashContent(fetched.value()) != expectedRecordHash) {
+        return Error{ErrorCode::InvalidData,
+                     "local direct-delta envelope failed integrity validation"};
+    }
+    auto record = deserialize(fetched.value());
+    if (!record) {
+        return record.error();
+    }
+    if (record.value().origin != nodeId_ ||
+        record.value().vv.get(nodeId_) <= peerVersion.get(nodeId_)) {
+        return std::optional<MemoryDelta>{};
+    }
+    if (!record.value().hasValidIdentity(corpusId_, corpusEpoch_, logicalKey)) {
+        return Error{ErrorCode::InvalidData,
+                     "local direct-delta envelope has invalid causal identity"};
+    }
+    const bool authenticated =
+        record.value().schemaVersion == kAuthenticatedMemoryIndexSchemaVersion;
+    if ((authenticated || (writerAuth_ && writerAuth_->required())) &&
+        (!writerAuth_ || !writerAuth_->verify(record.value()))) {
+        return Error{ErrorCode::Unauthorized,
+                     "local direct-delta envelope failed writer authentication"};
+    }
+    std::vector<std::byte> payload;
+    if (!record.value().isTombstone()) {
+        auto blob = backend_->retrieve(blobKey(record.value().entryHash));
+        if (!blob) {
+            return blob.error();
+        }
+        if (blob.value().size() > limits_.maxValueBytes ||
+            hashContent(blob.value()) != record.value().entryHash) {
+            return Error{ErrorCode::HashMismatch,
+                         "local direct-delta payload failed integrity validation"};
+        }
+        payload = std::move(blob.value());
+    }
+    return std::optional<MemoryDelta>{MemoryDelta{.logicalKey = logicalKey,
+                                                  .record = std::move(record.value()),
+                                                  .payload = std::move(payload)}};
+}
+
+Result<MemorySyncLoop::ValidatedDelta>
+MemorySyncLoop::validateDirectDelta(const MemoryDelta& delta) {
+    if (auto valid = validateLogicalKey(delta.logicalKey); !valid) {
+        return valid.error();
+    }
+    const auto& record = delta.record;
+    if (!record.hasValidIdentity(corpusId_, corpusEpoch_, delta.logicalKey)) {
+        return Error{ErrorCode::InvalidData, "direct delta has invalid causal identity"};
+    }
+    if (record.schemaVersion < kMemoryIndexSchemaVersion) {
+        return Error{ErrorCode::NotSupported, "direct delta schema is unsupported"};
+    }
+    const bool authenticated = record.schemaVersion == kAuthenticatedMemoryIndexSchemaVersion;
+    if ((authenticated || (writerAuth_ && writerAuth_->required())) &&
+        (!writerAuth_ || !writerAuth_->verify(record))) {
+        recordAuthFailure();
+        return Error{ErrorCode::Unauthorized, "direct delta writer authentication failed"};
+    }
+    const bool invalidPayload = record.isTombstone()
+                                    ? !delta.payload.empty()
+                                    : (delta.payload.size() > limits_.maxValueBytes ||
+                                       hashContent(delta.payload) != record.entryHash);
+    if (invalidPayload) {
+        return Error{ErrorCode::HashMismatch, "direct delta payload failed integrity validation"};
+    }
+    auto recordBytes = serialize(record);
+    if (recordBytes.size() > limits_.maxEnvelopeBytes) {
+        return Error{ErrorCode::InvalidData, "direct delta envelope exceeds configured size limit"};
+    }
+    const std::string recordHash = hashContent(recordBytes);
+    return ValidatedDelta{.recordBytes = std::move(recordBytes),
+                          .recordHash = recordHash,
+                          .fingerprint = {recordHash, delta.logicalKey}};
+}
+
+MemorySyncLoop::DirectDeltaDecision
+MemorySyncLoop::classifyDirectDelta(const MemoryDelta& delta,
+                                    const ValidatedDelta& validated) const {
+    const auto& record = delta.record;
+    const auto tracked = deltaOperations_.find(record.operationId);
+    if (tracked != deltaOperations_.end() && tracked->second != validated.fingerprint) {
+        return {DirectDeltaAction::Reject, "duplicate writer operation fork"};
+    }
+    const auto writerCounter = record.vv.get(record.origin);
+    const auto currentWriterCounter = version_.get(record.origin);
+    if (writerCounter <= currentWriterCounter) {
+        return {DirectDeltaAction::Replay, {}};
+    }
+    if (writerCounter != currentWriterCounter + 1) {
+        return {DirectDeltaAction::Reject, "direct delta has a causal writer gap"};
+    }
+    const bool missingDependency =
+        std::ranges::any_of(record.vv.counters(), [&](const auto& counter) {
+            return counter.first != record.origin && counter.second > version_.get(counter.first);
+        });
+    return missingDependency
+               ? DirectDeltaDecision{DirectDeltaAction::Reject,
+                                     "direct delta has an unresolved causal dependency"}
+               : DirectDeltaDecision{DirectDeltaAction::Apply, {}};
+}
+
+Result<MemorySyncLoop::DirectWinnerPlan>
+MemorySyncLoop::planDirectWinner(const MemoryDelta& delta) const {
+    const auto winner = merged_.find(delta.logicalKey);
+    DirectWinnerPlan plan;
+    plan.becomesWinner =
+        winner == merged_.end() || resolveLww(delta.record, winner->second) == LwwDecision::First;
+    std::size_t projectedCacheBytes = cachedBytes_;
+    if (plan.becomesWinner && winner != merged_.end() && !winner->second.isTombstone() &&
+        winner->second.entryHash != delta.record.entryHash) {
+        const auto cached = cachedBlobs_.find(winner->second.entryHash);
+        const bool shared = std::ranges::any_of(merged_, [&](const auto& entry) {
+            return entry.first != delta.logicalKey &&
+                   entry.second.entryHash == winner->second.entryHash;
+        });
+        if (cached != cachedBlobs_.end() && !shared) {
+            projectedCacheBytes -= cached->second.size();
+            plan.oldCachedHash = winner->second.entryHash;
+        }
+    }
+    if (plan.becomesWinner && !delta.record.isTombstone() &&
+        !cachedBlobs_.contains(delta.record.entryHash)) {
+        projectedCacheBytes += delta.payload.size();
+    }
+    if (projectedCacheBytes > limits_.maxCacheBytes) {
+        return Error{ErrorCode::ResourceExhausted, "direct delta exceeds configured cache limit"};
+    }
+    return plan;
+}
+
+Result<void> MemorySyncLoop::persistDirectDelta(const MemoryDelta& delta,
+                                                const ValidatedDelta& validated) {
+    if (!delta.record.isTombstone()) {
+        auto exists = backend_->exists(blobKey(delta.record.entryHash));
+        if (!exists) {
+            return exists.error();
+        }
+        if (!exists.value()) {
+            if (auto stored = backend_->store(blobKey(delta.record.entryHash), delta.payload);
+                !stored) {
+                return stored.error();
+            }
+        }
+    }
+    return backend_->store(indexKey(delta.logicalKey, validated.recordHash), validated.recordBytes);
+}
+
+void MemorySyncLoop::rememberDirectOperation(const MemoryDelta& delta,
+                                             const ValidatedDelta& validated) {
+    if (deltaOperations_.contains(delta.record.operationId)) {
+        return;
+    }
+    if (deltaOperationOrder_.size() >= limits_.maxTrackedIdentities &&
+        !deltaOperationOrder_.empty()) {
+        deltaOperations_.erase(deltaOperationOrder_.front());
+        deltaOperationOrder_.pop_front();
+    }
+    deltaOperations_[delta.record.operationId] = validated.fingerprint;
+    deltaOperationOrder_.push_back(delta.record.operationId);
+}
+
+bool MemorySyncLoop::commitDirectDelta(const MemoryDelta& delta, const DirectWinnerPlan& plan) {
+    version_.merge(delta.record.vv);
+    if (!plan.becomesWinner) {
+        return false;
+    }
+    if (plan.oldCachedHash) {
+        const auto cached = cachedBlobs_.find(*plan.oldCachedHash);
+        if (cached != cachedBlobs_.end()) {
+            cachedBytes_ -= cached->second.size();
+            cachedBlobs_.erase(cached);
+        }
+    }
+    if (!delta.record.isTombstone() && !cachedBlobs_.contains(delta.record.entryHash)) {
+        cachedBytes_ += delta.payload.size();
+        cachedBlobs_[delta.record.entryHash] = delta.payload;
+    }
+    merged_[delta.logicalKey] = delta.record;
+    return true;
+}
+
+void MemorySyncLoop::quarantineDirectDelta(const MemoryDelta& delta, std::string reason,
+                                           DeltaApplyResult& result) {
+    const std::string identity = delta.logicalKey + "#" + delta.record.operationId;
+    result.quarantined[identity] = reason;
+    quarantined_[identity] = std::move(reason);
+}
+
+std::string_view MemorySyncLoop::readinessProbeName(EraseReadinessProbe probe) {
+    switch (probe) {
+        case EraseReadinessProbe::Explicit:
+            return "explicit";
+        case EraseReadinessProbe::MetadataAbsent:
+            return "metadata_absent";
+        case EraseReadinessProbe::ContentAbsent:
+            return "content_absent";
+    }
+    return "invalid";
+}
+
+std::optional<EraseReadinessProbe> MemorySyncLoop::parseReadinessProbe(std::string_view name) {
+    if (name == "explicit") {
+        return EraseReadinessProbe::Explicit;
+    }
+    if (name == "metadata_absent") {
+        return EraseReadinessProbe::MetadataAbsent;
+    }
+    if (name == "content_absent") {
+        return EraseReadinessProbe::ContentAbsent;
+    }
+    return std::nullopt;
+}
+
+std::string MemorySyncLoop::eraseAuthorizationPayload(std::string_view tombstonePayload,
+                                                      EraseReadinessProbe probe) const {
+    return nlohmann::json::array({"yams-erase-authorization-v1", std::string(tombstonePayload),
+                                  readinessProbeName(probe)})
+        .dump();
+}
+
+std::size_t MemorySyncLoop::maxEraseOutboxBytes() const {
+    return limits_.maxEnvelopeBytes > std::numeric_limits<std::size_t>::max() / 3U
+               ? std::numeric_limits<std::size_t>::max()
+               : limits_.maxEnvelopeBytes * 3U;
+}
+
+std::string MemorySyncLoop::eraseOutboxPrefix() const {
+    const std::string identity =
+        nlohmann::json::array({"yams-erase-outbox-v1", corpusId_, corpusEpoch_, nodeId_}).dump();
+    return "outbox/erase-v1/" +
+           hashContent(std::span<const std::byte>{
+               reinterpret_cast<const std::byte*>(identity.data()), identity.size()}) +
+           "/";
+}
+
+std::string MemorySyncLoop::eraseOutboxKey(std::string_view logicalKey) const {
+    const std::string key(logicalKey);
+    return eraseOutboxPrefix() + hashContent(std::span<const std::byte>{
+                                     reinterpret_cast<const std::byte*>(key.data()), key.size()});
+}
+
+Result<MemorySyncLoop::EraseIntentState>
+MemorySyncLoop::decodeEraseIntent(std::string_view key, std::span<const std::byte> encoded) {
+    if (encoded.size() > maxEraseOutboxBytes()) {
+        return Error{ErrorCode::InvalidData, "erase outbox entry exceeds configured limit"};
+    }
+    try {
+        const std::string_view text(reinterpret_cast<const char*>(encoded.data()), encoded.size());
+        const auto json = nlohmann::json::parse(text);
+        if (json.at("schema_version").get<std::uint32_t>() != 1 ||
+            json.at("corpus_id").get<std::string>() != corpusId_ ||
+            json.at("corpus_epoch").get<std::uint64_t>() != corpusEpoch_ ||
+            json.at("node_id").get<std::string>() != nodeId_) {
+            return Error{ErrorCode::InvalidData, "erase outbox identity is invalid"};
+        }
+        EraseIntentState intent;
+        intent.logicalKey = json.at("logical_key").get<std::string>();
+        intent.tombstonePayload = json.at("tombstone_payload").get<std::string>();
+        const auto readiness = parseReadinessProbe(json.at("readiness_probe").get<std::string>());
+        if (!readiness) {
+            return Error{ErrorCode::InvalidData, "erase outbox readiness probe is invalid"};
+        }
+        intent.readinessProbe = *readiness;
+        intent.ready = json.at("ready").get<bool>();
+        if (auto valid = validateLogicalKey(intent.logicalKey);
+            !valid || intent.tombstonePayload.size() > limits_.maxEnvelopeBytes ||
+            eraseOutboxKey(intent.logicalKey) != key) {
+            return Error{ErrorCode::InvalidData, "erase outbox key or payload is invalid"};
+        }
+        if (json.contains("authorization")) {
+            intent.authorization = json.at("authorization").get<MemoryIndexRecord>();
+            if (!intent.authorization->isTombstone() ||
+                !intent.authorization->hasValidIdentity(corpusId_, corpusEpoch_,
+                                                        intent.logicalKey) ||
+                intent.authorization->origin != nodeId_ ||
+                intent.authorization->tombstonePayload !=
+                    eraseAuthorizationPayload(intent.tombstonePayload, intent.readinessProbe) ||
+                !writerAuth_ || !writerAuth_->verify(*intent.authorization)) {
+                return Error{ErrorCode::Unauthorized, "erase outbox authorization is invalid"};
+            }
+        }
+        if (json.contains("record")) {
+            intent.record = json.at("record").get<MemoryIndexRecord>();
+            intent.recordHash = json.at("record_hash").get<std::string>();
+            intent.preparedCommitment = WriterHistoryCommitment{
+                .counter = json.at("prepared_commitment").at("counter").get<std::uint64_t>(),
+                .digest = json.at("prepared_commitment").at("digest").get<std::string>()};
+            const auto recordBytes = serialize(*intent.record);
+            if (!intent.ready || !intent.record->isTombstone() ||
+                intent.record->tombstonePayload != intent.tombstonePayload ||
+                !intent.record->hasValidIdentity(corpusId_, corpusEpoch_, intent.logicalKey) ||
+                intent.record->origin != nodeId_ ||
+                intent.record->operationId !=
+                    makeOperationId(nodeId_, intent.record->vv.get(nodeId_)) ||
+                !isSha256Digest(intent.recordHash) ||
+                intent.preparedCommitment.counter != intent.record->vv.get(nodeId_) ||
+                !isSha256Digest(intent.preparedCommitment.digest) ||
+                hashContent(recordBytes) != intent.recordHash ||
+                recordBytes.size() > limits_.maxEnvelopeBytes) {
+                return Error{ErrorCode::InvalidData, "prepared erase outbox envelope is invalid"};
+            }
+            const bool authenticated =
+                intent.record->schemaVersion == kAuthenticatedMemoryIndexSchemaVersion;
+            if ((authenticated || (writerAuth_ && writerAuth_->required())) &&
+                (!writerAuth_ || !writerAuth_->verify(*intent.record))) {
+                return Error{ErrorCode::Unauthorized,
+                             "prepared erase outbox authentication failed"};
+            }
+        } else if (json.contains("record_hash") || json.contains("prepared_commitment") ||
+                   intent.ready) {
+            return Error{ErrorCode::InvalidData, "erase outbox preparation is incomplete"};
+        }
+        if (writerAuth_ && writerAuth_->required() && !intent.authorization) {
+            return Error{ErrorCode::Unauthorized,
+                         "erase outbox pending intent lacks writer authorization"};
+        }
+        return intent;
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::InvalidData,
+                     std::string("invalid erase outbox entry: ") + error.what()};
+    }
+}
+
+Result<void> MemorySyncLoop::storeEraseIntent(const EraseIntentState& intent) {
+    nlohmann::json encoded{{"schema_version", 1},
+                           {"corpus_id", corpusId_},
+                           {"corpus_epoch", corpusEpoch_},
+                           {"node_id", nodeId_},
+                           {"logical_key", intent.logicalKey},
+                           {"tombstone_payload", intent.tombstonePayload},
+                           {"readiness_probe", readinessProbeName(intent.readinessProbe)},
+                           {"ready", intent.ready}};
+    if (intent.authorization) {
+        encoded["authorization"] = *intent.authorization;
+    }
+    if (intent.record) {
+        encoded["record"] = *intent.record;
+        encoded["record_hash"] = intent.recordHash;
+        encoded["prepared_commitment"] = {{"counter", intent.preparedCommitment.counter},
+                                          {"digest", intent.preparedCommitment.digest}};
+    }
+    const std::string bytes = encoded.dump();
+    if (bytes.size() > maxEraseOutboxBytes()) {
+        return Error{ErrorCode::ResourceExhausted, "erase outbox entry exceeds configured limit"};
+    }
+    if (auto ready = beforeRemoteWork(); !ready) {
+        return ready.error();
+    }
+    return backend_->store(
+        eraseOutboxKey(intent.logicalKey),
+        std::span<const std::byte>{reinterpret_cast<const std::byte*>(bytes.data()), bytes.size()});
+}
+
+Result<std::optional<MemorySyncLoop::EraseIntentState>>
+MemorySyncLoop::loadEraseIntent(std::string_view logicalKey) {
+    const auto key = eraseOutboxKey(logicalKey);
+    auto exists = backend_->exists(key);
+    if (!exists) {
+        return exists.error();
+    }
+    if (!exists.value()) {
+        return std::optional<EraseIntentState>{};
+    }
+    auto encoded = backend_->retrieve(key);
+    if (!encoded) {
+        return encoded.error();
+    }
+    auto decoded = decodeEraseIntent(key, encoded.value());
+    if (!decoded) {
+        return decoded.error();
+    }
+    return std::optional<EraseIntentState>{std::move(decoded.value())};
+}
+
+Result<std::vector<MemorySyncLoop::EraseIntentState>> MemorySyncLoop::loadEraseIntents() {
+    auto listed = backend_->listPage(eraseOutboxPrefix(), std::nullopt, limits_.maxMergedKeys + 1U);
+    if (!listed) {
+        return listed.error();
+    }
+    if (listed.value().nextCursor || listed.value().keys.size() > limits_.maxMergedKeys) {
+        return Error{ErrorCode::ResourceExhausted,
+                     "erase outbox exceeds configured retained-intent bound"};
+    }
+    std::vector<EraseIntentState> intents;
+    intents.reserve(listed.value().keys.size());
+    for (const auto& key : listed.value().keys) {
+        auto encoded = backend_->retrieve(key);
+        if (!encoded) {
+            return encoded.error();
+        }
+        auto decoded = decodeEraseIntent(key, encoded.value());
+        if (!decoded) {
+            return decoded.error();
+        }
+        intents.push_back(std::move(decoded.value()));
+    }
+    return intents;
+}
+
+Result<MemoryIndexRecord> MemorySyncLoop::prepareEraseRecord(std::string_view logicalKey,
+                                                             std::string_view tombstonePayload) {
+    if (writerQuarantined(nodeId_)) {
+        return Error{ErrorCode::InvalidState, "quarantined writer cannot erase"};
+    }
+    if (auto committed = requireLocalHistoryCommitment(); !committed) {
+        return committed.error();
+    }
+    auto nextVersion = version_;
+    if (!nextVersion.increment(nodeId_)) {
+        return Error{ErrorCode::InvalidState, "memory sync writer counter exhausted"};
+    }
+    MemoryIndexRecord record;
+    record.ts.physicalMs = nowMs();
+    record.ts.logical = logicalClock_ + 1;
+    record.origin = nodeId_;
+    record.vv = std::move(nextVersion);
+    record.corpusId = corpusId_;
+    record.corpusEpoch = corpusEpoch_;
+    record.operationId = makeOperationId(nodeId_, record.vv.get(nodeId_));
+    record.logicalKey = logicalKey;
+    record.recordKind = std::string(kMemoryTombstoneRecordKind);
+    record.tombstonePayload = tombstonePayload;
+    if (writerAuth_) {
+        if (auto signedRecord = writerAuth_->sign(record); !signedRecord) {
+            return signedRecord.error();
+        }
+    }
+    const auto bytes = serialize(record);
+    if (bytes.size() > limits_.maxEnvelopeBytes) {
+        return Error{ErrorCode::InvalidArgument,
+                     "memory sync tombstone envelope exceeds configured limit"};
+    }
+    return record;
+}
+
+Result<WriterHistoryCommitment>
+MemorySyncLoop::preparedEraseCommitment(const MemoryIndexRecord& record,
+                                        std::string_view recordHash) const {
+    const auto prior = historyCommitments_.find(nodeId_);
+    const auto previous =
+        prior == historyCommitments_.end() ? WriterHistoryCommitment{} : prior->second;
+    const auto counter = record.vv.get(nodeId_);
+    if (counter != previous.counter + 1U) {
+        return Error{ErrorCode::InvalidState,
+                     "prepared erase does not extend local writer history"};
+    }
+    return WriterHistoryCommitment{
+        .counter = counter, .digest = advanceHistory(nodeId_, previous, recordHash, counter)};
+}
+
+Result<void> MemorySyncLoop::commitPreparedErase(const EraseIntentState& intent) {
+    if (!intent.ready || !intent.record || !isSha256Digest(intent.recordHash)) {
+        return Error{ErrorCode::InvalidState, "erase intent is not prepared"};
+    }
+    const auto retainCommittedWinner = [&] {
+        const auto winner = merged_.find(intent.logicalKey);
+        if (winner == merged_.end() ||
+            resolveLww(*intent.record, winner->second) == LwwDecision::First) {
+            merged_[intent.logicalKey] = *intent.record;
+        }
+    };
+    const auto operation = operations_.find(intent.record->operationId);
+    if (operation != operations_.end()) {
+        if (operation->second != std::pair{intent.recordHash, intent.logicalKey}) {
+            return Error{ErrorCode::InvalidState,
+                         "prepared erase operation conflicts with committed history"};
+        }
+        const auto commitment = historyCommitments_.find(nodeId_);
+        if (commitment == historyCommitments_.end() ||
+            commitment->second.counter < intent.record->vv.get(nodeId_)) {
+            return Error{ErrorCode::InvalidState,
+                         "prepared erase index lacks a durable history commitment"};
+        }
+        retainCommittedWinner();
+        return backend_->remove(eraseOutboxKey(intent.logicalKey));
+    }
+    const auto prior = historyCommitments_.find(nodeId_);
+    const auto current =
+        prior == historyCommitments_.end() ? WriterHistoryCommitment{} : prior->second;
+    if (current.counter == intent.preparedCommitment.counter) {
+        if (current != intent.preparedCommitment) {
+            return Error{ErrorCode::HashMismatch,
+                         "prepared erase commitment conflicts with durable history"};
+        }
+    } else if (current.counter + 1U == intent.preparedCommitment.counter) {
+        auto expected = preparedEraseCommitment(*intent.record, intent.recordHash);
+        if (!expected || expected.value() != intent.preparedCommitment) {
+            return Error{ErrorCode::HashMismatch,
+                         "prepared erase commitment does not extend durable history"};
+        }
+        auto next = historyCommitments_;
+        next[nodeId_] = intent.preparedCommitment;
+        if (auto indexed =
+                storeHistoryEntry(*intent.record, intent.recordHash, intent.preparedCommitment);
+            !indexed) {
+            return indexed.error();
+        }
+        if (auto persisted = persistReplicationCheckpoint(next, durableQuarantinedWriters_);
+            !persisted) {
+            return persisted.error();
+        }
+        historyCommitments_ = std::move(next);
+    } else {
+        return Error{ErrorCode::InvalidState,
+                     "prepared erase no longer extends local writer history"};
+    }
+    const auto recordBytes = serialize(*intent.record);
+    if (auto ready = beforeRemoteWork(); !ready) {
+        return ready.error();
+    }
+    if (auto stored = backend_->store(indexKey(intent.logicalKey, intent.recordHash), recordBytes);
+        !stored) {
+        return stored.error();
+    }
+    operations_[intent.record->operationId] = {intent.recordHash, intent.logicalKey};
+    version_.merge(intent.record->vv);
+    logicalClock_ = std::max(logicalClock_, intent.record->ts.logical);
+    retainCommittedWinner();
+    return backend_->remove(eraseOutboxKey(intent.logicalKey));
+}
+
+Result<void> MemorySyncLoop::replayReadyErasesAfterReconcile() {
+    auto intents = loadEraseIntents();
+    if (!intents) {
+        return intents.error();
+    }
+    std::ranges::sort(
+        intents.value(), [&](const EraseIntentState& lhs, const EraseIntentState& rhs) {
+            const auto lhsCounter = lhs.record ? lhs.record->vv.get(nodeId_)
+                                               : std::numeric_limits<std::uint64_t>::max();
+            const auto rhsCounter = rhs.record ? rhs.record->vv.get(nodeId_)
+                                               : std::numeric_limits<std::uint64_t>::max();
+            return std::tuple{lhsCounter, lhs.logicalKey} < std::tuple{rhsCounter, rhs.logicalKey};
+        });
+    for (auto& intent : intents.value()) {
+        if (!intent.ready || intent.readinessProbe != EraseReadinessProbe::Explicit) {
+            continue;
+        }
+        if (auto committed = commitPreparedErase(intent); !committed) {
+            return committed.error();
+        }
+    }
+    return {};
+}
+
+Result<void> MemorySyncLoop::reconcileBeforeWrite(bool allowDeferredPreparedErase) {
+    Result<std::map<std::string, MemoryIndexRecord>> reconciled =
+        backend_->isRemote() ? sync() : syncFully();
+    if (!reconciled) {
+        return reconciled.error();
+    }
+    if (auto replayed = replayReadyErasesAfterReconcile(); !replayed) {
+        return replayed.error();
+    }
+    if (allowDeferredPreparedErase) {
+        return {};
+    }
+    auto intents = loadEraseIntents();
+    if (!intents) {
+        return intents.error();
+    }
+    const bool deferredPrepared =
+        std::ranges::any_of(intents.value(), [](const EraseIntentState& intent) {
+            return intent.ready && intent.record &&
+                   intent.readinessProbe != EraseReadinessProbe::Explicit;
+        });
+    return deferredPrepared
+               ? Result<void>{Error{ErrorCode::InvalidState,
+                                    "prepared document deletion requires local revalidation"}}
+               : Result<void>{};
+}
+
+Result<void> MemorySyncLoop::beforeRemoteWork() const {
+    if (control_.isCancelled && control_.isCancelled()) {
+        return Error{ErrorCode::OperationCancelled, "memory sync reconciliation cancelled"};
+    }
+    if (backend_->isRemote() && control_.canAdmitRemoteWork && !control_.canAdmitRemoteWork()) {
+        return Error{ErrorCode::ResourceExhausted,
+                     "memory sync remote work denied by resource governor"};
+    }
+    return {};
+}
+
+Result<void> MemorySyncLoop::beforeDirectIngress() const {
+    if (control_.isCancelled && control_.isCancelled()) {
+        return Error{ErrorCode::OperationCancelled, "memory sync direct ingress cancelled"};
+    }
+    if (control_.canAdmitRemoteWork && !control_.canAdmitRemoteWork()) {
+        return Error{ErrorCode::ResourceExhausted,
+                     "memory sync direct ingress denied by resource governor"};
+    }
+    return {};
+}
+
+std::string MemorySyncLoop::acknowledgementKey(std::string_view operationId,
+                                               std::string_view peerId) {
+    return "ack/" + escapeKeySegment(operationId) + "/" + escapeKeySegment(peerId);
+}
+
+std::string MemorySyncLoop::blobKey(std::string_view hash) {
+    return std::string("blob/") + std::string(hash);
+}
+
+std::string MemorySyncLoop::indexKey(std::string_view logicalKey, std::string_view hash) {
+    return std::string("index/") + std::string(logicalKey) + "/" + std::string(hash);
+}
+
+std::string MemorySyncLoop::logicalKeyFromIndexKey(std::string_view key) {
+    constexpr std::string_view prefix = "index/";
+    if (!key.starts_with(prefix)) {
+        return {};
+    }
+    const auto rest = key.substr(prefix.size());
+    const auto slash = rest.rfind('/');
+    return slash == std::string_view::npos ? std::string(rest) : std::string(rest.substr(0, slash));
+}
+
+std::string MemorySyncLoop::recordHashFromIndexKey(std::string_view key) {
+    const auto slash = key.rfind('/');
+    if (slash == std::string_view::npos || slash + 1 >= key.size()) {
+        return {};
+    }
+    return std::string(key.substr(slash + 1));
+}
+
+std::string MemorySyncLoop::historyScopeHash(std::string_view writerId) const {
+    const std::string scope = nlohmann::json::array({"yams-history-counter-index-v1", corpusId_,
+                                                     corpusEpoch_, std::string(writerId)})
+                                  .dump();
+    return hashContent(
+        std::span<const std::byte>{reinterpret_cast<const std::byte*>(scope.data()), scope.size()});
+}
+
+std::string MemorySyncLoop::paddedCounter(std::uint64_t counter) {
+    auto text = std::to_string(counter);
+    text.insert(0, 20 - text.size(), '0');
+    return text;
+}
+
+Result<void> MemorySyncLoop::signControlArtifact(nlohmann::json& artifact,
+                                                 std::string_view domain) const {
+    const bool required = writerAuth_ && writerAuth_->required();
+    artifact["authenticated_writers"] = required;
+    artifact["control_scope"] = controlScope_;
+    artifact.erase("control_signature");
+    if (!required) {
+        return {};
+    }
+    const auto canonical = artifact.dump();
+    const auto digest = hashContent(std::span<const std::byte>{
+        reinterpret_cast<const std::byte*>(canonical.data()), canonical.size()});
+    auto signature = writerAuth_->signDigest(domain, digest);
+    if (!signature) {
+        return signature.error();
+    }
+    artifact["control_signature"] = {{"writer_id", signature.value().writerId},
+                                     {"key_id", signature.value().keyId},
+                                     {"algorithm", signature.value().algorithm},
+                                     {"signature", signature.value().signature}};
+    return {};
+}
+
+Result<void> MemorySyncLoop::verifyControlArtifact(const nlohmann::json& artifact,
+                                                   std::string_view domain,
+                                                   bool requireLocalSigner) const {
+    const bool required = writerAuth_ && writerAuth_->required();
+    if (artifact.value("authenticated_writers", false) != required) {
+        return Error{ErrorCode::InvalidData,
+                     "control artifact writer-authentication mode mismatch"};
+    }
+    if (!required) {
+        return {};
+    }
+    if (controlScope_.empty() || artifact.value("control_scope", std::string{}) != controlScope_) {
+        return Error{ErrorCode::InvalidData,
+                     "control artifact writer-authentication scope mismatch"};
+    }
+    try {
+        const auto& encoded = artifact.at("control_signature");
+        DetachedWriterSignature signature{.writerId = encoded.at("writer_id").get<std::string>(),
+                                          .keyId = encoded.at("key_id").get<std::string>(),
+                                          .algorithm = encoded.at("algorithm").get<std::string>(),
+                                          .signature = encoded.at("signature").get<std::string>()};
+        if (requireLocalSigner && signature.writerId != nodeId_) {
+            return Error{ErrorCode::Unauthorized,
+                         "control artifact was not signed by the local writer"};
+        }
+        auto unsignedArtifact = artifact;
+        unsignedArtifact.erase("control_signature");
+        const auto canonical = unsignedArtifact.dump();
+        const auto digest = hashContent(std::span<const std::byte>{
+            reinterpret_cast<const std::byte*>(canonical.data()), canonical.size()});
+        if (!writerAuth_->verifyDigest(signature, domain, digest)) {
+            return Error{ErrorCode::Unauthorized, "control artifact writer signature is invalid"};
+        }
+        return {};
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::InvalidData,
+                     std::string("control artifact signature is malformed: ") + error.what()};
+    }
+}
+
+std::string MemorySyncLoop::historyEntryKey(std::string_view writerId,
+                                            std::uint64_t counter) const {
+    return "history/counter-v1/" + historyScopeHash(writerId) + "/" + paddedCounter(counter);
+}
+
+std::string MemorySyncLoop::historyMigrationStateKey(std::string_view writerId) const {
+    return "history/migration-v1/" + historyScopeHash(writerId) + "/state";
+}
+
+std::string MemorySyncLoop::historyMigrationCandidateKey(std::string_view writerId,
+                                                         std::uint64_t counter) const {
+    return "history/migration-v1/" + historyScopeHash(writerId) + "/candidate/" +
+           paddedCounter(counter);
+}
+
+Result<MemorySyncLoop::HistoryEntry> MemorySyncLoop::loadHistoryEntry(std::string_view writerId,
+                                                                      std::uint64_t counter) const {
+    auto encoded = backend_->retrieve(historyEntryKey(writerId, counter));
+    if (!encoded) {
+        return encoded.error();
+    }
+    if (encoded.value().size() > limits_.maxEnvelopeBytes) {
+        return Error{ErrorCode::InvalidData, "writer counter entry exceeds envelope limit"};
+    }
+    try {
+        const std::string_view text(reinterpret_cast<const char*>(encoded.value().data()),
+                                    encoded.value().size());
+        const auto json = nlohmann::json::parse(text);
+        if (auto authenticated = verifyControlArtifact(json, "history-entry-v1", false);
+            !authenticated) {
+            return authenticated.error();
+        }
+        HistoryEntry entry{.writerId = json.at("writer_id").get<std::string>(),
+                           .counter = json.at("counter").get<std::uint64_t>(),
+                           .logicalKey = json.at("logical_key").get<std::string>(),
+                           .recordHash = json.at("record_hash").get<std::string>(),
+                           .prefixDigest = json.at("prefix_digest").get<std::string>()};
+        if (json.at("schema_version").get<std::uint32_t>() != 1 ||
+            json.value("authenticated_writers", false) !=
+                (writerAuth_ && writerAuth_->required()) ||
+            entry.writerId != writerId || entry.counter != counter ||
+            !isSha256Digest(entry.recordHash) || !isSha256Digest(entry.prefixDigest) ||
+            !validateLogicalKey(entry.logicalKey).has_value()) {
+            return Error{ErrorCode::InvalidData, "writer counter entry is inconsistent"};
+        }
+        return entry;
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::InvalidData,
+                     std::string("invalid writer counter entry: ") + error.what()};
+    }
+}
+
+Result<void> MemorySyncLoop::storeHistoryEntry(const MemoryIndexRecord& record,
+                                               std::string_view recordHash,
+                                               const WriterHistoryCommitment& commitment) {
+    const auto counter = record.vv.get(record.origin);
+    if (record.origin.empty() || counter == 0 || !isSha256Digest(recordHash) ||
+        commitment.counter != counter || !isSha256Digest(commitment.digest) ||
+        !validateLogicalKey(record.logicalKey).has_value()) {
+        return Error{ErrorCode::InvalidData, "writer counter entry source is invalid"};
+    }
+    HistoryEntry expected{.writerId = record.origin,
+                          .counter = counter,
+                          .logicalKey = record.logicalKey,
+                          .recordHash = std::string(recordHash),
+                          .prefixDigest = commitment.digest};
+    const auto key = historyEntryKey(record.origin, counter);
+    auto exists = backend_->exists(key);
+    if (!exists) {
+        return exists.error();
+    }
+    if (exists.value()) {
+        auto existing = loadHistoryEntry(record.origin, counter);
+        if (!existing) {
+            return existing.error();
+        }
+        if (existing.value().writerId != expected.writerId ||
+            existing.value().counter != expected.counter ||
+            existing.value().logicalKey != expected.logicalKey ||
+            existing.value().recordHash != expected.recordHash ||
+            existing.value().prefixDigest != expected.prefixDigest) {
+            return Error{ErrorCode::InvalidData,
+                         "writer counter entry conflicts with committed history"};
+        }
+        return {};
+    }
+    auto json = nlohmann::json{{"schema_version", 1},
+                               {"writer_id", expected.writerId},
+                               {"counter", expected.counter},
+                               {"logical_key", expected.logicalKey},
+                               {"record_hash", expected.recordHash},
+                               {"prefix_digest", expected.prefixDigest}};
+    if (auto signedArtifact = signControlArtifact(json, "history-entry-v1"); !signedArtifact) {
+        return signedArtifact.error();
+    }
+    const auto text = json.dump();
+    if (text.size() > limits_.maxEnvelopeBytes) {
+        return Error{ErrorCode::ResourceExhausted, "writer counter entry exceeds envelope limit"};
+    }
+    return backend_->store(key, std::span<const std::byte>{
+                                    reinterpret_cast<const std::byte*>(text.data()), text.size()});
+}
+
+Result<void> MemorySyncLoop::storeHistoryMigrationState(std::string_view writerId,
+                                                        const HistoryMigrationState& state) {
+    auto json = nlohmann::json{{"schema_version", 1},
+                               {"writer_id", writerId},
+                               {"phase", state.phase},
+                               {"cursor", state.cursor},
+                               {"target_counter", state.targetCounter},
+                               {"next_counter", state.nextCounter},
+                               {"prefix_digest", state.prefixDigest}};
+    if (auto signedArtifact = signControlArtifact(json, "history-migration-state-v1");
+        !signedArtifact) {
+        return signedArtifact.error();
+    }
+    const auto encoded = json.dump();
+    return backend_->store(historyMigrationStateKey(writerId),
+                           std::span<const std::byte>{
+                               reinterpret_cast<const std::byte*>(encoded.data()), encoded.size()});
+}
+
+Result<std::optional<MemorySyncLoop::HistoryMigrationState>>
+MemorySyncLoop::loadHistoryMigrationState(std::string_view writerId) const {
+    auto exists = backend_->exists(historyMigrationStateKey(writerId));
+    if (!exists) {
+        return exists.error();
+    }
+    if (!exists.value()) {
+        return std::optional<HistoryMigrationState>{};
+    }
+    auto encoded = backend_->retrieve(historyMigrationStateKey(writerId));
+    if (!encoded) {
+        return encoded.error();
+    }
+    try {
+        const std::string_view text(reinterpret_cast<const char*>(encoded.value().data()),
+                                    encoded.value().size());
+        const auto json = nlohmann::json::parse(text);
+        if (auto authenticated = verifyControlArtifact(json, "history-migration-state-v1", false);
+            !authenticated) {
+            return authenticated.error();
+        }
+        HistoryMigrationState state{.phase = json.at("phase").get<std::string>(),
+                                    .cursor = json.at("cursor").get<std::string>(),
+                                    .targetCounter = json.at("target_counter").get<std::uint64_t>(),
+                                    .nextCounter = json.at("next_counter").get<std::uint64_t>(),
+                                    .prefixDigest = json.at("prefix_digest").get<std::string>()};
+        if (json.at("schema_version").get<std::uint32_t>() != 1 ||
+            json.at("writer_id").get<std::string>() != writerId ||
+            json.value("authenticated_writers", false) !=
+                (writerAuth_ && writerAuth_->required()) ||
+            (state.phase != "scan" && state.phase != "finalize") || state.targetCounter == 0 ||
+            state.nextCounter == 0 ||
+            (state.nextCounter > 1 && !isSha256Digest(state.prefixDigest))) {
+            return Error{ErrorCode::InvalidData, "history migration state is invalid"};
+        }
+        return std::optional<HistoryMigrationState>{std::move(state)};
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::InvalidData,
+                     std::string("invalid history migration state: ") + error.what()};
+    }
+}
+
+Result<void> MemorySyncLoop::storeHistoryMigrationCandidate(const HistoryEntry& candidate) {
+    const auto key = historyMigrationCandidateKey(candidate.writerId, candidate.counter);
+    auto exists = backend_->exists(key);
+    if (!exists) {
+        return exists.error();
+    }
+    auto json = nlohmann::json{{"schema_version", 1},
+                               {"writer_id", candidate.writerId},
+                               {"counter", candidate.counter},
+                               {"logical_key", candidate.logicalKey},
+                               {"record_hash", candidate.recordHash}};
+    if (auto signedArtifact = signControlArtifact(json, "history-migration-candidate-v1");
+        !signedArtifact) {
+        return signedArtifact.error();
+    }
+    const auto encoded = json.dump();
+    if (exists.value()) {
+        auto prior = backend_->retrieve(key);
+        if (!prior) {
+            return prior.error();
+        }
+        try {
+            const std::string_view priorText(reinterpret_cast<const char*>(prior.value().data()),
+                                             prior.value().size());
+            if (nlohmann::json::parse(priorText) != json) {
+                return Error{ErrorCode::InvalidData,
+                             "history migration found a writer counter fork"};
+            }
+            return {};
+        } catch (const std::exception& error) {
+            return Error{ErrorCode::InvalidData,
+                         std::string("invalid history migration candidate: ") + error.what()};
+        }
+    }
+    return backend_->store(
+        key, std::span<const std::byte>{reinterpret_cast<const std::byte*>(encoded.data()),
+                                        encoded.size()});
+}
+
+Result<MemorySyncLoop::HistoryEntry>
+MemorySyncLoop::loadHistoryMigrationCandidate(std::string_view writerId,
+                                              std::uint64_t counter) const {
+    auto encoded = backend_->retrieve(historyMigrationCandidateKey(writerId, counter));
+    if (!encoded) {
+        return encoded.error();
+    }
+    try {
+        const std::string_view text(reinterpret_cast<const char*>(encoded.value().data()),
+                                    encoded.value().size());
+        const auto json = nlohmann::json::parse(text);
+        if (auto authenticated =
+                verifyControlArtifact(json, "history-migration-candidate-v1", false);
+            !authenticated) {
+            return authenticated.error();
+        }
+        HistoryEntry candidate{.writerId = json.at("writer_id").get<std::string>(),
+                               .counter = json.at("counter").get<std::uint64_t>(),
+                               .logicalKey = json.at("logical_key").get<std::string>(),
+                               .recordHash = json.at("record_hash").get<std::string>()};
+        if (json.at("schema_version").get<std::uint32_t>() != 1 ||
+            json.value("authenticated_writers", false) !=
+                (writerAuth_ && writerAuth_->required()) ||
+            candidate.writerId != writerId || candidate.counter != counter ||
+            !isSha256Digest(candidate.recordHash) ||
+            !validateLogicalKey(candidate.logicalKey).has_value()) {
+            return Error{ErrorCode::InvalidData, "history migration candidate is inconsistent"};
+        }
+        return candidate;
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::InvalidData,
+                     std::string("invalid history migration candidate: ") + error.what()};
+    }
+}
+
+Result<void> MemorySyncLoop::ensureHistoryEntries(std::string_view writerId,
+                                                  std::uint64_t targetCounter, bool forceRebuild) {
+    if (targetCounter == 0) {
+        return {};
+    }
+    auto firstExists = backend_->exists(historyEntryKey(writerId, 1));
+    if (!firstExists) {
+        return firstExists.error();
+    }
+    auto lastExists = backend_->exists(historyEntryKey(writerId, targetCounter));
+    if (!lastExists) {
+        return lastExists.error();
+    }
+    if (!forceRebuild && firstExists.value() && lastExists.value()) {
+        return {};
+    }
+
+    auto loadedState = loadHistoryMigrationState(writerId);
+    if (!loadedState) {
+        return loadedState.error();
+    }
+    HistoryMigrationState state =
+        loadedState.value().value_or(HistoryMigrationState{.targetCounter = targetCounter});
+    if (state.phase == "scan") {
+        std::size_t observed = 0;
+        std::size_t scannedBytes = 0;
+        if (limits_.maxHistoryMigrationObjects == 0 || limits_.maxHistoryMigrationBytes == 0 ||
+            limits_.maxEnvelopeBytes == 0) {
+            return Error{ErrorCode::InvalidArgument,
+                         "writer history migration bounds must be positive"};
+        }
+        while (observed < limits_.maxHistoryMigrationObjects) {
+            const auto remaining = limits_.maxHistoryMigrationObjects - observed;
+            const auto remainingBytes = limits_.maxHistoryMigrationBytes - scannedBytes;
+            if (observed != 0 && remainingBytes < limits_.maxEnvelopeBytes) {
+                if (auto saved = storeHistoryMigrationState(writerId, state); !saved) {
+                    return saved.error();
+                }
+                return Error{ErrorCode::OperationInProgress,
+                             "writer history migration scan is continuing"};
+            }
+            const auto recordsByBytes =
+                std::max<std::size_t>(1, remainingBytes / limits_.maxEnvelopeBytes);
+            const auto pageLimit =
+                std::min({limits_.maxIndexObjectsPerSync, remaining, recordsByBytes});
+            auto listed = backend_->listPage(
+                "index/",
+                state.cursor.empty() ? std::nullopt : std::optional<std::string_view>{state.cursor},
+                pageLimit);
+            if (!listed) {
+                return listed.error();
+            }
+            auto page = std::move(listed.value());
+            for (const auto& key : page.keys) {
+                ++observed;
+                const auto logicalKey = logicalKeyFromIndexKey(key);
+                const auto recordHash = recordHashFromIndexKey(key);
+                if (!logicalKey.empty() && isSha256Digest(recordHash)) {
+                    auto encoded = backend_->retrieve(key);
+                    if (encoded && encoded.value().size() <= limits_.maxEnvelopeBytes &&
+                        hashContent(encoded.value()) == recordHash) {
+                        if (encoded.value().size() > limits_.maxHistoryMigrationBytes) {
+                            return Error{ErrorCode::ResourceExhausted,
+                                         "one history envelope exceeds migration byte bound"};
+                        }
+                        scannedBytes += encoded.value().size();
+                        auto record = deserialize(encoded.value());
+                        if (record && record.value().origin == writerId &&
+                            record.value().hasValidIdentity(corpusId_, corpusEpoch_, logicalKey)) {
+                            const bool authenticated = record.value().schemaVersion ==
+                                                       kAuthenticatedMemoryIndexSchemaVersion;
+                            if ((!authenticated && !(writerAuth_ && writerAuth_->required())) ||
+                                (writerAuth_ && writerAuth_->verify(record.value()))) {
+                                const auto counter = record.value().vv.get(std::string(writerId));
+                                if (counter != 0 && counter <= state.targetCounter) {
+                                    if (auto stored = storeHistoryMigrationCandidate(
+                                            HistoryEntry{.writerId = std::string(writerId),
+                                                         .counter = counter,
+                                                         .logicalKey = logicalKey,
+                                                         .recordHash = recordHash});
+                                        !stored) {
+                                        return stored.error();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (!page.nextCursor) {
+                state.phase = "finalize";
+                state.cursor.clear();
+                state.nextCounter = 1;
+                state.prefixDigest.clear();
+                break;
+            }
+            state.cursor = *page.nextCursor;
+        }
+        if (auto saved = storeHistoryMigrationState(writerId, state); !saved) {
+            return saved.error();
+        }
+        if (state.phase == "scan") {
+            return Error{ErrorCode::OperationInProgress,
+                         "writer history migration scan is continuing"};
+        }
+    }
+
+    if (state.nextCounter > 1) {
+        if (auto cleaned =
+                backend_->remove(historyMigrationCandidateKey(writerId, state.nextCounter - 1));
+            !cleaned) {
+            return cleaned.error();
+        }
+    }
+    std::size_t finalized = 0;
+    WriterHistoryCommitment previous{.counter = state.nextCounter - 1,
+                                     .digest = state.prefixDigest};
+    while (state.nextCounter <= state.targetCounter &&
+           finalized < limits_.maxHistoryMigrationObjects) {
+        auto candidate = loadHistoryMigrationCandidate(writerId, state.nextCounter);
+        if (!candidate) {
+            return Error{ErrorCode::InvalidState,
+                         "writer history migration found an incomplete prefix"};
+        }
+        const WriterHistoryCommitment commitment{
+            .counter = state.nextCounter,
+            .digest = advanceHistory(writerId, previous, candidate.value().recordHash,
+                                     state.nextCounter)};
+        const auto durable = historyCommitments_.find(std::string(writerId));
+        if (state.nextCounter == state.targetCounter && durable != historyCommitments_.end() &&
+            durable->second.counter == state.targetCounter && durable->second != commitment) {
+            return Error{ErrorCode::HashMismatch,
+                         "writer history migration differs from durable commitment"};
+        }
+        MemoryIndexRecord record;
+        record.origin = writerId;
+        record.logicalKey = candidate.value().logicalKey;
+        record.vv.observe(std::string(writerId), state.nextCounter);
+        if (auto stored = storeHistoryEntry(record, candidate.value().recordHash, commitment);
+            !stored) {
+            return stored.error();
+        }
+        const auto completedCounter = state.nextCounter;
+        previous = commitment;
+        ++state.nextCounter;
+        state.prefixDigest = commitment.digest;
+        if (auto saved = storeHistoryMigrationState(writerId, state); !saved) {
+            return saved.error();
+        }
+        if (auto removed =
+                backend_->remove(historyMigrationCandidateKey(writerId, completedCounter));
+            !removed) {
+            return removed.error();
+        }
+        ++finalized;
+    }
+    if (state.nextCounter <= state.targetCounter) {
+        if (auto saved = storeHistoryMigrationState(writerId, state); !saved) {
+            return saved.error();
+        }
+        return Error{ErrorCode::OperationInProgress,
+                     "writer history migration finalization is continuing"};
+    }
+    if (auto removed = backend_->remove(historyMigrationStateKey(writerId)); !removed) {
+        return removed.error();
+    }
+    return targetCounter == state.targetCounter
+               ? Result<void>{}
+               : Result<void>{Error{ErrorCode::OperationInProgress,
+                                    "writer history migration target advanced"}};
+}
+
+std::string MemorySyncLoop::replicationCheckpointKey() const {
+    const std::string identity =
+        nlohmann::json::array({"yams-replication-state-v1", corpusId_, corpusEpoch_, nodeId_})
+            .dump();
+    const auto digest = hashContent(std::span<const std::byte>{
+        reinterpret_cast<const std::byte*>(identity.data()), identity.size()});
+    return "checkpoint/replication-state-v1/" + digest;
+}
+
+Result<void> MemorySyncLoop::ensureDurableQuarantineLoaded() {
+    if (durableQuarantineLoaded_) {
+        return recoverColdBootstrap();
+    }
+    const auto checkpointKey = replicationCheckpointKey();
+    auto exists = backend_->exists(checkpointKey);
+    if (!exists) {
+        return exists.error();
+    }
+    if (!exists.value()) {
+        durableQuarantineLoaded_ = true;
+        return recoverColdBootstrap();
+    }
+    auto encoded = backend_->retrieve(checkpointKey);
+    if (!encoded) {
+        return encoded.error();
+    }
+    if (encoded.value().size() > limits_.maxEnvelopeBytes) {
+        return Error{ErrorCode::InvalidData, "replication checkpoint exceeds limit"};
+    }
+    try {
+        const std::string_view text(reinterpret_cast<const char*>(encoded.value().data()),
+                                    encoded.value().size());
+        const auto json = nlohmann::json::parse(text);
+        if (auto authenticated = verifyControlArtifact(json, "replication-checkpoint-v1");
+            !authenticated) {
+            return authenticated.error();
+        }
+        if (json.at("schema_version").get<std::uint32_t>() != 1 ||
+            json.at("corpus_id").get<std::string>() != corpusId_ ||
+            json.at("corpus_epoch").get<std::uint64_t>() != corpusEpoch_ ||
+            !json.at("quarantined_writers").is_array() || !json.at("commitments").is_array()) {
+            return Error{ErrorCode::InvalidData, "replication checkpoint is invalid"};
+        }
+        std::map<std::string, std::string> quarantined;
+        for (const auto& entry : json.at("quarantined_writers")) {
+            const auto writer = entry.at("writer_id").get<std::string>();
+            const auto source = entry.at("source_node_id").get<std::string>();
+            if (writer.empty() || source.empty() || quarantined.contains(writer) ||
+                quarantined.size() >= limits_.maxTrackedIdentities) {
+                return Error{ErrorCode::InvalidData,
+                             "replication checkpoint violates quarantine bounds"};
+            }
+            quarantined.emplace(writer, source);
+        }
+        std::map<NodeId, WriterHistoryCommitment> commitments;
+        for (const auto& entry : json.at("commitments")) {
+            const auto writer = entry.at("writer_id").get<std::string>();
+            WriterHistoryCommitment commitment{.counter = entry.at("counter").get<std::uint64_t>(),
+                                               .digest = entry.at("digest").get<std::string>()};
+            if (writer.empty() || commitment.counter == 0 || !isSha256Digest(commitment.digest) ||
+                commitments.contains(writer) ||
+                commitments.size() >= limits_.maxTrackedIdentities) {
+                return Error{ErrorCode::InvalidData,
+                             "replication checkpoint violates commitment bounds"};
+            }
+            commitments.emplace(writer, std::move(commitment));
+        }
+        durableQuarantinedWriters_ = std::move(quarantined);
+        historyCommitments_ = std::move(commitments);
+        for (const auto& [writer, commitment] : historyCommitments_) {
+            version_.observe(writer, commitment.counter);
+        }
+        durableQuarantineLoaded_ = true;
+        removeQuarantinedWinners();
+        return recoverColdBootstrap();
+    } catch (const std::exception& error) {
+        return Error{ErrorCode::InvalidData,
+                     std::string("invalid replication checkpoint: ") + error.what()};
+    }
+}
+
+Result<void> MemorySyncLoop::persistReplicationCheckpoint(
+    const std::map<NodeId, WriterHistoryCommitment>& commitments,
+    const std::map<std::string, std::string>& quarantinedWriters) {
+    nlohmann::json quarantineJson = nlohmann::json::array();
+    for (const auto& [writer, source] : quarantinedWriters) {
+        quarantineJson.push_back({{"writer_id", writer}, {"source_node_id", source}});
+    }
+    auto commitmentJson = commitmentsJson(commitments);
+    auto artifact = nlohmann::json{{"schema_version", 1},
+                                   {"corpus_id", corpusId_},
+                                   {"corpus_epoch", corpusEpoch_},
+                                   {"quarantined_writers", std::move(quarantineJson)},
+                                   {"commitments", std::move(commitmentJson)}};
+    if (auto signedArtifact = signControlArtifact(artifact, "replication-checkpoint-v1");
+        !signedArtifact) {
+        return signedArtifact.error();
+    }
+    const std::string encoded = artifact.dump();
+    if (encoded.size() > limits_.maxEnvelopeBytes) {
+        return Error{ErrorCode::ResourceExhausted, "replication checkpoint exceeds envelope limit"};
+    }
+    return backend_->store(replicationCheckpointKey(),
+                           std::span<const std::byte>{
+                               reinterpret_cast<const std::byte*>(encoded.data()), encoded.size()});
+}
+
+std::string MemorySyncLoop::historySeed(std::string_view writerId) const {
+    const std::string material = nlohmann::json::array({"yams-writer-history-v1", corpusId_,
+                                                        corpusEpoch_, std::string(writerId)})
+                                     .dump();
+    return hashContent(std::span<const std::byte>{
+        reinterpret_cast<const std::byte*>(material.data()), material.size()});
+}
+
+std::string MemorySyncLoop::advanceHistory(std::string_view writerId,
+                                           const WriterHistoryCommitment& previous,
+                                           std::string_view recordHash,
+                                           std::uint64_t counter) const {
+    const std::string prior = previous.counter == 0 ? historySeed(writerId) : previous.digest;
+    const std::string material =
+        nlohmann::json::array({"yams-writer-history-link-v1", std::string(writerId), counter, prior,
+                               std::string(recordHash)})
+            .dump();
+    return hashContent(std::span<const std::byte>{
+        reinterpret_cast<const std::byte*>(material.data()), material.size()});
+}
+
+Result<void> MemorySyncLoop::commitScannedHistory(const std::vector<ScanCandidate>& candidates) {
+    auto next = historyCommitments_;
+    std::vector<const ScanCandidate*> ordered;
+    ordered.reserve(candidates.size());
+    for (const auto& candidate : candidates) {
+        ordered.push_back(&candidate);
+    }
+    std::ranges::sort(ordered, [](const ScanCandidate* lhs, const ScanCandidate* rhs) {
+        return std::tuple{lhs->record.origin, lhs->record.vv.get(lhs->record.origin),
+                          lhs->recordHash} < std::tuple{rhs->record.origin,
+                                                        rhs->record.vv.get(rhs->record.origin),
+                                                        rhs->recordHash};
+    });
+    for (const auto* candidate : ordered) {
+        const auto& writer = candidate->record.origin;
+        if (writerQuarantined(writer)) {
+            continue;
+        }
+        if (forkedOperations_.contains(candidate->record.operationId)) {
+            auto quarantined = quarantineWriter(writer, nodeId_);
+            if (!quarantined) {
+                return quarantined.error();
+            }
+            continue;
+        }
+        const auto counter = candidate->record.vv.get(writer);
+        auto previous = next.contains(writer) ? next.at(writer) : WriterHistoryCommitment{};
+        if (counter <= previous.counter) {
+            continue;
+        }
+        if (counter != previous.counter + 1) {
+            // Shared/legacy stores may retain only a later winner. Never manufacture a
+            // full-history commitment from that frontier; leave it uncommitted so direct
+            // equal-counter handshakes fail closed until bounded history/bootstrap repairs it.
+            continue;
+        }
+        const WriterHistoryCommitment commitment{
+            .counter = counter,
+            .digest = advanceHistory(writer, previous, candidate->recordHash, counter)};
+        if (auto indexed = storeHistoryEntry(candidate->record, candidate->recordHash, commitment);
+            !indexed) {
+            return indexed.error();
+        }
+        next[writer] = commitment;
+    }
+    for (const auto& [writer, _] : durableQuarantinedWriters_) {
+        next.erase(writer);
+    }
+    if (next == historyCommitments_) {
+        return {};
+    }
+    if (auto persisted = persistReplicationCheckpoint(next, durableQuarantinedWriters_);
+        !persisted) {
+        return persisted.error();
+    }
+    historyCommitments_ = std::move(next);
+    return {};
+}
+
+Result<WriterHistoryCommitment>
+MemorySyncLoop::computeHistoryCommitmentAt(std::string_view writerId, std::uint64_t targetCounter) {
+    const auto current = historyCommitments_.find(std::string(writerId));
+    if (current == historyCommitments_.end() || targetCounter == 0 ||
+        targetCounter > current->second.counter) {
+        return Error{ErrorCode::InvalidState, "requested writer history prefix is unavailable"};
+    }
+    if (targetCounter == current->second.counter) {
+        return current->second;
+    }
+    if (auto indexed = ensureHistoryEntries(writerId, targetCounter); !indexed) {
+        return indexed.error();
+    }
+    auto entry = loadHistoryEntry(writerId, targetCounter);
+    if (!entry) {
+        return entry.error();
+    }
+    WriterHistoryCommitment previous;
+    if (targetCounter > 1) {
+        auto prior = loadHistoryEntry(writerId, targetCounter - 1);
+        if (!prior && prior.error().code == ErrorCode::NotFound) {
+            if (auto rebuilt = ensureHistoryEntries(writerId, targetCounter, true); !rebuilt) {
+                return rebuilt.error();
+            }
+            prior = loadHistoryEntry(writerId, targetCounter - 1);
+        }
+        if (!prior) {
+            return prior.error();
+        }
+        previous = WriterHistoryCommitment{.counter = targetCounter - 1,
+                                           .digest = prior.value().prefixDigest};
+    }
+    const auto expected =
+        advanceHistory(writerId, previous, entry.value().recordHash, targetCounter);
+    if (expected != entry.value().prefixDigest) {
+        return Error{ErrorCode::HashMismatch,
+                     "writer counter entry does not extend its durable prefix"};
+    }
+    return WriterHistoryCommitment{.counter = targetCounter, .digest = entry.value().prefixDigest};
+}
+
+Result<void> MemorySyncLoop::requireLocalHistoryCommitment() const {
+    const auto counter = version_.get(nodeId_);
+    const auto commitment = historyCommitments_.find(nodeId_);
+    if (counter == 0) {
+        return commitment == historyCommitments_.end()
+                   ? Result<void>{}
+                   : Result<void>{Error{ErrorCode::InvalidState,
+                                        "zero-counter writer has a history commitment"}};
+    }
+    if (commitment == historyCommitments_.end() || commitment->second.counter != counter ||
+        !isSha256Digest(commitment->second.digest)) {
+        return Error{ErrorCode::InvalidState,
+                     "local writer history is incomplete; bootstrap is required"};
+    }
+    return {};
+}
+
+Result<void> MemorySyncLoop::commitRecordHistory(const MemoryIndexRecord& record,
+                                                 std::string_view recordHash) {
+    const auto& writer = record.origin;
+    auto next = historyCommitments_;
+    const auto previous = next.contains(writer) ? next.at(writer) : WriterHistoryCommitment{};
+    const auto counter = record.vv.get(writer);
+    if (counter != previous.counter + 1) {
+        return Error{ErrorCode::InvalidState,
+                     "record commitment does not extend contiguous history"};
+    }
+    next[writer] = WriterHistoryCommitment{
+        .counter = counter, .digest = advanceHistory(writer, previous, recordHash, counter)};
+    if (auto indexed = storeHistoryEntry(record, recordHash, next.at(writer)); !indexed) {
+        return indexed.error();
+    }
+    if (auto persisted = persistReplicationCheckpoint(next, durableQuarantinedWriters_);
+        !persisted) {
+        return persisted.error();
+    }
+    historyCommitments_ = std::move(next);
+    return {};
+}
+
+Result<void> MemorySyncLoop::commitDirectHistory(const MemoryDelta& delta,
+                                                 const ValidatedDelta& validated) {
+    return commitRecordHistory(delta.record, validated.recordHash);
+}
+
+Result<MemoryIndexRecord>
+MemorySyncLoop::makeQuarantineInvalidation(std::string_view logicalKey,
+                                           const MemoryIndexRecord& record) {
+    if (record.isTombstone()) {
+        return record;
+    }
+    std::vector<std::byte> payload;
+    const auto cached = cachedBlobs_.find(record.entryHash);
+    if (cached != cachedBlobs_.end()) {
+        payload = cached->second;
+    } else {
+        auto loaded = backend_->retrieve(blobKey(record.entryHash));
+        if (!loaded) {
+            return loaded.error();
+        }
+        if (loaded.value().size() > limits_.maxValueBytes ||
+            hashContent(loaded.value()) != record.entryHash) {
+            return Error{ErrorCode::HashMismatch,
+                         "quarantined winner payload failed integrity validation"};
+        }
+        payload = std::move(loaded.value());
+    }
+
+    const auto parsePayload = [&]<typename T>() -> Result<T> {
+        try {
+            const std::string_view text(reinterpret_cast<const char*>(payload.data()),
+                                        payload.size());
+            return nlohmann::json::parse(text).get<T>();
+        } catch (const std::exception& error) {
+            return Error{ErrorCode::InvalidData, error.what()};
+        }
+    };
+    std::string tombstonePayload;
+    const std::string documentPrefix = std::string(memoryStoreName(MemoryStore::Document)) + "/";
+    const std::string embeddingPrefix = std::string(memoryStoreName(MemoryStore::Embedding)) + "/";
+    const std::string nodePrefix = std::string(memoryStoreName(MemoryStore::TopologyNode)) + "/";
+    const std::string edgePrefix = std::string(memoryStoreName(MemoryStore::TopologyEdge)) + "/";
+    const std::string blobPrefix = std::string(memoryStoreName(MemoryStore::ContentBlob)) + "/";
+    if (logicalKey.starts_with(documentPrefix)) {
+        auto decoded = parsePayload.template operator()<MetadataDocumentRecord>();
+        if (!decoded) {
+            return decoded.error();
+        }
+        tombstonePayload = decoded.value().contentHash.empty() ? decoded.value().documentId
+                                                               : decoded.value().contentHash;
+    } else if (logicalKey.starts_with(embeddingPrefix)) {
+        auto decoded = parsePayload.template operator()<EmbeddingRecord>();
+        if (!decoded) {
+            return decoded.error();
+        }
+        tombstonePayload = decoded.value().chunkId;
+    } else if (logicalKey.starts_with(nodePrefix)) {
+        auto decoded = parsePayload.template operator()<TopologyNodeRecord>();
+        if (!decoded) {
+            return decoded.error();
+        }
+        tombstonePayload = decoded.value().nodeKey;
+    } else if (logicalKey.starts_with(edgePrefix)) {
+        auto decoded = parsePayload.template operator()<TopologyEdgeRecord>();
+        if (!decoded) {
+            return decoded.error();
+        }
+        tombstonePayload = nlohmann::json(decoded.value()).dump();
+    } else if (logicalKey.starts_with(blobPrefix)) {
+        tombstonePayload = std::string(logicalKey.substr(blobPrefix.size()));
+        if (!isSha256Digest(tombstonePayload)) {
+            return Error{ErrorCode::InvalidData, "quarantined content-blob key is invalid"};
+        }
+    } else {
+        tombstonePayload = std::string(logicalKey);
+    }
+
+    auto tombstone = record;
+    tombstone.entryHash.clear();
+    tombstone.recordKind = std::string(kMemoryTombstoneRecordKind);
+    tombstone.tombstonePayload = std::move(tombstonePayload);
+    return tombstone;
+}
+
+Result<void> MemorySyncLoop::captureQuarantineInvalidation(std::string_view logicalKey,
+                                                           const MemoryIndexRecord& record) {
+    const auto source = quarantineInvalidationSources_.find(std::string(logicalKey));
+    if (source != quarantineInvalidationSources_.end() &&
+        resolveLww(record, source->second) != LwwDecision::First) {
+        return {};
+    }
+    auto tombstone = makeQuarantineInvalidation(logicalKey, record);
+    if (!tombstone) {
+        // The durable writer quarantine remains authoritative. A malformed payload could not
+        // have passed the corresponding adapter's identity validation, so omit only that
+        // downstream invalidation and continue reconstructing the remaining valid keys.
+        return {};
+    }
+    quarantineInvalidationSources_[std::string(logicalKey)] = record;
+    quarantineInvalidations_[std::string(logicalKey)] = std::move(tombstone.value());
+    ++durableQuarantineGeneration_;
+    return {};
+}
+
+void MemorySyncLoop::removeVisibleWinnersFrom(std::string_view writerId) {
+    for (auto it = merged_.begin(); it != merged_.end();) {
+        if (it->second.origin == writerId) {
+            it = merged_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    pruneUnreferencedCachedBlobs();
+}
+
+void MemorySyncLoop::removeQuarantinedWinners() {
+    for (auto it = merged_.begin(); it != merged_.end();) {
+        if (writerQuarantined(it->second.origin)) {
+            it = merged_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    pruneUnreferencedCachedBlobs();
+}
+
+void MemorySyncLoop::pruneUnreferencedCachedBlobs() {
+    std::set<std::string> winningHashes;
+    for (const auto& [_, record] : merged_) {
+        if (!record.isTombstone()) {
+            winningHashes.insert(record.entryHash);
+        }
+    }
+    for (auto it = cachedBlobs_.begin(); it != cachedBlobs_.end();) {
+        if (!winningHashes.contains(it->first)) {
+            cachedBytes_ -= it->second.size();
+            it = cachedBlobs_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+std::string MemorySyncLoop::hashContent(std::span<const std::byte> content) {
+    crypto::SHA256Hasher hasher;
+    hasher.init();
+    hasher.update(content);
+    return hasher.finalize();
+}
+
+std::vector<std::byte> MemorySyncLoop::serialize(const MemoryIndexRecord& record) {
+    const std::string dump = nlohmann::json(record).dump();
+    std::vector<std::byte> bytes(dump.size());
+    std::memcpy(bytes.data(), dump.data(), dump.size());
+    return bytes;
+}
+
+Result<MemoryIndexRecord> MemorySyncLoop::deserialize(std::span<const std::byte> bytes) {
+    try {
+        const std::string_view text(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+        return nlohmann::json::parse(text).get<MemoryIndexRecord>();
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::InvalidData, e.what()};
+    }
+}
+
+void MemorySyncLoop::quarantine(std::string_view key, std::string_view reason) {
+    quarantined_[std::string(key)] = std::string(reason);
+}
+
+void MemorySyncLoop::recordAuthFailure() noexcept {
+    if (authFailures_ < limits_.maxTrackedIdentities) {
+        ++authFailures_;
+    }
+}
+
+} // namespace yams::memory_sync
