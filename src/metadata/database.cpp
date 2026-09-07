@@ -429,11 +429,12 @@ Database::~Database() {
 Database::Database(Database&& other) noexcept
     : db_(other.db_), path_(std::move(other.path_)), inTransaction_(other.inTransaction_),
       statementCache_(std::move(other.statementCache_)), cacheHits_(other.cacheHits_),
-      cacheMisses_(other.cacheMisses_) {
+      cacheMisses_(other.cacheMisses_), uncachedPrepares_(other.uncachedPrepares_) {
     other.db_ = nullptr;
     other.inTransaction_ = false;
     other.cacheHits_ = 0;
     other.cacheMisses_ = 0;
+    other.uncachedPrepares_ = 0;
 }
 
 Database& Database::operator=(Database&& other) noexcept {
@@ -445,10 +446,12 @@ Database& Database::operator=(Database&& other) noexcept {
         statementCache_ = std::move(other.statementCache_);
         cacheHits_ = other.cacheHits_;
         cacheMisses_ = other.cacheMisses_;
+        uncachedPrepares_ = other.uncachedPrepares_;
         other.db_ = nullptr;
         other.inTransaction_ = false;
         other.cacheHits_ = 0;
         other.cacheMisses_ = 0;
+        other.uncachedPrepares_ = 0;
     }
     return *this;
 }
@@ -528,7 +531,12 @@ Result<Statement> Database::prepare(const std::string& sql) {
     }
 
     try {
-        return Statement(db_, sql);
+        Statement statement(db_, sql);
+        {
+            std::lock_guard<std::mutex> lock(cacheMutex_);
+            ++uncachedPrepares_;
+        }
+        return statement;
     } catch (const std::exception& e) {
         return make_sqlite_error(sqlite3_errcode(db_), e.what());
     }
@@ -631,7 +639,8 @@ void Database::clearStatementCache() {
 
 Database::CacheStats Database::getStatementCacheStats() const {
     std::lock_guard<std::mutex> lock(cacheMutex_);
-    return CacheStats{cacheHits_, cacheMisses_, statementCache_.size(), kMaxCacheSize};
+    return CacheStats{cacheHits_, cacheMisses_, statementCache_.size(), kMaxCacheSize,
+                      uncachedPrepares_};
 }
 
 Result<void> Database::execute(const std::string& sql) {
