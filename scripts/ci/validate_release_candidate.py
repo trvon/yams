@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 from dataclasses import asdict, dataclass
@@ -53,6 +54,8 @@ def run_git(
     result = subprocess.run(
         ["git", *arguments],
         cwd=root,
+        # The explicit root owns this read, not a caller's Git-hook environment.
+        env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
         capture_output=True,
         text=True,
         check=False,

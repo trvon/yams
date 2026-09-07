@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -50,6 +51,8 @@ class ReleaseCandidateTests(unittest.TestCase):
         result = subprocess.run(
             ["git", *args],
             cwd=self.repo,
+            # Hooks export GIT_DIR even across cwd changes; never mutate the caller.
+            env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
             check=True,
             capture_output=True,
             text=True,
