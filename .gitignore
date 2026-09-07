@@ -118,6 +118,8 @@ tests/benchmarks/baseline/xplan_foundation_*.json
 
 # Internal benchmark harness scripts (not shipped)
 tests/benchmarks/*.py
+!tests/benchmarks/retrieval_contract.py
+!tests/benchmarks/test_retrieval_contract.py
 
 # Cloudflare Wrangler local cache
 .wrangler/
