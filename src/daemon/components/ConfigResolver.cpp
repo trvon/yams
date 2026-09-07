@@ -1357,8 +1357,20 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
     };
 
     const auto* tuning = findSection("tuning");
+    // Keys whose setter treats 0 as a real value (0 = auto). For every other uint32 knob 0 is
+    // the override's unset sentinel and below the minimum, so it cannot be expressed through
+    // [tuning]; storing it would silently fall back to the default.
+    static constexpr std::string_view kZeroMeansAuto[] = {"post_ingest_threads"};
     const auto applyUint32 = [&](std::string_view key, auto setter) {
         if (auto value = parseUint32(tuning, "tuning", key)) {
+            const bool zeroIsValue = std::find(std::begin(kZeroMeansAuto), std::end(kZeroMeansAuto),
+                                               key) != std::end(kZeroMeansAuto);
+            if (*value == 0 && !zeroIsValue) {
+                spdlog::warn("Config: tuning.{} = 0 cannot be expressed through [tuning] (0 is "
+                             "the unset sentinel); ignoring",
+                             key);
+                return;
+            }
             setter(*value);
             noteSource("tuning", key);
         }
