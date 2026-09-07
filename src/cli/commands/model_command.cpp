@@ -1131,8 +1131,8 @@ private:
             }
             std::cout << "  Check embedding status:\n";
             std::cout << "    yams config embeddings status\n";
-            std::cout << "  Enable automatic embedding generation (optional):\n";
-            std::cout << "    yams config embeddings enable\n";
+            std::cout << "  Choose the model used for automatic embedding during ingest:\n";
+            std::cout << "    yams config embeddings model <name>\n";
         }
 
         if (applyConfig_) {

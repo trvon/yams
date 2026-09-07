@@ -291,6 +291,37 @@ TEST_CASE("Typed post-ingest configuration outranks the compatibility environmen
     TuneAdvisor::setPostIngestTotalConcurrent(0);
 }
 
+TEST_CASE("ConfigResolver reads a legacy embeddings.batch_size silently",
+          "[daemon][config][embeddings][catch2]") {
+    ConfigResolverFixture fx;
+    // Older configs carry batch_size under [embeddings]; only [embeddings.runtime] is
+    // typed. The legacy spelling resolves without a warning when the runtime key is absent
+    // and yields to the runtime key when both are present.
+    const auto legacyOnly = fx.writeToml("legacy_batch.toml", R"toml(
+[embeddings]
+batch_size = 24
+)toml");
+    DaemonConfig legacyConfig;
+    legacyConfig.configFilePath = legacyOnly;
+    const auto legacy = ConfigResolver::resolveEmbeddingConfig(legacyConfig, fx.tempDir);
+    REQUIRE(legacy.runtime.batchSize.has_value());
+    CHECK((*legacy.runtime.batchSize == 24));
+    CHECK(legacy.warnings.empty());
+
+    const auto both = fx.writeToml("both_batch.toml", R"toml(
+[embeddings]
+batch_size = 24
+
+[embeddings.runtime]
+batch_size = 8
+)toml");
+    DaemonConfig bothConfig;
+    bothConfig.configFilePath = both;
+    const auto resolved = ConfigResolver::resolveEmbeddingConfig(bothConfig, fx.tempDir);
+    REQUIRE(resolved.runtime.batchSize.has_value());
+    CHECK((*resolved.runtime.batchSize == 8));
+}
+
 TEST_CASE("ConfigResolver applies typed search maintenance policy with provenance",
           "[daemon][components][config][search][catch2]") {
     ConfigResolver::ConfigSections sections;

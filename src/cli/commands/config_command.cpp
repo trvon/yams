@@ -66,18 +66,6 @@ public:
         auto* embeddingsCmd = cmd->add_subcommand("embeddings", "Manage embedding configuration");
         embeddingsCmd->require_subcommand();
 
-        // Enable auto-generation
-        auto* enableCmd =
-            embeddingsCmd->add_subcommand("enable", "Enable automatic embedding generation");
-        enableCmd->callback(
-            [this]() { exitOnError(executeEmbeddingsEnable(), "Enable embeddings"); });
-
-        // Disable auto-generation
-        auto* disableCmd =
-            embeddingsCmd->add_subcommand("disable", "Disable automatic embedding generation");
-        disableCmd->callback(
-            [this]() { exitOnError(executeEmbeddingsDisable(), "Disable embeddings"); });
-
         // Show status
         auto* statusCmd =
             embeddingsCmd->add_subcommand("status", "Show embedding configuration status");
@@ -936,52 +924,6 @@ private:
         return models;
     }
 
-    Result<void> executeEmbeddingsEnable() {
-        try {
-            auto models = getAvailableModels();
-            if (models.empty()) {
-                std::cout << ui::status_warning("No embedding models found.") << "\n";
-                std::cout << "Download a model first: yams model download nomic-embed-text-v1.5\n";
-                std::cout << "  (or use --hf nomic-ai/nomic-embed-text-v1.5)\n";
-                return Error{ErrorCode::NotFound, "No embedding models available"};
-            }
-
-            // Preserve existing preferred_model if set and valid, otherwise use first available
-            auto config = yams::config::parse_simple_toml(getConfigPath());
-            std::string preferredModel = config["embeddings.preferred_model"];
-            if (preferredModel.empty() ||
-                std::ranges::find(models, preferredModel) == models.end()) {
-                preferredModel = models[0];
-            }
-
-            // Set default configurations for auto-generation
-            auto result = setMultipleConfigs({{"embeddings.auto_generate", "true"},
-                                              {"embeddings.preferred_model", preferredModel},
-                                              {"embeddings.batch_size", "16"},
-                                              {"embeddings.generation_delay_ms", "1000"}});
-            if (!result)
-                return result;
-
-            std::cout << ui::status_ok("Automatic embedding generation enabled") << "\n";
-            std::cout << "  Model: " << preferredModel << "\n";
-            std::cout << "  Batch size: 16\n";
-            std::cout << "  Processing delay: 1000ms\n\n";
-            std::cout << "Documents added with 'yams add' will now automatically\n";
-            std::cout << "generate embeddings in the background.\n";
-
-            return Result<void>();
-        } catch (const std::exception& e) {
-            return Error{ErrorCode::Unknown, std::string(e.what())};
-        }
-    }
-
-    Result<void> executeEmbeddingsDisable() {
-        return setBooleanConfig("embeddings.auto_generate", false,
-                                "Automatic embedding generation disabled",
-                                "Automatic embedding generation disabled\n"
-                                "  Use 'yams repair --embeddings' to manually generate embeddings");
-    }
-
     Result<void> executeEmbeddingsStatus() {
         try {
             auto configPath = getConfigPath();
@@ -990,11 +932,6 @@ private:
 
             std::cout << ui::section_header("Embedding Configuration Status") << "\n";
 
-            // Auto-generation status
-            bool autoEnabled = config["embeddings.auto_generate"] == "true";
-            std::cout << "Auto-generation: "
-                      << (autoEnabled ? ui::status_ok("Enabled") : ui::status_error("Disabled"))
-                      << "\n";
             std::string backend = config["embeddings.backend"];
             if (backend.empty()) {
                 backend = "simeon (default)";
@@ -1013,18 +950,15 @@ private:
                 }
             }
 
-            // Current settings
-            if (autoEnabled) {
-                std::cout << "\nCurrent settings:\n";
-                std::cout << "  Preferred model: " << config["embeddings.preferred_model"] << "\n";
-                std::cout << "  Batch size: " << config["embeddings.batch_size"] << "\n";
-                std::cout << "  Processing delay: " << config["embeddings.generation_delay_ms"]
-                          << "ms\n";
+            // Current settings. Embeddings are generated during ingest; there is no
+            // switch for that, only the model and the runtime batch size.
+            std::cout << "\nCurrent settings:\n";
+            std::cout << "  Preferred model: " << config["embeddings.preferred_model"] << "\n";
+            if (const auto batch = config["embeddings.runtime.batch_size"]; !batch.empty()) {
+                std::cout << "  Batch size: " << batch << "\n";
             }
 
             std::cout << "\nCommands:\n";
-            std::cout << "  yams config embeddings enable   - Enable auto-generation\n";
-            std::cout << "  yams config embeddings disable  - Disable auto-generation\n";
             std::cout << "  yams config embeddings backend <simeon|onnxruntime|daemon|auto> - "
                          "Change backend\n";
             std::cout << "  yams config embeddings model <name> - Change preferred model\n";
@@ -1159,8 +1093,7 @@ private:
 
             // Apply preset configurations
             if (embeddingPreset_ == "performance") {
-                configs = {{"embeddings.batch_size", "32"},
-                           {"embeddings.generation_delay_ms", "500"}};
+                configs = {{"embeddings.runtime.batch_size", "32"}};
                 // Keep user's preferred model unless unset
                 if (yams::config::parse_simple_toml(getConfigPath())["embeddings.preferred_model"]
                         .empty()) {
@@ -1168,23 +1101,18 @@ private:
                 }
                 description = "Performance preset applied\n"
                               "  - Larger batch size (32)\n"
-                              "  - Faster processing (500ms delay)\n"
                               "  - Lightweight model (MiniLM)";
             } else if (embeddingPreset_ == "quality") {
-                configs = {{"embeddings.batch_size", "8"},
-                           {"embeddings.generation_delay_ms", "2000"},
+                configs = {{"embeddings.runtime.batch_size", "8"},
                            {"embeddings.preferred_model", "all-mpnet-base-v2"}};
                 description = "Quality preset applied\n"
                               "  - Smaller batch size (8)\n"
-                              "  - Slower processing (2000ms delay)\n"
                               "  - High-quality model (MPNet)";
             } else if (embeddingPreset_ == "balanced") {
-                configs = {{"embeddings.batch_size", "16"},
-                           {"embeddings.generation_delay_ms", "1000"},
+                configs = {{"embeddings.runtime.batch_size", "16"},
                            {"embeddings.preferred_model", "all-MiniLM-L6-v2"}};
                 description = "Balanced preset applied\n"
                               "  - Medium batch size (16)\n"
-                              "  - Moderate processing (1000ms delay)\n"
                               "  - Efficient model (MiniLM)";
             } else {
                 return Error{ErrorCode::InvalidArgument, "Unknown preset: " + embeddingPreset_};

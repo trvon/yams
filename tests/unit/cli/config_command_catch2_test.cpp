@@ -237,6 +237,31 @@ TEST_CASE("ConfigCommand - embeddings backend writes ONNX Runtime selection",
     CHECK(cfg.at("embeddings.backend") == "onnxruntime");
 }
 
+TEST_CASE("ConfigCommand - embeddings tune writes the runtime batch size the daemon reads",
+          "[cli][config][embeddings][catch2]") {
+    ConfigCommandFixture fixture;
+
+    int rc = fixture.runCommand({"yams", "config", "embeddings", "tune", "performance"});
+    REQUIRE(rc == 0);
+
+    const auto cfg = yams::config::parse_simple_toml(fixture.testConfigHome / "config.toml");
+    REQUIRE(cfg.count("embeddings.runtime.batch_size") == 1);
+    CHECK(cfg.at("embeddings.runtime.batch_size") == "32");
+    // Keys no daemon code reads must not be written any more.
+    CHECK(cfg.count("embeddings.batch_size") == 0);
+    CHECK(cfg.count("embeddings.generation_delay_ms") == 0);
+    CHECK(cfg.count("embeddings.auto_generate") == 0);
+}
+
+TEST_CASE("ConfigCommand - embeddings enable and disable are no longer subcommands",
+          "[cli][config][embeddings][catch2]") {
+    ConfigCommandFixture fixture;
+    // Automatic embedding generation is not configurable; the daemon always embeds on
+    // ingest. A toggle that wrote an unread key is gone rather than kept as a no-op.
+    CHECK(fixture.runCommand({"yams", "config", "embeddings", "enable"}) != 0);
+    CHECK(fixture.runCommand({"yams", "config", "embeddings", "disable"}) != 0);
+}
+
 TEST_CASE("ConfigCommand - set model fails for missing model",
           "[cli][config][embeddings][catch2][.death_test]") {
     ConfigCommandFixture fixture;
