@@ -5,13 +5,51 @@
 
 #include <nlohmann/json.hpp>
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
 
 #include <yams/search/query_text_utils.h>
 
 namespace yams::search {
+
+namespace {
+std::atomic<std::uint64_t> g_edgeAnchorParses{0};
+} // namespace
+
+// Returned by value: the memo below clears itself when full, so a reference into it would
+// dangle across calls.
+EdgeAnchorHints edgeAnchorHints(const std::optional<std::string>& properties) {
+    if (!properties || properties->empty()) {
+        return {};
+    }
+    const std::string& text = *properties;
+    if (text.find("region") == std::string::npos && text.find("scope") == std::string::npos) {
+        return {};
+    }
+    thread_local std::unordered_map<std::string, EdgeAnchorHints> cache;
+    if (auto it = cache.find(text); it != cache.end()) {
+        return it->second;
+    }
+    if (cache.size() >= 1024) {
+        cache.clear();
+    }
+    EdgeAnchorHints hints;
+    g_edgeAnchorParses.fetch_add(1, std::memory_order_relaxed);
+    try {
+        auto props = nlohmann::json::parse(text);
+        hints.region = props.value("region", "");
+        hints.scope = props.value("scope", "");
+    } catch (...) {
+    }
+    return cache.emplace(text, std::move(hints)).first->second;
+}
+
+std::uint64_t edgeAnchorParseCount() noexcept {
+    return g_edgeAnchorParses.load(std::memory_order_relaxed);
+}
 
 namespace {
 
@@ -64,10 +102,10 @@ float relationExpansionWeight(const metadata::KGEdge& edge) {
     }
 
     if (edge.properties.has_value()) {
-        try {
-            auto props = nlohmann::json::parse(*edge.properties);
-            const std::string region = props.value("region", "");
-            const std::string scope = props.value("scope", "");
+        {
+            const auto hints = edgeAnchorHints(edge.properties);
+            const std::string& region = hints.region;
+            const std::string& scope = hints.scope;
             if (region == "body_claim" || scope == "body_segment") {
                 base *= 1.25f;
             } else if (region == "title" || scope == "title") {
@@ -75,7 +113,6 @@ float relationExpansionWeight(const metadata::KGEdge& edge) {
             } else if (region == "summary" || scope == "summary") {
                 base *= 0.90f;
             }
-        } catch (...) {
         }
     }
 
@@ -615,9 +652,8 @@ std::vector<GraphExpansionTerm> generateGraphExpansionTermsFromDocuments(
                     }
                 }
                 if (edge.relation == "mentioned_in_segment" && edge.properties.has_value()) {
-                    try {
-                        auto props = nlohmann::json::parse(*edge.properties);
-                        const std::string region = props.value("region", "");
+                    {
+                        const std::string region = edgeAnchorHints(edge.properties).region;
                         if (region == "body_claim") {
                             anchoredToBodyClaim = true;
                             anchorBoost = std::max(anchorBoost, 1.15f);
@@ -625,7 +661,6 @@ std::vector<GraphExpansionTerm> generateGraphExpansionTermsFromDocuments(
                             anchoredToTitleOrPrimary = true;
                             anchorBoost = std::max(anchorBoost, 1.20f);
                         }
-                    } catch (...) {
                     }
                 }
             }
@@ -732,15 +767,14 @@ std::vector<GraphExpansionTerm> generateGraphExpansionTermsFromDocuments(
                             }
                             if (edge.relation == "mentioned_in_segment" &&
                                 edge.properties.has_value()) {
-                                try {
-                                    auto props = nlohmann::json::parse(*edge.properties);
-                                    const std::string region = props.value("region", "");
+                                {
+                                    const std::string region =
+                                        edgeAnchorHints(edge.properties).region;
                                     if (region == "body_claim" || region == "title") {
                                         neighborAnchored = true;
                                         neighborAnchorBoost = std::max(
                                             neighborAnchorBoost, region == "title" ? 1.20f : 1.15f);
                                     }
-                                } catch (...) {
                                 }
                             }
                         }
