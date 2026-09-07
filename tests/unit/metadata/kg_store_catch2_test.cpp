@@ -1472,3 +1472,72 @@ TEST_CASE("KG Store: write batch cleanup helpers commit scoped deletions", "[uni
     REQUIRE((validEntities.value().size() == 1));
     CHECK((validEntities.value()[0].entityText == "BatchEntity"));
 }
+
+TEST_CASE("KG Store hot lookups reuse prepared statements after warm-up",
+          "[unit][metadata][kg][statements][catch2]") {
+    // One connection so every call lands on the same statement cache.
+    const auto dbPath = tempDbPath("kg_store_prepared_");
+    {
+        auto bootstrap =
+            makeSqliteKnowledgeGraphStore(dbPath.string(), KnowledgeGraphStoreConfig{});
+        REQUIRE(bootstrap.has_value());
+    }
+    ConnectionPoolConfig poolCfg;
+    poolCfg.minConnections = 1;
+    poolCfg.maxConnections = 1;
+    ConnectionPool pool(dbPath.string(), poolCfg);
+    REQUIRE(pool.initialize().has_value());
+    auto storeRes = makeSqliteKnowledgeGraphStore(pool, KnowledgeGraphStoreConfig{});
+    REQUIRE(storeRes.has_value());
+    auto& store = *storeRes.value();
+
+    std::vector<KGNode> nodes;
+    for (int i = 0; i < 64; ++i) {
+        nodes.push_back(KGNode{.nodeKey = "ent:" + std::to_string(i),
+                               .label = std::string("N" + std::to_string(i)),
+                               .type = std::string("entity")});
+    }
+    auto ids = store.upsertNodes(nodes);
+    REQUIRE(ids.has_value());
+    REQUIRE(ids.value().size() == 64u);
+    for (std::size_t i = 1; i < ids.value().size(); ++i) {
+        REQUIRE(store
+                    .addEdge(KGEdge{.srcNodeId = ids.value()[0],
+                                    .dstNodeId = ids.value()[i],
+                                    .relation = std::string("REL")})
+                    .has_value());
+    }
+
+    const auto uncached = [&]() {
+        std::size_t count = 0;
+        auto r = pool.withConnection([&](Database& db) -> Result<void> {
+            count = db.getStatementCacheStats().uncachedPrepares;
+            return Result<void>();
+        });
+        REQUIRE(r.has_value());
+        return count;
+    };
+
+    // Warm every path once, then measure.
+    REQUIRE(store.neighbors(ids.value()[0], 100).has_value());
+    REQUIRE(store.getDocumentIdByHash("missing").has_value());
+    REQUIRE(store.ensureDocumentNode("deadbeef", "doc").has_value());
+    const auto before = uncached();
+    REQUIRE(store.neighbors(ids.value()[1], 100).has_value());
+    const auto afterOneNeighbors = uncached();
+    INFO("uncached prepares for one warmed neighbors() call: " << (afterOneNeighbors - before));
+    for (std::size_t i = 0; i < ids.value().size(); ++i) {
+        auto nb = store.neighbors(ids.value()[i], 100);
+        REQUIRE(nb.has_value());
+    }
+    for (int i = 0; i < 16; ++i) {
+        REQUIRE(store.getDocumentIdByHash("missing-" + std::to_string(i)).has_value());
+        // Existing node: the select path, not the insert path.
+        REQUIRE(store.ensureDocumentNode("deadbeef", "doc").has_value());
+    }
+    CHECK(afterOneNeighbors - before == 0);
+    CHECK(uncached() - before == 0);
+    pool.shutdown();
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
+}
