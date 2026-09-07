@@ -41,19 +41,16 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           EVENT_SHA: ${{ github.sha }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || '' }}
         run: |
           set -euo pipefail
           git fetch --force origin main experimental --tags
+          base_sha="$(git rev-parse origin/main)"
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            base_sha="$PR_BASE_SHA"
             candidate_sha="$PR_HEAD_SHA"
           elif [ "$EVENT_NAME" = "push" ]; then
-            base_sha="$(git rev-parse origin/main)"
             candidate_sha="$EVENT_SHA"
           else
-            base_sha="$(git rev-parse origin/main)"
             candidate_sha="$(git rev-parse origin/experimental)"
           fi
           echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
@@ -120,5 +117,5 @@ jobs:
             release-candidate.json
             release-candidate.md
             release-please-preview.log
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 14

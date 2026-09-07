@@ -1,0 +1,54 @@
+# Draft visibility is deliberately separate from candidate validation and release authority.
+name: Draft Promotion
+
+"on":
+  workflow_run:
+    workflows: [Tests]
+    types: [requested]
+    branches: [experimental]
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: draft-promotion-experimental-main
+  cancel-in-progress: false
+
+jobs:
+  reconcile:
+    if: >-
+      github.repository == 'trvon/yams' && github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' ||
+       (github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.head_branch == 'experimental' &&
+        github.event.workflow_run.head_repository.full_name == github.repository))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout immutable main-owned tooling only
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: false
+
+      - name: Reconcile draft visibility (never promotion)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 scripts/ci/reconcile_promotion_pr.py --apply
+
+      - name: Explain delivery boundaries
+        if: always()
+        run: |
+          {
+            echo '## Draft visibility only'
+            echo 'Existing PR text and state are never updated; the initial snapshot may age.'
+            echo 'No ready-for-review, merge, version change, tag, release, or publication is authorized.'
+            echo 'GITHUB_TOKEN PR creation does not trigger normal PR-opened checks.'
+            echo 'A maintainer must verify current-head checks and close/reopen the PR with their own account if needed.'
+            echo 'If PR creation is denied, a maintainer must approve repository Actions PR-creation settings; this job never changes them.'
+          } >> "$GITHUB_STEP_SUMMARY"
