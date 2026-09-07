@@ -1,5 +1,6 @@
 #include <yams/app/services/services.hpp>
 #include <yams/common/fs_utils.h>
+#include <yams/common/hash_predicates.h>
 #include <yams/common/time_utils.h>
 #include <yams/core/assert.hpp>
 #include <yams/core/checked_arithmetic.h>
@@ -192,18 +193,6 @@ inline void addMetadataToMap(const std::unordered_map<std::string, std::string>&
     }
 }
 
-// Returns true if s consists only of hex digits
-inline bool isHex(const std::string& s) {
-    return std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isxdigit(c) != 0; });
-}
-
-// Heuristic: treat as hash when it looks like a hex string of reasonable length (6-64)
-inline bool looksLikePartialHash(const std::string& s) {
-    if (s.size() < 6 || s.size() >= 64)
-        return false;
-    return isHex(s);
-}
-
 bool canForceCleanupAfterStorageError(const Error& error) {
     return error.code == ErrorCode::CorruptedData || error.code == ErrorCode::ManifestInvalid ||
            error.code == ErrorCode::DataCorruption;
@@ -267,7 +256,8 @@ public:
         }
 
         // Strategy 5: Hash prefix (only if explicitly requested)
-        if (opts.tryHashPrefix && looksLikePartialHash(query)) {
+        if (opts.tryHashPrefix && query.size() != 64 &&
+            yams::common::looksLikePartialHashArgument(query)) {
             auto hashMatches = tryHashPrefix(query);
             if (!hashMatches.empty()) {
                 if (hashMatches.size() == 1) {
@@ -314,7 +304,8 @@ public:
         addUnique(tryPathPatterns(query));
 
         // Try hash prefix if requested
-        if (opts.tryHashPrefix && looksLikePartialHash(query)) {
+        if (opts.tryHashPrefix && query.size() != 64 &&
+            yams::common::looksLikePartialHashArgument(query)) {
             addUnique(tryHashPrefix(query));
         }
 
@@ -884,7 +875,7 @@ private:
                 auto docRes = ctx_.metadataRepo->getDocumentByHash(req.hash);
                 if (docRes && docRes.value().has_value()) {
                     addUniqueDeleteTargets(targets, seenHashes, {docRes.value().value()});
-                } else if (docRes && isHex(req.hash)) {
+                } else if (docRes && yams::common::isHexDigits(req.hash)) {
                     rawFullHashWithoutMetadata = true;
                 }
             } else {
@@ -2016,7 +2007,7 @@ public:
 
         // Resolve hash (handle partial hashes)
         if (!resolvedHash.empty() && resolvedHash.size() != 64 &&
-            looksLikePartialHash(resolvedHash)) {
+            yams::common::looksLikePartialHashArgument(resolvedHash)) {
             if (!ctx_.metadataRepo) {
                 return Error{ErrorCode::NotInitialized,
                              "Metadata repository not available for partial hash resolution"};
