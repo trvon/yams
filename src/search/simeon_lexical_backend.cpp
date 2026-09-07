@@ -1,3 +1,4 @@
+#include "simeon_score_materialize_internal.h"
 #include <yams/search/simeon_lexical_backend.h>
 
 #include <yams/metadata/metadata_repository.h>
@@ -933,35 +934,8 @@ SimeonLexicalBackend::scoreRouted(std::string_view query,
         concept_index_->blend_into(query, std::span<float>{full}, cfg_.concept_weight);
     }
 
-    RescoreDecision decision;
-    decision.recipe_name = recipe_label;
-    // QuerySession requests the backend's own dense ID order. Retain that score
-    // buffer directly instead of hashing every corpus ID to rebuild the same array.
-    if (candidate_doc_ids.data() == index_to_doc_id_.data() &&
-        candidate_doc_ids.size() == index_to_doc_id_.size()) {
-        for (size_t di = 0; di < full.size(); ++di) {
-            if (!std::isfinite(full[di])) {
-                full[di] = di < lexical.size() && std::isfinite(lexical[di]) ? lexical[di] : 0.0f;
-            }
-        }
-        decision.scores = std::move(full);
-        return decision;
-    }
-    decision.scores.reserve(candidate_doc_ids.size());
-    for (auto id : candidate_doc_ids) {
-        auto it = doc_id_to_index_.find(id);
-        if (it == doc_id_to_index_.end()) {
-            decision.scores.push_back(0.0f);
-            continue;
-        }
-        const auto di = it->second;
-        const float score =
-            std::isfinite(full[di])
-                ? full[di]
-                : (di < lexical.size() && std::isfinite(lexical[di]) ? lexical[di] : 0.0f);
-        decision.scores.push_back(score);
-    }
-    return decision;
+    // Non-finite scores fall back to the BM25 baseline when one was computed.
+    return materializeDecision(std::move(full), lexical, candidate_doc_ids, recipe_label);
 }
 
 Result<SimeonLexicalBackend::RescoreDecision>
@@ -1084,30 +1058,7 @@ SimeonLexicalBackend::scoreStrategyRouted(std::string_view query,
         concept_index_->blend_into(query, std::span<float>{full}, cfg_.concept_weight);
     }
 
-    RescoreDecision decision;
-    decision.recipe_name = recipe_label;
-    if (candidate_doc_ids.data() == index_to_doc_id_.data() &&
-        candidate_doc_ids.size() == index_to_doc_id_.size()) {
-        for (auto& score : full) {
-            if (!std::isfinite(score)) {
-                score = 0.0f;
-            }
-        }
-        decision.scores = std::move(full);
-        return decision;
-    }
-    decision.scores.reserve(candidate_doc_ids.size());
-    for (auto id : candidate_doc_ids) {
-        auto it = doc_id_to_index_.find(id);
-        if (it == doc_id_to_index_.end()) {
-            decision.scores.push_back(0.0f);
-            continue;
-        }
-        const auto di = it->second;
-        const float score = std::isfinite(full[di]) ? full[di] : 0.0f;
-        decision.scores.push_back(score);
-    }
-    return decision;
+    return materializeDecision(std::move(full), {}, candidate_doc_ids, recipe_label);
 }
 
 Result<SimeonLexicalBackend::RescoreDecision>
@@ -1169,31 +1120,8 @@ SimeonLexicalBackend::scoreBanditRouted(std::string_view query, std::string_view
         concept_index_->blend_into(query, std::span<float>{full}, cfg_.concept_weight);
     }
 
-    RescoreDecision decision;
-    decision.recipe_name = recipe_label;
-    if (candidate_doc_ids.data() == index_to_doc_id_.data() &&
-        candidate_doc_ids.size() == index_to_doc_id_.size()) {
-        // The bandit scratch is thread-local and reused: the session must own a copy.
-        decision.scores = full;
-        for (auto& score : decision.scores) {
-            if (!std::isfinite(score)) {
-                score = 0.0f;
-            }
-        }
-        return decision;
-    }
-    decision.scores.reserve(candidate_doc_ids.size());
-    for (auto id : candidate_doc_ids) {
-        auto it = doc_id_to_index_.find(id);
-        if (it == doc_id_to_index_.end()) {
-            decision.scores.push_back(0.0f);
-            continue;
-        }
-        const auto di = it->second;
-        const float score = std::isfinite(full[di]) ? full[di] : 0.0f;
-        decision.scores.push_back(score);
-    }
-    return decision;
+    // The scratch is thread-local and reused, so the borrowed overload copies on the dense path.
+    return materializeDecision(std::span<const float>{full}, {}, candidate_doc_ids, recipe_label);
 }
 
 Result<SimeonLexicalBackend::TopCandidateDecision>
@@ -1202,6 +1130,27 @@ SimeonLexicalBackend::searchTop(std::string_view query, std::size_t limit,
     ScoreTimingScope scoreTiming(*this);
     QuerySession session(*this, query, arm_name);
     return session.searchTop(limit);
+}
+
+SimeonLexicalBackend::RescoreDecision
+SimeonLexicalBackend::materializeDecision(std::vector<float> full, std::span<const float> lexical,
+                                          std::span<const std::int64_t> candidate_doc_ids,
+                                          const char* recipe_label) const {
+    RescoreDecision decision;
+    decision.recipe_name = recipe_label;
+    decision.scores = simeon_internal::materializeScores(std::move(full), lexical, doc_id_to_index_,
+                                                         index_to_doc_id_, candidate_doc_ids);
+    return decision;
+}
+
+SimeonLexicalBackend::RescoreDecision SimeonLexicalBackend::materializeDecision(
+    std::span<const float> full, std::span<const float> lexical,
+    std::span<const std::int64_t> candidate_doc_ids, const char* recipe_label) const {
+    RescoreDecision decision;
+    decision.recipe_name = recipe_label;
+    decision.scores = simeon_internal::materializeScores(full, lexical, doc_id_to_index_,
+                                                         index_to_doc_id_, candidate_doc_ids);
+    return decision;
 }
 
 Result<void> SimeonLexicalBackend::QuerySession::ensureScored() {
