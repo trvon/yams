@@ -1821,6 +1821,7 @@ if catch2_dep.found()
       'unit/cli/cli_test_cleanup_listener.cpp',
       'unit/cli/daemon_helpers_pool_catch2_test.cpp',
       'unit/cli/daemon_command_catch2_test.cpp',
+      'unit/cli/daemon_status_render_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: cli_test_deps,
