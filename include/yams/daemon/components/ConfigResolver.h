@@ -268,6 +268,11 @@ public:
     /// explicitly supplied policy is invalid; config remains unchanged on failure.
     static bool applyStorageDiskPressure(const ConfigSections& sections, DaemonConfig& config);
 
+    /// Resolve [embeddings.semantic_graph] (top_k, similarity_threshold, use_hnsw) into
+    /// config.embeddingService.semanticGraph. Returns false on an unknown key or a value out of
+    /// range; the daemon refuses to start rather than run with a silently ignored knob.
+    static bool applyEmbeddingSemanticGraph(const ConfigSections& sections, DaemonConfig& config);
+
     /// Resolve the opt-in [memory_sync] policy once from typed TOML sections.
     /// Returns false when an explicitly enabled policy is invalid.
     static bool applyMemorySync(const ConfigSections& sections, DaemonConfig& config);

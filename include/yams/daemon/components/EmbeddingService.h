@@ -17,6 +17,7 @@
 #include <yams/daemon/components/embedding_service_config.h>
 #include <yams/daemon/components/IComponent.h>
 #include <yams/daemon/components/InternalEventBus.h>
+#include <yams/daemon/components/semantic_neighbor_graph_builder.h>
 #include <yams/metadata/document_metadata.h>
 
 namespace yams {
@@ -91,15 +92,9 @@ public:
     uint64_t inferSubBatchMaxDurationMs() const;
     uint64_t inferSubBatchWarnCount() const;
     uint64_t inferOldestActiveMs() const;
-    uint64_t semanticEdgesCreated() const {
-        return semanticEdgesCreated_.load(std::memory_order_relaxed);
-    }
-    uint64_t semanticDocsProcessed() const {
-        return semanticDocsProcessed_.load(std::memory_order_relaxed);
-    }
-    uint64_t semanticUpdateErrors() const {
-        return semanticUpdateErrors_.load(std::memory_order_relaxed);
-    }
+    uint64_t semanticEdgesCreated() const { return semanticGraph_.edgesCreated(); }
+    uint64_t semanticDocsProcessed() const { return semanticGraph_.docsProcessed(); }
+    uint64_t semanticUpdateErrors() const { return semanticGraph_.updateErrors(); }
     void setPhaseTimingSink(std::shared_ptr<EmbeddingPhaseTimingSink> sink) {
         std::atomic_store_explicit(&phaseTimingSink_, std::move(sink), std::memory_order_release);
     }
@@ -139,11 +134,6 @@ private:
         const std::shared_ptr<yams::vector::VectorDatabase>& vdb, const std::string& modelName,
         const std::vector<std::pair<std::string, std::string>>& sourceDocuments,
         bool sourceAllCorpus = false);
-    void updateSemanticNeighborGraphUnlocked(
-        const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore,
-        const std::shared_ptr<yams::vector::VectorDatabase>& vdb, const std::string& modelName,
-        const std::vector<std::pair<std::string, std::string>>& sourceDocuments,
-        bool sourceAllCorpus);
     void recordPhaseTiming(std::string_view phase, std::chrono::steady_clock::time_point start);
     void enqueueRepairStatusUpdate(std::vector<std::string> hashes, metadata::RepairStatus status,
                                    std::string source);
@@ -190,9 +180,6 @@ private:
     std::atomic<uint64_t> inferSubBatchLastDurationMs_{0};
     std::atomic<uint64_t> inferSubBatchMaxDurationMs_{0};
     std::atomic<uint64_t> inferSubBatchWarnCount_{0};
-    std::atomic<uint64_t> semanticEdgesCreated_{0};
-    std::atomic<uint64_t> semanticDocsProcessed_{0};
-    std::atomic<uint64_t> semanticUpdateErrors_{0};
 
     // Idle-tick semantic_neighbor backfill: counts consecutive idle ticks since
     // the last drain attempt. Bounded — not actually unbounded growth, just used
@@ -204,16 +191,9 @@ private:
     std::shared_ptr<EmbeddingPhaseTimingSink> phaseTimingSink_;
     mutable std::mutex inferTrackerMutex_;
     std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> activeInferSubBatches_;
-    struct SemanticCorpusEntry {
-        std::string hash;
-        std::string filePath;
-        std::vector<float> embedding;
-        float invNorm{0.0f};
-    };
-    mutable std::mutex semanticCorpusMutex_;
-    std::unordered_map<std::string, SemanticCorpusEntry> semanticCorpusCache_;
-    mutable std::mutex semanticNodeIdCacheMutex_;
-    std::unordered_map<std::string, std::optional<std::int64_t>> semanticNodeIdCache_;
+    // Owns the semantic_neighbor policy, caches, and counters; serialized by
+    // semanticGraphMutationMutex_ below.
+    SemanticNeighborGraphBuilder semanticGraph_;
     // Serializes semantic relation writers. Corpus rebuild holds this across
     // clear + reconstruction; backfill holds it across missing-node discovery
     // + write so a stale discovery cannot mutate the rebuilt relation.
