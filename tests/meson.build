@@ -43,6 +43,7 @@ configuration_authority_policy_tests = files('scripts/test_check_configuration_a
 production_environment_keys = files('scripts/production_environment_keys.txt')
 configuration_reader_allowlist = files('scripts/configuration_reader_allowlist.txt')
 retrieval_contract_tests = files('benchmarks/test_retrieval_contract.py')
+config_key_usage_report_tests = files('scripts/test_report_config_key_usage.py')
 portability_policy_script = files('scripts/check_portability.py')
 portability_policy_tests = files('scripts/test_check_portability.py')
 portability_allowlist = files('scripts/portability_allowlist.txt')
@@ -123,6 +124,12 @@ test('configuration_authority_policy',
     '--environment-allowlist', production_environment_keys,
     '--reader-allowlist', configuration_reader_allowlist,
   ],
+  suite: ['unit', 'policy', 'configuration'],
+  timeout: 30,
+)
+test('config_key_usage_report_unit',
+  python_exe,
+  args: [config_key_usage_report_tests],
   suite: ['unit', 'policy', 'configuration'],
   timeout: 30,
 )
