@@ -61,6 +61,11 @@ Artifacts: `build/benchmarks/retrieval_load/kpi-20260709T003228Z-load/`
 2000 docs · 50 queries · topk=10 · topology routing **off** (historical control; the current
 product default is `hybrid_assist` + `shadow`)
 
+This table is historical quality evidence, not a current latency baseline. Keep
+current product default, topology-disabled, and traced-shadow runs distinct.
+Stage tracing can perform an additional exact document-complete retrieval;
+use untraced runs for product latency and paired traced runs for attribution.
+
 | Metric | Value |
 |--------|------:|
 | MRR | 0.613 |

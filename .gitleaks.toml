@@ -1,0 +1,33 @@
+# Extend the standard rules while excluding disposable local agent worktrees.
+# Those worktrees duplicate repository fixtures and are scanned independently in
+# their owning sessions; scanning them here produces duplicate false positives.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Local disposable agent worktrees"
+paths = ['''^\.claude/worktrees/''']
+
+[[allowlists]]
+description = "Storage backend synthetic key fixtures"
+paths = ['''(^|/)tests/unit/storage/storage_backend_catch2_test\.cpp$''']
+
+[[allowlists]]
+description = "Gitignored local benchmark fixture configs with synthetic storage keys"
+paths = ['''^bench_results/''']
+
+[[allowlists]]
+description = "Cloudflare wrangler docs example with truncated placeholder key body (file deleted from tree, history-only)"
+paths = ['''^docs/external/cloudflare-wrangler-commands\.html$''']
+
+[[allowlists]]
+description = "Gitignored local build artifacts: benchmark source snapshots and disposable live P2P test credentials"
+paths = ['''^build/''']
+
+[[allowlists]]
+description = "Untracked/gitignored vendored subprojects and their build artifacts"
+paths = ['''^subprojects/''']
+
+[[allowlists]]
+description = "Vendored third_party submodule working trees and their build artifacts (own git repos, not pushed by this repo)"
+paths = ['''^third_party/''']
