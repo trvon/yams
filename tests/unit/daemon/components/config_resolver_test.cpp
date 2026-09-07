@@ -276,6 +276,69 @@ TEST_CASE("ConfigResolver applies one typed tuning snapshot for startup and relo
     TuneAdvisor::setMemoryWarningThreshold(0.0);
 }
 
+TEST_CASE("ConfigResolver wires [tuning] keys for every setter that was env-only",
+          "[daemon][components][config][tuning][catch2]") {
+    ConfigResolver::ConfigSections sections;
+    sections["tuning"] = {{"conn_slots_min", "300"},
+                          {"conn_slots_max", "5000"},
+                          {"conn_slots_step", "24"},
+                          {"cpu_high_pct", "77.5"},
+                          {"onnx_max_concurrent", "7"},
+                          {"onnx_gliner_reserved", "2"},
+                          {"onnx_embed_reserved", "3"},
+                          {"onnx_reranker_reserved", "4"},
+                          {"onnx_sessions_per_model", "5"},
+                          {"model_evict_warning_threshold", "0.61"},
+                          {"model_evict_critical_threshold", "0.72"},
+                          {"model_evict_emergency_threshold", "0.93"},
+                          {"indexing_workers_max", "9"},
+                          {"store_document_channel_capacity", "1024"},
+                          {"work_coordinator_threads", "11"},
+                          {"embed_channel_capacity", "4096"},
+                          {"connection_lifetime_s", "1234"}};
+    TuningConfig base;
+    const auto resolved = ConfigResolver::applyRuntimeTuning(sections, base);
+
+    CHECK((TuneAdvisor::connectionSlotsMin() == 300u));
+    CHECK((TuneAdvisor::connectionSlotsMax() == 5000u));
+    CHECK((TuneAdvisor::connectionSlotsScaleStep() == 24u));
+    CHECK((TuneAdvisor::cpuHighThresholdPercent() == Catch::Approx(77.5)));
+    CHECK((TuneAdvisor::onnxMaxConcurrent() == 7u));
+    CHECK((TuneAdvisor::onnxGlinerReserved() == 2u));
+    CHECK((TuneAdvisor::onnxEmbedReserved() == 3u));
+    CHECK((TuneAdvisor::onnxRerankerReserved() == 4u));
+    CHECK((TuneAdvisor::onnxSessionsPerModel(false) == 5u));
+    CHECK((TuneAdvisor::modelEvictWarningThreshold() == Catch::Approx(0.61)));
+    CHECK((TuneAdvisor::modelEvictCriticalThreshold() == Catch::Approx(0.72)));
+    CHECK((TuneAdvisor::modelEvictEmergencyThreshold() == Catch::Approx(0.93)));
+    CHECK((TuneAdvisor::maxIngestWorkers() == 9u));
+    CHECK((TuneAdvisor::storeDocumentChannelCapacity() == 1024u));
+    CHECK((TuneAdvisor::workCoordinatorThreads() == 11u));
+    CHECK((TuneAdvisor::embedChannelCapacity() == 4096u));
+    CHECK((TuneAdvisor::connectionLifetimeSeconds() == 1234u));
+    CHECK((resolved.provenance.at("tuning.conn_slots_min") == "config:tuning.conn_slots_min"));
+    CHECK((resolved.provenance.at("tuning.cpu_high_pct") == "config:tuning.cpu_high_pct"));
+
+    // A reload that drops the keys reverts every one of them.
+    sections["tuning"] = {};
+    (void)ConfigResolver::applyRuntimeTuning(sections, base);
+    CHECK((TuneAdvisor::connectionSlotsMin() != 300u));
+    CHECK((TuneAdvisor::connectionSlotsMax() != 5000u));
+    CHECK((TuneAdvisor::connectionSlotsScaleStep() != 24u));
+    CHECK((TuneAdvisor::cpuHighThresholdPercent() != Catch::Approx(77.5)));
+    CHECK((TuneAdvisor::onnxMaxConcurrent() != 7u));
+    CHECK((TuneAdvisor::onnxGlinerReserved() != 2u));
+    CHECK((TuneAdvisor::onnxEmbedReserved() != 3u));
+    CHECK((TuneAdvisor::onnxRerankerReserved() != 4u));
+    CHECK((TuneAdvisor::onnxSessionsPerModel(false) != 5u));
+    CHECK((TuneAdvisor::modelEvictWarningThreshold() != Catch::Approx(0.61)));
+    CHECK((TuneAdvisor::maxIngestWorkers() != 9u));
+    CHECK((TuneAdvisor::storeDocumentChannelCapacity() != 1024u));
+    CHECK((TuneAdvisor::workCoordinatorThreads() != 11u));
+    CHECK((TuneAdvisor::embedChannelCapacity() != 4096u));
+    CHECK((TuneAdvisor::connectionLifetimeSeconds() != 1234u));
+}
+
 TEST_CASE("Typed post-ingest configuration outranks the compatibility environment",
           "[daemon][components][config][tuning][precedence][catch2]") {
     EnvGuard compatibility{"YAMS_POST_INGEST_TOTAL_CONCURRENT", "3"};
@@ -1885,4 +1948,24 @@ TEST_CASE("ConfigResolver rejects malformed opt-in memory sync", "[daemon][confi
 
     CHECK_FALSE(ConfigResolver::applyMemorySync(sections, config));
     CHECK_FALSE(config.memorySync.enabled);
+}
+
+TEST_CASE("ConfigResolver reports out-of-range values for the ranged [tuning] setters",
+          "[daemon][components][config][tuning][catch2]") {
+    // The setters keep their default outside their ranges; the resolver must not record
+    // config provenance for a value that was never applied.
+    ConfigResolver::ConfigSections sections;
+    sections["tuning"] = {{"cpu_high_pct", "5"},
+                          {"model_evict_warning_threshold", "1.5"},
+                          {"connection_lifetime_s", "99999"}};
+    TuningConfig base;
+    const auto resolved = ConfigResolver::applyRuntimeTuning(sections, base);
+    CHECK((resolved.provenance.count("tuning.cpu_high_pct") == 0));
+    CHECK((resolved.provenance.count("tuning.model_evict_warning_threshold") == 0));
+    CHECK((resolved.provenance.count("tuning.connection_lifetime_s") == 0));
+    CHECK((TuneAdvisor::cpuHighThresholdPercent() >= 10.0));
+    CHECK((TuneAdvisor::modelEvictWarningThreshold() < 1.0));
+    CHECK((TuneAdvisor::connectionLifetimeSeconds() <= 86400u));
+    sections["tuning"] = {};
+    (void)ConfigResolver::applyRuntimeTuning(sections, base);
 }
