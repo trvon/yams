@@ -56,6 +56,31 @@ class ConfigurationAuthorityPolicyTest(unittest.TestCase):
             POLICY.run(self.root, self.env_allowlist, self.reader_allowlist), 1
         )
 
+    def test_stale_environment_key_fails(self) -> None:
+        # Nothing in src/ mentions YAMS_EXISTING any more: the allowlist must shrink.
+        (self.root / "src" / "config.cpp").write_text(
+            "Config parseSimpleTomlFlat(const Path&) { return {}; }\n", encoding="utf-8"
+        )
+        self.assertEqual(
+            POLICY.run(self.root, self.env_allowlist, self.reader_allowlist), 1
+        )
+
+    def test_stale_reader_entry_fails(self) -> None:
+        (self.root / "src" / "config.cpp").write_text(
+            'const char* key = "YAMS_EXISTING";\n', encoding="utf-8"
+        )
+        self.assertEqual(
+            POLICY.run(self.root, self.env_allowlist, self.reader_allowlist), 1
+        )
+
+    def test_stale_entries_are_named(self) -> None:
+        (self.root / "src" / "config.cpp").write_text("int x;\n", encoding="utf-8")
+        stale_keys, stale_readers = POLICY.stale_entries(
+            self.root, self.env_allowlist, self.reader_allowlist
+        )
+        self.assertEqual(stale_keys, ["YAMS_EXISTING"])
+        self.assertEqual(stale_readers, ["src/config.cpp:parseSimpleTomlFlat"])
+
 
 if __name__ == "__main__":
     unittest.main()
