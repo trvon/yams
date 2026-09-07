@@ -1565,8 +1565,8 @@ private:
         }
         if (info.hasModels && !info.autoGenerationEnabled) {
             info.advice.info("STATUS_EMB_AUTO_DISABLED",
-                             "Enable auto-embedding: yams config embeddings enable",
-                             "Keeps embeddings up to date automatically");
+                             "Embedding service unavailable: yams config embeddings model <name>",
+                             "Ingest embeds automatically once a model is configured");
         }
         if (info.totalDocuments > 0 && info.embeddingCount == 0) {
             info.advice.warning(

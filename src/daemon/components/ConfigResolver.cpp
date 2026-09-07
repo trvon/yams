@@ -689,6 +689,10 @@ ConfigResolver::resolveEmbeddingConfig(const DaemonConfig& config,
         }
     };
     applyRuntimeSize("embeddings.runtime.batch_size", result.runtime.batchSize, "batch_size");
+    if (!result.runtime.batchSize) {
+        // Older configs spell this key under [embeddings]; honour it silently.
+        applyRuntimeSize("embeddings.batch_size", result.runtime.batchSize, "batch_size");
+    }
     applyRuntimeSize("embeddings.runtime.batch_target", result.runtime.batchTarget, "batch_target");
     if (const auto raw = configured("embeddings.runtime.repair_lock_timeout_ms")) {
         if (const auto parsed = parseUnsignedIntegral<std::uint64_t>(*raw)) {

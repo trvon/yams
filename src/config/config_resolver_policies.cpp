@@ -189,6 +189,10 @@ ConfigResolver::EmbeddingRuntimePolicy ConfigResolver::resolveEmbeddingRuntimePo
             if (auto it = kv.find("embeddings.runtime.batch_size"); it != kv.end())
                 if (auto v = parseTomlU32(it->second))
                     policy.batchSize = static_cast<std::size_t>(*v);
+            if (!policy.batchSize)
+                if (auto it = kv.find("embeddings.batch_size"); it != kv.end())
+                    if (auto v = parseTomlU32(it->second))
+                        policy.batchSize = static_cast<std::size_t>(*v);
             if (auto it = kv.find("embeddings.runtime.batch_target"); it != kv.end())
                 if (auto v = parseTomlU32(it->second))
                     policy.batchTarget = static_cast<std::size_t>(*v);
