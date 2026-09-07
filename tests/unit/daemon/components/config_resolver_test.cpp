@@ -276,6 +276,27 @@ TEST_CASE("ConfigResolver applies one typed tuning snapshot for startup and relo
     TuneAdvisor::setMemoryWarningThreshold(0.0);
 }
 
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "Compatibility embedding runtime policy parses as strictly as the typed resolver",
+                 "[daemon][components][config][embeddings][catch2]") {
+    // Two resolvers read the same keys; the compatibility one used stoull in a bare catch,
+    // so "12abc" became 12 on one path and a rejected value on the other.
+    const auto configPath =
+        writeToml("strict-runtime.toml", "[embeddings]\nbackend = \"simeon\"\n");
+    EnvGuard configEnv{"YAMS_CONFIG_PATH", configPath.string()};
+    EnvGuard batch{"YAMS_EMBED_BATCH", "12abc"};
+    EnvGuard target{"YAMS_EMBED_BATCH_TARGET", "2048"};
+    const auto policy = ConfigResolver::resolveEmbeddingRuntimePolicy();
+    CHECK_FALSE(policy.batchSize.has_value());
+    REQUIRE(policy.batchTarget.has_value());
+    CHECK((*policy.batchTarget == 2048));
+
+    DaemonConfig config;
+    const auto typed = ConfigResolver::resolveEmbeddingConfig(config, {});
+    CHECK((typed.runtime.batchSize.has_value() == policy.batchSize.has_value()));
+    CHECK((typed.runtime.batchTarget == policy.batchTarget));
+}
+
 TEST_CASE("ConfigResolver rejects 0 for [tuning] integer keys instead of ignoring it",
           "[daemon][components][config][tuning][catch2]") {
     // For the uint32 overrides 0 is the unset sentinel and below every minimum, so "= 0"
