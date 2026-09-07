@@ -4,6 +4,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <cstring>
@@ -29,6 +30,29 @@ bool isCompressedWalLog(const std::filesystem::path& path) {
 
 bool isWalLogFile(const std::filesystem::path& path) {
     return path.extension() == ".log" || isCompressedWalLog(path);
+}
+
+// A plain segment that never received an entry is either zero bytes (clean close truncates
+// to the write position) or an mmap preallocation left behind by a killed process, which
+// starts with zeros where the first entry's magic word would be.
+bool isEmptyWalSegment(const std::filesystem::path& path) {
+    if (isCompressedWalLog(path)) {
+        return false;
+    }
+    std::error_code ec;
+    const auto size = std::filesystem::file_size(path, ec);
+    if (ec) {
+        return false;
+    }
+    if (size == 0) {
+        return true;
+    }
+    std::ifstream in(path, std::ios::binary);
+    std::array<char, sizeof(uint32_t)> head{};
+    if (!in.read(head.data(), static_cast<std::streamsize>(head.size()))) {
+        return false;
+    }
+    return std::all_of(head.begin(), head.end(), [](char c) { return c == 0; });
 }
 
 std::optional<yams::compression::CompressionAlgorithm>
@@ -477,14 +501,16 @@ struct WALManager::Impl {
     }
 };
 
-WALManager::WALManager() : pImpl(std::make_unique<Impl>(Config{})) {}
-
 WALManager::WALManager(Config config) : pImpl(std::make_unique<Impl>(std::move(config))) {}
 
 WALManager::WALManager(WALManager&&) noexcept = default;
 WALManager& WALManager::operator=(WALManager&&) noexcept = default;
 
 Result<void> WALManager::initialize() {
+    if (pImpl->config.walDirectory.empty()) {
+        return Result<void>(Error{ErrorCode::InvalidArgument, "WAL directory is not configured"});
+    }
+
     // Create WAL directory if needed
     if (!std::filesystem::exists(pImpl->config.walDirectory)) {
         if (!yams::common::ensureDirectories(pImpl->config.walDirectory)) {
@@ -492,11 +518,16 @@ Result<void> WALManager::initialize() {
         }
     }
 
-    // Find the latest sequence number from existing logs
+    // Find the latest sequence number from existing logs. Every log that was ever opened
+    // counts, including empty ones, so the sequence stays monotonic across restarts.
     uint64_t maxSeq = 0;
+    std::vector<std::filesystem::path> emptySegments;
     for (const auto& entry : std::filesystem::directory_iterator(pImpl->config.walDirectory)) {
         if (!isWalLogFile(entry.path())) {
             continue;
+        }
+        if (isEmptyWalSegment(entry.path())) {
+            emptySegments.push_back(entry.path());
         }
 
         auto stemPath = entry.path().stem();
@@ -519,6 +550,21 @@ Result<void> WALManager::initialize() {
     }
 
     pImpl->sequenceNumber = maxSeq;
+
+    // openNewLog() creates a segment on every start; a segment that never received an
+    // entry carries nothing to recover and only slows every later directory scan.
+    for (const auto& path : emptySegments) {
+        std::error_code removeEc;
+        std::filesystem::remove(path, removeEc);
+        if (removeEc) {
+            spdlog::warn("Failed to prune empty WAL segment {}: {}", path.string(),
+                         removeEc.message());
+        }
+    }
+    if (!emptySegments.empty()) {
+        spdlog::info("Pruned {} empty WAL segment(s) from {}", emptySegments.size(),
+                     pImpl->config.walDirectory.string());
+    }
 
     // Open new log file
     auto result = pImpl->openNewLog();

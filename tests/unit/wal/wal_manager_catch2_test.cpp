@@ -151,3 +151,65 @@ TEST_CASE("WALManager transaction lifecycle updates stats and enforces state",
     CHECK(manager.getStats().activeTransactions == 0);
     REQUIRE(manager.shutdown());
 }
+
+TEST_CASE("WALManager initialize rejects an unconfigured directory", "[unit][wal][manager]") {
+    WALManager::Config cfg;
+    cfg.enableGroupCommit = false;
+    REQUIRE(cfg.walDirectory.empty());
+
+    WALManager manager(cfg);
+    auto result = manager.initialize();
+    REQUIRE_FALSE(result);
+    CHECK(result.error().code == ErrorCode::InvalidArgument);
+}
+
+TEST_CASE("WALManager initialize prunes empty log segments but keeps their sequence",
+          "[unit][wal][manager]") {
+    TempDir temp;
+    auto walDir = temp.path / "wal";
+    std::filesystem::create_directories(walDir);
+    for (int i = 0; i < 50; ++i) {
+        std::ofstream empty((walDir / ("wal_20240101_0101" + std::to_string(10 + i) + "_" +
+                                       std::to_string(100 + i) + ".log"))
+                                .string(),
+                            std::ios::binary);
+        REQUIRE(empty.good());
+    }
+    {
+        // A killed writer leaves the mmap preallocation behind: 1 MiB of zeros, no entry.
+        std::ofstream preallocated((walDir / "wal_20240101_010159_150.log").string(),
+                                   std::ios::binary);
+        std::string zeros(1024 * 1024, '\0');
+        preallocated.write(zeros.data(), static_cast<std::streamsize>(zeros.size()));
+        REQUIRE(preallocated.good());
+    }
+    {
+        std::ofstream nonEmpty((walDir / "wal_20240101_010200_7.log").string(), std::ios::binary);
+        nonEmpty << "not-a-real-entry";
+        REQUIRE(nonEmpty.good());
+    }
+
+    WALManager::Config cfg;
+    cfg.walDirectory = walDir;
+    cfg.compressOldLogs = false;
+    cfg.enableGroupCommit = false;
+    WALManager manager(cfg);
+    REQUIRE(manager.initialize());
+
+    CHECK(manager.getCurrentSequence() == 150);
+
+    std::size_t logFiles = 0;
+    bool nonEmptySurvived = false;
+    for (const auto& entry : std::filesystem::directory_iterator(walDir)) {
+        if (entry.path().extension() == ".log") {
+            ++logFiles;
+            if (entry.path().filename() == "wal_20240101_010200_7.log") {
+                nonEmptySurvived = true;
+            }
+        }
+    }
+    CHECK(nonEmptySurvived);
+    // The non-empty segment plus the freshly opened active log.
+    CHECK(logFiles == 2);
+    REQUIRE(manager.shutdown());
+}
