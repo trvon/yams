@@ -790,6 +790,7 @@ else
   subdir('src/compression')
   subdir('src/storage')
   subdir('src/wal')
+  subdir('src/memory_sync')
   subdir('src/manifest')
   subdir('src/metadata')
   subdir('src/integrity')
