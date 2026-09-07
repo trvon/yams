@@ -169,6 +169,7 @@ yams_daemon_lib = static_library('yams_daemon',
     dependency('yams_detection'),
     dependency('yams_api'),
     dependency('yams_wal'),
+    dependency('yams_memory_sync'),
     dependency('yams_downloader'),
     dependency('yams_repair'),
     dependency('yams_integrity'),
@@ -205,7 +206,8 @@ yams_daemon_lib = static_library('yams_daemon',
 yams_daemon_dep = declare_dependency(
   link_with: yams_daemon_lib,
   include_directories: [include_directories('../../include'), generated_inc],
-  dependencies: [yams_daemon_client_dep, version_generated_dep] + daemon_platform_deps,
+  dependencies: [yams_daemon_client_dep, version_generated_dep, dependency('yams_memory_sync')] +
+                daemon_platform_deps,
 )
 
 meson.override_dependency('yams_daemon', yams_daemon_dep)
