@@ -1474,6 +1474,7 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
     applyUint32("io_conn_per_thread", &TuneAdvisor::setIoConnPerThread);
     applyUint32("post_ingest_threads", &TuneAdvisor::setPostIngestThreads);
     applyUint32("post_ingest_queue_max", &TuneAdvisor::setPostIngestQueueMax);
+    applyUint32("post_ingest_pending_kg_max", &TuneAdvisor::setPostIngestPendingKgMax);
     applyUint32("list_inflight_limit", &TuneAdvisor::setListInflightLimit);
     applyUint32("list_admission_wait_ms", &TuneAdvisor::setListAdmissionWaitMs);
     applyUint32("grep_inflight_limit", &TuneAdvisor::setGrepInflightLimit);

@@ -55,7 +55,8 @@ Named decisions from the tuning migration:
   `model_evict_critical_threshold`, `model_evict_emergency_threshold`,
   `indexing_workers_max`, `store_document_channel_capacity`, `work_coordinator_threads`,
   `embed_channel_capacity`, `connection_lifetime_s`. The matching environment names remain
-  deprecated compatibility inputs.
+  deprecated compatibility inputs. `post_ingest_pending_kg_max` bounds the overflow FIFO
+  behind the `kg_jobs` channel (default 16384) and has no environment counterpart.
 - New typed product sections are `[tuning.ipc]` (`timeout_ms`,
   `stream_chunk_timeout_ms`), `[tuning.resource]` (`enabled`, `admission_control`, memory thresholds,
   budgets, and hysteresis), and `[tuning.post_ingest]` (stage concurrency, batch, RPC queue, and RPC
