@@ -248,7 +248,9 @@ endif
 
 yams_daemon_client = dependency('yams_daemon_client', required: true)
 
-deps_vec = [spdlog_dep, sqlite_dep, json_dep, fmt_dep, boost_dep, yams_core, yams_config, yams_metadata, tl_expected_dep, yams_daemon_client]
+yams_tune_advisor = dependency('yams_tune_advisor', required: true)
+
+deps_vec = [spdlog_dep, sqlite_dep, json_dep, fmt_dep, boost_dep, yams_core, yams_config, yams_metadata, tl_expected_dep, yams_daemon_client, yams_tune_advisor]
 
 vector_platform_deps = []
 if host_machine.system() == 'windows'
@@ -284,6 +286,6 @@ pkg.generate(yams_vector,
 yams_vector_dep = declare_dependency(
   link_with: [yams_vector, simeon_vector_lib, simeon_common_lib] + simeon_extra_libs,
   include_directories: include_directories('../../include'),
-  dependencies: [yams_config] + vector_platform_deps,
+  dependencies: [yams_config, yams_tune_advisor] + vector_platform_deps,
 )
 meson.override_dependency('yams_vector', yams_vector_dep)
