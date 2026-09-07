@@ -302,6 +302,7 @@ public:
         ioConnPerThreadOverride_.store(0, std::memory_order_relaxed);
         postIngestThreads_.store(0, std::memory_order_relaxed);
         postIngestQueueMaxOverride_.store(0, std::memory_order_relaxed);
+        postIngestPendingKgMaxOverride_.store(0, std::memory_order_relaxed);
         listInflightLimitOverride_.store(0, std::memory_order_relaxed);
         listAdmissionWaitMsOverride_.store(0, std::memory_order_relaxed);
         grepInflightLimitOverride_.store(0, std::memory_order_relaxed);
@@ -1290,6 +1291,19 @@ public:
     }
     static void setPostIngestQueueMax(uint32_t v) {
         postIngestQueueMaxOverride_.store(v, std::memory_order_relaxed);
+    }
+
+    // Overflow FIFO behind the bounded kg_jobs channel. Each pending job may hold document
+    // bytes, so this bound is what keeps a KG stall from growing ingest memory without limit.
+    // Typed key only: tuning.post_ingest_pending_kg_max.
+    static uint32_t postIngestPendingKgMax() {
+        uint32_t ov = postIngestPendingKgMaxOverride_.load(std::memory_order_relaxed);
+        if (ov != 0)
+            return ov;
+        return 16384;
+    }
+    static void setPostIngestPendingKgMax(uint32_t v) {
+        postIngestPendingKgMaxOverride_.store(v, std::memory_order_relaxed);
     }
 
     // Post-ingest RPC queue capacity (high-priority channel). Env override:
@@ -2597,6 +2611,7 @@ private:
     static inline std::atomic<uint32_t> postIngestStageActiveMaskOverride_{0};
     static inline std::array<std::atomic<uint32_t>, 6> postIngestStageOwnerCounts_{};
     static inline std::atomic<uint32_t> postIngestQueueMaxOverride_{0};
+    static inline std::atomic<uint32_t> postIngestPendingKgMaxOverride_{0};
     static inline std::atomic<uint32_t> postIngestBatchSizeOverride_{0};
     static inline std::atomic<uint32_t> postIngestRpcQueueMaxOverride_{0};
     static inline std::atomic<uint32_t> storeDocumentChannelCapacityOverride_{0};

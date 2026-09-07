@@ -426,6 +426,11 @@ public:
     }
     void testing_schedulePendingKgDrain() { schedulePendingKgDrain(); }
     void testing_enqueueKgJob(InternalEventBus::KgJob job) { enqueueKgJob(std::move(job)); }
+    // Route every KG job to the pending FIFO, as a full channel does in production.
+    void testing_detachKgChannel() {
+        std::lock_guard<std::mutex> lock(pendingKgMutex_);
+        kgChannel_.reset();
+    }
     void testing_processEntityExtractionBatch(
         std::vector<InternalEventBus::EntityExtractionJob>&& jobs) {
         processEntityExtractionBatch(std::move(jobs));
@@ -627,6 +632,7 @@ private:
     std::shared_ptr<SpscQueue<InternalEventBus::KgJob>> kgChannel_;
     mutable std::mutex pendingKgMutex_;
     std::deque<InternalEventBus::KgJob> pendingKgJobs_;
+    std::atomic<std::uint64_t> pendingKgDropped_{0};
     std::atomic<bool> pendingKgDrainScheduled_{false};
     std::shared_ptr<SpscQueue<InternalEventBus::SymbolExtractionJob>> symbolChannel_;
     std::shared_ptr<SpscQueue<InternalEventBus::EntityExtractionJob>> entityChannel_;
