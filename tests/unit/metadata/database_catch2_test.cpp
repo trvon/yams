@@ -150,6 +150,30 @@ TEST_CASE("Database: prepared statements", "[unit][metadata][database]") {
     }
 }
 
+TEST_CASE("Database: cache stats count uncached prepares", "[unit][metadata][database]") {
+    DatabaseFixture fix;
+    Database db;
+    REQUIRE(db.open(fix.dbPath_.string(), ConnectionMode::Create).has_value());
+    REQUIRE(db.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)").has_value());
+
+    const auto before = db.getStatementCacheStats();
+    REQUIRE(db.prepare("SELECT id FROM t").has_value());
+    REQUIRE(db.prepare("SELECT id FROM t").has_value());
+    {
+        auto cached = db.prepareCached("SELECT id FROM t WHERE id = ?");
+        REQUIRE(cached.has_value());
+    }
+    {
+        auto cached = db.prepareCached("SELECT id FROM t WHERE id = ?");
+        REQUIRE(cached.has_value());
+    }
+    const auto after = db.getStatementCacheStats();
+    // prepare() bypasses the cache: this is the count a hot path must drive to zero.
+    CHECK(after.uncachedPrepares - before.uncachedPrepares == 2);
+    CHECK(after.misses - before.misses == 1);
+    CHECK(after.hits - before.hits == 1);
+}
+
 TEST_CASE("Database: statement failures include sqlite error detail",
           "[unit][metadata][database]") {
     DatabaseFixture fix;

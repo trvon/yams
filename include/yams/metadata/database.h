@@ -293,6 +293,9 @@ public:
         size_t misses{0};
         size_t currentSize{0};
         size_t maxSize{0};
+        // Statements compiled through prepare(), bypassing the cache. A hot path that
+        // re-prepares fixed SQL shows up here; tests pin it to zero after warm-up.
+        size_t uncachedPrepares{0};
     };
     [[nodiscard]] CacheStats getStatementCacheStats() const;
 
@@ -419,6 +422,7 @@ private:
     std::unordered_map<std::string, Statement> statementCache_;
     mutable size_t cacheHits_{0};
     mutable size_t cacheMisses_{0};
+    mutable size_t uncachedPrepares_{0};
     static constexpr size_t kMaxCacheSize = 64; // Limit cache size
 
     /**
