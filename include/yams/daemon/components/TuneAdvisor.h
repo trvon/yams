@@ -50,79 +50,27 @@ public:
     enum class Profile { Efficient, Balanced, Aggressive };
 
     // Resolve tuning profile (override -> env -> default Balanced).
-    static Profile tuningProfile() {
-        int ov = tuningProfileOverride_.load(std::memory_order_relaxed);
-        if (ov == 1)
-            return Profile::Efficient;
-        if (ov == 2)
-            return Profile::Balanced;
-        if (ov == 3)
-            return Profile::Aggressive;
-        if (const char* s = compatibilityEnvironment("YAMS_TUNING_PROFILE")) {
-            std::string v{s};
-            for (auto& c : v)
-                c = static_cast<char>(std::tolower(c));
-            if (v == "efficient" || v == "conservative")
-                return Profile::Efficient;
-            if (v == "aggressive")
-                return Profile::Aggressive;
-        }
-        return Profile::Balanced;
-    }
+    static Profile tuningProfile();
 
-    static void setTuningProfile(Profile p) {
-        int code = 0;
-        switch (p) {
-            case Profile::Efficient:
-                code = 1;
-                break;
-            case Profile::Balanced:
-                code = 2;
-                break;
-            case Profile::Aggressive:
-                code = 3;
-                break;
-        }
-        tuningProfileOverride_.store(code, std::memory_order_relaxed);
-    }
+    static void setTuningProfile(Profile p);
 
     // Scale factor applied to several heuristics
     // Efficient  -> 0.0 (minimal resource use)
     // Balanced   -> 0.5 (moderate resource use)
     // Aggressive -> 1.0 (maximum throughput)
-    static double profileScale() {
-        switch (tuningProfile()) {
-            case Profile::Efficient:
-                return 0.0;
-            case Profile::Aggressive:
-                return 1.0;
-            case Profile::Balanced:
-            default:
-                return 0.5;
-        }
-    }
+    static double profileScale();
 
     // Public accessors for embedding-related knobs (used outside daemon module)
     // These forward to internal tunables while keeping implementation details private.
     static constexpr std::size_t kDefaultEmbedDocCap = 64;
     static constexpr std::size_t kDefaultEmbedJobDocCap = 64;
-    static double getEmbedSafety() { return embedSafety(); }
-    static std::size_t getEmbedDocCap() { return embedDocCap(); }
-    static std::size_t resolvedEmbedDocCap() {
-        const std::size_t cap = getEmbedDocCap();
-        return cap == 0 ? kDefaultEmbedDocCap : cap;
-    }
-    static std::size_t getEmbedJobDocCap() { return embedJobDocCap(); }
-    static std::size_t resolvedEmbedJobDocCap() {
-        const std::size_t cap = getEmbedJobDocCap();
-        if (cap != 0) {
-            return cap;
-        }
-        const std::size_t inferCap = resolvedEmbedDocCap();
-        return std::min(inferCap, kDefaultEmbedJobDocCap);
-    }
-    static unsigned getEmbedPauseMs() { return embedPauseMs(); }
-    static uint32_t getEmbedMaxConcurrency() { return embedMaxConcurrency(); }
+    static double getEmbedSafety();
+    static std::size_t getEmbedDocCap();
+    static std::size_t resolvedEmbedDocCap();
+    static std::size_t getEmbedJobDocCap();
+    static std::size_t resolvedEmbedJobDocCap();
+    static unsigned getEmbedPauseMs();
+    static uint32_t getEmbedMaxConcurrency();
     static inline std::atomic<int> tuningProfileOverride_{0};
 
     // Refresh every YAMS_* compatibility input as one lifecycle snapshot. Production getters use
@@ -139,9 +87,7 @@ public:
 
     /// Report whether the immutable lifecycle compatibility snapshot contains a key. This lets
     /// status provenance describe the snapshotted source without re-reading ambient state.
-    static bool hasCompatibilityEnvironmentValue(const char* name) {
-        return compatibilityEnvironment(name) != nullptr;
-    }
+    static bool hasCompatibilityEnvironmentValue(const char* name);
 
     // Serializes process-wide value publication with the matching instance config/status update.
     // The mutex is recursive so ConfigResolver's aggregate update can nest inside a daemon reload
@@ -157,9 +103,7 @@ public:
         std::unique_lock<std::recursive_mutex> lock_;
     };
 
-    static ConfiguredOverridePublication beginConfiguredOverridePublication() {
-        return ConfiguredOverridePublication{};
-    }
+    static ConfiguredOverridePublication beginConfiguredOverridePublication();
 
     /// Hold lifecycle membership stable while deciding and publishing a process-global reload.
     /// Without the retained lock, a new embedded manager could join after validation and receive a
@@ -178,9 +122,7 @@ public:
         bool allowed_{false};
     };
 
-    static ConfiguredOverrideReloadGuard beginConfiguredOverrideReload() {
-        return ConfiguredOverrideReloadGuard{};
-    }
+    static ConfiguredOverrideReloadGuard beginConfiguredOverrideReload();
 
     // Serializes one ConfigResolver update and publishes an even sequence when all related atomics
     // are installed. Readers that need a coherent multi-field policy use
@@ -204,9 +146,7 @@ public:
         std::unique_lock<std::mutex> writeLock_;
     };
 
-    static ConfiguredOverrideUpdate beginConfiguredOverrideUpdate() {
-        return ConfiguredOverrideUpdate{};
-    }
+    static ConfiguredOverrideUpdate beginConfiguredOverrideUpdate();
 
     // Process-wide TuneAdvisor compatibility remains transitional authority. Concurrent embedded
     // construction waits for the primary lifecycle to commit initialization. If the primary
@@ -263,10 +203,10 @@ public:
         bool active_{true};
     };
 
-    static std::uint64_t configuredOverridesVersion() noexcept {
-        return configuredOverrideSequence_.load(std::memory_order_acquire);
-    }
+    static std::uint64_t configuredOverridesVersion() noexcept;
 
+    // Template: must stay in the header (instantiated from ServiceManager, TuningManager,
+    // ResourceGovernor).
     template <typename Reader> static auto readConfiguredOverridesSnapshot(Reader reader) {
         for (;;) {
             const auto before = configuredOverridesVersion();
@@ -285,149 +225,28 @@ public:
     // Start a fresh typed-config lifecycle without inheriting overrides installed while resolving
     // an earlier daemon in the same process. Dynamic caps and runtime observations are deliberately
     // excluded: this resets only fields written by ConfigResolver::applyRuntimeTuning().
-    static void resetConfiguredOverrides() noexcept {
-        tuningProfileOverride_.store(0, std::memory_order_relaxed);
-        backpressureReadPauseMsOverride_.store(0, std::memory_order_relaxed);
-        workerPollMsOverride_.store(0, std::memory_order_relaxed);
-        workerPollMsPinned_.store(false, std::memory_order_relaxed);
-        idleCpuPctOverride_.store(-1.0, std::memory_order_relaxed);
-        idleMuxLowBytesOverride_.store(0, std::memory_order_relaxed);
-        idleShrinkHoldMsOverride_.store(0, std::memory_order_relaxed);
-        poolCooldownMsOverride_.store(0, std::memory_order_relaxed);
-        poolScaleStepOverride_.store(0, std::memory_order_relaxed);
-        poolMinSizeIpcOverride_.store(0, std::memory_order_relaxed);
-        poolMaxSizeIpcOverride_.store(0, std::memory_order_relaxed);
-        poolMinSizeIpcIoOverride_.store(0, std::memory_order_relaxed);
-        poolMaxSizeIpcIoOverride_.store(0, std::memory_order_relaxed);
-        ioConnPerThreadOverride_.store(0, std::memory_order_relaxed);
-        postIngestThreads_.store(0, std::memory_order_relaxed);
-        postIngestQueueMaxOverride_.store(0, std::memory_order_relaxed);
-        postIngestPendingKgMaxOverride_.store(0, std::memory_order_relaxed);
-        listInflightLimitOverride_.store(0, std::memory_order_relaxed);
-        listAdmissionWaitMsOverride_.store(0, std::memory_order_relaxed);
-        grepInflightLimitOverride_.store(0, std::memory_order_relaxed);
-        grepAdmissionWaitMsOverride_.store(0, std::memory_order_relaxed);
-        useInternalBusRepair_.store(true, std::memory_order_relaxed);
-        useInternalBusPostIngest_.store(true, std::memory_order_relaxed);
-        ipcTimeoutMsOverride_.store(0, std::memory_order_relaxed);
-        streamChunkTimeoutMsOverride_.store(0, std::memory_order_relaxed);
-        enableResourceGovernorOverride_.store(-1, std::memory_order_relaxed);
-        enableAdmissionControlOverride_.store(-1, std::memory_order_relaxed);
-        governorWarningScalePctOverride_.store(0, std::memory_order_relaxed);
-        memoryBudgetBytesOverride_.store(0, std::memory_order_relaxed);
-        memoryWarningPctOverride_.store(0.0, std::memory_order_relaxed);
-        memoryCriticalPctOverride_.store(0.0, std::memory_order_relaxed);
-        memoryEmergencyPctOverride_.store(0.0, std::memory_order_relaxed);
-        memoryHysteresisMsOverride_.store(0, std::memory_order_relaxed);
-        cpuLevelHysteresisMsOverride_.store(0, std::memory_order_relaxed);
-        postIngestRpcQueueMaxOverride_.store(0, std::memory_order_relaxed);
-        postIngestRpcMaxPerBatchOverride_.store(0, std::memory_order_relaxed);
-        postIngestTotalConcurrentOverride_.store(0, std::memory_order_relaxed);
-        postExtractionConcurrentOverride_.store(0, std::memory_order_relaxed);
-        postKgConcurrentOverride_.store(0, std::memory_order_relaxed);
-        postSymbolConcurrentOverride_.store(0, std::memory_order_relaxed);
-        postEntityConcurrentOverride_.store(0, std::memory_order_relaxed);
-        postTitleConcurrentOverride_.store(0, std::memory_order_relaxed);
-        postEmbedConcurrentOverride_.store(0, std::memory_order_relaxed);
-        postIngestBatchSizeOverride_.store(0, std::memory_order_relaxed);
-        enableGradientLimitersOverride_.store(-1, std::memory_order_relaxed);
-        gradientSmoothingAlphaOverride_.store(0.0, std::memory_order_relaxed);
-        gradientLongAlphaOverride_.store(0.0, std::memory_order_relaxed);
-        gradientWarmupSamplesOverride_.store(0, std::memory_order_relaxed);
-        gradientToleranceOverride_.store(0.0, std::memory_order_relaxed);
-        connectionSlotsMinOverride_.store(0, std::memory_order_relaxed);
-        connectionSlotsMaxOverride_.store(0, std::memory_order_relaxed);
-        connectionSlotsScaleStepOverride_.store(0, std::memory_order_relaxed);
-        resetCpuHighThresholdPercentOverride();
-        onnxMaxConcurrentOverride_.store(0, std::memory_order_relaxed);
-        onnxGlinerReservedOverride_.store(0, std::memory_order_relaxed);
-        onnxEmbedReservedOverride_.store(0, std::memory_order_relaxed);
-        onnxRerankerReservedOverride_.store(0, std::memory_order_relaxed);
-        onnxSessionsPerModelOverride_.store(0, std::memory_order_relaxed);
-        resetModelEvictThresholdOverrides();
-        maxIngestWorkersOverride_.store(0, std::memory_order_relaxed);
-        storeDocumentChannelCapacityOverride_.store(0, std::memory_order_relaxed);
-        workCoordinatorThreadsOverride_.store(0, std::memory_order_relaxed);
-        embedChannelCapacityOverride_.store(0, std::memory_order_relaxed);
-        resetConnectionLifetimeSecondsOverride();
-        gradientInitialLimitOverride_.store(0.0, std::memory_order_relaxed);
-        gradientMinLimitOverride_.store(0.0, std::memory_order_relaxed);
-        gradientMaxLimitOverride_.store(0.0, std::memory_order_relaxed);
-    }
+    static void resetConfiguredOverrides() noexcept;
 
 private:
-    static std::recursive_mutex& configuredOverridePublicationMutex() {
-        static std::recursive_mutex mutex;
-        return mutex;
-    }
-    static std::mutex& configuredOverrideWriteMutex() {
-        static std::mutex mutex;
-        return mutex;
-    }
-    static std::mutex& configuredOverrideLifecycleMutex() {
-        static std::mutex mutex;
-        return mutex;
-    }
-    static std::condition_variable& configuredOverrideLifecycleCv() {
-        static std::condition_variable cv;
-        return cv;
-    }
-    static bool& configuredOverrideLifecycleInitializing() {
-        static bool initializing = false;
-        return initializing;
-    }
-    static std::size_t& configuredOverrideLifecycleCount() {
-        static std::size_t count = 0;
-        return count;
-    }
-    static std::mutex& postIngestStageActivityMutex() {
-        static std::mutex mutex;
-        return mutex;
-    }
-    static std::uint64_t& nextPostIngestStageActivityToken() {
-        static std::uint64_t token = 0;
-        return token;
-    }
-    static std::map<std::uint64_t, std::uint8_t>& livePostIngestStageActivityTokens() {
-        static std::map<std::uint64_t, std::uint8_t> tokens;
-        return tokens;
-    }
-    static void resetPostIngestRuntimeStateForNewLifecycle() noexcept {
-        {
-            std::lock_guard activityLock(postIngestStageActivityMutex());
-            livePostIngestStageActivityTokens().clear();
-            postIngestStageActiveMaskOverride_.store(0, std::memory_order_release);
-            for (auto& ownerCount : postIngestStageOwnerCounts_) {
-                ownerCount.store(0, std::memory_order_release);
-            }
-        }
-        beginDynamicCapWrite();
-        setPostExtractionConcurrentDynamicCap(UINT32_MAX);
-        setPostKgConcurrentDynamicCap(UINT32_MAX);
-        setPostSymbolConcurrentDynamicCap(UINT32_MAX);
-        setPostEntityConcurrentDynamicCap(UINT32_MAX);
-        setPostTitleConcurrentDynamicCap(UINT32_MAX);
-        setPostEmbedConcurrentDynamicCap(UINT32_MAX);
-        endDynamicCapWrite();
-    }
+    static std::recursive_mutex& configuredOverridePublicationMutex();
+    static std::mutex& configuredOverrideWriteMutex();
+    static std::mutex& configuredOverrideLifecycleMutex();
+    static std::condition_variable& configuredOverrideLifecycleCv();
+    static bool& configuredOverrideLifecycleInitializing();
+    static std::size_t& configuredOverrideLifecycleCount();
+    static std::mutex& postIngestStageActivityMutex();
+    static std::uint64_t& nextPostIngestStageActivityToken();
+    static std::map<std::uint64_t, std::uint8_t>& livePostIngestStageActivityTokens();
+    static void resetPostIngestRuntimeStateForNewLifecycle() noexcept;
     static inline std::atomic<std::uint64_t> configuredOverrideSequence_{0};
 
-    static void ignoreInvalidEnvParseFailure() noexcept {}
+    static void ignoreInvalidEnvParseFailure() noexcept;
 
-    static std::mutex& compatibilityEnvironmentSnapshotMutex() {
-        static auto* mutex = new std::mutex();
-        return *mutex;
-    }
+    static std::mutex& compatibilityEnvironmentSnapshotMutex();
 
-    static std::map<std::string, std::string>& compatibilityEnvironmentSnapshot() {
-        static auto* snapshot = new std::map<std::string, std::string>();
-        return *snapshot;
-    }
+    static std::map<std::string, std::string>& compatibilityEnvironmentSnapshot();
 
-    static bool& compatibilityEnvironmentSnapshotInitialized() {
-        static auto* initialized = new bool(false);
-        return *initialized;
-    }
+    static bool& compatibilityEnvironmentSnapshotInitialized();
 
     static const char* compatibilityEnvironment(const char* name) {
         thread_local std::optional<std::string> copiedValue;
@@ -454,121 +273,35 @@ private:
         return copiedValue ? copiedValue->c_str() : nullptr;
     }
 
-    static std::optional<bool> parseExplicitBoolEnvNow(const char* name) {
-        if (const char* s = compatibilityEnvironment(name)) {
-            std::string v{s};
-            std::transform(v.begin(), v.end(), v.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            if (v == "0" || v == "false" || v == "off" || v == "no")
-                return false;
-            if (v == "1" || v == "true" || v == "on" || v == "yes")
-                return true;
-        }
-        return std::nullopt;
-    }
+    static std::optional<bool> parseExplicitBoolEnvNow(const char* name);
 
     static std::optional<uint32_t> parseBoundedUintEnvNow(const char* name, uint32_t minValue,
-                                                          uint32_t maxValue) {
-        if (const char* s = compatibilityEnvironment(name)) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= minValue && v <= maxValue)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return std::nullopt;
-    }
+                                                          uint32_t maxValue);
 
     static std::optional<uint64_t> parseBoundedUint64EnvNow(const char* name, uint64_t minValue,
-                                                            uint64_t maxValue) {
-        if (const char* s = compatibilityEnvironment(name)) {
-            try {
-                uint64_t v = static_cast<uint64_t>(std::stoull(s));
-                if (v >= minValue && v <= maxValue)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return std::nullopt;
-    }
+                                                            uint64_t maxValue);
 
-    static std::optional<int> parseBoundedIntEnvNow(const char* name, int minValue, int maxValue) {
-        if (const char* s = compatibilityEnvironment(name)) {
-            try {
-                int v = std::stoi(s);
-                if (v >= minValue && v <= maxValue)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return std::nullopt;
-    }
+    static std::optional<int> parseBoundedIntEnvNow(const char* name, int minValue, int maxValue);
 
     static uint32_t readUint32Override(const std::atomic<uint32_t>& overrideValue,
                                        const char* envName, uint32_t defaultValue,
-                                       uint32_t minValue, uint32_t maxValue) {
-        uint32_t ov = overrideValue.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        if (auto envValue = parseBoundedUintEnvNow(envName, minValue, maxValue))
-            return *envValue;
-        return defaultValue;
-    }
+                                       uint32_t minValue, uint32_t maxValue);
 
     static std::uint64_t readUint64Override(const std::atomic<std::uint64_t>& overrideValue,
                                             const char* envName, std::uint64_t defaultValue,
-                                            std::uint64_t minValue, std::uint64_t maxValue) {
-        std::uint64_t ov = overrideValue.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        if (auto envValue = parseBoundedUint64EnvNow(envName, minValue, maxValue))
-            return *envValue;
-        return defaultValue;
-    }
+                                            std::uint64_t minValue, std::uint64_t maxValue);
 
     static int readPositiveIntOverride(const std::atomic<int>& overrideValue, const char* envName,
-                                       int defaultValue, int minValue, int maxValue) {
-        int ov = overrideValue.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        if (auto envValue = parseBoundedIntEnvNow(envName, minValue, maxValue))
-            return *envValue;
-        return defaultValue;
-    }
+                                       int defaultValue, int minValue, int maxValue);
 
     static double readPositiveDoubleOverride(const std::atomic<double>& overrideValue,
                                              const char* envName, double defaultValue,
-                                             double minValue, double maxValue) {
-        double ov = overrideValue.load(std::memory_order_relaxed);
-        if (ov > 0.0)
-            return ov;
-        if (auto envValue = parseBoundedDoubleEnvNow(envName, minValue, maxValue))
-            return *envValue;
-        return defaultValue;
-    }
+                                             double minValue, double maxValue);
 
     static std::optional<double> parseBoundedDoubleEnvNow(const char* name, double minValue,
-                                                          double maxValue, double scale = 1.0) {
-        if (const char* s = compatibilityEnvironment(name)) {
-            try {
-                double v = std::stod(s) * scale;
-                if (v >= minValue && v <= maxValue)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return std::nullopt;
-    }
+                                                          double maxValue, double scale = 1.0);
 
-    static std::optional<uint32_t> postStageConcurrentEnvOverride(const char* env,
-                                                                  uint32_t maxCap) {
-        return parseBoundedUintEnvNow(env, 1u, maxCap);
-    }
+    static std::optional<uint32_t> postStageConcurrentEnvOverride(const char* env, uint32_t maxCap);
 
 public:
     // -------- Runtime-tunable policy (defaults chosen conservatively) --------
@@ -578,53 +311,22 @@ public:
     ///   Balanced:   67% (clamped but reasonable throughput)
     ///   Aggressive: 85% (late throttling, max throughput)
     /// Environment: YAMS_CPU_HIGH_PCT (0-100)
-    static double cpuHighThresholdPercent() {
-        double ov = cpuHighPct_.load(std::memory_order_relaxed);
-        if (ov > 0.0)
-            return ov;
-        auto envValue = parseBoundedDoubleEnvNow("YAMS_CPU_HIGH_PCT", 10.0, 100.0);
-        if (envValue)
-            return *envValue;
-        return 50.0 + profileScale() * 35.0;
-    }
-    static void setCpuHighThresholdPercent(double v) {
-        if (std::isfinite(v) && v >= 10.0 && v <= 100.0) {
-            cpuHighPct_.store(v, std::memory_order_relaxed);
-        }
-    }
-    static void resetCpuHighThresholdPercentOverride() {
-        cpuHighPct_.store(0.0, std::memory_order_relaxed);
-    }
+    static double cpuHighThresholdPercent();
+    static void setCpuHighThresholdPercent(double v);
+    static void resetCpuHighThresholdPercentOverride();
 
     /// Gap between CPU high and CPU critical thresholds (%).
     /// Default 40% (up from 25%) to avoid false Critical during ONNX inference.
     /// Environment: YAMS_CPU_CRITICAL_GAP_PCT (10-50)
-    static double cpuCriticalGapPercent() {
-        auto envValue = parseBoundedDoubleEnvNow("YAMS_CPU_CRITICAL_GAP_PCT", 10.0, 50.0);
-        if (envValue)
-            return *envValue;
-        return 40.0;
-    }
+    static double cpuCriticalGapPercent();
 
     // CPU admission control hysteresis.
     // These time windows help avoid rejecting work on brief CPU spikes.
     // Envs:
     // - YAMS_CPU_ADMIT_HIGH_HOLD_MS (0..60000) default 250ms
     // - YAMS_CPU_ADMIT_LOW_HOLD_MS  (0..60000) default 500ms
-    static uint32_t cpuAdmissionHighHoldMs() {
-        uint32_t def = 250;
-        auto envValue = parseBoundedUintEnvNow("YAMS_CPU_ADMIT_HIGH_HOLD_MS", 0u, 60000u);
-        if (envValue)
-            return *envValue;
-        return def;
-    }
-    static uint32_t cpuAdmissionLowHoldMs() {
-        uint32_t def = 500;
-        auto envValue = parseBoundedUintEnvNow("YAMS_CPU_ADMIT_LOW_HOLD_MS", 0u, 60000u);
-        if (envValue)
-            return *envValue;
-        return def;
-    }
+    static uint32_t cpuAdmissionHighHoldMs();
+    static uint32_t cpuAdmissionLowHoldMs();
 
     /// Compute CPU-aware throttling delay in milliseconds.
     /// Returns 0 if CPU is below threshold, otherwise a small delay based on severity.
@@ -635,229 +337,64 @@ public:
     /// - cpuHighThresholdPercent() is defined in 0..100 semantics (percent of total host).
     ///
     /// Delay formula: (cpuPct - threshold) * 0.5ms, clamped to [2, 25]ms.
-    static int32_t computeCpuThrottleDelayMs(double currentCpuPct) {
-        double threshold = cpuHighThresholdPercent();
-        if (currentCpuPct < threshold)
-            return 0;
-        double overage = currentCpuPct - threshold;
-        int32_t delayMs = static_cast<int32_t>(std::llround(overage * 0.5));
-        return std::clamp(delayMs, 2, 25);
-    }
+    static int32_t computeCpuThrottleDelayMs(double currentCpuPct);
 
     // Embedding batch tuning knobs (used by vector::EmbeddingService)
-    static double embedSafety() { return embedSafety_.load(std::memory_order_relaxed); }
-    static std::size_t embedDocCap() {
-        std::size_t ov = embedDocCap_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        auto envValue = parseBoundedUint64EnvNow("YAMS_EMBED_DOC_CAP", 1u, 4096u);
-        if (envValue)
-            return static_cast<std::size_t>(*envValue);
-        return 0;
-    }
-    static void setEmbedDocCap(std::size_t v) { embedDocCap_.store(v, std::memory_order_relaxed); }
+    static double embedSafety();
+    static std::size_t embedDocCap();
+    static void setEmbedDocCap(std::size_t v);
     // Maximum number of document hashes grouped into a single EmbedJob.
     // This is intentionally separate from embedDocCap (inference sub-batch size)
     // to keep individual jobs bounded while preserving model-efficient infer batches.
-    static std::size_t embedJobDocCap() {
-        std::size_t ov = embedJobDocCap_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        auto envValue = parseBoundedUint64EnvNow("YAMS_EMBED_JOB_DOC_CAP", 1u, 4096u);
-        if (envValue)
-            return static_cast<std::size_t>(*envValue);
-        return 0;
-    }
-    static unsigned embedPauseMs() { return embedPauseMs_.load(std::memory_order_relaxed); }
+    static std::size_t embedJobDocCap();
+    static unsigned embedPauseMs();
 
     // Chunk size for IPC streaming (bytes). Default 512 KiB.
-    static uint32_t chunkSize() {
-        uint32_t def = 512u * 1024u;
-        if (const char* cs = compatibilityEnvironment("YAMS_CHUNK_SIZE")) {
-            try {
-                auto v = static_cast<uint64_t>(std::stoull(cs));
-                if (v >= 4ull * 1024ull && v <= 8ull * 1024ull * 1024ull)
-                    return static_cast<uint32_t>(v);
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
-    }
+    static uint32_t chunkSize();
 
     // Writer budget per turn for multiplexed writer (bytes). Default 3 MiB.
-    static uint32_t writerBudgetBytesPerTurn() {
-        if (auto snap = TuningSnapshotRegistry::instance().get()) {
-            return static_cast<uint32_t>(snap->writerBudgetBytesPerTurn);
-        }
-        uint32_t def = 3072u * 1024u; // 3 MiB
-        if (const char* wb = compatibilityEnvironment("YAMS_WRITER_BUDGET_BYTES")) {
-            try {
-                auto v = static_cast<uint64_t>(std::stoull(wb));
-                if (v >= 64ull * 1024ull && v <= 64ull * 1024ull * 1024ull)
-                    return static_cast<uint32_t>(v);
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
-    }
+    static uint32_t writerBudgetBytesPerTurn();
 
     // -------- Server-side IPC/mux controls (centralized) --------
     // Max inflight requests per connection (server). Default tuned for fairness under
     // multi-client load.
-    static std::size_t serverMaxInflightPerConn() {
-        if (auto snap = TuningSnapshotRegistry::instance().get()) {
-            return snap->serverMaxInflightPerConn;
-        }
-        if (const char* s = compatibilityEnvironment("YAMS_SERVER_MAX_INFLIGHT")) {
-            try {
-                std::size_t v = static_cast<std::size_t>(std::stoul(s));
-                if (v > 0)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return static_cast<std::size_t>(64);
-    }
+    static std::size_t serverMaxInflightPerConn();
 
     // Per-request queued frames cap (server). Default 1024.
-    static std::size_t serverQueueFramesCap() {
-        if (auto snap = TuningSnapshotRegistry::instance().get()) {
-            return snap->serverQueueFramesCap;
-        }
-        if (const char* s = compatibilityEnvironment("YAMS_SERVER_QUEUE_FRAMES_CAP")) {
-            try {
-                std::size_t v = static_cast<std::size_t>(std::stoul(s));
-                if (v > 0)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return static_cast<std::size_t>(1024);
-    }
+    static std::size_t serverQueueFramesCap();
 
     // Total queued bytes per connection cap (server). Default 128 MiB.
-    static std::size_t serverQueueBytesCap() {
-        if (auto snap = TuningSnapshotRegistry::instance().get()) {
-            return snap->serverQueueBytesCap;
-        }
-        if (const char* s = compatibilityEnvironment("YAMS_SERVER_QUEUE_BYTES_CAP")) {
-            try {
-                std::size_t v = static_cast<std::size_t>(std::stoul(s));
-                if (v >= 1024)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return static_cast<std::size_t>(128ull * 1024ull * 1024ull);
-    }
+    static std::size_t serverQueueBytesCap();
 
     // Server writer budget per turn (bytes). Falls back to 8 MiB default for balanced
     // throughput if unset.
-    static std::size_t serverWriterBudgetBytesPerTurn() {
-        if (auto snap = TuningSnapshotRegistry::instance().get()) {
-            return snap->serverWriterBudgetBytesPerTurn;
-        }
-        if (const char* s = compatibilityEnvironment("YAMS_SERVER_WRITER_BUDGET_BYTES")) {
-            try {
-                std::size_t v = static_cast<std::size_t>(std::stoul(s));
-                if (v >= 4096)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return static_cast<std::size_t>(8ull * 1024ull * 1024ull);
-    }
+    static std::size_t serverWriterBudgetBytesPerTurn();
 
     // Server writer maximum budget clamp per turn (bytes). Centralized here for consistency.
     // Default 8 MiB; env YAMS_SERVER_WRITER_BUDGET_MAX may override (min 4 KiB).
-    static std::size_t serverWriterBudgetMaxBytesPerTurn() {
-        if (auto snap = TuningSnapshotRegistry::instance().get()) {
-            return snap->serverWriterBudgetMaxBytesPerTurn;
-        }
-        std::size_t def = 8ull * 1024ull * 1024ull;
-        if (const char* mb = compatibilityEnvironment("YAMS_SERVER_WRITER_BUDGET_MAX")) {
-            try {
-                auto v = static_cast<std::size_t>(std::stoul(mb));
-                if (v >= 4096)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
-    }
+    static std::size_t serverWriterBudgetMaxBytesPerTurn();
 
     // Suggested maximum worker queue depth before backpressure (0=auto). Default auto scales with
     // profile.
-    static uint64_t maxWorkerQueue(size_t workerThreads) {
-        if (const char* s = compatibilityEnvironment("YAMS_MAX_WORKER_QUEUE")) {
-            try {
-                return static_cast<uint64_t>(std::stoull(s));
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        if (workerThreads == 0)
-            return 0; // unknown
-        double scale = profileScale();
-        if (scale < 0.5)
-            scale = 0.5;
-        double multiplier = 2.0 * scale;
-        auto derived = static_cast<uint64_t>(
-            std::max(1.0, std::ceil(static_cast<double>(workerThreads) * multiplier)));
-        return derived;
-    }
+    static uint64_t maxWorkerQueue(size_t workerThreads);
 
     // Suggested mux queued-bytes budget before backpressure. Default scales with profile (Balanced:
     // 256 MiB).
-    static uint64_t maxMuxBytes() {
-        constexpr uint64_t kBase = 256ull * 1024ull * 1024ull;
-        double scale = profileScale();
-        if (scale < 0.5)
-            scale = 0.5;
-        if (scale > 2.0)
-            scale = 2.0;
-        uint64_t def = static_cast<uint64_t>(std::llround(static_cast<double>(kBase) * scale));
-        if (def < 64ull * 1024ull * 1024ull)
-            def = 64ull * 1024ull * 1024ull;
-        if (const char* s = compatibilityEnvironment("YAMS_MAX_MUX_BYTES")) {
-            try {
-                return static_cast<uint64_t>(std::stoull(s));
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
-    }
+    static uint64_t maxMuxBytes();
 
     // Suggested max active connections. Default 0 = unlimited.
-    static uint64_t maxActiveConn() {
-        if (const char* s = compatibilityEnvironment("YAMS_MAX_ACTIVE_CONN")) {
-            try {
-                return static_cast<uint64_t>(std::stoull(s));
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 0;
-    }
+    static uint64_t maxActiveConn();
 
     // Status/metrics tick cadence for daemon main loop. Default 5 ms.
     // ResourceGovernor /proc caching (100ms min interval) prevents excessive
     // filesystem I/O even at 200 ticks/sec.
-    static uint32_t statusTickMs() { return 5; }
+    static uint32_t statusTickMs();
 
     // Idle-mode tick cadence for daemon tuning loop. Default 1000 ms.
     // When the daemon has no real work (zero non-health connections, empty queues),
     // the tuning loop sleeps for this duration instead of the active-mode 5 ms.
     // Dramatically reduces CPU wake-ups during idle periods.
-    static uint32_t idleTickMs() { return 1000; }
+    static uint32_t idleTickMs();
 
 #ifdef YAMS_TESTING
     /// Test-only accessor: returns idle tick cadence.
@@ -867,331 +404,75 @@ public:
     // -------- Repair coordinator tuning (env-driven) --------
     // Max repair batch size per cycle.
     // Profile-scaled: Efficient=24, Balanced=32, Aggressive=48
-    static uint32_t repairMaxBatch() {
-        if (const char* s = compatibilityEnvironment("YAMS_REPAIR_MAX_BATCH")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v > 0 && v <= 1000)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        // Profile-scaled: Efficient=8, Balanced=20, Aggressive=32
-        uint32_t base = 8;
-        uint32_t range = 24;
-        return base + static_cast<uint32_t>(range * profileScale());
-    }
+    static uint32_t repairMaxBatch();
 
     // Batch size for repair operations during startup phase.
     // Profile-scaled: Efficient=25, Balanced=62, Aggressive=100
     // Smaller batches reduce startup load. Normal operation uses repairMaxBatch().
-    static uint32_t repairStartupBatchSize() {
-        if (const char* s = compatibilityEnvironment("YAMS_REPAIR_STARTUP_BATCH")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v > 0 && v <= 1000)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        // Profile-scaled: Efficient=25, Balanced=62, Aggressive=100
-        uint32_t base = 25;
-        uint32_t range = 75;
-        return base + static_cast<uint32_t>(range * profileScale());
-    }
+    static uint32_t repairStartupBatchSize();
 
     // Maintenance tokens (concurrency) when daemon is idle. Default 1.
     // Maintenance tokens (concurrency) when daemon is idle. Default scales with profile.
     // Efficient: 1, Balanced: 2, Aggressive: 4
-    static uint32_t repairTokensIdle() {
-        uint32_t def = 1;
-        double scale = profileScale();
-        if (scale >= 1.0) {
-            def = 4;
-        } else if (scale >= 0.5) {
-            def = 2;
-        }
-
-        if (const char* s = compatibilityEnvironment("YAMS_REPAIR_TOKENS_IDLE")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
-    }
+    static uint32_t repairTokensIdle();
     // Maintenance tokens (concurrency) when daemon is busy (has active connections).
     // Default 0, except Aggressive mode which keeps 1 worker to ensure catch-up.
-    static uint32_t repairTokensBusy() {
-        uint32_t def = 0;
-        if (profileScale() >= 1.0) {
-            def = 1;
-        }
-
-        auto envValue = parseBoundedUintEnvNow("YAMS_REPAIR_TOKENS_BUSY", 0u, 256u);
-        if (envValue)
-            return *envValue;
-        return def;
-    }
+    static uint32_t repairTokensBusy();
     // Threshold of active connections to consider the daemon busy. Default 1.
-    static uint32_t repairBusyConnThreshold() {
-        uint32_t def = 1;
-        auto envValue = parseBoundedUintEnvNow("YAMS_REPAIR_BUSY_CONN_THRESHOLD", 0u, 1024u);
-        if (envValue)
-            return *envValue;
-        return def;
-    }
+    static uint32_t repairBusyConnThreshold();
 
     // Max allowed repair batches per second (rate limiter). Default 1.
-    static uint32_t repairMaxBatchesPerSec() {
-        uint32_t def = 1;
-        if (const char* s = compatibilityEnvironment("YAMS_REPAIR_MAX_BATCHES_PER_SEC")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v <= 1000)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
-    }
+    static uint32_t repairMaxBatchesPerSec();
 
     // Orphan scan interval (hours). Default 6h. Range 1-48h.
-    static uint32_t orphanScanIntervalHours() {
-        uint32_t def = 6;
-        if (const char* s = compatibilityEnvironment("YAMS_ORPHAN_SCAN_INTERVAL_HOURS")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1 && v <= 48)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
-    }
+    static uint32_t orphanScanIntervalHours();
 
-    static uint32_t repairDegradeHoldMs() { return repair_tuning::repairDegradeHoldMs(); }
-    static uint32_t repairReadyHoldMs() { return repair_tuning::repairReadyHoldMs(); }
+    static uint32_t repairDegradeHoldMs();
+    static uint32_t repairReadyHoldMs();
 
     // Auto-repair tick scheduling (tiered). Set to 0 to disable a tier.
-    static uint32_t repairAutoInitialDelayMinutes() {
-        uint32_t def = 10;
-        if (const char* s = compatibilityEnvironment("YAMS_REPAIR_AUTO_INITIAL_DELAY_MIN")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v <= 1440)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
-    }
+    static uint32_t repairAutoInitialDelayMinutes();
 
-    static uint32_t repairAutoFastMinutes() {
-        uint32_t def = 30;
-        if (const char* s = compatibilityEnvironment("YAMS_REPAIR_AUTO_FAST_MIN")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v <= 1440)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
-    }
+    static uint32_t repairAutoFastMinutes();
 
-    static uint32_t repairAutoWarmHours() {
-        uint32_t def = 6;
-        if (const char* s = compatibilityEnvironment("YAMS_REPAIR_AUTO_WARM_HOURS")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v <= 168)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
-    }
+    static uint32_t repairAutoWarmHours();
 
-    static uint32_t repairAutoColdHours() {
-        uint32_t def = 168;
-        if (const char* s = compatibilityEnvironment("YAMS_REPAIR_AUTO_COLD_HOURS")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v <= 720)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
-    }
+    static uint32_t repairAutoColdHours();
 
     // Fts5Job consumer startup delay (ms). Default 2000ms.
     // Gives time for daemon to fully initialize before processing FTS5 jobs.
-    static uint32_t fts5StartupDelayMs() {
-        uint32_t def = 2000;
-        if (const char* s = compatibilityEnvironment("YAMS_FTS5_STARTUP_DELAY_MS")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v <= 60000)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
-    }
+    static uint32_t fts5StartupDelayMs();
 
     // Fts5Job consumer throttle during startup (ms). Default 100ms.
     // Higher value reduces startup load. Normal operation uses 10ms.
-    static uint32_t fts5StartupThrottleMs() {
-        uint32_t def = 100;
-        if (const char* s = compatibilityEnvironment("YAMS_FTS5_STARTUP_THROTTLE_MS")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 10 && v <= 1000)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
-    }
+    static uint32_t fts5StartupThrottleMs();
 
     // Metrics snapshot cache window (ms). Default 250 ms.
-    static uint32_t metricsCacheMs() {
-        uint32_t def = 250;
-        if (const char* s = compatibilityEnvironment("YAMS_METRICS_CACHE_MS")) {
-            try {
-                return static_cast<uint32_t>(std::stoul(s));
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
-    }
+    static uint32_t metricsCacheMs();
 
     // -------- Central CPU budget and thread caps --------
     // Global CPU budget percent (10..100). Defaults adapt to profile posture.
-    static uint32_t cpuBudgetPercent() {
-        uint32_t def = static_cast<uint32_t>(40.0 + profileScale() * 20.0);
-        if (const char* s = compatibilityEnvironment("YAMS_CPU_BUDGET_PERCENT")) {
-            try {
-                int v = std::stoi(s);
-                if (v >= 10 && v <= 100)
-                    return static_cast<uint32_t>(v);
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
-    }
+    static uint32_t cpuBudgetPercent();
 
     // Absolute hard cap across subsystems (0 = no cap). Env: YAMS_MAX_THREADS
-    static uint32_t maxThreadsOverall() {
-        if (const char* s = compatibilityEnvironment("YAMS_MAX_THREADS")) {
-            try {
-                int v = std::stoi(s);
-                if (v >= 1 && v <= 1024)
-                    return static_cast<uint32_t>(v);
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 0;
-    }
+    static uint32_t maxThreadsOverall();
 
     // Profile-aware host reserve so daemon auto-sizing leaves room for other workloads.
-    static uint32_t hostThreadReserve(unsigned hw) {
-        if (hw <= 1u)
-            return 0u;
+    static uint32_t hostThreadReserve(unsigned hw);
 
-        switch (tuningProfile()) {
-            case Profile::Efficient:
-                return std::min(std::max<uint32_t>(2u, static_cast<uint32_t>(std::ceil(hw * 0.25))),
-                                hw - 1u);
-            case Profile::Aggressive:
-                return std::min(std::max<uint32_t>(1u, static_cast<uint32_t>(std::ceil(hw * 0.10))),
-                                hw - 1u);
-            case Profile::Balanced:
-            default:
-                return std::min(std::max<uint32_t>(2u, static_cast<uint32_t>(std::ceil(hw * 0.15))),
-                                hw - 1u);
-        }
-    }
+    static uint32_t daemonThreadCapacity(unsigned hw);
 
-    static uint32_t daemonThreadCapacity(unsigned hw) {
-        if (hw == 0u)
-            hw = 1u;
-        const uint32_t reserve = hostThreadReserve(hw);
-        return std::max<uint32_t>(1u, hw - reserve);
-    }
-
-    static uint64_t autoMemoryBudgetBytes(uint64_t systemMem) {
-        if (systemMem == 0) {
-            return 256ull * 1024ull * 1024ull;
-        }
-
-        switch (tuningProfile()) {
-            case Profile::Efficient:
-                return std::clamp((systemMem * 45ull) / 100ull, 256ull * 1024ull * 1024ull,
-                                  systemMem > 256ull * 1024ull * 1024ull
-                                      ? (systemMem - 256ull * 1024ull * 1024ull)
-                                      : 256ull * 1024ull * 1024ull);
-            case Profile::Aggressive:
-                return std::clamp((systemMem * 75ull) / 100ull, 256ull * 1024ull * 1024ull,
-                                  systemMem > 256ull * 1024ull * 1024ull
-                                      ? (systemMem - 256ull * 1024ull * 1024ull)
-                                      : 256ull * 1024ull * 1024ull);
-            case Profile::Balanced:
-            default:
-                break;
-        }
-
-        const uint64_t budget = (systemMem * 60ull) / 100ull;
-        const uint64_t minBudget = 256ull * 1024ull * 1024ull;
-        const uint64_t maxBudget = (systemMem > minBudget) ? (systemMem - minBudget) : minBudget;
-        return std::clamp<uint64_t>(budget, minBudget, maxBudget);
-    }
+    static uint64_t autoMemoryBudgetBytes(uint64_t systemMem);
 
     // WorkCoordinator threads (override, env, or derived).
     // Default: slightly I/O-biased relative to the general CPU budget because metadata and
     // retrieval paths frequently block on SQLite/disk work even when CPU usage is moderate.
     // Environment: YAMS_WORK_COORDINATOR_THREADS
-    static uint32_t workCoordinatorThreads() {
-        uint32_t ov = workCoordinatorThreadsOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        if (const char* s = compatibilityEnvironment("YAMS_WORK_COORDINATOR_THREADS")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1 && v <= 512)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return defaultReadPathCapacityModel(hardwareConcurrency()).workerThreads;
-    }
-    static void setWorkCoordinatorThreads(uint32_t n) {
-        workCoordinatorThreadsOverride_.store(std::clamp<uint32_t>(n, 1u, 512u),
-                                              std::memory_order_relaxed);
-    }
+    static uint32_t workCoordinatorThreads();
+    static void setWorkCoordinatorThreads(uint32_t n);
 
     // Recommended thread count based on CPU budget. backgroundFactor in (0,1].
-    static uint32_t recommendedThreads(double backgroundFactor = 1.0, uint32_t hardMax = 0) {
-        return recommendedThreadsForHw(hardwareConcurrency(), backgroundFactor, hardMax);
-    }
+    static uint32_t recommendedThreads(double backgroundFactor = 1.0, uint32_t hardMax = 0);
 
 #ifdef YAMS_TESTING
     static uint32_t testing_reservedHostThreads(unsigned hw) { return hostThreadReserve(hw); }
@@ -1201,187 +482,44 @@ public:
 #endif
 
     // Cached hardware concurrency (process-wide)
-    static unsigned hardwareConcurrency() {
-        unsigned v = hwCached_.load(std::memory_order_relaxed);
-        if (v == 0) {
-            unsigned m = std::thread::hardware_concurrency();
-            if (m == 0)
-                m = 4;
-            hwCached_.store(m, std::memory_order_relaxed);
-            v = m;
-        }
-        return v;
-    }
+    static unsigned hardwareConcurrency();
 
-    static void setHardwareConcurrencyForTests(unsigned v) {
-        if (v == 0)
-            v = 1;
-        hwCached_.store(v, std::memory_order_relaxed);
-    }
+    static void setHardwareConcurrencyForTests(unsigned v);
 
     // Embedding max concurrency (global). Env YAMS_EMBED_MAX_CONCURRENCY wins; else budgeted 25%.
-    static uint32_t embedMaxConcurrencyBase() {
-        if (const char* s = compatibilityEnvironment("YAMS_EMBED_MAX_CONCURRENCY")) {
-            try {
-                int v = std::stoi(s);
-                if (v >= 1 && v <= 1024)
-                    return static_cast<uint32_t>(v);
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        // Use a conservative fraction (25% of budgeted threads) for embeddings
-        uint32_t rec = recommendedThreads(0.25);
-        return std::max(1u, rec);
-    }
-    static uint32_t embedMaxConcurrency() {
-        uint32_t dyn = embedMaxConcurrencyOverride_.load(std::memory_order_relaxed);
-        if (dyn > 0)
-            return dyn;
-        return embedMaxConcurrencyBase();
-    }
+    static uint32_t embedMaxConcurrencyBase();
+    static uint32_t embedMaxConcurrency();
     // Runtime (daemon-only) dynamic cap. 0 = unset (use base/env).
-    static void setEmbedMaxConcurrencyDynamicCap(uint32_t v) {
-        if (v == 0) {
-            embedMaxConcurrencyOverride_.store(0u, std::memory_order_relaxed);
-            return;
-        }
-        embedMaxConcurrencyOverride_.store(std::clamp<uint32_t>(v, 1u, 1024u),
-                                           std::memory_order_relaxed);
-    }
+    static void setEmbedMaxConcurrencyDynamicCap(uint32_t v);
 
     // -------- Code-controlled worker sizing (no env steering) --------
     // When non-zero, components should prefer these values over heuristics.
-    static uint32_t postIngestThreads() {
-        // 1) Explicit override set by config/daemon_main
-        uint32_t configured = postIngestThreads_.load(std::memory_order_relaxed);
-        if (configured != 0)
-            return configured;
-        // 2) Environment variable override for quick experiments
-        if (const char* s = compatibilityEnvironment("YAMS_POST_INGEST_THREADS")) {
-            try {
-                int v = std::stoi(s);
-                if (v >= 1 && v <= 64)
-                    return static_cast<uint32_t>(v);
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        // 3) Conservative default: single background worker; users can raise via config/env
-        return 1u;
-    }
-    static void setPostIngestThreads(uint32_t n) {
-        postIngestThreads_.store(n, std::memory_order_relaxed);
-    }
+    static uint32_t postIngestThreads();
+    static void setPostIngestThreads(uint32_t n);
     // Post-ingest queue capacity (bounded queue). Env override: YAMS_POST_INGEST_QUEUE_MAX
-    static uint32_t postIngestQueueMax() {
-        uint32_t ov = postIngestQueueMaxOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        if (const char* s = compatibilityEnvironment("YAMS_POST_INGEST_QUEUE_MAX")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 10 && v <= 1'000'000)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 1000;
-    }
-    static void setPostIngestQueueMax(uint32_t v) {
-        postIngestQueueMaxOverride_.store(v, std::memory_order_relaxed);
-    }
+    static uint32_t postIngestQueueMax();
+    static void setPostIngestQueueMax(uint32_t v);
 
     // Overflow FIFO behind the bounded kg_jobs channel. Each pending job may hold document
     // bytes, so this bound is what keeps a KG stall from growing ingest memory without limit.
     // Typed key only: tuning.post_ingest_pending_kg_max.
-    static uint32_t postIngestPendingKgMax() {
-        uint32_t ov = postIngestPendingKgMaxOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        return 16384;
-    }
-    static void setPostIngestPendingKgMax(uint32_t v) {
-        postIngestPendingKgMaxOverride_.store(v, std::memory_order_relaxed);
-    }
+    static uint32_t postIngestPendingKgMax();
+    static void setPostIngestPendingKgMax(uint32_t v);
 
     // Post-ingest RPC queue capacity (high-priority channel). Env override:
     // YAMS_POST_INGEST_RPC_QUEUE_MAX
-    static uint32_t postIngestRpcQueueMax() {
-        uint32_t ov = postIngestRpcQueueMaxOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        if (const char* s = compatibilityEnvironment("YAMS_POST_INGEST_RPC_QUEUE_MAX")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 10 && v <= 1'000'000)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 256;
-    }
-    static void setPostIngestRpcQueueMax(uint32_t v) {
-        postIngestRpcQueueMaxOverride_.store(v, std::memory_order_relaxed);
-    }
+    static uint32_t postIngestRpcQueueMax();
+    static void setPostIngestRpcQueueMax(uint32_t v);
 
     // Maximum number of high-priority (RPC) post-ingest tasks to drain per batch.
     // Env override: YAMS_POST_INGEST_RPC_MAX_PER_BATCH
-    static uint32_t postIngestRpcMaxPerBatch() {
-        uint32_t ov = postIngestRpcMaxPerBatchOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        if (const char* s = compatibilityEnvironment("YAMS_POST_INGEST_RPC_MAX_PER_BATCH")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1 && v <= 1024)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 4;
-    }
-    static void setPostIngestRpcMaxPerBatch(uint32_t value) {
-        postIngestRpcMaxPerBatchOverride_.store(value, std::memory_order_relaxed);
-    }
+    static uint32_t postIngestRpcMaxPerBatch();
+    static void setPostIngestRpcMaxPerBatch(uint32_t value);
     // Post-ingest batching size. Env override: YAMS_POST_INGEST_BATCH_SIZE.
     // This is a cap: partial batches still dispatch after the bounded coalesce window.
     // Dynamically scales down when DB lock contention is detected.
-    static uint32_t postIngestBatchSize() {
-        uint32_t ov = postIngestBatchSizeOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-
-        // Keeps foreground retrieval responsive under concurrent ingestion while reducing
-        // content-index transaction overhead. Contention feedback below still scales to 4/2/1.
-        constexpr uint32_t kDefaultBatchSize = 32;
-        uint32_t baseBatchSize = kDefaultBatchSize;
-        auto embedCap = static_cast<uint32_t>(getEmbedDocCap());
-        if (embedCap == 0) {
-            embedCap = 64;
-        }
-        baseBatchSize = std::min({baseBatchSize, embedCap, 256u});
-        auto envValue = parseBoundedUintEnvNow("YAMS_POST_INGEST_BATCH_SIZE", 1u, 256u);
-        if (envValue)
-            baseBatchSize = *envValue;
-
-        // Adaptive scaling: reduce batch size when lock contention is high
-        uint64_t recentErrors = metadata::dbLockErrorCount();
-        if (recentErrors > 10) {
-            return 1; // Maximum contention: single-document transactions
-        } else if (recentErrors > 5) {
-            return std::min(baseBatchSize, 2u);
-        } else if (recentErrors > 2) {
-            return std::min(baseBatchSize, 4u);
-        }
-        return baseBatchSize;
-    }
-    static void setPostIngestBatchSize(uint32_t v) {
-        postIngestBatchSizeOverride_.store(v, std::memory_order_relaxed);
-    }
+    static uint32_t postIngestBatchSize();
+    static void setPostIngestBatchSize(uint32_t v);
 
     // Override store for IPC timeout (ms)
     static inline std::atomic<uint32_t> ipcTimeoutMsOverride_{0};
@@ -1389,500 +527,149 @@ public:
     // IPC timeouts (ms) for read/write operations. Default 15000ms; env: YAMS_IPC_TIMEOUT_MS.
     // Range clamp [500, 600000] — wide enough for large-corpus benchmarks under
     // sanitizer builds where each op can take 30-60s.
-    static uint32_t ipcTimeoutMs() {
-        return readUint32Override(ipcTimeoutMsOverride_, "YAMS_IPC_TIMEOUT_MS", 15000u, 500u,
-                                  600000u);
-    }
-    static void setIpcTimeoutMs(uint32_t value) {
-        ipcTimeoutMsOverride_.store(value, std::memory_order_relaxed);
-    }
+    static uint32_t ipcTimeoutMs();
+    static void setIpcTimeoutMs(uint32_t value);
     // Timeout for streaming chunk production (ms). When nonzero, a streaming
     // response will be failed with a Timeout error if next_chunk() exceeds this
     // limit. Default 30000ms; env: YAMS_STREAM_CHUNK_TIMEOUT_MS. Range clamp
     // [1000, 600000].
-    static uint32_t streamChunkTimeoutMs() {
-        return readUint32Override(streamChunkTimeoutMsOverride_, "YAMS_STREAM_CHUNK_TIMEOUT_MS",
-                                  30000u, 1000u, 600000u);
-    }
-    static void setStreamChunkTimeoutMs(uint32_t value) {
-        streamChunkTimeoutMsOverride_.store(value, std::memory_order_relaxed);
-    }
+    static uint32_t streamChunkTimeoutMs();
+    static void setStreamChunkTimeoutMs(uint32_t value);
     // -------- New centralized tuning getters (env-driven) --------
     // Backpressure read pause when receiver is backpressured (ms). Default 10.
-    static uint32_t backpressureReadPauseMs() {
-        return readUint32Override(backpressureReadPauseMsOverride_,
-                                  "YAMS_BACKPRESSURE_READ_PAUSE_MS", 10u, 0u, 1000u);
-    }
-    static void setBackpressureReadPauseMs(uint32_t ms) {
-        backpressureReadPauseMsOverride_.store(ms, std::memory_order_relaxed);
-    }
+    static uint32_t backpressureReadPauseMs();
+    static void setBackpressureReadPauseMs(uint32_t ms);
     // Worker pool poll/sleep cadence (ms) for run loop. Default 150.
-    static uint32_t workerPollMs() {
-        return readUint32Override(workerPollMsOverride_, "YAMS_WORKER_POLL_MS", 150u, 50u, 2000u);
-    }
-    static void setWorkerPollMs(uint32_t ms) {
-        workerPollMsOverride_.store(ms, std::memory_order_relaxed);
-        workerPollMsPinned_.store(ms != 0, std::memory_order_relaxed);
-    }
-    static void setWorkerPollMsDynamic(uint32_t ms) {
-        if (ms == 0 || workerPollMsPinned())
-            return;
-        workerPollMsOverride_.store(ms, std::memory_order_relaxed);
-    }
-    static bool workerPollMsPinned() {
-        if (workerPollMsPinned_.load(std::memory_order_relaxed))
-            return true;
-        return parseBoundedUintEnvNow("YAMS_WORKER_POLL_MS", 50u, 2000u).has_value();
-    }
+    static uint32_t workerPollMs();
+    static void setWorkerPollMs(uint32_t ms);
+    static void setWorkerPollMsDynamic(uint32_t ms);
+    static bool workerPollMsPinned();
 
     // Idle shrink policy
-    static double idleCpuThresholdPercent() {
-        return readPositiveDoubleOverride(idleCpuPctOverride_, "YAMS_IDLE_CPU_PCT", 10.0, 0.0,
-                                          100.0);
-    }
-    static void setIdleCpuThresholdPercent(double pct) {
-        idleCpuPctOverride_.store(pct, std::memory_order_relaxed);
-    }
-    static std::uint64_t idleMuxLowBytes() {
-        return readUint64Override(idleMuxLowBytesOverride_, "YAMS_IDLE_MUX_LOW_BYTES",
-                                  4ull * 1024ull * 1024ull, 0ull, UINT64_MAX);
-    }
-    static void setIdleMuxLowBytes(std::uint64_t b) {
-        idleMuxLowBytesOverride_.store(b, std::memory_order_relaxed);
-    }
-    static uint32_t idleShrinkHoldMs() {
-        return readUint32Override(idleShrinkHoldMsOverride_, "YAMS_IDLE_SHRINK_HOLD_MS", 5000u,
-                                  500u, 60000u);
-    }
-    static void setIdleShrinkHoldMs(uint32_t ms) {
-        idleShrinkHoldMsOverride_.store(ms, std::memory_order_relaxed);
-    }
-    static uint32_t poolCooldownMs() {
-        uint32_t ov = poolCooldownMsOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        switch (tuningProfile()) {
-            case Profile::Efficient:
-                return 750;
-            case Profile::Aggressive:
-                return 250;
-            case Profile::Balanced:
-            default:
-                break;
-        }
-        return parseBoundedUintEnvNow("YAMS_POOL_COOLDOWN_MS", 0u, 60000u).value_or(500u);
-    }
-    static void setPoolCooldownMs(uint32_t ms) {
-        poolCooldownMsOverride_.store(ms, std::memory_order_relaxed);
-    }
-    static int poolScaleStep() {
-        return readPositiveIntOverride(poolScaleStepOverride_, "YAMS_POOL_SCALE_STEP", 1, 1, 16);
-    }
-    static void setPoolScaleStep(int step) {
-        poolScaleStepOverride_.store(step, std::memory_order_relaxed);
-    }
+    static double idleCpuThresholdPercent();
+    static void setIdleCpuThresholdPercent(double pct);
+    static std::uint64_t idleMuxLowBytes();
+    static void setIdleMuxLowBytes(std::uint64_t b);
+    static uint32_t idleShrinkHoldMs();
+    static void setIdleShrinkHoldMs(uint32_t ms);
+    static uint32_t poolCooldownMs();
+    static void setPoolCooldownMs(uint32_t ms);
+    static int poolScaleStep();
+    static void setPoolScaleStep(int step);
 
     // Pool defaults (IPC CPU and IO pools)
-    static uint32_t poolMinSizeIpc() {
-        return readUint32Override(poolMinSizeIpcOverride_, "YAMS_POOL_IPC_MIN", 1u, 1u, 1024u);
-    }
-    static void setPoolMinSizeIpc(uint32_t v) {
-        poolMinSizeIpcOverride_.store(v, std::memory_order_relaxed);
-    }
-    static uint32_t poolMaxSizeIpc() {
-        return readUint32Override(poolMaxSizeIpcOverride_, "YAMS_POOL_IPC_MAX", 32u, 1u, 4096u);
-    }
-    static void setPoolMaxSizeIpc(uint32_t v) {
-        poolMaxSizeIpcOverride_.store(v, std::memory_order_relaxed);
-    }
-    static uint32_t poolMinSizeIpcIo() {
-        return readUint32Override(poolMinSizeIpcIoOverride_, "YAMS_POOL_IO_MIN", 1u, 1u, 1024u);
-    }
-    static void setPoolMinSizeIpcIo(uint32_t v) {
-        poolMinSizeIpcIoOverride_.store(v, std::memory_order_relaxed);
-    }
-    static uint32_t poolMaxSizeIpcIo() {
-        return readUint32Override(poolMaxSizeIpcIoOverride_, "YAMS_POOL_IO_MAX", 32u, 1u, 4096u);
-    }
-    static void setPoolMaxSizeIpcIo(uint32_t v) {
-        poolMaxSizeIpcIoOverride_.store(v, std::memory_order_relaxed);
-    }
-    static uint32_t poolLowWatermarkPercent() {
-        return readUint32Override(poolLowWatermarkPctOverride_, "YAMS_POOL_LOW_WATERMARK_PCT", 25u,
-                                  0u, 100u);
-    }
-    static uint32_t poolHighWatermarkPercent() {
-        return readUint32Override(poolHighWatermarkPctOverride_, "YAMS_POOL_HIGH_WATERMARK_PCT",
-                                  85u, 0u, 100u);
-    }
+    static uint32_t poolMinSizeIpc();
+    static void setPoolMinSizeIpc(uint32_t v);
+    static uint32_t poolMaxSizeIpc();
+    static void setPoolMaxSizeIpc(uint32_t v);
+    static uint32_t poolMinSizeIpcIo();
+    static void setPoolMinSizeIpcIo(uint32_t v);
+    static uint32_t poolMaxSizeIpcIo();
+    static void setPoolMaxSizeIpcIo(uint32_t v);
+    static uint32_t poolLowWatermarkPercent();
+    static uint32_t poolHighWatermarkPercent();
     // -------- Connection slot dynamic sizing (PBI-085) --------
     // Minimum connection slots (floor for dynamic resizing). Default 256.
     // Environment: YAMS_CONN_SLOTS_MIN (range 1..1024)
-    static uint32_t connectionSlotsMin() {
-        return readUint32Override(connectionSlotsMinOverride_, "YAMS_CONN_SLOTS_MIN", 256u, 1u,
-                                  1024u);
-    }
-    static void setConnectionSlotsMin(uint32_t v) {
-        connectionSlotsMinOverride_.store(v, std::memory_order_relaxed);
-    }
+    static uint32_t connectionSlotsMin();
+    static void setConnectionSlotsMin(uint32_t v);
 
     // Maximum connection slots (ceiling for dynamic resizing). Default 4096.
     // Environment: YAMS_CONN_SLOTS_MAX (range 64..16384)
-    static uint32_t connectionSlotsMax() {
-        return readUint32Override(connectionSlotsMaxOverride_, "YAMS_CONN_SLOTS_MAX", 4096u, 64u,
-                                  16384u);
-    }
-    static void setConnectionSlotsMax(uint32_t v) {
-        connectionSlotsMaxOverride_.store(v, std::memory_order_relaxed);
-    }
+    static uint32_t connectionSlotsMax();
+    static void setConnectionSlotsMax(uint32_t v);
 
     // Scale step for connection slot resizing. Default 16.
     // Environment: YAMS_CONN_SLOTS_STEP (range 1..128)
-    static uint32_t connectionSlotsScaleStep() {
-        return readUint32Override(connectionSlotsScaleStepOverride_, "YAMS_CONN_SLOTS_STEP", 16u,
-                                  1u, 128u);
-    }
-    static void setConnectionSlotsScaleStep(uint32_t v) {
-        connectionSlotsScaleStepOverride_.store(v, std::memory_order_relaxed);
-    }
+    static uint32_t connectionSlotsScaleStep();
+    static void setConnectionSlotsScaleStep(uint32_t v);
 
     // Initial/target connection slots based on hardware and profile.
     // Formula: recommendedThreads * ioConnPerThread * 4 * (0.5 + profileScale)
     // With minimum of 256 slots. Profile-scaled: Efficient=lower, Aggressive=higher.
-    static uint32_t connectionSlotsTarget() {
-        uint32_t ov = connectionSlotsTargetOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-
-        uint32_t rec = recommendedThreads();
-        uint32_t per = ioConnPerThread();
-        double scale = 0.5 + profileScale(); // 0.5 (Efficient) to 1.5 (Aggressive)
-
-        uint64_t computed = static_cast<uint64_t>(rec) * static_cast<uint64_t>(per) * 4ull;
-        computed = static_cast<uint64_t>(static_cast<double>(computed) * scale);
-
-        uint32_t minSlots = connectionSlotsMin();
-        if (computed < static_cast<uint64_t>(minSlots))
-            computed = minSlots;
-
-        uint32_t maxSlots = connectionSlotsMax();
-        if (computed > static_cast<uint64_t>(maxSlots))
-            computed = maxSlots;
-
-        return static_cast<uint32_t>(computed);
-    }
-    static uint32_t searchConcurrencyLimit() {
-        return readUint32Override(
-            searchConcurrencyOverride_, "YAMS_SEARCH_MAX_CONCURRENT",
-            defaultReadPathCapacityModel(hardwareConcurrency()).searchConcurrencyLimit, 1u, 512u);
-    }
-    static uint32_t readPoolMaxConnections(uint32_t configuredMax) {
-        return defaultReadPoolMaxConnectionsForHw(hardwareConcurrency(), configuredMax);
-    }
+    static uint32_t connectionSlotsTarget();
+    static uint32_t searchConcurrencyLimit();
+    static uint32_t readPoolMaxConnections(uint32_t configuredMax);
 
     // Dedicated daemon-side list admission controls.
     // Defaults are profile-aware and can be overridden via tuning config.
-    static uint32_t listInflightLimit() {
-        uint32_t ov = listInflightLimitOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        switch (tuningProfile()) {
-            case Profile::Efficient:
-                return 4;
-            case Profile::Aggressive:
-                return 16;
-            case Profile::Balanced:
-            default:
-                return 8;
-        }
-    }
-    static void setListInflightLimit(uint32_t v) {
-        listInflightLimitOverride_.store(std::clamp<uint32_t>(v, 1u, 1024u),
-                                         std::memory_order_relaxed);
-    }
+    static uint32_t listInflightLimit();
+    static void setListInflightLimit(uint32_t v);
 
-    static uint32_t listAdmissionWaitMs() {
-        uint32_t ov = listAdmissionWaitMsOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        return 200;
-    }
-    static void setListAdmissionWaitMs(uint32_t v) {
-        listAdmissionWaitMsOverride_.store(std::clamp<uint32_t>(v, 1u, 120000u),
-                                           std::memory_order_relaxed);
-    }
+    static uint32_t listAdmissionWaitMs();
+    static void setListAdmissionWaitMs(uint32_t v);
 
     // Dedicated daemon-side grep admission controls.
     // Defaults are profile-aware and can be overridden via tuning config.
-    static uint32_t grepInflightLimit() {
-        uint32_t ov = grepInflightLimitOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        switch (tuningProfile()) {
-            case Profile::Efficient:
-                return 1;
-            case Profile::Aggressive:
-                return 3;
-            case Profile::Balanced:
-            default:
-                return 1;
-        }
-    }
-    static void setGrepInflightLimit(uint32_t v) {
-        grepInflightLimitOverride_.store(std::clamp<uint32_t>(v, 1u, 1024u),
-                                         std::memory_order_relaxed);
-    }
+    static uint32_t grepInflightLimit();
+    static void setGrepInflightLimit(uint32_t v);
 
-    static uint32_t grepAdmissionWaitMs() {
-        uint32_t ov = grepAdmissionWaitMsOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        return 20000;
-    }
-    static void setGrepAdmissionWaitMs(uint32_t v) {
-        grepAdmissionWaitMsOverride_.store(std::clamp<uint32_t>(v, 1u, 120000u),
-                                           std::memory_order_relaxed);
-    }
+    static uint32_t grepAdmissionWaitMs();
+    static void setGrepAdmissionWaitMs(uint32_t v);
 
     // Writer drain ramp thresholds and multipliers
-    static uint32_t writerActiveLow1Threshold() { return 2; }
-    static uint32_t writerActiveLow2Threshold() { return 4; }
-    static uint32_t writerActiveHigh1Threshold() { return 8; }
-    static uint32_t writerActiveHigh2Threshold() { return 32; }
-    static double writerScaleActiveLow1Mul() { return 2.0; }
-    static double writerScaleActiveLow2Mul() { return 1.5; }
-    static double writerScaleActiveHigh1Mul() { return 2.0; }
-    static double writerScaleActiveHigh2Mul() { return 2.0; }
-    static double writerQueuedHalfThresholdFraction() { return 0.5; }
-    static double writerQueuedThreeQuarterThresholdFraction() { return 0.75; }
-    static double writerScaleQueuedHalfMul() { return 1.5; }
-    static double writerScaleQueuedThreeQuarterMul() { return 2.0; }
+    static uint32_t writerActiveLow1Threshold();
+    static uint32_t writerActiveLow2Threshold();
+    static uint32_t writerActiveHigh1Threshold();
+    static uint32_t writerActiveHigh2Threshold();
+    static double writerScaleActiveLow1Mul();
+    static double writerScaleActiveLow2Mul();
+    static double writerScaleActiveHigh1Mul();
+    static double writerScaleActiveHigh2Mul();
+    static double writerQueuedHalfThresholdFraction();
+    static double writerQueuedThreeQuarterThresholdFraction();
+    static double writerScaleQueuedHalfMul();
+    static double writerScaleQueuedThreeQuarterMul();
 
     // Streaming page sizing thresholds and clamps
-    static std::uint64_t streamMuxVeryHighBytes() { return 256ull * 1024ull * 1024ull; }
-    static std::uint64_t streamMuxHighBytes() { return 128ull * 1024ull * 1024ull; }
-    static std::uint64_t streamMuxLight1Bytes() { return 8ull * 1024ull * 1024ull; }
-    static std::uint64_t streamMuxLight2Bytes() { return 32ull * 1024ull * 1024ull; }
-    static std::uint64_t streamMuxLight3Bytes() { return 64ull * 1024ull * 1024ull; }
-    static double streamPageFactorVeryHighDiv() { return 0.25; } // divide by 4
-    static double streamPageFactorHighDiv() { return 0.5; }      // divide by 2
-    static double streamPageFactorLight1Mul() { return 3.0; }
-    static double streamPageFactorLight2Mul() { return 2.0; }
-    static double streamPageFactorLight3Mul() { return 1.5; }
-    static std::size_t streamPageClampMin() { return 5; }
-    static std::size_t streamPageClampMax() { return 50000; }
+    static std::uint64_t streamMuxVeryHighBytes();
+    static std::uint64_t streamMuxHighBytes();
+    static std::uint64_t streamMuxLight1Bytes();
+    static std::uint64_t streamMuxLight2Bytes();
+    static std::uint64_t streamMuxLight3Bytes();
+    static double streamPageFactorVeryHighDiv(); // divide by 4
+    static double streamPageFactorHighDiv();     // divide by 2
+    static double streamPageFactorLight1Mul();
+    static double streamPageFactorLight2Mul();
+    static double streamPageFactorLight3Mul();
+    static std::size_t streamPageClampMin();
+    static std::size_t streamPageClampMax();
 
     // IO: desired average connections per thread before scaling up IO pool.
     // Default 8; override via YAMS_IO_CONN_PER_THREAD (range 1..1024).
-    static uint32_t ioConnPerThread() {
-        uint32_t ov = ioConnPerThreadOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-        uint32_t def = 8;
-        if (const char* s = compatibilityEnvironment("YAMS_IO_CONN_PER_THREAD")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1 && v <= 1024)
-                    return v;
-            } catch (const std::exception&) {
-                return def;
-            }
-        }
-        return def;
-    }
-    static void setIoConnPerThread(uint32_t v) {
-        ioConnPerThreadOverride_.store(v, std::memory_order_relaxed);
-    }
+    static uint32_t ioConnPerThread();
+    static void setIoConnPerThread(uint32_t v);
 
-    static bool enableParallelIngest() {
-        int ov = enableParallelIngestOverride_.load(std::memory_order_relaxed);
-        if (ov >= 0)
-            return ov > 0;
-        if (const char* s = compatibilityEnvironment("YAMS_ENABLE_PARALLEL_INGEST")) {
-            std::string v{s};
-            std::transform(v.begin(), v.end(), v.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            if (v == "0" || v == "false" || v == "off" || v == "no")
-                return false;
-            return true;
-        }
-        return true;
-    }
-    static void setEnableParallelIngest(bool en) {
-        enableParallelIngestOverride_.store(en ? 1 : 0, std::memory_order_relaxed);
-    }
+    static bool enableParallelIngest();
+    static void setEnableParallelIngest(bool en);
 
-    static uint32_t maxIngestWorkers() {
-        uint32_t ov = maxIngestWorkersOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        if (const char* s = compatibilityEnvironment("YAMS_INDEXING_WORKERS_MAX")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return std::max(1u, recommendedThreads(1.0));
-    }
-    static void setMaxIngestWorkers(uint32_t v) {
-        maxIngestWorkersOverride_.store(v, std::memory_order_relaxed);
-    }
+    static uint32_t maxIngestWorkers();
+    static void setMaxIngestWorkers(uint32_t v);
 
-    static uint32_t storagePoolSize() {
-        uint32_t ov = storagePoolSizeOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        if (const char* s = compatibilityEnvironment("YAMS_STORAGE_POOL_SIZE")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 0;
-    }
-    static void setStoragePoolSize(uint32_t v) {
-        storagePoolSizeOverride_.store(v, std::memory_order_relaxed);
-    }
+    static uint32_t storagePoolSize();
+    static void setStoragePoolSize(uint32_t v);
 
-    static uint32_t ingestBacklogPerWorker() {
-        uint32_t ov = ingestBacklogPerWorkerOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        if (const char* s = compatibilityEnvironment("YAMS_INGEST_BACKLOG_PER_WORKER")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 32;
-    }
+    static uint32_t ingestBacklogPerWorker();
     // Internal Event Bus toggles (config-driven)
-    static bool useInternalBusForRepair() {
-        return useInternalBusRepair_.load(std::memory_order_relaxed);
-    }
-    static void setUseInternalBusForRepair(bool en) {
-        useInternalBusRepair_.store(en, std::memory_order_relaxed);
-    }
-    static bool useInternalBusForPostIngest() {
-        return useInternalBusPostIngest_.load(std::memory_order_relaxed);
-    }
-    static void setUseInternalBusForPostIngest(bool en) {
-        useInternalBusPostIngest_.store(en, std::memory_order_relaxed);
-    }
+    static bool useInternalBusForRepair();
+    static void setUseInternalBusForRepair(bool en);
+    static bool useInternalBusForPostIngest();
+    static void setUseInternalBusForPostIngest(bool en);
 
     /// Number of dedicated I/O threads (default 10)
     /// Environment: YAMS_IO_THREADS
-    static uint32_t ioThreadCount() {
-        uint32_t ov = ioThreadCountOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        if (const char* s = compatibilityEnvironment("YAMS_IO_THREADS")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1 && v <= 16)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 10;
-    }
+    static uint32_t ioThreadCount();
     /// Main-socket absolute connection lifetime in seconds (default 300).
     /// 0 disables lifetime-based forced close.
     /// Environment: YAMS_CONNECTION_LIFETIME_S
-    static uint32_t connectionLifetimeSeconds() {
-        int32_t ov = connectionLifetimeSecondsOverride_.load(std::memory_order_relaxed);
-        if (ov >= 0)
-            return static_cast<uint32_t>(ov);
-        if (const char* s = compatibilityEnvironment("YAMS_CONNECTION_LIFETIME_S")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v <= 86400)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 300;
-    }
-    static void setConnectionLifetimeSeconds(uint32_t v) {
-        if (v <= 86400) {
-            connectionLifetimeSecondsOverride_.store(static_cast<int32_t>(v),
-                                                     std::memory_order_relaxed);
-        }
-    }
-    static void resetConnectionLifetimeSecondsOverride() {
-        connectionLifetimeSecondsOverride_.store(-1, std::memory_order_relaxed);
-    }
+    static uint32_t connectionLifetimeSeconds();
+    static void setConnectionLifetimeSeconds(uint32_t v);
+    static void resetConnectionLifetimeSecondsOverride();
 
-    static uint32_t maxIdleTimeouts() {
-        uint32_t ov = maxIdleTimeoutsOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        if (const char* s = compatibilityEnvironment("YAMS_MAX_IDLE_TIMEOUTS")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1 && v <= 100)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 12;
-    }
-    static uint32_t checkpointIntervalSeconds() {
-        uint32_t ov = checkpointIntervalSecondsOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        if (const char* s = compatibilityEnvironment("YAMS_CHECKPOINT_INTERVAL_SECONDS")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 10 && v <= 3600)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 300;
-    }
-    static uint32_t checkpointInsertThreshold() {
-        uint32_t ov = checkpointInsertThresholdOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        if (const char* s = compatibilityEnvironment("YAMS_CHECKPOINT_INSERT_THRESHOLD")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1 && v <= 100000)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 1000;
-    }
-    static bool enableHotzoneCheckpoint() {
-        int ov = enableHotzoneCheckpointOverride_.load(std::memory_order_relaxed);
-        if (ov >= 0)
-            return ov > 0;
-        if (const char* s = compatibilityEnvironment("YAMS_ENABLE_HOTZONE_PERSISTENCE")) {
-            std::string v{s};
-            std::transform(v.begin(), v.end(), v.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            if (v == "1" || v == "true" || v == "on" || v == "yes")
-                return true;
-            return false;
-        }
-        return false;
-    }
+    static uint32_t maxIdleTimeouts();
+    static uint32_t checkpointIntervalSeconds();
+    static uint32_t checkpointInsertThreshold();
+    static bool enableHotzoneCheckpoint();
     // =========================================================================
     // PBI-05a: PostIngestQueue Dynamic Concurrency Scaling
     // =========================================================================
@@ -1897,237 +684,76 @@ public:
     };
     using PostIngestStageActivityToken = std::uint64_t;
 
-    static void setPostIngestStageActive(PostIngestStage stage, bool active) {
-        const uint32_t bit = 1u << static_cast<uint8_t>(stage);
-        if (active) {
-            postIngestStageActiveMaskOverride_.fetch_or(bit, std::memory_order_release);
-        } else {
-            postIngestStageActiveMaskOverride_.fetch_and(~bit, std::memory_order_release);
-        }
-    }
-    static PostIngestStageActivityToken acquirePostIngestStageActivity(PostIngestStage stage) {
-        std::lock_guard lock(postIngestStageActivityMutex());
-        auto& nextToken = nextPostIngestStageActivityToken();
-        auto& liveTokens = livePostIngestStageActivityTokens();
-        do {
-            ++nextToken;
-        } while (nextToken == 0 || liveTokens.contains(nextToken));
-        liveTokens.emplace(nextToken, static_cast<std::uint8_t>(stage));
-        postIngestStageOwnerCounts_[static_cast<std::size_t>(stage)].fetch_add(
-            1, std::memory_order_release);
-        return nextToken;
-    }
+    static void setPostIngestStageActive(PostIngestStage stage, bool active);
+    static PostIngestStageActivityToken acquirePostIngestStageActivity(PostIngestStage stage);
     static void releasePostIngestStageActivity(PostIngestStage stage,
-                                               PostIngestStageActivityToken token) {
-        std::lock_guard lock(postIngestStageActivityMutex());
-        auto& liveTokens = livePostIngestStageActivityTokens();
-        const auto tokenIt = liveTokens.find(token);
-        if (tokenIt == liveTokens.end() || tokenIt->second != static_cast<std::uint8_t>(stage)) {
-            return;
-        }
-        liveTokens.erase(tokenIt);
-        auto& owners = postIngestStageOwnerCounts_[static_cast<std::size_t>(stage)];
-        const uint32_t current = owners.load(std::memory_order_relaxed);
-        if (current > 0) {
-            owners.store(current - 1, std::memory_order_release);
-        }
-    }
-    static uint32_t postIngestStageActiveMask() {
-        uint32_t mask = postIngestStageActiveMaskOverride_.load(std::memory_order_acquire);
-        for (std::size_t i = 0; i < postIngestStageOwnerCounts_.size(); ++i) {
-            if (postIngestStageOwnerCounts_[i].load(std::memory_order_acquire) > 0) {
-                mask |= 1u << i;
-            }
-        }
-        return mask;
-    }
+                                               PostIngestStageActivityToken token);
+    static uint32_t postIngestStageActiveMask();
 
     /// Total post-ingest concurrency budget (shared across stages).
     /// Default uses cpuBudgetPercent() via recommendedThreads().
     /// Environment: YAMS_POST_INGEST_TOTAL_CONCURRENT
-    static uint32_t postIngestTotalConcurrent() {
-        uint32_t ov = postIngestTotalConcurrentOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        auto envValue = parseBoundedUintEnvNow("YAMS_POST_INGEST_TOTAL_CONCURRENT", 1u, 256u);
-        if (envValue)
-            return *envValue;
-        uint32_t hw = daemonThreadCapacity(hardwareConcurrency());
-
-        // Use round-up division to avoid integer truncation starving small systems.
-        // Without rounding: (8*20)/100 = 1, base = max(2,1) = 2, no scaling benefit.
-        // With rounding:    (8*20+99)/100 = 2, base = max(2,2) = 2, scaleRange grows too.
-        uint32_t base = std::max(2u, (hw * 20 + 99) / 100);
-        uint32_t scaleRange = std::max(1u, (hw * 15 + 99) / 100);
-        uint32_t total = base + static_cast<uint32_t>(scaleRange * profileScale());
-
-        // Ensure the budget can support at least 1 slot per active stage so no
-        // pipeline stage is starved.  Count active bits from the stage mask.
-        uint32_t mask = postIngestStageActiveMask();
-        uint32_t activeStages = 0;
-        for (uint32_t m = mask; m != 0; m >>= 1) {
-            activeStages += (m & 1u);
-        }
-
-        // Clamp to hardware capacity, then re-apply a per-stage floor only
-        // when the host has enough capacity. Small systems should not be
-        // inflated to six post-ingest slots merely because all stages are
-        // enabled.
-        total = std::clamp(total, 2u, std::max(2u, hw));
-        if (activeStages > 0) {
-            total = std::max(total, std::min(activeStages, std::max(2u, hw)));
-        }
-        return total;
-    }
-    static void setPostIngestTotalConcurrent(uint32_t v) {
-        if (v == 0) {
-            postIngestTotalConcurrentOverride_.store(0u, std::memory_order_relaxed);
-            return;
-        }
-        postIngestTotalConcurrentOverride_.store(std::clamp(v, 1u, 256u),
-                                                 std::memory_order_relaxed);
-    }
+    static uint32_t postIngestTotalConcurrent();
+    static void setPostIngestTotalConcurrent(uint32_t v);
 
     /// Maximum concurrent extraction tasks (profile-scaled, max 64)
     /// Profile-scaled: Efficient=2, Balanced=3, Aggressive=4
     /// Environment: YAMS_POST_EXTRACTION_CONCURRENT
-    static uint32_t postExtractionDefaultConcurrent() {
-        return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/false).extraction;
-    }
-    static uint32_t postExtractionConcurrent() {
-        return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/true).extraction;
-    }
-    static void setPostExtractionConcurrent(uint32_t v) {
-        postExtractionConcurrentOverride_.store(std::min(v, 64u), std::memory_order_relaxed);
-    }
+    static uint32_t postExtractionDefaultConcurrent();
+    static uint32_t postExtractionConcurrent();
+    static void setPostExtractionConcurrent(uint32_t v);
     // Runtime (daemon-only) dynamic cap. UINT32_MAX = unset; 0 = zero concurrency.
-    static void setPostExtractionConcurrentDynamicCap(uint32_t v) {
-        postExtractionConcurrentDynamicCap_.store(v == UINT32_MAX ? UINT32_MAX : std::min(v, 64u),
-                                                  std::memory_order_relaxed);
-    }
+    static void setPostExtractionConcurrentDynamicCap(uint32_t v);
 
     /// Maximum concurrent KG ingestion tasks (profile-scaled, max 64)
     /// Profile-scaled: Efficient=4, Balanced=6, Aggressive=8
     /// Environment: YAMS_POST_KG_CONCURRENT
-    static uint32_t postKgDefaultConcurrent() {
-        return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/false).kg;
-    }
-    static uint32_t postKgConcurrent() {
-        return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/true).kg;
-    }
-    static void setPostKgConcurrent(uint32_t v) {
-        postKgConcurrentOverride_.store(std::min(v, 64u), std::memory_order_relaxed);
-    }
-    static void setPostKgConcurrentDynamicCap(uint32_t v) {
-        postKgConcurrentDynamicCap_.store(v == UINT32_MAX ? UINT32_MAX : std::min(v, 64u),
-                                          std::memory_order_relaxed);
-    }
+    static uint32_t postKgDefaultConcurrent();
+    static uint32_t postKgConcurrent();
+    static void setPostKgConcurrent(uint32_t v);
+    static void setPostKgConcurrentDynamicCap(uint32_t v);
 
     /// Maximum concurrent symbol extraction tasks (profile-scaled, max 32)
     /// Profile-scaled: Efficient=2, Balanced=3, Aggressive=4
     /// Environment: YAMS_POST_SYMBOL_CONCURRENT
-    static uint32_t postSymbolDefaultConcurrent() {
-        return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/false).symbol;
-    }
-    static uint32_t postSymbolConcurrent() {
-        return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/true).symbol;
-    }
-    static void setPostSymbolConcurrent(uint32_t v) {
-        postSymbolConcurrentOverride_.store(std::min(v, 32u), std::memory_order_relaxed);
-    }
-    static void setPostSymbolConcurrentDynamicCap(uint32_t v) {
-        postSymbolConcurrentDynamicCap_.store(v == UINT32_MAX ? UINT32_MAX : std::min(v, 32u),
-                                              std::memory_order_relaxed);
-    }
+    static uint32_t postSymbolDefaultConcurrent();
+    static uint32_t postSymbolConcurrent();
+    static void setPostSymbolConcurrent(uint32_t v);
+    static void setPostSymbolConcurrentDynamicCap(uint32_t v);
 
     /// Maximum concurrent entity extraction tasks (profile-scaled, max 16)
     /// Entity extraction is CPU-heavy, so lower defaults
     /// Profile-scaled: Efficient=1, Balanced=2, Aggressive=2
     /// Environment: YAMS_POST_ENTITY_CONCURRENT
-    static uint32_t postEntityDefaultConcurrent() {
-        return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/false).entity;
-    }
-    static uint32_t postEntityConcurrent() {
-        return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/true).entity;
-    }
-    static void setPostEntityConcurrent(uint32_t v) {
-        postEntityConcurrentOverride_.store(std::min(v, 16u), std::memory_order_relaxed);
-    }
-    static void setPostEntityConcurrentDynamicCap(uint32_t v) {
-        postEntityConcurrentDynamicCap_.store(v == UINT32_MAX ? UINT32_MAX : std::min(v, 16u),
-                                              std::memory_order_relaxed);
-    }
+    static uint32_t postEntityDefaultConcurrent();
+    static uint32_t postEntityConcurrent();
+    static void setPostEntityConcurrent(uint32_t v);
+    static void setPostEntityConcurrentDynamicCap(uint32_t v);
 
     /// Maximum concurrent title extraction tasks (profile-scaled, max 16)
     /// Environment: YAMS_POST_TITLE_CONCURRENT
-    static uint32_t postTitleDefaultConcurrent() {
-        return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/false).title;
-    }
-    static uint32_t postTitleConcurrent() {
-        return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/true).title;
-    }
-    static void setPostTitleConcurrent(uint32_t v) {
-        postTitleConcurrentOverride_.store(std::min(v, 16u), std::memory_order_relaxed);
-    }
-    static void setPostTitleConcurrentDynamicCap(uint32_t v) {
-        postTitleConcurrentDynamicCap_.store(v == UINT32_MAX ? UINT32_MAX : std::min(v, 16u),
-                                             std::memory_order_relaxed);
-    }
+    static uint32_t postTitleDefaultConcurrent();
+    static uint32_t postTitleConcurrent();
+    static void setPostTitleConcurrent(uint32_t v);
+    static void setPostTitleConcurrentDynamicCap(uint32_t v);
 
     // PBI-05b: EmbeddingService concurrency (parallel embedding workers)
     // Embeddings are compute-heavy (ONNX inference) so we need parallelism to keep up with ingest
     // Profile-scaled: Efficient=2, Balanced=3, Aggressive=4
-    static uint32_t postEmbedDefaultConcurrent() {
-        return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/false).embed;
-    }
-    static uint32_t postEmbedConcurrent() {
-        return postIngestBudgetedConcurrency(/*includeDynamicCaps=*/true).embed;
-    }
-    static void setPostEmbedConcurrent(uint32_t v) {
-        postEmbedConcurrentOverride_.store(std::min(v, 32u), std::memory_order_relaxed);
-    }
-    static void setPostEmbedConcurrentDynamicCap(uint32_t v) {
-        postEmbedConcurrentDynamicCap_.store(v == UINT32_MAX ? UINT32_MAX : std::min(v, 32u),
-                                             std::memory_order_relaxed);
-    }
+    static uint32_t postEmbedDefaultConcurrent();
+    static uint32_t postEmbedConcurrent();
+    static void setPostEmbedConcurrent(uint32_t v);
+    static void setPostEmbedConcurrentDynamicCap(uint32_t v);
 
     // Seqlock helpers for DynamicCap batch writes.
     // Writer must call beginDynamicCapWrite() before and endDynamicCapWrite() after
     // storing all 6 DynamicCap atomics to prevent torn reads on the reader side.
-    static void beginDynamicCapWrite() {
-        // Publish an odd sequence before any following relaxed cap stores.
-        dynamicCapSeq_.fetch_add(1, std::memory_order_acq_rel);
-    }
-    static void endDynamicCapWrite() {
-        // Increment to even — signals "write complete"
-        dynamicCapSeq_.fetch_add(1, std::memory_order_release);
-    }
+    static void beginDynamicCapWrite();
+    static void endDynamicCapWrite();
 
     // Read all 6 DynamicCap values atomically w.r.t. the seqlock.
     // Returns a consistent snapshot of all DynamicCap values.
-    static std::array<uint32_t, 6> readDynamicCapsConsistent() {
-        std::array<uint32_t, 6> vals{};
-        for (int attempt = 0; attempt < 64; ++attempt) {
-            uint64_t seq1 = dynamicCapSeq_.load(std::memory_order_acquire);
-            if (seq1 & 1u) {
-                // Write in progress, spin briefly
-                continue;
-            }
-            vals[0] = postExtractionConcurrentDynamicCap_.load(std::memory_order_relaxed);
-            vals[1] = postKgConcurrentDynamicCap_.load(std::memory_order_relaxed);
-            vals[2] = postSymbolConcurrentDynamicCap_.load(std::memory_order_relaxed);
-            vals[3] = postEntityConcurrentDynamicCap_.load(std::memory_order_relaxed);
-            vals[4] = postTitleConcurrentDynamicCap_.load(std::memory_order_relaxed);
-            vals[5] = postEmbedConcurrentDynamicCap_.load(std::memory_order_relaxed);
-            uint64_t seq2 = dynamicCapSeq_.load(std::memory_order_acquire);
-            if (seq1 == seq2) {
-                return vals; // Consistent read
-            }
-            // Sequence changed mid-read, retry
-        }
-        // Fallback after too many retries: return whatever we got (best-effort)
-        return vals;
-    }
+    static std::array<uint32_t, 6> readDynamicCapsConsistent();
 
     // =========================================================================
     // ONNX Model Pool Sizing (GPU-aware)
@@ -2138,98 +764,17 @@ public:
     ///   GPU mode: max(2, min(hw_threads/2, 8)) - high throughput, GPU handles inference
     ///   CPU mode: max(1, min(hw_threads/4, 4)) - conservative to avoid CPU saturation
     /// Environment: YAMS_ONNX_SESSIONS_PER_MODEL
-    static uint32_t onnxSessionsPerModel(bool gpuEnabled) {
-        uint32_t ov = onnxSessionsPerModelOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        if (const char* s = compatibilityEnvironment("YAMS_ONNX_SESSIONS_PER_MODEL")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1 && v <= 32)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        // GPU-aware default sizing
-        uint32_t hw = hardwareConcurrency();
-        if (gpuEnabled) {
-            // GPU mode: GPU handles heavy lifting, more sessions useful for throughput
-            return std::max<uint32_t>(2, std::min<uint32_t>(hw / 2, 8));
-        } else {
-            // CPU-only mode: conservative to prevent CPU saturation during inference
-            // Each ONNX session uses multiple threads internally (intra-op parallelism)
-            return std::max<uint32_t>(1, std::min<uint32_t>(hw / 4, 4));
-        }
-    }
-    static void setOnnxSessionsPerModel(uint32_t v) {
-        onnxSessionsPerModelOverride_.store(std::clamp(v, 1u, 32u), std::memory_order_relaxed);
-    }
+    static uint32_t onnxSessionsPerModel(bool gpuEnabled);
+    static void setOnnxSessionsPerModel(uint32_t v);
 
     // Get the current embed channel capacity (for sizing the queue)
-    static uint32_t embedChannelCapacity() {
-        uint32_t ov = embedChannelCapacityOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        if (const char* val = compatibilityEnvironment("YAMS_EMBED_CHANNEL_CAPACITY")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(val));
-                if (v >= 256 && v <= 65536)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 8192; // Increased from 2048 to handle bulk ingest
-    }
-    static void setEmbedChannelCapacity(uint32_t v) {
-        embedChannelCapacityOverride_.store(std::clamp(v, 256u, 65536u), std::memory_order_relaxed);
-    }
+    static uint32_t embedChannelCapacity();
+    static void setEmbedChannelCapacity(uint32_t v);
 
     // Ingest channel capacity (store_document_tasks). Clamp to post-ingest queue max to avoid
     // unbounded buffering of document payloads under governor backpressure.
-    static uint32_t storeDocumentChannelCapacity() {
-        uint32_t ov = storeDocumentChannelCapacityOverride_.load(std::memory_order_relaxed);
-        if (ov != 0)
-            return ov;
-
-        uint32_t base = 4096;
-        if (const char* s = compatibilityEnvironment("YAMS_STORE_DOCUMENT_CHANNEL_CAPACITY")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 64 && v <= 1'000'000)
-                    base = v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-
-        bool correctnessMode = true;
-        if (const char* s = compatibilityEnvironment("YAMS_INGEST_CORRECTNESS_MODE")) {
-            std::string v(s);
-            std::transform(v.begin(), v.end(), v.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            correctnessMode = !(v == "0" || v == "false" || v == "no" || v == "off");
-        }
-
-        uint32_t cap = postIngestQueueMax();
-        if (cap == 0)
-            cap = base;
-
-        if (correctnessMode) {
-            // Favor correctness under bursty producers by allowing a deeper ingest queue.
-            // Still bounded to avoid unbounded memory growth.
-            uint32_t target = std::max<uint32_t>(base, 4096u);
-            return std::clamp(target, 64u, 65536u);
-        }
-
-        uint32_t bounded = std::min<uint32_t>(base, cap);
-        return std::max<uint32_t>(64u, bounded);
-    }
-    static void setStoreDocumentChannelCapacity(uint32_t v) {
-        storeDocumentChannelCapacityOverride_.store(std::clamp(v, 64u, 1'000'000u),
-                                                    std::memory_order_relaxed);
-    }
+    static uint32_t storeDocumentChannelCapacity();
+    static void setStoreDocumentChannelCapacity(uint32_t v);
 
     // =========================================================================
     // DB Contention Management (adaptive concurrency based on lock errors)
@@ -2238,23 +783,12 @@ public:
     /// Lock error threshold for scaling down concurrency (default 5)
     /// When recent lock errors exceed this, TuningManager reduces KG/embed concurrency
     /// Environment: YAMS_DB_LOCK_THRESHOLD
-    static uint32_t dbLockErrorThreshold() {
-        if (const char* s = compatibilityEnvironment("YAMS_DB_LOCK_THRESHOLD")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1 && v <= 100)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 5;
-    }
+    static uint32_t dbLockErrorThreshold();
     /// Increment DB lock error counter (call this when "database is locked" error occurs)
-    static void reportDbLockError() { metadata::reportDbLockError(); }
+    static void reportDbLockError();
 
     /// Get and reset DB lock error window count (called by TuningManager per tick)
-    static uint64_t getAndResetDbLockErrors() { return metadata::getAndResetDbLockErrors(); }
+    static uint64_t getAndResetDbLockErrors();
 
     /// Bulk result struct for postIngestBudgetAll() — avoids 6x redundant computation.
     struct PostIngestBudget {
@@ -2270,12 +804,7 @@ public:
     /// Each individual getter (postExtractionConcurrent(), etc.) internally calls
     /// postIngestBudgetedConcurrency(), which is expensive. When you need all 6
     /// values in the same tick, use this method instead.
-    static PostIngestBudget postIngestBudgetAll(bool includeDynamicCaps) {
-        return readConfiguredOverridesSnapshot([includeDynamicCaps] {
-            auto b = postIngestBudgetedConcurrency(includeDynamicCaps);
-            return PostIngestBudget{b.extraction, b.kg, b.symbol, b.entity, b.title, b.embed};
-        });
-    }
+    static PostIngestBudget postIngestBudgetAll(bool includeDynamicCaps);
 
 #ifdef YAMS_TESTING
     // ========================================================================
@@ -2309,274 +838,7 @@ private:
         uint32_t embed;
     };
 
-    static PostIngestConcurrencyBudget postIngestBudgetedConcurrency(bool includeDynamicCaps) {
-        constexpr std::size_t kStageCount = 6;
-        constexpr std::size_t kExtractionIdx = 0;
-        constexpr std::size_t kEmbedIdx = 5;
-        constexpr std::array<uint32_t, kStageCount> kWeights{1u, 1u, 1u, 1u, 1u, 2u};
-        constexpr std::array<uint32_t, kStageCount> kMaxCaps{64u, 64u, 32u, 16u, 16u, 32u};
-        const uint32_t totalBudget = std::max<uint32_t>(1, postIngestTotalConcurrent());
-        const uint32_t activeMask = postIngestStageActiveMask();
-
-        auto resolveOverride = [](std::atomic<uint32_t>& overrideSlot, const char* env,
-                                  uint32_t maxCap) -> std::optional<uint32_t> {
-            uint32_t ov = overrideSlot.load(std::memory_order_relaxed);
-            if (ov > 0)
-                return std::min(ov, maxCap);
-            return postStageConcurrentEnvOverride(env, maxCap);
-        };
-
-        auto allocate = [&](const std::array<uint32_t, kStageCount>& desired,
-                            const std::array<uint32_t, kStageCount>& caps,
-                            const std::array<uint32_t, kStageCount>& weights) {
-            std::array<uint32_t, kStageCount> alloc{};
-            std::array<bool, kStageCount> locked{};
-            uint32_t used = 0;
-            uint32_t activeStages = 0;
-
-            for (std::size_t i = 0; i < kStageCount; ++i) {
-                if (caps[i] > 0)
-                    activeStages += 1;
-            }
-
-            if (activeStages > 0 && totalBudget >= activeStages) {
-                for (std::size_t i = 0; i < kStageCount; ++i) {
-                    if (caps[i] > 0) {
-                        alloc[i] = 1;
-                        used += 1;
-                    }
-                }
-            } else if (totalBudget >= 2) {
-                if (caps[kExtractionIdx] > 0) {
-                    alloc[kExtractionIdx] = 1;
-                    used += 1;
-                }
-                if (caps[kEmbedIdx] > 0) {
-                    alloc[kEmbedIdx] = 1;
-                    used += 1;
-                }
-            } else if (totalBudget == 1 && caps[kExtractionIdx] > 0) {
-                alloc[kExtractionIdx] = 1;
-                used += 1;
-            }
-
-            for (std::size_t i = 0; i < kStageCount; ++i) {
-                uint32_t target = std::min(desired[i], caps[i]);
-                if (target > alloc[i]) {
-                    uint32_t gap = target - alloc[i];
-                    uint32_t room = caps[i] - alloc[i];
-                    uint32_t add = std::min(gap, room);
-                    alloc[i] += add;
-                    used += add;
-                }
-                locked[i] = desired[i] == caps[i];
-            }
-
-            if (used > totalBudget) {
-                double ratio = static_cast<double>(totalBudget) /
-                               static_cast<double>(std::max<uint32_t>(1, used));
-                used = 0;
-                for (std::size_t i = 0; i < kStageCount; ++i) {
-                    if (!locked[i]) {
-                        alloc[i] =
-                            std::min(caps[i], static_cast<uint32_t>(std::floor(alloc[i] * ratio)));
-                    }
-                    used += alloc[i];
-                }
-            }
-
-            if (totalBudget >= 2) {
-                if (alloc[kExtractionIdx] == 0 && caps[kExtractionIdx] > 0) {
-                    alloc[kExtractionIdx] = 1;
-                }
-                if (alloc[kEmbedIdx] == 0 && caps[kEmbedIdx] > 0) {
-                    alloc[kEmbedIdx] = 1;
-                }
-            } else if (totalBudget == 1 && caps[kExtractionIdx] > 0) {
-                alloc[kExtractionIdx] = 1;
-                alloc[kEmbedIdx] = 0;
-            }
-
-            used = 0;
-            for (auto value : alloc) {
-                used += value;
-            }
-
-            if (used > totalBudget) {
-                std::array<std::size_t, kStageCount> reduceOrder{};
-                for (std::size_t i = 0; i < kStageCount; ++i) {
-                    reduceOrder[i] = i;
-                }
-                std::sort(reduceOrder.begin(), reduceOrder.end(),
-                          [&](std::size_t a, std::size_t b) {
-                              if (weights[a] != weights[b])
-                                  return weights[a] < weights[b];
-                              return a < b;
-                          });
-                while (used > totalBudget) {
-                    bool progressed = false;
-                    for (auto idx : reduceOrder) {
-                        if (alloc[idx] == 0)
-                            continue;
-                        if (locked[idx])
-                            continue;
-                        if (idx == kExtractionIdx || idx == kEmbedIdx) {
-                            if (totalBudget >= 2 && alloc[idx] <= 1)
-                                continue;
-                        }
-                        alloc[idx] -= 1;
-                        used -= 1;
-                        progressed = true;
-                        if (used <= totalBudget)
-                            break;
-                    }
-                    if (!progressed)
-                        break;
-                }
-            }
-
-            if (used < totalBudget) {
-                uint32_t remaining = totalBudget - used;
-
-                // Weighted sort: distribute remaining budget by weight (higher weight first).
-                std::array<std::size_t, kStageCount> order{};
-                for (std::size_t i = 0; i < kStageCount; ++i) {
-                    order[i] = i;
-                }
-                std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
-                    if (weights[a] != weights[b])
-                        return weights[a] > weights[b];
-                    return a < b;
-                });
-                while (remaining > 0) {
-                    bool progressed = false;
-                    for (auto idx : order) {
-                        if (alloc[idx] >= caps[idx])
-                            continue;
-                        alloc[idx] += 1;
-                        remaining -= 1;
-                        progressed = true;
-                        if (remaining == 0)
-                            break;
-                    }
-                    if (!progressed)
-                        break;
-                }
-
-                // Fairness correction: if any stage with cap > 0 still has 0 allocation,
-                // steal 1 slot from the lowest-weight stage that has alloc > 1 AND
-                // whose weight does not exceed the needy stage's weight.
-                // This prevents starvation without penalizing higher-weight stages.
-                constexpr std::array<std::size_t, 4> kZeroFillOrder{
-                    4, // Title
-                    1, // KnowledgeGraph
-                    2, // Symbol
-                    3  // Entity
-                };
-                for (auto needIdx : kZeroFillOrder) {
-                    if (caps[needIdx] == 0 || alloc[needIdx] != 0)
-                        continue;
-                    // Find lowest-weight donor with alloc > 1 and weight <= needy stage
-                    std::size_t donor = kStageCount;
-                    for (auto it = order.rbegin(); it != order.rend(); ++it) {
-                        if (*it != needIdx && alloc[*it] > 1 && weights[*it] <= weights[needIdx]) {
-                            donor = *it;
-                            break;
-                        }
-                    }
-                    if (donor < kStageCount) {
-                        alloc[donor] -= 1;
-                        alloc[needIdx] = 1;
-                    }
-                }
-            }
-
-            return alloc;
-        };
-
-        std::array<uint32_t, kStageCount> caps = kMaxCaps;
-        std::array<uint32_t, kStageCount> weights = kWeights;
-        for (std::size_t i = 0; i < kStageCount; ++i) {
-            if ((activeMask & (1u << i)) == 0u) {
-                caps[i] = 0;
-                weights[i] = 0;
-            }
-        }
-
-        uint32_t weightSum = 0;
-        for (auto w : weights) {
-            weightSum += w;
-        }
-        if (weightSum == 0) {
-            weights = kWeights;
-            weightSum = 0;
-            for (auto w : weights) {
-                weightSum += w;
-            }
-            caps = kMaxCaps;
-        }
-
-        std::array<uint32_t, kStageCount> defaults{};
-        for (std::size_t i = 0; i < kStageCount; ++i) {
-            defaults[i] = static_cast<uint32_t>(
-                std::floor(static_cast<double>(totalBudget) * weights[i] / weightSum));
-            defaults[i] = std::min(defaults[i], caps[i]);
-        }
-        auto allocDefaults = allocate(defaults, caps, weights);
-
-        std::array<uint32_t, kStageCount> desired = allocDefaults;
-        bool hasOverride = false;
-        auto clampLocked = [&](std::size_t idx, uint32_t value) {
-            if (caps[idx] == 0) {
-                desired[idx] = 0;
-                return;
-            }
-            desired[idx] = value;
-            caps[idx] = value;
-            hasOverride = true;
-        };
-
-        if (auto v = resolveOverride(postExtractionConcurrentOverride_,
-                                     "YAMS_POST_EXTRACTION_CONCURRENT", kMaxCaps[0])) {
-            clampLocked(0, *v);
-        }
-        if (auto v = resolveOverride(postKgConcurrentOverride_, "YAMS_POST_KG_CONCURRENT",
-                                     kMaxCaps[1])) {
-            clampLocked(1, *v);
-        }
-        if (auto v = resolveOverride(postSymbolConcurrentOverride_, "YAMS_POST_SYMBOL_CONCURRENT",
-                                     kMaxCaps[2])) {
-            clampLocked(2, *v);
-        }
-        if (auto v = resolveOverride(postEntityConcurrentOverride_, "YAMS_POST_ENTITY_CONCURRENT",
-                                     kMaxCaps[3])) {
-            clampLocked(3, *v);
-        }
-        if (auto v = resolveOverride(postTitleConcurrentOverride_, "YAMS_POST_TITLE_CONCURRENT",
-                                     kMaxCaps[4])) {
-            clampLocked(4, *v);
-        }
-        if (auto v = resolveOverride(postEmbedConcurrentOverride_, "YAMS_POST_EMBED_CONCURRENT",
-                                     kMaxCaps[5])) {
-            clampLocked(5, *v);
-        }
-
-        bool hasDynamicCap = false;
-        if (includeDynamicCaps) {
-            const auto dyn = readDynamicCapsConsistent();
-            for (std::size_t i = 0; i < kStageCount; ++i) {
-                if (dyn[i] != UINT32_MAX) {
-                    caps[i] = std::min(caps[i], std::min(dyn[i], kMaxCaps[i]));
-                    hasDynamicCap = true;
-                }
-            }
-        }
-
-        auto alloc =
-            (hasOverride || hasDynamicCap) ? allocate(desired, caps, weights) : allocDefaults;
-        return PostIngestConcurrencyBudget{alloc[0], alloc[1], alloc[2],
-                                           alloc[3], alloc[4], alloc[5]};
-    }
+    static PostIngestConcurrencyBudget postIngestBudgetedConcurrency(bool includeDynamicCaps);
 
     // Runtime policy storage (single process); defaults chosen to reduce CPU when busy
     static inline std::atomic<double> cpuHighPct_{0.0};
@@ -2676,69 +938,24 @@ public:
     /// Enable/disable the resource governor. When disabled, no memory pressure
     /// monitoring or adaptive scaling occurs. Default: true.
     /// Environment: YAMS_ENABLE_RESOURCE_GOVERNOR
-    static bool enableResourceGovernor() {
-        int ov = enableResourceGovernorOverride_.load(std::memory_order_relaxed);
-        if (ov >= 0)
-            return ov > 0;
-        auto envValue = parseExplicitBoolEnvNow("YAMS_ENABLE_RESOURCE_GOVERNOR");
-        if (envValue)
-            return *envValue;
-        return true;
-    }
-    static void setEnableResourceGovernor(bool en) {
-        enableResourceGovernorOverride_.store(en ? 1 : 0, std::memory_order_relaxed);
-    }
+    static bool enableResourceGovernor();
+    static void setEnableResourceGovernor(bool en);
 
     /// Enable proactive model eviction under memory pressure. Default: true.
     /// Environment: YAMS_PROACTIVE_EVICTION
-    static bool enableProactiveEviction() {
-        return parseExplicitBoolEnvNow("YAMS_PROACTIVE_EVICTION").value_or(true);
-    }
+    static bool enableProactiveEviction();
 
     /// Enable admission control (refuse new work when at emergency pressure). Default: true.
     /// Environment: YAMS_ADMISSION_CONTROL
-    static bool enableAdmissionControl() {
-        int ov = enableAdmissionControlOverride_.load(std::memory_order_relaxed);
-        if (ov >= 0)
-            return ov > 0;
-        auto envValue = parseExplicitBoolEnvNow("YAMS_ADMISSION_CONTROL");
-        if (envValue)
-            return *envValue;
-        return true;
-    }
-    static void setEnableAdmissionControl(bool en) {
-        enableAdmissionControlOverride_.store(en ? 1 : 0, std::memory_order_relaxed);
-    }
+    static bool enableAdmissionControl();
+    static void setEnableAdmissionControl(bool en);
 
     /// Percent of normal concurrency retained at Warning pressure (10-100).
     /// Used by ResourceGovernor to apply a gradual slowdown instead of abrupt halving.
     /// Environment: YAMS_GOV_WARNING_SCALE_PCT
-    static uint32_t governorWarningScalePercent() {
-        uint32_t ov = governorWarningScalePctOverride_.load(std::memory_order_relaxed);
-        if (ov >= 10 && ov <= 100)
-            return ov;
-        if (const char* s = compatibilityEnvironment("YAMS_GOV_WARNING_SCALE_PCT")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 10 && v <= 100)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 85;
-    }
-    static void setGovernorWarningScalePercent(uint32_t pct) {
-        if (pct == 0) {
-            governorWarningScalePctOverride_.store(0, std::memory_order_relaxed);
-            return;
-        }
-        governorWarningScalePctOverride_.store(std::clamp<uint32_t>(pct, 10u, 100u),
-                                               std::memory_order_relaxed);
-    }
-    static void resetGovernorWarningScalePercentOverride() {
-        governorWarningScalePctOverride_.store(0, std::memory_order_relaxed);
-    }
+    static uint32_t governorWarningScalePercent();
+    static void setGovernorWarningScalePercent(uint32_t pct);
+    static void resetGovernorWarningScalePercentOverride();
 
     /// Memory budget in bytes. 0 = auto-detect based on profile while leaving
     /// headroom for other system workloads.
@@ -2746,120 +963,45 @@ public:
     ///   Balanced:   60% system RAM
     ///   Aggressive: 75% system RAM
     /// Environment: YAMS_MEMORY_BUDGET_BYTES
-    static uint64_t memoryBudgetBytes() {
-        uint64_t ov = memoryBudgetBytesOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        auto envValue = parseBoundedUint64EnvNow("YAMS_MEMORY_BUDGET_BYTES",
-                                                 64ull * 1024ull * 1024ull, ULLONG_MAX);
-        if (envValue)
-            return *envValue;
-        return autoMemoryBudgetBytes(detectSystemMemory());
-    }
-    static void setMemoryBudgetBytes(uint64_t bytes) {
-        memoryBudgetBytesOverride_.store(bytes, std::memory_order_relaxed);
-    }
+    static uint64_t memoryBudgetBytes();
+    static void setMemoryBudgetBytes(uint64_t bytes);
 
     /// Memory warning threshold (0.0-1.0). Profile-adjusted defaults:
     ///   Efficient:  0.70 (70%)
     ///   Balanced:   0.75 (75%)
     ///   Aggressive: 0.80 (80%)
     /// Environment: YAMS_MEMORY_WARNING_PCT (0-100)
-    static double memoryWarningThreshold() {
-        double ov = memoryWarningPctOverride_.load(std::memory_order_relaxed);
-        if (ov > 0.0)
-            return ov;
-        auto envValue = parseBoundedDoubleEnvNow("YAMS_MEMORY_WARNING_PCT", 0.5, 0.99, 0.01);
-        if (envValue)
-            return *envValue;
-        return 0.70 + profileScale() * 0.10;
-    }
-    static void setMemoryWarningThreshold(double pct) {
-        memoryWarningPctOverride_.store(pct, std::memory_order_relaxed);
-    }
+    static double memoryWarningThreshold();
+    static void setMemoryWarningThreshold(double pct);
 
     /// Memory critical threshold (0.0-1.0). Profile-adjusted defaults:
     ///   Efficient:  0.85 (85%)
     ///   Balanced:   0.90 (90%)
     ///   Aggressive: 0.92 (92%)
     /// Environment: YAMS_MEMORY_CRITICAL_PCT (0-100)
-    static double memoryCriticalThreshold() {
-        double ov = memoryCriticalPctOverride_.load(std::memory_order_relaxed);
-        if (ov > 0.0)
-            return ov;
-        auto envValue = parseBoundedDoubleEnvNow("YAMS_MEMORY_CRITICAL_PCT", 0.5, 0.99, 0.01);
-        if (envValue)
-            return *envValue;
-        return 0.85 + profileScale() * 0.07;
-    }
-    static void setMemoryCriticalThreshold(double pct) {
-        memoryCriticalPctOverride_.store(pct, std::memory_order_relaxed);
-    }
+    static double memoryCriticalThreshold();
+    static void setMemoryCriticalThreshold(double pct);
 
     /// Memory emergency threshold (0.0-1.0). Profile-adjusted defaults:
     ///   Efficient:  0.92 (92%)
     ///   Balanced:   0.95 (95%)
     ///   Aggressive: 0.97 (97%)
     /// Environment: YAMS_MEMORY_EMERGENCY_PCT (0-100)
-    static double memoryEmergencyThreshold() {
-        double ov = memoryEmergencyPctOverride_.load(std::memory_order_relaxed);
-        if (ov > 0.0)
-            return ov;
-        auto envValue = parseBoundedDoubleEnvNow("YAMS_MEMORY_EMERGENCY_PCT", 0.5, 0.99, 0.01);
-        if (envValue)
-            return *envValue;
-        return 0.92 + profileScale() * 0.05;
-    }
-    static void setMemoryEmergencyThreshold(double pct) {
-        memoryEmergencyPctOverride_.store(pct, std::memory_order_relaxed);
-    }
+    static double memoryEmergencyThreshold();
+    static void setMemoryEmergencyThreshold(double pct);
 
     /// Hysteresis duration before changing pressure level (milliseconds).
     /// Prevents rapid oscillation between levels. Default: 500ms.
     /// Environment: YAMS_MEMORY_HYSTERESIS_MS
-    static uint32_t memoryHysteresisMs() {
-        uint32_t ov = memoryHysteresisMsOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        auto envValue = parseBoundedUintEnvNow("YAMS_MEMORY_HYSTERESIS_MS", 10u, 10000u);
-        if (envValue)
-            return *envValue;
-        return 500; // 500ms default
-    }
-    static void setMemoryHysteresisMs(uint32_t ms) {
-        memoryHysteresisMsOverride_.store(ms, std::memory_order_relaxed);
-    }
+    static uint32_t memoryHysteresisMs();
+    static void setMemoryHysteresisMs(uint32_t ms);
 
-    static uint32_t cpuLevelHysteresisMs() {
-        uint32_t ov = cpuLevelHysteresisMsOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        auto envValue = parseBoundedUintEnvNow("YAMS_CPU_LEVEL_HYSTERESIS_MS", 10u, 10000u);
-        if (envValue)
-            return *envValue;
-        return 150;
-    }
-    static void setCpuLevelHysteresisMs(uint32_t ms) {
-        cpuLevelHysteresisMsOverride_.store(ms, std::memory_order_relaxed);
-    }
+    static uint32_t cpuLevelHysteresisMs();
+    static void setCpuLevelHysteresisMs(uint32_t ms);
 
     /// Cooldown period between model evictions to prevent thrashing (ms). Default: 500.
     /// Environment: YAMS_MODEL_EVICTION_COOLDOWN_MS
-    static uint32_t modelEvictionCooldownMs() {
-        uint32_t ov = modelEvictionCooldownMsOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        if (const char* s = compatibilityEnvironment("YAMS_MODEL_EVICTION_COOLDOWN_MS")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 100 && v <= 10000)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 500;
-    }
+    static uint32_t modelEvictionCooldownMs();
     // =========================================================================
     // Gradient Limiter Configuration (Netflix Gradient2 Algorithm)
     // =========================================================================
@@ -2868,173 +1010,52 @@ public:
     /// When enabled, post-ingest stages automatically tune their concurrency
     /// based on measured latency feedback (replaces static thresholds).
     /// Environment: YAMS_ENABLE_GRADIENT_LIMITERS
-    static bool enableSemanticNeighborBackfill() {
-        return parseExplicitBoolEnvNow("YAMS_ENABLE_SEMANTIC_NEIGHBOR_BACKFILL").value_or(true);
-    }
+    static bool enableSemanticNeighborBackfill();
 
-    static bool enableGradientLimiters() {
-        int ov = enableGradientLimitersOverride_.load(std::memory_order_relaxed);
-        if (ov >= 0)
-            return ov > 0;
-        return parseExplicitBoolEnvNow("YAMS_ENABLE_GRADIENT_LIMITERS").value_or(true);
-    }
-    static void setEnableGradientLimiters(bool en) {
-        enableGradientLimitersOverride_.store(en ? 1 : 0, std::memory_order_relaxed);
-    }
+    static bool enableGradientLimiters();
+    static void setEnableGradientLimiters(bool en);
 
     /// Gradient limiter EMA smoothing alpha (short window).
     /// Higher = more responsive to latency changes. Range: 0.0-1.0. Default: 0.2.
     /// Environment: YAMS_GRADIENT_SMOOTHING_ALPHA
-    static double gradientSmoothingAlpha() {
-        double ov = gradientSmoothingAlphaOverride_.load(std::memory_order_relaxed);
-        if (ov > 0.0)
-            return ov;
-        if (const char* s = compatibilityEnvironment("YAMS_GRADIENT_SMOOTHING_ALPHA")) {
-            try {
-                double v = std::stod(s);
-                if (v >= 0.01 && v <= 0.99)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 0.2;
-    }
-    static void setGradientSmoothingAlpha(double alpha) {
-        gradientSmoothingAlphaOverride_.store(alpha, std::memory_order_relaxed);
-    }
+    static double gradientSmoothingAlpha();
+    static void setGradientSmoothingAlpha(double alpha);
 
     /// Gradient limiter long-window EMA alpha (drift correction).
     /// Lower = slower drift correction, more stable. Range: 0.0-1.0. Default: 0.05.
     /// Environment: YAMS_GRADIENT_LONG_ALPHA
-    static double gradientLongAlpha() {
-        double ov = gradientLongAlphaOverride_.load(std::memory_order_relaxed);
-        if (ov > 0.0)
-            return ov;
-        if (const char* s = compatibilityEnvironment("YAMS_GRADIENT_LONG_ALPHA")) {
-            try {
-                double v = std::stod(s);
-                if (v >= 0.01 && v <= 0.5)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 0.05;
-    }
-    static void setGradientLongAlpha(double alpha) {
-        gradientLongAlphaOverride_.store(alpha, std::memory_order_relaxed);
-    }
+    static double gradientLongAlpha();
+    static void setGradientLongAlpha(double alpha);
 
     /// Gradient limiter warmup samples before adjusting limits.
     /// Minimum samples collected before limit adjustment begins. Default: 10.
     /// Environment: YAMS_GRADIENT_WARMUP_SAMPLES
-    static uint32_t gradientWarmupSamples() {
-        uint32_t ov = gradientWarmupSamplesOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        if (const char* s = compatibilityEnvironment("YAMS_GRADIENT_WARMUP_SAMPLES")) {
-            try {
-                uint32_t v = static_cast<uint32_t>(std::stoul(s));
-                if (v >= 1 && v <= 100)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 10;
-    }
-    static void setGradientWarmupSamples(uint32_t samples) {
-        gradientWarmupSamplesOverride_.store(samples, std::memory_order_relaxed);
-    }
+    static uint32_t gradientWarmupSamples();
+    static void setGradientWarmupSamples(uint32_t samples);
 
     /// Gradient limiter tolerance multiplier.
     /// Maximum growth multiplier when RTT is improving. Default: 1.5.
     /// Environment: YAMS_GRADIENT_TOLERANCE
-    static double gradientTolerance() {
-        double ov = gradientToleranceOverride_.load(std::memory_order_relaxed);
-        if (ov > 0.0)
-            return ov;
-        if (const char* s = compatibilityEnvironment("YAMS_GRADIENT_TOLERANCE")) {
-            try {
-                double v = std::stod(s);
-                if (v >= 1.0 && v <= 5.0)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 1.5;
-    }
-    static void setGradientTolerance(double tolerance) {
-        gradientToleranceOverride_.store(tolerance, std::memory_order_relaxed);
-    }
+    static double gradientTolerance();
+    static void setGradientTolerance(double tolerance);
 
     /// Gradient limiter initial concurrency limit.
     /// Starting concurrency per stage before gradient algorithm adjusts. Default: 4.0.
     /// Environment: YAMS_GRADIENT_INITIAL_LIMIT
-    static double gradientInitialLimit() {
-        double ov = gradientInitialLimitOverride_.load(std::memory_order_relaxed);
-        if (ov > 0.0)
-            return ov;
-        if (const char* s = compatibilityEnvironment("YAMS_GRADIENT_INITIAL_LIMIT")) {
-            try {
-                double v = std::stod(s);
-                if (v >= 1.0 && v <= 128.0)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 4.0;
-    }
-    static void setGradientInitialLimit(double limit) {
-        gradientInitialLimitOverride_.store(limit, std::memory_order_relaxed);
-    }
+    static double gradientInitialLimit();
+    static void setGradientInitialLimit(double limit);
 
     /// Gradient limiter minimum concurrency limit (floor).
     /// Limit will never drop below this value. Default: 1.0.
     /// Environment: YAMS_GRADIENT_MIN_LIMIT
-    static double gradientMinLimit() {
-        double ov = gradientMinLimitOverride_.load(std::memory_order_relaxed);
-        if (ov > 0.0)
-            return ov;
-        if (const char* s = compatibilityEnvironment("YAMS_GRADIENT_MIN_LIMIT")) {
-            try {
-                double v = std::stod(s);
-                if (v >= 0.0 && v <= 64.0)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 1.0;
-    }
-    static void setGradientMinLimit(double limit) {
-        gradientMinLimitOverride_.store(limit, std::memory_order_relaxed);
-    }
+    static double gradientMinLimit();
+    static void setGradientMinLimit(double limit);
 
     /// Gradient limiter maximum concurrency limit (ceiling).
     /// Limit will never exceed this value (per stage; overridden by stage cap). Default: 32.0.
     /// Environment: YAMS_GRADIENT_MAX_LIMIT
-    static double gradientMaxLimit() {
-        double ov = gradientMaxLimitOverride_.load(std::memory_order_relaxed);
-        if (ov > 0.0)
-            return ov;
-        if (const char* s = compatibilityEnvironment("YAMS_GRADIENT_MAX_LIMIT")) {
-            try {
-                double v = std::stod(s);
-                if (v >= 1.0 && v <= 256.0)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        return 32.0;
-    }
-    static void setGradientMaxLimit(double limit) {
-        gradientMaxLimitOverride_.store(limit, std::memory_order_relaxed);
-    }
+    static double gradientMaxLimit();
+    static void setGradientMaxLimit(double limit);
 
     // =========================================================================
     // ONNX Concurrency Configuration (Global Slot Coordination)
@@ -3043,79 +1064,25 @@ public:
     /// Maximum concurrent ONNX operations (global across GLiNER, embeddings, reranking).
     /// 0 = auto (hw_threads/2, clamped 4-16). Default: auto.
     /// Environment: YAMS_ONNX_MAX_CONCURRENT
-    static uint32_t onnxMaxConcurrent() {
-        uint32_t ov = onnxMaxConcurrentOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        auto envValue = parseBoundedUintEnvNow("YAMS_ONNX_MAX_CONCURRENT", 1u, 64u);
-        if (envValue)
-            return static_cast<uint32_t>(*envValue * profileScale());
-        uint32_t hw = daemonThreadCapacity(hardwareConcurrency());
-        uint32_t reserved = onnxGlinerReserved() + onnxEmbedReserved() + onnxRerankerReserved();
-
-        // Use round-up division to avoid integer truncation on small systems.
-        uint32_t base = std::max(2u, (hw * 10 + 99) / 100);
-        uint32_t scaleRange = std::max(1u, (hw * 15 + 99) / 100);
-        uint32_t total = base + static_cast<uint32_t>(scaleRange * profileScale());
-        // Ensure at least 1 shared slot beyond total reserved.
-        total = std::max(total, reserved + 1);
-
-        total = std::max(total, reserved + 1u);
-        return std::clamp(total, 2u, 12u);
-    }
-    static void setOnnxMaxConcurrent(uint32_t n) {
-        onnxMaxConcurrentOverride_.store(n, std::memory_order_relaxed);
-    }
+    static uint32_t onnxMaxConcurrent();
+    static void setOnnxMaxConcurrent(uint32_t n);
 
     /// Reserved ONNX slots for GLiNER operations (entity/title extraction).
     /// Guarantees GLiNER gets at least this many slots even under contention. Default: 1.
     /// Environment: YAMS_ONNX_GLINER_RESERVED
-    static uint32_t onnxGlinerReserved() {
-        uint32_t ov = onnxGlinerReservedOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        auto envValue = parseBoundedUintEnvNow("YAMS_ONNX_GLINER_RESERVED", 0u, 8u);
-        if (envValue)
-            return *envValue;
-        return 1;
-    }
-    static void setOnnxGlinerReserved(uint32_t n) {
-        onnxGlinerReservedOverride_.store(n, std::memory_order_relaxed);
-    }
+    static uint32_t onnxGlinerReserved();
+    static void setOnnxGlinerReserved(uint32_t n);
 
     /// Reserved ONNX slots for embedding operations.
     /// Guarantees embeddings get at least this many slots even under contention. Default: 1.
     /// Environment: YAMS_ONNX_EMBED_RESERVED
-    static uint32_t onnxEmbedReserved() {
-        uint32_t ov = onnxEmbedReservedOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        auto envValue = parseBoundedUintEnvNow("YAMS_ONNX_EMBED_RESERVED", 0u, 8u);
-        if (envValue)
-            return *envValue;
-        return 1;
-    }
-    static void setOnnxEmbedReserved(uint32_t n) {
-        onnxEmbedReservedOverride_.store(n, std::memory_order_relaxed);
-    }
+    static uint32_t onnxEmbedReserved();
+    static void setOnnxEmbedReserved(uint32_t n);
 
     /// Reserved ONNX slots for reranking operations. Default: 1.
     /// Environment: YAMS_ONNX_RERANKER_RESERVED
-    static uint32_t onnxRerankerReserved() {
-        uint32_t ov = onnxRerankerReservedOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
-            return ov;
-        auto envValue = parseBoundedUintEnvNow("YAMS_ONNX_RERANKER_RESERVED", 0u, 8u);
-        if (envValue)
-            return *envValue;
-        // Efficient profile with tight budget: reranker gets no reserved slot
-        if (profileScale() == 0.0)
-            return 0;
-        return 1;
-    }
-    static void setOnnxRerankerReserved(uint32_t n) {
-        onnxRerankerReservedOverride_.store(n, std::memory_order_relaxed);
-    }
+    static uint32_t onnxRerankerReserved();
+    static void setOnnxRerankerReserved(uint32_t n);
 
     // =========================================================================
     // Model Idle Maintenance Thresholds (Profile-Aware)
@@ -3124,48 +1091,15 @@ public:
     /// Maximum active connections before skipping model idle maintenance.
     /// Profile-adjusted: Efficient=2, Balanced=1, Aggressive=0.
     /// Environment: YAMS_MODEL_MAINT_CONN_THRESHOLD
-    static uint32_t modelMaintenanceConnThreshold() {
-        if (auto value = parseBoundedUintEnvNow("YAMS_MODEL_MAINT_CONN_THRESHOLD", 0, 100))
-            return *value;
-        switch (tuningProfile()) {
-            case Profile::Efficient:
-                return 2;
-            case Profile::Aggressive:
-                return 0;
-            default: // Balanced
-                return 1;
-        }
-    }
+    static uint32_t modelMaintenanceConnThreshold();
     /// Maximum active searches before skipping model idle maintenance.
     /// Profile-adjusted: Efficient=2, Balanced=1, Aggressive=0.
     /// Environment: YAMS_MODEL_MAINT_SEARCH_THRESHOLD
-    static uint32_t modelMaintenanceSearchThreshold() {
-        if (auto value = parseBoundedUintEnvNow("YAMS_MODEL_MAINT_SEARCH_THRESHOLD", 0, 100))
-            return *value;
-        switch (tuningProfile()) {
-            case Profile::Efficient:
-                return 2;
-            case Profile::Aggressive:
-                return 0;
-            default: // Balanced
-                return 1;
-        }
-    }
+    static uint32_t modelMaintenanceSearchThreshold();
     /// Maximum post-ingest queue depth before skipping model idle maintenance.
     /// Profile-adjusted: Efficient=20, Balanced=10, Aggressive=0.
     /// Environment: YAMS_MODEL_MAINT_QUEUE_THRESHOLD
-    static uint32_t modelMaintenanceQueueThreshold() {
-        if (auto value = parseBoundedUintEnvNow("YAMS_MODEL_MAINT_QUEUE_THRESHOLD", 0, 10000))
-            return *value;
-        switch (tuningProfile()) {
-            case Profile::Efficient:
-                return 20;
-            case Profile::Aggressive:
-                return 0;
-            default: // Balanced
-                return 10;
-        }
-    }
+    static uint32_t modelMaintenanceQueueThreshold();
     // =========================================================================
     // Model Eviction Pressure Thresholds (Profile-Aware)
     // =========================================================================
@@ -3173,100 +1107,24 @@ public:
     /// Pressure level to start warning-level model eviction (evict 1 model).
     /// Profile-adjusted: Efficient=0.30, Balanced=0.60, Aggressive=0.75.
     /// Environment: YAMS_MODEL_EVICT_WARNING_THRESHOLD
-    static double modelEvictWarningThreshold() {
-        double ov = modelEvictWarningOverride_.load(std::memory_order_relaxed);
-        if (ov > 0.0)
-            return ov;
-        if (const char* s = compatibilityEnvironment("YAMS_MODEL_EVICT_WARNING_THRESHOLD")) {
-            try {
-                double v = std::stod(s);
-                if (v > 0.0 && v < 1.0)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        switch (tuningProfile()) {
-            case Profile::Efficient:
-                return 0.30;
-            case Profile::Aggressive:
-                return 0.75;
-            default: // Balanced
-                return 0.60;
-        }
-    }
-    static void setModelEvictWarningThreshold(double v) {
-        if (v > 0.0 && v < 1.0 && std::isfinite(v))
-            modelEvictWarningOverride_.store(v, std::memory_order_relaxed);
-    }
+    static double modelEvictWarningThreshold();
+    static void setModelEvictWarningThreshold(double v);
 
     /// Pressure level for critical-level model eviction (evict 2 models).
     /// Profile-adjusted: Efficient=0.50, Balanced=0.75, Aggressive=0.85.
     /// Environment: YAMS_MODEL_EVICT_CRITICAL_THRESHOLD
-    static double modelEvictCriticalThreshold() {
-        double ov = modelEvictCriticalOverride_.load(std::memory_order_relaxed);
-        if (ov > 0.0)
-            return ov;
-        if (const char* s = compatibilityEnvironment("YAMS_MODEL_EVICT_CRITICAL_THRESHOLD")) {
-            try {
-                double v = std::stod(s);
-                if (v > 0.0 && v < 1.0)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        switch (tuningProfile()) {
-            case Profile::Efficient:
-                return 0.50;
-            case Profile::Aggressive:
-                return 0.85;
-            default: // Balanced
-                return 0.75;
-        }
-    }
-    static void setModelEvictCriticalThreshold(double v) {
-        if (v > 0.0 && v < 1.0 && std::isfinite(v))
-            modelEvictCriticalOverride_.store(v, std::memory_order_relaxed);
-    }
+    static double modelEvictCriticalThreshold();
+    static void setModelEvictCriticalThreshold(double v);
 
     /// Pressure level for emergency-level model eviction (evict all).
     /// Profile-adjusted: Efficient=0.70, Balanced=0.90, Aggressive=0.95.
     /// Environment: YAMS_MODEL_EVICT_EMERGENCY_THRESHOLD
-    static double modelEvictEmergencyThreshold() {
-        double ov = modelEvictEmergencyOverride_.load(std::memory_order_relaxed);
-        if (ov > 0.0)
-            return ov;
-        if (const char* s = compatibilityEnvironment("YAMS_MODEL_EVICT_EMERGENCY_THRESHOLD")) {
-            try {
-                double v = std::stod(s);
-                if (v > 0.0 && v < 1.0)
-                    return v;
-            } catch (const std::exception&) {
-                ignoreInvalidEnvParseFailure();
-            }
-        }
-        switch (tuningProfile()) {
-            case Profile::Efficient:
-                return 0.70;
-            case Profile::Aggressive:
-                return 0.95;
-            default: // Balanced
-                return 0.90;
-        }
-    }
-    static void setModelEvictEmergencyThreshold(double v) {
-        if (v > 0.0 && v < 1.0 && std::isfinite(v))
-            modelEvictEmergencyOverride_.store(v, std::memory_order_relaxed);
-    }
+    static double modelEvictEmergencyThreshold();
+    static void setModelEvictEmergencyThreshold(double v);
 
     /// Clear all eviction threshold overrides, restoring profile/env var defaults.
     /// Primarily intended for testing to ensure test isolation.
-    static void resetModelEvictThresholdOverrides() {
-        modelEvictWarningOverride_.store(0.0, std::memory_order_relaxed);
-        modelEvictCriticalOverride_.store(0.0, std::memory_order_relaxed);
-        modelEvictEmergencyOverride_.store(0.0, std::memory_order_relaxed);
-    }
+    static void resetModelEvictThresholdOverrides();
 
 private:
     struct ReadPathCapacityModel {
@@ -3274,62 +1132,14 @@ private:
         uint32_t searchConcurrencyLimit{4};
     };
 
-    static double workCoordinatorIoBias() {
-        switch (tuningProfile()) {
-            case Profile::Efficient:
-                return 1.0;
-            case Profile::Aggressive:
-                return 1.75;
-            case Profile::Balanced:
-            default:
-                return 1.5;
-        }
-    }
+    static double workCoordinatorIoBias();
 
     static uint32_t recommendedThreadsForHw(unsigned hw, double backgroundFactor,
-                                            uint32_t hardMax = 0) {
-        double budget = static_cast<double>(cpuBudgetPercent()) / 100.0;
-        if (backgroundFactor <= 0.0)
-            backgroundFactor = 0.5;
-        double eff = std::clamp(budget * backgroundFactor, 0.1, 1.0);
-        uint32_t budgetCap =
-            static_cast<uint32_t>(std::max(1.0, std::floor(eff * static_cast<double>(hw))));
-        uint32_t cap = std::min(budgetCap, daemonThreadCapacity(hw));
-        uint32_t absMax = maxThreadsOverall();
-        if (absMax > 0)
-            cap = std::min(cap, absMax);
-        if (hardMax > 0)
-            cap = std::min(cap, hardMax);
-        return std::max(1u, cap);
-    }
+                                            uint32_t hardMax = 0);
 
-    static ReadPathCapacityModel defaultReadPathCapacityModel(unsigned hw) {
-        ReadPathCapacityModel model;
-        model.workerThreads = std::max(4u, recommendedThreadsForHw(hw, workCoordinatorIoBias()));
+    static ReadPathCapacityModel defaultReadPathCapacityModel(unsigned hw);
 
-        auto derived = std::max<uint32_t>(2u, recommendedThreadsForHw(hw, 0.5)) * 2u;
-        switch (tuningProfile()) {
-            case Profile::Efficient:
-                model.searchConcurrencyLimit = derived;
-                break;
-            case Profile::Aggressive:
-                model.searchConcurrencyLimit = std::max<uint32_t>(6u, derived);
-                break;
-            case Profile::Balanced:
-            default:
-                model.searchConcurrencyLimit = std::max<uint32_t>(5u, derived);
-                break;
-        }
-        return model;
-    }
-
-    static uint32_t defaultReadPoolMaxConnectionsForHw(unsigned hw, uint32_t configuredMax) {
-        const auto model = defaultReadPathCapacityModel(hw);
-        uint32_t derived = std::max<uint32_t>(
-            {4u, model.workerThreads, model.searchConcurrencyLimit, listInflightLimit()});
-        const uint32_t capped = std::clamp<uint32_t>(derived, 4u, 8u);
-        return std::min(capped, std::max<uint32_t>(1u, configuredMax));
-    }
+    static uint32_t defaultReadPoolMaxConnectionsForHw(unsigned hw, uint32_t configuredMax);
 
     /// Detect system memory (cross-platform). Returns bytes.
     /// Implementation uses platform-specific APIs:

@@ -5,7 +5,8 @@ mobile_test_srcs = files(
 mobile_dep = dependency('yams_mobile', required: get_option('enable-mobile-bindings'))
 
 if mobile_dep.found() and catch2_dep.found() and catch2_main_dep.found()
-  mobile_test_deps = [catch2_dep, catch2_main_dep, mobile_dep, dependency('nlohmann_json'),
+  mobile_test_deps = [dependency('yams_tune_advisor_testing'), catch2_dep, catch2_main_dep,
+                      mobile_dep, dependency('nlohmann_json'),
                       dependency('yams_daemon'), dependency('spdlog'), boost_dep,
                       dependency('tl-expected')]
 

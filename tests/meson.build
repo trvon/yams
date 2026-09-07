@@ -198,6 +198,13 @@ test_deps = [
   dependency('yams_daemon'),
 ]
 
+# YAMS_TESTING build of TuneAdvisor's bodies must precede the production archive on every test
+# link line (see src/daemon/tune_advisor/meson.build). Order is load-bearing: meson emits
+# dependencies in list order, and the first archive that defines a symbol wins. Any executable
+# compiled with -DYAMS_TESTING that does not use test_deps must list
+# yams_tune_advisor_testing first itself.
+test_deps = [dependency('yams_tune_advisor_testing')] + test_deps
+
 yams_plugins_mgmt_dep = dependency('yams_plugins_mgmt', required: false)
 if yams_plugins_mgmt_dep.found()
   test_deps += yams_plugins_mgmt_dep
@@ -2404,6 +2411,7 @@ if catch2_dep.found()
       catch2_main_dep,
       dependency('threads'),
       dependency('yams_config'),
+      dependency('yams_tune_advisor'),
       dependency('spdlog'),
     ],
     cpp_args: test_cpp_noerror_args,

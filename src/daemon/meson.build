@@ -127,7 +127,6 @@ yams_daemon_lib = static_library('yams_daemon',
     'components/IOCoordinator.cpp',
     'components/EmbeddingService.cpp',
     'components/TuningManager.cpp',
-    'components/TuneAdvisor.cpp',
     'components/GradientLimiter.cpp',
     'components/ResourceGovernor.cpp',
     'components/RepairService.cpp',
@@ -177,6 +176,7 @@ yams_daemon_lib = static_library('yams_daemon',
     dependency('yams_config'),
     dependency('yams_metadata'),
     dependency('yams_topology'),
+    dependency('yams_tune_advisor'),
     yams_daemon_client_dep,
     yams_onnx_resource_dep,
     yams_plugin_runtime_dep,
@@ -206,7 +206,8 @@ yams_daemon_lib = static_library('yams_daemon',
 yams_daemon_dep = declare_dependency(
   link_with: yams_daemon_lib,
   include_directories: [include_directories('../../include'), generated_inc],
-  dependencies: [yams_daemon_client_dep, version_generated_dep, dependency('yams_memory_sync')] +
+  dependencies: [yams_daemon_client_dep, version_generated_dep, dependency('yams_memory_sync'),
+                 dependency('yams_tune_advisor')] +
                 daemon_platform_deps,
 )
 
