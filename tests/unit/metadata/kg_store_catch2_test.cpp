@@ -1474,7 +1474,7 @@ TEST_CASE("KG Store: write batch cleanup helpers commit scoped deletions", "[uni
 }
 
 TEST_CASE("KG Store hot lookups reuse prepared statements after warm-up",
-          "[unit][metadata][kg][statements][catch2]") {
+          "[unit][metadata][kg][statements][batch-bind-limit][catch2]") {
     // One connection so every call lands on the same statement cache.
     const auto dbPath = tempDbPath("kg_store_prepared_");
     {
@@ -1537,6 +1537,65 @@ TEST_CASE("KG Store hot lookups reuse prepared statements after warm-up",
     }
     CHECK(afterOneNeighbors - before == 0);
     CHECK(uncached() - before == 0);
+
+    // Exercise the connection's actual parameter budget, not the build-time default.
+    REQUIRE(pool.withConnection([](Database& db) -> Result<void> {
+                    sqlite3_limit(db.rawHandle(), SQLITE_LIMIT_VARIABLE_NUMBER, 16);
+                    return {};
+                })
+                .has_value());
+    auto repeatedIds = ids.value();
+    repeatedIds.insert(repeatedIds.end(), ids.value().begin(), ids.value().end());
+    SECTION("outgoing batches fit the connection variable limit") {
+        auto edges = store.getEdgesFromBatch(repeatedIds, std::string_view("REL"), 2);
+        REQUIRE(edges.has_value());
+        REQUIRE(edges.value().contains(ids.value()[0]));
+        CHECK(edges.value().at(ids.value()[0]).size() == 2);
+        auto unfiltered = store.getEdgesFromBatch(repeatedIds, std::nullopt, 2);
+        REQUIRE(unfiltered.has_value());
+        CHECK(unfiltered.value().at(ids.value()[0]).size() == 2);
+        CHECK(unfiltered.value().at(ids.value()[0])[0].id ==
+              edges.value().at(ids.value()[0])[0].id);
+    }
+    SECTION("incoming batches fit the connection variable limit") {
+        auto edges = store.getEdgesToBatch(repeatedIds, std::string_view("REL"), 2);
+        REQUIRE(edges.has_value());
+        CHECK(edges.value().size() == 63);
+        for (const auto& [id, selected] : edges.value()) {
+            CHECK(selected.size() == 1);
+        }
+        auto unfiltered = store.getEdgesToBatch(repeatedIds, std::nullopt, 2);
+        REQUIRE(unfiltered.has_value());
+        CHECK(unfiltered.value().size() == 63);
+    }
+    SECTION("a prepare failure rolls back the read savepoint") {
+        REQUIRE(pool.withConnection([](Database& db) -> Result<void> {
+                        sqlite3_limit(db.rawHandle(), SQLITE_LIMIT_SQL_LENGTH, 100);
+                        return {};
+                    })
+                    .has_value());
+        CHECK_FALSE(store.getEdgesFromBatch(repeatedIds, std::nullopt, 2).has_value());
+        CHECK_FALSE(store.getEdgesToBatch(repeatedIds, std::nullopt, 2).has_value());
+        REQUIRE(pool.withConnection([](Database& db) -> Result<void> {
+                        CHECK(sqlite3_get_autocommit(db.rawHandle()) != 0);
+                        return {};
+                    })
+                    .has_value());
+    }
+    SECTION("an impossible parameter budget fails without leaking a transaction") {
+        REQUIRE(pool.withConnection([](Database& db) -> Result<void> {
+                        sqlite3_limit(db.rawHandle(), SQLITE_LIMIT_VARIABLE_NUMBER, 1);
+                        return {};
+                    })
+                    .has_value());
+        CHECK_FALSE(store.getEdgesFromBatch(repeatedIds, std::nullopt, 2).has_value());
+        CHECK_FALSE(store.getEdgesToBatch(repeatedIds, std::string_view("REL"), 2).has_value());
+        REQUIRE(pool.withConnection([](Database& db) -> Result<void> {
+                        CHECK(sqlite3_get_autocommit(db.rawHandle()) != 0);
+                        return {};
+                    })
+                    .has_value());
+    }
     pool.shutdown();
     std::error_code ec;
     std::filesystem::remove(dbPath, ec);
