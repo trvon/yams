@@ -5415,6 +5415,50 @@ TEST_CASE("MetadataRepository batch complete publishes only current derivations"
     CHECK(again.value() == 0);
 }
 
+TEST_CASE("MetadataRepository batch derivation failure rolls back the whole batch",
+          "[unit][metadata][embeddings][derivation]") {
+    MetadataRepositoryFixture fix;
+    const std::vector<std::string> hashes{"batch-rollback-first", "batch-rollback-second"};
+    for (const auto& hash : hashes) {
+        REQUIRE(fix.repository_->insertDocument(makeDocumentWithPath("/tmp/" + hash, hash))
+                    .has_value());
+    }
+    auto tokens = fix.repository_->batchBeginDocumentEmbeddingDerivations(hashes, "recipe");
+    REQUIRE(tokens.has_value());
+    REQUIRE(tokens.value().size() == 2);
+    REQUIRE(fix.pool_
+                ->withConnection([](Database& db) -> Result<void> {
+                    return db.execute(R"(
+                    CREATE TRIGGER reject_second_batch_completion
+                    BEFORE UPDATE OF repair_status ON documents
+                    WHEN NEW.sha256_hash = 'batch-rollback-second'
+                    BEGIN SELECT RAISE(ABORT, 'injected batch completion failure'); END
+                )");
+                })
+                .has_value());
+    REQUIRE_FALSE(
+        fix.repository_->batchCompleteDocumentEmbeddingDerivations(tokens.value(), "model")
+            .has_value());
+    auto states = fix.repository_->batchGetDocumentEmbeddingDerivations(hashes);
+    REQUIRE(states.has_value());
+    REQUIRE(states.value().size() == 2);
+    for (const auto& hash : hashes) {
+        CHECK_FALSE(states.value().at(hash).completed);
+        auto ready = fix.repository_->hasDocumentEmbeddingByHash(hash);
+        REQUIRE(ready.has_value());
+        CHECK_FALSE(ready.value());
+    }
+    REQUIRE(fix.pool_
+                ->withConnection([](Database& db) -> Result<void> {
+                    return db.execute("DROP TRIGGER reject_second_batch_completion");
+                })
+                .has_value());
+    auto retried =
+        fix.repository_->batchCompleteDocumentEmbeddingDerivations(tokens.value(), "model");
+    REQUIRE(retried.has_value());
+    CHECK(retried.value() == 2);
+}
+
 TEST_CASE("MetadataRepository reconcile keeps an open derivation unembedded",
           "[unit][metadata][embeddings][derivation]") {
     // Vector rows can exist for text that was superseded while its embed job ran. The
