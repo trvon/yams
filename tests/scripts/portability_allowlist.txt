@@ -137,10 +137,10 @@ src/daemon/components/EmbeddingService.cpp:1686:portability/env-read # reviewed 
 src/daemon/components/EmbeddingService.cpp:1692:portability/env-read # reviewed raw environment read
 src/daemon/components/EmbeddingService.cpp:1698:portability/env-read # reviewed raw environment read
 src/daemon/components/EmbeddingService.cpp:1727:portability/env-read # reviewed raw environment read
-src/daemon/components/EmbeddingService.cpp:2583:portability/env-read # reviewed raw environment read
-src/daemon/components/EmbeddingService.cpp:2609:portability/env-read # reviewed raw environment read
-src/daemon/components/EmbeddingService.cpp:2628:portability/env-read # reviewed raw environment read
-src/daemon/components/EmbeddingService.cpp:2641:portability/env-read # reviewed raw environment read
+src/daemon/components/EmbeddingService.cpp:2605:portability/env-read # reviewed raw environment read
+src/daemon/components/EmbeddingService.cpp:2631:portability/env-read # reviewed raw environment read
+src/daemon/components/EmbeddingService.cpp:2650:portability/env-read # reviewed raw environment read
+src/daemon/components/EmbeddingService.cpp:2663:portability/env-read # reviewed raw environment read
 src/daemon/components/IngestService.cpp:56:portability/env-read # reviewed raw environment read
 src/daemon/components/LifecycleComponent.cpp:808:portability/env-read # reviewed raw environment read
 src/daemon/components/LifecycleComponent.cpp:818:portability/env-read # reviewed raw environment read

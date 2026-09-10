@@ -1942,6 +1942,9 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     const auto chunkPolicy = ConfigResolver::resolveEmbeddingChunkingPolicy();
     const auto selectionCfg = ConfigResolver::resolveEmbeddingSelectionPolicy();
     const auto preparationRecipe = embed::embeddingPreparationRecipe(chunkPolicy, selectionCfg);
+    const auto derivationRecipe = embed::embeddingDerivationRecipe(
+        preparationRecipe, provider->getEmbeddingSpaceIdentity(modelName),
+        provider->getProviderVersion(), provider->getEmbeddingDim(modelName));
     const auto selectedInputs = embed::selectEmbeddingInputs(job);
     std::vector<std::pair<std::string, InternalEventBus::EmbedPreparedDoc*>> inputs;
     for (const auto index : selectedInputs.preparedIndices) {
@@ -1950,6 +1953,25 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     }
     for (const auto& hash : selectedInputs.gatherHashes) {
         inputs.emplace_back(hash, nullptr);
+    }
+    std::unordered_map<std::string, metadata::EmbeddingDerivationState> previousDerivations;
+    if (job.skipExisting && !inputs.empty()) {
+        std::vector<std::string> lookupHashes;
+        lookupHashes.reserve(inputs.size());
+        for (const auto& input : inputs) {
+            lookupHashes.push_back(input.first);
+        }
+        auto previous = meta_->batchGetDocumentEmbeddingDerivations(lookupHashes);
+        if (!previous) {
+            spdlog::error("EmbeddingService: failed to read embedding derivations: {}",
+                          previous.error().message);
+            failedGather += inputs.size();
+            failedGatherHashes.insert(failedGatherHashes.end(), lookupHashes.begin(),
+                                      lookupHashes.end());
+            inputs.clear();
+        } else {
+            previousDerivations = std::move(previous.value());
+        }
     }
     struct GatherCandidate {
         std::string hash;
@@ -1968,8 +1990,11 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
                 continue;
             }
             if (job.skipExisting) {
-                auto existing = meta_->hasDocumentEmbeddingByHash(hash);
-                if (existing && existing.value()) {
+                const auto existing = previousDerivations.find(hash);
+                // The repository joins completion with readiness. Legacy readiness alone
+                // cannot establish which recipe produced the vectors; rederive it once.
+                if (existing != previousDerivations.end() && existing->second.completed &&
+                    existing->second.token.recipe == derivationRecipe) {
                     skipped++;
                     completedGatherHashes.push_back(hash);
                     continue;
@@ -1993,9 +2018,6 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         for (const auto& candidate : candidates) {
             mintHashes.push_back(candidate.hash);
         }
-        const auto derivationRecipe = embed::embeddingDerivationRecipe(
-            preparationRecipe, provider->getEmbeddingSpaceIdentity(modelName),
-            provider->getProviderVersion(), provider->getEmbeddingDim(modelName));
         auto minted = meta_->batchBeginDocumentEmbeddingDerivations(mintHashes, derivationRecipe);
         if (!minted) {
             spdlog::error("EmbeddingService: failed to begin embedding derivations for {} docs: {}",
