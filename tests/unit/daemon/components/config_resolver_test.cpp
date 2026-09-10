@@ -2000,6 +2000,144 @@ TEST_CASE("ConfigResolver rejects malformed opt-in memory sync", "[daemon][confi
     CHECK_FALSE(config.memorySync.enabled);
 }
 
+TEST_CASE("ConfigResolver preserves tuning bounds and zero reservations",
+          "[daemon][components][config][tuning-boundaries][catch2]") {
+    struct ResetTuning {
+        ~ResetTuning() { (void)ConfigResolver::applyRuntimeTuning({}, TuningConfig{}); }
+    } reset;
+    (void)ConfigResolver::applyRuntimeTuning({}, TuningConfig{});
+    ConfigResolver::ConfigSections sections;
+    SECTION("connection growth step cannot exceed its supported range") {
+        sections["tuning"]["conn_slots_step"] = "4294967295";
+        const auto resolved = ConfigResolver::applyRuntimeTuning(sections, TuningConfig{});
+        CHECK(resolved.provenance.count("tuning.conn_slots_step") == 0);
+        CHECK(TuneAdvisor::connectionSlotsScaleStep() <= 128u);
+    }
+    SECTION("typed integer boundaries agree with provenance") {
+        struct Range {
+            const char* key;
+            uint64_t minimum;
+            uint64_t maximum;
+        };
+        const Range ranges[] = {
+            {"backpressure_read_pause_ms", 1, 1000},
+            {"worker_poll_ms", 50, 2000},
+            {"idle_shrink_hold_ms", 500, 60000},
+            {"pool_cooldown_ms", 1, 60000},
+            {"pool_ipc_min", 1, 1024},
+            {"pool_ipc_max", 1, 4096},
+            {"pool_io_min", 1, 1024},
+            {"pool_io_max", 1, 4096},
+            {"io_conn_per_thread", 1, 1024},
+            {"post_ingest_threads", 0, 64},
+            {"post_ingest_queue_max", 10, 1000000},
+            {"list_inflight_limit", 1, 1024},
+            {"list_admission_wait_ms", 1, 120000},
+            {"grep_inflight_limit", 1, 1024},
+            {"grep_admission_wait_ms", 1, 120000},
+            {"conn_slots_min", 1, 1024},
+            {"conn_slots_max", 64, 16384},
+            {"conn_slots_step", 1, 128},
+            {"onnx_max_concurrent", 1, 64},
+            {"onnx_gliner_reserved", 0, 8},
+            {"onnx_embed_reserved", 0, 8},
+            {"onnx_reranker_reserved", 0, 8},
+            {"onnx_sessions_per_model", 1, 32},
+            {"indexing_workers_max", 1, UINT32_MAX},
+            {"store_document_channel_capacity", 64, 1000000},
+            {"work_coordinator_threads", 1, 512},
+            {"embed_channel_capacity", 256, 65536},
+        };
+        for (const auto& range : ranges) {
+            const uint64_t values[] = {0, range.minimum, range.maximum,
+                                       range.minimum > 0 ? range.minimum - 1 : 0,
+                                       range.maximum + 1};
+            for (auto value : values) {
+                CAPTURE(range.key, value);
+                sections["tuning"].clear();
+                const std::string key = range.key;
+                // Keep the paired endpoint compatible while testing scalar boundaries.
+                if (key == "conn_slots_min")
+                    sections["tuning"]["conn_slots_max"] = "16384";
+                if (key == "conn_slots_max")
+                    sections["tuning"]["conn_slots_min"] = "1";
+                if (key == "pool_ipc_min")
+                    sections["tuning"]["pool_ipc_max"] = "4096";
+                if (key == "pool_io_min")
+                    sections["tuning"]["pool_io_max"] = "4096";
+                sections["tuning"][key] = std::to_string(value);
+                const auto resolved = ConfigResolver::applyRuntimeTuning(sections, TuningConfig{});
+                const bool accepted = value >= range.minimum && value <= range.maximum;
+                CHECK(resolved.provenance.count("tuning." + key) == (accepted ? 1 : 0));
+            }
+        }
+    }
+    SECTION("inverted minimum and maximum are rejected together") {
+        struct Pair {
+            const char* minimum;
+            const char* maximum;
+            uint32_t (*getMinimum)();
+            uint32_t (*getMaximum)();
+        };
+        const Pair pairs[] = {
+            {"conn_slots_min", "conn_slots_max", &TuneAdvisor::connectionSlotsMin,
+             &TuneAdvisor::connectionSlotsMax},
+            {"pool_ipc_min", "pool_ipc_max", &TuneAdvisor::poolMinSizeIpc,
+             &TuneAdvisor::poolMaxSizeIpc},
+            {"pool_io_min", "pool_io_max", &TuneAdvisor::poolMinSizeIpcIo,
+             &TuneAdvisor::poolMaxSizeIpcIo},
+        };
+        for (const auto& pair : pairs) {
+            CAPTURE(pair.minimum, pair.maximum);
+            sections["tuning"] = {{pair.minimum, "1024"}, {pair.maximum, "64"}};
+            const auto resolved = ConfigResolver::applyRuntimeTuning(sections, TuningConfig{});
+            CHECK(resolved.provenance.count(std::string("tuning.") + pair.minimum) == 0);
+            CHECK(resolved.provenance.count(std::string("tuning.") + pair.maximum) == 0);
+            CHECK(pair.getMinimum() <= pair.getMaximum());
+        }
+    }
+    SECTION("a maximum below the inherited minimum is rejected") {
+        EnvGuard minimum{"YAMS_CONN_SLOTS_MIN", "256"};
+        const auto originalMaximum = TuneAdvisor::connectionSlotsMax();
+        sections["tuning"]["conn_slots_max"] = "64";
+        const auto resolved = ConfigResolver::applyRuntimeTuning(sections, TuningConfig{});
+        CHECK(resolved.provenance.count("tuning.conn_slots_max") == 0);
+        CHECK(TuneAdvisor::connectionSlotsMax() == originalMaximum);
+    }
+    SECTION("zero reserved ONNX slots are a value, not unset") {
+        const auto glinerDefault = TuneAdvisor::onnxGlinerReserved();
+        const auto embedDefault = TuneAdvisor::onnxEmbedReserved();
+        const auto rerankerDefault = TuneAdvisor::onnxRerankerReserved();
+        sections["tuning"] = {{"onnx_gliner_reserved", "0"},
+                              {"onnx_embed_reserved", "0"},
+                              {"onnx_reranker_reserved", "0"}};
+        const auto resolved = ConfigResolver::applyRuntimeTuning(sections, TuningConfig{});
+        CHECK(resolved.provenance.count("tuning.onnx_gliner_reserved") == 1);
+        CHECK(resolved.provenance.count("tuning.onnx_embed_reserved") == 1);
+        CHECK(resolved.provenance.count("tuning.onnx_reranker_reserved") == 1);
+        CHECK(TuneAdvisor::onnxGlinerReserved() == 0u);
+        CHECK(TuneAdvisor::onnxEmbedReserved() == 0u);
+        CHECK(TuneAdvisor::onnxRerankerReserved() == 0u);
+        (void)ConfigResolver::applyRuntimeTuning({}, TuningConfig{});
+        CHECK(TuneAdvisor::onnxGlinerReserved() == glinerDefault);
+        CHECK(TuneAdvisor::onnxEmbedReserved() == embedDefault);
+        CHECK(TuneAdvisor::onnxRerankerReserved() == rerankerDefault);
+    }
+}
+
+TEST_CASE_METHOD(ConfigResolverFixture,
+                 "Embedding backend environment selection does not conflict with the default",
+                 "[daemon][components][config][tuning-boundaries][catch2]") {
+    EnvGuard backend{"YAMS_EMBED_BACKEND", "simeon"};
+    DaemonConfig config;
+    config.configFilePath = writeToml("default-backend.toml", "[embeddings]\n");
+    const auto resolved = ConfigResolver::resolveEmbeddingConfig(config, tempDir);
+    CHECK(resolved.backend == "simeon");
+    for (const auto& warning : resolved.warnings) {
+        CHECK(warning.find("default:auto") == std::string::npos);
+    }
+}
+
 TEST_CASE("ConfigResolver reports out-of-range values for the ranged [tuning] setters",
           "[daemon][components][config][tuning][catch2]") {
     // The setters keep their default outside their ranges; the resolver must not record

@@ -339,9 +339,9 @@ public:
         connectionSlotsScaleStepOverride_.store(0, std::memory_order_relaxed);
         resetCpuHighThresholdPercentOverride();
         onnxMaxConcurrentOverride_.store(0, std::memory_order_relaxed);
-        onnxGlinerReservedOverride_.store(0, std::memory_order_relaxed);
-        onnxEmbedReservedOverride_.store(0, std::memory_order_relaxed);
-        onnxRerankerReservedOverride_.store(0, std::memory_order_relaxed);
+        onnxGlinerReservedOverride_.store(UINT32_MAX, std::memory_order_relaxed);
+        onnxEmbedReservedOverride_.store(UINT32_MAX, std::memory_order_relaxed);
+        onnxRerankerReservedOverride_.store(UINT32_MAX, std::memory_order_relaxed);
         onnxSessionsPerModelOverride_.store(0, std::memory_order_relaxed);
         resetModelEvictThresholdOverrides();
         maxIngestWorkersOverride_.store(0, std::memory_order_relaxed);
@@ -3057,7 +3057,7 @@ public:
     /// Environment: YAMS_ONNX_GLINER_RESERVED
     static uint32_t onnxGlinerReserved() {
         uint32_t ov = onnxGlinerReservedOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
+        if (ov <= 8)
             return ov;
         auto envValue = parseBoundedUintEnvNow("YAMS_ONNX_GLINER_RESERVED", 0u, 8u);
         if (envValue)
@@ -3073,7 +3073,7 @@ public:
     /// Environment: YAMS_ONNX_EMBED_RESERVED
     static uint32_t onnxEmbedReserved() {
         uint32_t ov = onnxEmbedReservedOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
+        if (ov <= 8)
             return ov;
         auto envValue = parseBoundedUintEnvNow("YAMS_ONNX_EMBED_RESERVED", 0u, 8u);
         if (envValue)
@@ -3088,7 +3088,7 @@ public:
     /// Environment: YAMS_ONNX_RERANKER_RESERVED
     static uint32_t onnxRerankerReserved() {
         uint32_t ov = onnxRerankerReservedOverride_.load(std::memory_order_relaxed);
-        if (ov > 0)
+        if (ov <= 8)
             return ov;
         auto envValue = parseBoundedUintEnvNow("YAMS_ONNX_RERANKER_RESERVED", 0u, 8u);
         if (envValue)
@@ -3347,9 +3347,10 @@ private:
 
     // ONNX concurrency overrides
     static inline std::atomic<uint32_t> onnxMaxConcurrentOverride_{0};
-    static inline std::atomic<uint32_t> onnxGlinerReservedOverride_{0};
-    static inline std::atomic<uint32_t> onnxEmbedReservedOverride_{0};
-    static inline std::atomic<uint32_t> onnxRerankerReservedOverride_{0};
+    // Zero is a valid reservation; UINT32_MAX restores profile/environment defaults.
+    static inline std::atomic<uint32_t> onnxGlinerReservedOverride_{UINT32_MAX};
+    static inline std::atomic<uint32_t> onnxEmbedReservedOverride_{UINT32_MAX};
+    static inline std::atomic<uint32_t> onnxRerankerReservedOverride_{UINT32_MAX};
 
     // Model eviction pressure threshold overrides
     static inline std::atomic<double> modelEvictWarningOverride_{0.0};

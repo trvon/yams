@@ -463,11 +463,11 @@ TEST_CASE("ONNX shared capacity", "[daemon][tune][allocation][onnx][catch2]") {
     SECTION("ONNX max concurrent exceeds total reserved (BUG 3 regression)") {
         resetPostIngestOverrides();
 
-        // Clear any ONNX env overrides so defaults are used
+        // Clear programmatic ONNX overrides so defaults are used.
         TuneAdvisor::setOnnxMaxConcurrent(0);
-        TuneAdvisor::setOnnxGlinerReserved(0);
-        TuneAdvisor::setOnnxEmbedReserved(0);
-        TuneAdvisor::setOnnxRerankerReserved(0);
+        TuneAdvisor::setOnnxGlinerReserved(UINT32_MAX);
+        TuneAdvisor::setOnnxEmbedReserved(UINT32_MAX);
+        TuneAdvisor::setOnnxRerankerReserved(UINT32_MAX);
 
         for (auto profile : {TuneAdvisor::Profile::Efficient, TuneAdvisor::Profile::Balanced,
                              TuneAdvisor::Profile::Aggressive}) {
@@ -494,9 +494,9 @@ TEST_CASE("ONNX shared capacity", "[daemon][tune][allocation][onnx][catch2]") {
         resetPostIngestOverrides();
 
         TuneAdvisor::setOnnxMaxConcurrent(0);
-        TuneAdvisor::setOnnxGlinerReserved(0);
-        TuneAdvisor::setOnnxEmbedReserved(0);
-        TuneAdvisor::setOnnxRerankerReserved(0);
+        TuneAdvisor::setOnnxGlinerReserved(UINT32_MAX);
+        TuneAdvisor::setOnnxEmbedReserved(UINT32_MAX);
+        TuneAdvisor::setOnnxRerankerReserved(UINT32_MAX);
 
         for (auto profile : {TuneAdvisor::Profile::Efficient, TuneAdvisor::Profile::Balanced,
                              TuneAdvisor::Profile::Aggressive}) {
