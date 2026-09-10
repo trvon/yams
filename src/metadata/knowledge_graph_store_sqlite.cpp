@@ -1120,77 +1120,120 @@ public:
     Result<std::unordered_map<std::int64_t, std::vector<KGEdge>>>
     getEdgesFromBatch(const std::vector<std::int64_t>& srcNodeIds,
                       std::optional<std::string_view> relation, std::size_t limitPerNode) override {
+        return getEdgesBatch(srcNodeIds, relation, limitPerNode, false);
+    }
+
+private:
+    Result<std::unordered_map<std::int64_t, std::vector<KGEdge>>>
+    getEdgesBatch(const std::vector<std::int64_t>& nodeIds,
+                  std::optional<std::string_view> relation, std::size_t limitPerNode,
+                  bool incoming) {
         using ResultMap = std::unordered_map<std::int64_t, std::vector<KGEdge>>;
-
-        if (srcNodeIds.empty()) {
+        if (nodeIds.empty() || limitPerNode == 0)
             return ResultMap{};
+        if (limitPerNode > static_cast<std::size_t>(std::numeric_limits<int64_t>::max())) {
+            return Error{ErrorCode::InvalidArgument,
+                         "Per-node edge limit exceeds SQLite integer range"};
         }
-
+        auto uniqueIds = nodeIds;
+        std::sort(uniqueIds.begin(), uniqueIds.end());
+        uniqueIds.erase(std::unique(uniqueIds.begin(), uniqueIds.end()), uniqueIds.end());
         return readPool()->withConnection([&](Database& db) -> Result<ResultMap> {
-            std::string placeholders;
-            for (size_t i = 0; i < srcNodeIds.size(); ++i) {
-                if (i > 0)
-                    placeholders += ",";
-                placeholders += "?";
+            const int fixedParameters = relation ? 2 : 1;
+            const int variableLimit =
+                sqlite3_limit(db.rawHandle(), SQLITE_LIMIT_VARIABLE_NUMBER, -1);
+            if (variableLimit <= fixedParameters) {
+                return Error{ErrorCode::InvalidArgument,
+                             "SQLite variable limit cannot fit an edge query"};
             }
-
-            std::string sql =
-                "SELECT id, src_node_id, dst_node_id, relation, weight, created_time, properties "
-                "FROM ("
-                "  SELECT *, ROW_NUMBER() OVER (PARTITION BY src_node_id "
-                "    ORDER BY weight DESC, created_time DESC, id DESC) as rn "
-                "  FROM kg_edges "
-                "  WHERE src_node_id IN (" +
-                placeholders + ")";
-            if (relation.has_value()) {
-                sql += " AND relation = ?";
-            }
-            sql += ") WHERE rn <= ?";
-
-            auto stmtR = db.prepare(sql);
-            if (!stmtR)
-                return stmtR.error();
-            auto stmt = std::move(stmtR).value();
-
-            int idx = 1;
-            for (const auto& nodeId : srcNodeIds) {
-                auto br = stmt.bind(idx++, nodeId);
-                if (!br)
-                    return br.error();
-            }
-            if (relation.has_value()) {
-                auto br = stmt.bind(idx++, relation.value());
-                if (!br)
-                    return br.error();
-            }
-            auto br = stmt.bind(idx, static_cast<int64_t>(limitPerNode));
-            if (!br)
-                return br.error();
-
+            // Bound SQL size even on connections configured with very large variable limits.
+            const auto batchSize = std::min<std::size_t>(512, variableLimit - fixedParameters);
+            // Keep the original single-query snapshot across all chunks; savepoints also
+            // work when this connection already belongs to a caller-owned transaction.
+            auto started = db.execute("SAVEPOINT yams_edge_batch_read");
+            if (!started)
+                return started.error();
+            struct Savepoint {
+                Database& db;
+                bool active{true};
+                ~Savepoint() {
+                    if (active) {
+                        (void)db.execute("ROLLBACK TO yams_edge_batch_read");
+                        (void)db.execute("RELEASE yams_edge_batch_read");
+                    }
+                }
+            } savepoint{db};
+            const std::string column = incoming ? "dst_node_id" : "src_node_id";
+            // Preserve the two APIs' existing, distinct selection policies.
+            const std::string ordering =
+                incoming ? "id" : "weight DESC, created_time DESC, id DESC";
             ResultMap out;
-            out.reserve(srcNodeIds.size());
-            while (true) {
-                auto step = stmt.step();
-                if (!step)
-                    return step.error();
-                if (!step.value())
-                    break;
-                KGEdge e;
-                e.id = stmt.getInt64(0);
-                e.srcNodeId = stmt.getInt64(1);
-                e.dstNodeId = stmt.getInt64(2);
-                e.relation = stmt.getString(3);
-                e.weight = static_cast<float>(stmt.getDouble(4));
-                if (!stmt.isNull(5))
-                    e.createdTime = stmt.getInt64(5);
-                if (!stmt.isNull(6))
-                    e.properties = stmt.getString(6);
-                out[e.srcNodeId].push_back(std::move(e));
+            out.reserve(uniqueIds.size());
+            for (std::size_t offset = 0; offset < uniqueIds.size();) {
+                const auto count = std::min(batchSize, uniqueIds.size() - offset);
+                std::string placeholders;
+                for (std::size_t i = 0; i < count; ++i) {
+                    if (i)
+                        placeholders += ',';
+                    placeholders += '?';
+                }
+                std::string sql = "SELECT id, src_node_id, dst_node_id, relation, weight, "
+                                  "created_time, properties "
+                                  "FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY " +
+                                  column + " ORDER BY " + ordering +
+                                  ") as rn FROM kg_edges WHERE " + column + " IN (" + placeholders +
+                                  ")";
+                if (relation)
+                    sql += " AND relation = ?";
+                sql += ") WHERE rn <= ? ORDER BY " + column + ", rn";
+                auto stmtR = db.prepare(sql);
+                if (!stmtR)
+                    return stmtR.error();
+                auto stmt = std::move(stmtR).value();
+                int idx = 1;
+                for (std::size_t i = 0; i < count; ++i) {
+                    auto bound = stmt.bind(idx++, uniqueIds[offset + i]);
+                    if (!bound)
+                        return bound.error();
+                }
+                if (relation) {
+                    auto bound = stmt.bind(idx++, *relation);
+                    if (!bound)
+                        return bound.error();
+                }
+                auto bound = stmt.bind(idx, static_cast<int64_t>(limitPerNode));
+                if (!bound)
+                    return bound.error();
+                while (true) {
+                    auto step = stmt.step();
+                    if (!step)
+                        return step.error();
+                    if (!step.value())
+                        break;
+                    KGEdge edge;
+                    edge.id = stmt.getInt64(0);
+                    edge.srcNodeId = stmt.getInt64(1);
+                    edge.dstNodeId = stmt.getInt64(2);
+                    edge.relation = stmt.getString(3);
+                    edge.weight = static_cast<float>(stmt.getDouble(4));
+                    if (!stmt.isNull(5))
+                        edge.createdTime = stmt.getInt64(5);
+                    if (!stmt.isNull(6))
+                        edge.properties = stmt.getString(6);
+                    const auto key = incoming ? edge.dstNodeId : edge.srcNodeId;
+                    out[key].push_back(std::move(edge));
+                }
+                offset += count;
             }
+            auto released = db.execute("RELEASE yams_edge_batch_read");
+            if (!released)
+                return released.error();
+            savepoint.active = false;
             return out;
         });
     }
 
+public:
     Result<std::vector<KGEdge>> getEdgesTo(std::int64_t dstNodeId,
                                            std::optional<std::string_view> relation,
                                            std::size_t limit, std::size_t offset) override {
@@ -1250,80 +1293,7 @@ public:
     Result<std::unordered_map<std::int64_t, std::vector<KGEdge>>>
     getEdgesToBatch(const std::vector<std::int64_t>& dstNodeIds,
                     std::optional<std::string_view> relation, std::size_t limitPerNode) override {
-        using ResultMap = std::unordered_map<std::int64_t, std::vector<KGEdge>>;
-
-        if (dstNodeIds.empty()) {
-            return ResultMap{};
-        }
-
-        return readPool()->withConnection([&](Database& db) -> Result<ResultMap> {
-            // Build SQL with IN clause for batch lookup
-            // Using window function to limit results per destination node
-            std::string placeholders;
-            for (size_t i = 0; i < dstNodeIds.size(); ++i) {
-                if (i > 0)
-                    placeholders += ",";
-                placeholders += "?";
-            }
-
-            std::string sql =
-                "SELECT id, src_node_id, dst_node_id, relation, weight, created_time, properties "
-                "FROM ("
-                "  SELECT *, ROW_NUMBER() OVER (PARTITION BY dst_node_id ORDER BY id) as rn "
-                "  FROM kg_edges "
-                "  WHERE dst_node_id IN (" +
-                placeholders + ")";
-            if (relation.has_value()) {
-                sql += " AND relation = ?";
-            }
-            sql += ") WHERE rn <= ?";
-
-            auto stmtR = db.prepare(sql);
-            if (!stmtR)
-                return stmtR.error();
-            auto stmt = std::move(stmtR).value();
-
-            int idx = 1;
-            // Bind all destination node IDs
-            for (const auto& nodeId : dstNodeIds) {
-                auto br = stmt.bind(idx++, nodeId);
-                if (!br)
-                    return br.error();
-            }
-            // Bind relation filter if provided
-            if (relation.has_value()) {
-                auto br = stmt.bind(idx++, relation.value());
-                if (!br)
-                    return br.error();
-            }
-            // Bind limit per node
-            auto br = stmt.bind(idx, static_cast<int64_t>(limitPerNode));
-            if (!br)
-                return br.error();
-
-            ResultMap out;
-            out.reserve(dstNodeIds.size());
-
-            while (true) {
-                auto step = stmt.step();
-                if (!step)
-                    return step.error();
-                if (!step.value())
-                    break;
-                KGEdge e;
-                e.id = stmt.getInt64(0);
-                e.srcNodeId = stmt.getInt64(1);
-                e.dstNodeId = stmt.getInt64(2);
-                e.relation = stmt.getString(3);
-                e.weight = static_cast<float>(stmt.getDouble(4));
-                if (!stmt.isNull(5))
-                    e.createdTime = stmt.getInt64(5);
-                if (!stmt.isNull(6))
-                    e.properties = stmt.getString(6);
-                out[e.dstNodeId].push_back(std::move(e));
-            }
-            return out;
-        });
+        return getEdgesBatch(dstNodeIds, relation, limitPerNode, true);
     }
 
     Result<std::vector<KGEdge>> getEdgesBidirectional(std::int64_t nodeId,
