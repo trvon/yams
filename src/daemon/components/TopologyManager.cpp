@@ -471,11 +471,32 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
         latestBatch = std::move(latestResult.value());
     }
 
-    std::vector<std::string> rebuildHashes = documentHashes;
+    // Incremental engines retain untouched prior clusters. A deleted member outside the
+    // dirty region (or a deleted-only seed omitted by extraction) would otherwise survive
+    // every retry. Rebuild the complete artifact from current metadata, not a filtered batch
+    // with stale cluster representatives. This is not a substitute for store-time validation.
+    bool replacingStaleSnapshot = false;
+    if (latestBatch.has_value() && !documentHashes.empty()) {
+        std::vector<std::string> priorHashes;
+        priorHashes.reserve(latestBatch->memberships.size());
+        for (const auto& membership : latestBatch->memberships) {
+            priorHashes.push_back(membership.documentHash);
+        }
+        auto existingHashes = metadataRepo->getExistingDocumentHashes(priorHashes);
+        if (!existingHashes) {
+            return Result<RebuildStats>(existingHashes.error());
+        }
+        replacingStaleSnapshot =
+            std::any_of(priorHashes.begin(), priorHashes.end(),
+                        [&](const auto& hash) { return !existingHashes.value().contains(hash); });
+    }
+
+    std::vector<std::string> rebuildHashes =
+        replacingStaleSnapshot ? std::vector<std::string>{} : documentHashes;
     topology::TopologyDirtyRegion dirtyRegion;
     topology::TopologyExtractionStats seedExtractionStats;
     topology::TopologyUpdateStats updateStats;
-    if (!documentHashes.empty()) {
+    if (!rebuildHashes.empty()) {
         topology::TopologyExtractionConfig seedConfig;
         seedConfig.documentHashes = documentHashes;
         seedConfig.limit = static_cast<int>(documentHashes.size());
@@ -544,7 +565,7 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     }
     buildConfig.embeddingSpaceIdentity = extractionStats.embeddingSpaceIdentity;
 
-    if (!documentHashes.empty() && extracted.value().empty()) {
+    if (!documentHashes.empty() && !replacingStaleSnapshot && extracted.value().empty()) {
         RebuildStats skipped;
         skipped.skipped = true;
         skipped.dryRun = dryRun;
@@ -582,7 +603,7 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     RebuildStats stats;
     stats.reason = reason;
     stats.dryRun = dryRun;
-    stats.fullRebuild = documentHashes.empty();
+    stats.fullRebuild = documentHashes.empty() || replacingStaleSnapshot;
     stats.snapshotId = artifacts.snapshotId;
     stats.algorithm = artifacts.algorithm;
     stats.documentsRequested = extractionStats.documentsRequested;
@@ -598,7 +619,11 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
     stats.dirtyRegionDocs = updateStats.dirtyRegionDocs > 0 ? updateStats.dirtyRegionDocs
                                                             : extractionStats.regionDocuments;
     stats.coalescedDirtySets = updateStats.coalescedDirtySets;
-    stats.fallbackFullRebuilds = updateStats.fallbackFullRebuilds;
+    stats.fallbackFullRebuilds =
+        updateStats.fallbackFullRebuilds + (replacingStaleSnapshot ? 1 : 0);
+    if (replacingStaleSnapshot) {
+        stats.dirtySeedCount = documentHashes.size();
+    }
 
     if (!artifacts.clusters.empty()) {
         std::vector<std::size_t> sizes;
@@ -713,7 +738,10 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
 
     stats.issues.push_back(std::string{"topology_algorithm="} + std::string{algorithmKey});
 
-    if (!documentHashes.empty()) {
+    if (replacingStaleSnapshot) {
+        stats.issues.push_back("prior topology members are missing from metadata; rebuilding from "
+                               "the current corpus");
+    } else if (!documentHashes.empty()) {
         stats.issues.push_back("incremental topology rebuild expanded " +
                                std::to_string(documentHashes.size()) + " seed docs to " +
                                std::to_string(rebuildHashes.size()) + " docs");
@@ -726,7 +754,11 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
         }
     }
 
-    if (artifacts.memberships.empty()) {
+    // A confirmed empty corpus must retire deleted members. Zero ready inputs alone is not
+    // sufficient: live documents may still be awaiting embeddings or graph nodes.
+    const bool replacingWithEmptyCorpus =
+        replacingStaleSnapshot && extractionStats.documentsLoaded == 0;
+    if (artifacts.memberships.empty() && !replacingWithEmptyCorpus) {
         stats.skipped = true;
         stats.issues.push_back(
             "topology rebuild produced no memberships; graph nodes or embeddings may be missing");
@@ -742,7 +774,9 @@ TopologyManager::runRebuild(const std::string& reason, bool dryRun,
         publishedEpoch_.store(artifacts.topologyEpoch, std::memory_order_release);
     }
 
-    if (stats.stored && stats.fullRebuild) {
+    // An incremental request owns only its supplied seeds, even when recovery rebuilt the
+    // whole corpus. Leave other/newly queued dirty hashes for the scheduler's next drain.
+    if (stats.stored && stats.fullRebuild && documentHashes.empty()) {
         std::lock_guard<std::mutex> lock(dirtyMutex_);
         dirtyHashes_.clear();
         std::lock_guard<std::mutex> telemetryLock(telemetryMutex_);
