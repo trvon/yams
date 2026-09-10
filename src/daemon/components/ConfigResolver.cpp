@@ -561,7 +561,7 @@ ConfigResolver::resolveEmbeddingConfig(const DaemonConfig& config,
     }
     if (auto environmentBackend = yams::config::getenv_nonempty("YAMS_EMBED_BACKEND")) {
         const auto normalized = normalizeBackend(*environmentBackend);
-        if (normalized != result.backend) {
+        if ((canonicalBackend || runtimeBackend) && normalized != result.backend) {
             noteConflict("backend", "YAMS_EMBED_BACKEND", normalized, result.provenance["backend"],
                          result.backend);
         }
@@ -1372,22 +1372,84 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
     };
 
     const auto* tuning = findSection("tuning");
-    // Keys whose setter treats 0 as a real value (0 = auto). For every other uint32 knob 0 is
-    // the override's unset sentinel and below the minimum, so it cannot be expressed through
-    // [tuning]; storing it would silently fall back to the default.
-    static constexpr std::string_view kZeroMeansAuto[] = {"post_ingest_threads"};
+    // Match the supported accessor/setter ranges, not merely the uint32 storage type.
+    // Zero is auto for post-ingest threads and an explicit value for ONNX reservations.
+    struct Uint32Range {
+        std::string_view key;
+        uint32_t minimum;
+        uint32_t maximum;
+    };
+    static constexpr Uint32Range kUint32Ranges[] = {
+        {"backpressure_read_pause_ms", 1, 1000},
+        {"worker_poll_ms", 50, 2000},
+        {"idle_shrink_hold_ms", 500, 60000},
+        {"pool_cooldown_ms", 1, 60000},
+        {"pool_ipc_min", 1, 1024},
+        {"pool_ipc_max", 1, 4096},
+        {"pool_io_min", 1, 1024},
+        {"pool_io_max", 1, 4096},
+        {"io_conn_per_thread", 1, 1024},
+        {"post_ingest_threads", 0, 64},
+        {"post_ingest_queue_max", 10, 1000000},
+        {"list_inflight_limit", 1, 1024},
+        {"list_admission_wait_ms", 1, 120000},
+        {"grep_inflight_limit", 1, 1024},
+        {"grep_admission_wait_ms", 1, 120000},
+        {"conn_slots_min", 1, 1024},
+        {"conn_slots_max", 64, 16384},
+        {"conn_slots_step", 1, 128},
+        {"onnx_max_concurrent", 1, 64},
+        {"onnx_gliner_reserved", 0, 8},
+        {"onnx_embed_reserved", 0, 8},
+        {"onnx_reranker_reserved", 0, 8},
+        {"onnx_sessions_per_model", 1, 32},
+        {"indexing_workers_max", 1, UINT32_MAX},
+        {"store_document_channel_capacity", 64, 1000000},
+        {"work_coordinator_threads", 1, 512},
+        {"embed_channel_capacity", 256, 65536},
+    };
+    const auto boundedUint32 = [&](std::string_view key) -> std::optional<uint32_t> {
+        auto value = parseUint32(tuning, "tuning", key);
+        if (!value)
+            return std::nullopt;
+        const auto range = std::find_if(std::begin(kUint32Ranges), std::end(kUint32Ranges),
+                                        [key](const auto& item) { return item.key == key; });
+        if (range == std::end(kUint32Ranges)) {
+            spdlog::error("Config: tuning.{} has no supported range; ignoring", key);
+            return std::nullopt;
+        }
+        if (*value < range->minimum || *value > range->maximum) {
+            spdlog::warn("Config: tuning.{} must be within [{}, {}]; ignoring {}", key,
+                         range->minimum, range->maximum, *value);
+            return std::nullopt;
+        }
+        return value;
+    };
     const auto applyUint32 = [&](std::string_view key, auto setter) {
-        if (auto value = parseUint32(tuning, "tuning", key)) {
-            const bool zeroIsValue = std::find(std::begin(kZeroMeansAuto), std::end(kZeroMeansAuto),
-                                               key) != std::end(kZeroMeansAuto);
-            if (*value == 0 && !zeroIsValue) {
-                spdlog::warn("Config: tuning.{} = 0 cannot be expressed through [tuning] (0 is "
-                             "the unset sentinel); ignoring",
-                             key);
-                return;
-            }
+        if (auto value = boundedUint32(key)) {
             setter(*value);
             noteSource("tuning", key);
+        }
+    };
+    // Validate the proposed pair before changing either override or its provenance.
+    // Missing endpoints retain the resolved baseline, including compatibility overlays.
+    const auto applyPair = [&](std::string_view minKey, std::string_view maxKey, auto getMin,
+                               auto getMax, auto setMin, auto setMax) {
+        const auto minimum = boundedUint32(minKey);
+        const auto maximum = boundedUint32(maxKey);
+        if (!minimum && !maximum)
+            return;
+        if (minimum.value_or(getMin()) > maximum.value_or(getMax())) {
+            spdlog::warn("Config: tuning.{} exceeds tuning.{}; ignoring pair", minKey, maxKey);
+            return;
+        }
+        if (minimum) {
+            setMin(*minimum);
+            noteSource("tuning", minKey);
+        }
+        if (maximum) {
+            setMax(*maximum);
+            noteSource("tuning", maxKey);
         }
     };
     applyUint32("backpressure_read_pause_ms", &TuneAdvisor::setBackpressureReadPauseMs);
@@ -1403,10 +1465,12 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
     if (auto value = parseSigned(tuning, "tuning", "pool_scale_step")) {
         TuneAdvisor::setPoolScaleStep(*value);
     }
-    applyUint32("pool_ipc_min", &TuneAdvisor::setPoolMinSizeIpc);
-    applyUint32("pool_ipc_max", &TuneAdvisor::setPoolMaxSizeIpc);
-    applyUint32("pool_io_min", &TuneAdvisor::setPoolMinSizeIpcIo);
-    applyUint32("pool_io_max", &TuneAdvisor::setPoolMaxSizeIpcIo);
+    applyPair("pool_ipc_min", "pool_ipc_max", &TuneAdvisor::poolMinSizeIpc,
+              &TuneAdvisor::poolMaxSizeIpc, &TuneAdvisor::setPoolMinSizeIpc,
+              &TuneAdvisor::setPoolMaxSizeIpc);
+    applyPair("pool_io_min", "pool_io_max", &TuneAdvisor::poolMinSizeIpcIo,
+              &TuneAdvisor::poolMaxSizeIpcIo, &TuneAdvisor::setPoolMinSizeIpcIo,
+              &TuneAdvisor::setPoolMaxSizeIpcIo);
     applyUint32("io_conn_per_thread", &TuneAdvisor::setIoConnPerThread);
     applyUint32("post_ingest_threads", &TuneAdvisor::setPostIngestThreads);
     applyUint32("post_ingest_queue_max", &TuneAdvisor::setPostIngestQueueMax);
@@ -1415,8 +1479,9 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
     applyUint32("grep_inflight_limit", &TuneAdvisor::setGrepInflightLimit);
     applyUint32("grep_admission_wait_ms", &TuneAdvisor::setGrepAdmissionWaitMs);
     // Typed keys for setters that were previously reachable only through YAMS_* overlays.
-    applyUint32("conn_slots_min", &TuneAdvisor::setConnectionSlotsMin);
-    applyUint32("conn_slots_max", &TuneAdvisor::setConnectionSlotsMax);
+    applyPair("conn_slots_min", "conn_slots_max", &TuneAdvisor::connectionSlotsMin,
+              &TuneAdvisor::connectionSlotsMax, &TuneAdvisor::setConnectionSlotsMin,
+              &TuneAdvisor::setConnectionSlotsMax);
     applyUint32("conn_slots_step", &TuneAdvisor::setConnectionSlotsScaleStep);
     // The setters below silently keep the default outside their ranges; check here so a
     // rejected value is reported and never recorded as config provenance.
