@@ -7,6 +7,7 @@
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <cstdint>
 #include <cstring>
 #include <deque>
 #include <fstream>
@@ -32,9 +33,8 @@ bool isWalLogFile(const std::filesystem::path& path) {
     return path.extension() == ".log" || isCompressedWalLog(path);
 }
 
-// A plain segment that never received an entry is either zero bytes (clean close truncates
-// to the write position) or an mmap preallocation left behind by a killed process, which
-// starts with zeros where the first entry's magic word would be.
+// Empty segments are zero-length or entirely zero-filled mmap preallocations. A zero
+// header alone can also be damage: preserve any nonzero bytes as recovery evidence.
 bool isEmptyWalSegment(const std::filesystem::path& path) {
     if (isCompressedWalLog(path)) {
         return false;
@@ -48,11 +48,21 @@ bool isEmptyWalSegment(const std::filesystem::path& path) {
         return true;
     }
     std::ifstream in(path, std::ios::binary);
-    std::array<char, sizeof(uint32_t)> head{};
-    if (!in.read(head.data(), static_cast<std::streamsize>(head.size()))) {
-        return false;
+    std::array<char, 64 * 1024> buffer{};
+    std::uintmax_t remaining = size;
+    while (remaining > 0) {
+        const auto count =
+            static_cast<std::streamsize>(std::min<std::uintmax_t>(remaining, buffer.size()));
+        if (!in.read(buffer.data(), count)) {
+            return false;
+        }
+        if (std::any_of(buffer.begin(), buffer.begin() + count, [](char c) { return c != 0; })) {
+            return false;
+        }
+        remaining -= static_cast<std::uintmax_t>(count);
     }
-    return std::all_of(head.begin(), head.end(), [](char c) { return c == 0; });
+    // Refuse to prune if the file grew while it was inspected or EOF cannot be read.
+    return in.peek() == std::ifstream::traits_type::eof() && !in.bad();
 }
 
 std::optional<yams::compression::CompressionAlgorithm>

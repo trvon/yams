@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 
 #include <chrono>
 #include <filesystem>
@@ -150,6 +151,40 @@ TEST_CASE("WALManager transaction lifecycle updates stats and enforces state",
 
     CHECK(manager.getStats().activeTransactions == 0);
     REQUIRE(manager.shutdown());
+}
+
+TEST_CASE("WALManager initialize preserves nonempty segments with a zero prefix",
+          "[unit][wal][manager]") {
+    TempDir temp;
+    const auto walDir = temp.path / "wal";
+    std::filesystem::create_directories(walDir);
+    const auto damagedLog = walDir / "wal_20240101_010159_150.log";
+    const auto size = GENERATE(std::size_t{3}, std::size_t{5}, std::size_t{64 * 1024},
+                               std::size_t{128 * 1024 + 1});
+    std::string original(size, '\0');
+    original.back() = 'x'; // Include short reads, buffer boundaries, and a trailing partial block.
+    {
+        std::ofstream out(damagedLog, std::ios::binary);
+        out.write(original.data(), static_cast<std::streamsize>(original.size()));
+        REQUIRE(out.good());
+    }
+
+    WALManager::Config cfg;
+    cfg.walDirectory = walDir;
+    cfg.compressOldLogs = false;
+    cfg.enableGroupCommit = false;
+    WALManager manager(cfg);
+    REQUIRE(manager.initialize());
+    CHECK(manager.getCurrentSequence() == 150);
+    REQUIRE(manager.shutdown());
+
+    REQUIRE(std::filesystem::exists(damagedLog));
+    REQUIRE(std::filesystem::file_size(damagedLog) == original.size());
+    std::ifstream in(damagedLog, std::ios::binary);
+    std::string preserved(original.size(), '\0');
+    in.read(preserved.data(), static_cast<std::streamsize>(preserved.size()));
+    REQUIRE(in.good());
+    CHECK(preserved == original);
 }
 
 TEST_CASE("WALManager initialize rejects an unconfigured directory", "[unit][wal][manager]") {
