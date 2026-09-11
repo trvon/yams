@@ -60,6 +60,21 @@ void applyMetadataTagDelta(std::atomic<uint64_t>& cachedTagCount,
 }
 } // namespace
 
+Result<bool> MetadataRepository::completeKnowledgeGraphEnrichment(int64_t documentId,
+                                                                  const std::string& token) {
+    if (token.empty())
+        return false;
+    return executeWriteQuery<bool>([&](Database& db) -> Result<bool> {
+        YAMS_TRY_UNWRAP(stmt, db.prepare("UPDATE metadata SET value = ? WHERE document_id = ? "
+                                         "AND key = 'yams:kg_enrichment' AND value = ?"));
+        YAMS_TRY(stmt.bind(1, "complete:" + token));
+        YAMS_TRY(stmt.bind(2, documentId));
+        YAMS_TRY(stmt.bind(3, "pending:" + token));
+        YAMS_TRY(stmt.execute());
+        return db.changes() == 1;
+    });
+}
+
 // Metadata operations
 Result<void> MetadataRepository::setMetadata(int64_t documentId, const std::string& key,
                                              const MetadataValue& value) {

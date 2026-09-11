@@ -22,6 +22,7 @@
 #include <yams/config/config_helpers.h>
 #include <yams/core/assert.hpp>
 #include <yams/core/atomic_utils.h>
+#include <yams/core/uuid.h>
 #include <yams/daemon/async_batcher.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/GraphComponent.h>
@@ -1232,7 +1233,8 @@ void PostIngestQueue::dispatchNonEmbeddingStages(
     if (plan.dispatchKg) {
         const auto dispatchStart = std::chrono::steady_clock::now();
         dispatchToKgChannel(prepared.hash, prepared.documentId, prepared.filePath,
-                            std::vector<std::string>(prepared.tags), contentBytes);
+                            std::vector<std::string>(prepared.tags), contentBytes,
+                            prepared.knowledgeGraphToken);
         timings.kgDispatch.add(std::chrono::steady_clock::now() - dispatchStart);
     }
     if (plan.dispatchSymbol) {
@@ -1564,7 +1566,9 @@ void PostIngestQueue::processKnowledgeGraphBatch(std::vector<InternalEventBus::K
                                                  .tags = std::move(job.tags),
                                                  .documentDbId = job.documentId,
                                                  .contentBytes = std::move(job.contentBytes),
-                                                 .skipEntityExtraction = false};
+                                                 .skipEntityExtraction = false,
+                                                 .knowledgeGraphToken =
+                                                     std::move(job.knowledgeGraphToken)};
         contexts.push_back(std::move(ctx));
     }
     recordTiming("kg_build_contexts", buildContextsStart);
@@ -1581,7 +1585,7 @@ void PostIngestQueue::processKnowledgeGraphBatch(std::vector<InternalEventBus::K
     if (!result) {
         spdlog::error("[PostIngestQueue] KG batch failed: {}", result.error().message);
     } else {
-        spdlog::debug("[PostIngestQueue] KG batch completed {} docs in {:.2f}ms (avg {:.2f}ms/doc)",
+        spdlog::debug("[PostIngestQueue] KG batch submitted {} docs in {:.2f}ms (avg {:.2f}ms/doc)",
                       jobs.size(), ms, ms / jobs.size());
     }
 }
@@ -1589,7 +1593,8 @@ void PostIngestQueue::processKnowledgeGraphBatch(std::vector<InternalEventBus::K
 void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId,
                                           const std::string& filePath,
                                           std::vector<std::string> tags,
-                                          std::shared_ptr<std::vector<std::byte>> contentBytes) {
+                                          std::shared_ptr<std::vector<std::byte>> contentBytes,
+                                          const std::string& knowledgeGraphToken) {
     // A disabled KG stage is outside the pipeline contract. A temporarily paused or
     // dynamically capped stage remains inside the contract: buffer its work and let channel
     // backpressure bound upstream admission instead of silently dropping enrichment.
@@ -1606,11 +1611,15 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
     job.tags = std::move(tags);
     job.contentBytes = std::move(contentBytes);
     job.enqueuedAt = std::chrono::steady_clock::now();
+    job.knowledgeGraphToken = knowledgeGraphToken;
 
     enqueueKgJob(std::move(job));
 }
 
 void PostIngestQueue::enqueueKgJob(InternalEventBus::KgJob job) {
+    // Content is durable before dispatch. GraphComponent reloads it by hash when absent;
+    // neither the regular channel nor overflow should pin a potentially huge raw buffer.
+    job.contentBytes.reset();
     bool queued = false;
     {
         // This lock also defines the disable boundary: once setKnowledgeGraphEnabled(false)
@@ -1629,8 +1638,8 @@ void PostIngestQueue::enqueueKgJob(InternalEventBus::KgJob job) {
         } else {
             // Keep full-channel backpressure off WorkCoordinator threads. One coroutine drains the
             // pending FIFO as the KG poller creates capacity; producers only append and return.
-            // The FIFO is bounded: each entry can pin document bytes, so an unbounded overflow
-            // would turn a KG stall into unbounded ingest memory.
+            // Bound descriptor count as well as avoiding retained raw content. Variable-length
+            // paths/tags still contribute memory; this is not a total byte/RSS limit.
             const std::size_t pendingCap = TuneAdvisor::postIngestPendingKgMax();
             if (pendingKgJobs_.size() >= pendingCap) {
                 InternalEventBus::instance().incKgDropped();
@@ -2809,8 +2818,14 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
         std::vector<metadata::BatchContentEntry> entries;
         entries.reserve(successes.size());
 
-        for (const auto& prepared : successes) {
+        for (auto& prepared : successes) {
+            if (prepared.shouldDispatchKg &&
+                knowledgeGraphEnabled_.load(std::memory_order_acquire) &&
+                prepared.knowledgeGraphToken.empty()) {
+                prepared.knowledgeGraphToken = yams::core::generateId("kg");
+            }
             metadata::BatchContentEntry entry;
+            entry.knowledgeGraphToken = prepared.knowledgeGraphToken;
             entry.documentId = prepared.documentId;
             entry.title = prepared.title.empty() ? prepared.fileName : prepared.title;
             entry.metadataTitle = prepared.title;

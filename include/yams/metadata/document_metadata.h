@@ -252,6 +252,9 @@ struct BatchContentEntry {
     bool priorContentExtracted = false;
     ExtractionStatus priorExtractionStatus = ExtractionStatus::Pending;
     std::string metadataTitle; ///< Extracted title to persist; empty keeps existing metadata
+    /// Nonempty unique admission token requests an atomic yams:kg_enrichment pending marker.
+    /// Extraction success is separate from completion of this asynchronous stage.
+    std::string knowledgeGraphToken;
 };
 
 /**

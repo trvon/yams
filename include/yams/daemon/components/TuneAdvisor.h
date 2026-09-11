@@ -1293,8 +1293,8 @@ public:
         postIngestQueueMaxOverride_.store(v, std::memory_order_relaxed);
     }
 
-    // Overflow FIFO behind the bounded kg_jobs channel. Each pending job may hold document
-    // bytes, so this bound is what keeps a KG stall from growing ingest memory without limit.
+    // Descriptor-count bound for the overflow FIFO behind kg_jobs. Admission releases raw
+    // document bytes; variable-size paths/tags mean this is not a total-byte or RSS bound.
     // Typed key only: tuning.post_ingest_pending_kg_max.
     static uint32_t postIngestPendingKgMax() {
         uint32_t ov = postIngestPendingKgMaxOverride_.load(std::memory_order_relaxed);

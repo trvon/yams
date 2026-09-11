@@ -1,5 +1,8 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <yams/daemon/components/GraphComponent.h>
+#include <yams/daemon/components/PostIngestQueue.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
@@ -37,7 +40,7 @@ std::unique_ptr<WriteBatch> makeTermBatch(const std::string& term) {
 }
 
 struct KgCoordinatorFixture {
-    explicit KgCoordinatorFixture(const std::string& prefix) {
+    explicit KgCoordinatorFixture(const std::string& prefix, std::size_t maxConnections = 2) {
         namespace fs = std::filesystem;
         dir = fs::temp_directory_path() / (prefix + std::to_string(std::random_device{}()));
         fs::create_directories(dir);
@@ -54,7 +57,8 @@ struct KgCoordinatorFixture {
         }
 
         yams::metadata::ConnectionPoolConfig poolConfig;
-        poolConfig.maxConnections = 2;
+        poolConfig.minConnections = 1;
+        poolConfig.maxConnections = maxConnections;
         pool = std::make_shared<yams::metadata::ConnectionPool>(dbPath, poolConfig);
         auto kgRes = yams::metadata::makeSqliteKnowledgeGraphStore(*pool);
         REQUIRE(kgRes);
@@ -119,8 +123,9 @@ DeferredEdgeOp makeDeferredEdge(const std::string& src, const std::string& dst,
 }
 
 struct CoordinatorRunner {
-    explicit CoordinatorRunner(KgCoordinatorFixture& fix, WriteCoordinator::Config config)
-        : coordinator(io, fix.kg, {}, config) {
+    explicit CoordinatorRunner(KgCoordinatorFixture& fix, WriteCoordinator::Config config,
+                               std::shared_ptr<yams::metadata::MetadataRepository> meta = {})
+        : coordinator(io, fix.kg, std::move(meta), config) {
         coordinator.start();
         runner = std::thread([this] { io.run(); });
     }
@@ -176,6 +181,117 @@ void runDuplicateEdgeScenario(KgCoordinatorFixture& fix, bool dedup) {
 }
 
 } // namespace
+
+TEST_CASE("PostIngestQueue: rejected KG dispatch retains durable pending intent",
+          "[unit][daemon][post-ingest][kg-intent]") {
+    using namespace yams::daemon;
+    KgCoordinatorFixture fix("kg_overflow_intent_");
+    auto meta = std::make_shared<yams::metadata::MetadataRepository>(*fix.pool);
+    auto graph = std::make_shared<GraphComponent>(meta, fix.kg);
+    yams::metadata::DocumentInfo doc;
+    doc.filePath = "/kg/overflow.cpp";
+    doc.fileName = "overflow.cpp";
+    doc.sha256Hash = "kg-overflow-intent";
+    auto id = meta->insertDocument(doc);
+    REQUIRE(id.has_value());
+    struct ResetCap {
+        ~ResetCap() { TuneAdvisor::setPostIngestPendingKgMax(0); }
+    } reset;
+    TuneAdvisor::setPostIngestPendingKgMax(1);
+    PostIngestQueue queue({}, meta, {}, fix.kg, graph, nullptr, nullptr, 8);
+    queue.testing_detachKgChannel();
+    queue.testing_deferKgJob(InternalEventBus::KgJob{}); // Full synchronously; no worker needed.
+    PostIngestQueue::PreparedMetadataEntry prepared;
+    prepared.documentId = id.value();
+    prepared.hash = doc.sha256Hash;
+    prepared.fileName = doc.fileName;
+    prepared.filePath = doc.filePath;
+    prepared.extractedText = "int overflow;";
+    std::vector<PostIngestQueue::PreparedMetadataEntry> entries{prepared};
+    auto dropped = InternalEventBus::instance().kgDropped();
+    REQUIRE(queue.testing_commitAndDispatchKg(entries));
+    REQUIRE(entries.size() == 1);
+    REQUIRE_FALSE(entries.front().knowledgeGraphToken.empty());
+    CHECK(InternalEventBus::instance().kgDropped() == dropped + 1);
+    auto marker = meta->getMetadata(id.value(), "yams:kg_enrichment");
+    REQUIRE(marker.has_value());
+    REQUIRE(marker.value().has_value());
+    CHECK(marker.value()->value == "pending:" + entries.front().knowledgeGraphToken);
+    auto content = meta->getContent(id.value());
+    REQUIRE(content.has_value());
+    REQUIRE(content.value().has_value());
+    CHECK(content.value()->contentText == "int overflow;");
+    queue.stop();
+}
+
+TEST_CASE("WriteCoordinator: KG intent acknowledges durable writes only",
+          "[unit][daemon][write-coordinator][kg-intent]") {
+    KgCoordinatorFixture fix("kg_intent_commit_", 1);
+    auto meta = std::make_shared<yams::metadata::MetadataRepository>(*fix.pool);
+    yams::metadata::DocumentInfo doc;
+    doc.filePath = "/kg/intent.cpp";
+    doc.fileName = "intent.cpp";
+    doc.sha256Hash = "kg-intent-write";
+    auto id = meta->insertDocument(doc);
+    REQUIRE(id.has_value());
+    yams::metadata::BatchContentEntry entry;
+    entry.documentId = id.value();
+    entry.contentText = "int intent;";
+    entry.knowledgeGraphToken = "attempt-one";
+    REQUIRE(meta->batchInsertContentAndIndex({entry}).has_value());
+    CoordinatorRunner run(fix, kgTestConfig(false), meta);
+    auto enqueue = [&](const std::string& token, bool expectSuccess = true) {
+        auto batch = std::make_unique<WriteBatch>();
+        batch->source = "test/kg-intent";
+        batch->knowledgeGraphDocumentId = id.value();
+        batch->knowledgeGraphToken = token;
+        batch->ops.emplace_back(UpsertNodesOp{{makeNode("kg-intent-node")}});
+        run.coordinator.enqueue(std::move(batch));
+        auto flushed = run.coordinator.flush(std::chrono::seconds{5});
+        if (expectSuccess) {
+            REQUIRE(flushed.has_value());
+        } else {
+            REQUIRE_FALSE(flushed.has_value());
+            CHECK(flushed.error().message.find("injected KG write failure") != std::string::npos);
+        }
+    };
+    auto marker = [&] {
+        auto value = meta->getMetadata(id.value(), "yams:kg_enrichment");
+        REQUIRE(value.has_value());
+        REQUIRE(value.value().has_value());
+        return value.value()->value;
+    };
+    SECTION("successful commit releases the KG lease before acknowledgement") {
+        enqueue("attempt-one");
+        CHECK(marker() == "complete:attempt-one");
+    }
+    SECTION("failed KG write remains pending and can retry") {
+        REQUIRE(fix.pool
+                    ->withConnection([](yams::metadata::Database& db) {
+                        return db.execute(
+                            "CREATE TRIGGER reject_intent_node BEFORE INSERT ON kg_nodes "
+                            "BEGIN SELECT RAISE(ABORT, 'injected KG write failure'); END");
+                    })
+                    .has_value());
+        enqueue("attempt-one", false);
+        CHECK(marker() == "pending:attempt-one");
+        REQUIRE(fix.pool
+                    ->withConnection([](yams::metadata::Database& db) {
+                        return db.execute("DROP TRIGGER reject_intent_node");
+                    })
+                    .has_value());
+        enqueue("attempt-one");
+        CHECK(marker() == "complete:attempt-one");
+    }
+    SECTION("stale write cannot acknowledge a newer admission") {
+        entry.knowledgeGraphToken = "attempt-two";
+        REQUIRE(meta->batchInsertContentAndIndex({entry}).has_value());
+        enqueue("attempt-one");
+        CHECK(marker() == "pending:attempt-two");
+        enqueue("attempt-two");
+        CHECK(marker() == "complete:attempt-two");
+    }
+}
 
 TEST_CASE("WriteCoordinator: tryEnqueue rejects batches at channel capacity",
           "[unit][daemon][write-coordinator]") {

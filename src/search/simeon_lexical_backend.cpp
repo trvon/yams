@@ -510,9 +510,10 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         if (cfg_.concept_mining_enabled && ids.size() >= 100) {
             try {
                 const auto cmt0 = std::chrono::steady_clock::now();
-                // Unlike the BM25 pass, which streams one chunked document at a time, concept
-                // mining needs every document's raw text resident at once. Hold it to the same
-                // corpus byte budget or the build's peak memory is the whole corpus.
+                // Bound retained raw text, not total process memory: getContent still
+                // materializes the next document before this check, and mining has its own
+                // allocations. Exceeding this budget disables the entire concept-scoring
+                // layer for this build; it is not sampling or a quality-neutral shortcut.
                 std::vector<std::string> conceptTexts;
                 conceptTexts.reserve(ids.size());
                 std::size_t conceptCorpusBytes = 0;

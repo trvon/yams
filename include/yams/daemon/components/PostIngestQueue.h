@@ -192,6 +192,7 @@ public:
     struct PreparedMetadataEntry {
         int64_t documentId = 0;
         std::string hash;
+        std::string knowledgeGraphToken;
         std::string fileName;
         std::string filePath; // Full path for KG node creation
         std::string title;
@@ -426,6 +427,16 @@ public:
     }
     void testing_schedulePendingKgDrain() { schedulePendingKgDrain(); }
     void testing_enqueueKgJob(InternalEventBus::KgJob job) { enqueueKgJob(std::move(job)); }
+    bool testing_commitAndDispatchKg(std::vector<PreparedMetadataEntry>& entries) {
+        std::vector<ExtractionFailure> failures;
+        commitBatchResults(entries, failures);
+        for (const auto& entry : entries) {
+            DispatchTimingSet timings;
+            dispatchNonEmbeddingStages(entry, buildDispatchPlan(entry, false, false),
+                                       entry.contentBytes, timings);
+        }
+        return failures.empty();
+    }
     // Route every KG job to the pending FIFO, as a full channel does in production.
     void testing_detachKgChannel() {
         std::lock_guard<std::mutex> lock(pendingKgMutex_);
@@ -469,7 +480,8 @@ private:
     void processTitleExtractionBatch(std::vector<InternalEventBus::TitleExtractionJob>&& jobs);
     void dispatchToKgChannel(const std::string& hash, int64_t docId, const std::string& filePath,
                              std::vector<std::string> tags,
-                             std::shared_ptr<std::vector<std::byte>> contentBytes);
+                             std::shared_ptr<std::vector<std::byte>> contentBytes,
+                             const std::string& knowledgeGraphToken);
     void enqueueKgJob(InternalEventBus::KgJob job);
     void schedulePendingKgDrain();
     boost::asio::awaitable<void> drainPendingKgJobs();
