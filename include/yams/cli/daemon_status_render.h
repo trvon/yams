@@ -1,6 +1,7 @@
 #pragma once
 
 #include <filesystem>
+#include <functional>
 #include <ostream>
 
 namespace yams::daemon {
@@ -27,5 +28,10 @@ void renderDaemonStatusBrief(const yams::daemon::StatusResponse& status,
 void renderDaemonStatusDetailed(const yams::daemon::StatusResponse& status,
                                 const DaemonStatusRenderContext& ctx, std::ostream& os);
 void renderMemorySyncSection(const yams::daemon::MemorySyncResponse* sync, std::ostream& os);
+
+// Render primary status and then invoke a best-effort optional-section producer.
+void renderDaemonStatusWithOptionalSection(
+    const yams::daemon::StatusResponse& status, const DaemonStatusRenderContext& ctx, bool detailed,
+    std::ostream& os, const std::function<void(std::ostream&)>& optionalSection);
 
 } // namespace yams::cli

@@ -59,6 +59,30 @@ std::string renderDetailed(const StatusResponse& s, const DaemonStatusRenderCont
 
 } // namespace
 
+TEST_CASE("primary status is flushed before optional collection", "[cli][status-order]") {
+    PlainColors plain;
+    for (bool detailed : {false, true}) {
+        struct Buffer : std::stringbuf {
+            bool flushed = false;
+            int sync() override {
+                flushed = true;
+                return std::stringbuf::sync();
+            }
+        } buffer;
+        std::ostream os(&buffer);
+        bool called = false;
+        yams::cli::renderDaemonStatusWithOptionalSection(readyDaemon(), {}, detailed, os,
+                                                         [&](std::ostream& out) {
+                                                             called = true;
+                                                             CHECK_FALSE(buffer.str().empty());
+                                                             CHECK(buffer.flushed);
+                                                             out << "optional-status";
+                                                         });
+        CHECK(called);
+        CHECK(buffer.str().find("optional-status") > 0);
+    }
+}
+
 TEST_CASE("daemon status brief renders the overview from a synthetic response",
           "[cli][daemon][status][catch2]") {
     PlainColors plain;
