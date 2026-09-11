@@ -188,6 +188,9 @@ TEST_CASE("PostIngestQueue bounds the pending KG overflow and accounts drops",
     coordinator.start(1);
     PostIngestQueue queue{nullptr, nullptr, {}, nullptr, nullptr, &coordinator, nullptr, 8};
     queue.testing_detachKgChannel();
+    struct ResetPendingCap {
+        ~ResetPendingCap() { TuneAdvisor::setPostIngestPendingKgMax(0); }
+    } resetPendingCap;
     TuneAdvisor::setPostIngestPendingKgMax(2);
 
     auto& bus = InternalEventBus::instance();
@@ -195,7 +198,12 @@ TEST_CASE("PostIngestQueue bounds the pending KG overflow and accounts drops",
     for (int i = 0; i < 3; ++i) {
         InternalEventBus::KgJob job;
         job.hash = "pending-" + std::to_string(i);
+        auto content = std::make_shared<std::vector<std::byte>>(1024 * 1024);
+        std::weak_ptr<std::vector<std::byte>> retained = content;
+        job.contentBytes = std::move(content);
         queue.testing_enqueueKgJob(std::move(job));
+        // Durable content is reloaded by hash; queued descriptors must not pin raw buffers.
+        CHECK(retained.expired());
     }
     CHECK(queue.testing_pendingKgJobs() == 2);
     CHECK(bus.kgDropped() == droppedBefore + 1);

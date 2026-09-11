@@ -233,6 +233,9 @@ TEST_CASE("SimeonLexicalBackend concept mining honours the corpus byte budget",
         }
         docs.emplace_back("hash_concept_" + std::to_string(i), std::move(text));
     }
+    std::size_t rawCorpusBytes = 0;
+    for (const auto& doc : docs)
+        rawCorpusBytes += doc.second.size();
     auto corpus = makeCorpus(docs);
 
     SimeonLexicalBackend::Config cfg;
@@ -243,6 +246,22 @@ TEST_CASE("SimeonLexicalBackend concept mining honours the corpus byte budget",
 
     SECTION("raw corpus over budget skips concept mining but keeps the index") {
         cfg.max_corpus_bytes = 64ULL * 1024ULL;
+        SimeonLexicalBackend backend(cfg);
+        REQUIRE(backend.buildAsync(corpus.repo).has_value());
+        REQUIRE(waitReady(backend, std::chrono::seconds(30)));
+        CHECK(backend.doc_count() == 120u);
+        CHECK(backend.concept_count() == 0u);
+    }
+    SECTION("exact raw byte boundary still mines concepts") {
+        cfg.max_corpus_bytes = rawCorpusBytes;
+        SimeonLexicalBackend backend(cfg);
+        REQUIRE(backend.buildAsync(corpus.repo).has_value());
+        REQUIRE(waitReady(backend, std::chrono::seconds(30)));
+        CHECK(backend.doc_count() == 120u);
+        CHECK(backend.concept_count() > 0u);
+    }
+    SECTION("one byte below raw corpus skips all concepts") {
+        cfg.max_corpus_bytes = rawCorpusBytes - 1;
         SimeonLexicalBackend backend(cfg);
         REQUIRE(backend.buildAsync(corpus.repo).has_value());
         REQUIRE(waitReady(backend, std::chrono::seconds(30)));

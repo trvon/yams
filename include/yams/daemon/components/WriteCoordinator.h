@@ -171,6 +171,9 @@ using WriteOp =
 struct WriteBatch {
     std::string source;
     std::vector<WriteOp> ops;
+    // Acknowledge this admission only after KG operations have committed successfully.
+    int64_t knowledgeGraphDocumentId = 0;
+    std::string knowledgeGraphToken;
     std::chrono::steady_clock::time_point enqueueTime{std::chrono::steady_clock::now()};
 
     WriteBatch() = default;

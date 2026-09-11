@@ -56,6 +56,7 @@ public:
         int64_t documentDbId = 0;
         std::shared_ptr<std::vector<std::byte>> contentBytes = nullptr;
         bool skipEntityExtraction{false};
+        std::string knowledgeGraphToken;
     };
     Result<void> onDocumentIngested(const DocumentGraphContext& ctx);
     Result<void> onDocumentsIngestedBatch(std::vector<DocumentGraphContext>& contexts);
@@ -68,6 +69,8 @@ public:
         std::string filePath;
         std::string contentUtf8;
         std::string language;
+        int64_t documentDbId = 0;
+        std::string knowledgeGraphToken;
     };
     Result<void> submitEntityExtraction(EntityExtractionJob job);
 
@@ -126,7 +129,8 @@ public:
         bool skipped{false};
     };
     Result<ReferenceReconcileStats>
-    reconcileSymbolReferences(bool dryRun = false, const std::atomic<bool>* cancelRequested = nullptr);
+    reconcileSymbolReferences(bool dryRun = false,
+                              const std::atomic<bool>* cancelRequested = nullptr);
     Result<SemanticTopologyMaintenanceStats>
     maintainSemanticTopologyForDocuments(const std::vector<std::string>& documentHashes,
                                          bool dryRun = false);
@@ -139,6 +143,12 @@ public:
         uint64_t jobsFailed{0};
     };
     EntityStats getEntityStats() const;
+
+#ifdef YAMS_TESTING
+    void testing_setEntityService(std::shared_ptr<EntityGraphService> service) {
+        entityService_ = std::move(service);
+    }
+#endif
 
 private:
     std::string resolveSymbolExtractorIdForLanguage(const std::string& language) const;

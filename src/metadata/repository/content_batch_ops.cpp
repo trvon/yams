@@ -50,6 +50,7 @@ public:
         std::string extractionMethod;
         std::string language;
         std::string metadataTitle;
+        std::string knowledgeGraphToken;
     };
 
     struct PhaseTimings {
@@ -128,6 +129,7 @@ public:
             prepared.extractionMethod = entry.extractionMethod;
             prepared.language = entry.language;
             prepared.metadataTitle = entry.metadataTitle;
+            prepared.knowledgeGraphToken = entry.knowledgeGraphToken;
 
             std::string contentStorage;
             prepared.sanitizedContent = common::ensureValidUtf8(contentView, contentStorage);
@@ -360,6 +362,10 @@ public:
             if (!entry.metadataTitle.empty()) {
                 metadataWrites.emplace_back(entry.documentId, "title",
                                             MetadataValue(entry.metadataTitle));
+            }
+            if (!entry.knowledgeGraphToken.empty()) {
+                metadataWrites.emplace_back(entry.documentId, "yams:kg_enrichment",
+                                            MetadataValue("pending:" + entry.knowledgeGraphToken));
             }
         }
 

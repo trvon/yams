@@ -132,7 +132,8 @@ TEST_CASE("metadata sync payload is independent of local derivation readiness",
     info.repairStatus = RepairStatus::Failed;
     info.repairAttempts = 12;
     info.repairAttemptedAt = std::chrono::sys_seconds{std::chrono::seconds{2000}};
-    REQUIRE(adapter.publish(info, {}).has_value());
+    REQUIRE(adapter.publish(info, {{"yams:kg_enrichment", MetadataValue("pending:local-token")}})
+                .has_value());
     REQUIRE(writer.syncOnce().has_value());
     const auto failedPayload = writer.readCached("document/" + std::string(kDocHash));
     REQUIRE(failedPayload.has_value());
@@ -155,6 +156,8 @@ TEST_CASE("legacy sender completion does not certify receiver indexes",
     record.repairStatus = static_cast<int>(RepairStatus::Completed);
     record.repairAttempts = 8;
     record.repairAttemptedAt = 2000;
+    record.metadata["yams:kg_enrichment"] = {.value = "complete:foreign-token",
+                                             .type = static_cast<int>(MetadataValueType::String)};
     REQUIRE(
         writer.publish("document/" + std::string(kDocHash), bytes(nlohmann::json(record).dump()))
             .has_value());
@@ -167,6 +170,25 @@ TEST_CASE("legacy sender completion does not certify receiver indexes",
     CHECK(imported.value()->repairStatus == RepairStatus::Pending);
     CHECK(imported.value()->repairAttempts == 0);
     CHECK(imported.value()->repairAttemptedAt.time_since_epoch().count() == 0);
+    auto foreign = repo.repository_->getMetadata(imported.value()->id, "yams:kg_enrichment");
+    REQUIRE(foreign.has_value());
+    CHECK_FALSE(foreign.value().has_value());
+    REQUIRE(repo.repository_
+                ->setMetadata(imported.value()->id, "yams:kg_enrichment",
+                              MetadataValue("pending:local-token"))
+                .has_value());
+    record.filePath = "/corpus/remote-update.md";
+    REQUIRE(
+        writer.publish("document/" + std::string(kDocHash), bytes(nlohmann::json(record).dump()))
+            .has_value());
+    REQUIRE(adapter.apply().has_value());
+    auto local = repo.repository_->getMetadata(imported.value()->id, "yams:kg_enrichment");
+    REQUIRE(local.has_value());
+    REQUIRE(local.value().has_value());
+    CHECK(local.value()->value == "pending:local-token");
+    auto unchanged = adapter.apply();
+    REQUIRE(unchanged.has_value());
+    CHECK(unchanged.value() == 0);
 }
 
 TEST_CASE("metadata sync adapter rejects payload identity mismatches before mutation",

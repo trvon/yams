@@ -30,6 +30,18 @@ namespace yams::daemon {
 
 namespace {
 
+Result<void> acknowledgeKnowledgeGraph(const std::shared_ptr<metadata::MetadataRepository>& repo,
+                                       int64_t documentId, const std::string& token) {
+    if (token.empty())
+        return {};
+    if (!repo)
+        return Error{ErrorCode::NotInitialized, "KG completion metadata unavailable"};
+    auto completed = repo->completeKnowledgeGraphEnrichment(documentId, token);
+    if (!completed)
+        return completed.error();
+    return {};
+}
+
 using DirectedNodePair = std::pair<std::int64_t, std::int64_t>;
 
 struct DirectedNodePairHash {
@@ -161,9 +173,12 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
     }
 
     // Skip entity extraction if requested or if no entity service available
-    if (ctx.skipEntityExtraction || !entityService_) {
-        spdlog::debug("[GraphComponent] Entity extraction skipped for {}",
-                      ctx.documentHash.substr(0, 12));
+    if (ctx.skipEntityExtraction) {
+        return acknowledgeKnowledgeGraph(metadataRepo_, ctx.documentDbId, ctx.knowledgeGraphToken);
+    }
+    if (!entityService_) {
+        if (!ctx.knowledgeGraphToken.empty())
+            return Error{ErrorCode::NotInitialized, "EntityGraphService unavailable"};
         return Result<void>();
     }
 
@@ -237,7 +252,7 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
             "[GraphComponent] No language/extractor for {} (ext='{}'), skipping extraction",
             ctx.filePath,
             ctx.filePath.empty() ? "" : std::filesystem::path(ctx.filePath).extension().string());
-        return Result<void>();
+        return acknowledgeKnowledgeGraph(metadataRepo_, ctx.documentDbId, ctx.knowledgeGraphToken);
     }
 
     std::vector<std::byte> bytes;
@@ -249,7 +264,7 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
         if (!contentResult) {
             spdlog::warn("[GraphComponent] Failed to load content for {}: {}",
                          ctx.documentHash.substr(0, 12), contentResult.error().message);
-            return Result<void>(); // Non-fatal, continue
+            return contentResult.error();
         }
         bytes = std::move(contentResult.value());
     }
@@ -263,6 +278,8 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
     job.filePath = ctx.filePath;
     job.contentUtf8 = std::move(contentUtf8);
     job.language = language; // Keep copy for logging
+    job.documentDbId = ctx.documentDbId;
+    job.knowledgeGraphToken = ctx.knowledgeGraphToken;
 
     auto submitResult = submitEntityExtraction(std::move(job));
     if (!submitResult) {
@@ -274,7 +291,7 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
                      language.empty() ? "(none)" : language, hasNlExtractor ? "yes" : "no");
     }
 
-    return Result<void>();
+    return submitResult;
 }
 
 Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphContext>& contexts) {
@@ -289,6 +306,13 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
 
     auto startTime = std::chrono::steady_clock::now();
     std::size_t skipped = 0;
+    std::optional<Error> firstError;
+    auto acknowledge = [&](const DocumentGraphContext& ctx) {
+        auto result =
+            acknowledgeKnowledgeGraph(metadataRepo_, ctx.documentDbId, ctx.knowledgeGraphToken);
+        if (!result && !firstError)
+            firstError = result.error();
+    };
 
     if (!entityService_ || !serviceManager_) {
         return Error{ErrorCode::NotInitialized,
@@ -324,6 +348,7 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
 
     for (auto& ctx : contexts) {
         if (ctx.skipEntityExtraction) {
+            acknowledge(ctx);
             skipped++;
             continue;
         }
@@ -360,6 +385,7 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
             spdlog::debug(
                 "[GraphComponent] No language/extractor for {} (ext='{}'), skipping extraction",
                 ctx.filePath, ext);
+            acknowledge(ctx);
             skipped++;
             continue;
         }
@@ -375,6 +401,8 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
             if (!contentResult) {
                 spdlog::warn("[GraphComponent] Failed to load content for {}: {}",
                              ctx.documentHash.substr(0, 12), contentResult.error().message);
+                if (!firstError)
+                    firstError = contentResult.error();
                 skipped++;
                 continue;
             }
@@ -391,6 +419,8 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
         job.filePath = std::move(ctx.filePath);
         job.contentUtf8 = std::move(contentUtf8);
         job.language = std::move(language);
+        job.documentDbId = ctx.documentDbId;
+        job.knowledgeGraphToken = std::move(ctx.knowledgeGraphToken);
 
         extractionJobs.push_back(std::move(job));
     }
@@ -402,6 +432,8 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
             if (!submitResult) {
                 spdlog::warn("[GraphComponent] Failed to submit extraction for batch job: {}",
                              submitResult.error().message);
+                if (!firstError)
+                    firstError = submitResult.error();
             }
         }
     }
@@ -412,6 +444,8 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
     spdlog::debug("[GraphComponent] Batch ingested {} contexts ({} jobs, {} skipped) in {:.2f}ms",
                   contexts.size(), extractionJobs.size(), skipped, ms);
 
+    if (firstError)
+        return *firstError;
     return Result<void>();
 }
 
@@ -475,10 +509,13 @@ Result<void> GraphComponent::submitEntityExtraction(EntityExtractionJob job) {
 
     const std::string expectedExtractorId = resolveSymbolExtractorIdForLanguage(job.language);
 
-    if (shouldSkipEntityExtraction(kgStore_, job.documentHash, expectedExtractorId)) {
+    // Legacy extractor state is recorded at submission, before deferred KG writes commit.
+    // It cannot certify a token-bearing admission: let that work reach the commit boundary.
+    if (job.knowledgeGraphToken.empty() &&
+        shouldSkipEntityExtraction(kgStore_, job.documentHash, expectedExtractorId)) {
         spdlog::debug("[GraphComponent] Skip entity extraction for {} (already extracted)",
                       job.documentHash.substr(0, 12));
-        return Result<void>();
+        return acknowledgeKnowledgeGraph(metadataRepo_, job.documentDbId, job.knowledgeGraphToken);
     }
 
     EntityGraphService::Job entityJob{
@@ -487,6 +524,8 @@ Result<void> GraphComponent::submitEntityExtraction(EntityExtractionJob job) {
         .contentUtf8 = std::move(job.contentUtf8),
         .language = std::move(job.language),
         .mimeType = {},
+        .documentDbId = job.documentDbId,
+        .knowledgeGraphToken = std::move(job.knowledgeGraphToken),
     };
 
     return entityService_->submitExtraction(std::move(entityJob));
@@ -910,8 +949,7 @@ GraphComponent::repairGraph(bool dryRun, RepairProgressFn progress,
         auto orphanResult = kgStore_->deleteOrphanedNodes();
         if (!orphanResult) {
             ++stats.errors;
-            stats.issues.push_back("orphaned node cleanup failed: " +
-                                   orphanResult.error().message);
+            stats.issues.push_back("orphaned node cleanup failed: " + orphanResult.error().message);
         } else if (orphanResult.value() > 0) {
             stats.issues.push_back("removed " + std::to_string(orphanResult.value()) +
                                    " orphaned KG nodes");
@@ -928,11 +966,11 @@ GraphComponent::repairGraph(bool dryRun, RepairProgressFn progress,
         stats.referencesLinked += rc.referencesLinked;
         stats.referencesAmbiguous += rc.referencesAmbiguous;
         stats.edgesCreated += rc.referencesLinked;
-        stats.issues.push_back(
-            "reconciled " + std::to_string(rc.referencesLinked) + " symbol references (" +
-            std::to_string(rc.referencesAmbiguous) + " ambiguous, " +
-            std::to_string(rc.referencesUnresolved) + " unresolved, " +
-            std::to_string(rc.referencesScanned) + " scanned)");
+        stats.issues.push_back("reconciled " + std::to_string(rc.referencesLinked) +
+                               " symbol references (" + std::to_string(rc.referencesAmbiguous) +
+                               " ambiguous, " + std::to_string(rc.referencesUnresolved) +
+                               " unresolved, " + std::to_string(rc.referencesScanned) +
+                               " scanned)");
     }
 
     if (dryRun) {
@@ -995,8 +1033,7 @@ GraphComponent::reconcileSymbolReferences(bool dryRun, const std::atomic<bool>* 
                 simple = surface.substr(pos + 2);
             }
 
-            auto candRes =
-                kgStore_->querySymbolMetadata(std::nullopt, std::nullopt, simple, 50, 0);
+            auto candRes = kgStore_->querySymbolMetadata(std::nullopt, std::nullopt, simple, 50, 0);
             if (!candRes) {
                 return candRes.error();
             }
@@ -1033,8 +1070,7 @@ GraphComponent::reconcileSymbolReferences(bool dryRun, const std::atomic<bool>* 
             // Idempotent: only count/create a link when this placeholder is not already
             // resolved, so counts converge to 0 on a clean graph (addEdgesUnique dedupes the
             // edge but cannot report whether a row was new).
-            auto existing =
-                kgStore_->getEdgesFrom(ref.id, std::string_view("resolves_to"), 1, 0);
+            auto existing = kgStore_->getEdgesFrom(ref.id, std::string_view("resolves_to"), 1, 0);
             if (!existing) {
                 return existing.error();
             }

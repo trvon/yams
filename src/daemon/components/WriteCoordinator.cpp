@@ -508,6 +508,20 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
         }
     }
 
+    // Release the KG write lease before acquiring a metadata connection (including size-one pools).
+    if (hasKgOps && kg_) {
+        for (const auto& batch : batches) {
+            if (batch->knowledgeGraphToken.empty())
+                continue;
+            if (!meta_)
+                return Error{ErrorCode::NotInitialized, "KG completion metadata unavailable"};
+            auto completed = meta_->completeKnowledgeGraphEnrichment(
+                batch->knowledgeGraphDocumentId, batch->knowledgeGraphToken);
+            if (!completed)
+                return completed.error();
+        }
+    }
+
     if (hasMetaOps && meta_) {
         YAMS_ZONE_SCOPED_N("WriteCoordinator::applyMetadata");
         struct RepairStatusGroup {
