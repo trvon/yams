@@ -596,14 +596,57 @@ TEST_CASE("MetadataRepository: session and tag helpers round-trip",
     REQUIRE((docCTags.has_value()));
     CHECK((docCTags.value() == std::vector<std::string>{"alpha", "beta"}));
 
-    auto batchTags = fix.repository_->batchGetDocumentTags(
-        std::vector<int64_t>{cId.value(), dId.value(), 999999});
+    std::vector<int64_t> tagIds{cId.value(), dId.value(), 999999};
+    SECTION("legacy tag values are retained") {}
+    SECTION("bounded queries deduplicate IDs across chunks") {
+        REQUIRE(fix.pool_
+                    ->withConnection([](Database& db) -> Result<void> {
+                        sqlite3_limit(db.rawHandle(), SQLITE_LIMIT_VARIABLE_NUMBER, 16);
+                        return {};
+                    })
+                    .has_value());
+        for (int64_t i = 1; i < 40; ++i)
+            tagIds.push_back(999999 + i);
+        tagIds.push_back(cId.value());
+        tagIds.push_back(dId.value());
+    }
+    auto batchTags = fix.repository_->batchGetDocumentTags(tagIds);
     REQUIRE((batchTags.has_value()));
     REQUIRE((batchTags.value().contains(cId.value())));
     REQUIRE((batchTags.value().contains(dId.value())));
     CHECK((batchTags.value().at(cId.value()) == std::vector<std::string>{"alpha", "beta"}));
-    CHECK((batchTags.value().at(dId.value()) == std::vector<std::string>{"alpha"}));
+    CHECK((batchTags.value().at(dId.value()) == std::vector<std::string>{"alpha", "legacy"}));
     CHECK_FALSE(batchTags.value().contains(999999));
+    std::vector<std::string> lookupHashes{docC.sha256Hash, docD.sha256Hash, docC.sha256Hash};
+    for (int i = 0; i < 40; ++i)
+        lookupHashes.push_back("missing-batch-hash-" + std::to_string(i));
+    auto hydrated = fix.repository_->batchGetDocumentsByHash(lookupHashes);
+    REQUIRE(hydrated.has_value());
+    REQUIRE(hydrated.value().size() == 2);
+    CHECK(hydrated.value().at(docC.sha256Hash).id == cId.value());
+    CHECK(hydrated.value().at(docD.sha256Hash).id == dId.value());
+
+    // Failed preparation must release the read savepoint and leave the connection reusable.
+    int previousSqlLimit = 0;
+    REQUIRE(fix.pool_
+                ->withConnection([&](Database& db) -> Result<void> {
+                    CHECK(sqlite3_get_autocommit(db.rawHandle()) == 1);
+                    previousSqlLimit = sqlite3_limit(db.rawHandle(), SQLITE_LIMIT_SQL_LENGTH, 64);
+                    return {};
+                })
+                .has_value());
+    auto prepareFailure = fix.repository_->batchGetDocumentsByHash(lookupHashes);
+    REQUIRE(fix.pool_
+                ->withConnection([&](Database& db) -> Result<void> {
+                    sqlite3_limit(db.rawHandle(), SQLITE_LIMIT_SQL_LENGTH, previousSqlLimit);
+                    CHECK(sqlite3_get_autocommit(db.rawHandle()) == 1);
+                    return {};
+                })
+                .has_value());
+    CHECK_FALSE(prepareFailure.has_value());
+    auto retryHydration = fix.repository_->batchGetDocumentsByHash(lookupHashes);
+    REQUIRE(retryHydration.has_value());
+    CHECK(retryHydration.value().size() == 2);
 
     auto allTags = fix.repository_->getAllTags();
     REQUIRE((allTags.has_value()));

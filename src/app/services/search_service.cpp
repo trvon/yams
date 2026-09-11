@@ -571,12 +571,11 @@ retryMetadataOp(Fn&& fn, std::size_t maxAttempts = 4,
     co_return attempt;
 }
 
-// Tags live in metadata as "tag:<name>" keys; MetadataRepository::batchGetDocumentTags returns
-// the names for many documents in one statement. Loading them once per request replaces the
-// getAllMetadata() round trip (with retries) that used to run for every candidate document.
+// Batch lookup supports normalized tag:<name> keys and legacy tag values, using bounded
+// queries. A lookup failure must be reported, not interpreted as an empty tag set.
 using TagsByDocument = std::unordered_map<int64_t, std::vector<std::string>>;
 
-static boost::asio::awaitable<TagsByDocument> loadTagsForDocuments(
+static boost::asio::awaitable<Result<TagsByDocument>> loadTagsForDocuments(
     metadata::MetadataRepository* repo, const std::vector<metadata::DocumentInfo>& docs,
     const std::vector<std::string>& requiredTags, MetadataTelemetry* telemetry = nullptr) {
     TagsByDocument tagsByDoc;
@@ -593,10 +592,7 @@ static boost::asio::awaitable<TagsByDocument> loadTagsForDocuments(
     auto loaded = co_await retryMetadataOp([&]() { return repo->batchGetDocumentTags(ids); }, 4,
                                            std::chrono::milliseconds(25), telemetry);
     if (!loaded) {
-        // Every document then fails the tag filter, as it did when its own lookup failed.
-        spdlog::debug("SearchService: tag lookup failed for {} docs: {}", ids.size(),
-                      loaded.error().message);
-        co_return tagsByDoc;
+        co_return loaded.error();
     }
     co_return std::move(loaded.value());
 }
@@ -881,7 +877,12 @@ public:
                 resp.queryInfo = "path/name contains match";
                 co_return Result<SearchResponse>(applyWorkspaceScope(std::move(resp)));
             }
-            // Fall through to standard paths on error.
+            // Required tag filtering could not be completed. Do not hide that failure
+            // behind a fallback search that can report an empty successful result.
+            if (!normalizedReq.tags.empty()) {
+                co_return pathResult.error();
+            }
+            // Untagged path heuristics may still fall back to the standard search paths.
         }
 
         if (type == "hybrid" || type == "semantic") {
@@ -1556,8 +1557,11 @@ private:
         }
 
         // Apply additional filters and shape results
-        const auto tagsByDoc =
+        auto loadedTags =
             co_await loadTagsForDocuments(ctx_.metadataRepo.get(), docs, req.tags, telemetry);
+        if (!loadedTags)
+            co_return loadedTags.error();
+        const auto& tagsByDoc = loadedTags.value();
         auto push_path = [&](const metadata::DocumentInfo& d) -> boost::asio::awaitable<void> {
             if (!req.extension.empty()) {
                 if (d.fileExtension != req.extension && d.fileExtension != ("." + req.extension))
@@ -1683,8 +1687,11 @@ private:
             return filePath.find(rawPattern) != std::string::npos;
         };
 
-        const auto tagsByDoc =
+        auto loadedTags =
             co_await loadTagsForDocuments(ctx_.metadataRepo.get(), docs, req.tags, telemetry);
+        if (!loadedTags)
+            co_return loadedTags.error();
+        const auto& tagsByDoc = loadedTags.value();
         for (const auto& doc : docs) {
             // Optional path and tag filters for CLI parity
             bool pathOk = effectivePathPatterns.empty();
