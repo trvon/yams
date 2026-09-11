@@ -84,11 +84,14 @@ public:
     Result<std::unordered_map<int64_t, std::vector<std::string>>>
     batchGetDocumentTags(std::span<const int64_t> documentIds) override {
         ++batchTagCalls;
+        if (failTagLookup)
+            return Error{ErrorCode::InternalError, "injected tag lookup failure"};
         return MetadataRepository::batchGetDocumentTags(documentIds);
     }
 
     std::atomic<int> allMetadataCalls{0};
     std::atomic<int> batchTagCalls{0};
+    bool failTagLookup{false};
 };
 
 class SlowSnippetMetadataRepository : public MetadataRepository {
@@ -491,7 +494,7 @@ TEST_CASE("SearchService: tag filtering loads tags once per request, not per doc
           "[unit][services][search][tags]") {
     SearchServiceFixture f;
     REQUIRE(f.testHashes.size() >= 3);
-    f.setMetadataForHash(f.testHashes[0], "tag:tutorial", "1");
+    f.setMetadataForHash(f.testHashes[0], "tag", "tutorial");
     f.setMetadataForHash(f.testHashes[1], "tag:example", "1");
     f.setMetadataForHash(f.testHashes[1], "tag:tutorial", "1");
 
@@ -500,6 +503,19 @@ TEST_CASE("SearchService: tag filtering loads tags once per request, not per doc
     f.appContext.metadataRepo = counting;
     f.searchService = makeSearchService(f.appContext);
 
+    SECTION("tag lookup failure is reported rather than an empty successful search") {
+        counting->failTagLookup = true;
+        for (bool byHash : {true, false}) {
+            auto request = f.createBasicSearchRequest(byHash ? "" : "*.txt");
+            if (byHash)
+                request.hash = f.testHashes[1].substr(0, 12);
+            request.tags = {"tutorial"};
+            auto result = runAwait(f.searchService->search(request));
+            CHECK_FALSE(result.has_value());
+            if (!result)
+                CHECK(result.error().message == "injected tag lookup failure");
+        }
+    }
     SECTION("hash prefix search") {
         auto request = f.createBasicSearchRequest("");
         request.hash = f.testHashes[1].substr(0, 12);
