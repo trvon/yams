@@ -2187,6 +2187,19 @@ TEST_CASE("ConfigResolver applies the typed semantic graph policy",
         CHECK_FALSE(config.embeddingService.semanticGraph.useHnsw);
     }
 
+    SECTION("top-K has a practical upper bound") {
+        for (const auto& value : {std::string("257"), std::to_string(SIZE_MAX)}) {
+            config.embeddingService.semanticGraph = {};
+            sections["embeddings.semantic_graph"] = {{"top_k", value}, {"use_hnsw", "false"}};
+            CHECK_FALSE(ConfigResolver::applyEmbeddingSemanticGraph(sections, config));
+            CHECK(config.embeddingService.semanticGraph.topK == 8);
+            CHECK(config.embeddingService.semanticGraph.useHnsw);
+        }
+        sections["embeddings.semantic_graph"] = {{"top_k", "256"}};
+        REQUIRE(ConfigResolver::applyEmbeddingSemanticGraph(sections, config));
+        CHECK(config.embeddingService.semanticGraph.topK == 256);
+    }
+
     SECTION("invalid values are rejected without touching the policy") {
         sections["embeddings.semantic_graph"] = {{"top_k", "0"}};
         CHECK_FALSE(ConfigResolver::applyEmbeddingSemanticGraph(sections, config));

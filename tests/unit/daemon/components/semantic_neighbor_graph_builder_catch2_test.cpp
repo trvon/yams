@@ -104,6 +104,33 @@ struct Fixture {
 
 } // namespace
 
+TEST_CASE("semantic edge capacity checks multiplication without allocating",
+          "[daemon][semantic-graph][bounds]") {
+    using Builder = yams::daemon::SemanticNeighborGraphBuilder;
+    CHECK(Builder::checkedEdgeCapacity(0, 8) == std::optional<std::size_t>{0});
+    CHECK(Builder::checkedEdgeCapacity(1, 256) == std::optional<std::size_t>{512});
+    CHECK_FALSE(Builder::checkedEdgeCapacity(1, 0));
+    CHECK_FALSE(Builder::checkedEdgeCapacity(1, 257));
+    CHECK_FALSE(Builder::checkedEdgeCapacity(SIZE_MAX, 256));
+    const auto largest = std::vector<yams::metadata::KGEdge>{}.max_size() / 512;
+    REQUIRE(Builder::checkedEdgeCapacity(largest, 256));
+    CHECK(*Builder::checkedEdgeCapacity(largest, 256) == largest * 512);
+    CHECK_FALSE(Builder::checkedEdgeCapacity(largest + 1, 256));
+}
+
+TEST_CASE("semantic neighbor builder rejects invalid direct top-K before work",
+          "[daemon][semantic-graph][bounds]") {
+    for (std::size_t topK : {std::size_t{0}, std::size_t{257}, SIZE_MAX}) {
+        yams::daemon::SemanticNeighborGraphConfig config;
+        config.topK = topK;
+        yams::daemon::SemanticNeighborGraphBuilder builder(config);
+        builder.update({}, {}, "test", {}, true);
+        CHECK(builder.updateErrors() == 1);
+        CHECK(builder.docsProcessed() == 0);
+        CHECK(builder.edgesCreated() == 0);
+    }
+}
+
 TEST_CASE("semantic neighbor builder emits top-K forward and reverse edges above the threshold",
           "[daemon][components][semantic-graph][catch2]") {
     Fixture fx;

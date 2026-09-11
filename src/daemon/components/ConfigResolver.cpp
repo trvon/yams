@@ -1787,8 +1787,9 @@ bool ConfigResolver::applyEmbeddingSemanticGraph(const ConfigSections& sections,
     auto policy = config.embeddingService.semanticGraph;
     if (const auto it = section->second.find("top_k"); it != section->second.end()) {
         const auto parsed = parseUnsignedIntegral<std::size_t>(it->second);
-        if (!parsed || *parsed == 0) {
-            spdlog::warn("Config: embeddings.semantic_graph.top_k must be a positive integer");
+        if (!parsed || !SemanticNeighborGraphConfig::validTopK(*parsed)) {
+            spdlog::warn("Config: embeddings.semantic_graph.top_k must be within [1, {}]",
+                         SemanticNeighborGraphConfig::kMaxTopK);
             return false;
         }
         policy.topK = *parsed;

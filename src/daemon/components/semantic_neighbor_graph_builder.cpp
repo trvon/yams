@@ -11,12 +11,24 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <unordered_set>
 
 namespace yams::daemon {
 
 SemanticNeighborGraphBuilder::SemanticNeighborGraphBuilder(SemanticNeighborGraphConfig config)
     : cfg_(std::move(config)) {}
+
+std::optional<std::size_t>
+SemanticNeighborGraphBuilder::checkedEdgeCapacity(std::size_t sources, std::size_t topK) noexcept {
+    if (!SemanticNeighborGraphConfig::validTopK(topK))
+        return std::nullopt;
+    const auto edgesPerSource = topK * 2;
+    const auto maximum = std::vector<metadata::KGEdge>{}.max_size();
+    if (sources > maximum / edgesPerSource)
+        return std::nullopt;
+    return sources * edgesPerSource;
+}
 
 void SemanticNeighborGraphBuilder::setEdgeSink(EdgeSink sink) {
     edgeSink_ = std::move(sink);
@@ -53,11 +65,17 @@ void SemanticNeighborGraphBuilder::update(
     const std::shared_ptr<metadata::KnowledgeGraphStore>& kgStore,
     const std::shared_ptr<yams::vector::VectorDatabase>& vdb, const std::string& modelName,
     const std::vector<std::pair<std::string, std::string>>& sourceDocuments, bool sourceAllCorpus) {
+    if (!SemanticNeighborGraphConfig::validTopK(cfg_.topK) ||
+        sourceDocuments.size() > std::numeric_limits<std::size_t>::max() / 8) {
+        semanticUpdateErrors_.fetch_add(1, std::memory_order_relaxed);
+        spdlog::warn("Semantic graph update rejected: invalid top-K or source capacity");
+        return;
+    }
     if (!kgStore || !vdb || (!sourceAllCorpus && sourceDocuments.empty())) {
         return;
     }
 
-    const std::size_t semanticTopK = std::max<std::size_t>(1, cfg_.topK);
+    const std::size_t semanticTopK = cfg_.topK;
     const std::optional<float> explicitSemanticThreshold = cfg_.similarityThreshold;
 
     const auto inverseNorm = [](const std::vector<float>& v) {
@@ -172,6 +190,11 @@ void SemanticNeighborGraphBuilder::update(
             return;
         }
 
+        const auto edgeCapacity = checkedEdgeCapacity(sources.size(), semanticTopK);
+        if (!edgeCapacity) {
+            semanticUpdateErrors_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
         std::vector<CorpusVector> cachedCorpus;
         {
             const auto tCorpusSnapshot = std::chrono::steady_clock::now();
@@ -203,7 +226,8 @@ void SemanticNeighborGraphBuilder::update(
         const bool useHnswOverride = cfg_.useHnsw;
         const auto candidateCorpusSize = std::max<std::size_t>(cachedCorpus.size(), sources.size());
         constexpr std::size_t kExactPairBudget = 250'000;
-        const bool exactMicroBatch = sources.size() * candidateCorpusSize <= kExactPairBudget;
+        const bool exactMicroBatch =
+            candidateCorpusSize == 0 || sources.size() <= kExactPairBudget / candidateCorpusSize;
         const bool useHnsw = useHnswOverride && !exactMicroBatch;
 
         const auto tPairScoring = std::chrono::steady_clock::now();
@@ -389,7 +413,7 @@ void SemanticNeighborGraphBuilder::update(
         float minEffectiveThreshold = 1.0f;
         float maxEffectiveThreshold = 0.0f;
         std::vector<metadata::KGEdge> semanticEdges;
-        semanticEdges.reserve(sources.size() * semanticTopK * 2);
+        semanticEdges.reserve(*edgeCapacity);
         const auto nowSecs = std::chrono::duration_cast<std::chrono::seconds>(
                                  std::chrono::system_clock::now().time_since_epoch())
                                  .count();
@@ -571,6 +595,11 @@ void SemanticNeighborGraphBuilder::update(
         return;
     }
 
+    const auto edgeCapacity = checkedEdgeCapacity(sources.size(), semanticTopK);
+    if (!edgeCapacity || corpus.size() > std::numeric_limits<std::size_t>::max() - sources.size()) {
+        semanticUpdateErrors_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     std::unordered_map<std::string, std::optional<std::int64_t>> nodeIdCache;
     nodeIdCache.reserve(corpus.size() + sources.size());
     auto resolveDocNodeId = [&](const std::string& hash) -> std::optional<std::int64_t> {
@@ -610,7 +639,7 @@ void SemanticNeighborGraphBuilder::update(
     float maxEffectiveThreshold = 0.0f;
 
     std::vector<metadata::KGEdge> semanticEdges;
-    semanticEdges.reserve(sources.size() * semanticTopK * 2);
+    semanticEdges.reserve(*edgeCapacity);
     const auto nowSecs = std::chrono::duration_cast<std::chrono::seconds>(
                              std::chrono::system_clock::now().time_since_epoch())
                              .count();

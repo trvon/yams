@@ -49,6 +49,10 @@ public:
 
     explicit SemanticNeighborGraphBuilder(SemanticNeighborGraphConfig config = {});
 
+    // Checked forward/reverse edge capacity, including the vector's representable size limit.
+    static std::optional<std::size_t> checkedEdgeCapacity(std::size_t sources,
+                                                          std::size_t topK) noexcept;
+
     void setEdgeSink(EdgeSink sink);
     void setPhaseTimer(PhaseTimer timer);
     const SemanticNeighborGraphConfig& config() const noexcept { return cfg_; }

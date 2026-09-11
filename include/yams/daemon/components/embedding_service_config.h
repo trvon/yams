@@ -14,6 +14,11 @@ namespace yams::daemon {
 // [embeddings.semantic_graph] policy for the semantic_neighbor KG layer (formerly the
 // YAMS_GRAPH_SEMANTIC_TOPK / _THRESHOLD / _USE_HNSW environment overlays).
 struct SemanticNeighborGraphConfig {
+    // At most 512 directed edges and 1024 ANN candidates per source; not a total-memory bound.
+    static constexpr std::size_t kMaxTopK = 256;
+    static constexpr bool validTopK(std::size_t value) noexcept {
+        return value >= 1 && value <= kMaxTopK;
+    }
     // Neighbors kept per source document. 4 left most docs at degree 0, so graph expansion at
     // search time fell back to medoid anchors; 8 stays sparse enough for component purity.
     std::size_t topK{8};
