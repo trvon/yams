@@ -6,6 +6,7 @@
 #include <yams/core/types.h>
 #include <yams/memory_sync/memory_sync_service.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -17,6 +18,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace yams::api {
