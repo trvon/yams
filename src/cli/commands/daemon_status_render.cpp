@@ -186,6 +186,20 @@ std::string repairOperationLabel(uint64_t code) {
 
 } // namespace
 
+void renderDaemonStatusWithOptionalSection(
+    const yams::daemon::StatusResponse& status, const DaemonStatusRenderContext& ctx, bool detailed,
+    std::ostream& os, const std::function<void(std::ostream&)>& optionalSection) {
+    auto primaryContext = ctx;
+    primaryContext.memorySync = nullptr;
+    if (detailed)
+        renderDaemonStatusDetailed(status, primaryContext, os);
+    else
+        renderDaemonStatusBrief(status, primaryContext, os);
+    os.flush(); // Make useful status visible before a best-effort RPC can wait on its deadline.
+    if (optionalSection)
+        optionalSection(os);
+}
+
 void renderMemorySyncSection(const yams::daemon::MemorySyncResponse* sync, std::ostream& os) {
     if (sync == nullptr || !sync->started) {
         return;

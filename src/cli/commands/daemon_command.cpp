@@ -1787,9 +1787,11 @@ private:
             DaemonStatusRenderContext ctx;
             ctx.configuredDataDir = expectedDataDir();
             ctx.explicitCustomSocket = explicitCustomSocket;
-            const auto memorySync = fetchMemorySyncStatus(cfg);
-            ctx.memorySync = memorySync ? &*memorySync : nullptr;
-            renderDaemonStatusBrief(sres.value(), ctx, std::cout);
+            renderDaemonStatusWithOptionalSection(
+                sres.value(), ctx, false, std::cout, [&](std::ostream& os) {
+                    const auto memorySync = fetchMemorySyncStatus(cfg);
+                    renderMemorySyncSection(memorySync ? &*memorySync : nullptr, os);
+                });
             return;
         }
 
@@ -1814,9 +1816,11 @@ private:
                 DaemonStatusRenderContext ctx;
                 ctx.configuredDataDir = expectedDataDir();
                 ctx.explicitCustomSocket = explicitCustomSocket;
-                const auto memorySync = fetchMemorySyncStatus(cfg);
-                ctx.memorySync = memorySync ? &*memorySync : nullptr;
-                renderDaemonStatusDetailed(statusResult.value(), ctx, std::cout);
+                renderDaemonStatusWithOptionalSection(
+                    statusResult.value(), ctx, true, std::cout, [&](std::ostream& os) {
+                        const auto memorySync = fetchMemorySyncStatus(cfg);
+                        renderMemorySyncSection(memorySync ? &*memorySync : nullptr, os);
+                    });
                 return;
             }
             lastErr = statusResult.error();
