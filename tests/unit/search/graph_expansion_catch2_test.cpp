@@ -207,7 +207,26 @@ TEST_CASE("Graph expansion parses edge anchor properties once per distinct strin
     CHECK(edgeAnchorHints(std::nullopt).scope.empty());
     CHECK(edgeAnchorParseCount() == mid);
 
+    const auto retained = edgeAnchorHints(anchored);
+    for (int i = 0; i < 1025; ++i) {
+        auto hints = edgeAnchorHints(std::string{"{\"region\":\"title\",\"nonce\":"} +
+                                     std::to_string(i) + "}");
+        CHECK(hints.region == "title");
+    }
+    CHECK(retained.region == "body_claim");
+    CHECK(edgeAnchorHints(anchored).scope == "body_segment");
+
     // Malformed JSON degrades to no hints instead of throwing.
     const std::optional<std::string> broken{"{region: nope"};
     CHECK(edgeAnchorHints(broken).region.empty());
+    CHECK(edgeAnchorHints(std::string{R"({"reg\u0069on":"title"})"}).region == "title");
+    // A wrong-type second field must not leave the first field committed in the cache.
+    for (const std::string invalid :
+         {R"({"region":"body_claim","scope":42})", R"({"region":false,"scope":"title"})"}) {
+        for (int repeat = 0; repeat < 2; ++repeat) {
+            auto hints = edgeAnchorHints(invalid);
+            CHECK(hints.region.empty());
+            CHECK(hints.scope.empty());
+        }
+    }
 }

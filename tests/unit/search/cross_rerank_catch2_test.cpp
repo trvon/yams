@@ -1,3 +1,4 @@
+#include <sqlite3.h>
 #include <catch2/catch_test_macros.hpp>
 
 #include "src/search/cross_rerank_internal.h"
@@ -163,9 +164,12 @@ public:
     batchGetContentPreview(const std::vector<int64_t>& documentIds, int maxChars,
                            int maxDocs = 0) override {
         ++previewBatchCalls;
+        if (failPreview)
+            return yams::Error{ErrorCode::InternalError, "injected preview failure"};
         return MetadataRepository::batchGetContentPreview(documentIds, maxChars, maxDocs);
     }
 
+    bool failPreview = false;
     std::atomic<int> fullContentCalls{0};
     std::atomic<int> previewBatchCalls{0};
 };
@@ -188,6 +192,7 @@ TEST_CASE("applyCrossRerank fetches window text as one preview batch", "[search]
         db.close();
     }
     yams::metadata::ConnectionPoolConfig poolCfg;
+    poolCfg.minConnections = 1;
     poolCfg.maxConnections = 1;
     auto pool = std::make_shared<yams::metadata::ConnectionPool>(dbPath, poolCfg);
     REQUIRE(pool->initialize().has_value());
@@ -242,6 +247,49 @@ TEST_CASE("applyCrossRerank fetches window text as one preview batch", "[search]
     // One bounded preview query for the window instead of a full-content read per result.
     CHECK(repo->previewBatchCalls.load() == 1);
     CHECK(repo->fullContentCalls.load() == 0);
+
+    {
+        int previousLimit = 0;
+        REQUIRE(pool->withConnection([&](yams::metadata::Database& db) -> Result<void> {
+            previousLimit = sqlite3_limit(db.rawHandle(), SQLITE_LIMIT_VARIABLE_NUMBER, 3);
+            return {};
+        }));
+        struct RestoreLimit {
+            yams::metadata::ConnectionPool& pool;
+            int limit;
+            ~RestoreLimit() {
+                (void)pool.withConnection([&](yams::metadata::Database& db) -> Result<void> {
+                    sqlite3_limit(db.rawHandle(), SQLITE_LIMIT_VARIABLE_NUMBER, limit);
+                    return {};
+                });
+            }
+        } restore{*pool, previousLimit};
+        seenTexts.clear();
+        const auto beforeLimitFailure = results;
+        auto limited = applyCrossRerank(results, "q", cfg, 3, scorer, repo);
+        CHECK_FALSE(limited.attempted);
+        CHECK(limited.status == CrossRerankOutcome::Status::Failed);
+        CHECK_FALSE(limited.errorMessage.empty());
+        CHECK(seenTexts.empty());
+        for (size_t i = 0; i < results.size(); ++i) {
+            CHECK(results[i].document.sha256Hash == beforeLimitFailure[i].document.sha256Hash);
+            CHECK(results[i].score == beforeLimitFailure[i].score);
+        }
+    }
+
+    repo->failPreview = true;
+    seenTexts.clear();
+    const auto beforeFailure = results;
+    auto failed = applyCrossRerank(results, "q", cfg, 3, scorer, repo);
+    CHECK_FALSE(failed.attempted);
+    CHECK(failed.status == CrossRerankOutcome::Status::Failed);
+    CHECK(failed.errorMessage == "injected preview failure");
+    CHECK(seenTexts.empty());
+    REQUIRE(results.size() == beforeFailure.size());
+    for (size_t i = 0; i < results.size(); ++i) {
+        CHECK(results[i].document.sha256Hash == beforeFailure[i].document.sha256Hash);
+        CHECK(results[i].score == beforeFailure[i].score);
+    }
 
     repo.reset();
     pool->shutdown();
