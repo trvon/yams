@@ -26,7 +26,9 @@ EdgeAnchorHints edgeAnchorHints(const std::optional<std::string>& properties) {
         return {};
     }
     const std::string& text = *properties;
-    if (text.find("region") == std::string::npos && text.find("scope") == std::string::npos) {
+    // Escaped JSON keys may decode to region/scope without containing the literal spelling.
+    if (text.find("region") == std::string::npos && text.find("scope") == std::string::npos &&
+        text.find('\\') == std::string::npos) {
         return {};
     }
     thread_local std::unordered_map<std::string, EdgeAnchorHints> cache;
@@ -40,8 +42,10 @@ EdgeAnchorHints edgeAnchorHints(const std::optional<std::string>& properties) {
     g_edgeAnchorParses.fetch_add(1, std::memory_order_relaxed);
     try {
         auto props = nlohmann::json::parse(text);
-        hints.region = props.value("region", "");
-        hints.scope = props.value("scope", "");
+        EdgeAnchorHints parsed;
+        parsed.region = props.value("region", "");
+        parsed.scope = props.value("scope", "");
+        hints = std::move(parsed);
     } catch (...) {
     }
     return cache.emplace(text, std::move(hints)).first->second;

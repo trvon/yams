@@ -72,10 +72,14 @@ applyCrossRerank(std::vector<SearchResult>& results, const std::string& query,
             }
         }
         if (!ids.empty()) {
-            if (auto fetched = metadataRepo->batchGetContentPreview(
-                    ids, static_cast<int>(std::min<std::size_t>(textLimit, INT_MAX)))) {
-                previews = std::move(fetched.value());
+            auto fetched = metadataRepo->batchGetContentPreview(
+                ids, static_cast<int>(std::min<std::size_t>(textLimit, INT_MAX)));
+            if (!fetched) {
+                outcome.status = CrossRerankOutcome::Status::Failed;
+                outcome.errorMessage = fetched.error().message;
+                return outcome;
             }
+            previews = std::move(fetched.value());
         }
     }
     std::vector<std::string> rerankTexts;
