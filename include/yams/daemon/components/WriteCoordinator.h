@@ -159,6 +159,12 @@ struct InsertRelationshipOp {
 struct AddSymSpellTermsOp {
     std::vector<std::string> terms;
 };
+struct AcknowledgeKnowledgeGraphOp {
+    std::int64_t documentId{0};
+    std::string token;
+    std::shared_ptr<KnowledgeGraphCompletion> completion;
+    KnowledgeGraphCompletionStage stage{KnowledgeGraphCompletionStage::TitleNl};
+};
 
 using WriteOp =
     std::variant<UpsertNodesOp, AddEdgesOp, AddDeferredEdgesOp, AddAliasesOp, AddDocEntitiesOp,
@@ -168,7 +174,8 @@ using WriteOp =
                  UpdateRepairStatusOp, UpsertTreeSnapshotOp, SetMetadataBatchOp,
                  UpdateExtractionStatusOp, UpdateEmbeddingStatusByHashOp,
                  UpdateEmbeddingStatusByHashesOp, CompleteDocumentEmbeddingsByHashesOp,
-                 UpsertSymbolExtractionStateOp, InsertRelationshipOp, AddSymSpellTermsOp>;
+                 UpsertSymbolExtractionStateOp, InsertRelationshipOp, AddSymSpellTermsOp,
+                 AcknowledgeKnowledgeGraphOp>;
 
 struct WriteBatch {
     std::string source;
@@ -342,6 +349,7 @@ private:
     Result<void> applyMetadataOp(UpsertSymbolExtractionStateOp& op);
     Result<void> applyMetadataOp(InsertRelationshipOp& op);
     Result<void> applyMetadataOp(AddSymSpellTermsOp& op);
+    Result<void> applyMetadataOp(AcknowledgeKnowledgeGraphOp& op);
 
     void recordSourceQueueWait(const std::string& source, std::uint64_t queueWaitMs);
     void recordSourceApply(const std::string& source, std::uint64_t opCount, std::uint64_t applyMs,

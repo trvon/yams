@@ -562,6 +562,68 @@ TEST_CASE_METHOD(ServiceDerivationFixture,
 }
 
 TEST_CASE_METHOD(ServiceDerivationFixture,
+                 "EmbeddingService pre-admission provider failure persists terminal repair status",
+                 "[daemon][embedding][service-derivation][pre-admission-failure]") {
+    SECTION("without an existing derivation") {
+        auto states = repo->batchGetDocumentEmbeddingDerivations({hash});
+        REQUIRE(states.has_value());
+        REQUIRE_FALSE(states.value().contains(hash));
+    }
+    SECTION("with a current pending derivation") {
+        auto token = repo->beginDocumentEmbeddingDerivation(hash, "pending-recipe");
+        REQUIRE(token.has_value());
+        auto states = repo->batchGetDocumentEmbeddingDerivations({hash});
+        REQUIRE(states.has_value());
+        REQUIRE(states.value().contains(hash));
+        REQUIRE_FALSE(states.value().at(hash).completed);
+    }
+
+    REQUIRE(repo->updateDocumentRepairStatus(hash, metadata::RepairStatus::Processing).has_value());
+    service->setProviders([]() -> std::shared_ptr<IModelProvider> { return {}; },
+                          [] { return "test-model"; }, [this] { return vectors; });
+
+    process();
+
+    auto document = repo->getDocumentByHash(hash);
+    REQUIRE(document.has_value());
+    REQUIRE(document.value().has_value());
+    CHECK(document.value()->repairStatus == metadata::RepairStatus::Failed);
+}
+
+TEST_CASE_METHOD(ServiceDerivationFixture,
+                 "EmbeddingService pre-admission failure preserves completed attempts",
+                 "[daemon][embedding][service-derivation][pre-admission-failure]") {
+    process();
+    bool completeInProvider = false;
+    SECTION("already completed attempt is retained") {}
+    SECTION("newer attempt completes during provider preparation") {
+        REQUIRE(repo->beginDocumentEmbeddingDerivation(hash, "pending").has_value());
+        completeInProvider = true;
+    }
+    service->setProviders(
+        [&]() -> std::shared_ptr<IModelProvider> {
+            if (completeInProvider) {
+                auto newer = repo->beginDocumentEmbeddingDerivation(hash, "newer");
+                REQUIRE(newer.has_value());
+                auto completed =
+                    repo->completeDocumentEmbeddingDerivation(newer.value(), "test-model");
+                REQUIRE(completed.has_value());
+                REQUIRE(completed.value());
+            }
+            return {};
+        },
+        [] { return "test-model"; }, [this] { return vectors; });
+    process();
+    auto ready = repo->hasDocumentEmbeddingByHash(hash);
+    REQUIRE(ready.has_value());
+    CHECK(ready.value());
+    auto document = repo->getDocumentByHash(hash);
+    REQUIRE(document.has_value());
+    REQUIRE(document.value().has_value());
+    CHECK(document.value()->repairStatus == metadata::RepairStatus::Completed);
+}
+
+TEST_CASE_METHOD(ServiceDerivationFixture,
                  "EmbeddingService late failure preserves a newer completed derivation",
                  "[daemon][embedding][service-derivation][late-failure]") {
     process();

@@ -285,7 +285,9 @@ TEST_CASE("PostIngestQueue: title-NL completion distinguishes GLiNER success fro
     content.knowledgeGraphToken = "title-shared-attempt";
     REQUIRE(meta->batchInsertContentAndIndex({content}).has_value());
 
+    CoordinatorRunner run(fix, kgTestConfig(false), meta);
     PostIngestQueue queue(nullptr, meta, {}, fix.kg, nullptr, nullptr, nullptr, 8);
+    queue.setWriteCoordinator(&run.coordinator);
     auto completion = std::make_shared<KnowledgeGraphCompletion>(true, true);
     REQUIRE_FALSE(completion->markCommitted(KnowledgeGraphCompletionStage::Graph));
     InternalEventBus::TitleExtractionJob job;
@@ -318,6 +320,7 @@ TEST_CASE("PostIngestQueue: title-NL completion distinguishes GLiNER success fro
                 return result;
             });
         process();
+        REQUIRE(run.coordinator.flush(std::chrono::seconds{5}).has_value());
         CHECK(marker() == "complete:" + content.knowledgeGraphToken);
     }
 
@@ -342,6 +345,92 @@ TEST_CASE("PostIngestQueue: title-NL completion distinguishes GLiNER success fro
         CHECK(marker() == "pending:" + content.knowledgeGraphToken);
         CHECK_FALSE(completion->markCommitted(KnowledgeGraphCompletionStage::Graph));
     }
+    queue.stop();
+}
+
+TEST_CASE("PostIngestQueue: writer propagates failed title-NL no-op acknowledgement",
+          "[unit][daemon][post-ingest][kg-completion][writer]") {
+    using namespace yams::daemon;
+    using yams::daemon::KnowledgeGraphCompletion;
+    using yams::daemon::KnowledgeGraphCompletionStage;
+
+    KgCoordinatorFixture fix("title_nl_writer_ack_");
+    auto meta = std::make_shared<yams::metadata::MetadataRepository>(*fix.pool);
+    yams::metadata::DocumentInfo doc;
+    doc.filePath = "/kg/title-writer-noop.txt";
+    doc.fileName = "title-writer-noop.txt";
+    doc.sha256Hash = "title-nl-writer-completion";
+    auto id = meta->insertDocument(doc);
+    REQUIRE(id.has_value());
+
+    yams::metadata::BatchContentEntry content;
+    content.documentId = id.value();
+    content.contentText = "writer-backed title completion content";
+    content.knowledgeGraphToken = "title-writer-attempt";
+    REQUIRE(meta->batchInsertContentAndIndex({content}).has_value());
+
+    CoordinatorRunner run(fix, kgTestConfig(false), meta);
+    PostIngestQueue queue(nullptr, meta, {}, fix.kg, nullptr, nullptr, nullptr, 8);
+    queue.setWriteCoordinator(&run.coordinator);
+    queue.setTitleExtractor(
+        [](const std::string&,
+           const std::vector<std::string>&) -> yams::Result<yams::search::QueryConceptResult> {
+            yams::search::QueryConceptResult result;
+            result.usedGliner = true;
+            return result;
+        });
+
+    auto completion = std::make_shared<KnowledgeGraphCompletion>(true, true);
+    REQUIRE_FALSE(completion->markCommitted(KnowledgeGraphCompletionStage::Graph));
+    InternalEventBus::TitleExtractionJob job;
+    job.hash = doc.sha256Hash;
+    job.documentId = id.value();
+    job.textSnippet = content.contentText;
+    job.fallbackTitle = doc.fileName;
+    job.filePath = doc.filePath;
+    job.mimeType = "text/plain";
+    job.knowledgeGraphToken = content.knowledgeGraphToken;
+    job.knowledgeGraphCompletion = completion;
+    auto process = [&] {
+        std::vector<InternalEventBus::TitleExtractionJob> jobs;
+        jobs.push_back(job);
+        queue.testing_processTitleExtractionBatch(std::move(jobs));
+    };
+    auto marker = [&] {
+        auto value = meta->getMetadata(id.value(), "yams:kg_enrichment");
+        REQUIRE(value.has_value());
+        REQUIRE(value.value().has_value());
+        return value.value()->value;
+    };
+
+    const auto triggerSql =
+        "CREATE TRIGGER reject_title_nl_ack BEFORE UPDATE OF value ON metadata "
+        "WHEN OLD.document_id = " +
+        std::to_string(id.value()) +
+        " AND OLD.key = 'yams:kg_enrichment' "
+        "AND NEW.value = 'complete:" +
+        content.knowledgeGraphToken +
+        "' BEGIN SELECT RAISE(ABORT, 'injected title-NL acknowledgement failure'); END";
+    REQUIRE(
+        fix.pool
+            ->withConnection([&](yams::metadata::Database& db) { return db.execute(triggerSql); })
+            .has_value());
+
+    process();
+    auto rejected = run.coordinator.flush(std::chrono::seconds{5});
+    REQUIRE_FALSE(rejected.has_value());
+    CHECK(rejected.error().message.find("injected title-NL acknowledgement failure") !=
+          std::string::npos);
+    CHECK(marker() == "pending:" + content.knowledgeGraphToken);
+
+    REQUIRE(fix.pool
+                ->withConnection([](yams::metadata::Database& db) {
+                    return db.execute("DROP TRIGGER reject_title_nl_ack");
+                })
+                .has_value());
+    process();
+    REQUIRE(run.coordinator.flush(std::chrono::seconds{5}).has_value());
+    CHECK(marker() == "complete:" + content.knowledgeGraphToken);
     queue.stop();
 }
 

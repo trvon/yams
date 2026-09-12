@@ -1768,6 +1768,23 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         monitor->phase = "queued";
         monitor->detail = "queued for embedding";
     }
+    // Establish failure authority before provider callbacks and cancellation exits. Keep
+    // completed attempts intact until a usable provider identifies the actual recipe.
+    if (!meta_) {
+        failed_.fetch_add(job.hashes.size(), std::memory_order_relaxed);
+        finishMonitor("failed", "embedding metadata repository unavailable");
+        return;
+    }
+    auto preparation = meta_->batchClassifyOrBeginEmbeddingDerivations(
+        job.hashes, "embedding-preparation-v1", true,
+        metadata::EmbeddingAdmissionPolicy::PreserveCompleted);
+    if (!preparation) {
+        failed_.fetch_add(job.hashes.size(), std::memory_order_relaxed);
+        finishMonitor("failed", "embedding admission failed: " + preparation.error().message);
+        return;
+    }
+    const auto preparationTokens = std::move(preparation.value().tokens);
+
     std::shared_ptr<IModelProvider> provider;
     std::string modelName;
     std::shared_ptr<yams::vector::VectorDatabase> vdb;
@@ -1789,7 +1806,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     auto markHashesFailed = [&](std::string_view reason) {
         if (!job.hashes.empty()) {
             enqueueRepairStatusUpdate(job.hashes, metadata::RepairStatus::Failed,
-                                      "EmbeddingService::jobFailed");
+                                      "EmbeddingService::jobFailed", preparationTokens);
         }
         failed_.fetch_add(job.hashes.size(), std::memory_order_relaxed);
         finishMonitor("failed", std::string(reason));
@@ -1802,7 +1819,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     if (isJobCanceled()) {
         if (!job.hashes.empty()) {
             enqueueRepairStatusUpdate(job.hashes, metadata::RepairStatus::Pending,
-                                      "EmbeddingService::jobPending");
+                                      "EmbeddingService::jobPending", preparationTokens);
         }
         finishMonitor("cancelled", "embedding job canceled before model preparation");
         return;
@@ -1851,7 +1868,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     if (isJobCanceled()) {
         if (!job.hashes.empty()) {
             enqueueRepairStatusUpdate(job.hashes, metadata::RepairStatus::Pending,
-                                      "EmbeddingService::jobPending");
+                                      "EmbeddingService::jobPending", preparationTokens);
         }
         finishMonitor("cancelled", "embedding job canceled before gather");
         return;

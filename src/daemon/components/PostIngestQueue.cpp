@@ -2386,21 +2386,21 @@ void PostIngestQueue::processTitleExtractionStage(
                   hash.substr(0, 12), docId);
 
     auto acknowledgeSuccessfulNoop = [&]() {
-        if (knowledgeGraphToken.empty() || !knowledgeGraphCompletion ||
-            !knowledgeGraphCompletion->markCommitted(KnowledgeGraphCompletionStage::TitleNl)) {
+        if (knowledgeGraphToken.empty() || !knowledgeGraphCompletion) {
             return;
         }
-        if (!meta_) {
-            spdlog::warn("[PostIngestQueue] Cannot acknowledge title+NL completion for {}: "
-                         "metadata repository unavailable",
+        if (!writeCoordinator_) {
+            spdlog::warn("[PostIngestQueue] Cannot queue title+NL completion for {}: "
+                         "WriteCoordinator unavailable",
                          hash.substr(0, 12));
             return;
         }
-        auto completed = meta_->completeKnowledgeGraphEnrichment(docId, knowledgeGraphToken);
-        if (!completed) {
-            spdlog::warn("[PostIngestQueue] Failed to acknowledge title+NL completion for {}: {}",
-                         hash.substr(0, 12), completed.error().message);
-        }
+        auto batch = std::make_unique<WriteBatch>();
+        batch->source = "PostIngestQueue::titleExtraction/noopAcknowledgement";
+        batch->ops.emplace_back(
+            AcknowledgeKnowledgeGraphOp{docId, knowledgeGraphToken, knowledgeGraphCompletion});
+        enqueueWithBackpressure(*writeCoordinator_, std::move(batch),
+                                "title+NL no-op acknowledgement", stop_);
     };
 
     try {

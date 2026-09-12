@@ -640,7 +640,8 @@ MetadataRepository::batchBeginDocumentEmbeddingDerivations(const std::vector<std
 }
 
 Result<EmbeddingDerivationAdmission> MetadataRepository::batchClassifyOrBeginEmbeddingDerivations(
-    const std::vector<std::string>& hashes, const std::string& recipe, bool skipExisting) {
+    const std::vector<std::string>& hashes, const std::string& recipe, bool skipExisting,
+    EmbeddingAdmissionPolicy policy) {
     if (recipe.empty()) {
         return Error{ErrorCode::InvalidArgument, "Embedding derivation requires a recipe"};
     }
@@ -688,7 +689,8 @@ Result<EmbeddingDerivationAdmission> MetadataRepository::batchClassifyOrBeginEmb
                 const auto id = doc->getInt64(0);
                 const bool wasReady = doc->getInt(1) != 0;
                 if (skipExisting && wasReady && doc->getInt(3) != 0 &&
-                    doc->getString(4) == recipe) {
+                    (policy == EmbeddingAdmissionPolicy::PreserveCompleted ||
+                     doc->getString(4) == recipe)) {
                     admission.alreadyCompleted.push_back(hash);
                     continue;
                 }

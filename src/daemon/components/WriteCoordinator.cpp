@@ -359,7 +359,8 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                                   std::is_same_v<T, CompleteDocumentEmbeddingsByHashesOp> ||
                                   std::is_same_v<T, UpsertSymbolExtractionStateOp> ||
                                   std::is_same_v<T, InsertRelationshipOp> ||
-                                  std::is_same_v<T, AddSymSpellTermsOp>) {
+                                  std::is_same_v<T, AddSymSpellTermsOp> ||
+                                  std::is_same_v<T, AcknowledgeKnowledgeGraphOp>) {
                         hasMetaOps = true;
                     } else {
                         hasKgOps = true;
@@ -432,7 +433,8 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                                       std::is_same_v<T, CompleteDocumentEmbeddingsByHashesOp> ||
                                       std::is_same_v<T, UpsertSymbolExtractionStateOp> ||
                                       std::is_same_v<T, InsertRelationshipOp> ||
-                                      std::is_same_v<T, AddSymSpellTermsOp>) {
+                                      std::is_same_v<T, AddSymSpellTermsOp> ||
+                                      std::is_same_v<T, AcknowledgeKnowledgeGraphOp>) {
                             return;
                         } else if constexpr (std::is_same_v<T, AddDeferredEdgesOp>) {
                             r = applyOp(kgBatch, concrete, nodeKeyToId, bufferPtr);
@@ -597,7 +599,8 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                         Result<void> r;
                         if constexpr (std::is_same_v<T, UpsertTreeSnapshotOp> ||
                                       std::is_same_v<T, InsertRelationshipOp> ||
-                                      std::is_same_v<T, UpsertSymbolExtractionStateOp>) {
+                                      std::is_same_v<T, UpsertSymbolExtractionStateOp> ||
+                                      std::is_same_v<T, AcknowledgeKnowledgeGraphOp>) {
                             r = applyMetadataOp(concrete);
                         } else if constexpr (std::is_same_v<T, AddSymSpellTermsOp>) {
                             if (concrete.terms.empty())
@@ -710,6 +713,9 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                             return;
                         }
                         if (!r) {
+                            if (!firstOpError) {
+                                firstOpError = r.error();
+                            }
                             sourceError = true;
                             spdlog::warn("[WriteCoordinator] meta op '{}' failed: {}",
                                          batch->source, r.error().message);
@@ -1437,6 +1443,29 @@ Result<void> WriteCoordinator::applyMetadataOp(AddSymSpellTermsOp& op) {
     {
         std::lock_guard<std::mutex> lock(statsMutex_);
         stats_.symSpellTermsAdded += termCount;
+    }
+    return Result<void>();
+}
+
+Result<void> WriteCoordinator::applyMetadataOp(AcknowledgeKnowledgeGraphOp& op) {
+    if (!op.completion) {
+        return Error{ErrorCode::InvalidArgument,
+                     "Knowledge graph acknowledgement requires a completion barrier"};
+    }
+    if (op.token.empty()) {
+        return Error{ErrorCode::InvalidArgument,
+                     "Knowledge graph acknowledgement requires a token"};
+    }
+    if (!op.completion->markCommitted(op.stage)) {
+        return Result<void>();
+    }
+    if (!meta_) {
+        return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
+    }
+    metadata::MetadataOpScope opScope("wc_knowledge_graph_acknowledgement");
+    auto completed = meta_->completeKnowledgeGraphEnrichment(op.documentId, op.token);
+    if (!completed) {
+        return completed.error();
     }
     return Result<void>();
 }
