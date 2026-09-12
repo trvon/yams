@@ -17,6 +17,55 @@ class RetrievalConfigurationTests(unittest.TestCase):
              "YAMS_VECTOR_VEC0_PHSS_CANDIDATES": "128"},
             {}, {"ann_candidate_budget": 128}), [])
 
+    def test_phss_boolean_spellings_enforce_effective_pool(self):
+        for enabled in ("1", "true", "TRUE", "yes", "on"):
+            with self.subTest(enabled=enabled):
+                self.assertTrue(validate_retrieval_configuration(
+                    {"YAMS_VECTOR_MAX_RESULTS": "32", "YAMS_VECTOR_VEC0_PHSS_ENABLED": enabled,
+                     "YAMS_VECTOR_VEC0_PHSS_CANDIDATES": "16"},
+                    {}, {"ann_candidate_budget": 16}))
+
+    def test_product_latency_accepts_disabled_boolean_spellings(self):
+        for disabled in ("0", "false", "FALSE", "no", "off"):
+            with self.subTest(disabled=disabled):
+                self.assertEqual(validate_retrieval_configuration(
+                    {"YAMS_SEARCH_STAGE_TRACE": disabled}, {"latency_mode": "product"}, {}), [])
+
+    def test_aggregation_matches_runtime_case_rules(self):
+        for aggregation, budget in (("max", 32), ("MAX", 32), ("Max", 96)):
+            with self.subTest(aggregation=aggregation):
+                self.assertEqual(validate_retrieval_configuration(
+                    {"YAMS_VECTOR_MAX_RESULTS": "32", "YAMS_VECTOR_VEC0_PHSS_ENABLED": "1",
+                     "YAMS_SEARCH_CHUNK_AGGREGATION": aggregation,
+                     "YAMS_VECTOR_VEC0_PHSS_CANDIDATES": "16"},
+                    {}, {"ann_candidate_budget": budget}), [])
+
+    def test_candidate_multiplier_precedes_explicit_vector_override(self):
+        env = {"YAMS_VECTOR_VEC0_PHSS_ENABLED": "1", "YAMS_CANDIDATE_MULTIPLIER": "2.0"}
+        self.assertEqual(validate_retrieval_configuration(env, {}, {"ann_candidate_budget": 900}), [])
+        env["YAMS_VECTOR_MAX_RESULTS"] = "32"
+        self.assertEqual(validate_retrieval_configuration(env, {}, {"ann_candidate_budget": 96}), [])
+
+    def test_invalid_configuration_returns_issues_not_exceptions(self):
+        for key in ("YAMS_VECTOR_MAX_RESULTS", "YAMS_VECTOR_VEC0_PHSS_CANDIDATES",
+                    "YAMS_CANDIDATE_MULTIPLIER"):
+            for value in ("invalid", None, "NaN", "-1"):
+                with self.subTest(key=key, value=value):
+                    self.assertTrue(validate_retrieval_configuration(
+                        {"YAMS_VECTOR_VEC0_PHSS_ENABLED": "1", key: value},
+                        {}, {"ann_candidate_budget": 450}))
+        self.assertTrue(validate_retrieval_configuration(
+            {"YAMS_VECTOR_VEC0_PHSS_ENABLED": "1"}, {}, {"ann_candidate_budget": None}))
+
+    def test_invalid_metrics_return_issues_not_exceptions(self):
+        for value in (None, "invalid", {}, [], float("inf")):
+            with self.subTest(value=value):
+                self.assertTrue(validate_retrieval_metrics(
+                    {"topology_shadow_evaluation_rate": value}, {"require_shadow_evaluation": True}))
+                self.assertTrue(validate_retrieval_metrics(
+                    {"topology_candidate_rescue_exact_distance_evaluations_sum": value},
+                    {"require_exact_shadow_control": True}))
+
     def test_vec0_cannot_validate_fast_narrowing(self):
         issues = validate_retrieval_configuration(
             {"YAMS_VECTOR_SEARCH_ENGINE": "vec0"},

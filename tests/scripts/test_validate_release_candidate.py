@@ -94,6 +94,44 @@ class ReleaseCandidateTests(unittest.TestCase):
         with self.assertRaisesRegex(CandidateError, "must contain the complete base"):
             candidate_module.validate_candidate(self.repo, self.base, divergent)
 
+    def test_behind_main_explains_manual_reconciliation_without_mutating(self) -> None:
+        self.git("checkout", "-q", "--detach", self.base)
+        (self.repo / "feature.txt").write_text("main changes\n", encoding="utf-8")
+        self.git("add", "feature.txt")
+        self.git("commit", "-q", "-m", "fix: main changes")
+        current_main = self.git("rev-parse", "HEAD")
+        before_status = self.git("status", "--porcelain")
+
+        with self.assertRaises(CandidateError) as raised:
+            candidate_module.validate_candidate(self.repo, current_main, self.candidate)
+
+        message = str(raised.exception)
+        self.assertIn("1 base commit", message)
+        self.assertIn(current_main, message)
+        self.assertIn("resolve conflicts", message)
+        self.assertIn("rerun", message)
+        self.assertEqual(self.git("rev-parse", "HEAD"), current_main)
+        self.assertEqual(self.git("status", "--porcelain"), before_status)
+        self.assertFalse((self.repo / ".git" / "MERGE_HEAD").exists())
+
+    def test_accepts_reconciled_candidate_with_both_histories(self) -> None:
+        self.git("checkout", "-q", "--detach", self.base)
+        (self.repo / "main-only.txt").write_text("main\n", encoding="utf-8")
+        self.git("add", "main-only.txt")
+        self.git("commit", "-q", "-m", "fix: main-only change")
+        current_main = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-q", "--detach", self.candidate)
+        self.git("merge", "--no-ff", "-m", "Merge current main", current_main)
+        reconciled = self.git("rev-parse", "HEAD")
+
+        report = candidate_module.validate_candidate(self.repo, current_main, reconciled)
+
+        self.assertEqual(report.base_sha, current_main)
+        self.assertEqual(report.candidate_sha, reconciled)
+        self.assertEqual(report.current_version, "0.19.0")
+        self.assertEqual(self.git("show", f"{reconciled}:feature.txt"), "candidate")
+        self.assertEqual(self.git("show", f"{reconciled}:main-only.txt"), "main")
+
     def test_rejects_candidate_version_prebump(self) -> None:
         self.write_versions("0.20.0")
         self.git("add", ".")
