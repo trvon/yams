@@ -9,10 +9,6 @@ description = "Local disposable agent worktrees"
 paths = ['''^\.claude/worktrees/''']
 
 [[allowlists]]
-description = "Storage backend synthetic key fixtures"
-paths = ['''(^|/)tests/unit/storage/storage_backend_catch2_test\.cpp$''']
-
-[[allowlists]]
 description = "Gitignored local benchmark fixture configs with synthetic storage keys"
 paths = ['''^bench_results/''']
 

@@ -583,6 +583,23 @@ TEST_CASE("MetadataRepository: content and KG intent commit atomically",
         REQUIRE(marker.value().has_value());
         CHECK(marker.value()->value == "complete:generation-new");
     }
+    SECTION("KG completion invalidates cached metadata value counts") {
+        REQUIRE(fix.repository_->batchInsertContentAndIndex({a}).has_value());
+        auto before = fix.repository_->getMetadataValueCounts({"yams:kg_enrichment"}, {});
+        REQUIRE(before.has_value());
+        REQUIRE(before.value().at("yams:kg_enrichment").size() == 1);
+        CHECK(before.value().at("yams:kg_enrichment").front().value == "pending:generation-a");
+
+        auto completed =
+            fix.repository_->completeKnowledgeGraphEnrichment(first.value(), "generation-a");
+        REQUIRE(completed.has_value());
+        REQUIRE(completed.value());
+
+        auto after = fix.repository_->getMetadataValueCounts({"yams:kg_enrichment"}, {});
+        REQUIRE(after.has_value());
+        REQUIRE(after.value().at("yams:kg_enrichment").size() == 1);
+        CHECK(after.value().at("yams:kg_enrichment").front().value == "complete:generation-a");
+    }
     SECTION("failed intent write rolls back the entire content batch") {
         REQUIRE(fix.pool_
                     ->withConnection([&](Database& db) -> Result<void> {
@@ -1105,6 +1122,55 @@ TEST_CASE("WriteCoordinator preserves derivation identities across completion ba
     auto ready = fix.repository_->hasDocumentEmbeddingByHash(hash);
     REQUIRE(ready.has_value());
     CHECK(ready.value());
+}
+
+TEST_CASE("WriteCoordinator reports derivation SQL failures through flush",
+          "[unit][metadata][embeddings][derivation]") {
+    MetadataRepositoryFixture fix;
+    const std::string hash = "queued-derivation-error";
+    REQUIRE(fix.repository_
+                ->insertDocument(makeDocumentWithPath("/tmp/queued-derivation-error.txt", hash))
+                .has_value());
+    auto token = fix.repository_->beginDocumentEmbeddingDerivation(hash, "recipe");
+    REQUIRE(token.has_value());
+    REQUIRE(fix.pool_
+                ->withConnection([](Database& db) -> Result<void> {
+                    return db.execute(
+                        "CREATE TRIGGER reject_queued_completion BEFORE UPDATE OF repair_status ON "
+                        "documents "
+                        "BEGIN SELECT RAISE(ABORT, 'queued completion failure'); END");
+                })
+                .has_value());
+
+    boost::asio::io_context io;
+    auto repo =
+        std::shared_ptr<MetadataRepository>(fix.repository_.get(), [](MetadataRepository*) {});
+    yams::daemon::WriteCoordinator coordinator(io, {}, repo);
+    auto batch = std::make_unique<yams::daemon::WriteBatch>();
+    batch->source = "test/derivation-error";
+    batch->ops.emplace_back(
+        yams::daemon::CompleteDocumentEmbeddingsByHashesOp{{}, "model", {token.value()}});
+    coordinator.enqueue(std::move(batch));
+    coordinator.start();
+    auto runner = std::async(std::launch::async, [&] { io.run(); });
+    auto flushed = coordinator.flush(std::chrono::seconds{5});
+    coordinator.shutdown();
+    io.stop();
+    runner.get();
+
+    CHECK_FALSE(flushed.has_value());
+    CHECK(coordinator.getStats().batchesCommitted == 0);
+    auto ready = fix.repository_->hasDocumentEmbeddingByHash(hash);
+    REQUIRE(ready.has_value());
+    CHECK_FALSE(ready.value());
+    REQUIRE(fix.pool_
+                ->withConnection([](Database& db) {
+                    return db.execute("DROP TRIGGER reject_queued_completion");
+                })
+                .has_value());
+    auto retried = fix.repository_->completeDocumentEmbeddingDerivation(token.value(), "model");
+    REQUIRE(retried.has_value());
+    CHECK(retried.value());
 }
 
 TEST_CASE("MetadataRepository derivation completion rolls back and can be retried",

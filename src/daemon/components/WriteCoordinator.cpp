@@ -885,6 +885,11 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
         }
     }
 
+    // Metadata derivation completion can roll back after the KG phase has succeeded.
+    // Preserve that failure for flush() rather than reporting the batch as committed.
+    if (firstOpError) {
+        return *firstOpError;
+    }
     {
         std::lock_guard<std::mutex> lock(statsMutex_);
         stats_.batchesCommitted += batches.size();

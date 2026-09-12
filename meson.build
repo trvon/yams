@@ -801,8 +801,8 @@ else
   if get_option('build-plugins')
     subdir('src/plugins')
   endif
-  subdir('src/daemon/client')
   subdir('src/daemon/tune_advisor')
+  subdir('src/daemon/client')
   subdir('src/embedding_simeon')
   subdir('src/vector')
   subdir('src/topology')

@@ -699,9 +699,9 @@ public:
 
         if (!normalizedReq.hash.empty()) {
             YAMS_ZONE_SCOPED_N("search_service::hash_lookup");
-            if (!yams::common::looksLikeHashQueryToken(normalizedReq.hash)) {
+            if (!yams::common::looksLikePartialHashArgument(normalizedReq.hash)) {
                 co_return Error{ErrorCode::InvalidArgument,
-                                "Invalid hash format (expected hex, 8-64 chars)"};
+                                "Invalid hash format (expected hex, 6-64 chars)"};
             }
             auto result = co_await searchByHashPrefix(normalizedReq, &metadataTelemetry);
             setExecTime(result, t0);

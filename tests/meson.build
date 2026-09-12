@@ -598,6 +598,18 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_daemon_client_link_exe = executable('catch2_daemon_client_link',
+    files('unit/daemon/daemon_client_link_catch2_test.cpp'),
+    dependencies: [catch2_dep, catch2_main_dep, dependency('yams_daemon_client')],
+    cpp_args: test_cpp_noerror_args,
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  test('daemon_client_link', catch2_daemon_client_link_exe,
+    suite: ['unit', 'daemon', 'sdk'],
+    timeout: 30,
+  )
+
   catch2_search_admission_controller_exe = executable('catch2_search_admission_controller',
     files('unit/daemon/search_admission_controller_catch2_test.cpp'),
     include_directories: incs,

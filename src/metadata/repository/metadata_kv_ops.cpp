@@ -64,7 +64,7 @@ Result<bool> MetadataRepository::completeKnowledgeGraphEnrichment(int64_t docume
                                                                   const std::string& token) {
     if (token.empty())
         return false;
-    return executeWriteQuery<bool>([&](Database& db) -> Result<bool> {
+    auto result = executeWriteQuery<bool>([&](Database& db) -> Result<bool> {
         YAMS_TRY_UNWRAP(stmt, db.prepare("UPDATE metadata SET value = ? WHERE document_id = ? "
                                          "AND key = 'yams:kg_enrichment' AND value = ?"));
         YAMS_TRY(stmt.bind(1, "complete:" + token));
@@ -73,6 +73,10 @@ Result<bool> MetadataRepository::completeKnowledgeGraphEnrichment(int64_t docume
         YAMS_TRY(stmt.execute());
         return db.changes() == 1;
     });
+    if (result && result.value()) {
+        metadataChangeCounter_.fetch_add(1, std::memory_order_release);
+    }
+    return result;
 }
 
 // Metadata operations

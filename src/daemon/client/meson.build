@@ -102,6 +102,7 @@ yams_daemon_client_lib = static_library('yams_daemon_client',
   dependencies: [
     dependency('yams_core'),
     dependency('yams_config'),
+    dependency('yams_tune_advisor'),
     dependency('spdlog'),
     protobuf_dep,
     # Boost.Asio relies on Boost.System + Boost.Thread at link time; both
@@ -122,16 +123,18 @@ pkg = import('pkgconfig')
 pkg.generate(yams_daemon_client_lib,
   name: 'yams-daemon-client',
   description: 'YAMS daemon client library',
-  subdirs: ['yams'],
+  subdirs: ['.', 'yams'],
 )
 
 yams_daemon_client_dep = declare_dependency(
   link_with: yams_daemon_client_lib,
   include_directories: include_directories('../../../include'),
   dependencies: [
+    boost_dep,
     tl_expected_dep,
     dependency('yams_core'),
     dependency('yams_config'),
+    dependency('yams_tune_advisor'),
   ],
 )
 
