@@ -18,6 +18,16 @@ Dogfood YAMS as the distributed memory across sessions, agents, and handoffs —
 contract in the prompt; the graph here is rich: function-level nodes with
 `calls`/`defined_in` edges, so "who uses X" is one `yams graph --explore`).
 
+## Development Memory
+
+Store development audits, plans, decisions, and handoffs in YAMS with task/source/
+phase metadata, not as new local Markdown documents. Keep repository instructions
+here; keep executable tests and raw benchmark artifacts in their normal locations.
+Before removing a local note after ingestion, hydrate its returned hash and verify
+the content. An add acknowledgement is not a successful read-back. If hydration
+fails, report the blocker and preserve the only recoverable copy until it is safe
+to remove; do not describe the migration as complete.
+
 ## Mobile Host Consumers
 
 When YAMS is embedded in a mobile app, treat `libyams_mobile` as a local corpus
@@ -164,7 +174,8 @@ driven by this loop, not intuition alone.
    | Question | Plan |
    |----------|------|
    | Which hybrid component carries quality? | `search_component_ablation` |
-   | Product-default path (topology off) | `search_product_component_ablation` (`repeats=3`) |
+   | Topology-off control | `search_product_component_ablation` (`repeats=3`) |
+   | Current default vs topology off vs traced shadow | `search_shadow_cost` (`repeats=3`) |
    | Vector fusion weight | `search_vector_weight_ablation` (`repeats=3`) |
    | Vector weight multi-corpus gate | `search_vector_weight_0_20_multicorp` (`repeats=3`) |
    | Graph-vector fusion weight | `search_graph_vector_weight_ablation` (`repeats=3`) — **parked for product defaults**: only meaningful with topology assist; SCIENTIFIC/no-KG gates force `graphVectorWeight=0` |
@@ -188,8 +199,10 @@ driven by this loop, not intuition alone.
 5. **Compare stamps** with `runner.py compare` before claiming a win. Do not
    rebuild `build/release` mid-run (poisons arms). xplan skips meson compile when
    the bench binary already exists; force with `YAMS_BENCH_FORCE_BUILD=1`.
-6. **Product default** for topology routing stays **disabled**. Experimental
-   engine paths must beat that default hybrid on quality without a large
+6. **Product default** is **hybrid_assist + shadow**; topology-disabled hybrid is
+   the explicit no-topology control. Shadow can perform counterfactual work, and
+   stage tracing adds exact-control work: compare untraced timings separately.
+   Experimental engine paths must beat the default hybrid on quality without a large
    latency regression, or stay opt-in / parked.
 7. **Catch2 first** for seams and unit behavior (`tests/unit/search/`); xplan
    is for multi-arm KPI and default-system ranking — not a substitute for TDD.

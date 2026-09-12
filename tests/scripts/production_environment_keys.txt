@@ -1,5 +1,6 @@
 # Reviewed production string literals that name YAMS_* environment surfaces.
-# New entries require typed-config/provenance review; removals may remain grandfathered.
+# New entries require typed-config/provenance review. Entries whose key no longer
+# appears in src/, include/, or tools/ fail the policy and must be deleted here.
 YAMS_ADMISSION_CONTROL
 YAMS_ALLOW_MODEL_DOWNLOAD
 YAMS_AUTOLOAD_PLUGINS

@@ -9,5 +9,5 @@ plugins/onnx/onnx_gpu_provider.h:122:raw-env/setenv # ONNX provider environment 
 src/extraction/plugin_process.cpp:282:raw-env/setenv # Child plugin process environment construction
 tools/fuzzing/fuzz_plugin_abi_mount.cpp:55:raw-env/setenv # Single-process fuzz harness setup
 tools/fuzzing/fuzz_plugin_abi_negotiation.cpp:51:raw-env/setenv # Single-process fuzz harness setup
-tools/yams-cli/main.cpp:39:raw-env/setenv # Pre-thread one-shot executable marker
-tools/yams-cli/main.cpp:41:raw-env/_putenv_s # Pre-thread one-shot executable marker
+tools/yams-cli/main.cpp:40:raw-env/setenv # Pre-thread one-shot executable marker
+tools/yams-cli/main.cpp:42:raw-env/_putenv_s # Pre-thread one-shot executable marker
