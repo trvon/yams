@@ -35,6 +35,7 @@
 #include <yams/daemon/components/EmbeddingService.h>
 #include <yams/daemon/components/IngestMetricsPublisher.h>
 #include <yams/daemon/components/InternalEventBus.h>
+#include <yams/daemon/components/MemorySyncCoordinator.h>
 #include <yams/daemon/components/PluginHostFsm.h>
 #include <yams/daemon/components/PluginManager.h>
 #include <yams/daemon/components/PostIngestQueue.h>
@@ -184,26 +185,19 @@ public:
         return std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
     }
 
-    struct MemorySyncStatus {
-        bool started{false};
-        std::uint64_t records{0};
-        std::uint64_t quarantinedRecords{0};
-        std::uint64_t authFailures{0};
-        std::uint64_t successfulCycles{0};
-        std::uint64_t failedCycles{0};
-        std::uint64_t lastSuccessAgeMs{0};
-        std::string backend;
-        std::string nodeId;
-        std::string corpusId;
-        std::uint64_t corpusEpoch{0};
-        std::string mode;
-        std::string trustMode;
-        std::uint64_t peerCount{0};
-    };
-    Result<void> publishMemorySync(const std::string& key, const std::string& value);
-    Result<void> deleteMemorySync(const std::string& key);
-    Result<std::string> readMemorySyncCached(const std::string& key) const;
-    Result<MemorySyncStatus> getMemorySyncStatus() const;
+    using MemorySyncStatus = MemorySyncCoordinator::MemorySyncStatus;
+    Result<void> publishMemorySync(const std::string& key, const std::string& value) {
+        return memorySyncCoordinator_.publishMemorySync(key, value);
+    }
+    Result<void> deleteMemorySync(const std::string& key) {
+        return memorySyncCoordinator_.deleteMemorySync(key);
+    }
+    Result<std::string> readMemorySyncCached(const std::string& key) const {
+        return memorySyncCoordinator_.readMemorySyncCached(key);
+    }
+    Result<MemorySyncStatus> getMemorySyncStatus() const {
+        return memorySyncCoordinator_.getMemorySyncStatus();
+    }
     Result<p2p::P2pSyncResult> connectP2p(std::string_view connectionString);
     Result<void> disconnectP2p(std::string_view nodeId);
     Result<void> enrollP2pPeer(std::string_view nodeId, std::string_view spkiPin);
@@ -211,9 +205,13 @@ public:
     Result<p2p::P2pLocalIdentity> getP2pIdentity() const;
     Result<std::vector<p2p::PeerRegistryRecord>> listP2pPeers() const;
     Result<void> stageMemorySyncDocumentDelete(std::string_view contentHash,
-                                               bool retainContent = false);
+                                               bool retainContent = false) {
+        return memorySyncCoordinator_.stageMemorySyncDocumentDelete(contentHash, retainContent);
+    }
     Result<void> publishMemorySyncDocumentDelete(std::string_view contentHash,
-                                                 bool retainContent = false);
+                                                 bool retainContent = false) {
+        return memorySyncCoordinator_.publishMemorySyncDocumentDelete(contentHash, retainContent);
+    }
 
     struct SearchLoadMetrics {
         std::uint32_t active{0};
@@ -441,39 +439,36 @@ public:
         writeCoordinator_ = std::move(coordinator);
     }
     yams::memory_sync::MemorySyncService* testingMemorySyncService() const noexcept {
-        return memorySync_.get();
+        return memorySyncCoordinator_.service();
     }
     void
     testingSetMemorySyncService(std::unique_ptr<yams::memory_sync::MemorySyncService> service) {
-        memorySync_ = std::move(service);
+        memorySyncCoordinator_.testingSetMemorySyncService(std::move(service));
     }
     void testingSetMemorySyncStageObserver(std::function<void(std::string_view)> observer) {
-        std::lock_guard<std::mutex> lock(memorySyncStageObserverMutex_);
-        memorySyncStageObserver_ = std::move(observer);
+        memorySyncCoordinator_.testingSetMemorySyncStageObserver(std::move(observer));
     }
     void testingSetMemorySyncDeleteOutboxObserver(std::function<void(std::string_view)> observer) {
-        std::lock_guard<std::mutex> lock(memorySyncDeleteOutboxObserverMutex_);
-        memorySyncDeleteOutboxObserver_ = std::move(observer);
+        memorySyncCoordinator_.testingSetMemorySyncDeleteOutboxObserver(std::move(observer));
     }
-    void testingApplyMemorySyncWinners() { applyMemorySyncWinners(); }
-    void testingPublishMemorySyncBackfill() { publishMemorySyncBackfill(); }
+    void testingApplyMemorySyncWinners() { memorySyncCoordinator_.testingApplyMemorySyncWinners(); }
+    void testingPublishMemorySyncBackfill() {
+        memorySyncCoordinator_.testingPublishMemorySyncBackfill();
+    }
     void testingSetMemorySyncBackfillItemBudget(std::size_t budget) {
-        std::lock_guard<std::mutex> lock(memorySyncBackfillMutex_);
-        memorySyncBackfillState_.itemBudgetPerCycle = std::max<std::size_t>(budget, 1);
+        memorySyncCoordinator_.testingSetMemorySyncBackfillItemBudget(budget);
     }
     bool testingMemorySyncApplyLockHeld() {
-        std::unique_lock<std::mutex> lock(memorySyncApplyMutex_, std::try_to_lock);
-        return !lock.owns_lock();
+        return memorySyncCoordinator_.testingMemorySyncApplyLockHeld();
     }
     std::uint64_t testingMemorySyncApplyAttempts() const noexcept {
-        return memorySyncApplyAttempts_.load(std::memory_order_acquire);
+        return memorySyncCoordinator_.testingMemorySyncApplyAttempts();
     }
     bool testingMemorySyncBackfillLockHeld() {
-        std::unique_lock<std::mutex> lock(memorySyncBackfillMutex_, std::try_to_lock);
-        return !lock.owns_lock();
+        return memorySyncCoordinator_.testingMemorySyncBackfillLockHeld();
     }
     std::uint64_t testingMemorySyncBackfillAttempts() const noexcept {
-        return memorySyncBackfillAttempts_.load(std::memory_order_acquire);
+        return memorySyncCoordinator_.testingMemorySyncBackfillAttempts();
     }
     static bool __test_shouldStartSessionWatcher(std::string_view disableValue) {
         return shouldStartSessionWatcher(disableValue);
@@ -825,17 +820,7 @@ private:
     Result<void> initializeImpl(const std::function<void()>& beforePoolConfigure);
     Result<void> configureResourcePools(const std::function<void()>& beforeConfigure);
     Result<std::filesystem::path> initializeDataDirAndContentStore();
-    Result<void> initializeMemorySync(const std::filesystem::path& dataDir);
     Result<void> initializeDirectP2p(const std::filesystem::path& dataDir);
-    Result<void> configureMemorySyncApply();
-    void applyMemorySyncWinners() noexcept;
-    bool drainMemorySyncDocumentDeleteOutbox() noexcept;
-    Result<bool> memorySyncDeleteLocallyAbsent(std::string_view contentHash,
-                                               memory_sync::EraseReadinessProbe probe) const;
-    void publishMemorySyncBackfill() noexcept;
-    void notifyMemorySyncStage(std::string_view stage) noexcept;
-    void notifyMemorySyncDeleteOutboxStage(std::string_view stage) noexcept;
-    Result<std::size_t> applyMemorySyncContentBlobs();
     boost::asio::awaitable<bool> initializeMetadataDatabaseAt(const std::filesystem::path& dbPath,
                                                               yams::compat::stop_token token);
     bool finalizeDatabaseStartup(const std::filesystem::path& dbPath,
@@ -967,42 +952,12 @@ private:
     // async-init wait expires.
     mutable std::mutex databaseManagerLifecycleMutex_;
     std::unique_ptr<DatabaseManager> databaseManager_;
+    // Owns the memory-sync service, its apply/backfill state, and the delete outbox. Declared
+    // here, after the stores it applies into and before p2pManager_ (which holds a reference
+    // to the service), so destruction order matches the old memorySync_ member.
+    MemorySyncCoordinator memorySyncCoordinator_;
 
-    // P2P memory-sync service (version-vector + LWW over a shared store).
-    // Started after storage/content-store init, stopped during shutdown.
-    std::unique_ptr<yams::memory_sync::MemorySyncService> memorySync_;
     std::unique_ptr<yams::daemon::p2p::P2pManager> p2pManager_;
-    mutable std::mutex memorySyncDeleteOutboxMutex_;
-    mutable std::mutex memorySyncDeleteOutboxObserverMutex_;
-    std::function<void(std::string_view)> memorySyncDeleteOutboxObserver_;
-    mutable std::mutex memorySyncStageObserverMutex_;
-    std::function<void(std::string_view)> memorySyncStageObserver_;
-    // Direct sessions may finish concurrently. Serialize the daemon adapter pipeline and its
-    // vector rebuild state; backfill has a separate lock so focused maintenance calls are safe.
-    mutable std::mutex memorySyncApplyMutex_;
-    mutable std::mutex memorySyncBackfillMutex_;
-    std::atomic<std::uint64_t> memorySyncApplyAttempts_{0};
-    std::atomic<std::uint64_t> memorySyncBackfillAttempts_{0};
-    bool memorySyncVectorRebuildDirty_{false};
-    struct MemorySyncBackfillState {
-        enum class Domain { Documents, Vectors, Topology };
-
-        std::int64_t documentIdCursor{0};
-        std::string vectorDocumentHashCursor;
-        std::string vectorChunkIdCursor;
-        bool topologySnapshotInitialized{false};
-        std::vector<std::string> topologyNodeTypes;
-        std::size_t topologyTypeIndex{0};
-        std::unordered_map<std::string, std::size_t> topologyNodeOffsets;
-        std::size_t topologyEdgeOffset{0};
-        std::int64_t topologyNodeId{0};
-        std::string topologyNodeKey;
-        bool topologyNodeActive{false};
-        Domain nextDomain{Domain::Documents};
-        std::size_t itemBudgetPerCycle{256};
-        std::chrono::milliseconds timeBudgetPerCycle{100};
-    } memorySyncBackfillState_;
-    std::chrono::steady_clock::time_point nextMemorySyncBackfill_{};
 
     // Cached GLiNER query concept extraction function.
     mutable search::EntityExtractionFunc cachedQueryConceptExtractor_;
