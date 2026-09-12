@@ -412,7 +412,7 @@ tests/integration/services/retrieval_and_ingestion_catch2_test.cpp:216:portabili
 tests/integration/services/retrieval_and_ingestion_catch2_test.cpp:1212:portability/env-read # reviewed raw environment read
 tests/integration/services/ui_cli_expectations_catch2_test.cpp:46:portability/env-read # reviewed raw environment read
 tests/integration/services/ui_cli_expectations_catch2_test.cpp:1270:portability/env-read # reviewed raw environment read
-tests/integration/smoke/add_command_sandbox_smoke_catch2_test.cpp:42:portability/env-read # reviewed raw environment read
+tests/integration/smoke/add_command_sandbox_smoke_catch2_test.cpp:41:portability/env-read # reviewed raw environment read
 tests/integration/smoke/cli_subprocess_segfault_regression_smoke_catch2_test.cpp:97:portability/env-read # reviewed raw environment read
 tests/integration/smoke/cli_subprocess_segfault_regression_smoke_catch2_test.cpp:153:portability/env-read # reviewed raw environment read
 tests/integration/smoke/cli_transport_fallback_smoke_catch2_test.cpp:39:portability/env-read # reviewed raw environment read

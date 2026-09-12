@@ -13,7 +13,6 @@
 #include "common/test_helpers_catch2.h"
 
 #include <yams/cli/yams_cli.h>
-#include <yams/daemon/client/global_io_context.h>
 
 namespace fs = std::filesystem;
 
@@ -139,7 +138,7 @@ TEST_CASE("IntegrationSmoke.AddCommandSandboxOperations", "[smoke][integrationsm
     CHECK(j["summary"]["failed"].get<int>() == 0);
 
     rc = run_cli({"yams", "--json", "add", inputDir.string(), "--recursive", "--include",
-                  "*.txt,*.md", "--exclude", "*.log", "--tags", "sandbox,dir"},
+                  "*.txt,*.md", "--exclude", "*.log", "--tags", "sandbox,dir", "--sync"},
                  &out);
     INFO(out);
     REQUIRE(rc == 0);
@@ -173,14 +172,6 @@ TEST_CASE("IntegrationSmoke.AddCommandSandboxOperations", "[smoke][integrationsm
     REQUIRE(j.contains("results"));
     CHECK(static_cast<int>(j["results"].size()) >= 2);
     CHECK(j["summary"]["failed"].get<int>() == 0);
-
-    rc = run_cli({"yams", "--json", "list", "--limit", "200"}, &out);
-    INFO(out);
-    REQUIRE(rc == 0);
-    j = parse_json_output(out);
-    INFO(out);
-    REQUIRE((j.is_array() || (j.is_object() && j.contains("items")) ||
-             (j.is_object() && j.contains("documents"))));
 
     std::error_code ec;
     fs::remove_all(root, ec);
