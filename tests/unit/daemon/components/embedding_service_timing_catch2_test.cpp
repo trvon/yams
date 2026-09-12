@@ -13,6 +13,7 @@
 
 #include "../../../../src/daemon/components/embedding_derivation_policy.h"
 #include "../../../../src/daemon/components/embedding_input_selection.h"
+#include "../../../../src/daemon/components/semantic_graph_candidate_policy.h"
 #include <yams/crypto/hasher.h>
 #include <yams/daemon/components/embed_preparer.h>
 #include <yams/daemon/components/EmbeddingService.h>
@@ -29,6 +30,17 @@
 using namespace std::chrono_literals;
 
 namespace yams::daemon {
+
+TEST_CASE("Semantic graph output capacity follows retained neighbors rather than scored pairs",
+          "[daemon][embedding][semantic-candidate-policy]") {
+    const embed::SemanticGraphCandidateCounts dense{1000, 1000, 999000, 8000};
+    CHECK(dense.nodeCapacity() == 9000);
+    const embed::SemanticGraphCandidateCounts singleNeighbor{1, 1, 1, 1};
+    CHECK(singleNeighbor.hasGraphWork());
+    CHECK(singleNeighbor.nodeCapacity() == 2);
+    const embed::SemanticGraphCandidateCounts noNeighbor{2, 2, 0, 0};
+    CHECK_FALSE(noNeighbor.hasGraphWork());
+}
 
 TEST_CASE("Prepared embedding payload binds the extracted text snapshot",
           "[daemon][embedding][prepared-freshness]") {

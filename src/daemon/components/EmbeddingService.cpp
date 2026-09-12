@@ -1,5 +1,6 @@
 #include "embedding_derivation_policy.h"
 #include "embedding_input_selection.h"
+#include "semantic_graph_candidate_policy.h"
 #include <yams/daemon/components/EmbeddingService.h>
 #include <yams/daemon/components/WriteCoordinator.h>
 
@@ -678,14 +679,20 @@ void EmbeddingService::updateSemanticNeighborGraphUnlocked(
         }
         recordPhaseTiming("semantic_pair_scoring", tPairScoring);
 
-        if (candidateDocs < 2) {
+        std::size_t retainedNeighbors = 0;
+        for (const auto& neighbors : topBySource) {
+            retainedNeighbors += neighbors.size();
+        }
+        const embed::SemanticGraphCandidateCounts candidateCounts{
+            sources.size(), candidateDocs, candidateNeighborCount, retainedNeighbors};
+        if (!candidateCounts.hasGraphWork()) {
             return;
         }
 
         std::vector<std::string> nodeKeys;
-        nodeKeys.reserve(sources.size() + candidateNeighborCount);
+        nodeKeys.reserve(candidateCounts.nodeCapacity());
         std::unordered_set<std::string> seenNodeKeys;
-        seenNodeKeys.reserve(sources.size() + candidateNeighborCount);
+        seenNodeKeys.reserve(candidateCounts.nodeCapacity());
         auto rememberNodeKey = [&](const std::string& hash) {
             if (hash.empty()) {
                 return;
