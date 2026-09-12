@@ -148,12 +148,12 @@ TEST_CASE("populatePathDerivedFields fills DocumentInfo path index fields", "[me
 }
 
 struct MetadataRepositoryFixture {
-    MetadataRepositoryFixture() {
+    explicit MetadataRepositoryFixture(std::size_t maxConnections = 2) {
         dbPath_ = tempDbPath("metadata_repo_catch2_test_");
 
         ConnectionPoolConfig config;
         config.minConnections = 1;
-        config.maxConnections = 2;
+        config.maxConnections = maxConnections;
 
         pool_ = std::make_unique<ConnectionPool>(dbPath_.string(), config);
         auto initResult = pool_->initialize();
@@ -626,7 +626,8 @@ TEST_CASE("MetadataRepository: content and KG intent commit atomically",
 
 TEST_CASE("MetadataRepository: session and tag helpers round-trip",
           "[unit][metadata][repository][session-tags]") {
-    MetadataRepositoryFixture fix;
+    // SQLITE_LIMIT_SQL_LENGTH is connection-local; pin fault injection and queries together.
+    MetadataRepositoryFixture fix{1};
 
     auto docA = makeDocumentWithPath("repo/sessions/a.txt", "session-tag-a");
     auto docB = makeDocumentWithPath("repo/sessions/b.txt", "session-tag-b");
@@ -737,6 +738,7 @@ TEST_CASE("MetadataRepository: session and tag helpers round-trip",
     REQUIRE(fix.pool_
                 ->withConnection([&](Database& db) -> Result<void> {
                     CHECK(sqlite3_get_autocommit(db.rawHandle()) == 1);
+                    db.clearStatementCache();
                     previousSqlLimit = sqlite3_limit(db.rawHandle(), SQLITE_LIMIT_SQL_LENGTH, 64);
                     return {};
                 })

@@ -10,6 +10,7 @@
 #include <yams/vector/vector_database.h>
 
 #include <spdlog/spdlog.h>
+#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -18,6 +19,7 @@
 #include <filesystem>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #ifdef _WIN32
 #include <io.h>
 #include <windows.h>
@@ -338,6 +340,28 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
         size_t end = std::min(i + config.batchSize, documents.size());
         std::vector<std::string> texts;
         std::vector<metadata::DocumentInfo> batchDocs;
+        std::vector<metadata::EmbeddingDerivationToken> batchTokens;
+        const yams::vector::ChunkingConfig chunkConfig{};
+        const auto recipe =
+            nlohmann::json{{"pipeline", "standalone-repair-v1"},
+                           {"space", modelProvider->getEmbeddingSpaceIdentity(modelName)},
+                           {"version", modelProvider->getProviderVersion()},
+                           {"dimension", embeddingDim},
+                           {"input_limit", kMaxTextForEmbeddingBytes},
+                           {"strategy", "sentence"},
+                           {"target", chunkConfig.target_chunk_size},
+                           {"max", chunkConfig.max_chunk_size},
+                           {"min", chunkConfig.min_chunk_size},
+                           {"overlap", chunkConfig.overlap_size},
+                           {"sentences", chunkConfig.preserve_sentences},
+                           {"paragraphs", chunkConfig.preserve_paragraphs},
+                           {"words", chunkConfig.preserve_words},
+                           {"overlap_percentage", chunkConfig.overlap_percentage},
+                           {"chunk_separator", chunkConfig.chunk_separator},
+                           {"token_count", chunkConfig.use_token_count},
+                           {"semantic_threshold", chunkConfig.semantic_threshold},
+                           {"separators", chunkConfig.separators}}
+                .dump();
 
         // Collect texts for this batch (extract text; avoid raw bytes)
         for (size_t j = i; j < end; ++j) {
@@ -349,8 +373,14 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
 
             // Check if embedding already exists
             if (config.skipExisting && embeddedHashes.contains(doc.sha256Hash)) {
-                stats.embeddingsSkipped++;
-                continue;
+                auto ready = metadataRepo->hasDocumentEmbeddingByHash(doc.sha256Hash);
+                if (!ready) {
+                    return ready.error();
+                }
+                if (ready.value()) {
+                    stats.embeddingsSkipped++;
+                    continue;
+                }
             }
 
             // Extract text using util (plugins + built-ins)
@@ -396,6 +426,8 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
                 if (!contentUpsert) {
                     spdlog::warn("[repair] Failed to upsert content for {}: {}", doc.sha256Hash,
                                  contentUpsert.error().message);
+                    stats.failedOperations++;
+                    continue;
                 } else {
                     auto docRow = metadataRepo->getDocument(doc.id);
                     if (docRow && docRow.value().has_value()) {
@@ -406,6 +438,20 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
                     }
                 }
             }
+
+            // Persist first, then mint and read the canonical snapshot. A later content
+            // mutation invalidates this token; legacy readiness must never publish it.
+            auto token = metadataRepo->beginDocumentEmbeddingDerivation(doc.sha256Hash, recipe);
+            if (!token) {
+                return token.error();
+            }
+            auto snapshot = metadataRepo->getContent(doc.id);
+            if (!snapshot || !snapshot.value() || snapshot.value()->contentText.empty()) {
+                stats.failedOperations++;
+                continue;
+            }
+            text = snapshot.value()->contentText;
+            batchTokens.push_back(std::move(token.value()));
 
             // Guard overly large text for embedding input.
             if (text.size() > kMaxTextForEmbeddingBytes) {
@@ -435,9 +481,8 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
             std::vector<ChunkInfo> allChunks;
             std::vector<PendingDocumentState> docStates(batchDocs.size());
 
-            yams::vector::ChunkingConfig ccfg{};
             auto chunker = yams::vector::createChunker(
-                yams::vector::ChunkingStrategy::SENTENCE_BASED, ccfg, nullptr);
+                yams::vector::ChunkingStrategy::SENTENCE_BASED, chunkConfig, nullptr);
 
             allChunks.reserve(texts.size() * 2);
 
@@ -604,17 +649,26 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
                         break;
                     }
 
-                    // Update embedding status for all docs in this batch.
-                    std::vector<std::string> successHashes;
-                    successHashes.reserve(batchDocs.size());
-                    for (const auto& d : batchDocs) {
-                        successHashes.push_back(d.sha256Hash);
+                    std::unordered_set<std::string> persistedHashes;
+                    for (const auto& record : allRecords) {
+                        if (record.level == yams::vector::EmbeddingLevel::DOCUMENT) {
+                            persistedHashes.insert(record.document_hash);
+                        }
                     }
-                    auto metaUp = metadataRepo->batchUpdateDocumentEmbeddingStatusByHashes(
-                        successHashes, true, modelName);
+                    std::vector<metadata::EmbeddingDerivationToken> successTokens;
+                    for (const auto& token : batchTokens) {
+                        if (persistedHashes.contains(token.hash)) {
+                            successTokens.push_back(token);
+                        }
+                    }
+                    auto metaUp = metadataRepo->batchCompleteDocumentEmbeddingDerivations(
+                        successTokens, modelName);
                     if (!metaUp) {
-                        spdlog::warn("[repair] Failed to batch update embedding status: {}",
+                        spdlog::warn("[repair] Failed to complete embedding derivations: {}",
                                      metaUp.error().message);
+                        stats.failedOperations += successTokens.size();
+                    } else {
+                        stats.failedOperations += successTokens.size() - metaUp.value();
                     }
 
                     // Count only chunk-level embeddings for stats (matches previous behavior).
