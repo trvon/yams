@@ -11,6 +11,7 @@
 #include <unordered_set>
 #include <vector>
 #include <yams/core/types.h>
+#include <yams/daemon/components/embedding_service_config.h>
 #include <yams/topology/topology_input_extractor.h>
 
 namespace yams::metadata {
@@ -115,6 +116,9 @@ public:
         std::function<std::shared_ptr<metadata::MetadataRepository>()> getMetadataRepo;
         std::function<std::shared_ptr<metadata::KnowledgeGraphStore>()> getKgStore;
         std::function<std::shared_ptr<vector::VectorDatabase>()> getVectorDatabase;
+        // The semantic_neighbor policy the artifacts were built under; part of the cell
+        // identity so a changed top-K or threshold invalidates them.
+        SemanticNeighborGraphConfig semanticGraph;
     };
 
     explicit TopologyManager(Dependencies deps);

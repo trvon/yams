@@ -327,6 +327,16 @@ private:
     std::unique_ptr<simeon::TextAdapter> text_adapter_;
     std::vector<std::unique_ptr<simeon::RetrievalStrategy>> strategies_;
     std::unique_ptr<simeon::StrategyRouter> strategy_router_;
+    // Shared tail of every scoring entry point: dense corpus-order buffer -> candidate order,
+    // with one non-finite policy (see simeon_score_materialize_internal.h). The vector overload
+    // keeps the buffer on the dense fast path; the span overload is for borrowed scratch.
+    RescoreDecision materializeDecision(std::vector<float> full, std::span<const float> lexical,
+                                        std::span<const std::int64_t> candidate_doc_ids,
+                                        const char* recipe_label) const;
+    RescoreDecision materializeDecision(std::span<const float> full, std::span<const float> lexical,
+                                        std::span<const std::int64_t> candidate_doc_ids,
+                                        const char* recipe_label) const;
+
     std::unordered_map<std::int64_t, std::uint32_t> doc_id_to_index_;
     std::vector<std::int64_t> index_to_doc_id_;
     std::size_t doc_count_ = 0;

@@ -1770,6 +1770,51 @@ void ConfigResolver::applySearchMaintenance(const ConfigSections& sections, Daem
     config.searchMaintenance.automaticRebuildsSource = "config:search.automatic_rebuilds";
 }
 
+bool ConfigResolver::applyEmbeddingSemanticGraph(const ConfigSections& sections,
+                                                 DaemonConfig& config) {
+    const auto section = sections.find("embeddings.semantic_graph");
+    if (section == sections.end()) {
+        return true;
+    }
+    for (const auto& [key, value] : section->second) {
+        (void)value;
+        if (key != "top_k" && key != "similarity_threshold" && key != "use_hnsw") {
+            spdlog::warn("Config: unknown embeddings.semantic_graph key '{}'", key);
+            return false;
+        }
+    }
+
+    auto policy = config.embeddingService.semanticGraph;
+    if (const auto it = section->second.find("top_k"); it != section->second.end()) {
+        const auto parsed = parseUnsignedIntegral<std::size_t>(it->second);
+        if (!parsed || !SemanticNeighborGraphConfig::validTopK(*parsed)) {
+            spdlog::warn("Config: embeddings.semantic_graph.top_k must be within [1, {}]",
+                         SemanticNeighborGraphConfig::kMaxTopK);
+            return false;
+        }
+        policy.topK = *parsed;
+    }
+    if (const auto it = section->second.find("similarity_threshold"); it != section->second.end()) {
+        const auto parsed = parseDouble(it->second);
+        if (!parsed || *parsed < 0.0 || *parsed > 1.0) {
+            spdlog::warn(
+                "Config: embeddings.semantic_graph.similarity_threshold must be within [0, 1]");
+            return false;
+        }
+        policy.similarityThreshold = static_cast<float>(*parsed);
+    }
+    if (const auto it = section->second.find("use_hnsw"); it != section->second.end()) {
+        const auto parsed = parseBoolValue(it->second);
+        if (!parsed) {
+            spdlog::warn("Config: embeddings.semantic_graph.use_hnsw must be a boolean");
+            return false;
+        }
+        policy.useHnsw = *parsed;
+    }
+    config.embeddingService.semanticGraph = policy;
+    return true;
+}
+
 bool ConfigResolver::applyStorageDiskPressure(const ConfigSections& sections,
                                               DaemonConfig& config) {
     const auto section = sections.find("storage.disk_pressure");

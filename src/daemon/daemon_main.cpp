@@ -433,6 +433,11 @@ int main(int argc, char* argv[]) {
                 spdlog::error("Config: refusing to start with invalid [memory_sync] settings");
                 return 1;
             }
+            if (!yams::daemon::ConfigResolver::applyEmbeddingSemanticGraph(tomlConfig, config)) {
+                spdlog::error(
+                    "Config: refusing to start with invalid [embeddings.semantic_graph] settings");
+                return 1;
+            }
 
             // [plugins] section: trust list for ABI and external plugins
             if (tomlConfig.find("plugins") != tomlConfig.end()) {
