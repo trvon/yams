@@ -1923,64 +1923,6 @@ void PostIngestQueue::dispatchToSymbolChannel(
     }
 }
 
-void PostIngestQueue::processSymbolExtractionStage(const std::string& hash,
-                                                   [[maybe_unused]] int64_t docId,
-                                                   const std::string& filePath,
-                                                   const std::string& language,
-                                                   std::vector<std::byte>* contentBytes) {
-    // Legacy single-item handler (kept for now); metrics are owned by the poller layer.
-    if (!graphComponent_) {
-        spdlog::warn("[PostIngestQueue] Symbol extraction skipped for {} - no graphComponent",
-                     hash);
-        return;
-    }
-
-    spdlog::info("[PostIngestQueue] Symbol extraction starting for {} ({}) lang={}", filePath,
-                 hash.substr(0, 12), language);
-
-    try {
-        auto startTime = std::chrono::steady_clock::now();
-
-        // Use GraphComponent to submit the extraction job
-        GraphComponent::EntityExtractionJob extractJob;
-        extractJob.documentHash = hash;
-        extractJob.filePath = filePath;
-        extractJob.language = language;
-
-        std::vector<std::byte> bytes;
-        if (contentBytes) {
-            bytes = std::move(*contentBytes);
-        } else if (store_) {
-            auto contentResult = store_->retrieveBytes(hash);
-            if (contentResult) {
-                bytes = std::move(contentResult.value());
-            } else {
-                spdlog::warn("[PostIngestQueue] Failed to load content for symbol extraction: {}",
-                             hash.substr(0, 12));
-                return;
-            }
-        } else {
-            spdlog::warn("[PostIngestQueue] No content store for symbol extraction");
-            return;
-        }
-        extractJob.contentUtf8 =
-            std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-
-        auto result = graphComponent_->submitEntityExtraction(std::move(extractJob));
-        if (!result) {
-            spdlog::warn("[PostIngestQueue] Symbol extraction failed for {}: {}", hash,
-                         result.error().message);
-        } else {
-            auto duration = std::chrono::steady_clock::now() - startTime;
-            double ms = std::chrono::duration<double, std::milli>(duration).count();
-            spdlog::debug("[PostIngestQueue] Symbol extraction submitted for {} in {:.2f}ms", hash,
-                          ms);
-        }
-    } catch (const std::exception& e) {
-        spdlog::error("[PostIngestQueue] Symbol extraction failed for {}: {}", hash, e.what());
-    }
-}
-
 void PostIngestQueue::dispatchToEntityChannel(
     const std::string& hash, int64_t docId, const std::string& filePath,
     const std::string& extension, std::shared_ptr<std::vector<std::byte>> contentBytes) {
@@ -2051,7 +1993,7 @@ void PostIngestQueue::processEntityExtractionBatch(
 void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int64_t docId,
                                                    const std::string& filePath,
                                                    const std::string& extension,
-                                                   std::vector<std::byte>* contentBytes) {
+                                                   const std::vector<std::byte>* contentBytes) {
     spdlog::info("[PostIngestQueue] Entity extraction starting for {} ({}) ext={}", filePath,
                  hash.substr(0, 12), extension);
 
@@ -2079,23 +2021,25 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
             return;
         }
 
-        // Load content from store
-        std::vector<std::byte> content;
-        if (contentBytes) {
-            content = std::move(*contentBytes);
-        } else if (store_) {
+        // Read the dispatched buffer in place: the same bytes are shared with the KG and
+        // symbol channels, so moving out of it would starve whichever consumer runs later.
+        std::vector<std::byte> ownedFallback;
+        const std::vector<std::byte>* contentPtr = contentBytes;
+        if (!contentPtr) {
+            if (!store_) {
+                spdlog::warn("[PostIngestQueue] No content store for entity extraction");
+                return;
+            }
             auto contentResult = store_->retrieveBytes(hash);
-            if (contentResult) {
-                content = std::move(contentResult.value());
-            } else {
+            if (!contentResult) {
                 spdlog::warn("[PostIngestQueue] Failed to load content for entity extraction: {}",
                              hash.substr(0, 12));
                 return;
             }
-        } else {
-            spdlog::warn("[PostIngestQueue] No content store for entity extraction");
-            return;
+            ownedFallback = std::move(contentResult.value());
+            contentPtr = &ownedFallback;
         }
+        const std::vector<std::byte>& content = *contentPtr;
 
         if (!kg_) {
             spdlog::warn("[PostIngestQueue] No KG store for entity extraction");

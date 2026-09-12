@@ -426,6 +426,10 @@ public:
     }
     void testing_schedulePendingKgDrain() { schedulePendingKgDrain(); }
     void testing_enqueueKgJob(InternalEventBus::KgJob job) { enqueueKgJob(std::move(job)); }
+    void testing_processEntityExtractionBatch(
+        std::vector<InternalEventBus::EntityExtractionJob>&& jobs) {
+        processEntityExtractionBatch(std::move(jobs));
+    }
     [[nodiscard]] std::size_t testing_pendingKgJobs() const {
         std::lock_guard<std::mutex> lock(pendingKgMutex_);
         return pendingKgJobs_.size();
@@ -455,9 +459,6 @@ private:
         const std::vector<std::shared_ptr<ExternalEntityProviderAdapter>>& entityProviders);
 
     void processKnowledgeGraphBatch(std::vector<InternalEventBus::KgJob>&& jobs);
-    void processSymbolExtractionStage(const std::string& hash, int64_t docId,
-                                      const std::string& filePath, const std::string& language,
-                                      std::vector<std::byte>* contentBytes);
     void processSymbolExtractionBatch(std::vector<InternalEventBus::SymbolExtractionJob>&& jobs);
     void processEntityExtractionBatch(std::vector<InternalEventBus::EntityExtractionJob>&& jobs);
     void processTitleExtractionBatch(std::vector<InternalEventBus::TitleExtractionJob>&& jobs);
@@ -474,9 +475,11 @@ private:
     void dispatchToEntityChannel(const std::string& hash, int64_t docId,
                                  const std::string& filePath, const std::string& extension,
                                  std::shared_ptr<std::vector<std::byte>> contentBytes);
+    // contentBytes may alias a buffer shared with the KG and symbol channels; the stage
+    // reads it in place and must never move out of it.
     void processEntityExtractionStage(const std::string& hash, int64_t docId,
                                       const std::string& filePath, const std::string& extension,
-                                      std::vector<std::byte>* contentBytes);
+                                      const std::vector<std::byte>* contentBytes);
     void dispatchToTitleChannel(const std::string& hash, int64_t docId,
                                 const std::string& textSnippet, const std::string& fallbackTitle,
                                 const std::string& filePath, const std::string& language,
