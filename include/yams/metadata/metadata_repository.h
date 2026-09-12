@@ -876,6 +876,14 @@ public:
     Result<std::vector<EmbeddingDerivationToken>>
     batchBeginDocumentEmbeddingDerivations(const std::vector<std::string>& hashes,
                                            const std::string& recipe);
+    /// Classify ready matching recipes or mint new tokens atomically under the writer transaction.
+    Result<EmbeddingDerivationAdmission>
+    batchClassifyOrBeginEmbeddingDerivations(const std::vector<std::string>& hashes,
+                                             const std::string& recipe, bool skipExisting);
+    /// Update only still-pending matching attempts; success uses derivation completion instead.
+    Result<std::size_t>
+    batchUpdateEmbeddingDerivationRepairStatus(const std::vector<EmbeddingDerivationToken>& tokens,
+                                               RepairStatus status);
     /// Batch form of completeDocumentEmbeddingDerivation: one transaction; returns how many
     /// tokens were still current and are now published. Stale tokens are skipped silently.
     Result<std::size_t>

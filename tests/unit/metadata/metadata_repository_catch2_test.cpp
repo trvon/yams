@@ -16,6 +16,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <spdlog/sinks/ostream_sink.h>
@@ -1085,6 +1086,111 @@ TEST_CASE("MetadataRepository direct content writes invalidate pending derivatio
     auto completed = fix.repository_->completeDocumentEmbeddingDerivation(token.value(), "model");
     REQUIRE(completed.has_value());
     CHECK_FALSE(completed.value());
+}
+
+TEST_CASE("MetadataRepository content writes clear completed embedding readiness",
+          "[unit][metadata][embeddings][content-readiness]") {
+    MetadataRepositoryFixture fix;
+    const bool tracked = GENERATE(false, true);
+    const std::string hash = "completed-content-hash";
+    auto id =
+        fix.repository_->insertDocument(makeDocumentWithPath("/tmp/completed-content.txt", hash));
+    REQUIRE(id.has_value());
+    DocumentContent content;
+    content.documentId = id.value();
+    content.contentText = "original";
+    REQUIRE(fix.repository_->insertContent(content).has_value());
+    if (tracked) {
+        auto token = fix.repository_->beginDocumentEmbeddingDerivation(hash, "recipe");
+        REQUIRE(token.has_value());
+        auto complete =
+            fix.repository_->completeDocumentEmbeddingDerivation(token.value(), "model");
+        REQUIRE(complete.has_value());
+        REQUIRE(complete.value());
+    } else {
+        REQUIRE(
+            fix.repository_->updateDocumentEmbeddingStatus(id.value(), true, "model").has_value());
+    }
+    REQUIRE(fix.repository_->getCachedEmbeddedCount() == 1);
+    bool changed = true;
+    SECTION("upsert changed text") {
+        content.contentText = "replacement";
+        REQUIRE(fix.repository_->insertContent(content).has_value());
+    }
+    SECTION("update changed text") {
+        content.contentText = "replacement";
+        REQUIRE(fix.repository_->updateContent(content).has_value());
+    }
+    SECTION("delete") {
+        REQUIRE(fix.repository_->deleteContent(id.value()).has_value());
+    }
+    SECTION("identical update preserves readiness") {
+        changed = false;
+        REQUIRE(fix.repository_->updateContent(content).has_value());
+    }
+    SECTION("identical upsert preserves readiness") {
+        changed = false;
+        REQUIRE(fix.repository_->insertContent(content).has_value());
+    }
+    auto status = getEmbeddingStatusRow(*fix.pool_, hash);
+    REQUIRE(status.has_value());
+    REQUIRE(status.value().has_value());
+    CHECK(status.value()->hasEmbedding == !changed);
+    auto count = fix.repository_->getEmbeddedDocumentCount();
+    REQUIRE(count.has_value());
+    CHECK(count.value() == (changed ? 0 : 1));
+    CHECK(fix.repository_->getCachedEmbeddedCount() == (changed ? 0 : 1));
+}
+
+TEST_CASE("Embedding readiness migration upgrades version 38 databases",
+          "[unit][metadata][embeddings][content-readiness][migration]") {
+    MetadataRepositoryFixture fix;
+    const std::string hash = "upgrade-content-hash";
+    auto id =
+        fix.repository_->insertDocument(makeDocumentWithPath("/tmp/upgrade-content.txt", hash));
+    REQUIRE(id.has_value());
+    DocumentContent content;
+    content.documentId = id.value();
+    content.contentText = "original";
+    REQUIRE(fix.repository_->insertContent(content).has_value());
+    auto token = fix.repository_->beginDocumentEmbeddingDerivation(hash, "recipe");
+    REQUIRE(token.has_value());
+    REQUIRE(
+        fix.repository_->completeDocumentEmbeddingDerivation(token.value(), "model").has_value());
+    auto upgraded = fix.pool_->withConnection([&](Database& db) -> Result<void> {
+        MigrationManager manager(db);
+        manager.registerMigrations(YamsMetadataMigrations::getAllMigrations());
+        if (auto rolledBack = manager.rollbackTo(38); !rolledBack) {
+            return rolledBack.error();
+        }
+        // Version 38 invalidates the token but leaves the legacy ready bit set.
+        if (auto changed =
+                db.execute("UPDATE document_content SET content_text = 'changed before upgrade'");
+            !changed) {
+            return changed.error();
+        }
+        return manager.migrateTo(39);
+    });
+    REQUIRE(upgraded.has_value());
+    auto status = getEmbeddingStatusRow(*fix.pool_, hash);
+    REQUIRE(status.has_value());
+    REQUIRE(status.value().has_value());
+    CHECK_FALSE(status.value()->hasEmbedding);
+
+    auto next = fix.repository_->beginDocumentEmbeddingDerivation(hash, "recipe");
+    REQUIRE(next.has_value());
+    REQUIRE(
+        fix.repository_->completeDocumentEmbeddingDerivation(next.value(), "model").has_value());
+    REQUIRE(fix.pool_
+                ->withConnection([](Database& db) -> Result<void> {
+                    return db.execute(
+                        "UPDATE document_content SET content_text = 'changed after upgrade'");
+                })
+                .has_value());
+    auto invalidated = getEmbeddingStatusRow(*fix.pool_, hash);
+    REQUIRE(invalidated.has_value());
+    REQUIRE(invalidated.value().has_value());
+    CHECK_FALSE(invalidated.value()->hasEmbedding);
 }
 
 TEST_CASE("WriteCoordinator preserves derivation identities across completion batches",

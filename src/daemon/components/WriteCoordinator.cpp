@@ -344,6 +344,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
 
     bool hasKgOps = false;
     bool hasMetaOps = false;
+    std::unordered_set<const WriteBatch*> batchesWithKgOps;
     for (const auto& batch : batches) {
         for (const auto& op : batch->ops) {
             std::visit(
@@ -362,6 +363,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                         hasMetaOps = true;
                     } else {
                         hasKgOps = true;
+                        batchesWithKgOps.insert(batch.get());
                     }
                 },
                 op);
@@ -510,16 +512,31 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
 
     // Release the KG write lease before acquiring a metadata connection (including size-one pools).
     if (hasKgOps && kg_) {
+        std::optional<Error> firstCompletionError;
         for (const auto& batch : batches) {
             if (batch->knowledgeGraphToken.empty())
                 continue;
-            if (!meta_)
-                return Error{ErrorCode::NotInitialized, "KG completion metadata unavailable"};
+            if (batch->knowledgeGraphCompletion) {
+                if (!batchesWithKgOps.contains(batch.get()) ||
+                    !batch->knowledgeGraphCompletion->markCommitted(
+                        batch->knowledgeGraphCompletionStage)) {
+                    continue;
+                }
+            }
+            if (!meta_) {
+                if (!firstCompletionError) {
+                    firstCompletionError =
+                        Error{ErrorCode::NotInitialized, "KG completion metadata unavailable"};
+                }
+                continue;
+            }
             auto completed = meta_->completeKnowledgeGraphEnrichment(
                 batch->knowledgeGraphDocumentId, batch->knowledgeGraphToken);
-            if (!completed)
-                return completed.error();
+            if (!completed && !firstCompletionError)
+                firstCompletionError = completed.error();
         }
+        if (firstCompletionError)
+            return *firstCompletionError;
     }
 
     if (hasMetaOps && meta_) {
@@ -593,20 +610,28 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                             concrete.terms.clear();
                             return;
                         } else if constexpr (std::is_same_v<T, UpdateRepairStatusOp>) {
-                            if (concrete.hashes.empty())
+                            if (!concrete.derivations.empty()) {
+                                r = applyMetadataOp(concrete);
+                                if (!r && !firstOpError) {
+                                    firstOpError = r.error();
+                                }
+                            } else {
+                                if (concrete.hashes.empty())
+                                    return;
+                                const auto key = batch->source + "\x1f" +
+                                                 std::to_string(static_cast<int>(concrete.status));
+                                auto& group = repairStatusBySourceAndStatus[key];
+                                if (group.source.empty()) {
+                                    group.source = batch->source;
+                                    group.status = concrete.status;
+                                }
+                                group.hashes.insert(
+                                    group.hashes.end(),
+                                    std::make_move_iterator(concrete.hashes.begin()),
+                                    std::make_move_iterator(concrete.hashes.end()));
+                                concrete.hashes.clear();
                                 return;
-                            const auto key = batch->source + "\x1f" +
-                                             std::to_string(static_cast<int>(concrete.status));
-                            auto& group = repairStatusBySourceAndStatus[key];
-                            if (group.source.empty()) {
-                                group.source = batch->source;
-                                group.status = concrete.status;
                             }
-                            group.hashes.insert(group.hashes.end(),
-                                                std::make_move_iterator(concrete.hashes.begin()),
-                                                std::make_move_iterator(concrete.hashes.end()));
-                            concrete.hashes.clear();
-                            return;
                         } else if constexpr (std::is_same_v<T, SetMetadataBatchOp>) {
                             if (concrete.entries.empty())
                                 return;
@@ -885,7 +910,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
         }
     }
 
-    // Metadata derivation completion can roll back after the KG phase has succeeded.
+    // Token-fenced metadata operations can fail after the KG phase has succeeded.
     // Preserve that failure for flush() rather than reporting the batch as committed.
     if (firstOpError) {
         return *firstOpError;
@@ -1246,6 +1271,21 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
 Result<void> WriteCoordinator::applyMetadataOp(UpdateRepairStatusOp& op) {
     if (!meta_)
         return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
+    if (!op.derivations.empty()) {
+        if (!op.hashes.empty()) {
+            return Error{ErrorCode::InvalidArgument,
+                         "repair status op cannot mix hashes and derivation tokens"};
+        }
+        metadata::MetadataOpScope opScope("wc_repair_status_derivation_batch");
+        auto r = meta_->batchUpdateEmbeddingDerivationRepairStatus(op.derivations, op.status);
+        if (!r)
+            return r.error();
+        {
+            std::lock_guard<std::mutex> lock(statsMutex_);
+            stats_.repairStatusesUpdated += r.value();
+        }
+        return Result<void>();
+    }
     if (op.hashes.empty())
         return Result<void>();
     metadata::MetadataOpScope opScope("wc_repair_status_batch");

@@ -17,6 +17,7 @@
 #include <boost/asio/strand.hpp>
 
 #include <yams/core/types.h>
+#include <yams/daemon/components/knowledge_graph_completion.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
@@ -117,6 +118,7 @@ struct DeleteOrphanedDocEntitiesOp {};
 struct UpdateRepairStatusOp {
     std::vector<std::string> hashes;
     metadata::RepairStatus status;
+    std::vector<metadata::EmbeddingDerivationToken> derivations;
 };
 struct UpsertTreeSnapshotOp {
     metadata::TreeSnapshotRecord record;
@@ -175,6 +177,9 @@ struct WriteBatch {
     int64_t knowledgeGraphDocumentId = 0;
     std::string knowledgeGraphToken;
     std::chrono::steady_clock::time_point enqueueTime{std::chrono::steady_clock::now()};
+    KnowledgeGraphCompletionStage knowledgeGraphCompletionStage{
+        KnowledgeGraphCompletionStage::Graph};
+    std::shared_ptr<KnowledgeGraphCompletion> knowledgeGraphCompletion;
 
     WriteBatch() = default;
     WriteBatch(WriteBatch&&) = default;

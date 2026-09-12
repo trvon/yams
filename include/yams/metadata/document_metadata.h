@@ -234,6 +234,11 @@ struct EmbeddingDerivationState {
     bool completed = false;
 };
 
+struct EmbeddingDerivationAdmission {
+    std::vector<EmbeddingDerivationToken> tokens;
+    std::vector<std::string> alreadyCompleted;
+};
+
 /**
  * @brief Entry for batch content insertion and indexing.
  *

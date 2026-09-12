@@ -231,13 +231,25 @@ class DerivationTestProvider final : public IModelProvider {
 public:
     std::size_t calls{0};
     std::string version{"v1"};
+    bool fail{false};
+    std::function<void()> beforeFailure;
 
     Result<std::vector<float>> generateEmbedding(const std::string&) override {
+        if (fail) {
+            return Error{ErrorCode::InternalError, "injected inference failure"};
+        }
         return std::vector<float>(64, 0.125f);
     }
     Result<std::vector<std::vector<float>>>
     generateBatchEmbeddings(const std::vector<std::string>& texts) override {
         ++calls;
+        if (beforeFailure) {
+            auto callback = std::exchange(beforeFailure, {});
+            callback();
+        }
+        if (fail) {
+            return Error{ErrorCode::InternalError, "injected inference failure"};
+        }
         return std::vector<std::vector<float>>(texts.size(), std::vector<float>(64, 0.125f));
     }
     Result<std::vector<float>> generateEmbeddingFor(const std::string&,
@@ -272,12 +284,27 @@ public:
     void shutdown() override {}
 };
 
+class DerivationRaceRepository final : public metadata::MetadataRepository {
+public:
+    using metadata::MetadataRepository::MetadataRepository;
+    std::function<void()> beforeLookup;
+
+    Result<std::optional<metadata::DocumentInfo>>
+    getDocumentByHash(const std::string& hash) override {
+        if (beforeLookup) {
+            auto callback = std::exchange(beforeLookup, {});
+            callback();
+        }
+        return metadata::MetadataRepository::getDocumentByHash(hash);
+    }
+};
+
 struct ServiceDerivationFixture {
     yams::test::SpdlogLevelGuard logLevel;
     yams::test::TempDirGuard temp{"embedding_service_derivation_"};
     std::filesystem::path metadataPath;
     std::unique_ptr<metadata::ConnectionPool> pool;
-    std::shared_ptr<metadata::MetadataRepository> repo;
+    std::shared_ptr<DerivationRaceRepository> repo;
     std::shared_ptr<vector::VectorDatabase> vectors;
     std::shared_ptr<DerivationTestProvider> provider{std::make_shared<DerivationTestProvider>()};
     boost::asio::io_context io;
@@ -296,7 +323,7 @@ struct ServiceDerivationFixture {
         config.maxConnections = 2;
         pool = std::make_unique<metadata::ConnectionPool>(metadataPath.string(), config);
         REQUIRE(pool->initialize().has_value());
-        repo = std::make_shared<metadata::MetadataRepository>(
+        repo = std::make_shared<DerivationRaceRepository>(
             *pool, nullptr, metadata::MetadataRepository::SchemaBootstrapMode::AssumeReady);
         vector::VectorDatabaseConfig vectorConfig;
         vectorConfig.database_path = (temp.path() / "vectors.db").string();
@@ -355,6 +382,60 @@ struct ServiceDerivationFixture {
 };
 
 } // namespace
+
+TEST_CASE_METHOD(ServiceDerivationFixture,
+                 "EmbeddingService rechecks skip readiness after gathering document identity",
+                 "[daemon][embedding][service-derivation][skip-race]") {
+    process();
+    const auto calls = provider->calls;
+    auto document = repo->getDocumentByHash(hash);
+    REQUIRE(document.has_value());
+    REQUIRE(document.value().has_value());
+    const auto id = document.value()->id;
+    repo->beforeLookup = [&] {
+        metadata::BatchContentEntry content;
+        content.documentId = id;
+        content.title = "derivation.txt";
+        content.contentText = "A replacement extraction after the cached readiness snapshot.";
+        content.mimeType = "text/plain";
+        content.extractionMethod = "test";
+        content.language = "en";
+        REQUIRE(repo->batchInsertContentAndIndex({content}).has_value());
+    };
+    process();
+    CHECK(provider->calls > calls);
+    auto ready = repo->hasDocumentEmbeddingByHash(hash);
+    REQUIRE(ready.has_value());
+    CHECK(ready.value());
+}
+
+TEST_CASE_METHOD(ServiceDerivationFixture,
+                 "EmbeddingService late failure preserves a newer completed derivation",
+                 "[daemon][embedding][service-derivation][late-failure]") {
+    process();
+    const auto records = vectors->getVectorsByDocument(hash);
+    REQUIRE_FALSE(records.empty());
+    provider->version = "v2";
+    provider->beforeFailure = [&] {
+        // A newer attempt commits while the old attempt is still in inference. This
+        // synchronous boundary reproduces the interleaving without threads or sleeps.
+        auto newer = repo->beginDocumentEmbeddingDerivation(hash, "newer-recipe");
+        REQUIRE(newer.has_value());
+        auto complete = repo->completeDocumentEmbeddingDerivation(newer.value(), "test-model");
+        REQUIRE(complete.has_value());
+        REQUIRE(complete.value());
+    };
+    provider->fail = true;
+    process();
+    CHECK(vectors->getVectorsByDocument(hash).size() == records.size());
+    auto ready = repo->hasDocumentEmbeddingByHash(hash);
+    REQUIRE(ready.has_value());
+    CHECK(ready.value());
+    auto document = repo->getDocumentByHash(hash);
+    REQUIRE(document.has_value());
+    REQUIRE(document.value().has_value());
+    CHECK(document.value()->repairStatus == metadata::RepairStatus::Completed);
+}
 
 TEST_CASE_METHOD(ServiceDerivationFixture,
                  "EmbeddingService skipExisting requires the current derivation recipe",

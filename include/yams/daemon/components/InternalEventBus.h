@@ -12,6 +12,7 @@
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
+#include <yams/daemon/components/knowledge_graph_completion.h>
 #include <yams/daemon/ipc/ipc_protocol_requests.h>
 #include <yams/integrity/repair_manager.h>
 
@@ -312,6 +313,7 @@ public:
         std::shared_ptr<std::vector<std::byte>> contentBytes;
         std::chrono::steady_clock::time_point enqueuedAt{};
         std::string knowledgeGraphToken;
+        std::shared_ptr<KnowledgeGraphCompletion> knowledgeGraphCompletion;
     };
     struct SymbolExtractionJob {
         std::string hash;
@@ -338,6 +340,8 @@ public:
         std::string language;      // Language hint for extraction
         std::string mimeType;      // MIME type for content routing
         bool preserveTitle{false}; // Supplied metadata title must not be replaced by inference.
+        std::string knowledgeGraphToken;
+        std::shared_ptr<KnowledgeGraphCompletion> knowledgeGraphCompletion;
     };
     struct StoreDocumentTask {
         AddDocumentRequest request;
@@ -379,6 +383,7 @@ public:
         std::string mimeType;
         int64_t documentDbId = 0;
         std::string knowledgeGraphToken;
+        std::shared_ptr<KnowledgeGraphCompletion> knowledgeGraphCompletion;
     };
 
 private:

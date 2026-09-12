@@ -22,6 +22,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <yams/daemon/components/GradientLimiter.h>
 #include <yams/daemon/components/InternalEventBus.h>
+#include <yams/daemon/components/knowledge_graph_completion.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/search/query_concept_extractor.h>
@@ -446,6 +447,15 @@ public:
         std::vector<InternalEventBus::EntityExtractionJob>&& jobs) {
         processEntityExtractionBatch(std::move(jobs));
     }
+    void
+    testing_processTitleExtractionBatch(std::vector<InternalEventBus::TitleExtractionJob>&& jobs) {
+        processTitleExtractionBatch(std::move(jobs));
+    }
+    void testing_dispatchNonEmbeddingStages(const PreparedMetadataEntry& entry) {
+        DispatchTimingSet timings;
+        dispatchNonEmbeddingStages(entry, buildDispatchPlan(entry, false, false),
+                                   entry.contentBytes, timings);
+    }
     [[nodiscard]] std::size_t testing_pendingKgJobs() const {
         std::lock_guard<std::mutex> lock(pendingKgMutex_);
         return pendingKgJobs_.size();
@@ -481,7 +491,8 @@ private:
     void dispatchToKgChannel(const std::string& hash, int64_t docId, const std::string& filePath,
                              std::vector<std::string> tags,
                              std::shared_ptr<std::vector<std::byte>> contentBytes,
-                             const std::string& knowledgeGraphToken);
+                             const std::string& knowledgeGraphToken,
+                             std::shared_ptr<KnowledgeGraphCompletion> knowledgeGraphCompletion);
     void enqueueKgJob(InternalEventBus::KgJob job);
     void schedulePendingKgDrain();
     boost::asio::awaitable<void> drainPendingKgJobs();
@@ -500,12 +511,14 @@ private:
     void dispatchToTitleChannel(const std::string& hash, int64_t docId,
                                 const std::string& textSnippet, const std::string& fallbackTitle,
                                 const std::string& filePath, const std::string& language,
-                                const std::string& mimeType, bool preserveTitle);
-    void processTitleExtractionStage(const std::string& hash, int64_t docId,
-                                     const std::string& textSnippet,
-                                     const std::string& fallbackTitle, const std::string& filePath,
-                                     const std::string& language, const std::string& mimeType,
-                                     bool preserveTitle);
+                                const std::string& mimeType, bool preserveTitle,
+                                const std::string& knowledgeGraphToken,
+                                std::shared_ptr<KnowledgeGraphCompletion> knowledgeGraphCompletion);
+    void processTitleExtractionStage(
+        const std::string& hash, int64_t docId, const std::string& textSnippet,
+        const std::string& fallbackTitle, const std::string& filePath, const std::string& language,
+        const std::string& mimeType, bool preserveTitle, const std::string& knowledgeGraphToken,
+        const std::shared_ptr<KnowledgeGraphCompletion>& knowledgeGraphCompletion);
     std::size_t resolveChannelCapacity() const;
     std::size_t boundedStageChannelCapacity(std::size_t defaultCap) const;
 

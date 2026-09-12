@@ -202,6 +202,7 @@ boost::asio::awaitable<void> EntityGraphService::channelPoller() {
             job.mimeType = std::move(busJob.mimeType);
             job.documentDbId = busJob.documentDbId;
             job.knowledgeGraphToken = std::move(busJob.knowledgeGraphToken);
+            job.knowledgeGraphCompletion = std::move(busJob.knowledgeGraphCompletion);
 
             try {
                 bool success = process(job);
@@ -257,6 +258,7 @@ Result<void> EntityGraphService::submitExtraction(Job job) {
     busJob.mimeType = std::move(job.mimeType);
     busJob.documentDbId = job.documentDbId;
     busJob.knowledgeGraphToken = std::move(job.knowledgeGraphToken);
+    busJob.knowledgeGraphCompletion = std::move(job.knowledgeGraphCompletion);
 
     constexpr std::size_t kChannelCapacity = 4096;
     auto channel = bus.get_or_create_channel<InternalEventBus::EntityGraphJob>("entity_graph_jobs",
@@ -293,6 +295,10 @@ bool EntityGraphService::process(Job& job) {
     auto acknowledgeNoop = [&]() {
         if (job.knowledgeGraphToken.empty())
             return true;
+        if (job.knowledgeGraphCompletion &&
+            !job.knowledgeGraphCompletion->markCommitted(KnowledgeGraphCompletionStage::Graph)) {
+            return true;
+        }
         auto repo = services_->getMetadataRepo();
         if (!repo)
             return false;
@@ -1055,6 +1061,8 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
                                                     "EntityGraphService::symbols/" + job.filePath);
         wb->knowledgeGraphDocumentId = job.documentDbId;
         wb->knowledgeGraphToken = job.knowledgeGraphToken;
+        wb->knowledgeGraphCompletionStage = KnowledgeGraphCompletionStage::Graph;
+        wb->knowledgeGraphCompletion = job.knowledgeGraphCompletion;
         writeCoordinator->enqueue(std::move(wb));
 
         spdlog::debug("EntityGraphService: queued KG batch with {} symbols from {}",

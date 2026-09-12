@@ -632,20 +632,30 @@ MetadataRepository::completeDocumentEmbeddingDerivation(const EmbeddingDerivatio
 Result<std::vector<EmbeddingDerivationToken>>
 MetadataRepository::batchBeginDocumentEmbeddingDerivations(const std::vector<std::string>& hashes,
                                                            const std::string& recipe) {
-    using Tokens = std::vector<EmbeddingDerivationToken>;
+    auto result = batchClassifyOrBeginEmbeddingDerivations(hashes, recipe, false);
+    if (!result) {
+        return result.error();
+    }
+    return std::move(result.value().tokens);
+}
+
+Result<EmbeddingDerivationAdmission> MetadataRepository::batchClassifyOrBeginEmbeddingDerivations(
+    const std::vector<std::string>& hashes, const std::string& recipe, bool skipExisting) {
     if (recipe.empty()) {
         return Error{ErrorCode::InvalidArgument, "Embedding derivation requires a recipe"};
     }
     if (hashes.empty()) {
-        return Tokens{};
+        return EmbeddingDerivationAdmission{};
     }
-    auto result = executeQuery<std::pair<Tokens, uint64_t>>(
-        [&](Database& db) -> Result<std::pair<Tokens, uint64_t>> {
+    auto result = executeWriteQuery<std::pair<EmbeddingDerivationAdmission, uint64_t>>(
+        [&](Database& db) -> Result<std::pair<EmbeddingDerivationAdmission, uint64_t>> {
             YAMS_TRY(beginTransaction(db));
             auto rollback = scope_exit([&] { rollbackIgnoringErrors(db); });
             YAMS_TRY_UNWRAP(doc, db.prepareCached(R"(
-                SELECT d.id, COALESCE(s.has_embedding, 0), lower(hex(randomblob(16)))
+                SELECT d.id, COALESCE(s.has_embedding, 0), lower(hex(randomblob(16))),
+                       COALESCE(a.completed, 0), a.recipe
                 FROM documents d LEFT JOIN document_embeddings_status s ON s.document_id = d.id
+                LEFT JOIN document_embedding_derivations a ON a.document_id = d.id
                 WHERE d.sha256_hash = ?
             )"));
             YAMS_TRY_UNWRAP(attempt, db.prepareCached(R"(
@@ -659,8 +669,8 @@ MetadataRepository::batchBeginDocumentEmbeddingDerivations(const std::vector<std
                 SET has_embedding = 0, model_id = NULL, updated_at = unixepoch()
                 WHERE document_id = ?
             )"));
-            Tokens tokens;
-            tokens.reserve(hashes.size());
+            EmbeddingDerivationAdmission admission;
+            admission.tokens.reserve(hashes.size());
             uint64_t previouslyReady = 0;
             std::unordered_set<std::string> seen;
             seen.reserve(hashes.size());
@@ -677,6 +687,11 @@ MetadataRepository::batchBeginDocumentEmbeddingDerivations(const std::vector<std
                 }
                 const auto id = doc->getInt64(0);
                 const bool wasReady = doc->getInt(1) != 0;
+                if (skipExisting && wasReady && doc->getInt(3) != 0 &&
+                    doc->getString(4) == recipe) {
+                    admission.alreadyCompleted.push_back(hash);
+                    continue;
+                }
                 EmbeddingDerivationToken token{hash, doc->getString(2), recipe};
                 YAMS_TRY(attempt->reset());
                 YAMS_TRY(attempt->clearBindings());
@@ -689,11 +704,11 @@ MetadataRepository::batchBeginDocumentEmbeddingDerivations(const std::vector<std
                 if (wasReady) {
                     ++previouslyReady;
                 }
-                tokens.push_back(std::move(token));
+                admission.tokens.push_back(std::move(token));
             }
             YAMS_TRY(commitOrRollback(db));
             rollback.dismiss();
-            return std::make_pair(std::move(tokens), previouslyReady);
+            return std::make_pair(std::move(admission), previouslyReady);
         });
     if (!result) {
         return result.error();
@@ -703,6 +718,41 @@ MetadataRepository::batchBeginDocumentEmbeddingDerivations(const std::vector<std
         signalCorpusStatsStale();
     }
     return std::move(result.value().first);
+}
+
+Result<std::size_t> MetadataRepository::batchUpdateEmbeddingDerivationRepairStatus(
+    const std::vector<EmbeddingDerivationToken>& tokens, RepairStatus status) {
+    if (status == RepairStatus::Completed) {
+        return Error{ErrorCode::InvalidArgument, "Use derivation completion to publish success"};
+    }
+    if (tokens.empty()) {
+        return std::size_t{0};
+    }
+    return executeWriteQuery<std::size_t>([&](Database& db) -> Result<std::size_t> {
+        YAMS_TRY(beginTransaction(db));
+        auto rollback = scope_exit([&] { rollbackIgnoringErrors(db); });
+        YAMS_TRY_UNWRAP(stmt, db.prepareCached(R"(
+            UPDATE documents SET repair_status = ?, repair_attempted_at = unixepoch(),
+                repair_attempts = repair_attempts + 1
+            WHERE sha256_hash = ? AND EXISTS (
+                SELECT 1 FROM document_embedding_derivations a
+                WHERE a.document_id = documents.id AND a.generation = ?
+                  AND a.recipe = ? AND a.completed = 0
+            )
+        )"));
+        std::size_t changed = 0;
+        const auto statusText = RepairStatusUtils::toString(status);
+        for (const auto& token : tokens) {
+            YAMS_TRY(stmt->reset());
+            YAMS_TRY(stmt->clearBindings());
+            YAMS_TRY(stmt->bindAll(statusText, token.hash, token.generation, token.recipe));
+            YAMS_TRY(stmt->execute());
+            changed += static_cast<std::size_t>(db.changes());
+        }
+        YAMS_TRY(commitOrRollback(db));
+        rollback.dismiss();
+        return changed;
+    });
 }
 
 Result<std::size_t> MetadataRepository::batchCompleteDocumentEmbeddingDerivations(
