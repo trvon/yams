@@ -1989,62 +1989,92 @@ MetadataRepository::batchGetDocumentsByHash(const std::vector<std::string>& hash
 
     return executeReadQuery<std::unordered_map<std::string, DocumentInfo>>(
         [&](Database& db) -> Result<std::unordered_map<std::string, DocumentInfo>> {
-            std::string sql = "SELECT id, file_path, file_name, file_extension, file_size, "
-                              "sha256_hash, mime_type, created_time, modified_time, indexed_time, "
-                              "content_extracted, extraction_status, extraction_error "
-                              "FROM documents WHERE sha256_hash IN (";
-            for (size_t i = 0; i < hashes.size(); ++i) {
-                if (i > 0)
-                    sql += ",";
-                sql += "?";
+            const int variableLimit =
+                sqlite3_limit(db.rawHandle(), SQLITE_LIMIT_VARIABLE_NUMBER, -1);
+            if (variableLimit < 1) {
+                return Error{ErrorCode::InvalidArgument,
+                             "SQLite variable limit cannot fit a document query"};
             }
-            sql += ")";
-
-            auto stmtResult = db.prepare(sql);
-            if (!stmtResult) {
-                return stmtResult.error();
-            }
-
-            Statement stmt = std::move(stmtResult).value();
-
-            // Bind hashes
-            for (size_t i = 0; i < hashes.size(); ++i) {
-                if (auto bindResult = stmt.bind(static_cast<int>(i + 1), hashes[i]); !bindResult) {
-                    return bindResult.error();
+            auto uniqueHashes = hashes;
+            std::sort(uniqueHashes.begin(), uniqueHashes.end());
+            uniqueHashes.erase(std::unique(uniqueHashes.begin(), uniqueHashes.end()),
+                               uniqueHashes.end());
+            const auto batchSize = std::min<std::size_t>(500, variableLimit);
+            auto started = db.execute("SAVEPOINT yams_document_batch_read");
+            if (!started)
+                return started.error();
+            bool released = false;
+            auto rollback = scope_exit([&] {
+                if (!released) {
+                    (void)db.execute("ROLLBACK TO yams_document_batch_read");
+                    (void)db.execute("RELEASE yams_document_batch_read");
                 }
-            }
-
+            });
             std::unordered_map<std::string, DocumentInfo> result;
+            for (std::size_t offset = 0; offset < uniqueHashes.size();) {
+                const auto count = std::min(batchSize, uniqueHashes.size() - offset);
+                std::string sql =
+                    "SELECT id, file_path, file_name, file_extension, file_size, "
+                    "sha256_hash, mime_type, created_time, modified_time, indexed_time, "
+                    "content_extracted, extraction_status, extraction_error "
+                    "FROM documents WHERE sha256_hash IN (";
+                for (size_t i = 0; i < count; ++i) {
+                    if (i > 0)
+                        sql += ",";
+                    sql += "?";
+                }
+                sql += ")";
 
-            while (true) {
-                auto stepResult = stmt.step();
-                if (!stepResult) {
-                    return stepResult.error();
+                auto stmtResult = db.prepare(sql);
+                if (!stmtResult) {
+                    return stmtResult.error();
                 }
 
-                if (!stepResult.value()) {
-                    break;
+                Statement stmt = std::move(stmtResult).value();
+
+                // Bind only this chunk; each distinct hash belongs to exactly one chunk.
+                for (size_t i = 0; i < count; ++i) {
+                    if (auto bindResult =
+                            stmt.bind(static_cast<int>(i + 1), uniqueHashes[offset + i]);
+                        !bindResult) {
+                        return bindResult.error();
+                    }
                 }
 
-                DocumentInfo info;
-                info.id = stmt.getInt64(0);
-                info.filePath = stmt.getString(1);
-                info.fileName = stmt.getString(2);
-                info.fileExtension = stmt.getString(3);
-                info.fileSize = stmt.getInt64(4);
-                info.sha256Hash = stmt.getString(5);
-                info.mimeType = stmt.getString(6);
-                info.setCreatedTime(stmt.getInt64(7));
-                info.setModifiedTime(stmt.getInt64(8));
-                info.setIndexedTime(stmt.getInt64(9));
-                info.contentExtracted = stmt.getInt(10) != 0;
-                info.extractionStatus = ExtractionStatusUtils::fromString(stmt.getString(11));
-                info.extractionError = stmt.getString(12);
+                while (true) {
+                    auto stepResult = stmt.step();
+                    if (!stepResult) {
+                        return stepResult.error();
+                    }
 
-                auto hash = info.sha256Hash;
-                result.emplace(std::move(hash), std::move(info));
+                    if (!stepResult.value()) {
+                        break;
+                    }
+
+                    DocumentInfo info;
+                    info.id = stmt.getInt64(0);
+                    info.filePath = stmt.getString(1);
+                    info.fileName = stmt.getString(2);
+                    info.fileExtension = stmt.getString(3);
+                    info.fileSize = stmt.getInt64(4);
+                    info.sha256Hash = stmt.getString(5);
+                    info.mimeType = stmt.getString(6);
+                    info.setCreatedTime(stmt.getInt64(7));
+                    info.setModifiedTime(stmt.getInt64(8));
+                    info.setIndexedTime(stmt.getInt64(9));
+                    info.contentExtracted = stmt.getInt(10) != 0;
+                    info.extractionStatus = ExtractionStatusUtils::fromString(stmt.getString(11));
+                    info.extractionError = stmt.getString(12);
+
+                    auto hash = info.sha256Hash;
+                    result.emplace(std::move(hash), std::move(info));
+                }
+                offset += count;
             }
-
+            auto release = db.execute("RELEASE yams_document_batch_read");
+            if (!release)
+                return release.error();
+            released = true;
             return result;
         });
 }
@@ -4460,41 +4490,64 @@ MetadataRepository::batchGetDocumentTags(std::span<const int64_t> documentIds) {
         return std::unordered_map<int64_t, std::vector<std::string>>{};
     }
 
+    // Match tag-filter semantics for both current and legacy metadata, without
+    // repeating tags when the same document occurs in multiple input chunks.
+    std::vector<int64_t> uniqueIds(documentIds.begin(), documentIds.end());
+    std::sort(uniqueIds.begin(), uniqueIds.end());
+    uniqueIds.erase(std::unique(uniqueIds.begin(), uniqueIds.end()), uniqueIds.end());
     return executeReadQuery<std::unordered_map<int64_t, std::vector<std::string>>>(
         [&](Database& db) -> Result<std::unordered_map<int64_t, std::vector<std::string>>> {
-            std::string query =
-                "SELECT document_id, key FROM metadata WHERE key LIKE 'tag:%' AND document_id IN (";
-            for (std::size_t i = 0; i < documentIds.size(); ++i) {
-                if (i)
-                    query += ",";
-                query += "?";
-            }
-            query += ") ORDER BY document_id, key";
-
-            auto stmtResult = db.prepare(query);
-            if (!stmtResult)
-                return stmtResult.error();
-
-            Statement stmt = std::move(stmtResult).value();
-            int bindIndex = 1;
-            for (auto id : documentIds) {
-                auto b = stmt.bind(bindIndex++, id);
-                if (!b)
-                    return b.error();
-            }
-
             std::unordered_map<int64_t, std::vector<std::string>> out;
-            while (true) {
-                auto stepResult = stmt.step();
-                if (!stepResult)
-                    return stepResult.error();
-                if (!stepResult.value())
-                    break;
-
-                std::string fullKey = stmt.getString(1);
-                if (fullKey.starts_with("tag:")) {
-                    out[stmt.getInt64(0)].push_back(fullKey.substr(4));
+            const int variableLimit =
+                sqlite3_limit(db.rawHandle(), SQLITE_LIMIT_VARIABLE_NUMBER, -1);
+            if (variableLimit < 1) {
+                return Error{ErrorCode::InvalidArgument,
+                             "SQLite variable limit cannot fit a tag query"};
+            }
+            const auto batchSize = std::min<std::size_t>(500, variableLimit);
+            const std::span<const int64_t> ids(uniqueIds);
+            for (std::size_t offset = 0; offset < ids.size();) {
+                const auto chunk = ids.subspan(offset, std::min(batchSize, ids.size() - offset));
+                std::string query = "SELECT document_id, key, value FROM metadata "
+                                    "WHERE (key = 'tag' OR key LIKE 'tag:%') AND document_id IN (";
+                for (std::size_t i = 0; i < chunk.size(); ++i) {
+                    if (i)
+                        query += ",";
+                    query += "?";
                 }
+                query += ") ORDER BY document_id, key";
+
+                auto stmtResult = db.prepare(query);
+                if (!stmtResult)
+                    return stmtResult.error();
+
+                Statement stmt = std::move(stmtResult).value();
+                int bindIndex = 1;
+                for (auto id : chunk) {
+                    auto b = stmt.bind(bindIndex++, id);
+                    if (!b)
+                        return b.error();
+                }
+
+                while (true) {
+                    auto stepResult = stmt.step();
+                    if (!stepResult)
+                        return stepResult.error();
+                    if (!stepResult.value())
+                        break;
+
+                    std::string fullKey = stmt.getString(1);
+                    if (fullKey.starts_with("tag:")) {
+                        out[stmt.getInt64(0)].push_back(fullKey.substr(4));
+                    } else if (fullKey == "tag" && !stmt.isNull(2)) {
+                        out[stmt.getInt64(0)].push_back(stmt.getString(2));
+                    }
+                }
+                offset += chunk.size();
+            }
+            for (auto& [id, tags] : out) {
+                std::sort(tags.begin(), tags.end());
+                tags.erase(std::unique(tags.begin(), tags.end()), tags.end());
             }
 
             return out;

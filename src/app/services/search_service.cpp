@@ -571,72 +571,47 @@ retryMetadataOp(Fn&& fn, std::size_t maxAttempts = 4,
     co_return attempt;
 }
 
-static boost::asio::awaitable<bool> metadataHasTags(metadata::MetadataRepository* repo,
-                                                    int64_t docId,
-                                                    const std::vector<std::string>& tags,
-                                                    bool matchAll,
-                                                    MetadataTelemetry* telemetry = nullptr) {
-    if (!repo || tags.empty()) {
-        co_return true;
+// Batch lookup supports normalized tag:<name> keys and legacy tag values, using bounded
+// queries. A lookup failure must be reported, not interpreted as an empty tag set.
+using TagsByDocument = std::unordered_map<int64_t, std::vector<std::string>>;
+
+static boost::asio::awaitable<Result<TagsByDocument>> loadTagsForDocuments(
+    metadata::MetadataRepository* repo, const std::vector<metadata::DocumentInfo>& docs,
+    const std::vector<std::string>& requiredTags, MetadataTelemetry* telemetry = nullptr) {
+    TagsByDocument tagsByDoc;
+    if (!repo || requiredTags.empty() || docs.empty()) {
+        co_return tagsByDoc;
     }
-
-    auto md = co_await retryMetadataOp([&]() { return repo->getAllMetadata(docId); }, 4,
-                                       std::chrono::milliseconds(25), telemetry);
-
-    if (!md) {
-        spdlog::debug("SearchService: metadata lookup failed for doc {}: {}", docId,
-                      md.error().message);
-        co_return false;
+    std::vector<int64_t> ids;
+    ids.reserve(docs.size());
+    for (const auto& d : docs) {
+        if (d.id > 0) {
+            ids.push_back(d.id);
+        }
     }
-
-    auto& all = md.value();
-
-    // Debug: log all metadata keys for this document
-    if (!tags.empty()) {
-        std::string keys;
-        for (const auto& [k, v] : all) {
-            if (!keys.empty())
-                keys += ", ";
-            keys += k + "=" + v.asString();
-        }
-        spdlog::info(
-            "metadataHasTags: docId={} searching for tags=[{}] matchAll={} found_metadata=[{}]",
-            docId, tags.size(), matchAll, keys);
+    auto loaded = co_await retryMetadataOp([&]() { return repo->batchGetDocumentTags(ids); }, 4,
+                                           std::chrono::milliseconds(25), telemetry);
+    if (!loaded) {
+        co_return loaded.error();
     }
+    co_return std::move(loaded.value());
+}
 
-    auto hasTag = [&](const std::string& t) {
-        // Check for normalized storage (key="tag:<name>")
-        auto it = all.find("tag:" + t);
-        if (it != all.end()) {
-            spdlog::debug("metadataHasTags: found tag:{}", t);
-            return true;
-        }
-        // Fallback: check for legacy storage (key="tag", value="<name>")
-        for (const auto& [k, v] : all) {
-            if (k == "tag" && v.asString() == t) {
-                spdlog::debug("metadataHasTags: found legacy tag {}", t);
-                return true;
-            }
-        }
-        spdlog::debug("metadataHasTags: tag '{}' not found", t);
+static bool hasRequiredTags(const TagsByDocument& tagsByDoc, int64_t docId,
+                            const std::vector<std::string>& required, bool matchAll) {
+    if (required.empty()) {
+        return true;
+    }
+    const auto it = tagsByDoc.find(docId);
+    if (it == tagsByDoc.end()) {
         return false;
-    };
-
-    if (matchAll) {
-        for (const auto& t : tags) {
-            if (!hasTag(t)) {
-                co_return false;
-            }
-        }
-        co_return true;
-    } else {
-        for (const auto& t : tags) {
-            if (hasTag(t)) {
-                co_return true;
-            }
-        }
-        co_return false;
     }
+    const auto& tags = it->second;
+    const auto has = [&](const std::string& t) {
+        return std::find(tags.begin(), tags.end(), t) != tags.end();
+    };
+    return matchAll ? std::all_of(required.begin(), required.end(), has)
+                    : std::any_of(required.begin(), required.end(), has);
 }
 
 // Compute recommended worker count based on hardware, load and caps
@@ -902,7 +877,12 @@ public:
                 resp.queryInfo = "path/name contains match";
                 co_return Result<SearchResponse>(applyWorkspaceScope(std::move(resp)));
             }
-            // Fall through to standard paths on error.
+            // Required tag filtering could not be completed. Do not hide that failure
+            // behind a fallback search that can report an empty successful result.
+            if (!normalizedReq.tags.empty()) {
+                co_return pathResult.error();
+            }
+            // Untagged path heuristics may still fall back to the standard search paths.
         }
 
         if (type == "hybrid" || type == "semantic") {
@@ -1577,6 +1557,11 @@ private:
         }
 
         // Apply additional filters and shape results
+        auto loadedTags =
+            co_await loadTagsForDocuments(ctx_.metadataRepo.get(), docs, req.tags, telemetry);
+        if (!loadedTags)
+            co_return loadedTags.error();
+        const auto& tagsByDoc = loadedTags.value();
         auto push_path = [&](const metadata::DocumentInfo& d) -> boost::asio::awaitable<void> {
             if (!req.extension.empty()) {
                 if (d.fileExtension != req.extension && d.fileExtension != ("." + req.extension))
@@ -1584,8 +1569,7 @@ private:
             }
             if (!req.mimeType.empty() && d.mimeType != req.mimeType)
                 co_return;
-            if (!(co_await metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags,
-                                           req.matchAllTags, telemetry)))
+            if (!hasRequiredTags(tagsByDoc, d.id, req.tags, req.matchAllTags))
                 co_return;
             const std::string resolvedPath = !d.filePath.empty() ? d.filePath : d.fileName;
             const double score = computePathMatchScore(d, pathQuery, wildcard);
@@ -1703,6 +1687,11 @@ private:
             return filePath.find(rawPattern) != std::string::npos;
         };
 
+        auto loadedTags =
+            co_await loadTagsForDocuments(ctx_.metadataRepo.get(), docs, req.tags, telemetry);
+        if (!loadedTags)
+            co_return loadedTags.error();
+        const auto& tagsByDoc = loadedTags.value();
         for (const auto& doc : docs) {
             // Optional path and tag filters for CLI parity
             bool pathOk = effectivePathPatterns.empty();
@@ -1733,8 +1722,7 @@ private:
             }
 
             if (!pathOk || !metaFiltersOk ||
-                !(co_await metadataHasTags(ctx_.metadataRepo.get(), doc.id, req.tags,
-                                           req.matchAllTags, telemetry))) {
+                !hasRequiredTags(tagsByDoc, doc.id, req.tags, req.matchAllTags)) {
                 continue;
             }
 

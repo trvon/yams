@@ -332,7 +332,29 @@ void collectGraphNeighborStageTrace(
     trace.eligibleCandidateCount = eligibleCandidates.size();
 
     std::unordered_map<std::string, std::optional<std::string>> documentIds;
-    documentIds.reserve(request.seedDocumentHashes.size() + relationCandidates.size());
+    documentIds.reserve(request.seedDocumentHashes.size() + relationCandidates.size() +
+                        fetchedCandidates.size() + eligibleCandidates.size());
+    {
+        std::vector<std::string> allHashes;
+        allHashes.reserve(documentIds.bucket_count());
+        for (const auto* stage : {&request.seedDocumentHashes, &relationCandidates,
+                                  &fetchedCandidates, &eligibleCandidates}) {
+            for (const auto& hash : *stage) {
+                if (documentIds.try_emplace(hash).second) {
+                    allHashes.push_back(hash);
+                }
+            }
+        }
+        if (auto hydrated = metadataRepo->batchGetDocumentsByHash(allHashes)) {
+            for (auto& [hash, document] : hydrated.value()) {
+                documentIds[hash] = documentIdForTrace(document.filePath, hash);
+            }
+        } else {
+            // A failed batch is not a cache of confirmed misses. Retain the existing
+            // per-document diagnostic fallback without changing routing decisions.
+            documentIds.clear();
+        }
+    }
     auto resolveDocumentId = [&](const std::string& hash) -> const std::optional<std::string>& {
         auto [it, inserted] = documentIds.try_emplace(hash);
         if (!inserted) {
@@ -505,6 +527,22 @@ tryMedoidGraphExpansion(const TopologyRoutingSessionRequest& request,
     return out;
 }
 
+void rejectMetadataHydration(TopologyRoutingSessionResult& result, const Error& error) {
+    result.skipReason = "metadata_lookup_failed:" + error.message;
+    result.applied = false;
+    result.artifactAdmitted = false;
+    result.acceptedRoutes = 0;
+    result.addedCandidates = 0;
+    result.duplicateCandidates = 0;
+    result.certificate = {};
+    result.routeEvidence.clear();
+    result.addedCandidateHashes.clear();
+    result.routedCandidateHashes.clear();
+    result.routedCandidateDocIds.clear();
+    result.medoidHashes.clear();
+    result.candidateStructureEvidence.clear();
+}
+
 void admitRankedCandidates(TopologyRoutingSessionResult& result,
                            const TopologyRoutingSessionRequest& request,
                            const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
@@ -517,11 +555,22 @@ void admitRankedCandidates(TopologyRoutingSessionResult& result,
     }
     candidateHashes.reserve(candidateHashes.size() + ranked.size());
 
+    // One bounded batch call; only a successful lookup can establish that a hash is stale.
+    const auto docLookupStart = std::chrono::steady_clock::now();
+    auto hydrated = metadataRepo->batchGetDocumentsByHash(ranked);
+    result.timings.docLookupMicros += microsSince(docLookupStart);
+    if (!hydrated) {
+        rejectMetadataHydration(result, hydrated.error());
+        return;
+    }
     for (const auto& hash : ranked) {
-        const auto docLookupStart = std::chrono::steady_clock::now();
-        auto docLookup = metadataRepo->getDocumentByHash(hash);
-        result.timings.docLookupMicros += microsSince(docLookupStart);
-        if (!docLookup || !docLookup.value().has_value()) {
+        const yams::metadata::DocumentInfo* document = nullptr;
+        if (hydrated) {
+            if (const auto it = hydrated.value().find(hash); it != hydrated.value().end()) {
+                document = &it->second;
+            }
+        }
+        if (!document) {
             ++result.staleCandidates;
             continue;
         }
@@ -529,8 +578,7 @@ void admitRankedCandidates(TopologyRoutingSessionResult& result,
             result.certificate.allowedDocumentHashes.insert(hash);
         }
         result.routedCandidateHashes.insert(hash);
-        result.routedCandidateDocIds.push_back(
-            documentIdForTrace(docLookup.value()->filePath, hash));
+        result.routedCandidateDocIds.push_back(documentIdForTrace(document->filePath, hash));
         const auto insertStart = std::chrono::steady_clock::now();
         const auto [_, inserted] = candidateHashes.insert(hash);
         result.timings.candidateInsertMicros += microsSince(insertStart);
@@ -608,7 +656,7 @@ bool tryRunGraphNeighborExpansion(
     }
 
     admitRankedCandidates(result, request, metadataRepo, ranked);
-    if (!result.applied) {
+    if (!result.applied && result.skipReason.empty()) {
         result.skipReason = "graph_all_duplicates";
     } else if (result.skipReason.empty()) {
         result.skipReason = "graph_seed_neighbors";
@@ -1072,16 +1120,35 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
         if (request.options.collectRouteMembership) {
             continue;
         }
-        const auto expansionHashes = selectClusterExpansionHashes(route);
-        for (const auto& hash : expansionHashes) {
-            if (request.options.maxDocs > 0 && result.routedDocs >= request.options.maxDocs) {
-                break;
+        auto expansionHashes = selectClusterExpansionHashes(route);
+        if (request.options.maxDocs > 0) {
+            // Same cut the per-document loop applied, taken before hydration.
+            const std::size_t remaining = result.routedDocs >= request.options.maxDocs
+                                              ? 0
+                                              : request.options.maxDocs - result.routedDocs;
+            if (expansionHashes.size() > remaining) {
+                expansionHashes.resize(remaining);
             }
+        }
+        const auto docLookupStart = std::chrono::steady_clock::now();
+        auto hydrated = expansionHashes.empty()
+                            ? decltype(metadataRepo->batchGetDocumentsByHash(expansionHashes)){}
+                            : metadataRepo->batchGetDocumentsByHash(expansionHashes);
+        result.timings.docLookupMicros += microsSince(docLookupStart);
+        if (!expansionHashes.empty() && !hydrated) {
+            rejectMetadataHydration(result, hydrated.error());
+            result.timings.totalMicros = microsSince(totalStart);
+            return result;
+        }
+        for (const auto& hash : expansionHashes) {
             ++result.routedDocs;
-            const auto docLookupStart = std::chrono::steady_clock::now();
-            auto docLookup = metadataRepo->getDocumentByHash(hash);
-            result.timings.docLookupMicros += microsSince(docLookupStart);
-            if (!docLookup || !docLookup.value().has_value()) {
+            const yams::metadata::DocumentInfo* document = nullptr;
+            if (hydrated) {
+                if (const auto it = hydrated.value().find(hash); it != hydrated.value().end()) {
+                    document = &it->second;
+                }
+            }
+            if (!document) {
                 ++result.staleCandidates;
                 continue;
             }
@@ -1089,8 +1156,7 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
                 continue;
             }
             result.routedCandidateHashes.insert(hash);
-            result.routedCandidateDocIds.push_back(
-                documentIdForTrace(docLookup.value()->filePath, hash));
+            result.routedCandidateDocIds.push_back(documentIdForTrace(document->filePath, hash));
             const auto insertStart = std::chrono::steady_clock::now();
             const auto [_, inserted] = candidateHashes.insert(hash);
             result.timings.candidateInsertMicros += microsSince(insertStart);

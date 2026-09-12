@@ -1917,13 +1917,15 @@ RepairOperationResult RepairService::repairDownloads(bool dryRun, bool verbose,
 
         try {
             metaFacade.setMetadata(doc.id, "source_url", metadata::MetadataValue(sourceUrl));
-            metaFacade.setMetadata(doc.id, "tag", metadata::MetadataValue("downloaded"));
+            metaFacade.setMetadata(doc.id, "tag:downloaded", metadata::MetadataValue("downloaded"));
             auto host = extract_host(sourceUrl);
             auto scheme = extract_scheme(sourceUrl);
             if (!host.empty())
-                metaFacade.setMetadata(doc.id, "tag", metadata::MetadataValue("host:" + host));
+                metaFacade.setMetadata(doc.id, "tag:host:" + host,
+                                       metadata::MetadataValue("host:" + host));
             if (!scheme.empty())
-                metaFacade.setMetadata(doc.id, "tag", metadata::MetadataValue("scheme:" + scheme));
+                metaFacade.setMetadata(doc.id, "tag:scheme:" + scheme,
+                                       metadata::MetadataValue("scheme:" + scheme));
         } catch (const std::exception& e) {
             spdlog::debug("RepairService: failed to persist download metadata for {}: {}",
                           sourceUrl, e.what());

@@ -3,6 +3,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -80,6 +81,30 @@ public:
 private:
     std::vector<float> embedding_;
     bool initialized_{false};
+};
+
+class HashLookupCountingRepository : public MetadataRepository {
+public:
+    explicit HashLookupCountingRepository(ConnectionPool& pool) : MetadataRepository(pool) {}
+
+    Result<std::optional<DocumentInfo>> getDocumentByHash(const std::string& hash) override {
+        ++singleLookups;
+        return MetadataRepository::getDocumentByHash(hash);
+    }
+
+    Result<std::unordered_map<std::string, DocumentInfo>>
+    batchGetDocumentsByHash(const std::vector<std::string>& hashes) override {
+        const auto call = ++batchLookups;
+        if (failBatchLookups || (failBatchAt > 0 && call == failBatchAt)) {
+            return Error{ErrorCode::InternalError, "injected metadata lookup failure"};
+        }
+        return MetadataRepository::batchGetDocumentsByHash(hashes);
+    }
+
+    std::atomic<int> singleLookups{0};
+    std::atomic<int> batchLookups{0};
+    bool failBatchLookups{false};
+    int failBatchAt{0};
 };
 
 struct TopologySearchFixture {
@@ -2208,4 +2233,105 @@ TEST_CASE("Graph-neighbor trace separates stored relation from the selected cap"
           std::vector<std::string>{"near", "far"});
     REQUIRE(result.routedCandidateDocIds.size() == 1);
     CHECK(result.routedCandidateDocIds.front() == "near");
+}
+
+TEST_CASE("Topology cluster hydration failure discards partial admission",
+          "[unit][search][topology][hydration]") {
+    TopologySearchFixture fix;
+    auto counting = std::make_shared<HashLookupCountingRepository>(*fix.pool);
+    fix.repo = counting;
+    seedTopologyDocuments(fix);
+    const auto batch = buildTwoClusterTopologyBatch();
+    TopologyRoutingSessionRequest request;
+    request.seedDocumentHashes = {"x1", "y1"};
+    request.options.routingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    request.options.expansionSource = SearchEngineConfig::TopologyExpansionSource::Clusters;
+    request.options.maxClusters = 2;
+    request.options.maxDocs = 8;
+    request.options.minRouteScore = 0.0F;
+    request.snapshotCache = std::make_shared<TopologyRoutingSnapshotCache>(
+        [batch] { return Result<std::optional<yams::topology::TopologyArtifactBatch>>{batch}; });
+    counting->batchLookups = 0;
+    SECTION("all cluster lookups succeed") {
+        const auto result = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
+        CHECK(result.applied);
+        // Non-membership expansion materializes one medoid per selected cluster.
+        CHECK(result.addedCandidateHashes.size() == 2);
+        CHECK(counting->batchLookups.load() == 2);
+    }
+    SECTION("second cluster lookup fails after the first was admitted") {
+        counting->failBatchAt = 2;
+        const auto result = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
+        CHECK(counting->batchLookups.load() == 2);
+        CHECK_FALSE(result.applied);
+        CHECK(result.staleCandidates == 0);
+        CHECK(result.skipReason.starts_with("metadata_lookup_failed"));
+        CHECK(result.certificate.allowedDocumentHashes.empty());
+        CHECK(result.routedCandidateHashes.empty());
+        CHECK(result.addedCandidateHashes.empty());
+        CHECK(result.addedCandidates == 0);
+    }
+}
+
+TEST_CASE("Topology routing hydrates ranked candidates and trace stages in batches",
+          "[unit][search][topology][graph_neighbors][hydration]") {
+    TopologySearchFixture fix;
+    auto counting = std::make_shared<HashLookupCountingRepository>(*fix.pool);
+    fix.repo = counting;
+    fix.addDocument("seed", "seed", {1.0F, 0.0F});
+    std::vector<KGNode> nodes{KGNode{.nodeKey = "doc:seed", .type = "document"}};
+    for (int i = 0; i < 8; ++i) {
+        const auto hash = "near" + std::to_string(i);
+        fix.addDocument(hash, hash, {0.9F, 0.1F});
+        nodes.push_back(KGNode{.nodeKey = "doc:" + hash, .type = "document"});
+    }
+    const auto nodeIds = fix.kgStore->upsertNodes(nodes);
+    REQUIRE(nodeIds.has_value());
+    REQUIRE(nodeIds.value().size() == 9);
+    for (std::size_t i = 1; i < nodeIds.value().size(); ++i) {
+        REQUIRE(fix.kgStore
+                    ->addEdge(KGEdge{.srcNodeId = nodeIds.value()[0],
+                                     .dstNodeId = nodeIds.value()[i],
+                                     .relation = "semantic_neighbor",
+                                     .weight = 0.9F})
+                    .has_value());
+    }
+    TopologyRoutingSessionRequest request;
+    request.seedDocumentHashes = {"seed"};
+    request.options.routingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    request.options.expansionSource = SearchEngineConfig::TopologyExpansionSource::GraphNeighbors;
+    request.options.maxDocs = 8;
+    request.options.collectRouteMembership = true;
+    request.options.collectGraphDiagnostics = true;
+    request.options.graphNeighborMinScore = 0.0F;
+    request.options.graphNeighborReciprocalOnly = false;
+
+    counting->singleLookups = 0;
+    counting->batchLookups = 0;
+    SECTION("successful hydration remains batched") {
+        const auto result = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
+        REQUIRE(result.graphNeighborTrace.collected);
+        CHECK(result.graphNeighborTrace.relationCandidateCount == 8);
+        REQUIRE(result.routedCandidateDocIds.size() == 8);
+        CHECK(counting->batchLookups.load() >= 1);
+        CHECK(counting->singleLookups.load() == 0);
+    }
+    SECTION("a diagnostic batch failure retains per-document fallback") {
+        counting->failBatchAt = 1;
+        const auto result = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
+        CHECK(result.applied);
+        CHECK(result.staleCandidates == 0);
+        CHECK(result.graphNeighborTrace.eligibleUnresolvedCount == 0);
+        CHECK(result.graphNeighborTrace.eligibleCandidateDocumentIds.size() == 8);
+        CHECK(counting->singleLookups.load() > 0);
+    }
+    SECTION("metadata failure is not evidence of stale documents") {
+        counting->failBatchLookups = true;
+        const auto result = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
+        CHECK_FALSE(result.applied);
+        CHECK(result.staleCandidates == 0);
+        CHECK(result.skipReason.starts_with("metadata_lookup_failed"));
+        CHECK(result.certificate.allowedDocumentHashes.empty());
+        CHECK(result.addedCandidateHashes.empty());
+    }
 }
