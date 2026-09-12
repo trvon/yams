@@ -10,6 +10,7 @@
 #include <utility>
 #include <vector>
 
+#include <yams/common/fs_utils.h>
 #include <yams/common/pattern_utils.h>
 #include <yams/core/types.h>
 #include <yams/metadata/metadata_repository.h>
@@ -61,19 +62,8 @@ struct FilesystemBackend {
             return Error{ErrorCode::FileNotFound, "Path not found: " + abs.string()};
         }
 
-        auto normalize_display = [](const std::string& p) -> std::string {
-#ifdef __APPLE__
-            // On macOS, /var is a symlink to /private/var; tests expect the /var variant.
-            const std::string prefix = "/private/var/";
-            if (p.rfind(prefix, 0) == 0) {
-                return std::string{"/var/"} + p.substr(prefix.size());
-            }
-#endif
-            return p;
-        };
-
         const auto absStr = abs.string();
-        const auto disp = normalize_display(absStr);
+        const auto disp = yams::common::displayMacPathAlias(absStr);
         // For files: return the absolute file; for directories: return the absolute directory.
         // Recursion and include/exclude are applied by the caller/daemon.
         return std::vector<Target>{{disp, disp}};
@@ -101,17 +91,8 @@ struct FilesystemBackend {
         if (!fs::exists(abs) || !fs::is_directory(abs)) {
             return Error{ErrorCode::InvalidArgument, "Not a directory: " + abs.string()};
         }
-        auto normalize_display = [](const std::string& p) -> std::string {
-#ifdef __APPLE__
-            const std::string prefix = "/private/var/";
-            if (p.rfind(prefix, 0) == 0) {
-                return std::string{"/var/"} + p.substr(prefix.size());
-            }
-#endif
-            return p;
-        };
         const auto absStr = abs.string();
-        const auto disp = normalize_display(absStr);
+        const auto disp = yams::common::displayMacPathAlias(absStr);
         return std::vector<Target>{{disp, disp}};
     }
 };

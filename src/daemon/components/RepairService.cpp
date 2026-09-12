@@ -14,6 +14,7 @@
 #include <yams/daemon/components/TuningManager.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/VectorIndexCoordinator.h>
+#include <yams/daemon/metric_keys.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/extraction/content_extractor.h>
@@ -85,33 +86,7 @@ uint64_t steadyNowMillis() {
 }
 
 uint64_t repairOperationCode(std::string_view operation) {
-    if (operation == "stuck_docs")
-        return 1;
-    if (operation == "orphans")
-        return 2;
-    if (operation == "mime")
-        return 3;
-    if (operation == "downloads")
-        return 4;
-    if (operation == "path_tree")
-        return 5;
-    if (operation == "dedupe")
-        return 6;
-    if (operation == "chunks")
-        return 7;
-    if (operation == "block_refs")
-        return 8;
-    if (operation == "graph")
-        return 9;
-    if (operation == "fts5")
-        return 10;
-    if (operation == "embeddings")
-        return 11;
-    if (operation == "topology")
-        return 12;
-    if (operation == "optimize")
-        return 13;
-    return 0;
+    return metrics::repairOperationCodeForName(operation);
 }
 
 // Check the shared vector compatibility policy used by search and initialization.

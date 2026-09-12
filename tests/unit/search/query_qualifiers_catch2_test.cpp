@@ -112,3 +112,43 @@ TEST_CASE("Query Qualifiers - MultipleScopesLastOneWinsForType", "[search][quali
     CHECK(parsed.scope.range == "3-4");
     CHECK(parsed.normalizedQuery == "foo bar");
 }
+
+// ---------------------------------------------------------------------------
+// Structured metadata (key=value) extraction shared by SearchService (keyword path) and
+// SearchEngine's metadata component.
+// ---------------------------------------------------------------------------
+
+using yams::search::extractStructuredMetadataQuery;
+
+TEST_CASE("Structured metadata - splits key=value tokens from the residual query",
+          "[search][qualifiers][metadata][catch2]") {
+    auto parsed = extractStructuredMetadataQuery("  task=alpha   report phase=checkpoint  ");
+    REQUIRE(parsed.filters.size() == 2);
+    CHECK(parsed.filters[0].first == "phase");
+    CHECK(parsed.filters[0].second == "checkpoint");
+    CHECK(parsed.filters[1].first == "task");
+    CHECK(parsed.filters[1].second == "alpha");
+    CHECK(parsed.residualQuery == "report");
+}
+
+TEST_CASE("Structured metadata - duplicate keys keep the last value",
+          "[search][qualifiers][metadata][catch2]") {
+    auto parsed = extractStructuredMetadataQuery("task=one task=two");
+    REQUIRE(parsed.filters.size() == 1);
+    CHECK(parsed.filters[0].second == "two");
+    CHECK(parsed.residualQuery.empty());
+}
+
+TEST_CASE("Structured metadata - malformed or quoted tokens stay in the query",
+          "[search][qualifiers][metadata][catch2]") {
+    auto parsed = extractStructuredMetadataQuery("=x key= a=b=c name=\"quoted\" k[0]=v plain");
+    CHECK(parsed.filters.empty());
+    CHECK(parsed.residualQuery == "=x key= a=b=c name=\"quoted\" k[0]=v plain");
+}
+
+TEST_CASE("Structured metadata - filters only leaves an empty residual query",
+          "[search][qualifiers][metadata][catch2]") {
+    auto parsed = extractStructuredMetadataQuery("owner=codex source=decision");
+    REQUIRE(parsed.filters.size() == 2);
+    CHECK(parsed.residualQuery.empty());
+}

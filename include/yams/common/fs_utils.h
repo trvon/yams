@@ -6,8 +6,112 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <vector>
 
 namespace yams::common {
+
+/**
+ * macOS mounts /var and /tmp as symlinks into /private, so a document can be indexed under
+ * either spelling. Everything that compares, displays, or expands stored paths goes through
+ * this one table; the helpers are purely lexical and never touch the filesystem.
+ */
+namespace path_alias {
+
+struct AliasPair {
+    std::string_view shortForm;
+    std::string_view privateForm;
+};
+
+inline constexpr AliasPair kAliases[] = {
+    {"/var", "/private/var"},
+    {"/tmp", "/private/tmp"},
+};
+
+/// True when `path` is exactly `root` or lives under it as a whole component.
+[[nodiscard]] inline bool hasRoot(std::string_view path, std::string_view root) noexcept {
+    return path.size() >= root.size() && path.compare(0, root.size(), root) == 0 &&
+           (path.size() == root.size() || path[root.size()] == '/');
+}
+
+/// The other spelling of `path` (/var/x <-> /private/var/x), or empty when it has none.
+[[nodiscard]] inline std::string otherSpelling(std::string_view path) {
+    for (const auto& alias : kAliases) {
+        if (hasRoot(path, alias.privateForm)) {
+            return std::string(alias.shortForm) +
+                   std::string(path.substr(alias.privateForm.size()));
+        }
+        if (hasRoot(path, alias.shortForm)) {
+            return std::string(alias.privateForm) +
+                   std::string(path.substr(alias.shortForm.size()));
+        }
+    }
+    return {};
+}
+
+/// The /private spelling, used when comparing paths. Identity for anything else.
+[[nodiscard]] inline std::string canonicalSpelling(std::string path) {
+    for (const auto& alias : kAliases) {
+        if (hasRoot(path, alias.shortForm)) {
+            return std::string(alias.privateForm) + path.substr(alias.shortForm.size());
+        }
+    }
+    return path;
+}
+
+/// The short spelling, used when showing a path back to the operator. Identity otherwise.
+[[nodiscard]] inline std::string displaySpelling(std::string path) {
+    for (const auto& alias : kAliases) {
+        if (hasRoot(path, alias.privateForm)) {
+            return std::string(alias.shortForm) + path.substr(alias.privateForm.size());
+        }
+    }
+    return path;
+}
+
+} // namespace path_alias
+
+/// Canonical (/private) spelling on macOS; identity on every other platform.
+[[nodiscard]] inline std::string canonicalizeMacPathAlias(std::string path) {
+#if defined(__APPLE__)
+    return path_alias::canonicalSpelling(std::move(path));
+#else
+    return path;
+#endif
+}
+
+/// Display (short) spelling on macOS; identity on every other platform.
+[[nodiscard]] inline std::string displayMacPathAlias(std::string path) {
+#if defined(__APPLE__)
+    return path_alias::displaySpelling(std::move(path));
+#else
+    return path;
+#endif
+}
+
+/// On macOS, append the other spelling of every pattern that has one (deduplicated), so a
+/// pattern written as /var/... also matches documents stored as /private/var/... and vice
+/// versa. No-op on every other platform.
+inline void appendMacPathAliases(std::vector<std::string>& patterns) {
+#if defined(__APPLE__)
+    const std::size_t original = patterns.size();
+    for (std::size_t i = 0; i < original; ++i) {
+        std::string alias = path_alias::otherSpelling(patterns[i]);
+        if (alias.empty())
+            continue;
+        bool seen = false;
+        for (const auto& existing : patterns) {
+            if (existing == alias) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen)
+            patterns.push_back(std::move(alias));
+    }
+#else
+    (void)patterns;
+#endif
+}
 
 /**
  * Ensure parent directories exist for the given path.

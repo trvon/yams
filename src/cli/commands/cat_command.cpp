@@ -11,22 +11,13 @@
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
+#include <yams/common/hash_predicates.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/extraction/html_text_extractor.h>
 #include <yams/extraction/text_extractor.h>
 #include <yams/profiling.h>
 
 namespace yams::cli {
-
-namespace {
-
-bool looksLikeHashPrefix(const std::string& input) {
-    if (input.size() < 6 || input.size() > 64)
-        return false;
-    return std::ranges::all_of(input, [](unsigned char c) { return std::isxdigit(c) != 0; });
-}
-
-} // namespace
 
 class CatCommand : public ICommand {
 public:
@@ -46,8 +37,9 @@ public:
         selector->add_option("--hash", hash_, "Document hash or unambiguous hash prefix")
             ->check(CLI::Validator(
                 [](const std::string& value) {
-                    return looksLikeHashPrefix(value) ? std::string{}
-                                                      : "Expected 6 to 64 hexadecimal characters";
+                    return yams::common::looksLikePartialHashArgument(value)
+                               ? std::string{}
+                               : "Expected 6 to 64 hexadecimal characters";
                 },
                 "HASH"));
         // Disambiguation flags: select newest/oldest when multiple matches exist
@@ -82,7 +74,7 @@ public:
             if (!hash_.empty()) {
                 hashCandidate = hash_;
             } else if (!target_.empty() && name_.empty()) {
-                if (looksLikeHashPrefix(target_)) {
+                if (yams::common::looksLikePartialHashArgument(target_)) {
                     hashCandidate = target_;
                 } else {
                     name_ = target_;

@@ -1702,6 +1702,8 @@ if catch2_dep.found()
     files(
       'unit/common/format_catch2_test.cpp',
       'unit/common/crc32_catch2_test.cpp',
+      'unit/common/hash_predicates_catch2_test.cpp',
+      'unit/common/path_alias_catch2_test.cpp',
       'unit/common/pattern_utils_catch2_test.cpp',
       'unit/common/string_utils_catch2_test.cpp',
       'unit/common/test_utils_catch2_test.cpp',
@@ -1821,6 +1823,7 @@ if catch2_dep.found()
       'unit/cli/cli_test_cleanup_listener.cpp',
       'unit/cli/daemon_helpers_pool_catch2_test.cpp',
       'unit/cli/daemon_command_catch2_test.cpp',
+      'unit/cli/daemon_status_render_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: cli_test_deps,
