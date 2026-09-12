@@ -250,23 +250,23 @@ Result<int> bindKgPathRanges(Statement& stmt, int firstIndex,
 }
 
 Result<std::int64_t> selectKgNodeIdByKey(Database& db, std::string_view nodeKey) {
-    auto stmtResult = db.prepare("SELECT id FROM kg_nodes WHERE node_key = ? LIMIT 1");
+    auto stmtResult = db.prepareCached("SELECT id FROM kg_nodes WHERE node_key = ? LIMIT 1");
     if (!stmtResult) {
         return stmtResult.error();
     }
     auto stmt = std::move(stmtResult).value();
-    auto bindResult = stmt.bind(1, nodeKey);
+    auto bindResult = stmt->bind(1, nodeKey);
     if (!bindResult) {
         return bindResult.error();
     }
-    auto stepResult = stmt.step();
+    auto stepResult = stmt->step();
     if (!stepResult) {
         return stepResult.error();
     }
     if (!stepResult.value()) {
         return Error{ErrorCode::NotFound, "node not found after upsert"};
     }
-    return stmt.getInt64(0);
+    return stmt->getInt64(0);
 }
 
 } // namespace
@@ -404,24 +404,24 @@ public:
 
     Result<std::optional<KGNode>> getNodeById(std::int64_t nodeId) override {
         return readPool()->withConnection([&](Database& db) -> Result<std::optional<KGNode>> {
-            auto stmtResult = db.prepare(std::string("SELECT ") + kKgNodeSelectProjection +
-                                         " FROM kg_nodes WHERE id = ? LIMIT 1");
+            auto stmtResult = db.prepareCached(std::string("SELECT ") + kKgNodeSelectProjection +
+                                               " FROM kg_nodes WHERE id = ? LIMIT 1");
             if (!stmtResult) {
                 return stmtResult.error();
             }
             auto stmt = std::move(stmtResult).value();
-            auto bindResult = stmt.bind(1, nodeId);
+            auto bindResult = stmt->bind(1, nodeId);
             if (!bindResult) {
                 return bindResult.error();
             }
-            auto stepResult = stmt.step();
+            auto stepResult = stmt->step();
             if (!stepResult) {
                 return stepResult.error();
             }
             if (!stepResult.value()) {
                 return std::optional<KGNode>{};
             }
-            return std::optional<KGNode>{hydrateKgNodeRow(stmt)};
+            return std::optional<KGNode>{hydrateKgNodeRow(*stmt)};
         });
     }
 
@@ -749,27 +749,28 @@ public:
                                                            std::size_t limit) override {
         return readPool()->withConnection(
             [&](Database& db) -> Result<std::vector<AliasResolution>> {
-                auto stmtR = db.prepare("SELECT node_id FROM kg_aliases WHERE alias = ? LIMIT ?");
+                auto stmtR =
+                    db.prepareCached("SELECT node_id FROM kg_aliases WHERE alias = ? LIMIT ?");
                 if (!stmtR)
                     return stmtR.error();
                 auto stmt = std::move(stmtR).value();
 
-                auto br = stmt.bind(1, alias);
+                auto br = stmt->bind(1, alias);
                 if (!br)
                     return br.error();
-                br = stmt.bind(2, static_cast<int64_t>(limit));
+                br = stmt->bind(2, static_cast<int64_t>(limit));
                 if (!br)
                     return br.error();
 
                 std::vector<AliasResolution> out;
                 while (true) {
-                    auto step = stmt.step();
+                    auto step = stmt->step();
                     if (!step)
                         return step.error();
                     if (!step.value())
                         break;
                     AliasResolution ar;
-                    ar.nodeId = stmt.getInt64(0);
+                    ar.nodeId = stmt->getInt64(0);
                     ar.score = 1.0f;
                     out.push_back(ar);
                 }
@@ -832,11 +833,11 @@ public:
                     return resolveAliasExact(aliasQuery, limit);
                 }
 
-                auto stmtR = db.prepare("SELECT a.node_id, 1.0 AS score "
-                                        "FROM kg_aliases_fts f "
-                                        "JOIN kg_aliases a ON a.id = f.rowid "
-                                        "WHERE kg_aliases_fts MATCH ? "
-                                        "LIMIT ?");
+                auto stmtR = db.prepareCached("SELECT a.node_id, 1.0 AS score "
+                                              "FROM kg_aliases_fts f "
+                                              "JOIN kg_aliases a ON a.id = f.rowid "
+                                              "WHERE kg_aliases_fts MATCH ? "
+                                              "LIMIT ?");
                 if (!stmtR)
                     return stmtR.error();
                 auto stmt = std::move(stmtR).value();
@@ -848,22 +849,22 @@ public:
                     aliasQuery.find(':') != std::string_view::npos
                         ? quoteFts5Literal(aliasQuery)
                         : sanitizeFts5UserQuery(std::string(aliasQuery));
-                auto br = stmt.bind(1, sanitizedQuery);
+                auto br = stmt->bind(1, sanitizedQuery);
                 if (!br)
                     return br.error();
-                br = stmt.bind(2, static_cast<int64_t>(limit));
+                br = stmt->bind(2, static_cast<int64_t>(limit));
                 if (!br)
                     return br.error();
 
                 std::vector<AliasResolution> out;
                 while (true) {
-                    auto step = stmt.step();
+                    auto step = stmt->step();
                     if (!step)
                         return step.error();
                     if (!step.value())
                         break;
                     AliasResolution ar;
-                    ar.nodeId = stmt.getInt64(0);
+                    ar.nodeId = stmt->getInt64(0);
                     ar.score = 1.0f;
                     out.push_back(ar);
                 }
@@ -1072,44 +1073,44 @@ public:
             }
             sql += " ORDER BY weight DESC, created_time DESC, id DESC LIMIT ? OFFSET ?";
 
-            auto stmtR = db.prepare(sql);
+            auto stmtR = db.prepareCached(sql);
             if (!stmtR)
                 return stmtR.error();
             auto stmt = std::move(stmtR).value();
 
             int idx = 1;
-            auto br = stmt.bind(idx++, srcNodeId);
+            auto br = stmt->bind(idx++, srcNodeId);
             if (!br)
                 return br.error();
             if (relation.has_value()) {
-                br = stmt.bind(idx++, relation.value());
+                br = stmt->bind(idx++, relation.value());
                 if (!br)
                     return br.error();
             }
-            br = stmt.bind(idx++, static_cast<int64_t>(limit));
+            br = stmt->bind(idx++, static_cast<int64_t>(limit));
             if (!br)
                 return br.error();
-            br = stmt.bind(idx, static_cast<int64_t>(offset));
+            br = stmt->bind(idx, static_cast<int64_t>(offset));
             if (!br)
                 return br.error();
 
             std::vector<KGEdge> out;
             while (true) {
-                auto step = stmt.step();
+                auto step = stmt->step();
                 if (!step)
                     return step.error();
                 if (!step.value())
                     break;
                 KGEdge e;
-                e.id = stmt.getInt64(0);
-                e.srcNodeId = stmt.getInt64(1);
-                e.dstNodeId = stmt.getInt64(2);
-                e.relation = stmt.getString(3);
-                e.weight = static_cast<float>(stmt.getDouble(4));
-                if (!stmt.isNull(5))
-                    e.createdTime = stmt.getInt64(5);
-                if (!stmt.isNull(6))
-                    e.properties = stmt.getString(6);
+                e.id = stmt->getInt64(0);
+                e.srcNodeId = stmt->getInt64(1);
+                e.dstNodeId = stmt->getInt64(2);
+                e.relation = stmt->getString(3);
+                e.weight = static_cast<float>(stmt->getDouble(4));
+                if (!stmt->isNull(5))
+                    e.createdTime = stmt->getInt64(5);
+                if (!stmt->isNull(6))
+                    e.properties = stmt->getString(6);
                 out.push_back(std::move(e));
             }
             return out;
@@ -1119,77 +1120,120 @@ public:
     Result<std::unordered_map<std::int64_t, std::vector<KGEdge>>>
     getEdgesFromBatch(const std::vector<std::int64_t>& srcNodeIds,
                       std::optional<std::string_view> relation, std::size_t limitPerNode) override {
+        return getEdgesBatch(srcNodeIds, relation, limitPerNode, false);
+    }
+
+private:
+    Result<std::unordered_map<std::int64_t, std::vector<KGEdge>>>
+    getEdgesBatch(const std::vector<std::int64_t>& nodeIds,
+                  std::optional<std::string_view> relation, std::size_t limitPerNode,
+                  bool incoming) {
         using ResultMap = std::unordered_map<std::int64_t, std::vector<KGEdge>>;
-
-        if (srcNodeIds.empty()) {
+        if (nodeIds.empty() || limitPerNode == 0)
             return ResultMap{};
+        if (limitPerNode > static_cast<std::size_t>(std::numeric_limits<int64_t>::max())) {
+            return Error{ErrorCode::InvalidArgument,
+                         "Per-node edge limit exceeds SQLite integer range"};
         }
-
+        auto uniqueIds = nodeIds;
+        std::sort(uniqueIds.begin(), uniqueIds.end());
+        uniqueIds.erase(std::unique(uniqueIds.begin(), uniqueIds.end()), uniqueIds.end());
         return readPool()->withConnection([&](Database& db) -> Result<ResultMap> {
-            std::string placeholders;
-            for (size_t i = 0; i < srcNodeIds.size(); ++i) {
-                if (i > 0)
-                    placeholders += ",";
-                placeholders += "?";
+            const int fixedParameters = relation ? 2 : 1;
+            const int variableLimit =
+                sqlite3_limit(db.rawHandle(), SQLITE_LIMIT_VARIABLE_NUMBER, -1);
+            if (variableLimit <= fixedParameters) {
+                return Error{ErrorCode::InvalidArgument,
+                             "SQLite variable limit cannot fit an edge query"};
             }
-
-            std::string sql =
-                "SELECT id, src_node_id, dst_node_id, relation, weight, created_time, properties "
-                "FROM ("
-                "  SELECT *, ROW_NUMBER() OVER (PARTITION BY src_node_id "
-                "    ORDER BY weight DESC, created_time DESC, id DESC) as rn "
-                "  FROM kg_edges "
-                "  WHERE src_node_id IN (" +
-                placeholders + ")";
-            if (relation.has_value()) {
-                sql += " AND relation = ?";
-            }
-            sql += ") WHERE rn <= ?";
-
-            auto stmtR = db.prepare(sql);
-            if (!stmtR)
-                return stmtR.error();
-            auto stmt = std::move(stmtR).value();
-
-            int idx = 1;
-            for (const auto& nodeId : srcNodeIds) {
-                auto br = stmt.bind(idx++, nodeId);
-                if (!br)
-                    return br.error();
-            }
-            if (relation.has_value()) {
-                auto br = stmt.bind(idx++, relation.value());
-                if (!br)
-                    return br.error();
-            }
-            auto br = stmt.bind(idx, static_cast<int64_t>(limitPerNode));
-            if (!br)
-                return br.error();
-
+            // Bound SQL size even on connections configured with very large variable limits.
+            const auto batchSize = std::min<std::size_t>(512, variableLimit - fixedParameters);
+            // Keep the original single-query snapshot across all chunks; savepoints also
+            // work when this connection already belongs to a caller-owned transaction.
+            auto started = db.execute("SAVEPOINT yams_edge_batch_read");
+            if (!started)
+                return started.error();
+            struct Savepoint {
+                Database& db;
+                bool active{true};
+                ~Savepoint() {
+                    if (active) {
+                        (void)db.execute("ROLLBACK TO yams_edge_batch_read");
+                        (void)db.execute("RELEASE yams_edge_batch_read");
+                    }
+                }
+            } savepoint{db};
+            const std::string column = incoming ? "dst_node_id" : "src_node_id";
+            // Preserve the two APIs' existing, distinct selection policies.
+            const std::string ordering =
+                incoming ? "id" : "weight DESC, created_time DESC, id DESC";
             ResultMap out;
-            out.reserve(srcNodeIds.size());
-            while (true) {
-                auto step = stmt.step();
-                if (!step)
-                    return step.error();
-                if (!step.value())
-                    break;
-                KGEdge e;
-                e.id = stmt.getInt64(0);
-                e.srcNodeId = stmt.getInt64(1);
-                e.dstNodeId = stmt.getInt64(2);
-                e.relation = stmt.getString(3);
-                e.weight = static_cast<float>(stmt.getDouble(4));
-                if (!stmt.isNull(5))
-                    e.createdTime = stmt.getInt64(5);
-                if (!stmt.isNull(6))
-                    e.properties = stmt.getString(6);
-                out[e.srcNodeId].push_back(std::move(e));
+            out.reserve(uniqueIds.size());
+            for (std::size_t offset = 0; offset < uniqueIds.size();) {
+                const auto count = std::min(batchSize, uniqueIds.size() - offset);
+                std::string placeholders;
+                for (std::size_t i = 0; i < count; ++i) {
+                    if (i)
+                        placeholders += ',';
+                    placeholders += '?';
+                }
+                std::string sql = "SELECT id, src_node_id, dst_node_id, relation, weight, "
+                                  "created_time, properties "
+                                  "FROM (SELECT *, ROW_NUMBER() OVER (PARTITION BY " +
+                                  column + " ORDER BY " + ordering +
+                                  ") as rn FROM kg_edges WHERE " + column + " IN (" + placeholders +
+                                  ")";
+                if (relation)
+                    sql += " AND relation = ?";
+                sql += ") WHERE rn <= ? ORDER BY " + column + ", rn";
+                auto stmtR = db.prepare(sql);
+                if (!stmtR)
+                    return stmtR.error();
+                auto stmt = std::move(stmtR).value();
+                int idx = 1;
+                for (std::size_t i = 0; i < count; ++i) {
+                    auto bound = stmt.bind(idx++, uniqueIds[offset + i]);
+                    if (!bound)
+                        return bound.error();
+                }
+                if (relation) {
+                    auto bound = stmt.bind(idx++, *relation);
+                    if (!bound)
+                        return bound.error();
+                }
+                auto bound = stmt.bind(idx, static_cast<int64_t>(limitPerNode));
+                if (!bound)
+                    return bound.error();
+                while (true) {
+                    auto step = stmt.step();
+                    if (!step)
+                        return step.error();
+                    if (!step.value())
+                        break;
+                    KGEdge edge;
+                    edge.id = stmt.getInt64(0);
+                    edge.srcNodeId = stmt.getInt64(1);
+                    edge.dstNodeId = stmt.getInt64(2);
+                    edge.relation = stmt.getString(3);
+                    edge.weight = static_cast<float>(stmt.getDouble(4));
+                    if (!stmt.isNull(5))
+                        edge.createdTime = stmt.getInt64(5);
+                    if (!stmt.isNull(6))
+                        edge.properties = stmt.getString(6);
+                    const auto key = incoming ? edge.dstNodeId : edge.srcNodeId;
+                    out[key].push_back(std::move(edge));
+                }
+                offset += count;
             }
+            auto released = db.execute("RELEASE yams_edge_batch_read");
+            if (!released)
+                return released.error();
+            savepoint.active = false;
             return out;
         });
     }
 
+public:
     Result<std::vector<KGEdge>> getEdgesTo(std::int64_t dstNodeId,
                                            std::optional<std::string_view> relation,
                                            std::size_t limit, std::size_t offset) override {
@@ -1202,44 +1246,44 @@ public:
             }
             sql += " LIMIT ? OFFSET ?";
 
-            auto stmtR = db.prepare(sql);
+            auto stmtR = db.prepareCached(sql);
             if (!stmtR)
                 return stmtR.error();
             auto stmt = std::move(stmtR).value();
 
             int idx = 1;
-            auto br = stmt.bind(idx++, dstNodeId);
+            auto br = stmt->bind(idx++, dstNodeId);
             if (!br)
                 return br.error();
             if (relation.has_value()) {
-                br = stmt.bind(idx++, relation.value());
+                br = stmt->bind(idx++, relation.value());
                 if (!br)
                     return br.error();
             }
-            br = stmt.bind(idx++, static_cast<int64_t>(limit));
+            br = stmt->bind(idx++, static_cast<int64_t>(limit));
             if (!br)
                 return br.error();
-            br = stmt.bind(idx, static_cast<int64_t>(offset));
+            br = stmt->bind(idx, static_cast<int64_t>(offset));
             if (!br)
                 return br.error();
 
             std::vector<KGEdge> out;
             while (true) {
-                auto step = stmt.step();
+                auto step = stmt->step();
                 if (!step)
                     return step.error();
                 if (!step.value())
                     break;
                 KGEdge e;
-                e.id = stmt.getInt64(0);
-                e.srcNodeId = stmt.getInt64(1);
-                e.dstNodeId = stmt.getInt64(2);
-                e.relation = stmt.getString(3);
-                e.weight = static_cast<float>(stmt.getDouble(4));
-                if (!stmt.isNull(5))
-                    e.createdTime = stmt.getInt64(5);
-                if (!stmt.isNull(6))
-                    e.properties = stmt.getString(6);
+                e.id = stmt->getInt64(0);
+                e.srcNodeId = stmt->getInt64(1);
+                e.dstNodeId = stmt->getInt64(2);
+                e.relation = stmt->getString(3);
+                e.weight = static_cast<float>(stmt->getDouble(4));
+                if (!stmt->isNull(5))
+                    e.createdTime = stmt->getInt64(5);
+                if (!stmt->isNull(6))
+                    e.properties = stmt->getString(6);
                 out.push_back(std::move(e));
             }
             return out;
@@ -1249,80 +1293,7 @@ public:
     Result<std::unordered_map<std::int64_t, std::vector<KGEdge>>>
     getEdgesToBatch(const std::vector<std::int64_t>& dstNodeIds,
                     std::optional<std::string_view> relation, std::size_t limitPerNode) override {
-        using ResultMap = std::unordered_map<std::int64_t, std::vector<KGEdge>>;
-
-        if (dstNodeIds.empty()) {
-            return ResultMap{};
-        }
-
-        return readPool()->withConnection([&](Database& db) -> Result<ResultMap> {
-            // Build SQL with IN clause for batch lookup
-            // Using window function to limit results per destination node
-            std::string placeholders;
-            for (size_t i = 0; i < dstNodeIds.size(); ++i) {
-                if (i > 0)
-                    placeholders += ",";
-                placeholders += "?";
-            }
-
-            std::string sql =
-                "SELECT id, src_node_id, dst_node_id, relation, weight, created_time, properties "
-                "FROM ("
-                "  SELECT *, ROW_NUMBER() OVER (PARTITION BY dst_node_id ORDER BY id) as rn "
-                "  FROM kg_edges "
-                "  WHERE dst_node_id IN (" +
-                placeholders + ")";
-            if (relation.has_value()) {
-                sql += " AND relation = ?";
-            }
-            sql += ") WHERE rn <= ?";
-
-            auto stmtR = db.prepare(sql);
-            if (!stmtR)
-                return stmtR.error();
-            auto stmt = std::move(stmtR).value();
-
-            int idx = 1;
-            // Bind all destination node IDs
-            for (const auto& nodeId : dstNodeIds) {
-                auto br = stmt.bind(idx++, nodeId);
-                if (!br)
-                    return br.error();
-            }
-            // Bind relation filter if provided
-            if (relation.has_value()) {
-                auto br = stmt.bind(idx++, relation.value());
-                if (!br)
-                    return br.error();
-            }
-            // Bind limit per node
-            auto br = stmt.bind(idx, static_cast<int64_t>(limitPerNode));
-            if (!br)
-                return br.error();
-
-            ResultMap out;
-            out.reserve(dstNodeIds.size());
-
-            while (true) {
-                auto step = stmt.step();
-                if (!step)
-                    return step.error();
-                if (!step.value())
-                    break;
-                KGEdge e;
-                e.id = stmt.getInt64(0);
-                e.srcNodeId = stmt.getInt64(1);
-                e.dstNodeId = stmt.getInt64(2);
-                e.relation = stmt.getString(3);
-                e.weight = static_cast<float>(stmt.getDouble(4));
-                if (!stmt.isNull(5))
-                    e.createdTime = stmt.getInt64(5);
-                if (!stmt.isNull(6))
-                    e.properties = stmt.getString(6);
-                out[e.dstNodeId].push_back(std::move(e));
-            }
-            return out;
-        });
+        return getEdgesBatch(dstNodeIds, relation, limitPerNode, true);
     }
 
     Result<std::vector<KGEdge>> getEdgesBidirectional(std::int64_t nodeId,
@@ -1443,26 +1414,26 @@ public:
                                                 std::size_t maxNeighbors) override {
         return readPool()->withConnection([&](Database& db) -> Result<std::vector<std::int64_t>> {
             auto stmtR =
-                db.prepare("SELECT dst_node_id FROM kg_edges WHERE src_node_id = ? LIMIT ?");
+                db.prepareCached("SELECT dst_node_id FROM kg_edges WHERE src_node_id = ? LIMIT ?");
             if (!stmtR)
                 return stmtR.error();
             auto stmt = std::move(stmtR).value();
 
-            auto br = stmt.bind(1, nodeId);
+            auto br = stmt->bind(1, nodeId);
             if (!br)
                 return br.error();
-            br = stmt.bind(2, static_cast<int64_t>(maxNeighbors));
+            br = stmt->bind(2, static_cast<int64_t>(maxNeighbors));
             if (!br)
                 return br.error();
 
             std::vector<std::int64_t> out;
             while (true) {
-                auto step = stmt.step();
+                auto step = stmt->step();
                 if (!step)
                     return step.error();
                 if (!step.value())
                     break;
-                out.push_back(stmt.getInt64(0));
+                out.push_back(stmt->getInt64(0));
             }
             return out;
         });
@@ -1569,37 +1540,37 @@ public:
 
     Result<std::optional<std::int64_t>> getDocumentIdByHash(std::string_view sha256) override {
         return readPool()->withConnection([&](Database& db) -> Result<std::optional<std::int64_t>> {
-            auto stmtR = db.prepare("SELECT id FROM documents WHERE sha256_hash = ? LIMIT 1");
+            auto stmtR = db.prepareCached("SELECT id FROM documents WHERE sha256_hash = ? LIMIT 1");
             if (!stmtR)
                 return stmtR.error();
             auto stmt = std::move(stmtR).value();
-            auto br = stmt.bind(1, sha256);
+            auto br = stmt->bind(1, sha256);
             if (!br)
                 return br.error();
-            auto step = stmt.step();
+            auto step = stmt->step();
             if (!step)
                 return step.error();
             if (!step.value())
                 return std::optional<std::int64_t>{};
-            return std::optional<std::int64_t>{stmt.getInt64(0)};
+            return std::optional<std::int64_t>{stmt->getInt64(0)};
         });
     }
 
     Result<std::optional<std::int64_t>> getDocumentIdByPath(std::string_view file_path) override {
         return readPool()->withConnection([&](Database& db) -> Result<std::optional<std::int64_t>> {
-            auto stmtR = db.prepare("SELECT id FROM documents WHERE file_path = ? LIMIT 1");
+            auto stmtR = db.prepareCached("SELECT id FROM documents WHERE file_path = ? LIMIT 1");
             if (!stmtR)
                 return stmtR.error();
             auto stmt = std::move(stmtR).value();
-            auto br = stmt.bind(1, file_path);
+            auto br = stmt->bind(1, file_path);
             if (!br)
                 return br.error();
-            auto step = stmt.step();
+            auto step = stmt->step();
             if (!step)
                 return step.error();
             if (!step.value())
                 return std::optional<std::int64_t>{};
-            return std::optional<std::int64_t>{stmt.getInt64(0)};
+            return std::optional<std::int64_t>{stmt->getInt64(0)};
         });
     }
 
@@ -1643,44 +1614,45 @@ public:
                                                              std::size_t limit,
                                                              std::size_t offset) override {
         return readPool()->withConnection([&](Database& db) -> Result<std::vector<DocEntity>> {
-            auto stmtR = db.prepare("SELECT id, document_id, entity_text, node_id, start_offset, "
-                                    "end_offset, confidence, extractor "
-                                    "FROM kg_doc_entities WHERE document_id = ? LIMIT ? OFFSET ?");
+            auto stmtR =
+                db.prepareCached("SELECT id, document_id, entity_text, node_id, start_offset, "
+                                 "end_offset, confidence, extractor "
+                                 "FROM kg_doc_entities WHERE document_id = ? LIMIT ? OFFSET ?");
             if (!stmtR)
                 return stmtR.error();
             auto stmt = std::move(stmtR).value();
 
-            auto br = stmt.bind(1, documentId);
+            auto br = stmt->bind(1, documentId);
             if (!br)
                 return br.error();
-            br = stmt.bind(2, static_cast<int64_t>(limit));
+            br = stmt->bind(2, static_cast<int64_t>(limit));
             if (!br)
                 return br.error();
-            br = stmt.bind(3, static_cast<int64_t>(offset));
+            br = stmt->bind(3, static_cast<int64_t>(offset));
             if (!br)
                 return br.error();
 
             std::vector<DocEntity> out;
             while (true) {
-                auto step = stmt.step();
+                auto step = stmt->step();
                 if (!step)
                     return step.error();
                 if (!step.value())
                     break;
                 DocEntity de;
-                de.id = stmt.getInt64(0);
-                de.documentId = stmt.getInt64(1);
-                de.entityText = stmt.getString(2);
-                if (!stmt.isNull(3))
-                    de.nodeId = stmt.getInt64(3);
-                if (!stmt.isNull(4))
-                    de.startOffset = stmt.getInt64(4);
-                if (!stmt.isNull(5))
-                    de.endOffset = stmt.getInt64(5);
-                if (!stmt.isNull(6))
-                    de.confidence = static_cast<float>(stmt.getDouble(6));
-                if (!stmt.isNull(7))
-                    de.extractor = stmt.getString(7);
+                de.id = stmt->getInt64(0);
+                de.documentId = stmt->getInt64(1);
+                de.entityText = stmt->getString(2);
+                if (!stmt->isNull(3))
+                    de.nodeId = stmt->getInt64(3);
+                if (!stmt->isNull(4))
+                    de.startOffset = stmt->getInt64(4);
+                if (!stmt->isNull(5))
+                    de.endOffset = stmt->getInt64(5);
+                if (!stmt->isNull(6))
+                    de.confidence = static_cast<float>(stmt->getDouble(6));
+                if (!stmt->isNull(7))
+                    de.extractor = stmt->getString(7);
                 out.push_back(std::move(de));
             }
             return out;
@@ -2232,7 +2204,7 @@ public:
             }
             sqlPattern += "%";
 
-            auto stmtR = db.prepare(R"(
+            auto stmtR = db.prepareCached(R"(
                 SELECT id, node_key, label, type, created_time, updated_time, properties
                 FROM kg_nodes
                 WHERE label LIKE ? COLLATE NOCASE
@@ -2243,32 +2215,32 @@ public:
                 return stmtR.error();
 
             auto stmt = std::move(stmtR).value();
-            auto bindRes = stmt.bindAll(sqlPattern, static_cast<std::int64_t>(limit),
-                                        static_cast<std::int64_t>(offset));
+            auto bindRes = stmt->bindAll(sqlPattern, static_cast<std::int64_t>(limit),
+                                         static_cast<std::int64_t>(offset));
             if (!bindRes)
                 return bindRes.error();
 
             std::vector<KGNode> results;
             while (true) {
-                auto step = stmt.step();
+                auto step = stmt->step();
                 if (!step)
                     return step.error();
                 if (!step.value())
                     break;
 
                 KGNode node;
-                node.id = stmt.getInt64(0);
-                node.nodeKey = stmt.getString(1);
-                if (!stmt.isNull(2))
-                    node.label = stmt.getString(2);
-                if (!stmt.isNull(3))
-                    node.type = stmt.getString(3);
-                if (!stmt.isNull(4))
-                    node.createdTime = stmt.getInt64(4);
-                if (!stmt.isNull(5))
-                    node.updatedTime = stmt.getInt64(5);
-                if (!stmt.isNull(6))
-                    node.properties = stmt.getString(6);
+                node.id = stmt->getInt64(0);
+                node.nodeKey = stmt->getString(1);
+                if (!stmt->isNull(2))
+                    node.label = stmt->getString(2);
+                if (!stmt->isNull(3))
+                    node.type = stmt->getString(3);
+                if (!stmt->isNull(4))
+                    node.createdTime = stmt->getInt64(4);
+                if (!stmt->isNull(5))
+                    node.updatedTime = stmt->getInt64(5);
+                if (!stmt->isNull(6))
+                    node.properties = stmt->getString(6);
 
                 results.push_back(std::move(node));
             }
@@ -2294,11 +2266,11 @@ public:
         return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
             // Check if blob node exists
             auto selectStmt =
-                db.prepare("SELECT id FROM kg_nodes WHERE node_key = ? AND type = 'blob'");
+                db.prepareCached("SELECT id FROM kg_nodes WHERE node_key = ? AND type = 'blob'");
             if (!selectStmt)
                 return selectStmt.error();
 
-            auto& stmt = selectStmt.value();
+            auto& stmt = *selectStmt.value();
             std::string nodeKey = std::string("blob:") + std::string(sha256);
             auto bindRes = stmt.bindAll(nodeKey);
             if (!bindRes)
@@ -2337,12 +2309,12 @@ public:
     Result<std::int64_t> ensureDocumentNode(std::string_view sha256,
                                             std::string_view label = std::string_view{}) override {
         return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
-            auto selectStmt = db.prepare(
+            auto selectStmt = db.prepareCached(
                 "SELECT id, label FROM kg_nodes WHERE node_key = ? AND type = 'document'");
             if (!selectStmt)
                 return selectStmt.error();
 
-            auto& stmt = selectStmt.value();
+            auto& stmt = *selectStmt.value();
             std::string nodeKey = std::string("doc:") + std::string(sha256);
             auto bindRes = stmt.bindAll(nodeKey);
             if (!bindRes)
@@ -2399,11 +2371,11 @@ public:
 
             // Check if path node exists
             auto selectStmt =
-                db.prepare("SELECT id FROM kg_nodes WHERE node_key = ? AND type = 'path'");
+                db.prepareCached("SELECT id FROM kg_nodes WHERE node_key = ? AND type = 'path'");
             if (!selectStmt)
                 return selectStmt.error();
 
-            auto& stmt = selectStmt.value();
+            auto& stmt = *selectStmt.value();
             auto bindRes = stmt.bindAll(nodeKey);
             if (!bindRes)
                 return bindRes.error();
@@ -2450,11 +2422,11 @@ public:
             // Logical path node to group snapshot path nodes.
             std::string logicalKey = "path:logical:" + descriptor.path;
             auto logicalSelect =
-                db.prepare("SELECT id FROM kg_nodes WHERE node_key = ? AND type = 'path'");
+                db.prepareCached("SELECT id FROM kg_nodes WHERE node_key = ? AND type = 'path'");
             if (!logicalSelect)
                 return logicalSelect.error();
 
-            auto& logicalStmt = logicalSelect.value();
+            auto& logicalStmt = *logicalSelect.value();
             auto logicalBind = logicalStmt.bindAll(logicalKey);
             if (!logicalBind)
                 return logicalBind.error();

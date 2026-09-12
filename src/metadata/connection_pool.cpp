@@ -900,12 +900,14 @@ bool ConnectionPool::isConnectionValid(const Database& db) const {
     }
 
     try {
-        auto stmtResult = const_cast<Database&>(db).prepare("SELECT 1");
+        // Runs on every acquire and release: keep the probe in the connection's statement
+        // cache instead of compiling it twice per pooled call.
+        auto stmtResult = const_cast<Database&>(db).prepareCached("SELECT 1");
         if (!stmtResult)
             return false;
 
-        Statement stmt = std::move(stmtResult).value();
-        auto result = stmt.step();
+        auto stmt = std::move(stmtResult).value();
+        auto result = stmt->step();
         if (!result.has_value())
             return false;
 
