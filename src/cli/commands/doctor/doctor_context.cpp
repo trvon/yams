@@ -1,3 +1,4 @@
+#include <spdlog/fmt/fmt.h>
 #include <yams/cli/daemon_helpers.h>
 #include <yams/cli/doctor/doctor_context.h>
 #include <yams/cli/result_helpers.h>
@@ -6,6 +7,7 @@
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/storage/storage_runtime_resolver.h>
 
@@ -14,7 +16,6 @@
 
 #include <chrono>
 #include <cstdlib>
-#include <thread>
 
 extern "C" int sqlite3_vec_init(sqlite3* db, char** pzErrMsg, const sqlite3_api_routines* pApi);
 
@@ -350,23 +351,22 @@ void DoctorContext::validateGraph(std::ostream& os, YamsCLI* cli) {
 }
 
 void DoctorContext::applyTuningBaseline(std::ostream& os, bool apply) {
-    unsigned hc = std::thread::hardware_concurrency();
-    if (hc == 0)
-        hc = 4;
-    uint32_t ipcMax = std::min<unsigned>(64, hc * 2);
-    uint32_t ioMax = std::min<unsigned>(32, std::max<unsigned>(1, hc / 2));
+    // The baseline is the daemon's own effective defaults (TuneAdvisor), so applying it
+    // never rewrites a default as a divergent override.
+    using yams::daemon::TuneAdvisor;
     std::map<std::string, std::string> suggestions{
-        {"tuning.backpressure_read_pause_ms", "10"},
-        {"tuning.worker_poll_ms", "75"},
-        {"tuning.idle_cpu_pct", "10.0"},
-        {"tuning.idle_mux_low_bytes", "4194304"},
-        {"tuning.idle_shrink_hold_ms", "5000"},
-        {"tuning.pool_cooldown_ms", "500"},
-        {"tuning.pool_scale_step", "1"},
-        {"tuning.pool_ipc_min", "1"},
-        {"tuning.pool_ipc_max", std::to_string(ipcMax)},
-        {"tuning.pool_io_min", "1"},
-        {"tuning.pool_io_max", std::to_string(ioMax)},
+        {"tuning.backpressure_read_pause_ms",
+         std::to_string(TuneAdvisor::backpressureReadPauseMs())},
+        {"tuning.worker_poll_ms", std::to_string(TuneAdvisor::workerPollMs())},
+        {"tuning.idle_cpu_pct", fmt::format("{:.1f}", TuneAdvisor::idleCpuThresholdPercent())},
+        {"tuning.idle_mux_low_bytes", std::to_string(TuneAdvisor::idleMuxLowBytes())},
+        {"tuning.idle_shrink_hold_ms", std::to_string(TuneAdvisor::idleShrinkHoldMs())},
+        {"tuning.pool_cooldown_ms", std::to_string(TuneAdvisor::poolCooldownMs())},
+        {"tuning.pool_scale_step", std::to_string(TuneAdvisor::poolScaleStep())},
+        {"tuning.pool_ipc_min", std::to_string(TuneAdvisor::poolMinSizeIpc())},
+        {"tuning.pool_ipc_max", std::to_string(TuneAdvisor::poolMaxSizeIpc())},
+        {"tuning.pool_io_min", std::to_string(TuneAdvisor::poolMinSizeIpcIo())},
+        {"tuning.pool_io_max", std::to_string(TuneAdvisor::poolMaxSizeIpcIo())},
     };
     os << "Doctor tuning baseline (proposed):\n";
     for (const auto& [k, v] : suggestions)

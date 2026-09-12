@@ -264,7 +264,7 @@
 		{
 			"label": "bench: search graph rerank",
 			"type": "shell",
-			"command": "mkdir -p bench_results && YAMS_ENABLE_ENV_OVERRIDES=1 YAMS_BENCH_ENABLE_EMBEDDINGS=1 YAMS_BENCH_DOC_COUNT=500 YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK=0 YAMS_SEARCH_ENABLE_GRAPH_RERANK=1 YAMS_SEARCH_GRAPH_RERANK_TOPN=25 YAMS_SEARCH_GRAPH_RERANK_WEIGHT=0.15 YAMS_SEARCH_GRAPH_RERANK_MAX_BOOST=0.20 YAMS_SEARCH_GRAPH_MAX_NEIGHBORS=16 YAMS_SEARCH_GRAPH_MAX_HOPS=1 YAMS_SEARCH_GRAPH_BUDGET_MS=10 ./builddir/tests/benchmarks/yams_retrieval_service_benchmarks --benchmark_filter='BM_RetrievalService_Search_(Keyword|Hybrid)' --benchmark_repetitions=5 --benchmark_report_aggregates_only=true --benchmark_out=bench_results/search_latency_graph_rerank.json --benchmark_out_format=json",
+			"command": "mkdir -p bench_results && YAMS_ENABLE_ENV_OVERRIDES=1 YAMS_BENCH_ENABLE_EMBEDDINGS=1 YAMS_BENCH_DOC_COUNT=500 YAMS_SEARCH_ENABLE_ADAPTIVE_FALLBACK=0 YAMS_SEARCH_ENABLE_GRAPH_RERANK=1 YAMS_SEARCH_GRAPH_RERANK_TOPN=25 YAMS_SEARCH_GRAPH_RERANK_WEIGHT=0.15 YAMS_SEARCH_GRAPH_RERANK_MAX_BOOST=0.20 YAMS_SEARCH_GRAPH_BUDGET_MS=10 ./builddir/tests/benchmarks/yams_retrieval_service_benchmarks --benchmark_filter='BM_RetrievalService_Search_(Keyword|Hybrid)' --benchmark_repetitions=5 --benchmark_report_aggregates_only=true --benchmark_out=bench_results/search_latency_graph_rerank.json --benchmark_out_format=json",
 			"group": "test"
 		},
 		{
