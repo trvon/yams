@@ -191,6 +191,8 @@ public:
     void setMaxBatch(std::uint32_t maxBatch) { cfg_.maxBatch = maxBatch; }
 
 private:
+    // Order is the wire code minus one (metrics::kRepairOperationCodes); runRepairOperation
+    // static_asserts the two stay the same length.
     enum class OnDemandRepairOperation : std::uint8_t {
         StuckDocuments,
         Orphans,
@@ -281,60 +283,6 @@ private:
 
     // ── Dependencies (virtual for unit tests) ──
     virtual std::shared_ptr<metadata::IMetadataRepository> getMetadataRepoForRepair() const;
-
-    // ── Core repair operations (each returns per-op result) ──
-    RepairOperationResult cleanOrphanedMetadata(bool dryRun, bool verbose, bool removeCorrupt,
-                                                ProgressFn progress);
-    RepairOperationResult repairMimeTypes(bool dryRun, bool verbose, ProgressFn progress);
-    RepairOperationResult repairDownloads(bool dryRun, bool verbose, ProgressFn progress);
-    RepairOperationResult rebuildPathTree(bool dryRun, bool verbose, ProgressFn progress);
-    RepairOperationResult cleanOrphanedChunks(bool dryRun, bool verbose,
-                                              const ProgressFn& progress);
-    RepairOperationResult repairBlockReferences(bool dryRun, bool verbose,
-                                                const ProgressFn& progress);
-    RepairOperationResult repairKnowledgeGraph(const RepairRequest& req, const ProgressFn& progress,
-                                               std::atomic<bool>* cancelRequested = nullptr);
-    RepairOperationResult rebuildTopologyArtifacts(const RepairRequest& req,
-                                                   const ProgressFn& progress);
-    RepairOperationResult applySemanticDedupe(const RepairRequest& req, const ProgressFn& progress);
-    RepairOperationResult rebuildFts5Index(const RepairRequest& req, const ProgressFn& progress,
-                                           std::atomic<bool>* cancelRequested = nullptr);
-    RepairOperationResult generateMissingEmbeddings(const RepairRequest& req,
-                                                    const ProgressFn& progress,
-                                                    std::atomic<bool>* cancelRequested = nullptr);
-    boost::asio::awaitable<RepairOperationResult>
-    generateMissingEmbeddingsAsync(const RepairRequest& req, const ProgressFn& progress,
-                                   std::atomic<bool>* cancelRequested = nullptr);
-    RepairOperationResult optimizeDatabase(bool dryRun, bool verbose, ProgressFn progress);
-
-    // ── NEW: stuck document recovery ──
-    RepairOperationResult recoverStuckDocuments(const RepairRequest& req,
-                                                const ProgressFn& progress);
-    boost::asio::awaitable<RepairOperationResult>
-    recoverStuckDocumentsAsync(const RepairRequest& req, const ProgressFn& progress,
-                               std::atomic<bool>* cancelRequested = nullptr);
-
-    struct StuckDocumentInfo {
-        enum Category { FailedExtraction, GhostSuccess, StalledPending, StalledProcessing };
-        Category category;
-        int64_t docId{0};
-        std::string hash;
-        std::string path;
-        int repairAttempts{0};
-    };
-    std::vector<StuckDocumentInfo> detectStuckDocuments(int32_t maxRetries);
-
-    struct KgCleanupStats {
-        uint64_t nodesScanned{0};
-        uint64_t orphanNodes{0};
-        uint64_t nodesDeleted{0};
-        uint64_t edgesDeleted{0};
-        uint64_t docEntitiesDeleted{0};
-        uint64_t skipped{0};
-        uint64_t errors{0};
-        std::vector<std::string> issues;
-    };
-    KgCleanupStats cleanOrphanedKgEntries(bool dryRun, bool verbose, const ProgressFn& progress);
 
     // ── Symbol extraction scheduling (ported from RepairCoordinator) ──
     virtual std::shared_ptr<GraphComponent> getGraphComponentForScheduling() const;
