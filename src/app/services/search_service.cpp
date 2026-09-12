@@ -50,6 +50,7 @@
 #endif
 
 #include "yams/profiling.h"
+#include "glob_matcher.h"
 
 namespace yams::app::services {
 
@@ -306,43 +307,19 @@ void applyExtensionFacets(SearchResponse& resp) {
 }
 
 // Converts a glob pattern to a regex string.
-static std::string globToRegex(const std::string& glob) {
-    std::string regex_str;
-    regex_str.reserve(glob.size() * 2);
-    for (size_t i = 0; i < glob.size(); ++i) {
-        char c = glob[i];
-        if (c == '*') {
-            if (i + 1 < glob.size() && glob[i + 1] == '*') {
-                // '**' matches any sequence of characters, including path separators
-                regex_str += ".*";
-                i++; // consume second '*'
-            } else {
-                // '*' matches any sequence of characters except path separators
-                regex_str += "[^/]*";
-            }
-        } else if (c == '?') {
-            regex_str += ".";
-        } else if (c == '.' || c == '+' || c == '(' || c == ')' || c == '{' || c == '}' ||
-                   c == '[' || c == ']' || c == '^' || c == '|' || c == '\\') {
-            regex_str += '\\';
-            regex_str += c;
-        } else {
-            regex_str += c;
-        }
-    }
-    return regex_str;
-}
-
-// Robust glob matcher using regex, supporting '**'.
+// Glob matching compiled once per pattern. Path filters apply the same handful of
+// patterns to every candidate document, so the compiled form is cached per thread and
+// the cache is cleared if it ever grows past a small bound.
 static bool wildcardMatch(const std::string& text, const std::string& pattern) {
-    try {
-        std::regex re(globToRegex(pattern));
-        return std::regex_match(text, re);
-    } catch (const std::regex_error& e) {
-        spdlog::warn("Invalid glob pattern '{}' converted to regex: {}", pattern, e.what());
-        // Fallback to simple string contains for invalid patterns
-        return text.find(pattern) != std::string::npos;
+    thread_local std::unordered_map<std::string, GlobMatcher> matchers;
+    auto it = matchers.find(pattern);
+    if (it == matchers.end()) {
+        if (matchers.size() >= 256) {
+            matchers.clear();
+        }
+        it = matchers.emplace(pattern, GlobMatcher(pattern)).first;
     }
+    return it->second.matches(text);
 }
 
 // Heuristic: treat as path/filename when the query contains a separator
@@ -473,12 +450,13 @@ static std::string_view basenameView(std::string_view path) {
     return path.substr(pos + 1);
 }
 
-static double computePathMatchScore(const metadata::DocumentInfo& doc, const std::string& query,
-                                    bool wildcard) {
+// queryLower is the trimmed, lowercased query, computed once by the caller for the whole
+// candidate set rather than once per document.
+static double computePathMatchScore(const metadata::DocumentInfo& doc,
+                                    const std::string& queryLower, bool wildcard) {
     const std::string path = !doc.filePath.empty() ? doc.filePath : doc.fileName;
     const std::string pathLower = yams::common::asciiToLowerCopy(path);
     const std::string nameLower = yams::common::asciiToLowerCopy(doc.fileName);
-    const std::string queryLower = yams::common::asciiToLowerCopy(yams::common::trimCopy(query));
 
     if (queryLower.empty()) {
         return 0.01;
@@ -1562,6 +1540,8 @@ private:
         if (!loadedTags)
             co_return loadedTags.error();
         const auto& tagsByDoc = loadedTags.value();
+        const std::string pathQueryLower =
+            yams::common::asciiToLowerCopy(yams::common::trimCopy(pathQuery));
         auto push_path = [&](const metadata::DocumentInfo& d) -> boost::asio::awaitable<void> {
             if (!req.extension.empty()) {
                 if (d.fileExtension != req.extension && d.fileExtension != ("." + req.extension))
@@ -1572,7 +1552,7 @@ private:
             if (!hasRequiredTags(tagsByDoc, d.id, req.tags, req.matchAllTags))
                 co_return;
             const std::string resolvedPath = !d.filePath.empty() ? d.filePath : d.fileName;
-            const double score = computePathMatchScore(d, pathQuery, wildcard);
+            const double score = computePathMatchScore(d, pathQueryLower, wildcard);
 
             if (req.pathsOnly) {
                 rankedPaths.emplace_back(resolvedPath, score);
