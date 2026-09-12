@@ -790,6 +790,7 @@ else
   subdir('src/compression')
   subdir('src/storage')
   subdir('src/wal')
+  subdir('src/memory_sync')
   subdir('src/manifest')
   subdir('src/metadata')
   subdir('src/integrity')
@@ -801,6 +802,7 @@ else
     subdir('src/plugins')
   endif
   subdir('src/daemon/client')
+  subdir('src/daemon/tune_advisor')
   subdir('src/embedding_simeon')
   subdir('src/vector')
   subdir('src/topology')
