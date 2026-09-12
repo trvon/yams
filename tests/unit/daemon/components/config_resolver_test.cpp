@@ -2007,6 +2007,12 @@ TEST_CASE("ConfigResolver preserves tuning bounds and zero reservations",
     } reset;
     (void)ConfigResolver::applyRuntimeTuning({}, TuningConfig{});
     ConfigResolver::ConfigSections sections;
+    SECTION("pending KG capacity is applied through typed configuration") {
+        sections["tuning"]["post_ingest_pending_kg_max"] = "7";
+        const auto resolved = ConfigResolver::applyRuntimeTuning(sections, TuningConfig{});
+        CHECK(TuneAdvisor::postIngestPendingKgMax() == 7u);
+        CHECK(resolved.provenance.count("tuning.post_ingest_pending_kg_max") == 1);
+    }
     SECTION("connection growth step cannot exceed its supported range") {
         sections["tuning"]["conn_slots_step"] = "4294967295";
         const auto resolved = ConfigResolver::applyRuntimeTuning(sections, TuningConfig{});
@@ -2031,6 +2037,7 @@ TEST_CASE("ConfigResolver preserves tuning bounds and zero reservations",
             {"io_conn_per_thread", 1, 1024},
             {"post_ingest_threads", 0, 64},
             {"post_ingest_queue_max", 10, 1000000},
+            {"post_ingest_pending_kg_max", 1, UINT32_MAX},
             {"list_inflight_limit", 1, 1024},
             {"list_admission_wait_ms", 1, 120000},
             {"grep_inflight_limit", 1, 1024},

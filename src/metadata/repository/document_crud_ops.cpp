@@ -987,7 +987,8 @@ Result<void> MetadataRepository::replaceDocumentAndMetadata(
             info.reversePath, info.pathHash, info.parentHash, info.pathDepth, info.id));
         YAMS_TRY(updateStmt.execute());
 
-        YAMS_TRY_UNWRAP(deleteStmt, db.prepare("DELETE FROM metadata WHERE document_id = ?"));
+        YAMS_TRY_UNWRAP(deleteStmt, db.prepare("DELETE FROM metadata WHERE document_id = ? "
+                                               "AND key != 'yams:kg_enrichment'"));
         YAMS_TRY(deleteStmt.bind(1, info.id));
         YAMS_TRY(deleteStmt.execute());
 
@@ -995,6 +996,8 @@ Result<void> MetadataRepository::replaceDocumentAndMetadata(
                                                "(document_id, key, value, value_type) "
                                                "VALUES (?, ?, ?, ?)"));
         for (const auto& [key, value] : metadata) {
+            if (key == "yams:kg_enrichment")
+                continue;
             YAMS_TRY(insertStmt.reset());
             YAMS_TRY(insertStmt.clearBindings());
             YAMS_TRY(insertStmt.bindAll(info.id, key, value.value,

@@ -518,6 +518,94 @@ TEST_CASE("MetadataRepository: snapshot metadata helpers round-trip",
     CHECK((batchInfo.value().at("snap-2").gitCommit == "def456"));
 }
 
+TEST_CASE("MetadataRepository: content and KG intent commit atomically",
+          "[unit][metadata][repository][kg-intent]") {
+    MetadataRepositoryFixture fix;
+    auto first = fix.repository_->insertDocument(makeDocumentWithPath("kg/a.txt", "kg-intent-a"));
+    auto second = fix.repository_->insertDocument(makeDocumentWithPath("kg/b.txt", "kg-intent-b"));
+    REQUIRE(first.has_value());
+    REQUIRE(second.has_value());
+    BatchContentEntry a;
+    a.documentId = first.value();
+    a.contentText = "first KG content";
+    a.knowledgeGraphToken = "generation-a";
+    BatchContentEntry b;
+    b.documentId = second.value();
+    b.contentText = "second KG content";
+    b.knowledgeGraphToken = "generation-b";
+    SECTION("successful extraction retains independently pending KG intent") {
+        REQUIRE(fix.repository_->batchInsertContentAndIndex({a, b}).has_value());
+        auto marker = fix.repository_->getMetadata(first.value(), "yams:kg_enrichment");
+        REQUIRE(marker.has_value());
+        REQUIRE(marker.value().has_value());
+        CHECK(marker.value()->value == "pending:generation-a");
+    }
+    SECTION("completion acknowledges only the current pending token") {
+        REQUIRE(fix.repository_->batchInsertContentAndIndex({a}).has_value());
+        a.knowledgeGraphToken = "generation-new";
+        REQUIRE(fix.repository_->batchInsertContentAndIndex({a}).has_value());
+        auto stale =
+            fix.repository_->completeKnowledgeGraphEnrichment(first.value(), "generation-a");
+        REQUIRE(stale.has_value());
+        CHECK_FALSE(stale.value());
+        auto empty = fix.repository_->completeKnowledgeGraphEnrichment(first.value(), "");
+        REQUIRE(empty.has_value());
+        CHECK_FALSE(empty.value());
+        REQUIRE(fix.pool_
+                    ->withConnection([](Database& db) -> Result<void> {
+                        return db.execute(
+                            "CREATE TRIGGER reject_kg_ack BEFORE UPDATE ON metadata "
+                            "WHEN NEW.key='yams:kg_enrichment' AND NEW.value LIKE 'complete:%' "
+                            "BEGIN SELECT RAISE(ABORT, 'injected KG ack failure'); END");
+                    })
+                    .has_value());
+        CHECK_FALSE(
+            fix.repository_->completeKnowledgeGraphEnrichment(first.value(), "generation-new")
+                .has_value());
+        auto pending = fix.repository_->getMetadata(first.value(), "yams:kg_enrichment");
+        REQUIRE(pending.has_value());
+        REQUIRE(pending.value().has_value());
+        CHECK(pending.value()->value == "pending:generation-new");
+        REQUIRE(fix.pool_
+                    ->withConnection(
+                        [](Database& db) { return db.execute("DROP TRIGGER reject_kg_ack"); })
+                    .has_value());
+        auto completed =
+            fix.repository_->completeKnowledgeGraphEnrichment(first.value(), "generation-new");
+        REQUIRE(completed.has_value());
+        CHECK(completed.value());
+        auto duplicate =
+            fix.repository_->completeKnowledgeGraphEnrichment(first.value(), "generation-new");
+        REQUIRE(duplicate.has_value());
+        CHECK_FALSE(duplicate.value());
+        auto marker = fix.repository_->getMetadata(first.value(), "yams:kg_enrichment");
+        REQUIRE(marker.has_value());
+        REQUIRE(marker.value().has_value());
+        CHECK(marker.value()->value == "complete:generation-new");
+    }
+    SECTION("failed intent write rolls back the entire content batch") {
+        REQUIRE(fix.pool_
+                    ->withConnection([&](Database& db) -> Result<void> {
+                        return db.execute(
+                            "CREATE TRIGGER reject_kg_intent BEFORE INSERT ON metadata "
+                            "WHEN NEW.key = 'yams:kg_enrichment' AND NEW.document_id = " +
+                            std::to_string(second.value()) +
+                            " BEGIN SELECT RAISE(ABORT, 'injected KG intent failure'); END");
+                    })
+                    .has_value());
+        auto written = fix.repository_->batchInsertContentAndIndex({a, b});
+        CHECK_FALSE(written.has_value());
+        for (auto id : {first.value(), second.value()}) {
+            auto content = fix.repository_->getContent(id);
+            REQUIRE(content.has_value());
+            CHECK_FALSE(content.value().has_value());
+            auto marker = fix.repository_->getMetadata(id, "yams:kg_enrichment");
+            REQUIRE(marker.has_value());
+            CHECK_FALSE(marker.value().has_value());
+        }
+    }
+}
+
 TEST_CASE("MetadataRepository: session and tag helpers round-trip",
           "[unit][metadata][repository][session-tags]") {
     MetadataRepositoryFixture fix;

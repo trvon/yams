@@ -200,9 +200,12 @@ boost::asio::awaitable<void> EntityGraphService::channelPoller() {
             job.contentUtf8 = std::move(busJob.contentUtf8);
             job.language = std::move(busJob.language);
             job.mimeType = std::move(busJob.mimeType);
+            job.documentDbId = busJob.documentDbId;
+            job.knowledgeGraphToken = std::move(busJob.knowledgeGraphToken);
 
             try {
-                if (!process(job))
+                bool success = process(job);
+                if (!success)
                     failed_.fetch_add(1, std::memory_order_relaxed);
             } catch (const std::exception& e) {
                 spdlog::error("EntityGraphService: exception processing {}: {}", job.filePath,
@@ -252,6 +255,8 @@ Result<void> EntityGraphService::submitExtraction(Job job) {
     busJob.contentUtf8 = std::move(job.contentUtf8);
     busJob.language = std::move(job.language);
     busJob.mimeType = std::move(job.mimeType);
+    busJob.documentDbId = job.documentDbId;
+    busJob.knowledgeGraphToken = std::move(job.knowledgeGraphToken);
 
     constexpr std::size_t kChannelCapacity = 4096;
     auto channel = bus.get_or_create_channel<InternalEventBus::EntityGraphJob>("entity_graph_jobs",
@@ -263,6 +268,8 @@ Result<void> EntityGraphService::submitExtraction(Job job) {
     } else {
         bus.incEntityGraphDropped();
         spdlog::debug("EntityGraphService: channel full, dropping job for {}", filePath);
+        accepted_.fetch_sub(1, std::memory_order_relaxed);
+        return Error{ErrorCode::ResourceExhausted, "entity_graph_jobs channel full"};
     }
 
     return Result<void>();
@@ -283,15 +290,24 @@ bool EntityGraphService::process(Job& job) {
     if (!services_)
         return false;
 
+    auto acknowledgeNoop = [&]() {
+        if (job.knowledgeGraphToken.empty())
+            return true;
+        auto repo = services_->getMetadataRepo();
+        if (!repo)
+            return false;
+        return repo->completeKnowledgeGraphEnrichment(job.documentDbId, job.knowledgeGraphToken)
+            .has_value();
+    };
     auto kg = services_->getKgStore();
     if (!kg) {
         spdlog::debug("EntityGraphService: no KG store available");
-        return true; // not an error if KG is not configured
+        return job.knowledgeGraphToken.empty();
     }
 
     // NL extraction handled in PostIngestQueue title+NL stage
     if (isNaturalLanguageContent(job)) {
-        return true;
+        return acknowledgeNoop();
     }
 
     // Code path: Locate a symbol extractor plugin that supports the language
@@ -306,14 +322,14 @@ bool EntityGraphService::process(Job& job) {
         }
     }
     if (!table || !table->extract_symbols) {
-        return true; // no code extractor, NL handled in title+NL stage
+        return acknowledgeNoop(); // no code extractor, NL handled in title+NL stage
     }
 
     // Get extractor ID for versioned state tracking
     std::string extractorId = extractorAdapter ? extractorAdapter->getExtractorId() : "unknown";
 
     if (isKnownUnsupportedLanguage(job.language)) {
-        return true;
+        return acknowledgeNoop();
     }
 
     yams_symbol_extraction_result_v1* result = nullptr;
@@ -349,6 +365,8 @@ bool EntityGraphService::process(Job& job) {
 
     // Populate KG with rich symbol relationships
     bool success = populateKnowledgeGraph(kg, job, result);
+    if (success && result->symbol_count == 0)
+        success = acknowledgeNoop();
 
     // Record successful extraction state (even with 0 symbols)
     if (!job.documentHash.empty()) {
@@ -1035,6 +1053,8 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
     try {
         auto wb = makeWriteBatchFromDeferredKGBatch(std::move(batch),
                                                     "EntityGraphService::symbols/" + job.filePath);
+        wb->knowledgeGraphDocumentId = job.documentDbId;
+        wb->knowledgeGraphToken = job.knowledgeGraphToken;
         writeCoordinator->enqueue(std::move(wb));
 
         spdlog::debug("EntityGraphService: queued KG batch with {} symbols from {}",

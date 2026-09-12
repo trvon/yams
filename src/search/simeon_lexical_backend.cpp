@@ -510,19 +510,39 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         if (cfg_.concept_mining_enabled && ids.size() >= 100) {
             try {
                 const auto cmt0 = std::chrono::steady_clock::now();
+                // Bound retained raw text, not total process memory: getContent still
+                // materializes the next document before this check, and mining has its own
+                // allocations. Exceeding this budget disables the entire concept-scoring
+                // layer for this build; it is not sampling or a quality-neutral shortcut.
                 std::vector<std::string> conceptTexts;
                 conceptTexts.reserve(ids.size());
+                std::size_t conceptCorpusBytes = 0;
+                bool conceptBudgetExceeded = false;
                 for (auto docId : ids) {
                     if (stop.stop_requested())
                         break;
                     auto contentResult = repo->getContent(docId);
                     if (contentResult && contentResult.value()) {
-                        conceptTexts.emplace_back(std::move(contentResult.value()->contentText));
+                        auto& text = contentResult.value()->contentText;
+                        if (exceedsBudget(conceptCorpusBytes, text.size(), cfg_.max_corpus_bytes)) {
+                            conceptBudgetExceeded = true;
+                            break;
+                        }
+                        conceptCorpusBytes += text.size();
+                        conceptTexts.emplace_back(std::move(text));
                     } else {
                         conceptTexts.emplace_back();
                     }
                 }
-                if (!stop.stop_requested() && conceptTexts.size() == ids.size()) {
+                if (conceptBudgetExceeded) {
+                    spdlog::warn("[simeon-lexical] concept mining skipped: raw corpus exceeds "
+                                 "max_corpus_bytes (docs_loaded={} bytes={} cap={})",
+                                 conceptTexts.size(), conceptCorpusBytes, cfg_.max_corpus_bytes);
+                    conceptTexts.clear();
+                    conceptTexts.shrink_to_fit();
+                }
+                if (!conceptBudgetExceeded && !stop.stop_requested() &&
+                    conceptTexts.size() == ids.size()) {
                     YAMS_ZONE_SCOPED_N("simeon::mine_concepts");
                     std::vector<std::string_view> docViews;
                     docViews.reserve(conceptTexts.size());

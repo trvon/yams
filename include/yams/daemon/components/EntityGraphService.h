@@ -47,6 +47,8 @@ public:
         std::string contentUtf8;  ///< UTF-8 document content
         std::string language;     ///< Language hint (e.g., "cpp", "python")
         std::string mimeType;     ///< MIME type for content routing (e.g., "text/plain")
+        int64_t documentDbId = 0;
+        std::string knowledgeGraphToken;
     };
 
     /**

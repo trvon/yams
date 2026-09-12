@@ -629,6 +629,10 @@ public:
     Result<void> deleteContent(int64_t documentId) override;
     Result<void> batchInsertContentAndIndex(const std::vector<BatchContentEntry>& entries) override;
 
+    /// Acknowledge actual KG completion only for the matching pending admission token.
+    /// False means stale, missing, untracked, or already acknowledged; errors leave it pending.
+    Result<bool> completeKnowledgeGraphEnrichment(int64_t documentId, const std::string& token);
+
     // Metadata operations
     Result<void> setMetadata(int64_t documentId, const std::string& key,
                              const MetadataValue& value) override;

@@ -176,6 +176,7 @@ public:
             if (!currentMetadata) {
                 return currentMetadata.error();
             }
+            currentMetadata.value().erase("yams:kg_enrichment");
             if (documentMatches(*existing.value(), item.info) &&
                 metadataMatches(currentMetadata.value(), item.tags)) {
                 continue;
@@ -232,6 +233,8 @@ private:
         // Otherwise two peers with different extractor availability repeatedly
         // republish the same portable metadata with different payload hashes.
         for (const auto& [key, value] : tags) {
+            if (key == "yams:kg_enrichment")
+                continue;
             record.metadata[key] = memory_sync::MetadataValueRecord{
                 .value = value.value,
                 .type = static_cast<std::int32_t>(value.type),
@@ -260,6 +263,8 @@ private:
         item.info.repairStatus = RepairStatus::Pending;
         populatePathDerivedFields(item.info);
         for (const auto& [key, value] : record.metadata) {
+            if (key == "yams:kg_enrichment")
+                continue;
             MetadataValue mv;
             mv.value = value.value;
             mv.type = static_cast<MetadataValueType>(value.type);

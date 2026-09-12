@@ -311,6 +311,7 @@ public:
         std::vector<std::string> tags;
         std::shared_ptr<std::vector<std::byte>> contentBytes;
         std::chrono::steady_clock::time_point enqueuedAt{};
+        std::string knowledgeGraphToken;
     };
     struct SymbolExtractionJob {
         std::string hash;
@@ -376,6 +377,8 @@ public:
         std::string contentUtf8;
         std::string language;
         std::string mimeType;
+        int64_t documentDbId = 0;
+        std::string knowledgeGraphToken;
     };
 
 private:

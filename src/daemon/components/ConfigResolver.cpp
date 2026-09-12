@@ -1391,6 +1391,7 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
         {"io_conn_per_thread", 1, 1024},
         {"post_ingest_threads", 0, 64},
         {"post_ingest_queue_max", 10, 1000000},
+        {"post_ingest_pending_kg_max", 1, UINT32_MAX},
         {"list_inflight_limit", 1, 1024},
         {"list_admission_wait_ms", 1, 120000},
         {"grep_inflight_limit", 1, 1024},
@@ -1474,6 +1475,7 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
     applyUint32("io_conn_per_thread", &TuneAdvisor::setIoConnPerThread);
     applyUint32("post_ingest_threads", &TuneAdvisor::setPostIngestThreads);
     applyUint32("post_ingest_queue_max", &TuneAdvisor::setPostIngestQueueMax);
+    applyUint32("post_ingest_pending_kg_max", &TuneAdvisor::setPostIngestPendingKgMax);
     applyUint32("list_inflight_limit", &TuneAdvisor::setListInflightLimit);
     applyUint32("list_admission_wait_ms", &TuneAdvisor::setListAdmissionWaitMs);
     applyUint32("grep_inflight_limit", &TuneAdvisor::setGrepInflightLimit);

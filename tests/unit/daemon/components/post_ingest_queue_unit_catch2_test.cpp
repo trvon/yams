@@ -12,6 +12,8 @@
 
 #include "src/daemon/components/post_ingest_nl_graph_builder.h"
 #include <yams/daemon/components/PostIngestQueue.h>
+#include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/resource/external_entity_provider_adapter.h>
 #include <yams/metadata/path_utils.h>
 
@@ -176,6 +178,39 @@ TEST_CASE("PostIngestQueue entity stage leaves the shared content buffer intact"
     queue.testing_processEntityExtractionBatch(std::move(jobs));
 
     CHECK(shared->size() == expectedSize);
+}
+
+TEST_CASE("PostIngestQueue bounds the pending KG overflow and accounts drops",
+          "[daemon][post-ingest][kg][backpressure][catch2]") {
+    // With the channel detached every job lands in the overflow FIFO; a running coordinator
+    // keeps the drain coroutine alive so pending jobs are neither cancelled nor consumed.
+    WorkCoordinator coordinator;
+    coordinator.start(1);
+    PostIngestQueue queue{nullptr, nullptr, {}, nullptr, nullptr, &coordinator, nullptr, 8};
+    queue.testing_detachKgChannel();
+    struct ResetPendingCap {
+        ~ResetPendingCap() { TuneAdvisor::setPostIngestPendingKgMax(0); }
+    } resetPendingCap;
+    TuneAdvisor::setPostIngestPendingKgMax(2);
+
+    auto& bus = InternalEventBus::instance();
+    const auto droppedBefore = bus.kgDropped();
+    for (int i = 0; i < 3; ++i) {
+        InternalEventBus::KgJob job;
+        job.hash = "pending-" + std::to_string(i);
+        auto content = std::make_shared<std::vector<std::byte>>(1024 * 1024);
+        std::weak_ptr<std::vector<std::byte>> retained = content;
+        job.contentBytes = std::move(content);
+        queue.testing_enqueueKgJob(std::move(job));
+        // Durable content is reloaded by hash; queued descriptors must not pin raw buffers.
+        CHECK(retained.expired());
+    }
+    CHECK(queue.testing_pendingKgJobs() == 2);
+    CHECK(bus.kgDropped() == droppedBefore + 1);
+
+    TuneAdvisor::setPostIngestPendingKgMax(0);
+    queue.stop();
+    coordinator.stop();
 }
 
 TEST_CASE("PostIngestQueue stage constants", "[daemon][post-ingest][catch2]") {
