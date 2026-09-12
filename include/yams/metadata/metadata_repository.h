@@ -867,6 +867,16 @@ public:
                                                      const std::string& modelId);
     Result<std::unordered_map<std::string, EmbeddingDerivationState>>
     batchGetDocumentEmbeddingDerivations(const std::vector<std::string>& hashes);
+    /// Batch form of beginDocumentEmbeddingDerivation: one transaction, one token per known
+    /// document (unknown or duplicate hashes are skipped), previous readiness invalidated.
+    Result<std::vector<EmbeddingDerivationToken>>
+    batchBeginDocumentEmbeddingDerivations(const std::vector<std::string>& hashes,
+                                           const std::string& recipe);
+    /// Batch form of completeDocumentEmbeddingDerivation: one transaction; returns how many
+    /// tokens were still current and are now published. Stale tokens are skipped silently.
+    Result<std::size_t>
+    batchCompleteDocumentEmbeddingDerivations(const std::vector<EmbeddingDerivationToken>& tokens,
+                                              const std::string& modelId);
     Result<void> updateDocumentEmbeddingStatus(int64_t documentId, bool hasEmbedding,
                                                const std::string& modelId = "") override;
     Result<void> updateDocumentEmbeddingStatusByHash(const std::string& hash, bool hasEmbedding,

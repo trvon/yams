@@ -3,8 +3,11 @@
 #include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
+#include <yams/metadata/document_metadata.h>
 #include <yams/metadata/knowledge_graph_store.h>
+#include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
+#include <yams/metadata/path_utils.h>
 
 #include <boost/asio/io_context.hpp>
 
@@ -16,6 +19,7 @@
 
 using yams::daemon::AddDeferredEdgesOp;
 using yams::daemon::AddSymSpellTermsOp;
+using yams::daemon::CompleteDocumentEmbeddingsByHashesOp;
 using yams::daemon::DeferredEdgeOp;
 using yams::daemon::DeleteOrphanedDocEntitiesOp;
 using yams::daemon::DeleteOrphanedEdgesOp;
@@ -457,4 +461,69 @@ TEST_CASE("WriteCoordinator: delete op mid-stream does not lose buffered edges",
 
     auto row = queryEdgesForRelation(fix.dbPath, "del_rel");
     CHECK((row.count == 2));
+}
+
+TEST_CASE("WriteCoordinator: derivation completions publish only current tokens",
+          "[unit][daemon][write-coordinator][embedding][derivation]") {
+    KgCoordinatorFixture fix("yams_wc_derivation_");
+    auto repo = std::make_shared<yams::metadata::MetadataRepository>(
+        *fix.pool, nullptr, yams::metadata::MetadataRepository::SchemaBootstrapMode::AssumeReady);
+
+    const std::string current = "wc-derivation-current";
+    const std::string superseded = "wc-derivation-superseded";
+    for (const auto& hash : {current, superseded}) {
+        yams::metadata::DocumentInfo info;
+        info.filePath = "/tmp/" + hash + ".txt";
+        info.fileName = hash + ".txt";
+        info.fileExtension = ".txt";
+        info.fileSize = 16;
+        info.sha256Hash = hash;
+        info.mimeType = "text/plain";
+        info.createdTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+        info.modifiedTime = info.createdTime;
+        info.indexedTime = info.createdTime;
+        yams::metadata::populatePathDerivedFields(info);
+        REQUIRE(repo->insertDocument(info).has_value());
+    }
+    auto tokens = repo->batchBeginDocumentEmbeddingDerivations({current, superseded}, "recipe");
+    REQUIRE(tokens.has_value());
+    REQUIRE(tokens.value().size() == 2);
+    // A newer attempt on the second document makes its earlier token stale.
+    REQUIRE(repo->beginDocumentEmbeddingDerivation(superseded, "recipe").has_value());
+
+    boost::asio::io_context io;
+    WriteCoordinator::Config config;
+    config.maxBatchSize = 4;
+    config.maxBatchDelayMs = std::chrono::milliseconds{1};
+    config.channelCapacity = 8;
+    WriteCoordinator coordinator(io, fix.kg, repo, config);
+    coordinator.start();
+    std::thread writerLoop([&io] { io.run(); });
+
+    const auto before = coordinator.getStats();
+    auto batch = std::make_unique<WriteBatch>();
+    batch->source = "test/derivation_completion";
+    CompleteDocumentEmbeddingsByHashesOp op;
+    op.modelName = "model-x";
+    op.derivations = tokens.value();
+    batch->ops.emplace_back(std::move(op));
+    coordinator.enqueue(std::move(batch));
+    REQUIRE(coordinator.flush(std::chrono::seconds{10}).has_value());
+    const auto after = coordinator.getStats();
+    CHECK((after.embeddingStatusesUpdated - before.embeddingStatusesUpdated) == 1);
+
+    auto ready = repo->hasDocumentEmbeddingByHash(current);
+    REQUIRE(ready.has_value());
+    CHECK(ready.value());
+    auto stale = repo->hasDocumentEmbeddingByHash(superseded);
+    REQUIRE(stale.has_value());
+    CHECK_FALSE(stale.value());
+
+    coordinator.shutdown();
+    io.stop();
+    if (writerLoop.joinable()) {
+        writerLoop.join();
+    }
+    repo.reset();
 }

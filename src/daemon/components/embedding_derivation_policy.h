@@ -4,9 +4,13 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 #include <yams/crypto/hasher.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/InternalEventBus.h>
+#include <yams/metadata/document_metadata.h>
 
 namespace yams::daemon::embed {
 
@@ -57,5 +61,35 @@ inline std::string embeddingDerivationRecipe(const std::string& preparation,
                           {"dimension", dimension}}
         .dump();
 }
+
+// Tokens minted for one embed job, keyed by hash so completion can be issued for exactly the
+// documents that produced vectors. A hash without a token was never minted (unknown document)
+// and must not be completed by the legacy hash path either.
+struct EmbeddingDerivationLedger {
+    std::unordered_map<std::string, metadata::EmbeddingDerivationToken> byHash;
+
+    void adopt(std::vector<metadata::EmbeddingDerivationToken> tokens) {
+        for (auto& token : tokens) {
+            auto key = token.hash;
+            byHash.insert_or_assign(std::move(key), std::move(token));
+        }
+    }
+
+    [[nodiscard]] std::vector<metadata::EmbeddingDerivationToken>
+    tokensFor(const std::vector<std::string>& hashes) const {
+        std::vector<metadata::EmbeddingDerivationToken> out;
+        out.reserve(hashes.size());
+        std::unordered_set<std::string_view> emitted;
+        emitted.reserve(hashes.size());
+        for (const auto& hash : hashes) {
+            auto it = byHash.find(hash);
+            if (it == byHash.end() || !emitted.insert(it->first).second) {
+                continue;
+            }
+            out.push_back(it->second);
+        }
+        return out;
+    }
+};
 
 } // namespace yams::daemon::embed
