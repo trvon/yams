@@ -485,6 +485,17 @@ public:
     /// is deferred to the next getCorpusStats() call.
     virtual void signalCorpusStatsStale() = 0;
 
+    // Repositories without attempt fencing fail closed rather than publishing legacy readiness.
+    virtual Result<EmbeddingDerivationToken> beginDocumentEmbeddingDerivation(const std::string&,
+                                                                              const std::string&) {
+        return Error{ErrorCode::NotImplemented, "Embedding derivation fencing unavailable"};
+    }
+    virtual Result<std::size_t>
+    batchCompleteDocumentEmbeddingDerivations(const std::vector<EmbeddingDerivationToken>&,
+                                              const std::string&) {
+        return Error{ErrorCode::NotImplemented, "Embedding derivation fencing unavailable"};
+    }
+
     // Embedding status operations
     virtual Result<void> updateDocumentEmbeddingStatus(int64_t documentId, bool hasEmbedding,
                                                        const std::string& modelId = "") = 0;
@@ -864,8 +875,8 @@ public:
     // Embedding status operations
     /// Starts a new local attempt and invalidates previous readiness/tokens.
     /// Call before reading the input snapshot. Recipe must identify the full derivation policy.
-    Result<EmbeddingDerivationToken> beginDocumentEmbeddingDerivation(const std::string& hash,
-                                                                      const std::string& recipe);
+    Result<EmbeddingDerivationToken>
+    beginDocumentEmbeddingDerivation(const std::string& hash, const std::string& recipe) override;
     /// Returns false for stale, deleted, or already-completed attempts, without changing readiness.
     Result<bool> completeDocumentEmbeddingDerivation(const EmbeddingDerivationToken& token,
                                                      const std::string& modelId);
@@ -876,11 +887,19 @@ public:
     Result<std::vector<EmbeddingDerivationToken>>
     batchBeginDocumentEmbeddingDerivations(const std::vector<std::string>& hashes,
                                            const std::string& recipe);
+    /// Classify ready matching recipes or mint new tokens atomically under the writer transaction.
+    Result<EmbeddingDerivationAdmission> batchClassifyOrBeginEmbeddingDerivations(
+        const std::vector<std::string>& hashes, const std::string& recipe, bool skipExisting,
+        EmbeddingAdmissionPolicy policy = EmbeddingAdmissionPolicy::MatchRecipe);
+    /// Update only still-pending matching attempts; success uses derivation completion instead.
+    Result<std::size_t>
+    batchUpdateEmbeddingDerivationRepairStatus(const std::vector<EmbeddingDerivationToken>& tokens,
+                                               RepairStatus status);
     /// Batch form of completeDocumentEmbeddingDerivation: one transaction; returns how many
     /// tokens were still current and are now published. Stale tokens are skipped silently.
     Result<std::size_t>
     batchCompleteDocumentEmbeddingDerivations(const std::vector<EmbeddingDerivationToken>& tokens,
-                                              const std::string& modelId);
+                                              const std::string& modelId) override;
     Result<void> updateDocumentEmbeddingStatus(int64_t documentId, bool hasEmbedding,
                                                const std::string& modelId = "") override;
     Result<void> updateDocumentEmbeddingStatusByHash(const std::string& hash, bool hasEmbedding,

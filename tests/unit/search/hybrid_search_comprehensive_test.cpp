@@ -1809,7 +1809,7 @@ TEST_CASE("Validation - Invalid hash format (too short)", "[search][validation][
 
     app::services::SearchRequest req;
     req.query = "";
-    req.hash = "abc123"; // < 8 chars
+    req.hash = "abc12"; // < 6 chars
     req.limit = 10;
 
     // Hash too short should fail validation
@@ -1844,7 +1844,7 @@ TEST_CASE("HashSearch - Valid hash prefix", "[search][hash]") {
 
     app::services::SearchRequest req;
     req.query = "";
-    req.hash = "abc12345"; // Valid 8-char hex
+    req.hash = "abc123"; // Valid minimum-length 6-char hex
     req.limit = 10;
 
     // Valid hash format should not fail validation (but may return NotFound)

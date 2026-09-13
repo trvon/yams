@@ -164,11 +164,13 @@ public:
     batchGetContentPreview(const std::vector<int64_t>& documentIds, int maxChars,
                            int maxDocs = 0) override {
         ++previewBatchCalls;
+        lastPreviewDocumentIds = documentIds;
         if (failPreview)
             return yams::Error{ErrorCode::InternalError, "injected preview failure"};
         return MetadataRepository::batchGetContentPreview(documentIds, maxChars, maxDocs);
     }
 
+    std::vector<int64_t> lastPreviewDocumentIds;
     bool failPreview = false;
     std::atomic<int> fullContentCalls{0};
     std::atomic<int> previewBatchCalls{0};
@@ -289,6 +291,31 @@ TEST_CASE("applyCrossRerank fetches window text as one preview batch", "[search]
     for (size_t i = 0; i < results.size(); ++i) {
         CHECK(results[i].document.sha256Hash == beforeFailure[i].document.sha256Hash);
         CHECK(results[i].score == beforeFailure[i].score);
+    }
+
+    // A preview failure must not affect candidates whose metadata already fills the text.
+    for (const std::size_t limit : {std::size_t{0}, std::size_t{8}}) {
+        cfg.rerankSnippetMaxChars = limit;
+        seenTexts.clear();
+        const auto beforeCalls = repo->previewBatchCalls.load();
+        auto metadataOnly = applyCrossRerank(results, "q", cfg, 3, scorer, repo);
+        CHECK(metadataOnly.attempted);
+        CHECK(metadataOnly.status != CrossRerankOutcome::Status::Failed);
+        REQUIRE(seenTexts.size() == 3);
+        for (const auto& text : seenTexts) {
+            CHECK(text.size() <= limit);
+        }
+        CHECK(repo->previewBatchCalls.load() == beforeCalls);
+    }
+    cfg.rerankSnippetMaxChars = 256;
+    repo->failPreview = false;
+    results.front().snippet = std::string(300, 'x');
+    const auto metadataOnlyId = results.front().document.id;
+    auto mixed = applyCrossRerank(results, "q", cfg, 3, scorer, repo);
+    CHECK(mixed.attempted);
+    REQUIRE(repo->lastPreviewDocumentIds.size() == 2);
+    for (const auto id : repo->lastPreviewDocumentIds) {
+        CHECK(id != metadataOnlyId);
     }
 
     repo.reset();

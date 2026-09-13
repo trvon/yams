@@ -157,6 +157,30 @@ test('portability_policy',
   timeout: 30,
 )
 
+release_candidate_unit_tests = files('scripts/test_validate_release_candidate.py')
+test('release_candidate_unit',
+  python_exe,
+  args: [release_candidate_unit_tests],
+  suite: ['unit', 'policy', 'release'],
+  timeout: 30,
+)
+
+git_environment_isolation_tests = files('scripts/test_git_environment_isolation.py')
+test('git_environment_isolation_unit',
+  python_exe,
+  args: [git_environment_isolation_tests],
+  suite: ['unit', 'policy', 'release'],
+  timeout: 60,
+)
+
+promotion_reconciliation_tests = files('scripts/test_reconcile_promotion_pr.py')
+test('promotion_reconciliation',
+  python_exe,
+  args: [promotion_reconciliation_tests],
+  suite: ['unit', 'policy', 'release'],
+  timeout: 30,
+)
+
 cli11_dep = cli11_resolved_dep
 if not cli11_dep.found()
   cli11_dep = declare_dependency()
@@ -572,6 +596,18 @@ if catch2_dep.found()
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
     build_rpath: ':'.join(_test_rpaths),
     install: false,
+  )
+
+  catch2_daemon_client_link_exe = executable('catch2_daemon_client_link',
+    files('unit/daemon/daemon_client_link_catch2_test.cpp'),
+    dependencies: [catch2_dep, catch2_main_dep, dependency('yams_daemon_client')],
+    cpp_args: test_cpp_noerror_args,
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  test('daemon_client_link', catch2_daemon_client_link_exe,
+    suite: ['unit', 'daemon', 'sdk'],
+    timeout: 30,
   )
 
   catch2_search_admission_controller_exe = executable('catch2_search_admission_controller',

@@ -376,7 +376,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             optimizeDocumentsPathFtsUpdateTrigger(),
             createSymbolMetadataTrigramFts(),
             createDocumentGraphCleanupIndexes(),
-            createEmbeddingDerivations()};
+            createEmbeddingDerivations(),
+            invalidateEmbeddingReadinessOnContentChanges()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -2941,6 +2942,49 @@ Migration YamsMetadataMigrations::createEmbeddingDerivations() {
         DROP TRIGGER IF EXISTS embedding_derivation_content_update;
         DROP TRIGGER IF EXISTS embedding_derivation_content_insert;
         DROP TABLE IF EXISTS document_embedding_derivations;
+    )";
+    return m;
+}
+
+Migration YamsMetadataMigrations::invalidateEmbeddingReadinessOnContentChanges() {
+    Migration m;
+    m.version = 39;
+    m.name = "Invalidate embedding readiness with extracted inputs";
+    m.created = std::chrono::system_clock::now();
+    m.upSQL = R"(
+        UPDATE document_embeddings_status
+        SET has_embedding = 0, model_id = NULL, updated_at = unixepoch()
+        WHERE has_embedding = 1 AND EXISTS (
+            SELECT 1 FROM document_embedding_derivations a
+            WHERE a.document_id = document_embeddings_status.document_id AND a.completed = 0
+        );
+        CREATE TRIGGER embedding_readiness_content_insert AFTER INSERT ON document_content
+        BEGIN
+            UPDATE document_embeddings_status
+            SET has_embedding = 0, model_id = NULL, updated_at = unixepoch()
+            WHERE document_id = NEW.document_id AND has_embedding = 1;
+        END;
+        CREATE TRIGGER embedding_readiness_content_update AFTER UPDATE ON document_content
+        WHEN OLD.content_text IS NOT NEW.content_text
+          OR OLD.extraction_method IS NOT NEW.extraction_method
+          OR OLD.language IS NOT NEW.language
+          OR OLD.document_id IS NOT NEW.document_id
+        BEGIN
+            UPDATE document_embeddings_status
+            SET has_embedding = 0, model_id = NULL, updated_at = unixepoch()
+            WHERE document_id IN (OLD.document_id, NEW.document_id) AND has_embedding = 1;
+        END;
+        CREATE TRIGGER embedding_readiness_content_delete AFTER DELETE ON document_content
+        BEGIN
+            UPDATE document_embeddings_status
+            SET has_embedding = 0, model_id = NULL, updated_at = unixepoch()
+            WHERE document_id = OLD.document_id AND has_embedding = 1;
+        END;
+    )";
+    m.downSQL = R"(
+        DROP TRIGGER IF EXISTS embedding_readiness_content_delete;
+        DROP TRIGGER IF EXISTS embedding_readiness_content_update;
+        DROP TRIGGER IF EXISTS embedding_readiness_content_insert;
     )";
     return m;
 }

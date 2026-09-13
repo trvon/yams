@@ -234,6 +234,16 @@ struct EmbeddingDerivationState {
     bool completed = false;
 };
 
+enum class EmbeddingAdmissionPolicy {
+    MatchRecipe,
+    PreserveCompleted, // Pre-model admission: retain any already-published result.
+};
+
+struct EmbeddingDerivationAdmission {
+    std::vector<EmbeddingDerivationToken> tokens;
+    std::vector<std::string> alreadyCompleted;
+};
+
 /**
  * @brief Entry for batch content insertion and indexing.
  *

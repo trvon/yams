@@ -146,9 +146,8 @@ private:
         bool sourceAllCorpus);
     void recordPhaseTiming(std::string_view phase, std::chrono::steady_clock::time_point start);
     void enqueueRepairStatusUpdate(std::vector<std::string> hashes, metadata::RepairStatus status,
-                                   std::string source);
-    void enqueueEmbeddingStatusUpdate(std::vector<std::string> hashes, bool embedded,
-                                      std::string modelName, std::string source);
+                                   std::string source,
+                                   std::vector<metadata::EmbeddingDerivationToken> tokens);
     void enqueueEmbeddingCompletion(std::vector<metadata::EmbeddingDerivationToken> tokens,
                                     std::string modelName);
 

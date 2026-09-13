@@ -17,6 +17,7 @@
 #include <boost/asio/strand.hpp>
 
 #include <yams/core/types.h>
+#include <yams/daemon/components/knowledge_graph_completion.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
@@ -117,6 +118,7 @@ struct DeleteOrphanedDocEntitiesOp {};
 struct UpdateRepairStatusOp {
     std::vector<std::string> hashes;
     metadata::RepairStatus status;
+    std::vector<metadata::EmbeddingDerivationToken> derivations;
 };
 struct UpsertTreeSnapshotOp {
     metadata::TreeSnapshotRecord record;
@@ -157,6 +159,12 @@ struct InsertRelationshipOp {
 struct AddSymSpellTermsOp {
     std::vector<std::string> terms;
 };
+struct AcknowledgeKnowledgeGraphOp {
+    std::int64_t documentId{0};
+    std::string token;
+    std::shared_ptr<KnowledgeGraphCompletion> completion;
+    KnowledgeGraphCompletionStage stage{KnowledgeGraphCompletionStage::TitleNl};
+};
 
 using WriteOp =
     std::variant<UpsertNodesOp, AddEdgesOp, AddDeferredEdgesOp, AddAliasesOp, AddDocEntitiesOp,
@@ -166,7 +174,8 @@ using WriteOp =
                  UpdateRepairStatusOp, UpsertTreeSnapshotOp, SetMetadataBatchOp,
                  UpdateExtractionStatusOp, UpdateEmbeddingStatusByHashOp,
                  UpdateEmbeddingStatusByHashesOp, CompleteDocumentEmbeddingsByHashesOp,
-                 UpsertSymbolExtractionStateOp, InsertRelationshipOp, AddSymSpellTermsOp>;
+                 UpsertSymbolExtractionStateOp, InsertRelationshipOp, AddSymSpellTermsOp,
+                 AcknowledgeKnowledgeGraphOp>;
 
 struct WriteBatch {
     std::string source;
@@ -175,6 +184,9 @@ struct WriteBatch {
     int64_t knowledgeGraphDocumentId = 0;
     std::string knowledgeGraphToken;
     std::chrono::steady_clock::time_point enqueueTime{std::chrono::steady_clock::now()};
+    KnowledgeGraphCompletionStage knowledgeGraphCompletionStage{
+        KnowledgeGraphCompletionStage::Graph};
+    std::shared_ptr<KnowledgeGraphCompletion> knowledgeGraphCompletion;
 
     WriteBatch() = default;
     WriteBatch(WriteBatch&&) = default;
@@ -337,6 +349,7 @@ private:
     Result<void> applyMetadataOp(UpsertSymbolExtractionStateOp& op);
     Result<void> applyMetadataOp(InsertRelationshipOp& op);
     Result<void> applyMetadataOp(AddSymSpellTermsOp& op);
+    Result<void> applyMetadataOp(AcknowledgeKnowledgeGraphOp& op);
 
     void recordSourceQueueWait(const std::string& source, std::uint64_t queueWaitMs);
     void recordSourceApply(const std::string& source, std::uint64_t opCount, std::uint64_t applyMs,

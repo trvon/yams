@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <yams/core/types.h>
+#include <yams/daemon/components/knowledge_graph_completion.h>
 
 namespace yams::app::services {
 class IGraphQueryService;
@@ -57,6 +58,7 @@ public:
         std::shared_ptr<std::vector<std::byte>> contentBytes = nullptr;
         bool skipEntityExtraction{false};
         std::string knowledgeGraphToken;
+        std::shared_ptr<KnowledgeGraphCompletion> knowledgeGraphCompletion;
     };
     Result<void> onDocumentIngested(const DocumentGraphContext& ctx);
     Result<void> onDocumentsIngestedBatch(std::vector<DocumentGraphContext>& contexts);
@@ -71,6 +73,7 @@ public:
         std::string language;
         int64_t documentDbId = 0;
         std::string knowledgeGraphToken;
+        std::shared_ptr<KnowledgeGraphCompletion> knowledgeGraphCompletion;
     };
     Result<void> submitEntityExtraction(EntityExtractionJob job);
 

@@ -11,6 +11,7 @@
 #include <nlohmann/json.hpp>
 
 #include "src/daemon/components/post_ingest_nl_graph_builder.h"
+#include <yams/daemon/components/GraphComponent.h>
 #include <yams/daemon/components/PostIngestQueue.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/WorkCoordinator.h>
@@ -146,6 +147,43 @@ TEST_CASE("PostIngestQueue rejects and accounts KG admission after stop",
     CHECK(bus.kgQueued() == queuedBefore);
     CHECK(bus.kgDropped() == droppedBefore + 1);
     CHECK(queue.testing_pendingKgJobs() == 0);
+}
+
+TEST_CASE("PostIngestQueue shares KG completion across graph and title dispatch",
+          "[daemon][post-ingest][kg-completion][catch2]") {
+    auto& bus = InternalEventBus::instance();
+    auto kgChannel = bus.get_or_create_channel<InternalEventBus::KgJob>("kg_jobs", 4096);
+    auto titleChannel =
+        bus.get_or_create_channel<InternalEventBus::TitleExtractionJob>("title_extraction", 4096);
+    InternalEventBus::KgJob staleKg;
+    while (kgChannel->try_pop(staleKg)) {
+    }
+    InternalEventBus::TitleExtractionJob staleTitle;
+    while (titleChannel->try_pop(staleTitle)) {
+    }
+
+    auto graph = std::make_shared<GraphComponent>(nullptr, nullptr);
+    PostIngestQueue queue{nullptr, nullptr, {}, nullptr, graph, nullptr, nullptr, 8};
+    PostIngestQueue::PreparedMetadataEntry entry;
+    entry.documentId = 42;
+    entry.hash = "shared-dispatch";
+    entry.knowledgeGraphToken = "shared-dispatch-token";
+    entry.filePath = "/tmp/shared-dispatch.txt";
+    entry.shouldDispatchKg = true;
+    entry.shouldDispatchTitle = true;
+    entry.titleTextSnippet = "shared dispatch";
+
+    queue.testing_dispatchNonEmbeddingStages(entry);
+
+    InternalEventBus::KgJob kgJob;
+    REQUIRE(kgChannel->try_pop(kgJob));
+    InternalEventBus::TitleExtractionJob titleJob;
+    REQUIRE(titleChannel->try_pop(titleJob));
+    REQUIRE(kgJob.knowledgeGraphCompletion != nullptr);
+    CHECK(titleJob.knowledgeGraphCompletion == kgJob.knowledgeGraphCompletion);
+    CHECK(kgJob.knowledgeGraphToken == entry.knowledgeGraphToken);
+    CHECK(titleJob.knowledgeGraphToken == entry.knowledgeGraphToken);
+    queue.stop();
 }
 
 TEST_CASE("PostIngestQueue entity stage leaves the shared content buffer intact",

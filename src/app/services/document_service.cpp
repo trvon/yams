@@ -1982,13 +1982,10 @@ public:
         RetrieveDocumentResponse resp;
         resp.graphEnabled = false;
 
-        // Validate hash format if provided (must be hex string, at least 8 chars for partial)
+        // Explicit hash arguments accept six-character prefixes; bare query tokens do not.
         if (!req.hash.empty()) {
             std::string normalized = normalizeHashInput(req.hash);
-            // Check if it's a valid hex string (allows partial hashes >= 8 chars)
-            if (normalized.size() < 8 ||
-                !std::all_of(normalized.begin(), normalized.end(),
-                             [](char c) { return std::isxdigit(static_cast<unsigned char>(c)); })) {
+            if (!yams::common::looksLikePartialHashArgument(normalized)) {
                 return Error{ErrorCode::NotFound,
                              "Document not found for hash: '" + req.hash + "'"};
             }

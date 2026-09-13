@@ -16,6 +16,7 @@
 #include <vector>
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <spdlog/sinks/ostream_sink.h>
@@ -147,12 +148,12 @@ TEST_CASE("populatePathDerivedFields fills DocumentInfo path index fields", "[me
 }
 
 struct MetadataRepositoryFixture {
-    MetadataRepositoryFixture() {
+    explicit MetadataRepositoryFixture(std::size_t maxConnections = 2) {
         dbPath_ = tempDbPath("metadata_repo_catch2_test_");
 
         ConnectionPoolConfig config;
         config.minConnections = 1;
-        config.maxConnections = 2;
+        config.maxConnections = maxConnections;
 
         pool_ = std::make_unique<ConnectionPool>(dbPath_.string(), config);
         auto initResult = pool_->initialize();
@@ -583,6 +584,23 @@ TEST_CASE("MetadataRepository: content and KG intent commit atomically",
         REQUIRE(marker.value().has_value());
         CHECK(marker.value()->value == "complete:generation-new");
     }
+    SECTION("KG completion invalidates cached metadata value counts") {
+        REQUIRE(fix.repository_->batchInsertContentAndIndex({a}).has_value());
+        auto before = fix.repository_->getMetadataValueCounts({"yams:kg_enrichment"}, {});
+        REQUIRE(before.has_value());
+        REQUIRE(before.value().at("yams:kg_enrichment").size() == 1);
+        CHECK(before.value().at("yams:kg_enrichment").front().value == "pending:generation-a");
+
+        auto completed =
+            fix.repository_->completeKnowledgeGraphEnrichment(first.value(), "generation-a");
+        REQUIRE(completed.has_value());
+        REQUIRE(completed.value());
+
+        auto after = fix.repository_->getMetadataValueCounts({"yams:kg_enrichment"}, {});
+        REQUIRE(after.has_value());
+        REQUIRE(after.value().at("yams:kg_enrichment").size() == 1);
+        CHECK(after.value().at("yams:kg_enrichment").front().value == "complete:generation-a");
+    }
     SECTION("failed intent write rolls back the entire content batch") {
         REQUIRE(fix.pool_
                     ->withConnection([&](Database& db) -> Result<void> {
@@ -608,7 +626,8 @@ TEST_CASE("MetadataRepository: content and KG intent commit atomically",
 
 TEST_CASE("MetadataRepository: session and tag helpers round-trip",
           "[unit][metadata][repository][session-tags]") {
-    MetadataRepositoryFixture fix;
+    // SQLITE_LIMIT_SQL_LENGTH is connection-local; pin fault injection and queries together.
+    MetadataRepositoryFixture fix{1};
 
     auto docA = makeDocumentWithPath("repo/sessions/a.txt", "session-tag-a");
     auto docB = makeDocumentWithPath("repo/sessions/b.txt", "session-tag-b");
@@ -719,6 +738,7 @@ TEST_CASE("MetadataRepository: session and tag helpers round-trip",
     REQUIRE(fix.pool_
                 ->withConnection([&](Database& db) -> Result<void> {
                     CHECK(sqlite3_get_autocommit(db.rawHandle()) == 1);
+                    db.clearStatementCache();
                     previousSqlLimit = sqlite3_limit(db.rawHandle(), SQLITE_LIMIT_SQL_LENGTH, 64);
                     return {};
                 })
@@ -1070,6 +1090,111 @@ TEST_CASE("MetadataRepository direct content writes invalidate pending derivatio
     CHECK_FALSE(completed.value());
 }
 
+TEST_CASE("MetadataRepository content writes clear completed embedding readiness",
+          "[unit][metadata][embeddings][content-readiness]") {
+    MetadataRepositoryFixture fix;
+    const bool tracked = GENERATE(false, true);
+    const std::string hash = "completed-content-hash";
+    auto id =
+        fix.repository_->insertDocument(makeDocumentWithPath("/tmp/completed-content.txt", hash));
+    REQUIRE(id.has_value());
+    DocumentContent content;
+    content.documentId = id.value();
+    content.contentText = "original";
+    REQUIRE(fix.repository_->insertContent(content).has_value());
+    if (tracked) {
+        auto token = fix.repository_->beginDocumentEmbeddingDerivation(hash, "recipe");
+        REQUIRE(token.has_value());
+        auto complete =
+            fix.repository_->completeDocumentEmbeddingDerivation(token.value(), "model");
+        REQUIRE(complete.has_value());
+        REQUIRE(complete.value());
+    } else {
+        REQUIRE(
+            fix.repository_->updateDocumentEmbeddingStatus(id.value(), true, "model").has_value());
+    }
+    REQUIRE(fix.repository_->getCachedEmbeddedCount() == 1);
+    bool changed = true;
+    SECTION("upsert changed text") {
+        content.contentText = "replacement";
+        REQUIRE(fix.repository_->insertContent(content).has_value());
+    }
+    SECTION("update changed text") {
+        content.contentText = "replacement";
+        REQUIRE(fix.repository_->updateContent(content).has_value());
+    }
+    SECTION("delete") {
+        REQUIRE(fix.repository_->deleteContent(id.value()).has_value());
+    }
+    SECTION("identical update preserves readiness") {
+        changed = false;
+        REQUIRE(fix.repository_->updateContent(content).has_value());
+    }
+    SECTION("identical upsert preserves readiness") {
+        changed = false;
+        REQUIRE(fix.repository_->insertContent(content).has_value());
+    }
+    auto status = getEmbeddingStatusRow(*fix.pool_, hash);
+    REQUIRE(status.has_value());
+    REQUIRE(status.value().has_value());
+    CHECK(status.value()->hasEmbedding == !changed);
+    auto count = fix.repository_->getEmbeddedDocumentCount();
+    REQUIRE(count.has_value());
+    CHECK(count.value() == (changed ? 0 : 1));
+    CHECK(fix.repository_->getCachedEmbeddedCount() == (changed ? 0 : 1));
+}
+
+TEST_CASE("Embedding readiness migration upgrades version 38 databases",
+          "[unit][metadata][embeddings][content-readiness][migration]") {
+    MetadataRepositoryFixture fix;
+    const std::string hash = "upgrade-content-hash";
+    auto id =
+        fix.repository_->insertDocument(makeDocumentWithPath("/tmp/upgrade-content.txt", hash));
+    REQUIRE(id.has_value());
+    DocumentContent content;
+    content.documentId = id.value();
+    content.contentText = "original";
+    REQUIRE(fix.repository_->insertContent(content).has_value());
+    auto token = fix.repository_->beginDocumentEmbeddingDerivation(hash, "recipe");
+    REQUIRE(token.has_value());
+    REQUIRE(
+        fix.repository_->completeDocumentEmbeddingDerivation(token.value(), "model").has_value());
+    auto upgraded = fix.pool_->withConnection([&](Database& db) -> Result<void> {
+        MigrationManager manager(db);
+        manager.registerMigrations(YamsMetadataMigrations::getAllMigrations());
+        if (auto rolledBack = manager.rollbackTo(38); !rolledBack) {
+            return rolledBack.error();
+        }
+        // Version 38 invalidates the token but leaves the legacy ready bit set.
+        if (auto changed =
+                db.execute("UPDATE document_content SET content_text = 'changed before upgrade'");
+            !changed) {
+            return changed.error();
+        }
+        return manager.migrateTo(39);
+    });
+    REQUIRE(upgraded.has_value());
+    auto status = getEmbeddingStatusRow(*fix.pool_, hash);
+    REQUIRE(status.has_value());
+    REQUIRE(status.value().has_value());
+    CHECK_FALSE(status.value()->hasEmbedding);
+
+    auto next = fix.repository_->beginDocumentEmbeddingDerivation(hash, "recipe");
+    REQUIRE(next.has_value());
+    REQUIRE(
+        fix.repository_->completeDocumentEmbeddingDerivation(next.value(), "model").has_value());
+    REQUIRE(fix.pool_
+                ->withConnection([](Database& db) -> Result<void> {
+                    return db.execute(
+                        "UPDATE document_content SET content_text = 'changed after upgrade'");
+                })
+                .has_value());
+    auto invalidated = getEmbeddingStatusRow(*fix.pool_, hash);
+    REQUIRE(invalidated.has_value());
+    REQUIRE(invalidated.value().has_value());
+    CHECK_FALSE(invalidated.value()->hasEmbedding);
+}
+
 TEST_CASE("WriteCoordinator preserves derivation identities across completion batches",
           "[unit][metadata][embeddings][derivation][write-coordinator]") {
     MetadataRepositoryFixture fix;
@@ -1105,6 +1230,55 @@ TEST_CASE("WriteCoordinator preserves derivation identities across completion ba
     auto ready = fix.repository_->hasDocumentEmbeddingByHash(hash);
     REQUIRE(ready.has_value());
     CHECK(ready.value());
+}
+
+TEST_CASE("WriteCoordinator reports derivation SQL failures through flush",
+          "[unit][metadata][embeddings][derivation]") {
+    MetadataRepositoryFixture fix;
+    const std::string hash = "queued-derivation-error";
+    REQUIRE(fix.repository_
+                ->insertDocument(makeDocumentWithPath("/tmp/queued-derivation-error.txt", hash))
+                .has_value());
+    auto token = fix.repository_->beginDocumentEmbeddingDerivation(hash, "recipe");
+    REQUIRE(token.has_value());
+    REQUIRE(fix.pool_
+                ->withConnection([](Database& db) -> Result<void> {
+                    return db.execute(
+                        "CREATE TRIGGER reject_queued_completion BEFORE UPDATE OF repair_status ON "
+                        "documents "
+                        "BEGIN SELECT RAISE(ABORT, 'queued completion failure'); END");
+                })
+                .has_value());
+
+    boost::asio::io_context io;
+    auto repo =
+        std::shared_ptr<MetadataRepository>(fix.repository_.get(), [](MetadataRepository*) {});
+    yams::daemon::WriteCoordinator coordinator(io, {}, repo);
+    auto batch = std::make_unique<yams::daemon::WriteBatch>();
+    batch->source = "test/derivation-error";
+    batch->ops.emplace_back(
+        yams::daemon::CompleteDocumentEmbeddingsByHashesOp{{}, "model", {token.value()}});
+    coordinator.enqueue(std::move(batch));
+    coordinator.start();
+    auto runner = std::async(std::launch::async, [&] { io.run(); });
+    auto flushed = coordinator.flush(std::chrono::seconds{5});
+    coordinator.shutdown();
+    io.stop();
+    runner.get();
+
+    CHECK_FALSE(flushed.has_value());
+    CHECK(coordinator.getStats().batchesCommitted == 0);
+    auto ready = fix.repository_->hasDocumentEmbeddingByHash(hash);
+    REQUIRE(ready.has_value());
+    CHECK_FALSE(ready.value());
+    REQUIRE(fix.pool_
+                ->withConnection([](Database& db) {
+                    return db.execute("DROP TRIGGER reject_queued_completion");
+                })
+                .has_value());
+    auto retried = fix.repository_->completeDocumentEmbeddingDerivation(token.value(), "model");
+    REQUIRE(retried.has_value());
+    CHECK(retried.value());
 }
 
 TEST_CASE("MetadataRepository derivation completion rolls back and can be retried",

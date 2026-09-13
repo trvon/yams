@@ -30,9 +30,13 @@ namespace yams::daemon {
 
 namespace {
 
-Result<void> acknowledgeKnowledgeGraph(const std::shared_ptr<metadata::MetadataRepository>& repo,
-                                       int64_t documentId, const std::string& token) {
+Result<void>
+acknowledgeKnowledgeGraph(const std::shared_ptr<metadata::MetadataRepository>& repo,
+                          int64_t documentId, const std::string& token,
+                          const std::shared_ptr<KnowledgeGraphCompletion>& completion = nullptr) {
     if (token.empty())
+        return {};
+    if (completion && !completion->markCommitted(KnowledgeGraphCompletionStage::Graph))
         return {};
     if (!repo)
         return Error{ErrorCode::NotInitialized, "KG completion metadata unavailable"};
@@ -174,7 +178,8 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
 
     // Skip entity extraction if requested or if no entity service available
     if (ctx.skipEntityExtraction) {
-        return acknowledgeKnowledgeGraph(metadataRepo_, ctx.documentDbId, ctx.knowledgeGraphToken);
+        return acknowledgeKnowledgeGraph(metadataRepo_, ctx.documentDbId, ctx.knowledgeGraphToken,
+                                         ctx.knowledgeGraphCompletion);
     }
     if (!entityService_) {
         if (!ctx.knowledgeGraphToken.empty())
@@ -252,7 +257,8 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
             "[GraphComponent] No language/extractor for {} (ext='{}'), skipping extraction",
             ctx.filePath,
             ctx.filePath.empty() ? "" : std::filesystem::path(ctx.filePath).extension().string());
-        return acknowledgeKnowledgeGraph(metadataRepo_, ctx.documentDbId, ctx.knowledgeGraphToken);
+        return acknowledgeKnowledgeGraph(metadataRepo_, ctx.documentDbId, ctx.knowledgeGraphToken,
+                                         ctx.knowledgeGraphCompletion);
     }
 
     std::vector<std::byte> bytes;
@@ -280,6 +286,7 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
     job.language = language; // Keep copy for logging
     job.documentDbId = ctx.documentDbId;
     job.knowledgeGraphToken = ctx.knowledgeGraphToken;
+    job.knowledgeGraphCompletion = ctx.knowledgeGraphCompletion;
 
     auto submitResult = submitEntityExtraction(std::move(job));
     if (!submitResult) {
@@ -308,8 +315,8 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
     std::size_t skipped = 0;
     std::optional<Error> firstError;
     auto acknowledge = [&](const DocumentGraphContext& ctx) {
-        auto result =
-            acknowledgeKnowledgeGraph(metadataRepo_, ctx.documentDbId, ctx.knowledgeGraphToken);
+        auto result = acknowledgeKnowledgeGraph(
+            metadataRepo_, ctx.documentDbId, ctx.knowledgeGraphToken, ctx.knowledgeGraphCompletion);
         if (!result && !firstError)
             firstError = result.error();
     };
@@ -421,6 +428,7 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
         job.language = std::move(language);
         job.documentDbId = ctx.documentDbId;
         job.knowledgeGraphToken = std::move(ctx.knowledgeGraphToken);
+        job.knowledgeGraphCompletion = std::move(ctx.knowledgeGraphCompletion);
 
         extractionJobs.push_back(std::move(job));
     }
@@ -526,6 +534,7 @@ Result<void> GraphComponent::submitEntityExtraction(EntityExtractionJob job) {
         .mimeType = {},
         .documentDbId = job.documentDbId,
         .knowledgeGraphToken = std::move(job.knowledgeGraphToken),
+        .knowledgeGraphCompletion = std::move(job.knowledgeGraphCompletion),
     };
 
     return entityService_->submitExtraction(std::move(entityJob));

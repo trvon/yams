@@ -67,7 +67,8 @@ applyCrossRerank(std::vector<SearchResult>& results, const std::string& query,
         std::vector<int64_t> ids;
         ids.reserve(window);
         for (size_t i = 0; i < window; ++i) {
-            if (results[i].document.id > 0) {
+            if (results[i].document.id > 0 && textLimit > 0 &&
+                buildCrossRerankText(results[i], {}, textLimit).size() < textLimit) {
                 ids.push_back(results[i].document.id);
             }
         }

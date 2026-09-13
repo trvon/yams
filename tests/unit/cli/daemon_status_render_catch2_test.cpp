@@ -27,7 +27,7 @@ struct PlainColors {
 };
 
 StatusResponse readyDaemon() {
-    StatusResponse s;
+    StatusResponse s{};
     s.running = true;
     s.ready = true;
     s.version = "9.9.9";
@@ -79,7 +79,7 @@ TEST_CASE("primary status is flushed before optional collection", "[cli][status-
                                                              out << "optional-status";
                                                          });
         CHECK(called);
-        CHECK(buffer.str().find("optional-status") > 0);
+        CHECK(buffer.str().find("optional-status") != std::string::npos);
     }
 }
 

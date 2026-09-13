@@ -13,6 +13,7 @@
 
 #include "../../../../src/daemon/components/embedding_derivation_policy.h"
 #include "../../../../src/daemon/components/embedding_input_selection.h"
+#include "../../../../src/daemon/components/semantic_graph_candidate_policy.h"
 #include <yams/crypto/hasher.h>
 #include <yams/daemon/components/embed_preparer.h>
 #include <yams/daemon/components/EmbeddingService.h>
@@ -21,6 +22,7 @@
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/repair/embedding_repair_util.h>
 #include <yams/vector/vector_database.h>
 
 #include "../../../common/metadata_test_db.h"
@@ -29,6 +31,17 @@
 using namespace std::chrono_literals;
 
 namespace yams::daemon {
+
+TEST_CASE("Semantic graph output capacity follows retained neighbors rather than scored pairs",
+          "[daemon][embedding][semantic-candidate-policy]") {
+    const embed::SemanticGraphCandidateCounts dense{1000, 1000, 999000, 8000};
+    CHECK(dense.nodeCapacity() == 9000);
+    const embed::SemanticGraphCandidateCounts singleNeighbor{1, 1, 1, 1};
+    CHECK(singleNeighbor.hasGraphWork());
+    CHECK(singleNeighbor.nodeCapacity() == 2);
+    const embed::SemanticGraphCandidateCounts noNeighbor{2, 2, 0, 0};
+    CHECK_FALSE(noNeighbor.hasGraphWork());
+}
 
 TEST_CASE("Prepared embedding payload binds the extracted text snapshot",
           "[daemon][embedding][prepared-freshness]") {
@@ -226,18 +239,91 @@ TEST_CASE("EmbeddingService phase timing is optional and replaceable",
 
 namespace {
 
+// Force repair to use the metadata content cache without touching a live content corpus.
+class MissingContentStore final : public api::IContentStore {
+public:
+    Result<api::StoreResult> store(const std::filesystem::path&, const api::ContentMetadata&,
+                                   api::ProgressCallback) override {
+        return ErrorCode::NotImplemented;
+    }
+    Result<api::RetrieveResult> retrieve(const std::string&, const std::filesystem::path&,
+                                         api::ProgressCallback) override {
+        return ErrorCode::NotImplemented;
+    }
+    Result<api::StoreResult> storeStream(std::istream&, const api::ContentMetadata&,
+                                         api::ProgressCallback) override {
+        return ErrorCode::NotImplemented;
+    }
+    Result<api::RetrieveResult> retrieveStream(const std::string&, std::ostream&,
+                                               api::ProgressCallback) override {
+        return ErrorCode::NotImplemented;
+    }
+    Result<api::StoreResult> storeBytes(std::span<const std::byte>,
+                                        const api::ContentMetadata&) override {
+        return ErrorCode::NotImplemented;
+    }
+    Result<std::vector<std::byte>> retrieveBytes(const std::string&) override {
+        return Error{ErrorCode::NotFound, "content intentionally absent in repair test"};
+    }
+    Result<std::vector<std::byte>> retrieveBytesPrefix(const std::string&, std::size_t) override {
+        return Error{ErrorCode::NotFound, "content intentionally absent in repair test"};
+    }
+    Result<RawContent> retrieveRaw(const std::string&) override {
+        return Error{ErrorCode::NotFound, "content intentionally absent in repair test"};
+    }
+    std::future<Result<RawContent>> retrieveRawAsync(const std::string&) override {
+        return std::async(std::launch::deferred, [] {
+            return Result<RawContent>(
+                Error{ErrorCode::NotFound, "content intentionally absent in repair test"});
+        });
+    }
+    Result<bool> exists(const std::string&) const override { return false; }
+    Result<bool> remove(const std::string&) override { return ErrorCode::NotImplemented; }
+    Result<api::ContentMetadata> getMetadata(const std::string&) const override {
+        return ErrorCode::NotImplemented;
+    }
+    Result<void> updateMetadata(const std::string&, const api::ContentMetadata&) override {
+        return ErrorCode::NotImplemented;
+    }
+    std::vector<Result<api::StoreResult>>
+    storeBatch(const std::vector<std::filesystem::path>&,
+               const std::vector<api::ContentMetadata>&) override {
+        return {};
+    }
+    std::vector<Result<bool>> removeBatch(const std::vector<std::string>&) override { return {}; }
+    api::ContentStoreStats getStats() const override { return {}; }
+    api::HealthStatus checkHealth() const override { return {}; }
+    Result<void> verify(api::ProgressCallback) override { return ErrorCode::NotImplemented; }
+    Result<void> compact(api::ProgressCallback) override { return ErrorCode::NotImplemented; }
+    Result<void> garbageCollect(api::ProgressCallback) override {
+        return ErrorCode::NotImplemented;
+    }
+};
+
 // Deterministic in-process provider: no daemon, model download, or timing sleeps.
 class DerivationTestProvider final : public IModelProvider {
 public:
     std::size_t calls{0};
     std::string version{"v1"};
+    bool fail{false};
+    std::function<void()> beforeFailure;
 
     Result<std::vector<float>> generateEmbedding(const std::string&) override {
+        if (fail) {
+            return Error{ErrorCode::InternalError, "injected inference failure"};
+        }
         return std::vector<float>(64, 0.125f);
     }
     Result<std::vector<std::vector<float>>>
     generateBatchEmbeddings(const std::vector<std::string>& texts) override {
         ++calls;
+        if (beforeFailure) {
+            auto callback = std::exchange(beforeFailure, {});
+            callback();
+        }
+        if (fail) {
+            return Error{ErrorCode::InternalError, "injected inference failure"};
+        }
         return std::vector<std::vector<float>>(texts.size(), std::vector<float>(64, 0.125f));
     }
     Result<std::vector<float>> generateEmbeddingFor(const std::string&,
@@ -272,14 +358,30 @@ public:
     void shutdown() override {}
 };
 
+class DerivationRaceRepository final : public metadata::MetadataRepository {
+public:
+    using metadata::MetadataRepository::MetadataRepository;
+    std::function<void()> beforeLookup;
+
+    Result<std::optional<metadata::DocumentInfo>>
+    getDocumentByHash(const std::string& hash) override {
+        if (beforeLookup) {
+            auto callback = std::exchange(beforeLookup, {});
+            callback();
+        }
+        return metadata::MetadataRepository::getDocumentByHash(hash);
+    }
+};
+
 struct ServiceDerivationFixture {
     yams::test::SpdlogLevelGuard logLevel;
     yams::test::TempDirGuard temp{"embedding_service_derivation_"};
     std::filesystem::path metadataPath;
     std::unique_ptr<metadata::ConnectionPool> pool;
-    std::shared_ptr<metadata::MetadataRepository> repo;
+    std::shared_ptr<DerivationRaceRepository> repo;
     std::shared_ptr<vector::VectorDatabase> vectors;
     std::shared_ptr<DerivationTestProvider> provider{std::make_shared<DerivationTestProvider>()};
+    std::shared_ptr<api::IContentStore> contentStore{std::make_shared<MissingContentStore>()};
     boost::asio::io_context io;
     WorkCoordinator work;
     std::unique_ptr<WriteCoordinator> writer;
@@ -296,7 +398,7 @@ struct ServiceDerivationFixture {
         config.maxConnections = 2;
         pool = std::make_unique<metadata::ConnectionPool>(metadataPath.string(), config);
         REQUIRE(pool->initialize().has_value());
-        repo = std::make_shared<metadata::MetadataRepository>(
+        repo = std::make_shared<DerivationRaceRepository>(
             *pool, nullptr, metadata::MetadataRepository::SchemaBootstrapMode::AssumeReady);
         vector::VectorDatabaseConfig vectorConfig;
         vectorConfig.database_path = (temp.path() / "vectors.db").string();
@@ -352,9 +454,202 @@ struct ServiceDerivationFixture {
         }
         REQUIRE(writer->flush(5s).has_value());
     }
+
+    Result<yams::repair::EmbeddingRepairStats> repairOnce(bool skipExisting = false) {
+        yams::repair::EmbeddingRepairConfig config;
+        config.batchSize = 1;
+        config.skipExisting = skipExisting;
+        config.dataPath = temp.path();
+        return yams::repair::repairMissingEmbeddings(contentStore, repo, provider, "test-model",
+                                                     config, {hash});
+    }
 };
 
 } // namespace
+
+TEST_CASE_METHOD(ServiceDerivationFixture,
+                 "Standalone embedding repair does not skip stale physical vectors",
+                 "[repair][embedding][derivation][standalone]") {
+    process();
+    REQUIRE_FALSE(vectors->getVectorsByDocument(hash).empty());
+    auto document = repo->getDocumentByHash(hash);
+    REQUIRE(document.has_value());
+    REQUIRE(document.value().has_value());
+    auto content = repo->getContent(document.value()->id);
+    REQUIRE(content.has_value());
+    REQUIRE(content.value().has_value());
+    content.value()->contentText = "Changed text with stale physical vectors still present.";
+    REQUIRE(repo->updateContent(*content.value()).has_value());
+    auto repaired = repairOnce(true);
+    REQUIRE(repaired.has_value());
+    CHECK(repaired.value().embeddingsGenerated > 0);
+    auto ready = repo->hasDocumentEmbeddingByHash(hash);
+    REQUIRE(ready.has_value());
+    CHECK(ready.value());
+}
+
+TEST_CASE_METHOD(ServiceDerivationFixture,
+                 "Standalone embedding repair completes the current derivation",
+                 "[repair][embedding][derivation][standalone]") {
+    auto repaired = repairOnce();
+    REQUIRE(repaired.has_value());
+    CHECK(repaired.value().embeddingsGenerated > 0);
+
+    auto states = repo->batchGetDocumentEmbeddingDerivations({hash});
+    REQUIRE(states.has_value());
+    REQUIRE(states.value().contains(hash));
+    CHECK(states.value().at(hash).completed);
+
+    auto ready = repo->hasDocumentEmbeddingByHash(hash);
+    REQUIRE(ready.has_value());
+    CHECK(ready.value());
+}
+
+TEST_CASE_METHOD(ServiceDerivationFixture,
+                 "Standalone embedding repair does not restore readiness after content changes",
+                 "[repair][embedding][derivation][standalone][content-race]") {
+    auto document = repo->getDocumentByHash(hash);
+    REQUIRE(document.has_value());
+    REQUIRE(document.value().has_value());
+    const auto id = document.value()->id;
+    bool mutationRan = false;
+    provider->beforeFailure = [&] {
+        mutationRan = true;
+        metadata::BatchContentEntry replacement;
+        replacement.documentId = id;
+        replacement.title = "derivation.txt";
+        replacement.contentText = "Replacement text committed while repair inference is active.";
+        replacement.mimeType = "text/plain";
+        replacement.extractionMethod = "test";
+        replacement.language = "en";
+        REQUIRE(repo->batchInsertContentAndIndex({replacement}).has_value());
+    };
+
+    auto repaired = repairOnce();
+    REQUIRE(repaired.has_value());
+    REQUIRE(mutationRan);
+    REQUIRE(provider->calls > 0);
+
+    auto ready = repo->hasDocumentEmbeddingByHash(hash);
+    REQUIRE(ready.has_value());
+    CHECK_FALSE(ready.value());
+}
+
+TEST_CASE_METHOD(ServiceDerivationFixture,
+                 "EmbeddingService rechecks skip readiness after gathering document identity",
+                 "[daemon][embedding][service-derivation][skip-race]") {
+    process();
+    const auto calls = provider->calls;
+    auto document = repo->getDocumentByHash(hash);
+    REQUIRE(document.has_value());
+    REQUIRE(document.value().has_value());
+    const auto id = document.value()->id;
+    repo->beforeLookup = [&] {
+        metadata::BatchContentEntry content;
+        content.documentId = id;
+        content.title = "derivation.txt";
+        content.contentText = "A replacement extraction after the cached readiness snapshot.";
+        content.mimeType = "text/plain";
+        content.extractionMethod = "test";
+        content.language = "en";
+        REQUIRE(repo->batchInsertContentAndIndex({content}).has_value());
+    };
+    process();
+    CHECK(provider->calls > calls);
+    auto ready = repo->hasDocumentEmbeddingByHash(hash);
+    REQUIRE(ready.has_value());
+    CHECK(ready.value());
+}
+
+TEST_CASE_METHOD(ServiceDerivationFixture,
+                 "EmbeddingService pre-admission provider failure persists terminal repair status",
+                 "[daemon][embedding][service-derivation][pre-admission-failure]") {
+    SECTION("without an existing derivation") {
+        auto states = repo->batchGetDocumentEmbeddingDerivations({hash});
+        REQUIRE(states.has_value());
+        REQUIRE_FALSE(states.value().contains(hash));
+    }
+    SECTION("with a current pending derivation") {
+        auto token = repo->beginDocumentEmbeddingDerivation(hash, "pending-recipe");
+        REQUIRE(token.has_value());
+        auto states = repo->batchGetDocumentEmbeddingDerivations({hash});
+        REQUIRE(states.has_value());
+        REQUIRE(states.value().contains(hash));
+        REQUIRE_FALSE(states.value().at(hash).completed);
+    }
+
+    REQUIRE(repo->updateDocumentRepairStatus(hash, metadata::RepairStatus::Processing).has_value());
+    service->setProviders([]() -> std::shared_ptr<IModelProvider> { return {}; },
+                          [] { return "test-model"; }, [this] { return vectors; });
+
+    process();
+
+    auto document = repo->getDocumentByHash(hash);
+    REQUIRE(document.has_value());
+    REQUIRE(document.value().has_value());
+    CHECK(document.value()->repairStatus == metadata::RepairStatus::Failed);
+}
+
+TEST_CASE_METHOD(ServiceDerivationFixture,
+                 "EmbeddingService pre-admission failure preserves completed attempts",
+                 "[daemon][embedding][service-derivation][pre-admission-failure]") {
+    process();
+    bool completeInProvider = false;
+    SECTION("already completed attempt is retained") {}
+    SECTION("newer attempt completes during provider preparation") {
+        REQUIRE(repo->beginDocumentEmbeddingDerivation(hash, "pending").has_value());
+        completeInProvider = true;
+    }
+    service->setProviders(
+        [&]() -> std::shared_ptr<IModelProvider> {
+            if (completeInProvider) {
+                auto newer = repo->beginDocumentEmbeddingDerivation(hash, "newer");
+                REQUIRE(newer.has_value());
+                auto completed =
+                    repo->completeDocumentEmbeddingDerivation(newer.value(), "test-model");
+                REQUIRE(completed.has_value());
+                REQUIRE(completed.value());
+            }
+            return {};
+        },
+        [] { return "test-model"; }, [this] { return vectors; });
+    process();
+    auto ready = repo->hasDocumentEmbeddingByHash(hash);
+    REQUIRE(ready.has_value());
+    CHECK(ready.value());
+    auto document = repo->getDocumentByHash(hash);
+    REQUIRE(document.has_value());
+    REQUIRE(document.value().has_value());
+    CHECK(document.value()->repairStatus == metadata::RepairStatus::Completed);
+}
+
+TEST_CASE_METHOD(ServiceDerivationFixture,
+                 "EmbeddingService late failure preserves a newer completed derivation",
+                 "[daemon][embedding][service-derivation][late-failure]") {
+    process();
+    const auto records = vectors->getVectorsByDocument(hash);
+    REQUIRE_FALSE(records.empty());
+    provider->version = "v2";
+    provider->beforeFailure = [&] {
+        // A newer attempt commits while the old attempt is still in inference. This
+        // synchronous boundary reproduces the interleaving without threads or sleeps.
+        auto newer = repo->beginDocumentEmbeddingDerivation(hash, "newer-recipe");
+        REQUIRE(newer.has_value());
+        auto complete = repo->completeDocumentEmbeddingDerivation(newer.value(), "test-model");
+        REQUIRE(complete.has_value());
+        REQUIRE(complete.value());
+    };
+    provider->fail = true;
+    process();
+    CHECK(vectors->getVectorsByDocument(hash).size() == records.size());
+    auto ready = repo->hasDocumentEmbeddingByHash(hash);
+    REQUIRE(ready.has_value());
+    CHECK(ready.value());
+    auto document = repo->getDocumentByHash(hash);
+    REQUIRE(document.has_value());
+    REQUIRE(document.value().has_value());
+    CHECK(document.value()->repairStatus == metadata::RepairStatus::Completed);
+}
 
 TEST_CASE_METHOD(ServiceDerivationFixture,
                  "EmbeddingService skipExisting requires the current derivation recipe",

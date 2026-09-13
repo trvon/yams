@@ -16,6 +16,7 @@
 
 #include <chrono>
 #include <cstdlib>
+#include <map>
 
 extern "C" int sqlite3_vec_init(sqlite3* db, char** pzErrMsg, const sqlite3_api_routines* pApi);
 

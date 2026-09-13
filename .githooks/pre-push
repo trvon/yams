@@ -3,6 +3,14 @@ set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 
+# Git exports repository-local overrides to hooks. Do not let test fixtures in
+# temporary directories inherit this worktree's refs, index or shared config.
+git_local_env="$(git rev-parse --local-env-vars)"
+while IFS= read -r git_env_name; do
+  unset "$git_env_name"
+done <<< "$git_local_env"
+unset git_local_env git_env_name
+
 if [ "${YAMS_SKIP_PREPUSH_CI_GATE:-0}" != "1" ]; then
   gate_args=()
   if [ "${YAMS_PREPUSH_GATE_SELF_TEST:-0}" = "1" ]; then

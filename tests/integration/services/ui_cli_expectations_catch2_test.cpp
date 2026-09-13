@@ -1059,15 +1059,12 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: short hash prefix is rejected
 
     yams::app::services::SearchRequest searchReq;
     searchReq.type = "hash";
-    searchReq.hash = fullHash.substr(0, 7);
+    searchReq.hash = fullHash.substr(0, 5);
     searchReq.pathsOnly = true;
     auto searchRes = yams::test_async::res(searchSvc->search(searchReq), 2s);
     REQUIRE_FALSE(searchRes);
-    const std::string message = searchRes.error().message;
-    const bool ok = (message.find("Invalid hash format") != std::string::npos) ||
-                    (message.find("not found") != std::string::npos) ||
-                    (message.find("invalid") != std::string::npos);
-    CHECK(ok);
+    REQUIRE(searchRes.error().code == yams::ErrorCode::InvalidArgument);
+    CHECK(searchRes.error().message.find("Invalid hash format") != std::string::npos);
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: degraded fallback structure",

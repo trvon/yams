@@ -1230,11 +1230,17 @@ std::shared_ptr<std::vector<std::byte>> PostIngestQueue::getOrLoadDispatchConten
 void PostIngestQueue::dispatchNonEmbeddingStages(
     const PreparedMetadataEntry& prepared, const PreparedDispatchPlan& plan,
     std::shared_ptr<std::vector<std::byte>> contentBytes, DispatchTimingSet& timings) {
+    std::shared_ptr<KnowledgeGraphCompletion> knowledgeGraphCompletion;
+    if (!prepared.knowledgeGraphToken.empty() && (plan.dispatchKg || plan.dispatchTitle)) {
+        knowledgeGraphCompletion =
+            std::make_shared<KnowledgeGraphCompletion>(plan.dispatchKg, plan.dispatchTitle);
+    }
+
     if (plan.dispatchKg) {
         const auto dispatchStart = std::chrono::steady_clock::now();
         dispatchToKgChannel(prepared.hash, prepared.documentId, prepared.filePath,
                             std::vector<std::string>(prepared.tags), contentBytes,
-                            prepared.knowledgeGraphToken);
+                            prepared.knowledgeGraphToken, knowledgeGraphCompletion);
         timings.kgDispatch.add(std::chrono::steady_clock::now() - dispatchStart);
     }
     if (plan.dispatchSymbol) {
@@ -1253,7 +1259,8 @@ void PostIngestQueue::dispatchNonEmbeddingStages(
         const auto dispatchStart = std::chrono::steady_clock::now();
         dispatchToTitleChannel(prepared.hash, prepared.documentId, prepared.titleTextSnippet,
                                prepared.title, prepared.filePath, prepared.language,
-                               prepared.mimeType, prepared.preserveTitle);
+                               prepared.mimeType, prepared.preserveTitle,
+                               prepared.knowledgeGraphToken, knowledgeGraphCompletion);
         timings.titleDispatch.add(std::chrono::steady_clock::now() - dispatchStart);
     }
 }
@@ -1559,16 +1566,17 @@ void PostIngestQueue::processKnowledgeGraphBatch(std::vector<InternalEventBus::K
     contexts.reserve(jobs.size());
 
     for (auto& job : jobs) {
-        GraphComponent::DocumentGraphContext ctx{.documentHash = std::move(job.hash),
-                                                 .filePath = std::move(job.filePath),
-                                                 .snapshotId = std::nullopt,
-                                                 .rootTreeHash = std::nullopt,
-                                                 .tags = std::move(job.tags),
-                                                 .documentDbId = job.documentId,
-                                                 .contentBytes = std::move(job.contentBytes),
-                                                 .skipEntityExtraction = false,
-                                                 .knowledgeGraphToken =
-                                                     std::move(job.knowledgeGraphToken)};
+        GraphComponent::DocumentGraphContext ctx{
+            .documentHash = std::move(job.hash),
+            .filePath = std::move(job.filePath),
+            .snapshotId = std::nullopt,
+            .rootTreeHash = std::nullopt,
+            .tags = std::move(job.tags),
+            .documentDbId = job.documentId,
+            .contentBytes = std::move(job.contentBytes),
+            .skipEntityExtraction = false,
+            .knowledgeGraphToken = std::move(job.knowledgeGraphToken),
+            .knowledgeGraphCompletion = std::move(job.knowledgeGraphCompletion)};
         contexts.push_back(std::move(ctx));
     }
     recordTiming("kg_build_contexts", buildContextsStart);
@@ -1590,11 +1598,11 @@ void PostIngestQueue::processKnowledgeGraphBatch(std::vector<InternalEventBus::K
     }
 }
 
-void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId,
-                                          const std::string& filePath,
-                                          std::vector<std::string> tags,
-                                          std::shared_ptr<std::vector<std::byte>> contentBytes,
-                                          const std::string& knowledgeGraphToken) {
+void PostIngestQueue::dispatchToKgChannel(
+    const std::string& hash, int64_t docId, const std::string& filePath,
+    std::vector<std::string> tags, std::shared_ptr<std::vector<std::byte>> contentBytes,
+    const std::string& knowledgeGraphToken,
+    std::shared_ptr<KnowledgeGraphCompletion> knowledgeGraphCompletion) {
     // A disabled KG stage is outside the pipeline contract. A temporarily paused or
     // dynamically capped stage remains inside the contract: buffer its work and let channel
     // backpressure bound upstream admission instead of silently dropping enrichment.
@@ -1612,6 +1620,7 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
     job.contentBytes = std::move(contentBytes);
     job.enqueuedAt = std::chrono::steady_clock::now();
     job.knowledgeGraphToken = knowledgeGraphToken;
+    job.knowledgeGraphCompletion = std::move(knowledgeGraphCompletion);
 
     enqueueKgJob(std::move(job));
 }
@@ -2271,12 +2280,11 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
     }
 }
 
-void PostIngestQueue::dispatchToTitleChannel(const std::string& hash, int64_t docId,
-                                             const std::string& textSnippet,
-                                             const std::string& fallbackTitle,
-                                             const std::string& filePath,
-                                             const std::string& language,
-                                             const std::string& mimeType, bool preserveTitle) {
+void PostIngestQueue::dispatchToTitleChannel(
+    const std::string& hash, int64_t docId, const std::string& textSnippet,
+    const std::string& fallbackTitle, const std::string& filePath, const std::string& language,
+    const std::string& mimeType, bool preserveTitle, const std::string& knowledgeGraphToken,
+    std::shared_ptr<KnowledgeGraphCompletion> knowledgeGraphCompletion) {
     auto channel = titleChannel_;
 
     InternalEventBus::TitleExtractionJob job;
@@ -2288,6 +2296,8 @@ void PostIngestQueue::dispatchToTitleChannel(const std::string& hash, int64_t do
     job.language = language;
     job.mimeType = mimeType;
     job.preserveTitle = preserveTitle;
+    job.knowledgeGraphToken = knowledgeGraphToken;
+    job.knowledgeGraphCompletion = std::move(knowledgeGraphCompletion);
 
     // Bounded retry absorbs the titlePoller warmup window (cap=0 until next
     // TuningManager tick) without changing steady-state drop behavior.
@@ -2347,14 +2357,16 @@ void PostIngestQueue::processTitleExtractionBatch(
     }
     for (auto& job : jobs) {
         processTitleExtractionStage(job.hash, job.documentId, job.textSnippet, job.fallbackTitle,
-                                    job.filePath, job.language, job.mimeType, job.preserveTitle);
+                                    job.filePath, job.language, job.mimeType, job.preserveTitle,
+                                    job.knowledgeGraphToken, job.knowledgeGraphCompletion);
     }
 }
 
 void PostIngestQueue::processTitleExtractionStage(
     const std::string& hash, int64_t docId, const std::string& textSnippet,
     const std::string& fallbackTitle, const std::string& filePath, const std::string& language,
-    const std::string& /*mimeType*/, bool preserveTitle) {
+    const std::string& /*mimeType*/, bool preserveTitle, const std::string& knowledgeGraphToken,
+    const std::shared_ptr<KnowledgeGraphCompletion>& knowledgeGraphCompletion) {
     const auto stageStart = std::chrono::steady_clock::now();
     struct StageTimingGuard {
         PostIngestQueue* self;
@@ -2372,6 +2384,24 @@ void PostIngestQueue::processTitleExtractionStage(
 
     spdlog::debug("[PostIngestQueue] Title+NL extraction starting for {} (docId={})",
                   hash.substr(0, 12), docId);
+
+    auto acknowledgeSuccessfulNoop = [&]() {
+        if (knowledgeGraphToken.empty() || !knowledgeGraphCompletion) {
+            return;
+        }
+        if (!writeCoordinator_) {
+            spdlog::warn("[PostIngestQueue] Cannot queue title+NL completion for {}: "
+                         "WriteCoordinator unavailable",
+                         hash.substr(0, 12));
+            return;
+        }
+        auto batch = std::make_unique<WriteBatch>();
+        batch->source = "PostIngestQueue::titleExtraction/noopAcknowledgement";
+        batch->ops.emplace_back(
+            AcknowledgeKnowledgeGraphOp{docId, knowledgeGraphToken, knowledgeGraphCompletion});
+        enqueueWithBackpressure(*writeCoordinator_, std::move(batch),
+                                "title+NL no-op acknowledgement", stop_);
+    };
 
     try {
         auto startTime = std::chrono::steady_clock::now();
@@ -2425,9 +2455,14 @@ void PostIngestQueue::processTitleExtractionStage(
             } inferenceTimingGuard{this, inferenceStart};
             return titleExtractor(textSnippet, kCombinedEntityTypes);
         }();
-        if (!result || !result.value().usedGliner || result.value().concepts.empty()) {
-            spdlog::debug("[PostIngestQueue] GLiNER returned no concepts for {}",
-                          hash.substr(0, 12));
+        if (!result) {
+            spdlog::warn("[PostIngestQueue] GLiNER extraction failed for {}: {}",
+                         hash.substr(0, 12), result.error().message);
+            InternalEventBus::instance().incTitleConsumed();
+            return;
+        }
+        if (!result.value().usedGliner) {
+            spdlog::debug("[PostIngestQueue] GLiNER was not used for {}", hash.substr(0, 12));
             InternalEventBus::instance().incTitleConsumed();
             return;
         }
@@ -2561,6 +2596,10 @@ void PostIngestQueue::processTitleExtractionStage(
                 auto source = "PostIngestQueue::nlEntityKg/" + graph.batch->sourceFile;
                 auto writeBatch =
                     makeWriteBatchFromDeferredKGBatch(std::move(graph.batch), std::move(source));
+                writeBatch->knowledgeGraphDocumentId = docId;
+                writeBatch->knowledgeGraphToken = knowledgeGraphToken;
+                writeBatch->knowledgeGraphCompletionStage = KnowledgeGraphCompletionStage::TitleNl;
+                writeBatch->knowledgeGraphCompletion = knowledgeGraphCompletion;
                 enqueueWithBackpressure(*writeCoordinator_, std::move(writeBatch),
                                         "NL entity KG batch", stop_);
                 spdlog::debug("[PostIngestQueue] Queued {} NL entities for KG from {}",
@@ -2570,6 +2609,8 @@ void PostIngestQueue::processTitleExtractionStage(
                                                           std::memory_order_relaxed);
                 spdlog::warn("[PostIngestQueue] Failed to queue NL entities for KG: {}", e.what());
             }
+        } else if (nlEntities.empty()) {
+            acknowledgeSuccessfulNoop();
         }
 
         auto duration = std::chrono::steady_clock::now() - startTime;
