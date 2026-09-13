@@ -239,6 +239,7 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
 #endif
 
     SECTION("initializeOnce prepares persisted search index for warm vectors") {
+        yams::test::ScopedEnvVar enableVectorAlias("YAMS_DISABLE_VECTOR", "0");
         yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",
                                                 std::optional<std::string>("0"));
         yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB",
@@ -286,6 +287,7 @@ TEST_CASE_METHOD(VectorSystemManagerFixture, "VectorSystemManager initializeOnce
     }
 
     SECTION("initializeOnce does not block on rebuilding missing persisted search index") {
+        yams::test::ScopedEnvVar enableVectorAlias("YAMS_DISABLE_VECTOR", "0");
         yams::test::ScopedEnvVar disableVectors("YAMS_DISABLE_VECTORS",
                                                 std::optional<std::string>("0"));
         yams::test::ScopedEnvVar disableVectorDb("YAMS_DISABLE_VECTOR_DB",

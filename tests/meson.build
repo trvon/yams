@@ -76,6 +76,22 @@ test('forgejo_mirror_policy',
   suite: ['unit', 'policy', 'repository'],
   timeout: 30,
 )
+if is_variable('yams_cli_exe') and get_option('build-mcp-server') and host_machine.system() != 'windows'
+  test('serve_delegation',
+    python_exe,
+    args: [files('scripts/test_serve_delegation.py'), '--cli', yams_cli_exe.full_path()],
+    depends: yams_cli_exe,
+    suite: ['integration', 'cli', 'mcp'],
+    timeout: 90,
+  )
+endif
+
+test('repository_metadata_scan_unit',
+  python_exe,
+  args: [files('scripts/test_repository_metadata_scan.py')],
+  suite: ['unit', 'policy', 'repository'],
+  timeout: 30,
+)
 test('repository_metadata_policy',
   python_exe,
   args: [repository_metadata_policy_script, '--root', meson.project_source_root()],
