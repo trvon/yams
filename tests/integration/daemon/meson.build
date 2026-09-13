@@ -592,7 +592,7 @@ else
       memory_sync_service_integration_srcs,
       include_directories: incs,
       dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
-      cpp_args: ['-DYAMS_TESTING=1'],
+      cpp_args: ['-DYAMS_TESTING=1', _test_timeout_cpp_arg],
       install: false,
     )
 
