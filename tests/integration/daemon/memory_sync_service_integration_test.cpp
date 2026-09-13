@@ -343,6 +343,7 @@ sync_interval_ms = 25
     CHECK(source.value()->value == "peer");
 
     // A document committed after daemon startup is discovered by bounded periodic backfill.
+    const auto backfillAttemptsBefore = serviceManager->testingMemorySyncBackfillAttempts();
     const auto localPayload = bytes("periodic-backfill-search-needle");
     auto stored = contentStore->storeBytes(localPayload);
     REQUIRE(stored.has_value());
@@ -390,7 +391,8 @@ sync_interval_ms = 25
     bool topologyEdgePublished = false;
     const auto backfillDeadline = std::chrono::steady_clock::now() + scaledTimeout(8s);
     while ((!documentPublished || !blobPublished || !topologyNodePublished ||
-            !topologyEdgePublished) &&
+            !topologyEdgePublished ||
+            serviceManager->testingMemorySyncBackfillAttempts() <= backfillAttemptsBefore) &&
            std::chrono::steady_clock::now() < backfillDeadline) {
         documentPublished = peer.read(documentKey).has_value();
         auto replicatedBlob = peer.read(blobKey);
@@ -398,10 +400,15 @@ sync_interval_ms = 25
         topologyNodePublished = peer.read(topologyNodeKey).has_value();
         topologyEdgePublished = peer.read(topologyEdgeKey).has_value();
         if (!documentPublished || !blobPublished || !topologyNodePublished ||
-            !topologyEdgePublished) {
+            !topologyEdgePublished ||
+            serviceManager->testingMemorySyncBackfillAttempts() <= backfillAttemptsBefore) {
             std::this_thread::sleep_for(25ms);
         }
     }
+    const auto backfillAttemptsAfter = serviceManager->testingMemorySyncBackfillAttempts();
+    INFO("Periodic backfill attempts before=" << backfillAttemptsBefore
+                                              << " after=" << backfillAttemptsAfter);
+    CHECK(backfillAttemptsAfter > backfillAttemptsBefore);
     CHECK(documentPublished);
     CHECK(blobPublished);
     CHECK(topologyNodePublished);

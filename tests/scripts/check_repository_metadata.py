@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 FORGEJO_URL = "https://git.trevon.dev/trevon/yams"
@@ -38,6 +39,16 @@ SKIP_PARTS = {".git", "build", "node_modules", "subprojects", "third_party"}
 RETIRED_PATHS = (".build.yml", "scripts/srht-collect-artifacts.sh")
 
 
+def repository_files(root: Path):
+    # Prune before descent: filtering rglob results still traverses build/cache trees.
+    for directory, directories, filenames in os.walk(root, followlinks=False):
+        directories[:] = sorted(name for name in directories if name not in SKIP_PARTS)
+        for name in sorted(filenames):
+            path = Path(directory) / name
+            if name not in SKIP_PARTS and path.is_file():
+                yield path
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path.cwd())
@@ -59,9 +70,7 @@ def main() -> int:
         if (root / relative).exists():
             failures.append(f"retired SourceHut path remains: {relative}")
 
-    for path in root.rglob("*"):
-        if not path.is_file() or any(part in SKIP_PARTS for part in path.parts):
-            continue
+    for path in repository_files(root):
         relative = path.relative_to(root).as_posix()
         if relative in SOURCEHUT_ALLOWLIST:
             continue

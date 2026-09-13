@@ -374,6 +374,12 @@ public:
 };
 
 struct ServiceDerivationFixture {
+    // These tests exercise real vector persistence, even in vector-disabled CI lanes.
+    // Declare guards before owned resources so restoration happens after teardown.
+    yams::test::ScopedEnvVar enableVectors{"YAMS_DISABLE_VECTORS", "0"};
+    yams::test::ScopedEnvVar enableVectorAlias{"YAMS_DISABLE_VECTOR", "0"};
+    yams::test::ScopedEnvVar enableVectorDb{"YAMS_DISABLE_VECTOR_DB", "0"};
+    yams::test::ScopedEnvVar initializeVectors{"YAMS_SQLITE_VEC_SKIP_INIT", "0"};
     yams::test::SpdlogLevelGuard logLevel;
     yams::test::TempDirGuard temp{"embedding_service_derivation_"};
     std::filesystem::path metadataPath;
@@ -466,6 +472,24 @@ struct ServiceDerivationFixture {
 };
 
 } // namespace
+
+TEST_CASE("Derivation fixture restores vector-disabled CI environment",
+          "[daemon][embedding][service-derivation][environment]") {
+    yams::test::ScopedEnvVar disabled{"YAMS_DISABLE_VECTORS", "1"};
+    yams::test::ScopedEnvVar aliasDisabled{"YAMS_DISABLE_VECTOR", "1"};
+    yams::test::ScopedEnvVar dbDisabled{"YAMS_DISABLE_VECTOR_DB", "1"};
+    yams::test::ScopedEnvVar skipInit{"YAMS_SQLITE_VEC_SKIP_INIT", "1"};
+    {
+        ServiceDerivationFixture fixture;
+        fixture.process();
+        REQUIRE_FALSE(fixture.vectors->getVectorsByDocument(fixture.hash).empty());
+    }
+    for (const auto* key : {"YAMS_DISABLE_VECTORS", "YAMS_DISABLE_VECTOR", "YAMS_DISABLE_VECTOR_DB",
+                            "YAMS_SQLITE_VEC_SKIP_INIT"}) {
+        INFO(key);
+        REQUIRE(yams::config::getenv_optional(key) == std::optional<std::string>{"1"});
+    }
+}
 
 TEST_CASE_METHOD(ServiceDerivationFixture,
                  "Standalone embedding repair does not skip stale physical vectors",
