@@ -11,6 +11,16 @@
 
 namespace yams::common {
 
+/// Lexical containment only; callers must resolve symlinks when that matters.
+[[nodiscard]] inline bool isLexicallyContained(const std::filesystem::path& path,
+                                               const std::filesystem::path& root) {
+    if (path.empty() || root.empty())
+        return false;
+    const auto relative = path.lexically_normal().lexically_relative(root.lexically_normal());
+    // Empty means incompatible roots (or absolute versus relative), not equality.
+    return !relative.empty() && (relative == "." || *relative.begin() != "..");
+}
+
 /**
  * macOS mounts /var and /tmp as symlinks into /private, so a document can be indexed under
  * either spelling. Everything that compares, displays, or expands stored paths goes through

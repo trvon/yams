@@ -150,7 +150,12 @@ PY
             timeout=10,
             check=False,
         )
-        self.assertEqual(child.returncode, 0, child.stderr)
+        self.assertEqual(
+            child.returncode,
+            0,
+            f"bash={shutil.which('bash')!r}; python={sys.executable!r}\n"
+            f"stdout={child.stdout!r}\nstderr={child.stderr!r}",
+        )
         self.assertTrue((self.linked / "gate.ran").is_file())
         self.assertEqual(self.snapshot(), self.before)
 

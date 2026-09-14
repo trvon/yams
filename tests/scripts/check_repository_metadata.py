@@ -35,7 +35,7 @@ SOURCEHUT_ALLOWLIST = {
     "docs/newsletter.md",
     "tests/scripts/check_repository_metadata.py",
 }
-SKIP_PARTS = {".git", "build", "node_modules", "subprojects", "third_party"}
+SKIP_PARTS = {".git", "build", "builddir", "node_modules", "subprojects", "third_party"}
 RETIRED_PATHS = (".build.yml", "scripts/srht-collect-artifacts.sh")
 
 
@@ -47,6 +47,23 @@ def repository_files(root: Path):
             path = Path(directory) / name
             if name not in SKIP_PARTS and path.is_file():
                 yield path
+
+
+def find_text_markers(path: Path, markers: tuple[str, ...]) -> set[str]:
+    """Scan strict UTF-8 with bounded memory, including cross-chunk matches.
+
+    Consume the whole file even after finding every marker: invalid UTF-8 near
+    EOF must still reject the file exactly as the former read_text did.
+    """
+    found: set[str] = set()
+    overlap = max((len(marker) for marker in markers), default=1) - 1
+    tail = ""
+    with path.open("r", encoding="utf-8") as stream:
+        while chunk := stream.read(65536):
+            text = tail + chunk
+            found.update(marker for marker in markers if marker in text)
+            tail = text[-overlap:] if overlap else ""
+    return found
 
 
 def main() -> int:
@@ -61,9 +78,9 @@ def main() -> int:
         if not path.is_file():
             failures.append(f"missing metadata file: {relative}")
             continue
-        text = path.read_text(encoding="utf-8")
+        found = find_text_markers(path, required)
         for value in required:
-            if value not in text:
+            if value not in found:
                 failures.append(f"{relative}: missing {value!r}")
 
     for relative in RETIRED_PATHS:
@@ -75,11 +92,11 @@ def main() -> int:
         if relative in SOURCEHUT_ALLOWLIST:
             continue
         try:
-            text = path.read_text(encoding="utf-8")
+            found = find_text_markers(path, SOURCEHUT_MARKERS)
         except UnicodeDecodeError:
             continue
         for marker in SOURCEHUT_MARKERS:
-            if marker in text:
+            if marker in found:
                 failures.append(f"{relative}: retired repository URL remains: {marker}")
 
     if failures:

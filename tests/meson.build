@@ -76,11 +76,24 @@ test('forgejo_mirror_policy',
   suite: ['unit', 'policy', 'repository'],
   timeout: 30,
 )
+test('serve_runtime_environment_unit',
+  python_exe,
+  args: [files('scripts/test_serve_runtime_environment.py')],
+  suite: ['unit', 'cli', 'mcp'],
+  timeout: 30,
+)
 if is_variable('yams_cli_exe') and get_option('build-mcp-server') and host_machine.system() != 'windows'
+  serve_delegation_args = [files('scripts/test_serve_delegation.py'), '--cli', yams_cli_exe.full_path()]
+  serve_delegation_deps = [yams_cli_exe]
+  if is_variable('yams_onnx_resource_lib')
+    # The fixture relocates the executable, not its build-tree shared libraries.
+    serve_delegation_args += ['--runtime-library-dir', fs.parent(yams_onnx_resource_lib.full_path())]
+    serve_delegation_deps += [yams_onnx_resource_lib]
+  endif
   test('serve_delegation',
     python_exe,
-    args: [files('scripts/test_serve_delegation.py'), '--cli', yams_cli_exe.full_path()],
-    depends: yams_cli_exe,
+    args: serve_delegation_args,
+    depends: serve_delegation_deps,
     suite: ['integration', 'cli', 'mcp'],
     timeout: 90,
   )

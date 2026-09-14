@@ -7,6 +7,7 @@
 
 #include <yams/cli/daemon_status_render.h>
 #include <yams/cli/ui_helpers.hpp>
+#include <yams/common/fs_utils.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/metric_keys.h>
 
@@ -102,6 +103,21 @@ TEST_CASE("daemon status brief renders the overview from a synthetic response",
     CHECK(out.find("Error:") == std::string::npos);
     CHECK(out.find("Memory Sync") == std::string::npos);
     CHECK(out.find("yams daemon status -d") != std::string::npos);
+}
+
+TEST_CASE("lexical containment rejects incomparable roots", "[cli][daemon][status][catch2]") {
+    using yams::common::isLexicallyContained;
+    CHECK(isLexicallyContained("/tmp", "/tmp"));
+    CHECK(isLexicallyContained("/tmp/child", "/tmp"));
+    CHECK_FALSE(isLexicallyContained("relative", "/tmp"));
+    CHECK_FALSE(isLexicallyContained("/tmp", "relative"));
+    CHECK_FALSE(isLexicallyContained("/tmp-other", "/tmp"));
+    CHECK_FALSE(isLexicallyContained("/tmp/../outside", "/tmp"));
+    CHECK_FALSE(isLexicallyContained({}, "/tmp"));
+    CHECK_FALSE(isLexicallyContained("/tmp", {}));
+#ifdef _WIN32
+    CHECK_FALSE(isLexicallyContained("D:/data", "C:/temp"));
+#endif
 }
 
 TEST_CASE("daemon status brief surfaces blockers, errors, and data-dir drift",
