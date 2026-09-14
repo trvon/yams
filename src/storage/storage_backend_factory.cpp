@@ -1,3 +1,5 @@
+#include "windows_path.h"
+
 #include <yams/common/fs_utils.h>
 #include <yams/crypto/hasher.h>
 #include <yams/profiling.h>
@@ -309,8 +311,25 @@ Result<void> FilesystemBackend::initialize(const BackendConfig& config) {
         basePath_ = dataHome / "yams" / "storage";
     }
 
-    // Create storage directories
     std::error_code ec;
+#ifdef _WIN32
+    // Every backend operation must use the same extended namespace, not just rename().
+    // Resolve relative paths and normalize before adding the prefix: extended Win32 paths
+    // do not perform the ordinary slash/dot normalization and need no host registry opt-in.
+    auto absolutePath = std::filesystem::absolute(basePath_, ec);
+    if (ec) {
+        return Error{ErrorCode::InvalidPath, "Failed to resolve storage path: " + ec.message()};
+    }
+    absolutePath = absolutePath.lexically_normal();
+    absolutePath.make_preferred();
+    auto extendedPath = detail::extendedWindowsPath(absolutePath.native());
+    if (!extendedPath) {
+        return extendedPath.error();
+    }
+    basePath_ = std::filesystem::path(std::move(extendedPath).value());
+#endif
+
+    // Create storage directories
     if (!yams::common::ensureDirectories(basePath_ / "objects", ec)) {
         return Result<void>(Error{ErrorCode::PermissionDenied,
                                   "Failed to create storage directory: " + ec.message()});
@@ -336,9 +355,11 @@ Result<std::filesystem::path> FilesystemBackend::getObjectPath(std::string_view 
         std::span<const std::byte>(reinterpret_cast<const std::byte*>(key.data()), key.size()));
 
     const auto objectsRoot = basePath_ / "objects";
-    const auto objectPath = hash.length() >= 4
-                                ? objectsRoot / hash.substr(0, 2) / hash.substr(2, 2) / keyStr
-                                : objectsRoot / keyStr;
+    auto objectPath = hash.length() >= 4
+                          ? objectsRoot / hash.substr(0, 2) / hash.substr(2, 2) / keyStr
+                          : objectsRoot / keyStr;
+    // Object keys use '/', but extended Win32 paths require native separators throughout.
+    objectPath.make_preferred();
     if (auto contained = verifyFilesystemContainment(objectsRoot, objectPath); !contained) {
         return contained.error();
     }
