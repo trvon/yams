@@ -9,8 +9,12 @@
 #include <sqlite3.h>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <cstddef>
 #include <filesystem>
 #include <future>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <yams/metadata/connection_pool.h>
@@ -31,6 +35,73 @@ std::filesystem::path make_db_path(const std::string& prefix) {
     std::filesystem::remove(p, ec);
     return p;
 }
+
+class CreationGate {
+public:
+    explicit CreationGate(std::size_t passThroughCalls = 0) : passThroughCalls_(passThroughCalls) {}
+
+    ~CreationGate() { release(); }
+
+    void arriveAndWait() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        ++calls_;
+        cv_.notify_all();
+        if (calls_ <= passThroughCalls_) {
+            return;
+        }
+        cv_.wait(lock, [this] { return released_; });
+    }
+
+    bool waitForCalls(std::size_t count, std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, timeout, [this, count] { return calls_ >= count; });
+    }
+
+    void markContenderCompleted() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            contenderCompleted_ = true;
+        }
+        cv_.notify_all();
+    }
+
+    bool waitForCallsOrContender(std::size_t count, std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, timeout,
+                            [this, count] { return calls_ >= count || contenderCompleted_; });
+    }
+
+    [[nodiscard]] std::size_t calls() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return calls_;
+    }
+
+    [[nodiscard]] bool contenderCompleted() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return contenderCompleted_;
+    }
+
+    void release() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            released_ = true;
+        }
+        cv_.notify_all();
+    }
+
+private:
+    const std::size_t passThroughCalls_;
+    mutable std::mutex mutex_;
+    std::condition_variable cv_;
+    std::size_t calls_{0};
+    bool contenderCompleted_{false};
+    bool released_{false};
+};
+
+struct CreationGateRelease {
+    std::shared_ptr<CreationGate> gate;
+    ~CreationGateRelease() { gate->release(); }
+};
 } // namespace
 
 // ============================================================================
@@ -386,6 +457,101 @@ TEST_CASE("Connection pool WAL mode creates WAL and SHM files",
     std::error_code ec;
     fs::remove(walPath, ec);
     fs::remove(shmPath, ec);
+}
+
+TEST_CASE("Connection pool reserves capacity before concurrent acquire creation",
+          "[metadata][connection_pool][concurrent][capacity]") {
+    ConnectionPoolConfig cfg;
+    cfg.minConnections = 0;
+    cfg.maxConnections = 1;
+    cfg.enableWAL = false;
+
+    auto gate = std::make_shared<CreationGate>();
+    ConnectionPool pool(make_db_path("pool_acquire_capacity_").string(), cfg);
+    pool.testing_setBeforeCreateHook([gate] { gate->arriveAndWait(); });
+    REQUIRE(pool.initialize().has_value());
+
+    using AcquireResult = decltype(pool.acquire());
+    std::future<AcquireResult> firstFuture;
+    std::future<AcquireResult> contenderFuture;
+    CreationGateRelease releaseOnExit{gate};
+
+    firstFuture = std::async(std::launch::async, [&pool] { return pool.acquire(5s); });
+    REQUIRE(gate->waitForCalls(1, 2s));
+
+    contenderFuture = std::async(std::launch::async, [&pool, gate] {
+        auto result = pool.acquire(0ms);
+        gate->markContenderCompleted();
+        return result;
+    });
+    REQUIRE(gate->waitForCallsOrContender(2, 2s));
+    const bool contenderCompletedBeforeRelease = gate->contenderCompleted();
+
+    gate->release();
+    auto first = firstFuture.get();
+    auto contender = contenderFuture.get();
+
+    REQUIRE(first.has_value());
+    CHECK(contenderCompletedBeforeRelease);
+    CHECK_FALSE(contender.has_value());
+    if (!contender.has_value()) {
+        CHECK((contender.error().code == yams::ErrorCode::Timeout));
+    }
+    CHECK((gate->calls() == 1));
+    CHECK((pool.getStats().totalConnections <= cfg.maxConnections));
+
+    pool.shutdown();
+}
+
+TEST_CASE("Connection pool reserves capacity across health check and acquire creation",
+          "[metadata][connection_pool][concurrent][capacity][health]") {
+    ConnectionPoolConfig cfg;
+    cfg.minConnections = 1;
+    cfg.maxConnections = 1;
+    cfg.enableWAL = false;
+
+    // initialize() owns the first creation. Every later creation is held at the seam. The
+    // maintenance thread may win the post-refresh race; the test deliberately does not care.
+    auto gate = std::make_shared<CreationGate>(1);
+    ConnectionPool pool(make_db_path("pool_health_capacity_").string(), cfg);
+    pool.testing_setBeforeCreateHook([gate] { gate->arriveAndWait(); });
+    REQUIRE(pool.initialize().has_value());
+    REQUIRE((gate->calls() == 1));
+
+    using HealthResult = decltype(pool.healthCheck());
+    using AcquireResult = decltype(pool.acquire());
+    std::future<HealthResult> healthFuture;
+    std::future<AcquireResult> contenderFuture;
+    CreationGateRelease releaseOnExit{gate};
+
+    pool.refreshAll();
+    CHECK((pool.getStats().totalConnections == 0));
+
+    healthFuture = std::async(std::launch::async, [&pool] { return pool.healthCheck(); });
+    REQUIRE(gate->waitForCalls(2, 2s));
+
+    contenderFuture = std::async(std::launch::async, [&pool, gate] {
+        auto result = pool.acquire(0ms);
+        gate->markContenderCompleted();
+        return result;
+    });
+    REQUIRE(gate->waitForCallsOrContender(3, 2s));
+    const bool contenderCompletedBeforeRelease = gate->contenderCompleted();
+
+    gate->release();
+    auto health = healthFuture.get();
+    auto contender = contenderFuture.get();
+
+    REQUIRE(health.has_value());
+    CHECK(contenderCompletedBeforeRelease);
+    CHECK_FALSE(contender.has_value());
+    if (!contender.has_value()) {
+        CHECK((contender.error().code == yams::ErrorCode::Timeout));
+    }
+    CHECK((gate->calls() == 2));
+    CHECK((pool.getStats().totalConnections <= cfg.maxConnections));
+
+    pool.shutdown();
 }
 
 TEST_CASE("Connection pool handles concurrent acquire/release",
