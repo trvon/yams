@@ -133,6 +133,7 @@ public:
         // A concurrent start may have acquired the lifecycle lock after the first request.
         // Reassert cancellation while holding the lock before joining that generation.
         stop_.store(true, std::memory_order_release);
+        backend_->requestCancel();
         sleepCv_.notify_all();
         if (worker_.joinable()) {
             try {

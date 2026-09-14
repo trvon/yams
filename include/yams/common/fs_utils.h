@@ -16,6 +16,10 @@ namespace yams::common {
                                                const std::filesystem::path& root) {
     if (path.empty() || root.empty())
         return false;
+    // On Windows a root-directory-only path is not absolute; reject this mismatch
+    // symmetrically rather than relying on lexically_relative's asymmetric rule.
+    if (path.has_root_directory() != root.has_root_directory())
+        return false;
     const auto relative = path.lexically_normal().lexically_relative(root.lexically_normal());
     // Empty means incompatible roots (or absolute versus relative), not equality.
     return !relative.empty() && (relative == "." || *relative.begin() != "..");

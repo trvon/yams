@@ -103,7 +103,7 @@ class RepositoryScanTests(unittest.TestCase):
             self.seed(root)
             source = root / "boundary.txt"
             marker = policy.SOURCEHUT_MARKERS[0]
-            source.write_text("x" * (65536 - 5) + marker + "é" * 65536)
+            source.write_text("x" * (65536 - 5) + marker + "é" * 65536, encoding="utf-8")
             result, output = self.run_policy(root)
             self.assertEqual(result, 1, output)
             self.assertIn("boundary.txt", output)
@@ -112,6 +112,15 @@ class RepositoryScanTests(unittest.TestCase):
                 stream.write(b"\xff")
             result, output = self.run_policy(root)
             self.assertEqual(result, 0, output)
+
+    def test_unicode_fixture_is_independent_of_locale_encoding(self):
+        original = Path.write_text
+
+        def windows_default(path, data, encoding=None, **kwargs):
+            return original(path, data, encoding=encoding or "cp1252", **kwargs)
+
+        with mock.patch.object(Path, "write_text", windows_default):
+            self.test_marker_crossing_chunk_boundary_and_late_invalid_utf8()
 
     def test_real_source_marker_is_still_detected(self):
         with tempfile.TemporaryDirectory() as temp:

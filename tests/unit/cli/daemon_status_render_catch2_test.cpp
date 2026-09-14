@@ -117,6 +117,9 @@ TEST_CASE("lexical containment rejects incomparable roots", "[cli][daemon][statu
     CHECK_FALSE(isLexicallyContained("/tmp", {}));
 #ifdef _WIN32
     CHECK_FALSE(isLexicallyContained("D:/data", "C:/temp"));
+    CHECK_FALSE(isLexicallyContained("C:relative", "C:/temp"));
+    CHECK_FALSE(isLexicallyContained("C:/temp", "C:relative"));
+    CHECK(isLexicallyContained("C:/temp/child", "C:/temp"));
 #endif
 }
 
