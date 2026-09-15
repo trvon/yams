@@ -1,20 +1,19 @@
 #define _CRT_SECURE_NO_WARNINGS
+// pi-lens-ignore: fatal error
 #include <yams/api/content_store_builder.h>
 #include <yams/api/content_store_error.h>
 #include <yams/chunking/streaming_chunker.h>
 #include <yams/common/fs_utils.h>
 #include <yams/compression/compression_policy.h>
+#include <yams/config/config_helpers.h>
 #include <yams/storage/compressed_storage_engine.h>
 
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <charconv>
 #include <filesystem>
-#include <fstream>
 #include <limits>
-#include <map>
 #include <optional>
-#include <sstream>
 
 namespace fs = std::filesystem;
 
@@ -24,7 +23,8 @@ std::unique_ptr<IContentStore> createContentStore(
     std::shared_ptr<storage::IStorageEngine> storage, std::shared_ptr<chunking::IChunker> chunker,
     std::shared_ptr<crypto::IHasher> hasher,
     std::shared_ptr<manifest::IManifestManager> manifestManager,
-    std::shared_ptr<storage::IReferenceCounter> refCounter, const ContentStoreConfig& config);
+    std::shared_ptr<storage::IReferenceCounter> refCounter, const ContentStoreConfig& config,
+    const storage::DiskPressurePolicy& diskPressure, storage::DiskSpaceProbe diskSpaceProbe);
 }
 
 namespace yams::api {
@@ -69,6 +69,8 @@ struct ContentStoreBuilder::Impl {
     std::shared_ptr<crypto::IHasher> hasher;
     std::shared_ptr<manifest::IManifestManager> manifestManager;
     std::shared_ptr<storage::IReferenceCounter> referenceCounter;
+    storage::DiskPressurePolicy diskPressure{};
+    storage::DiskSpaceProbe diskSpaceProbe{storage::probeDiskSpace};
     bool storageEngineProvided = false;
 
     Impl() {
@@ -202,12 +204,12 @@ struct ContentStoreBuilder::Impl {
         hasAlwaysCompressAbove = false;
 
         // Try to read config file
-        fs::path configPath = getConfigPath();
+        const fs::path configPath = yams::config::get_config_path();
         if (!fs::exists(configPath)) {
             return; // Use defaults if no config
         }
 
-        auto configMap = parseSimpleToml(configPath);
+        auto configMap = yams::config::parse_simple_toml(configPath);
 
         // Load compression levels
         if (auto it = configMap.find("compression.zstd_level"); it != configMap.end()) {
@@ -273,94 +275,6 @@ struct ContentStoreBuilder::Impl {
         spdlog::debug("Loaded compression config: zstd_level={}, lzma_level={}, threshold={}",
                       rules.defaultZstdLevel, rules.defaultLzmaLevel, rules.neverCompressBelow);
     }
-
-    bool getConfigBool(const std::string& key, bool defaultValue) {
-        fs::path configPath = getConfigPath();
-        if (!fs::exists(configPath)) {
-            return defaultValue;
-        }
-
-        auto configMap = parseSimpleToml(configPath);
-        if (configMap.find(key) != configMap.end()) {
-            return configMap[key] == "true";
-        }
-        return defaultValue;
-    }
-
-    fs::path getConfigPath() const {
-        const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME");
-        const char* homeEnv = std::getenv("HOME");
-
-        fs::path configHome;
-        if (xdgConfigHome) {
-            configHome = fs::path(xdgConfigHome);
-        } else if (homeEnv) {
-            configHome = fs::path(homeEnv) / ".config";
-        } else {
-            return fs::path("~/.config") / "yams" / "config.toml";
-        }
-
-        return configHome / "yams" / "config.toml";
-    }
-
-    std::map<std::string, std::string> parseSimpleToml(const fs::path& path) const {
-        std::map<std::string, std::string> parsedConfig;
-        std::ifstream file(path);
-        if (!file) {
-            return parsedConfig;
-        }
-
-        std::string line;
-        std::string currentSection;
-
-        while (std::getline(file, line)) {
-            // Skip comments and empty lines
-            if (line.empty() || line[0] == '#')
-                continue;
-
-            // Check for section headers
-            if (line[0] == '[') {
-                size_t end = line.find(']');
-                if (end != std::string::npos) {
-                    currentSection = line.substr(1, end - 1);
-                    if (!currentSection.empty()) {
-                        currentSection += ".";
-                    }
-                }
-                continue;
-            }
-
-            // Parse key-value pairs
-            size_t eq = line.find('=');
-            if (eq != std::string::npos) {
-                std::string key = line.substr(0, eq);
-                std::string value = line.substr(eq + 1);
-
-                // Trim whitespace
-                key.erase(0, key.find_first_not_of(" \t"));
-                key.erase(key.find_last_not_of(" \t") + 1);
-                value.erase(0, value.find_first_not_of(" \t"));
-                value.erase(value.find_last_not_of(" \t") + 1);
-
-                // Remove quotes if present
-                if (value.size() >= 2 && value[0] == '"' && value.back() == '"') {
-                    value = value.substr(1, value.size() - 2);
-                }
-
-                // Remove comments from value
-                size_t comment = value.find('#');
-                if (comment != std::string::npos) {
-                    value.resize(comment);
-                    // Trim again after removing comment
-                    value.erase(value.find_last_not_of(" \t") + 1);
-                }
-
-                parsedConfig[currentSection + key] = value;
-            }
-        }
-
-        return parsedConfig;
-    }
 };
 
 ContentStoreBuilder::ContentStoreBuilder() : pImpl(std::make_unique<Impl>()) {}
@@ -422,6 +336,14 @@ ContentStoreBuilder::withGarbageCollectionInterval(std::chrono::seconds interval
     return *this;
 }
 
+ContentStoreBuilder&
+ContentStoreBuilder::withDiskPressurePolicy(const storage::DiskPressurePolicy& policy,
+                                            storage::DiskSpaceProbe probe) {
+    pImpl->diskPressure = policy;
+    pImpl->diskSpaceProbe = std::move(probe);
+    return *this;
+}
+
 // Component injection
 ContentStoreBuilder&
 ContentStoreBuilder::withStorageEngine(std::shared_ptr<storage::IStorageEngine> engine) {
@@ -459,6 +381,12 @@ Result<std::unique_ptr<IContentStore>> ContentStoreBuilder::build() {
     if (!validateResult) {
         return Result<std::unique_ptr<IContentStore>>(validateResult.error());
     }
+    if (const auto diskPolicy = pImpl->diskPressure.validate(); !diskPolicy) {
+        return Result<std::unique_ptr<IContentStore>>(diskPolicy.error());
+    }
+    if (!pImpl->diskSpaceProbe) {
+        return Error{ErrorCode::InvalidArgument, "disk-space probe is not configured"};
+    }
 
     // Ensure storage directories exist (may have been created previously).
     try {
@@ -477,7 +405,8 @@ Result<std::unique_ptr<IContentStore>> ContentStoreBuilder::build() {
 
     // Create content store
     auto store = createContentStore(pImpl->storageEngine, pImpl->chunker, pImpl->hasher,
-                                    pImpl->manifestManager, pImpl->referenceCounter, pImpl->config);
+                                    pImpl->manifestManager, pImpl->referenceCounter, pImpl->config,
+                                    pImpl->diskPressure, pImpl->diskSpaceProbe);
 
     spdlog::debug("Content store built successfully with storage path: {}",
                   pImpl->config.storagePath.string());

@@ -111,6 +111,10 @@ run_step() {
 	if [ "${rc}" -eq 0 ]; then
 		ok "${name}"
 		record_summary "- Result: pass"
+	elif [ "${rc}" -eq 77 ]; then
+		fail "${name} infra-retry (${rc}); log: ${log_file}"
+		record_summary "- Result: infra-retry (transient network failure)"
+		FAILURES+=("${name} infra-retry (${rc})")
 	else
 		fail "${name} failed (${rc}); log: ${log_file}"
 		record_summary "- Result: fail (${rc})"
@@ -132,6 +136,14 @@ tsan_profile="tsan"
 if [ "${SELF_TEST}" -eq 1 ]; then
 	asan_profile="self-test"
 	tsan_profile="self-test"
+fi
+
+# Host-agnostic compile-only cross-compile smoke. Skips cleanly when no cross
+# toolchain is installed; compiles a portability probe otherwise.
+if [ "${SELF_TEST}" -eq 1 ]; then
+	run_step "cross-compile-smoke" bash "${SCRIPT_DIR}/cross-compile-smoke.sh" --self-test
+else
+	run_step "cross-compile-smoke" bash "${SCRIPT_DIR}/cross-compile-smoke.sh"
 fi
 
 if [ "$(uname -s)" != "Darwin" ]; then

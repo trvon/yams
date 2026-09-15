@@ -4,6 +4,7 @@
 #include <yams/daemon/components/WriteCoordinator.h>
 
 #include <yams/compat/thread_stop_compat.h>
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/components/GraphComponent.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/ResourceGovernor.h>
@@ -13,6 +14,7 @@
 #include <yams/daemon/components/TuningManager.h>
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/VectorIndexCoordinator.h>
+#include <yams/daemon/metric_keys.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/extraction/content_extractor.h>
@@ -21,6 +23,7 @@
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/query_helpers.h>
+#include <yams/repair/embedding_repair_util.h>
 #include <yams/vector/sqlite_vec_backend.h>
 #include <yams/vector/vector_database.h>
 
@@ -40,11 +43,11 @@
 #include <sqlite3.h>
 #include <algorithm>
 #include <cctype>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <set>
 #include <span>
 #include <string>
 #include <thread>
@@ -57,17 +60,6 @@ namespace {
 
 constexpr size_t kMaxTextToPersistInMetadataBytes =
     16ULL * 1024ULL * 1024ULL; // 16 MiB (best-effort)
-
-std::string getenvCopy(std::string_view name) {
-    static std::mutex envMutex;
-    std::lock_guard<std::mutex> lock(envMutex);
-    const std::string key(name);
-    const char* env = std::getenv(key.c_str()); // NOLINT(concurrency-mt-unsafe)
-    if (!env || !*env) {
-        return {};
-    }
-    return std::string(env);
-}
 
 template <typename Meta>
 inline void submitRepairStatusUpdate(const RepairServiceContext& ctx, Meta& metaRepo,
@@ -94,42 +86,12 @@ uint64_t steadyNowMillis() {
 }
 
 uint64_t repairOperationCode(std::string_view operation) {
-    if (operation == "stuck_docs")
-        return 1;
-    if (operation == "orphans")
-        return 2;
-    if (operation == "mime")
-        return 3;
-    if (operation == "downloads")
-        return 4;
-    if (operation == "path_tree")
-        return 5;
-    if (operation == "dedupe")
-        return 6;
-    if (operation == "chunks")
-        return 7;
-    if (operation == "block_refs")
-        return 8;
-    if (operation == "graph")
-        return 9;
-    if (operation == "fts5")
-        return 10;
-    if (operation == "embeddings")
-        return 11;
-    if (operation == "topology")
-        return 12;
-    if (operation == "optimize")
-        return 13;
-    return 0;
+    return metrics::repairOperationCodeForName(operation);
 }
 
-// Check if vector operations are disabled via environment variables
+// Check the shared vector compatibility policy used by search and initialization.
 bool vectorsDisabledByEnv() {
-    if (!getenvCopy("YAMS_DISABLE_VECTORS").empty())
-        return true;
-    if (!getenvCopy("YAMS_DISABLE_VECTOR_DB").empty())
-        return true;
-    return false;
+    return !yams::config::resolve_vector_environment().enabled;
 }
 
 std::string normalizedRepairExtension(const metadata::DocumentInfo& doc) {
@@ -342,10 +304,7 @@ RepairServiceContext makeRepairServiceContext(ServiceManager* services) {
     ctx.getModelProvider = [services] { return services->getModelProvider(); };
     ctx.getEmbeddingQueuedJobs = [services] { return services->getEmbeddingQueuedJobs(); };
     ctx.getEmbeddingInFlightJobs = [services] { return services->getEmbeddingInFlightJobs(); };
-    ctx.getContentExtractors =
-        [services]() -> const std::vector<std::shared_ptr<extraction::IContentExtractor>>& {
-        return services->getContentExtractors();
-    };
+    ctx.getContentExtractors = [services] { return services->getContentExtractors(); };
     ctx.getSymbolExtractors =
         [services]() -> const std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>>& {
         return services->getSymbolExtractors();
@@ -924,9 +883,9 @@ RepairService::detectMissingWork(const std::vector<std::string>& batch) {
         return result;
 
     const bool checkEmbeddings = !vectorsDisabledByEnv();
-    static const std::vector<std::shared_ptr<extraction::IContentExtractor>> kEmptyExtractors;
-    const auto& customExtractors =
-        ctx_.getContentExtractors ? ctx_.getContentExtractors() : kEmptyExtractors;
+    auto customExtractors = ctx_.getContentExtractors
+                                ? ctx_.getContentExtractors()
+                                : std::vector<std::shared_ptr<extraction::IContentExtractor>>{};
 
     std::vector<MissingWorkFlags> flags(batch.size());
     std::vector<std::exception_ptr> errors(batch.size());
@@ -1933,13 +1892,15 @@ RepairOperationResult RepairService::repairDownloads(bool dryRun, bool verbose,
 
         try {
             metaFacade.setMetadata(doc.id, "source_url", metadata::MetadataValue(sourceUrl));
-            metaFacade.setMetadata(doc.id, "tag", metadata::MetadataValue("downloaded"));
+            metaFacade.setMetadata(doc.id, "tag:downloaded", metadata::MetadataValue("downloaded"));
             auto host = extract_host(sourceUrl);
             auto scheme = extract_scheme(sourceUrl);
             if (!host.empty())
-                metaFacade.setMetadata(doc.id, "tag", metadata::MetadataValue("host:" + host));
+                metaFacade.setMetadata(doc.id, "tag:host:" + host,
+                                       metadata::MetadataValue("host:" + host));
             if (!scheme.empty())
-                metaFacade.setMetadata(doc.id, "tag", metadata::MetadataValue("scheme:" + scheme));
+                metaFacade.setMetadata(doc.id, "tag:scheme:" + scheme,
+                                       metadata::MetadataValue("scheme:" + scheme));
         } catch (const std::exception& e) {
             spdlog::debug("RepairService: failed to persist download metadata for {}: {}",
                           sourceUrl, e.what());
@@ -2681,9 +2642,9 @@ RepairOperationResult RepairService::rebuildFts5Index(const RepairRequest& req,
     auto* wc = ctx_.getWriteCoordinator ? ctx_.getWriteCoordinator() : nullptr;
     MetadataWriteFacade metaFacade(wc, meta.get());
 
-    static const std::vector<std::shared_ptr<extraction::IContentExtractor>> kEmptyExtractors;
-    const auto& customExtractors =
-        ctx_.getContentExtractors ? ctx_.getContentExtractors() : kEmptyExtractors;
+    auto customExtractors = ctx_.getContentExtractors
+                                ? ctx_.getContentExtractors()
+                                : std::vector<std::shared_ptr<extraction::IContentExtractor>>{};
 
     // Pre-load all FTS5 rowids so the incremental skip check below is O(1)
     // per document instead of one SQL round-trip each.
@@ -2921,52 +2882,21 @@ RepairService::generateMissingEmbeddingsAsync(const RepairRequest& req, const Pr
         progress(ev);
     }
 
-    metadata::DocumentQueryOptions queryOpts;
-    if (!req.force) {
-        queryOpts.hasEmbedding = false;
-    }
-    auto docs = meta->queryDocumentsForGrepCandidates(queryOpts);
-    if (!docs) {
+    auto candidateScanResult =
+        repair::selectEmbeddingRepairCandidates(*meta, req.includeMime, req.force);
+    if (!candidateScanResult) {
         result.message = "Failed to query";
         co_return result;
     }
-
-    auto isEmbeddable = [&req](const std::string& m) -> bool {
-        if (m.rfind("text/", 0) == 0)
-            return true;
-        if (m == "application/json" || m == "application/xml" || m == "application/x-yaml" ||
-            m == "application/yaml")
-            return true;
-        for (const auto& inc : req.includeMime) {
-            if (!inc.empty() && (m == inc || m.rfind(inc, 0) == 0))
-                return true;
-        }
-        return false;
-    };
-
-    std::vector<std::string> hashes;
-    size_t eligibleByMime = 0;
-    size_t eligibleByExtractedText = 0;
-    std::vector<std::string> excludedSamples;
-    for (const auto& d : docs.value()) {
-        const bool hasExtractedText = d.contentExtracted;
-        if (isEmbeddable(d.mimeType)) {
-            ++eligibleByMime;
-            hashes.push_back(d.sha256Hash);
-        } else if (hasExtractedText) {
-            ++eligibleByExtractedText;
-            hashes.push_back(d.sha256Hash);
-        } else if (excludedSamples.size() < 8) {
-            excludedSamples.push_back(d.filePath + " mime=" + d.mimeType +
-                                      " extracted=" + std::string(d.contentExtracted ? "1" : "0"));
-        }
-    }
+    auto candidateScan = std::move(candidateScanResult.value());
+    const auto& hashes = candidateScan.documentHashes;
 
     spdlog::info("RepairService::generateMissingEmbeddingsAsync candidates: scanned={} eligible={} "
                  "eligible_by_mime={} eligible_by_extracted_text={} excluded_samples=[{}] "
                  "force={} missing_only_query={}",
-                 docs.value().size(), hashes.size(), eligibleByMime, eligibleByExtractedText,
-                 excludedSamples.size(), req.force ? 1 : 0, req.force ? 0 : 1);
+                 candidateScan.documentsScanned, hashes.size(), candidateScan.eligibleByMime,
+                 candidateScan.eligibleByExtractedText, candidateScan.excludedSamples.size(),
+                 req.force ? 1 : 0, req.force ? 0 : 1);
 
     if (progress) {
         RepairEvent ev;
@@ -3114,52 +3044,21 @@ RepairOperationResult RepairService::generateMissingEmbeddings(const RepairReque
         progress(ev);
     }
 
-    metadata::DocumentQueryOptions queryOpts;
-    if (!req.force) {
-        queryOpts.hasEmbedding = false;
-    }
-    auto docs = meta->queryDocumentsForGrepCandidates(queryOpts);
-    if (!docs) {
+    auto candidateScanResult =
+        repair::selectEmbeddingRepairCandidates(*meta, req.includeMime, req.force);
+    if (!candidateScanResult) {
         result.message = "Failed to query";
         return result;
     }
-
-    // Filter for embeddable MIME types
-    auto isEmbeddable = [&req](const std::string& m) -> bool {
-        if (m.rfind("text/", 0) == 0)
-            return true;
-        if (m == "application/json" || m == "application/xml" || m == "application/x-yaml" ||
-            m == "application/yaml")
-            return true;
-        for (const auto& inc : req.includeMime)
-            if (!inc.empty() && (m == inc || m.rfind(inc, 0) == 0))
-                return true;
-        return false;
-    };
-
-    std::vector<std::string> hashes;
-    size_t eligibleByMime = 0;
-    size_t eligibleByExtractedText = 0;
-    std::vector<std::string> excludedSamples;
-    for (const auto& d : docs.value()) {
-        const bool hasExtractedText = d.contentExtracted;
-        if (isEmbeddable(d.mimeType)) {
-            ++eligibleByMime;
-            hashes.push_back(d.sha256Hash);
-        } else if (hasExtractedText) {
-            ++eligibleByExtractedText;
-            hashes.push_back(d.sha256Hash);
-        } else if (excludedSamples.size() < 8) {
-            excludedSamples.push_back(d.filePath + " mime=" + d.mimeType +
-                                      " extracted=" + std::string(d.contentExtracted ? "1" : "0"));
-        }
-    }
+    auto candidateScan = std::move(candidateScanResult.value());
+    const auto& hashes = candidateScan.documentHashes;
 
     spdlog::info("RepairService::generateMissingEmbeddings candidates: scanned={} eligible={} "
                  "eligible_by_mime={} eligible_by_extracted_text={} excluded_samples=[{}] "
                  "force={} missing_only_query={}",
-                 docs.value().size(), hashes.size(), eligibleByMime, eligibleByExtractedText,
-                 excludedSamples.size(), req.force ? 1 : 0, req.force ? 0 : 1);
+                 candidateScan.documentsScanned, hashes.size(), candidateScan.eligibleByMime,
+                 candidateScan.eligibleByExtractedText, candidateScan.excludedSamples.size(),
+                 req.force ? 1 : 0, req.force ? 0 : 1);
 
     if (progress) {
         RepairEvent ev;

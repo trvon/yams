@@ -75,6 +75,7 @@ onnx_plugin_deps = [
   json_dep,
   yams_core,
   dependency('yams_vector'),
+  dependency('yams_tune_advisor'),
   yams_onnx_resource,
   boost_dep,
 ] + win_extra_deps

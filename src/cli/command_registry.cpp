@@ -33,6 +33,7 @@ std::unique_ptr<ICommand> createDoctorCommand();
 std::unique_ptr<ICommand> createGraphCommand();
 std::unique_ptr<ICommand> createDiffCommand();
 std::unique_ptr<ICommand> createTuneCommand();
+std::unique_ptr<ICommand> createP2PCommand();
 #ifdef YAMS_BUILD_MCP_SERVER
 std::unique_ptr<ICommand> createServeCommand();
 #endif
@@ -63,6 +64,7 @@ constexpr auto kConfigCommandRegistrations = std::to_array<CommandRegistration>(
     {"auth", &createAuthCommand},
     {"status", &createStatusCommand},
     {"update", &createUpdateCommand},
+    {"p2p", &createP2PCommand},
 });
 
 constexpr auto kWorkflowCommandRegistrations = std::to_array<CommandRegistration>({

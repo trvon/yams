@@ -35,8 +35,11 @@ inline std::vector<float> meanEmbedding(std::span<const TopologyDocumentInput> d
 
         const auto& embedding = documents[index].embedding;
         if (centroid.empty()) {
-            centroid.assign(embedding.size(), 0.0F);
-        } else if (centroid.size() != embedding.size()) {
+            centroid = embedding;
+            count = 1;
+            continue;
+        }
+        if (centroid.size() != embedding.size()) {
             continue;
         }
 
@@ -49,8 +52,10 @@ inline std::vector<float> meanEmbedding(std::span<const TopologyDocumentInput> d
     if (count == 0) {
         return {};
     }
-    for (float& value : centroid) {
-        value /= static_cast<float>(count);
+    if (count > 1) {
+        for (float& value : centroid) {
+            value /= static_cast<float>(count);
+        }
     }
     return centroid;
 }

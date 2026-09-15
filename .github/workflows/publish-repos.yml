@@ -1,10 +1,18 @@
 name: Publish Package Repositories
 
-on:
+"on":
   workflow_dispatch:
     inputs:
+      channel:
+        description: "Repository channel expected from the trusted release manifest"
+        type: choice
+        options:
+          - stable
+          - experimental
+        required: true
+        default: stable
       run_id:
-        description: "Release run ID to publish (leave empty for latest successful stable)"
+        description: "Exact successful Release run ID (required for experimental)"
         required: false
         default: ""
 
@@ -17,181 +25,151 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - name: Checkout (shallow)
+      - name: Checkout publication policy
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
-          submodules: false # Publishing does not require submodule contents
+          submodules: false
 
-      - name: Validate and resolve artifact source run
+      - name: Validate and resolve trusted Release run
         id: resolve-run
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REQUESTED_CHANNEL: ${{ inputs.channel }}
+          REQUESTED_RUN_ID: ${{ inputs.run_id }}
         run: |
           set -euo pipefail
-          if [ -n "${{ inputs.run_id }}" ]; then
-            RUN_ID="${{ inputs.run_id }}"
-            echo "Validating provided run_id: $RUN_ID"
-            RUN_INFO=$(gh api "repos/${{ github.repository }}/actions/runs/${RUN_ID}" \
-              --jq '{conclusion: .conclusion, head_branch: .head_branch, event: .event}')
-            CONCLUSION=$(echo "$RUN_INFO" | jq -r '.conclusion')
-            BRANCH=$(echo "$RUN_INFO" | jq -r '.head_branch')
-            EVENT=$(echo "$RUN_INFO" | jq -r '.event')
-            if [[ "$CONCLUSION" != "success" ]]; then
-              echo "::warning::Run $RUN_ID did not succeed (conclusion=$CONCLUSION); using explicit run_id for repo artifact republish"
-            fi
-            if [[ "$BRANCH" != "main" ]]; then
-              echo "::warning::Run $RUN_ID is from branch '$BRANCH', not main"
-            fi
-            if [[ "$EVENT" == "pull_request" ]]; then
-              echo "::error::Run $RUN_ID is a pull_request run; refusing artifact from untrusted source"
-              exit 1
-            fi
-            echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
-          else
-            # Find latest successful release.yml run on main (stable tag push)
-            RUN_ID=$(gh api "repos/${{ github.repository }}/actions/workflows/release.yml/runs?per_page=20&branch=main" \
-              --jq '.workflow_runs[] | select(.conclusion=="success" and (.event=="push" or .event=="workflow_dispatch")) | .id' | head -1)
-            if [ -z "$RUN_ID" ]; then
-              echo "::error::No successful Release workflow run found on main"
-              exit 1
-            fi
-            echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
-            echo "Resolved latest successful Release run on main: $RUN_ID"
+          if [ "$REQUESTED_CHANNEL" != stable ] && [ "$REQUESTED_CHANNEL" != experimental ]; then
+            echo "::error::Missing or unsupported repository channel: $REQUESTED_CHANNEL"
+            exit 1
+          fi
+          if [ "$REQUESTED_CHANNEL" = experimental ] && [ -z "$REQUESTED_RUN_ID" ]; then
+            echo "::error::Experimental publication requires an exact Release run ID"
+            exit 1
           fi
 
-      - name: Download repo artifacts (apt-repo)
+          RUN_ID="$REQUESTED_RUN_ID"
+          if [ -z "$RUN_ID" ]; then
+            RUN_ID=$(gh api "repos/${{ github.repository }}/actions/workflows/release.yml/runs?per_page=100" \
+              --jq '.workflow_runs[] | select(.conclusion == "success" and .event == "push") | .id' | head -1)
+            if [ -z "$RUN_ID" ]; then
+              echo "::error::No successful tag-triggered Release workflow run found"
+              exit 1
+            fi
+          fi
+          if ! [[ "$RUN_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::run_id must be a positive numeric Actions run ID"
+            exit 1
+          fi
+
+          RUN_INFO=$(gh api "repos/${{ github.repository }}/actions/runs/${RUN_ID}" \
+            --jq '{conclusion: .conclusion, status: .status, event: .event, path: .path, run_attempt: .run_attempt}')
+          CONCLUSION=$(jq -r '.conclusion' <<<"$RUN_INFO")
+          STATUS=$(jq -r '.status' <<<"$RUN_INFO")
+          EVENT=$(jq -r '.event' <<<"$RUN_INFO")
+          WORKFLOW_PATH=$(jq -r '.path' <<<"$RUN_INFO")
+          RUN_ATTEMPT=$(jq -r '.run_attempt' <<<"$RUN_INFO")
+          if [ "$STATUS" != completed ] || [ "$CONCLUSION" != success ]; then
+            echo "::error::Release run $RUN_ID is not a completed success"
+            exit 1
+          fi
+          if [ "$EVENT" = pull_request ] || [ "$EVENT" = pull_request_target ]; then
+            echo "::error::Refusing repository artifacts from a pull-request run"
+            exit 1
+          fi
+          if [ "$WORKFLOW_PATH" != ".github/workflows/release.yml" ]; then
+            echo "::error::Run $RUN_ID belongs to $WORKFLOW_PATH, not release.yml"
+            exit 1
+          fi
+          if ! [[ "$RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::Release run has invalid attempt metadata"
+            exit 1
+          fi
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "run_attempt=$RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+
+      - name: Download trusted release manifest
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ steps.resolve-run.outputs.run_id }}
+          name: release-manifest
+          path: trusted-manifest
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download APT repository artifact
         uses: actions/download-artifact@v4
         with:
           run-id: ${{ steps.resolve-run.outputs.run_id }}
           name: apt-repo
-          path: repo-artifacts/apt-repo
+          path: repository-input/aptrepo
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download repo artifacts (yum-repo)
+      - name: Download YUM repository artifact
         uses: actions/download-artifact@v4
         with:
           run-id: ${{ steps.resolve-run.outputs.run_id }}
           name: yum-repo
-          path: repo-artifacts/yum-repo
+          path: repository-input/yumrepo
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Download repo artifacts (arch-repo)
+      - name: Download Arch repository artifact
         uses: actions/download-artifact@v4
         with:
           run-id: ${{ steps.resolve-run.outputs.run_id }}
           name: arch-repo
-          path: repo-artifacts/arch-repo
+          path: repository-input/archrepo
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Prepare upload set
-        id: prep
+      - name: Publish validated channel to R2
+        env:
+          STABLE_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          STABLE_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          STABLE_CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          EXPERIMENTAL_R2_ACCESS_KEY_ID: ${{ secrets.EXPERIMENTAL_R2_ACCESS_KEY_ID }}
+          EXPERIMENTAL_R2_SECRET_ACCESS_KEY: ${{ secrets.EXPERIMENTAL_R2_SECRET_ACCESS_KEY }}
+          EXPERIMENTAL_CLOUDFLARE_ACCOUNT_ID: ${{ secrets.EXPERIMENTAL_CLOUDFLARE_ACCOUNT_ID }}
+          STABLE_GPG_PUBLIC_KEY_B64: ${{ secrets.GPG_PUBLIC_KEY_B64 || '' }}
+          EXPERIMENTAL_GPG_PUBLIC_KEY_B64: ${{ secrets.EXPERIMENTAL_GPG_PUBLIC_KEY_B64 || '' }}
+          REQUESTED_CHANNEL: ${{ inputs.channel }}
         shell: bash
         run: |
           set -euo pipefail
-          ls -1 repo-artifacts || true
-          # Expect artifacts named: apt-repo, yum-repo, homebrew-formula, etc.
-          if [ -d repo-artifacts/apt-repo ]; then
-            mv repo-artifacts/apt-repo aptrepo
-          fi
-          if [ -d repo-artifacts/yum-repo ]; then
-            mv repo-artifacts/yum-repo yumrepo
-          fi
-          if [ -d repo-artifacts/arch-repo ]; then
-            mv repo-artifacts/arch-repo archrepo
-          fi
-          # latest.json is inside assets attached to release; we attempt fetch from GitHub release API.
-          TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName') || TAG=""
-          if [ -z "$TAG" ]; then
-            echo "Could not determine latest tag; skipping manifest fetch" >&2
+          if [ "$REQUESTED_CHANNEL" = stable ]; then
+            AWS_ACCESS_KEY_ID="$STABLE_R2_ACCESS_KEY_ID"
+            AWS_SECRET_ACCESS_KEY="$STABLE_R2_SECRET_ACCESS_KEY"
+            CLOUDFLARE_ACCOUNT_ID="$STABLE_CLOUDFLARE_ACCOUNT_ID"
+            GPG_PUBLIC_KEY_B64="$STABLE_GPG_PUBLIC_KEY_B64"
           else
-            echo "Latest tag: $TAG" >&2
-            gh release download "$TAG" --pattern latest.json --dir . || echo "No latest.json asset yet"
+            AWS_ACCESS_KEY_ID="$EXPERIMENTAL_R2_ACCESS_KEY_ID"
+            AWS_SECRET_ACCESS_KEY="$EXPERIMENTAL_R2_SECRET_ACCESS_KEY"
+            CLOUDFLARE_ACCOUNT_ID="$EXPERIMENTAL_CLOUDFLARE_ACCOUNT_ID"
+            GPG_PUBLIC_KEY_B64="$EXPERIMENTAL_GPG_PUBLIC_KEY_B64"
           fi
-          # Summaries
-          {
-            echo "HAS_APT=$([ -d aptrepo ] && echo 1 || echo 0)"
-            echo "HAS_YUM=$([ -d yumrepo ] && echo 1 || echo 0)"
-            echo "HAS_ARCH=$([ -d archrepo ] && echo 1 || echo 0)"
-          } >> "$GITHUB_OUTPUT"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Publish to R2
-        if: ${{ steps.prep.outputs.HAS_APT == '1' || steps.prep.outputs.HAS_YUM == '1' || steps.prep.outputs.HAS_ARCH == '1' }}
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN || secrets.R2_SECRET_ACCESS_KEY }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          GPG_PUBLIC_KEY_B64: ${{ secrets.GPG_PUBLIC_KEY_B64 || '' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
-            echo "Cloudflare API token/account missing; aborting publish." >&2
+          export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+          unset STABLE_R2_ACCESS_KEY_ID STABLE_R2_SECRET_ACCESS_KEY
+          unset EXPERIMENTAL_R2_ACCESS_KEY_ID EXPERIMENTAL_R2_SECRET_ACCESS_KEY
+          unset STABLE_CLOUDFLARE_ACCOUNT_ID EXPERIMENTAL_CLOUDFLARE_ACCOUNT_ID
+          unset STABLE_GPG_PUBLIC_KEY_B64 EXPERIMENTAL_GPG_PUBLIC_KEY_B64
+          if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ] || \
+             [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "Missing channel-specific Cloudflare R2 S3 authority" >&2
             exit 1
           fi
-          WRANGLER_ROOT="${RUNNER_TEMP:-/tmp}/wrangler-cli"
-          WRANGLER_BIN="$WRANGLER_ROOT/node_modules/.bin/wrangler"
-          if [ ! -x "$WRANGLER_BIN" ]; then
-            npm install --prefix "$WRANGLER_ROOT" wrangler@4.69.0 >/dev/null
-          fi
-          "$WRANGLER_BIN" --version >&2
-          upload_file() {
-            local src="$1"; shift
-            local key="$1"; shift
-            local ct="application/octet-stream"
-            case "$key" in
-              *.json) ct="application/json" ;;
-              *.key) ct="text/plain" ;;
-              *.txt) ct="text/plain" ;;
-              *.xml) ct="application/xml" ;;
-              *.gz) ct="application/gzip" ;;
-              *.deb) ct="application/vnd.debian.binary-package" ;;
-              *.rpm) ct="application/x-rpm" ;;
-              *.pkg.tar.zst) ct="application/zstd" ;;
-              *.db|*.files) ct="application/gzip" ;;
-              *.asc) ct="application/pgp-signature" ;;
-            esac
-            echo "-- Upload $key" >&2
-            for attempt in 1 2 3 4 5; do
-              if "$WRANGLER_BIN" r2 object put "yams-repository/$key" \
-                --remote \
-                --file "$src" \
-                --content-type "$ct"; then
-                return 0
-              fi
-              if [ "$attempt" -eq 5 ]; then
-                echo "R2 upload failed after ${attempt} attempts: $key" >&2
-                return 1
-              fi
-              sleep $((attempt * 5))
-            done
-          }
-          if [ -n "${GPG_PUBLIC_KEY_B64:-}" ]; then
-            echo "$GPG_PUBLIC_KEY_B64" | base64 -d > gpg.key
-            upload_file gpg.key gpg.key
-          fi
-          if [ -d aptrepo ]; then
-            find aptrepo -type f -print0 | while IFS= read -r -d '' f; do
-              rel="${f#aptrepo/}"; upload_file "$f" "aptrepo/$rel";
-            done
-          fi
-          if [ -d yumrepo ]; then
-            find yumrepo -type f -print0 | while IFS= read -r -d '' f; do
-              rel="${f#yumrepo/}"; upload_file "$f" "yumrepo/$rel";
-            done
-          fi
-          if [ -d archrepo ]; then
-            find archrepo -type f -print0 | while IFS= read -r -d '' f; do
-              rel="${f#archrepo/}"; upload_file "$f" "archrepo/$rel";
-            done
-          fi
-          if [ -f latest.json ]; then
-            upload_file latest.json latest.json
-          fi
-          echo "Publish complete." >&2
+          python3 -m pip install --disable-pip-version-check boto3==1.40.76 >/dev/null
 
-      - name: Warn if nothing to publish
-        if: ${{ steps.prep.outputs.HAS_APT != '1' && steps.prep.outputs.HAS_YUM != '1' && steps.prep.outputs.HAS_ARCH != '1' }}
-        run: echo "No repo artifacts found to publish." >&2
+          public_key_args=()
+          if [ -n "$GPG_PUBLIC_KEY_B64" ]; then
+            echo "$GPG_PUBLIC_KEY_B64" | base64 -d > channel-gpg.key
+            public_key_args=(--public-key channel-gpg.key)
+          fi
+          python3 scripts/ci/publish_repository.py \
+            --repo-root repository-input \
+            --manifest trusted-manifest/latest.json \
+            --expected-channel "$REQUESTED_CHANNEL" \
+            --selected-run-id "${{ steps.resolve-run.outputs.run_id }}" \
+            --selected-run-attempt "${{ steps.resolve-run.outputs.run_attempt }}" \
+            --bucket yams-repository \
+            --endpoint-url "https://${CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com" \
+            "${public_key_args[@]}"
+          echo "Published $REQUESTED_CHANNEL without pruning any channel objects." >&2

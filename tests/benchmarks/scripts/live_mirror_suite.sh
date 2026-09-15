@@ -107,7 +107,7 @@ cat >"$SUITE_MANIFEST" <<EOF
   ],
   "notes": [
     "Suite pairs daemon-ish ingestion metrics with correlated retrieval/profile artifacts.",
-    "Default live path uses simeon-default for fast built-in embeddings; ONNX should stay opt-in.",
+    "Ingestion always uses the isolated simeon-default fixture; --embed-model applies to retrieval only.",
     "Use --real-embeddings for higher-fidelity end-to-end runs; --mock-embeddings is synthetic only."
   ]
 }
@@ -119,12 +119,9 @@ echo "  Corpus size: $CORPUS_SIZE"
 echo "  Queries:     $QUERIES"
 echo "  Poll ms:     $POLL_INTERVAL_MS"
 echo "  Trace sec:   $TRACE_TIME_LIMIT"
-echo "  Embeddings:  $([[ "$FORCE_MOCK_EMBEDDINGS" == "1" ]] && echo mock || echo live)"
-echo "  Embed model: $EMBED_MODEL"
-
-if [[ "$FORCE_MOCK_EMBEDDINGS" != "1" && "$EMBED_MODEL" == "simeon-default" ]]; then
-	export YAMS_EMBED_BACKEND=simeon
-fi
+echo "  Embeddings:       $([[ "$FORCE_MOCK_EMBEDDINGS" == "1" ]] && echo mock || echo live)"
+echo "  Ingestion model:  simeon-default"
+echo "  Retrieval model:  $EMBED_MODEL"
 
 echo "[1/2] Running ingestion_e2e_bench..."
 set +e
@@ -133,7 +130,6 @@ YAMS_BENCH_CORPUS_SIZE="$CORPUS_SIZE" \
 	YAMS_BENCH_OUTPUT="$INGEST_JSON" \
 	YAMS_BENCH_FORCE_MOCK_EMBEDDINGS="$FORCE_MOCK_EMBEDDINGS" \
 	YAMS_DISABLE_VECTORS="$FORCE_MOCK_EMBEDDINGS" \
-	YAMS_BENCH_EMBED_MODEL="$EMBED_MODEL" \
 	YAMS_TEST_SAFE_SINGLE_INSTANCE=1 \
 	"$INGEST_BIN" 2>&1 | tee "$INGEST_LOG"
 

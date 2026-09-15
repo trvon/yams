@@ -45,6 +45,7 @@ bool isBinaryLike(const app::services::GrepMatch& match) {
 
 struct MatchIdentity {
     std::string file;
+    std::string hash;
     std::size_t lineNumber{0};
     std::string line;
 
@@ -57,6 +58,7 @@ struct MatchIdentityHash {
             return seed ^ (value + 0x9e3779b9U + (seed << 6U) + (seed >> 2U));
         };
         auto hash = std::hash<std::string>{}(identity.file);
+        hash = combine(hash, std::hash<std::string>{}(identity.hash));
         hash = combine(hash, std::hash<std::size_t>{}(identity.lineNumber));
         return combine(hash, std::hash<std::string>{}(identity.line));
     }
@@ -66,6 +68,7 @@ GrepMatch toDaemonMatch(const app::services::GrepFileResult& fileResult,
                         const app::services::GrepMatch& match) {
     GrepMatch output;
     output.file = fileResult.file;
+    output.hash = fileResult.hash;
     output.lineNumber = match.lineNumber;
     output.line = match.line;
     output.contextBefore = match.before;
@@ -90,6 +93,7 @@ Selection select(const std::vector<app::services::GrepFileResult>& fileResults,
             }
             MatchIdentity identity{
                 .file = fileResult.file,
+                .hash = fileResult.hash,
                 .lineNumber = match.lineNumber,
                 .line = normalizeLine(match.line),
             };

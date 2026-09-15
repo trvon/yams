@@ -15,6 +15,7 @@
 #include <string>
 #include <thread>
 
+#include "test_async_helpers.h"
 #include "test_daemon_harness.h"
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/metadata/database.h>
@@ -117,8 +118,8 @@ std::optional<fs::path> findQuarantinedFile(const fs::path& dataDir) {
             ec.clear();
             continue;
         }
-        if (it->path().filename().string().rfind(prefix, 0) == 0 &&
-            it->path().extension() != ".sentinel") {
+        const auto name = it->path().filename().string();
+        if (name.starts_with(prefix) && !name.ends_with("-wal") && !name.ends_with("-shm")) {
             return it->path();
         }
     }

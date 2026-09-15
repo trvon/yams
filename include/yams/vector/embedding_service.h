@@ -17,6 +17,9 @@
 namespace yams::cli {
 class YamsCLI;
 }
+namespace yams::daemon {
+struct ResolvedEmbeddingConfig;
+}
 
 namespace yams::vector {
 
@@ -35,9 +38,10 @@ public:
      */
     static std::unique_ptr<EmbeddingService> create(cli::YamsCLI* cli);
 
-    EmbeddingService(std::shared_ptr<api::IContentStore> store,
-                     std::shared_ptr<metadata::IMetadataRepository> metadataRepo,
-                     std::filesystem::path dataPath);
+    EmbeddingService(
+        std::shared_ptr<api::IContentStore> store,
+        std::shared_ptr<metadata::IMetadataRepository> metadataRepo, std::filesystem::path dataPath,
+        std::shared_ptr<const daemon::ResolvedEmbeddingConfig> embeddingPolicy = nullptr);
 
     /**
      * @brief Generate embedding for a single document (synchronous)
@@ -74,6 +78,7 @@ private:
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::IMetadataRepository> metadataRepo_;
     std::filesystem::path dataPath_;
+    std::shared_ptr<const daemon::ResolvedEmbeddingConfig> embeddingPolicy_;
 
     // Managed background worker (uses compat shim; joins on destruction)
     mutable std::mutex workerMutex_;

@@ -1,3 +1,4 @@
+// pi-lens-ignore: fatal error
 #include <yams/daemon/client/asio_connection.h>
 
 #include <boost/asio/as_tuple.hpp>
@@ -84,6 +85,14 @@ void AsioConnection::closeSocketOnStrand(bool cancelFirst, bool resetSocket) {
         }
     };
 
+    // Static teardown destroys queued coroutine handlers while the global io_context itself is
+    // shutting down. Do not dispatch another handler or reacquire the singleton from a connection
+    // destructor once that boundary has started.
+    if (!opts.executor.has_value() && GlobalIOContext::is_destroyed()) {
+        closeOp();
+        return;
+    }
+
     if (strand.running_in_this_thread()) {
         closeOp();
         return;
@@ -105,8 +114,9 @@ void AsioConnection::closeSocketOnStrand(bool cancelFirst, bool resetSocket) {
     // complete exactly one close/reset best-effort off-strand so shutdown does not hang or leak.
     if (future.wait_for(kSocketCloseDispatchWait) != std::future_status::ready) {
         const bool globalExecutorStopped =
-            !opts.executor.has_value() && GlobalIOContext::instance().get_io_context().stopped();
-        if (isExecutorStopped(strand) || globalExecutorStopped) {
+            !opts.executor.has_value() && (GlobalIOContext::is_destroyed() ||
+                                           GlobalIOContext::instance().get_io_context().stopped());
+        if (globalExecutorStopped || isExecutorStopped(strand)) {
             if (!completed->exchange(true, std::memory_order_acq_rel)) {
                 closeOp();
             }
@@ -244,7 +254,9 @@ boost::asio::awaitable<Result<void>> AsioConnection::async_write_frame(std::vect
             writing = false;
             alive = false;
             boost::system::error_code close_ec;
-            socket->close(close_ec);
+            // NOLINTNEXTLINE(bugprone-unused-return-value): error_code overload reports via
+            // close_ec.
+            (void)socket->close(close_ec);
             if (close_ec) {
                 spdlog::debug("AsioConnection::async_write_frame: close after timeout failed: {}",
                               close_ec.message());

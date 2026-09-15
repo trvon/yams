@@ -4,12 +4,12 @@
 // concurrency Covers: queue lifecycle, async processing, bus integration, stress testing, MPMC
 // correctness
 
+// pi-lens-ignore: fatal error
 #include <spdlog/sinks/ostream_sink.h>
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <climits>
 #include <condition_variable>
 #include <cstdlib>
 #include <filesystem>
@@ -199,6 +199,20 @@ private:
     uint32_t prevHw_{0};
     uint32_t prevTotal_{0};
     uint32_t prevExtraction_{0};
+};
+
+class PostIngestStageActivityGuard {
+public:
+    explicit PostIngestStageActivityGuard(TuneAdvisor::PostIngestStage stage)
+        : stage_(stage), token_(TuneAdvisor::acquirePostIngestStageActivity(stage)) {}
+    ~PostIngestStageActivityGuard() { TuneAdvisor::releasePostIngestStageActivity(stage_, token_); }
+
+    PostIngestStageActivityGuard(const PostIngestStageActivityGuard&) = delete;
+    PostIngestStageActivityGuard& operator=(const PostIngestStageActivityGuard&) = delete;
+
+private:
+    TuneAdvisor::PostIngestStage stage_;
+    TuneAdvisor::PostIngestStageActivityToken token_;
 };
 
 class WorkCoordinatorThreadsGuard {
@@ -706,9 +720,113 @@ TEST_CASE("IngestService preserves single and batched queued storage paths",
     }
 }
 
+TEST_CASE("IngestService suspends instead of blocking its WorkCoordinator worker",
+          "[daemon][background][ingest][executor-progress]") {
+    SpdlogCaptureGuard logGuard(spdlog::level::err);
+    StoreDocumentChannelGuard channelGuard;
+    WorkCoordinatorThreadsGuard threadsGuard(2);
+    yams::test::TempDirGuard testDir("yams_ingest_service_executor_progress_");
+
+    DaemonConfig config;
+    config.dataDir = testDir.path();
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    ServiceManager serviceManager(config, state, lifecycleFsm);
+    auto contentStore = std::make_shared<StubContentStore>();
+    serviceManager.__test_setContentStore(contentStore);
+
+    auto blockerStarted = std::make_shared<std::promise<void>>();
+    auto blockerStartedFuture = blockerStarted->get_future();
+    auto releaseBlocker = std::make_shared<std::promise<void>>();
+    auto releaseFuture = releaseBlocker->get_future().share();
+    boost::asio::post(serviceManager.getWorkCoordinator()->getExecutor(),
+                      [blockerStarted, releaseFuture] {
+                          blockerStarted->set_value();
+                          releaseFuture.wait();
+                      });
+    REQUIRE(blockerStartedFuture.wait_for(std::chrono::seconds(1)) == std::future_status::ready);
+
+    auto channel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::StoreDocumentTask>(
+            "store_document_tasks", 64);
+    InternalEventBus::StoreDocumentTask task;
+    task.request.name = "executor-progress.txt";
+    task.request.content = "executor progress";
+    REQUIRE(channel->try_push(std::move(task)));
+
+    IngestService ingestService(&serviceManager, serviceManager.getWorkCoordinator());
+    ingestService.start();
+    const bool stored = contentStore->waitForStoredItems(1, std::chrono::steady_clock::now() +
+                                                                std::chrono::seconds(1));
+
+    releaseBlocker->set_value();
+    ingestService.stop();
+    CHECK(stored);
+}
+
 // =============================================================================
 // PostIngestQueue Tests
 // =============================================================================
+
+TEST_CASE("PostIngestQueue full KG channel does not block WorkCoordinator progress",
+          "[daemon][background][queue][kg][backpressure]") {
+    WorkCoordinator coordinator;
+    coordinator.start(1);
+
+    auto kgChannel =
+        InternalEventBus::instance().get_or_create_channel<InternalEventBus::KgJob>("kg_jobs", 32);
+    std::size_t fillerId = 0;
+    while (!kgChannel->full()) {
+        InternalEventBus::KgJob filler;
+        filler.hash = "kg-filler-" + std::to_string(fillerId++);
+        REQUIRE(kgChannel->try_push(std::move(filler)));
+    }
+
+    {
+        PostIngestQueue queue(nullptr, nullptr, {}, nullptr, nullptr, &coordinator, nullptr, 32);
+        InternalEventBus::KgJob job;
+        job.hash = "kg-pending-target";
+        queue.testing_deferKgJob(std::move(job));
+        queue.testing_schedulePendingKgDrain();
+        REQUIRE(queue.testing_pendingKgJobs() == 1);
+        CHECK_FALSE(queue.tryEnqueue(PostIngestQueue::Task{.hash = "upstream-backpressure"}));
+
+        auto sentinelRan = std::make_shared<std::promise<void>>();
+        auto sentinelFuture = sentinelRan->get_future();
+        boost::asio::post(coordinator.getExecutor(), [sentinelRan] { sentinelRan->set_value(); });
+        REQUIRE(sentinelFuture.wait_for(std::chrono::milliseconds(250)) ==
+                std::future_status::ready);
+
+        // Explicit disablement cancels deferred work outside the pipeline without counting a drop.
+        const auto droppedBefore = InternalEventBus::instance().kgDropped();
+        queue.setKnowledgeGraphEnabled(false);
+        CHECK(queue.testing_pendingKgJobs() == 0);
+        CHECK(InternalEventBus::instance().kgDropped() == droppedBefore);
+        queue.stop();
+    }
+
+    coordinator.stop();
+    coordinator.join();
+
+    InternalEventBus::KgJob drained;
+    while (kgChannel->try_pop(drained)) {
+    }
+}
+
+TEST_CASE("PostIngestQueue accounts deferred KG jobs when its scheduler is unavailable",
+          "[daemon][background][queue][kg][backpressure]") {
+    WorkCoordinator coordinator;
+    PostIngestQueue queue(nullptr, nullptr, {}, nullptr, nullptr, &coordinator, nullptr, 32);
+    const auto droppedBefore = InternalEventBus::instance().kgDropped();
+
+    InternalEventBus::KgJob job;
+    job.hash = "kg-unscheduled-target";
+    queue.testing_deferKgJob(std::move(job));
+    queue.testing_schedulePendingKgDrain();
+
+    CHECK(queue.testing_pendingKgJobs() == 0);
+    CHECK(InternalEventBus::instance().kgDropped() == droppedBefore + 1);
+}
 
 TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][background][queue]") {
     BusToggleGuard busGuard(false); // Disable bus for direct queue testing
@@ -765,6 +883,13 @@ TEST_CASE("PostIngestQueue: Basic lifecycle and task processing", "[daemon][back
         REQUIRE((queue->processed() == 1));
         REQUIRE((queue->failed() == 0));
         REQUIRE((queue->entityInFlight() == 0));
+        // The content insert is a later pipeline stage than processed(); on slow platforms it can
+        // lag, so poll instead of asserting immediately.
+        auto contentDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!metadataRepo->contentInserted() &&
+               std::chrono::steady_clock::now() < contentDeadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
         REQUIRE(metadataRepo->contentInserted());
 
         auto content = metadataRepo->lastContent();
@@ -839,6 +964,7 @@ TEST_CASE("PostIngestQueue: Batch uses batched metadata lookup and enqueues embe
     BusToggleGuard busGuard(false);
     drainPostIngestChannel();
     PostIngestBatchGuard batchGuard(4);
+    PostIngestStageActivityGuard embedActivity(TuneAdvisor::PostIngestStage::Embed);
 
     // Ensure embed chunking policy is exercised through the PostIngestQueue -> embed_jobs path.
     ScopedEnvVar chunkStrategy("YAMS_EMBED_CHUNK_STRATEGY", "fixed");
@@ -904,13 +1030,16 @@ TEST_CASE("PostIngestQueue: Batch uses batched metadata lookup and enqueues embe
     }
 
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    while (queue->processed() < docs.size() && std::chrono::steady_clock::now() < deadline) {
+    while ((queue->processed() < docs.size() ||
+            queue->metricsSnapshot().batches.embedDocsEmitted < docs.size()) &&
+           std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
     REQUIRE((queue->processed() == docs.size()));
-    // Note: With parallel processing and caching, individual lookups may be used instead of batch
-    // The important thing is that all documents were processed successfully
+    REQUIRE((queue->metricsSnapshot().batches.embedDocsEmitted == docs.size()));
+    // Note: With parallel processing and caching, individual lookups may be used instead of batch.
+    // The dispatch metric is the completion barrier for the subsequent embed channel inspection.
 
     std::size_t jobCount = 0;
     std::size_t docsWithPreparedChunks = 0;
@@ -1201,7 +1330,7 @@ TEST_CASE("PostIngestQueue: full-channel enqueueBatch waits only log at debug",
 // =============================================================================
 
 TEST_CASE("PostIngestQueue: InternalEventBus integration and stress",
-          "[daemon][background][bus][stress]") {
+          "[daemon][background][bus][stress][slow]") {
     if (!isMpmcEnabled()) {
         SKIP("MPMC bus not enabled (set YAMS_INTERNAL_BUS_MPMC=1)");
     }

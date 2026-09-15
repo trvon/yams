@@ -165,8 +165,19 @@ def validate_candidate(root: Path, base: str, candidate: str) -> CandidateReport
     ancestry = run_git(
         root, "merge-base", "--is-ancestor", base_sha, candidate_sha, check=False
     )
-    if ancestry.returncode != 0:
-        raise CandidateError("candidate must contain the complete base history")
+    if ancestry.returncode not in (0, 1):
+        raise CandidateError("could not determine candidate ancestry; inspect repository integrity")
+    if ancestry.returncode == 1:
+        missing = int(
+            run_git(root, "rev-list", "--count", f"{candidate_sha}..{base_sha}").stdout.strip()
+        )
+        raise CandidateError(
+            "candidate must contain the complete base history: "
+            f"{missing} base commit(s) from main {base_sha} are missing from {candidate_sha}. "
+            "Merge current main into the candidate branch, resolve conflicts while preserving "
+            "both branches' changes, then rerun validation on the resulting immutable SHA. "
+            "This preflight does not merge or modify either branch."
+        )
 
     commit_count = int(
         run_git(

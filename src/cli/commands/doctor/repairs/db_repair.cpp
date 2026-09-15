@@ -6,7 +6,9 @@
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/extraction/extraction_util.h>
 #include <yams/metadata/query_helpers.h>
@@ -37,12 +39,14 @@ void DbRepairCommand::execute(std::ostream& os, YamsCLI* cli, const Config& cfg)
 
     try {
         // Embeddings repair
-
-        // Embeddings repair
         if (cfg.repairEmbeddings) {
             os << status_pending("Repairing missing embeddings") << "\n";
             yams::repair::EmbeddingRepairConfig rcfg;
-            rcfg.batchSize = 8;
+            const auto& embeddingPolicy = cli->getResolvedEmbeddingConfig();
+            rcfg.batchSize = embeddingPolicy.runtime.batchSize.value_or(8);
+            rcfg.repairLockTimeoutMs =
+                embeddingPolicy.runtime.repairLockTimeoutMs.value_or(rcfg.repairLockTimeoutMs);
+            rcfg.preferredModel = embeddingPolicy.preferredModel;
             rcfg.skipExisting = true;
             bool daemonRepairAlreadyAttempted = false;
 
@@ -101,9 +105,10 @@ void DbRepairCommand::execute(std::ostream& os, YamsCLI* cli, const Config& cfg)
                     yams::daemon::ClientConfig cfg;
                     cfg.dataDir = cli->getDataPath();
                     int rpc_ms = 60000;
-                    if (const char* env = std::getenv("YAMS_DOCTOR_RPC_TIMEOUT_MS")) {
+                    if (const auto environment =
+                            yams::config::getenv_nonempty("YAMS_DOCTOR_RPC_TIMEOUT_MS")) {
                         try {
-                            rpc_ms = std::max(1000, std::stoi(env));
+                            rpc_ms = std::max(1000, std::stoi(*environment));
                         } catch (...) {
                             spdlog::debug("db_repair: failed to parse YAMS_DOCTOR_RPC_TIMEOUT_MS");
                         }
@@ -162,9 +167,7 @@ void DbRepairCommand::execute(std::ostream& os, YamsCLI* cli, const Config& cfg)
                     yams::daemon::RepairRequest repairReq;
                     repairReq.repairEmbeddings = true;
                     repairReq.foreground = true;
-                    if (const char* preferred = std::getenv("YAMS_PREFERRED_MODEL")) {
-                        repairReq.embeddingModel = preferred;
-                    }
+                    repairReq.embeddingModel = embeddingPolicy.preferredModel;
                     os << "  " << ui::status_pending("Daemon: generating missing embeddings")
                        << "\n"
                        << std::flush;
@@ -394,9 +397,10 @@ void DbRepairCommand::execute(std::ostream& os, YamsCLI* cli, const Config& cfg)
                             cfg.dataDir = cli->getDataPath();
                             // Configurable RPC timeout (default 60s)
                             int rpc_ms = 60000;
-                            if (const char* env = std::getenv("YAMS_DOCTOR_RPC_TIMEOUT_MS")) {
+                            if (const auto environment =
+                                    yams::config::getenv_nonempty("YAMS_DOCTOR_RPC_TIMEOUT_MS")) {
                                 try {
-                                    rpc_ms = std::max(1000, std::stoi(env));
+                                    rpc_ms = std::max(1000, std::stoi(*environment));
                                 } catch (...) {
                                     spdlog::debug("db_repair: failed to parse RPC timeout");
                                 }
@@ -461,9 +465,7 @@ void DbRepairCommand::execute(std::ostream& os, YamsCLI* cli, const Config& cfg)
                             yams::daemon::RepairRequest repairReq;
                             repairReq.repairEmbeddings = true;
                             repairReq.foreground = true;
-                            if (const char* preferred = std::getenv("YAMS_PREFERRED_MODEL")) {
-                                repairReq.embeddingModel = preferred;
-                            }
+                            repairReq.embeddingModel = embeddingPolicy.preferredModel;
                             os << "  "
                                << ui::status_pending("Daemon: generating missing embeddings")
                                << "\n"
@@ -552,9 +554,7 @@ void DbRepairCommand::execute(std::ostream& os, YamsCLI* cli, const Config& cfg)
                         if (localProvider) {
                             std::string modelName = cli->getEmbeddingModelName();
                             if (modelName.empty()) {
-                                if (const char* preferred = std::getenv("YAMS_PREFERRED_MODEL")) {
-                                    modelName = preferred;
-                                }
+                                modelName = rcfg.preferredModel;
                             }
                             if (!modelName.empty()) {
                                 rcfg.preferredModel = modelName;
@@ -812,7 +812,8 @@ void DbRepairCommand::execute(std::ostream& os, YamsCLI* cli, const Config& cfg)
                         if (!ir && isTooBigError(ir.error().message)) {
                             // Best-effort retry: index a truncated prefix when SQLite
                             // length limits would otherwise stall the entire repair.
-                            constexpr size_t kDefaultTruncateBytes = 8 * 1024 * 1024; // 8 MiB
+                            constexpr size_t kDefaultTruncateBytes =
+                                size_t{8} * 1024 * 1024; // 8 MiB
                             size_t cap = kDefaultTruncateBytes;
                             if (auto limit = parseSqliteLimitLen(ir.error().message);
                                 limit && *limit > 1024) {

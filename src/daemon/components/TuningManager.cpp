@@ -172,14 +172,14 @@ void TuningManager::stop() {
         }
         try {
             wakeDrain->set_value();
-        } catch (...) {
-            // Intentional best-effort path; keep the primary operation unaffected.
+        } catch (const std::future_error& e) {
+            spdlog::debug("TuningManager wake-drain completion error: {}", e.what());
         }
     });
     try {
         wakeDrainFuture.wait();
-    } catch (...) {
-        // Intentional best-effort path; keep the primary operation unaffected.
+    } catch (const std::future_error& e) {
+        spdlog::debug("TuningManager wake-drain wait error: {}", e.what());
     }
 
     try {
@@ -449,12 +449,14 @@ void TuningManager::configureOnnxConcurrencyRegistry() {
         computeOnnxSlotBudget(maxConcurrent, glinerReserved, embedReserved, rerankerReserved,
                               /*pressureCap=*/maxConcurrent, /*underPressure=*/false);
 
-    // Configure the registry
-    registry.setMaxSlots(slotBudget.maxSlots);
+    // Apply reserved lanes first, then the total. setReservedSlots() protects accounting by
+    // raising a too-small total, so publishing the total first can retain a prior lifecycle's
+    // larger reservation floor when a profile scales down.
     registry.setReservedSlots(OnnxLane::Gliner, slotBudget.glinerReserved);
     registry.setReservedSlots(OnnxLane::Embedding, slotBudget.embedReserved);
     registry.setReservedSlots(OnnxLane::Reranker, slotBudget.rerankerReserved);
     registry.setReservedSlots(OnnxLane::Other, 0);
+    registry.setMaxSlots(slotBudget.maxSlots);
 
     spdlog::info(
         "[TuningManager] Configured OnnxConcurrencyRegistry: maxSlots={}, reserved=[gliner={}, "
@@ -509,15 +511,16 @@ bool TuningManager::tick_once() {
     auto& governor = ResourceGovernor::instance();
     ResourceSnapshot govSnap = governor.tick(sm_);
 
+    // Publish static ONNX policy during the synchronous startup tick so Ready never exposes
+    // process-global values retained from an earlier lifecycle. Adaptive tuning remains gated.
+    if (!onnxRegistryConfigured_.exchange(true)) {
+        configureOnnxConcurrencyRegistry();
+    }
+
     // Don't perform adaptive tuning until services are at least partially ready,
     // to avoid acting on default pool configs.
     if (!state_->readiness.metadataRepoReady.load()) {
         return true; // Not ready yet → treat as idle
-    }
-
-    // Configure ONNX concurrency registry once on first tick
-    if (!onnxRegistryConfigured_.exchange(true)) {
-        configureOnnxConcurrencyRegistry();
     }
 
     // =========================================================================
@@ -798,6 +801,9 @@ bool TuningManager::tick_once() {
             }
 
             const uint64_t dbLockErrors = TuneAdvisor::getAndResetDbLockErrors();
+            if (state_ != nullptr && dbLockErrors > 0) {
+                state_->stats.dbLockErrors.fetch_add(dbLockErrors, std::memory_order_relaxed);
+            }
             const uint32_t lockThreshold = TuneAdvisor::dbLockErrorThreshold();
 
             auto budget = TuneAdvisor::postIngestBudgetAll(/*includeDynamicCaps=*/true);
@@ -890,7 +896,7 @@ bool TuningManager::tick_once() {
                 // keep embed target derived from budget/governor instead of stale limiter state.
             }
 
-            if (dbLockErrors > lockThreshold * 2) {
+            if (dbLockErrors > static_cast<std::uint64_t>(lockThreshold) * 2ULL) {
                 kgTarget = std::min<uint32_t>(kgTarget, 2);
                 embedTarget = std::min<uint32_t>(embedTarget, 1);
                 spdlog::debug("TuningManager: DB lock errors ({}) severe; KG/embed reduced",
@@ -1401,25 +1407,28 @@ bool TuningManager::tick_once() {
     // Publish a precomputed tuning snapshot for hot-path consumers
     try {
         auto s = std::make_shared<TuningSnapshot>();
-        s->workerPollMs = TuneAdvisor::workerPollMs();
-        s->backpressureReadPauseMs = TuneAdvisor::backpressureReadPauseMs();
-        s->daemonIdle = daemonIdle;
-        s->idleCpuPct = TuneAdvisor::idleCpuThresholdPercent();
-        s->idleMuxLowBytes = TuneAdvisor::idleMuxLowBytes();
-        s->idleShrinkHoldMs = TuneAdvisor::idleShrinkHoldMs();
-        s->poolScaleStep = TuneAdvisor::poolScaleStep();
-        s->poolCooldownMs = TuneAdvisor::poolCooldownMs();
-        s->poolIpcMin = TuneAdvisor::poolMinSizeIpc();
-        s->poolIpcMax = TuneAdvisor::poolMaxSizeIpc();
-        s->poolIoMin = TuneAdvisor::poolMinSizeIpcIo();
-        s->poolIoMax = TuneAdvisor::poolMaxSizeIpcIo();
-        s->writerBudgetBytesPerTurn = writerBudget;
+        (void)TuneAdvisor::readConfiguredOverridesSnapshot([&] {
+            s->workerPollMs = TuneAdvisor::workerPollMs();
+            s->backpressureReadPauseMs = TuneAdvisor::backpressureReadPauseMs();
+            s->daemonIdle = daemonIdle;
+            s->idleCpuPct = TuneAdvisor::idleCpuThresholdPercent();
+            s->idleMuxLowBytes = TuneAdvisor::idleMuxLowBytes();
+            s->idleShrinkHoldMs = TuneAdvisor::idleShrinkHoldMs();
+            s->poolScaleStep = TuneAdvisor::poolScaleStep();
+            s->poolCooldownMs = TuneAdvisor::poolCooldownMs();
+            s->poolIpcMin = TuneAdvisor::poolMinSizeIpc();
+            s->poolIpcMax = TuneAdvisor::poolMaxSizeIpc();
+            s->poolIoMin = TuneAdvisor::poolMinSizeIpcIo();
+            s->poolIoMax = TuneAdvisor::poolMaxSizeIpcIo();
+            s->writerBudgetBytesPerTurn = writerBudget;
 
-        s->serverMaxInflightPerConn = TuneAdvisor::serverMaxInflightPerConn();
-        s->serverQueueFramesCap = TuneAdvisor::serverQueueFramesCap();
-        s->serverQueueBytesCap = TuneAdvisor::serverQueueBytesCap();
-        s->serverWriterBudgetBytesPerTurn = TuneAdvisor::serverWriterBudgetBytesPerTurn();
-        s->serverWriterBudgetMaxBytesPerTurn = TuneAdvisor::serverWriterBudgetMaxBytesPerTurn();
+            s->serverMaxInflightPerConn = TuneAdvisor::serverMaxInflightPerConn();
+            s->serverQueueFramesCap = TuneAdvisor::serverQueueFramesCap();
+            s->serverQueueBytesCap = TuneAdvisor::serverQueueBytesCap();
+            s->serverWriterBudgetBytesPerTurn = TuneAdvisor::serverWriterBudgetBytesPerTurn();
+            s->serverWriterBudgetMaxBytesPerTurn = TuneAdvisor::serverWriterBudgetMaxBytesPerTurn();
+            return true;
+        });
 
         const auto repairBacklog = state_->stats.repairQueueDepth.load(std::memory_order_relaxed);
         const auto holdHints = computeRepairHoldHints(govSnap.level, repairBacklog);

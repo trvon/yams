@@ -66,18 +66,6 @@ public:
         auto* embeddingsCmd = cmd->add_subcommand("embeddings", "Manage embedding configuration");
         embeddingsCmd->require_subcommand();
 
-        // Enable auto-generation
-        auto* enableCmd =
-            embeddingsCmd->add_subcommand("enable", "Enable automatic embedding generation");
-        enableCmd->callback(
-            [this]() { exitOnError(executeEmbeddingsEnable(), "Enable embeddings"); });
-
-        // Disable auto-generation
-        auto* disableCmd =
-            embeddingsCmd->add_subcommand("disable", "Disable automatic embedding generation");
-        disableCmd->callback(
-            [this]() { exitOnError(executeEmbeddingsDisable(), "Disable embeddings"); });
-
         // Show status
         auto* statusCmd =
             embeddingsCmd->add_subcommand("status", "Show embedding configuration status");
@@ -415,11 +403,6 @@ private:
 
     fs::path getConfigPath() const { return yams::config::get_config_path(configPath_); }
 
-    // Parse all config values into a map (section.key format)
-    std::map<std::string, std::string> parseSimpleToml(const fs::path& path) const {
-        return yams::config::parse_simple_toml(path);
-    }
-
     static std::vector<std::string> parseStringList(const std::string& raw) {
         std::vector<std::string> items;
         std::string s = raw;
@@ -485,7 +468,7 @@ private:
                              "Configuration file not found: " + configPath.string()};
             }
 
-            auto config = parseSimpleToml(configPath);
+            auto config = yams::config::parse_simple_toml(configPath);
 
             // Look for the key
             if (config.find(key_) != config.end()) {
@@ -562,7 +545,7 @@ private:
                              "Configuration file not found: " + configPath.string()};
             }
 
-            auto config = parseSimpleToml(configPath);
+            auto config = yams::config::parse_simple_toml(configPath);
 
             std::cout << "Current configuration:\n";
             std::cout << ui::horizontal_rule(21) << "\n";
@@ -586,7 +569,7 @@ private:
                              "Configuration file not found: " + configPath.string()};
             }
 
-            auto config = parseSimpleToml(configPath);
+            auto config = yams::config::parse_simple_toml(configPath);
 
             // Check for required fields
             std::vector<std::string> errors;
@@ -649,7 +632,7 @@ private:
                 std::cout << file.rdbuf();
             } else if (format_ == "json") {
                 // Convert to simple JSON
-                auto config = parseSimpleToml(configPath);
+                auto config = yams::config::parse_simple_toml(configPath);
 
                 std::cout << "{\n";
                 bool first = true;
@@ -758,7 +741,7 @@ private:
     Result<void> executeTuningStatus() {
         try {
             auto configPath = getConfigPath();
-            auto config = parseSimpleToml(configPath);
+            auto config = yams::config::parse_simple_toml(configPath);
 
             auto getValue = [&config](const std::string& key,
                                       const std::string& fallback) -> std::string {
@@ -802,7 +785,7 @@ private:
     Result<void> executePluginsStatus() {
         try {
             auto configPath = getConfigPath();
-            auto config = parseSimpleToml(configPath);
+            auto config = yams::config::parse_simple_toml(configPath);
 
             auto getValue = [&config](const std::string& key,
                                       const std::string& fallback) -> std::string {
@@ -814,8 +797,9 @@ private:
 
             bool strictMode =
                 yams::config::parse_bool(getValue("daemon.plugin_dir_strict", "false"), false);
-            if (const char* envStrict = std::getenv("YAMS_PLUGIN_DIR_STRICT")) {
-                strictMode = yams::config::parse_bool(envStrict, strictMode);
+            if (const auto envStrict =
+                    yams::config::read_env_bool("YAMS_PLUGIN_DIR_STRICT").value) {
+                strictMode = *envStrict;
             }
 
             std::vector<std::filesystem::path> defaultRoots;
@@ -823,9 +807,9 @@ private:
 #ifdef _WIN32
                 defaultRoots.push_back(yams::config::get_data_dir() / "plugins");
 #else
-                if (const char* home = std::getenv("HOME")) {
-                    defaultRoots.push_back(std::filesystem::path(home) / ".local" / "lib" / "yams" /
-                                           "plugins");
+                if (const auto home = yams::config::getenv_nonempty("HOME")) {
+                    defaultRoots.push_back(std::filesystem::path(*home) / ".local" / "lib" /
+                                           "yams" / "plugins");
                 }
 #ifdef __APPLE__
                 defaultRoots.push_back(std::filesystem::path("/opt/homebrew/lib/yams/plugins"));
@@ -857,21 +841,15 @@ private:
             std::cout << "plugins.trusted_paths: " << getValue("plugins.trusted_paths", "(unset)")
                       << "\n";
 
+            const auto environmentDisplay = [](std::string_view key) {
+                return yams::config::getenv_optional(key).value_or("(unset)");
+            };
             std::cout << "\nEnvironment overrides:\n";
-            std::cout << "  YAMS_PLUGIN_DIR="
-                      << (std::getenv("YAMS_PLUGIN_DIR") ? std::getenv("YAMS_PLUGIN_DIR")
-                                                         : "(unset)")
-                      << "\n";
-            std::cout << "  YAMS_PLUGIN_DIR_STRICT="
-                      << (std::getenv("YAMS_PLUGIN_DIR_STRICT")
-                              ? std::getenv("YAMS_PLUGIN_DIR_STRICT")
-                              : "(unset)")
+            std::cout << "  YAMS_PLUGIN_DIR=" << environmentDisplay("YAMS_PLUGIN_DIR") << "\n";
+            std::cout << "  YAMS_PLUGIN_DIR_STRICT=" << environmentDisplay("YAMS_PLUGIN_DIR_STRICT")
                       << "\n";
             std::cout << "  YAMS_DISABLE_ABI_PLUGINS="
-                      << (std::getenv("YAMS_DISABLE_ABI_PLUGINS")
-                              ? std::getenv("YAMS_DISABLE_ABI_PLUGINS")
-                              : "(unset)")
-                      << "\n";
+                      << environmentDisplay("YAMS_DISABLE_ABI_PLUGINS") << "\n";
 
             std::cout << "\nDefault plugin roots (" << defaultRoots.size() << "):\n";
             for (const auto& p : defaultRoots) {
@@ -901,26 +879,28 @@ private:
         // Priority 0: core.data_dir from config file (user's configured storage)
         try {
             auto configPath = getConfigPath();
-            auto config = parseSimpleToml(configPath);
+            auto config = yams::config::parse_simple_toml(configPath);
             if (config.contains("core.data_dir")) {
                 fs::path dataDir = config["core.data_dir"];
                 searchPaths.emplace_back(dataDir / "models");
             }
+        } catch (const std::exception& error) {
+            spdlog::debug("Ignoring model config lookup error: {}", error.what());
         } catch (...) {
-            // Ignore config parsing errors, fall through to other paths
+            spdlog::debug("Ignoring unknown model config lookup error");
         }
 
         // Priority 1: YAMS_STORAGE environment variable
-        if (const char* storage = std::getenv("YAMS_STORAGE")) {
-            searchPaths.emplace_back(fs::path(storage) / "models");
+        if (const auto storage = yams::config::getenv_nonempty("YAMS_STORAGE")) {
+            searchPaths.emplace_back(fs::path(*storage) / "models");
         }
 
         // Priority 2: XDG_DATA_HOME or ~/.local/share/yams
         searchPaths.emplace_back(yams::config::get_data_dir() / "models");
 
         // Priority 3: ~/.yams/models (legacy path)
-        if (const char* home = std::getenv("HOME")) {
-            searchPaths.emplace_back(fs::path(home) / ".yams" / "models");
+        if (const auto home = yams::config::getenv_nonempty("HOME")) {
+            searchPaths.emplace_back(fs::path(*home) / ".yams" / "models");
         }
 
         // Scan all paths for models
@@ -944,65 +924,14 @@ private:
         return models;
     }
 
-    Result<void> executeEmbeddingsEnable() {
-        try {
-            auto models = getAvailableModels();
-            if (models.empty()) {
-                std::cout << ui::status_warning("No embedding models found.") << "\n";
-                std::cout << "Download a model first: yams model download nomic-embed-text-v1.5\n";
-                std::cout << "  (or use --hf nomic-ai/nomic-embed-text-v1.5)\n";
-                return Error{ErrorCode::NotFound, "No embedding models available"};
-            }
-
-            // Preserve existing preferred_model if set and valid, otherwise use first available
-            auto config = parseSimpleToml(getConfigPath());
-            std::string preferredModel = config["embeddings.preferred_model"];
-            if (preferredModel.empty() ||
-                std::ranges::find(models, preferredModel) == models.end()) {
-                preferredModel = models[0];
-            }
-
-            // Set default configurations for auto-generation
-            auto result = setMultipleConfigs({{"embeddings.auto_generate", "true"},
-                                              {"embeddings.preferred_model", preferredModel},
-                                              {"embeddings.batch_size", "16"},
-                                              {"embeddings.generation_delay_ms", "1000"}});
-            if (!result)
-                return result;
-
-            std::cout << ui::status_ok("Automatic embedding generation enabled") << "\n";
-            std::cout << "  Model: " << preferredModel << "\n";
-            std::cout << "  Batch size: 16\n";
-            std::cout << "  Processing delay: 1000ms\n\n";
-            std::cout << "Documents added with 'yams add' will now automatically\n";
-            std::cout << "generate embeddings in the background.\n";
-
-            return Result<void>();
-        } catch (const std::exception& e) {
-            return Error{ErrorCode::Unknown, std::string(e.what())};
-        }
-    }
-
-    Result<void> executeEmbeddingsDisable() {
-        return setBooleanConfig("embeddings.auto_generate", false,
-                                "Automatic embedding generation disabled",
-                                "Automatic embedding generation disabled\n"
-                                "  Use 'yams repair --embeddings' to manually generate embeddings");
-    }
-
     Result<void> executeEmbeddingsStatus() {
         try {
             auto configPath = getConfigPath();
-            auto config = parseSimpleToml(configPath);
+            auto config = yams::config::parse_simple_toml(configPath);
             auto models = getAvailableModels();
 
             std::cout << ui::section_header("Embedding Configuration Status") << "\n";
 
-            // Auto-generation status
-            bool autoEnabled = config["embeddings.auto_generate"] == "true";
-            std::cout << "Auto-generation: "
-                      << (autoEnabled ? ui::status_ok("Enabled") : ui::status_error("Disabled"))
-                      << "\n";
             std::string backend = config["embeddings.backend"];
             if (backend.empty()) {
                 backend = "simeon (default)";
@@ -1021,18 +950,15 @@ private:
                 }
             }
 
-            // Current settings
-            if (autoEnabled) {
-                std::cout << "\nCurrent settings:\n";
-                std::cout << "  Preferred model: " << config["embeddings.preferred_model"] << "\n";
-                std::cout << "  Batch size: " << config["embeddings.batch_size"] << "\n";
-                std::cout << "  Processing delay: " << config["embeddings.generation_delay_ms"]
-                          << "ms\n";
+            // Current settings. Embeddings are generated during ingest; there is no
+            // switch for that, only the model and the runtime batch size.
+            std::cout << "\nCurrent settings:\n";
+            std::cout << "  Preferred model: " << config["embeddings.preferred_model"] << "\n";
+            if (const auto batch = config["embeddings.runtime.batch_size"]; !batch.empty()) {
+                std::cout << "  Batch size: " << batch << "\n";
             }
 
             std::cout << "\nCommands:\n";
-            std::cout << "  yams config embeddings enable   - Enable auto-generation\n";
-            std::cout << "  yams config embeddings disable  - Disable auto-generation\n";
             std::cout << "  yams config embeddings backend <simeon|onnxruntime|daemon|auto> - "
                          "Change backend\n";
             std::cout << "  yams config embeddings model <name> - Change preferred model\n";
@@ -1067,7 +993,7 @@ private:
             configs.emplace_back("embeddings.preferred_model", embeddingModel_);
 
             // Keep preferred model in the daemon preload list as the first entry.
-            auto config = parseSimpleToml(getConfigPath());
+            auto config = yams::config::parse_simple_toml(getConfigPath());
             auto preloadRaw = config["daemon.models.preload_models"];
             auto preloadModels = parseStringList(preloadRaw);
             if (!preloadModels.empty()) {
@@ -1167,31 +1093,26 @@ private:
 
             // Apply preset configurations
             if (embeddingPreset_ == "performance") {
-                configs = {{"embeddings.batch_size", "32"},
-                           {"embeddings.generation_delay_ms", "500"}};
+                configs = {{"embeddings.runtime.batch_size", "32"}};
                 // Keep user's preferred model unless unset
-                if (parseSimpleToml(getConfigPath())["embeddings.preferred_model"].empty()) {
+                if (yams::config::parse_simple_toml(getConfigPath())["embeddings.preferred_model"]
+                        .empty()) {
                     configs.push_back({"embeddings.preferred_model", "nomic-embed-text-v1.5"});
                 }
                 description = "Performance preset applied\n"
                               "  - Larger batch size (32)\n"
-                              "  - Faster processing (500ms delay)\n"
                               "  - Lightweight model (MiniLM)";
             } else if (embeddingPreset_ == "quality") {
-                configs = {{"embeddings.batch_size", "8"},
-                           {"embeddings.generation_delay_ms", "2000"},
+                configs = {{"embeddings.runtime.batch_size", "8"},
                            {"embeddings.preferred_model", "all-mpnet-base-v2"}};
                 description = "Quality preset applied\n"
                               "  - Smaller batch size (8)\n"
-                              "  - Slower processing (2000ms delay)\n"
                               "  - High-quality model (MPNet)";
             } else if (embeddingPreset_ == "balanced") {
-                configs = {{"embeddings.batch_size", "16"},
-                           {"embeddings.generation_delay_ms", "1000"},
+                configs = {{"embeddings.runtime.batch_size", "16"},
                            {"embeddings.preferred_model", "all-MiniLM-L6-v2"}};
                 description = "Balanced preset applied\n"
                               "  - Medium batch size (16)\n"
-                              "  - Moderate processing (1000ms delay)\n"
                               "  - Efficient model (MiniLM)";
             } else {
                 return Error{ErrorCode::InvalidArgument, "Unknown preset: " + embeddingPreset_};
@@ -1280,7 +1201,7 @@ private:
         try {
             auto configPath = getConfigPath();
             bool hasConfig = fs::exists(configPath);
-            auto config = parseSimpleToml(configPath);
+            auto config = yams::config::parse_simple_toml(configPath);
 
             bool enabled = false;
             if (auto it = config.find("search.path_tree.enable"); it != config.end()) {
@@ -1366,7 +1287,7 @@ private:
     Result<void> executeRerankerModelStatus() {
         try {
             auto configPath = getConfigPath();
-            auto config = parseSimpleToml(configPath);
+            auto config = yams::config::parse_simple_toml(configPath);
             std::string rerankerBackend = "simeon";
             if (auto it = config.find("search.reranker_backend");
                 it != config.end() && !it->second.empty()) {
@@ -1376,21 +1297,12 @@ private:
             if (auto it = config.find("search.reranker_model"); it != config.end()) {
                 rerankerModel = it->second;
             }
-            std::string rerankerPath;
-            if (auto it = config.find("search.reranker_model_path"); it != config.end()) {
-                rerankerPath = it->second;
-            }
             std::cout << ui::section_header("Reranker Configuration") << "\n";
             std::cout << "Backend: " << rerankerBackend << "\n";
             if (!rerankerModel.empty()) {
                 std::cout << "Model: " << rerankerModel << "\n";
             } else {
                 std::cout << "Model: (auto)\n";
-            }
-            if (!rerankerPath.empty()) {
-                std::cout << "Model path: " << rerankerPath << "\n";
-            } else {
-                std::cout << "Model path: (auto)\n";
             }
             std::cout << "\nCommands:\n";
             std::cout << "  yams config search reranker backend <simeon|onnx|colbert|auto>\n";
@@ -1655,7 +1567,7 @@ private:
 
             if (!hasUpdates) {
                 auto configPath = getConfigPath();
-                auto cfg = parseSimpleToml(configPath);
+                auto cfg = yams::config::parse_simple_toml(configPath);
                 auto getValue = [&cfg](const std::string& key,
                                        const std::string& fallback = "") -> std::string {
                     auto it = cfg.find(key);
@@ -1707,7 +1619,7 @@ private:
                 return Result<void>();
             }
 
-            auto cfg = parseSimpleToml(getConfigPath());
+            auto cfg = yams::config::parse_simple_toml(getConfigPath());
             auto getValue = [&cfg](const std::string& key,
                                    const std::string& fallback = "") -> std::string {
                 auto it = cfg.find(key);

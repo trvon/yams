@@ -1,5 +1,7 @@
 #include <yams/daemon/ipc/ipc_protocol.h>
 
+#include <array>
+
 namespace yams::daemon {
 
 // Trait to map request/response types to MessageType
@@ -223,6 +225,10 @@ template <> struct MessageTypeTraits<MetadataValueCountsRequest> {
     static constexpr MessageType value = MessageType::MetadataValueCountsRequest;
     static constexpr const char* name = "MetadataValueCounts";
 };
+template <> struct MessageTypeTraits<MemorySyncRequest> {
+    static constexpr MessageType value = MessageType::MemorySyncRequest;
+    static constexpr const char* name = "MemorySync";
+};
 template <> struct MessageTypeTraits<BatchRequest> {
     static constexpr MessageType value = MessageType::BatchRequest;
     static constexpr const char* name = "Batch";
@@ -375,6 +381,9 @@ template <> struct MessageTypeTraits<KgIngestResponse> {
 template <> struct MessageTypeTraits<MetadataValueCountsResponse> {
     static constexpr MessageType value = MessageType::MetadataValueCountsResponse;
 };
+template <> struct MessageTypeTraits<MemorySyncResponse> {
+    static constexpr MessageType value = MessageType::MemorySyncResponse;
+};
 template <> struct MessageTypeTraits<BatchResponse> {
     static constexpr MessageType value = MessageType::BatchResponse;
 };
@@ -440,8 +449,9 @@ static constexpr MessageType kRequestTypeMap[] = {
     MessageType::GraphValidateRequest,       // 51
     MessageType::KgIngestRequest,            // 52
     MessageType::MetadataValueCountsRequest, // 53
-    MessageType::BatchRequest,               // 54
-    MessageType::RepairRequest_MsgType       // 55 (RepairRequest)
+    MessageType::MemorySyncRequest,          // 54
+    MessageType::BatchRequest,               // 55
+    MessageType::RepairRequest_MsgType       // 56 (RepairRequest)
 };
 
 // MUST MATCH Request std::variant order in ipc_protocol.h
@@ -500,8 +510,9 @@ static constexpr const char* kRequestNameMap[] = {
     "GraphValidate",       // 51
     "KgIngest",            // 52
     "MetadataValueCounts", // 53
-    "Batch",               // 54
-    "Repair"               // 55
+    "MemorySync",          // 54
+    "Batch",               // 55
+    "Repair"               // 56
 };
 
 // MUST MATCH Response std::variant order in ipc_protocol.h
@@ -551,12 +562,70 @@ static constexpr MessageType kResponseTypeMap[] = {
     MessageType::GraphValidateResponse,       // 42
     MessageType::KgIngestResponse,            // 43
     MessageType::MetadataValueCountsResponse, // 44
-    MessageType::BatchResponse,               // 45
-    MessageType::EmbeddingEvent,              // 46
-    MessageType::ModelLoadEvent,              // 47
-    MessageType::RepairResponse_MsgType,      // 48
-    MessageType::RepairEvent_MsgType          // 49
+    MessageType::MemorySyncResponse,          // 45
+    MessageType::BatchResponse,               // 46
+    MessageType::EmbeddingEvent,              // 47
+    MessageType::ModelLoadEvent,              // 48
+    MessageType::RepairResponse_MsgType,      // 49
+    MessageType::RepairEvent_MsgType          // 50
 };
+
+// MUST MATCH Response std::variant order in ipc_protocol_responses.h
+static constexpr std::array<const char*, 51> kResponseNameMap = {
+    "SearchResponse",              // 0
+    "AddResponse",                 // 1
+    "GetResponse",                 // 2
+    "GetInitResponse",             // 3
+    "GetChunkResponse",            // 4
+    "StatusResponse",              // 5
+    "SuccessResponse",             // 6
+    "ErrorResponse",               // 7
+    "PongResponse",                // 8
+    "EmbeddingResponse",           // 9
+    "BatchEmbeddingResponse",      // 10
+    "ModelLoadResponse",           // 11
+    "ModelStatusResponse",         // 12
+    "ListResponse",                // 13
+    "AddDocumentResponse",         // 14
+    "GrepResponse",                // 15
+    "UpdateDocumentResponse",      // 16
+    "GetStatsResponse",            // 17
+    "DownloadResponse",            // 18
+    "ListDownloadJobsResponse",    // 19
+    "DeleteResponse",              // 20
+    "PrepareSessionResponse",      // 21
+    "EmbedDocumentsResponse",      // 22
+    "PluginScanResponse",          // 23
+    "PluginLoadResponse",          // 24
+    "PluginTrustListResponse",     // 25
+    "CatResponse",                 // 26
+    "ListSessionsResponse",        // 27
+    "ListTreeDiffResponse",        // 28
+    "FileHistoryResponse",         // 29
+    "PruneResponse",               // 30
+    "ListSnapshotsResponse",       // 31
+    "RestoreCollectionResponse",   // 32
+    "RestoreSnapshotResponse",     // 33
+    "GraphQueryResponse",          // 34
+    "GraphExploreResponse",        // 35
+    "GraphSymbolLookupResponse",   // 36
+    "GraphTraceResponse",          // 37
+    "GraphImpactResponse",         // 38
+    "GraphAffectedTestsResponse",  // 39
+    "GraphPathHistoryResponse",    // 40
+    "GraphRepairResponse",         // 41
+    "GraphValidateResponse",       // 42
+    "KgIngestResponse",            // 43
+    "MetadataValueCountsResponse", // 44
+    "MemorySyncResponse",          // 45
+    "BatchResponse",               // 46
+    "EmbeddingEvent",              // 47
+    "ModelLoadEvent",              // 48
+    "RepairResponse",              // 49
+    "RepairEvent"                  // 50
+};
+
+static_assert(std::size(kResponseNameMap) == std::variant_size_v<Response>);
 
 MessageType getMessageType(const Request& req) {
     const size_t idx = req.index();
@@ -581,6 +650,14 @@ std::string getRequestName(const Request& req) {
         return kRequestNameMap[idx];
     }
     return "Unknown";
+}
+
+std::string getResponseName(const Response& res) {
+    const size_t idx = res.index();
+    if (idx < std::size(kResponseNameMap)) {
+        return kResponseNameMap[idx];
+    }
+    return "UnknownResponse";
 }
 
 } // namespace yams::daemon

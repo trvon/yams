@@ -8,6 +8,7 @@
 #include <spdlog/spdlog.h>
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -45,6 +46,7 @@ struct ExternalPluginHost::Impl {
     ServiceManager* service_manager{nullptr};
     std::filesystem::path trust_file;
     ExternalPluginHostConfig config;
+    mutable std::mutex lifecycle_mutex;
     mutable std::mutex mutex;
     std::unordered_map<std::string, std::unique_ptr<ExternalPluginInstance>> loaded;
     std::set<std::filesystem::path> trusted;
@@ -60,17 +62,27 @@ struct ExternalPluginHost::Impl {
         loadTrust();
     }
 
-    ~Impl() {
-        // Unload all plugins gracefully
-        std::vector<std::string> names;
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            for (const auto& [name, _] : loaded) {
-                names.push_back(name);
+    ~Impl() noexcept {
+        try {
+            std::vector<std::string> names;
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                for (const auto& [name, _] : loaded) {
+                    names.push_back(name);
+                }
             }
-        }
-        for (const auto& name : names) {
-            unload(name);
+            for (const auto& name : names) {
+                try {
+                    auto result = unload(name);
+                    if (!result) {
+                        std::fputs("ExternalPluginHost shutdown unload failed\n", stderr);
+                    }
+                } catch (...) {
+                    std::fputs("ExternalPluginHost shutdown unload threw\n", stderr);
+                }
+            }
+        } catch (...) {
+            std::fputs("ExternalPluginHost shutdown enumeration failed\n", stderr);
         }
     }
 
@@ -155,15 +167,21 @@ struct ExternalPluginHost::Impl {
             }
         }
 
-        // Fall back to launching process to get manifest (for standalone scripts)
+        // Standalone script discovery requires execution. Never execute an untrusted path during
+        // scan or dry-run; manifest-backed plugins above remain metadata-only until load.
+        if (!desc && !isTrusted(file)) {
+            return Error{ErrorCode::Unauthorized, "Plugin is not in trust list: " + file.string()};
+        }
+
+        // Fall back to launching a trusted process to get its manifest.
         if (!desc) {
-            spdlog::debug("ExternalPluginHost: Spawning process to get manifest for {}",
+            spdlog::debug("ExternalPluginHost: Spawning trusted process to get manifest for {}",
                           file.string());
             auto proc_config = buildProcessConfig(file);
             auto process = std::make_unique<extraction::PluginProcess>(std::move(proc_config));
             auto rpc_client = std::make_unique<extraction::JsonRpcClient>(*process);
 
-            auto result = rpc_client->call("handshake.manifest");
+            auto result = rpc_client->call("handshake.manifest", nullptr, config.defaultRpcTimeout);
             if (!result) {
                 return Error{ErrorCode::IOError,
                              "Failed to get manifest from plugin: " + file.string()};
@@ -172,7 +190,7 @@ struct ExternalPluginHost::Impl {
             desc = buildDescriptorFromManifest(result.value(), file);
 
             // Shutdown the temporary process
-            (void)rpc_client->call("plugin.shutdown");
+            (void)rpc_client->call("plugin.shutdown", nullptr, config.defaultRpcTimeout);
         }
 
         // Cache the result
@@ -222,6 +240,7 @@ struct ExternalPluginHost::Impl {
 
     auto load(const std::filesystem::path& file, const std::string& configJson)
         -> Result<PluginDescriptor> {
+        std::lock_guard lifecycleLock(lifecycle_mutex);
         spdlog::info("ExternalPluginHost::load() called for: {}", file.string());
 
         // Validate file exists and is trusted
@@ -244,8 +263,8 @@ struct ExternalPluginHost::Impl {
         // Check if already loaded and max plugins limit
         {
             std::lock_guard<std::mutex> lock(mutex);
-            if (loaded.find(name) != loaded.end()) {
-                return Error{ErrorCode::InvalidState, "Plugin already loaded: " + name};
+            if (const auto existing = loaded.find(name); existing != loaded.end()) {
+                return existing->second->descriptor;
             }
             if (loaded.size() >= config.maxPlugins) {
                 return Error{ErrorCode::ResourceExhausted, "Maximum number of plugins loaded"};
@@ -259,7 +278,7 @@ struct ExternalPluginHost::Impl {
         auto rpc_client = std::make_unique<extraction::JsonRpcClient>(*process);
 
         // Handshake (required by plugin protocol)
-        if (!rpc_client->call("handshake.manifest")) {
+        if (!rpc_client->call("handshake.manifest", nullptr, config.defaultRpcTimeout)) {
             return Error{ErrorCode::IOError, "Handshake failed during load"};
         }
 
@@ -273,7 +292,7 @@ struct ExternalPluginHost::Impl {
             }
         }
 
-        if (!rpc_client->call("plugin.init", init_params)) {
+        if (!rpc_client->call("plugin.init", init_params, config.defaultRpcTimeout)) {
             return Error{ErrorCode::IOError, "Plugin init failed"};
         }
 
@@ -300,6 +319,7 @@ struct ExternalPluginHost::Impl {
     }
 
     auto unload(const std::string& name) -> Result<void> {
+        std::lock_guard lifecycleLock(lifecycle_mutex);
         std::unique_ptr<ExternalPluginInstance> instance;
 
         {
@@ -314,7 +334,8 @@ struct ExternalPluginHost::Impl {
 
         // Graceful shutdown via RPC
         if (instance->rpc_client) {
-            auto result = instance->rpc_client->call("plugin.shutdown");
+            auto result =
+                instance->rpc_client->call("plugin.shutdown", nullptr, config.defaultRpcTimeout);
             if (!result) {
                 spdlog::warn("Plugin '{}' shutdown RPC failed", name);
             }
@@ -381,7 +402,6 @@ struct ExternalPluginHost::Impl {
             // Try to restart if policy allows
             if (instance->restart_count < static_cast<size_t>(config.restartPolicy.maxRetries)) {
                 auto path = instance->descriptor.path;
-                auto config_json = instance->descriptor.manifestJson;
 
                 spdlog::warn("Plugin '{}' crashed, attempting restart ({}/{})", name,
                              instance->restart_count + 1, config.restartPolicy.maxRetries);
@@ -396,9 +416,11 @@ struct ExternalPluginHost::Impl {
                     instance->rpc_client =
                         std::make_unique<extraction::JsonRpcClient>(*instance->process);
 
-                    auto handshake = instance->rpc_client->call("handshake.manifest");
+                    auto handshake = instance->rpc_client->call("handshake.manifest", nullptr,
+                                                                config.defaultRpcTimeout);
                     if (handshake) {
-                        auto init = instance->rpc_client->call("plugin.init");
+                        auto init = instance->rpc_client->call("plugin.init", nullptr,
+                                                               config.defaultRpcTimeout);
                         if (init) {
                             instance->healthy = true;
                             if (state_callback) {
@@ -407,8 +429,10 @@ struct ExternalPluginHost::Impl {
                             return std::string(R"({"status":"restarted"})");
                         }
                     }
+                } catch (const std::exception& e) {
+                    spdlog::warn("Plugin '{}' restart failed: {}", name, e.what());
                 } catch (...) {
-                    // Restart failed
+                    spdlog::warn("Plugin '{}' restart failed with unknown error", name);
                 }
             }
 
@@ -419,7 +443,8 @@ struct ExternalPluginHost::Impl {
         }
 
         // Call health RPC
-        auto result = instance->rpc_client->call("plugin.health");
+        auto result =
+            instance->rpc_client->call("plugin.health", nullptr, config.defaultRpcTimeout);
         if (!result) {
             instance->healthy = false;
             return Error{ErrorCode::IOError, "Health check RPC failed"};
@@ -930,12 +955,18 @@ private:
     }
 
     bool isTrusted(const std::filesystem::path& path) const {
+        std::set<std::filesystem::path> trustEntries;
+        {
+            std::lock_guard lock(mutex);
+            trustEntries = trusted;
+        }
+
         std::error_code ec;
         auto candidate = fs::weakly_canonical(path, ec);
         if (ec)
             candidate = path;
 
-        for (const auto& entry : trusted) {
+        for (const auto& entry : trustEntries) {
             std::error_code tec;
             auto base = fs::weakly_canonical(entry, tec);
             if (tec)

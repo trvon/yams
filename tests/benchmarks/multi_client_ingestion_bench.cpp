@@ -524,9 +524,7 @@ public:
 
 class MCPPipelineClient {
 public:
-    explicit MCPPipelineClient(const fs::path& socketPath) {
-        ::setenv("YAMS_DAEMON_SOCKET_PATH", socketPath.string().c_str(), 1);
-        ::setenv("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1", 1);
+    MCPPipelineClient() {
         server_ = std::make_shared<yams::mcp::MCPServer>(std::make_unique<NullTransport>());
         initialize();
     }
@@ -661,11 +659,13 @@ private:
 
 class MCPPipelineClientPool {
 public:
-    MCPPipelineClientPool(const fs::path& socketPath, size_t poolSize) {
+    MCPPipelineClientPool(const fs::path& socketPath, size_t poolSize)
+        : socketEnvironment_("YAMS_DAEMON_SOCKET_PATH", socketPath.string()),
+          autoStartEnvironment_("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", std::string{"1"}) {
         const size_t size = std::max<size_t>(1, poolSize);
         clients_.reserve(size);
         for (size_t i = 0; i < size; ++i) {
-            clients_.push_back(std::make_unique<MCPPipelineClient>(socketPath));
+            clients_.push_back(std::make_unique<MCPPipelineClient>());
         }
     }
 
@@ -676,6 +676,8 @@ public:
     }
 
 private:
+    yams::test::ScopedEnvVar socketEnvironment_;
+    yams::test::ScopedEnvVar autoStartEnvironment_;
     std::vector<std::unique_ptr<MCPPipelineClient>> clients_;
 };
 
@@ -5268,27 +5270,18 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
     //   searchBuildTimeout:   unclamped
     std::string timeoutStr =
         std::to_string(std::min(checkedMulToInt(kOpTimeoutS, 2000, 600000), 600000));
-#ifdef _WIN32
-    if (!std::getenv("YAMS_SEARCH_BUILD_TIMEOUT_MS"))
-        _putenv_s("YAMS_SEARCH_BUILD_TIMEOUT_MS", "120000");
-    if (!std::getenv("YAMS_IPC_TIMEOUT_MS"))
-        _putenv_s("YAMS_IPC_TIMEOUT_MS", timeoutStr.c_str());
-    if (!std::getenv("YAMS_STREAM_CHUNK_TIMEOUT_MS"))
-        _putenv_s("YAMS_STREAM_CHUNK_TIMEOUT_MS", timeoutStr.c_str());
-#else
-    if (!std::getenv("YAMS_SEARCH_BUILD_TIMEOUT_MS"))
-        ::setenv("YAMS_SEARCH_BUILD_TIMEOUT_MS", "120000", 0);
-    if (!std::getenv("YAMS_IPC_TIMEOUT_MS"))
-        ::setenv("YAMS_IPC_TIMEOUT_MS", timeoutStr.c_str(), 0);
-    if (!std::getenv("YAMS_STREAM_CHUNK_TIMEOUT_MS"))
-        ::setenv("YAMS_STREAM_CHUNK_TIMEOUT_MS", timeoutStr.c_str(), 0);
-#endif
+    std::vector<yams::test::ScopedEnvVar> timeoutEnvironment;
+    if (!yams::config::getenv_nonempty("YAMS_SEARCH_BUILD_TIMEOUT_MS"))
+        timeoutEnvironment.emplace_back("YAMS_SEARCH_BUILD_TIMEOUT_MS", std::string{"120000"});
+    if (!yams::config::getenv_nonempty("YAMS_IPC_TIMEOUT_MS"))
+        timeoutEnvironment.emplace_back("YAMS_IPC_TIMEOUT_MS", timeoutStr);
+    if (!yams::config::getenv_nonempty("YAMS_STREAM_CHUNK_TIMEOUT_MS"))
+        timeoutEnvironment.emplace_back("YAMS_STREAM_CHUNK_TIMEOUT_MS", timeoutStr);
 
-    const char* ipcTimeoutEnv = std::getenv("YAMS_IPC_TIMEOUT_MS");
-    const char* streamTimeoutEnv = std::getenv("YAMS_STREAM_CHUNK_TIMEOUT_MS");
-    std::cout << "  IPC timeout:    " << (ipcTimeoutEnv ? ipcTimeoutEnv : "default") << " ms\n";
-    std::cout << "  Stream timeout: " << (streamTimeoutEnv ? streamTimeoutEnv : "default")
-              << " ms\n";
+    const auto ipcTimeout = yams::config::getenv_nonempty("YAMS_IPC_TIMEOUT_MS");
+    const auto streamTimeout = yams::config::getenv_nonempty("YAMS_STREAM_CHUNK_TIMEOUT_MS");
+    std::cout << "  IPC timeout:    " << ipcTimeout.value_or("default") << " ms\n";
+    std::cout << "  Stream timeout: " << streamTimeout.value_or("default") << " ms\n";
 
     // --- Start daemon ---
     auto opts = benchHarnessOptions(cfg);
@@ -5339,7 +5332,7 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
 
         mcpTransientSessionCalls.fetch_add(1, std::memory_order_relaxed);
         try {
-            MCPPipelineClient transientClient(harness.socketPath());
+            MCPPipelineClient transientClient;
             return transientClient.queryStep(op, params);
         } catch (const std::exception& e) {
             return yams::Error{yams::ErrorCode::InvalidState,
@@ -5365,7 +5358,11 @@ TEST_CASE("Multi-client ingestion: large corpus reads",
             return true;
         }
 
-        MCPPipelineClient sessionClient(harness.socketPath());
+        yams::test::ScopedEnvVar socketEnvironment{"YAMS_DAEMON_SOCKET_PATH",
+                                                   harness.socketPath().string()};
+        yams::test::ScopedEnvVar autoStartEnvironment{"YAMS_CLI_DISABLE_DAEMON_AUTOSTART",
+                                                      std::string{"1"}};
+        MCPPipelineClient sessionClient;
         auto startRes = sessionClient.queryStep("session_start",
                                                 {{"name", sessionName},
                                                  {"description", "large corpus benchmark session"},

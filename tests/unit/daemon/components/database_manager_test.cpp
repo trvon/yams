@@ -8,7 +8,10 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/daemon/components/DatabaseManager.h>
+#include <yams/daemon/components/db_integrity_stamp.h>
 #include <yams/daemon/components/StateComponent.h>
+#include <yams/metadata/connection_pool.h>
+#include <yams/metadata/database.h>
 
 #include <chrono>
 #include <filesystem>
@@ -52,7 +55,8 @@ TEST_CASE_METHOD(DatabaseManagerFixture, "DatabaseManager construction",
 
     SECTION("construction succeeds with valid dependencies") {
         DatabaseManager mgr(deps);
-        CHECK(mgr.getName() == std::string("DatabaseManager"));
+        const bool hasExpectedName = std::string(mgr.getName()) == "DatabaseManager";
+        CHECK(hasExpectedName);
     }
 }
 
@@ -91,20 +95,43 @@ TEST_CASE_METHOD(DatabaseManagerFixture, "DatabaseManager accessor before/after 
     DatabaseManager mgr(deps);
 
     SECTION("getDatabase returns nullptr before init") {
-        CHECK(mgr.getDatabase() == nullptr);
+        CHECK_FALSE(static_cast<bool>(mgr.getDatabase()));
     }
 
     SECTION("getConnectionPool returns nullptr before init") {
-        CHECK(mgr.getConnectionPool() == nullptr);
+        CHECK_FALSE(static_cast<bool>(mgr.getConnectionPool()));
     }
 
     SECTION("getMetadataRepo returns nullptr before init") {
-        CHECK(mgr.getMetadataRepo() == nullptr);
+        CHECK_FALSE(static_cast<bool>(mgr.getMetadataRepo()));
     }
 
     SECTION("isReady returns false before init") {
         CHECK_FALSE(mgr.isReady());
     }
+}
+
+TEST_CASE_METHOD(DatabaseManagerFixture,
+                 "DatabaseManager refuses a clean stamp while a connection lease is active",
+                 "[daemon][components][database][integrity_stamp][catch2]") {
+    const auto dbPath = tempDir / "yams.db";
+    auto database = std::make_shared<yams::metadata::Database>();
+    REQUIRE(database->open(dbPath.string(), yams::metadata::ConnectionMode::Create));
+
+    DatabaseManager mgr(makeDeps());
+    mgr.setDatabase(database);
+    REQUIRE(mgr.initializePools(dbPath));
+
+    auto pool = mgr.getConnectionPool();
+    REQUIRE(pool);
+    auto lease = pool->acquire();
+    REQUIRE(lease);
+
+    mgr.setIntegrityStampEligible(true);
+    mgr.shutdown();
+
+    const auto decision = consumeDbCleanShutdownStamp(dbPath);
+    CHECK_FALSE(decision.trustedCleanShutdown);
 }
 
 TEST_CASE("DatabaseManager getName returns component name",
@@ -114,5 +141,6 @@ TEST_CASE("DatabaseManager getName returns component name",
     deps.state = &state;
     DatabaseManager mgr(deps);
 
-    CHECK(std::string(mgr.getName()) == "DatabaseManager");
+    const bool hasExpectedName = std::string(mgr.getName()) == "DatabaseManager";
+    CHECK(hasExpectedName);
 }

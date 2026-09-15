@@ -33,8 +33,10 @@ class ExternalPluginHost;
  */
 class PluginContentExtractorAdapter : public yams::extraction::IContentExtractor {
 public:
-    /// Construct adapter for an ABI (native) plugin
+    /// Construct adapter for an ABI (native) plugin.
     explicit PluginContentExtractorAdapter(yams_content_extractor_v1* table, std::string name = {});
+    PluginContentExtractorAdapter(yams_content_extractor_v1* table,
+                                  std::shared_ptr<void> pluginKeepalive, std::string name = {});
 
     /// Construct adapter for an external plugin
     /// Default timeout is 5 minutes to allow for heavy operations like Ghidra decompilation
@@ -76,6 +78,7 @@ private:
     // ABI backend - direct function table calls
     struct AbiBackend {
         yams_content_extractor_v1* table{nullptr};
+        std::shared_ptr<void> pluginKeepalive;
     };
 
     // External backend - JSON-RPC calls via ExternalPluginHost

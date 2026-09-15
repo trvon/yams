@@ -12,6 +12,7 @@
 #include <yams/daemon/resource/onnx_model_pool.h>
 
 #include "../../common/env_compat.h"
+#include "../../common/test_helpers_catch2.h"
 #include "plugins/onnx/ort_runtime_loader.h"
 
 #include <algorithm>
@@ -252,7 +253,7 @@ TEST_CASE("ONNX Diagnostic: GPU model load and embed",
         REQUIRE(warm);
     }
     UNSCOPED_INFO("  warm avg time: " << (warmTotalMs / kWarmIters) << " ms");
-    CHECK(mat.size() == texts.size());
+    CHECK((mat.size() == texts.size()));
 }
 
 // ---------------------------------------------------------------------------
@@ -330,7 +331,7 @@ TEST_CASE("ONNX Diagnostic: CPU model load and embed",
     if (!mat.empty()) {
         UNSCOPED_INFO("  embedding dim returned: " << mat[0].size());
     }
-    CHECK(mat.size() == texts.size());
+    CHECK((mat.size() == texts.size()));
 }
 
 // ---------------------------------------------------------------------------
@@ -467,7 +468,7 @@ TEST_CASE("ONNX Diagnostic: GPU vs CPU comparison", "[daemon][onnx][diagnostic][
     if (gpuEmbedOk && cpuEmbedOk) {
         UNSCOPED_INFO("  DIAGNOSIS: Both GPU and CPU work. Issue is elsewhere (ABI, cooldown, "
                       "daemon state).");
-        CHECK(gpuDim == cpuDim);
+        CHECK((gpuDim == cpuDim));
     } else if (!gpuEmbedOk && cpuEmbedOk) {
         UNSCOPED_INFO("  DIAGNOSIS: GPU fails but CPU works => CoreML / GPU issue.");
         FAIL("GPU embedding fails while CPU succeeds. GPU error: " + gpuError);
@@ -574,9 +575,9 @@ TEST_CASE("ONNX Diagnostic: single vs batch embedding path",
 
     CHECK(cpu.singleOk);
     CHECK(cpu.batchOk);
-    CHECK(cpu.batchSize == 2);
-    CHECK(cpu.singleDim > 0);
-    CHECK(cpu.batchDim > 0);
+    CHECK((cpu.batchSize == 2));
+    CHECK((cpu.singleDim > 0));
+    CHECK((cpu.batchDim > 0));
 }
 
 TEST_CASE("ONNX Diagnostic: Gemma GPU fallback behavior",
@@ -649,14 +650,14 @@ TEST_CASE("ONNX Diagnostic: Gemma GPU fallback behavior",
 
     CHECK(gpu.ok);
     CHECK(cpu.ok);
-    CHECK(gpu.initialEp == "coreml");
-    CHECK(gpu.finalEp == "cpu");
-    CHECK(gpu.batchSize == 2);
-    CHECK(gpu.dim > 0);
-    CHECK(cpu.initialEp == "cpu");
-    CHECK(cpu.finalEp == "cpu");
-    CHECK(cpu.batchSize == 2);
-    CHECK(cpu.dim > 0);
+    CHECK((gpu.initialEp == "coreml"));
+    CHECK((gpu.finalEp == "cpu"));
+    CHECK((gpu.batchSize == 2));
+    CHECK((gpu.dim > 0));
+    CHECK((cpu.initialEp == "cpu"));
+    CHECK((cpu.finalEp == "cpu"));
+    CHECK((cpu.batchSize == 2));
+    CHECK((cpu.dim > 0));
 }
 
 // ---------------------------------------------------------------------------
@@ -694,8 +695,6 @@ TEST_CASE("ONNX Diagnostic: CoreML config variants",
         bool enableGpu;
     };
 
-    std::string modelsRoot = resolveModelsRoot();
-    std::string modelDir = (fs::path(modelsRoot) / modelName).string();
     std::string diagCacheRoot =
         (fs::temp_directory_path() / "yams-coreml-diagnostic-cache").string();
 
@@ -733,16 +732,17 @@ TEST_CASE("ONNX Diagnostic: CoreML config variants",
         TimingResult timing;
         timing.label = variant.label;
 
-        // Set env vars for this variant
+        // Set env vars for this variant and restore their exact prior values after the run.
+        std::vector<yams::test::ScopedEnvVar> environment;
         if (variant.enableGpu) {
             if (!variant.computeUnits.empty())
-                ::setenv("YAMS_COREML_COMPUTE_UNITS", variant.computeUnits.c_str(), 1);
+                environment.emplace_back("YAMS_COREML_COMPUTE_UNITS", variant.computeUnits);
             if (!variant.modelFormat.empty())
-                ::setenv("YAMS_COREML_MODEL_FORMAT", variant.modelFormat.c_str(), 1);
+                environment.emplace_back("YAMS_COREML_MODEL_FORMAT", variant.modelFormat);
             if (!variant.cacheDir.empty())
-                ::setenv("YAMS_COREML_CACHE_DIR", variant.cacheDir.c_str(), 1);
+                environment.emplace_back("YAMS_COREML_CACHE_DIR", variant.cacheDir);
             if (variant.disableCache) {
-                ::setenv("YAMS_COREML_DISABLE_CACHE", "1", 1);
+                environment.emplace_back("YAMS_COREML_DISABLE_CACHE", std::string{"1"});
             }
         }
 
@@ -803,12 +803,6 @@ TEST_CASE("ONNX Diagnostic: CoreML config variants",
                 timing.error = std::string("exception: ") + ex.what();
             }
         }
-
-        // Clean up env vars
-        ::unsetenv("YAMS_COREML_COMPUTE_UNITS");
-        ::unsetenv("YAMS_COREML_MODEL_FORMAT");
-        ::unsetenv("YAMS_COREML_CACHE_DIR");
-        ::unsetenv("YAMS_COREML_DISABLE_CACHE");
 
         results.push_back(timing);
     }
@@ -909,14 +903,16 @@ TEST_CASE("ONNX Diagnostic: MIGraphX config variants",
         row.label = variant.label;
 
         // Configure MIGraphX knobs for this run.
+        std::vector<yams::test::ScopedEnvVar> environment;
         if (variant.enableGpu) {
-            ::setenv("YAMS_MIGRAPHX_FP16", variant.fp16 ? "1" : "0", 1);
-            ::setenv("YAMS_MIGRAPHX_FP8", "0", 1);
-            ::setenv("YAMS_MIGRAPHX_INT8", "0", 1);
-            ::setenv("YAMS_MIGRAPHX_EXHAUSTIVE_TUNE", "0", 1);
+            environment.emplace_back("YAMS_MIGRAPHX_FP16",
+                                     variant.fp16 ? std::string{"1"} : std::string{"0"});
+            environment.emplace_back("YAMS_MIGRAPHX_FP8", std::string{"0"});
+            environment.emplace_back("YAMS_MIGRAPHX_INT8", std::string{"0"});
+            environment.emplace_back("YAMS_MIGRAPHX_EXHAUSTIVE_TUNE", std::string{"0"});
             // Keep caching enabled by default; relies on model directory cache.
-            ::setenv("YAMS_MIGRAPHX_SAVE_COMPILED", "1", 1);
-            ::setenv("YAMS_MIGRAPHX_LOAD_COMPILED", "1", 1);
+            environment.emplace_back("YAMS_MIGRAPHX_SAVE_COMPILED", std::string{"1"});
+            environment.emplace_back("YAMS_MIGRAPHX_LOAD_COMPILED", std::string{"1"});
         }
 
         {
@@ -977,15 +973,6 @@ TEST_CASE("ONNX Diagnostic: MIGraphX config variants",
             } catch (const std::exception& ex) {
                 row.error = std::string("exception: ") + ex.what();
             }
-        }
-
-        if (variant.enableGpu) {
-            ::unsetenv("YAMS_MIGRAPHX_FP16");
-            ::unsetenv("YAMS_MIGRAPHX_FP8");
-            ::unsetenv("YAMS_MIGRAPHX_INT8");
-            ::unsetenv("YAMS_MIGRAPHX_EXHAUSTIVE_TUNE");
-            ::unsetenv("YAMS_MIGRAPHX_SAVE_COMPILED");
-            ::unsetenv("YAMS_MIGRAPHX_LOAD_COMPILED");
         }
 
         results.push_back(row);
@@ -1113,8 +1100,8 @@ TEST_CASE("ONNX Benchmark: batch size sweep", "[daemon][onnx][benchmark][.requir
     // Verify we got results for all batch sizes (throughput comparison is
     // informational — with max-length padding, large batches may be slower
     // due to memory pressure; dynamic padding would fix this).
-    REQUIRE(results.size() >= 2);
-    CHECK(results.front().textsPerSec > 0.0);
+    REQUIRE((results.size() >= 2));
+    CHECK((results.front().textsPerSec > 0.0));
 }
 
 // ---------------------------------------------------------------------------
@@ -1217,7 +1204,7 @@ TEST_CASE("ONNX Benchmark: concurrent inference throughput",
 
     // All threads should succeed
     for (const auto& r : results) {
-        CHECK(r.successes == r.threadCount * kInferenceCycles);
+        CHECK((r.successes == r.threadCount * kInferenceCycles));
     }
 }
 
@@ -1288,8 +1275,8 @@ TEST_CASE("ONNX Benchmark: session reuse performance",
     UNSCOPED_INFO("================================================================");
 
     // Warm acquires (cycles 1+) should be faster than cold (cycle 0)
-    REQUIRE(results.size() >= 2);
-    CHECK(results[1].acquireMs <= results[0].acquireMs);
+    REQUIRE((results.size() >= 2));
+    CHECK((results[1].acquireMs <= results[0].acquireMs));
 }
 
 // ---------------------------------------------------------------------------
@@ -1362,7 +1349,7 @@ TEST_CASE("ONNX Benchmark: dynamic padding throughput",
 
     // --- Run with dynamic padding OFF ---
     {
-        ::setenv("YAMS_ONNX_DYNAMIC_PADDING", "0", 1);
+        yams::test::ScopedEnvVar dynamicPadding{"YAMS_ONNX_DYNAMIC_PADDING", std::string{"0"}};
 
         DiagnosticFixture fix(false);
         fix.pool_ = std::make_unique<OnnxModelPool>(fix.config_);
@@ -1394,8 +1381,6 @@ TEST_CASE("ONNX Benchmark: dynamic padding throughput",
             double tps = avgMs > 0 ? (static_cast<double>(kCorpusSize) / avgMs) * 1000.0 : 0.0;
             allResults.push_back({bs, avgMs, tps, "Dynamic OFF"});
         }
-
-        ::unsetenv("YAMS_ONNX_DYNAMIC_PADDING");
     }
 
     // Print comparison table
@@ -1415,8 +1400,8 @@ TEST_CASE("ONNX Benchmark: dynamic padding throughput",
     UNSCOPED_INFO("================================================================");
 
     // Dynamic padding ON should not be slower than OFF for short texts
-    REQUIRE(allResults.size() >= 2);
-    CHECK(allResults.front().textsPerSec > 0.0);
+    REQUIRE((allResults.size() >= 2));
+    CHECK((allResults.front().textsPerSec > 0.0));
 }
 
 } // namespace yams::daemon::test

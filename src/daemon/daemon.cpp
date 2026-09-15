@@ -125,17 +125,83 @@ void YamsDaemon::restoreTuningProfileOverrideSnapshot() noexcept {
     tuningProfileOverrideSnapshotActive_ = false;
 }
 
+void YamsDaemon::leaseRuntimeEnvironment(const char* name, const std::string& value) {
+    const auto [lease, inserted] = runtimeEnvironmentLeases_.try_emplace(name);
+    if (!inserted) {
+        throw std::logic_error(
+            std::string{"YamsDaemon attempted to lease environment key twice: "} + name);
+    }
+
+    const auto token = yams::config::set_environment_owned(name, value.c_str());
+    if (!token.has_value()) {
+        runtimeEnvironmentLeases_.erase(lease);
+        throw std::runtime_error(std::string{"YamsDaemon failed to lease environment key "} + name);
+    }
+    lease->second.token = *token;
+}
+
+void YamsDaemon::restoreRuntimeEnvironment() noexcept {
+    for (const auto& [name, lease] : runtimeEnvironmentLeases_) {
+        const auto result = yams::config::restore_environment_if_owned(name.c_str(), lease.token);
+        if (result == yams::config::EnvironmentRestoreResult::OwnershipLost) {
+            std::fprintf(stderr, "YamsDaemon left newer environment owner unchanged for key %s\n",
+                         name.c_str());
+        } else if (result == yams::config::EnvironmentRestoreResult::Error) {
+            std::fputs("YamsDaemon failed to restore runtime environment\n", stderr);
+        }
+    }
+    runtimeEnvironmentLeases_.clear();
+}
+
 YamsDaemon::YamsDaemon(const DaemonConfig& config)
     : config_(config), asyncInitStartedFuture_(asyncInitStartedPromise_.get_future().share()) {
     spdlog::info("[YamsDaemon] Constructor entry");
-    // Resolve paths if not explicitly set
-    if (config_.socketPath.empty()) {
-        // Keep centralized FSM-based resolution for consistency with client/CLI
-        config_.socketPath = yams::daemon::ConnectionFsm::resolve_socket_path_config_first();
+    yams::config::RuntimePathOverrides pathOverrides;
+    if (!config_.configFilePath.empty()) {
+        pathOverrides.configFile = config_.configFilePath;
     }
-    if (config_.pidFile.empty()) {
-        config_.pidFile = resolveSystemPath(PathType::PidFile);
+    if (!config_.dataDir.empty()) {
+        pathOverrides.dataDir = config_.dataDir;
     }
+    if (!config_.socketPath.empty()) {
+        pathOverrides.socketPath = config_.socketPath;
+    }
+    if (!config_.pidFile.empty()) {
+        pathOverrides.pidFile = config_.pidFile;
+    }
+    auto runtimePaths = yams::config::resolve_runtime_paths(pathOverrides);
+    if (!runtimePaths) {
+        throw std::invalid_argument(runtimePaths.error().message);
+    }
+    config_.configFilePath = runtimePaths.value().configFile.value;
+    config_.dataDir = runtimePaths.value().dataDir.value;
+    config_.socketPath = runtimePaths.value().socketPath.value;
+    config_.pidFile = runtimePaths.value().pidFile.value;
+    for (const auto& diagnostic : runtimePaths.value().diagnostics) {
+        spdlog::warn("YamsDaemon runtime path policy: {}", diagnostic);
+    }
+    const auto restoreEnvironment = [this](YamsDaemon*) { restoreRuntimeEnvironment(); };
+    std::unique_ptr<YamsDaemon, decltype(restoreEnvironment)> restoreOnFailure(this,
+                                                                               restoreEnvironment);
+
+    // Normalize compatibility aliases before constructing dependent components. Their
+    // constructors perform ordinary config/path lookups and must observe this resolved snapshot.
+    leaseRuntimeEnvironment("YAMS_IN_DAEMON", "1");
+    if (!config_.dataDir.empty()) {
+        leaseRuntimeEnvironment("YAMS_STORAGE", config_.dataDir.string());
+        leaseRuntimeEnvironment("YAMS_DATA_DIR", config_.dataDir.string());
+        spdlog::debug("Seeded data path aliases='{}'", config_.dataDir.string());
+    }
+    if (!config_.configFilePath.empty()) {
+        leaseRuntimeEnvironment("YAMS_CONFIG", config_.configFilePath.string());
+        leaseRuntimeEnvironment("YAMS_CONFIG_PATH", config_.configFilePath.string());
+        spdlog::debug("Seeded config path aliases='{}'", config_.configFilePath.string());
+    }
+    if (!config_.socketPath.empty()) {
+        leaseRuntimeEnvironment("YAMS_DAEMON_SOCKET", config_.socketPath.string());
+        spdlog::debug("Seeded YAMS_DAEMON_SOCKET='{}'", config_.socketPath.string());
+    }
+
     if (config_.logFile.empty()) {
         config_.logFile = resolveSystemPath(PathType::LogFile);
     }
@@ -183,41 +249,8 @@ YamsDaemon::YamsDaemon(const DaemonConfig& config)
     spdlog::info("  PID file: {}", config_.pidFile.string());
     spdlog::info("  Log file: {}", config_.logFile.string());
 
-    // Let in-process components such as EmbeddingGenerator know they are running.
-    // inside the daemon so they can avoid creating a DaemonBackend and self-calling the IPC API.
-#ifndef _WIN32
-    ::setenv("YAMS_IN_DAEMON", "1", 1); // NOLINT(concurrency-mt-unsafe)
-#else
-    _putenv_s("YAMS_IN_DAEMON", "1");
-#endif
-
-    if (!config_.dataDir.empty()) {
-#ifndef _WIN32
-        ::setenv("YAMS_STORAGE", config_.dataDir.c_str(), 1); // NOLINT(concurrency-mt-unsafe)
-#else
-        _putenv_s("YAMS_STORAGE", config_.dataDir.string().c_str());
-#endif
-        spdlog::debug("Seeded YAMS_STORAGE='{}'", config_.dataDir.string());
-    }
-
-    if (!config_.configFilePath.empty()) {
-#ifndef _WIN32
-        ::setenv("YAMS_CONFIG", config_.configFilePath.c_str(), 1); // NOLINT(concurrency-mt-unsafe)
-#else
-        _putenv_s("YAMS_CONFIG", config_.configFilePath.string().c_str());
-#endif
-        spdlog::debug("Seeded YAMS_CONFIG='{}'", config_.configFilePath.string());
-    }
-
-    if (!config_.socketPath.empty()) {
-#ifndef _WIN32
-        ::setenv("YAMS_DAEMON_SOCKET", config_.socketPath.c_str(),
-                 1); // NOLINT(concurrency-mt-unsafe)
-#else
-        _putenv_s("YAMS_DAEMON_SOCKET", config_.socketPath.string().c_str());
-#endif
-        spdlog::debug("Seeded YAMS_DAEMON_SOCKET='{}'", config_.socketPath.string());
-    }
+    // Successful construction transfers environment restoration to the daemon destructor.
+    [[maybe_unused]] YamsDaemon* environmentOwner = restoreOnFailure.release();
 }
 
 YamsDaemon::~YamsDaemon() {
@@ -245,6 +278,12 @@ YamsDaemon::~YamsDaemon() {
         }
     }
 
+    // Constructor-only and failed-start daemons may retain ServiceManager through callbacks. End
+    // their process-global tuning membership even when no running stop path was needed.
+    if (serviceManager_) {
+        serviceManager_->releaseTuningLifecycle();
+    }
+
     try {
         reapCompletedShutdownThread();
     } catch (const std::exception& e) {
@@ -256,6 +295,7 @@ YamsDaemon::~YamsDaemon() {
     }
 
     restoreTuningProfileOverrideSnapshot();
+    restoreRuntimeEnvironment();
 }
 
 Result<size_t> YamsDaemon::autoloadPluginsNow() {
@@ -643,8 +683,7 @@ Result<void> YamsDaemon::start() {
     // Fast-start mode for tests: skip heavy service initialization and allow
     // streaming stubs/status responses to operate over the live socket server.
     // Enable by setting YAMS_TEST_FAST_START=1 in the environment.
-    if (const char* fast = std::getenv("YAMS_TEST_FAST_START");
-        fast && *fast && std::string(fast) != "0" && std::string(fast) != "false") {
+    if (yams::config::read_env_bool("YAMS_TEST_FAST_START").valueOr(false)) {
         spdlog::warn("YAMS_TEST_FAST_START enabled: skipping ServiceManager initialization");
         // Leave lifecycle FSM in its current (Initializing) state; readiness flags
         // for services remain false. RequestDispatcher will serve Status responses
@@ -884,7 +923,7 @@ void YamsDaemon::runLoop() {
             auto rs = serviceManager_->getRepairServiceShared();
             spdlog::debug("[DaemonLoop] FSM state={}, enableAutoRepair={}, repairService_exists={}",
                           static_cast<int>(snap.state), config_.enableAutoRepair, (rs != nullptr));
-            if (snap.state == LifecycleState::Ready) {
+            if (snap.state == LifecycleState::Ready || snap.state == LifecycleState::Degraded) {
                 if (config_.enableAutoRepair && !rs) {
                     spdlog::info("[DaemonLoop] Starting RepairService...");
                     try {
@@ -1279,6 +1318,14 @@ std::filesystem::path getXDGStateHome() {
 
 std::filesystem::path YamsDaemon::resolveSystemPath(PathType type) {
     namespace fs = std::filesystem;
+    if (type == PathType::Socket || type == PathType::PidFile) {
+        auto runtimePaths = yams::config::resolve_runtime_paths();
+        if (!runtimePaths) {
+            throw std::invalid_argument(runtimePaths.error().message);
+        }
+        return type == PathType::Socket ? runtimePaths.value().socketPath.value
+                                        : runtimePaths.value().pidFile.value;
+    }
 #ifndef _WIN32
     bool isRoot = (geteuid() == 0);
     uid_t uid = getuid();
@@ -1286,19 +1333,8 @@ std::filesystem::path YamsDaemon::resolveSystemPath(PathType type) {
 
     switch (type) {
         case PathType::Socket:
-            return yams::daemon::ConnectionFsm::resolve_socket_path();
         case PathType::PidFile:
-#ifdef _WIN32
-            if (auto xdg = getXDGRuntimeDir(); !xdg.empty() && canWriteToDirectory(xdg))
-                return xdg / "yams-daemon.pid";
-            return fs::temp_directory_path() / "yams-daemon.pid";
-#else
-            if (isRoot)
-                return fs::path("/var/run/yams-daemon.pid");
-            if (auto xdg = getXDGRuntimeDir(); !xdg.empty() && canWriteToDirectory(xdg))
-                return xdg / "yams-daemon.pid";
-            return fs::path("/tmp") / ("yams-daemon-" + std::to_string(uid) + ".pid");
-#endif
+            break;
         case PathType::LogFile:
 #ifdef _WIN32
             if (auto xdg = getXDGStateHome(); !xdg.empty()) {
@@ -1368,12 +1404,23 @@ std::shared_ptr<yams::vector::EmbeddingGenerator> YamsDaemon::_test_getEmbedding
 namespace yams::daemon {
 
 void YamsDaemon::reloadTuningConfig() {
+    std::lock_guard<std::mutex> reloadLock(tuningReloadMutex_);
+    [[maybe_unused]] auto publication = TuneAdvisor::beginConfiguredOverridePublication();
     std::filesystem::path configFilePath;
     TuningConfig currentTuning;
     {
         std::lock_guard<std::mutex> lock(configMutex_);
         configFilePath = config_.configFilePath;
         currentTuning = config_.tuning;
+    }
+    auto lifecycleGuard = TuneAdvisor::beginConfiguredOverrideReload();
+    if (!lifecycleGuard) {
+        spdlog::warn("[Reload] Skipped tuning reload while multiple daemon lifecycles are active");
+        return;
+    }
+    if (serviceManager_) {
+        // ServiceManager resolves construction-time policy after daemon config construction.
+        currentTuning = serviceManager_->getTuningConfig();
     }
 
     try {
@@ -1396,14 +1443,19 @@ void YamsDaemon::reloadTuningConfig() {
             spdlog::warn("[Reload] Failed to parse config: {}", parsed.error().message);
             return;
         }
-        const auto tuning =
-            ConfigResolver::applyRuntimeTuning(parsed.value(), std::move(currentTuning));
+        // Reload is replacement, not merge: removed TOML keys must revoke both their configured
+        // overrides and provenance. Preserve only topology selection, which is construction-time
+        // state owned outside the runtime-tuning resolver.
+        TuningConfig baseline;
+        baseline.topologyAlgorithm = currentTuning.topologyAlgorithm;
+        auto tuning = ConfigResolver::applyRuntimeTuning(parsed.value(), std::move(baseline));
+        if (serviceManager_) {
+            serviceManager_->setTuningConfig(tuning);
+            tuning = serviceManager_->getTuningConfig();
+        }
         {
             std::lock_guard<std::mutex> lock(configMutex_);
             config_.tuning = tuning;
-        }
-        if (serviceManager_) {
-            serviceManager_->setTuningConfig(tuning);
         }
         spdlog::info("[Reload] Applied tuning config: cap={}, threads={}..{}",
                      tuning.postIngestCapacity, tuning.postIngestThreadsMin,

@@ -12,7 +12,6 @@
 #include <yams/compression/compression_header.h>
 #include <yams/compression/compressor_interface.h>
 #include <yams/config/config_helpers.h>
-#include <yams/config/config_migration.h>
 #include <yams/core/task.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/client/global_io_context.h>
@@ -68,16 +67,6 @@
 #include <fcntl.h>
 #include <io.h>
 #include <windows.h>
-// Windows implementation of setenv
-inline int setenv(const char* name, const char* value, int overwrite) {
-    if (!overwrite) {
-        size_t envsize = 0;
-        const int errcode = getenv_s(&envsize, NULL, 0, name);
-        if (errcode || envsize)
-            return errcode;
-    }
-    return _putenv_s(name, value);
-}
 #elif !defined(YAMS_WASI)
 #include <poll.h>
 #include <unistd.h>
@@ -113,14 +102,13 @@ void MCPServer::sendResponse(const nlohmann::json& message) {
         return;
     }
 
-    size_t maxPayloadBytes = 64 * 1024;
-    if (const char* env = std::getenv("YAMS_MCP_MAX_OUTPUT_BYTES")) {
-        try {
-            maxPayloadBytes = std::max<size_t>(4096, static_cast<size_t>(std::stoul(env)));
-        } catch (...) {
-            maxPayloadBytes = 64 * 1024;
-        }
+    constexpr size_t kDefaultMaxPayloadBytes = 64ULL * 1024;
+    size_t maxPayloadBytes = kDefaultMaxPayloadBytes;
+#if !defined(YAMS_WASI)
+    if (const auto configured = yams::config::read_env_size("YAMS_MCP_MAX_OUTPUT_BYTES").value) {
+        maxPayloadBytes = std::max<size_t>(4096, *configured);
     }
+#endif
 
     if (payload.size() > maxPayloadBytes && message.is_object()) {
         nlohmann::json adjusted = message;
@@ -154,7 +142,11 @@ void MCPServer::sendResponse(const nlohmann::json& message) {
                             } else {
                                 enqueueOutbound(std::move(chunkPayload));
                             }
+                        } catch (const std::exception& error) {
+                            spdlog::debug("MCP output chunk delivery failed: {}", error.what());
+                            break;
                         } catch (...) {
+                            spdlog::debug("MCP output chunk delivery failed with unknown error");
                             break;
                         }
                     }
@@ -165,14 +157,19 @@ void MCPServer::sendResponse(const nlohmann::json& message) {
                     shrunk = true;
                 }
             }
+        } catch (const std::exception& error) {
+            spdlog::debug("MCP oversized response adjustment failed: {}", error.what());
         } catch (...) {
-            // fall through
+            spdlog::debug("MCP oversized response adjustment failed with unknown error");
         }
 
         if (shrunk) {
             try {
                 payload = adjusted.dump();
+            } catch (const std::exception& error) {
+                spdlog::debug("MCP adjusted response serialization failed: {}", error.what());
             } catch (...) {
+                spdlog::debug("MCP adjusted response serialization failed with unknown error");
             }
         }
 
@@ -192,8 +189,10 @@ void MCPServer::sendResponse(const nlohmann::json& message) {
             if (message.is_object() && message.contains("method")) {
                 httpPublisher_(tlsSessionId_, message);
             }
+        } catch (const std::exception& error) {
+            spdlog::debug("MCP HTTP notification publish failed: {}", error.what());
         } catch (...) {
-            // best effort; always continue to stdio
+            spdlog::debug("MCP HTTP notification publish failed with unknown error");
         }
     }
 
@@ -337,18 +336,21 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
     // Initialize the tool registry with modern handlers
     initializeToolRegistry();
 
-    // Set default handshake behavior from environment variables
+    // Set default handshake behavior from environment variables when the platform provides the
+    // normal configuration layer. The minimal WASI profile retains the constructor defaults.
     enableYamsExtensions_ = true;
-    if (const char* env = std::getenv("YAMS_DISABLE_EXTENSIONS")) {
-        enableYamsExtensions_ = !(std::string(env) == "1" || std::string(env) == "true");
+#if !defined(YAMS_WASI)
+    if (const auto value = yams::config::read_env_bool("YAMS_DISABLE_EXTENSIONS").value) {
+        enableYamsExtensions_ = !*value;
     }
-    if (const char* env = std::getenv("YAMS_MCP_STRICT_PROTOCOL")) {
-        strictProtocol_ = (std::string(env) == "1" || std::string(env) == "true");
+    if (const auto value = yams::config::read_env_bool("YAMS_MCP_STRICT_PROTOCOL").value) {
+        strictProtocol_ = *value;
     }
 
-    if (const char* env = std::getenv("YAMS_MCP_LIMIT_DUP_CONTENT")) {
-        limitToolResultDup_ = !(std::string(env) == "0" || std::string(env) == "false");
+    if (const auto value = yams::config::read_env_bool("YAMS_MCP_LIMIT_DUP_CONTENT").value) {
+        limitToolResultDup_ = *value;
     }
+#endif
 
     // Initialize outbound strand for serialized writes.
     // For WASI builds we don't have the daemon global IO context.
@@ -362,54 +364,26 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
 #endif
     }
 
-    // Resolve prompts directory (file-backed templates)
+#if !defined(YAMS_WASI)
+    // Resolve prompts directory (file-backed templates).
     try {
-        // Highest priority: explicit env override
-        if (const char* env = std::getenv("YAMS_MCP_PROMPTS_DIR"); env && *env) {
-            promptsDir_ = std::filesystem::path(env);
+        const auto runtimePaths = yams::config::resolve_runtime_paths();
+        if (const auto explicitPrompts = yams::config::getenv_nonempty("YAMS_MCP_PROMPTS_DIR")) {
+            promptsDir_ = yams::config::expand_tilde(*explicitPrompts);
         }
-        // Next: config.toml [mcp_server].prompts_dir
         if (promptsDir_.empty()) {
-            std::map<std::string, std::map<std::string, std::string>> toml;
-            std::filesystem::path configPath;
-            if (const char* xdgConfigHome = std::getenv("XDG_CONFIG_HOME")) {
-                configPath = std::filesystem::path(xdgConfigHome) / "yams" / "config.toml";
-            } else if (const char* homeEnv = std::getenv("HOME")) {
-                configPath = std::filesystem::path(homeEnv) / ".config" / "yams" / "config.toml";
-            }
-            if (!configPath.empty() && std::filesystem::exists(configPath)) {
-                yams::config::ConfigMigrator migrator;
-                if (auto parsed = migrator.parseTomlConfig(configPath)) {
-                    toml = std::move(parsed.value());
-                }
-            }
-            if (auto it = toml.find("mcp_server"); it != toml.end()) {
-                const auto& mcp = it->second;
-                if (auto f = mcp.find("prompts_dir"); f != mcp.end() && !f->second.empty()) {
-                    std::string p = f->second;
-                    if (!p.empty() && p.front() == '~') {
-                        if (const char* home = std::getenv("HOME")) {
-                            p = std::string(home) + p.substr(1);
-                        }
-                    }
-                    promptsDir_ = std::filesystem::path(p);
-                }
+            const auto configPath = runtimePaths ? runtimePaths.value().configFile.value
+                                                 : yams::config::get_config_path();
+            const auto toml = yams::config::parse_simple_toml(configPath);
+            if (const auto it = toml.find("mcp_server.prompts_dir");
+                it != toml.end() && !it->second.empty()) {
+                promptsDir_ = yams::config::expand_tilde(it->second);
             }
         }
-        // Next: XDG_DATA_HOME/yams/prompts or ~/.local/share/yams/prompts
-        if (promptsDir_.empty()) {
-            std::filesystem::path base;
-            if (const char* xdgData = std::getenv("XDG_DATA_HOME")) {
-                base = std::filesystem::path(xdgData);
-            } else if (const char* home = std::getenv("HOME")) {
-                base = std::filesystem::path(home) / ".local" / "share";
-            }
-            if (!base.empty()) {
-                auto p = base / "yams" / "prompts";
-                promptsDir_ = std::move(p);
-            }
+        if (promptsDir_.empty() && runtimePaths) {
+            promptsDir_ = runtimePaths.value().dataDir.value / "prompts";
         }
-        // Last: local docs/prompts (useful for dev runs from the repo root)
+        // Last: local docs/prompts (useful for dev runs from the repo root).
         if (!std::filesystem::exists(promptsDir_)) {
             auto localDocs = std::filesystem::current_path() / "docs" / "prompts";
             if (std::filesystem::exists(localDocs)) {
@@ -419,15 +393,16 @@ MCPServer::MCPServer(std::unique_ptr<ITransport> transport, std::atomic<bool>* e
         if (!promptsDir_.empty()) {
             spdlog::info("MCP prompts directory resolved to: {}", promptsDir_.string());
         }
+    } catch (const std::exception& error) {
+        spdlog::debug("MCP prompt directory resolution failed: {}", error.what());
     } catch (...) {
-        // Ignore prompt dir resolution errors; built-ins remain available
+        spdlog::debug("MCP prompt directory resolution failed with unknown error");
     }
+#endif
 }
 
+#if !defined(YAMS_WASI)
 Result<void> MCPServer::ensureDaemonClient() {
-#if defined(YAMS_WASI)
-    return Error{ErrorCode::NotSupported, "Daemon client not available on WASI"};
-#else
     if (testEnsureDaemonClientHook_) {
         auto hookResult = testEnsureDaemonClientHook_(daemon_client_config_);
         if (!hookResult) {
@@ -447,7 +422,6 @@ Result<void> MCPServer::ensureDaemonClient() {
     }
 
     return Result<void>();
-#endif
 }
 
 Result<yams::daemon::DaemonClient*> MCPServer::requireDaemonClient() {
@@ -459,10 +433,6 @@ Result<yams::daemon::DaemonClient*> MCPServer::requireDaemonClient() {
 
 boost::asio::awaitable<Result<std::optional<yams::daemon::StatusResponse>>>
 MCPServer::fetchDaemonStatus(DaemonStatusFetchMode mode) {
-#if defined(YAMS_WASI)
-    (void)mode;
-    co_return Error{ErrorCode::NotSupported, "Daemon status not available on WASI"};
-#else
     if (auto ensure = ensureDaemonClient(); !ensure) {
         if (mode == DaemonStatusFetchMode::BestEffort) {
             co_return std::optional<yams::daemon::StatusResponse>{};
@@ -479,8 +449,8 @@ MCPServer::fetchDaemonStatus(DaemonStatusFetchMode mode) {
     }
 
     co_return std::optional<yams::daemon::StatusResponse>{std::move(sres.value())};
-#endif
 }
+#endif
 
 MCPServer::~MCPServer() {
     stop();
@@ -607,7 +577,10 @@ void MCPServer::start() {
                                 progressToken = meta["progressToken"];
                             }
                         }
+                    } catch (const std::exception& error) {
+                        spdlog::debug("MCP progress token parse failed: {}", error.what());
                     } catch (...) {
+                        spdlog::debug("MCP progress token parse failed with unknown error");
                     }
                     this->sendProgress("tool", 0.0, std::string("calling ") + toolName,
                                        progressToken);

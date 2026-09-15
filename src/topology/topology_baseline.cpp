@@ -3,6 +3,7 @@
 #include <yams/topology/topology_representatives.h>
 #include <yams/vector/static_cosine_ann_index.h>
 
+#include "protected_relation_identity_internal.h"
 #include "topology_build_utils.h"
 
 #include <algorithm>
@@ -38,34 +39,50 @@ void sortComponentByHash(std::vector<std::size_t>& component,
     });
 }
 
+struct SplitScratch {
+    std::vector<std::uint8_t> remainingMask;
+    std::vector<double> remainingDegrees;
+
+    void ensureSize(std::size_t size) {
+        remainingMask.resize(size, 0);
+        remainingDegrees.resize(size, 0.0);
+    }
+};
+
 /// Lean ConstructionGates anti-giant: peel greedy high-degree pieces of size ≤ cap.
 /// maxComponentDocs == 0 keeps legacy unlimited CC behavior.
 std::vector<std::vector<std::size_t>>
-splitOversizedComponent(std::vector<std::size_t> component, std::size_t maxComponentDocs,
+splitOversizedComponent(std::vector<std::size_t>& component, std::size_t maxComponentDocs,
                         const Adjacency& adjacency,
-                        std::span<const TopologyDocumentInput> documents) {
+                        std::span<const TopologyDocumentInput> documents, SplitScratch& scratch) {
     if (maxComponentDocs == 0 || component.size() <= maxComponentDocs) {
-        return {std::move(component)};
+        std::vector<std::vector<std::size_t>> pieces(1);
+        pieces.front().swap(component);
+        return pieces;
     }
 
     std::unordered_set<std::size_t> remaining(component.begin(), component.end());
+    scratch.ensureSize(adjacency.size());
+    for (const std::size_t index : component) {
+        scratch.remainingMask[index] = 1;
+    }
     std::vector<std::vector<std::size_t>> pieces;
     pieces.reserve((component.size() + maxComponentDocs - 1) / maxComponentDocs);
 
-    auto degreeInRemaining = [&](std::size_t idx) {
-        double deg = 0.0;
-        for (const auto& [nbr, weight] : adjacency[idx]) {
-            if (remaining.contains(nbr)) {
-                deg += weight;
-            }
-        }
-        return deg;
-    };
-
     while (!remaining.empty()) {
+        for (const std::size_t index : remaining) {
+            double degree = 0.0;
+            for (const auto& [neighbor, weight] : adjacency[index]) {
+                if (scratch.remainingMask[neighbor] != 0) {
+                    degree += weight;
+                }
+            }
+            scratch.remainingDegrees[index] = degree;
+        }
+
         const auto seedIt = std::ranges::max_element(remaining, [&](std::size_t a, std::size_t b) {
-            const double da = degreeInRemaining(a);
-            const double db = degreeInRemaining(b);
+            const double da = scratch.remainingDegrees[a];
+            const double db = scratch.remainingDegrees[b];
             if (std::abs(da - db) > 1e-9) {
                 return da < db;
             }
@@ -86,15 +103,16 @@ splitOversizedComponent(std::vector<std::size_t> component, std::size_t maxCompo
         std::priority_queue<EdgeCand, std::vector<EdgeCand>, decltype(edgeCmp)> frontier(edgeCmp);
 
         auto addNode = [&](std::size_t idx) {
-            if (!remaining.contains(idx) || inPiece.contains(idx) ||
+            if (scratch.remainingMask[idx] == 0 || inPiece.contains(idx) ||
                 piece.size() >= maxComponentDocs) {
                 return;
             }
+            scratch.remainingMask[idx] = 0;
             remaining.erase(idx);
             inPiece.insert(idx);
             piece.push_back(idx);
             for (const auto& [nbr, weight] : adjacency[idx]) {
-                if (remaining.contains(nbr) && !inPiece.contains(nbr)) {
+                if (scratch.remainingMask[nbr] != 0 && !inPiece.contains(nbr)) {
                     frontier.push({weight, nbr});
                 }
             }
@@ -105,16 +123,18 @@ splitOversizedComponent(std::vector<std::size_t> component, std::size_t maxCompo
             const auto [w, nbr] = frontier.top();
             frontier.pop();
             (void)w;
-            if (remaining.contains(nbr) && !inPiece.contains(nbr)) {
+            if (scratch.remainingMask[nbr] != 0 && !inPiece.contains(nbr)) {
                 addNode(nbr);
             }
         }
         if (piece.empty()) {
             piece.push_back(seed);
+            scratch.remainingMask[seed] = 0;
             remaining.erase(seed);
         }
         sortComponentByHash(piece, documents);
-        pieces.push_back(std::move(piece));
+        pieces.emplace_back();
+        pieces.back().swap(piece);
     }
     return pieces;
 }
@@ -247,10 +267,10 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
     batch.algorithm = "connected_components_v1";
     batch.inputKind = config.inputKind;
     batch.embeddingSpaceIdentity = config.embeddingSpaceIdentity;
-    batch.protectedRelationIdentity = protectedRelationConstructionIdentity(documents, config);
     batch.generatedAtUnixSeconds = static_cast<std::uint64_t>(nowSeconds);
 
     if (documents.empty()) {
+        batch.protectedRelationIdentity = protectedRelationConstructionIdentity(documents, config);
         return batch;
     }
 
@@ -279,7 +299,8 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
             if (config.reciprocalOnly && !neighbor.reciprocal) {
                 continue;
             }
-            if (neighbor.score < static_cast<float>(config.minEdgeScore)) {
+            if (!std::isfinite(neighbor.score) ||
+                neighbor.score < static_cast<float>(config.minEdgeScore)) {
                 continue;
             }
             const detail::PairKey key{std::min(i, j), std::max(i, j)};
@@ -293,14 +314,27 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
     }
 
     Adjacency adjacency(documents.size());
+    std::vector<detail::ProtectedRelationObservation> relationObservations;
+    relationObservations.reserve(pairWeights.size());
     for (const auto& [key, weight] : pairWeights) {
         adjacency[key.first].push_back({key.second, weight});
         adjacency[key.second].push_back({key.first, weight});
+        const std::string_view firstHash = documents[key.first].documentHash;
+        const std::string_view secondHash = documents[key.second].documentHash;
+        const auto endpoints = std::minmax(firstHash, secondHash);
+        relationObservations.push_back(detail::ProtectedRelationObservation{
+            .lhs = endpoints.first,
+            .rhs = endpoints.second,
+            .score = weight,
+        });
     }
+    batch.protectedRelationIdentity =
+        detail::protectedRelationIdentityFromObservations(std::move(relationObservations));
 
     // BFS connected components over the filtered undirected graph.
     std::vector<bool> visited(documents.size(), false);
     std::vector<std::vector<std::size_t>> components;
+    SplitScratch splitScratch;
     components.reserve(documents.size());
     for (std::size_t root = 0; root < documents.size(); ++root) {
         if (visited[root]) {
@@ -322,9 +356,10 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
             }
         }
         sortComponentByHash(component, documents);
-        for (auto& piece : splitOversizedComponent(std::move(component), config.maxComponentDocs,
-                                                   adjacency, documents)) {
-            components.push_back(std::move(piece));
+        for (auto& piece : splitOversizedComponent(component, config.maxComponentDocs, adjacency,
+                                                   documents, splitScratch)) {
+            components.emplace_back();
+            components.back().swap(piece);
         }
     }
 

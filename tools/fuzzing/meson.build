@@ -36,6 +36,9 @@ fuzz_deps = [
   dependency('protobuf'),
   dependency('nlohmann_json'),
 ]
+if host_machine.system() == 'windows'
+  fuzz_deps += cpp.find_library('advapi32', required: true)
+endif
 
 # Seed generator (non-fuzzer utility)
 seedgen = executable('seedgen',
@@ -75,6 +78,29 @@ fuzz_abi_negotiation_plugin = shared_module('fuzz_abi_negotiation_plugin',
 # IPC Protocol Fuzzer
 fuzz_ipc_protocol = executable('fuzz_ipc_protocol',
   'fuzz_ipc_protocol.cpp',
+  include_directories: include_directories('../../include'),
+  link_with: yams_daemon_lib,
+  dependencies: fuzz_deps,
+  cpp_args: fuzzer_args,
+  link_args: fuzzer_args,
+  build_by_default: true,
+)
+
+# Direct P2P protocol-v4 handshake/control fuzzer.
+# The corpus retains protocol-v3 seeds to continuously exercise exact-version rejection.
+fuzz_p2p_protocol = executable('fuzz_p2p_protocol',
+  'fuzz_p2p_protocol.cpp',
+  include_directories: include_directories('../../include'),
+  link_with: yams_daemon_lib,
+  dependencies: fuzz_deps,
+  cpp_args: fuzzer_args,
+  link_args: fuzzer_args,
+  build_by_default: true,
+)
+
+# Direct P2P delta/bootstrap control-message fuzzer.
+fuzz_p2p_delta = executable('fuzz_p2p_delta',
+  'fuzz_p2p_delta.cpp',
   include_directories: include_directories('../../include'),
   link_with: yams_daemon_lib,
   dependencies: fuzz_deps,

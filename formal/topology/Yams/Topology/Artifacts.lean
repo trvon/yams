@@ -74,7 +74,6 @@ structure TopologyBuildConfig where
   dirtyRegionExpansion : DirtyRegionExpansionMode := .priorClusterAndNeighbors
   kmeansK : Nat := 0
   kmeansMaxIterations : Nat := 10
-  minSimilarityToJoin : Rat := 45 / 100
   deriving Repr, BEq
 
 structure TopologyDirtyRegion where

@@ -7,11 +7,14 @@
 
 #include <sqlite3.h>
 
+#include <yams/cli/doctor/doctor_context.h>
 #include <yams/cli/yams_cli.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 
 #include <algorithm>
 #include <filesystem>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -314,4 +317,33 @@ TEST_CASE("DoctorCommand - reports non-vec0 vector schema with fix hint",
     CHECK(rc == 0);
     CHECK(output.find("doc_embeddings table not using vec0 virtual table") != std::string::npos);
     CHECK(output.find("yams doctor --recreate-vectors --stop-daemon") != std::string::npos);
+}
+
+TEST_CASE("DoctorCommand - tuning baseline proposes the daemon's own defaults",
+          "[cli][doctor][tuning][catch2]") {
+    using yams::daemon::TuneAdvisor;
+    std::ostringstream os;
+    yams::cli::doctor::DoctorContext::applyTuningBaseline(os, false);
+
+    std::map<std::string, std::string> proposed;
+    std::istringstream lines(os.str());
+    std::string line;
+    while (std::getline(lines, line)) {
+        const auto eq = line.find(" = ");
+        if (line.rfind("  tuning.", 0) == 0 && eq != std::string::npos) {
+            proposed[line.substr(2, eq - 2)] = line.substr(eq + 3);
+        }
+    }
+    REQUIRE_FALSE(proposed.empty());
+    // A doctor baseline that disagrees with TuneAdvisor rewrites defaults as overrides.
+    CHECK(proposed.at("tuning.worker_poll_ms") == std::to_string(TuneAdvisor::workerPollMs()));
+    CHECK(proposed.at("tuning.pool_cooldown_ms") == std::to_string(TuneAdvisor::poolCooldownMs()));
+    CHECK(proposed.at("tuning.pool_ipc_min") == std::to_string(TuneAdvisor::poolMinSizeIpc()));
+    CHECK(proposed.at("tuning.pool_ipc_max") == std::to_string(TuneAdvisor::poolMaxSizeIpc()));
+    CHECK(proposed.at("tuning.pool_io_min") == std::to_string(TuneAdvisor::poolMinSizeIpcIo()));
+    CHECK(proposed.at("tuning.pool_io_max") == std::to_string(TuneAdvisor::poolMaxSizeIpcIo()));
+    CHECK(proposed.at("tuning.idle_shrink_hold_ms") ==
+          std::to_string(TuneAdvisor::idleShrinkHoldMs()));
+    CHECK(proposed.at("tuning.backpressure_read_pause_ms") ==
+          std::to_string(TuneAdvisor::backpressureReadPauseMs()));
 }

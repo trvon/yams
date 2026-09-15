@@ -1,7 +1,10 @@
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
-#include <fstream>
+#if !defined(_WIN32) && !defined(__APPLE__)
+#include <fstream> // NOLINT(misc-include-cleaner) -- used by the POSIX /proc probes below.
+#endif
 #include <iomanip>
 #include <sstream>
 #ifndef _WIN32
@@ -15,6 +18,7 @@
 #endif
 #include <Windows.h>
 #endif
+// pi-lens-ignore: fatal error
 #include <boost/asio/as_tuple.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -34,6 +38,7 @@
 #include <yams/daemon/components/SocketServer.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/VectorIndexCoordinator.h>
 #include <yams/daemon/components/WorkCoordinator.h>
 #include <yams/daemon/ipc/fsm_metrics_registry.h>
 #include <yams/daemon/ipc/mux_metrics_registry.h>
@@ -41,6 +46,7 @@
 #include <yams/daemon/metric_keys.h>
 #include <yams/daemon/resource/OnnxConcurrencyRegistry.h>
 #include <yams/search/search_tuner.h>
+#include <yams/storage/disk_pressure.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/vector_database.h>
 #include <yams/version.hpp>
@@ -839,24 +845,7 @@ boost::asio::awaitable<void> DaemonMetrics::pollingLoop() {
                 try {
                     if (services_) {
                         if (auto* searchComp = services_->getSearchComponent()) {
-                            // Allow disabling rebuild checks for high-scale benchmarks.
-                            // Rebuilds compete with ingestion/post-ingest and can dominate runtime.
-                            bool disableRebuilds = false;
-                            try {
-                                // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only daemon setting.
-                                if (const char* env = std::getenv("YAMS_DISABLE_SEARCH_REBUILDS")) {
-                                    std::string v(env);
-                                    std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-                                    disableRebuilds =
-                                        (v == "1" || v == "true" || v == "yes" || v == "on");
-                                }
-                            } catch (...) {
-                                spdlog::debug("[DaemonMetrics] best-effort metric probe failed "
-                                              "with unknown exception");
-                            }
-                            if (!disableRebuilds) {
-                                searchComp->checkAndTriggerRebuildIfNeeded();
-                            }
+                            searchComp->checkAndTriggerRebuildIfNeeded();
                         }
                     }
                 } catch (...) {
@@ -1580,9 +1569,26 @@ void DaemonMetrics::populateRuntimeCounterSnapshot(MetricsSnapshot& out) const {
     try {
         if (services_) {
             if (auto* wc = services_->getWorkCoordinator()) {
+                wc->requestProgressProbe();
                 auto wcStats = wc->getStats();
                 out.workCoordinatorActiveWorkers = wcStats.activeWorkers;
                 out.workCoordinatorRunning = wcStats.isRunning;
+                out.workCoordinatorProgressProbesPosted = wcStats.progressProbesPosted;
+                out.workCoordinatorProgressProbesCompleted = wcStats.progressProbesCompleted;
+                out.workCoordinatorProgressProbeInFlight = wcStats.progressProbeInFlight;
+                out.workCoordinatorLastProgressAgeMs = wcStats.lastProgressAgeMs;
+            }
+            if (auto coordinator = services_->getVectorIndexCoordinator()) {
+                const auto checkpoint = coordinator->checkpointSnapshot();
+                out.vectorCheckpointPhase = static_cast<uint8_t>(checkpoint.phase);
+                out.vectorCheckpointRequests = checkpoint.requests;
+                out.vectorCheckpointCoalesced = checkpoint.coalesced;
+                out.vectorCheckpointStarted = checkpoint.started;
+                out.vectorCheckpointCompleted = checkpoint.completed;
+                out.vectorCheckpointTimedOut = checkpoint.timedOut;
+                out.vectorCheckpointPostFailures = checkpoint.postFailures;
+                out.vectorCheckpointQueuedAgeMs = checkpoint.queuedAgeMs;
+                out.vectorCheckpointRunningAgeMs = checkpoint.runningAgeMs;
             }
         }
     } catch (...) {
@@ -1712,6 +1718,8 @@ void DaemonMetrics::populateResourceVectorSnapshot(MetricsSnapshot& out, bool de
                 out.diagnosticCounters["msl_stack_log_warn_bytes"] = warnBytes;
             }
         }
+        out.diagnosticCounters["database_integrity_fast_path"] =
+            state_->readiness.databaseIntegrityFastPath.load(std::memory_order_acquire) ? 1u : 0u;
 #if defined(TRACY_ENABLE)
         TracyPlot("daemon.mem.mb", out.memoryUsageMb);
         TracyPlot("daemon.cpu.pct", out.cpuUsagePercent);
@@ -1834,6 +1842,12 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                     out.dataDir = dd.string();
                     out.contentStoreRoot = (dd / "storage").string();
                 }
+            } catch (...) {
+                spdlog::debug(
+                    "[DaemonMetrics] best-effort metric probe failed with unknown exception");
+            }
+            try {
+                out.logFile = services_->getResolvedLogFilePath().string();
             } catch (...) {
                 spdlog::debug(
                     "[DaemonMetrics] best-effort metric probe failed with unknown exception");
@@ -1998,6 +2012,19 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                     }
                     if (services_) {
                         dataDirForVolume = services_->getResolvedDataDir();
+                        const auto& policy = services_->getConfig().diskPressure;
+                        out.storageWriteAdmissionBytes = policy.minimumWriteAdmissionBytes;
+                        out.storageEmergencyReserveBytes = policy.emergencyReserveBytes;
+                        out.storageWarningFreePercentBp = static_cast<std::uint32_t>(
+                            std::lround(policy.warningFreePercent * 100.0));
+                        const auto observed = storage::inspectDiskPressure(
+                            dataDirForVolume / "storage", policy, storage::probeDiskSpace);
+                        if (observed) {
+                            out.storageCapacityBytes = observed.value().space.capacityBytes;
+                            out.storageAvailableBytes = observed.value().space.availableBytes;
+                            out.storagePressureLevel =
+                                static_cast<std::uint8_t>(observed.value().level);
+                        }
                     }
                     if (const auto volumeUsed = queryVolumeUsedBytes(dataDirForVolume)) {
                         out.volumeUsedBytes = volumeUsed;
@@ -2046,6 +2073,7 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
     // Embedding runtime details (best-effort)
     try {
         if (services_) {
+            const auto embeddingPolicy = services_->getResolvedEmbeddingConfig();
             auto provider = services_->getModelProvider();
             if (provider) {
                 try {
@@ -2064,8 +2092,12 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                         "[DaemonMetrics] best-effort metric probe failed with unknown exception");
                 }
             }
-            // Backend label and model details
+            // Backend label and model details. Before a provider is active, report the immutable
+            // startup policy instead of an unrelated ambient re-resolution.
             out.embeddingModel = services_->getEmbeddingModelName();
+            if (out.embeddingModel.empty() && embeddingPolicy) {
+                out.embeddingModel = embeddingPolicy->preferredModel;
+            }
             try {
                 auto prov = services_->getModelProvider();
                 if (prov && prov->isAvailable()) {
@@ -2101,11 +2133,14 @@ void DaemonMetrics::populateCommonSnapshot(MetricsSnapshot& out, bool detailed) 
                         }
                     }
                 } else {
-                    out.embeddingBackend = "unknown";
+                    out.embeddingBackend = embeddingPolicy ? embeddingPolicy->backend : "unknown";
                 }
             } catch (...) {
                 spdlog::debug(
                     "[DaemonMetrics] best-effort metric probe failed with unknown exception");
+            }
+            if (out.embeddingDim == 0 && embeddingPolicy && embeddingPolicy->dimension) {
+                out.embeddingDim = static_cast<std::uint32_t>(*embeddingPolicy->dimension);
             }
         }
     } catch (...) {
@@ -2285,6 +2320,18 @@ void DaemonMetrics::enrichDetailedSnapshot(MetricsSnapshot& out) const {
                             static_cast<double>(cfg.graphScoringBudgetMs);
                     }
                 }
+            }
+
+            // WAL data-system optics: surface WALManager counters that were previously
+            // collected but never exposed to any queryable surface (WalMetricsProvider was
+            // dead code). Cheap atomic reads; safe to run on the detailed path.
+            if (auto walProvider = services_->getWalMetricsProvider()) {
+                const auto walStats = walProvider->getStats();
+                out.walActiveTransactions = walStats.activeTransactions;
+                out.walPendingEntries = walStats.pendingEntries;
+                out.walTotalEntries = walStats.totalEntries;
+                out.walTotalBytes = walStats.totalBytes;
+                out.walLogFileCount = walStats.logFileCount;
             }
         }
     } catch (...) {

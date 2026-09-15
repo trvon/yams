@@ -728,6 +728,19 @@ TEST_CASE("DocumentService - Listing", "[document][service][listing]") {
 TEST_CASE("DocumentService - Retrieval", "[document][service][retrieval]") {
     DocumentFixture fixture;
 
+    SECTION("Metadata lookup failures are not reported as missing documents") {
+        fixture.pool_->shutdown();
+        auto metadataResult = fixture.metadataRepo_->getDocumentByHash(fixture.testHash1_);
+        REQUIRE_FALSE(metadataResult);
+        RetrieveDocumentRequest request;
+        request.hash = fixture.testHash1_;
+        auto result = fixture.documentService_->retrieve(request);
+        REQUIRE_FALSE(result);
+        CHECK(result.error().code == metadataResult.error().code);
+        CHECK(result.error().message == metadataResult.error().message);
+        CHECK(result.error().code != ErrorCode::NotFound);
+    }
+
     SECTION("Retrieve document by hash") {
         REQUIRE_FALSE(fixture.testHash1_.empty());
 
@@ -874,6 +887,29 @@ TEST_CASE("DocumentService - Deletion", "[document][service][deletion]") {
 
         REQUIRE(result);
         CHECK_FALSE(result.value().deleted.empty());
+    }
+
+    SECTION("Delete aborts before local mutation when durable intent staging fails") {
+        DeleteByNameRequest request;
+        request.name = (fixture.testDir_ / "test2.md").string();
+        std::string stagedHash;
+        request.beforeDelete = [&](std::string_view hash) -> Result<void> {
+            stagedHash = hash;
+            return Error{ErrorCode::IOError, "injected outbox failure"};
+        };
+
+        auto result = fixture.documentService_->deleteByName(request);
+
+        REQUIRE(result);
+        CHECK(stagedHash == fixture.testHash2_);
+        CHECK(result.value().deleted.empty());
+        REQUIRE(result.value().errors.size() == 1);
+        auto retained = fixture.metadataRepo_->getDocumentByHash(fixture.testHash2_);
+        REQUIRE(retained);
+        REQUIRE(retained.value().has_value());
+        auto content = fixture.contentStore_->exists(fixture.testHash2_);
+        REQUIRE(content);
+        CHECK(content.value());
     }
 
     SECTION("Delete document removes vector rows") {

@@ -1,10 +1,16 @@
 #include <catch2/catch_test_macros.hpp>
 
+#include <yams/daemon/components/GraphComponent.h>
+#include <yams/daemon/components/PostIngestQueue.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
+#include <yams/metadata/document_metadata.h>
 #include <yams/metadata/knowledge_graph_store.h>
+#include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/migration.h>
+#include <yams/metadata/path_utils.h>
 
 #include <boost/asio/io_context.hpp>
 
@@ -16,6 +22,7 @@
 
 using yams::daemon::AddDeferredEdgesOp;
 using yams::daemon::AddSymSpellTermsOp;
+using yams::daemon::CompleteDocumentEmbeddingsByHashesOp;
 using yams::daemon::DeferredEdgeOp;
 using yams::daemon::DeleteOrphanedDocEntitiesOp;
 using yams::daemon::DeleteOrphanedEdgesOp;
@@ -33,7 +40,7 @@ std::unique_ptr<WriteBatch> makeTermBatch(const std::string& term) {
 }
 
 struct KgCoordinatorFixture {
-    explicit KgCoordinatorFixture(const std::string& prefix) {
+    explicit KgCoordinatorFixture(const std::string& prefix, std::size_t maxConnections = 2) {
         namespace fs = std::filesystem;
         dir = fs::temp_directory_path() / (prefix + std::to_string(std::random_device{}()));
         fs::create_directories(dir);
@@ -50,7 +57,8 @@ struct KgCoordinatorFixture {
         }
 
         yams::metadata::ConnectionPoolConfig poolConfig;
-        poolConfig.maxConnections = 2;
+        poolConfig.minConnections = 1;
+        poolConfig.maxConnections = maxConnections;
         pool = std::make_shared<yams::metadata::ConnectionPool>(dbPath, poolConfig);
         auto kgRes = yams::metadata::makeSqliteKnowledgeGraphStore(*pool);
         REQUIRE(kgRes);
@@ -115,8 +123,9 @@ DeferredEdgeOp makeDeferredEdge(const std::string& src, const std::string& dst,
 }
 
 struct CoordinatorRunner {
-    explicit CoordinatorRunner(KgCoordinatorFixture& fix, WriteCoordinator::Config config)
-        : coordinator(io, fix.kg, {}, config) {
+    explicit CoordinatorRunner(KgCoordinatorFixture& fix, WriteCoordinator::Config config,
+                               std::shared_ptr<yams::metadata::MetadataRepository> meta = {})
+        : coordinator(io, fix.kg, std::move(meta), config) {
         coordinator.start();
         runner = std::thread([this] { io.run(); });
     }
@@ -172,6 +181,410 @@ void runDuplicateEdgeScenario(KgCoordinatorFixture& fix, bool dedup) {
 }
 
 } // namespace
+
+TEST_CASE("KnowledgeGraphCompletion releases only after every expected stage commits",
+          "[unit][daemon][kg-completion]") {
+    using yams::daemon::KnowledgeGraphCompletion;
+    using yams::daemon::KnowledgeGraphCompletionStage;
+
+    SECTION("graph then title-NL") {
+        KnowledgeGraphCompletion completion(true, true);
+        CHECK_FALSE(completion.markCommitted(KnowledgeGraphCompletionStage::Graph));
+        CHECK(completion.markCommitted(KnowledgeGraphCompletionStage::TitleNl));
+    }
+
+    SECTION("title-NL then graph") {
+        KnowledgeGraphCompletion completion(true, true);
+        CHECK_FALSE(completion.markCommitted(KnowledgeGraphCompletionStage::TitleNl));
+        CHECK(completion.markCommitted(KnowledgeGraphCompletionStage::Graph));
+    }
+
+    SECTION("repeating the final stage remains retry-friendly") {
+        KnowledgeGraphCompletion completion(true, true);
+        CHECK_FALSE(completion.markCommitted(KnowledgeGraphCompletionStage::Graph));
+        REQUIRE(completion.markCommitted(KnowledgeGraphCompletionStage::TitleNl));
+        CHECK(completion.markCommitted(KnowledgeGraphCompletionStage::TitleNl));
+        CHECK(completion.markCommitted(KnowledgeGraphCompletionStage::Graph));
+    }
+
+    SECTION("zero expected stages and unexpected stages never release") {
+        KnowledgeGraphCompletion none(false, false);
+        CHECK_FALSE(none.markCommitted(KnowledgeGraphCompletionStage::Graph));
+        CHECK_FALSE(none.markCommitted(KnowledgeGraphCompletionStage::TitleNl));
+
+        KnowledgeGraphCompletion graphOnly(true, false);
+        CHECK_FALSE(graphOnly.markCommitted(KnowledgeGraphCompletionStage::TitleNl));
+        CHECK(graphOnly.markCommitted(KnowledgeGraphCompletionStage::Graph));
+
+        KnowledgeGraphCompletion titleOnly(false, true);
+        CHECK_FALSE(titleOnly.markCommitted(KnowledgeGraphCompletionStage::Graph));
+        CHECK(titleOnly.markCommitted(KnowledgeGraphCompletionStage::TitleNl));
+    }
+}
+
+TEST_CASE("PostIngestQueue: rejected KG dispatch retains durable pending intent",
+          "[unit][daemon][post-ingest][kg-intent]") {
+    using namespace yams::daemon;
+    KgCoordinatorFixture fix("kg_overflow_intent_");
+    auto meta = std::make_shared<yams::metadata::MetadataRepository>(*fix.pool);
+    auto graph = std::make_shared<GraphComponent>(meta, fix.kg);
+    yams::metadata::DocumentInfo doc;
+    doc.filePath = "/kg/overflow.cpp";
+    doc.fileName = "overflow.cpp";
+    doc.sha256Hash = "kg-overflow-intent";
+    auto id = meta->insertDocument(doc);
+    REQUIRE(id.has_value());
+    struct ResetCap {
+        ~ResetCap() { TuneAdvisor::setPostIngestPendingKgMax(0); }
+    } reset;
+    TuneAdvisor::setPostIngestPendingKgMax(1);
+    PostIngestQueue queue({}, meta, {}, fix.kg, graph, nullptr, nullptr, 8);
+    queue.testing_detachKgChannel();
+    queue.testing_deferKgJob(InternalEventBus::KgJob{}); // Full synchronously; no worker needed.
+    PostIngestQueue::PreparedMetadataEntry prepared;
+    prepared.documentId = id.value();
+    prepared.hash = doc.sha256Hash;
+    prepared.fileName = doc.fileName;
+    prepared.filePath = doc.filePath;
+    prepared.extractedText = "int overflow;";
+    std::vector<PostIngestQueue::PreparedMetadataEntry> entries{prepared};
+    auto dropped = InternalEventBus::instance().kgDropped();
+    REQUIRE(queue.testing_commitAndDispatchKg(entries));
+    REQUIRE(entries.size() == 1);
+    REQUIRE_FALSE(entries.front().knowledgeGraphToken.empty());
+    CHECK(InternalEventBus::instance().kgDropped() == dropped + 1);
+    auto marker = meta->getMetadata(id.value(), "yams:kg_enrichment");
+    REQUIRE(marker.has_value());
+    REQUIRE(marker.value().has_value());
+    CHECK(marker.value()->value == "pending:" + entries.front().knowledgeGraphToken);
+    auto content = meta->getContent(id.value());
+    REQUIRE(content.has_value());
+    REQUIRE(content.value().has_value());
+    CHECK(content.value()->contentText == "int overflow;");
+    queue.stop();
+}
+
+TEST_CASE("PostIngestQueue: title-NL completion distinguishes GLiNER success from failure",
+          "[unit][daemon][post-ingest][kg-completion]") {
+    using namespace yams::daemon;
+    using yams::daemon::KnowledgeGraphCompletion;
+    using yams::daemon::KnowledgeGraphCompletionStage;
+
+    KgCoordinatorFixture fix("title_nl_completion_");
+    auto meta = std::make_shared<yams::metadata::MetadataRepository>(*fix.pool);
+    yams::metadata::DocumentInfo doc;
+    doc.filePath = "/kg/title-noop.txt";
+    doc.fileName = "title-noop.txt";
+    doc.sha256Hash = "title-nl-completion";
+    auto id = meta->insertDocument(doc);
+    REQUIRE(id.has_value());
+
+    yams::metadata::BatchContentEntry content;
+    content.documentId = id.value();
+    content.contentText = "title completion content";
+    content.knowledgeGraphToken = "title-shared-attempt";
+    REQUIRE(meta->batchInsertContentAndIndex({content}).has_value());
+
+    CoordinatorRunner run(fix, kgTestConfig(false), meta);
+    PostIngestQueue queue(nullptr, meta, {}, fix.kg, nullptr, nullptr, nullptr, 8);
+    queue.setWriteCoordinator(&run.coordinator);
+    auto completion = std::make_shared<KnowledgeGraphCompletion>(true, true);
+    REQUIRE_FALSE(completion->markCommitted(KnowledgeGraphCompletionStage::Graph));
+    InternalEventBus::TitleExtractionJob job;
+    job.hash = doc.sha256Hash;
+    job.documentId = id.value();
+    job.textSnippet = content.contentText;
+    job.fallbackTitle = doc.fileName;
+    job.filePath = doc.filePath;
+    job.mimeType = "text/plain";
+    job.knowledgeGraphToken = content.knowledgeGraphToken;
+    job.knowledgeGraphCompletion = completion;
+    auto process = [&] {
+        std::vector<InternalEventBus::TitleExtractionJob> jobs;
+        jobs.push_back(job);
+        queue.testing_processTitleExtractionBatch(std::move(jobs));
+    };
+    auto marker = [&] {
+        auto value = meta->getMetadata(id.value(), "yams:kg_enrichment");
+        REQUIRE(value.has_value());
+        REQUIRE(value.value().has_value());
+        return value.value()->value;
+    };
+
+    SECTION("successful GLiNER result with no useful graph acknowledges a no-op") {
+        queue.setTitleExtractor(
+            [](const std::string&,
+               const std::vector<std::string>&) -> yams::Result<yams::search::QueryConceptResult> {
+                yams::search::QueryConceptResult result;
+                result.usedGliner = true;
+                return result;
+            });
+        process();
+        REQUIRE(run.coordinator.flush(std::chrono::seconds{5}).has_value());
+        CHECK(marker() == "complete:" + content.knowledgeGraphToken);
+    }
+
+    SECTION("extraction error remains pending and does not mark title-NL") {
+        queue.setTitleExtractor(
+            [](const std::string&,
+               const std::vector<std::string>&) -> yams::Result<yams::search::QueryConceptResult> {
+                return yams::Error{yams::ErrorCode::InternalError, "injected GLiNER failure"};
+            });
+        process();
+        CHECK(marker() == "pending:" + content.knowledgeGraphToken);
+        CHECK_FALSE(completion->markCommitted(KnowledgeGraphCompletionStage::Graph));
+    }
+
+    SECTION("fallback extraction remains pending and does not mark title-NL") {
+        queue.setTitleExtractor(
+            [](const std::string&,
+               const std::vector<std::string>&) -> yams::Result<yams::search::QueryConceptResult> {
+                return yams::search::QueryConceptResult{};
+            });
+        process();
+        CHECK(marker() == "pending:" + content.knowledgeGraphToken);
+        CHECK_FALSE(completion->markCommitted(KnowledgeGraphCompletionStage::Graph));
+    }
+    queue.stop();
+}
+
+TEST_CASE("PostIngestQueue: writer propagates failed title-NL no-op acknowledgement",
+          "[unit][daemon][post-ingest][kg-completion][writer]") {
+    using namespace yams::daemon;
+    using yams::daemon::KnowledgeGraphCompletion;
+    using yams::daemon::KnowledgeGraphCompletionStage;
+
+    KgCoordinatorFixture fix("title_nl_writer_ack_");
+    auto meta = std::make_shared<yams::metadata::MetadataRepository>(*fix.pool);
+    yams::metadata::DocumentInfo doc;
+    doc.filePath = "/kg/title-writer-noop.txt";
+    doc.fileName = "title-writer-noop.txt";
+    doc.sha256Hash = "title-nl-writer-completion";
+    auto id = meta->insertDocument(doc);
+    REQUIRE(id.has_value());
+
+    yams::metadata::BatchContentEntry content;
+    content.documentId = id.value();
+    content.contentText = "writer-backed title completion content";
+    content.knowledgeGraphToken = "title-writer-attempt";
+    REQUIRE(meta->batchInsertContentAndIndex({content}).has_value());
+
+    CoordinatorRunner run(fix, kgTestConfig(false), meta);
+    PostIngestQueue queue(nullptr, meta, {}, fix.kg, nullptr, nullptr, nullptr, 8);
+    queue.setWriteCoordinator(&run.coordinator);
+    queue.setTitleExtractor(
+        [](const std::string&,
+           const std::vector<std::string>&) -> yams::Result<yams::search::QueryConceptResult> {
+            yams::search::QueryConceptResult result;
+            result.usedGliner = true;
+            return result;
+        });
+
+    auto completion = std::make_shared<KnowledgeGraphCompletion>(true, true);
+    REQUIRE_FALSE(completion->markCommitted(KnowledgeGraphCompletionStage::Graph));
+    InternalEventBus::TitleExtractionJob job;
+    job.hash = doc.sha256Hash;
+    job.documentId = id.value();
+    job.textSnippet = content.contentText;
+    job.fallbackTitle = doc.fileName;
+    job.filePath = doc.filePath;
+    job.mimeType = "text/plain";
+    job.knowledgeGraphToken = content.knowledgeGraphToken;
+    job.knowledgeGraphCompletion = completion;
+    auto process = [&] {
+        std::vector<InternalEventBus::TitleExtractionJob> jobs;
+        jobs.push_back(job);
+        queue.testing_processTitleExtractionBatch(std::move(jobs));
+    };
+    auto marker = [&] {
+        auto value = meta->getMetadata(id.value(), "yams:kg_enrichment");
+        REQUIRE(value.has_value());
+        REQUIRE(value.value().has_value());
+        return value.value()->value;
+    };
+
+    const auto triggerSql =
+        "CREATE TRIGGER reject_title_nl_ack BEFORE UPDATE OF value ON metadata "
+        "WHEN OLD.document_id = " +
+        std::to_string(id.value()) +
+        " AND OLD.key = 'yams:kg_enrichment' "
+        "AND NEW.value = 'complete:" +
+        content.knowledgeGraphToken +
+        "' BEGIN SELECT RAISE(ABORT, 'injected title-NL acknowledgement failure'); END";
+    REQUIRE(
+        fix.pool
+            ->withConnection([&](yams::metadata::Database& db) { return db.execute(triggerSql); })
+            .has_value());
+
+    process();
+    auto rejected = run.coordinator.flush(std::chrono::seconds{5});
+    REQUIRE_FALSE(rejected.has_value());
+    CHECK(rejected.error().message.find("injected title-NL acknowledgement failure") !=
+          std::string::npos);
+    CHECK(marker() == "pending:" + content.knowledgeGraphToken);
+
+    REQUIRE(fix.pool
+                ->withConnection([](yams::metadata::Database& db) {
+                    return db.execute("DROP TRIGGER reject_title_nl_ack");
+                })
+                .has_value());
+    process();
+    REQUIRE(run.coordinator.flush(std::chrono::seconds{5}).has_value());
+    CHECK(marker() == "complete:" + content.knowledgeGraphToken);
+    queue.stop();
+}
+
+TEST_CASE("WriteCoordinator: KG intent acknowledges durable writes only",
+          "[unit][daemon][write-coordinator][kg-intent]") {
+    KgCoordinatorFixture fix("kg_intent_commit_", 1);
+    auto meta = std::make_shared<yams::metadata::MetadataRepository>(*fix.pool);
+    yams::metadata::DocumentInfo doc;
+    doc.filePath = "/kg/intent.cpp";
+    doc.fileName = "intent.cpp";
+    doc.sha256Hash = "kg-intent-write";
+    auto id = meta->insertDocument(doc);
+    REQUIRE(id.has_value());
+    yams::metadata::BatchContentEntry entry;
+    entry.documentId = id.value();
+    entry.contentText = "int intent;";
+    entry.knowledgeGraphToken = "attempt-one";
+    REQUIRE(meta->batchInsertContentAndIndex({entry}).has_value());
+    CoordinatorRunner run(fix, kgTestConfig(false), meta);
+    auto enqueue = [&](const std::string& token, bool expectSuccess = true) {
+        auto batch = std::make_unique<WriteBatch>();
+        batch->source = "test/kg-intent";
+        batch->knowledgeGraphDocumentId = id.value();
+        batch->knowledgeGraphToken = token;
+        batch->ops.emplace_back(UpsertNodesOp{{makeNode("kg-intent-node")}});
+        run.coordinator.enqueue(std::move(batch));
+        auto flushed = run.coordinator.flush(std::chrono::seconds{5});
+        if (expectSuccess) {
+            REQUIRE(flushed.has_value());
+        } else {
+            REQUIRE_FALSE(flushed.has_value());
+            CHECK(flushed.error().message.find("injected KG write failure") != std::string::npos);
+        }
+    };
+    auto marker = [&] {
+        auto value = meta->getMetadata(id.value(), "yams:kg_enrichment");
+        REQUIRE(value.has_value());
+        REQUIRE(value.value().has_value());
+        return value.value()->value;
+    };
+    SECTION("successful commit releases the KG lease before acknowledgement") {
+        enqueue("attempt-one");
+        CHECK(marker() == "complete:attempt-one");
+    }
+    SECTION("failed KG write remains pending and can retry") {
+        REQUIRE(fix.pool
+                    ->withConnection([](yams::metadata::Database& db) {
+                        return db.execute(
+                            "CREATE TRIGGER reject_intent_node BEFORE INSERT ON kg_nodes "
+                            "BEGIN SELECT RAISE(ABORT, 'injected KG write failure'); END");
+                    })
+                    .has_value());
+        enqueue("attempt-one", false);
+        CHECK(marker() == "pending:attempt-one");
+        REQUIRE(fix.pool
+                    ->withConnection([](yams::metadata::Database& db) {
+                        return db.execute("DROP TRIGGER reject_intent_node");
+                    })
+                    .has_value());
+        enqueue("attempt-one");
+        CHECK(marker() == "complete:attempt-one");
+    }
+    SECTION("stale write cannot acknowledge a newer admission") {
+        entry.knowledgeGraphToken = "attempt-two";
+        REQUIRE(meta->batchInsertContentAndIndex({entry}).has_value());
+        enqueue("attempt-one");
+        CHECK(marker() == "pending:attempt-two");
+        enqueue("attempt-two");
+        CHECK(marker() == "complete:attempt-two");
+    }
+}
+
+TEST_CASE("WriteCoordinator: shared KG completion waits for both durable stages",
+          "[unit][daemon][write-coordinator][kg-completion]") {
+    using yams::daemon::KnowledgeGraphCompletion;
+    using yams::daemon::KnowledgeGraphCompletionStage;
+
+    KgCoordinatorFixture fix("kg_shared_completion_", 1);
+    auto meta = std::make_shared<yams::metadata::MetadataRepository>(*fix.pool);
+    yams::metadata::DocumentInfo doc;
+    doc.filePath = "/kg/shared-completion.cpp";
+    doc.fileName = "shared-completion.cpp";
+    doc.sha256Hash = "kg-shared-completion";
+    auto id = meta->insertDocument(doc);
+    REQUIRE(id.has_value());
+
+    yams::metadata::BatchContentEntry entry;
+    entry.documentId = id.value();
+    entry.contentText = "int shared_completion;";
+    entry.knowledgeGraphToken = "shared-attempt";
+    REQUIRE(meta->batchInsertContentAndIndex({entry}).has_value());
+
+    CoordinatorRunner run(fix, kgTestConfig(false), meta);
+    auto completion = std::make_shared<KnowledgeGraphCompletion>(true, true);
+    auto marker = [&] {
+        auto value = meta->getMetadata(id.value(), "yams:kg_enrichment");
+        REQUIRE(value.has_value());
+        REQUIRE(value.value().has_value());
+        return value.value()->value;
+    };
+    auto writeStage = [&](KnowledgeGraphCompletionStage stage, const std::string& nodeKey,
+                          bool expectSuccess = true) {
+        auto batch = std::make_unique<WriteBatch>();
+        batch->source = "test/kg-shared-completion";
+        batch->knowledgeGraphDocumentId = id.value();
+        batch->knowledgeGraphToken = entry.knowledgeGraphToken;
+        batch->knowledgeGraphCompletionStage = stage;
+        batch->knowledgeGraphCompletion = completion;
+        batch->ops.emplace_back(UpsertNodesOp{{makeNode(nodeKey)}});
+        run.coordinator.enqueue(std::move(batch));
+        auto flushed = run.coordinator.flush(std::chrono::seconds{5});
+        if (expectSuccess) {
+            REQUIRE(flushed.has_value());
+        } else {
+            REQUIRE_FALSE(flushed.has_value());
+            CHECK(flushed.error().message.find("injected KG write failure") != std::string::npos);
+        }
+    };
+
+    SECTION("graph then title-NL") {
+        writeStage(KnowledgeGraphCompletionStage::Graph, "shared:graph-first");
+        CHECK(marker() == "pending:" + entry.knowledgeGraphToken);
+        writeStage(KnowledgeGraphCompletionStage::TitleNl, "shared:title-second");
+        CHECK(marker() == "complete:" + entry.knowledgeGraphToken);
+    }
+
+    SECTION("title-NL then graph") {
+        writeStage(KnowledgeGraphCompletionStage::TitleNl, "shared:title-first");
+        CHECK(marker() == "pending:" + entry.knowledgeGraphToken);
+        writeStage(KnowledgeGraphCompletionStage::Graph, "shared:graph-second");
+        CHECK(marker() == "complete:" + entry.knowledgeGraphToken);
+    }
+
+    SECTION("failed KG transaction does not mark its stage") {
+        REQUIRE(fix.pool
+                    ->withConnection([](yams::metadata::Database& db) {
+                        return db.execute(
+                            "CREATE TRIGGER reject_shared_completion BEFORE INSERT ON kg_nodes "
+                            "BEGIN SELECT RAISE(ABORT, 'injected KG write failure'); END");
+                    })
+                    .has_value());
+        writeStage(KnowledgeGraphCompletionStage::Graph, "shared:rejected", false);
+        CHECK(marker() == "pending:" + entry.knowledgeGraphToken);
+        REQUIRE(fix.pool
+                    ->withConnection([](yams::metadata::Database& db) {
+                        return db.execute("DROP TRIGGER reject_shared_completion");
+                    })
+                    .has_value());
+
+        CHECK_FALSE(completion->markCommitted(KnowledgeGraphCompletionStage::TitleNl));
+        writeStage(KnowledgeGraphCompletionStage::Graph, "shared:retry");
+        CHECK(marker() == "complete:" + entry.knowledgeGraphToken);
+    }
+}
 
 TEST_CASE("WriteCoordinator: tryEnqueue rejects batches at channel capacity",
           "[unit][daemon][write-coordinator]") {
@@ -457,4 +870,69 @@ TEST_CASE("WriteCoordinator: delete op mid-stream does not lose buffered edges",
 
     auto row = queryEdgesForRelation(fix.dbPath, "del_rel");
     CHECK((row.count == 2));
+}
+
+TEST_CASE("WriteCoordinator: derivation completions publish only current tokens",
+          "[unit][daemon][write-coordinator][embedding][derivation]") {
+    KgCoordinatorFixture fix("yams_wc_derivation_");
+    auto repo = std::make_shared<yams::metadata::MetadataRepository>(
+        *fix.pool, nullptr, yams::metadata::MetadataRepository::SchemaBootstrapMode::AssumeReady);
+
+    const std::string current = "wc-derivation-current";
+    const std::string superseded = "wc-derivation-superseded";
+    for (const auto& hash : {current, superseded}) {
+        yams::metadata::DocumentInfo info;
+        info.filePath = "/tmp/" + hash + ".txt";
+        info.fileName = hash + ".txt";
+        info.fileExtension = ".txt";
+        info.fileSize = 16;
+        info.sha256Hash = hash;
+        info.mimeType = "text/plain";
+        info.createdTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+        info.modifiedTime = info.createdTime;
+        info.indexedTime = info.createdTime;
+        yams::metadata::populatePathDerivedFields(info);
+        REQUIRE(repo->insertDocument(info).has_value());
+    }
+    auto tokens = repo->batchBeginDocumentEmbeddingDerivations({current, superseded}, "recipe");
+    REQUIRE(tokens.has_value());
+    REQUIRE(tokens.value().size() == 2);
+    // A newer attempt on the second document makes its earlier token stale.
+    REQUIRE(repo->beginDocumentEmbeddingDerivation(superseded, "recipe").has_value());
+
+    boost::asio::io_context io;
+    WriteCoordinator::Config config;
+    config.maxBatchSize = 4;
+    config.maxBatchDelayMs = std::chrono::milliseconds{1};
+    config.channelCapacity = 8;
+    WriteCoordinator coordinator(io, fix.kg, repo, config);
+    coordinator.start();
+    std::thread writerLoop([&io] { io.run(); });
+
+    const auto before = coordinator.getStats();
+    auto batch = std::make_unique<WriteBatch>();
+    batch->source = "test/derivation_completion";
+    CompleteDocumentEmbeddingsByHashesOp op;
+    op.modelName = "model-x";
+    op.derivations = tokens.value();
+    batch->ops.emplace_back(std::move(op));
+    coordinator.enqueue(std::move(batch));
+    REQUIRE(coordinator.flush(std::chrono::seconds{10}).has_value());
+    const auto after = coordinator.getStats();
+    CHECK((after.embeddingStatusesUpdated - before.embeddingStatusesUpdated) == 1);
+
+    auto ready = repo->hasDocumentEmbeddingByHash(current);
+    REQUIRE(ready.has_value());
+    CHECK(ready.value());
+    auto stale = repo->hasDocumentEmbeddingByHash(superseded);
+    REQUIRE(stale.has_value());
+    CHECK_FALSE(stale.value());
+
+    coordinator.shutdown();
+    io.stop();
+    if (writerLoop.joinable()) {
+        writerLoop.join();
+    }
+    repo.reset();
 }

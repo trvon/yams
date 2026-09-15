@@ -5,7 +5,6 @@
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/VectorIndexCoordinator.h>
 #include <yams/daemon/components/VectorSystemManager.h>
-#include <yams/metadata/metadata_repository.h>
 #include <yams/search/hotzone_manager.h>
 #include <yams/vector/vector_database.h>
 
@@ -56,17 +55,20 @@ void CheckpointManager::stop() {
         checkpointThread_.join();
     }
 
-    if (deps_.metadataRepository) {
+    const auto& shutdownCheckpoint =
+        deps_.checkpointWalTruncate ? deps_.checkpointWalTruncate : deps_.checkpointWal;
+    if (shutdownCheckpoint) {
+        const char* mode = deps_.checkpointWalTruncate ? "TRUNCATE" : "PASSIVE";
         try {
-            auto result = deps_.metadataRepository->checkpointWalTruncate();
+            auto result = shutdownCheckpoint();
             if (result) {
-                spdlog::info("[CheckpointManager] Shutdown WAL checkpoint (TRUNCATE) completed");
+                spdlog::info("[CheckpointManager] Shutdown WAL checkpoint ({}) completed", mode);
             } else {
-                spdlog::warn("[CheckpointManager] Shutdown WAL TRUNCATE failed: {}",
+                spdlog::warn("[CheckpointManager] Shutdown WAL {} failed: {}", mode,
                              result.error().message);
             }
         } catch (const std::exception& e) {
-            spdlog::warn("[CheckpointManager] Shutdown WAL TRUNCATE threw: {}", e.what());
+            spdlog::warn("[CheckpointManager] Shutdown WAL {} threw: {}", mode, e.what());
         }
     }
 }
@@ -220,7 +222,7 @@ bool CheckpointManager::checkpointHotzone() {
 }
 
 bool CheckpointManager::checkpointWal() {
-    if (!deps_.metadataRepository) {
+    if (!deps_.checkpointWal && !deps_.checkpointWalTruncate) {
         return true;
     }
 
@@ -246,7 +248,7 @@ bool CheckpointManager::checkpointWal() {
                      *preSize / (1024ULL * 1024ULL), kTruncateWatermarkBytes / (1024ULL * 1024ULL));
     }
 
-    if (wantsTruncate) {
+    if (wantsTruncate && deps_.checkpointWalTruncate) {
         // ── TRUNCATE with retry (exclusive-lock contention is common under load) ──
         constexpr int kMaxRetries = 3;
         for (int attempt = 0; attempt < kMaxRetries; ++attempt) {
@@ -257,7 +259,7 @@ bool CheckpointManager::checkpointWal() {
                 std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
             }
             try {
-                auto result = deps_.metadataRepository->checkpointWalTruncate();
+                auto result = deps_.checkpointWalTruncate();
                 if (result) {
                     stats_.wal_checkpoints.fetch_add(1, std::memory_order_relaxed);
                     auto postSize = walSizeBytes();
@@ -281,8 +283,12 @@ bool CheckpointManager::checkpointWal() {
     }
 
     // ── Routine PASSIVE checkpoint ──
+    if (!deps_.checkpointWal) {
+        return true;
+    }
+
     try {
-        auto result = deps_.metadataRepository->checkpointWal();
+        auto result = deps_.checkpointWal();
         if (result) {
             stats_.wal_checkpoints.fetch_add(1, std::memory_order_relaxed);
             spdlog::debug("[CheckpointManager] WAL checkpoint (PASSIVE) completed");

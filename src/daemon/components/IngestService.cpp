@@ -2,16 +2,13 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
-#include <future>
 #include <memory>
 #include <string>
 #include <unordered_map>
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
-#include <boost/asio/post.hpp>
 #include <boost/asio/steady_timer.hpp>
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/app/services/services.hpp>
+#include <yams/daemon/components/dispatch_utils.hpp>
 #include <yams/daemon/components/DocumentRequestMapper.h>
 #include <yams/daemon/components/IngestService.h>
 #include <yams/daemon/components/InternalEventBus.h>
@@ -30,35 +27,16 @@ static PendingPostIngestByMime processTask(ServiceManager* sm,
                                            const InternalEventBus::StoreDocumentTask& task);
 static PendingPostIngestByMime
 processTaskBatch(ServiceManager* sm, std::vector<InternalEventBus::StoreDocumentTask> tasks);
-static std::future<PendingPostIngestByMime>
+static boost::asio::awaitable<PendingPostIngestByMime>
 dispatchBatchToCoordinator(ServiceManager* sm, WorkCoordinator* coordinator,
                            std::vector<InternalEventBus::StoreDocumentTask> tasks) {
-    std::promise<PendingPostIngestByMime> promise;
-    auto future = promise.get_future();
-
-    // channelPoller runs on this coordinator and waits on the returned future. With only one
-    // worker, posting back to the same executor would deadlock that sole worker.
-    if (!coordinator || !coordinator->isRunning() || coordinator->getWorkerCount() < 2) {
-        try {
-            promise.set_value(processTaskBatch(sm, std::move(tasks)));
-        } catch (...) {
-            promise.set_exception(std::current_exception());
-        }
-        return future;
+    if (!coordinator || !coordinator->isRunning()) {
+        co_return processTaskBatch(sm, std::move(tasks));
     }
 
-    auto sharedPromise =
-        std::make_shared<std::promise<PendingPostIngestByMime>>(std::move(promise));
-    auto executor = coordinator->getExecutor();
-    boost::asio::post(executor, [sm, tasks = std::move(tasks), sharedPromise]() mutable {
-        try {
-            sharedPromise->set_value(processTaskBatch(sm, std::move(tasks)));
-        } catch (...) {
-            sharedPromise->set_exception(std::current_exception());
-        }
+    co_return co_await dispatch::offload_to_worker(sm, [sm, tasks = std::move(tasks)]() mutable {
+        return processTaskBatch(sm, std::move(tasks));
     });
-
-    return future;
 }
 
 static void mergePendingPostIngest(PendingPostIngestByMime& target,
@@ -236,9 +214,9 @@ boost::asio::awaitable<void> IngestService::channelPoller() {
 
         PendingPostIngestByMime pendingPostIngest;
         if (!batch.empty()) {
-            auto future = dispatchBatchToCoordinator(sm_, coordinator_, std::move(batch));
             try {
-                mergePendingPostIngest(pendingPostIngest, future.get());
+                mergePendingPostIngest(pendingPostIngest, co_await dispatchBatchToCoordinator(
+                                                              sm_, coordinator_, std::move(batch)));
             } catch (const std::exception& e) {
                 spdlog::error("[IngestService] task batch failed: {}", e.what());
             } catch (...) {

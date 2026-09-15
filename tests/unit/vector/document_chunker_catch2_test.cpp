@@ -402,6 +402,7 @@ TEST_CASE_METHOD(DocumentChunkerFixture, "SemanticChunker basic chunking",
     config.semantic_threshold = 0.7f;
 
     EmbeddingConfig embedConfig;
+    embedConfig.backend_is_resolved = true;
     auto embedder = std::make_shared<EmbeddingGenerator>(embedConfig);
 
     SemanticChunker chunker(config, embedder);
@@ -440,6 +441,7 @@ TEST_CASE_METHOD(DocumentChunkerFixture, "createChunker semantic with embedder",
     ChunkingConfig config = defaultConfig;
     config.min_chunk_size = 5;
     EmbeddingConfig embedConfig;
+    embedConfig.backend_is_resolved = true;
     auto embedder = std::make_shared<EmbeddingGenerator>(embedConfig);
 
     auto chunker = createChunker(ChunkingStrategy::SEMANTIC, config, embedder);

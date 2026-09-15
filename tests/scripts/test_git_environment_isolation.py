@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -126,9 +127,11 @@ class GitEnvironmentIsolationTests(unittest.TestCase):
         gate = self.linked / "scripts/local-ci/pre-push-ci-gate.sh"
         gate.parent.mkdir(parents=True)
         # A hook dispatch unit test, NOT a substitute for the actual sanitizer gate.
-        gate.write_text("""#!/usr/bin/env bash
+        # Use LF bytes and the running interpreter, independent of Windows defaults.
+        python = shlex.quote(Path(sys.executable).as_posix())
+        gate.write_bytes(f"""#!/usr/bin/env bash
 set -euo pipefail
-python3 - <<'PY'
+{python} - <<'PY'
 import os
 from pathlib import Path
 for key in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT_PREFIX',
@@ -136,13 +139,17 @@ for key in ('GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR', 'GIT_INDEX_FILE', 'GIT
     assert key not in os.environ, 'Leaked hook variable: ' + key
 Path('gate.ran').write_text('yes')
 PY
-""")
+""".encode("utf-8"))
         gate.chmod(0o755)
         hook = self.linked / ".githooks/pre-push"
         hook.parent.mkdir()
         shutil.copyfile(ROOT / ".githooks/pre-push", hook)
+        # CreateProcess can resolve bare bash to System32/WSL before searching PATH.
+        bash = shutil.which("bash")
+        self.assertIsNotNone(bash, "Bash is required to exercise the POSIX hook")
+        bash = str(Path(bash).resolve())
         child = subprocess.run(
-            ["bash", str(hook)],
+            [bash, str(hook)],
             cwd=self.linked,
             env=self.hook_env,
             capture_output=True,
@@ -150,7 +157,12 @@ PY
             timeout=10,
             check=False,
         )
-        self.assertEqual(child.returncode, 0, child.stderr)
+        self.assertEqual(
+            child.returncode,
+            0,
+            f"bash={shutil.which('bash')!r}; python={sys.executable!r}\n"
+            f"stdout={child.stdout!r}\nstderr={child.stderr!r}",
+        )
         self.assertTrue((self.linked / "gate.ran").is_file())
         self.assertEqual(self.snapshot(), self.before)
 

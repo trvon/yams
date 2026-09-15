@@ -304,7 +304,14 @@ TEST_CASE("PluginProcess stderr capture", "[extraction][plugin]") {
 
     PluginProcess process{std::move(config)};
 
-    // Wait for Python to start and write to stderr - Windows needs more time
+    // Synchronize with the child instead of relying on a startup delay. The script writes and
+    // flushes stderr before reading this request, so a response proves the stderr write happened.
+    size_t read_pos = 0;
+    send_request(process, 1, "stderr_ready");
+    auto response = read_response(process, read_pos, std::chrono::seconds{10});
+    REQUIRE(response.has_value());
+
+    // Allow the independent stderr reader to publish the already-written bytes.
     std::span<const std::byte> stderr_data;
     auto start = std::chrono::steady_clock::now();
     while (std::chrono::steady_clock::now() - start < std::chrono::seconds{5}) {

@@ -10,6 +10,7 @@
 #include <list>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -213,6 +214,25 @@ public:
     struct TopCandidateDecision {
         const char* recipe_name = "Bm25SabSmooth";
         std::vector<TopCandidate> candidates;
+    };
+
+    /// Request-local, lazy scoring for one query and recipe. The backend must outlive
+    /// this session and must not be rebuilt while it is in use. Sessions are not shared
+    /// between threads or requests; failures are memoized as well as successful scores.
+    class QuerySession {
+    public:
+        QuerySession(const SimeonLexicalBackend& backend, std::string_view query,
+                     std::string_view arm = {})
+            : backend_(backend), query_(query), arm_(arm) {}
+        Result<RescoreDecision> score(std::span<const std::int64_t> documentIds);
+        Result<TopCandidateDecision> searchTop(std::size_t limit);
+
+    private:
+        Result<void> ensureScored();
+        const SimeonLexicalBackend& backend_;
+        std::string query_;
+        std::string arm_;
+        std::optional<Result<RescoreDecision>> scores_;
     };
 
     // Router-driven rescore: computes pre-retrieval QueryFeatures, picks a

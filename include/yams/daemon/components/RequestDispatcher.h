@@ -263,6 +263,10 @@ private:
     boost::asio::awaitable<Response>
     handleMetadataValueCountsRequest(const MetadataValueCountsRequest& req);
 
+    // Memory-sync control is deliberately daemon-owned: calls do not construct
+    // standalone services or force a reconciliation cycle.
+    boost::asio::awaitable<Response> handleMemorySyncRequest(const MemorySyncRequest& req);
+
     // Batch request handler (Track B: Communication Overhead Reduction)
     boost::asio::awaitable<Response> handleBatchRequest(const BatchRequest& req);
 

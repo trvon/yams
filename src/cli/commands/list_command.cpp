@@ -1,10 +1,12 @@
 #include <spdlog/spdlog.h>
+#include "file_history_json.h"
 #include <yams/app/services/factory.hpp>
 #include <yams/app/services/list_input_resolver.hpp>
 #include <yams/app/services/retrieval_service.h>
 #include <yams/app/services/services.hpp>
 #include <yams/cli/command.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/time_filters.h>
 #include <yams/cli/time_parser.h>
 #include <yams/cli/ui_helpers.hpp>
 #include <yams/cli/yams_cli.h>
@@ -208,7 +210,7 @@ public:
         try {
             const bool cliOneShot = yams::cli::cli_one_shot_enabled();
 
-            if (jsonFlag_)
+            if (jsonFlag_ || (cli_ && cli_->getJsonOutput()))
                 format_ = "json";
             if (!metadataValuesRaw_.empty()) {
                 return listMetadataValues();
@@ -448,15 +450,6 @@ public:
                         "list: socket transport unavailable; using in-process transport: {}",
                         prepared.plan.fallbackReason);
                 }
-                if (prepared.plan.resolvedMode == yams::daemon::ClientTransportMode::InProcess) {
-                    spdlog::info("list: socket-only client cannot service in-process plan; using "
-                                 "local services");
-                    if (spinner) {
-                        spinner->stop();
-                    }
-                    return executeWithServices(&spinner);
-                }
-
                 yams::app::services::RetrievalService rsvc;
                 auto res = rsvc.list(dreq, prepared.options);
                 if (res) {
@@ -469,6 +462,10 @@ public:
                 if (spinner) {
                     spinner->stop();
                 }
+                // A local fallback may open the same store. Release the prepared transport first
+                // so an embedded ServiceManager cannot retain conflicting database ownership.
+                prepared.options.transport.reset();
+                prepared.plan.config.transport.reset();
                 return yams::cli::detail::daemon_error_or_local_fallback(
                     res.error(), "list", [&]() { return executeWithServices(&spinner); });
             }
@@ -678,6 +675,11 @@ private:
             }
 
             const auto& history = response.value();
+
+            if (format_ == "json") {
+                std::cout << fileHistoryToJson(history).dump(2) << '\n';
+                return Result<void>();
+            }
 
             // Extract filename for display
             std::filesystem::path p(history.filepath);
@@ -1717,7 +1719,7 @@ private:
 
         for (const auto& doc : documents) {
             json d;
-            d["hash"] = doc.info.sha256Hash;
+            addContentReference(d, doc.info.sha256Hash);
             d["name"] = doc.info.fileName;
             d["path"] = doc.info.filePath;
             d["extension"] = doc.info.fileExtension;
@@ -1839,76 +1841,13 @@ private:
     }
 
     bool applyTimeFilters(const metadata::DocumentInfo& doc) {
-        // Parse and apply created time filters
-        if (!createdAfter_.empty()) {
-            auto afterTime = TimeParser::parse(createdAfter_);
-            if (!afterTime) {
-                spdlog::warn("Invalid created-after time: {}", createdAfter_);
-                return true; // Don't filter on invalid input
-            }
-            if (doc.createdTime < afterTime.value()) {
-                return false;
-            }
-        }
-
-        if (!createdBefore_.empty()) {
-            auto beforeTime = TimeParser::parse(createdBefore_);
-            if (!beforeTime) {
-                spdlog::warn("Invalid created-before time: {}", createdBefore_);
-                return true;
-            }
-            if (doc.createdTime > beforeTime.value()) {
-                return false;
-            }
-        }
-
-        // Parse and apply modified time filters
-        if (!modifiedAfter_.empty()) {
-            auto afterTime = TimeParser::parse(modifiedAfter_);
-            if (!afterTime) {
-                spdlog::warn("Invalid modified-after time: {}", modifiedAfter_);
-                return true;
-            }
-            if (doc.modifiedTime < afterTime.value()) {
-                return false;
-            }
-        }
-
-        if (!modifiedBefore_.empty()) {
-            auto beforeTime = TimeParser::parse(modifiedBefore_);
-            if (!beforeTime) {
-                spdlog::warn("Invalid modified-before time: {}", modifiedBefore_);
-                return true;
-            }
-            if (doc.modifiedTime > beforeTime.value()) {
-                return false;
-            }
-        }
-
-        // Parse and apply indexed time filters
-        if (!indexedAfter_.empty()) {
-            auto afterTime = TimeParser::parse(indexedAfter_);
-            if (!afterTime) {
-                spdlog::warn("Invalid indexed-after time: {}", indexedAfter_);
-                return true;
-            }
-            if (doc.indexedTime < afterTime.value()) {
-                return false;
-            }
-        }
-
-        if (!indexedBefore_.empty()) {
-            auto beforeTime = TimeParser::parse(indexedBefore_);
-            if (!beforeTime) {
-                spdlog::warn("Invalid indexed-before time: {}", indexedBefore_);
-                return true;
-            }
-            if (doc.indexedTime > beforeTime.value()) {
-                return false;
-            }
-        }
-
-        return true;
+        const yams::cli::DocTimeFilters filters{.createdAfter = createdAfter_,
+                                                .createdBefore = createdBefore_,
+                                                .modifiedAfter = modifiedAfter_,
+                                                .modifiedBefore = modifiedBefore_,
+                                                .indexedAfter = indexedAfter_,
+                                                .indexedBefore = indexedBefore_};
+        return yams::cli::applyDocTimeFilters(doc, filters);
     }
 
     bool applyChangeFilters(const metadata::DocumentInfo& doc) {

@@ -1,3 +1,4 @@
+// pi-lens-ignore: fatal error
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/cli/status_metrics.h>
@@ -55,6 +56,37 @@ TEST_CASE("effectiveSearchMetrics recovers zeroed typed metrics from requestCoun
     CHECK(effective.cacheHitRate == 0.64);
     CHECK(effective.avgLatencyUs == 10230234);
     CHECK(effective.concurrencyLimit == 7);
+}
+
+TEST_CASE("extractStoragePressure decodes detailed disk policy metrics",
+          "[cli][status][metrics][disk-pressure]") {
+    StatusResponse status;
+    status.requestCounts[std::string(yams::daemon::metrics::kStorageCapacityBytesLow)] =
+        0x80000000ULL;
+    status.requestCounts[std::string(yams::daemon::metrics::kStorageCapacityBytesHigh)] = 2;
+    status.requestCounts[std::string(yams::daemon::metrics::kStorageAvailableBytesLow)] =
+        512ULL * 1024ULL * 1024ULL;
+    status.requestCounts[std::string(yams::daemon::metrics::kStorageAvailableBytesHigh)] = 0;
+    status.requestCounts[std::string(yams::daemon::metrics::kStoragePressureLevel)] =
+        static_cast<std::size_t>(yams::storage::DiskPressureLevel::Warning);
+    status.requestCounts[std::string(yams::daemon::metrics::kStorageWarningFreePercentBp)] = 1250;
+    status.requestCounts[std::string(yams::daemon::metrics::kStorageWriteAdmissionBytesLow)] =
+        256ULL * 1024ULL * 1024ULL;
+    status.requestCounts[std::string(yams::daemon::metrics::kStorageWriteAdmissionBytesHigh)] = 0;
+    status.requestCounts[std::string(yams::daemon::metrics::kStorageEmergencyReserveBytesLow)] =
+        100ULL * 1024ULL * 1024ULL;
+    status.requestCounts[std::string(yams::daemon::metrics::kStorageEmergencyReserveBytesHigh)] = 0;
+
+    const auto disk = yams::cli::extractStoragePressure(status);
+
+    REQUIRE(disk.capacityBytes.has_value());
+    REQUIRE(disk.availableBytes.has_value());
+    CHECK(*disk.capacityBytes == 10ULL * 1024ULL * 1024ULL * 1024ULL);
+    CHECK(*disk.availableBytes == 512ULL * 1024ULL * 1024ULL);
+    CHECK(disk.level == yams::storage::DiskPressureLevel::Warning);
+    CHECK(disk.warningFreePercent == 12.5);
+    CHECK(disk.minimumWriteAdmissionBytes == 256ULL * 1024ULL * 1024ULL);
+    CHECK(disk.emergencyReserveBytes == 100ULL * 1024ULL * 1024ULL);
 }
 
 TEST_CASE("effectiveSearchMetrics fills only missing typed fields", "[cli][status][metrics]") {

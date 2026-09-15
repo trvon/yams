@@ -10,6 +10,7 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/use_future.hpp>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -56,6 +57,79 @@ TEST_CASE("requestCheckpoint: stalled strand does not block the caller forever",
     CHECK_FALSE(result);
 }
 
+TEST_CASE("requestCheckpoint: repeated timeouts keep one persistence callback queued",
+          "[coordinator][checkpoint][coalesce]") {
+    boost::asio::io_context io;
+    VectorIndexCoordinator coord(io.get_executor(), nullptr, nullptr);
+    coord.testing_setCheckpointWaitTimeout(10ms);
+
+    constexpr std::size_t kCallers = 8;
+    std::mutex gateMutex;
+    std::condition_variable gateCv;
+    std::size_t ready = 0;
+    bool start = false;
+    std::array<bool, kCallers> results{};
+    std::vector<std::thread> callers;
+    callers.reserve(kCallers);
+
+    for (std::size_t i = 0; i < kCallers; ++i) {
+        callers.emplace_back([&, i] {
+            {
+                std::unique_lock lock(gateMutex);
+                ++ready;
+                gateCv.notify_all();
+                gateCv.wait(lock, [&] { return start; });
+            }
+            results[i] = coord.requestCheckpoint();
+        });
+    }
+
+    {
+        std::unique_lock lock(gateMutex);
+        REQUIRE(gateCv.wait_for(lock, 1s, [&] { return ready == kCallers; }));
+        start = true;
+    }
+    gateCv.notify_all();
+
+    for (auto& caller : callers) {
+        caller.join();
+    }
+    for (bool result : results) {
+        CHECK_FALSE(result);
+    }
+
+    const auto queued = coord.checkpointSnapshot();
+    CHECK(queued.phase == VectorCheckpointPhase::Queued);
+    CHECK(queued.generation == 1);
+    CHECK(queued.requests == kCallers);
+    CHECK(queued.coalesced == kCallers - 1);
+    CHECK(queued.started == 0);
+    CHECK(queued.completed == 0);
+    CHECK(queued.timedOut == kCallers);
+
+    io.run();
+
+    const auto completed = coord.checkpointSnapshot();
+    CHECK(coord.testing_checkpointCallbacksStarted() == 1);
+    CHECK(completed.phase == VectorCheckpointPhase::Idle);
+    CHECK(completed.started == 1);
+    CHECK(completed.completed == 1);
+    CHECK(completed.postFailures == 0);
+}
+
+TEST_CASE("requestCheckpoint: timed-out callback may run after coordinator destruction",
+          "[coordinator][checkpoint][lifetime]") {
+    boost::asio::io_context io;
+    {
+        VectorIndexCoordinator coord(io.get_executor(), nullptr, nullptr);
+        coord.testing_setCheckpointWaitTimeout(5ms);
+        CHECK_FALSE(coord.requestCheckpoint());
+        CHECK(coord.checkpointSnapshot().phase == VectorCheckpointPhase::Queued);
+    }
+
+    CHECK(io.run() == 1);
+}
+
 TEST_CASE("snapshot: concurrent reads return consistent telemetry during rebuild",
           "[coordinator][telemetry]") {
     boost::asio::io_context io;
@@ -100,11 +174,11 @@ TEST_CASE("snapshot: concurrent reads return consistent telemetry during rebuild
     // No active scopes remain.
     REQUIRE(coord.testing_activeScopes() == 0u);
 
-    // Final snapshot must show ready=true and epoch==kRebuildCount.
+    // A coordinator without a vector database records each failed epoch but never reports ready.
     const auto final_snap = coord.snapshot();
     REQUIRE(final_snap.rebuildEpoch == static_cast<uint64_t>(kRebuildCount));
     REQUIRE(final_snap.rebuilding == false);
-    REQUIRE(final_snap.ready == true);
+    REQUIRE(final_snap.ready == false);
 }
 
 TEST_CASE("snapshot: epoch is monotonic across BulkScope releases", "[coordinator][telemetry]") {

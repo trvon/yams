@@ -98,7 +98,15 @@ parseTopologyVectorPolicy(std::string raw) {
 }
 } // namespace
 
-SearchEngineManager::SearchEngineManager() : runtimeExecutor_(searchRuntimeThreadCount()) {}
+struct SearchEngineManager::RuntimePolicy {
+    ConfigResolver::TopologyRoutingPolicy topologyRouting;
+};
+
+SearchEngineManager::SearchEngineManager()
+    : compatibilityEnvironment_(yams::search::snapshotLegacySearchEnvironment()),
+      runtimePolicy_(std::make_unique<RuntimePolicy>(
+          RuntimePolicy{ConfigResolver::resolveTopologyRoutingPolicy()})),
+      runtimeExecutor_(searchRuntimeThreadCount()) {}
 
 SearchEngineManager::~SearchEngineManager() {
     runtimeExecutor_.stop();
@@ -112,6 +120,10 @@ std::shared_ptr<yams::search::SearchEngine> SearchEngineManager::getCachedEngine
 
 SearchEngineSnapshot SearchEngineManager::getSnapshot() const {
     return fsm_.snapshot();
+}
+
+std::optional<std::size_t> SearchEngineManager::topologyMaxClustersSnapshot() const {
+    return runtimePolicy_ ? runtimePolicy_->topologyRouting.maxClusters : std::nullopt;
 }
 
 void SearchEngineManager::noteLexicalDeltaQueued(std::size_t documentCount) {
@@ -286,6 +298,8 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         builder->withEmbeddingGenerator(std::move(embeddingGen));
 
     auto opts = yams::search::SearchEngineBuilder::BuildOptions::makeDefault();
+    opts.compatibilityEnvironment = compatibilityEnvironment_;
+    opts.compatibilityEnvironmentSnapshotted = true;
     if (!tunerStatePath_.empty()) {
         opts.tunerStatePath = tunerStatePath_;
     }
@@ -295,7 +309,8 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
     // evidence is sparse.
     opts.config.enableWeakQueryFanoutBoost = false;
     {
-        const auto backend = ConfigResolver::resolveEmbeddingBackend();
+        const auto backend = embeddingBackend_.empty() ? ConfigResolver::resolveEmbeddingBackend()
+                                                       : embeddingBackend_;
         const auto bm25Policy = ConfigResolver::resolveSimeonBm25Policy();
         if (!enableSimeonLexicalBuild) {
             spdlog::warn("[simeon-lexical] async BM25 build suppressed by memory "
@@ -428,7 +443,7 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
     // Topology routing selects query-ranked cluster members before the vector stage; the typed
     // vector policy decides whether to observe or apply route-restricted ANN.
     {
-        auto tp = ConfigResolver::resolveTopologyRoutingPolicy();
+        const auto& tp = runtimePolicy_->topologyRouting;
         if (tp.mode) {
             if (auto mode = parseTopologyRoutingMode(*tp.mode); mode.has_value()) {
                 opts.config.topologyRoutingMode = *mode;
@@ -499,6 +514,14 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         if (tp.routeCalibrationFingerprint) {
             opts.config.topologyRouteRiskCalibration.constructionFingerprint =
                 *tp.routeCalibrationFingerprint;
+        }
+        if (tp.routeCalibrationPolicyFingerprint) {
+            opts.config.topologyRouteRiskCalibration.routingPolicyFingerprint =
+                *tp.routeCalibrationPolicyFingerprint;
+        }
+        if (tp.routeCalibrationDatasetIdentity) {
+            opts.config.topologyRouteRiskCalibration.datasetIdentity =
+                *tp.routeCalibrationDatasetIdentity;
         }
         if (tp.routeCalibrationQueries) {
             opts.config.topologyRouteRiskCalibration.calibrationQueries =

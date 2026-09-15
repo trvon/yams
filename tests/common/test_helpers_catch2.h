@@ -6,7 +6,6 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -18,6 +17,8 @@
 #include <string_view>
 #include <thread>
 #include <vector>
+
+#include <yams/config/config_helpers.h>
 
 namespace yams::test {
 
@@ -145,33 +146,20 @@ public:
 
 private:
     static std::optional<std::string> get_env(const std::string& key) {
-        if (const auto* value = std::getenv(key.c_str()); value != nullptr) {
-            return std::string(value);
-        }
-        return std::nullopt;
+        return yams::config::getenv_optional(key);
     }
 
     static void set_env(const std::string& key, std::optional<std::string> value) {
-#ifdef _WIN32
-        if (value) {
-            _putenv_s(key.c_str(), value->c_str());
-        } else {
-            // MSVC does not provide setenv/unsetenv; `_putenv("KEY=")` removes the variable.
-            std::string entry = key + "=";
-            _putenv(entry.c_str());
+        const char* raw = value ? value->c_str() : nullptr;
+        if (!yams::config::set_environment(key.c_str(), raw)) {
+            throw std::runtime_error("Failed to update test environment variable '" + key + "'");
         }
-#else
-        if (value) {
-            ::setenv(key.c_str(), value->c_str(), 1);
-        } else {
-            ::unsetenv(key.c_str());
-        }
-#endif
     }
 
-    void restore() {
+    void restore() noexcept {
         if (active_) {
-            set_env(key_, previous_);
+            const char* raw = previous_ ? previous_->c_str() : nullptr;
+            (void)yams::config::set_environment(key_.c_str(), raw);
             active_ = false;
         }
     }

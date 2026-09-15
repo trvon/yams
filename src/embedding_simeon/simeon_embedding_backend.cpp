@@ -1,6 +1,7 @@
 #include <yams/vector/simeon_embedding_backend.h>
 
 #include <yams/daemon/components/ConfigResolver.h>
+#include <yams/vector/embedding_generator.h>
 
 #include <simeon/simeon.hpp>
 

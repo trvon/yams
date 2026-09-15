@@ -18,12 +18,6 @@ using namespace yams::test;
 // NOLINTBEGIN(bugprone-chained-comparison)
 namespace {
 
-struct ArtifactGuard {
-    explicit ArtifactGuard(std::filesystem::path p) : path(std::move(p)) {}
-    ~ArtifactGuard() { remove_sqlite_artifacts(path); }
-    std::filesystem::path path;
-};
-
 Migration makeTableMigration(int version, const std::string& table) {
     return MigrationBuilder(version, "create_" + table)
         .up("CREATE TABLE " + table + "(id INTEGER PRIMARY KEY, payload TEXT)")
@@ -100,17 +94,17 @@ TEST_CASE("failed migration is recorded and retry resumes",
     mm.registerMigration(makeTableMigration(1, "t1"));
 
     bool failOnce = true;
-    mm.registerMigration(
-        MigrationBuilder(2, "flaky_v2")
-            .upFunction([&failOnce](Database& mdb) -> Result<void> {
-                if (failOnce) {
-                    failOnce = false;
-                    return Error{ErrorCode::DatabaseError, "simulated crash mid-migration"};
-                }
-                return mdb.execute("CREATE TABLE t2(id INTEGER PRIMARY KEY)");
-            })
-            .down("DROP TABLE t2")
-            .build());
+    mm.registerMigration(MigrationBuilder(2, "flaky_v2")
+                             .upFunction([&failOnce](Database& mdb) -> Result<void> {
+                                 if (failOnce) {
+                                     failOnce = false;
+                                     return Error{ErrorCode::DatabaseError,
+                                                  "simulated crash mid-migration"};
+                                 }
+                                 return mdb.execute("CREATE TABLE t2(id INTEGER PRIMARY KEY)");
+                             })
+                             .down("DROP TABLE t2")
+                             .build());
 
     auto firstAttempt = mm.migrate();
     REQUIRE_FALSE(firstAttempt);

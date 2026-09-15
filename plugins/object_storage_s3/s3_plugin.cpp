@@ -19,11 +19,11 @@ extern "C" {
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <future>
 #include <limits>
-#include <memory>
 #include <mutex>
 #include <regex>
 #include <sstream>
@@ -140,6 +140,9 @@ public:
     S3Backend() = default;
     ~S3Backend() override = default;
 
+    void requestCancel() noexcept override { cancelled_.store(true, std::memory_order_release); }
+    void resetCancel() noexcept override { cancelled_.store(false, std::memory_order_release); }
+
     Result<void> initialize(const BackendConfig& cfg) override {
         config_ = cfg;
         if (cfg.url.empty()) {
@@ -152,18 +155,22 @@ public:
         s3_ = std::move(parsedUrl.value());
 
         // Resolve endpoint
+        endpointHost_.clear();
+        endpointScheme_ = "https://";
         auto it = config_.credentials.find("endpoint");
         if (it != config_.credentials.end()) {
-            endpointHost_.append(it->second);
+            endpointHost_ = it->second;
         } else {
             endpointHost_ = "s3.amazonaws.com";
         }
 
         if (endpointHost_.rfind("http://", 0) == 0 || endpointHost_.rfind("https://", 0) == 0) {
-            // Strip scheme to keep only host[:port]
-            auto pos = endpointHost_.find("://");
-            auto hostRest = endpointHost_.substr(pos + 3);
-            auto slash = hostRest.find('/');
+            // Preserve an explicitly configured scheme so local/internal S3-compatible
+            // endpoints can opt out of TLS. Remote endpoints remain HTTPS by default.
+            const auto pos = endpointHost_.find("://");
+            endpointScheme_ = endpointHost_.substr(0, pos + 3);
+            const auto hostRest = endpointHost_.substr(pos + 3);
+            const auto slash = hostRest.find('/');
             endpointHost_ = (slash == std::string::npos) ? hostRest : hostRest.substr(0, slash);
         }
 
@@ -180,6 +187,7 @@ public:
             return Error{ErrorCode::Unknown, "curl init failed"};
 
         ReadData rd{data.data(), data.size(), 0};
+        configureCancellation(curl);
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_UPLOAD, 1L);
         curl_easy_setopt(curl, CURLOPT_READFUNCTION, readCb);
@@ -228,6 +236,7 @@ public:
             return Error{ErrorCode::Unknown, "curl init failed"};
 
         std::vector<uint8_t> buf;
+        configureCancellation(curl);
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCb);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
@@ -264,6 +273,7 @@ public:
         CURL* curl = curl_easy_init();
         if (!curl)
             return Error{ErrorCode::Unknown, "curl init failed"};
+        configureCancellation(curl);
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, (long)config_.requestTimeout);
@@ -293,6 +303,7 @@ public:
         CURL* curl = curl_easy_init();
         if (!curl)
             return Error{ErrorCode::Unknown, "curl init failed"};
+        configureCancellation(curl);
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "DELETE");
         curl_easy_setopt(curl, CURLOPT_TIMEOUT, (long)config_.requestTimeout);
@@ -315,10 +326,13 @@ public:
         return {};
     }
 
-    Result<std::vector<std::string>> list(std::string_view prefix) const override {
-        // Perform S3 ListObjectsV2 with effective prefix (base + parameter)
-        // Minimal implementation: gather up to 1000 keys, single or multiple pages (max 10 pages)
-        std::vector<std::string> results;
+    Result<ObjectListPage> listPage(std::string_view prefix, std::optional<std::string_view> cursor,
+                                    std::size_t limit) const override {
+        if (limit == 0) {
+            return Error{ErrorCode::InvalidArgument, "S3 list page limit must be positive"};
+        }
+        const auto pageLimit = std::min<std::size_t>(limit, 1000);
+        ObjectListPage page;
 
         auto percentEncode = [](const std::string& s) {
             static const char* unreserved =
@@ -337,7 +351,6 @@ public:
         };
 
         auto buildBucketBase = [this]() {
-            std::string scheme = "https://";
             std::string host = endpointHost_;
             std::string path;
             if (config_.usePathStyle) {
@@ -346,13 +359,12 @@ public:
                 host = s3_.bucket + "." + host;
                 path = "/"; // root of bucket
             }
-            return std::make_pair(scheme + host + path, host);
+            return std::make_pair(endpointScheme_ + host + path, host);
         };
 
-        std::string continuation;
-        std::string effectivePrefix = s3_.prefix + std::string("") + std::string(prefix);
-        int pages = 0;
-        do {
+        std::string continuation = cursor ? std::string(*cursor) : std::string{};
+        std::string effectivePrefix = s3_.prefix + std::string(prefix);
+        {
             auto [baseUrl, hostForSign] = buildBucketBase();
 
             // Build canonical query sorted
@@ -360,7 +372,7 @@ public:
             params.emplace_back("list-type", "2");
             if (!effectivePrefix.empty())
                 params.emplace_back("prefix", effectivePrefix);
-            params.emplace_back("max-keys", "1000");
+            params.emplace_back("max-keys", std::to_string(pageLimit));
             if (!continuation.empty())
                 params.emplace_back("continuation-token", continuation);
             std::sort(params.begin(), params.end());
@@ -378,6 +390,7 @@ public:
             if (!curl)
                 return Error{ErrorCode::Unknown, "curl init failed"};
             std::vector<uint8_t> buf;
+            configureCancellation(curl);
             curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
             curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCb);
             curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
@@ -410,17 +423,29 @@ public:
                 if (!s3_.prefix.empty() && k.rfind(s3_.prefix, 0) == 0) {
                     k = k.substr(s3_.prefix.size());
                 }
-                results.emplace_back(std::move(k));
+                page.keys.emplace_back(std::move(k));
             }
             std::smatch m;
             std::regex contRe(R"(<NextContinuationToken>([^<]+)</NextContinuationToken>)");
             if (std::regex_search(xml, m, contRe)) {
-                continuation = m[1].str();
-            } else {
-                continuation.clear();
+                page.nextCursor = m[1].str();
             }
-        } while (!continuation.empty() && ++pages < 10 && results.size() < 5000);
+        }
+        return page;
+    }
 
+    Result<std::vector<std::string>> list(std::string_view prefix) const override {
+        std::vector<std::string> results;
+        std::optional<std::string> cursor;
+        do {
+            auto page = listPage(
+                prefix, cursor ? std::optional<std::string_view>{*cursor} : std::nullopt, 1000);
+            if (!page) {
+                return page.error();
+            }
+            results.insert(results.end(), page.value().keys.begin(), page.value().keys.end());
+            cursor = std::move(page.value().nextCursor);
+        } while (cursor);
         return results;
     }
 
@@ -469,12 +494,24 @@ public:
                                 const std::string& algorithm) override;
 
 private:
+    static int transferProgress(void* context, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+        const auto* backend = static_cast<const S3Backend*>(context);
+        return backend->cancelled_.load(std::memory_order_acquire) ? 1 : 0;
+    }
+
+    void configureCancellation(CURL* curl) const {
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, &S3Backend::transferProgress);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, const_cast<S3Backend*>(this));
+    }
+
     BackendConfig config_;
     S3Url s3_;
     std::string endpointHost_;
+    std::string endpointScheme_{"https://"};
+    mutable std::atomic<bool> cancelled_{false};
 
     std::string buildObjectUrl(std::string_view key) const {
-        std::string scheme = "https://";
         std::string host = endpointHost_;
         std::string path;
         // Encode prefix and key safely (preserve path separators but encode reserved chars)
@@ -486,7 +523,7 @@ private:
             host = s3_.bucket + "." + host;
             path = "/" + encodedPrefix + encodedKey;
         }
-        return scheme + host + path;
+        return endpointScheme_ + host + path;
     }
 };
 

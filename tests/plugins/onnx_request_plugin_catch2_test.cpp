@@ -1,6 +1,7 @@
 #include <nlohmann/json.hpp>
 #include <string>
 #include "../common/env_compat.h"
+#include "../common/test_helpers_catch2.h"
 #include <catch2/catch_test_macros.hpp>
 #include <yams/compat/dlfcn.h>
 #include <yams/compat/unistd.h>
@@ -36,24 +37,24 @@ static yams_onnx_request_v1* load_req_iface(void** handle) {
 }
 
 TEST_CASE("OnnxRequestPluginTest.NoInputsError", "[plugin][onnxrequestplugintest]") {
-    // Avoid background preload threads during tests
-    setenv("YAMS_SKIP_MODEL_LOADING", "1", 1);
+    // Avoid background preload threads during tests.
+    yams::test::ScopedEnvVar skipLoading{"YAMS_SKIP_MODEL_LOADING", std::string{"1"}};
     void* h = nullptr;
     auto* req = load_req_iface(&h);
     if (!req)
         SKIP("onnx plugin not available");
     char* out = nullptr;
     int rc = req->process_json(req->self, "{}", &out);
-    REQUIRE(rc == 0);
-    REQUIRE(out != nullptr);
+    REQUIRE((rc == 0));
+    REQUIRE((out != nullptr));
     auto j = nlohmann::json::parse(out);
     req->free_string(req->self, out);
     REQUIRE(j.contains("error"));
 }
 
 TEST_CASE("OnnxRequestPluginTest.EmbeddingMockBatchShape", "[plugin][onnxrequestplugintest]") {
-    // Avoid heavy model load on CI
-    setenv("YAMS_SKIP_MODEL_LOADING", "1", 1);
+    // Avoid heavy model load on CI.
+    yams::test::ScopedEnvVar skipLoading{"YAMS_SKIP_MODEL_LOADING", std::string{"1"}};
     void* h = nullptr;
     auto* req = load_req_iface(&h);
     if (!req)
@@ -62,13 +63,13 @@ TEST_CASE("OnnxRequestPluginTest.EmbeddingMockBatchShape", "[plugin][onnxrequest
         R"({"task":"embedding","model_id":"e5-small","inputs":["a","b"],"options":{"device":"cpu","batch":2}})";
     char* out = nullptr;
     int rc = req->process_json(req->self, body.c_str(), &out);
-    REQUIRE(rc == 0);
-    REQUIRE(out != nullptr);
+    REQUIRE((rc == 0));
+    REQUIRE((out != nullptr));
     auto j = nlohmann::json::parse(out, nullptr, false);
     req->free_string(req->self, out);
     REQUIRE_FALSE(j.is_discarded());
     if (j.contains("error"))
         SKIP(j.dump());
-    REQUIRE(j.value("task", "") == "embedding");
-    REQUIRE(j.value("batch", 0) == 2);
+    REQUIRE((j.value("task", "") == "embedding"));
+    REQUIRE((j.value("batch", 0) == 2));
 }

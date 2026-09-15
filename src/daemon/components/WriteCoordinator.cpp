@@ -344,6 +344,7 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
 
     bool hasKgOps = false;
     bool hasMetaOps = false;
+    std::unordered_set<const WriteBatch*> batchesWithKgOps;
     for (const auto& batch : batches) {
         for (const auto& op : batch->ops) {
             std::visit(
@@ -358,10 +359,12 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                                   std::is_same_v<T, CompleteDocumentEmbeddingsByHashesOp> ||
                                   std::is_same_v<T, UpsertSymbolExtractionStateOp> ||
                                   std::is_same_v<T, InsertRelationshipOp> ||
-                                  std::is_same_v<T, AddSymSpellTermsOp>) {
+                                  std::is_same_v<T, AddSymSpellTermsOp> ||
+                                  std::is_same_v<T, AcknowledgeKnowledgeGraphOp>) {
                         hasMetaOps = true;
                     } else {
                         hasKgOps = true;
+                        batchesWithKgOps.insert(batch.get());
                     }
                 },
                 op);
@@ -430,7 +433,8 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                                       std::is_same_v<T, CompleteDocumentEmbeddingsByHashesOp> ||
                                       std::is_same_v<T, UpsertSymbolExtractionStateOp> ||
                                       std::is_same_v<T, InsertRelationshipOp> ||
-                                      std::is_same_v<T, AddSymSpellTermsOp>) {
+                                      std::is_same_v<T, AddSymSpellTermsOp> ||
+                                      std::is_same_v<T, AcknowledgeKnowledgeGraphOp>) {
                             return;
                         } else if constexpr (std::is_same_v<T, AddDeferredEdgesOp>) {
                             r = applyOp(kgBatch, concrete, nodeKeyToId, bufferPtr);
@@ -508,6 +512,35 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
         }
     }
 
+    // Release the KG write lease before acquiring a metadata connection (including size-one pools).
+    if (hasKgOps && kg_) {
+        std::optional<Error> firstCompletionError;
+        for (const auto& batch : batches) {
+            if (batch->knowledgeGraphToken.empty())
+                continue;
+            if (batch->knowledgeGraphCompletion) {
+                if (!batchesWithKgOps.contains(batch.get()) ||
+                    !batch->knowledgeGraphCompletion->markCommitted(
+                        batch->knowledgeGraphCompletionStage)) {
+                    continue;
+                }
+            }
+            if (!meta_) {
+                if (!firstCompletionError) {
+                    firstCompletionError =
+                        Error{ErrorCode::NotInitialized, "KG completion metadata unavailable"};
+                }
+                continue;
+            }
+            auto completed = meta_->completeKnowledgeGraphEnrichment(
+                batch->knowledgeGraphDocumentId, batch->knowledgeGraphToken);
+            if (!completed && !firstCompletionError)
+                firstCompletionError = completed.error();
+        }
+        if (firstCompletionError)
+            return *firstCompletionError;
+    }
+
     if (hasMetaOps && meta_) {
         YAMS_ZONE_SCOPED_N("WriteCoordinator::applyMetadata");
         struct RepairStatusGroup {
@@ -566,7 +599,8 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                         Result<void> r;
                         if constexpr (std::is_same_v<T, UpsertTreeSnapshotOp> ||
                                       std::is_same_v<T, InsertRelationshipOp> ||
-                                      std::is_same_v<T, UpsertSymbolExtractionStateOp>) {
+                                      std::is_same_v<T, UpsertSymbolExtractionStateOp> ||
+                                      std::is_same_v<T, AcknowledgeKnowledgeGraphOp>) {
                             r = applyMetadataOp(concrete);
                         } else if constexpr (std::is_same_v<T, AddSymSpellTermsOp>) {
                             if (concrete.terms.empty())
@@ -579,20 +613,28 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                             concrete.terms.clear();
                             return;
                         } else if constexpr (std::is_same_v<T, UpdateRepairStatusOp>) {
-                            if (concrete.hashes.empty())
+                            if (!concrete.derivations.empty()) {
+                                r = applyMetadataOp(concrete);
+                                if (!r && !firstOpError) {
+                                    firstOpError = r.error();
+                                }
+                            } else {
+                                if (concrete.hashes.empty())
+                                    return;
+                                const auto key = batch->source + "\x1f" +
+                                                 std::to_string(static_cast<int>(concrete.status));
+                                auto& group = repairStatusBySourceAndStatus[key];
+                                if (group.source.empty()) {
+                                    group.source = batch->source;
+                                    group.status = concrete.status;
+                                }
+                                group.hashes.insert(
+                                    group.hashes.end(),
+                                    std::make_move_iterator(concrete.hashes.begin()),
+                                    std::make_move_iterator(concrete.hashes.end()));
+                                concrete.hashes.clear();
                                 return;
-                            const auto key = batch->source + "\x1f" +
-                                             std::to_string(static_cast<int>(concrete.status));
-                            auto& group = repairStatusBySourceAndStatus[key];
-                            if (group.source.empty()) {
-                                group.source = batch->source;
-                                group.status = concrete.status;
                             }
-                            group.hashes.insert(group.hashes.end(),
-                                                std::make_move_iterator(concrete.hashes.begin()),
-                                                std::make_move_iterator(concrete.hashes.end()));
-                            concrete.hashes.clear();
-                            return;
                         } else if constexpr (std::is_same_v<T, SetMetadataBatchOp>) {
                             if (concrete.entries.empty())
                                 return;
@@ -646,23 +688,34 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
                             return;
                         } else if constexpr (std::is_same_v<T,
                                                             CompleteDocumentEmbeddingsByHashesOp>) {
-                            if (concrete.hashes.empty())
+                            if (!concrete.derivations.empty()) {
+                                r = applyMetadataOp(concrete);
+                                if (!r && !firstOpError) {
+                                    firstOpError = r.error();
+                                }
+                            } else {
+                                if (concrete.hashes.empty())
+                                    return;
+                                const auto key = batch->source + "\x1f" + concrete.modelName;
+                                auto& group = embeddingCompletionBySourceAndModel[key];
+                                if (group.source.empty()) {
+                                    group.source = batch->source;
+                                    group.modelName = concrete.modelName;
+                                }
+                                group.hashes.insert(
+                                    group.hashes.end(),
+                                    std::make_move_iterator(concrete.hashes.begin()),
+                                    std::make_move_iterator(concrete.hashes.end()));
+                                concrete.hashes.clear();
                                 return;
-                            const auto key = batch->source + "\x1f" + concrete.modelName;
-                            auto& group = embeddingCompletionBySourceAndModel[key];
-                            if (group.source.empty()) {
-                                group.source = batch->source;
-                                group.modelName = concrete.modelName;
                             }
-                            group.hashes.insert(group.hashes.end(),
-                                                std::make_move_iterator(concrete.hashes.begin()),
-                                                std::make_move_iterator(concrete.hashes.end()));
-                            concrete.hashes.clear();
-                            return;
                         } else {
                             return;
                         }
                         if (!r) {
+                            if (!firstOpError) {
+                                firstOpError = r.error();
+                            }
                             sourceError = true;
                             spdlog::warn("[WriteCoordinator] meta op '{}' failed: {}",
                                          batch->source, r.error().message);
@@ -863,6 +916,11 @@ Result<void> WriteCoordinator::applyBatches(std::vector<std::unique_ptr<WriteBat
         }
     }
 
+    // Token-fenced metadata operations can fail after the KG phase has succeeded.
+    // Preserve that failure for flush() rather than reporting the batch as committed.
+    if (firstOpError) {
+        return *firstOpError;
+    }
     {
         std::lock_guard<std::mutex> lock(statsMutex_);
         stats_.batchesCommitted += batches.size();
@@ -1219,6 +1277,21 @@ Result<void> WriteCoordinator::applyOp(metadata::KnowledgeGraphStore::WriteBatch
 Result<void> WriteCoordinator::applyMetadataOp(UpdateRepairStatusOp& op) {
     if (!meta_)
         return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
+    if (!op.derivations.empty()) {
+        if (!op.hashes.empty()) {
+            return Error{ErrorCode::InvalidArgument,
+                         "repair status op cannot mix hashes and derivation tokens"};
+        }
+        metadata::MetadataOpScope opScope("wc_repair_status_derivation_batch");
+        auto r = meta_->batchUpdateEmbeddingDerivationRepairStatus(op.derivations, op.status);
+        if (!r)
+            return r.error();
+        {
+            std::lock_guard<std::mutex> lock(statsMutex_);
+            stats_.repairStatusesUpdated += r.value();
+        }
+        return Result<void>();
+    }
     if (op.hashes.empty())
         return Result<void>();
     metadata::MetadataOpScope opScope("wc_repair_status_batch");
@@ -1299,6 +1372,24 @@ Result<void> WriteCoordinator::applyMetadataOp(UpdateEmbeddingStatusByHashesOp& 
 Result<void> WriteCoordinator::applyMetadataOp(CompleteDocumentEmbeddingsByHashesOp& op) {
     if (!meta_)
         return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
+    if (!op.derivations.empty()) {
+        if (!op.hashes.empty()) {
+            return Error{ErrorCode::InvalidArgument,
+                         "Embedding completion cannot mix legacy hashes and derivation tokens"};
+        }
+        metadata::MetadataOpScope opScope("wc_embedding_derivation_completion");
+        auto completed =
+            meta_->batchCompleteDocumentEmbeddingDerivations(op.derivations, op.modelName);
+        if (!completed) {
+            return completed.error();
+        }
+        if (completed.value() > 0) {
+            std::lock_guard<std::mutex> lock(statsMutex_);
+            stats_.embeddingStatusesUpdated += completed.value();
+            stats_.repairStatusesUpdated += completed.value();
+        }
+        return {};
+    }
     if (op.hashes.empty())
         return Result<void>();
     metadata::MetadataOpScope opScope("wc_embedding_completion_batch");
@@ -1352,6 +1443,29 @@ Result<void> WriteCoordinator::applyMetadataOp(AddSymSpellTermsOp& op) {
     {
         std::lock_guard<std::mutex> lock(statsMutex_);
         stats_.symSpellTermsAdded += termCount;
+    }
+    return Result<void>();
+}
+
+Result<void> WriteCoordinator::applyMetadataOp(AcknowledgeKnowledgeGraphOp& op) {
+    if (!op.completion) {
+        return Error{ErrorCode::InvalidArgument,
+                     "Knowledge graph acknowledgement requires a completion barrier"};
+    }
+    if (op.token.empty()) {
+        return Error{ErrorCode::InvalidArgument,
+                     "Knowledge graph acknowledgement requires a token"};
+    }
+    if (!op.completion->markCommitted(op.stage)) {
+        return Result<void>();
+    }
+    if (!meta_) {
+        return Error{ErrorCode::InvalidState, "MetadataRepository unavailable"};
+    }
+    metadata::MetadataOpScope opScope("wc_knowledge_graph_acknowledgement");
+    auto completed = meta_->completeKnowledgeGraphEnrichment(op.documentId, op.token);
+    if (!completed) {
+        return completed.error();
     }
     return Result<void>();
 }

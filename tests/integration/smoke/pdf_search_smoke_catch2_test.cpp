@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <future>
 #include <thread>
+#include <vector>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -25,6 +26,7 @@ struct PdfSearchSmoke {
     fs::path storageDir_;
     fs::path runtimeRoot_;
     std::unique_ptr<yams::test::FixtureManager> fixtures_;
+    std::vector<yams::test::ScopedEnvVar> preflightEnvironment_;
 
     PdfSearchSmoke() {
         auto unique = std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
@@ -35,7 +37,7 @@ struct PdfSearchSmoke {
         fs::create_directories(runtimeRoot_);
         fixtures_ = std::make_unique<yams::test::FixtureManager>(root_ / "fixtures");
 
-        yams::test::harnesses::DaemonPreflight::ensure_environment({
+        preflightEnvironment_ = yams::test::harnesses::DaemonPreflight::ensure_environment({
             .runtime_dir = runtimeRoot_,
             .socket_name_prefix = "yams-daemon-smoke-",
             .kill_others = false,

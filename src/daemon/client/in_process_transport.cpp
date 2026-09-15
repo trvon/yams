@@ -77,14 +77,6 @@ Response make_stream_header(const Request& request) {
     return SuccessResponse{"Streaming response"};
 }
 
-bool is_control_request(const Request& request) {
-    return std::holds_alternative<ShutdownRequest>(request) ||
-           std::holds_alternative<PingRequest>(request) ||
-           std::holds_alternative<StatusRequest>(request) ||
-           std::holds_alternative<GetStatsRequest>(request) ||
-           std::holds_alternative<PrepareSessionRequest>(request);
-}
-
 } // namespace
 
 Result<std::shared_ptr<IClientTransport>>
@@ -167,11 +159,11 @@ boost::asio::awaitable<Result<void>> InProcessTransport::send_request_streaming(
 
                 auto immediate = co_await processor->process_streaming(request);
                 if (immediate.has_value()) {
+                    // Match the socket transport's non-chunked response contract:
+                    // the header carries the complete response, followed by completion.
+                    // Sending it again as a chunk duplicates content/results in collectors.
                     if (onHeader) {
                         onHeader(immediate.value());
-                    }
-                    if (onChunk && !is_control_request(request)) {
-                        (void)onChunk(immediate.value(), true);
                     }
                     if (onComplete) {
                         onComplete();

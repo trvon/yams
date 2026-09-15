@@ -15,6 +15,7 @@ namespace yams::daemon {
 class EmbeddingService;
 class IModelProvider;
 struct DaemonConfig;
+struct ResolvedEmbeddingConfig;
 
 class EmbeddingLifecycleManager {
 public:
@@ -23,6 +24,7 @@ public:
         std::function<std::shared_ptr<EmbeddingService>()> getEmbeddingService;
         const DaemonConfig* config{nullptr};
         const std::filesystem::path* dataDir{nullptr};
+        std::function<std::shared_ptr<const ResolvedEmbeddingConfig>()> getEmbeddingConfig;
     };
 
     explicit EmbeddingLifecycleManager(Dependencies deps);

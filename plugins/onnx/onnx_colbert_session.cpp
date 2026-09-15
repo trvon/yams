@@ -37,10 +37,13 @@ static Ort::Env& get_colbert_ort_env() {
             (void)Ort::GetApi().SetGlobalIntraOpNumThreads(threading_options, 1);
             (void)Ort::GetApi().SetGlobalInterOpNumThreads(threading_options, 1);
             (void)Ort::GetApi().SetGlobalSpinControl(threading_options, 0);
+            // Process-lifetime singleton: Ort::Env intentionally never freed — ORT
+            // requires the env for the process lifetime.
             g_colbert_onnx_env =
                 new Ort::Env(threading_options, ORT_LOGGING_LEVEL_WARNING, "YamsColbert");
             Ort::GetApi().ReleaseThreadingOptions(threading_options);
         } else {
+            // Process-lifetime singleton: see comment above.
             g_colbert_onnx_env = new Ort::Env(ORT_LOGGING_LEVEL_WARNING, "YamsColbert");
         }
         g_colbert_onnx_env_initialized = true;

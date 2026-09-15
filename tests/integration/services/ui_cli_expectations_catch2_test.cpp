@@ -137,22 +137,12 @@ private:
 
 int runCliCommand(const std::vector<std::string>& args,
                   const std::optional<std::filesystem::path>& socketPath = std::nullopt) {
-    const char* yamsTestingEnv = std::getenv("YAMS_TESTING");
-    const char* yamsSafeEnv = std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
-    std::optional<std::string> yamsTesting =
-        yamsTestingEnv ? std::make_optional(std::string(yamsTestingEnv)) : std::nullopt;
-    std::optional<std::string> yamsSafe =
-        yamsSafeEnv ? std::make_optional(std::string(yamsSafeEnv)) : std::nullopt;
+    ScopedEnvVar yamsTesting{"YAMS_TESTING", std::nullopt};
+    ScopedEnvVar yamsSafe{"YAMS_TEST_SAFE_SINGLE_INSTANCE", std::nullopt};
     std::optional<ScopedEnvVar> socketPathEnv;
     std::optional<ScopedEnvVar> disableAutoStartEnv;
     std::optional<ScopedEnvVar> embeddedSocketEnv;
 
-    if (yamsTesting) {
-        unsetenv("YAMS_TESTING");
-    }
-    if (yamsSafe) {
-        unsetenv("YAMS_TEST_SAFE_SINGLE_INSTANCE");
-    }
     if (socketPath) {
         socketPathEnv.emplace("YAMS_DAEMON_SOCKET_PATH", socketPath->string());
         disableAutoStartEnv.emplace("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1");
@@ -179,12 +169,6 @@ int runCliCommand(const std::vector<std::string>& args,
 #endif
     yams::daemon::AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
     yams::daemon::GlobalIOContext::reset();
-    if (yamsTesting) {
-        setenv("YAMS_TESTING", yamsTesting->c_str(), 1);
-    }
-    if (yamsSafe) {
-        setenv("YAMS_TEST_SAFE_SINGLE_INSTANCE", yamsSafe->c_str(), 1);
-    }
     return rc;
 }
 
@@ -1075,15 +1059,12 @@ TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: short hash prefix is rejected
 
     yams::app::services::SearchRequest searchReq;
     searchReq.type = "hash";
-    searchReq.hash = fullHash.substr(0, 7);
+    searchReq.hash = fullHash.substr(0, 5);
     searchReq.pathsOnly = true;
     auto searchRes = yams::test_async::res(searchSvc->search(searchReq), 2s);
     REQUIRE_FALSE(searchRes);
-    const std::string message = searchRes.error().message;
-    const bool ok = (message.find("Invalid hash format") != std::string::npos) ||
-                    (message.find("not found") != std::string::npos) ||
-                    (message.find("invalid") != std::string::npos);
-    CHECK(ok);
+    REQUIRE(searchRes.error().code == yams::ErrorCode::InvalidArgument);
+    CHECK(searchRes.error().message.find("Invalid hash format") != std::string::npos);
 }
 
 TEST_CASE_METHOD(UiCliExpectationsFixture, "UiCli: degraded fallback structure",

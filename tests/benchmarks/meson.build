@@ -44,6 +44,10 @@ if enable_profiling
   endif
 endif
 
+# Benchmarks compile with -DYAMS_TESTING; link TuneAdvisor's testing bodies first (see
+# tests/meson.build).
+tune_advisor_testing_link = [dependency('yams_tune_advisor_testing')]
+
 # Google Benchmark dependency (library + main entry point)
 benchmark_dep = dependency('benchmark', required: false)
 benchmark_main_dep = dependency('benchmark', modules: ['benchmark::benchmark_main'], required: false)
@@ -73,6 +77,17 @@ core_bench = executable('yams_core_benchmarks', files('core_benchmarks.cpp'),
   install: false,
 )
 
+topology_build_bench = executable('topology_build_bench', files('topology_build_bench.cpp'),
+  include_directories: incs,
+  dependencies: tune_advisor_testing_link + [
+    dependency('yams_topology'),
+    dependency('nlohmann_json'),
+  ] + tracy_deps,
+  cpp_args: ['-DYAMS_TESTING=1'] + tracy_args,
+  install: false,
+)
+alias_target('bench_topology_build', topology_build_bench)
+
 grep_bench = executable('yams_grep_benchmarks', files('grep_benchmarks.cpp'),
   include_directories: incs,
   dependencies: [test_deps, dependency('yams_benchmarks')] + tracy_deps,
@@ -83,7 +98,7 @@ grep_bench = executable('yams_grep_benchmarks', files('grep_benchmarks.cpp'),
 vector_backend_engine_compare = executable('vector_backend_engine_compare',
   files('vector_backend_engine_compare.cpp'),
   include_directories: incs,
-  dependencies: [
+  dependencies: tune_advisor_testing_link + [
     dependency('yams_vector'),
     dependency('spdlog'),
   ] + tracy_deps,
@@ -96,7 +111,7 @@ alias_target('bench_vector_backend_engine_compare', vector_backend_engine_compar
 vector_memory_scaling_bench = executable('vector_memory_scaling_bench',
   files('vector_memory_scaling_bench.cpp'),
   include_directories: incs,
-  dependencies: [
+  dependencies: tune_advisor_testing_link + [
     dependency('yams_vector'),
     dependency('spdlog'),
   ] + tracy_deps,
@@ -106,9 +121,22 @@ vector_memory_scaling_bench = executable('vector_memory_scaling_bench',
 
 alias_target('bench_vector_memory_scaling', vector_memory_scaling_bench)
 
+vector_persistence_warm_start_bench = executable('vector_persistence_warm_start_bench',
+  files('vector_persistence_warm_start_bench.cpp'),
+  include_directories: incs,
+  dependencies: tune_advisor_testing_link + [
+    dependency('yams_vector'),
+    dependency('spdlog'),
+  ] + tracy_deps,
+  cpp_args: tracy_args,
+  install: false,
+)
+
+alias_target('bench_vector_persistence_warm_start', vector_persistence_warm_start_bench)
+
 # Large-scale ingestion benchmark (requires google-benchmark and provides its own main)
 if benchmark_dep.found()
-  large_scale_ingestion_bench_deps = [
+  large_scale_ingestion_bench_deps = tune_advisor_testing_link + [
     test_deps,
     dependency('yams_benchmarks'),
     benchmark_dep,
@@ -127,8 +155,8 @@ else
   message('Google Benchmark not found; skipping large_scale_ingestion_bench')
 endif
 
-if benchmark_dep.found() and benchmark_main_dep.found()
-  storage_bench_deps = [test_deps, dependency('yams_benchmarks'), benchmark_main_dep] + tracy_deps + [benchmark_dep]
+if benchmark_dep.found()
+  storage_bench_deps = [test_deps, dependency('yams_benchmarks'), benchmark_dep] + tracy_deps
 
   storage_bench = executable('yams_storage_throughput_benchmarks',
     files('storage_throughput_bench.cpp'),
@@ -138,7 +166,7 @@ if benchmark_dep.found() and benchmark_main_dep.found()
     install: false,
   )
 else
-  message('Google Benchmark benchmark_main not found; skipping storage throughput benchmark')
+  message('Google Benchmark not found; skipping storage throughput benchmark')
 endif
 
 if benchmark_dep.found()
@@ -156,7 +184,7 @@ else
 endif
 
 if benchmark_dep.found()
-  metadata_query_bench_deps = [dependency('yams_metadata'), dependency('yams_search'), dependency('yams_daemon'), dependency('spdlog')] + tracy_deps + [benchmark_dep]
+  metadata_query_bench_deps = tune_advisor_testing_link + [dependency('yams_metadata'), dependency('yams_search'), dependency('yams_daemon'), dependency('spdlog')] + tracy_deps + [benchmark_dep]
 
   metadata_query_bench = executable('metadata_path_query_bench', files('metadata_path_query_bench.cpp'),
     include_directories: incs,
@@ -176,7 +204,7 @@ if benchmark_dep.found()
   alias_target('bench_tree_list_filter', tree_list_filter_bench)
 
   # Common dependencies for search-related benchmarks
-  search_bench_deps = [
+  search_bench_deps = tune_advisor_testing_link + [
     dependency('yams_metadata'),
     dependency('yams_search'),
     dependency('yams_vector'),

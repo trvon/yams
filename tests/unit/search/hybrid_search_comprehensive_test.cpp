@@ -13,9 +13,9 @@
  * components rather than mocks to validate end-to-end behavior.
  */
 
+#include "../../common/test_helpers_catch2.h"
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
-#include "../../common/test_helpers_catch2.h"
 
 #include <yams/compat/unistd.h>
 
@@ -282,6 +282,7 @@ private:
 
                 // Try to create embedding generator (may fail if ONNX not available)
                 yams::vector::EmbeddingConfig embCfg;
+                embCfg.backend_is_resolved = true;
                 embCfg.model_name = "all-MiniLM-L6-v2";
                 embCfg.embedding_dim = 384;
                 auto embGen = std::make_shared<yams::vector::EmbeddingGenerator>(embCfg);
@@ -1726,7 +1727,7 @@ TEST_CASE("Concurrency - Same query different filters", "[search][concurrency][f
     REQUIRE(responses.size() == 4);
 }
 
-TEST_CASE("Concurrency - High load stress test", "[search][concurrency][stress]") {
+TEST_CASE("Concurrency - High load stress test", "[search][concurrency][stress][slow]") {
     SKIP_HYBRID_ON_WINDOWS();
     SearchServiceFixture fixture;
 
@@ -1808,7 +1809,7 @@ TEST_CASE("Validation - Invalid hash format (too short)", "[search][validation][
 
     app::services::SearchRequest req;
     req.query = "";
-    req.hash = "abc123"; // < 8 chars
+    req.hash = "abc12"; // < 6 chars
     req.limit = 10;
 
     // Hash too short should fail validation
@@ -1843,7 +1844,7 @@ TEST_CASE("HashSearch - Valid hash prefix", "[search][hash]") {
 
     app::services::SearchRequest req;
     req.query = "";
-    req.hash = "abc12345"; // Valid 8-char hex
+    req.hash = "abc123"; // Valid minimum-length 6-char hex
     req.limit = 10;
 
     // Valid hash format should not fail validation (but may return NotFound)

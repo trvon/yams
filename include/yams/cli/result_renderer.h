@@ -13,6 +13,7 @@
 #include <string_view>
 #include <vector>
 #include <yams/metadata/document_metadata.h>
+#include <yams/cli/content_reference.h>
 #include <yams/search/search_results.h>
 
 namespace yams::cli {
@@ -357,9 +358,7 @@ private:
         for (const auto& adapter : filtered_results) {
             json item;
             item["id"] = adapter.id();
-            if (!adapter.hash().empty()) {
-                item["hash"] = adapter.hash();
-            }
+            addContentReference(item, adapter.hash());
             item["title"] = adapter.title();
             item["path"] = adapter.path();
             if (adapter.size() > 0) {

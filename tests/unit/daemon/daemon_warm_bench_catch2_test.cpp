@@ -12,6 +12,8 @@
 
 #include <yams/compat/unistd.h>
 
+#include "../../common/test_helpers_catch2.h"
+
 namespace yams::daemon::bench {
 
 namespace fs = std::filesystem;
@@ -25,9 +27,9 @@ static bool isSocketPermissionDenied(const yams::Error& error) {
 
 TEST_CASE("DaemonBench: warm latency fast", "[daemon][.bench][.slow]") {
     // Only run when explicitly requested (bench suite or local env)
-    const char* fast = ::getenv("YAMS_BENCH_FAST");
-    const char* enable = ::getenv("YAMS_ENABLE_DAEMON_BENCH");
-    if (!fast || std::string_view(fast) != "1" || !enable || std::string_view(enable) != "1") {
+    const auto fast = yams::config::getenv_nonempty("YAMS_BENCH_FAST");
+    const auto enable = yams::config::getenv_nonempty("YAMS_ENABLE_DAEMON_BENCH");
+    if (!fast || *fast != "1" || !enable || *enable != "1") {
         SKIP("Bench disabled (set YAMS_BENCH_FAST=1 and YAMS_ENABLE_DAEMON_BENCH=1 to run)");
     }
 
@@ -44,10 +46,10 @@ TEST_CASE("DaemonBench: warm latency fast", "[daemon][.bench][.slow]") {
     cfg.autoLoadPlugins = false;
 
     // Tighten init timeouts and avoid vector DB
-    ::setenv("YAMS_DB_OPEN_TIMEOUT_MS", "1000", 1);
-    ::setenv("YAMS_DB_MIGRATE_TIMEOUT_MS", "1500", 1);
-    ::setenv("YAMS_SEARCH_BUILD_TIMEOUT_MS", "1000", 1);
-    ::setenv("YAMS_DISABLE_VECTORS", "1", 1);
+    yams::test::ScopedEnvVar openTimeout{"YAMS_DB_OPEN_TIMEOUT_MS", std::string{"1000"}};
+    yams::test::ScopedEnvVar migrateTimeout{"YAMS_DB_MIGRATE_TIMEOUT_MS", std::string{"1500"}};
+    yams::test::ScopedEnvVar searchTimeout{"YAMS_SEARCH_BUILD_TIMEOUT_MS", std::string{"1000"}};
+    yams::test::ScopedEnvVar disableVectors{"YAMS_DISABLE_VECTORS", std::string{"1"}};
 
     std::error_code se;
     fs::create_directories(cfg.dataDir, se);

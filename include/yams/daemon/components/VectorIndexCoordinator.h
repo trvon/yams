@@ -6,13 +6,12 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <vector>
 
-#include <boost/asio/any_io_executor.hpp>
-#include <boost/asio/awaitable.hpp>
-#include <boost/asio/strand.hpp>
+#include <yams/compat/boost_asio_core.h> // IWYU pragma: keep
 
 namespace yams::vector {
 class VectorDatabase;
@@ -40,6 +39,21 @@ struct VectorIndexTelemetry {
     bool rebuilding{false};       ///< True while a rebuild is in-flight
     bool ready{false};            ///< True after the first successful finalize
     uint32_t progressPct{0};      ///< 0–100
+};
+
+enum class VectorCheckpointPhase : uint8_t { Idle, Queued, Running };
+
+struct VectorCheckpointTelemetry {
+    VectorCheckpointPhase phase{VectorCheckpointPhase::Idle};
+    uint64_t generation{0};
+    uint64_t requests{0};
+    uint64_t coalesced{0};
+    uint64_t started{0};
+    uint64_t completed{0};
+    uint64_t timedOut{0};
+    uint64_t postFailures{0};
+    uint64_t queuedAgeMs{0};
+    uint64_t runningAgeMs{0};
 };
 
 /**
@@ -109,6 +123,10 @@ public:
      */
     void fireRebuild(RebuildReason reason) noexcept;
 
+    /// Request a coordinated rebuild and wait for build/persist completion.
+    /// Returns InvalidState when invoked from the coordinator strand.
+    Result<void> requestRebuildBlocking(RebuildReason reason);
+
     /**
      * @brief Synchronously persist the index through the coordinator strand.
      *
@@ -137,6 +155,14 @@ public:
      * Safe to call from any thread, including the status RPC path.
      */
     VectorIndexTelemetry snapshot() const noexcept;
+
+    /**
+     * @brief Snapshot checkpoint admission and execution state.
+     *
+     * Queued means the strand callback has not started. Running means persistence entered the
+     * callback and may be waiting in the vector backend.
+     */
+    VectorCheckpointTelemetry checkpointSnapshot() const noexcept;
 
     /**
      * @brief One-shot initial build/load called by ServiceManager after VDB is ready.
@@ -178,8 +204,14 @@ public:
     uint64_t testing_rebuildEpoch() const noexcept {
         return rebuildEpoch_.load(std::memory_order_relaxed);
     }
+    uint64_t testing_checkpointCallbacksStarted() const noexcept {
+        return checkpointStarted_.load(std::memory_order_relaxed);
+    }
     // Expose strand so tests may submit work serialised with the coordinator.
     boost::asio::strand<boost::asio::any_io_executor>& testing_strand() noexcept { return strand_; }
+    void testing_setAfterRebuildAdmission(std::function<void()> callback) {
+        afterRebuildAdmissionForTesting_ = std::move(callback);
+    }
 #endif
 
 private:
@@ -199,11 +231,24 @@ private:
 
     void publishTelemetry(const VectorIndexTelemetry& tel) noexcept;
 
+    struct CheckpointAttempt {
+        uint64_t generation{0};
+        std::shared_ptr<std::promise<bool>> completion;
+        std::shared_future<bool> result;
+    };
+    struct CallbackLifetime {
+        std::mutex mutex;
+        VectorIndexCoordinator* owner{nullptr};
+    };
+    void completeCheckpointAttempt(const std::shared_ptr<CheckpointAttempt>& attempt, bool result,
+                                   bool callbackStarted) noexcept;
+
     // Drain and notify all waiters whose targetEpoch <= current epoch.
     // Called on the strand after an epoch bump.
-    void notifyWaiters(uint64_t currentEpoch);
+    void notifyWaiters(uint64_t currentEpoch, const Result<void>& result);
 
     boost::asio::strand<boost::asio::any_io_executor> strand_;
+    std::shared_ptr<CallbackLifetime> callbackLifetime_;
     mutable std::mutex vdbMutex_;
     std::shared_ptr<vector::VectorDatabase>
         vectorDb_; // guarded by vdbMutex_ for set, strand for use
@@ -222,6 +267,19 @@ private:
     std::atomic<bool> buildsSuppressed_{false};
     std::chrono::milliseconds checkpointWaitTimeout_{std::chrono::seconds(30)};
 
+    mutable std::mutex checkpointMutex_;
+    std::shared_ptr<CheckpointAttempt> checkpointAttempt_; // guarded by checkpointMutex_
+    std::atomic<VectorCheckpointPhase> checkpointPhase_{VectorCheckpointPhase::Idle};
+    std::atomic<uint64_t> checkpointGeneration_{0};
+    std::atomic<uint64_t> checkpointRequests_{0};
+    std::atomic<uint64_t> checkpointCoalesced_{0};
+    std::atomic<uint64_t> checkpointStarted_{0};
+    std::atomic<uint64_t> checkpointCompleted_{0};
+    std::atomic<uint64_t> checkpointTimedOut_{0};
+    std::atomic<uint64_t> checkpointPostFailures_{0};
+    std::atomic<uint64_t> checkpointQueuedAtNs_{0};
+    std::atomic<uint64_t> checkpointRunningAtNs_{0};
+
     // Waiters registered by requestRebuild; drained when epoch advances.
     using RebuildCompletion = std::function<void(Result<void>)>;
     struct Waiter {
@@ -230,6 +288,7 @@ private:
     };
     std::mutex waitersMutex_; // protects waiters_ (accessed from multiple strand posts)
     std::vector<Waiter> waiters_;
+    std::function<void()> afterRebuildAdmissionForTesting_;
 
     mutable std::mutex telemetryMutex_;
     VectorIndexTelemetry telemetry_{};

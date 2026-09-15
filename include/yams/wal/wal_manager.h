@@ -33,7 +33,9 @@ class WALManager {
 public:
     // Configuration for WAL behavior
     struct Config {
-        std::filesystem::path walDirectory = "./wal";
+        // Required. Callers pass an explicit directory (the daemon uses <dataDir>/wal);
+        // initialize() rejects an empty path instead of writing into the process CWD.
+        std::filesystem::path walDirectory;
         size_t maxLogSize = 100 * 1024 * 1024;      // 100MB per log file
         size_t syncInterval = 1000;                 // Sync every N entries
         std::chrono::milliseconds syncTimeout{100}; // Max time between syncs
@@ -53,7 +55,6 @@ public:
     };
 
     // Constructor
-    WALManager();
     explicit WALManager(Config config);
     ~WALManager();
 

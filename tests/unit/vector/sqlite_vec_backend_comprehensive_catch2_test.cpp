@@ -808,6 +808,40 @@ TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend hasEmbedding",
     CHECK((noResult.value() == false));
 }
 
+TEST_CASE_METHOD(SqliteVecBackendFixture, "SqliteVecBackend pages vectors by stable cursor",
+                 "[vector][backend][paging][catch2]") {
+    skipIfNeeded();
+
+    SqliteVecBackend backend;
+    REQUIRE(backend.initialize(":memory:").has_value());
+    REQUIRE(backend.createTables(64).has_value());
+    for (const auto& [id, document] : std::vector<std::pair<std::string, std::string>>{
+             {"b2", "doc_b"}, {"a2", "doc_a"}, {"b1", "doc_b"}, {"a1", "doc_a"}}) {
+        REQUIRE(backend.insertVector(createVectorRecord(id, createEmbedding(64), document))
+                    .has_value());
+    }
+
+    auto first = backend.getVectorsPage("", "", 2);
+    REQUIRE(first.has_value());
+    REQUIRE(first.value().size() == 2);
+    CHECK(first.value()[0].document_hash == "doc_a");
+    CHECK(first.value()[0].chunk_id == "chunk_a1");
+    CHECK(first.value()[1].chunk_id == "chunk_a2");
+
+    auto second =
+        backend.getVectorsPage(first.value()[1].document_hash, first.value()[1].chunk_id, 2);
+    REQUIRE(second.has_value());
+    REQUIRE(second.value().size() == 2);
+    CHECK(second.value()[0].document_hash == "doc_b");
+    CHECK(second.value()[0].chunk_id == "chunk_b1");
+    CHECK(second.value()[1].chunk_id == "chunk_b2");
+
+    auto exhausted =
+        backend.getVectorsPage(second.value()[1].document_hash, second.value()[1].chunk_id, 2);
+    REQUIRE(exhausted.has_value());
+    CHECK(exhausted.value().empty());
+}
+
 // =============================================================================
 // Search Tests
 // =============================================================================
@@ -2033,6 +2067,120 @@ TEST_CASE_METHOD(SqliteVecBackendFixture,
 }
 
 TEST_CASE_METHOD(SqliteVecBackendFixture,
+                 "SqliteVecBackend prepare persists a newly built Simeon PQ snapshot for restart",
+                 "[vector][backend][search][spq][persistence][restart][catch2]") {
+    skipIfNeeded();
+#ifdef _WIN32
+    SKIP("Simeon PQ persistence/reload is not bounded on Windows CI");
+#endif
+
+    constexpr size_t kDim = 64;
+    const std::string dbPath = createTempDbPath();
+    SqliteVecBackend::Config config;
+    config.embedding_dim = kDim;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_centroids = 16;
+    config.simeon_pq_train_limit = 64;
+    config.simeon_pq_rerank_factor = 1;
+
+    {
+        SqliteVecBackend writer(config);
+        REQUIRE((writer.initialize(dbPath).has_value()));
+        REQUIRE((writer.createTables(kDim).has_value()));
+        for (int i = 0; i < 24; ++i) {
+            REQUIRE((writer
+                         .insertVector(createVectorRecord("prepare_missing_" + std::to_string(i),
+                                                          createEmbedding(kDim, float(i + 1))))
+                         .has_value()));
+        }
+        auto reusable = writer.hasReusablePersistedSearchIndex();
+        REQUIRE((reusable.has_value()));
+        CHECK_FALSE(reusable.value());
+    }
+
+    {
+        SqliteVecBackend preparer(config);
+        REQUIRE((preparer.initialize(dbPath).has_value()));
+        REQUIRE((preparer.prepareSearchIndex().has_value()));
+
+        auto result = preparer.searchSimilar(createEmbedding(kDim, 1.0F), 5, -1.0F);
+        REQUIRE((result.has_value()));
+        REQUIRE((result.value().size() == 5));
+        CHECK((result.value().front().chunk_id == "chunk_prepare_missing_0"));
+    }
+
+    SqliteVecBackend verifier(config);
+    REQUIRE((verifier.initialize(dbPath).has_value()));
+    auto reusable = verifier.hasReusablePersistedSearchIndex();
+    REQUIRE((reusable.has_value()));
+    CHECK((reusable.value()));
+    REQUIRE((verifier.prepareSearchIndex().has_value()));
+
+    auto result = verifier.searchSimilar(createEmbedding(kDim, 1.0F), 5, -1.0F);
+    REQUIRE((result.has_value()));
+    REQUIRE((result.value().size() == 5));
+    CHECK((result.value().front().chunk_id == "chunk_prepare_missing_0"));
+}
+
+TEST_CASE_METHOD(
+    SqliteVecBackendFixture,
+    "SqliteVecBackend prepare reports persistence failure but keeps rebuilt state current",
+    "[vector][backend][search][spq][persistence][failure][catch2]") {
+    skipIfNeeded();
+
+    constexpr size_t kDim = 64;
+    const std::string dbPath = createTempDbPath();
+    SqliteVecBackend::Config config;
+    config.embedding_dim = kDim;
+    config.search_engine = VectorSearchEngine::SimeonPqAdc;
+    config.simeon_pq_subquantizers = 8;
+    config.simeon_pq_centroids = 16;
+    config.simeon_pq_train_limit = 64;
+    config.simeon_pq_rerank_factor = 1;
+
+    {
+        SqliteVecBackend writer(config);
+        REQUIRE((writer.initialize(dbPath).has_value()));
+        REQUIRE((writer.createTables(kDim).has_value()));
+        for (int i = 0; i < 24; ++i) {
+            REQUIRE((writer
+                         .insertVector(createVectorRecord("prepare_failure_" + std::to_string(i),
+                                                          createEmbedding(kDim, float(i + 1))))
+                         .has_value()));
+        }
+    }
+
+    {
+        SqliteVecBackend preparer(config);
+        REQUIRE((preparer.initialize(dbPath).has_value()));
+        REQUIRE((sqlite3_exec(preparer.getDbHandle(), "PRAGMA query_only=ON", nullptr, nullptr,
+                              nullptr) == SQLITE_OK));
+
+        auto prepared = preparer.prepareSearchIndex();
+        REQUIRE_FALSE((prepared.has_value()));
+        CHECK((prepared.error().code == yams::ErrorCode::DatabaseError));
+        CHECK(
+            (prepared.error().message.find("rebuilt but persistence failed") != std::string::npos));
+
+        // Persistence failure is observable, but the freshly rebuilt current-generation index
+        // remains safe to query during this process. It is never represented as durable state.
+        auto result = preparer.searchSimilar(createEmbedding(kDim, 1.0F), 5, -1.0F);
+        REQUIRE((result.has_value()));
+        REQUIRE((result.value().size() == 5));
+        CHECK((result.value().front().chunk_id == "chunk_prepare_failure_0"));
+        REQUIRE((sqlite3_exec(preparer.getDbHandle(), "PRAGMA query_only=OFF", nullptr, nullptr,
+                              nullptr) == SQLITE_OK));
+    }
+
+    SqliteVecBackend verifier(config);
+    REQUIRE((verifier.initialize(dbPath).has_value()));
+    auto reusable = verifier.hasReusablePersistedSearchIndex();
+    REQUIRE((reusable.has_value()));
+    CHECK_FALSE((reusable.value()));
+}
+
+TEST_CASE_METHOD(SqliteVecBackendFixture,
                  "SqliteVecBackend prepare rebuilds dirty Simeon PQ instead of loading stale state",
                  "[vector][backend][search][spq][persistence][catch2]") {
     skipIfNeeded();
@@ -2117,17 +2265,37 @@ TEST_CASE_METHOD(
     config.simeon_pq_centroids = 16;
     config.simeon_pq_train_limit = 64;
     config.simeon_pq_rerank_factor = 1;
-    SqliteVecBackend reader(config);
-    REQUIRE((reader.initialize(dbPath).has_value()));
+    {
+        SqliteVecBackend reader(config);
+        REQUIRE((reader.initialize(dbPath).has_value()));
 
-    auto reusable = reader.hasReusablePersistedSearchIndex();
+        auto reusable = reader.hasReusablePersistedSearchIndex();
+        REQUIRE((reusable.has_value()));
+        CHECK_FALSE(reusable.value());
+        REQUIRE((reader.prepareSearchIndex().has_value()));
+
+        VectorSearchDiagnostics diagnostics;
+        auto result = reader.searchSimilarWithDiagnostics(exactQuery, 25, -1.0F, std::nullopt, {},
+                                                          {}, diagnostics);
+        REQUIRE((result.has_value()));
+        REQUIRE((result.value().size() == 25));
+        CHECK((result.value().front().chunk_id == "chunk_restart_fresh"));
+        CHECK((diagnostics.rowsVisited == 25));
+    }
+
+    // Startup preparation rebuilt the rejected stale snapshot from authoritative rows. That
+    // successful current-generation rebuild must be durable so the next restart does not repeat
+    // the same work.
+    SqliteVecBackend verifier(config);
+    REQUIRE((verifier.initialize(dbPath).has_value()));
+    auto reusable = verifier.hasReusablePersistedSearchIndex();
     REQUIRE((reusable.has_value()));
-    CHECK_FALSE(reusable.value());
-    REQUIRE((reader.prepareSearchIndex().has_value()));
+    CHECK((reusable.value()));
+    REQUIRE((verifier.prepareSearchIndex().has_value()));
 
     VectorSearchDiagnostics diagnostics;
-    auto result = reader.searchSimilarWithDiagnostics(exactQuery, 25, -1.0F, std::nullopt, {}, {},
-                                                      diagnostics);
+    auto result = verifier.searchSimilarWithDiagnostics(exactQuery, 25, -1.0F, std::nullopt, {}, {},
+                                                        diagnostics);
     REQUIRE((result.has_value()));
     REQUIRE((result.value().size() == 25));
     CHECK((result.value().front().chunk_id == "chunk_restart_fresh"));
