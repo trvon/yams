@@ -591,7 +591,10 @@ TEST_CASE("P2P connection enforces one aggregate session deadline",
                 return;
             }
         }
-        (void)channel.readFrame(2s);
+        // Keep the peer alive while the client tests its shorter session deadline.
+        // Returning after the first late frame instead tests a premature peer close.
+        while (channel.readFrame(2s).has_value()) {
+        }
     });
     REQUIRE(listener.start().has_value());
 
@@ -612,9 +615,8 @@ TEST_CASE("P2P connection enforces one aggregate session deadline",
     }
     // The session deadline is absolute (not idle-based), so a write only starts failing
     // once 500ms of wall time have passed. Poll until it does instead of sleeping a fixed
-    // 600ms, which is timing-sensitive under load. At the boundary the failure surfaces as
-    // Timeout (client-side deadline check) or NotFound (the peer closed the channel after
-    // its own deadline); both prove the session expired.
+    // 600ms, which is timing-sensitive under load. Require a client-side Timeout:
+    // a peer close at the server's longer deadline does not prove this contract.
     const auto expiryDeadline = std::chrono::steady_clock::now() + 3s;
     bool observedExpiry = false;
     yams::ErrorCode expiryCode = yams::ErrorCode::InvalidState;
@@ -628,7 +630,7 @@ TEST_CASE("P2P connection enforces one aggregate session deadline",
         std::this_thread::sleep_for(10ms);
     }
     REQUIRE(observedExpiry);
-    CHECK((expiryCode == yams::ErrorCode::Timeout || expiryCode == yams::ErrorCode::NotFound));
+    CHECK(expiryCode == yams::ErrorCode::Timeout);
     listener.stop();
 }
 

@@ -5,10 +5,13 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
+#include <condition_variable>
 #include <cstring>
 #include <filesystem>
 #include <future>
 #include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -34,6 +37,28 @@ std::vector<std::byte> bytes(std::string_view text) {
 std::string text(const std::vector<std::byte>& data) {
     return std::string(reinterpret_cast<const char*>(data.data()), data.size());
 }
+
+class CompletionSignal {
+public:
+    void signal() {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            signalled_ = true;
+        }
+        cv_.notify_all();
+    }
+
+    template <typename Rep, typename Period>
+    bool waitFor(const std::chrono::duration<Rep, Period>& timeout) const {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, timeout, [this] { return signalled_; });
+    }
+
+private:
+    mutable std::mutex mutex_;
+    mutable std::condition_variable cv_;
+    bool signalled_{false};
+};
 
 class CountingBackend : public yams::storage::IStorageBackend {
 public:
@@ -141,19 +166,22 @@ public:
             entered_.set_value();
         }
         std::unique_lock<std::mutex> lock(mutex_);
-        cv_.wait(lock, [this] { return cancelled_.load(std::memory_order_acquire); });
+        cv_.wait(lock, [this] { return cancelled_; });
         return yams::Error{yams::ErrorCode::OperationCancelled, "blocking list cancelled"};
     }
 
     void requestCancel() noexcept override {
         cancelCalls.fetch_add(1, std::memory_order_relaxed);
-        cancelled_.store(true, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            cancelled_ = true;
+        }
         cv_.notify_all();
     }
 
     void resetCancel() noexcept override {
-        cancelled_.store(false, std::memory_order_release);
-        enteredOnce_.store(false, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(mutex_);
+        cancelled_ = false;
     }
 
     std::atomic<std::uint32_t> cancelCalls{0};
@@ -163,7 +191,117 @@ private:
     mutable std::atomic<bool> enteredOnce_{false};
     mutable std::mutex mutex_;
     mutable std::condition_variable cv_;
-    std::atomic<bool> cancelled_{false};
+    bool cancelled_{false};
+};
+
+/// Provides a generation-aware cancellation barrier for the stop/start race test.
+/// The first requestCancel() wakes the old worker, then pauses before returning so
+/// a concurrent start can reset cancellation and launch the next generation.
+class RestartCancellationBackend final : public CountingBackend {
+public:
+    template <typename Rep, typename Period>
+    bool waitForListCalls(std::size_t count,
+                          const std::chrono::duration<Rep, Period>& timeout) const {
+        std::unique_lock<std::mutex> lock(stateMutex_);
+        return stateCv_.wait_for(lock, timeout,
+                                 [this, count] { return listGenerations_.size() >= count; });
+    }
+
+    template <typename Rep, typename Period>
+    bool waitForFirstCancel(const std::chrono::duration<Rep, Period>& timeout) const {
+        std::unique_lock<std::mutex> lock(barrierMutex_);
+        return barrierCv_.wait_for(lock, timeout, [this] { return firstCancelApplied_; });
+    }
+
+    template <typename Rep, typename Period>
+    bool waitForGenerationCancel(std::uint64_t generation,
+                                 const std::chrono::duration<Rep, Period>& timeout) const {
+        std::unique_lock<std::mutex> lock(stateMutex_);
+        return stateCv_.wait_for(lock, timeout,
+                                 [this, generation] { return cancelledGeneration_ == generation; });
+    }
+
+    std::optional<std::uint64_t> listGeneration(std::size_t oneBasedCall) const {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        if (oneBasedCall == 0 || listGenerations_.size() < oneBasedCall) {
+            return std::nullopt;
+        }
+        return listGenerations_[oneBasedCall - 1];
+    }
+
+    void releaseFirstCancel() {
+        {
+            std::lock_guard<std::mutex> lock(barrierMutex_);
+            releaseFirstCancel_ = true;
+        }
+        barrierCv_.notify_all();
+    }
+
+    // Failure cleanup must also cover a reset that races after cleanup begins.
+    void abortWaits() {
+        {
+            std::lock_guard<std::mutex> lock(barrierMutex_);
+            aborting_ = true;
+            releaseFirstCancel_ = true;
+        }
+        barrierCv_.notify_all();
+        {
+            std::lock_guard<std::mutex> lock(stateMutex_);
+            cancelledGeneration_ = generation_;
+        }
+        stateCv_.notify_all();
+    }
+
+    yams::Result<yams::storage::ObjectListPage>
+    listPage(std::string_view, std::optional<std::string_view>, std::size_t) const override {
+        std::unique_lock<std::mutex> lock(stateMutex_);
+        const auto generation = generation_;
+        listGenerations_.push_back(generation);
+        stateCv_.notify_all();
+        stateCv_.wait(lock, [this, generation] { return cancelledGeneration_ == generation; });
+        return yams::Error{yams::ErrorCode::OperationCancelled, "generation list cancelled"};
+    }
+
+    void requestCancel() noexcept override {
+        const auto call = cancelCalls_.fetch_add(1, std::memory_order_acq_rel) + 1;
+        {
+            std::lock_guard<std::mutex> lock(stateMutex_);
+            cancelledGeneration_ = generation_;
+        }
+        stateCv_.notify_all();
+        if (call != 1) {
+            return;
+        }
+        std::unique_lock<std::mutex> lock(barrierMutex_);
+        firstCancelApplied_ = true;
+        barrierCv_.notify_all();
+        barrierCv_.wait(lock, [this] { return releaseFirstCancel_ || aborting_; });
+    }
+
+    void resetCancel() noexcept override {
+        {
+            // Serialize the abort decision with installing the new generation.
+            // Otherwise cleanup can cancel the old generation between these updates.
+            std::scoped_lock lock(barrierMutex_, stateMutex_);
+            ++generation_;
+            cancelledGeneration_ = aborting_ ? generation_ : 0;
+        }
+        stateCv_.notify_all();
+    }
+
+private:
+    mutable std::mutex stateMutex_;
+    mutable std::condition_variable stateCv_;
+    mutable std::uint64_t generation_{0};
+    mutable std::uint64_t cancelledGeneration_{0};
+    mutable std::vector<std::uint64_t> listGenerations_;
+    std::atomic<std::uint32_t> cancelCalls_{0};
+
+    mutable std::mutex barrierMutex_;
+    mutable std::condition_variable barrierCv_;
+    bool firstCancelApplied_{false};
+    bool releaseFirstCancel_{false};
+    bool aborting_{false};
 };
 
 /// Blocks `listPage` while armed, releasing when unarmed. Used to prove IPC
@@ -172,37 +310,41 @@ private:
 /// snapshot while the worker is stuck mid-sync.
 class SlowListBackend final : public CountingBackend {
 public:
-    void arm() { armed_.store(true, std::memory_order_release); }
+    void arm() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        armed_ = true;
+    }
 
     void releaseList() {
-        armed_.store(false, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            armed_ = false;
+        }
         cv_.notify_all();
     }
 
     void waitUntilBlocked() const {
         std::unique_lock<std::mutex> lock(mutex_);
-        cv_.wait(lock, [this] { return blocked_.load(std::memory_order_acquire); });
+        cv_.wait(lock, [this] { return blocked_; });
     }
 
     yams::Result<yams::storage::ObjectListPage> listPage(std::string_view prefix,
                                                          std::optional<std::string_view> cursor,
                                                          std::size_t limit) const override {
-        if (armed_.load(std::memory_order_acquire)) {
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                blocked_.store(true, std::memory_order_release);
-            }
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (armed_) {
+            blocked_ = true;
             cv_.notify_all();
-            std::unique_lock<std::mutex> lock(mutex_);
-            cv_.wait(lock, [this] { return !armed_.load(std::memory_order_acquire); });
-            blocked_.store(false, std::memory_order_release);
+            cv_.wait(lock, [this] { return !armed_; });
+            blocked_ = false;
         }
+        lock.unlock();
         return CountingBackend::listPage(prefix, cursor, limit);
     }
 
 private:
-    mutable std::atomic<bool> armed_{false};
-    mutable std::atomic<bool> blocked_{false};
+    mutable bool armed_{false};
+    mutable bool blocked_{false};
     mutable std::mutex mutex_;
     mutable std::condition_variable cv_;
 };
@@ -496,6 +638,90 @@ TEST_CASE("MemorySyncService stop interrupts a slow backend reconciliation",
     auto stopped = std::async(std::launch::async, [&] { service.stop(); });
     REQUIRE(stopped.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
     CHECK(observed->cancelCalls.load(std::memory_order_relaxed) > 0);
+    CHECK_FALSE(service.started());
+}
+
+TEST_CASE("MemorySyncService stop re-cancels a worker restarted during shutdown",
+          "[memory-sync][service][lifecycle][cancellation][race]") {
+    TempDirGuard tmp;
+    auto backend = std::make_unique<RestartCancellationBackend>();
+    yams::storage::BackendConfig config;
+    config.type = "filesystem";
+    config.localPath = tmp.path;
+    REQUIRE(backend->initialize(config).has_value());
+    auto* observed = backend.get();
+    MemorySyncService service{std::move(backend), MemorySyncConfig{"A", 5000}};
+
+    REQUIRE(service.start().has_value());
+    const bool firstWorkerEntered = observed->waitForListCalls(1, std::chrono::seconds(2));
+    if (!firstWorkerEntered) {
+        observed->abortWaits();
+        service.stop();
+        REQUIRE(firstWorkerEntered);
+    }
+
+    CompletionSignal stopFinished;
+    std::thread stopper([&] {
+        service.stop();
+        stopFinished.signal();
+    });
+    const bool firstCancelApplied = observed->waitForFirstCancel(std::chrono::seconds(2));
+    if (!firstCancelApplied) {
+        observed->abortWaits();
+        stopper.join();
+        service.stop();
+        REQUIRE(firstCancelApplied);
+    }
+
+    CompletionSignal restartFinished;
+    std::atomic<bool> restartSucceeded{false};
+    std::thread restarter([&] {
+        restartSucceeded.store(service.start().has_value(), std::memory_order_release);
+        restartFinished.signal();
+    });
+    const bool restartReturned = restartFinished.waitFor(std::chrono::seconds(2));
+    if (!restartReturned) {
+        observed->abortWaits();
+        restarter.join();
+        stopper.join();
+        service.stop();
+        REQUIRE(restartReturned);
+    }
+    restarter.join();
+    const bool restarted = restartSucceeded.load(std::memory_order_acquire);
+    if (!restarted) {
+        observed->abortWaits();
+        stopper.join();
+        service.stop();
+        REQUIRE(restarted);
+    }
+
+    const bool restartedWorkerEntered = observed->waitForListCalls(2, std::chrono::seconds(2));
+    const auto restartedGeneration = observed->listGeneration(2);
+    if (!restartedWorkerEntered || !restartedGeneration.has_value()) {
+        observed->abortWaits();
+        stopper.join();
+        service.stop();
+        REQUIRE(restartedWorkerEntered);
+        REQUIRE(restartedGeneration.has_value());
+    }
+
+    // Let the original, pre-lock cancellation return. stop() must cancel again
+    // while holding lifecycleMutex_, because start() reset cancellation and the
+    // worker now blocked belongs to a new generation.
+    observed->releaseFirstCancel();
+    const bool newGenerationCancelled =
+        observed->waitForGenerationCancel(*restartedGeneration, std::chrono::seconds(2));
+    const bool stopReturned = stopFinished.waitFor(std::chrono::seconds(2));
+
+    // Preserve a bounded red failure: unblock every generation before joining
+    // test threads, even when production omitted the second cancellation.
+    observed->abortWaits();
+    stopper.join();
+    service.stop();
+
+    CHECK(newGenerationCancelled);
+    CHECK(stopReturned);
     CHECK_FALSE(service.started());
 }
 

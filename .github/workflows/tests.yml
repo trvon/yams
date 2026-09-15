@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, master, experimental]
   pull_request:
-    branches: [main] # Or your default branch
+    branches: [main, experimental]
 
 permissions:
   contents: read

@@ -1,4 +1,5 @@
 #include <yams/cli/daemon_status_render.h>
+#include <yams/common/fs_utils.h>
 
 #include <yams/cli/pipeline_stage_render.h>
 #include <yams/cli/status_metrics.h>
@@ -143,8 +144,7 @@ bool isEphemeralDataDir(const std::filesystem::path& path) {
     const auto tmpRoot = std::filesystem::temp_directory_path(ec);
     if (!ec) {
         const auto normalizedTmp = normalizePath(tmpRoot);
-        const auto rel = normalized.lexically_relative(normalizedTmp);
-        if (rel.empty() || rel == "." || (!rel.empty() && *rel.begin() != "..")) {
+        if (yams::common::isLexicallyContained(normalized, normalizedTmp)) {
             return true;
         }
     }

@@ -114,8 +114,7 @@ bool isEphemeralDataDir(const std::filesystem::path& path) {
     const fs::path tmpRoot = fs::temp_directory_path(ec);
     if (!ec) {
         const fs::path normalizedTmp = normalize(tmpRoot);
-        auto rel = normalized.lexically_relative(normalizedTmp);
-        if (rel.empty() || rel == "." || (!rel.empty() && *rel.begin() != "..")) {
+        if (yams::common::isLexicallyContained(normalized, normalizedTmp)) {
             return true;
         }
     }

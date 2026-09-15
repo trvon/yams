@@ -413,7 +413,11 @@ Result<void> FilesystemBackend::store(std::string_view key, std::span<const std:
             return {};
         }
 
-        return Result<void>(Error{ErrorCode::Unknown, "Failed to rename file: " + ec.message()});
+        return Result<void>(Error{
+            ErrorCode::Unknown,
+            "Failed to rename file: " + ec.message() + " (code=" + std::to_string(ec.value()) +
+                ", source_chars=" + std::to_string(tempPath.native().size()) +
+                ", destination_chars=" + std::to_string(objectPath.native().size()) + ")"});
     }
 
     return {};

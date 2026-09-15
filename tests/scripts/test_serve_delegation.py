@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -14,17 +15,38 @@ import unittest
 from pathlib import Path
 
 CLI_UNDER_TEST: Path | None = None
+RUNTIME_LIBRARY_DIRS: list[Path] = []
 
 
-def _split_harness_arguments(argv: list[str]) -> tuple[Path, list[str]]:
+def _runtime_environment(
+    inherited: dict[str, str], directories: list[Path], system: str
+) -> dict[str, str]:
+    """Give a copied CLI its build libraries without changing executable lookup."""
+    env = inherited.copy()
+    loader_key = {"Darwin": "DYLD_LIBRARY_PATH", "Linux": "LD_LIBRARY_PATH"}.get(system)
+    if loader_key and directories:
+        entries = [str(directory) for directory in directories]
+        if env.get(loader_key):
+            entries.append(env[loader_key])
+        env[loader_key] = ":".join(entries)
+    return env
+
+
+def _split_harness_arguments(argv: list[str]) -> tuple[Path, list[Path], list[str]]:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--cli", required=True, type=Path)
+    parser.add_argument("--runtime-library-dir", action="append", default=[], type=Path)
     args, unittest_args = parser.parse_known_args(argv)
     if not args.cli.is_absolute():
         parser.error("--cli must be an absolute path")
     if not args.cli.is_file():
         parser.error(f"--cli is not a file: {args.cli}")
-    return args.cli, unittest_args
+    for directory in args.runtime_library_dir:
+        if not directory.is_absolute():
+            parser.error("--runtime-library-dir must be an absolute path")
+        if not directory.is_dir():
+            parser.error(f"--runtime-library-dir is not a directory: {directory}")
+    return args.cli, args.runtime_library_dir, unittest_args
 
 
 @unittest.skipIf(sys.platform == "win32", "POSIX exec delegation tests")
@@ -65,7 +87,9 @@ class ServeDelegationTests(unittest.TestCase):
 
         self.socket = self.runtime_dir / "never-connect-to-a-real-daemon.sock"
         self.config = self.config_dir / "missing-test-config.toml"
-        self.env = os.environ.copy()
+        self.env = _runtime_environment(
+            dict(os.environ), RUNTIME_LIBRARY_DIRS, platform.system()
+        )
         for name in (
             "HOME",
             "PATH",
@@ -235,5 +259,7 @@ class ServeDelegationTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    CLI_UNDER_TEST, unittest_arguments = _split_harness_arguments(sys.argv[1:])
+    CLI_UNDER_TEST, RUNTIME_LIBRARY_DIRS, unittest_arguments = _split_harness_arguments(
+        sys.argv[1:]
+    )
     unittest.main(argv=[sys.argv[0], *unittest_arguments])

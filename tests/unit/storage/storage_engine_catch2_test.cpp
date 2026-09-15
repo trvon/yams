@@ -1105,6 +1105,8 @@ TEST_CASE("StorageEngine verifyReads detects corrupted data",
     auto storage = std::make_unique<StorageEngine>(std::move(config));
 
     auto data = generateRandomBytes(1024);
+    // Exercise the case where overwriting with zero would not change the payload.
+    data[10] = std::byte{0};
     auto hasher = crypto::createSHA256Hasher();
     const auto hash = hasher->hash(data);
 
@@ -1117,8 +1119,9 @@ TEST_CASE("StorageEngine verifyReads detects corrupted data",
         std::ofstream f(objPath, std::ios::binary | std::ios::in | std::ios::out);
         REQUIRE((f.is_open()));
         f.seekp(10);
-        f.put('\x00');
+        f.put(static_cast<char>(std::to_integer<unsigned char>(data[10]) ^ 1u));
         f.close();
+        REQUIRE(f.good());
     }
 
     auto result = storage->retrieve(hash);
@@ -1149,13 +1152,16 @@ TEST_CASE("StorageEngine verifyReads disabled does not check",
     auto objPath = testDir / "objects" / hash.substr(0, 2) / hash.substr(2);
     {
         std::ofstream f(objPath, std::ios::binary | std::ios::in | std::ios::out);
+        REQUIRE(f.is_open());
         f.seekp(10);
-        f.put('\x00');
+        f.put(static_cast<char>(std::to_integer<unsigned char>(data[10]) ^ 1u));
         f.close();
+        REQUIRE(f.good());
     }
 
     auto result = storage->retrieve(hash);
-    CHECK((result.has_value())); // No check → returns corrupted data silently
+    REQUIRE(result.has_value()); // Verification disabled: return the corrupted payload.
+    CHECK(result.value() != data);
 
     std::error_code ec;
     std::filesystem::remove_all(testDir, ec);

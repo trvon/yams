@@ -574,7 +574,10 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     const auto value = record.dump();
     const auto hash = crypto::SHA256Hasher::hash(std::as_bytes(std::span(value)));
     const auto key = "task-record/" + taskId + "/" + hash;
-    REQUIRE(manager.publishMemorySync(key, value).has_value());
+    const auto published = manager.publishMemorySync(key, value);
+    CAPTURE(backendConfig.localPath.string(), key.size());
+    INFO((published ? "task record published" : published.error().message));
+    REQUIRE(published.has_value());
     REQUIRE(sync->syncOnce().has_value());
     const auto hydrated = manager.readMemorySyncCached(key);
     REQUIRE(hydrated.has_value());
