@@ -1388,7 +1388,8 @@ if catch2_dep.found()
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
 
   catch2_storage_backend_exe = executable('catch2_storage_backend',
-    files('unit/storage/storage_backend_catch2_test.cpp'),
+    files('unit/storage/storage_backend_catch2_test.cpp',
+          'unit/storage/windows_path_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],

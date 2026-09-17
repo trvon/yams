@@ -211,7 +211,29 @@ public:
 
     ~TestDirectory() {
         std::error_code ec;
+#ifdef _WIN32
+        // The fixture owns this root. Prefix the short root before recursive cleanup so a failed
+        // long-path test cannot leave descendants that remove_all cannot traverse via MAX_PATH.
+        auto absolutePath = fs::absolute(path_, ec);
+        if (ec) {
+            fs::remove_all(path_, ec);
+            return;
+        }
+        absolutePath = absolutePath.lexically_normal();
+        absolutePath.make_preferred();
+        const auto& nativePath = absolutePath.native();
+        fs::path cleanupPath;
+        if (nativePath.starts_with(L"\\\\?\\")) {
+            cleanupPath = absolutePath;
+        } else if (nativePath.starts_with(L"\\\\")) {
+            cleanupPath = fs::path(std::wstring(L"\\\\?\\UNC\\") + nativePath.substr(2));
+        } else {
+            cleanupPath = fs::path(std::wstring(L"\\\\?\\") + nativePath);
+        }
+        fs::remove_all(cleanupPath, ec);
+#else
         fs::remove_all(path_, ec);
+#endif
     }
 
     const fs::path& path() const { return path_; }
@@ -388,6 +410,52 @@ TEST_CASE("FilesystemBackend - Store and Retrieve", "[storage][backend][filesyst
         REQUIRE_FALSE(result);
         CHECK(result.error().code == ErrorCode::ChunkNotFound);
     }
+}
+
+TEST_CASE("FilesystemBackend - long object paths support CRUD and listing",
+          "[storage][backend][filesystem][long-path]") {
+    TestDirectory testDir;
+    const auto storagePath = testDir.subdir("task-record-store");
+    auto backend = createFilesystemBackend(storagePath);
+    REQUIRE(backend != nullptr);
+
+    const std::string taskId(180, 't');
+    const std::string recordHash(64, 'a');
+    const std::string key = "index/user/" + taskId + "/" + recordHash;
+    REQUIRE(taskId.size() < 255);
+    REQUIRE(recordHash.size() < 255);
+    REQUIRE((storagePath / "objects" / "00" / "00" / key).native().size() > 300);
+
+    const auto original = bytesOf("long-path-original");
+    REQUIRE(backend->store(key, original));
+
+    const auto existsAfterStore = backend->exists(key);
+    REQUIRE(existsAfterStore);
+    CHECK(existsAfterStore.value());
+
+    const auto retrieved = backend->retrieve(key);
+    REQUIRE(retrieved);
+    CHECK(retrieved.value() == original);
+
+    const auto listed = backend->list("index/user/");
+    REQUIRE(listed);
+    REQUIRE(listed.value().size() == 1);
+    CHECK(listed.value().front() == key);
+
+    const auto updated = bytesOf("long-path-updated");
+    REQUIRE(backend->store(key, updated));
+    const auto retrievedAfterUpdate = backend->retrieve(key);
+    REQUIRE(retrievedAfterUpdate);
+    CHECK(retrievedAfterUpdate.value() == updated);
+
+    REQUIRE(backend->remove(key));
+    const auto existsAfterRemove = backend->exists(key);
+    REQUIRE(existsAfterRemove);
+    CHECK_FALSE(existsAfterRemove.value());
+
+    const auto listedAfterRemove = backend->list("index/user/");
+    REQUIRE(listedAfterRemove);
+    CHECK(listedAfterRemove.value().empty());
 }
 
 TEST_CASE("FilesystemBackend - Exists", "[storage][backend][filesystem][exists]") {

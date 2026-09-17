@@ -179,8 +179,8 @@ src/storage/s3_signer.cpp:83:portability/env-read # reviewed raw environment rea
 src/storage/s3_signer.cpp:159:portability/env-read # reviewed raw environment read
 src/storage/s3_signer.cpp:161:portability/env-read # reviewed raw environment read
 src/storage/s3_signer.cpp:163:portability/env-read # reviewed raw environment read
-src/storage/storage_backend_factory.cpp:300:portability/env-read # reviewed raw environment read
-src/storage/storage_backend_factory.cpp:305:portability/env-read # reviewed raw environment read
+src/storage/storage_backend_factory.cpp:340:portability/env-read # reviewed raw environment read
+src/storage/storage_backend_factory.cpp:345:portability/env-read # reviewed raw environment read
 src/vector/sqlite_vec_backend.cpp:705:portability/path-cstr # std::string filename, not filesystem::path
 tests/benchmarks/beir_loader.h:68:portability/env-read # reviewed raw environment read
 tests/benchmarks/bench_utils.h:42:portability/env-read # reviewed raw environment read
