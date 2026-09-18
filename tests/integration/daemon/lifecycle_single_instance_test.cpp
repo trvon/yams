@@ -61,6 +61,32 @@ bool reachesLifecycleStateWithin(const YamsDaemon& daemon, LifecycleState state,
     return waitForLifecycleState(daemon, state, timeout);
 }
 
+/// Wait for the repair-busy Degraded transition while keeping repair work pending.
+///
+/// The daemon only degrades while the repair queue is still non-empty at the moment the busy hold
+/// elapses (`pending && busyHeld` in daemon.cpp). A finite batch that finishes faster than the hold
+/// returns the daemon to Healthy and it never degrades at all, which makes a bare
+/// "enqueue once, then wait" racy against machine speed. Re-enqueueing on each poll keeps the
+/// precondition the implementation actually requires.
+template <typename RepairServicePtr, typename Hashes>
+bool awaitDegradedWithPendingRepair(const YamsDaemon& daemon, RepairServicePtr repairService,
+                                    const Hashes& repairHashes) {
+    const auto deadline = std::chrono::steady_clock::now() + scaledTimeout(30s);
+    // Bound the resubmission: if the transition never arrives the test is failing anyway, and this
+    // keeps a broken run from queueing unbounded work.
+    constexpr int kMaxResubmissions = 40;
+    int resubmissions = 0;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (resubmissions++ < kMaxResubmissions) {
+            repairService->enqueueEmbeddingRepair(repairHashes);
+        }
+        if (waitForLifecycleState(daemon, LifecycleState::Degraded, 200ms)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool waitForRepairService(const YamsDaemon& daemon, std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -442,9 +468,7 @@ TEST_CASE("Repair lifecycle hysteresis does not leak across daemon instances",
         REQUIRE(waitForActiveConnections(*first.daemon(), busyThreshold, scaledTimeout(5s)));
         auto firstRepairService = first.daemon()->getServiceManager()->getRepairServiceShared();
         REQUIRE(firstRepairService);
-        firstRepairService->enqueueEmbeddingRepair(repairHashes);
-        REQUIRE(
-            waitForLifecycleState(*first.daemon(), LifecycleState::Degraded, scaledTimeout(5s)));
+        REQUIRE(awaitDegradedWithPendingRepair(*first.daemon(), firstRepairService, repairHashes));
 
         firstConnections.clear();
         first.stop();
@@ -460,12 +484,11 @@ TEST_CASE("Repair lifecycle hysteresis does not leak across daemon instances",
         REQUIRE(waitForActiveConnections(*second.daemon(), busyThreshold, scaledTimeout(5s)));
         auto secondRepairService = second.daemon()->getServiceManager()->getRepairServiceShared();
         REQUIRE(secondRepairService);
-        secondRepairService->enqueueEmbeddingRepair(repairHashes);
 
         CHECK_FALSE(
             reachesLifecycleStateWithin(*second.daemon(), LifecycleState::Degraded, earlyWindow));
         REQUIRE(
-            waitForLifecycleState(*second.daemon(), LifecycleState::Degraded, scaledTimeout(5s)));
+            awaitDegradedWithPendingRepair(*second.daemon(), secondRepairService, repairHashes));
 
         secondConnections.clear();
         second.stop();
