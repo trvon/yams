@@ -42,11 +42,31 @@ std::filesystem::path plainPath(const std::filesystem::path& path) {
     }
     return std::filesystem::path(detail::stripExtendedWindowsPath(path.native()));
 }
+
+// Enumeration always runs in the extended namespace on Windows, even when the directory being
+// opened is short: the iterator appends descendant names itself, so a short root can still build
+// child paths past MAX_PATH and fail partway through the walk. Callers must derive keys through
+// plainPath().
+std::filesystem::path traversalPath(const std::filesystem::path& path) {
+    if (path.empty()) {
+        return path;
+    }
+    auto nativeForm = path;
+    nativeForm.make_preferred();
+    auto extended = detail::extendedWindowsPath(nativeForm.native());
+    if (!extended) {
+        return path;
+    }
+    return std::filesystem::path(std::move(extended).value());
+}
 #else
 std::filesystem::path longPath(const std::filesystem::path& path) {
     return path;
 }
 std::filesystem::path plainPath(const std::filesystem::path& path) {
+    return path;
+}
+std::filesystem::path traversalPath(const std::filesystem::path& path) {
     return path;
 }
 #endif
@@ -556,7 +576,7 @@ Result<std::vector<std::string>> FilesystemBackend::list(std::string_view prefix
 
     try {
         for (const auto& entry :
-             std::filesystem::recursive_directory_iterator(longPath(objectsDir))) {
+             std::filesystem::recursive_directory_iterator(traversalPath(objectsDir))) {
             if (entry.is_regular_file()) {
                 // Derive the key lexically from the de-prefixed entry path. filesystem::relative()
                 // canonicalises both operands, which is unsafe when one carries the extended
@@ -624,7 +644,7 @@ Result<::yams::StorageStats> FilesystemBackend::getStats() const {
 
     try {
         for (const auto& entry :
-             std::filesystem::recursive_directory_iterator(longPath(basePath_ / "objects"))) {
+             std::filesystem::recursive_directory_iterator(traversalPath(basePath_ / "objects"))) {
             if (entry.is_regular_file()) {
                 stats.totalObjects++;
                 stats.totalBytes += entry.file_size();
