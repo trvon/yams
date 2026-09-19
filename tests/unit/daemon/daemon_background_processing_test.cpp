@@ -41,6 +41,19 @@ using namespace yams;
 using namespace yams::daemon;
 
 namespace {
+
+/// PostIngestQueue::processed() counts prepared tasks before their content is committed
+/// (commitBatchResults() runs after the counter advances), so it is not a completion barrier for
+/// assertions on repository state. Wait for the committed observable with a bounded deadline.
+template <typename Predicate>
+void waitForCommittedState(Predicate&& ready,
+                           std::chrono::milliseconds timeout = std::chrono::seconds(10)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (!ready() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
+
 void stopAndResetQueue(std::unique_ptr<PostIngestQueue>& queue) {
     if (!queue) {
         return;
@@ -612,6 +625,54 @@ private:
     std::unordered_map<int64_t, metadata::DocumentInfo> docsById_{};
 };
 
+/// Holds the first content commit so a test can observe queue counters while content is provably
+/// uncommitted. Always released on destruction so a failing case cannot strand the writer thread.
+class GatedInsertRepository : public StubMetadataRepository {
+public:
+    Result<void>
+    batchInsertContentAndIndex(const std::vector<metadata::BatchContentEntry>& entries) override {
+        {
+            std::unique_lock<std::mutex> lock(gateMutex_);
+            insertEntered_ = true;
+            gateCv_.notify_all();
+            gateCv_.wait(lock, [this] { return released_; });
+        }
+        return StubMetadataRepository::batchInsertContentAndIndex(entries);
+    }
+
+    bool waitForInsertEntered(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(gateMutex_);
+        return gateCv_.wait_for(lock, timeout, [this] { return insertEntered_; });
+    }
+
+    void release() {
+        {
+            std::lock_guard<std::mutex> lock(gateMutex_);
+            released_ = true;
+        }
+        gateCv_.notify_all();
+    }
+
+    ~GatedInsertRepository() override { release(); }
+
+private:
+    std::mutex gateMutex_;
+    std::condition_variable gateCv_;
+    bool insertEntered_{false};
+    bool released_{false};
+};
+
+/// Releases the insert gate before the owning queue is destroyed, so a failing assertion cannot
+/// deadlock the queue's writer-thread join on a still-blocked repository call.
+struct InsertGateRelease {
+    std::shared_ptr<GatedInsertRepository> repo;
+    ~InsertGateRelease() {
+        if (repo) {
+            repo->release();
+        }
+    }
+};
+
 class StubExtractor : public extraction::IContentExtractor {
 public:
     bool supports(const std::string& mime, const std::string&) const override {
@@ -1139,6 +1200,8 @@ TEST_CASE("PostIngestQueue: Parallel extraction preserves per-task identity",
     REQUIRE((queue->processed() == docs.size()));
     REQUIRE((queue->failed() == 0));
 
+    waitForCommittedState([&] { return metadataRepo->batchInsertedDocIds().size() >= docs.size(); },
+                          std::chrono::seconds(8));
     auto insertedDocIds = metadataRepo->batchInsertedDocIds();
     REQUIRE((insertedDocIds.size() == docs.size()));
 
@@ -1215,6 +1278,9 @@ TEST_CASE("PostIngestQueue: enqueueBatch submits all tasks without loss",
     REQUIRE((queue->processed() == kDocCount));
     REQUIRE((queue->failed() == 0));
 
+    waitForCommittedState([&] {
+        return metadataRepo->batchInsertedDocIds().size() >= static_cast<std::size_t>(kDocCount);
+    });
     auto insertedDocIds = metadataRepo->batchInsertedDocIds();
     REQUIRE((insertedDocIds.size() == static_cast<std::size_t>(kDocCount)));
     std::sort(insertedDocIds.begin(), insertedDocIds.end());
@@ -1227,6 +1293,72 @@ TEST_CASE("PostIngestQueue: enqueueBatch submits all tasks without loss",
     CHECK(metrics.batches.extractionBatches == expectedBatches);
     CHECK(metrics.batches.contentIndexCalls == expectedBatches);
     CHECK(metrics.batches.contentIndexMaxEntries == expectedMaxBatchSize);
+
+    stopAndResetQueue(queue);
+    coordinator.stop();
+    coordinator.join();
+}
+
+// Characterizes the ordering that makes a bare wait on processed() racy: the counter advances
+// once tasks are prepared, before commitBatchResults() writes their content.
+TEST_CASE("PostIngestQueue: processed() advances before content is committed",
+          "[daemon][background][queue][batch][ordering]") {
+    BusToggleGuard busGuard(false);
+    drainPostIngestChannel();
+    PostIngestBatchGuard batchGuard(8);
+    PostIngestConcurrencyGuard concurrencyGuard(32, 8);
+
+    WorkCoordinator coordinator;
+    coordinator.start(4);
+
+    auto store = std::make_shared<StubContentStore>();
+    auto metadataRepo = std::make_shared<GatedInsertRepository>();
+    auto extractor = std::make_shared<StubExtractor>();
+    std::vector<std::shared_ptr<extraction::IContentExtractor>> extractors{extractor};
+
+    constexpr int64_t kDocBaseId = 9000;
+    constexpr int kDocCount = 16;
+    std::vector<PostIngestQueue::Task> tasks;
+    tasks.reserve(kDocCount);
+    for (int i = 0; i < kDocCount; ++i) {
+        metadata::DocumentInfo doc{};
+        doc.id = kDocBaseId + i;
+        doc.fileName = "gated-doc-" + std::to_string(i) + ".txt";
+        doc.fileExtension = ".txt";
+        doc.sha256Hash = "gated-commit-hash-" + std::to_string(i);
+        doc.mimeType = "text/plain";
+        doc.indexedTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+        metadataRepo->setDocument(doc);
+        store->setContent(doc.sha256Hash, "gated-payload-" + std::to_string(i));
+        tasks.push_back(PostIngestQueue::Task{.hash = doc.sha256Hash, .mime = doc.mimeType});
+    }
+
+    auto queue = std::make_unique<PostIngestQueue>(store, metadataRepo, extractors, nullptr,
+                                                   nullptr, &coordinator, nullptr, 64);
+    InsertGateRelease releaseOnExit{metadataRepo};
+    queue->setBatchCoalesceWindow(std::chrono::milliseconds(20));
+    queue->start();
+    auto startDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!queue->started() && std::chrono::steady_clock::now() < startDeadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE(queue->started());
+
+    queue->enqueueBatch(std::move(tasks));
+    REQUIRE(metadataRepo->waitForInsertEntered(std::chrono::seconds(5)));
+
+    // A commit is blocked inside the repository, yet the queue already reports prepared work.
+    CHECK((queue->processed() > 0));
+    CHECK((metadataRepo->batchInsertedDocIds().empty()));
+
+    metadataRepo->release();
+    waitForCommittedState([&] {
+        return metadataRepo->batchInsertedDocIds().size() >= static_cast<std::size_t>(kDocCount);
+    });
+    REQUIRE((queue->processed() == kDocCount));
+    REQUIRE((queue->failed() == 0));
+    REQUIRE((metadataRepo->batchInsertedDocIds().size() == static_cast<std::size_t>(kDocCount)));
 
     stopAndResetQueue(queue);
     coordinator.stop();
@@ -1285,6 +1417,9 @@ TEST_CASE("PostIngestQueue: keeps multi-doc batches when extraction concurrency 
 
     REQUIRE((queue->processed() == kDocCount));
     REQUIRE((queue->failed() == 0));
+    waitForCommittedState([&] {
+        return metadataRepo->batchInsertedDocIds().size() >= static_cast<std::size_t>(kDocCount);
+    });
     REQUIRE((metadataRepo->maxBatchWriteSize() > 1));
 
     const auto metrics = queue->metricsSnapshot();
