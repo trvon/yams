@@ -1,3 +1,5 @@
+#include "windows_path.h"
+
 #include <yams/common/fs_utils.h>
 #include <yams/crypto/hasher.h>
 #include <yams/profiling.h>
@@ -13,6 +15,63 @@
 #include <unordered_map>
 
 namespace yams::storage {
+
+namespace {
+
+#ifdef _WIN32
+// Add the extended-length prefix only when the path actually needs it. Keeping short paths in the
+// ordinary Win32 spelling preserves every existing path semantic (canonicalisation, iteration,
+// relative-path derivation) that the backend relies on.
+std::filesystem::path longPath(const std::filesystem::path& path) {
+    if (path.empty() || path.native().size() < detail::kWindowsMaxPath) {
+        return path;
+    }
+    auto nativeForm = path;
+    nativeForm.make_preferred();
+    auto extended = detail::extendedWindowsPath(nativeForm.native());
+    if (!extended) {
+        return path;
+    }
+    return std::filesystem::path(std::move(extended).value());
+}
+
+// Inverse of longPath, for comparisons and logical key derivation.
+std::filesystem::path plainPath(const std::filesystem::path& path) {
+    if (path.empty() || !detail::isExtendedWindowsPath(path.native())) {
+        return path;
+    }
+    return std::filesystem::path(detail::stripExtendedWindowsPath(path.native()));
+}
+
+// Enumeration always runs in the extended namespace on Windows, even when the directory being
+// opened is short: the iterator appends descendant names itself, so a short root can still build
+// child paths past MAX_PATH and fail partway through the walk. Callers must derive keys through
+// plainPath().
+std::filesystem::path traversalPath(const std::filesystem::path& path) {
+    if (path.empty()) {
+        return path;
+    }
+    auto nativeForm = path;
+    nativeForm.make_preferred();
+    auto extended = detail::extendedWindowsPath(nativeForm.native());
+    if (!extended) {
+        return path;
+    }
+    return std::filesystem::path(std::move(extended).value());
+}
+#else
+std::filesystem::path longPath(const std::filesystem::path& path) {
+    return path;
+}
+std::filesystem::path plainPath(const std::filesystem::path& path) {
+    return path;
+}
+std::filesystem::path traversalPath(const std::filesystem::path& path) {
+    return path;
+}
+#endif
+
+} // namespace
 
 Result<void> IStorageBackend::clear() {
     auto keys = list("");
@@ -270,18 +329,19 @@ Result<void> verifyFilesystemContainment(const std::filesystem::path& root,
     }
 
     std::error_code ec;
-    const auto canonicalRoot = std::filesystem::weakly_canonical(root, ec);
+    const auto canonicalRoot = plainPath(std::filesystem::weakly_canonical(longPath(root), ec));
     if (ec) {
         return Error{ErrorCode::InvalidPath,
                      "failed to resolve filesystem backend root: " + ec.message()};
     }
-    const auto canonicalParent = std::filesystem::weakly_canonical(candidate.parent_path(), ec);
+    const auto canonicalParent =
+        plainPath(std::filesystem::weakly_canonical(longPath(candidate.parent_path()), ec));
     if (ec || !pathIsWithin(canonicalRoot, canonicalParent)) {
         return Error{ErrorCode::InvalidPath,
                      "filesystem backend key crosses a symlink outside the object root"};
     }
 
-    const auto status = std::filesystem::symlink_status(candidate, ec);
+    const auto status = std::filesystem::symlink_status(longPath(candidate), ec);
     if (!ec && std::filesystem::is_symlink(status)) {
         return Error{ErrorCode::InvalidPath,
                      "filesystem backend object path must not be a symbolic link"};
@@ -309,14 +369,26 @@ Result<void> FilesystemBackend::initialize(const BackendConfig& config) {
         basePath_ = dataHome / "yams" / "storage";
     }
 
-    // Create storage directories
     std::error_code ec;
-    if (!yams::common::ensureDirectories(basePath_ / "objects", ec)) {
+#ifdef _WIN32
+    // Resolve and normalize the configured root once. The extended-length prefix is deliberately
+    // NOT applied here: it is added per operation, and only for paths that actually reach
+    // MAX_PATH, so short-path semantics (listing, canonicalisation, iteration) stay identical to
+    // the non-Windows code.
+    auto absolutePath = std::filesystem::absolute(basePath_, ec);
+    if (ec) {
+        return Error{ErrorCode::InvalidPath, "Failed to resolve storage path: " + ec.message()};
+    }
+    basePath_ = absolutePath.lexically_normal();
+#endif
+
+    // Create storage directories
+    if (!yams::common::ensureDirectories(longPath(basePath_ / "objects"), ec)) {
         return Result<void>(Error{ErrorCode::PermissionDenied,
                                   "Failed to create storage directory: " + ec.message()});
     }
 
-    if (!yams::common::ensureDirectories(basePath_ / "temp", ec)) {
+    if (!yams::common::ensureDirectories(longPath(basePath_ / "temp"), ec)) {
         return Result<void>(
             Error{ErrorCode::PermissionDenied, "Failed to create temp directory: " + ec.message()});
     }
@@ -347,7 +419,7 @@ Result<std::filesystem::path> FilesystemBackend::getObjectPath(std::string_view 
 
 Result<void> FilesystemBackend::ensureDirectoryExists(const std::filesystem::path& path) const {
     std::error_code ec;
-    if (!yams::common::ensureDirectories(path.parent_path(), ec)) {
+    if (!yams::common::ensureDirectories(longPath(path.parent_path()), ec)) {
         return Result<void>(
             Error{ErrorCode::PermissionDenied, "Failed to create directory: " + ec.message()});
     }
@@ -381,13 +453,13 @@ Result<void> FilesystemBackend::store(std::string_view key, std::span<const std:
     // clear() may remove the owned namespace between service generations. Recreate the
     // temporary staging directory lazily so the same backend can be restarted safely.
     std::error_code ec;
-    if (!yams::common::ensureDirectories(basePath_ / "temp", ec)) {
+    if (!yams::common::ensureDirectories(longPath(basePath_ / "temp"), ec)) {
         return Result<void>(
             Error{ErrorCode::PermissionDenied, "Failed to create temp directory: " + ec.message()});
     }
 
     {
-        std::ofstream file(tempPath, std::ios::binary);
+        std::ofstream file(longPath(tempPath), std::ios::binary);
         if (!file) {
             return Result<void>(Error{ErrorCode::PermissionDenied, "Failed to create temp file"});
         }
@@ -396,20 +468,20 @@ Result<void> FilesystemBackend::store(std::string_view key, std::span<const std:
                    static_cast<std::streamsize>(data.size()));
 
         if (!file) {
-            std::filesystem::remove(tempPath);
+            std::filesystem::remove(longPath(tempPath));
             return Result<void>(Error{ErrorCode::Unknown, "Failed to write data"});
         }
     }
 
     // Atomic rename
     ec.clear();
-    std::filesystem::rename(tempPath, objectPath, ec);
+    std::filesystem::rename(longPath(tempPath), longPath(objectPath), ec);
 
     if (ec) {
-        std::filesystem::remove(tempPath);
+        std::filesystem::remove(longPath(tempPath));
 
         // Check if file already exists (not an error for content-addressed storage)
-        if (std::filesystem::exists(objectPath)) {
+        if (std::filesystem::exists(longPath(objectPath))) {
             return {};
         }
 
@@ -431,11 +503,11 @@ Result<std::vector<std::byte>> FilesystemBackend::retrieve(std::string_view key)
     }
     const auto& objectPath = resolvedPath.value();
 
-    if (!std::filesystem::exists(objectPath)) {
+    if (!std::filesystem::exists(longPath(objectPath))) {
         return Result<std::vector<std::byte>>(Error{ErrorCode::ChunkNotFound});
     }
 
-    std::ifstream file(objectPath, std::ios::binary | std::ios::ate);
+    std::ifstream file(longPath(objectPath), std::ios::binary | std::ios::ate);
     if (!file) {
         return Result<std::vector<std::byte>>(Error{ErrorCode::PermissionDenied});
     }
@@ -458,7 +530,7 @@ Result<bool> FilesystemBackend::exists(std::string_view key) const {
     if (!resolvedPath) {
         return resolvedPath.error();
     }
-    return Result<bool>(std::filesystem::exists(resolvedPath.value()));
+    return Result<bool>(std::filesystem::exists(longPath(resolvedPath.value())));
 }
 
 Result<void> FilesystemBackend::remove(std::string_view key) {
@@ -469,9 +541,9 @@ Result<void> FilesystemBackend::remove(std::string_view key) {
     const auto& objectPath = resolvedPath.value();
 
     std::error_code ec;
-    std::filesystem::remove(objectPath, ec);
+    std::filesystem::remove(longPath(objectPath), ec);
 
-    if (ec && std::filesystem::exists(objectPath)) {
+    if (ec && std::filesystem::exists(longPath(objectPath))) {
         return Result<void>(
             Error{ErrorCode::PermissionDenied, "Failed to remove file: " + ec.message()});
     }
@@ -484,8 +556,8 @@ Result<void> FilesystemBackend::clear() {
     // callers may have placed the backend beneath a directory containing unrelated markers.
     for (const auto* component : {"objects", "temp"}) {
         std::error_code ec;
-        std::filesystem::remove_all(basePath_ / component, ec);
-        if (ec && std::filesystem::exists(basePath_ / component)) {
+        std::filesystem::remove_all(longPath(basePath_ / component), ec);
+        if (ec && std::filesystem::exists(longPath(basePath_ / component))) {
             return Error{ErrorCode::PermissionDenied,
                          "Failed to clear filesystem backend: " + ec.message()};
         }
@@ -498,14 +570,18 @@ Result<std::vector<std::string>> FilesystemBackend::list(std::string_view prefix
 
     // Check if objects directory exists
     auto objectsDir = basePath_ / "objects";
-    if (!std::filesystem::exists(objectsDir)) {
+    if (!std::filesystem::exists(longPath(objectsDir))) {
         return results; // Return empty list if no objects stored yet
     }
 
     try {
-        for (const auto& entry : std::filesystem::recursive_directory_iterator(objectsDir)) {
+        for (const auto& entry :
+             std::filesystem::recursive_directory_iterator(traversalPath(objectsDir))) {
             if (entry.is_regular_file()) {
-                auto relativePath = std::filesystem::relative(entry.path(), basePath_ / "objects");
+                // Derive the key lexically from the de-prefixed entry path. filesystem::relative()
+                // canonicalises both operands, which is unsafe when one carries the extended
+                // Win32 prefix and the other does not.
+                auto relativePath = plainPath(entry.path()).lexically_relative(objectsDir);
                 std::string pathStr = relativePath.string();
 
                 // Normalize path separators to forward slashes first
@@ -568,7 +644,7 @@ Result<::yams::StorageStats> FilesystemBackend::getStats() const {
 
     try {
         for (const auto& entry :
-             std::filesystem::recursive_directory_iterator(basePath_ / "objects")) {
+             std::filesystem::recursive_directory_iterator(traversalPath(basePath_ / "objects"))) {
             if (entry.is_regular_file()) {
                 stats.totalObjects++;
                 stats.totalBytes += entry.file_size();
