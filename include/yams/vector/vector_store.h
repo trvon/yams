@@ -60,9 +60,19 @@ public:
     getVectorsBatch(const std::vector<std::string>& chunk_ids) = 0;
     virtual Result<std::vector<VectorRecord>>
     getVectorsByDocument(const std::string& document_hash) = 0;
+    // Cursor-paged vector reads. This is a capability, not a requirement: it is deliberately not
+    // pure so that adding it did not break every existing in-tree and downstream IVectorStore
+    // implementation. Backends that support paging override it; the default reports NotSupported,
+    // matching the compatibility pattern used for IStorageBackend::listPage.
     virtual Result<std::vector<VectorRecord>> getVectorsPage(std::string_view afterDocumentHash,
                                                              std::string_view afterChunkId,
-                                                             std::size_t limit) = 0;
+                                                             std::size_t limit) {
+        (void)afterDocumentHash;
+        (void)afterChunkId;
+        (void)limit;
+        return Error{ErrorCode::NotSupported,
+                     "vector paging is not supported by this vector store"};
+    }
     virtual Result<std::unordered_map<std::string, VectorRecord>> getDocumentLevelVectorsAll() = 0;
     virtual Result<size_t>
     forEachDocumentLevelVector(const std::function<bool(VectorRecord&&)>& visitor) = 0;
