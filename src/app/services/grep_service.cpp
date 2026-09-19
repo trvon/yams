@@ -6,6 +6,8 @@
 #include <yams/app/services/service_utils.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/simd_newline_scanner.hpp>
+#include <yams/common/fs_utils.h>
+#include <yams/common/string_utils.h>
 #include <yams/common/utf8_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/core/cpp23_features.hpp>
@@ -60,59 +62,14 @@ private:
     int active_{1};
 };
 
-static constexpr std::string_view kRegexSpecialChars = "\\^$.|?*+()[]{}";
-
-#if __cpp_lib_string_contains >= 202011L
-template <typename StringType, typename SubType>
-constexpr bool string_contains(const StringType& str, const SubType& substr) noexcept {
-    return str.contains(substr);
-}
-#else
-template <typename StringType, typename SubType>
-constexpr bool string_contains(const StringType& str, const SubType& substr) noexcept {
-    return str.find(substr) != StringType::npos;
-}
-#endif
-
-static std::string escapeRegex(std::string_view text) {
-    std::string escaped;
-    escaped.reserve(text.size() * 2);
-    for (char c : text) {
-        if (kRegexSpecialChars.find(c) != std::string_view::npos) {
-            escaped += '\\';
-        }
-        escaped += c;
-    }
-    return escaped;
-}
-
 struct PathTreeConfigSettings {
     bool enabled{false};
     std::string mode{"fallback"};
 };
 
-static std::filesystem::path resolveConfigPath() {
-    if (const char* explicitPath = std::getenv("YAMS_CONFIG_PATH")) {
-        std::filesystem::path p{explicitPath};
-        if (std::filesystem::exists(p))
-            return p;
-    }
-    if (const char* xdg = std::getenv("XDG_CONFIG_HOME")) {
-        std::filesystem::path p = std::filesystem::path(xdg) / "yams" / "config.toml";
-        if (std::filesystem::exists(p))
-            return p;
-    }
-    if (const char* home = std::getenv("HOME")) {
-        std::filesystem::path p = std::filesystem::path(home) / ".config" / "yams" / "config.toml";
-        if (std::filesystem::exists(p))
-            return p;
-    }
-    return {};
-}
-
 static PathTreeConfigSettings loadPathTreeConfigSettings() {
     PathTreeConfigSettings cfg;
-    if (auto cfgPath = resolveConfigPath(); !cfgPath.empty()) {
+    if (const auto cfgPath = yams::config::get_config_path(); std::filesystem::exists(cfgPath)) {
         auto values = yams::config::parse_simple_toml(cfgPath);
         if (auto it = values.find("search.path_tree.enable"); it != values.end()) {
             auto v = yams::common::asciiToLowerCopy(it->second);
@@ -125,8 +82,8 @@ static PathTreeConfigSettings loadPathTreeConfigSettings() {
         }
     }
 
-    if (const char* envEnable = std::getenv("YAMS_GREP_PATH_TREE")) {
-        auto v = yams::common::asciiToLowerCopy(envEnable);
+    if (const auto envEnable = yams::config::getenv_optional("YAMS_GREP_PATH_TREE")) {
+        auto v = yams::common::asciiToLowerCopy(*envEnable);
         if (v == "0" || v == "false" || v == "off" || v == "no") {
             cfg.enabled = false;
         } else {
@@ -135,16 +92,12 @@ static PathTreeConfigSettings loadPathTreeConfigSettings() {
                 cfg.mode = v;
         }
     }
-    if (const char* envMode = std::getenv("YAMS_GREP_PATH_TREE_MODE")) {
-        auto v = yams::common::asciiToLowerCopy(envMode);
+    if (const auto envMode = yams::config::getenv_optional("YAMS_GREP_PATH_TREE_MODE")) {
+        auto v = yams::common::asciiToLowerCopy(*envMode);
         if (v == "preferred" || v == "fallback")
             cfg.mode = v;
     }
     return cfg;
-}
-
-static constexpr bool hasWildcard(std::string_view s) noexcept {
-    return s.find('*') != std::string_view::npos || s.find('?') != std::string_view::npos;
 }
 
 static std::string normalizePathForCompare(const std::string& path) {
@@ -156,25 +109,7 @@ static std::string normalizePathForCompare(const std::string& path) {
     if (out.empty()) {
         out = fs.generic_string();
     }
-#if defined(__APPLE__)
-    // Canonicalize common macOS path aliases so comparisons/globs are consistent
-    auto canonApple = [](const std::string& s) -> std::string {
-        if (s.rfind("/private/var/", 0) == 0 || s == "/private/var")
-            return s; // already canonical
-        if (s.rfind("/private/tmp/", 0) == 0 || s == "/private/tmp")
-            return s; // already canonical
-        if (s.rfind("/var/", 0) == 0)
-            return std::string("/private") + s; // "/var/..." -> "/private/var/..."
-        if (s == "/var")
-            return std::string("/private/var");
-        if (s.rfind("/tmp/", 0) == 0)
-            return std::string("/private") + s; // "/tmp/..." -> "/private/tmp/..."
-        if (s == "/tmp")
-            return std::string("/private/tmp");
-        return s;
-    };
-    out = canonApple(out);
-#endif
+    out = yams::common::canonicalizeMacPathAlias(std::move(out));
 #if defined(_WIN32) || defined(__APPLE__)
     std::transform(out.begin(), out.end(), out.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -187,55 +122,13 @@ static std::string normalizeForGlobMatch(const std::string& value) {
 #if defined(_WIN32)
     std::replace(out.begin(), out.end(), '\\', '/');
 #endif
-#if defined(__APPLE__)
-    // Canonicalize macOS path aliases for consistent glob matching
-    auto canonApple = [](const std::string& s) -> std::string {
-        if (s.rfind("/private/var/", 0) == 0 || s == "/private/var")
-            return s;
-        if (s.rfind("/private/tmp/", 0) == 0 || s == "/private/tmp")
-            return s;
-        if (s.rfind("/var/", 0) == 0)
-            return std::string("/private") + s;
-        if (s == "/var")
-            return std::string("/private/var");
-        if (s.rfind("/tmp/", 0) == 0)
-            return std::string("/private") + s;
-        if (s == "/tmp")
-            return std::string("/private/tmp");
-        return s;
-    };
-    out = canonApple(out);
-#endif
+    out = yams::common::canonicalizeMacPathAlias(std::move(out));
 #if defined(_WIN32) || defined(__APPLE__)
     std::transform(out.begin(), out.end(), out.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 #endif
     return out;
 }
-
-static bool isTransientMetadataError(const Error& err) noexcept {
-    switch (err.code) {
-        case ErrorCode::NotInitialized:
-        case ErrorCode::DatabaseError:
-        case ErrorCode::ResourceBusy:
-        case ErrorCode::OperationInProgress:
-        case ErrorCode::Timeout:
-            return true;
-        case ErrorCode::InternalError: {
-            const auto& msg = err.message;
-            return string_contains(msg, "database is locked") || string_contains(msg, "readonly") ||
-                   string_contains(msg, "busy");
-        }
-        default:
-            return false;
-    }
-}
-
-struct MetadataTelemetry {
-    std::atomic<std::uint64_t> operations{0};
-    std::atomic<std::uint64_t> retries{0};
-    std::atomic<std::uint64_t> transientFailures{0};
-};
 
 using GrepClock = std::chrono::steady_clock;
 
@@ -287,7 +180,7 @@ static bool pathFilterMatch(const std::string& filePath, const std::vector<std::
     for (const auto& f : filters) {
         if (f.empty())
             continue;
-        if (hasWildcard(f)) {
+        if (yams::common::hasWildcard(f)) {
             // First try a straight glob match (supports '*' and '?')
             if (yams::app::services::utils::matchGlob(globDoc, normalizeForGlobMatch(f)))
                 return true;
@@ -311,7 +204,7 @@ static bool pathFilterMatch(const std::string& filePath, const std::vector<std::
             auto normalizedFilter = normalizePathForCompare(f);
             if (normalizedFilter.empty())
                 continue;
-            if (string_contains(normalizedDoc, normalizedFilter))
+            if (features::string_contains(normalizedDoc, normalizedFilter))
                 return true;
         }
     }
@@ -413,7 +306,7 @@ public:
         {
             YAMS_ZONE_SCOPED_N("grep_service::pattern_prep");
             if (req.literalText) {
-                regexPattern = escapeRegex(regexPattern);
+                regexPattern = yams::common::escapeRegex(regexPattern);
             }
 
             // Extract literals for two-phase matching (ripgrep strategy)
@@ -462,14 +355,11 @@ public:
             afterContext = 0;
 
         // Stage caps and timeouts (env-overridable)
-        auto getenv_int = [](const char* k, int def) -> int {
-            if (const char* v = std::getenv(k)) {
-                try {
-                    return std::max(0, std::stoi(v));
-                } catch (...) {
-                }
+        auto getenv_int = [](const char* key, int defaultValue) -> int {
+            if (const auto value = yams::config::read_env_int(key).value) {
+                return std::max(0, *value);
             }
-            return def;
+            return defaultValue;
         };
         // PERFORMANCE: Lower default limits to prevent timeouts on large repos
         // Users can override with environment variables if needed
@@ -655,7 +545,7 @@ public:
                         bool matches = false;
                         const std::string docGlobPath = normalizeForGlobMatch(doc.filePath);
                         for (const auto& pattern : req.includePatterns) {
-                            if (hasWildcard(pattern)) {
+                            if (yams::common::hasWildcard(pattern)) {
                                 if (yams::app::services::utils::matchGlob(
                                         docGlobPath, normalizeForGlobMatch(pattern))) {
                                     matches = true;
@@ -664,7 +554,7 @@ public:
                             } else {
                                 const auto normalizedPattern = normalizeForGlobMatch(pattern);
                                 if (!normalizedPattern.empty() &&
-                                    string_contains(docGlobPath, normalizedPattern)) {
+                                    features::string_contains(docGlobPath, normalizedPattern)) {
                                     matches = true;
                                     break;
                                 }
@@ -696,7 +586,7 @@ public:
         const auto candidateClassificationStart = GrepClock::now();
         {
             YAMS_ZONE_SCOPED_N("grep_service::candidate_classification");
-            const size_t maxFileSize = 100 * 1024 * 1024;
+            const size_t maxFileSize = 100ULL * 1024 * 1024;
             size_t filesSkippedType = 0;
             size_t filesSkippedSize = 0;
             size_t filesSkippedGenerated = 0;
@@ -976,6 +866,7 @@ public:
 
                     GrepFileResult fileResult;
                     fileResult.file = doc.filePath;
+                    fileResult.hash = doc.sha256Hash;
                     fileResult.fileName = std::filesystem::path(doc.filePath).filename().string();
                     fileResult.matchCount = 0;
                     size_t ln_counter = 0;
@@ -1395,7 +1286,7 @@ public:
                                     bool ok = false;
                                     const std::string pathGlob = normalizeForGlobMatch(path);
                                     for (const auto& p : req.includePatterns) {
-                                        if (hasWildcard(p)) {
+                                        if (yams::common::hasWildcard(p)) {
                                             if (yams::app::services::utils::matchGlob(
                                                     pathGlob, normalizeForGlobMatch(p))) {
                                                 ok = true;
@@ -1420,7 +1311,7 @@ public:
                                         } else {
                                             const auto normalized = normalizeForGlobMatch(p);
                                             if (!normalized.empty() &&
-                                                string_contains(pathGlob, normalized)) {
+                                                features::string_contains(pathGlob, normalized)) {
                                                 ok = true;
                                                 break;
                                             }
@@ -1433,6 +1324,7 @@ public:
                                     continue;
                                 GrepFileResult fr;
                                 fr.file = path;
+                                fr.hash = r.document.sha256Hash;
                                 fr.fileName = std::filesystem::path(path).filename().string();
                                 GrepMatch gm;
                                 gm.matchType = "semantic";
@@ -1456,7 +1348,10 @@ public:
                             }
                         }
                     }
+                } catch (const std::exception& error) {
+                    spdlog::debug("[GrepService] semantic fallback failed: {}", error.what());
                 } catch (...) {
+                    spdlog::debug("[GrepService] semantic fallback failed with unknown error");
                 }
             }
         }
@@ -1610,7 +1505,7 @@ private:
 
         std::vector<std::string> prefixes;
         for (const auto& raw : req.paths) {
-            if (hasWildcard(raw))
+            if (yams::common::hasWildcard(raw))
                 continue;
             auto norm = canonicalize(raw);
             if (!norm.empty())
@@ -1620,9 +1515,7 @@ private:
         if (!prefixes.empty()) {
             for (const auto& prefix : prefixes) {
                 auto nodeRes = repo->findPathTreeNodeByFullPath(prefix);
-                if (nodeRes && nodeRes.value()) {
-                    fetchPrefix(prefix);
-                } else if (pathTreePreferred_) {
+                if ((nodeRes && nodeRes.value()) || pathTreePreferred_) {
                     fetchPrefix(prefix);
                 }
             }

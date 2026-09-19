@@ -1,3 +1,4 @@
+// pi-lens-ignore: fatal error
 #include <catch2/catch_test_macros.hpp>
 
 #include <nlohmann/json.hpp>
@@ -12,6 +13,7 @@
 
 #include "common/test_helpers_catch2.h"
 
+#include <yams/cli/daemon_helpers.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/client/global_io_context.h>
 
@@ -139,6 +141,8 @@ struct SearchGraphUxFixture {
                                                 std::to_string(kSmokeIpcTimeoutMs)};
 
     SearchGraphUxFixture() {
+        yams::cli::cli_pool_reset_for_test();
+        yams::daemon::GlobalIOContext::reset();
         fs::create_directories(dataDir);
         fs::create_directories(stateDir);
         fs::create_directories(worktree / "src");
@@ -151,6 +155,11 @@ struct SearchGraphUxFixture {
                                                "    return 0;\n"
                                                "}\n");
         yams::test::write_file(externalFile, globalToken + "\n");
+    }
+
+    ~SearchGraphUxFixture() {
+        yams::cli::cli_pool_reset_for_test();
+        yams::daemon::GlobalIOContext::reset();
     }
 };
 

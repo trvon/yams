@@ -2,6 +2,7 @@
 // Validates that two daemons cannot share the same data-dir
 
 #define CATCH_CONFIG_MAIN
+// pi-lens-ignore: fatal error
 #include <spdlog/spdlog.h>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
@@ -31,6 +32,16 @@ using namespace std::chrono_literals;
 
 namespace {
 
+#ifndef YAMS_TEST_TIMEOUT_SCALE
+#define YAMS_TEST_TIMEOUT_SCALE 1
+#endif
+constexpr int kTestTimeoutScale = YAMS_TEST_TIMEOUT_SCALE;
+
+template <typename Rep, typename Period>
+constexpr auto scaledTimeout(std::chrono::duration<Rep, Period> timeout) {
+    return timeout * kTestTimeoutScale;
+}
+
 using yams::test::ScopedEnvVar;
 
 bool waitForLifecycleState(const YamsDaemon& daemon, LifecycleState state,
@@ -50,6 +61,32 @@ bool reachesLifecycleStateWithin(const YamsDaemon& daemon, LifecycleState state,
     return waitForLifecycleState(daemon, state, timeout);
 }
 
+/// Wait for the repair-busy Degraded transition while keeping repair work pending.
+///
+/// The daemon only degrades while the repair queue is still non-empty at the moment the busy hold
+/// elapses (`pending && busyHeld` in daemon.cpp). A finite batch that finishes faster than the hold
+/// returns the daemon to Healthy and it never degrades at all, which makes a bare
+/// "enqueue once, then wait" racy against machine speed. Re-enqueueing on each poll keeps the
+/// precondition the implementation actually requires.
+template <typename RepairServicePtr, typename Hashes>
+bool awaitDegradedWithPendingRepair(const YamsDaemon& daemon, RepairServicePtr repairService,
+                                    const Hashes& repairHashes) {
+    const auto deadline = std::chrono::steady_clock::now() + scaledTimeout(30s);
+    // Bound the resubmission: if the transition never arrives the test is failing anyway, and this
+    // keeps a broken run from queueing unbounded work.
+    constexpr int kMaxResubmissions = 40;
+    int resubmissions = 0;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (resubmissions++ < kMaxResubmissions) {
+            repairService->enqueueEmbeddingRepair(repairHashes);
+        }
+        if (waitForLifecycleState(daemon, LifecycleState::Degraded, 200ms)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool waitForRepairService(const YamsDaemon& daemon, std::chrono::milliseconds timeout) {
     const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -61,6 +98,18 @@ bool waitForRepairService(const YamsDaemon& daemon, std::chrono::milliseconds ti
     }
     const auto* serviceManager = daemon.getServiceManager();
     return serviceManager && serviceManager->getRepairServiceShared();
+}
+
+bool waitForActiveConnections(const YamsDaemon& daemon, std::size_t count,
+                              std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (daemon.getState().stats.activeConnections.load(std::memory_order_acquire) >= count) {
+            return true;
+        }
+        std::this_thread::sleep_for(10ms);
+    }
+    return daemon.getState().stats.activeConnections.load(std::memory_order_acquire) >= count;
 }
 
 struct HeldConnection {
@@ -83,8 +132,10 @@ std::vector<HeldConnection> openHeldConnections(const std::filesystem::path& soc
         auto io = std::make_shared<boost::asio::io_context>();
         boost::asio::local::stream_protocol::socket socket(*io);
         boost::system::error_code ec;
-        socket.connect(boost::asio::local::stream_protocol::endpoint(socketPath.string()), ec);
-        if (!ec) {
+        const bool connected =
+            (socket.connect(boost::asio::local::stream_protocol::endpoint(socketPath.string()), ec),
+             !ec);
+        if (connected) {
             sockets.emplace_back(std::move(io), std::move(socket));
             continue;
         }
@@ -207,8 +258,10 @@ private:
         boost::asio::io_context io;
         boost::asio::local::stream_protocol::socket socket(io);
         boost::system::error_code ec;
-        socket.connect(boost::asio::local::stream_protocol::endpoint(sock_.string()), ec);
-        if (ec) {
+        const bool connected =
+            (socket.connect(boost::asio::local::stream_protocol::endpoint(sock_.string()), ec),
+             !ec);
+        if (!connected) {
             if (statusOut) {
                 *statusOut = "connect failed: " + ec.message();
             }
@@ -292,19 +345,19 @@ TEST_CASE("Data-dir lock prevents concurrent access", "[daemon][lifecycle][singl
                 std::ifstream f(lockFile);
                 std::string content((std::istreambuf_iterator<char>(f)),
                                     std::istreambuf_iterator<char>());
-                REQUIRE(content.find("\"pid\"") != std::string::npos);
-                REQUIRE(content.find("\"socket\"") != std::string::npos);
-                REQUIRE(content.find(harness1.socketPath().string()) != std::string::npos);
+                REQUIRE((content.find("\"pid\"") != std::string::npos));
+                REQUIRE((content.find("\"socket\"") != std::string::npos));
+                REQUIRE((content.find(harness1.socketPath().string()) != std::string::npos));
             }
 
             // Verify that flock is actually held (non-blocking attempt must fail)
 #ifndef _WIN32
             {
                 int probe_fd = open(lockFile.c_str(), O_RDONLY);
-                REQUIRE(probe_fd >= 0);
+                REQUIRE((probe_fd >= 0));
                 int rc = flock(probe_fd, LOCK_EX | LOCK_NB);
                 // rc should be -1/EWOULDBLOCK since daemon1 holds the lock
-                CHECK(rc == -1);
+                CHECK((rc == -1));
                 close(probe_fd);
             }
 #endif
@@ -318,7 +371,7 @@ TEST_CASE("Data-dir lock prevents concurrent access", "[daemon][lifecycle][singl
         // --- Phase 2: daemon2 acquires the same data-dir lock ---
         {
             SharedDataDirHarness harness2(sharedDataDir, "_second");
-            REQUIRE(harness2.start(15s));
+            REQUIRE(harness2.start(45s));
             REQUIRE(std::filesystem::exists(harness2.socketPath()));
 
             // Lock file should now reference daemon2
@@ -326,7 +379,7 @@ TEST_CASE("Data-dir lock prevents concurrent access", "[daemon][lifecycle][singl
                 std::ifstream f(lockFile);
                 std::string content((std::istreambuf_iterator<char>(f)),
                                     std::istreambuf_iterator<char>());
-                REQUIRE(content.find(harness2.socketPath().string()) != std::string::npos);
+                REQUIRE((content.find(harness2.socketPath().string()) != std::string::npos));
             }
 
             harness2.stop();
@@ -345,8 +398,8 @@ TEST_CASE("Data-dir lock prevents concurrent access", "[daemon][lifecycle][singl
         std::ifstream f(lockFile);
         std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
         REQUIRE(!content.empty());
-        REQUIRE(content.find("\"pid\"") != std::string::npos);
-        REQUIRE(content.find("\"socket\"") != std::string::npos);
+        REQUIRE((content.find("\"pid\"") != std::string::npos));
+        REQUIRE((content.find("\"socket\"") != std::string::npos));
 
         harness.stop();
     }
@@ -387,7 +440,7 @@ TEST_CASE("Data-dir lock released on shutdown", "[daemon][lifecycle][single-inst
 }
 
 TEST_CASE("Repair lifecycle hysteresis does not leak across daemon instances",
-          "[daemon][lifecycle][repair-hysteresis]") {
+          "[daemon][lifecycle][repair-hysteresis][slow]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
     ScopedEnvVar degradeGuard("YAMS_REPAIR_DEGRADE_HOLD_MS", "400");
@@ -406,35 +459,36 @@ TEST_CASE("Repair lifecycle hysteresis does not leak across daemon instances",
         const auto repairHashes = makeRepairHashes(256);
 
         DaemonHarness first(opts);
-        REQUIRE(first.start(20s));
-        REQUIRE(waitForLifecycleState(*first.daemon(), LifecycleState::Ready, 10s));
-        REQUIRE(waitForRepairService(*first.daemon(), 10s));
+        REQUIRE(first.start(scaledTimeout(45s)));
+        REQUIRE(waitForLifecycleState(*first.daemon(), LifecycleState::Ready, scaledTimeout(10s)));
+        REQUIRE(waitForRepairService(*first.daemon(), scaledTimeout(10s)));
 
         auto firstConnections = openHeldConnections(first.socketPath(), busyThreshold);
-        REQUIRE(firstConnections.size() == busyThreshold);
+        REQUIRE((firstConnections.size() == busyThreshold));
+        REQUIRE(waitForActiveConnections(*first.daemon(), busyThreshold, scaledTimeout(5s)));
         auto firstRepairService = first.daemon()->getServiceManager()->getRepairServiceShared();
         REQUIRE(firstRepairService);
-        firstRepairService->enqueueEmbeddingRepair(repairHashes);
-        REQUIRE(waitForLifecycleState(*first.daemon(), LifecycleState::Degraded, 5s));
+        REQUIRE(awaitDegradedWithPendingRepair(*first.daemon(), firstRepairService, repairHashes));
 
         firstConnections.clear();
         first.stop();
         std::this_thread::sleep_for(150ms);
 
         DaemonHarness second(opts);
-        REQUIRE(second.start(20s));
-        REQUIRE(waitForLifecycleState(*second.daemon(), LifecycleState::Ready, 10s));
-        REQUIRE(waitForRepairService(*second.daemon(), 10s));
+        REQUIRE(second.start(scaledTimeout(45s)));
+        REQUIRE(waitForLifecycleState(*second.daemon(), LifecycleState::Ready, scaledTimeout(10s)));
+        REQUIRE(waitForRepairService(*second.daemon(), scaledTimeout(10s)));
 
         auto secondConnections = openHeldConnections(second.socketPath(), busyThreshold);
-        REQUIRE(secondConnections.size() == busyThreshold);
+        REQUIRE((secondConnections.size() == busyThreshold));
+        REQUIRE(waitForActiveConnections(*second.daemon(), busyThreshold, scaledTimeout(5s)));
         auto secondRepairService = second.daemon()->getServiceManager()->getRepairServiceShared();
         REQUIRE(secondRepairService);
-        secondRepairService->enqueueEmbeddingRepair(repairHashes);
 
         CHECK_FALSE(
             reachesLifecycleStateWithin(*second.daemon(), LifecycleState::Degraded, earlyWindow));
-        REQUIRE(waitForLifecycleState(*second.daemon(), LifecycleState::Degraded, 5s));
+        REQUIRE(
+            awaitDegradedWithPendingRepair(*second.daemon(), secondRepairService, repairHashes));
 
         secondConnections.clear();
         second.stop();

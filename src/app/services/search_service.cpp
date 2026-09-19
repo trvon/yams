@@ -7,8 +7,11 @@
 #include <yams/app/services/enhanced_search_executor.h>
 #include <yams/app/services/path_projection.hpp>
 #include <yams/app/services/retrieval_path_policy.hpp>
+#include <yams/app/services/service_utils.hpp>
 #include <yams/app/services/services.hpp>
 #include <yams/app/services/session_service.hpp>
+#include <yams/common/fs_utils.h>
+#include <yams/common/hash_predicates.h>
 #include <yams/common/string_utils.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/metadata/kg_relation_summary.h>
@@ -49,6 +52,7 @@
 #endif
 
 #include "yams/profiling.h"
+#include "glob_matcher.h"
 
 namespace yams::app::services {
 
@@ -82,127 +86,6 @@ void annotateRecentLexicalDeltaHits(SearchResponse& resp,
         }
     }
     resp.searchStats["lexical_delta_recent_hits"] = std::to_string(recentHits);
-}
-
-// Returns true if s consists only of hex digits
-bool isHex(const std::string& s) {
-    return std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isxdigit(c) != 0; });
-}
-
-// Heuristic: treat as hash when it looks like a hex string of reasonable length (8-64)
-bool looksLikeHash(const std::string& s) {
-    if (s.size() < 8 || s.size() > 64)
-        return false;
-    return isHex(s);
-}
-
-static bool hasWildcard(const std::string& s) {
-    return s.find('*') != std::string::npos || s.find('?') != std::string::npos;
-}
-
-static void appendMacPathAliases(std::vector<std::string>& patterns) {
-#if defined(__APPLE__)
-    if (patterns.empty()) {
-        return;
-    }
-
-    std::unordered_set<std::string> seen(patterns.begin(), patterns.end());
-    std::vector<std::string> aliases;
-    aliases.reserve(patterns.size());
-
-    for (const auto& pattern : patterns) {
-        std::string alias;
-        if (pattern == "/var") {
-            alias = "/private/var";
-        } else if (pattern.rfind("/var/", 0) == 0) {
-            alias = "/private" + pattern;
-        } else if (pattern == "/private/var") {
-            alias = "/var";
-        } else if (pattern.rfind("/private/var/", 0) == 0) {
-            alias = pattern.substr(std::string("/private").size());
-        }
-
-        if (!alias.empty() && seen.insert(alias).second) {
-            aliases.push_back(std::move(alias));
-        }
-    }
-
-    if (!aliases.empty()) {
-        patterns.insert(patterns.end(), aliases.begin(), aliases.end());
-    }
-#else
-    (void)patterns;
-#endif
-}
-
-// Helper function to escape regex special characters
-static std::string escapeRegex(const std::string& text) {
-    static const std::string specialChars = "\\^$.|?*+()[]{}";
-    std::string escaped;
-    escaped.reserve(text.size() * 2);
-    for (char c : text) {
-        if (specialChars.find(c) != std::string::npos) {
-            escaped += '\\';
-        }
-        escaped += c;
-    }
-    return escaped;
-}
-
-struct ParsedMetadataQuery {
-    std::string residualQuery;
-    std::vector<std::pair<std::string, std::string>> filters;
-};
-
-std::string trimAscii(std::string value) {
-    auto notSpace = [](unsigned char c) { return !std::isspace(c); };
-    value.erase(value.begin(), std::find_if(value.begin(), value.end(), notSpace));
-    value.erase(std::find_if(value.rbegin(), value.rend(), notSpace).base(), value.end());
-    return value;
-}
-
-bool isStructuredMetadataToken(std::string_view token) {
-    const auto pos = token.find('=');
-    if (pos == std::string_view::npos || pos == 0 || pos + 1 >= token.size()) {
-        return false;
-    }
-    if (token.find('=', pos + 1) != std::string_view::npos) {
-        return false;
-    }
-    static constexpr std::string_view kDisallowed = "\"'()[]{}<>|&";
-    return token.find_first_of(kDisallowed) == std::string_view::npos;
-}
-
-ParsedMetadataQuery extractStructuredMetadataQuery(std::string_view query) {
-    ParsedMetadataQuery parsed;
-    std::istringstream stream{std::string{query}};
-    std::vector<std::string> residualTokens;
-    std::map<std::string, std::string> dedupedFilters;
-    for (std::string token; stream >> token;) {
-        if (!isStructuredMetadataToken(token)) {
-            residualTokens.push_back(std::move(token));
-            continue;
-        }
-        const auto pos = token.find('=');
-        std::string key = trimAscii(token.substr(0, pos));
-        std::string value = trimAscii(token.substr(pos + 1));
-        if (key.empty() || value.empty()) {
-            residualTokens.push_back(std::move(token));
-            continue;
-        }
-        dedupedFilters[std::move(key)] = std::move(value);
-    }
-
-    for (const auto& [key, value] : dedupedFilters) {
-        parsed.filters.emplace_back(key, value);
-    }
-    for (std::size_t i = 0; i < residualTokens.size(); ++i) {
-        if (i > 0) {
-            parsed.residualQuery += ' ';
-        }
-        parsed.residualQuery += residualTokens[i];
-    }
-    return parsed;
 }
 
 std::size_t annotateResultRelations(std::vector<SearchItem>& results,
@@ -322,58 +205,27 @@ void applyExtensionFacets(SearchResponse& resp) {
 }
 
 // Converts a glob pattern to a regex string.
-static std::string globToRegex(const std::string& glob) {
-    std::string regex_str;
-    regex_str.reserve(glob.size() * 2);
-    for (size_t i = 0; i < glob.size(); ++i) {
-        char c = glob[i];
-        if (c == '*') {
-            if (i + 1 < glob.size() && glob[i + 1] == '*') {
-                // '**' matches any sequence of characters, including path separators
-                regex_str += ".*";
-                i++; // consume second '*'
-            } else {
-                // '*' matches any sequence of characters except path separators
-                regex_str += "[^/]*";
-            }
-        } else if (c == '?') {
-            regex_str += ".";
-        } else if (c == '.' || c == '+' || c == '(' || c == ')' || c == '{' || c == '}' ||
-                   c == '[' || c == ']' || c == '^' || c == '|' || c == '\\') {
-            regex_str += '\\';
-            regex_str += c;
-        } else {
-            regex_str += c;
-        }
-    }
-    return regex_str;
-}
-
-// Robust glob matcher using regex, supporting '**'.
+// Glob matching compiled once per pattern. Path filters apply the same handful of
+// patterns to every candidate document, so the compiled form is cached per thread and
+// the cache is cleared if it ever grows past a small bound.
 static bool wildcardMatch(const std::string& text, const std::string& pattern) {
-    try {
-        std::regex re(globToRegex(pattern));
-        return std::regex_match(text, re);
-    } catch (const std::regex_error& e) {
-        spdlog::warn("Invalid glob pattern '{}' converted to regex: {}", pattern, e.what());
-        // Fallback to simple string contains for invalid patterns
-        return text.find(pattern) != std::string::npos;
+    thread_local std::unordered_map<std::string, GlobMatcher> matchers;
+    auto it = matchers.find(pattern);
+    if (it == matchers.end()) {
+        if (matchers.size() >= 256) {
+            matchers.clear();
+        }
+        it = matchers.emplace(pattern, GlobMatcher(pattern)).first;
     }
+    return it->second.matches(text);
 }
 
 // Heuristic: treat as path/filename when the query contains a separator
 // or looks like a single token with an extension and no spaces.
-static std::string trimCopy(std::string s) {
-    const auto isSpace = [](unsigned char c) { return static_cast<bool>(std::isspace(c)); };
-    s.erase(s.begin(), std::find_if_not(s.begin(), s.end(), isSpace));
-    s.erase(std::find_if_not(s.rbegin(), s.rend(), isSpace).base(), s.end());
-    return s;
-}
-
 // Stricter heuristic for query routing: avoid misclassifying code-like tokens as hashes.
 // Require explicit prefix or a long hex length with at least one alpha hex digit.
 bool looksLikeHashQuery(const std::string& raw) {
-    auto trimmed = trimCopy(raw);
+    auto trimmed = yams::common::trimCopy(raw);
     if (trimmed.empty())
         return false;
 
@@ -392,19 +244,19 @@ bool looksLikeHashQuery(const std::string& raw) {
     };
 
     if (auto v = stripPrefix("hash:"); !v.empty()) {
-        return looksLikeHash(trimCopy(std::move(v)));
+        return yams::common::looksLikeHashQueryToken(yams::common::trimCopy(std::move(v)));
     }
     if (auto v = stripPrefix("sha1:"); !v.empty()) {
-        return looksLikeHash(trimCopy(std::move(v)));
+        return yams::common::looksLikeHashQueryToken(yams::common::trimCopy(std::move(v)));
     }
     if (auto v = stripPrefix("sha256:"); !v.empty()) {
-        return looksLikeHash(trimCopy(std::move(v)));
+        return yams::common::looksLikeHashQueryToken(yams::common::trimCopy(std::move(v)));
     }
     if (auto v = stripPrefix("md5:"); !v.empty()) {
-        return looksLikeHash(trimCopy(std::move(v)));
+        return yams::common::looksLikeHashQueryToken(yams::common::trimCopy(std::move(v)));
     }
 
-    if (!looksLikeHash(trimmed))
+    if (!yams::common::looksLikeHashQueryToken(trimmed))
         return false;
 
     // Require at least 8 chars for hash prefix searches (matches looksLikeHash minimum).
@@ -416,7 +268,7 @@ bool looksLikeHashQuery(const std::string& raw) {
 }
 
 std::optional<std::string> extractHashPrefix(const std::string& raw) {
-    auto trimmed = trimCopy(raw);
+    auto trimmed = yams::common::trimCopy(raw);
     if (trimmed.empty())
         return std::nullopt;
 
@@ -426,22 +278,26 @@ std::optional<std::string> extractHashPrefix(const std::string& raw) {
 
     auto stripPrefix = [&](std::string_view prefix) -> std::string {
         if (lower.rfind(prefix, 0) == 0) {
-            return trimCopy(trimmed.substr(prefix.size()));
+            return yams::common::trimCopy(trimmed.substr(prefix.size()));
         }
         return {};
     };
 
     if (auto v = stripPrefix("hash:"); !v.empty()) {
-        return looksLikeHash(v) ? std::optional<std::string>(v) : std::nullopt;
+        return yams::common::looksLikeHashQueryToken(v) ? std::optional<std::string>(v)
+                                                        : std::nullopt;
     }
     if (auto v = stripPrefix("sha1:"); !v.empty()) {
-        return looksLikeHash(v) ? std::optional<std::string>(v) : std::nullopt;
+        return yams::common::looksLikeHashQueryToken(v) ? std::optional<std::string>(v)
+                                                        : std::nullopt;
     }
     if (auto v = stripPrefix("sha256:"); !v.empty()) {
-        return looksLikeHash(v) ? std::optional<std::string>(v) : std::nullopt;
+        return yams::common::looksLikeHashQueryToken(v) ? std::optional<std::string>(v)
+                                                        : std::nullopt;
     }
     if (auto v = stripPrefix("md5:"); !v.empty()) {
-        return looksLikeHash(v) ? std::optional<std::string>(v) : std::nullopt;
+        return yams::common::looksLikeHashQueryToken(v) ? std::optional<std::string>(v)
+                                                        : std::nullopt;
     }
 
     if (looksLikeHashQuery(trimmed)) {
@@ -464,11 +320,11 @@ static bool looksLikePathToken(const std::string& token) {
         return true;
     }
     // Wildcards also indicate a path-style intent
-    return hasWildcard(token);
+    return yams::common::hasWildcard(token);
 }
 
 static bool looksLikePathQuery(const std::string& raw) {
-    auto trimmed = trimCopy(raw);
+    auto trimmed = yams::common::trimCopy(raw);
     if (trimmed.empty())
         return false;
 
@@ -496,12 +352,13 @@ static std::string_view basenameView(std::string_view path) {
     return path.substr(pos + 1);
 }
 
-static double computePathMatchScore(const metadata::DocumentInfo& doc, const std::string& query,
-                                    bool wildcard) {
+// queryLower is the trimmed, lowercased query, computed once by the caller for the whole
+// candidate set rather than once per document.
+static double computePathMatchScore(const metadata::DocumentInfo& doc,
+                                    const std::string& queryLower, bool wildcard) {
     const std::string path = !doc.filePath.empty() ? doc.filePath : doc.fileName;
     const std::string pathLower = yams::common::asciiToLowerCopy(path);
     const std::string nameLower = yams::common::asciiToLowerCopy(doc.fileName);
-    const std::string queryLower = yams::common::asciiToLowerCopy(trimCopy(query));
 
     if (queryLower.empty()) {
         return 0.01;
@@ -546,31 +403,6 @@ static double computePathMatchScore(const metadata::DocumentInfo& doc, const std
 }
 
 // Presence-based tag match using metadata repository
-static bool isTransientMetadataError(const Error& err) {
-    switch (err.code) {
-        case ErrorCode::NotInitialized:
-        case ErrorCode::DatabaseError:
-        case ErrorCode::ResourceBusy:
-        case ErrorCode::OperationInProgress:
-        case ErrorCode::Timeout:
-            return true;
-        case ErrorCode::InternalError: {
-            const auto& msg = err.message;
-            return msg.find("database is locked") != std::string::npos ||
-                   msg.find("readonly") != std::string::npos ||
-                   msg.find("busy") != std::string::npos;
-        }
-        default:
-            return false;
-    }
-}
-
-struct MetadataTelemetry {
-    std::atomic<std::uint64_t> operations{0};
-    std::atomic<std::uint64_t> retries{0};
-    std::atomic<std::uint64_t> transientFailures{0};
-};
-
 template <typename Fn>
 boost::asio::awaitable<decltype(std::declval<Fn>()())>
 retryMetadataOp(Fn&& fn, std::size_t maxAttempts = 4,
@@ -619,72 +451,47 @@ retryMetadataOp(Fn&& fn, std::size_t maxAttempts = 4,
     co_return attempt;
 }
 
-static boost::asio::awaitable<bool> metadataHasTags(metadata::MetadataRepository* repo,
-                                                    int64_t docId,
-                                                    const std::vector<std::string>& tags,
-                                                    bool matchAll,
-                                                    MetadataTelemetry* telemetry = nullptr) {
-    if (!repo || tags.empty()) {
-        co_return true;
+// Batch lookup supports normalized tag:<name> keys and legacy tag values, using bounded
+// queries. A lookup failure must be reported, not interpreted as an empty tag set.
+using TagsByDocument = std::unordered_map<int64_t, std::vector<std::string>>;
+
+static boost::asio::awaitable<Result<TagsByDocument>> loadTagsForDocuments(
+    metadata::MetadataRepository* repo, const std::vector<metadata::DocumentInfo>& docs,
+    const std::vector<std::string>& requiredTags, MetadataTelemetry* telemetry = nullptr) {
+    TagsByDocument tagsByDoc;
+    if (!repo || requiredTags.empty() || docs.empty()) {
+        co_return tagsByDoc;
     }
-
-    auto md = co_await retryMetadataOp([&]() { return repo->getAllMetadata(docId); }, 4,
-                                       std::chrono::milliseconds(25), telemetry);
-
-    if (!md) {
-        spdlog::debug("SearchService: metadata lookup failed for doc {}: {}", docId,
-                      md.error().message);
-        co_return false;
+    std::vector<int64_t> ids;
+    ids.reserve(docs.size());
+    for (const auto& d : docs) {
+        if (d.id > 0) {
+            ids.push_back(d.id);
+        }
     }
-
-    auto& all = md.value();
-
-    // Debug: log all metadata keys for this document
-    if (!tags.empty()) {
-        std::string keys;
-        for (const auto& [k, v] : all) {
-            if (!keys.empty())
-                keys += ", ";
-            keys += k + "=" + v.asString();
-        }
-        spdlog::info(
-            "metadataHasTags: docId={} searching for tags=[{}] matchAll={} found_metadata=[{}]",
-            docId, tags.size(), matchAll, keys);
+    auto loaded = co_await retryMetadataOp([&]() { return repo->batchGetDocumentTags(ids); }, 4,
+                                           std::chrono::milliseconds(25), telemetry);
+    if (!loaded) {
+        co_return loaded.error();
     }
+    co_return std::move(loaded.value());
+}
 
-    auto hasTag = [&](const std::string& t) {
-        // Check for normalized storage (key="tag:<name>")
-        auto it = all.find("tag:" + t);
-        if (it != all.end()) {
-            spdlog::debug("metadataHasTags: found tag:{}", t);
-            return true;
-        }
-        // Fallback: check for legacy storage (key="tag", value="<name>")
-        for (const auto& [k, v] : all) {
-            if (k == "tag" && v.asString() == t) {
-                spdlog::debug("metadataHasTags: found legacy tag {}", t);
-                return true;
-            }
-        }
-        spdlog::debug("metadataHasTags: tag '{}' not found", t);
+static bool hasRequiredTags(const TagsByDocument& tagsByDoc, int64_t docId,
+                            const std::vector<std::string>& required, bool matchAll) {
+    if (required.empty()) {
+        return true;
+    }
+    const auto it = tagsByDoc.find(docId);
+    if (it == tagsByDoc.end()) {
         return false;
-    };
-
-    if (matchAll) {
-        for (const auto& t : tags) {
-            if (!hasTag(t)) {
-                co_return false;
-            }
-        }
-        co_return true;
-    } else {
-        for (const auto& t : tags) {
-            if (hasTag(t)) {
-                co_return true;
-            }
-        }
-        co_return false;
     }
+    const auto& tags = it->second;
+    const auto has = [&](const std::string& t) {
+        return std::find(tags.begin(), tags.end(), t) != tags.end();
+    };
+    return matchAll ? std::all_of(required.begin(), required.end(), has)
+                    : std::any_of(required.begin(), required.end(), has);
 }
 
 // Compute recommended worker count based on hardware, load and caps
@@ -810,7 +617,7 @@ public:
         SearchRequest normalizedReq = req;
         normalizedReq.query = std::move(parsed.normalizedQuery);
         if (normalizedReq.type == "keyword") {
-            auto structured = extractStructuredMetadataQuery(normalizedReq.query);
+            auto structured = yams::search::extractStructuredMetadataQuery(normalizedReq.query);
             if (!structured.filters.empty()) {
                 normalizedReq.metadataFilters = std::move(structured.filters);
                 normalizedReq.query = std::move(structured.residualQuery);
@@ -866,7 +673,7 @@ public:
             normalizedReq.pathPatterns.insert(normalizedReq.pathPatterns.end(),
                                               scopePatterns.begin(), scopePatterns.end());
         }
-        appendMacPathAliases(normalizedReq.pathPatterns);
+        yams::common::appendMacPathAliases(normalizedReq.pathPatterns);
 
         if (normalizedReq.extension.empty() && !parsed.scope.ext.empty()) {
             normalizedReq.extension = parsed.scope.ext;
@@ -892,9 +699,9 @@ public:
 
         if (!normalizedReq.hash.empty()) {
             YAMS_ZONE_SCOPED_N("search_service::hash_lookup");
-            if (!looksLikeHash(normalizedReq.hash)) {
+            if (!yams::common::looksLikePartialHashArgument(normalizedReq.hash)) {
                 co_return Error{ErrorCode::InvalidArgument,
-                                "Invalid hash format (expected hex, 8-64 chars)"};
+                                "Invalid hash format (expected hex, 6-64 chars)"};
             }
             auto result = co_await searchByHashPrefix(normalizedReq, &metadataTelemetry);
             setExecTime(result, t0);
@@ -950,7 +757,12 @@ public:
                 resp.queryInfo = "path/name contains match";
                 co_return Result<SearchResponse>(applyWorkspaceScope(std::move(resp)));
             }
-            // Fall through to standard paths on error.
+            // Required tag filtering could not be completed. Do not hide that failure
+            // behind a fallback search that can report an empty successful result.
+            if (!normalizedReq.tags.empty()) {
+                co_return pathResult.error();
+            }
+            // Untagged path heuristics may still fall back to the standard search paths.
         }
 
         if (type == "hybrid" || type == "semantic") {
@@ -981,7 +793,7 @@ public:
                 if (rawPattern.empty()) {
                     return false;
                 }
-                if (hasWildcard(rawPattern)) {
+                if (yams::common::hasWildcard(rawPattern)) {
                     std::string normalized = rawPattern;
                     // Normalize glob patterns for path matching:
                     // - "*.ext" should match any path ending in .ext (prepend **/)
@@ -1595,7 +1407,7 @@ private:
         const auto recentLexicalDeltaHashes = buildRecentLexicalDeltaSet(ctx_);
         std::vector<metadata::DocumentInfo> docs;
 
-        std::string pathQuery = trimCopy(req.query);
+        std::string pathQuery = yams::common::trimCopy(req.query);
         const bool quotedPathQuery =
             (pathQuery.size() >= 2 && ((pathQuery.front() == '"' && pathQuery.back() == '"') ||
                                        (pathQuery.front() == '\'' && pathQuery.back() == '\'')));
@@ -1603,7 +1415,7 @@ private:
             pathQuery = pathQuery.substr(1, pathQuery.size() - 2);
         }
 
-        const bool wildcard = hasWildcard(pathQuery);
+        const bool wildcard = yams::common::hasWildcard(pathQuery);
 
         std::string likePattern;
         if (wildcard) {
@@ -1625,6 +1437,13 @@ private:
         }
 
         // Apply additional filters and shape results
+        auto loadedTags =
+            co_await loadTagsForDocuments(ctx_.metadataRepo.get(), docs, req.tags, telemetry);
+        if (!loadedTags)
+            co_return loadedTags.error();
+        const auto& tagsByDoc = loadedTags.value();
+        const std::string pathQueryLower =
+            yams::common::asciiToLowerCopy(yams::common::trimCopy(pathQuery));
         auto push_path = [&](const metadata::DocumentInfo& d) -> boost::asio::awaitable<void> {
             if (!req.extension.empty()) {
                 if (d.fileExtension != req.extension && d.fileExtension != ("." + req.extension))
@@ -1632,11 +1451,10 @@ private:
             }
             if (!req.mimeType.empty() && d.mimeType != req.mimeType)
                 co_return;
-            if (!(co_await metadataHasTags(ctx_.metadataRepo.get(), d.id, req.tags,
-                                           req.matchAllTags, telemetry)))
+            if (!hasRequiredTags(tagsByDoc, d.id, req.tags, req.matchAllTags))
                 co_return;
             const std::string resolvedPath = !d.filePath.empty() ? d.filePath : d.fileName;
-            const double score = computePathMatchScore(d, pathQuery, wildcard);
+            const double score = computePathMatchScore(d, pathQueryLower, wildcard);
 
             if (req.pathsOnly) {
                 rankedPaths.emplace_back(resolvedPath, score);
@@ -1737,7 +1555,7 @@ private:
             if (rawPattern.empty()) {
                 return false;
             }
-            if (hasWildcard(rawPattern)) {
+            if (yams::common::hasWildcard(rawPattern)) {
                 std::string pattern = rawPattern;
                 if (!pattern.empty() && pattern.front() == '*' &&
                     (pattern.size() == 1 || pattern[1] != '*')) { // NOLINT(bugprone-branch-clone)
@@ -1751,6 +1569,11 @@ private:
             return filePath.find(rawPattern) != std::string::npos;
         };
 
+        auto loadedTags =
+            co_await loadTagsForDocuments(ctx_.metadataRepo.get(), docs, req.tags, telemetry);
+        if (!loadedTags)
+            co_return loadedTags.error();
+        const auto& tagsByDoc = loadedTags.value();
         for (const auto& doc : docs) {
             // Optional path and tag filters for CLI parity
             bool pathOk = effectivePathPatterns.empty();
@@ -1781,8 +1604,7 @@ private:
             }
 
             if (!pathOk || !metaFiltersOk ||
-                !(co_await metadataHasTags(ctx_.metadataRepo.get(), doc.id, req.tags,
-                                           req.matchAllTags, telemetry))) {
+                !hasRequiredTags(tagsByDoc, doc.id, req.tags, req.matchAllTags)) {
                 continue;
             }
 
@@ -1995,7 +1817,7 @@ private:
                 if (patternRaw.empty()) {
                     continue;
                 }
-                if (hasWildcard(patternRaw)) {
+                if (yams::common::hasWildcard(patternRaw)) {
                     std::string pattern = patternRaw;
                     if (!pattern.empty() && pattern.front() != '*' && pattern.front() != '/' &&
                         pattern.find(":/") == std::string::npos) {
@@ -2276,7 +2098,7 @@ private:
 
         if (req.literalText) {
             // Escape regex special characters
-            processedQuery = escapeRegex(req.query);
+            processedQuery = yams::common::escapeRegex(req.query);
         }
 
         // Get docIds for tags if provided

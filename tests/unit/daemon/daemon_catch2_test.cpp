@@ -5,7 +5,9 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -18,6 +20,7 @@
 using nlohmann::json;
 
 #include <yams/compat/unistd.h>
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/components/ServiceManager.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/daemon_lifecycle.h>
@@ -53,6 +56,7 @@ struct DaemonFixture {
     std::unique_ptr<YamsDaemon> daemon_;
     fs::path runtime_root_;
     std::thread runLoopThread_;
+    std::vector<yams::test::ScopedEnvVar> environment_;
 
     DaemonFixture() {
 #ifdef _WIN32
@@ -73,8 +77,8 @@ struct DaemonFixture {
 
         // When ABI plugins are disabled, no model provider can be adopted,
         // so disable the requirement to avoid init failure.
-        if (const char* v = std::getenv("YAMS_DISABLE_ABI_PLUGINS");
-            v && std::string_view(v) == "1") {
+        if (const auto value = yams::config::getenv_nonempty("YAMS_DISABLE_ABI_PLUGINS");
+            value && *value == "1") {
             config_.enableModelProvider = false;
         } else {
             config_.enableModelProvider = true;
@@ -83,18 +87,18 @@ struct DaemonFixture {
         config_.modelPoolConfig.lazyLoading = true;
         config_.modelPoolConfig.preloadModels.clear();
 
-        ::setenv("YAMS_DB_OPEN_TIMEOUT_MS", "1500", 1);
-        ::setenv("YAMS_DB_MIGRATE_TIMEOUT_MS", "2000", 1);
-        ::setenv("YAMS_SEARCH_BUILD_TIMEOUT_MS", "1500", 1);
-        ::setenv("YAMS_DISABLE_VECTORS", "1", 1);
-        ::setenv("YAMS_DISABLE_SESSION_WATCHER", "1", 1);
+        environment_.emplace_back("YAMS_DB_OPEN_TIMEOUT_MS", std::string{"1500"});
+        environment_.emplace_back("YAMS_DB_MIGRATE_TIMEOUT_MS", std::string{"2000"});
+        environment_.emplace_back("YAMS_SEARCH_BUILD_TIMEOUT_MS", std::string{"1500"});
+        environment_.emplace_back("YAMS_DISABLE_VECTORS", std::string{"1"});
+        environment_.emplace_back("YAMS_DISABLE_SESSION_WATCHER", std::string{"1"});
 
         std::error_code se;
         fs::create_directories(config_.dataDir, se);
 
-        ::setenv("YAMS_RUNTIME_DIR", runtime_root_.string().c_str(), 1);
-        ::setenv("YAMS_SOCKET_PATH", config_.socketPath.string().c_str(), 1);
-        ::setenv("YAMS_PID_FILE", config_.pidFile.string().c_str(), 1);
+        environment_.emplace_back("YAMS_RUNTIME_DIR", runtime_root_.string());
+        environment_.emplace_back("YAMS_SOCKET_PATH", config_.socketPath.string());
+        environment_.emplace_back("YAMS_PID_FILE", config_.pidFile.string());
     }
 
     ~DaemonFixture() {
@@ -175,34 +179,281 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon creation and destruction", "[daemon][lif
     REQUIRE_FALSE(daemon_->isRunning());
 }
 
-TEST_CASE_METHOD(DaemonFixture, "Daemon tuning reload preserves unspecified values",
+TEST_CASE_METHOD(DaemonFixture, "Daemon starts repair service while provider-degraded",
+                 "[daemon][lifecycle][repair]") {
+    SKIP_ON_WINDOWS();
+
+    yams::test::ScopedEnvVar skipModelLoading("YAMS_SKIP_MODEL_LOADING", "1");
+    yams::test::ScopedEnvVar embeddingBackend("YAMS_EMBED_BACKEND", "daemon");
+    config_.enableModelProvider = true;
+    config_.modelProviderRequired = false;
+    config_.autoLoadPlugins = false;
+    daemon_ = std::make_unique<YamsDaemon>(config_);
+
+    auto startResult = daemon_->start();
+    if (!startResult && isSocketPermissionDenied(startResult.error())) {
+        SKIP("UNIX domain sockets not permitted");
+    }
+    REQUIRE(startResult);
+    startRunLoop();
+
+    REQUIRE(waitForCondition(5s, [&] {
+        return !daemon_->getState().readiness.modelProviderReady.load(std::memory_order_acquire);
+    }));
+    REQUIRE(waitForCondition(
+        2s, [&] { return daemon_->getServiceManager()->getRepairServiceShared() != nullptr; }));
+}
+
+TEST_CASE_METHOD(DaemonFixture, "Daemon restores compatibility path environment",
+                 "[daemon][lifecycle][environment]") {
+    yams::test::ScopedEnvVar storage("YAMS_STORAGE", "/before/storage");
+    yams::test::ScopedEnvVar data("YAMS_DATA_DIR", "/before/data");
+    yams::test::ScopedEnvVar config("YAMS_CONFIG", "/before/config.toml");
+    const auto compatibilityConfig = runtime_root_ / "before-compatibility.toml";
+    std::ofstream(compatibilityConfig) << "[daemon]\nmode = \"old\"\n";
+    yams::test::ScopedEnvVar configCompatibility("YAMS_CONFIG_PATH", compatibilityConfig.string());
+    yams::test::ScopedEnvVar socket("YAMS_DAEMON_SOCKET", "/before/socket.sock");
+    yams::test::ScopedEnvVar inDaemon("YAMS_IN_DAEMON", "before");
+
+    config_.configFilePath = runtime_root_ / "config.toml";
+    daemon_ = std::make_unique<YamsDaemon>(config_);
+    CHECK((yams::config::getenv_copy("YAMS_STORAGE") == config_.dataDir.string()));
+    CHECK((yams::config::getenv_copy("YAMS_DATA_DIR") == config_.dataDir.string()));
+    CHECK((yams::config::getenv_copy("YAMS_CONFIG") == config_.configFilePath.string()));
+    CHECK((yams::config::getenv_copy("YAMS_CONFIG_PATH") == config_.configFilePath.string()));
+    CHECK((yams::config::get_config_path() == config_.configFilePath));
+    CHECK((yams::config::getenv_copy("YAMS_DAEMON_SOCKET") == config_.socketPath.string()));
+    CHECK((yams::config::getenv_copy("YAMS_IN_DAEMON") == "1"));
+
+    daemon_.reset();
+    CHECK((yams::config::getenv_copy("YAMS_STORAGE") == "/before/storage"));
+    CHECK((yams::config::getenv_copy("YAMS_DATA_DIR") == "/before/data"));
+    CHECK((yams::config::getenv_copy("YAMS_CONFIG") == "/before/config.toml"));
+    CHECK((yams::config::getenv_copy("YAMS_CONFIG_PATH") == compatibilityConfig.string()));
+    CHECK((yams::config::getenv_copy("YAMS_DAEMON_SOCKET") == "/before/socket.sock"));
+    CHECK((yams::config::getenv_copy("YAMS_IN_DAEMON") == "before"));
+}
+
+TEST_CASE_METHOD(DaemonFixture, "Daemon environment lease preserves newer writers",
+                 "[daemon][lifecycle][environment][ownership]") {
+    yams::test::ScopedEnvVar socket{"YAMS_DAEMON_SOCKET", std::string{"/before/socket.sock"}};
+
+    daemon_ = std::make_unique<YamsDaemon>(config_);
+    REQUIRE((yams::config::getenv_copy("YAMS_DAEMON_SOCKET") == config_.socketPath.string()));
+
+    socket.set("/newer/owner.sock");
+    daemon_.reset();
+
+    CHECK((yams::config::getenv_copy("YAMS_DAEMON_SOCKET") == "/newer/owner.sock"));
+}
+
+TEST_CASE_METHOD(DaemonFixture, "Daemon environment lease detects same-value newer writers",
+                 "[daemon][lifecycle][environment][ownership]") {
+    yams::test::ScopedEnvVar socket{"YAMS_DAEMON_SOCKET", std::string{"/before/socket.sock"}};
+
+    daemon_ = std::make_unique<YamsDaemon>(config_);
+    const auto installed = config_.socketPath.string();
+    REQUIRE((yams::config::getenv_copy("YAMS_DAEMON_SOCKET") == installed));
+
+    socket.set(installed);
+    daemon_.reset();
+
+    CHECK((yams::config::getenv_copy("YAMS_DAEMON_SOCKET") == installed));
+}
+
+TEST_CASE_METHOD(DaemonFixture, "Nested daemons restore every runtime environment lease",
+                 "[daemon][lifecycle][environment][ownership][nested]") {
+    std::vector<yams::test::ScopedEnvVar> original;
+    original.reserve(6);
+    original.emplace_back("YAMS_IN_DAEMON", std::string{"before-daemon"});
+    original.emplace_back("YAMS_STORAGE", std::string{"/before/storage"});
+    original.emplace_back("YAMS_DATA_DIR", std::string{"/before/data"});
+    original.emplace_back("YAMS_CONFIG", std::string{"/before/config"});
+    original.emplace_back("YAMS_CONFIG_PATH", std::string{"/before/config-path"});
+    original.emplace_back("YAMS_DAEMON_SOCKET", std::string{"/before/socket"});
+
+    auto outerConfig = config_;
+    outerConfig.dataDir = runtime_root_ / "outer-data";
+    outerConfig.configFilePath = runtime_root_ / "outer.toml";
+    outerConfig.socketPath = runtime_root_ / "outer.sock";
+    outerConfig.pidFile = runtime_root_ / "outer.pid";
+
+    auto innerConfig = config_;
+    innerConfig.dataDir = runtime_root_ / "inner-data";
+    innerConfig.configFilePath = runtime_root_ / "inner.toml";
+    innerConfig.socketPath = runtime_root_ / "inner.sock";
+    innerConfig.pidFile = runtime_root_ / "inner.pid";
+
+    const auto checkInstalled = [](const DaemonConfig& expected) {
+        CHECK((yams::config::getenv_copy("YAMS_IN_DAEMON") == "1"));
+        CHECK((yams::config::getenv_copy("YAMS_STORAGE") == expected.dataDir.string()));
+        CHECK((yams::config::getenv_copy("YAMS_DATA_DIR") == expected.dataDir.string()));
+        CHECK((yams::config::getenv_copy("YAMS_CONFIG") == expected.configFilePath.string()));
+        CHECK((yams::config::getenv_copy("YAMS_CONFIG_PATH") == expected.configFilePath.string()));
+        CHECK((yams::config::getenv_copy("YAMS_DAEMON_SOCKET") == expected.socketPath.string()));
+    };
+    const auto checkOriginal = [] {
+        CHECK((yams::config::getenv_copy("YAMS_IN_DAEMON") == "before-daemon"));
+        CHECK((yams::config::getenv_copy("YAMS_STORAGE") == "/before/storage"));
+        CHECK((yams::config::getenv_copy("YAMS_DATA_DIR") == "/before/data"));
+        CHECK((yams::config::getenv_copy("YAMS_CONFIG") == "/before/config"));
+        CHECK((yams::config::getenv_copy("YAMS_CONFIG_PATH") == "/before/config-path"));
+        CHECK((yams::config::getenv_copy("YAMS_DAEMON_SOCKET") == "/before/socket"));
+    };
+
+    SECTION("LIFO destruction resumes the outer daemon") {
+        auto outer = std::make_unique<YamsDaemon>(outerConfig);
+        checkInstalled(outerConfig);
+        auto inner = std::make_unique<YamsDaemon>(innerConfig);
+        checkInstalled(innerConfig);
+
+        inner.reset();
+        checkInstalled(outerConfig);
+        outer.reset();
+        checkOriginal();
+    }
+
+    SECTION("non-LIFO destruction rebases the inner daemon onto the original state") {
+        auto outer = std::make_unique<YamsDaemon>(outerConfig);
+        auto inner = std::make_unique<YamsDaemon>(innerConfig);
+        checkInstalled(innerConfig);
+
+        outer.reset();
+        checkInstalled(innerConfig);
+        inner.reset();
+        checkOriginal();
+    }
+}
+
+TEST_CASE_METHOD(DaemonFixture, "Daemon construction failure releases acquired environment leases",
+                 "[daemon][lifecycle][environment][ownership][failure]") {
+    std::vector<yams::test::ScopedEnvVar> original;
+    original.reserve(6);
+    original.emplace_back("YAMS_IN_DAEMON", std::string{"before-daemon"});
+    original.emplace_back("YAMS_STORAGE", std::string{"/before/storage"});
+    original.emplace_back("YAMS_DATA_DIR", std::string{"/before/data"});
+    original.emplace_back("YAMS_CONFIG", std::string{"/before/config"});
+    original.emplace_back("YAMS_CONFIG_PATH", std::string{"/before/config-path"});
+    original.emplace_back("YAMS_DAEMON_SOCKET", std::string{"/before/socket"});
+
+    config_.configFilePath = runtime_root_ / "failure.toml";
+    yams::config::testing_fail_owned_environment_lease_after(2);
+    try {
+        auto unexpected = std::make_unique<YamsDaemon>(config_);
+        FAIL("YamsDaemon construction unexpectedly succeeded");
+    } catch (const std::runtime_error& error) {
+        CHECK(std::string_view{error.what()}.starts_with(
+            "YamsDaemon failed to lease environment key YAMS_DATA_DIR"));
+    }
+
+    CHECK((yams::config::getenv_copy("YAMS_IN_DAEMON") == "before-daemon"));
+    CHECK((yams::config::getenv_copy("YAMS_STORAGE") == "/before/storage"));
+    CHECK((yams::config::getenv_copy("YAMS_DATA_DIR") == "/before/data"));
+    CHECK((yams::config::getenv_copy("YAMS_CONFIG") == "/before/config"));
+    CHECK((yams::config::getenv_copy("YAMS_CONFIG_PATH") == "/before/config-path"));
+    CHECK((yams::config::getenv_copy("YAMS_DAEMON_SOCKET") == "/before/socket"));
+}
+
+TEST_CASE_METHOD(DaemonFixture, "Daemon tuning reload revokes removed overrides coherently",
                  "[daemon][tuning][reload]") {
     SKIP_ON_WINDOWS();
 
+    yams::test::ScopedEnvVar ipcCompatibility{"YAMS_IPC_TIMEOUT_MS", std::nullopt};
+    yams::test::ScopedEnvVar admissionCompatibility{"YAMS_ADMISSION_CONTROL", std::nullopt};
+    yams::test::ScopedEnvVar memoryCompatibility{"YAMS_MEMORY_WARNING_PCT", std::nullopt};
+    yams::test::ScopedEnvVar postIngestCompatibility{"YAMS_POST_INGEST_RPC_QUEUE_MAX",
+                                                     std::nullopt};
     const auto configPath = runtime_root_ / "config.toml";
-    {
-        std::ofstream out(configPath);
+    const auto writeOverrides = [&](bool enabled) {
+        std::ofstream out(configPath, std::ios::trunc);
         REQUIRE(out.is_open());
+        if (!enabled) {
+            out << "# runtime tuning overrides removed\n";
+            return;
+        }
         out << "[tuning]\n";
         out << "target_cpu_percent = 321\n";
-        out << "post_ingest_capacity = 111\n";
-        out << "control_interval_ms = 222\n";
-    }
+        out << "[tuning.ipc]\n";
+        out << "timeout_ms = 4321\n";
+        out << "[tuning.resource]\n";
+        out << "admission_control = false\n";
+        out << "memory_warning_threshold = 0.91\n";
+        out << "[tuning.post_ingest]\n";
+        out << "rpc_queue_max = 333\n";
+    };
+    writeOverrides(true);
 
     config_.configFilePath = configPath;
-    config_.tuning.postIngestThreadsMin = 5;
-    config_.tuning.holdMs = 777;
-
     daemon_ = std::make_unique<YamsDaemon>(config_);
     REQUIRE(daemon_ != nullptr);
+    auto activeTuning = daemon_->serviceManager_->getTuningConfig();
+    activeTuning.topologyAlgorithm = "exact";
+    daemon_->serviceManager_->setTuningConfig(activeTuning);
 
     daemon_->reloadTuningConfig();
+    CHECK((daemon_->config_.tuning.targetCpuPercent == 321u));
+    CHECK((TuneAdvisor::ipcTimeoutMs() == 4321u));
+    CHECK_FALSE(TuneAdvisor::enableAdmissionControl());
+    CHECK((TuneAdvisor::memoryWarningThreshold() == 0.91));
+    CHECK((TuneAdvisor::postIngestRpcQueueMax() == 333u));
+    CHECK((daemon_->config_.tuning.provenance.at("tuning.ipc.timeout_ms") ==
+           "config:tuning.ipc.timeout_ms"));
 
-    CHECK(daemon_->config_.tuning.targetCpuPercent == 321u);
-    CHECK(daemon_->config_.tuning.postIngestCapacity == 111u);
-    CHECK(daemon_->config_.tuning.controlIntervalMs == 222u);
-    CHECK(daemon_->config_.tuning.postIngestThreadsMin == 5u);
-    CHECK(daemon_->config_.tuning.holdMs == 777u);
+    writeOverrides(false);
+    const auto versionBeforeRemoval = TuneAdvisor::configuredOverridesVersion();
+    daemon_->reloadTuningConfig();
+
+    CHECK((TuneAdvisor::configuredOverridesVersion() == versionBeforeRemoval + 2));
+    CHECK((daemon_->config_.tuning.targetCpuPercent == 200u));
+    CHECK((daemon_->config_.tuning.topologyAlgorithm == "exact"));
+    CHECK(daemon_->config_.tuning.provenance.empty());
+    CHECK((TuneAdvisor::ipcTimeoutMs() == 15000u));
+    CHECK(TuneAdvisor::enableAdmissionControl());
+    CHECK((TuneAdvisor::memoryWarningThreshold() == 0.75));
+    CHECK((TuneAdvisor::postIngestRpcQueueMax() == 256u));
+
+    const auto status = daemon_->serviceManager_->getRuntimeTuningStatus();
+    CHECK((status.at("ipc.timeout_ms") == "15000"));
+    CHECK((status.at("ipc.timeout_ms.source") == "default"));
+    CHECK((status.at("resource.admission_control") == "1"));
+    CHECK((status.at("resource.admission_control.source") == "default"));
+    CHECK((status.at("resource.memory_warning_threshold") == "0.750000"));
+    CHECK((status.at("resource.memory_warning_threshold.source") == "default"));
+    CHECK((status.at("post_ingest.rpc_queue_max") == "256"));
+    CHECK((status.at("post_ingest.rpc_queue_max.source") == "default"));
+}
+
+TEST_CASE_METHOD(DaemonFixture, "Daemon tuning reload rejects multiple active lifecycles",
+                 "[daemon][tuning][reload][lifecycle]") {
+    SKIP_ON_WINDOWS();
+
+    yams::test::ScopedEnvVar ipcCompatibility{"YAMS_IPC_TIMEOUT_MS", std::nullopt};
+    const auto configPath = runtime_root_ / "config.toml";
+    config_.configFilePath = configPath;
+    daemon_ = std::make_unique<YamsDaemon>(config_);
+    REQUIRE(daemon_ != nullptr);
+    REQUIRE((TuneAdvisor::ipcTimeoutMs() == 15000u));
+
+    auto nestedConfig = config_;
+    nestedConfig.dataDir = runtime_root_ / "nested-data";
+    nestedConfig.socketPath = runtime_root_ / "nested.sock";
+    nestedConfig.pidFile = runtime_root_ / "nested.pid";
+    nestedConfig.logFile = runtime_root_ / "nested.log";
+    YamsDaemon nested(nestedConfig);
+
+    {
+        std::ofstream out(configPath, std::ios::trunc);
+        REQUIRE(out.is_open());
+        out << "[tuning.ipc]\n";
+        out << "timeout_ms = 4321\n";
+    }
+    const auto versionBefore = TuneAdvisor::configuredOverridesVersion();
+    daemon_->reloadTuningConfig();
+
+    CHECK((TuneAdvisor::configuredOverridesVersion() == versionBefore));
+    CHECK((TuneAdvisor::ipcTimeoutMs() == 15000u));
+    CHECK((daemon_->config_.tuning.provenance.count("tuning.ipc.timeout_ms") == 0));
+    CHECK((daemon_->serviceManager_->getRuntimeTuningStatus().at("ipc.timeout_ms") == "15000"));
 }
 
 TEST_CASE_METHOD(DaemonFixture, "Lifecycle shutdown waits for owner-thread stop",
@@ -614,20 +865,32 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon does not terminate unverified data-dir l
     SKIP_ON_WINDOWS();
 
 #ifndef _WIN32
+    // Pre-compute fork-safe inputs in the parent: the child must not allocate
+    // (a fork in a multithreaded process can leave the malloc lock held by a
+    // vanished thread), so build the lock path here and format the payload with
+    // snprintf into a stack buffer in the child.
+    const std::string lockPathStr = (config_.dataDir / ".yams-lock").string();
+
     int readyPipe[2] = {-1, -1};
     REQUIRE(::pipe(readyPipe) == 0);
     const pid_t child = ::fork();
     REQUIRE(child >= 0);
     if (child == 0) {
         ::close(readyPipe[0]);
-        const auto lockPath = config_.dataDir / ".yams-lock";
-        const int lockFd = ::open(lockPath.c_str(), O_CREAT | O_RDWR, 0644);
+        const int lockFd = ::open(lockPathStr.c_str(), O_CREAT | O_RDWR, 0644);
         if (lockFd < 0 || ::flock(lockFd, LOCK_EX) != 0) {
+            const char failed = '2';
+            (void)::write(readyPipe[1], &failed, 1);
             _exit(2);
         }
-        const auto payload = json{{"pid", ::getpid()}, {"socket", "/tmp/not-a-daemon.sock"}}.dump();
-        (void)::ftruncate(lockFd, 0);
-        (void)::write(lockFd, payload.data(), payload.size());
+        char payload[128];
+        const int payloadLen = ::snprintf(payload, sizeof(payload),
+                                          "{\"pid\":%d,\"socket\":\"/tmp/not-a-daemon.sock\"}",
+                                          static_cast<int>(::getpid()));
+        if (payloadLen > 0 && static_cast<size_t>(payloadLen) < sizeof(payload)) {
+            (void)::ftruncate(lockFd, 0);
+            (void)::write(lockFd, payload, static_cast<size_t>(payloadLen));
+        }
         const char ready = '1';
         (void)::write(readyPipe[1], &ready, 1);
         for (;;) {
@@ -648,7 +911,12 @@ TEST_CASE_METHOD(DaemonFixture, "Daemon does not terminate unverified data-dir l
     } childGuard{child, readyPipe[0]};
 
     char ready = 0;
-    REQUIRE(::read(readyPipe[0], &ready, 1) == 1);
+    ssize_t readyRead = -1;
+    do {
+        readyRead = ::read(readyPipe[0], &ready, 1);
+    } while (readyRead < 0 && errno == EINTR);
+    INFO("lock holder child status byte=" << static_cast<int>(ready) << " read=" << readyRead);
+    REQUIRE(readyRead == 1);
     REQUIRE(ready == '1');
 
     daemon_ = std::make_unique<YamsDaemon>(config_);

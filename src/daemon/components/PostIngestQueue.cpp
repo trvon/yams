@@ -9,6 +9,9 @@
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
+#include "embedding_derivation_policy.h"
+#include "post_ingest_nl_graph_builder.h"
+#include "title_enrichment_policy.h"
 #include <boost/asio.hpp>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
@@ -16,8 +19,10 @@
 #include <boost/asio/use_awaitable.hpp>
 #include <yams/api/content_store.h>
 #include <yams/common/utf8_utils.h>
+#include <yams/config/config_helpers.h>
 #include <yams/core/assert.hpp>
 #include <yams/core/atomic_utils.h>
+#include <yams/core/uuid.h>
 #include <yams/daemon/async_batcher.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/GraphComponent.h>
@@ -66,30 +71,6 @@ PostIngestBatchPolicy resolvePostIngestBatchPolicy() {
     return {};
 }
 
-bool shouldPrepareSequentially(std::uint32_t maxWorkers, std::size_t taskCount,
-                               const PostIngestBatchPolicy& policy) {
-    return maxWorkers <= 1 || taskCount < policy.minParallelPrepareTasks;
-}
-
-std::string normalizeGraphPath(const std::string& path) {
-    if (path.empty()) {
-        return {};
-    }
-    try {
-        auto derived = yams::metadata::computePathDerivedValues(path);
-        if (!derived.normalizedPath.empty()) {
-            return derived.normalizedPath;
-        }
-    } catch (const std::exception&) {
-        return path;
-    }
-    return path;
-}
-
-std::string makePathFileNodeKey(const std::string& path) {
-    return "path:file:" + normalizeGraphPath(path);
-}
-
 std::string normalizeEntityTextForKey(std::string_view text) {
     return yams::search::normalizeEntityTextForKey(text);
 }
@@ -100,104 +81,6 @@ std::string canonicalizeNlEntityType(std::string_view rawType, std::string_view 
 
 bool isLowValueNlEntity(std::string_view normalizedText, std::string_view normalizedType) {
     return yams::search::isLowValueEntityText(normalizedText, normalizedType);
-}
-
-bool isHighValueGraphType(std::string_view normalizedType) {
-    return normalizedType == "protein" || normalizedType == "gene" || normalizedType == "cell" ||
-           normalizedType == "disease" || normalizedType == "chemical" ||
-           normalizedType == "drug" || normalizedType == "pathway" ||
-           normalizedType == "biological_process" || normalizedType == "biomarker" ||
-           normalizedType == "anatomy" || normalizedType == "organism";
-}
-
-bool entityTextOverlapsTitle(std::string_view entityText, std::string_view titleText) {
-    const std::string normEntity = normalizeEntityTextForKey(entityText);
-    const std::string normTitle = normalizeEntityTextForKey(titleText);
-    if (normEntity.empty() || normTitle.empty()) {
-        return false;
-    }
-    return normTitle.find(normEntity) != std::string::npos ||
-           (normEntity.size() >= 4 && normEntity.find(normTitle) != std::string::npos);
-}
-
-struct TextSegmentWindow {
-    std::string text;
-    std::size_t startOffset = 0;
-    std::size_t endOffset = 0;
-};
-
-std::vector<TextSegmentWindow> buildBodyClaimSegments(std::string_view textSnippet,
-                                                      std::string_view titleText,
-                                                      std::size_t maxSegments = 3) {
-    std::vector<TextSegmentWindow> segments;
-    if (textSnippet.empty() || maxSegments == 0) {
-        return segments;
-    }
-
-    std::size_t start = 0;
-    if (!titleText.empty()) {
-        const std::string normTitle = normalizeEntityTextForKey(titleText);
-        const auto newline = textSnippet.find('\n');
-        if (newline != std::string_view::npos) {
-            const std::string firstLine = normalizeEntityTextForKey(textSnippet.substr(0, newline));
-            if (!firstLine.empty() && firstLine == normTitle) {
-                start = newline + 1;
-            }
-        }
-    }
-
-    auto flushSegment = [&](std::size_t segStart, std::size_t segEnd) {
-        if (segEnd <= segStart) {
-            return;
-        }
-        auto raw = std::string(textSnippet.substr(segStart, segEnd - segStart));
-        auto cleaned = yams::search::trimAndCollapseWhitespace(raw);
-        if (cleaned.size() < 24) {
-            return;
-        }
-        segments.push_back({std::move(cleaned), segStart, segEnd});
-    };
-
-    std::size_t sentenceStart = start;
-    std::size_t sentenceCount = 0;
-    for (std::size_t i = start; i < textSnippet.size() && segments.size() < maxSegments; ++i) {
-        const char c = textSnippet[i];
-        const bool boundary = (c == '.' || c == '!' || c == '?' || c == '\n');
-        if (!boundary) {
-            continue;
-        }
-        ++sentenceCount;
-        if (sentenceCount >= 2 || c == '\n') {
-            flushSegment(sentenceStart, i + 1);
-            sentenceStart = i + 1;
-            sentenceCount = 0;
-        }
-    }
-    if (segments.size() < maxSegments) {
-        flushSegment(sentenceStart, textSnippet.size());
-    }
-    return segments;
-}
-
-std::string coOccurrenceRelation(std::string_view lhsType, std::string_view rhsType) {
-    const bool lhsBio = isHighValueGraphType(lhsType);
-    const bool rhsBio = isHighValueGraphType(rhsType);
-    if (lhsBio && rhsBio) {
-        return "co_occurs_biomedical";
-    }
-    if ((lhsType == "protein" && rhsType == "cell") ||
-        (lhsType == "cell" && rhsType == "protein")) {
-        return "protein_cell_association";
-    }
-    if ((lhsType == "protein" && rhsType == "disease") ||
-        (lhsType == "disease" && rhsType == "protein")) {
-        return "protein_disease_association";
-    }
-    if ((lhsType == "drug" && rhsType == "disease") ||
-        (lhsType == "disease" && rhsType == "drug")) {
-        return "drug_disease_association";
-    }
-    return "co_mentioned_with";
 }
 
 bool isUsefulNlEntity(const search::QueryConcept& qc) {
@@ -228,70 +111,11 @@ bool isUsefulNlEntity(const search::QueryConcept& qc) {
     return true;
 }
 
-struct NlAliasVariant {
-    std::string text;
-    float confidence = 1.0f;
-    std::string sourceTag;
-};
-
-std::vector<NlAliasVariant> buildNlAliasVariants(const std::string& entityText,
-                                                 const std::string& entityType,
-                                                 float baseConfidence) {
-    std::vector<NlAliasVariant> variants;
-    std::unordered_set<std::string> seen;
-    const auto kind = yams::search::surfaceVariantKindForEntityType(entityType);
-
-    auto addVariant = [&](const std::string& value, float confScale, std::string sourceTag) {
-        std::string normalized = normalizeEntityTextForKey(value);
-        if (normalized.size() < 2) {
-            return;
-        }
-        if (!seen.insert(normalized).second) {
-            return;
-        }
-        float conf = std::clamp(baseConfidence * confScale, 0.05f, 1.0f);
-        variants.push_back(NlAliasVariant{std::move(normalized), conf, std::move(sourceTag)});
-    };
-
-    auto addGeneratedVariants = [&](const std::string& value, float primaryScale,
-                                    float secondaryScale, std::string primarySource,
-                                    std::string secondarySource) {
-        auto generated = yams::search::generateSurfaceVariants(value, kind, 8);
-        for (size_t i = 0; i < generated.size() && variants.size() < 8; ++i) {
-            addVariant(generated[i], i == 0 ? primaryScale : secondaryScale,
-                       i == 0 ? primarySource : secondarySource);
-        }
-    };
-
-    // Primary alias: full normalized entity text.
-    addGeneratedVariants(entityText, 1.0f, 0.72f, "surface", "variant");
-
-    // Type-qualified alias helps disambiguation for collisions.
-    if (!entityType.empty()) {
-        addGeneratedVariants(entityType + " " + entityText, 0.95f, 0.68f, "type_qualified",
-                             "type_qualified");
-    }
-
-    return variants;
-}
-
-// Copy an environment variable under a static mutex so thread-safety
-// checkers can see we're serializing access to the env block.
-inline std::optional<std::string> getenvCopy(const char* name) {
-    static std::mutex envMutex;
-    std::lock_guard<std::mutex> lock(envMutex);
-    if (const char* value = std::getenv(name)) { // NOLINT(concurrency-mt-unsafe)
-        return std::string(value);
-    }
-    return std::nullopt;
-}
-
 // Check if GLiNER title extraction is disabled via environment variable
 // Set YAMS_DISABLE_GLINER_TITLES=1 for faster ingestion at the cost of title quality
 inline bool isGlinerTitleExtractionDisabled() {
     static const bool disabled = []() {
-        auto env = getenvCopy("YAMS_DISABLE_GLINER_TITLES");
-        return env && *env == "1";
+        return yams::config::read_env_bool("YAMS_DISABLE_GLINER_TITLES").valueOr(false);
     }();
     return disabled;
 }
@@ -337,13 +161,24 @@ PostIngestQueue::PostIngestQueue(
     if (meta_) {
         contentIndexWriter_ = std::make_unique<metadata::ContentIndexWriter>(meta_);
     }
-    refreshStageAvailability();
     initializeChannels();
     spdlog::info("[PostIngestQueue] Created (parallel processing via WorkCoordinator)");
+    try {
+        refreshStageAvailability();
+    } catch (...) {
+        for (std::size_t i = 0; i < kStageCount; ++i) {
+            publishStageActivity(i, false);
+        }
+        throw;
+    }
 }
 
 PostIngestQueue::~PostIngestQueue() {
     stop_.store(true, std::memory_order_release);
+    cancelPendingKgJobs(true, "destructor shutdown");
+    for (std::size_t i = 0; i < kStageCount; ++i) {
+        publishStageActivity(i, false);
+    }
     signalAllWakeTimers();
     notifyLifecycle();
 
@@ -588,14 +423,18 @@ void PostIngestQueue::start() {
 }
 
 void PostIngestQueue::stop() {
-    stop_.exchange(true, std::memory_order_acq_rel);
+    {
+        // Share the KG admission lock so stop() has a strict boundary: an enqueue either
+        // linearizes before this store or observes stop_ and is rejected/accounted below.
+        std::lock_guard<std::mutex> lock(pendingKgMutex_);
+        stop_.store(true, std::memory_order_release);
+    }
+    cancelPendingKgJobs(true, "queue shutdown");
     notifyLifecycle();
     signalAllWakeTimers();
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Extraction, false);
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::KnowledgeGraph, false);
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Symbol, false);
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Entity, false);
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Title, false);
+    for (std::size_t i = 0; i < kStageCount; ++i) {
+        publishStageActivity(i, false);
+    }
 
     spdlog::info("[PostIngestQueue] Stop requested");
 
@@ -659,11 +498,30 @@ static_assert(std::size(kTuneAdvisorStages) == 5,
               "kTuneAdvisorStages must stay in sync with PostIngestQueue::Stage");
 } // namespace
 
+void PostIngestQueue::publishStageActivity(std::size_t index, bool active) {
+    YAMS_PRECONDITION(index < kStageCount,
+                      "publishStageActivity requires a valid PostIngestQueue stage index");
+    std::lock_guard lock(stageActivityMutex_);
+    if (stageActivityPublished_[index] == active) {
+        return;
+    }
+    if (active) {
+        stageActivityTokens_[index] =
+            TuneAdvisor::acquirePostIngestStageActivity(kTuneAdvisorStages[index]);
+        stageActivityPublished_[index] = true;
+    } else {
+        TuneAdvisor::releasePostIngestStageActivity(kTuneAdvisorStages[index],
+                                                    stageActivityTokens_[index]);
+        stageActivityPublished_[index] = false;
+        stageActivityTokens_[index] = 0;
+    }
+}
+
 void PostIngestQueue::pauseStage(Stage stage) {
     const auto idx = static_cast<std::size_t>(stage);
     YAMS_PRECONDITION(idx < kStageCount, "pauseStage requires a valid PostIngestQueue::Stage");
     stagePaused_[idx].store(true, std::memory_order_release);
-    TuneAdvisor::setPostIngestStageActive(kTuneAdvisorStages[idx], false);
+    publishStageActivity(idx, false);
     spdlog::info("[PostIngestQueue] Paused {} stage", kStageNames[idx]);
 }
 
@@ -671,7 +529,7 @@ void PostIngestQueue::resumeStage(Stage stage) {
     const auto idx = static_cast<std::size_t>(stage);
     YAMS_PRECONDITION(idx < kStageCount, "resumeStage requires a valid PostIngestQueue::Stage");
     stagePaused_[idx].store(false, std::memory_order_release);
-    TuneAdvisor::setPostIngestStageActive(kTuneAdvisorStages[idx], true);
+    refreshStageAvailability();
     spdlog::info("[PostIngestQueue] Resumed {} stage", kStageNames[idx]);
 }
 
@@ -681,10 +539,38 @@ bool PostIngestQueue::isStagePaused(Stage stage) const {
     return stagePaused_[idx].load(std::memory_order_acquire);
 }
 
+void PostIngestQueue::setKnowledgeGraphEnabled(bool enabled) {
+    std::size_t cancelled = 0;
+    {
+        // Serialize enablement changes with KG admission so that no producer can publish a job
+        // after disablement returns. Explicit disablement is outside the pipeline and therefore
+        // clears deferred jobs without recording pipeline drops.
+        std::lock_guard<std::mutex> lock(pendingKgMutex_);
+        knowledgeGraphEnabled_.store(enabled, std::memory_order_release);
+        if (!enabled) {
+            cancelled = pendingKgJobs_.size();
+            pendingKgJobs_.clear();
+        }
+    }
+    refreshStageAvailability();
+    if (cancelled > 0) {
+        spdlog::info(
+            "[PostIngestQueue] KnowledgeGraph dispatch disabled (cancelled {} deferred jobs)",
+            cancelled);
+    } else {
+        spdlog::info("[PostIngestQueue] KnowledgeGraph dispatch {}",
+                     enabled ? "enabled" : "disabled");
+    }
+}
+
+bool PostIngestQueue::isKnowledgeGraphEnabled() const {
+    return knowledgeGraphEnabled_.load(std::memory_order_acquire);
+}
+
 void PostIngestQueue::pauseAll() {
     for (std::size_t i = 0; i < kStageCount; ++i) {
         stagePaused_[i].store(true, std::memory_order_release);
-        TuneAdvisor::setPostIngestStageActive(kTuneAdvisorStages[i], false);
+        publishStageActivity(i, false);
     }
     spdlog::warn("[PostIngestQueue] All stages paused (emergency mode)");
 }
@@ -742,12 +628,12 @@ bool PostIngestQueue::hasTitleExtractor() const {
 
 void PostIngestQueue::refreshStageAvailability() {
     const bool extractionActive = !stagePaused_[0].load(std::memory_order_acquire);
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Extraction,
-                                          extractionActive);
+    publishStageActivity(0, extractionActive);
 
-    const bool kgActive =
-        graphComponent_ != nullptr && !stagePaused_[1].load(std::memory_order_acquire);
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::KnowledgeGraph, kgActive);
+    const bool kgActive = graphComponent_ != nullptr &&
+                          knowledgeGraphEnabled_.load(std::memory_order_acquire) &&
+                          !stagePaused_[1].load(std::memory_order_acquire);
+    publishStageActivity(1, kgActive);
 
     bool symbolCapable = false;
     {
@@ -755,7 +641,7 @@ void PostIngestQueue::refreshStageAvailability() {
         symbolCapable = !symbolExtensionMap_.empty();
     }
     const bool symbolActive = symbolCapable && !stagePaused_[2].load(std::memory_order_acquire);
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Symbol, symbolActive);
+    publishStageActivity(2, symbolActive);
 
     bool entityCapable = false;
     {
@@ -763,11 +649,11 @@ void PostIngestQueue::refreshStageAvailability() {
         entityCapable = !entityProviders_.empty();
     }
     const bool entityActive = entityCapable && !stagePaused_[3].load(std::memory_order_acquire);
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Entity, entityActive);
+    publishStageActivity(3, entityActive);
 
     const bool titleActive =
         hasTitleExtractor() && !stagePaused_[4].load(std::memory_order_acquire);
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Title, titleActive);
+    publishStageActivity(4, titleActive);
 }
 
 void PostIngestQueue::logStageAvailabilitySnapshot() const {
@@ -787,7 +673,8 @@ void PostIngestQueue::logStageAvailabilitySnapshot() const {
         "title={}}} paused={{extraction={}, kg={}, symbol={}, entity={}, title={}}} limits={{"
         "extraction={}, kg={}, symbol={}, entity={}, title={}}}",
         !stagePaused_[0].load(std::memory_order_acquire),
-        graphComponent_ != nullptr && !stagePaused_[1].load(std::memory_order_acquire),
+        graphComponent_ != nullptr && knowledgeGraphEnabled_.load(std::memory_order_acquire) &&
+            !stagePaused_[1].load(std::memory_order_acquire),
         symbolCapable && !stagePaused_[2].load(std::memory_order_acquire),
         entityCapable && !stagePaused_[3].load(std::memory_order_acquire),
         hasTitleExtractor() && !stagePaused_[4].load(std::memory_order_acquire),
@@ -858,7 +745,7 @@ std::size_t PostIngestQueue::resolveChannelCapacity() const {
 }
 
 std::size_t PostIngestQueue::boundedStageChannelCapacity(std::size_t defaultCap) const {
-    return std::max<std::size_t>(1u, defaultCap);
+    return std::max<std::size_t>(1u, std::min(defaultCap, resolveChannelCapacity()));
 }
 
 double PostIngestQueue::kgChannelFillRatio(std::size_t* depthOut, std::size_t* capacityOut) const {
@@ -872,12 +759,17 @@ double PostIngestQueue::kgChannelFillRatio(std::size_t* depthOut, std::size_t* c
     }
 
     const std::size_t cap = std::max<std::size_t>(1u, ch->capacity());
-    const std::size_t depth = ch->size_approx();
+    std::size_t pending = 0;
+    {
+        std::lock_guard<std::mutex> lock(pendingKgMutex_);
+        pending = pendingKgJobs_.size();
+    }
+    const std::size_t depth = ch->size_approx() + pending;
     if (depthOut)
         *depthOut = depth;
     if (capacityOut)
         *capacityOut = cap;
-    return static_cast<double>(depth) / static_cast<double>(cap);
+    return std::min(1.0, static_cast<double>(depth) / static_cast<double>(cap));
 }
 
 std::size_t PostIngestQueue::adaptiveExtractionBatchSize(std::size_t baseBatchSize) const {
@@ -905,7 +797,7 @@ std::size_t PostIngestQueue::adaptiveStageBatchSize(std::size_t queueDepth,
 }
 
 bool PostIngestQueue::isKgChannelBackpressured() const {
-    if (maxKgConcurrent() == 0) {
+    if (!knowledgeGraphEnabled_.load(std::memory_order_acquire)) {
         return false;
     }
     return kgChannelFillRatio() >= PostIngestQueue::kKgBackpressureThreshold;
@@ -1008,6 +900,7 @@ boost::asio::awaitable<void> PostIngestQueue::channelPoller() {
         extractionWakeTimer);
     cfg.batchMode = true;
     cfg.batchLimiterPerTask = false;
+    cfg.admissionPausedFn = [this]() { return isKgChannelBackpressured(); };
     cfg.batchSizeFn = [this]() -> std::size_t {
         const std::size_t base = std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
         return adaptiveExtractionBatchSize(base);
@@ -1337,10 +1230,17 @@ std::shared_ptr<std::vector<std::byte>> PostIngestQueue::getOrLoadDispatchConten
 void PostIngestQueue::dispatchNonEmbeddingStages(
     const PreparedMetadataEntry& prepared, const PreparedDispatchPlan& plan,
     std::shared_ptr<std::vector<std::byte>> contentBytes, DispatchTimingSet& timings) {
+    std::shared_ptr<KnowledgeGraphCompletion> knowledgeGraphCompletion;
+    if (!prepared.knowledgeGraphToken.empty() && (plan.dispatchKg || plan.dispatchTitle)) {
+        knowledgeGraphCompletion =
+            std::make_shared<KnowledgeGraphCompletion>(plan.dispatchKg, plan.dispatchTitle);
+    }
+
     if (plan.dispatchKg) {
         const auto dispatchStart = std::chrono::steady_clock::now();
         dispatchToKgChannel(prepared.hash, prepared.documentId, prepared.filePath,
-                            std::vector<std::string>(prepared.tags), contentBytes);
+                            std::vector<std::string>(prepared.tags), contentBytes,
+                            prepared.knowledgeGraphToken, knowledgeGraphCompletion);
         timings.kgDispatch.add(std::chrono::steady_clock::now() - dispatchStart);
     }
     if (plan.dispatchSymbol) {
@@ -1358,14 +1258,17 @@ void PostIngestQueue::dispatchNonEmbeddingStages(
     if (plan.dispatchTitle) {
         const auto dispatchStart = std::chrono::steady_clock::now();
         dispatchToTitleChannel(prepared.hash, prepared.documentId, prepared.titleTextSnippet,
-                               prepared.fileName, prepared.filePath, prepared.language,
-                               prepared.mimeType);
+                               prepared.title, prepared.filePath, prepared.language,
+                               prepared.mimeType, prepared.preserveTitle,
+                               prepared.knowledgeGraphToken, knowledgeGraphCompletion);
         timings.titleDispatch.add(std::chrono::steady_clock::now() - dispatchStart);
     }
 }
 
 std::size_t PostIngestQueue::kgQueueDepth() const {
-    return kgChannel_ ? kgChannel_->size_approx() : 0;
+    const std::size_t channelDepth = kgChannel_ ? kgChannel_->size_approx() : 0;
+    std::lock_guard<std::mutex> lock(pendingKgMutex_);
+    return channelDepth + pendingKgJobs_.size();
 }
 
 std::size_t PostIngestQueue::symbolQueueDepth() const {
@@ -1554,9 +1457,11 @@ PostIngestQueue::prepareMetadataEntry(
     // Title+NL extraction: single GLiNER call for both title and NL entities.
     // Skip for code files — GLiNER does not extract meaningful titles from
     // source code, and the deriveTitle heuristic already produces good results.
-    // Also skip when the plugin already provided a title (e.g. PDF metadata).
-    if (!isCodeFile && !pluginProvidedTitle && hasTitleExtractor() &&
-        !isGlinerTitleExtractionDisabled()) {
+    // A supplied title suppresses title replacement, not NL entity extraction.
+    const auto titlePlan = planTitleEnrichment(isCodeFile, pluginProvidedTitle, hasTitleExtractor(),
+                                               isGlinerTitleExtractionDisabled());
+    prepared.preserveTitle = titlePlan.preserveTitle;
+    if (titlePlan.dispatch) {
         prepared.shouldDispatchTitle = true;
         prepared.titleTextSnippet = prepared.extractedText.size() > kMaxGlinerChars
                                         ? prepared.extractedText.substr(0, kMaxGlinerChars)
@@ -1661,14 +1566,17 @@ void PostIngestQueue::processKnowledgeGraphBatch(std::vector<InternalEventBus::K
     contexts.reserve(jobs.size());
 
     for (auto& job : jobs) {
-        GraphComponent::DocumentGraphContext ctx{.documentHash = std::move(job.hash),
-                                                 .filePath = std::move(job.filePath),
-                                                 .snapshotId = std::nullopt,
-                                                 .rootTreeHash = std::nullopt,
-                                                 .tags = std::move(job.tags),
-                                                 .documentDbId = job.documentId,
-                                                 .contentBytes = std::move(job.contentBytes),
-                                                 .skipEntityExtraction = false};
+        GraphComponent::DocumentGraphContext ctx{
+            .documentHash = std::move(job.hash),
+            .filePath = std::move(job.filePath),
+            .snapshotId = std::nullopt,
+            .rootTreeHash = std::nullopt,
+            .tags = std::move(job.tags),
+            .documentDbId = job.documentId,
+            .contentBytes = std::move(job.contentBytes),
+            .skipEntityExtraction = false,
+            .knowledgeGraphToken = std::move(job.knowledgeGraphToken),
+            .knowledgeGraphCompletion = std::move(job.knowledgeGraphCompletion)};
         contexts.push_back(std::move(ctx));
     }
     recordTiming("kg_build_contexts", buildContextsStart);
@@ -1685,22 +1593,20 @@ void PostIngestQueue::processKnowledgeGraphBatch(std::vector<InternalEventBus::K
     if (!result) {
         spdlog::error("[PostIngestQueue] KG batch failed: {}", result.error().message);
     } else {
-        spdlog::debug("[PostIngestQueue] KG batch completed {} docs in {:.2f}ms (avg {:.2f}ms/doc)",
+        spdlog::debug("[PostIngestQueue] KG batch submitted {} docs in {:.2f}ms (avg {:.2f}ms/doc)",
                       jobs.size(), ms, ms / jobs.size());
     }
 }
 
-void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId,
-                                          const std::string& filePath,
-                                          std::vector<std::string> tags,
-                                          std::shared_ptr<std::vector<std::byte>> contentBytes) {
-    // Do not let a disabled/saturated KG stage throttle extraction throughput.
-    // KG is an optional downstream enrichment path; metadata extraction/indexing should continue.
-    const bool kgStageActive = (graphComponent_ != nullptr) &&
-                               !stagePaused_[1].load(std::memory_order_acquire) &&
-                               (maxKgConcurrent() > 0);
-    if (!kgStageActive) {
-        InternalEventBus::instance().incKgDropped();
+void PostIngestQueue::dispatchToKgChannel(
+    const std::string& hash, int64_t docId, const std::string& filePath,
+    std::vector<std::string> tags, std::shared_ptr<std::vector<std::byte>> contentBytes,
+    const std::string& knowledgeGraphToken,
+    std::shared_ptr<KnowledgeGraphCompletion> knowledgeGraphCompletion) {
+    // A disabled KG stage is outside the pipeline contract. A temporarily paused or
+    // dynamically capped stage remains inside the contract: buffer its work and let channel
+    // backpressure bound upstream admission instead of silently dropping enrichment.
+    if (!graphComponent_ || !knowledgeGraphEnabled_.load(std::memory_order_acquire)) {
         return;
     }
 
@@ -1713,21 +1619,197 @@ void PostIngestQueue::dispatchToKgChannel(const std::string& hash, int64_t docId
     job.tags = std::move(tags);
     job.contentBytes = std::move(contentBytes);
     job.enqueuedAt = std::chrono::steady_clock::now();
+    job.knowledgeGraphToken = knowledgeGraphToken;
+    job.knowledgeGraphCompletion = std::move(knowledgeGraphCompletion);
 
-    // push_wait attempts an immediate non-blocking push before applying bounded backoff.
-    static constexpr auto kEnqueueTimeout = std::chrono::milliseconds(10);
-    if (!channel->push_wait(std::move(job), kEnqueueTimeout)) {
-        const auto n = InternalEventBus::instance().kgDropped();
-        if (((n + 1u) % 64u) == 1u) {
-            spdlog::warn(
-                "[PostIngestQueue] KG channel full (depth={}/{}), dropping job for {} (drops={})",
-                channel->size_approx(), channel->capacity(), hash.substr(0, 12), n + 1u);
+    enqueueKgJob(std::move(job));
+}
+
+void PostIngestQueue::enqueueKgJob(InternalEventBus::KgJob job) {
+    // Content is durable before dispatch. GraphComponent reloads it by hash when absent;
+    // neither the regular channel nor overflow should pin a potentially huge raw buffer.
+    job.contentBytes.reset();
+    bool queued = false;
+    {
+        // This lock also defines the disable boundary: once setKnowledgeGraphEnabled(false)
+        // returns, no producer can enqueue or account another KG job from an earlier admission.
+        std::lock_guard<std::mutex> lock(pendingKgMutex_);
+        if (stop_.load(std::memory_order_acquire)) {
+            InternalEventBus::instance().incKgDropped();
+            return;
         }
-        InternalEventBus::instance().incKgDropped();
-    } else {
-        InternalEventBus::instance().incKgQueued();
+        if (!knowledgeGraphEnabled_.load(std::memory_order_acquire)) {
+            return;
+        }
+        if (kgChannel_ && kgChannel_->try_push(job)) {
+            InternalEventBus::instance().incKgQueued();
+            queued = true;
+        } else {
+            // Keep full-channel backpressure off WorkCoordinator threads. One coroutine drains the
+            // pending FIFO as the KG poller creates capacity; producers only append and return.
+            // Bound descriptor count as well as avoiding retained raw content. Variable-length
+            // paths/tags still contribute memory; this is not a total byte/RSS limit.
+            const std::size_t pendingCap = TuneAdvisor::postIngestPendingKgMax();
+            if (pendingKgJobs_.size() >= pendingCap) {
+                InternalEventBus::instance().incKgDropped();
+                const auto dropped = pendingKgDropped_.fetch_add(1, std::memory_order_relaxed) + 1;
+                if (dropped == 1 || (dropped % 1000) == 0) {
+                    spdlog::warn("[PostIngestQueue] pending KG overflow full ({}), dropping job "
+                                 "for {} (dropped={})",
+                                 pendingCap, job.hash.substr(0, 12), dropped);
+                }
+                return;
+            }
+            pendingKgJobs_.push_back(std::move(job));
+        }
+    }
+
+    if (queued) {
         TuningManager::notifyWakeup();
         signalWakeTimer(Stage::KnowledgeGraph);
+    } else {
+        schedulePendingKgDrain();
+    }
+}
+
+void PostIngestQueue::schedulePendingKgDrain() {
+    if (!coordinator_ || !coordinator_->isRunning()) {
+        const bool countAsDrop = knowledgeGraphEnabled_.load(std::memory_order_acquire);
+        cancelPendingKgJobs(countAsDrop, "KG drain scheduler unavailable");
+        return;
+    }
+
+    bool expected = false;
+    if (!pendingKgDrainScheduled_.compare_exchange_strong(expected, true,
+                                                          std::memory_order_acq_rel)) {
+        return;
+    }
+
+    callbacksInFlight_.fetch_add(1, std::memory_order_acq_rel);
+    try {
+        boost::asio::co_spawn(
+            coordinator_->getExecutor(), drainPendingKgJobs(), [this](std::exception_ptr error) {
+                pendingKgDrainScheduled_.store(false, std::memory_order_release);
+                if (error) {
+                    try {
+                        std::rethrow_exception(error);
+                    } catch (const std::exception& ex) {
+                        spdlog::error("[PostIngestQueue] pending KG drain failed: {}", ex.what());
+                    } catch (...) {
+                        spdlog::error(
+                            "[PostIngestQueue] pending KG drain failed with unknown exception");
+                    }
+                }
+
+                bool hasPending = false;
+                {
+                    std::lock_guard<std::mutex> lock(pendingKgMutex_);
+                    hasPending = !pendingKgJobs_.empty();
+                }
+                if (hasPending && !stop_.load(std::memory_order_acquire) &&
+                    knowledgeGraphEnabled_.load(std::memory_order_acquire)) {
+                    schedulePendingKgDrain();
+                }
+                // Publish callback completion while holding the lifecycle mutex. A destructor
+                // waiter cannot observe zero and destroy this object until the callback's final
+                // access to the mutex has completed.
+                {
+                    std::lock_guard<std::mutex> lock(lifecycleMutex_);
+                    callbacksInFlight_.fetch_sub(1, std::memory_order_acq_rel);
+                    lifecycleCv_.notify_all();
+                }
+            });
+    } catch (const std::exception& ex) {
+        pendingKgDrainScheduled_.store(false, std::memory_order_release);
+        cancelPendingKgJobs(knowledgeGraphEnabled_.load(std::memory_order_acquire),
+                            "KG drain scheduling failure");
+        callbacksInFlight_.fetch_sub(1, std::memory_order_acq_rel);
+        notifyLifecycle();
+        spdlog::error("[PostIngestQueue] failed to schedule pending KG drain: {}", ex.what());
+    } catch (...) {
+        pendingKgDrainScheduled_.store(false, std::memory_order_release);
+        cancelPendingKgJobs(knowledgeGraphEnabled_.load(std::memory_order_acquire),
+                            "KG drain scheduling failure");
+        callbacksInFlight_.fetch_sub(1, std::memory_order_acq_rel);
+        notifyLifecycle();
+    }
+}
+
+std::size_t PostIngestQueue::cancelPendingKgJobs(bool countAsDrop, const char* reason) noexcept {
+    std::size_t cancelled = 0;
+    {
+        std::lock_guard<std::mutex> lock(pendingKgMutex_);
+        cancelled = pendingKgJobs_.size();
+        pendingKgJobs_.clear();
+    }
+    if (countAsDrop) {
+        for (std::size_t i = 0; i < cancelled; ++i) {
+            InternalEventBus::instance().incKgDropped();
+        }
+    }
+    if (cancelled > 0) {
+        spdlog::warn("[PostIngestQueue] cancelled {} pending KG jobs (reason={}, counted_drop={})",
+                     cancelled, reason, countAsDrop);
+    }
+    return cancelled;
+}
+
+boost::asio::awaitable<void> PostIngestQueue::drainPendingKgJobs() {
+    boost::asio::steady_timer retryTimer(co_await boost::asio::this_coro::executor);
+    constexpr auto kRetryDelay = std::chrono::milliseconds(2);
+
+    for (;;) {
+        bool queued = false;
+        std::size_t cancelled = 0;
+        bool cancellationRequested = false;
+        bool cancelledByStop = false;
+        {
+            std::lock_guard<std::mutex> lock(pendingKgMutex_);
+            cancelledByStop = stop_.load(std::memory_order_acquire);
+            const bool disabled = !knowledgeGraphEnabled_.load(std::memory_order_acquire);
+            cancellationRequested = cancelledByStop || disabled;
+            if (cancellationRequested) {
+                cancelled = pendingKgJobs_.size();
+                pendingKgJobs_.clear();
+            } else if (pendingKgJobs_.empty()) {
+                co_return;
+            } else if (kgChannel_ && kgChannel_->try_push(pendingKgJobs_.front())) {
+                pendingKgJobs_.pop_front();
+                InternalEventBus::instance().incKgQueued();
+                queued = true;
+            }
+        }
+
+        if (cancellationRequested) {
+            if (cancelled > 0) {
+                if (cancelledByStop) {
+                    for (std::size_t i = 0; i < cancelled; ++i) {
+                        InternalEventBus::instance().incKgDropped();
+                    }
+                    spdlog::warn("[PostIngestQueue] cancelled {} pending KG jobs during shutdown",
+                                 cancelled);
+                } else {
+                    spdlog::info(
+                        "[PostIngestQueue] cancelled {} pending KG jobs after KG disablement",
+                        cancelled);
+                }
+            }
+            co_return;
+        }
+
+        if (queued) {
+            TuningManager::notifyWakeup();
+            signalWakeTimer(Stage::KnowledgeGraph);
+            continue;
+        }
+
+        retryTimer.expires_after(kRetryDelay);
+        boost::system::error_code error;
+        co_await retryTimer.async_wait(
+            boost::asio::redirect_error(boost::asio::use_awaitable, error));
+        if (error && error != boost::asio::error::operation_aborted) {
+            spdlog::warn("[PostIngestQueue] pending KG retry wait failed: {}", error.message());
+        }
     }
 }
 
@@ -1872,64 +1954,6 @@ void PostIngestQueue::dispatchToSymbolChannel(
     }
 }
 
-void PostIngestQueue::processSymbolExtractionStage(const std::string& hash,
-                                                   [[maybe_unused]] int64_t docId,
-                                                   const std::string& filePath,
-                                                   const std::string& language,
-                                                   std::vector<std::byte>* contentBytes) {
-    // Legacy single-item handler (kept for now); metrics are owned by the poller layer.
-    if (!graphComponent_) {
-        spdlog::warn("[PostIngestQueue] Symbol extraction skipped for {} - no graphComponent",
-                     hash);
-        return;
-    }
-
-    spdlog::info("[PostIngestQueue] Symbol extraction starting for {} ({}) lang={}", filePath,
-                 hash.substr(0, 12), language);
-
-    try {
-        auto startTime = std::chrono::steady_clock::now();
-
-        // Use GraphComponent to submit the extraction job
-        GraphComponent::EntityExtractionJob extractJob;
-        extractJob.documentHash = hash;
-        extractJob.filePath = filePath;
-        extractJob.language = language;
-
-        std::vector<std::byte> bytes;
-        if (contentBytes) {
-            bytes = std::move(*contentBytes);
-        } else if (store_) {
-            auto contentResult = store_->retrieveBytes(hash);
-            if (contentResult) {
-                bytes = std::move(contentResult.value());
-            } else {
-                spdlog::warn("[PostIngestQueue] Failed to load content for symbol extraction: {}",
-                             hash.substr(0, 12));
-                return;
-            }
-        } else {
-            spdlog::warn("[PostIngestQueue] No content store for symbol extraction");
-            return;
-        }
-        extractJob.contentUtf8 =
-            std::string(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-
-        auto result = graphComponent_->submitEntityExtraction(std::move(extractJob));
-        if (!result) {
-            spdlog::warn("[PostIngestQueue] Symbol extraction failed for {}: {}", hash,
-                         result.error().message);
-        } else {
-            auto duration = std::chrono::steady_clock::now() - startTime;
-            double ms = std::chrono::duration<double, std::milli>(duration).count();
-            spdlog::debug("[PostIngestQueue] Symbol extraction submitted for {} in {:.2f}ms", hash,
-                          ms);
-        }
-    } catch (const std::exception& e) {
-        spdlog::error("[PostIngestQueue] Symbol extraction failed for {}: {}", hash, e.what());
-    }
-}
-
 void PostIngestQueue::dispatchToEntityChannel(
     const std::string& hash, int64_t docId, const std::string& filePath,
     const std::string& extension, std::shared_ptr<std::vector<std::byte>> contentBytes) {
@@ -2000,7 +2024,7 @@ void PostIngestQueue::processEntityExtractionBatch(
 void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int64_t docId,
                                                    const std::string& filePath,
                                                    const std::string& extension,
-                                                   std::vector<std::byte>* contentBytes) {
+                                                   const std::vector<std::byte>* contentBytes) {
     spdlog::info("[PostIngestQueue] Entity extraction starting for {} ({}) ext={}", filePath,
                  hash.substr(0, 12), extension);
 
@@ -2028,23 +2052,25 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
             return;
         }
 
-        // Load content from store
-        std::vector<std::byte> content;
-        if (contentBytes) {
-            content = std::move(*contentBytes);
-        } else if (store_) {
+        // Read the dispatched buffer in place: the same bytes are shared with the KG and
+        // symbol channels, so moving out of it would starve whichever consumer runs later.
+        std::vector<std::byte> ownedFallback;
+        const std::vector<std::byte>* contentPtr = contentBytes;
+        if (!contentPtr) {
+            if (!store_) {
+                spdlog::warn("[PostIngestQueue] No content store for entity extraction");
+                return;
+            }
             auto contentResult = store_->retrieveBytes(hash);
-            if (contentResult) {
-                content = std::move(contentResult.value());
-            } else {
+            if (!contentResult) {
                 spdlog::warn("[PostIngestQueue] Failed to load content for entity extraction: {}",
                              hash.substr(0, 12));
                 return;
             }
-        } else {
-            spdlog::warn("[PostIngestQueue] No content store for entity extraction");
-            return;
+            ownedFallback = std::move(contentResult.value());
+            contentPtr = &ownedFallback;
         }
+        const std::vector<std::byte>& content = *contentPtr;
 
         if (!kg_) {
             spdlog::warn("[PostIngestQueue] No KG store for entity extraction");
@@ -2254,12 +2280,11 @@ void PostIngestQueue::processEntityExtractionStage(const std::string& hash, int6
     }
 }
 
-void PostIngestQueue::dispatchToTitleChannel(const std::string& hash, int64_t docId,
-                                             const std::string& textSnippet,
-                                             const std::string& fallbackTitle,
-                                             const std::string& filePath,
-                                             const std::string& language,
-                                             const std::string& mimeType) {
+void PostIngestQueue::dispatchToTitleChannel(
+    const std::string& hash, int64_t docId, const std::string& textSnippet,
+    const std::string& fallbackTitle, const std::string& filePath, const std::string& language,
+    const std::string& mimeType, bool preserveTitle, const std::string& knowledgeGraphToken,
+    std::shared_ptr<KnowledgeGraphCompletion> knowledgeGraphCompletion) {
     auto channel = titleChannel_;
 
     InternalEventBus::TitleExtractionJob job;
@@ -2270,6 +2295,9 @@ void PostIngestQueue::dispatchToTitleChannel(const std::string& hash, int64_t do
     job.filePath = filePath;
     job.language = language;
     job.mimeType = mimeType;
+    job.preserveTitle = preserveTitle;
+    job.knowledgeGraphToken = knowledgeGraphToken;
+    job.knowledgeGraphCompletion = std::move(knowledgeGraphCompletion);
 
     // Bounded retry absorbs the titlePoller warmup window (cap=0 until next
     // TuningManager tick) without changing steady-state drop behavior.
@@ -2329,16 +2357,23 @@ void PostIngestQueue::processTitleExtractionBatch(
     }
     for (auto& job : jobs) {
         processTitleExtractionStage(job.hash, job.documentId, job.textSnippet, job.fallbackTitle,
-                                    job.filePath, job.language, job.mimeType);
+                                    job.filePath, job.language, job.mimeType, job.preserveTitle,
+                                    job.knowledgeGraphToken, job.knowledgeGraphCompletion);
     }
 }
 
-void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64_t docId,
-                                                  const std::string& textSnippet,
-                                                  const std::string& fallbackTitle,
-                                                  const std::string& filePath,
-                                                  const std::string& language,
-                                                  const std::string& /*mimeType*/) {
+void PostIngestQueue::processTitleExtractionStage(
+    const std::string& hash, int64_t docId, const std::string& textSnippet,
+    const std::string& fallbackTitle, const std::string& filePath, const std::string& language,
+    const std::string& /*mimeType*/, bool preserveTitle, const std::string& knowledgeGraphToken,
+    const std::shared_ptr<KnowledgeGraphCompletion>& knowledgeGraphCompletion) {
+    const auto stageStart = std::chrono::steady_clock::now();
+    struct StageTimingGuard {
+        PostIngestQueue* self;
+        std::chrono::steady_clock::time_point start;
+        ~StageTimingGuard() { self->recordTiming("title_process", start); }
+    } stageTimingGuard{this, stageStart};
+
     titleNlDocsProcessed_.fetch_add(1, std::memory_order_relaxed);
     auto titleExtractor = getTitleExtractor();
     if (!titleExtractor) {
@@ -2349,6 +2384,24 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
 
     spdlog::debug("[PostIngestQueue] Title+NL extraction starting for {} (docId={})",
                   hash.substr(0, 12), docId);
+
+    auto acknowledgeSuccessfulNoop = [&]() {
+        if (knowledgeGraphToken.empty() || !knowledgeGraphCompletion) {
+            return;
+        }
+        if (!writeCoordinator_) {
+            spdlog::warn("[PostIngestQueue] Cannot queue title+NL completion for {}: "
+                         "WriteCoordinator unavailable",
+                         hash.substr(0, 12));
+            return;
+        }
+        auto batch = std::make_unique<WriteBatch>();
+        batch->source = "PostIngestQueue::titleExtraction/noopAcknowledgement";
+        batch->ops.emplace_back(
+            AcknowledgeKnowledgeGraphOp{docId, knowledgeGraphToken, knowledgeGraphCompletion});
+        enqueueWithBackpressure(*writeCoordinator_, std::move(batch),
+                                "title+NL no-op acknowledgement", stop_);
+    };
 
     try {
         auto startTime = std::chrono::steady_clock::now();
@@ -2393,10 +2446,23 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
         static const std::unordered_set<std::string> kTitleTypes = {
             "title", "heading", "function", "class", "method", "module", "file", "symbol"};
 
-        auto result = titleExtractor(textSnippet, kCombinedEntityTypes);
-        if (!result || !result.value().usedGliner || result.value().concepts.empty()) {
-            spdlog::debug("[PostIngestQueue] GLiNER returned no concepts for {}",
-                          hash.substr(0, 12));
+        auto result = [&]() {
+            const auto inferenceStart = std::chrono::steady_clock::now();
+            struct InferenceTimingGuard {
+                PostIngestQueue* self;
+                std::chrono::steady_clock::time_point start;
+                ~InferenceTimingGuard() { self->recordTiming("title_gliner_infer", start); }
+            } inferenceTimingGuard{this, inferenceStart};
+            return titleExtractor(textSnippet, kCombinedEntityTypes);
+        }();
+        if (!result) {
+            spdlog::warn("[PostIngestQueue] GLiNER extraction failed for {}: {}",
+                         hash.substr(0, 12), result.error().message);
+            InternalEventBus::instance().incTitleConsumed();
+            return;
+        }
+        if (!result.value().usedGliner) {
+            spdlog::debug("[PostIngestQueue] GLiNER was not used for {}", hash.substr(0, 12));
             InternalEventBus::instance().incTitleConsumed();
             return;
         }
@@ -2434,22 +2500,29 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
             }
         }
 
-        std::vector<const search::QueryConcept*> nlEntities;
-        nlEntities.reserve(nlEntityByKey.size());
+        std::vector<const search::QueryConcept*> orderedNlEntities;
+        orderedNlEntities.reserve(nlEntityByKey.size());
         for (const auto& [_, entityPtr] : nlEntityByKey) {
-            nlEntities.push_back(entityPtr);
+            orderedNlEntities.push_back(entityPtr);
         }
-        std::sort(nlEntities.begin(), nlEntities.end(),
+        std::sort(orderedNlEntities.begin(), orderedNlEntities.end(),
                   [](const search::QueryConcept* a, const search::QueryConcept* b) {
                       return a->confidence > b->confidence;
                   });
+
+        std::vector<search::QueryConcept> nlEntities;
+        nlEntities.reserve(orderedNlEntities.size());
+        for (const auto* entity : orderedNlEntities) {
+            nlEntities.push_back(*entity);
+        }
+        const auto nlEntityCount = nlEntities.size();
         if (!nlEntities.empty()) {
             titleNlDocsWithEntities_.fetch_add(1, std::memory_order_relaxed);
-            titleNlEntitiesExtracted_.fetch_add(nlEntities.size(), std::memory_order_relaxed);
+            titleNlEntitiesExtracted_.fetch_add(nlEntityCount, std::memory_order_relaxed);
         }
 
         // Update title if we found a good candidate
-        if (bestTitle) {
+        if (bestTitle && !preserveTitle) {
             auto newTitle = yams::extraction::util::normalizeTitleCandidate(bestTitle->text);
             if (!newTitle.empty() && newTitle != fallbackTitle) {
                 if (meta_ && docId >= 0) {
@@ -2477,492 +2550,73 @@ void PostIngestQueue::processTitleExtractionStage(const std::string& hash, int64
 
         // Populate KG with NL entities if we have any and the write coordinator is available.
         if (!nlEntities.empty() && writeCoordinator_ && kg_) {
-            auto batch = std::make_unique<DeferredKGBatch>();
-            batch->nodes.reserve(nlEntities.size() + 6);
-            batch->deferredEdges.reserve(nlEntities.size() * 4 + 8);
-            batch->aliases.reserve(nlEntities.size() * 3);
-            const std::string normalizedFilePath = normalizeGraphPath(filePath);
-            batch->sourceFile = normalizedFilePath.empty() ? filePath : normalizedFilePath;
-
-            auto now = std::chrono::system_clock::now().time_since_epoch().count();
-
-            // Get document database ID for doc entities
-            std::optional<std::int64_t> documentDbId;
-            if (!hash.empty() && docId >= 0) {
-                documentDbId = docId;
-                batch->documentIdToDelete = documentDbId; // Delete old doc entities
-            }
-
-            // Build document context node
-            std::string docNodeKey;
-            if (!hash.empty()) {
-                docNodeKey = "doc:" + hash;
-
-                metadata::KGNode docNode;
-                docNode.nodeKey = docNodeKey;
-                docNode.label = common::sanitizeUtf8(filePath);
-                docNode.type = "document";
-                nlohmann::json docProps;
-                docProps["hash"] = hash;
-                docProps["path"] = common::sanitizeUtf8(batch->sourceFile);
-                docProps["language"] = common::sanitizeUtf8(language);
-                docNode.properties = docProps.dump();
-                batch->nodes.push_back(std::move(docNode));
-            }
-
-            // Build file context node
-            std::string fileNodeKey;
-            if (!filePath.empty()) {
-                fileNodeKey = makePathFileNodeKey(batch->sourceFile);
-
-                metadata::KGNode fileNode;
-                fileNode.nodeKey = fileNodeKey;
-                fileNode.label = common::sanitizeUtf8(batch->sourceFile);
-                fileNode.type = "file";
-                nlohmann::json fileProps;
-                fileProps["path"] = common::sanitizeUtf8(batch->sourceFile);
-                fileProps["language"] = common::sanitizeUtf8(language);
-                if (!batch->sourceFile.empty()) {
-                    fileProps["basename"] = common::sanitizeUtf8(
-                        std::filesystem::path(batch->sourceFile).filename().string());
-                }
-                if (!hash.empty()) {
-                    fileProps["current_hash"] = hash;
-                }
-                fileNode.properties = fileProps.dump();
-                batch->nodes.push_back(std::move(fileNode));
-            }
-
-            // Build entity nodes and edges
-            std::string targetNodeKey = !docNodeKey.empty() ? docNodeKey : fileNodeKey;
-            const std::string effectiveTitle = !fallbackTitle.empty() ? fallbackTitle : filePath;
-            std::string titleSegmentNodeKey;
-            std::string summarySegmentNodeKey;
-            struct SegmentRef {
-                std::string nodeKey;
-                std::string region;
-                std::size_t startOffset = 0;
-                std::size_t endOffset = 0;
+            const auto now = std::chrono::system_clock::now().time_since_epoch().count();
+            PostIngestNlGraphContext graphContext{
+                .hash = hash,
+                .documentId = docId,
+                .textSnippet = textSnippet,
+                .fallbackTitle = fallbackTitle,
+                .filePath = filePath,
+                .language = language,
+                .titleConfidence =
+                    bestTitle ? std::optional<float>{bestTitle->confidence} : std::nullopt,
+                .lastSeen = now,
             };
-            std::vector<SegmentRef> bodySegments;
+            auto graph = buildPostIngestNlGraph(graphContext, std::move(nlEntities));
+            const auto& deltas = graph.metrics;
+            segmentNodesCreated_.fetch_add(deltas.segmentNodesCreated, std::memory_order_relaxed);
+            segmentEdgesCreated_.fetch_add(deltas.segmentEdgesCreated, std::memory_order_relaxed);
+            entitySegmentEdgesCreated_.fetch_add(deltas.entitySegmentEdgesCreated,
+                                                 std::memory_order_relaxed);
+            bodySegmentNodesCreated_.fetch_add(deltas.bodySegmentNodesCreated,
+                                               std::memory_order_relaxed);
+            bodyEntitySegmentEdgesCreated_.fetch_add(deltas.bodyEntitySegmentEdgesCreated,
+                                                     std::memory_order_relaxed);
+            deferredDocEntitiesQueued_.fetch_add(deltas.deferredDocEntitiesQueued,
+                                                 std::memory_order_relaxed);
 
-            const auto addSegmentNode = [&](std::string segmentNodeKey, std::string label,
-                                            std::string segmentType, std::string region,
-                                            float confidence, std::size_t startOffset,
-                                            std::size_t endOffset) {
-                if (segmentNodeKey.empty() || label.empty()) {
-                    return;
-                }
-
-                metadata::KGNode segNode;
-                segNode.nodeKey = segmentNodeKey;
-                segNode.label = common::sanitizeUtf8(label);
-                segNode.type = segmentType;
-                nlohmann::json segProps;
-                segProps["segment_type"] = segmentType;
-                segProps["region"] = region;
-                segProps["confidence"] = confidence;
-                segProps["start_offset"] = startOffset;
-                segProps["end_offset"] = endOffset;
-                segProps["path"] = common::sanitizeUtf8(batch->sourceFile);
-                if (!hash.empty()) {
-                    segProps["snapshot_id"] = hash;
-                }
-                segNode.properties = segProps.dump();
-                batch->nodes.push_back(std::move(segNode));
-                segmentNodesCreated_.fetch_add(1, std::memory_order_relaxed);
-                if (region == "body_claim") {
-                    bodySegmentNodesCreated_.fetch_add(1, std::memory_order_relaxed);
-                }
-
-                if (!targetNodeKey.empty()) {
-                    DeferredEdge containsEdge;
-                    containsEdge.srcNodeKey = targetNodeKey;
-                    containsEdge.dstNodeKey = segmentNodeKey;
-                    containsEdge.relation = "contains_segment";
-                    containsEdge.weight = confidence;
-                    containsEdge.properties = nlohmann::json{
-                        {"source", "gliner"},
-                        {"region", region},
-                        {"confidence",
-                         confidence}}.dump();
-                    batch->deferredEdges.push_back(std::move(containsEdge));
-                    segmentEdgesCreated_.fetch_add(1, std::memory_order_relaxed);
-
-                    DeferredEdge segmentOfEdge;
-                    segmentOfEdge.srcNodeKey = std::move(segmentNodeKey);
-                    segmentOfEdge.dstNodeKey = targetNodeKey;
-                    segmentOfEdge.relation = "segment_of";
-                    segmentOfEdge.weight = confidence;
-                    segmentOfEdge.properties = nlohmann::json{
-                        {"source", "gliner"},
-                        {"region", region},
-                        {"confidence", confidence}}.dump();
-                    batch->deferredEdges.push_back(std::move(segmentOfEdge));
-                    segmentEdgesCreated_.fetch_add(1, std::memory_order_relaxed);
-                }
-            };
-
-            if (!hash.empty() && !effectiveTitle.empty()) {
-                titleSegmentNodeKey = "segment:title:" + hash;
-                const float titleConfidence =
-                    bestTitle ? std::clamp(bestTitle->confidence, 0.5f, 1.0f) : 0.75f;
-                addSegmentNode(titleSegmentNodeKey, effectiveTitle, "text_segment", "title",
-                               titleConfidence, 0, effectiveTitle.size());
-            }
-            if (!hash.empty() && !textSnippet.empty()) {
-                summarySegmentNodeKey = "segment:summary:" + hash;
-                addSegmentNode(summarySegmentNodeKey, textSnippet, "text_segment", "summary", 0.65f,
-                               0, textSnippet.size());
-
-                const auto claimSegments = buildBodyClaimSegments(textSnippet, effectiveTitle, 3);
-                for (std::size_t segIdx = 0; segIdx < claimSegments.size(); ++segIdx) {
-                    const std::string segmentNodeKey =
-                        "segment:body:" + hash + ":" + std::to_string(segIdx + 1);
-                    addSegmentNode(segmentNodeKey, claimSegments[segIdx].text, "text_segment",
-                                   "body_claim", 0.60f, claimSegments[segIdx].startOffset,
-                                   claimSegments[segIdx].endOffset);
-                    bodySegments.push_back({segmentNodeKey, "body_claim",
-                                            claimSegments[segIdx].startOffset,
-                                            claimSegments[segIdx].endOffset});
-                }
+            // Diagnostic: publish graph-construction statistics from the pure builder.
+            const auto nth = gs_processed_.fetch_add(1, std::memory_order_relaxed) + 1;
+            gs_totalEntities_ += deltas.entities;
+            gs_highValueEntities_ += deltas.highValueEntities;
+            gs_totalEdges_ += deltas.coMentionEdges;
+            gs_totalPrimaryTopicEdges_ += deltas.primaryTopicEdges;
+            if ((nth % 100) == 0 || nth == 1) {
+                spdlog::info(
+                    "[PIQ-graph] doc={}/{} entities={} high_value={} edges={} primary_topic={} "
+                    "(cumulative: docs={} entities={} hv={} edges={} primary={})",
+                    hash.substr(0, 12), nth, deltas.entities, deltas.highValueEntities,
+                    deltas.coMentionEdges, deltas.primaryTopicEdges, gs_processed_.load(),
+                    gs_totalEntities_.load(), gs_highValueEntities_.load(), gs_totalEdges_.load(),
+                    gs_totalPrimaryTopicEdges_.load());
             }
 
-            struct EntityRef {
-                std::string nodeKey;
-                std::string type;
-                std::string text;
-                float confidence{0.0f};
-                bool titleOverlap{false};
-                bool highValue{false};
-                int segmentIndex{-1};
-            };
-            std::vector<EntityRef> entityRefs;
-            entityRefs.reserve(nlEntities.size());
-
-            for (const auto* qc : nlEntities) {
-                std::string text = common::sanitizeUtf8(qc->text);
-                std::string type =
-                    common::sanitizeUtf8(canonicalizeNlEntityType(qc->type, qc->text));
-
-                // Normalize text for canonical matching
-                std::string normalizedText = normalizeEntityTextForKey(text);
-
-                std::string nodeKey = "nl_entity:" + type + ":" + normalizedText;
-
-                metadata::KGNode node;
-                node.nodeKey = nodeKey;
-                node.label = text;
-                node.type = type;
-
-                nlohmann::json props;
-                props["entity_text"] = text;
-                props["entity_type"] = type;
-                props["confidence"] = qc->confidence;
-                props["first_seen_file"] = common::sanitizeUtf8(filePath);
-                props["last_seen"] = now;
-                if (!hash.empty()) {
-                    props["first_seen_hash"] = hash;
-                }
-                node.properties = props.dump();
-                batch->nodes.push_back(std::move(node));
-                const bool titleOverlap = entityTextOverlapsTitle(text, effectiveTitle);
-                const bool highValue = isHighValueGraphType(type);
-                int segmentIndex = -1;
-                if (!titleOverlap) {
-                    for (std::size_t segIdx = 0; segIdx < bodySegments.size(); ++segIdx) {
-                        if (qc->startOffset < bodySegments[segIdx].endOffset &&
-                            qc->endOffset > bodySegments[segIdx].startOffset) {
-                            segmentIndex = static_cast<int>(segIdx);
-                            break;
-                        }
-                    }
-                }
-                entityRefs.push_back(EntityRef{nodeKey, type, text, qc->confidence, titleOverlap,
-                                               highValue, segmentIndex});
-
-                // Add aliases for query-time KG resolution. WriteCoordinator resolves nodeId from
-                // source when encoded as "source|nodeKey".
-                for (const auto& aliasVariant : buildNlAliasVariants(text, type, qc->confidence)) {
-                    metadata::KGAlias alias;
-                    alias.alias = aliasVariant.text;
-                    alias.source = std::string("gliner.") + aliasVariant.sourceTag + "|" + nodeKey;
-                    alias.confidence = aliasVariant.confidence;
-                    batch->aliases.push_back(std::move(alias));
-                }
-
-                // Add edge from entity to document/file
-                if (!targetNodeKey.empty()) {
-                    DeferredEdge edge;
-                    edge.srcNodeKey = nodeKey;
-                    edge.dstNodeKey = targetNodeKey;
-                    edge.relation = "mentioned_in";
-                    edge.weight = qc->confidence;
-
-                    nlohmann::json edgeProps;
-                    edgeProps["source"] = "gliner";
-                    edgeProps["confidence"] = qc->confidence;
-                    edgeProps["provenance"] =
-                        nlohmann::json{{"source", "gliner"}, {"confidence", qc->confidence}};
-                    if (!hash.empty()) {
-                        edgeProps["snapshot_id"] = hash;
-                    }
-                    edge.properties = edgeProps.dump();
-                    batch->deferredEdges.push_back(std::move(edge));
-
-                    if (titleOverlap) {
-                        DeferredEdge titleEdge;
-                        titleEdge.srcNodeKey = nodeKey;
-                        titleEdge.dstNodeKey = targetNodeKey;
-                        titleEdge.relation = "title_mentions";
-                        titleEdge.weight = std::min(1.0f, qc->confidence * 1.15f);
-
-                        nlohmann::json titleProps;
-                        titleProps["source"] = "gliner";
-                        titleProps["region"] = "title";
-                        titleProps["confidence"] = titleEdge.weight;
-                        if (!hash.empty()) {
-                            titleProps["snapshot_id"] = hash;
-                        }
-                        titleEdge.properties = titleProps.dump();
-                        batch->deferredEdges.push_back(std::move(titleEdge));
-                    }
-                }
-
-                if (titleOverlap && !titleSegmentNodeKey.empty()) {
-                    DeferredEdge segEdge;
-                    segEdge.srcNodeKey = nodeKey;
-                    segEdge.dstNodeKey = titleSegmentNodeKey;
-                    segEdge.relation = "mentioned_in_segment";
-                    segEdge.weight = std::min(1.0f, qc->confidence * 1.10f);
-                    segEdge.properties = nlohmann::json{
-                        {"source", "gliner"},
-                        {"region", "title"},
-                        {"confidence",
-                         segEdge.weight}}.dump();
-                    batch->deferredEdges.push_back(std::move(segEdge));
-                    entitySegmentEdgesCreated_.fetch_add(1, std::memory_order_relaxed);
-                } else if (segmentIndex >= 0 &&
-                           static_cast<std::size_t>(segmentIndex) < bodySegments.size()) {
-                    DeferredEdge segEdge;
-                    segEdge.srcNodeKey = nodeKey;
-                    segEdge.dstNodeKey = bodySegments[segmentIndex].nodeKey;
-                    segEdge.relation = "mentioned_in_segment";
-                    segEdge.weight = std::min(1.0f, qc->confidence * 1.05f);
-                    segEdge.properties = nlohmann::json{
-                        {"source", "gliner"},
-                        {"region", "body_claim"},
-                        {"confidence", segEdge.weight},
-                        {"segment_index",
-                         segmentIndex}}.dump();
-                    batch->deferredEdges.push_back(std::move(segEdge));
-                    entitySegmentEdgesCreated_.fetch_add(1, std::memory_order_relaxed);
-                    bodyEntitySegmentEdgesCreated_.fetch_add(1, std::memory_order_relaxed);
-                } else if (!summarySegmentNodeKey.empty()) {
-                    DeferredEdge segEdge;
-                    segEdge.srcNodeKey = nodeKey;
-                    segEdge.dstNodeKey = summarySegmentNodeKey;
-                    segEdge.relation = "mentioned_in_segment";
-                    segEdge.weight = qc->confidence;
-                    segEdge.properties = nlohmann::json{
-                        {"source", "gliner"},
-                        {"region", "summary"},
-                        {"confidence",
-                         qc->confidence}}.dump();
-                    batch->deferredEdges.push_back(std::move(segEdge));
-                    entitySegmentEdgesCreated_.fetch_add(1, std::memory_order_relaxed);
-                }
-
-                // Add doc entity reference
-                if (documentDbId.has_value()) {
-                    DeferredDocEntity docEnt;
-                    docEnt.documentId = documentDbId.value();
-                    docEnt.entityText = text;
-                    docEnt.nodeKey = nodeKey;
-                    docEnt.startOffset = qc->startOffset;
-                    docEnt.endOffset = qc->endOffset;
-                    docEnt.confidence = qc->confidence;
-                    docEnt.extractor = "gliner_title_nl";
-                    batch->deferredDocEntities.push_back(std::move(docEnt));
-                    deferredDocEntitiesQueued_.fetch_add(1, std::memory_order_relaxed);
-                }
-            }
-
-            std::stable_sort(entityRefs.begin(), entityRefs.end(),
-                             [](const EntityRef& a, const EntityRef& b) {
-                                 if (a.titleOverlap != b.titleOverlap) {
-                                     return a.titleOverlap > b.titleOverlap;
-                                 }
-                                 if (a.highValue != b.highValue) {
-                                     return a.highValue > b.highValue;
-                                 }
-                                 return a.confidence > b.confidence;
-                             });
-
-            // Add stronger document semantics for top title/high-value entities.
-            constexpr std::size_t kMaxPrimaryTopicEdges = 3;
-            std::size_t primaryTopicCount = 0;
-            for (const auto& ref : entityRefs) {
-                if (primaryTopicCount >= kMaxPrimaryTopicEdges) {
-                    break;
-                }
-                if (!ref.highValue) {
-                    continue;
-                }
-                if (!ref.titleOverlap && ref.confidence < 0.78f) {
-                    continue;
-                }
-                if (targetNodeKey.empty()) {
-                    break;
-                }
-
-                DeferredEdge primaryEdge;
-                primaryEdge.srcNodeKey = ref.nodeKey;
-                primaryEdge.dstNodeKey = targetNodeKey;
-                primaryEdge.relation = "primary_topic_of";
-                primaryEdge.weight =
-                    std::min(1.0f, ref.confidence * (ref.titleOverlap ? 1.20f : 1.05f));
-
-                nlohmann::json primaryProps;
-                primaryProps["source"] = "gliner";
-                primaryProps["confidence"] = primaryEdge.weight;
-                primaryProps["title_overlap"] = ref.titleOverlap;
-                primaryProps["entity_type"] = ref.type;
-                if (!hash.empty()) {
-                    primaryProps["snapshot_id"] = hash;
-                }
-                primaryEdge.properties = primaryProps.dump();
-                batch->deferredEdges.push_back(std::move(primaryEdge));
-                ++primaryTopicCount;
-            }
-
-            // Add bounded co-mention edges among strongest entities to enrich local graph
-            // structure without exploding edge count.
-            //
-            // Edge-creation policy:
-            // 1. Only create edges where at least one entity is a high-value biomedical type
-            //    (protein, gene, disease, drug, etc.). Skipping generic-NL-only pairs
-            //    (person/organization/location) dramatically reduces noise — the graph
-            //    reranker's composite score is dominated by entity entity-signal-weight,
-            //    and injecting low-relevance edges dilutes it.
-            // 2. Tighten edge weight scaling so that high-confidence biomedical co-occurrences
-            //    stand out against the noise floor. The confidence floor for a biomedical pair
-            //    is raised to 0.20 (from 0.10), and the per-edge weight floor for
-            //    non-biomedical pairs is 0.08. The base multiplier goes from 0.50→0.65 and
-            //    title-overlap boost from 0.75→0.85, so weights land in [0.08, 0.45] range
-            //    instead of the previous [0.05, 0.35].
-            // 3. Tighter edge budget: top-8 entities (was 12), max 16 edges (was 36). With
-            //    ~15 entities per SciFact doc this still covers the most important pairs while
-            //    cutting the total edge count by over 50%.
-            constexpr std::size_t kMaxCoMentionEntities = 8;
-            constexpr std::size_t kMaxCoMentionEdges = 16;
-            const std::size_t entityLimit = std::min(entityRefs.size(), kMaxCoMentionEntities);
-            std::size_t coMentionEdgeCount = 0;
-            for (std::size_t i = 0; i < entityLimit; ++i) {
-                for (std::size_t j = i + 1; j < entityLimit; ++j) {
-                    if (coMentionEdgeCount >= kMaxCoMentionEdges) {
-                        break;
-                    }
-
-                    // Skip edges where neither entity is a high-value biomedical type.
-                    // Generic NL types (person, organization, location) offer no useful
-                    // graph signal for scientific retrieval and only add noise.
-                    if (!entityRefs[i].highValue && !entityRefs[j].highValue) {
-                        continue;
-                    }
-
-                    DeferredEdge coEdge;
-                    coEdge.srcNodeKey = entityRefs[i].nodeKey;
-                    coEdge.dstNodeKey = entityRefs[j].nodeKey;
-                    coEdge.relation = coOccurrenceRelation(entityRefs[i].type, entityRefs[j].type);
-                    const bool bothHighValue = entityRefs[i].highValue && entityRefs[j].highValue;
-                    const float confidenceFloor = bothHighValue ? 0.20f : 0.08f;
-                    coEdge.weight = std::max(
-                        confidenceFloor,
-                        std::min(entityRefs[i].confidence, entityRefs[j].confidence) *
-                            ((entityRefs[i].titleOverlap || entityRefs[j].titleOverlap) ? 0.85f
-                                                                                        : 0.65f));
-
-                    nlohmann::json edgeProps;
-                    edgeProps["source"] = "gliner";
-                    edgeProps["confidence"] = coEdge.weight;
-                    edgeProps["lhs_type"] = entityRefs[i].type;
-                    edgeProps["rhs_type"] = entityRefs[j].type;
-                    edgeProps["title_overlap_pair"] =
-                        entityRefs[i].titleOverlap || entityRefs[j].titleOverlap;
-                    edgeProps["scope"] =
-                        (entityRefs[i].titleOverlap && entityRefs[j].titleOverlap)
-                            ? "title"
-                            : ((entityRefs[i].segmentIndex >= 0 &&
-                                entityRefs[i].segmentIndex == entityRefs[j].segmentIndex)
-                                   ? "body_segment"
-                                   : ((entityRefs[i].titleOverlap || entityRefs[j].titleOverlap)
-                                          ? "mixed"
-                                          : "summary"));
-                    if (entityRefs[i].segmentIndex >= 0 &&
-                        entityRefs[i].segmentIndex == entityRefs[j].segmentIndex) {
-                        edgeProps["segment_index"] = entityRefs[i].segmentIndex;
-                    }
-                    edgeProps["provenance"] =
-                        nlohmann::json{{"source", "gliner"}, {"confidence", coEdge.weight}};
-                    if (!hash.empty()) {
-                        edgeProps["snapshot_id"] = hash;
-                    }
-                    coEdge.properties = edgeProps.dump();
-                    batch->deferredEdges.push_back(std::move(coEdge));
-                    ++coMentionEdgeCount;
-                }
-                if (coMentionEdgeCount >= kMaxCoMentionEdges) {
-                    break;
-                }
-            }
-
-            // Diagnostic: log graph-construction statistics every 100 documents
-            // so we can trace entity extraction → edge creation → KG population.
-            {
-                const auto nth = gs_processed_.fetch_add(1, std::memory_order_relaxed) + 1;
-                gs_totalEntities_ += nlEntities.size();
-                gs_highValueEntities_ += static_cast<size_t>(
-                    std::count_if(entityRefs.begin(), entityRefs.end(),
-                                  [](const EntityRef& r) { return r.highValue; }));
-                gs_totalEdges_ += coMentionEdgeCount;
-                gs_totalPrimaryTopicEdges_ += primaryTopicCount;
-                if ((nth % 100) == 0 || nth == 1) {
-                    spdlog::info(
-                        "[PIQ-graph] doc={}/{} entities={} high_value={} edges={} primary_topic={} "
-                        "(cumulative: docs={} entities={} hv={} edges={} primary={})",
-                        hash.substr(0, 12), nth, nlEntities.size(),
-                        static_cast<size_t>(
-                            std::count_if(entityRefs.begin(), entityRefs.end(),
-                                          [](const EntityRef& r) { return r.highValue; })),
-                        coMentionEdgeCount, primaryTopicCount, gs_processed_.load(),
-                        gs_totalEntities_.load(), gs_highValueEntities_.load(),
-                        gs_totalEdges_.load(), gs_totalPrimaryTopicEdges_.load());
-                }
-            }
-
-            const auto deferredEntityCount = batch->deferredDocEntities.size();
+            const auto deferredEntityCount = graph.batch->deferredDocEntities.size();
             try {
-                if (writeCoordinator_) {
-                    auto source = "PostIngestQueue::nlEntityKg/" + batch->sourceFile;
-                    auto wb =
-                        makeWriteBatchFromDeferredKGBatch(std::move(batch), std::move(source));
-                    enqueueWithBackpressure(*writeCoordinator_, std::move(wb), "NL entity KG batch",
-                                            stop_);
-                }
+                auto source = "PostIngestQueue::nlEntityKg/" + graph.batch->sourceFile;
+                auto writeBatch =
+                    makeWriteBatchFromDeferredKGBatch(std::move(graph.batch), std::move(source));
+                writeBatch->knowledgeGraphDocumentId = docId;
+                writeBatch->knowledgeGraphToken = knowledgeGraphToken;
+                writeBatch->knowledgeGraphCompletionStage = KnowledgeGraphCompletionStage::TitleNl;
+                writeBatch->knowledgeGraphCompletion = knowledgeGraphCompletion;
+                enqueueWithBackpressure(*writeCoordinator_, std::move(writeBatch),
+                                        "NL entity KG batch", stop_);
                 spdlog::debug("[PostIngestQueue] Queued {} NL entities for KG from {}",
-                              nlEntities.size(), hash.substr(0, 12));
+                              deltas.entities, hash.substr(0, 12));
             } catch (const std::exception& e) {
                 deferredDocEntityQueueFailures_.fetch_add(deferredEntityCount,
                                                           std::memory_order_relaxed);
                 spdlog::warn("[PostIngestQueue] Failed to queue NL entities for KG: {}", e.what());
             }
+        } else if (nlEntities.empty()) {
+            acknowledgeSuccessfulNoop();
         }
 
         auto duration = std::chrono::steady_clock::now() - startTime;
         double ms = std::chrono::duration<double, std::milli>(duration).count();
         spdlog::info("[PostIngestQueue] Title+NL extraction for {} in {:.2f}ms (title={}, nl={})",
-                     hash.substr(0, 12), ms, bestTitle ? "yes" : "no", nlEntities.size());
+                     hash.substr(0, 12), ms, bestTitle ? "yes" : "no", nlEntityCount);
 
         InternalEventBus::instance().incTitleConsumed();
     } catch (const std::exception& e) {
@@ -3205,8 +2859,14 @@ void PostIngestQueue::commitBatchResults(std::vector<PreparedMetadataEntry>& suc
         std::vector<metadata::BatchContentEntry> entries;
         entries.reserve(successes.size());
 
-        for (const auto& prepared : successes) {
+        for (auto& prepared : successes) {
+            if (prepared.shouldDispatchKg &&
+                knowledgeGraphEnabled_.load(std::memory_order_acquire) &&
+                prepared.knowledgeGraphToken.empty()) {
+                prepared.knowledgeGraphToken = yams::core::generateId("kg");
+            }
             metadata::BatchContentEntry entry;
+            entry.knowledgeGraphToken = prepared.knowledgeGraphToken;
             entry.documentId = prepared.documentId;
             entry.title = prepared.title.empty() ? prepared.fileName : prepared.title;
             entry.metadataTitle = prepared.title;
@@ -3312,7 +2972,8 @@ PostIngestQueue::PreparedDispatchPlan
 PostIngestQueue::buildDispatchPlan(const PreparedMetadataEntry& prepared, bool embedStageActive,
                                    bool hasEmbedQueue) const {
     return PreparedDispatchPlan{
-        .dispatchKg = prepared.shouldDispatchKg,
+        .dispatchKg =
+            prepared.shouldDispatchKg && knowledgeGraphEnabled_.load(std::memory_order_acquire),
         .dispatchSymbol = prepared.shouldDispatchSymbol,
         .dispatchEntity = prepared.shouldDispatchEntity,
         .dispatchTitle = prepared.shouldDispatchTitle,
@@ -3436,6 +3097,8 @@ void PostIngestQueue::dispatchSuccesses(const std::vector<PreparedMetadataEntry>
         if (!preparedDoc) {
             return std::nullopt;
         }
+        preparedDoc->preparationRecipe =
+            embed::embeddingPreparationRecipe(chunkPolicy, selectionCfg);
 
         std::size_t payloadBytes = 0;
         for (const auto& chunk : preparedDoc->chunks) {
@@ -3537,118 +3200,25 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         return result;
     };
 
-    // WriteCoordinator is set asynchronously after PIQ::start().  If it isn't
-    // ready yet, process directly without WriteCoordinator batching so that
-    // standalone tests and early-init phases can still complete task processing.
-    if (!writeCoordinator_) {
-        std::vector<PreparedMetadataEntry> allSuccesses;
-        std::vector<ExtractionFailure> allFailures;
-        allSuccesses.reserve(tasks.size());
-        allFailures.reserve(tasks.size() / static_cast<std::size_t>(10));
-
-        const auto prepareStart = std::chrono::steady_clock::now();
-        for (const auto& task : tasks) {
-            auto result = prepareTask(task);
-            if (std::holds_alternative<PreparedMetadataEntry>(result)) {
-                allSuccesses.push_back(std::get<PreparedMetadataEntry>(std::move(result)));
-            } else {
-                allFailures.push_back(std::get<ExtractionFailure>(std::move(result)));
-            }
-        }
-        recordTiming("prepare_metadata", prepareStart);
-
-        processed_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
-        failed_.fetch_add(allFailures.size(), std::memory_order_relaxed);
-        extractionSuccesses_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
-        extractionFailures_.fetch_add(allFailures.size(), std::memory_order_relaxed);
-        commitBatchResults(allSuccesses, allFailures);
-        dispatchSuccesses(allSuccesses);
-        return;
-    }
-
-    // Get current concurrency limits from TuneAdvisor
-    const auto batchPolicy = resolvePostIngestBatchPolicy();
-    const uint32_t maxWorkers = static_cast<uint32_t>(maxExtractionConcurrent());
-    if (shouldPrepareSequentially(maxWorkers, tasks.size(), batchPolicy)) {
-        // Sequential path: process tasks one by one
-        std::vector<PreparedMetadataEntry> allSuccesses;
-        std::vector<ExtractionFailure> allFailures;
-        allSuccesses.reserve(tasks.size());
-        allFailures.reserve(tasks.size() / static_cast<std::size_t>(10));
-
-        const auto prepareStart = std::chrono::steady_clock::now();
-        for (const auto& task : tasks) {
-            auto result = prepareTask(task);
-            if (std::holds_alternative<PreparedMetadataEntry>(result)) {
-                allSuccesses.push_back(std::get<PreparedMetadataEntry>(std::move(result)));
-            } else {
-                allFailures.push_back(std::get<ExtractionFailure>(std::move(result)));
-            }
-        }
-        recordTiming("prepare_metadata", prepareStart);
-
-        processed_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
-        failed_.fetch_add(allFailures.size(), std::memory_order_relaxed);
-        extractionSuccesses_.fetch_add(allSuccesses.size(), std::memory_order_relaxed);
-        extractionFailures_.fetch_add(allFailures.size(), std::memory_order_relaxed);
-        commitBatchResults(allSuccesses, allFailures);
-        dispatchSuccesses(allSuccesses);
-        return;
-    }
-
+    // pressureLimitedPoll already fans out independent batches across WorkCoordinator handlers.
+    // Preparing child chunks on the same executor and synchronously waiting for their futures can
+    // consume every worker with parents that are waiting for queued children. Keep each admitted
+    // batch self-contained so executor progress never depends on another handler from this pool.
     YAMS_ZONE_SCOPED_N("PostIngestQueue::processBatch");
-
-    // Invariant: in-flight work requires pending tasks
     YAMS_DCHECK(totalInFlight() == 0 || !tasks.empty(), "in-flight work without pending tasks");
-
-    using TaskResult = std::variant<PreparedMetadataEntry, ExtractionFailure>;
-    const std::size_t numChunks = std::min<std::size_t>(maxWorkers, tasks.size());
-    YAMS_ASSERT(numChunks > 0, "PostIngestQueue::processBatch requires at least one worker chunk");
-    const std::size_t chunkSize = (tasks.size() + numChunks - 1) / numChunks;
-    std::vector<std::future<std::vector<TaskResult>>> futures;
-    futures.reserve(numChunks);
-    auto executor = coordinator_->getExecutor();
-
-    const auto prepareStart = std::chrono::steady_clock::now();
-    for (std::size_t i = 0; i < tasks.size(); i += chunkSize) {
-        std::size_t end = std::min(i + chunkSize, tasks.size());
-        std::vector<InternalEventBus::PostIngestTask> chunk(tasks.begin() + i, tasks.begin() + end);
-        auto promise = std::make_shared<std::promise<std::vector<TaskResult>>>();
-        futures.push_back(promise->get_future());
-        boost::asio::post(
-            executor, [p = std::move(promise), chunk = std::move(chunk), prepareTask]() mutable {
-                try {
-                    std::vector<TaskResult> results;
-                    results.reserve(chunk.size());
-                    for (const auto& task : chunk) {
-                        results.push_back(prepareTask(task));
-                    }
-                    p->set_value(std::move(results));
-                } catch (...) {
-                    p->set_exception(std::current_exception());
-                }
-            });
-    }
 
     std::vector<PreparedMetadataEntry> allSuccesses;
     std::vector<ExtractionFailure> allFailures;
     allSuccesses.reserve(tasks.size());
-    allFailures.reserve(tasks.size() / 10);
+    allFailures.reserve(tasks.size() / static_cast<std::size_t>(10));
 
-    for (auto& future : futures) {
-        try {
-            auto results = future.get();
-            for (auto& variant : results) {
-                if (std::holds_alternative<PreparedMetadataEntry>(variant)) {
-                    allSuccesses.push_back(std::get<PreparedMetadataEntry>(std::move(variant)));
-                } else {
-                    allFailures.push_back(std::get<ExtractionFailure>(std::move(variant)));
-                }
-            }
-        } catch (const std::exception& e) {
-            spdlog::error("[PostIngestQueue] Chunk processing failed: {}", e.what());
-        } catch (...) {
-            spdlog::error("[PostIngestQueue] Chunk processing failed: unknown exception");
+    const auto prepareStart = std::chrono::steady_clock::now();
+    for (const auto& task : tasks) {
+        auto result = prepareTask(task);
+        if (std::holds_alternative<PreparedMetadataEntry>(result)) {
+            allSuccesses.push_back(std::get<PreparedMetadataEntry>(std::move(result)));
+        } else {
+            allFailures.push_back(std::get<ExtractionFailure>(std::move(result)));
         }
     }
     recordTiming("prepare_metadata", prepareStart);

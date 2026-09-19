@@ -8,8 +8,6 @@
 
 namespace yams::daemon {
 
-class ServiceManager;
-
 struct PluginDescriptor {
     std::string name;
     std::string version;
@@ -40,9 +38,17 @@ public:
 
 class AbiPluginHost : public IPluginHost {
 public:
-    explicit AbiPluginHost(ServiceManager* sm, const std::filesystem::path& trustFile = {});
+    enum class NamePolicy { Relaxed, Spec };
+
+    struct InterfaceLease {
+        void* interface{nullptr};
+        std::shared_ptr<void> keepAlive;
+    };
+
+    explicit AbiPluginHost(const std::filesystem::path& trustFile = {});
     ~AbiPluginHost();
     void setTrustFile(const std::filesystem::path& trustFile);
+    void setNamePolicy(NamePolicy policy);
 
     Result<PluginDescriptor> scanTarget(const std::filesystem::path& file) override;
     Result<std::vector<PluginDescriptor>> scanDirectory(const std::filesystem::path& dir) override;
@@ -62,6 +68,10 @@ public:
 
     // Acquire a lifetime token that keeps a loaded plugin resident until released.
     Result<std::shared_ptr<void>> acquireKeepAlive(const std::string& name) const;
+
+    // Atomically acquire an interface and its lifetime token against concurrent unload.
+    Result<InterfaceLease> acquireInterface(const std::string& name, const std::string& ifaceId,
+                                            uint32_t version);
 
     // Diagnostics for last scan
     std::vector<std::pair<std::filesystem::path, std::string>> getLastScanSkips() const;

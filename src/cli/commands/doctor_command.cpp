@@ -16,6 +16,7 @@
 #include <yams/config/config_helpers.h>
 #include <yams/core/magic_numbers.hpp>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/model_provider.h>
@@ -90,19 +91,6 @@ static const char* dlerror() {
     return buf;
 }
 
-static int setenv(const char* name, const char* value, int overwrite) {
-    int errcode = 0;
-    if (!overwrite) {
-        size_t envsize = 0;
-        errcode = getenv_s(&envsize, NULL, 0, name);
-        if (errcode || envsize)
-            return errcode;
-    }
-    return _putenv_s(name, value);
-}
-static int unsetenv(const char* name) {
-    return _putenv_s(name, "");
-}
 #else
 #include <dlfcn.h>
 #include <unistd.h>
@@ -233,7 +221,10 @@ public:
                         break;
                     }
                 }
+            } catch (const std::exception& error) {
+                spdlog::debug("Unable to inspect embedding degraded status: {}", error.what());
             } catch (...) {
+                spdlog::debug("Unable to inspect embedding degraded status: unknown error");
             }
             if (!degraded) {
                 std::cout << "Embedding subsystem is not degraded. Nothing to clear.\n";
@@ -254,12 +245,14 @@ public:
                         break;
                     }
                 }
+            } catch (const std::exception& error) {
+                spdlog::debug("Unable to inspect loaded embedding models: {}", error.what());
             } catch (...) {
+                spdlog::debug("Unable to inspect loaded embedding models: unknown error");
             }
             if (targetModel.empty()) {
-                // Read from config or env
-                if (const char* p = std::getenv("YAMS_PREFERRED_MODEL"))
-                    targetModel = p;
+                if (cli_)
+                    targetModel = cli_->getResolvedEmbeddingConfig().preferredModel;
                 if (targetModel.empty()) {
                     // Fallback: prefer common local models
                     if (cli_) {
@@ -310,7 +303,10 @@ public:
                     const auto& st2 = s2.value();
                     auto it2 = st2.readinessStates.find("embedding_degraded");
                     cleared = (it2 == st2.readinessStates.end() || !it2->second);
+                } catch (const std::exception& error) {
+                    spdlog::debug("Unable to verify cleared embedding state: {}", error.what());
                 } catch (...) {
+                    spdlog::debug("Unable to verify cleared embedding state: unknown error");
                 }
             }
             if (cleared) {
@@ -364,7 +360,10 @@ private:
             auto& shut = **leaseHandle;
             (void)yams::cli::run_result(shut.shutdown(true), std::chrono::seconds(6),
                                         getExecutor());
+        } catch (const std::exception& error) {
+            spdlog::debug("Unable to stop daemon before doctor maintenance: {}", error.what());
         } catch (...) {
+            spdlog::debug("Unable to stop daemon before doctor maintenance: unknown error");
         }
     }
 
@@ -457,11 +456,10 @@ private:
     }
 
     static void setEnvIfUnset(const char* key, int value) {
-        if (!std::getenv(key)) {
-            try {
-                std::string v = std::to_string(value);
-                setenv(key, v.c_str(), 0);
-            } catch (...) {
+        if (!yams::config::getenv_optional(key)) {
+            const auto rendered = std::to_string(value);
+            if (!yams::config::set_environment(key, rendered.c_str())) {
+                spdlog::debug("Unable to set doctor environment default for {}", key);
             }
         }
     }
@@ -557,7 +555,10 @@ private:
             }
 
             yams::cli::ui::render_rows(std::cout, embRows);
+        } catch (const std::exception& error) {
+            spdlog::debug("Unable to render embedding runtime: {}", error.what());
         } catch (...) {
+            spdlog::debug("Unable to render embedding runtime: unknown error");
         }
     }
 
@@ -792,7 +793,6 @@ private:
     void runTune();
     // Tuning helpers
     Result<void> applyTuningBaseline(bool apply);
-    std::map<std::string, std::string> parseSimpleToml(const std::filesystem::path& path) const;
     std::filesystem::path getConfigPath() const;
     Result<void> writeConfigValue(const std::string& key, const std::string& value);
 };
@@ -1013,17 +1013,12 @@ void DoctorCommand::registerCommand(CLI::App& app, YamsCLI* cli) {
         auto r = applyTuningBaseline(apply);
         if (!r) {
             spdlog::error("Doctor tuning failed: {}", r.error().message);
-            std::exit(1);
+            throw CLI::RuntimeError(1);
         }
     });
 }
 
 // --- TOML helpers (delegating to shared utilities) ---
-std::map<std::string, std::string>
-DoctorCommand::parseSimpleToml(const std::filesystem::path& path) const {
-    return yams::config::parse_simple_toml(path);
-}
-
 std::filesystem::path DoctorCommand::getConfigPath() const {
     return yams::config::get_config_path();
 }
@@ -1161,7 +1156,9 @@ void DoctorCommand::runVectorsFix() {
                                     std::string num = ddl.substr(pos + 6, end - (pos + 6));
                                     try {
                                         dbDim = static_cast<size_t>(std::stoul(num));
-                                    } catch (...) {
+                                    } catch (const std::exception& error) {
+                                        spdlog::debug("Unable to parse stored vector dimension: {}",
+                                                      error.what());
                                     }
                                 }
                             }
@@ -1196,21 +1193,7 @@ void DoctorCommand::runVectorsFix() {
     std::string modelName;
     fs::path modelsPath = cli_->getDataPath() / "models";
 
-    // Check preferred model from env first
-    if (const char* pref = std::getenv("YAMS_PREFERRED_MODEL")) {
-        modelName = pref;
-    }
-
-    // Then check config file
-    if (modelName.empty()) {
-        if (!configPath.empty()) {
-            auto config = parseSimpleToml(configPath);
-            auto it = config.find("embeddings.preferred_model");
-            if (it != config.end() && !it->second.empty()) {
-                modelName = it->second;
-            }
-        }
-    }
+    modelName = cli_->getResolvedEmbeddingConfig().preferredModel;
 
     // If still no preference, find first installed model
     if (modelName.empty()) {
@@ -1231,7 +1214,7 @@ void DoctorCommand::runVectorsFix() {
     auto getModelDim = [&](const std::string& name) -> std::optional<size_t> {
         auto dataPath = cli_ ? cli_->getDataPath() : yams::config::get_data_dir();
         if (auto metaDim = vecutil::getModelDimensionFromMetadata(dataPath, name))
-            return *metaDim;
+            return metaDim;
         return vecutil::getModelDimensionHeuristic(name);
     };
 

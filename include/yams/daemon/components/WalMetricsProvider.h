@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <memory>
 #include <yams/wal/wal_manager.h>
 
@@ -15,13 +16,15 @@ public:
         std::size_t logFileCount{0};
     };
 
-    void setManager(std::shared_ptr<yams::wal::WALManager> wal) { wal_ = std::move(wal); }
+    void setManager(std::shared_ptr<yams::wal::WALManager> wal) {
+        std::atomic_store_explicit(&wal_, std::move(wal), std::memory_order_release);
+    }
 
     Stats getStats() const noexcept {
         // Best-effort: return zeros unless WAL stats are explicitly available.
         // Avoid hard link dependency on yams_wal in daemon binary linking.
         Stats s;
-        auto wal = wal_.lock();
+        auto wal = std::atomic_load_explicit(&wal_, std::memory_order_acquire);
         if (wal) {
             auto walStats = wal->getStats();
             s.activeTransactions = walStats.activeTransactions;
@@ -34,7 +37,7 @@ public:
     }
 
 private:
-    std::weak_ptr<yams::wal::WALManager> wal_;
+    std::shared_ptr<yams::wal::WALManager> wal_;
 };
 
 } // namespace yams::daemon

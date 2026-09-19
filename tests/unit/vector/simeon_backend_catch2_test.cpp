@@ -12,6 +12,8 @@
 #include <vector>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include "../../common/test_helpers_catch2.h"
+
 using namespace yams::vector;
 using Catch::Matchers::StartsWith;
 
@@ -20,6 +22,7 @@ namespace {
 EmbeddingConfig make_cfg(size_t dim = 256) {
     EmbeddingConfig cfg;
     cfg.backend = EmbeddingConfig::Backend::Simeon;
+    cfg.backend_is_resolved = true;
     cfg.embedding_dim = dim;
     cfg.normalize_embeddings = true;
     cfg.max_sequence_length = 512;
@@ -89,10 +92,12 @@ TEST_CASE("SimeonBackend batch matches per-item encoding", "[vector][simeon]") {
     }
 }
 
-TEST_CASE("EmbeddingGenerator selects Simeon via env override", "[vector][simeon]") {
-    setenv("YAMS_EMBED_BACKEND", "simeon", 1);
+TEST_CASE("EmbeddingGenerator trusts typed backend over ambient environment",
+          "[vector][simeon][config]") {
+    yams::test::ScopedEnvVar backend{"YAMS_EMBED_BACKEND", std::string{"daemon"}};
 
     EmbeddingConfig cfg;
+    cfg.backend = EmbeddingConfig::Backend::Simeon;
     cfg.embedding_dim = 384;
     cfg.normalize_embeddings = true;
     EmbeddingGenerator gen(cfg);
@@ -102,13 +107,12 @@ TEST_CASE("EmbeddingGenerator selects Simeon via env override", "[vector][simeon
 
     auto v = gen.generateEmbedding("hello world");
     REQUIRE(v.size() == 384u);
-
-    unsetenv("YAMS_EMBED_BACKEND");
 }
 
 TEST_CASE("EmbeddingGenerator selects Simeon when configured directly", "[vector][simeon]") {
     EmbeddingConfig cfg;
     cfg.backend = EmbeddingConfig::Backend::Simeon;
+    cfg.backend_is_resolved = true;
     cfg.embedding_dim = 128;
     cfg.normalize_embeddings = true;
 
@@ -130,45 +134,10 @@ TEST_CASE("EmbeddingGenerator moved-from observers report neutral state",
     CHECK((destination.getConfig().embedding_dim == 128));
 }
 
-TEST_CASE("EmbeddingGenerator selects Daemon via env override", "[vector][daemon]") {
-    setenv("YAMS_EMBED_BACKEND", "daemon", 1);
-
-    EmbeddingConfig cfg;
-    cfg.backend = EmbeddingConfig::Backend::Simeon;
-    EmbeddingGenerator gen(cfg);
-
-    REQUIRE_THAT(gen.getBackendName(), StartsWith("Daemon"));
-
-    unsetenv("YAMS_EMBED_BACKEND");
-}
-
-TEST_CASE("EmbeddingGenerator maps legacy onnx env override to Daemon", "[vector][daemon]") {
-    setenv("YAMS_EMBED_BACKEND", "onnx", 1);
-
-    EmbeddingConfig cfg;
-    cfg.backend = EmbeddingConfig::Backend::Simeon;
-    EmbeddingGenerator gen(cfg);
-
-    REQUIRE_THAT(gen.getBackendName(), StartsWith("Daemon"));
-
-    unsetenv("YAMS_EMBED_BACKEND");
-}
-
-TEST_CASE("EmbeddingGenerator maps onnxruntime env override to Daemon path", "[vector][daemon]") {
-    setenv("YAMS_EMBED_BACKEND", "onnxruntime", 1);
-
-    EmbeddingConfig cfg;
-    cfg.backend = EmbeddingConfig::Backend::Simeon;
-    EmbeddingGenerator gen(cfg);
-
-    REQUIRE_THAT(gen.getBackendName(), StartsWith("Daemon"));
-
-    unsetenv("YAMS_EMBED_BACKEND");
-}
-
 TEST_CASE("EmbeddingGenerator maps OnnxRuntime config to Daemon path", "[vector][daemon]") {
     EmbeddingConfig cfg;
     cfg.backend = EmbeddingConfig::Backend::OnnxRuntime;
+    cfg.backend_is_resolved = true;
 
     EmbeddingGenerator gen(cfg);
     REQUIRE_THAT(gen.getBackendName(), StartsWith("Daemon"));
@@ -177,6 +146,7 @@ TEST_CASE("EmbeddingGenerator maps OnnxRuntime config to Daemon path", "[vector]
 TEST_CASE("EmbeddingGenerator maps legacy Hybrid config to Daemon path", "[vector][daemon]") {
     EmbeddingConfig cfg;
     cfg.backend = EmbeddingConfig::Backend::Hybrid;
+    cfg.backend_is_resolved = true;
 
     EmbeddingGenerator gen(cfg);
     REQUIRE_THAT(gen.getBackendName(), StartsWith("Daemon"));
@@ -185,6 +155,7 @@ TEST_CASE("EmbeddingGenerator maps legacy Hybrid config to Daemon path", "[vecto
 TEST_CASE("EmbeddingGenerator selects Daemon when configured directly", "[vector][daemon]") {
     EmbeddingConfig cfg;
     cfg.backend = EmbeddingConfig::Backend::Daemon;
+    cfg.backend_is_resolved = true;
 
     EmbeddingGenerator gen(cfg);
     REQUIRE_THAT(gen.getBackendName(), StartsWith("Daemon"));

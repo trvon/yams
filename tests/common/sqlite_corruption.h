@@ -114,8 +114,7 @@ inline void corruptWalFrame(const std::filesystem::path& dbPath) {
     const auto wal = walPath(dbPath);
     if (!std::filesystem::exists(wal) ||
         std::filesystem::file_size(wal) <= kWalHeaderSize + kWalFrameHeaderSize) {
-        throw std::runtime_error("corruptWalFrame: no uncheckpointed WAL frame at " +
-                                 wal.string());
+        throw std::runtime_error("corruptWalFrame: no uncheckpointed WAL frame at " + wal.string());
     }
     corruptOffset(wal, kWalHeaderSize + kWalFrameHeaderSize - 8, 8);
 }
@@ -157,8 +156,7 @@ snapshotMidTransaction(const std::filesystem::path& dbPath,
     }
     auto begin = db.execute("BEGIN IMMEDIATE");
     if (!begin) {
-        throw std::runtime_error("snapshotMidTransaction: begin failed: " +
-                                 begin.error().message);
+        throw std::runtime_error("snapshotMidTransaction: begin failed: " + begin.error().message);
     }
     mutate(db);
 
@@ -175,5 +173,14 @@ snapshotMidTransaction(const std::filesystem::path& dbPath,
     db.close();
     return target;
 }
+
+/**
+ * @brief RAII cleanup for sqlite database artifacts (.db, -wal, -shm).
+ */
+struct ArtifactGuard {
+    explicit ArtifactGuard(std::filesystem::path p) : path(std::move(p)) {}
+    ~ArtifactGuard() { remove_sqlite_artifacts(path); }
+    std::filesystem::path path;
+};
 
 } // namespace yams::test

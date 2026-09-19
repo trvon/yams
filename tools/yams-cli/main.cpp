@@ -4,6 +4,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include "logging.h"
 
 #include <spdlog/spdlog.h>
 #include <boost/asio/executor_work_guard.hpp>
@@ -66,8 +67,7 @@ int main(int argc, char* argv[]) {
         }
 
         // Set up logging with conservative default; YamsCLI::run() adjusts based on flags
-        spdlog::set_level(spdlog::level::warn);
-        spdlog::set_pattern("[%H:%M:%S] [%l] %v");
+        yams::cli::initializeCliLogging();
         yams::cli::cli_perf_trace("main.logging",
                                   std::chrono::duration_cast<std::chrono::microseconds>(
                                       std::chrono::steady_clock::now() - mainStart));

@@ -26,6 +26,7 @@
 #include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <yams/core/types.h>
+#include <yams/crypto/hasher.h>
 #include <yams/storage/storage_backend.h>
 
 namespace yams::storage {
@@ -210,7 +211,29 @@ public:
 
     ~TestDirectory() {
         std::error_code ec;
+#ifdef _WIN32
+        // The fixture owns this root. Prefix the short root before recursive cleanup so a failed
+        // long-path test cannot leave descendants that remove_all cannot traverse via MAX_PATH.
+        auto absolutePath = fs::absolute(path_, ec);
+        if (ec) {
+            fs::remove_all(path_, ec);
+            return;
+        }
+        absolutePath = absolutePath.lexically_normal();
+        absolutePath.make_preferred();
+        const auto& nativePath = absolutePath.native();
+        fs::path cleanupPath;
+        if (nativePath.starts_with(L"\\\\?\\")) {
+            cleanupPath = absolutePath;
+        } else if (nativePath.starts_with(L"\\\\")) {
+            cleanupPath = fs::path(std::wstring(L"\\\\?\\UNC\\") + nativePath.substr(2));
+        } else {
+            cleanupPath = fs::path(std::wstring(L"\\\\?\\") + nativePath);
+        }
+        fs::remove_all(cleanupPath, ec);
+#else
         fs::remove_all(path_, ec);
+#endif
     }
 
     const fs::path& path() const { return path_; }
@@ -273,6 +296,60 @@ TEST_CASE("FilesystemBackend - Initialization", "[storage][backend][filesystem][
     }
 }
 
+TEST_CASE("FilesystemBackend - Rejects unsafe object keys",
+          "[storage][backend][filesystem][security]") {
+    TestDirectory testDir;
+    const auto storagePath = testDir.subdir("storage");
+    auto backend = createFilesystemBackend(storagePath);
+    REQUIRE(backend != nullptr);
+    const auto data = bytesOf("must-stay-contained");
+
+    const std::vector<std::string> invalidKeys = {
+        "",
+        "/absolute",
+        "C:/absolute",
+        "../escape",
+        "nested/../escape",
+        "./relative",
+        "nested\\escape",
+        "control\nkey",
+        std::string(4097, 'a'),
+    };
+    for (const auto& key : invalidKeys) {
+        CAPTURE(key);
+        const auto stored = backend->store(key, data);
+        REQUIRE_FALSE(stored.has_value());
+        CHECK(stored.error().code == ErrorCode::InvalidPath);
+        CHECK(backend->retrieve(key).error().code == ErrorCode::InvalidPath);
+        CHECK(backend->exists(key).error().code == ErrorCode::InvalidPath);
+        CHECK(backend->remove(key).error().code == ErrorCode::InvalidPath);
+    }
+
+    CHECK_FALSE(fs::exists(testDir.path() / "escape"));
+    REQUIRE(backend->store("valid/nested/key", data).has_value());
+    REQUIRE(backend->retrieve("valid/nested/key").has_value());
+    CHECK(backend->retrieve("valid/nested/key").value() == data);
+
+#ifndef _WIN32
+    const std::string symlinkKey = "pivot/escaped";
+    auto hasher = crypto::createSHA256Hasher();
+    const auto hash = hasher->hash(std::span<const std::byte>(
+        reinterpret_cast<const std::byte*>(symlinkKey.data()), symlinkKey.size()));
+    REQUIRE(hash.size() >= 4);
+    const auto shard = storagePath / "objects" / hash.substr(0, 2) / hash.substr(2, 2);
+    REQUIRE(fs::create_directories(shard));
+
+    const auto outside = testDir.subdir("outside");
+    REQUIRE(fs::create_directories(outside));
+    fs::create_directory_symlink(outside, shard / "pivot");
+
+    const auto stored = backend->store(symlinkKey, data);
+    REQUIRE_FALSE(stored.has_value());
+    CHECK(stored.error().code == ErrorCode::InvalidPath);
+    CHECK_FALSE(fs::exists(outside / "escaped"));
+#endif
+}
+
 TEST_CASE("FilesystemBackend - Store and Retrieve", "[storage][backend][filesystem][crud]") {
     TestDirectory testDir;
     auto backend = createFilesystemBackend(testDir.subdir("storage"));
@@ -298,7 +375,7 @@ TEST_CASE("FilesystemBackend - Store and Retrieve", "[storage][backend][filesyst
     }
 
     SECTION("Store and retrieve 1MB data") {
-        auto data = generateTestData(1024 * 1024);
+        auto data = generateTestData(std::size_t{1024} * 1024);
         REQUIRE(backend->store("1mb_key", data));
 
         auto result = backend->retrieve("1mb_key");
@@ -333,6 +410,52 @@ TEST_CASE("FilesystemBackend - Store and Retrieve", "[storage][backend][filesyst
         REQUIRE_FALSE(result);
         CHECK(result.error().code == ErrorCode::ChunkNotFound);
     }
+}
+
+TEST_CASE("FilesystemBackend - long object paths support CRUD and listing",
+          "[storage][backend][filesystem][long-path]") {
+    TestDirectory testDir;
+    const auto storagePath = testDir.subdir("task-record-store");
+    auto backend = createFilesystemBackend(storagePath);
+    REQUIRE(backend != nullptr);
+
+    const std::string taskId(180, 't');
+    const std::string recordHash(64, 'a');
+    const std::string key = "index/user/" + taskId + "/" + recordHash;
+    REQUIRE(taskId.size() < 255);
+    REQUIRE(recordHash.size() < 255);
+    REQUIRE((storagePath / "objects" / "00" / "00" / key).native().size() > 300);
+
+    const auto original = bytesOf("long-path-original");
+    REQUIRE(backend->store(key, original));
+
+    const auto existsAfterStore = backend->exists(key);
+    REQUIRE(existsAfterStore);
+    CHECK(existsAfterStore.value());
+
+    const auto retrieved = backend->retrieve(key);
+    REQUIRE(retrieved);
+    CHECK(retrieved.value() == original);
+
+    const auto listed = backend->list("index/user/");
+    REQUIRE(listed);
+    REQUIRE(listed.value().size() == 1);
+    CHECK(listed.value().front() == key);
+
+    const auto updated = bytesOf("long-path-updated");
+    REQUIRE(backend->store(key, updated));
+    const auto retrievedAfterUpdate = backend->retrieve(key);
+    REQUIRE(retrievedAfterUpdate);
+    CHECK(retrievedAfterUpdate.value() == updated);
+
+    REQUIRE(backend->remove(key));
+    const auto existsAfterRemove = backend->exists(key);
+    REQUIRE(existsAfterRemove);
+    CHECK_FALSE(existsAfterRemove.value());
+
+    const auto listedAfterRemove = backend->list("index/user/");
+    REQUIRE(listedAfterRemove);
+    CHECK(listedAfterRemove.value().empty());
 }
 
 TEST_CASE("FilesystemBackend - Exists", "[storage][backend][filesystem][exists]") {
@@ -395,6 +518,23 @@ TEST_CASE("FilesystemBackend - Remove", "[storage][backend][filesystem][remove]"
 
         auto result = backend->retrieve("retrieve_after_remove");
         REQUIRE_FALSE(result);
+    }
+
+    SECTION("Clear removes the owned namespace and permits reuse") {
+        const auto storagePath = testDir.subdir("storage");
+        const auto data = generateDeterministicData(32);
+        REQUIRE(backend->store("nested/session/object", data));
+        REQUIRE(fs::exists(storagePath));
+
+        REQUIRE(backend->clear());
+        CHECK((!fs::exists(storagePath) || fs::is_empty(storagePath)));
+        REQUIRE(backend->list());
+        CHECK(backend->list().value().empty());
+
+        REQUIRE(backend->store("after-clear", data));
+        const auto restored = backend->retrieve("after-clear");
+        REQUIRE(restored);
+        CHECK(restored.value() == data);
     }
 }
 
@@ -589,7 +729,10 @@ TEST_CASE("FilesystemBackend - Key Names", "[storage][backend][filesystem][keys]
     }
 
     SECTION("SHA256-like hash keys") {
-        std::string hashKey = "a1b2c3d4e5f6789012345678901234567890123456789012345678901234abcd";
+        std::string hashKey =
+            "a1b2c3d4e5f6789012345678901234567890123456789012345678901234abcd"; // gitleaks:allow --
+                                                                                // synthetic SHA-256
+                                                                                // fixture
         REQUIRE(backend->store(hashKey, data));
         CHECK(backend->retrieve(hashKey));
     }
@@ -734,7 +877,7 @@ TEST_CASE("FilesystemBackend - Edge Cases", "[storage][backend][filesystem][edge
     }
 
     SECTION("Large file handling (10MB)") {
-        auto data = generateTestData(10 * 1024 * 1024);
+        auto data = generateTestData(std::size_t{10} * 1024 * 1024);
         REQUIRE(backend->store("large_10mb", data));
 
         auto result = backend->retrieve("large_10mb");
@@ -1210,7 +1353,7 @@ TEST_CASE("BackendConfig - Default Values", "[storage][backend][config]") {
     BackendConfig config;
 
     CHECK(config.type == "filesystem");
-    CHECK(config.cacheSize == 256 * 1024 * 1024);
+    CHECK(config.cacheSize == std::size_t{256} * 1024 * 1024);
     CHECK(config.cacheTTL == 3600);
     CHECK(config.maxConcurrentOps == 10);
     CHECK(config.requestTimeout == 30);

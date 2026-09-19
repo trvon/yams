@@ -1,5 +1,6 @@
 // AsioConnectionPool unit tests for stale socket detection
 
+// pi-lens-ignore: fatal error
 #include <catch2/catch_test_macros.hpp>
 
 #include <boost/asio/co_spawn.hpp>
@@ -50,6 +51,36 @@ std::string randomSuffix() {
 }
 
 } // namespace
+
+TEST_CASE("ConnectionRegistry shutdown closes idle sockets without terminal cancellation",
+          "[daemon][connection-pool][shutdown][unit]") {
+    boost::asio::io_context io;
+    auto workGuard = boost::asio::make_work_guard(io);
+    std::thread ioThread([&] { io.run(); });
+
+    TransportOptions opts;
+    opts.executor = io.get_executor();
+    auto conn = std::make_shared<AsioConnection>(opts);
+    conn->socket = std::make_unique<AsioConnection::socket_t>(conn->strand);
+    boost::system::error_code ec;
+    conn->socket->open(boost::asio::local::stream_protocol(), ec);
+    REQUIRE_FALSE(ec);
+
+    std::atomic<bool> terminalCancellation{false};
+    conn->cancellation_slot().assign([&](boost::asio::cancellation_type) {
+        terminalCancellation.store(true, std::memory_order_release);
+    });
+    ConnectionRegistry::instance().add(conn);
+
+    ConnectionRegistry::instance().closeAll();
+
+    CHECK_FALSE(terminalCancellation.load(std::memory_order_acquire));
+    CHECK_FALSE(conn->socket);
+
+    workGuard.reset();
+    io.stop();
+    ioThread.join();
+}
 
 TEST_CASE("AsioConnection socket close waits for the socket strand",
           "[daemon][connection-pool][strand][unit]") {
@@ -128,6 +159,44 @@ TEST_CASE("AsioConnection close does not hang when its executor is already stopp
     }
 
     closeThread.join();
+    CHECK_FALSE(conn->socket);
+}
+
+TEST_CASE("AsioConnection bypasses a blocked strand during global teardown",
+          "[daemon][connection-pool][strand][shutdown][unit]") {
+#ifdef _WIN32
+    SKIP("Unix domain socket tests skipped on Windows");
+#endif
+
+    TransportOptions opts;
+    auto conn = std::make_shared<AsioConnection>(opts);
+    conn->socket = std::make_unique<AsioConnection::socket_t>(conn->strand);
+    boost::system::error_code ec;
+    conn->socket->open(boost::asio::local::stream_protocol(), ec);
+    REQUIRE_FALSE(ec);
+
+    std::promise<void> blockerEntered;
+    std::promise<void> releaseBlocker;
+    std::promise<void> blockerExited;
+    auto releaseFuture = releaseBlocker.get_future();
+    boost::asio::post(conn->strand, [&] {
+        blockerEntered.set_value();
+        releaseFuture.wait();
+        blockerExited.set_value();
+    });
+    REQUIRE(blockerEntered.get_future().wait_for(1s) == std::future_status::ready);
+
+    GlobalIOContext::testing_set_destroyed(true);
+    auto closeFuture = std::async(std::launch::async, [&] { conn->close(); });
+    const bool returnedDuringTeardown = closeFuture.wait_for(100ms) == std::future_status::ready;
+    GlobalIOContext::testing_set_destroyed(false);
+    releaseBlocker.set_value();
+    // The strand task holds a reference to releaseFuture; wait until it actually finishes so the
+    // promises below are not destroyed while the io thread is still inside wait().
+    REQUIRE(blockerExited.get_future().wait_for(1s) == std::future_status::ready);
+    closeFuture.wait();
+
+    CHECK(returnedDuringTeardown);
     CHECK_FALSE(conn->socket);
 }
 

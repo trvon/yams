@@ -193,7 +193,7 @@ TEST_CASE("Plugin: ONNX plugin loading with isolation", "[daemon][plugin][onnx]"
     }
 
     SECTION("Load ONNX plugin successfully") {
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(env.trustFile);
         REQUIRE(host.trustAdd(pluginPath->parent_path()));
 
@@ -222,7 +222,7 @@ TEST_CASE("Plugin: ONNX plugin loading with isolation", "[daemon][plugin][onnx]"
     }
 
     SECTION("Trust validation") {
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(env.trustFile);
 
         // Scanning is allowed even without trust (just reads metadata)
@@ -245,7 +245,7 @@ TEST_CASE("Plugin: ONNX plugin loading with isolation", "[daemon][plugin][onnx]"
     }
 
     SECTION("Multiple load/unload cycles") {
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(env.trustFile);
         REQUIRE(host.trustAdd(pluginPath->parent_path()));
 
@@ -302,7 +302,7 @@ TEST_CASE("Plugin: ONNX plugin reports missing runtime cleanly",
                             (env.tempDir / "missing-onnxruntime.so").string());
 #endif
 
-    AbiPluginHost host(nullptr);
+    AbiPluginHost host;
     host.setTrustFile(env.trustFile);
     REQUIRE(host.trustAdd(pluginPath->parent_path()));
 
@@ -356,7 +356,7 @@ TEST_CASE("Plugin: Error handling and edge cases", "[daemon][plugin][error]") {
     IsolatedPluginEnv env;
 
     SECTION("Load non-existent plugin") {
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(env.trustFile);
 
         fs::path nonExistent = env.tempDir / "nonexistent.so";
@@ -370,7 +370,7 @@ TEST_CASE("Plugin: Error handling and edge cases", "[daemon][plugin][error]") {
             SKIP("ONNX plugin not available for trust test");
         }
 
-        AbiPluginHost host(nullptr);
+        AbiPluginHost host;
         host.setTrustFile(env.trustFile);
         // Don't add trust
 
@@ -403,7 +403,7 @@ TEST_CASE("Plugin: provenance root smoke", "[daemon][plugin][provenance]") {
 
     const fs::path expectedRoot = fs::weakly_canonical(fs::path(expectedRootEnv));
 
-    AbiPluginHost host(nullptr);
+    AbiPluginHost host;
     host.setTrustFile(env.trustFile);
     REQUIRE(host.trustAdd(pluginPath->parent_path()));
 

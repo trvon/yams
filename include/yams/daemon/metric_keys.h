@@ -1,5 +1,7 @@
 #pragma once
 
+#include <array>
+#include <cstdint>
 #include <string_view>
 
 namespace yams::daemon::metrics {
@@ -145,12 +147,23 @@ constexpr std::string_view kSnapshotPersisted = "snapshot_persisted";
 constexpr std::string_view kPostIngestDrained = "post_ingest_drained";
 constexpr std::string_view kIndexVisible = "index_visible";
 
-// Storage metrics
+// Storage and local disk-pressure metrics
 constexpr std::string_view kStorageLogicalBytes = "storage_logical_bytes";
 constexpr std::string_view kStoragePhysicalBytes = "storage_physical_bytes";
 constexpr std::string_view kStorageDocuments = "storage_documents";
 constexpr std::string_view kStorageSavedBytes = "storage_saved_bytes";
 constexpr std::string_view kStorageSavedPct = "storage_saved_pct";
+constexpr std::string_view kStorageCapacityBytesLow = "storage_capacity_bytes_low";
+constexpr std::string_view kStorageCapacityBytesHigh = "storage_capacity_bytes_high";
+constexpr std::string_view kStorageAvailableBytesLow = "storage_available_bytes_low";
+constexpr std::string_view kStorageAvailableBytesHigh = "storage_available_bytes_high";
+constexpr std::string_view kStoragePressureLevel = "storage_pressure_level";
+constexpr std::string_view kStorageWarningFreePercentBp = "storage_warning_free_percent_bp";
+constexpr std::string_view kStorageWriteAdmissionBytesLow = "storage_write_admission_bytes_low";
+constexpr std::string_view kStorageWriteAdmissionBytesHigh = "storage_write_admission_bytes_high";
+constexpr std::string_view kStorageEmergencyReserveBytesLow = "storage_emergency_reserve_bytes_low";
+constexpr std::string_view kStorageEmergencyReserveBytesHigh =
+    "storage_emergency_reserve_bytes_high";
 
 // Detailed storage breakdown
 constexpr std::string_view kCasPhysicalBytes = "cas_physical_bytes";
@@ -162,6 +175,13 @@ constexpr std::string_view kIndexPhysicalBytes = "index_physical_bytes";
 constexpr std::string_view kVectorPhysicalBytes = "vector_physical_bytes";
 constexpr std::string_view kLogsTmpPhysicalBytes = "logs_tmp_physical_bytes";
 constexpr std::string_view kPhysicalTotalBytes = "physical_total_bytes";
+
+// WAL metrics (detailed optics for the write-ahead log data system)
+constexpr std::string_view kWALActiveTransactions = "wal_active_transactions";
+constexpr std::string_view kWALPendingEntries = "wal_pending_entries";
+constexpr std::string_view kWALTotalEntries = "wal_total_entries";
+constexpr std::string_view kWALTotalBytes = "wal_total_bytes";
+constexpr std::string_view kWALLogFileCount = "wal_log_file_count";
 
 // Session metrics
 constexpr std::string_view kWatchEnabled = "watch_enabled";
@@ -177,6 +197,25 @@ constexpr std::string_view kTuningAdmitStopThreshold = "tuning_admit_stop_thresh
 // WorkCoordinator metrics
 constexpr std::string_view kWorkCoordinatorActive = "work_coordinator_active";
 constexpr std::string_view kWorkCoordinatorRunning = "work_coordinator_running";
+constexpr std::string_view kWorkCoordinatorProgressProbesPosted =
+    "work_coordinator_progress_probes_posted";
+constexpr std::string_view kWorkCoordinatorProgressProbesCompleted =
+    "work_coordinator_progress_probes_completed";
+constexpr std::string_view kWorkCoordinatorProgressProbeInFlight =
+    "work_coordinator_progress_probe_in_flight";
+constexpr std::string_view kWorkCoordinatorLastProgressAgeMs =
+    "work_coordinator_last_progress_age_ms";
+
+// Vector checkpoint metrics
+constexpr std::string_view kVectorCheckpointPhase = "vector_checkpoint_phase";
+constexpr std::string_view kVectorCheckpointRequests = "vector_checkpoint_requests";
+constexpr std::string_view kVectorCheckpointCoalesced = "vector_checkpoint_coalesced";
+constexpr std::string_view kVectorCheckpointStarted = "vector_checkpoint_started";
+constexpr std::string_view kVectorCheckpointCompleted = "vector_checkpoint_completed";
+constexpr std::string_view kVectorCheckpointTimedOut = "vector_checkpoint_timed_out";
+constexpr std::string_view kVectorCheckpointPostFailures = "vector_checkpoint_post_failures";
+constexpr std::string_view kVectorCheckpointQueuedAgeMs = "vector_checkpoint_queued_age_ms";
+constexpr std::string_view kVectorCheckpointRunningAgeMs = "vector_checkpoint_running_age_ms";
 
 // Other request counts
 constexpr std::string_view kServiceFsmState = "service_fsm_state";
@@ -229,6 +268,44 @@ constexpr std::string_view kRepairTotalBacklog = "repair_total_backlog";
 constexpr std::string_view kRepairProcessed = "repair_processed";
 constexpr std::string_view kRepairCurrentOperationCode = "repair_current_operation_code";
 constexpr std::string_view kRepairCurrentOperationElapsedMs = "repair_current_operation_elapsed_ms";
+
+// Wire codes published under kRepairCurrentOperationCode (0 = idle). The daemon and the CLI both
+// read this table, so an operation is named in exactly one place.
+struct RepairOperationCode {
+    uint64_t code;
+    std::string_view name;
+};
+inline constexpr std::array<RepairOperationCode, 13> kRepairOperationCodes = {{
+    {1, "stuck_docs"},
+    {2, "orphans"},
+    {3, "mime"},
+    {4, "downloads"},
+    {5, "path_tree"},
+    {6, "dedupe"},
+    {7, "chunks"},
+    {8, "block_refs"},
+    {9, "graph"},
+    {10, "fts5"},
+    {11, "embeddings"},
+    {12, "topology"},
+    {13, "optimize"},
+}};
+
+constexpr uint64_t repairOperationCodeForName(std::string_view name) noexcept {
+    for (const auto& entry : kRepairOperationCodes) {
+        if (entry.name == name)
+            return entry.code;
+    }
+    return 0;
+}
+
+constexpr std::string_view repairOperationNameForCode(uint64_t code) noexcept {
+    for (const auto& entry : kRepairOperationCodes) {
+        if (entry.code == code)
+            return entry.name;
+    }
+    return "";
+}
 
 // Topology rebuild telemetry
 constexpr std::string_view kTopologyRebuildRunning = "topology_rebuild_running";

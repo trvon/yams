@@ -46,22 +46,6 @@ std::string hexEncode(const unsigned char* data, std::size_t len) {
     return out;
 }
 
-std::string percentEncode(const std::string& s, bool encodeSlash = false) {
-    static const char* unreserved =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.~";
-    std::string out;
-    for (unsigned char c : s) {
-        if (std::strchr(unreserved, c) || (!encodeSlash && c == '/')) {
-            out.push_back((char)c);
-        } else {
-            char buf[4]{};
-            std::snprintf(buf, sizeof(buf), "%%%02X", c);
-            out.append(buf);
-        }
-    }
-    return out;
-}
-
 struct ParsedUrl {
     std::string scheme;
     std::string host;
@@ -95,6 +79,7 @@ ParsedUrl parseUrl(const std::string& url) {
 }
 
 std::string formatAmzDate(std::string* outShortDate) {
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only test date override, allowlisted.
     if (const char* fixed = std::getenv("YAMS_S3_SIGNER_FIXED_AMZ_DATE")) {
         std::string ts = trimWhitespace(fixed);
         if (ts.size() >= 8) {
@@ -170,8 +155,11 @@ S3Signer::signRequest(CURL* curl, const BackendConfig& config, const std::string
     }
 
     if (accessKey.empty() || secretKey.empty()) {
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only AWS credential fallback, allowlisted.
         const char* ak = std::getenv("AWS_ACCESS_KEY_ID");
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only AWS credential fallback, allowlisted.
         const char* sk = std::getenv("AWS_SECRET_ACCESS_KEY");
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only AWS credential fallback, allowlisted.
         const char* st = std::getenv("AWS_SESSION_TOKEN");
         if (ak)
             accessKey = ak;
@@ -227,7 +215,12 @@ S3Signer::signRequest(CURL* curl, const BackendConfig& config, const std::string
     std::string amzDate = formatAmzDate(&ymd);
 
     // Canonical request
-    std::string canonicalURI = percentEncode(pu.path, false);
+    // Canonical URI must be the absolute path exactly as it will appear on the wire. Callers
+    // (the S3 plugin's buildObjectUrl) already RFC3986-encode the path, so re-encoding here would
+    // double-encode '%' (e.g. a key containing '%2F' becomes '%252F' on the wire, which must stay
+    // '%252F' in the canonical URI). MinIO and AWS SDKs sign the encoded path verbatim; a
+    // re-encoded canonical URI produces SignatureDoesNotMatch (HTTP 403) for encoded keys.
+    std::string canonicalURI = pu.path;
     // Canonical query (assume none or already encoded → sort if present)
     std::string canonicalQuery;
     if (!pu.query.empty()) {

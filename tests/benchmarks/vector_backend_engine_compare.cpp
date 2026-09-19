@@ -3,13 +3,17 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
-#include <filesystem>
 #include <numeric>
 #include <random>
 #include <stdexcept>
 #include <string>
 #include <unordered_set>
 #include <vector>
+
+#if defined(__APPLE__)
+#include <os/log.h>
+#include <os/signpost.h>
+#endif
 
 #include <spdlog/spdlog.h>
 
@@ -20,12 +24,205 @@ using namespace yams::vector;
 
 namespace {
 
+enum class ProfilePhase {
+    CorpusSetup,
+    GroundTruth,
+    SimeonPqIngest,
+    SimeonPqBuild,
+    SimeonPqReadiness,
+    SimeonPqSteadyQueries,
+    Vec0L2Ingest,
+    Vec0L2Build,
+    Vec0L2Readiness,
+    Vec0L2SteadyQueries,
+    ExactScanIngest,
+    ExactScanBuild,
+    ExactScanReadiness,
+    ExactScanSteadyQueries,
+};
+
+class ProfileInterval {
+public:
+    explicit ProfileInterval(ProfilePhase phase) : phase_(phase) {
+#if defined(__APPLE__)
+        id_ = os_signpost_id_generate(log());
+        begin();
+#endif
+    }
+
+    ~ProfileInterval() {
+#if defined(__APPLE__)
+        end();
+#endif
+    }
+
+    ProfileInterval(const ProfileInterval&) = delete;
+    ProfileInterval& operator=(const ProfileInterval&) = delete;
+
+private:
+#if defined(__APPLE__)
+    static os_log_t log() {
+        static os_log_t benchmarkLog =
+            os_log_create("org.yams.benchmarks", OS_LOG_CATEGORY_POINTS_OF_INTEREST);
+        return benchmarkLog;
+    }
+
+    void begin() const {
+        switch (phase_) {
+            case ProfilePhase::CorpusSetup:
+                os_signpost_interval_begin(log(), id_, "corpus_setup");
+                break;
+            case ProfilePhase::GroundTruth:
+                os_signpost_interval_begin(log(), id_, "ground_truth");
+                break;
+            case ProfilePhase::SimeonPqIngest:
+                os_signpost_interval_begin(log(), id_, "simeon_pq_ingest");
+                break;
+            case ProfilePhase::SimeonPqBuild:
+                os_signpost_interval_begin(log(), id_, "simeon_pq_build");
+                break;
+            case ProfilePhase::SimeonPqReadiness:
+                os_signpost_interval_begin(log(), id_, "simeon_pq_readiness");
+                break;
+            case ProfilePhase::SimeonPqSteadyQueries:
+                os_signpost_interval_begin(log(), id_, "simeon_pq_steady_queries");
+                break;
+            case ProfilePhase::Vec0L2Ingest:
+                os_signpost_interval_begin(log(), id_, "vec0_l2_ingest");
+                break;
+            case ProfilePhase::Vec0L2Build:
+                os_signpost_interval_begin(log(), id_, "vec0_l2_build");
+                break;
+            case ProfilePhase::Vec0L2Readiness:
+                os_signpost_interval_begin(log(), id_, "vec0_l2_readiness");
+                break;
+            case ProfilePhase::Vec0L2SteadyQueries:
+                os_signpost_interval_begin(log(), id_, "vec0_l2_steady_queries");
+                break;
+            case ProfilePhase::ExactScanIngest:
+                os_signpost_interval_begin(log(), id_, "exact_scan_ingest");
+                break;
+            case ProfilePhase::ExactScanBuild:
+                os_signpost_interval_begin(log(), id_, "exact_scan_build");
+                break;
+            case ProfilePhase::ExactScanReadiness:
+                os_signpost_interval_begin(log(), id_, "exact_scan_readiness");
+                break;
+            case ProfilePhase::ExactScanSteadyQueries:
+                os_signpost_interval_begin(log(), id_, "exact_scan_steady_queries");
+                break;
+        }
+    }
+
+    void end() const {
+        switch (phase_) {
+            case ProfilePhase::CorpusSetup:
+                os_signpost_interval_end(log(), id_, "corpus_setup");
+                break;
+            case ProfilePhase::GroundTruth:
+                os_signpost_interval_end(log(), id_, "ground_truth");
+                break;
+            case ProfilePhase::SimeonPqIngest:
+                os_signpost_interval_end(log(), id_, "simeon_pq_ingest");
+                break;
+            case ProfilePhase::SimeonPqBuild:
+                os_signpost_interval_end(log(), id_, "simeon_pq_build");
+                break;
+            case ProfilePhase::SimeonPqReadiness:
+                os_signpost_interval_end(log(), id_, "simeon_pq_readiness");
+                break;
+            case ProfilePhase::SimeonPqSteadyQueries:
+                os_signpost_interval_end(log(), id_, "simeon_pq_steady_queries");
+                break;
+            case ProfilePhase::Vec0L2Ingest:
+                os_signpost_interval_end(log(), id_, "vec0_l2_ingest");
+                break;
+            case ProfilePhase::Vec0L2Build:
+                os_signpost_interval_end(log(), id_, "vec0_l2_build");
+                break;
+            case ProfilePhase::Vec0L2Readiness:
+                os_signpost_interval_end(log(), id_, "vec0_l2_readiness");
+                break;
+            case ProfilePhase::Vec0L2SteadyQueries:
+                os_signpost_interval_end(log(), id_, "vec0_l2_steady_queries");
+                break;
+            case ProfilePhase::ExactScanIngest:
+                os_signpost_interval_end(log(), id_, "exact_scan_ingest");
+                break;
+            case ProfilePhase::ExactScanBuild:
+                os_signpost_interval_end(log(), id_, "exact_scan_build");
+                break;
+            case ProfilePhase::ExactScanReadiness:
+                os_signpost_interval_end(log(), id_, "exact_scan_readiness");
+                break;
+            case ProfilePhase::ExactScanSteadyQueries:
+                os_signpost_interval_end(log(), id_, "exact_scan_steady_queries");
+                break;
+        }
+    }
+
+    os_signpost_id_t id_ = OS_SIGNPOST_ID_INVALID;
+#endif
+    ProfilePhase phase_;
+};
+
+ProfilePhase ingestPhase(VectorSearchEngine engine) {
+    switch (engine) {
+        case VectorSearchEngine::SimeonPqAdc:
+            return ProfilePhase::SimeonPqIngest;
+        case VectorSearchEngine::Vec0L2:
+            return ProfilePhase::Vec0L2Ingest;
+        case VectorSearchEngine::ExactScan:
+            return ProfilePhase::ExactScanIngest;
+    }
+    std::abort();
+}
+
+ProfilePhase buildPhase(VectorSearchEngine engine) {
+    switch (engine) {
+        case VectorSearchEngine::SimeonPqAdc:
+            return ProfilePhase::SimeonPqBuild;
+        case VectorSearchEngine::Vec0L2:
+            return ProfilePhase::Vec0L2Build;
+        case VectorSearchEngine::ExactScan:
+            return ProfilePhase::ExactScanBuild;
+    }
+    std::abort();
+}
+
+ProfilePhase readinessPhase(VectorSearchEngine engine) {
+    switch (engine) {
+        case VectorSearchEngine::SimeonPqAdc:
+            return ProfilePhase::SimeonPqReadiness;
+        case VectorSearchEngine::Vec0L2:
+            return ProfilePhase::Vec0L2Readiness;
+        case VectorSearchEngine::ExactScan:
+            return ProfilePhase::ExactScanReadiness;
+    }
+    std::abort();
+}
+
+ProfilePhase steadyQueriesPhase(VectorSearchEngine engine) {
+    switch (engine) {
+        case VectorSearchEngine::SimeonPqAdc:
+            return ProfilePhase::SimeonPqSteadyQueries;
+        case VectorSearchEngine::Vec0L2:
+            return ProfilePhase::Vec0L2SteadyQueries;
+        case VectorSearchEngine::ExactScan:
+            return ProfilePhase::ExactScanSteadyQueries;
+    }
+    std::abort();
+}
+
+enum class EngineSelection { Both, SimeonPq, Vec0L2 };
+
 struct Config {
     size_t corpus = 5000;
     size_t queries = 100;
     size_t dim = 128;
     size_t k = 10;
     unsigned int seed = 42;
+    EngineSelection engine = EngineSelection::Both;
     bool spq_sweep = false;
     bool filter_cell = false;
 };
@@ -56,6 +253,19 @@ Config parseArgs(int argc, char* argv[]) {
             parse("--dim=", cfg.dim) || parse("--k=", cfg.k) || parse("--seed=", cfg.seed)) {
             continue;
         }
+        if (arg.rfind("--engine=", 0) == 0) {
+            const auto engine = arg.substr(std::string_view{"--engine="}.size());
+            if (engine == "both") {
+                cfg.engine = EngineSelection::Both;
+            } else if (engine == "simeon") {
+                cfg.engine = EngineSelection::SimeonPq;
+            } else if (engine == "vec0") {
+                cfg.engine = EngineSelection::Vec0L2;
+            } else {
+                throw std::invalid_argument("--engine must be both, simeon, or vec0");
+            }
+            continue;
+        }
         if (arg == "--spq-sweep") {
             cfg.spq_sweep = true;
             continue;
@@ -66,7 +276,7 @@ Config parseArgs(int argc, char* argv[]) {
         }
         if (arg == "--help") {
             std::printf("Usage: %s [--corpus=N] [--queries=N] [--dim=N] [--k=N] [--seed=N] "
-                        "[--spq-sweep] [--filter-cell]\n",
+                        "[--engine=both|simeon|vec0] [--spq-sweep] [--filter-cell]\n",
                         argv[0]);
             std::exit(0);
         }
@@ -169,46 +379,59 @@ EngineResult runEngine(VectorSearchEngine engine, const Config& cfg,
         rec.content = "benchmark content " + std::to_string(i);
         records.push_back(std::move(rec));
     }
-    auto insert = backend.insertVectorsBatch(records);
-    if (!insert) {
-        throw std::runtime_error(insert.error().message);
+    {
+        ProfileInterval profile(ingestPhase(engine));
+        auto insert = backend.insertVectorsBatch(records);
+        if (!insert) {
+            throw std::runtime_error(insert.error().message);
+        }
     }
 
     const auto build_start = std::chrono::steady_clock::now();
-    auto build = backend.buildIndex();
-    if (!build) {
-        throw std::runtime_error(build.error().message);
+    {
+        ProfileInterval profile(buildPhase(engine));
+        auto build = backend.buildIndex();
+        if (!build) {
+            throw std::runtime_error(build.error().message);
+        }
     }
     const auto build_end = std::chrono::steady_clock::now();
 
     // Exclude one-time lazy index initialization from steady-state query timing. Run the same
     // unmeasured query for every engine so Vec0, Simeon PQ, and exact scan enter the measured loop
-    // from the same query-ready boundary.
-    auto warmup = backend.searchSimilar(queries.front(), cfg.k, 0.0f, std::nullopt, {});
-    if (!warmup) {
-        throw std::runtime_error(warmup.error().message);
+    // from the same query-ready boundary. The readiness signpost keeps this excluded work visible
+    // to Instruments and prevents it from being mistaken for build or steady-query work.
+    {
+        ProfileInterval profile(readinessPhase(engine));
+        auto warmup = backend.searchSimilar(queries.front(), cfg.k, 0.0f, std::nullopt, {});
+        if (!warmup) {
+            throw std::runtime_error(warmup.error().message);
+        }
     }
 
     std::vector<double> latencies_us;
     latencies_us.reserve(queries.size());
     size_t total_hits = 0;
 
-    for (size_t i = 0; i < queries.size(); ++i) {
-        const auto start = std::chrono::steady_clock::now();
-        auto result = backend.searchSimilar(queries[i], cfg.k, 0.0f, std::nullopt, {});
-        const auto end = std::chrono::steady_clock::now();
-        if (!result) {
-            throw std::runtime_error(result.error().message);
-        }
+    {
+        ProfileInterval profile(steadyQueriesPhase(engine));
+        for (size_t i = 0; i < queries.size(); ++i) {
+            const auto start = std::chrono::steady_clock::now();
+            auto result = backend.searchSimilar(queries[i], cfg.k, 0.0f, std::nullopt, {});
+            const auto end = std::chrono::steady_clock::now();
+            if (!result) {
+                throw std::runtime_error(result.error().message);
+            }
 
-        latencies_us.push_back(std::chrono::duration<double, std::micro>(end - start).count());
+            latencies_us.push_back(std::chrono::duration<double, std::micro>(end - start).count());
 
-        std::unordered_set<std::string> expected;
-        for (size_t idx : ground_truth[i]) {
-            expected.insert("chunk_" + std::to_string(idx));
-        }
-        for (const auto& rec : result.value()) {
-            total_hits += expected.contains(rec.chunk_id) ? 1 : 0;
+            std::unordered_set<std::string> expected;
+            for (size_t idx : ground_truth[i]) {
+                expected.insert("chunk_" + std::to_string(idx));
+            }
+            for (const auto& rec : result.value()) {
+                total_hits += expected.contains(rec.chunk_id) ? 1 : 0;
+            }
         }
     }
 
@@ -249,13 +472,21 @@ int main(int argc, char* argv[]) {
     try {
         const Config cfg = parseArgs(argc, argv);
         std::mt19937 rng(cfg.seed);
-        auto corpus = generateCorpus(cfg.corpus, cfg.dim, rng);
-        auto queries = generateCorpus(cfg.queries, cfg.dim, rng);
+        std::vector<std::vector<float>> corpus;
+        std::vector<std::vector<float>> queries;
+        {
+            ProfileInterval profile(ProfilePhase::CorpusSetup);
+            corpus = generateCorpus(cfg.corpus, cfg.dim, rng);
+            queries = generateCorpus(cfg.queries, cfg.dim, rng);
+        }
 
         std::vector<std::vector<size_t>> ground_truth;
-        ground_truth.reserve(queries.size());
-        for (const auto& query : queries) {
-            ground_truth.push_back(bruteForceTopK(query, corpus, cfg.k));
+        {
+            ProfileInterval profile(ProfilePhase::GroundTruth);
+            ground_truth.reserve(queries.size());
+            for (const auto& query : queries) {
+                ground_truth.push_back(bruteForceTopK(query, corpus, cfg.k));
+            }
         }
 
         std::printf("============================================================\n");
@@ -413,12 +644,16 @@ int main(int argc, char* argv[]) {
             return 0;
         }
 
-        const auto spq =
-            runEngine(VectorSearchEngine::SimeonPqAdc, cfg, corpus, queries, ground_truth);
-        const auto vec0 = runEngine(VectorSearchEngine::Vec0L2, cfg, corpus, queries, ground_truth);
-
-        printResult(spq, cfg.k);
-        printResult(vec0, cfg.k);
+        if (cfg.engine != EngineSelection::Vec0L2) {
+            const auto spq =
+                runEngine(VectorSearchEngine::SimeonPqAdc, cfg, corpus, queries, ground_truth);
+            printResult(spq, cfg.k);
+        }
+        if (cfg.engine != EngineSelection::SimeonPq) {
+            const auto vec0 =
+                runEngine(VectorSearchEngine::Vec0L2, cfg, corpus, queries, ground_truth);
+            printResult(vec0, cfg.k);
+        }
         return 0;
     } catch (const std::exception& e) {
         std::fprintf(stderr, "Benchmark failed: %s\n", e.what());

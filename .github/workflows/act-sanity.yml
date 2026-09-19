@@ -77,7 +77,7 @@ jobs:
           set -euo pipefail
           grep -q "run_id:" .github/workflows/publish-repos.yml
           grep -q "workflow_runs" .github/workflows/publish-repos.yml
-          grep -q -- "--content-type" .github/workflows/publish-repos.yml
+          grep -q '"ContentType"' scripts/ci/publish_repository.py
           grep -q "Get-MsiProperty" packaging/windows/generate-winget-manifest.ps1
           grep -q "ProductCode: '\$productCode'" packaging/windows/generate-winget-manifest.ps1
 

@@ -3,6 +3,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -80,6 +81,30 @@ public:
 private:
     std::vector<float> embedding_;
     bool initialized_{false};
+};
+
+class HashLookupCountingRepository : public MetadataRepository {
+public:
+    explicit HashLookupCountingRepository(ConnectionPool& pool) : MetadataRepository(pool) {}
+
+    Result<std::optional<DocumentInfo>> getDocumentByHash(const std::string& hash) override {
+        ++singleLookups;
+        return MetadataRepository::getDocumentByHash(hash);
+    }
+
+    Result<std::unordered_map<std::string, DocumentInfo>>
+    batchGetDocumentsByHash(const std::vector<std::string>& hashes) override {
+        const auto call = ++batchLookups;
+        if (failBatchLookups || (failBatchAt > 0 && call == failBatchAt)) {
+            return Error{ErrorCode::InternalError, "injected metadata lookup failure"};
+        }
+        return MetadataRepository::batchGetDocumentsByHash(hashes);
+    }
+
+    std::atomic<int> singleLookups{0};
+    std::atomic<int> batchLookups{0};
+    bool failBatchLookups{false};
+    int failBatchAt{0};
 };
 
 struct TopologySearchFixture {
@@ -300,10 +325,15 @@ Result<SearchResponse> runTopologySearch(
 }
 
 void configureCertifiedTopologyRoute(SearchEngineConfig& config,
-                                     std::string constructionFingerprint,
+                                     const yams::topology::TopologyArtifactBatch& batch,
                                      std::size_t maxRowsVisited = 2) {
     config.topologyRouteRiskCalibration.constructionFingerprint =
-        std::move(constructionFingerprint);
+        topologyRoutingConstructionFingerprint(batch);
+    auto options = makeTopologyRoutingOptions(config, config.topologyRoutingMode, true, true);
+    options.maxDocs = 0; // PQ narrowing defers the document limit to vector selection.
+    config.topologyRouteRiskCalibration.routingPolicyFingerprint =
+        topologyRoutingPolicyFingerprint(topologyRoutingRepresentationFingerprint(batch), options);
+    config.topologyRouteRiskCalibration.datasetIdentity = "fixture-held-out-v1";
     config.topologyRouteRiskCalibration.calibrationQueries = 50;
     config.topologyRouteRiskCalibration.protectedCandidates = 100;
     config.topologyRouteRiskCalibration.missedProtectedCandidates = 0;
@@ -470,13 +500,12 @@ TEST_CASE("SearchEngine commits hard narrowing when every theorem certificate pa
     TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
     seedTopologyDocuments(fix);
     auto batch = buildTwoClusterTopologyBatch();
-    const auto constructionFingerprint = topologyRoutingConstructionFingerprint(batch);
     yams::topology::MetadataKgTopologyArtifactStore topologyStore(fix.repo, fix.kgStore);
     REQUIRE(topologyStore.storeBatch(batch).has_value());
 
     auto generator = makeFixedGenerator({0.0F, 1.0F});
     auto config = topologyRoutingTestConfig(true);
-    configureCertifiedTopologyRoute(config, constructionFingerprint);
+    configureCertifiedTopologyRoute(config, batch);
 
     auto response = runTopologySearch(fix, generator, config, 4, "omega");
     REQUIRE(response.has_value());
@@ -504,13 +533,12 @@ TEST_CASE("SearchEngine discards a trial route whose observed vector work exceed
     TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
     seedTopologyDocuments(fix);
     auto batch = buildTwoClusterTopologyBatch();
-    const auto constructionFingerprint = topologyRoutingConstructionFingerprint(batch);
     yams::topology::MetadataKgTopologyArtifactStore topologyStore(fix.repo, fix.kgStore);
     REQUIRE(topologyStore.storeBatch(batch).has_value());
 
     auto generator = makeFixedGenerator({0.0F, 1.0F});
     auto config = topologyRoutingTestConfig(true);
-    configureCertifiedTopologyRoute(config, constructionFingerprint, 1);
+    configureCertifiedTopologyRoute(config, batch, 1);
 
     auto response = runTopologySearch(fix, generator, config, 4, "omega");
     REQUIRE(response.has_value());
@@ -535,13 +563,12 @@ TEST_CASE("SearchEngine rejects a relation cover that cuts an observed protected
     REQUIRE(selectedChart != batch.clusters.end());
     REQUIRE(selectedChart->protectedPairCount > 0);
     selectedChart->preservedProtectedPairCount = 0;
-    const auto constructionFingerprint = topologyRoutingConstructionFingerprint(batch);
     yams::topology::MetadataKgTopologyArtifactStore topologyStore(fix.repo, fix.kgStore);
     REQUIRE(topologyStore.storeBatch(batch).has_value());
 
     auto generator = makeFixedGenerator({0.0F, 1.0F});
     auto config = topologyRoutingTestConfig(true);
-    configureCertifiedTopologyRoute(config, constructionFingerprint);
+    configureCertifiedTopologyRoute(config, batch);
 
     auto response = runTopologySearch(fix, generator, config, 4, "omega");
     REQUIRE(response.has_value());
@@ -564,7 +591,8 @@ TEST_CASE("SearchEngine rejects route calibration from a different topology cons
 
     auto generator = makeFixedGenerator({0.0F, 1.0F});
     auto config = topologyRoutingTestConfig(true);
-    configureCertifiedTopologyRoute(config, "different-construction");
+    configureCertifiedTopologyRoute(config, batch);
+    config.topologyRouteRiskCalibration.constructionFingerprint = "different-construction";
 
     auto response = runTopologySearch(fix, generator, config, 4, "omega");
     REQUIRE(response.has_value());
@@ -582,13 +610,12 @@ TEST_CASE("SearchEngine does not infer protected fiber representation from bound
     TopologySearchFixture fix{vector::VectorSearchEngine::SimeonPqAdc};
     seedTopologyDocuments(fix);
     auto batch = buildTwoClusterTopologyBatch();
-    const auto constructionFingerprint = topologyRoutingConstructionFingerprint(batch);
     yams::topology::MetadataKgTopologyArtifactStore topologyStore(fix.repo, fix.kgStore);
     REQUIRE(topologyStore.storeBatch(batch).has_value());
 
     auto generator = makeFixedGenerator({0.0F, 1.0F});
     auto config = topologyRoutingTestConfig(true);
-    configureCertifiedTopologyRoute(config, constructionFingerprint);
+    configureCertifiedTopologyRoute(config, batch);
     config.topologyRouteRiskCalibration.missedProtectedCandidates = 1;
 
     auto response = runTopologySearch(fix, generator, config, 4, "omega");
@@ -1789,6 +1816,17 @@ TEST_CASE("Topology construction fingerprint excludes publication and routing re
     const auto experimentalIdentity = topologyRoutingConstructionFingerprint(experimental);
     REQUIRE(baselineIdentity.size() == 16);
     CHECK(experimentalIdentity == baselineIdentity);
+    const auto baselineRepresentations = topologyRoutingRepresentationFingerprint(baseline);
+    CHECK(topologyRoutingRepresentationFingerprint(experimental) != baselineRepresentations);
+    auto options = TopologyRoutingOptions{};
+    const auto policyIdentity = topologyRoutingPolicyFingerprint(baselineRepresentations, options);
+    options.collectGraphDiagnostics = true;
+    CHECK(topologyRoutingPolicyFingerprint(baselineRepresentations, options) == policyIdentity);
+    options.sparseDenseAlpha = 0.25F;
+    CHECK(topologyRoutingPolicyFingerprint(baselineRepresentations, options) != policyIdentity);
+    options = TopologyRoutingOptions{};
+    options.graphNeighborReciprocalOnly = false;
+    CHECK(topologyRoutingPolicyFingerprint(baselineRepresentations, options) != policyIdentity);
 
     experimental.embeddingSpaceIdentity = "test-space-v2";
     CHECK(topologyRoutingConstructionFingerprint(experimental) != baselineIdentity);
@@ -1820,6 +1858,10 @@ TEST_CASE("Topology routing refuses theorem admission across coordinate spaces",
     request.options.maxDocs = 0;
     request.options.collectRouteMembership = true;
     request.options.routeRiskCalibration.constructionFingerprint = constructionFingerprint;
+    request.options.routeRiskCalibration.routingPolicyFingerprint =
+        topologyRoutingPolicyFingerprint(topologyRoutingRepresentationFingerprint(batch),
+                                         request.options);
+    request.options.routeRiskCalibration.datasetIdentity = "fixture-held-out-v1";
     request.options.routeRiskCalibration.calibrationQueries = 50;
     request.options.routeRiskCalibration.protectedCandidates = 100;
     request.options.routeRiskCalibration.missedProtectedCandidates = 0;
@@ -1843,6 +1885,13 @@ TEST_CASE("Topology routing refuses theorem admission across coordinate spaces",
     const auto aligned = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
     CHECK(aligned.certificate.admission.coordinateSpaceAlignment ==
           TopologyProofObligationStatus::Satisfied);
+    CHECK(aligned.certificate.admission.routeRisk == TopologyProofObligationStatus::Satisfied);
+
+    // Counts from an older routing policy cannot certify a changed representative budget.
+    request.options.representativeLimit = 1;
+    const auto changedPolicy = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
+    CHECK(changedPolicy.certificate.admission.routeRisk ==
+          TopologyProofObligationStatus::Unavailable);
 }
 
 TEST_CASE("Topology snapshot cache rejects duplicate cluster identifiers",
@@ -2092,6 +2141,44 @@ TEST_CASE("rankGraphNeighborCandidates can weight support by query seed evidence
     CHECK(weighted.front() == "focused");
 }
 
+TEST_CASE("SearchEngine topology merge keeps graph-vector candidates behind baseline anchors",
+          "[search][topology][graph-vector][characterization][catch2]") {
+    using yams::search::detail::AuxiliaryVectorCandidateBatch;
+
+    SearchEngineConfig config;
+    config.vectorMaxResults = 2;
+    config.graphExpansionVectorPenalty = 0.5F;
+    config.graphVectorRequireCorroboration = true;
+    config.graphVectorRequireTextAnchoring = true;
+    config.graphVectorRequireBaselineTextAnchoring = true;
+
+    std::vector<ComponentResult> components{
+        {.documentHash = "baseline-anchor", .score = 0.9F, .source = ComponentResult::Source::Text},
+        {.documentHash = "graph-anchor",
+         .score = 0.8F,
+         .source = ComponentResult::Source::GraphText},
+    };
+    std::vector<AuxiliaryVectorCandidateBatch> graphTerms{
+        {.query = "related",
+         .weight = 1.0F,
+         .candidates = {{.documentHash = "baseline-anchor", .score = 1.0F},
+                        {.documentHash = "graph-anchor", .score = 1.0F},
+                        {.documentHash = "unanchored", .score = 1.0F}}},
+    };
+
+    const auto merged = yams::search::detail::mergeAuxiliaryVectorCandidates(
+        std::move(components), {}, std::move(graphTerms), config);
+
+    CHECK(merged.stats.graphVectorRawHitCount == 3U);
+    CHECK(merged.stats.graphVectorAddedNewCount == 1U);
+    CHECK(merged.stats.graphVectorBlockedUncorroboratedCount == 1U);
+    CHECK(merged.stats.graphVectorBlockedMissingBaselineTextAnchorCount == 1U);
+    REQUIRE(merged.components.size() == 3U);
+    CHECK(merged.components.back().documentHash == "baseline-anchor");
+    CHECK(merged.components.back().source == ComponentResult::Source::GraphVector);
+    CHECK(merged.components.back().score == Catch::Approx(0.5F));
+}
+
 TEST_CASE("Graph-neighbor trace separates stored relation from the selected cap",
           "[unit][search][topology][graph_neighbors][trace]") {
     TopologySearchFixture fix;
@@ -2146,4 +2233,105 @@ TEST_CASE("Graph-neighbor trace separates stored relation from the selected cap"
           std::vector<std::string>{"near", "far"});
     REQUIRE(result.routedCandidateDocIds.size() == 1);
     CHECK(result.routedCandidateDocIds.front() == "near");
+}
+
+TEST_CASE("Topology cluster hydration failure discards partial admission",
+          "[unit][search][topology][hydration]") {
+    TopologySearchFixture fix;
+    auto counting = std::make_shared<HashLookupCountingRepository>(*fix.pool);
+    fix.repo = counting;
+    seedTopologyDocuments(fix);
+    const auto batch = buildTwoClusterTopologyBatch();
+    TopologyRoutingSessionRequest request;
+    request.seedDocumentHashes = {"x1", "y1"};
+    request.options.routingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    request.options.expansionSource = SearchEngineConfig::TopologyExpansionSource::Clusters;
+    request.options.maxClusters = 2;
+    request.options.maxDocs = 8;
+    request.options.minRouteScore = 0.0F;
+    request.snapshotCache = std::make_shared<TopologyRoutingSnapshotCache>(
+        [batch] { return Result<std::optional<yams::topology::TopologyArtifactBatch>>{batch}; });
+    counting->batchLookups = 0;
+    SECTION("all cluster lookups succeed") {
+        const auto result = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
+        CHECK(result.applied);
+        // Non-membership expansion materializes one medoid per selected cluster.
+        CHECK(result.addedCandidateHashes.size() == 2);
+        CHECK(counting->batchLookups.load() == 2);
+    }
+    SECTION("second cluster lookup fails after the first was admitted") {
+        counting->failBatchAt = 2;
+        const auto result = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
+        CHECK(counting->batchLookups.load() == 2);
+        CHECK_FALSE(result.applied);
+        CHECK(result.staleCandidates == 0);
+        CHECK(result.skipReason.starts_with("metadata_lookup_failed"));
+        CHECK(result.certificate.allowedDocumentHashes.empty());
+        CHECK(result.routedCandidateHashes.empty());
+        CHECK(result.addedCandidateHashes.empty());
+        CHECK(result.addedCandidates == 0);
+    }
+}
+
+TEST_CASE("Topology routing hydrates ranked candidates and trace stages in batches",
+          "[unit][search][topology][graph_neighbors][hydration]") {
+    TopologySearchFixture fix;
+    auto counting = std::make_shared<HashLookupCountingRepository>(*fix.pool);
+    fix.repo = counting;
+    fix.addDocument("seed", "seed", {1.0F, 0.0F});
+    std::vector<KGNode> nodes{KGNode{.nodeKey = "doc:seed", .type = "document"}};
+    for (int i = 0; i < 8; ++i) {
+        const auto hash = "near" + std::to_string(i);
+        fix.addDocument(hash, hash, {0.9F, 0.1F});
+        nodes.push_back(KGNode{.nodeKey = "doc:" + hash, .type = "document"});
+    }
+    const auto nodeIds = fix.kgStore->upsertNodes(nodes);
+    REQUIRE(nodeIds.has_value());
+    REQUIRE(nodeIds.value().size() == 9);
+    for (std::size_t i = 1; i < nodeIds.value().size(); ++i) {
+        REQUIRE(fix.kgStore
+                    ->addEdge(KGEdge{.srcNodeId = nodeIds.value()[0],
+                                     .dstNodeId = nodeIds.value()[i],
+                                     .relation = "semantic_neighbor",
+                                     .weight = 0.9F})
+                    .has_value());
+    }
+    TopologyRoutingSessionRequest request;
+    request.seedDocumentHashes = {"seed"};
+    request.options.routingMode = SearchEngineConfig::TopologyRoutingMode::HybridAssist;
+    request.options.expansionSource = SearchEngineConfig::TopologyExpansionSource::GraphNeighbors;
+    request.options.maxDocs = 8;
+    request.options.collectRouteMembership = true;
+    request.options.collectGraphDiagnostics = true;
+    request.options.graphNeighborMinScore = 0.0F;
+    request.options.graphNeighborReciprocalOnly = false;
+
+    counting->singleLookups = 0;
+    counting->batchLookups = 0;
+    SECTION("successful hydration remains batched") {
+        const auto result = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
+        REQUIRE(result.graphNeighborTrace.collected);
+        CHECK(result.graphNeighborTrace.relationCandidateCount == 8);
+        REQUIRE(result.routedCandidateDocIds.size() == 8);
+        CHECK(counting->batchLookups.load() >= 1);
+        CHECK(counting->singleLookups.load() == 0);
+    }
+    SECTION("a diagnostic batch failure retains per-document fallback") {
+        counting->failBatchAt = 1;
+        const auto result = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
+        CHECK(result.applied);
+        CHECK(result.staleCandidates == 0);
+        CHECK(result.graphNeighborTrace.eligibleUnresolvedCount == 0);
+        CHECK(result.graphNeighborTrace.eligibleCandidateDocumentIds.size() == 8);
+        CHECK(counting->singleLookups.load() > 0);
+    }
+    SECTION("metadata failure is not evidence of stale documents") {
+        counting->failBatchLookups = true;
+        const auto result = runTopologyRoutingSession(request, fix.repo, fix.kgStore);
+        CHECK_FALSE(result.applied);
+        CHECK(result.staleCandidates == 0);
+        CHECK(result.skipReason.starts_with("metadata_lookup_failed"));
+        CHECK(result.certificate.allowedDocumentHashes.empty());
+        CHECK(result.addedCandidateHashes.empty());
+    }
 }

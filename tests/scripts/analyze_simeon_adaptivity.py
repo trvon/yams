@@ -5,7 +5,7 @@ Reads JSONL cells produced by `run_simeon_adaptivity_matrix.sh` and emits:
   * Per-corpus pivot tables: backend x alpha vs MRR / Recall@10 / nDCG@10.
   * Fusion-contribution summary (dense_contrib vs bm25_contrib).
   * Promotion-bar verdicts for the candidate levers defined in the plan
-    (docs/plans tracked under .claude/plans/).
+    (plans live in YAMS with task/source=plan metadata, per AGENTS.md).
 
 Usage (with uv):
   uv run tests/scripts/analyze_simeon_adaptivity.py \

@@ -21,6 +21,19 @@
 #include <future>
 
 namespace yams::daemon {
+namespace {
+
+uint64_t steadyNowNs() noexcept {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count());
+}
+
+uint64_t elapsedMs(uint64_t startedAtNs, uint64_t nowNs) noexcept {
+    return startedAtNs == 0 || nowNs < startedAtNs ? 0 : (nowNs - startedAtNs) / 1'000'000;
+}
+
+} // namespace
 
 // ── BulkScope ───────────────────────────────────────────────────────────────
 
@@ -51,9 +64,31 @@ VectorIndexCoordinator::BulkScope::~BulkScope() {
 VectorIndexCoordinator::VectorIndexCoordinator(boost::asio::any_io_executor exec,
                                                std::shared_ptr<vector::VectorDatabase> vdb,
                                                StateComponent* state)
-    : strand_(boost::asio::make_strand(exec)), vectorDb_(std::move(vdb)), state_(state) {}
+    : strand_(boost::asio::make_strand(exec)),
+      callbackLifetime_(std::make_shared<CallbackLifetime>()), vectorDb_(std::move(vdb)),
+      state_(state) {
+    callbackLifetime_->owner = this;
+}
 
-VectorIndexCoordinator::~VectorIndexCoordinator() = default;
+VectorIndexCoordinator::~VectorIndexCoordinator() {
+    std::lock_guard<std::mutex> lock(callbackLifetime_->mutex);
+    callbackLifetime_->owner = nullptr;
+}
+
+// Synchronous bridge used by non-Asio workers such as memory-sync apply.
+Result<void> VectorIndexCoordinator::requestRebuildBlocking(RebuildReason reason) {
+    if (strand_.running_in_this_thread()) {
+        return Error{ErrorCode::InvalidState,
+                     "blocking vector rebuild cannot run on the coordinator strand"};
+    }
+    try {
+        auto future =
+            boost::asio::co_spawn(strand_, requestRebuild(reason), boost::asio::use_future);
+        return future.get();
+    } catch (const std::exception& e) {
+        return Error{ErrorCode::InternalError, e.what()};
+    }
+}
 
 void VectorIndexCoordinator::fireRebuild(RebuildReason reason) noexcept {
     // Delegate to requestRebuild() on the strand, detached.  This gives the
@@ -218,56 +253,54 @@ void VectorIndexCoordinator::doFinalizeOnStrand() {
         state_->readiness.vectorIndexProgress.store(100, std::memory_order_relaxed);
     }
 
-    notifyWaiters(epoch);
+    notifyWaiters(epoch, Result<void>{});
 }
 
 boost::asio::awaitable<Result<void>> VectorIndexCoordinator::requestRebuild(RebuildReason reason) {
     YAMS_ZONE_SCOPED_N("VecIdxCoord::requestRebuild");
-    // This function is safe to call from any executor — use atomics for the
-    // critical path and waitersMutex_ to protect the waiter list.
-    // doRebuild runs on the strand (single-writer for VDB).
-    pendingReasons_.fetch_or(static_cast<uint32_t>(reason), std::memory_order_acq_rel);
-
-    // Snapshot target epoch BEFORE trying to start a rebuild.
-    const uint64_t targetEpoch = rebuildEpoch_.load(std::memory_order_acquire) + 1;
-
-    // Only one caller wins the CAS and starts the rebuild coroutine.
-    bool expected = false;
-    if (rebuildInFlight_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
-        const uint32_t reasons = pendingReasons_.exchange(0, std::memory_order_acq_rel);
-
-        auto t = snapshot();
-        t.rebuilding = true;
-        t.pendingReasons = reasons;
-        publishTelemetry(t);
-
-        if (state_) {
-            state_->readiness.vectorIndexReady.store(false, std::memory_order_relaxed);
-            state_->readiness.vectorIndexProgress.store(0, std::memory_order_relaxed);
-        }
-
-        // Use post() — never inline — to ensure doRebuildOnStrand runs AFTER all
-        // concurrent requestRebuild callers have stored their waiters.
-        boost::asio::post(strand_, [this, reasons]() { doRebuildOnStrand(reasons); });
-    }
-
-    // Fast path: epoch already satisfied.
-    if (rebuildEpoch_.load(std::memory_order_acquire) >= targetEpoch) {
-        co_return Result<void>{};
-    }
-
-    // Suspend until epoch advances.  notifyWaiters drains our handler when done.
+    // Register the completion handler while holding the same mutex used by epoch completion.
+    // The rebuild cannot publish an epoch result before this caller has a waiter for it.
     co_return co_await boost::asio::async_initiate<const boost::asio::use_awaitable_t<>&,
                                                    void(Result<void>)>(
-        [this, targetEpoch](auto&& handler) mutable {
-            if (rebuildEpoch_.load(std::memory_order_acquire) >= targetEpoch) {
-                auto ex = boost::asio::get_associated_executor(handler, strand_);
-                boost::asio::post(ex, [h = std::move(handler)]() mutable { h(Result<void>{}); });
-            } else {
-                auto h = std::make_shared<std::decay_t<decltype(handler)>>(std::move(handler));
+        [this, reason](auto&& handler) mutable {
+            pendingReasons_.fetch_or(static_cast<uint32_t>(reason), std::memory_order_acq_rel);
+
+            auto h = std::make_shared<std::decay_t<decltype(handler)>>(
+                std::forward<decltype(handler)>(handler));
+            bool startRebuild = false;
+            uint32_t reasons = 0;
+            {
                 std::lock_guard<std::mutex> lk(waitersMutex_);
+                const uint64_t targetEpoch = rebuildEpoch_.load(std::memory_order_acquire) + 1;
                 waiters_.push_back(
                     {targetEpoch, [h](Result<void> r) mutable { (*h)(std::move(r)); }});
+
+                bool expected = false;
+                startRebuild = rebuildInFlight_.compare_exchange_strong(expected, true,
+                                                                        std::memory_order_acq_rel);
+                if (startRebuild) {
+                    reasons = pendingReasons_.exchange(0, std::memory_order_acq_rel);
+                }
+            }
+
+            if (startRebuild) {
+                auto t = snapshot();
+                t.rebuilding = true;
+                t.ready = false;
+                t.progressPct = 0;
+                t.pendingReasons = reasons;
+                publishTelemetry(t);
+
+                if (state_) {
+                    state_->readiness.vectorIndexReady.store(false, std::memory_order_relaxed);
+                    state_->readiness.vectorIndexProgress.store(0, std::memory_order_relaxed);
+                }
+
+                boost::asio::post(strand_, [this, reasons]() { doRebuildOnStrand(reasons); });
+            }
+
+            if (afterRebuildAdmissionForTesting_) {
+                afterRebuildAdmissionForTesting_();
             }
         },
         boost::asio::use_awaitable);
@@ -279,28 +312,26 @@ void VectorIndexCoordinator::doRebuildOnStrand(uint32_t /*reasons*/) {
     // post() guarantees this runs AFTER all currently-queued strand items, so
     // every concurrent requestRebuild caller has already stored its waiter before
     // we bump the epoch (fixing the coalescing invariant).
+    Result<void> rebuildResult;
     {
         auto vdb = getVdbLocked(vdbMutex_, vectorDb_);
-        if (vdb) {
-            if (buildsSuppressed_.load(std::memory_order_relaxed)) {
-                spdlog::warn("[VectorIndexCoordinator] rebuild suppressed by memory "
-                             "instrumentation profile");
-            } else {
-                try {
-                    warnIfRebuildExceedsBudget(vdb);
-                    vdb->buildIndex();
-                    if (!vdb->persistIndex()) {
-                        spdlog::warn(
-                            "[VectorIndexCoordinator] doRebuild persistIndex returned failure: {}",
-                            vdb->getLastError());
-                    }
-                } catch (const std::exception& e) {
-                    spdlog::warn("[VectorIndexCoordinator] doRebuild build/persist failed: {}",
-                                 e.what());
-                } catch (...) {
-                    spdlog::warn(
-                        "[VectorIndexCoordinator] doRebuild build/persist failed (unknown)");
+        if (!vdb) {
+            rebuildResult = Error{ErrorCode::InvalidState, "vector database is unavailable"};
+        } else if (buildsSuppressed_.load(std::memory_order_relaxed)) {
+            rebuildResult = Error{ErrorCode::InvalidState, "vector index rebuild is suppressed"};
+        } else {
+            try {
+                warnIfRebuildExceedsBudget(vdb);
+                if (auto built = vdb->buildIndexChecked(); !built) {
+                    rebuildResult = built.error();
+                } else if (auto persisted = vdb->persistIndexChecked(); !persisted) {
+                    rebuildResult = persisted.error();
                 }
+            } catch (const std::exception& e) {
+                rebuildResult = Error{ErrorCode::InternalError, e.what()};
+            } catch (...) {
+                rebuildResult =
+                    Error{ErrorCode::InternalError, "vector index rebuild threw unknown error"};
             }
         }
     }
@@ -310,7 +341,7 @@ void VectorIndexCoordinator::doRebuildOnStrand(uint32_t /*reasons*/) {
     // Drain any reasons that arrived during rebuild — but only start a follow-up
     // rebuild if there are active waiters expecting a future epoch.  Without this
     // guard, concurrent same-reason callers cause spurious extra rebuilds.
-    notifyWaiters(epoch);
+    notifyWaiters(epoch, rebuildResult);
     bool hasNewWaiters = false;
     {
         std::lock_guard<std::mutex> lk(waitersMutex_);
@@ -321,18 +352,21 @@ void VectorIndexCoordinator::doRebuildOnStrand(uint32_t /*reasons*/) {
     const bool startNext = (nextReasons != 0 && hasNewWaiters);
     rebuildInFlight_.store(startNext, std::memory_order_release);
 
+    const bool rebuildSucceeded = rebuildResult.has_value();
     VectorIndexTelemetry t{};
     t.rebuildEpoch = epoch;
     t.rebuilding = startNext;
-    t.ready = !startNext;
-    t.progressPct = 100;
+    t.ready = rebuildSucceeded && !startNext;
+    t.progressPct = rebuildSucceeded && !startNext ? 100u : 0u;
     t.activeBulkScopes = activeBulkScopes_.load(std::memory_order_relaxed);
     t.pendingReasons = startNext ? nextReasons : 0u;
     publishTelemetry(t);
 
     if (state_) {
-        state_->readiness.vectorIndexReady.store(!startNext, std::memory_order_relaxed);
-        state_->readiness.vectorIndexProgress.store(100, std::memory_order_relaxed);
+        state_->readiness.vectorIndexReady.store(rebuildSucceeded && !startNext,
+                                                 std::memory_order_relaxed);
+        state_->readiness.vectorIndexProgress.store(rebuildSucceeded && !startNext ? 100u : 0u,
+                                                    std::memory_order_relaxed);
     }
 
     if (startNext) {
@@ -389,49 +423,167 @@ boost::asio::awaitable<Result<void>> VectorIndexCoordinator::initialBuildIfNeede
 }
 
 bool VectorIndexCoordinator::requestCheckpoint() noexcept {
-    // Serialise persistIndex through the strand so it cannot race an in-flight
-    // buildIndex/finalizeBulkLoad.  Blocks the caller briefly — acceptable for
-    // CheckpointManager which already blocks on the backend mutex today.
-    std::promise<bool> done;
-    auto fut = done.get_future();
+    // Keep one shared persistence attempt. A timed-out caller must not enqueue another callback
+    // behind a stalled strand, or periodic checkpoints amplify one executor stall indefinitely.
+    checkpointRequests_.fetch_add(1, std::memory_order_relaxed);
+
+    std::shared_ptr<CheckpointAttempt> attempt;
+    bool shouldPost = false;
     try {
-        boost::asio::post(strand_, [this, p = std::move(done)]() mutable {
-            auto vdb = getVdbLocked(vdbMutex_, vectorDb_);
-            if (!vdb || !vdb->isInitialized()) {
-                p.set_value(false);
-                return;
-            }
-            try {
-                p.set_value(vdb->persistIndex());
-            } catch (const std::exception& ex) {
-                spdlog::warn("[VectorIndexCoordinator] requestCheckpoint persistIndex threw: {}",
-                             ex.what());
-                p.set_value(false);
-            } catch (...) {
-                spdlog::warn("[VectorIndexCoordinator] requestCheckpoint persistIndex threw "
-                             "(unknown)");
-                p.set_value(false);
-            }
-        });
+        std::lock_guard<std::mutex> lock(checkpointMutex_);
+        if (checkpointAttempt_) {
+            attempt = checkpointAttempt_;
+            checkpointCoalesced_.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            auto completion = std::make_shared<std::promise<bool>>();
+            const uint64_t generation =
+                checkpointGeneration_.fetch_add(1, std::memory_order_relaxed) + 1;
+            attempt = std::make_shared<CheckpointAttempt>(
+                CheckpointAttempt{generation, completion, completion->get_future().share()});
+            checkpointAttempt_ = attempt;
+            checkpointQueuedAtNs_.store(steadyNowNs(), std::memory_order_relaxed);
+            checkpointRunningAtNs_.store(0, std::memory_order_relaxed);
+            checkpointPhase_.store(VectorCheckpointPhase::Queued, std::memory_order_release);
+            shouldPost = true;
+        }
     } catch (const std::exception& ex) {
-        spdlog::warn("[VectorIndexCoordinator] requestCheckpoint post failed: {}", ex.what());
+        spdlog::warn("[VectorIndexCoordinator] requestCheckpoint admission failed: {}", ex.what());
         return false;
     } catch (...) {
         return false;
     }
-    if (fut.wait_for(checkpointWaitTimeout_) != std::future_status::ready) {
+
+    if (shouldPost) {
+        try {
+            auto lifetime = callbackLifetime_;
+            boost::asio::post(strand_, [lifetime = std::move(lifetime), attempt]() mutable {
+                // A queued callback may execute after a timed-out caller and coordinator teardown.
+                // Copy backend ownership while the owner gate is held, then release the gate before
+                // persistence so teardown is never blocked by a slow backend call.
+                auto completeWithoutOwner = [&attempt]() noexcept {
+                    try {
+                        attempt->completion->set_value(false);
+                    } catch (...) {
+                        const auto ignored = std::current_exception();
+                        (void)ignored;
+                    }
+                };
+
+                std::shared_ptr<vector::VectorDatabase> vdb;
+                {
+                    std::lock_guard<std::mutex> lifetimeLock(lifetime->mutex);
+                    auto* owner = lifetime->owner;
+                    if (!owner) {
+                        completeWithoutOwner();
+                        return;
+                    }
+                    owner->checkpointStarted_.fetch_add(1, std::memory_order_relaxed);
+                    owner->checkpointRunningAtNs_.store(steadyNowNs(), std::memory_order_relaxed);
+                    owner->checkpointPhase_.store(VectorCheckpointPhase::Running,
+                                                  std::memory_order_release);
+                    vdb = getVdbLocked(owner->vdbMutex_, owner->vectorDb_);
+                }
+
+                bool persisted = false;
+                if (vdb && vdb->isInitialized()) {
+                    try {
+                        persisted = vdb->persistIndex();
+                    } catch (const std::exception& ex) {
+                        spdlog::warn(
+                            "[VectorIndexCoordinator] requestCheckpoint persistIndex threw: {}",
+                            ex.what());
+                    } catch (...) {
+                        spdlog::warn(
+                            "[VectorIndexCoordinator] requestCheckpoint persistIndex threw "
+                            "(unknown)");
+                    }
+                }
+
+                std::lock_guard<std::mutex> lifetimeLock(lifetime->mutex);
+                if (auto* owner = lifetime->owner) {
+                    owner->completeCheckpointAttempt(attempt, persisted, true);
+                } else {
+                    completeWithoutOwner();
+                }
+            });
+        } catch (const std::exception& ex) {
+            spdlog::warn("[VectorIndexCoordinator] requestCheckpoint post failed: {}", ex.what());
+            completeCheckpointAttempt(attempt, false, false);
+        } catch (...) {
+            completeCheckpointAttempt(attempt, false, false);
+        }
+    }
+
+    if (attempt->result.wait_for(checkpointWaitTimeout_) != std::future_status::ready) {
+        checkpointTimedOut_.fetch_add(1, std::memory_order_relaxed);
         spdlog::warn(
-            "[VectorIndexCoordinator] requestCheckpoint timed out after {}ms; queued persistence "
-            "may still complete",
+            "[VectorIndexCoordinator] requestCheckpoint timed out after {}ms; shared persistence "
+            "attempt remains queued or running",
             checkpointWaitTimeout_.count());
         return false;
     }
-    return fut.get();
+    try {
+        return attempt->result.get();
+    } catch (const std::exception& ex) {
+        spdlog::warn("[VectorIndexCoordinator] requestCheckpoint completion failed: {}", ex.what());
+    } catch (...) {
+        spdlog::warn("[VectorIndexCoordinator] requestCheckpoint completion failed (unknown)");
+    }
+    return false;
+}
+
+void VectorIndexCoordinator::completeCheckpointAttempt(
+    const std::shared_ptr<CheckpointAttempt>& attempt, bool result, bool callbackStarted) noexcept {
+    if (callbackStarted) {
+        checkpointCompleted_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        checkpointPostFailures_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(checkpointMutex_);
+        if (checkpointAttempt_ == attempt) {
+            checkpointAttempt_.reset();
+            checkpointQueuedAtNs_.store(0, std::memory_order_relaxed);
+            checkpointRunningAtNs_.store(0, std::memory_order_relaxed);
+            checkpointPhase_.store(VectorCheckpointPhase::Idle, std::memory_order_release);
+        }
+    }
+
+    try {
+        attempt->completion->set_value(result);
+    } catch (...) {
+        // A double completion would indicate a lifecycle bug; preserve noexcept at this boundary.
+        const auto ignored = std::current_exception();
+        (void)ignored;
+    }
 }
 
 VectorIndexTelemetry VectorIndexCoordinator::snapshot() const noexcept {
     std::lock_guard<std::mutex> lock(telemetryMutex_);
     return telemetry_;
+}
+
+VectorCheckpointTelemetry VectorIndexCoordinator::checkpointSnapshot() const noexcept {
+    VectorCheckpointTelemetry telemetry;
+    telemetry.phase = checkpointPhase_.load(std::memory_order_acquire);
+    telemetry.generation = checkpointGeneration_.load(std::memory_order_relaxed);
+    telemetry.requests = checkpointRequests_.load(std::memory_order_relaxed);
+    telemetry.coalesced = checkpointCoalesced_.load(std::memory_order_relaxed);
+    telemetry.started = checkpointStarted_.load(std::memory_order_relaxed);
+    telemetry.completed = checkpointCompleted_.load(std::memory_order_relaxed);
+    telemetry.timedOut = checkpointTimedOut_.load(std::memory_order_relaxed);
+    telemetry.postFailures = checkpointPostFailures_.load(std::memory_order_relaxed);
+
+    const uint64_t nowNs = steadyNowNs();
+    if (telemetry.phase == VectorCheckpointPhase::Queued) {
+        telemetry.queuedAgeMs =
+            elapsedMs(checkpointQueuedAtNs_.load(std::memory_order_relaxed), nowNs);
+    } else if (telemetry.phase == VectorCheckpointPhase::Running) {
+        telemetry.runningAgeMs =
+            elapsedMs(checkpointRunningAtNs_.load(std::memory_order_relaxed), nowNs);
+    }
+    return telemetry;
 }
 
 void VectorIndexCoordinator::publishTelemetry(const VectorIndexTelemetry& tel) noexcept {
@@ -441,7 +593,7 @@ void VectorIndexCoordinator::publishTelemetry(const VectorIndexTelemetry& tel) n
 
 // ── Waiters ──────────────────────────────────────────────────────────────────
 
-void VectorIndexCoordinator::notifyWaiters(uint64_t currentEpoch) {
+void VectorIndexCoordinator::notifyWaiters(uint64_t currentEpoch, const Result<void>& result) {
     YAMS_ZONE_SCOPED_N("VecIdxCoord::notifyWaiters");
     // Drain waiters whose targetEpoch is satisfied.  Protected by waitersMutex_.
     std::vector<RebuildCompletion> toNotify;
@@ -458,7 +610,11 @@ void VectorIndexCoordinator::notifyWaiters(uint64_t currentEpoch) {
         }
     }
     for (auto& h : toNotify) {
-        h(Result<void>{});
+        if (result) {
+            h(Result<void>{});
+        } else {
+            h(result.error());
+        }
     }
 }
 

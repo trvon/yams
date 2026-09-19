@@ -67,6 +67,8 @@ void ensure_plugin_logger() {
     }
 }
 
+// C-ABI ownership: the returned string is owned by the result struct handed to the
+// host and released via free_result_abi; do not free here.
 char* dup_cstr(const std::string& s) {
     char* p = static_cast<char*>(std::malloc(s.size() + 1));
     if (p)

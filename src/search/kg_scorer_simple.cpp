@@ -129,16 +129,18 @@ public:
             }
         }
 
-        // Pre-compute 1-hop neighbor set for structural scoring (budget-aware)
+        // Pre-compute the 1-hop neighbor union for structural scoring in one batched
+        // fetch instead of one statement per query node.
         std::unordered_set<std::int64_t> query_neighbor_union;
-        for (auto nid : query_nodes) {
-            if (timedOut(t0))
-                break;
-            auto nb = store_->neighbors(nid, cfg_.max_neighbors);
-            if (!nb)
-                return nb.error();
-            for (auto v : nb.value()) {
-                query_neighbor_union.insert(v);
+        if (!query_nodes.empty() && !timedOut(t0)) {
+            std::vector<std::int64_t> sources(query_nodes.begin(), query_nodes.end());
+            auto edges = store_->getEdgesFromBatch(sources, std::nullopt, cfg_.max_neighbors);
+            if (!edges)
+                return edges.error();
+            for (const auto& [src, outgoing] : edges.value()) {
+                for (const auto& e : outgoing) {
+                    query_neighbor_union.insert(e.dstNodeId);
+                }
             }
         }
 

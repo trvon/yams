@@ -1,3 +1,4 @@
+// pi-lens-ignore: fatal error
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/daemon/components/DaemonLifecycleFsm.h>

@@ -1,36 +1,25 @@
+#define YAMS_DAEMON_TEST_HOOKS_IMPL 1
 #include <algorithm>
-#include <array>
 #include <atomic>
-#include <cctype>
-#include <cstdlib>
+#include <cstdio>
 #include <memory>
-#include <new>
-#include <string>
+#include <new> // IWYU pragma: keep — placement new below constructs private GlobalIOContext
 #include <thread>
 
+// pi-lens-ignore: fatal error
 #include <boost/asio.hpp>
 #include <boost/asio/executor_work_guard.hpp>
 
 #include <spdlog/spdlog.h>
 
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/client/asio_connection.h>
 #include <yams/daemon/client/asio_connection_pool.h>
 #include <yams/daemon/client/global_io_context.h>
+#undef YAMS_DAEMON_TEST_HOOKS_IMPL
 #include <yams/daemon/components/TuneAdvisor.h>
 
 namespace {
-bool env_truthy(const char* value) {
-    if (!value)
-        return false;
-
-    std::string normalized(value);
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-
-    return !(normalized.empty() || normalized == "0" || normalized == "false" ||
-             normalized == "off" || normalized == "no");
-}
-
 std::atomic<int> g_nifty_counter{0};
 alignas(yams::daemon::GlobalIOContext) char g_global_io_context_storage[sizeof(
     yams::daemon::GlobalIOContext)];
@@ -60,6 +49,8 @@ void log_noexcept_warning(const char* message) noexcept {
     try {
         spdlog::warn("{}", message);
     } catch (...) {
+        std::fputs(message, stderr);
+        std::fputc('\n', stderr);
     }
 }
 
@@ -67,6 +58,10 @@ void log_noexcept_warning(const char* message, const std::exception& e) noexcept
     try {
         spdlog::warn("{}: {}", message, e.what());
     } catch (...) {
+        std::fputs(message, stderr);
+        std::fputs(": ", stderr);
+        std::fputs(e.what(), stderr);
+        std::fputc('\n', stderr);
     }
 }
 
@@ -74,6 +69,8 @@ void log_noexcept_error(const char* message) noexcept {
     try {
         spdlog::error("{}", message);
     } catch (...) {
+        std::fputs(message, stderr);
+        std::fputc('\n', stderr);
     }
 }
 
@@ -81,6 +78,10 @@ void log_noexcept_error(const char* message, const std::exception& e) noexcept {
     try {
         spdlog::error("{}: {}", message, e.what());
     } catch (...) {
+        std::fputs(message, stderr);
+        std::fputs(": ", stderr);
+        std::fputs(e.what(), stderr);
+        std::fputc('\n', stderr);
     }
 }
 
@@ -126,11 +127,11 @@ void GlobalIOContext::reset() {
         return;
     }
 
-    if (env_truthy(std::getenv("YAMS_TESTING"))) {
+    if (yams::config::read_env_bool("YAMS_TESTING").valueOr(false)) {
         return;
     }
 #if defined(YAMS_TESTING) || defined(YAMS_TEST_LIFECYCLE_CONTROLS)
-    if (env_truthy(std::getenv("YAMS_TEST_SAFE_SINGLE_INSTANCE"))) {
+    if (yams::config::read_env_bool("YAMS_TEST_SAFE_SINGLE_INSTANCE").valueOr(false)) {
         return;
     }
 #endif
@@ -339,23 +340,21 @@ bool GlobalIOContext::is_destroyed() noexcept {
     return g_global_io_context_ptr->destroyed_.load(std::memory_order_acquire);
 }
 
+#if YAMS_DAEMON_TEST_HOOKS_ENABLED
+void GlobalIOContext::testing_set_destroyed(bool destroyed) noexcept {
+    if (g_global_io_context_ptr) {
+        g_global_io_context_ptr->destroyed_.store(destroyed, std::memory_order_release);
+    }
+}
+#endif
+
 GlobalIOContext::~GlobalIOContext() noexcept {
     // Mark as destroyed FIRST to prevent restart() from trying to lock mutex
     destroyed_.store(true, std::memory_order_release);
 
-    // IMPORTANT: Close connections BEFORE stopping io_context
-    // Socket destructors need the reactor to properly deregister
-    try {
-        ConnectionRegistry::instance().closeAll();
-    } catch (...) {
-        log_noexcept_warning("[GlobalIOContext] closeAll threw during destruction");
-    }
-
-    try {
-        AsioConnectionPool::shutdown_all(std::chrono::milliseconds(500));
-    } catch (...) {
-        log_noexcept_warning("[GlobalIOContext] shutdown_all threw during destruction");
-    }
+    // Process teardown must not invoke connection cancellation callbacks. One-shot clients may
+    // already have destroyed their coroutine state, while the registry still holds a live socket.
+    // The OS closes descriptors as the process exits; only stop and join the I/O workers here.
 
     // Now safe to stop the io_context
     try {

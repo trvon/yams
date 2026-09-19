@@ -67,6 +67,30 @@ public:
 
 } // namespace
 
+TEST_CASE("StdioTransport - Construction preserves redirected standard streams",
+          "[mcp][transport][stdio][catch2][regression]") {
+    std::stringstream input;
+    std::stringstream output;
+    auto* originalCin = std::cin.rdbuf(input.rdbuf());
+    auto* originalCout = std::cout.rdbuf(output.rdbuf());
+
+    struct StreamBufferGuard {
+        std::streambuf* cinBuffer;
+        std::streambuf* coutBuffer;
+        ~StreamBufferGuard() {
+            std::cin.rdbuf(cinBuffer);
+            std::cout.rdbuf(coutBuffer);
+        }
+    } guard{originalCin, originalCout};
+
+    auto* redirectedCin = std::cin.rdbuf();
+    auto* redirectedCout = std::cout.rdbuf();
+    StdioTransport transport;
+
+    CHECK(std::cin.rdbuf() == redirectedCin);
+    CHECK(std::cout.rdbuf() == redirectedCout);
+}
+
 TEST_CASE_METHOD(StdioTransportFixture, "StdioTransport - Initial state",
                  "[mcp][transport][stdio][catch2]") {
     CHECK(transport->isConnected());

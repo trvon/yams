@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+// pi-lens-ignore: fatal error
 #include <yams/daemon/components/TuningConfig.h>
 #include <yams/vector/document_chunker.h>
 
@@ -17,18 +18,44 @@ namespace yams::daemon {
 
 struct DaemonConfig; // Forward declaration
 
+/// Runtime operational knobs for the embedding pipeline. Compatibility env overlays are
+/// resolved once with the embedding identity instead of being re-read at each call site.
+struct EmbeddingRuntimePolicy {
+    std::optional<std::string> backend;
+    std::optional<std::string> preferredModel;
+    std::optional<std::size_t> batchSize;
+    std::optional<std::size_t> batchTarget;
+    std::optional<std::uint64_t> repairLockTimeoutMs;
+};
+
+enum class EmbeddingDimensionSource {
+    Unresolved,
+    ExistingDatabase,
+    Sentinel,
+    Config,
+    Environment,
+    ModelConfig,
+    ModelName,
+};
+
 /**
- * @brief Resolved embedding configuration with cross-validated backend and model.
+ * @brief Immutable-by-convention effective embedding configuration snapshot.
  *
- * Produced by ConfigResolver::resolveEmbeddingConfig() which validates
- * the backend + preferred_model pair and emits warnings for mismatches
- * (e.g. ONNX model name under model-free simeon backend).
+ * Produced from one config file parse and one environment snapshot. Consumers should retain
+ * this value for their lifecycle instead of re-reading ambient configuration.
  */
 struct ResolvedEmbeddingConfig {
-    std::string backend;               // canonical: "simeon"|"onnxruntime"|"daemon"|"mock"|"auto"
-    std::string preferredModel;        // validated, canonicalized (empty if unresolved)
-    bool isTrainingFree = false;       // true when backend does not load ONNX models (e.g. simeon)
-    std::vector<std::string> warnings; // config mismatches detected during resolution
+    std::string backend;
+    std::string preferredModel;
+    bool isTrainingFree{false};
+    bool preloadOnStartup{false};
+    std::optional<std::size_t> dimension;
+    EmbeddingDimensionSource dimensionSource{EmbeddingDimensionSource::Unresolved};
+    EmbeddingRuntimePolicy runtime;
+    std::filesystem::path effectiveConfigPath;
+    std::map<std::string, std::string> provenance;
+    std::string policyIdentity;
+    std::vector<std::string> warnings;
 };
 
 /**
@@ -94,6 +121,8 @@ public:
         std::optional<float> sparseDenseAlpha;
         std::optional<float> minRouteScore;
         std::optional<std::string> routeCalibrationFingerprint;
+        std::optional<std::string> routeCalibrationPolicyFingerprint;
+        std::optional<std::string> routeCalibrationDatasetIdentity;
         std::optional<std::size_t> routeCalibrationQueries;
         std::optional<std::size_t> routeCalibrationProtectedCandidates;
         std::optional<std::size_t> routeCalibrationMissedProtectedCandidates;
@@ -152,6 +181,7 @@ public:
         std::optional<std::size_t> persistenceSampleSize;
     };
 
+    /// Compatibility shape retained for external consumers. Startup tuning uses ConfigSections.
     struct PostIngestCaps {
         std::optional<std::uint32_t> totalConcurrent;
         std::optional<std::uint32_t> embedConcurrent;
@@ -216,16 +246,8 @@ public:
         std::uint64_t mslStackLogWarnBytes{2ULL * 1024ULL * 1024ULL * 1024ULL};
     };
 
-    /// Runtime operational knobs for the embedding pipeline. Replaces ad-hoc
-    /// YAMS_EMBED_* and YAMS_REPAIR_* env vars with typed config resolved
-    /// through the standard TOML + env-overlay path.
-    struct EmbeddingRuntimePolicy {
-        std::optional<std::string> backend;               // "simeon" | "daemon" | "onnx"
-        std::optional<std::string> preferredModel;        // model name override
-        std::optional<std::size_t> batchSize;             // max texts per batch
-        std::optional<std::size_t> batchTarget;           // adaptive batch token target
-        std::optional<std::uint64_t> repairLockTimeoutMs; // repair DB lock timeout (ms)
-    };
+    /// Installed compatibility name for the shared runtime portion of the effective snapshot.
+    using EmbeddingRuntimePolicy = yams::daemon::EmbeddingRuntimePolicy;
 
     ConfigResolver() = delete; // Static-only class
 
@@ -238,40 +260,50 @@ public:
      */
     static TuningConfig applyRuntimeTuning(const ConfigSections& sections, TuningConfig base);
 
+    /// Apply the canonical [search].automatic_rebuilds startup policy. Compatibility environment
+    /// is resolved later only when this typed value remains absent.
+    static void applySearchMaintenance(const ConfigSections& sections, DaemonConfig& config);
+
+    /// Apply [storage.disk_pressure] without environment overlays. Returns false when an
+    /// explicitly supplied policy is invalid; config remains unchanged on failure.
+    static bool applyStorageDiskPressure(const ConfigSections& sections, DaemonConfig& config);
+
+    /// Resolve the opt-in [memory_sync] policy once from typed TOML sections.
+    /// Returns false when an explicitly enabled policy is invalid.
+    static bool applyMemorySync(const ConfigSections& sections, DaemonConfig& config);
+
     /**
      * @brief Check if an environment variable value is "truthy".
      *
-     * Returns true for any value except: empty, "0", "false", "off", "no" (case-insensitive).
+     * Returns true only for 1, true, yes, or on (case-insensitive). Unknown values are false;
+     * callers that need to preserve a typed default should use config::read_env_bool().
      *
      * @param value Environment variable value (may be nullptr)
      * @return true if value is truthy, false otherwise
      */
     static bool envTruthy(const char* value);
 
+    /// Resolve the effective plugin-directory strict mode. A non-empty
+    /// YAMS_PLUGIN_DIR_STRICT compatibility overlay takes precedence over typed config.
+    static bool resolvePluginDirStrict(bool configuredStrict);
+
     /**
      * @brief Resolve the default config file path.
      *
      * Search order:
-     * 1. YAMS_CONFIG_PATH environment variable
-     * 2. $XDG_CONFIG_HOME/yams/config.toml
-     * 3. $HOME/.config/yams/config.toml
+     * 1. Existing YAMS_CONFIG_PATH compatibility override
+     * 2. YAMS_CONFIG canonical environment override
+     * 3. Platform config default from yams::config::get_config_path()
      *
      * @return Path to config file if found, empty path otherwise
      */
     static std::filesystem::path resolveDefaultConfigPath();
 
     /**
-     * @brief Parse a simple TOML file into a flat key-value map.
+     * @brief Compatibility wrapper around yams::config::parse_simple_toml().
      *
-     * Supports basic TOML features:
-     * - [section] headers (flattened as "section.key")
-     * - key = "value" assignments
-     * - # comments
-     *
-     * Does NOT support: nested tables, arrays, multi-line strings.
-     *
-     * @param path Path to TOML file
-     * @return Map of flattened keys to values
+     * New code should call the shared config reader directly. This installed API remains available
+     * for source and static-link compatibility.
      */
     static std::map<std::string, std::string>
     parseSimpleTomlFlat(const std::filesystem::path& path);
@@ -365,24 +397,10 @@ public:
     resolveEmbeddingConfig(const DaemonConfig& config,
                            const std::filesystem::path& resolvedDataDir);
 
-    /**
-     * @brief Resolve the preferred reranker model name from env/config.
-     *
-     * Precedence:
-     * 1. Environment variable YAMS_RERANKER_MODEL (if non-empty)
-     * 2. Config file key search.reranker_model
-     *
-     * @param config Daemon configuration (used for config file path)
-     * @return Reranker model name or empty string if none found
-     */
+    /// Compatibility lookup retained for installed consumers; typed startup policy is preferred.
     static std::string resolveRerankerModel(const DaemonConfig& config);
 
-    /**
-     * @brief Determine if symbol extraction plugins should be enabled.
-     *
-     * Reads plugins.symbol_extraction.enable from config.toml when present;
-     * defaults to true when unset or on parse errors.
-     */
+    /// Compatibility lookup retained for installed consumers; typed plugin policy is preferred.
     static bool isSymbolExtractionEnabled(const DaemonConfig& config);
 
     /**
@@ -477,6 +495,8 @@ public:
      * - search.topology.sparse_dense_alpha = float in [0,1]
      * - search.topology.min_route_score = float
      * - search.topology.route_calibration_fingerprint = string
+     * - search.topology.route_calibration_policy_fingerprint = string
+     * - search.topology.route_calibration_dataset_identity = string
      * - search.topology.route_calibration_queries = int
      * - search.topology.route_calibration_protected_candidates = int
      * - search.topology.route_calibration_missed_protected_candidates = int
@@ -597,21 +617,9 @@ public:
     static InstrumentationPolicy resolveInstrumentationPolicy(const DaemonConfig& config);
 
     /**
-     * @brief Resolve post-ingest concurrency caps from config file.
+     * @brief Compatibility resolver for [tuning.post_ingest] concurrency caps.
      *
-     * Reads [tuning.post_ingest] keys. Each entry is optional; callers apply
-     * values via TuneAdvisor::setPost*Concurrent() only when the corresponding
-     * YAMS_POST_*_CONCURRENT env var is not set (env wins).
-     *
-     * Config keys:
-     * - tuning.post_ingest.total_concurrent    = int (1..256)
-     * - tuning.post_ingest.embed_concurrent    = int (1..32)
-     * - tuning.post_ingest.extraction_concurrent = int (1..64)
-     * - tuning.post_ingest.kg_concurrent       = int (1..64)
-     * - tuning.post_ingest.symbol_concurrent   = int (1..32)
-     * - tuning.post_ingest.entity_concurrent   = int (1..16)
-     * - tuning.post_ingest.title_concurrent    = int (1..16)
-     * - tuning.post_ingest.batch_size          = int (1..256)
+     * New startup code applies the typed tuning snapshot through ConfigSections.
      */
     static PostIngestCaps resolvePostIngestCaps();
 

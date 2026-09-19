@@ -34,13 +34,32 @@ struct EmbeddingRepairStats {
 
 struct EmbeddingRepairConfig {
     size_t batchSize = 32;
+    std::uint64_t repairLockTimeoutMs = 10ULL * 60 * 1000;
     bool skipExisting = true;
-    std::string preferredModel; // Empty = auto-detect
+    std::string preferredModel; // Empty = effective embedding policy
     std::filesystem::path dataPath;
     bool verbose = false;
     // Optional cancellation flag (checked best-effort between operations)
     std::atomic<bool>* cancelRequested = nullptr;
 };
+
+struct EmbeddingRepairCandidateScan {
+    std::vector<std::string> documentHashes;
+    size_t documentsScanned = 0;
+    size_t eligibleByMime = 0;
+    size_t eligibleByExtractedText = 0;
+    std::vector<std::string> excludedSamples;
+};
+
+/**
+ * Select metadata documents eligible for embedding repair.
+ *
+ * Normal scans query only documents missing embeddings; force scans query all documents.
+ * Text-like MIME types, requested MIME prefixes, and documents with extracted content are eligible.
+ */
+Result<EmbeddingRepairCandidateScan>
+selectEmbeddingRepairCandidates(metadata::IMetadataRepository& metadataRepo,
+                                const std::vector<std::string>& includeMimePrefixes, bool force);
 
 class BulkIngestLease {
 public:

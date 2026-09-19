@@ -510,19 +510,39 @@ Result<void> SimeonLexicalBackend::buildAsync(std::shared_ptr<metadata::Metadata
         if (cfg_.concept_mining_enabled && ids.size() >= 100) {
             try {
                 const auto cmt0 = std::chrono::steady_clock::now();
+                // Bound retained raw text, not total process memory: getContent still
+                // materializes the next document before this check, and mining has its own
+                // allocations. Exceeding this budget disables the entire concept-scoring
+                // layer for this build; it is not sampling or a quality-neutral shortcut.
                 std::vector<std::string> conceptTexts;
                 conceptTexts.reserve(ids.size());
+                std::size_t conceptCorpusBytes = 0;
+                bool conceptBudgetExceeded = false;
                 for (auto docId : ids) {
                     if (stop.stop_requested())
                         break;
                     auto contentResult = repo->getContent(docId);
                     if (contentResult && contentResult.value()) {
-                        conceptTexts.emplace_back(std::move(contentResult.value()->contentText));
+                        auto& text = contentResult.value()->contentText;
+                        if (exceedsBudget(conceptCorpusBytes, text.size(), cfg_.max_corpus_bytes)) {
+                            conceptBudgetExceeded = true;
+                            break;
+                        }
+                        conceptCorpusBytes += text.size();
+                        conceptTexts.emplace_back(std::move(text));
                     } else {
                         conceptTexts.emplace_back();
                     }
                 }
-                if (!stop.stop_requested() && conceptTexts.size() == ids.size()) {
+                if (conceptBudgetExceeded) {
+                    spdlog::warn("[simeon-lexical] concept mining skipped: raw corpus exceeds "
+                                 "max_corpus_bytes (docs_loaded={} bytes={} cap={})",
+                                 conceptTexts.size(), conceptCorpusBytes, cfg_.max_corpus_bytes);
+                    conceptTexts.clear();
+                    conceptTexts.shrink_to_fit();
+                }
+                if (!conceptBudgetExceeded && !stop.stop_requested() &&
+                    conceptTexts.size() == ids.size()) {
                     YAMS_ZONE_SCOPED_N("simeon::mine_concepts");
                     std::vector<std::string_view> docViews;
                     docViews.reserve(conceptTexts.size());
@@ -916,6 +936,18 @@ SimeonLexicalBackend::scoreRouted(std::string_view query,
 
     RescoreDecision decision;
     decision.recipe_name = recipe_label;
+    // QuerySession requests the backend's own dense ID order. Retain that score
+    // buffer directly instead of hashing every corpus ID to rebuild the same array.
+    if (candidate_doc_ids.data() == index_to_doc_id_.data() &&
+        candidate_doc_ids.size() == index_to_doc_id_.size()) {
+        for (size_t di = 0; di < full.size(); ++di) {
+            if (!std::isfinite(full[di])) {
+                full[di] = di < lexical.size() && std::isfinite(lexical[di]) ? lexical[di] : 0.0f;
+            }
+        }
+        decision.scores = std::move(full);
+        return decision;
+    }
     decision.scores.reserve(candidate_doc_ids.size());
     for (auto id : candidate_doc_ids) {
         auto it = doc_id_to_index_.find(id);
@@ -1055,6 +1087,16 @@ SimeonLexicalBackend::scoreStrategyRouted(std::string_view query,
 
     RescoreDecision decision;
     decision.recipe_name = recipe_label;
+    if (candidate_doc_ids.data() == index_to_doc_id_.data() &&
+        candidate_doc_ids.size() == index_to_doc_id_.size()) {
+        for (auto& score : full) {
+            if (!std::isfinite(score)) {
+                score = 0.0f;
+            }
+        }
+        decision.scores = std::move(full);
+        return decision;
+    }
     decision.scores.reserve(candidate_doc_ids.size());
     for (auto id : candidate_doc_ids) {
         auto it = doc_id_to_index_.find(id);
@@ -1130,6 +1172,17 @@ SimeonLexicalBackend::scoreBanditRouted(std::string_view query, std::string_view
 
     RescoreDecision decision;
     decision.recipe_name = recipe_label;
+    if (candidate_doc_ids.data() == index_to_doc_id_.data() &&
+        candidate_doc_ids.size() == index_to_doc_id_.size()) {
+        // The bandit scratch is thread-local and reused: the session must own a copy.
+        decision.scores = full;
+        for (auto& score : decision.scores) {
+            if (!std::isfinite(score)) {
+                score = 0.0f;
+            }
+        }
+        return decision;
+    }
     decision.scores.reserve(candidate_doc_ids.size());
     for (auto id : candidate_doc_ids) {
         auto it = doc_id_to_index_.find(id);
@@ -1147,31 +1200,69 @@ SimeonLexicalBackend::scoreBanditRouted(std::string_view query, std::string_view
 Result<SimeonLexicalBackend::TopCandidateDecision>
 SimeonLexicalBackend::searchTop(std::string_view query, std::size_t limit,
                                 std::string_view arm_name) const {
-    if (!ready_.load(std::memory_order_acquire) || !index_) {
+    ScoreTimingScope scoreTiming(*this);
+    QuerySession session(*this, query, arm_name);
+    return session.searchTop(limit);
+}
+
+Result<void> SimeonLexicalBackend::QuerySession::ensureScored() {
+    if (!scores_) {
+        if (!backend_.ready()) {
+            return Error{ErrorCode::NotInitialized, "SimeonLexicalBackend: not ready"};
+        }
+        scores_.emplace([&]() -> Result<RescoreDecision> {
+            if (!arm_.empty()) {
+                return backend_.scoreBanditRouted(query_, arm_, backend_.index_to_doc_id_);
+            }
+            if (backend_.hasStrategyRouter()) {
+                return backend_.scoreStrategyRouted(query_, backend_.index_to_doc_id_);
+            }
+            return backend_.scoreRouted(query_, backend_.index_to_doc_id_);
+        }());
+    }
+    if (!scores_->has_value()) {
+        return scores_->error();
+    }
+    return {};
+}
+
+Result<SimeonLexicalBackend::RescoreDecision>
+SimeonLexicalBackend::QuerySession::score(std::span<const std::int64_t> documentIds) {
+    auto scored = ensureScored();
+    if (!scored) {
+        return scored.error();
+    }
+    RescoreDecision result;
+    result.recipe_name = scores_->value().recipe_name;
+    result.scores.reserve(documentIds.size());
+    for (const auto id : documentIds) {
+        const auto found = backend_.doc_id_to_index_.find(id);
+        result.scores.push_back(found == backend_.doc_id_to_index_.end()
+                                    ? 0.0F
+                                    : scores_->value().scores[found->second]);
+    }
+    return result;
+}
+
+Result<SimeonLexicalBackend::TopCandidateDecision>
+SimeonLexicalBackend::QuerySession::searchTop(std::size_t limit) {
+    if (!backend_.ready()) {
         return Error{ErrorCode::NotInitialized, "SimeonLexicalBackend: not ready"};
     }
-    ScoreTimingScope scoreTiming(*this);
 
     TopCandidateDecision out;
+    const auto& index_to_doc_id_ = backend_.index_to_doc_id_;
     if (limit == 0 || index_to_doc_id_.empty()) {
         return out;
     }
 
-    auto decision = [&]() -> Result<RescoreDecision> {
-        if (!arm_name.empty()) {
-            return scoreBanditRouted(query, arm_name, index_to_doc_id_);
-        }
-        if (hasStrategyRouter()) {
-            return scoreStrategyRouted(query, index_to_doc_id_);
-        }
-        return scoreRouted(query, index_to_doc_id_);
-    }();
-    if (!decision) {
-        return Error{decision.error().code, decision.error().message};
+    auto scored = ensureScored();
+    if (!scored) {
+        return scored.error();
     }
 
-    out.recipe_name = decision.value().recipe_name;
-    const auto& scores = decision.value().scores;
+    out.recipe_name = scores_->value().recipe_name;
+    const auto& scores = scores_->value().scores;
     if (scores.size() != index_to_doc_id_.size()) {
         return Error{ErrorCode::InternalError, "SimeonLexicalBackend: direct score size mismatch"};
     }

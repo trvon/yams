@@ -1,8 +1,13 @@
+#include "embedding_derivation_policy.h"
+#include "embedding_input_selection.h"
+#include "semantic_graph_candidate_policy.h"
 #include <yams/daemon/components/EmbeddingService.h>
 #include <yams/daemon/components/WriteCoordinator.h>
 
 #include <spdlog/spdlog.h>
+#include <yams/config/config_helpers.h>
 #include <yams/core/assert.hpp>
+#include <yams/crypto/hasher.h>
 #include <yams/profiling.h>
 
 #include <algorithm>
@@ -46,12 +51,34 @@ namespace daemon {
 
 EmbeddingService::EmbeddingService(std::shared_ptr<api::IContentStore> store,
                                    std::shared_ptr<metadata::MetadataRepository> meta,
-                                   WorkCoordinator* coordinator)
-    : store_(std::move(store)), meta_(std::move(meta)), coordinator_(coordinator),
+                                   WorkCoordinator* coordinator, EmbeddingServiceConfig config)
+    : config_(std::move(config)), effectiveConfig_(resolveConcurrencyPolicy(config_)),
+      store_(std::move(store)), meta_(std::move(meta)), coordinator_(coordinator),
       strand_(coordinator_->makeStrand()) {}
 
 EmbeddingService::~EmbeddingService() {
     shutdown();
+}
+
+EffectiveEmbeddingServiceConfig
+EmbeddingService::resolveConcurrencyPolicy(const EmbeddingServiceConfig& config) {
+    if (config.coremlUnifiedConcurrency > 0) {
+        return EffectiveEmbeddingServiceConfig{config.coremlUnifiedConcurrency,
+                                               config.coremlUnifiedConcurrencySource.empty()
+                                                   ? std::string{"typed:explicit"}
+                                                   : config.coremlUnifiedConcurrencySource};
+    }
+
+    const auto compatibility = yams::config::read_env_size("YAMS_EMBED_COREML_SAFE_CONCURRENCY");
+    if (compatibility.value && *compatibility.value > 0) {
+        return EffectiveEmbeddingServiceConfig{*compatibility.value,
+                                               "environment:YAMS_EMBED_COREML_SAFE_CONCURRENCY"};
+    }
+    return {};
+}
+
+EffectiveEmbeddingServiceConfig EmbeddingService::effectiveConcurrencyPolicy() const {
+    return effectiveConfig_;
 }
 
 Result<void> EmbeddingService::initialize() {
@@ -78,52 +105,64 @@ Result<void> EmbeddingService::initialize() {
 
 void EmbeddingService::start() {
     YAMS_ZONE_SCOPED_N("Embedding::start");
-    stop_.store(false);
     pollerRunning_.store(false, std::memory_order_release);
     {
         std::lock_guard<std::mutex> lock(inferTrackerMutex_);
         activeInferSubBatches_.clear();
     }
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Embed, true);
-    coordinator_->spawnDetached(strand_, channelPoller());
+    {
+        std::lock_guard lock(stageActivityMutex_);
+        stop_.store(false, std::memory_order_release);
+        const bool acquiredActivity = !stageActivityPublished_;
+        if (acquiredActivity) {
+            stageActivityToken_ =
+                TuneAdvisor::acquirePostIngestStageActivity(TuneAdvisor::PostIngestStage::Embed);
+            stageActivityPublished_ = true;
+        }
+        try {
+            coordinator_->spawnDetached(strand_, channelPoller());
+        } catch (...) {
+            if (acquiredActivity) {
+                TuneAdvisor::releasePostIngestStageActivity(TuneAdvisor::PostIngestStage::Embed,
+                                                            stageActivityToken_);
+                stageActivityPublished_ = false;
+                stageActivityToken_ = 0;
+                stop_.store(true, std::memory_order_release);
+            }
+            throw;
+        }
+    }
     spdlog::info("EmbeddingService: started channel poller");
 }
 
-std::unordered_map<std::string, EmbeddingService::PhaseTiming>
-EmbeddingService::phaseTimingsSnapshot() const {
-    std::lock_guard<std::mutex> lock(phaseTimingsMutex_);
-    return phaseTimings_;
-}
-
-void EmbeddingService::resetPhaseTimings() {
-    YAMS_ZONE_SCOPED_N("Embedding::resetPhaseTimings");
-    std::lock_guard<std::mutex> lock(phaseTimingsMutex_);
-    phaseTimings_.clear();
-}
-
-void EmbeddingService::recordPhaseTiming(const std::string& phase,
+void EmbeddingService::recordPhaseTiming(std::string_view phase,
                                          std::chrono::steady_clock::time_point start) {
-    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - start)
-                        .count();
-    std::lock_guard<std::mutex> lock(phaseTimingsMutex_);
-    auto& timing = phaseTimings_[phase];
-    timing.calls += 1;
-    timing.totalMs += static_cast<uint64_t>(std::max<long long>(0, ms));
-    timing.maxMs =
-        std::max<uint64_t>(timing.maxMs, static_cast<uint64_t>(std::max<long long>(0, ms)));
+    auto sink = std::atomic_load_explicit(&phaseTimingSink_, std::memory_order_acquire);
+    if (!sink) {
+        return;
+    }
+
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    const auto elapsedUs = std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count();
+    const auto nonNegativeUs = static_cast<std::uint64_t>(std::max<std::int64_t>(0, elapsedUs));
+    try {
+        sink->record(phase, nonNegativeUs);
+    } catch (...) {
+        // Instrumentation must never affect embedding or semantic-graph work.
+    }
 }
 
-void EmbeddingService::enqueueRepairStatusUpdate(std::vector<std::string> hashes,
-                                                 metadata::RepairStatus status,
-                                                 std::string source) {
-    if (hashes.empty() || !meta_) {
+void EmbeddingService::enqueueRepairStatusUpdate(
+    std::vector<std::string> hashes, metadata::RepairStatus status, std::string source,
+    std::vector<metadata::EmbeddingDerivationToken> tokens) {
+    // Without an attempt identity this job has no authority to overwrite repair state.
+    if (hashes.empty() || !meta_ || tokens.empty()) {
         return;
     }
     if (auto* coord = getWriteCoordinator_ ? getWriteCoordinator_() : nullptr) {
         auto batch = std::make_unique<WriteBatch>();
         batch->source = source.empty() ? "EmbeddingService::repairStatus" : std::move(source);
-        batch->ops.emplace_back(UpdateRepairStatusOp{std::move(hashes), status});
+        batch->ops.emplace_back(UpdateRepairStatusOp{{}, status, std::move(tokens)});
         coord->enqueue(std::move(batch));
         return;
     }
@@ -132,107 +171,98 @@ void EmbeddingService::enqueueRepairStatusUpdate(std::vector<std::string> hashes
                  hashes.size(), source);
 }
 
-void EmbeddingService::enqueueEmbeddingStatusUpdate(std::vector<std::string> hashes, bool embedded,
-                                                    std::string modelName, std::string source) {
-    if (hashes.empty() || !meta_) {
-        return;
-    }
-    if (auto* coord = getWriteCoordinator_ ? getWriteCoordinator_() : nullptr) {
-        auto batch = std::make_unique<WriteBatch>();
-        batch->source = source.empty() ? "EmbeddingService::embeddingStatus" : std::move(source);
-        if (hashes.size() == 1) {
-            batch->ops.emplace_back(UpdateEmbeddingStatusByHashOp{std::move(hashes.front()),
-                                                                  embedded, std::move(modelName)});
-        } else {
-            batch->ops.emplace_back(
-                UpdateEmbeddingStatusByHashesOp{std::move(hashes), embedded, std::move(modelName)});
-        }
-        coord->enqueue(std::move(batch));
-        return;
-    }
-    spdlog::warn("EmbeddingService: WriteCoordinator unavailable; dropping {} embedding-status "
-                 "updates from {}",
-                 hashes.size(), source);
-}
-
-void EmbeddingService::enqueueEmbeddingCompletion(std::vector<std::string> hashes,
-                                                  std::string modelName) {
-    if (hashes.empty() || !meta_) {
+void EmbeddingService::enqueueEmbeddingCompletion(
+    std::vector<metadata::EmbeddingDerivationToken> tokens, std::string modelName) {
+    if (tokens.empty() || !meta_) {
         return;
     }
     if (auto* coord = getWriteCoordinator_ ? getWriteCoordinator_() : nullptr) {
         auto batch = std::make_unique<WriteBatch>();
         batch->source = "EmbeddingService::completion";
-        batch->ops.emplace_back(
-            CompleteDocumentEmbeddingsByHashesOp{std::move(hashes), std::move(modelName)});
+        CompleteDocumentEmbeddingsByHashesOp op;
+        op.modelName = std::move(modelName);
+        op.derivations = std::move(tokens);
+        batch->ops.emplace_back(std::move(op));
         coord->enqueue(std::move(batch));
         return;
     }
     spdlog::warn("EmbeddingService: WriteCoordinator unavailable; dropping {} embedding "
                  "completion updates",
-                 hashes.size());
+                 tokens.size());
 }
 
 void EmbeddingService::shutdown() {
     YAMS_ZONE_SCOPED_N("Embedding::shutdown");
-    if (stop_.exchange(true)) {
+    bool alreadyStopped = false;
+    bool hadPoller = false;
+    {
+        std::lock_guard lock(stageActivityMutex_);
+        alreadyStopped = stop_.exchange(true, std::memory_order_acq_rel);
+        hadPoller = stageActivityPublished_;
+        if (stageActivityPublished_) {
+            TuneAdvisor::releasePostIngestStageActivity(TuneAdvisor::PostIngestStage::Embed,
+                                                        stageActivityToken_);
+            stageActivityPublished_ = false;
+            stageActivityToken_ = 0;
+        }
+    }
+    if (alreadyStopped) {
         return;
     }
-    TuneAdvisor::setPostIngestStageActive(TuneAdvisor::PostIngestStage::Embed, false);
     spdlog::info("EmbeddingService: shutting down (processed={}, failed={}, inFlight={})",
                  processed_.load(), failed_.load(), inFlight_.load());
 
     // Best-effort: clear queued jobs promptly so shutdown focuses on already-running work.
     // This runs on the service strand to avoid races with channelPoller's pendingJobs_ access.
     try {
-        std::promise<void> drainDone;
-        auto drainFuture = drainDone.get_future();
-        boost::asio::post(strand_, [this, done = std::move(drainDone)]() mutable {
-            std::size_t droppedDocs = 0;
-            std::size_t droppedJobs = 0;
-            try {
-                for (const auto& pending : pendingJobs_) {
-                    droppedDocs += pending.hashes.size();
-                    ++droppedJobs;
-                }
-                pendingJobs_.clear();
+        // Without start(), there is no strand-owned work to drain. In particular, do not
+        // leave a closure capturing this queued on a coordinator that may start later.
+        if (hadPoller) {
+            std::promise<void> drainDone;
+            auto drainFuture = drainDone.get_future();
+            boost::asio::post(strand_, [this, done = std::move(drainDone)]() mutable {
+                std::size_t droppedDocs = 0;
+                std::size_t droppedJobs = 0;
+                try {
+                    for (const auto& pending : pendingJobs_) {
+                        droppedDocs += pending.hashes.size();
+                        ++droppedJobs;
+                    }
+                    pendingJobs_.clear();
 
-                auto channel = std::atomic_load_explicit(&embedChannel_, std::memory_order_acquire);
-                InternalEventBus::EmbedJob queued;
-                while (channel && channel->try_pop(queued)) {
-                    droppedDocs += queued.hashes.size();
-                    ++droppedJobs;
-                }
+                    auto channel =
+                        std::atomic_load_explicit(&embedChannel_, std::memory_order_acquire);
+                    InternalEventBus::EmbedJob queued;
+                    while (channel && channel->try_pop(queued)) {
+                        droppedDocs += queued.hashes.size();
+                        ++droppedJobs;
+                    }
 
-                pendingApprox_.store(0, std::memory_order_relaxed);
-                if (droppedDocs > 0) {
-                    failed_.fetch_add(droppedDocs, std::memory_order_relaxed);
-                    InternalEventBus::instance().incEmbedDropped(droppedDocs);
-                    spdlog::info("EmbeddingService: dropped queued embed jobs={} "
-                                 "docs={} during shutdown",
-                                 droppedJobs, droppedDocs);
+                    pendingApprox_.store(0, std::memory_order_relaxed);
+                    if (droppedDocs > 0) {
+                        failed_.fetch_add(droppedDocs, std::memory_order_relaxed);
+                        InternalEventBus::instance().incEmbedDropped(droppedDocs);
+                        spdlog::info("EmbeddingService: dropped queued embed jobs={} "
+                                     "docs={} during shutdown",
+                                     droppedJobs, droppedDocs);
+                    }
+                } catch (...) {
                 }
-            } catch (...) {
-            }
-            lifecycleCv_.notify_all();
-            try {
-                done.set_value();
-            } catch (...) {
-            }
-        });
-        (void)drainFuture.wait_for(std::chrono::milliseconds(1500));
+                lifecycleCv_.notify_all();
+                try {
+                    done.set_value();
+                } catch (...) {
+                }
+            });
+            (void)drainFuture.wait_for(std::chrono::milliseconds(1500));
+        }
     } catch (...) {
     }
 
     std::chrono::milliseconds maxWait{30000};
-    if (const char* env = std::getenv("YAMS_EMBED_SHUTDOWN_WAIT_MS")) {
-        try {
-            const auto parsed = static_cast<std::chrono::milliseconds::rep>(std::stoll(env));
-            if (parsed > 0) {
-                maxWait = std::chrono::milliseconds(parsed);
-            }
-        } catch (...) {
-        }
+    if (auto configured = yams::config::read_env_milliseconds("YAMS_EMBED_SHUTDOWN_WAIT_MS").value;
+        configured && configured->count() > 0) {
+        maxWait = *configured;
     }
 
     const auto deadline = std::chrono::steady_clock::now() + maxWait;
@@ -649,14 +679,20 @@ void EmbeddingService::updateSemanticNeighborGraphUnlocked(
         }
         recordPhaseTiming("semantic_pair_scoring", tPairScoring);
 
-        if (candidateDocs < 2) {
+        std::size_t retainedNeighbors = 0;
+        for (const auto& neighbors : topBySource) {
+            retainedNeighbors += neighbors.size();
+        }
+        const embed::SemanticGraphCandidateCounts candidateCounts{
+            sources.size(), candidateDocs, candidateNeighborCount, retainedNeighbors};
+        if (!candidateCounts.hasGraphWork()) {
             return;
         }
 
         std::vector<std::string> nodeKeys;
-        nodeKeys.reserve(sources.size() + candidateNeighborCount);
+        nodeKeys.reserve(candidateCounts.nodeCapacity());
         std::unordered_set<std::string> seenNodeKeys;
-        seenNodeKeys.reserve(sources.size() + candidateNeighborCount);
+        seenNodeKeys.reserve(candidateCounts.nodeCapacity());
         auto rememberNodeKey = [&](const std::string& hash) {
             if (hash.empty()) {
                 return;
@@ -1233,32 +1269,13 @@ boost::asio::awaitable<void> EmbeddingService::channelPoller() {
     const auto& gpuInfo = resource::detectGpu();
     const bool coremlUnifiedHardware =
         gpuInfo.detected && gpuInfo.provider == "coreml" && gpuInfo.unifiedMemory;
-    std::size_t coremlUnifiedCap = 1;
-    std::string embedProfile;
-    if (const char* s = std::getenv("YAMS_BENCH_EMBED_PROFILE")) {
-        embedProfile = s;
-        std::transform(embedProfile.begin(), embedProfile.end(), embedProfile.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        if (embedProfile == "safe") {
-            coremlUnifiedCap = 1;
-        } else if (embedProfile == "balanced") {
-            coremlUnifiedCap = 2;
-        }
-    }
-    if (const char* s = std::getenv("YAMS_EMBED_COREML_SAFE_CONCURRENCY")) {
-        try {
-            const auto parsed = static_cast<std::size_t>(std::stoull(s));
-            if (parsed > 0) {
-                coremlUnifiedCap = parsed;
-            }
-        } catch (...) {
-        }
-    }
+    const auto concurrencyPolicy = effectiveConcurrencyPolicy();
+    const std::size_t coremlUnifiedCap = concurrencyPolicy.coremlUnifiedConcurrency;
     if (coremlUnifiedHardware) {
         spdlog::info(
             "[EmbeddingService] CoreML unified-memory safety mode available: non-Simeon embed "
-            "jobs capped at {} (profile='{}')",
-            coremlUnifiedCap, embedProfile.empty() ? "default" : embedProfile);
+            "jobs capped at {} (source='{}')",
+            coremlUnifiedCap, concurrencyPolicy.coremlUnifiedConcurrencySource);
     }
     auto usesSimeonPreferredModel = [&]() {
         std::string preferred;
@@ -1666,7 +1683,8 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     if (const char* s = std::getenv("YAMS_EMBED_TIMING_WARN_MS")) {
         try {
             warnMs = static_cast<uint64_t>(std::stoull(s));
-        } catch (...) {
+        } catch (const std::exception& e) {
+            spdlog::debug("Ignoring invalid YAMS_EMBED_TIMING_WARN_MS: {}", e.what());
         }
     }
 
@@ -1683,13 +1701,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                             std::chrono::steady_clock::now() - start)
                             .count();
-        {
-            std::lock_guard<std::mutex> lock(phaseTimingsMutex_);
-            auto& timing = phaseTimings_[phase];
-            timing.calls += 1;
-            timing.totalMs += static_cast<uint64_t>(std::max<long long>(0, ms));
-            timing.maxMs = std::max<uint64_t>(timing.maxMs, static_cast<uint64_t>(ms));
-        }
+        recordPhaseTiming(phase, start);
         if (timingEnabled || ms >= static_cast<long long>(warnMs)) {
             spdlog::info("[EmbeddingService] job={} phase={} dur_ms={} {}", jobTag, phase, ms,
                          detail);
@@ -1756,6 +1768,23 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         monitor->phase = "queued";
         monitor->detail = "queued for embedding";
     }
+    // Establish failure authority before provider callbacks and cancellation exits. Keep
+    // completed attempts intact until a usable provider identifies the actual recipe.
+    if (!meta_) {
+        failed_.fetch_add(job.hashes.size(), std::memory_order_relaxed);
+        finishMonitor("failed", "embedding metadata repository unavailable");
+        return;
+    }
+    auto preparation = meta_->batchClassifyOrBeginEmbeddingDerivations(
+        job.hashes, "embedding-preparation-v1", true,
+        metadata::EmbeddingAdmissionPolicy::PreserveCompleted);
+    if (!preparation) {
+        failed_.fetch_add(job.hashes.size(), std::memory_order_relaxed);
+        finishMonitor("failed", "embedding admission failed: " + preparation.error().message);
+        return;
+    }
+    const auto preparationTokens = std::move(preparation.value().tokens);
+
     std::shared_ptr<IModelProvider> provider;
     std::string modelName;
     std::shared_ptr<yams::vector::VectorDatabase> vdb;
@@ -1777,7 +1806,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     auto markHashesFailed = [&](std::string_view reason) {
         if (!job.hashes.empty()) {
             enqueueRepairStatusUpdate(job.hashes, metadata::RepairStatus::Failed,
-                                      "EmbeddingService::jobFailed");
+                                      "EmbeddingService::jobFailed", preparationTokens);
         }
         failed_.fetch_add(job.hashes.size(), std::memory_order_relaxed);
         finishMonitor("failed", std::string(reason));
@@ -1790,7 +1819,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     if (isJobCanceled()) {
         if (!job.hashes.empty()) {
             enqueueRepairStatusUpdate(job.hashes, metadata::RepairStatus::Pending,
-                                      "EmbeddingService::jobPending");
+                                      "EmbeddingService::jobPending", preparationTokens);
         }
         finishMonitor("cancelled", "embedding job canceled before model preparation");
         return;
@@ -1839,7 +1868,7 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     if (isJobCanceled()) {
         if (!job.hashes.empty()) {
             enqueueRepairStatusUpdate(job.hashes, metadata::RepairStatus::Pending,
-                                      "EmbeddingService::jobPending");
+                                      "EmbeddingService::jobPending", preparationTokens);
         }
         finishMonitor("cancelled", "embedding job canceled before gather");
         return;
@@ -1912,36 +1941,29 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     std::vector<std::string> failedGatherHashes;
     failedGatherHashes.reserve(job.hashes.size());
 
-    std::unordered_set<std::string> preparedHashes;
-    preparedHashes.reserve(job.preparedDocs.size());
-    for (auto& pd : job.preparedDocs) {
-        preparedHashes.insert(pd.hash);
-        if (job.skipExisting) {
-            auto hasEmbedRes = meta_->hasDocumentEmbeddingByHash(pd.hash);
-            if (hasEmbedRes && hasEmbedRes.value()) {
-                spdlog::debug(
-                    "EmbeddingService: skipExisting=true, already embedded (prepared): {}",
-                    pd.hash);
-                skipped++;
-                completedGatherHashes.push_back(pd.hash);
-                continue;
-            }
-        }
-
-        if (pd.chunks.empty()) {
-            // Malformed prepared payload; fall back to DB gather via hashes.
-            continue;
-        }
-
-        docsToEmbed.push_back({pd.hash, std::string{}, pd.fileName, pd.filePath, pd.mimeType});
-        preparedDocPtr.push_back(&pd);
-        docHasPreparedChunks.push_back(true);
+    const auto chunkPolicy = ConfigResolver::resolveEmbeddingChunkingPolicy();
+    const auto selectionCfg = ConfigResolver::resolveEmbeddingSelectionPolicy();
+    const auto preparationRecipe = embed::embeddingPreparationRecipe(chunkPolicy, selectionCfg);
+    const auto derivationRecipe = embed::embeddingDerivationRecipe(
+        preparationRecipe, provider->getEmbeddingSpaceIdentity(modelName),
+        provider->getProviderVersion(), provider->getEmbeddingDim(modelName));
+    const auto selectedInputs = embed::selectEmbeddingInputs(job);
+    std::vector<std::pair<std::string, InternalEventBus::EmbedPreparedDoc*>> inputs;
+    for (const auto index : selectedInputs.preparedIndices) {
+        auto& pd = job.preparedDocs[index];
+        inputs.emplace_back(pd.hash, &pd);
     }
-
-    for (const auto& hash : job.hashes) {
-        if (!job.preparedDocs.empty() && preparedHashes.find(hash) != preparedHashes.end()) {
-            continue;
-        }
+    for (const auto& hash : selectedInputs.gatherHashes) {
+        inputs.emplace_back(hash, nullptr);
+    }
+    struct GatherCandidate {
+        std::string hash;
+        metadata::DocumentInfo docInfo;
+        InternalEventBus::EmbedPreparedDoc* prepared;
+    };
+    std::vector<GatherCandidate> candidates;
+    candidates.reserve(inputs.size());
+    for (const auto& [hash, prepared] : inputs) {
         try {
             auto docInfoRes = meta_->getDocumentByHash(hash);
             if (!docInfoRes || !docInfoRes.value().has_value()) {
@@ -1950,22 +1972,63 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
                 failedGatherHashes.push_back(hash);
                 continue;
             }
+            candidates.push_back({hash, std::move(*docInfoRes.value()), prepared});
+        } catch (const std::exception& e) {
+            spdlog::error("EmbeddingService: exception gathering {}: {}", hash, e.what());
+            failedGather++;
+            failedGatherHashes.push_back(hash);
+        }
+    }
 
-            const auto& docInfo = *docInfoRes.value();
+    // Mint a derivation token per document before any input snapshot is read: content that
+    // changes after this point invalidates the token, and completion is rejected instead of
+    // publishing vectors for text the corpus no longer holds.
+    embed::EmbeddingDerivationLedger ledger;
+    const auto enqueueAttemptRepairStatusUpdate = [&](std::vector<std::string> hashes,
+                                                      metadata::RepairStatus status,
+                                                      std::string source) {
+        auto tokens = ledger.tokensFor(hashes);
+        enqueueRepairStatusUpdate(std::move(hashes), status, std::move(source), std::move(tokens));
+    };
+    if (!candidates.empty()) {
+        std::vector<std::string> mintHashes;
+        mintHashes.reserve(candidates.size());
+        for (const auto& candidate : candidates) {
+            mintHashes.push_back(candidate.hash);
+        }
+        auto minted = meta_->batchClassifyOrBeginEmbeddingDerivations(mintHashes, derivationRecipe,
+                                                                      job.skipExisting);
+        if (!minted) {
+            spdlog::error("EmbeddingService: failed to begin embedding derivations for {} docs: {}",
+                          mintHashes.size(), minted.error().message);
+            failedGather += candidates.size();
+            failedGatherHashes.insert(failedGatherHashes.end(), mintHashes.begin(),
+                                      mintHashes.end());
+            candidates.clear();
+        } else {
+            completedGatherHashes = std::move(minted.value().alreadyCompleted);
+            skipped += completedGatherHashes.size();
+            ledger.adopt(std::move(minted.value().tokens));
+        }
+    }
 
-            // Check embedding status via metadata repository (separate DB, no VectorDatabase lock)
-            // This avoids mutex contention with EntityGraphService's insertEntityVectorsBatch
-            if (job.skipExisting) {
-                auto hasEmbedRes = meta_->hasDocumentEmbeddingByHash(hash);
-                if (hasEmbedRes && hasEmbedRes.value()) {
-                    spdlog::debug("EmbeddingService: skipExisting=true, already embedded: {}",
-                                  hash);
-                    skipped++;
-                    completedGatherHashes.push_back(hash);
-                    continue;
-                }
+    const std::unordered_set<std::string> completedAtAdmission(completedGatherHashes.begin(),
+                                                               completedGatherHashes.end());
+    for (auto& candidate : candidates) {
+        const auto& hash = candidate.hash;
+        if (completedAtAdmission.contains(hash)) {
+            continue;
+        }
+        const auto& docInfo = candidate.docInfo;
+        auto* prepared = candidate.prepared;
+        try {
+            if (!ledger.byHash.contains(hash)) {
+                // Deleted between lookup and mint; nothing to embed.
+                spdlog::warn("EmbeddingService: document vanished before derivation: {}", hash);
+                failedGather++;
+                failedGatherHashes.push_back(hash);
+                continue;
             }
-
             auto contentOpt = meta_->getContent(docInfo.id);
             if (!contentOpt || !contentOpt.value().has_value()) {
                 spdlog::debug("EmbeddingService: no content for document {}", hash);
@@ -1982,10 +2045,12 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
                 continue;
             }
 
-            docsToEmbed.push_back(
-                {hash, text, docInfo.fileName, docInfo.filePath, docInfo.mimeType});
-            preparedDocPtr.push_back(nullptr);
-            docHasPreparedChunks.push_back(false);
+            const bool usePrepared =
+                prepared && embed::preparedEmbeddingMatches(*prepared, text, preparationRecipe);
+            docsToEmbed.push_back({hash, usePrepared ? std::string{} : text, docInfo.fileName,
+                                   docInfo.filePath, docInfo.mimeType});
+            preparedDocPtr.push_back(usePrepared ? prepared : nullptr);
+            docHasPreparedChunks.push_back(usePrepared);
         } catch (const std::exception& e) {
             spdlog::error("EmbeddingService: exception gathering {}: {}", hash, e.what());
             failedGather++;
@@ -1995,17 +2060,15 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
 
     failed_.fetch_add(failedGather);
 
-    if (!completedGatherHashes.empty()) {
-        enqueueRepairStatusUpdate(completedGatherHashes, metadata::RepairStatus::Completed,
-                                  "EmbeddingService::gatherCompleted");
-    }
+    // A skipped attempt was already complete at admission. Do not enqueue an unfenced
+    // completion write that could run after a newer attempt has started.
     if (!skippedGatherHashes.empty()) {
-        enqueueRepairStatusUpdate(skippedGatherHashes, metadata::RepairStatus::Skipped,
-                                  "EmbeddingService::gatherSkipped");
+        enqueueAttemptRepairStatusUpdate(skippedGatherHashes, metadata::RepairStatus::Skipped,
+                                         "EmbeddingService::gatherSkipped");
     }
     if (!failedGatherHashes.empty()) {
-        enqueueRepairStatusUpdate(failedGatherHashes, metadata::RepairStatus::Failed,
-                                  "EmbeddingService::gatherFailed");
+        enqueueAttemptRepairStatusUpdate(failedGatherHashes, metadata::RepairStatus::Failed,
+                                         "EmbeddingService::gatherFailed");
     }
     updateMonitorCounts([&](InternalEventBus::EmbedJobMonitor& mon) {
         mon.succeededDocs += completedGatherHashes.size();
@@ -2031,8 +2094,8 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         for (const auto& doc : docsToEmbed) {
             pendingHashes.push_back(doc.hash);
         }
-        enqueueRepairStatusUpdate(std::move(pendingHashes), metadata::RepairStatus::Pending,
-                                  "EmbeddingService::chunkPending");
+        enqueueAttemptRepairStatusUpdate(std::move(pendingHashes), metadata::RepairStatus::Pending,
+                                         "EmbeddingService::chunkPending");
         finishMonitor("cancelled", "embedding job canceled before chunking");
         return;
     }
@@ -2047,8 +2110,8 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         for (const auto& doc : docsToEmbed) {
             failedHashes.push_back(doc.hash);
         }
-        enqueueRepairStatusUpdate(std::move(failedHashes), metadata::RepairStatus::Failed,
-                                  "EmbeddingService::chunkFailed");
+        enqueueAttemptRepairStatusUpdate(std::move(failedHashes), metadata::RepairStatus::Failed,
+                                         "EmbeddingService::chunkFailed");
         finishMonitor("failed", "embedding service shutting down before chunking");
         return;
     }
@@ -2076,7 +2139,6 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
     std::vector<std::string> docPreviews;
     docPreviews.resize(docsToEmbed.size());
 
-    const auto chunkPolicy = ConfigResolver::resolveEmbeddingChunkingPolicy();
     auto strategy = chunkPolicy.strategy;
     const auto& ccfg = chunkPolicy.config;
     const bool chunkCfgOverridden = chunkPolicy.overridden;
@@ -2127,8 +2189,9 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
             spdlog::info(
                 "EmbeddingService: aborting job={} during chunking (docs={}) due to cancel", jobTag,
                 docsToEmbed.size());
-            enqueueRepairStatusUpdate(std::move(hashesToUpdate), metadata::RepairStatus::Pending,
-                                      "EmbeddingService::chunkAbortPending");
+            enqueueAttemptRepairStatusUpdate(std::move(hashesToUpdate),
+                                             metadata::RepairStatus::Pending,
+                                             "EmbeddingService::chunkAbortPending");
             finishMonitor("cancelled", "embedding job canceled during chunking");
             return;
         }
@@ -2137,8 +2200,8 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
                      jobTag, docsToEmbed.size());
         failed_.fetch_add(docsToEmbed.size(), std::memory_order_relaxed);
         InternalEventBus::instance().incEmbedDropped(docsToEmbed.size());
-        enqueueRepairStatusUpdate(std::move(hashesToUpdate), metadata::RepairStatus::Failed,
-                                  "EmbeddingService::chunkAbortFailed");
+        enqueueAttemptRepairStatusUpdate(std::move(hashesToUpdate), metadata::RepairStatus::Failed,
+                                         "EmbeddingService::chunkAbortFailed");
         finishMonitor("failed", "embedding service shutting down during chunking");
     };
 
@@ -2243,8 +2306,6 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         mon.detail = "chunked docs=" + std::to_string(docsToEmbed.size()) +
                      " chunks=" + std::to_string(allChunks.size());
     });
-
-    const auto selectionCfg = ConfigResolver::resolveEmbeddingSelectionPolicy();
 
     if (selectionCfg.mode != ConfigResolver::EmbeddingSelectionPolicy::Mode::Full &&
         !allChunks.empty()) {
@@ -2497,8 +2558,8 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         for (const auto& doc : docsToEmbed) {
             failedHashes.push_back(doc.hash);
         }
-        enqueueRepairStatusUpdate(std::move(failedHashes), metadata::RepairStatus::Failed,
-                                  "EmbeddingService::chunkFailed");
+        enqueueAttemptRepairStatusUpdate(std::move(failedHashes), metadata::RepairStatus::Failed,
+                                         "EmbeddingService::chunkFailed");
         finishMonitor("failed", "embedding job failed");
     };
 
@@ -2682,10 +2743,8 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
             persistedRecordCounts.erase(it);
         }
 
-        if (!vdb->deleteVectorsByDocument(doc.hash)) {
-            spdlog::warn("EmbeddingService: failed to clean partial vectors for {}: {}", doc.hash,
-                         vdb->getLastError());
-        }
+        // Do not delete by hash: another attempt may already have committed vectors.
+        // Begin invalidates readiness; generation-scoped partial-vector cleanup is separate.
 
         auto& acc = docAccumulators[docIdx];
         acc.sumEmbedding.clear();
@@ -2693,11 +2752,9 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         docPreviews[docIdx].clear();
 
         failed_.fetch_add(1, std::memory_order_relaxed);
-        enqueueEmbeddingStatusUpdate(std::vector<std::string>{doc.hash}, false, modelName,
-                                     "EmbeddingService::embeddingStatusFailed");
-        enqueueRepairStatusUpdate(std::vector<std::string>{doc.hash},
-                                  metadata::RepairStatus::Failed,
-                                  "EmbeddingService::embeddingFailed");
+        enqueueAttemptRepairStatusUpdate(std::vector<std::string>{doc.hash},
+                                         metadata::RepairStatus::Failed,
+                                         "EmbeddingService::embeddingFailed");
         updateMonitorCounts([&](InternalEventBus::EmbedJobMonitor& mon) {
             mon.failedDocs += 1;
             mon.processedDocs = approxProcessedDocs(mon);
@@ -2725,8 +2782,9 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
                 }
             }
             if (!pendingHashes.empty()) {
-                enqueueRepairStatusUpdate(std::move(pendingHashes), metadata::RepairStatus::Pending,
-                                          "EmbeddingService::inferenceCancelledPending");
+                enqueueAttemptRepairStatusUpdate(std::move(pendingHashes),
+                                                 metadata::RepairStatus::Pending,
+                                                 "EmbeddingService::inferenceCancelledPending");
             }
             finishMonitor("cancelled", "embedding job canceled during inference");
             return;
@@ -3076,8 +3134,9 @@ void EmbeddingService::processEmbedJob(InternalEventBus::EmbedJob job) {
         topologyRebuildRequester_(successHashes);
     }
 
-    // Transfer ownership only after every synchronous observer has consumed the hashes.
-    enqueueEmbeddingCompletion(std::move(successHashes), modelName);
+    // Publish readiness only for tokens still current: a document whose content changed
+    // while it was being embedded keeps has_embedding = 0 and is re-derived later.
+    enqueueEmbeddingCompletion(ledger.tokensFor(successHashes), modelName);
 
     logPoolState("job_end");
     finishMonitor("completed", "embedding job completed");

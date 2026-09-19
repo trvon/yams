@@ -1,7 +1,9 @@
 #define YAMS_DAEMON_TEST_HOOKS_IMPL 1
+// pi-lens-ignore: fatal error
 #include <yams/daemon/client/asio_connection_pool.h>
 #undef YAMS_DAEMON_TEST_HOOKS_IMPL
 
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/client/ipc_wait_config.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
@@ -27,10 +29,8 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cctype>
 #include <cerrno>
 #include <chrono>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <optional>
@@ -49,7 +49,9 @@
 namespace yams::daemon {
 
 ConnectionRegistry& ConnectionRegistry::instance() {
-    static auto* reg = new ConnectionRegistry();
+    // Deliberately process-lifetime. Static destruction can run after transport callback owners
+    // have gone away; destroying the registry then must not traverse connection state.
+    static ConnectionRegistry* const reg = new ConnectionRegistry();
     return *reg;
 }
 
@@ -62,9 +64,10 @@ void ConnectionRegistry::closeAll() {
     std::lock_guard<std::mutex> lk(mutex_);
     for (auto& weak : connections_) {
         if (auto conn = weak.lock()) {
-            // Use the connection's cancel() method to emit cancellation signals
-            // This notifies all pending coroutines before closing the socket
-            conn->cancel();
+            // Socket closure aborts pending I/O without invoking cancellation slots.
+            // A one-shot CLI can destroy those slots before GlobalIOContext teardown;
+            // emitting terminal cancellation then dereferences stale callback state.
+            conn->close();
         }
     }
     connections_.clear();
@@ -78,20 +81,8 @@ using boost::asio::use_future;
 
 namespace {
 
-bool env_truthy(const char* value) {
-    if (!value) {
-        return false;
-    }
-    std::string normalized(value);
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return !(normalized.empty() || normalized == "0" || normalized == "false" ||
-             normalized == "off" || normalized == "no");
-}
-
 bool cli_one_shot_shutdown_enabled() {
-    // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only test/CLI process knob, not mutated here.
-    return env_truthy(std::getenv("YAMS_CLI_ONE_SHOT"));
+    return yams::config::read_env_bool("YAMS_CLI_ONE_SHOT").valueOr(false);
 }
 
 void log_pool_debug(const char* message) noexcept {
@@ -133,6 +124,12 @@ async_connect_with_timeout(const TransportOptions& opts,
     if (cs.cancelled() != boost::asio::cancellation_type::none) {
         co_return Error{ErrorCode::OperationCancelled, "Operation cancelled"};
     }
+    // The coroutine's own cancellation slot: binding to it here (instead of the handler's
+    // associated slot, which is not available during async_initiate) lets a terminal
+    // cancellation resume this co_await with operation_aborted instead of destroying the
+    // suspended frame. Without this, cancelling a pending connect leaves the co_spawn future
+    // with no value (broken promise) and future::get() aborts under _GLIBCXX_ASSERTIONS.
+    auto connectCancelSlot = cs.slot();
 
     static constexpr bool trace = false;
     auto completion_executor = co_await this_coro::executor;
@@ -153,8 +150,8 @@ async_connect_with_timeout(const TransportOptions& opts,
 
     auto connect_result = co_await boost::asio::async_initiate<
         decltype(use_awaitable), void(std::exception_ptr, RaceResult)>(
-        [&socket, &endpoint, io_executor, completion_executor,
-         timeout = opts.requestTimeout](auto handler) mutable {
+        [&socket, &endpoint, io_executor, completion_executor, timeout = opts.requestTimeout,
+         connectCancelSlot](auto handler) mutable {
             auto completed = std::make_shared<std::atomic<bool>>(false);
             auto timer = std::make_shared<boost::asio::steady_timer>(io_executor);
             timer->expires_after(timeout);
@@ -163,6 +160,26 @@ async_connect_with_timeout(const TransportOptions& opts,
             auto handlerPtr = std::make_shared<HandlerT>(std::move(handler));
             auto completion_exec =
                 boost::asio::get_associated_executor(*handlerPtr, completion_executor);
+
+            // Bind the coroutine's cancellation slot so a terminal cancellation resumes this
+            // co_await with operation_aborted instead of destroying the suspended frame.
+            if (connectCancelSlot.is_connected()) {
+                connectCancelSlot.assign([completed, timer, handlerPtr, completion_exec](
+                                             boost::asio::cancellation_type type) mutable {
+                    if (type == boost::asio::cancellation_type::none) {
+                        return;
+                    }
+                    if (!completed->exchange(true, std::memory_order_acq_rel)) {
+                        timer->cancel();
+                        boost::asio::post(completion_exec, [h = std::move(*handlerPtr)]() mutable {
+                            std::move(h)(
+                                std::exception_ptr{},
+                                RaceResult(std::in_place_index<0>,
+                                           ConnectResult{boost::asio::error::operation_aborted}));
+                        });
+                    }
+                });
+            }
 
             timer->async_wait([completed, handlerPtr,
                                completion_exec](const boost::system::error_code& ec) mutable {
@@ -418,12 +435,17 @@ bool socket_looks_healthy_cached(AsioConnection& conn, std::chrono::steady_clock
 namespace {
 
 std::shared_mutex& registry_mutex() {
-    static auto* m = new std::shared_mutex();
-    return *m;
+    // The pool registry is explicitly drained by shutdown_all(). Its synchronization storage must
+    // remain valid through process teardown because late clients may still reach registry APIs.
+    static std::shared_mutex* const mutex = new std::shared_mutex();
+    return *mutex;
 }
 
 std::unordered_map<std::string, std::shared_ptr<AsioConnectionPool>>& registry_map() {
-    static auto* map = new std::unordered_map<std::string, std::shared_ptr<AsioConnectionPool>>();
+    // Deliberately process-lifetime: destroying shared pools from an atexit callback would invoke
+    // shutdown(), which emits cancellation into callback state whose static lifetime is unknown.
+    static auto* const map =
+        new std::unordered_map<std::string, std::shared_ptr<AsioConnectionPool>>();
     return *map;
 }
 
@@ -772,7 +794,15 @@ awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::create_co
                 auto exec = co_await this_coro::executor;
                 boost::asio::steady_timer timer(exec);
                 timer.expires_after(backoff);
-                co_await timer.async_wait(use_awaitable);
+                try {
+                    co_await timer.async_wait(use_awaitable);
+                } catch (const boost::system::system_error& e) {
+                    if (e.code() == boost::asio::error::operation_aborted) {
+                        co_return Error{ErrorCode::SystemShutdown,
+                                        "Connection pool shut down while connecting"};
+                    }
+                    throw;
+                }
                 if (shutdown_.load(std::memory_order_acquire)) {
                     co_return Error{ErrorCode::SystemShutdown,
                                     "Connection pool shut down while connecting"};
@@ -804,7 +834,15 @@ awaitable<Result<std::shared_ptr<AsioConnection>>> AsioConnectionPool::create_co
             auto exec = co_await this_coro::executor;
             boost::asio::steady_timer timer(exec);
             timer.expires_after(backoff);
-            co_await timer.async_wait(use_awaitable);
+            try {
+                co_await timer.async_wait(use_awaitable);
+            } catch (const boost::system::system_error& e) {
+                if (e.code() == boost::asio::error::operation_aborted) {
+                    co_return Error{ErrorCode::SystemShutdown,
+                                    "Connection pool shut down while connecting"};
+                }
+                throw;
+            }
             if (shutdown_.load(std::memory_order_acquire)) {
                 co_return Error{ErrorCode::SystemShutdown,
                                 "Connection pool shut down while connecting"};

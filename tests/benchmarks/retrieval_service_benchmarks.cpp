@@ -22,6 +22,7 @@
 #include <tracy/Tracy.hpp>
 #endif
 
+#include "../common/test_helpers_catch2.h"
 #include "../integration/daemon/test_async_helpers.h"
 #include "../integration/daemon/test_daemon_harness.h"
 #include <yams/app/services/document_ingestion_service.h>
@@ -51,12 +52,7 @@ std::vector<std::string> g_test_docs;      // Hashes of test documents
 std::vector<std::string> g_test_doc_names; // Names used for by-name retrieval
 BenchConfig g_activeConfig;
 std::optional<std::filesystem::path> g_activeConfigPath;
-std::optional<std::string> g_savedEmbedBackendEnv;
-bool g_savedEmbedBackendEnvPresent{false};
-bool g_savedEmbedBackendEnvCaptured{false};
-std::optional<std::string> g_savedOnnxForceCpuEnv;
-bool g_savedOnnxForceCpuEnvPresent{false};
-bool g_savedOnnxForceCpuEnvCaptured{false};
+std::vector<yams::test::ScopedEnvVar> g_environment;
 std::string g_observedEmbeddingBackend;
 std::string g_observedEmbeddingModel;
 uint32_t g_observedEmbeddingDim{0};
@@ -132,62 +128,6 @@ std::filesystem::path writeEmbeddingBackendConfig(const BenchConfig& config) {
     return configPath;
 }
 
-void captureEmbedBackendEnvOnce() {
-    if (g_savedEmbedBackendEnvCaptured) {
-        return;
-    }
-    g_savedEmbedBackendEnvCaptured = true;
-    if (const char* env = std::getenv("YAMS_EMBED_BACKEND")) {
-        g_savedEmbedBackendEnvPresent = true;
-        g_savedEmbedBackendEnv = std::string(env);
-    } else {
-        g_savedEmbedBackendEnvPresent = false;
-        g_savedEmbedBackendEnv.reset();
-    }
-}
-
-void restoreEmbedBackendEnvIfCaptured() {
-    if (!g_savedEmbedBackendEnvCaptured) {
-        return;
-    }
-    if (g_savedEmbedBackendEnvPresent && g_savedEmbedBackendEnv) {
-        ::setenv("YAMS_EMBED_BACKEND", g_savedEmbedBackendEnv->c_str(), 1);
-    } else {
-        ::unsetenv("YAMS_EMBED_BACKEND");
-    }
-    g_savedEmbedBackendEnvCaptured = false;
-    g_savedEmbedBackendEnvPresent = false;
-    g_savedEmbedBackendEnv.reset();
-}
-
-void captureOnnxForceCpuEnvOnce() {
-    if (g_savedOnnxForceCpuEnvCaptured) {
-        return;
-    }
-    g_savedOnnxForceCpuEnvCaptured = true;
-    if (const char* env = std::getenv("YAMS_ONNX_FORCE_CPU")) {
-        g_savedOnnxForceCpuEnvPresent = true;
-        g_savedOnnxForceCpuEnv = std::string(env);
-    } else {
-        g_savedOnnxForceCpuEnvPresent = false;
-        g_savedOnnxForceCpuEnv.reset();
-    }
-}
-
-void restoreOnnxForceCpuEnvIfCaptured() {
-    if (!g_savedOnnxForceCpuEnvCaptured) {
-        return;
-    }
-    if (g_savedOnnxForceCpuEnvPresent && g_savedOnnxForceCpuEnv) {
-        ::setenv("YAMS_ONNX_FORCE_CPU", g_savedOnnxForceCpuEnv->c_str(), 1);
-    } else {
-        ::unsetenv("YAMS_ONNX_FORCE_CPU");
-    }
-    g_savedOnnxForceCpuEnvCaptured = false;
-    g_savedOnnxForceCpuEnvPresent = false;
-    g_savedOnnxForceCpuEnv.reset();
-}
-
 void updateObservedEmbeddingStatus(const daemon::StatusResponse& status) {
     g_observedEmbeddingBackend = status.embeddingBackend;
     g_observedEmbeddingModel = status.embeddingModel;
@@ -209,12 +149,9 @@ void runBenchmarkEmbeddingRepair(const BenchConfig& config) {
     repairReq.embeddingModel = preferredModelForBackend(config.embeddingBackend);
 
     auto timeout = std::chrono::milliseconds(180000);
-    if (const char* env = std::getenv("YAMS_BENCH_REPAIR_WAIT_MS")) {
-        try {
-            timeout = std::chrono::milliseconds(
-                static_cast<std::chrono::milliseconds::rep>(std::stoll(env)));
-        } catch (...) {
-        }
+    if (const auto configured = yams::config::read_env_milliseconds("YAMS_BENCH_REPAIR_WAIT_MS");
+        configured.value) {
+        timeout = *configured.value;
     }
 
     std::cout << "Running foreground embedding repair";
@@ -259,14 +196,9 @@ bool benchmarkFilterTargetsBackendAB(int argc, char** argv) {
 }
 
 std::size_t benchDocCount() {
-    if (const char* env = std::getenv("YAMS_BENCH_DOC_COUNT")) {
-        try {
-            auto val = std::stoul(env);
-            if (val > 0) {
-                return val;
-            }
-        } catch (...) {
-        }
+    if (const auto configured = yams::config::read_env_size("YAMS_BENCH_DOC_COUNT");
+        configured.value && *configured.value > 0) {
+        return *configured.value;
     }
     return 500; // Default larger dataset for benchmarks
 }
@@ -472,6 +404,7 @@ void SetupBenchmarkSuite(const BenchConfig& config = {}) {
 
     g_client.reset();
     g_harness.reset();
+    g_environment.clear();
     g_test_docs.clear();
     g_test_doc_names.clear();
     g_activeConfig = config;
@@ -484,14 +417,17 @@ void SetupBenchmarkSuite(const BenchConfig& config = {}) {
 
     std::cout << "\n=== Setting up benchmark environment ===\n";
 
-    // Apply tuning profile/env knobs before daemon start
+    // Apply compatibility knobs through guards so each benchmark arm restores its exact host
+    // environment before the next configuration.
+    g_environment.emplace_back("YAMS_TUNING_PROFILE",
+                               config.tuningProfile.empty()
+                                   ? std::nullopt
+                                   : std::optional<std::string>{config.tuningProfile});
     if (!config.tuningProfile.empty()) {
-        ::setenv("YAMS_TUNING_PROFILE", config.tuningProfile.c_str(), 1);
         std::cout << "Using tuning profile: " << config.tuningProfile << "\n";
-    } else {
-        ::unsetenv("YAMS_TUNING_PROFILE");
     }
-    ::setenv("YAMS_BENCH_ENABLE_EMBEDDINGS", config.embeddingsEnabled ? "1" : "0", 1);
+    g_environment.emplace_back("YAMS_BENCH_ENABLE_EMBEDDINGS",
+                               config.embeddingsEnabled ? std::string{"1"} : std::string{"0"});
 
     // Start daemon
     DaemonHarness::Options harnessOptions;
@@ -505,14 +441,13 @@ void SetupBenchmarkSuite(const BenchConfig& config = {}) {
         if (!config.embeddingBackend.empty()) {
             // Backend A/B is driven through typed config so the benchmark exercises the same
             // ConfigResolver path as production. Clear the legacy env overlay while the
-            // benchmark-owned config is active; restore it on teardown.
-            captureEmbedBackendEnvOnce();
-            ::unsetenv("YAMS_EMBED_BACKEND");
-            if (config.embeddingBackend == "onnxruntime" && !std::getenv("YAMS_ONNX_FORCE_CPU")) {
+            // benchmark-owned config is active; guards restore it on teardown.
+            g_environment.emplace_back("YAMS_EMBED_BACKEND", std::nullopt);
+            if (config.embeddingBackend == "onnxruntime" &&
+                !yams::config::getenv_nonempty("YAMS_ONNX_FORCE_CPU")) {
                 // Keep release-validation numbers comparable and avoid platform EP failures
                 // (e.g. CoreML partition bugs) from masking ONNX Runtime backend selection.
-                captureOnnxForceCpuEnvOnce();
-                ::setenv("YAMS_ONNX_FORCE_CPU", "1", 1);
+                g_environment.emplace_back("YAMS_ONNX_FORCE_CPU", std::string{"1"});
             }
             auto configPath = writeEmbeddingBackendConfig(config);
             harnessOptions.configPath = configPath;
@@ -633,6 +568,7 @@ void SetupBenchmarkSuite(const BenchConfig& config = {}) {
 void TeardownBenchmarkSuite() {
     g_client.reset();
     g_harness.reset();
+    g_environment.clear();
     g_test_docs.clear();
     g_test_doc_names.clear();
     g_activeConfig = {};
@@ -642,10 +578,7 @@ void TeardownBenchmarkSuite() {
     g_observedEmbeddingDim = 0;
     g_observedVectorCount = 0;
     g_embeddingRepairSucceeded = 0;
-    ::unsetenv("YAMS_TUNING_PROFILE");
-    ::unsetenv("YAMS_BENCH_ENABLE_EMBEDDINGS");
-    restoreEmbedBackendEnvIfCaptured();
-    restoreOnnxForceCpuEnvIfCaptured();
+    g_environment.clear();
 }
 
 } // anonymous namespace

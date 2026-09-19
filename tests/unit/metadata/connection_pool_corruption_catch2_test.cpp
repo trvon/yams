@@ -19,12 +19,6 @@ using namespace yams::test;
 // NOLINTBEGIN(bugprone-chained-comparison)
 namespace {
 
-struct ArtifactGuard {
-    explicit ArtifactGuard(std::filesystem::path p) : path(std::move(p)) {}
-    ~ArtifactGuard() { remove_sqlite_artifacts(path); }
-    std::filesystem::path path;
-};
-
 std::filesystem::path makeCorruptDb(std::string_view prefix) {
     auto dbPath = migrated_metadata_db_template().clone(prefix);
     corruptPage(dbPath, static_cast<std::uint64_t>(tableRootPage(dbPath, "documents")));
@@ -66,8 +60,8 @@ TEST_CASE("pool surfaces corruption errors and stays usable",
     CHECK(stats.activeConnections == 0);
     CHECK(stats.totalAcquired == stats.totalReleased);
 
-    auto healthy = pool.withConnection(
-        [](Database& db) -> Result<void> { return db.execute("SELECT 1"); });
+    auto healthy =
+        pool.withConnection([](Database& db) -> Result<void> { return db.execute("SELECT 1"); });
     CHECK(healthy);
 
     pool.shutdown();
@@ -106,8 +100,8 @@ TEST_CASE("pool caches connections that observed corruption (documented behavior
     auto first = pool.withConnection(scanDocumentsTable);
     REQUIRE_FALSE(first);
 
-    auto second = pool.withConnection(
-        [](Database& db) -> Result<void> { return db.execute("SELECT 1"); });
+    auto second =
+        pool.withConnection([](Database& db) -> Result<void> { return db.execute("SELECT 1"); });
     INFO("Pool currently returns connections to the cache after a corruption error; eviction of "
          "poisoned connections is future work");
     CHECK(second);

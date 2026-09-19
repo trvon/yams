@@ -76,10 +76,10 @@ void appendLexicalBatchAtRank(const std::string& query, QueryIntent queryIntent,
 }
 
 std::optional<yams::metadata::SearchResults>
-makeSimeonLexicalResults(const std::string& query, SimeonLexicalBackend* backend,
+makeSimeonLexicalResults(SimeonLexicalBackend::QuerySession* session,
                          const yams::metadata::SearchResults& searchResults,
-                         std::string* lastSimeonRouteRecipe, const SearchEngineConfig& config) {
-    if (!backend || !backend->ready() || searchResults.results.empty()) {
+                         std::string* lastSimeonRouteRecipe) {
+    if (!session || searchResults.results.empty()) {
         return std::nullopt;
     }
 
@@ -89,15 +89,7 @@ makeSimeonLexicalResults(const std::string& query, SimeonLexicalBackend* backend
         ids.push_back(r.document.id);
     }
 
-    auto decision = [&]() -> Result<SimeonLexicalBackend::RescoreDecision> {
-        if (!config.simeonBanditArm.empty()) {
-            return backend->scoreBanditRouted(query, config.simeonBanditArm, ids);
-        }
-        if (backend->hasStrategyRouter()) {
-            return backend->scoreStrategyRouted(query, ids);
-        }
-        return backend->scoreRouted(query, ids);
-    }();
+    auto decision = session->score(ids);
     if (!decision) {
         spdlog::debug("[simeon-lexical] score failed, keeping FTS5 scores: {}",
                       decision.error().message);
@@ -124,15 +116,14 @@ makeSimeonLexicalResults(const std::string& query, SimeonLexicalBackend* backend
     return rescored;
 }
 
-void appendSimeonLexicalBatch(const std::string& query, SimeonLexicalBackend* backend,
+void appendSimeonLexicalBatch(const std::string& query, SimeonLexicalBackend::QuerySession* session,
                               std::string* lastSimeonRouteRecipe, QueryIntent queryIntent,
                               const SearchEngineConfig& config,
                               const yams::metadata::SearchResults& searchResults,
                               float scorePenalty, std::unordered_set<std::string>& simeonSeenHashes,
                               std::vector<ComponentResult>& results,
                               QueryExpansionStats* expansionStats) {
-    auto simeonResults =
-        makeSimeonLexicalResults(query, backend, searchResults, lastSimeonRouteRecipe, config);
+    auto simeonResults = makeSimeonLexicalResults(session, searchResults, lastSimeonRouteRecipe);
     if (!simeonResults) {
         return;
     }
@@ -144,13 +135,13 @@ void appendSimeonLexicalBatch(const std::string& query, SimeonLexicalBackend* ba
 
 std::optional<yams::metadata::SearchResults> makeDirectSimeonLexicalResults(
     const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
-    const std::string& query, SimeonLexicalBackend* backend, std::string* lastSimeonRouteRecipe,
-    const SearchEngineConfig& config, size_t limit, QueryExpansionStats* expansionStats) {
-    if (!metadataRepo || !backend || !backend->ready() || limit == 0) {
+    const std::string& query, SimeonLexicalBackend::QuerySession* session,
+    std::string* lastSimeonRouteRecipe, size_t limit, QueryExpansionStats* expansionStats) {
+    if (!metadataRepo || !session || limit == 0) {
         return std::nullopt;
     }
 
-    auto decision = backend->searchTop(query, limit, config.simeonBanditArm);
+    auto decision = session->searchTop(limit);
     if (!decision) {
         spdlog::debug("[simeon-lexical] direct candidate search failed: {}",
                       decision.error().message);
@@ -195,12 +186,12 @@ std::optional<yams::metadata::SearchResults> makeDirectSimeonLexicalResults(
 
 void appendDirectSimeonLexicalBatch(
     const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
-    const std::string& query, SimeonLexicalBackend* backend, std::string* lastSimeonRouteRecipe,
-    QueryIntent queryIntent, const SearchEngineConfig& config, size_t limit,
-    std::unordered_set<std::string>& seenHashes, std::vector<ComponentResult>& results,
-    QueryExpansionStats* expansionStats) {
+    const std::string& query, SimeonLexicalBackend::QuerySession* session,
+    std::string* lastSimeonRouteRecipe, QueryIntent queryIntent, const SearchEngineConfig& config,
+    size_t limit, std::unordered_set<std::string>& seenHashes,
+    std::vector<ComponentResult>& results, QueryExpansionStats* expansionStats) {
     auto directResults = makeDirectSimeonLexicalResults(
-        metadataRepo, query, backend, lastSimeonRouteRecipe, config, limit, expansionStats);
+        metadataRepo, query, session, lastSimeonRouteRecipe, limit, expansionStats);
     if (!directResults || directResults->results.empty()) {
         return;
     }
@@ -217,9 +208,9 @@ void appendDirectSimeonLexicalBatch(
 
 Fts5CandidatePoolStats fetchFts5CandidatePool(
     const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
-    SimeonLexicalBackend* backend, std::string* lastSimeonRouteRecipe, const std::string& query,
-    QueryIntent queryIntent, const SearchEngineConfig& config, size_t limit,
-    QueryExpansionStats* expansionStats, std::vector<ComponentResult>& results,
+    SimeonLexicalBackend::QuerySession* session, std::string* lastSimeonRouteRecipe,
+    const std::string& query, QueryIntent queryIntent, const SearchEngineConfig& config,
+    size_t limit, QueryExpansionStats* expansionStats, std::vector<ComponentResult>& results,
     std::unordered_set<std::string>& seenHashes,
     const std::function<std::vector<std::string>(const std::string&, size_t)>& subPhraseGenerator) {
     Fts5CandidatePoolStats stats;
@@ -237,7 +228,7 @@ Fts5CandidatePoolStats fetchFts5CandidatePool(
         stats.baseFtsHitCount = fts5Results.value().results.size();
         appendLexicalBatch(query, queryIntent, config, fts5Results.value(), 1.0f, true, &seenHashes,
                            ComponentResult::Source::Text, results, expansionStats);
-        appendSimeonLexicalBatch(query, backend, lastSimeonRouteRecipe, queryIntent, config,
+        appendSimeonLexicalBatch(query, session, lastSimeonRouteRecipe, queryIntent, config,
                                  fts5Results.value(), 1.0f, simeonSeenHashes, results,
                                  expansionStats);
     }
@@ -277,7 +268,7 @@ Fts5CandidatePoolStats fetchFts5CandidatePool(
                 appendLexicalBatch(query, queryIntent, config, expandedResults.value(), penalty,
                                    true, &seenHashes, ComponentResult::Source::Text, results,
                                    expansionStats);
-                appendSimeonLexicalBatch(query, backend, lastSimeonRouteRecipe, queryIntent, config,
+                appendSimeonLexicalBatch(query, session, lastSimeonRouteRecipe, queryIntent, config,
                                          expandedResults.value(), penalty, simeonSeenHashes,
                                          results, expansionStats);
                 spdlog::debug("queryFullText lexical expansion: base_hits={} expanded_hits={} "
@@ -343,7 +334,7 @@ Fts5CandidatePoolStats fetchFts5CandidatePool(
                 appendLexicalBatch(query, queryIntent, config, expandedResults.value(), penalty,
                                    true, &seenHashes, ComponentResult::Source::Text, results,
                                    expansionStats);
-                appendSimeonLexicalBatch(query, backend, lastSimeonRouteRecipe, queryIntent, config,
+                appendSimeonLexicalBatch(query, session, lastSimeonRouteRecipe, queryIntent, config,
                                          expandedResults.value(), penalty, simeonSeenHashes,
                                          results, expansionStats);
                 if (expansionStats != nullptr) {
@@ -566,7 +557,12 @@ std::vector<ComponentResult> queryFullTextPipeline(
     std::unordered_set<std::string> seenHashes;
     seenHashes.reserve(limit * 2);
 
-    const auto poolStats = fetchFts5CandidatePool(metadataRepo, backend, lastSimeonRouteRecipe,
+    std::optional<SimeonLexicalBackend::QuerySession> queryScores;
+    if (backend && backend->ready()) {
+        queryScores.emplace(*backend, query, config.simeonBanditArm);
+    }
+    auto* session = queryScores ? &*queryScores : nullptr;
+    const auto poolStats = fetchFts5CandidatePool(metadataRepo, session, lastSimeonRouteRecipe,
                                                   query, queryIntent, config, limit, expansionStats,
                                                   results, seenHashes, subPhraseGenerator);
     const size_t baseFtsHitCount = poolStats.baseFtsHitCount;
@@ -575,7 +571,7 @@ std::vector<ComponentResult> queryFullTextPipeline(
     const bool weakLexicalPool = baseFtsHitCount < config.weakQueryMinTextHits ||
                                  results.size() < config.weakQueryMinTextHits;
     if (weakLexicalPool) {
-        appendDirectSimeonLexicalBatch(metadataRepo, query, backend, lastSimeonRouteRecipe,
+        appendDirectSimeonLexicalBatch(metadataRepo, query, session, lastSimeonRouteRecipe,
                                        queryIntent, config, limit, seenHashes, results,
                                        expansionStats);
     }

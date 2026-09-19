@@ -7,6 +7,8 @@
 
 #include <yams/mcp/mcp_server.h>
 
+#include "../../common/test_helpers_catch2.h"
+
 using nlohmann::json;
 using yams::mcp::ITransport;
 using yams::mcp::MCPServer;
@@ -30,7 +32,7 @@ TEST_CASE("MCP AddDisconnect - Error contains socket and hint", "[mcp][disconnec
     auto t = std::make_unique<NullTransport>();
     MCPServer svr(std::move(t));
 #if !defined(_WIN32)
-    ::setenv("XDG_RUNTIME_DIR", "/run/user/1002", 1);
+    yams::test::ScopedEnvVar runtimeDirectory{"XDG_RUNTIME_DIR", std::string{"/run/user/1002"}};
 #endif
     svr.setEnsureDaemonClientHook([&](const yams::daemon::ClientConfig&) -> yams::Result<void> {
         return yams::Error{yams::ErrorCode::NetworkError, "dial error"};

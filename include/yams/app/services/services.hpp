@@ -55,9 +55,6 @@ namespace yams::app::services::utils {
 /// week") Returns Unix epoch seconds, or error if parsing fails
 Result<std::int64_t> parseTimeExpression(const std::string& timeExpr);
 
-/// Check if a string looks like a content hash (hex string, 8-64 chars)
-bool looksLikeHash(const std::string& str);
-
 /// Classify file type from MIME type and extension for enhanced filtering
 /// Returns: "text", "binary", "image", "document", "archive", "audio", "video", "executable"
 std::string classifyFileType(const std::string& mimeType, const std::string& extension);
@@ -432,6 +429,7 @@ struct GrepFileResult {
     // Search method used for this file
     std::string searchMethod;      // how this file was searched
     bool wasSemanticSearch{false}; // true if semantic search was used
+    std::string hash;              // Immutable stored source revision, empty when unknown.
 };
 
 struct GrepResponse {
@@ -802,6 +800,9 @@ struct DeleteByNameRequest {
     bool keepRefs{false};  // retain CAS content while deleting corpus metadata/graph state
     bool recursive{false}; // delete directory contents recursively
     bool verbose{false};   // verbose output
+
+    // Optional durable-intent seam invoked for the exact resolved hash before destructive work.
+    std::function<Result<void>(std::string_view)> beforeDelete;
 };
 
 struct DeleteByNameResult {

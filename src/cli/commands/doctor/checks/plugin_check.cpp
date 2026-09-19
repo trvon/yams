@@ -1,14 +1,14 @@
 #include <yams/cli/doctor/checks/plugin_check.h>
 
-#include <yams/cli/doctor/plugin_trust.h>
 #include <yams/cli/daemon_helpers.h>
+#include <yams/cli/doctor/plugin_trust.h>
 #include <yams/cli/result_helpers.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/plugins/model_provider_v1.h>
 
 #include <chrono>
-#include <cstdlib>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
@@ -76,8 +76,6 @@ void PluginCheck::execute(std::ostream& os, YamsCLI* cli, const Config& cfg) {
     auto get_abi = reinterpret_cast<int (*)()>(dlsym(handle, "yams_plugin_get_abi_version"));
     auto get_name = reinterpret_cast<const char* (*)()>(dlsym(handle, "yams_plugin_get_name"));
     auto get_ver = reinterpret_cast<const char* (*)()>(dlsym(handle, "yams_plugin_get_version"));
-    auto get_manifest =
-        reinterpret_cast<const char* (*)()>(dlsym(handle, "yams_plugin_get_manifest_json"));
     bool have_core = (get_abi && get_name && get_ver);
     if (!have_core) {
         os << "  [FAIL] Missing required ABI symbols (get_abi/get_name/get_version)\n";
@@ -87,7 +85,6 @@ void PluginCheck::execute(std::ostream& os, YamsCLI* cli, const Config& cfg) {
     int abi = get_abi();
     std::string pname = get_name() ? get_name() : "";
     std::string pver = get_ver() ? get_ver() : "";
-    std::string manifest = (get_manifest && get_manifest()) ? get_manifest() : std::string();
     os << "  Name: " << pname << "  Version: " << pver << "  ABI: " << abi << "\n";
     os << "  Trusted: " << (isTrusted ? "yes" : "no") << "\n";
 
@@ -112,8 +109,8 @@ void PluginCheck::execute(std::ostream& os, YamsCLI* cli, const Config& cfg) {
             if (has_batch) {
                 const char* model_id = nullptr;
                 std::string chosen;
-                if (const char* pref = std::getenv("YAMS_PREFERRED_MODEL"))
-                    chosen = pref;
+                if (cli)
+                    chosen = cli->getResolvedEmbeddingConfig().preferredModel;
                 if (chosen.empty()) {
                     const char* candidates[] = {"nomic-embed-text-v1.5", "all-mpnet-base-v2",
                                                 nullptr};

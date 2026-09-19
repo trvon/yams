@@ -3,10 +3,10 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <cstdlib>
 #include <string_view>
 #include <fmt/ranges.h>
 #include <yams/app/services/services.hpp>
+#include <yams/config/config_helpers.h>
 #include <yams/core/uuid.h>
 #include <yams/daemon/components/admission_control.h>
 #include <yams/daemon/components/dispatch_response.hpp>
@@ -80,11 +80,10 @@ boost::asio::awaitable<Response> RequestDispatcher::handleSearchRequest(const Se
             serviceReq.metadataFilters.emplace_back("collection", req.collection);
         }
 
-        // NOLINTNEXTLINE(concurrency-mt-unsafe): read-only daemon compatibility env override.
-        if (const char* disVec = std::getenv("YAMS_DISABLE_VECTOR");
-            disVec && *disVec && std::string(disVec) != "0" && std::string(disVec) != "false") {
+        if (!yams::config::resolve_vector_environment().enabled) {
             serviceReq.type = "metadata";
-            spdlog::debug("YAMS_DISABLE_VECTOR set; forcing metadata-only search.");
+            spdlog::debug("Vector environment policy disabled scoring; forcing metadata-only "
+                          "search.");
         }
         if (!state_->readiness.searchEngineReady.load()) {
             serviceReq.type = "metadata";

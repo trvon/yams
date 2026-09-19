@@ -222,6 +222,28 @@ struct DocumentContent {
     std::string language;         ///< Detected language code
 };
 
+// Local derivation identity, not a distributed ownership/fencing token.
+struct EmbeddingDerivationToken {
+    std::string hash;
+    std::string generation;
+    std::string recipe;
+};
+
+struct EmbeddingDerivationState {
+    EmbeddingDerivationToken token;
+    bool completed = false;
+};
+
+enum class EmbeddingAdmissionPolicy {
+    MatchRecipe,
+    PreserveCompleted, // Pre-model admission: retain any already-published result.
+};
+
+struct EmbeddingDerivationAdmission {
+    std::vector<EmbeddingDerivationToken> tokens;
+    std::vector<std::string> alreadyCompleted;
+};
+
 /**
  * @brief Entry for batch content insertion and indexing.
  *
@@ -240,6 +262,9 @@ struct BatchContentEntry {
     bool priorContentExtracted = false;
     ExtractionStatus priorExtractionStatus = ExtractionStatus::Pending;
     std::string metadataTitle; ///< Extracted title to persist; empty keeps existing metadata
+    /// Nonempty unique admission token requests an atomic yams:kg_enrichment pending marker.
+    /// Extraction success is separate from completion of this asynchronous stage.
+    std::string knowledgeGraphToken;
 };
 
 /**
@@ -515,14 +540,36 @@ namespace ExtractionStatusUtils {
  * @brief Convert string to extraction status
  */
 [[nodiscard]] inline ExtractionStatus fromString(const std::string& str) {
-    if (str == "pending")
+    const auto equalsIgnoreAsciiCase = [&str](std::string_view expected) {
+        if (str.size() != expected.size()) {
+            return false;
+        }
+        for (std::size_t i = 0; i < str.size(); ++i) {
+            const auto fold = [](unsigned char character) {
+                return character >= 'A' && character <= 'Z'
+                           ? static_cast<unsigned char>(character + ('a' - 'A'))
+                           : character;
+            };
+            if (fold(static_cast<unsigned char>(str[i])) !=
+                fold(static_cast<unsigned char>(expected[i]))) {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    if (equalsIgnoreAsciiCase("pending")) {
         return ExtractionStatus::Pending;
-    if (str == "success")
+    }
+    if (equalsIgnoreAsciiCase("success")) {
         return ExtractionStatus::Success;
-    if (str == "failed")
+    }
+    if (equalsIgnoreAsciiCase("failed")) {
         return ExtractionStatus::Failed;
-    if (str == "skipped")
+    }
+    if (equalsIgnoreAsciiCase("skipped")) {
         return ExtractionStatus::Skipped;
+    }
     return ExtractionStatus::Pending;
 }
 } // namespace ExtractionStatusUtils

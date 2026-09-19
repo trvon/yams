@@ -34,6 +34,25 @@ namespace fs = std::filesystem;
 
 namespace {
 
+class FixedResponseTransport final : public IClientTransport {
+public:
+    explicit FixedResponseTransport(const Response& response) : response_(response) {}
+
+    boost::asio::awaitable<Result<Response>, boost::asio::any_io_executor>
+    send_request(Request) override {
+        co_return response_;
+    }
+
+    boost::asio::awaitable<Result<void>, boost::asio::any_io_executor>
+    send_request_streaming(Request, const HeaderCallback&, const ChunkCallback&,
+                           const ErrorCallback&, const CompleteCallback&) override {
+        co_return Error{ErrorCode::InvalidOperation, "streaming not supported"};
+    }
+
+private:
+    Response response_;
+};
+
 class RecordingTransport final : public IClientTransport {
 public:
     boost::asio::awaitable<Result<Response>, boost::asio::any_io_executor>
@@ -187,6 +206,24 @@ void writeAddResponse(boost::asio::local::stream_protocol::socket& sock, uint64_
 }
 
 } // namespace
+
+TEST_CASE("DaemonClient identifies mismatched IPC response types",
+          "[daemon][client][protocol][diagnostics]") {
+    auto transport = std::make_shared<FixedResponseTransport>(SuccessResponse{});
+    ClientConfig cfg;
+    cfg.transportMode = ClientTransportMode::InProcess;
+    cfg.transport = transport;
+
+    DaemonClient client(cfg);
+    auto result = yams::cli::run_sync(client.call<PruneRequest>(PruneRequest{}), 2s);
+
+    REQUIRE_FALSE(result);
+    const auto& message = result.error().message;
+    CHECK(message.find("Prune") != std::string::npos);
+    CHECK(message.find("PruneResponse") != std::string::npos);
+    CHECK(message.find("SuccessResponse") != std::string::npos);
+    CHECK(message.find("yams daemon restart") != std::string::npos);
+}
 
 TEST_CASE("DaemonClient dispatches through an injected transport", "[daemon][client][transport]") {
     auto transport = std::make_shared<RecordingTransport>();

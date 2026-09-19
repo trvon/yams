@@ -14,8 +14,9 @@ fs = import('fs')
 cpp = meson.get_compiler('cpp')
 
 wasi_enabled = get_option('wasi')
+wasi_cpp_args = []
 if wasi_enabled
-  add_project_arguments('-DYAMS_WASI=1', language: 'cpp')
+  wasi_cpp_args += '-DYAMS_WASI=1'
 endif
 
 _yams_include_dir = join_paths(meson.current_source_dir(), 'include')
@@ -778,19 +779,21 @@ if wasi_enabled
 
   if get_option('build-mcp-server')
     subdir('src/mcp')
+    subdir('tests/wasi')
   endif
 else
   # Core libraries (ordered by dependency)
   subdir('src/core')
+  subdir('src/config')
   subdir('src/crypto')
   subdir('src/chunking')
   subdir('src/compression')
   subdir('src/storage')
   subdir('src/wal')
+  subdir('src/memory_sync')
   subdir('src/manifest')
   subdir('src/metadata')
   subdir('src/integrity')
-  subdir('src/config')
   subdir('src/extraction')
   subdir('src/detection')
   subdir('src/content')
@@ -798,6 +801,7 @@ else
   if get_option('build-plugins')
     subdir('src/plugins')
   endif
+  subdir('src/daemon/tune_advisor')
   subdir('src/daemon/client')
   subdir('src/embedding_simeon')
   subdir('src/vector')

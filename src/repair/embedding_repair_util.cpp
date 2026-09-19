@@ -1,3 +1,4 @@
+#include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/extraction/extraction_util.h>
@@ -9,6 +10,8 @@
 #include <yams/vector/vector_database.h>
 
 #include <spdlog/spdlog.h>
+#include <nlohmann/json.hpp>
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <ctime>
@@ -16,6 +19,7 @@
 #include <filesystem>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #ifdef _WIN32
 #include <io.h>
 #include <windows.h>
@@ -27,8 +31,24 @@
 namespace yams::repair {
 
 namespace {
-constexpr size_t kMaxTextForEmbeddingBytes = 1'000'000;               // 1MB (advisory)
-constexpr size_t kMaxTextToPersistInMetadataBytes = 16 * 1024 * 1024; // 16 MiB (best-effort)
+constexpr size_t kMaxTextForEmbeddingBytes = 1'000'000; // 1MB (advisory)
+constexpr size_t kMaxTextToPersistInMetadataBytes =
+    size_t{16} * 1024 * 1024; // 16 MiB (best-effort)
+constexpr size_t kMaxEmbeddingRepairExcludedSamples = 8;
+
+bool isEmbeddingRepairMimeEligible(std::string_view mimeType,
+                                   const std::vector<std::string>& includeMimePrefixes) {
+    if (mimeType.starts_with("text/") || mimeType == "application/json" ||
+        mimeType == "application/xml" || mimeType == "application/x-yaml" ||
+        mimeType == "application/yaml") {
+        return true;
+    }
+
+    return std::any_of(includeMimePrefixes.begin(), includeMimePrefixes.end(),
+                       [mimeType](const std::string& prefix) {
+                           return !prefix.empty() && mimeType.starts_with(prefix);
+                       });
+}
 
 bool isLikelyTextualMime(std::string_view mimeType) {
     return mimeType.starts_with("text/") || mimeType == "application/json" ||
@@ -97,7 +117,7 @@ public:
                         _write(fd_, stamp.data(), static_cast<unsigned int>(stamp.size()));
                         _lseek(fd_, 0, SEEK_SET);
                     } catch (...) {
-                        // Intentional best-effort path; keep the primary operation unaffected.
+                        spdlog::debug("Embedding repair: Windows lock diagnostic stamp failed");
                     }
                 }
             } else {
@@ -128,7 +148,7 @@ public:
                     (void)::write(fd_, stamp.data(), stamp.size());
                     (void)lseek(fd_, 0, SEEK_SET);
                 } catch (...) {
-                    // Intentional best-effort path; keep the primary operation unaffected.
+                    spdlog::debug("Embedding repair: POSIX lock diagnostic stamp failed");
                 }
             }
         }
@@ -163,6 +183,42 @@ private:
     int fd_;
 };
 } // namespace
+
+Result<EmbeddingRepairCandidateScan>
+selectEmbeddingRepairCandidates(metadata::IMetadataRepository& metadataRepo,
+                                const std::vector<std::string>& includeMimePrefixes, bool force) {
+    metadata::DocumentQueryOptions queryOptions;
+    if (!force) {
+        queryOptions.hasEmbedding = false;
+    }
+
+    auto documents = metadataRepo.queryDocumentsForGrepCandidates(queryOptions);
+    if (!documents) {
+        return documents.error();
+    }
+
+    EmbeddingRepairCandidateScan scan;
+    scan.documentsScanned = documents.value().size();
+    scan.documentHashes.reserve(scan.documentsScanned);
+    scan.excludedSamples.reserve(
+        std::min(scan.documentsScanned, kMaxEmbeddingRepairExcludedSamples));
+
+    for (const auto& document : documents.value()) {
+        if (isEmbeddingRepairMimeEligible(document.mimeType, includeMimePrefixes)) {
+            ++scan.eligibleByMime;
+            scan.documentHashes.push_back(document.sha256Hash);
+        } else if (document.contentExtracted) {
+            ++scan.eligibleByExtractedText;
+            scan.documentHashes.push_back(document.sha256Hash);
+        } else if (scan.excludedSamples.size() < kMaxEmbeddingRepairExcludedSamples) {
+            scan.excludedSamples.push_back(
+                document.filePath + " mime=" + document.mimeType +
+                " extracted=" + std::string(document.contentExtracted ? "1" : "0"));
+        }
+    }
+
+    return scan;
+}
 
 Result<EmbeddingRepairStats>
 repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
@@ -234,7 +290,7 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
             return Error{ErrorCode::InvalidState, msg};
         }
     } catch (...) {
-        // Intentional best-effort path; keep the primary operation unaffected.
+        spdlog::debug("Embedding repair: existing vector dimension guard probe failed");
     }
 
     // Get documents to process
@@ -284,6 +340,28 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
         size_t end = std::min(i + config.batchSize, documents.size());
         std::vector<std::string> texts;
         std::vector<metadata::DocumentInfo> batchDocs;
+        std::vector<metadata::EmbeddingDerivationToken> batchTokens;
+        const yams::vector::ChunkingConfig chunkConfig{};
+        const auto recipe =
+            nlohmann::json{{"pipeline", "standalone-repair-v1"},
+                           {"space", modelProvider->getEmbeddingSpaceIdentity(modelName)},
+                           {"version", modelProvider->getProviderVersion()},
+                           {"dimension", embeddingDim},
+                           {"input_limit", kMaxTextForEmbeddingBytes},
+                           {"strategy", "sentence"},
+                           {"target", chunkConfig.target_chunk_size},
+                           {"max", chunkConfig.max_chunk_size},
+                           {"min", chunkConfig.min_chunk_size},
+                           {"overlap", chunkConfig.overlap_size},
+                           {"sentences", chunkConfig.preserve_sentences},
+                           {"paragraphs", chunkConfig.preserve_paragraphs},
+                           {"words", chunkConfig.preserve_words},
+                           {"overlap_percentage", chunkConfig.overlap_percentage},
+                           {"chunk_separator", chunkConfig.chunk_separator},
+                           {"token_count", chunkConfig.use_token_count},
+                           {"semantic_threshold", chunkConfig.semantic_threshold},
+                           {"separators", chunkConfig.separators}}
+                .dump();
 
         // Collect texts for this batch (extract text; avoid raw bytes)
         for (size_t j = i; j < end; ++j) {
@@ -295,8 +373,14 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
 
             // Check if embedding already exists
             if (config.skipExisting && embeddedHashes.contains(doc.sha256Hash)) {
-                stats.embeddingsSkipped++;
-                continue;
+                auto ready = metadataRepo->hasDocumentEmbeddingByHash(doc.sha256Hash);
+                if (!ready) {
+                    return ready.error();
+                }
+                if (ready.value()) {
+                    stats.embeddingsSkipped++;
+                    continue;
+                }
             }
 
             // Extract text using util (plugins + built-ins)
@@ -342,6 +426,8 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
                 if (!contentUpsert) {
                     spdlog::warn("[repair] Failed to upsert content for {}: {}", doc.sha256Hash,
                                  contentUpsert.error().message);
+                    stats.failedOperations++;
+                    continue;
                 } else {
                     auto docRow = metadataRepo->getDocument(doc.id);
                     if (docRow && docRow.value().has_value()) {
@@ -352,6 +438,20 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
                     }
                 }
             }
+
+            // Persist first, then mint and read the canonical snapshot. A later content
+            // mutation invalidates this token; legacy readiness must never publish it.
+            auto token = metadataRepo->beginDocumentEmbeddingDerivation(doc.sha256Hash, recipe);
+            if (!token) {
+                return token.error();
+            }
+            auto snapshot = metadataRepo->getContent(doc.id);
+            if (!snapshot || !snapshot.value() || snapshot.value()->contentText.empty()) {
+                stats.failedOperations++;
+                continue;
+            }
+            text = snapshot.value()->contentText;
+            batchTokens.push_back(std::move(token.value()));
 
             // Guard overly large text for embedding input.
             if (text.size() > kMaxTextForEmbeddingBytes) {
@@ -381,9 +481,8 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
             std::vector<ChunkInfo> allChunks;
             std::vector<PendingDocumentState> docStates(batchDocs.size());
 
-            yams::vector::ChunkingConfig ccfg{};
             auto chunker = yams::vector::createChunker(
-                yams::vector::ChunkingStrategy::SENTENCE_BASED, ccfg, nullptr);
+                yams::vector::ChunkingStrategy::SENTENCE_BASED, chunkConfig, nullptr);
 
             allChunks.reserve(texts.size() * 2);
 
@@ -532,16 +631,9 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
 
             // Insert once per batch under a bounded advisory lock.
             const auto lockPath = config.dataPath / "vectors.db.lock";
-            auto now = std::chrono::steady_clock::now();
-            uint64_t timeout_ms = 10 * 60 * 1000ULL; // default 10 minutes
-            if (const char* env_ms = std::getenv("YAMS_REPAIR_LOCK_TIMEOUT_MS")) {
-                try {
-                    timeout_ms = std::stoull(std::string(env_ms));
-                } catch (...) {
-                    // Intentional best-effort path; keep the primary operation unaffected.
-                }
-            }
-            const auto deadline = now + std::chrono::milliseconds(timeout_ms);
+            const auto now = std::chrono::steady_clock::now();
+            const auto timeoutMs = std::max<std::uint64_t>(1, config.repairLockTimeoutMs);
+            const auto deadline = now + std::chrono::milliseconds(timeoutMs);
             uint64_t sleep_ms = 50;
             bool inserted = false;
             while (!inserted) {
@@ -557,17 +649,26 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
                         break;
                     }
 
-                    // Update embedding status for all docs in this batch.
-                    std::vector<std::string> successHashes;
-                    successHashes.reserve(batchDocs.size());
-                    for (const auto& d : batchDocs) {
-                        successHashes.push_back(d.sha256Hash);
+                    std::unordered_set<std::string> persistedHashes;
+                    for (const auto& record : allRecords) {
+                        if (record.level == yams::vector::EmbeddingLevel::DOCUMENT) {
+                            persistedHashes.insert(record.document_hash);
+                        }
                     }
-                    auto metaUp = metadataRepo->batchUpdateDocumentEmbeddingStatusByHashes(
-                        successHashes, true, modelName);
+                    std::vector<metadata::EmbeddingDerivationToken> successTokens;
+                    for (const auto& token : batchTokens) {
+                        if (persistedHashes.contains(token.hash)) {
+                            successTokens.push_back(token);
+                        }
+                    }
+                    auto metaUp = metadataRepo->batchCompleteDocumentEmbeddingDerivations(
+                        successTokens, modelName);
                     if (!metaUp) {
-                        spdlog::warn("[repair] Failed to batch update embedding status: {}",
+                        spdlog::warn("[repair] Failed to complete embedding derivations: {}",
                                      metaUp.error().message);
+                        stats.failedOperations += successTokens.size();
+                    } else {
+                        stats.failedOperations += successTokens.size() - metaUp.value();
                     }
 
                     // Count only chunk-level embeddings for stats (matches previous behavior).
@@ -731,10 +832,11 @@ repairMissingEmbeddings(const std::shared_ptr<api::IContentStore>& contentStore,
     auto provider = std::make_shared<GeneratorModelProvider>(embeddingGenerator);
     std::shared_ptr<daemon::IModelProvider> modelProvider = provider;
 
-    // Use a placeholder model name since EmbeddingGenerator doesn't expose it
-    std::string modelName = "default";
-    if (const char* env = std::getenv("YAMS_PREFERRED_MODEL")) {
-        modelName = env;
+    // Use the command-local effective policy when the caller did not select a model explicitly.
+    std::string modelName = config.preferredModel;
+    if (modelName.empty()) {
+        const auto runtimePolicy = daemon::ConfigResolver::resolveEmbeddingRuntimePolicy();
+        modelName = runtimePolicy.preferredModel.value_or("default");
     }
 
     return repairMissingEmbeddings(contentStore, metadataRepo, modelProvider, modelName, config,

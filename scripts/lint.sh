@@ -107,7 +107,7 @@ done
 # Default check sets
 if (( HOOK )); then
   SCOPE="git"; STRICT=1; MODE_FIX=0
-  CHECKS=(format windows-hdr license opengrep)
+  CHECKS=(format windows-hdr license portability opengrep)
 elif (( CI )); then
   SCOPE="all-files"; STRICT=1
   CHECKS=(opengrep cppcheck tidy actionlint dco)
@@ -387,6 +387,17 @@ EOF
   ok "license: clean"
 }
 
+lint_portability() {
+  section "portability (std::jthread / path.c_str / raw getenv)"
+  local script="$REPO_ROOT/tests/scripts/check_portability.py"
+  local allowlist="$REPO_ROOT/tests/scripts/portability_allowlist.txt"
+  if python3 "$script" --root "$REPO_ROOT" --allowlist "$allowlist"; then
+    ok "portability: clean"; return 0
+  else
+    err "portability: unreviewed cross-platform occurrence(s)"; return 1
+  fi
+}
+
 # ----- Helpers: metadata checks -----------------------------------------
 
 lint_commitlint() {
@@ -565,6 +576,7 @@ resolve_fn() {
     opengrep)      echo lint_opengrep ;;
     windows-hdr)   echo lint_windows_hdr ;;
     license)       echo lint_license ;;
+    portability)   echo lint_portability ;;
     commitlint)    echo lint_commitlint ;;
     dco)           echo lint_dco ;;
     actionlint)    echo lint_actionlint ;;

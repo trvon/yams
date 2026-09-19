@@ -1,8 +1,8 @@
 site_name: YAMS
 site_description: Yet Another Memory System — local, persistent memory for documents and applications.
 site_url: https://trvon.github.io/yams
-repo_url: https://sr.ht/~trvon/yams/
-repo_name: sr.ht/~trvon/yams
+repo_url: https://git.trevon.dev/trevon/yams
+repo_name: git.trevon.dev/trevon/yams
 docs_dir: docs
 site_dir: site
 use_directory_urls: true
@@ -18,6 +18,8 @@ nav:
   - Benchmarks: benchmarks/index.md
   - Roadmap: roadmap.md
   - Newsletter: newsletter.md
+  - Operations:
+      - Source mirroring: source-mirroring.md
 
 theme:
   name: material
@@ -69,12 +71,12 @@ plugins:
 
 extra:
   social:
-    - icon: simple/sourcehut
-      link: https://sr.ht/~trvon/yams/
-      name: SourceHut
     - icon: fontawesome/brands/github
       link: https://github.com/trvon/yams
-      name: GitHub (mirror)
+      name: GitHub
+    - icon: fontawesome/solid/code-branch
+      link: https://git.trevon.dev/trevon/yams
+      name: Self-hosted Git mirror
     - icon: fontawesome/solid/envelope
       link: mailto:support@yamsmemory.ai
       name: Email

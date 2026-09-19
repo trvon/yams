@@ -88,13 +88,10 @@ struct TopologyBuildConfig {
         DirtyRegionExpansionMode::PriorClusterAndNeighbors};
     Duration budget{Duration{250}};
     // Phase S: KMeans engine knobs.
-    // kmeansK: target cluster count for KMeans engines (0 = auto: max(64, min(300, sqrt(n)))).
-    // kmeansMaxIterations: Lloyd iteration cap during buildArtifacts.
-    // minSimilarityToJoin: cosine threshold below which an incremental update spawns a
-    //   new cluster instead of assigning to nearest existing centroid (default 0.45).
+    // kmeansK: target cluster count for KMeans engines (0 = auto: round(sqrt(n)) clamped to [2,
+    // n]). kmeansMaxIterations: Lloyd iteration cap during buildArtifacts.
     std::size_t kmeansK{0};
     std::size_t kmeansMaxIterations{10};
-    float minSimilarityToJoin{0.45F};
     // Total dense route representatives per cluster, including the centroid. Values above one
     // add deterministic diverse member embeddings. The default preserves centroid-only routing.
     std::size_t routingRepresentativeCount{1};

@@ -3,6 +3,7 @@
 #include <yams/core/types.h>
 #include <yams/search/search_engine.h>
 
+#include <yams/search/search_environment.hpp>
 #include <yams/search/search_tuner.h>
 #include <yams/search/simeon_lexical_backend.h>
 
@@ -60,6 +61,11 @@ public:
         // When set, the builder loads prior state at construction time and enables
         // throttled auto-save from SearchTuner::observe(). Empty => disabled.
         std::filesystem::path tunerStatePath{};
+
+        // Daemon rebuilds provide one lifecycle-copied compatibility snapshot. External callers
+        // retain the historical process lookup unless this flag is set.
+        SearchEnvironmentSnapshot compatibilityEnvironment{};
+        bool compatibilityEnvironmentSnapshotted{false};
 
         // Optional first-class lexical backend injection. When set, the builder
         // installs Simeon lexical rescoring before returning the engine.

@@ -5,11 +5,13 @@
 #include <optional>
 #include <string_view>
 
+// pi-lens-ignore: fatal error
 #include <yams/cli/daemon_helpers.h>
 #include <yams/core/types.h>
 #include <yams/daemon/client/daemon_client.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/metric_keys.h>
+#include <yams/storage/disk_pressure.h>
 
 namespace yams::cli {
 
@@ -35,6 +37,54 @@ inline DaemonRepairState extractRepairState(const daemon::StatusResponse& status
         state.queueDepth = static_cast<std::uint64_t>(*value);
     }
     return state;
+}
+
+struct DaemonStoragePressure {
+    // pi-lens-ignore: no-bit-fields
+    std::optional<std::uint64_t> capacityBytes;
+    std::optional<std::uint64_t> availableBytes;
+    // pi-lens-ignore: no-bit-fields
+    storage::DiskPressureLevel level{storage::DiskPressureLevel::Unknown};
+    double warningFreePercent{0.0};
+    std::uint64_t minimumWriteAdmissionBytes{0};
+    std::uint64_t emergencyReserveBytes{0};
+};
+
+inline DaemonStoragePressure extractStoragePressure(const daemon::StatusResponse& status) {
+    DaemonStoragePressure pressure;
+    auto findCount = [&](std::string_view key) -> const std::size_t* {
+        const auto entry = status.requestCounts.find(std::string(key));
+        return entry != status.requestCounts.end() ? &entry->second : nullptr;
+    };
+    auto readUint64 = [&](std::string_view lowKey,
+                          std::string_view highKey) -> std::optional<std::uint64_t> {
+        const auto* low = findCount(lowKey);
+        const auto* high = findCount(highKey);
+        if (!low || !high) {
+            return std::nullopt;
+        }
+        return (static_cast<std::uint64_t>(*high) << 32U) |
+               (static_cast<std::uint64_t>(*low) & 0xffffffffULL);
+    };
+    pressure.capacityBytes = readUint64(daemon::metrics::kStorageCapacityBytesLow,
+                                        daemon::metrics::kStorageCapacityBytesHigh);
+    pressure.availableBytes = readUint64(daemon::metrics::kStorageAvailableBytesLow,
+                                         daemon::metrics::kStorageAvailableBytesHigh);
+    if (const auto* value = findCount(daemon::metrics::kStoragePressureLevel);
+        value && *value <= static_cast<std::size_t>(storage::DiskPressureLevel::Emergency)) {
+        pressure.level = static_cast<storage::DiskPressureLevel>(*value);
+    }
+    if (const auto* value = findCount(daemon::metrics::kStorageWarningFreePercentBp)) {
+        pressure.warningFreePercent = static_cast<double>(*value) / 100.0;
+    }
+    pressure.minimumWriteAdmissionBytes =
+        readUint64(daemon::metrics::kStorageWriteAdmissionBytesLow,
+                   daemon::metrics::kStorageWriteAdmissionBytesHigh)
+            .value_or(0);
+    pressure.emergencyReserveBytes = readUint64(daemon::metrics::kStorageEmergencyReserveBytesLow,
+                                                daemon::metrics::kStorageEmergencyReserveBytesHigh)
+                                         .value_or(0);
+    return pressure;
 }
 
 inline Result<DaemonRepairState>

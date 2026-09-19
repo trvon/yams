@@ -1,3 +1,4 @@
+#include <cmath>
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
@@ -109,6 +110,47 @@ TEST_CASE("Vector pipeline scores every admitted document before exact-control t
     CHECK(diagnostics.rowsVisited == 3U);
     CHECK(diagnostics.exactDistanceEvaluations == 3U);
     CHECK(diagnostics.returnedRows == 3U);
+
+    cfg.similarityThreshold = -1.0F;
+    yams::vector::VectorSearchDiagnostics refillWork;
+    const auto global = yams::search::detail::queryVectorIndexPipeline(
+        nullptr, vectorDb, {1.0F, 0.0F}, cfg, 2, &refillWork);
+    REQUIRE(global.has_value());
+    REQUIRE(global.value().size() == 2U);
+    CHECK(global.value()[1].documentHash == "rescued");
+    CHECK(refillWork.documentRefillAttempts == 1U);
+    CHECK(refillWork.accumulatedSamples == 2U);
+
+    cfg.chunkAggregation = SearchEngineConfig::ChunkAggregation::TOP_K_AVG;
+    cfg.chunkAggregationTopK = 2;
+    // Switching to document-complete scoring must also disable the per-chunk cutoff.
+    // Otherwise the lower chunk disappears before averaging and inflates the document score.
+    cfg.similarityThreshold = 0.999F;
+    const auto averaged = yams::search::detail::queryVectorIndexPipeline(
+        nullptr, vectorDb, {1.0F, 0.0F}, cfg, 2, routed,
+        yams::vector::CandidateFilterMode::DocumentTopK);
+    REQUIRE(averaged.has_value());
+    REQUIRE(averaged.value().size() == 2U);
+    const float secondChunk = 0.9F / std::sqrt(0.82F);
+    CHECK(averaged.value()[0].score == Catch::Approx((1.0F + secondChunk) / 2.0F));
+}
+
+TEST_CASE("Vector work remains unavailable when any merged sample is unobserved",
+          "[search][vector][topology][work][catch2]") {
+    using yams::search::detail::mergeVectorSearchDiagnostics;
+    yams::vector::VectorSearchDiagnostics known;
+    known.rowsVisitedObserved = known.exactDistanceEvaluationsObserved =
+        known.annCandidateBudgetObserved = true;
+    known.rowsVisited = 10;
+    yams::vector::VectorSearchDiagnostics total;
+    mergeVectorSearchDiagnostics(total, known);
+    CHECK(total.rowsVisitedObserved);
+    mergeVectorSearchDiagnostics(total, {});
+    CHECK_FALSE(total.rowsVisitedObserved);
+    mergeVectorSearchDiagnostics(total, known);
+    CHECK_FALSE(total.rowsVisitedObserved);
+    CHECK(total.rowsVisited == 20U);
+    CHECK(total.accumulatedSamples == 3U);
 }
 
 TEST_CASE("Vector pipeline filters global hits by routed membership with zero-overlap fallback",
@@ -211,4 +253,118 @@ TEST_CASE("Vector pipeline candidate rescue enriches an existing lexical candida
     CHECK(merged.results[1].documentHash == "buried-lexical");
     CHECK(merged.results[1].debugInfo.at("candidate_rescue") == "1");
     CHECK(merged.results[1].debugInfo.at("candidate_rescue_kind") == "evidence");
+}
+
+TEST_CASE("Vector pipeline merges auxiliary candidates with stable policy counters",
+          "[search][vector][auxiliary][catch2]") {
+    using yams::search::ComponentResult;
+    using yams::search::detail::AuxiliaryVectorCandidateBatch;
+
+    SearchEngineConfig config;
+    config.vectorMaxResults = 3;
+    config.multiVectorScoreDecay = 0.5F;
+    config.graphExpansionVectorPenalty = 0.5F;
+    config.graphVectorRequireCorroboration = true;
+    config.graphVectorRequireTextAnchoring = true;
+    config.graphVectorRequireBaselineTextAnchoring = true;
+
+    std::vector<ComponentResult> components{
+        {.documentHash = "anchor", .score = 0.7F, .source = ComponentResult::Source::Text},
+        {.documentHash = "base-b", .score = 0.6F, .source = ComponentResult::Source::Vector},
+        {.documentHash = "base-a", .score = 0.6F, .source = ComponentResult::Source::Vector},
+        {.documentHash = "base-a", .score = 0.8F, .source = ComponentResult::Source::EntityVector},
+    };
+    std::vector<AuxiliaryVectorCandidateBatch> phrases{
+        {.query = "first",
+         .candidates = {{.documentHash = "phrase-new", .score = 1.2F},
+                        {.documentHash = "base-b", .score = 1.4F}}},
+        {.query = "second",
+         .candidates = {{.documentHash = "base-b", .score = 1.6F},
+                        {.documentHash = "tie-z", .score = 1.0F},
+                        {.documentHash = "tie-a", .score = 1.0F}}},
+    };
+    std::vector<AuxiliaryVectorCandidateBatch> graphTerms{
+        {.query = "blocked",
+         .weight = 1.0F,
+         .candidates = {{.documentHash = "uncorroborated", .score = 1.0F}}},
+        {.query = "allowed",
+         .weight = 0.8F,
+         .candidates = {{.documentHash = "anchor", .score = 1.0F},
+                        {.documentHash = "anchor", .score = 1.2F}}},
+    };
+
+    auto merged = yams::search::detail::mergeAuxiliaryVectorCandidates(
+        std::move(components), std::move(phrases), std::move(graphTerms), config);
+
+    CHECK(merged.stats.baseVectorCount == 3U);
+    CHECK(merged.stats.multiVectorRawHitCount == 5U);
+    CHECK(merged.stats.multiVectorAddedNewCount == 3U);
+    CHECK(merged.stats.multiVectorReplacedBaseCount == 2U);
+    CHECK(merged.stats.multiVectorMergedCount == 5U);
+    CHECK(merged.stats.graphVectorRawHitCount == 3U);
+    CHECK(merged.stats.graphVectorAddedNewCount == 1U);
+    CHECK(merged.stats.graphVectorReplacedBaseCount == 1U);
+    CHECK(merged.stats.graphVectorBlockedUncorroboratedCount == 1U);
+    CHECK(merged.stats.graphVectorBlockedMissingTextAnchorCount == 0U);
+    CHECK(merged.stats.graphVectorBlockedMissingBaselineTextAnchorCount == 0U);
+
+    REQUIRE(merged.components.size() == 5U);
+    CHECK(merged.components[0].source == ComponentResult::Source::Text);
+    const auto vectorsBegin = merged.components.begin() + 1;
+    REQUIRE(std::distance(vectorsBegin, merged.components.end()) == 4);
+    CHECK(((vectorsBegin[0].documentHash == "base-a" && vectorsBegin[1].documentHash == "base-b") ||
+           (vectorsBegin[0].documentHash == "base-b" && vectorsBegin[1].documentHash == "base-a")));
+    const auto& baseA =
+        vectorsBegin[vectorsBegin[0].documentHash == "base-a" ? std::size_t{0} : std::size_t{1}];
+    const auto& baseB =
+        vectorsBegin[vectorsBegin[0].documentHash == "base-b" ? std::size_t{0} : std::size_t{1}];
+    CHECK(baseA.score == Catch::Approx(0.8F));
+    CHECK(baseB.score == Catch::Approx(0.8F));
+    CHECK(baseB.debugInfo.at("multi_vector_phrase") == "second");
+    CHECK(vectorsBegin[2].documentHash == "phrase-new");
+    CHECK(vectorsBegin[2].score == Catch::Approx(0.6F));
+    CHECK(vectorsBegin[2].rank == 2U);
+    CHECK(vectorsBegin[3].documentHash == "anchor");
+    CHECK(vectorsBegin[3].source == ComponentResult::Source::GraphVector);
+    CHECK(vectorsBegin[3].score == Catch::Approx(0.48F));
+    CHECK(vectorsBegin[3].rank == 0U);
+    CHECK(vectorsBegin[3].debugInfo.at("graph_vector_term") == "allowed");
+}
+
+TEST_CASE("Vector pipeline applies graph gates independently without defining equal-score order",
+          "[search][vector][auxiliary][graph-gates][catch2]") {
+    using yams::search::ComponentResult;
+    using yams::search::detail::AuxiliaryVectorCandidateBatch;
+
+    SearchEngineConfig config;
+    config.vectorMaxResults = 4;
+    config.graphExpansionVectorPenalty = 1.0F;
+    config.graphVectorRequireCorroboration = false;
+    config.graphVectorRequireTextAnchoring = true;
+    config.graphVectorRequireBaselineTextAnchoring = true;
+
+    std::vector<ComponentResult> components{
+        {.documentHash = "graph-only", .score = 0.9F, .source = ComponentResult::Source::GraphText},
+        {.documentHash = "baseline", .score = 0.8F, .source = ComponentResult::Source::Text},
+        {.documentHash = "z", .score = 0.4F, .source = ComponentResult::Source::Vector},
+        {.documentHash = "a", .score = 0.4F, .source = ComponentResult::Source::Vector},
+    };
+    std::vector<AuxiliaryVectorCandidateBatch> graphTerms{
+        {.query = "term",
+         .weight = 1.0F,
+         .candidates = {{.documentHash = "missing-text", .score = 0.8F},
+                        {.documentHash = "graph-only", .score = 0.8F},
+                        {.documentHash = "baseline", .score = 0.8F}}},
+    };
+
+    auto merged = yams::search::detail::mergeAuxiliaryVectorCandidates(
+        std::move(components), {}, std::move(graphTerms), config);
+
+    CHECK(merged.stats.graphVectorBlockedMissingTextAnchorCount == 1U);
+    CHECK(merged.stats.graphVectorBlockedMissingBaselineTextAnchorCount == 1U);
+    CHECK(merged.stats.graphVectorAddedNewCount == 1U);
+    REQUIRE(merged.components.size() == 5U);
+    CHECK(((merged.components[2].documentHash == "a" && merged.components[3].documentHash == "z") ||
+           (merged.components[2].documentHash == "z" && merged.components[3].documentHash == "a")));
+    CHECK(merged.components[4].documentHash == "baseline");
 }

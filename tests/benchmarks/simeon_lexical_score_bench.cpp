@@ -142,6 +142,43 @@ struct BucketLatency {
     double maxUs = 0.0;
 };
 
+BucketLatency measureRequestBatches(const SimeonLexicalBackend& backend,
+                                    const std::vector<std::string>& terms,
+                                    const std::vector<std::int64_t>& ids, int repeats,
+                                    bool reuseScores, size_t batches = 2,
+                                    bool includeDirect = true) {
+    std::vector<double> samples;
+    for (const auto& term : terms) {
+        for (int repeat = 0; repeat < repeats; ++repeat) {
+            const auto start = std::chrono::steady_clock::now();
+            if (reuseScores) {
+                SimeonLexicalBackend::QuerySession session(backend, term);
+                for (size_t batch = 0; batch < batches; ++batch) {
+                    REQUIRE(session.score(ids).has_value());
+                }
+                if (includeDirect) {
+                    REQUIRE(session.searchTop(32).has_value());
+                }
+            } else {
+                for (size_t batch = 0; batch < batches; ++batch) {
+                    REQUIRE(backend.scoreRouted(term, ids).has_value());
+                }
+                if (includeDirect) {
+                    REQUIRE(backend.searchTop(term, 32).has_value());
+                }
+            }
+            samples.push_back(
+                std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start)
+                    .count());
+        }
+    }
+    std::sort(samples.begin(), samples.end());
+    if (samples.empty()) {
+        return {};
+    }
+    return {samples[samples.size() / 2], samples[(samples.size() - 1) * 95 / 100], samples.back()};
+}
+
 BucketLatency measureBucket(const SimeonLexicalBackend& backend,
                             const std::vector<std::string>& terms,
                             const std::vector<std::int64_t>& docIds, int callsPerTerm) {
@@ -151,9 +188,9 @@ BucketLatency measureBucket(const SimeonLexicalBackend& backend,
         for (int c = 0; c < callsPerTerm; ++c) {
             const auto start = std::chrono::steady_clock::now();
             auto result = backend.score(term, docIds);
-            const auto us = std::chrono::duration<double, std::micro>(
-                                std::chrono::steady_clock::now() - start)
-                                .count();
+            const auto us =
+                std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start)
+                    .count();
             REQUIRE(result.has_value());
             samples.push_back(us);
         }
@@ -207,6 +244,22 @@ TEST_CASE("Simeon lexical score latency by IDF bucket", "[bench][simeon][score-i
 
     const auto common = measureBucket(backend, commonTerms, corpus->docIds, callsPerTerm);
     const auto rare = measureBucket(backend, rareTerms, corpus->docIds, callsPerTerm);
+    const auto callsBefore = backend.scoreCalls();
+    const auto separateRequests =
+        measureRequestBatches(backend, commonTerms, corpus->docIds, callsPerTerm, false);
+    const auto separateCalls = backend.scoreCalls() - callsBefore;
+    const auto sharedCallsBefore = backend.scoreCalls();
+    const auto sharedRequests =
+        measureRequestBatches(backend, commonTerms, corpus->docIds, callsPerTerm, true);
+    const auto sharedCalls = backend.scoreCalls() - sharedCallsBefore;
+    REQUIRE(separateCalls == sharedCalls * 3);
+    const std::vector<std::int64_t> smallBatch(corpus->docIds.begin(),
+                                               corpus->docIds.begin() +
+                                                   std::min<size_t>(32, corpus->docIds.size()));
+    const auto separateSingle =
+        measureRequestBatches(backend, commonTerms, smallBatch, callsPerTerm, false, 1, false);
+    const auto sharedSingle =
+        measureRequestBatches(backend, commonTerms, smallBatch, callsPerTerm, true, 1, false);
 
     SimeonLexicalBackend::Config cachedCfg;
     cachedCfg.score_cache_entries = 256;
@@ -227,6 +280,16 @@ TEST_CASE("Simeon lexical score latency by IDF bucket", "[bench][simeon][score-i
                 {"common_df_min", byFrequency[99].second},
                 {"rare_df_max", byFrequency[byFrequency.size() - 100].second},
                 {"common_p50_us", common.p50Us},
+                {"routed_separate_batches_p50_us", separateRequests.p50Us},
+                {"routed_shared_batches_p50_us", sharedRequests.p50Us},
+                {"routed_separate_batches_p95_us", separateRequests.p95Us},
+                {"routed_shared_batches_p95_us", sharedRequests.p95Us},
+                {"routed_separate_score_calls", separateCalls},
+                {"routed_shared_score_calls", sharedCalls},
+                {"routed_separate_single_batch_p50_us", separateSingle.p50Us},
+                {"routed_shared_single_batch_p50_us", sharedSingle.p50Us},
+                {"routed_separate_single_batch_p95_us", separateSingle.p95Us},
+                {"routed_shared_single_batch_p95_us", sharedSingle.p95Us},
                 {"common_p95_us", common.p95Us},
                 {"common_max_us", common.maxUs},
                 {"rare_p50_us", rare.p50Us},

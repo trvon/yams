@@ -18,12 +18,6 @@ using namespace yams::test;
 // NOLINTBEGIN(bugprone-chained-comparison)
 namespace {
 
-struct ArtifactGuard {
-    explicit ArtifactGuard(std::filesystem::path p) : path(std::move(p)) {}
-    ~ArtifactGuard() { remove_sqlite_artifacts(path); }
-    std::filesystem::path path;
-};
-
 std::filesystem::path makeSeededKgDb(std::string_view prefix) {
     auto dbPath = make_temp_sqlite_path(prefix);
     KnowledgeGraphStoreConfig cfg{};

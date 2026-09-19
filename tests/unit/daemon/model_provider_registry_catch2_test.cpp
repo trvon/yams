@@ -7,21 +7,11 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cstdlib>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "common/test_helpers_catch2.h"
-
-#ifdef _WIN32
-static int setenv(const char* name, const char* value, int /*overwrite*/) {
-    return _putenv_s(name, value);
-}
-static void unsetenv(const char* name) {
-    _putenv_s(name, "");
-}
-#endif
 
 using yams::daemon::IModelProvider;
 using yams::daemon::ModelPoolConfig;
@@ -30,22 +20,7 @@ using yams::daemon::ModelProviderFactoryRegistration;
 namespace {
 
 struct ScopedEmbedBackendAuto {
-    std::string saved;
-    bool hadValue{false};
-    ScopedEmbedBackendAuto() {
-        if (const char* p = std::getenv("YAMS_EMBED_BACKEND")) {
-            saved = p;
-            hadValue = true;
-        }
-        setenv("YAMS_EMBED_BACKEND", "auto", 1);
-    }
-    ~ScopedEmbedBackendAuto() {
-        if (hadValue) {
-            setenv("YAMS_EMBED_BACKEND", saved.c_str(), 1);
-        } else {
-            unsetenv("YAMS_EMBED_BACKEND");
-        }
-    }
+    yams::test::ScopedEnvVar environment{"YAMS_EMBED_BACKEND", std::string{"auto"}};
 };
 
 class TaggedMockProvider : public IModelProvider {

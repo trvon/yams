@@ -1,6 +1,7 @@
 // Copyright 2025 The YAMS Authors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <yams/config/config_helpers.h>
 #include <yams/core/assert.hpp>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/ServiceManagerFsm.h>
@@ -16,7 +17,6 @@
 #include <algorithm>
 #include <charconv>
 #include <chrono>
-#include <cstdlib>
 #include <optional>
 #include <string_view>
 #include <thread>
@@ -69,25 +69,8 @@ std::optional<int> parseInt(std::string_view raw) {
     return value;
 }
 
-std::optional<std::string> getenvCopy(const char* name) {
-    static std::mutex envMutex;
-    std::lock_guard<std::mutex> lock(envMutex);
-    if (const char* value = std::getenv(name)) { // NOLINT(concurrency-mt-unsafe)
-        return std::string(value);
-    }
-    return std::nullopt;
-}
-
 bool isTruthyValue(std::string_view raw) {
-    if (raw.empty()) {
-        return false;
-    }
-
-    std::string normalized(raw);
-    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](char c) {
-        return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    });
-    return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
+    return yams::config::parse_bool(raw, false);
 }
 
 void markVectorInitAttempted(StateComponent* state, bool attempted) noexcept {
@@ -222,30 +205,39 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
         }
     }
 
-    // 4. Config file / env (fallback only when model dimension unknown)
-    if (!dim) {
-        auto cfgPath = ConfigResolver::resolveDefaultConfigPath();
+    // 4. Immutable startup snapshot (config/env fallback only when runtime dimension is unknown).
+    if (!dim && deps_.resolveConfiguredDimension) {
+        try {
+            dim = deps_.resolveConfiguredDimension();
+            if (dim && *dim > 0) {
+                spdlog::info("[VectorInit] probe: resolved policy dim={}", *dim);
+            } else {
+                dim.reset();
+            }
+        } catch (...) {
+            spdlog::debug("[VectorInit] resolved embedding dimension callback failed");
+        }
+    }
+
+    // Standalone compatibility path for callers that do not inject a startup snapshot.
+    if (!dim && !deps_.resolveConfiguredDimension) {
+        const auto cfgPath = ConfigResolver::resolveDefaultConfigPath();
         if (!cfgPath.empty()) {
             try {
-                auto kv = ConfigResolver::parseSimpleTomlFlat(cfgPath);
-                auto it = kv.find("embeddings.embedding_dim");
+                const auto kv = yams::config::parse_simple_toml(cfgPath);
+                const auto it = kv.find("embeddings.embedding_dim");
                 if (it != kv.end() && !it->second.empty()) {
-                    if (auto parsed = parseUnsigned<size_t>(it->second)) {
+                    if (const auto parsed = parseUnsigned<size_t>(it->second)) {
                         dim = parsed;
-                        spdlog::info("[VectorInit] probe: config dim={}", *dim);
+                        spdlog::info("[VectorInit] probe: compatibility config dim={}", *dim);
                     }
                 }
             } catch (...) {
-                spdlog::debug("[VectorInit] config embedding dim probe failed");
+                spdlog::debug("[VectorInit] compatibility config embedding dim probe failed");
             }
         }
-
         if (!dim) {
-            if (auto envd = getenvCopy("YAMS_EMBED_DIM"); envd) {
-                if (auto parsed = parseUnsigned<size_t>(*envd)) {
-                    dim = parsed;
-                }
-            }
+            dim = yams::config::read_env_size("YAMS_EMBED_DIM").value;
         }
     }
 
@@ -276,8 +268,8 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
 
     // 6. Last resort: try YAMS_PREFERRED_MODEL env var directly for model name heuristic
     // This handles cases where resolvePreferredModel callback isn't ready yet
-    if (!dim) {
-        if (auto envModel = getenvCopy("YAMS_PREFERRED_MODEL"); envModel) {
+    if (!dim && !deps_.resolvePreferredModel) {
+        if (auto envModel = yams::config::getenv_optional("YAMS_PREFERRED_MODEL"); envModel) {
             std::string modelName(*envModel);
             if (!modelName.empty()) {
                 if (auto nameDim = vector::dimres::dim_from_model_name(modelName)) {
@@ -289,12 +281,12 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
         }
     }
 
-    // 7. Final fallback: check preload_models from config for model name heuristic
-    if (!dim) {
+    // 7. Standalone compatibility fallback when no preferred-model snapshot was injected.
+    if (!dim && !deps_.resolvePreferredModel) {
         auto cfgPath = ConfigResolver::resolveDefaultConfigPath();
         if (!cfgPath.empty()) {
             try {
-                auto kv = ConfigResolver::parseSimpleTomlFlat(cfgPath);
+                auto kv = yams::config::parse_simple_toml(cfgPath);
                 // Check preload_models list for known model names
                 auto preload = kv.find("daemon.models.preload_models");
                 if (preload != kv.end() && !preload->second.empty()) {
@@ -336,7 +328,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
     auto cfgPath = ConfigResolver::resolveDefaultConfigPath();
     if (!cfgPath.empty()) {
         try {
-            auto kv = ConfigResolver::parseSimpleTomlFlat(cfgPath);
+            auto kv = yams::config::parse_simple_toml(cfgPath);
             if (auto it = kv.find("vector_database.search_engine");
                 it != kv.end() && !it->second.empty()) {
                 std::string normalized(it->second);
@@ -378,7 +370,7 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
         }
     }
 
-    if (auto env = getenvCopy("YAMS_VECTOR_SEARCH_ENGINE"); env) {
+    if (auto env = yams::config::getenv_optional("YAMS_VECTOR_SEARCH_ENGINE"); env) {
         std::string normalized(*env);
         std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](char c) {
             return static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -392,17 +384,15 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                          *env, vector::vectorSearchEngineName(cfg.search_engine));
         }
     }
-    if (auto env = getenvCopy("YAMS_VECTOR_VEC0_PHSS_ENABLED"); env) {
-        cfg.vec0_phss_enabled = isTruthyValue(*env);
+    if (const auto enabled = yams::config::read_env_bool("YAMS_VECTOR_VEC0_PHSS_ENABLED").value) {
+        cfg.vec0_phss_enabled = *enabled;
         spdlog::info("[VectorInit] vec0 PHSS overridden to {} via env",
                      cfg.vec0_phss_enabled ? "enabled" : "disabled");
     }
-    if (auto env = getenvCopy("YAMS_VECTOR_VEC0_PHSS_CANDIDATES"); env) {
-        if (auto candidates = parseInt(*env)) {
-            cfg.vec0_phss_candidates = static_cast<size_t>(std::max(1, *candidates));
-            spdlog::info("[VectorInit] vec0 PHSS candidates overridden to {} via env",
-                         cfg.vec0_phss_candidates);
-        }
+    if (auto candidates = yams::config::read_env_size("YAMS_VECTOR_VEC0_PHSS_CANDIDATES").value) {
+        cfg.vec0_phss_candidates = std::max<std::size_t>(1, *candidates);
+        spdlog::info("[VectorInit] vec0 PHSS candidates overridden to {} via env",
+                     cfg.vec0_phss_candidates);
     }
 
     // Log start
@@ -482,22 +472,18 @@ Result<bool> VectorSystemManager::initializeOnce(const std::filesystem::path& da
                     const auto rows = vdb->getVectorCount();
                     vectorDbReady = (rows > 0);
                     if (vectorDbReady) {
-                        // Eagerly prepare the search index so first query doesn't
-                        // pay the O(n log n) ANN build cost (profiler: 99% CPU).
-                        spdlog::info("[VectorInit] preparing search index for {} vectors", rows);
-                        if (vdb->prepareSearchIndex()) {
-                            spdlog::info("[VectorInit] search index ready");
-                        } else {
-                            spdlog::warn("[VectorInit] search index prepare failed: {}",
-                                         vdb->getLastError());
-                        }
+                        // VectorIndexCoordinator is the sole authority for loading or rebuilding
+                        // search indexes. ServiceManager wires the initialized database into the
+                        // coordinator immediately after this method returns.
+                        spdlog::info("[VectorInit] Found {} vectors; deferring search index "
+                                     "preparation to coordinator",
+                                     rows);
                     } else {
                         spdlog::info("[VectorInit] Empty vector DB; index will be built on first "
                                      "embedding batch (coordinator owns index readiness)");
                     }
                 } catch (...) {
-                    spdlog::debug(
-                        "[VectorInit] failed probing vector count/search index readiness");
+                    spdlog::debug("[VectorInit] failed probing vector count readiness");
                 }
 
                 // Update state (DB readiness only; index readiness is managed by coordinator)

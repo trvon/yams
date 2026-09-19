@@ -36,7 +36,11 @@ yams serve
 ## Reference
 
 - [Build from source](BUILD.md)
+- [P2P corpus sync](p2p.md)
 - [Benchmarks](benchmarks/)
+- [Runtime path authority](architecture/runtime-paths.md)
+- [Configuration reading boundaries](architecture/config-reading.md)
+- [Environment override policy](architecture/environment-overrides.md)
 - [Roadmap](roadmap.md)
 - [Newsletter](newsletter.md)
 - [Contributing](https://github.com/trvon/yams/blob/main/CONTRIBUTING.md)
@@ -47,7 +51,7 @@ source.
 
 ## Project
 
-- SourceHut: <https://sr.ht/~trvon/yams/>
 - GitHub: <https://github.com/trvon/yams>
+- Self-hosted mirror: <https://git.trevon.dev/trevon/yams>
 - Discord: <https://discord.gg/rTBmRHdTEc>
 - License: GPL-3.0-or-later

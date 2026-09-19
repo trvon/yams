@@ -287,11 +287,13 @@ ResourceSnapshot ResourceGovernor::tick(ServiceManager* sm) {
                      snap.memoryBudgetBytes / (1024ull * 1024ull), snap.memoryPressure * 100.0,
                      snap.cpuUsagePercent);
 
-        // Fix Issue 1 (timing audit): update scaling caps BEFORE publishing
-        // the new level so concurrent readers never observe the new level with
-        // stale (old-level) caps.
-        updateScalingCaps(newLevel);
-        currentLevel_.store(newLevel, std::memory_order_release);
+        // Publish caps and their pressure level under one lock. Runtime tuning refreshes use the
+        // same lock, so they cannot overwrite Emergency caps with an earlier level.
+        {
+            std::unique_lock lock(mutex_);
+            updateScalingCapsLocked(newLevel);
+            currentLevel_.store(newLevel, std::memory_order_release);
+        }
 
         // Trigger level-specific responses
         switch (newLevel) {
@@ -446,12 +448,29 @@ void ResourceGovernor::collectMetrics(ServiceManager* sm, ResourceSnapshot& snap
 // ============================================================================
 
 ResourcePressureLevel ResourceGovernor::computeLevel(const ResourceSnapshot& snap) {
+    struct PressurePolicy {
+        double warningThreshold;
+        double criticalThreshold;
+        double emergencyThreshold;
+        double cpuHighThreshold;
+        double cpuCriticalGap;
+        std::uint32_t memoryHysteresisMs;
+        std::uint32_t cpuHysteresisMs;
+    };
+    const auto policy = TuneAdvisor::readConfiguredOverridesSnapshot([] {
+        return PressurePolicy{
+            TuneAdvisor::memoryWarningThreshold(),   TuneAdvisor::memoryCriticalThreshold(),
+            TuneAdvisor::memoryEmergencyThreshold(), TuneAdvisor::cpuHighThresholdPercent(),
+            TuneAdvisor::cpuCriticalGapPercent(),    TuneAdvisor::memoryHysteresisMs(),
+            TuneAdvisor::cpuLevelHysteresisMs()};
+    });
+
     // Determine raw level based on thresholds
     ResourcePressureLevel rawLevel = ResourcePressureLevel::Normal;
 
-    const double warningThresh = TuneAdvisor::memoryWarningThreshold();
-    const double criticalThresh = TuneAdvisor::memoryCriticalThreshold();
-    const double emergencyThresh = TuneAdvisor::memoryEmergencyThreshold();
+    const double warningThresh = policy.warningThreshold;
+    const double criticalThresh = policy.criticalThreshold;
+    const double emergencyThresh = policy.emergencyThreshold;
 
     // Memory-based pressure level
     if (snap.memoryPressure >= emergencyThresh) {
@@ -464,8 +483,8 @@ ResourcePressureLevel ResourceGovernor::computeLevel(const ResourceSnapshot& sna
 
     // CPU-based pressure escalation: if CPU is very high, escalate the pressure level
     // This prevents CPU saturation even when memory is fine
-    const double cpuHighThresh = TuneAdvisor::cpuHighThresholdPercent();
-    const double cpuCriticalGap = TuneAdvisor::cpuCriticalGapPercent();
+    const double cpuHighThresh = policy.cpuHighThreshold;
+    const double cpuCriticalGap = policy.cpuCriticalGap;
     const double cpuCriticalThresh = cpuHighThresh + cpuCriticalGap;
 
     if (snap.cpuUsagePercent >= cpuCriticalThresh) {
@@ -480,8 +499,8 @@ ResourcePressureLevel ResourceGovernor::computeLevel(const ResourceSnapshot& sna
 
     // Apply hysteresis: require time at a level before transitioning
     // (decoupled from tick interval for consistent behavior at any tick rate)
-    const auto hysteresisMs = std::chrono::milliseconds(TuneAdvisor::memoryHysteresisMs());
-    const auto cpuHysteresisMs = std::chrono::milliseconds(TuneAdvisor::cpuLevelHysteresisMs());
+    const auto hysteresisMs = std::chrono::milliseconds(policy.memoryHysteresisMs);
+    const auto cpuHysteresisMs = std::chrono::milliseconds(policy.cpuHysteresisMs);
     // Fix Issue 5 (timing audit): use snap.timestamp instead of calling now() again
     // to avoid drift between the snapshot time and the hysteresis comparison.
     auto now = snap.timestamp;
@@ -523,7 +542,10 @@ ResourcePressureLevel ResourceGovernor::computeLevel(const ResourceSnapshot& sna
 
 void ResourceGovernor::updateScalingCaps(ResourcePressureLevel level) {
     std::unique_lock lock(mutex_);
+    updateScalingCapsLocked(level);
+}
 
+void ResourceGovernor::updateScalingCapsLocked(ResourcePressureLevel level) {
     auto slowDown = [](std::uint32_t current, std::uint32_t percent) -> std::uint32_t {
         if (current == 0) {
             return 0;
@@ -533,17 +555,35 @@ void ResourceGovernor::updateScalingCaps(ResourcePressureLevel level) {
         return std::min(current, std::max(1u, scaled));
     };
 
-    // Get TuneAdvisor defaults
-    const auto defaultIngest = TuneAdvisor::maxIngestWorkers();
-    const auto defaultSearch = TuneAdvisor::searchConcurrencyLimit();
-    const auto defaultExtract = TuneAdvisor::postExtractionDefaultConcurrent();
-    const auto defaultKg = TuneAdvisor::postKgDefaultConcurrent();
-    const auto defaultEmbed = TuneAdvisor::postEmbedDefaultConcurrent();
+    struct ScalingPolicy {
+        std::uint32_t ingest;
+        std::uint32_t search;
+        std::uint32_t extraction;
+        std::uint32_t kg;
+        std::uint32_t enrich;
+        std::uint32_t embed;
+        std::uint32_t warningScalePercent;
+    };
+    const auto policy = TuneAdvisor::readConfiguredOverridesSnapshot([] {
+        const auto postIngest = TuneAdvisor::postIngestBudgetAll(false);
+        return ScalingPolicy{
+            TuneAdvisor::maxIngestWorkers(),
+            TuneAdvisor::searchConcurrencyLimit(),
+            postIngest.extraction,
+            postIngest.kg,
+            std::max({postIngest.symbol, postIngest.entity, postIngest.title}),
+            postIngest.embed,
+            TuneAdvisor::governorWarningScalePercent(),
+        };
+    });
+
     // PBI-081 Phase 3: unified enrich budget covers symbol+entity+title sub-stages.
-    // Use the max of the three sub-stage defaults as the governor's enrich cap.
-    const auto defaultEnrich = std::max({TuneAdvisor::postSymbolDefaultConcurrent(),
-                                         TuneAdvisor::postEntityDefaultConcurrent(),
-                                         TuneAdvisor::postTitleDefaultConcurrent()});
+    const auto defaultIngest = policy.ingest;
+    const auto defaultSearch = policy.search;
+    const auto defaultExtract = policy.extraction;
+    const auto defaultKg = policy.kg;
+    const auto defaultEnrich = policy.enrich;
+    const auto defaultEmbed = policy.embed;
 
     switch (level) {
         case ResourcePressureLevel::Normal:
@@ -564,7 +604,7 @@ void ResourceGovernor::updateScalingCaps(ResourcePressureLevel level) {
             // Gentle reduction under Warning to avoid abrupt throughput cliffs.
             // Keep model-load blocking, but retain most pipeline concurrency so
             // gradient limiters can adapt smoothly.
-            const std::uint32_t warningScale = TuneAdvisor::governorWarningScalePercent();
+            const std::uint32_t warningScale = policy.warningScalePercent;
             scalingCaps_ = ScalingCaps{
                 .ingestWorkers = slowDown(defaultIngest, warningScale),
                 .searchConcurrency = slowDown(defaultSearch, warningScale),
@@ -1126,6 +1166,13 @@ ResourcePressureLevel ResourceGovernor::getPressureLevel() const noexcept {
 ScalingCaps ResourceGovernor::getScalingCaps() const {
     std::shared_lock lock(mutex_);
     return scalingCaps_;
+}
+
+void ResourceGovernor::refreshScalingCaps() {
+    std::unique_lock lock(mutex_);
+    // Refresh the raw state. getPressureLevel() intentionally masks startup Emergency as Warning
+    // for callers, but using that view here would permanently publish permissive Warning caps.
+    updateScalingCapsLocked(currentLevel_.load(std::memory_order_acquire));
 }
 
 // ============================================================================

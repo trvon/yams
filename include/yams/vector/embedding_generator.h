@@ -25,6 +25,9 @@ struct EmbeddingConfig {
         OnnxRuntime, // ONNX Runtime embeddings via the daemon/plugin model provider path
     };
     Backend backend = Backend::Daemon; // Daemon-only embedding path
+    // Transitional marker for callers that applied compatibility overlays before constructing the
+    // generator. EmbeddingGenerator always trusts backend and never reads ambient configuration.
+    bool backend_is_resolved = false;
 
     enum class SimeonEncoderProfile {
         Configurable,

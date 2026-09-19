@@ -136,7 +136,7 @@ RequestDispatcher::handleEmbedDocumentsRequest(const EmbedDocumentsRequest& req)
                 ErrorCode::InvalidState, "Embedding generation disabled: provider degraded");
         }
     } catch (...) {
-        // Provider FSM snapshot is advisory; continue to provider availability checks below.
+        spdlog::debug("Embedding repair: provider FSM snapshot unavailable");
     }
     auto signal = getWorkerJobSignal();
     if (signal) {
@@ -158,14 +158,14 @@ RequestDispatcher::handleEmbedDocumentsRequest(const EmbedDocumentsRequest& req)
             try {
                 modelName = serviceManager_->resolvePreferredModel();
             } catch (...) {
-                // Preferred model resolution is best-effort; try runtime model name next.
+                spdlog::debug("Embedding repair: preferred model snapshot unavailable");
             }
         }
         if (modelName.empty()) {
             try {
                 modelName = serviceManager_->getEmbeddingModelName();
             } catch (...) {
-                // Runtime model name is best-effort; report no configured model below.
+                spdlog::debug("Embedding repair: runtime model name unavailable");
             }
         }
         if (modelName.empty()) {
@@ -199,7 +199,12 @@ RequestDispatcher::handleEmbedDocumentsRequest(const EmbedDocumentsRequest& req)
                 try {
                     repairConfig.dataPath = serviceManager_->getResolvedDataDir();
                 } catch (...) {
-                    // Optional repair path hint; repair utility can proceed without it.
+                    spdlog::debug("Embedding repair: resolved data directory unavailable");
+                }
+                if (const auto policy = serviceManager_->getResolvedEmbeddingConfig()) {
+                    repairConfig.preferredModel = policy->preferredModel;
+                    repairConfig.repairLockTimeoutMs = policy->runtime.repairLockTimeoutMs.value_or(
+                        repairConfig.repairLockTimeoutMs);
                 }
                 yams::repair::BeginBulkIngestCallback beginBulkIngest;
                 if (auto coord = serviceManager_->getVectorIndexCoordinator()) {

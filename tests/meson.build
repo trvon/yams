@@ -33,6 +33,159 @@ _test_timeout_cpp_arg = '-DYAMS_TEST_TIMEOUT_SCALE=' + _test_timeout_scale.to_st
 
 fs = import('fs')
 
+raw_environment_policy_script = files('scripts/check_raw_environment_calls.py')
+raw_environment_policy_tests = files('scripts/test_check_raw_environment_calls.py')
+raw_environment_allowlist = files('scripts/raw_environment_allowlist.txt')
+benchmark_environment_policy_script = files('scripts/check_benchmark_environment_leaks.py')
+benchmark_environment_policy_tests = files('scripts/test_check_benchmark_environment_leaks.py')
+configuration_authority_policy_script = files('scripts/check_configuration_authority.py')
+configuration_authority_policy_tests = files('scripts/test_check_configuration_authority.py')
+production_environment_keys = files('scripts/production_environment_keys.txt')
+configuration_reader_allowlist = files('scripts/configuration_reader_allowlist.txt')
+retrieval_contract_tests = files('benchmarks/test_retrieval_contract.py')
+config_key_usage_report_tests = files('scripts/test_report_config_key_usage.py')
+portability_policy_script = files('scripts/check_portability.py')
+portability_policy_tests = files('scripts/test_check_portability.py')
+portability_allowlist = files('scripts/portability_allowlist.txt')
+repository_metadata_policy_script = files('scripts/check_repository_metadata.py')
+forgejo_mirror_policy_script = files('scripts/check_forgejo_mirror_workflow.py')
+experimental_release_source_policy_script = files('scripts/check_experimental_release_source.py')
+release_manifest_unit_tests = files('scripts/test_generate_release_manifest.py')
+repository_publication_unit_tests = files('scripts/test_publish_repository.py')
+test('release_manifest_unit',
+  python_exe,
+  args: [release_manifest_unit_tests],
+  suite: ['unit', 'release'],
+  timeout: 30,
+)
+test('repository_publication_unit',
+  python_exe,
+  args: [repository_publication_unit_tests],
+  suite: ['unit', 'policy', 'release', 'repository'],
+  timeout: 30,
+)
+test('experimental_release_source_policy',
+  python_exe,
+  args: [experimental_release_source_policy_script, '--root', meson.project_source_root()],
+  suite: ['unit', 'policy', 'release'],
+  timeout: 30,
+)
+test('forgejo_mirror_policy',
+  python_exe,
+  args: [forgejo_mirror_policy_script, '--root', meson.project_source_root()],
+  suite: ['unit', 'policy', 'repository'],
+  timeout: 30,
+)
+test('serve_runtime_environment_unit',
+  python_exe,
+  args: [files('scripts/test_serve_runtime_environment.py')],
+  suite: ['unit', 'cli', 'mcp'],
+  timeout: 30,
+)
+if is_variable('yams_cli_exe') and get_option('build-mcp-server') and host_machine.system() != 'windows'
+  serve_delegation_args = [files('scripts/test_serve_delegation.py'), '--cli', yams_cli_exe.full_path()]
+  serve_delegation_deps = [yams_cli_exe]
+  if is_variable('yams_onnx_resource_lib')
+    # The fixture relocates the executable, not its build-tree shared libraries.
+    serve_delegation_args += ['--runtime-library-dir', fs.parent(yams_onnx_resource_lib.full_path())]
+    serve_delegation_deps += [yams_onnx_resource_lib]
+  endif
+  test('serve_delegation',
+    python_exe,
+    args: serve_delegation_args,
+    depends: serve_delegation_deps,
+    suite: ['integration', 'cli', 'mcp'],
+    timeout: 90,
+  )
+endif
+
+test('repository_metadata_scan_unit',
+  python_exe,
+  args: [files('scripts/test_repository_metadata_scan.py')],
+  suite: ['unit', 'policy', 'repository'],
+  timeout: 30,
+)
+test('repository_metadata_policy',
+  python_exe,
+  args: [repository_metadata_policy_script, '--root', meson.project_source_root()],
+  suite: ['unit', 'policy', 'repository'],
+  timeout: 30,
+)
+test('raw_environment_policy_unit',
+  python_exe,
+  args: [raw_environment_policy_tests],
+  suite: ['unit', 'policy', 'environment'],
+  timeout: 30,
+)
+test('raw_environment_policy',
+  python_exe,
+  args: [
+    raw_environment_policy_script,
+    '--root', meson.project_source_root(),
+    '--allowlist', raw_environment_allowlist,
+  ],
+  suite: ['unit', 'policy', 'environment'],
+  timeout: 30,
+)
+test('benchmark_environment_policy_unit',
+  python_exe,
+  args: [benchmark_environment_policy_tests],
+  suite: ['unit', 'policy', 'environment'],
+  timeout: 30,
+)
+test('benchmark_environment_policy',
+  python_exe,
+  args: [benchmark_environment_policy_script, '--root', meson.project_source_root()],
+  suite: ['unit', 'policy', 'environment'],
+  timeout: 30,
+)
+test('configuration_authority_policy_unit',
+  python_exe,
+  args: [configuration_authority_policy_tests],
+  suite: ['unit', 'policy', 'configuration'],
+  timeout: 30,
+)
+test('configuration_authority_policy',
+  python_exe,
+  args: [
+    configuration_authority_policy_script,
+    '--root', meson.project_source_root(),
+    '--environment-allowlist', production_environment_keys,
+    '--reader-allowlist', configuration_reader_allowlist,
+  ],
+  suite: ['unit', 'policy', 'configuration'],
+  timeout: 30,
+)
+test('config_key_usage_report_unit',
+  python_exe,
+  args: [config_key_usage_report_tests],
+  suite: ['unit', 'policy', 'configuration'],
+  timeout: 30,
+)
+test('retrieval_contract_unit',
+  python_exe,
+  args: [retrieval_contract_tests],
+  workdir: meson.project_source_root() / 'tests' / 'benchmarks',
+  suite: ['unit', 'policy', 'benchmark'],
+  timeout: 30,
+)
+test('portability_policy_unit',
+  python_exe,
+  args: [portability_policy_tests],
+  suite: ['unit', 'policy', 'portability'],
+  timeout: 30,
+)
+test('portability_policy',
+  python_exe,
+  args: [
+    portability_policy_script,
+    '--root', meson.project_source_root(),
+    '--allowlist', portability_allowlist,
+  ],
+  suite: ['unit', 'policy', 'portability'],
+  timeout: 30,
+)
+
 release_candidate_unit_tests = files('scripts/test_validate_release_candidate.py')
 test('release_candidate_unit',
   python_exe,
@@ -97,6 +250,13 @@ test_deps = [
   dependency('yams_daemon_client'),
   dependency('yams_daemon'),
 ]
+
+# YAMS_TESTING build of TuneAdvisor's bodies must precede the production archive on every test
+# link line (see src/daemon/tune_advisor/meson.build). Order is load-bearing: meson emits
+# dependencies in list order, and the first archive that defines a symbol wins. Any executable
+# compiled with -DYAMS_TESTING that does not use test_deps must list
+# yams_tune_advisor_testing first itself.
+test_deps = [dependency('yams_tune_advisor_testing')] + test_deps
 
 yams_plugins_mgmt_dep = dependency('yams_plugins_mgmt', required: false)
 if yams_plugins_mgmt_dep.found()
@@ -342,6 +502,26 @@ endif
 
 if catch2_dep.found()
 
+  catch2_retrieval_json_exe = executable('catch2_retrieval_json',
+    files('unit/cli/retrieval_json_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep, dependency('nlohmann_json')],
+    cpp_args: test_cpp_noerror_args,
+    install: false,
+  )
+  test('retrieval_json', catch2_retrieval_json_exe,
+    suite: ['catch2', 'unit', 'cli'], timeout: 30)
+
+  catch2_extraction_contracts_exe = executable('catch2_extraction_contracts',
+    files('unit/daemon/extraction_response_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep, dependency('nlohmann_json')],
+    cpp_args: test_cpp_noerror_args,
+    install: false,
+  )
+  test('extraction_contracts', catch2_extraction_contracts_exe,
+    suite: ['catch2', 'unit', 'daemon', 'extraction'], timeout: 30)
+
 #Daemon Test Suites(6 consolidated executables)
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
 
@@ -381,6 +561,51 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_p2p_transport_exe = executable('catch2_p2p_transport',
+    files('unit/daemon/p2p_transport_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_p2p_protocol_exe = executable('catch2_p2p_protocol',
+    files('unit/daemon/p2p_protocol_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_p2p_delta_exe = executable('catch2_p2p_delta',
+    files('unit/daemon/p2p_delta_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_peer_registry_exe = executable('catch2_peer_registry',
+    files('unit/daemon/peer_registry_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_p2p_manager_exe = executable('catch2_p2p_manager',
+    files('unit/daemon/p2p_manager_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_admission_policy_exe = executable('catch2_admission_policy',
     files('unit/daemon/admission_policy_catch2_test.cpp'),
     include_directories: incs,
@@ -400,6 +625,18 @@ if catch2_dep.found()
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
     build_rpath: ':'.join(_test_rpaths),
     install: false,
+  )
+
+  catch2_daemon_client_link_exe = executable('catch2_daemon_client_link',
+    files('unit/daemon/daemon_client_link_catch2_test.cpp'),
+    dependencies: [catch2_dep, catch2_main_dep, dependency('yams_daemon_client')],
+    cpp_args: test_cpp_noerror_args,
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  test('daemon_client_link', catch2_daemon_client_link_exe,
+    suite: ['unit', 'daemon', 'sdk'],
+    timeout: 30,
   )
 
   catch2_search_admission_controller_exe = executable('catch2_search_admission_controller',
@@ -493,6 +730,7 @@ if catch2_dep.found()
       'unit/daemon/components/checkpoint_manager_test.cpp',
       'unit/daemon/components/config_resolver_test.cpp',
       'unit/daemon/components/database_manager_test.cpp',
+      'unit/daemon/components/embedding_service_timing_catch2_test.cpp',
       'unit/daemon/components/plugin_manager_test.cpp',
       'unit/daemon/plugin_manager_config_test.cpp',
       'unit/daemon/components/topology_tuner_catch2_test.cpp',
@@ -1150,9 +1388,114 @@ if catch2_dep.found()
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
 
   catch2_storage_backend_exe = executable('catch2_storage_backend',
-    files('unit/storage/storage_backend_catch2_test.cpp'),
+    files('unit/storage/storage_backend_catch2_test.cpp',
+          'unit/storage/windows_path_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_version_vector_exe = executable('catch2_version_vector',
+    files('unit/memory_sync/version_vector_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep, dependency('nlohmann_json')],
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_memory_sync_records_exe = executable('catch2_memory_sync_records',
+    files('unit/memory_sync/records_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep, dependency('nlohmann_json')],
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_memory_sync_exe = executable('catch2_memory_sync',
+    files('unit/memory_sync/memory_sync_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [
+      catch2_dep,
+      catch2_main_dep,
+      dependency('nlohmann_json'),
+      dependency('OpenSSL'),
+      dependency('yams_storage_engine'),
+      dependency('yams_crypto'),
+      dependency('yams_memory_sync'),
+      dependency('yams_core'),
+    ],
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_content_blob_sync_exe = executable('catch2_content_blob_sync',
+    files('unit/memory_sync/content_blob_sync_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [
+      catch2_dep,
+      catch2_main_dep,
+      dependency('nlohmann_json'),
+      dependency('yams_storage_engine'),
+      dependency('yams_crypto'),
+      dependency('yams_memory_sync'),
+      dependency('yams_core'),
+    ],
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_memory_sync_service_exe = executable('catch2_memory_sync_service',
+    files('unit/memory_sync/memory_sync_service_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [
+      catch2_dep,
+      catch2_main_dep,
+      dependency('nlohmann_json'),
+      dependency('yams_storage_engine'),
+      dependency('yams_crypto'),
+      dependency('yams_memory_sync'),
+      dependency('yams_core'),
+    ],
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_memory_sync_config_exe = executable('catch2_memory_sync_config',
+    files('unit/memory_sync/memory_sync_config_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [
+      catch2_dep,
+      catch2_main_dep,
+      dependency('nlohmann_json'),
+      dependency('yams_storage_engine'),
+      dependency('yams_crypto'),
+      dependency('yams_memory_sync'),
+      dependency('yams_core'),
+    ],
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_memory_sync_cli_exe = executable('catch2_memory_sync_cli',
+    files('unit/memory_sync/memory_sync_cli_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [
+      catch2_dep,
+      catch2_main_dep,
+      dependency('nlohmann_json'),
+      dependency('yams_storage_engine'),
+      dependency('yams_crypto'),
+      dependency('yams_memory_sync'),
+      dependency('yams_core'),
+    ],
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
     build_rpath: ':'.join(_test_rpaths),
     install: false,
@@ -1196,6 +1539,7 @@ if catch2_dep.found()
     files(
       'unit/wal/wal_file_catch2_test.cpp',
       'unit/wal/wal_manager_catch2_test.cpp',
+      'unit/wal/wal_metrics_provider_catch2_test.cpp',
       'unit/wal/wal_recovery_catch2_test.cpp',
     ),
     include_directories: incs,
@@ -1308,6 +1652,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_benchmark_invocation_exe = executable('catch2_benchmark_invocation',
+    files('unit/benchmarks/benchmark_invocation_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep],
+    cpp_args: test_cpp_noerror_args,
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
   catch2_retrieval_benchmark_support_exe = executable('catch2_retrieval_benchmark_support',
     files(
       'unit/search/retrieval_benchmark_support_catch2_test.cpp',
@@ -1414,7 +1767,11 @@ if catch2_dep.found()
     version_header,
     files(
       'unit/common/format_catch2_test.cpp',
+      'unit/common/crc32_catch2_test.cpp',
+      'unit/common/hash_predicates_catch2_test.cpp',
+      'unit/common/path_alias_catch2_test.cpp',
       'unit/common/pattern_utils_catch2_test.cpp',
+      'unit/common/string_utils_catch2_test.cpp',
       'unit/common/test_utils_catch2_test.cpp',
       'unit/common/time_utils_catch2_test.cpp',
       'unit/common/utf8_utils_catch2_test.cpp',
@@ -1425,6 +1782,7 @@ if catch2_dep.found()
       'unit/cli/prompt_util_catch2_test.cpp',
       'unit/cli/recommendation_util_catch2_test.cpp',
       'unit/cli/status_metrics_catch2_test.cpp',
+      'unit/cli/time_filters_catch2_test.cpp',
       'unit/cli/stream_heuristics_catch2_test.cpp',
       'unit/cli/time_parser_catch2_test.cpp',
       'unit/cli/version_generated_header_catch2_test.cpp',
@@ -1458,6 +1816,7 @@ if catch2_dep.found()
       'unit/cli/cli_test_cleanup_listener.cpp',
       'unit/cli/add_command_stdin_catch2_test.cpp',
       'unit/cli/command_registry_catch2_test.cpp',
+      'unit/cli/content_roundtrip_catch2_test.cpp',
       'unit/cli/completion_command_catch2_test.cpp',
       'unit/cli/delete_command_catch2_test.cpp',
       'unit/cli/download_command_catch2_test.cpp',
@@ -1530,6 +1889,7 @@ if catch2_dep.found()
       'unit/cli/cli_test_cleanup_listener.cpp',
       'unit/cli/daemon_helpers_pool_catch2_test.cpp',
       'unit/cli/daemon_command_catch2_test.cpp',
+      'unit/cli/daemon_status_render_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: cli_test_deps,
@@ -1565,6 +1925,15 @@ if catch2_dep.found()
       install: false,
     )
   endif
+
+  catch2_vector_sync_adapter_exe = executable('catch2_vector_sync_adapter',
+    files('unit/vector/vector_sync_adapter_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
 
 #Tokenizer Tests(Catch2) - HuggingFaceTokenizer WordPiece, Unigram, special token injection
 #Always - on : uses synthetic tokenizer.json files, no model downloads or sqlite - vec required.
@@ -1855,6 +2224,36 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_metadata_content_transaction_exe = executable(
+    'catch2_metadata_content_transaction',
+    files('unit/metadata/metadata_content_transaction_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_metadata_sync_adapter_exe = executable(
+    'catch2_metadata_sync_adapter',
+    files('unit/metadata/metadata_sync_adapter_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_topology_sync_adapter_exe = executable(
+    'catch2_topology_sync_adapter',
+    files('unit/metadata/topology_sync_adapter_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
 #Metadata Repository Cache Tests(Catch2) - cache operations
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
@@ -1869,6 +2268,15 @@ if catch2_dep.found()
 
   catch2_topology_baseline_exe = executable('catch2_topology_baseline',
     files('unit/topology/topology_baseline_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_topology_identity_exe = executable('catch2_topology_identity',
+    files('unit/topology/protected_relation_identity_catch2_test.cpp'),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
@@ -2045,11 +2453,48 @@ if catch2_dep.found()
   )
 
   config_parse_utils_exe = executable('config_parse_utils',
-    files('unit/config/config_parse_utils_catch2_test.cpp'),
+    files(
+      'unit/config/config_parse_utils_catch2_test.cpp',
+      'unit/config/environment_catch2_test.cpp',
+      'unit/config/flat_toml_reader_catch2_test.cpp',
+    ),
     include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep],
+    dependencies: [
+      catch2_dep,
+      catch2_main_dep,
+      dependency('threads'),
+      dependency('yams_config'),
+      dependency('spdlog'),
+    ],
     cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
     build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  tune_advisor_environment_snapshot_exe = executable(
+    'tune_advisor_environment_snapshot',
+    files('unit/daemon/tune_advisor_environment_snapshot_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [
+      catch2_dep,
+      catch2_main_dep,
+      dependency('threads'),
+      dependency('yams_config'),
+      dependency('yams_tune_advisor'),
+      dependency('spdlog'),
+    ],
+    cpp_args: test_cpp_noerror_args,
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+  test('tune_advisor_environment_snapshot', tune_advisor_environment_snapshot_exe,
+    timeout: 30,
+  )
+
+  config_reader_link_smoke_exe = executable('config_reader_link_smoke',
+    files('unit/config/config_reader_link_smoke.cpp'),
+    include_directories: incs,
+    dependencies: [dependency('yams_api')],
     install: false,
   )
 
@@ -2313,6 +2758,7 @@ if catch2_dep.found()
     files(
       'unit/app/services/service_utilities_test.cpp',
       'unit/app/services/download_metadata_entries_test.cpp',
+      'unit/app/services/enhanced_search_config_catch2_test.cpp',
       'unit/app/services/retrieval_service_mapping_catch2_test.cpp',
     ),
     include_directories: incs,
@@ -2497,6 +2943,24 @@ if catch2_dep.found()
     timeout: 180
   )
 
+  test('metadata_content_transaction', catch2_metadata_content_transaction_exe,
+    suite: ['catch2', 'unit', 'metadata', 'repository', 'transaction'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
+  test('metadata_sync_adapter', catch2_metadata_sync_adapter_exe,
+    suite: ['catch2', 'unit', 'metadata', 'memory-sync'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
+  test('topology_sync_adapter', catch2_topology_sync_adapter_exe,
+    suite: ['catch2', 'unit', 'metadata', 'topology', 'memory-sync'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
   test('metadata_repository_cache', catch2_metadata_repository_cache_exe,
     suite: ['catch2', 'unit', 'metadata', 'cache'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -2507,6 +2971,12 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'topology'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
+  )
+
+  test('topology_identity', catch2_topology_identity_exe,
+    suite: ['catch2', 'unit', 'topology'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
   )
 
   test('topology_factory', catch2_topology_factory_exe,
@@ -2613,6 +3083,19 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'config', 'parse'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
+  )
+
+  test('config_environment_random_order', config_parse_utils_exe,
+    suite: ['catch2', 'unit', 'config', 'environment', 'order'],
+    args: ['[config][environment]', '--order', 'rand', '--rng-seed', '66'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('config_reader_link_smoke', config_reader_link_smoke_exe,
+    suite: ['unit', 'config', 'link'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
   )
 
   test('detection', detection_exe,
@@ -2776,6 +3259,17 @@ if catch2_dep.found()
 #Search tests
   test('hybrid_search', hybrid_search_exe,
     suite: ['catch2', 'unit', 'search', 'hybrid'],
+    args: ['~[slow]', '--allow-running-no-tests'],
+    env: {
+      'LD_LIBRARY_PATH': _test_env_ld_library_path,
+      'YAMS_DISABLE_VECTORS': '1',
+    },
+    timeout: 120
+  )
+
+  test('hybrid_search_slow', hybrid_search_exe,
+    suite: ['catch2', 'slow', 'search', 'hybrid'],
+    args: ['[slow]', '--allow-running-no-tests'],
     env: {
       'LD_LIBRARY_PATH': _test_env_ld_library_path,
       'YAMS_DISABLE_VECTORS': '1',
@@ -2820,6 +3314,65 @@ if catch2_dep.found()
 
   test('daemon_components', catch2_daemon_components_exe,
     suite: ['catch2', 'unit', 'daemon', 'components'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60,
+    is_parallel: false
+  )
+
+  test('p2p_transport', catch2_p2p_transport_exe,
+    suite: ['catch2', 'unit', 'daemon', 'p2p', 'network'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60,
+    is_parallel: false
+  )
+
+  test('p2p_protocol', catch2_p2p_protocol_exe,
+    args: ['~[fuzz]'],
+    suite: ['catch2', 'unit', 'daemon', 'p2p', 'network'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60,
+    is_parallel: false
+  )
+
+  test('p2p_protocol_fuzz_controls', catch2_p2p_protocol_exe,
+    args: ['[daemon][p2p][protocol][fuzz]'],
+    suite: ['catch2', 'unit', 'daemon', 'p2p', 'fuzz-smoke'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
+  )
+
+  test('p2p_delta', catch2_p2p_delta_exe,
+    args: ['~[fuzz]'],
+    suite: ['catch2', 'unit', 'daemon', 'p2p', 'network'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60,
+    is_parallel: false
+  )
+
+  test('p2p_delta_fuzz_controls', catch2_p2p_delta_exe,
+    args: ['[daemon][p2p][delta][fuzz]'],
+    suite: ['catch2', 'unit', 'daemon', 'p2p', 'fuzz-smoke'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
+  )
+
+  test('p2p_delta_large_history', catch2_p2p_delta_exe,
+    args: ['direct P2P catch-up advances beyond 1024 retained operations'],
+    suite: ['catch2', 'slow', 'daemon', 'p2p', 'network'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 1200,
+    is_parallel: false
+  )
+
+  test('peer_registry', catch2_peer_registry_exe,
+    suite: ['catch2', 'unit', 'daemon', 'p2p', 'sqlite'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60,
+    is_parallel: false
+  )
+
+  test('p2p_manager', catch2_p2p_manager_exe,
+    suite: ['catch2', 'unit', 'daemon', 'p2p', 'network', 'sqlite'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
     is_parallel: false
@@ -2900,6 +3453,14 @@ if catch2_dep.found()
 
   test('daemon_background_processing', catch2_daemon_background_exe,
     suite: ['catch2', 'unit', 'daemon', 'background'],
+    args: ['~[slow]', '--allow-running-no-tests'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
+
+  test('daemon_background_processing_slow', catch2_daemon_background_exe,
+    suite: ['catch2', 'slow', 'daemon', 'background'],
+    args: ['[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120
   )
@@ -2930,6 +3491,14 @@ if catch2_dep.found()
 
   test('work_coordinator', catch2_work_coordinator_exe,
     suite: ['catch2', 'unit', 'daemon', 'work-coordinator'],
+    args: ['~[slow]', '--allow-running-no-tests'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('work_coordinator_slow', catch2_work_coordinator_exe,
+    suite: ['catch2', 'slow', 'daemon', 'work-coordinator'],
+    args: ['[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60
   )
@@ -3015,6 +3584,15 @@ if catch2_dep.found()
 
   test('plugin_infrastructure', catch2_plugin_infrastructure_exe,
     suite: ['catch2', 'unit', 'daemon', 'plugin', 'infrastructure'],
+    args: ['~[slow]', '--allow-running-no-tests'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60,
+    is_parallel: false
+  )
+
+  test('plugin_infrastructure_slow', catch2_plugin_infrastructure_exe,
+    suite: ['catch2', 'slow', 'daemon', 'plugin', 'infrastructure'],
+    args: ['[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 60,
     is_parallel: false
@@ -3210,9 +3788,7 @@ if catch2_dep.found()
     suite: ['catch2', 'unit', 'daemon', 'connection-pool'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 120,
-    is_parallel: false,
-#Test skips on Windows(Unix domain sockets not supported)
-    should_fail: host_machine.system() == 'windows'
+    is_parallel: false
   )
 
   test('asio_transport_exhaustion', catch2_asio_transport_exhaustion_exe,
@@ -3342,6 +3918,48 @@ if catch2_dep.found()
     timeout: 120
   )
 
+  test('version_vector', catch2_version_vector_exe,
+    suite: ['catch2', 'unit', 'memory-sync'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('memory_sync_records', catch2_memory_sync_records_exe,
+    suite: ['catch2', 'unit', 'memory-sync'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('memory_sync', catch2_memory_sync_exe,
+    suite: ['catch2', 'unit', 'memory-sync'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('content_blob_sync', catch2_content_blob_sync_exe,
+    suite: ['catch2', 'unit', 'memory-sync'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('memory_sync_service', catch2_memory_sync_service_exe,
+    suite: ['catch2', 'unit', 'memory-sync'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('memory_sync_config', catch2_memory_sync_config_exe,
+    suite: ['catch2', 'unit', 'memory-sync'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
+  test('memory_sync_cli', catch2_memory_sync_cli_exe,
+    suite: ['catch2', 'unit', 'memory-sync'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 60
+  )
+
   test('storage_submodule', catch2_storage_submodule_exe,
     suite: ['catch2', 'unit', 'storage', 'yams-8b9'],
     args: ['~[slow]', '--allow-running-no-tests'],
@@ -3414,6 +4032,13 @@ if catch2_dep.found()
     timeout: 60
   )
 
+  test('benchmark_invocation', catch2_benchmark_invocation_exe,
+    suite: ['catch2', 'unit', 'benchmark', 'harness'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    workdir: meson.project_source_root(),
+    timeout: 30
+  )
+
   test('retrieval_benchmark_support', catch2_retrieval_benchmark_support_exe,
     suite: ['catch2', 'unit', 'search', 'benchmark'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
@@ -3436,6 +4061,14 @@ if catch2_dep.found()
 
   test('mcp_submodule', catch2_mcp_submodule_exe,
     suite: ['catch2', 'unit', 'mcp', 'yams-84g'],
+    args: ['~[slow]', '--allow-running-no-tests'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 180
+  )
+
+  test('mcp_submodule_slow', catch2_mcp_submodule_exe,
+    suite: ['catch2', 'slow', 'mcp', 'yams-84g'],
+    args: ['[slow]', '--allow-running-no-tests'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 180
   )
@@ -3508,6 +4141,12 @@ if catch2_dep.found()
       timeout: heavy_submodule_timeout
     )
   endif
+
+  test('vector_sync_adapter', catch2_vector_sync_adapter_exe,
+    suite: ['catch2', 'unit', 'vector', 'memory-sync'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 120
+  )
 
 #API submodule tests(content store, metadata API)
 #Migrated from GTest as part of yams - 3s4 / api

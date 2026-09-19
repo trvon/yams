@@ -13,6 +13,8 @@ echo "Generating seed corpus from protocol tests..."
 mkdir -p \
 	"${CORPUS_DIR}/ipc_protocol" \
 	"${CORPUS_DIR}/ipc_roundtrip" \
+	"${CORPUS_DIR}/p2p_protocol" \
+	"${CORPUS_DIR}/p2p_delta" \
 	"${CORPUS_DIR}/add_document" \
 	"${CORPUS_DIR}/proto_serializer" \
 	"${CORPUS_DIR}/request_handler" \
@@ -33,6 +35,27 @@ printf '\x00\x00\x00\x00' >> "$min_frame"  # checksum=0
 printf '\x00\x00\x00\x00' >> "$min_frame"  # flags=0
 
 cp "$min_frame" "${CORPUS_DIR}/ipc_roundtrip/01_min_frame.bin"
+
+# Direct-P2P control seeds. Keep a protocol-v3 hello so exact-version rejection remains covered
+# after the authenticated bounded-window protocol-v4 upgrade.
+cat > "${CORPUS_DIR}/p2p_protocol/01_hello_v4.json" <<'EOF'
+{"type":"hello","protocol":4,"schema_version":4,"node_id":"node-a","corpus_id":"corpus","corpus_epoch":1,"max_writer_advance":128,"max_writer_window_bytes":1048576}
+EOF
+cat > "${CORPUS_DIR}/p2p_protocol/02_legacy_hello_v3.json" <<'EOF'
+{"type":"hello","protocol":3,"schema_version":4,"node_id":"node-a","corpus_id":"corpus","corpus_epoch":1,"max_writer_advance":128,"max_writer_window_bytes":1048576}
+EOF
+cat > "${CORPUS_DIR}/p2p_protocol/03_empty_state.json" <<'EOF'
+{"type":"state","vv":{"counters_":{}},"seen":{},"commitments":[],"quarantined_writers":[]}
+EOF
+cat > "${CORPUS_DIR}/p2p_delta/01_delta_batch.json" <<'EOF'
+{"type":"delta_batch","count":1,"has_more":false}
+EOF
+cat > "${CORPUS_DIR}/p2p_delta/02_replication_mode.json" <<'EOF'
+{"type":"replication_mode","mode":"delta"}
+EOF
+cat > "${CORPUS_DIR}/p2p_delta/03_invalid_snapshot.json" <<'EOF'
+{"type":"snapshot_begin","witness":"node-a","frontier":{"counters_":{}},"commitments":[],"record_count":18446744073709551615,"payload_bytes":0,"root_digest":"0000000000000000000000000000000000000000000000000000000000000000","witness_key_id":"node-a-v1","witness_algorithm":"Ed25519","witness_signature":"AA=="}
+EOF
 
 # Some non-empty byte seeds for payload-focused fuzzers
 printf '\x00' > "${CORPUS_DIR}/add_document/00_zero.bin"

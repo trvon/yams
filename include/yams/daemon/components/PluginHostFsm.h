@@ -24,8 +24,14 @@ struct PluginScanStartedEvent {
 struct PluginLoadedEvent {
     std::string name;
 };
+struct PluginUnloadedEvent {
+    std::string name;
+};
 struct AllPluginsLoadedEvent {
     std::size_t count{0};
+};
+struct PluginLoadRejectedEvent {
+    std::string error;
 };
 struct PluginLoadFailedEvent {
     std::string error;
@@ -44,7 +50,9 @@ struct PluginHostMachine : tinyfsm::MooreMachine<PluginHostMachine> {
 
     virtual void react(const PluginScanStartedEvent&);
     virtual void react(const PluginLoadedEvent&);
+    virtual void react(const PluginUnloadedEvent&);
     virtual void react(const AllPluginsLoadedEvent&);
+    virtual void react(const PluginLoadRejectedEvent&);
     virtual void react(const PluginLoadFailedEvent&);
 };
 
@@ -73,16 +81,27 @@ inline void PluginHostMachine::react(const PluginScanStartedEvent&) {
 }
 
 inline void PluginHostMachine::react(const PluginLoadedEvent& ev) {
-    ++snap.loadedCount;
     if (std::find(snap.loadedPlugins.begin(), snap.loadedPlugins.end(), ev.name) ==
         snap.loadedPlugins.end()) {
         snap.loadedPlugins.push_back(ev.name);
     }
+    snap.loadedCount = snap.loadedPlugins.size();
     transit<PHLoadingPlugins>();
+}
+
+inline void PluginHostMachine::react(const PluginUnloadedEvent& ev) {
+    std::erase(snap.loadedPlugins, ev.name);
+    snap.loadedCount = snap.loadedPlugins.size();
+    transit<PHReady>();
 }
 
 inline void PluginHostMachine::react(const AllPluginsLoadedEvent& ev) {
     snap.loadedCount = ev.count;
+    transit<PHReady>();
+}
+
+inline void PluginHostMachine::react(const PluginLoadRejectedEvent& ev) {
+    snap.lastError = ev.error;
     transit<PHReady>();
 }
 

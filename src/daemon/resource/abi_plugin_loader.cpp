@@ -37,6 +37,7 @@ static const char* dlerror() {
 #endif
 #include <fstream>
 #include <regex>
+#include <string_view>
 #include <yams/app/services/services.hpp>
 #include <yams/config/config_helpers.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
@@ -50,6 +51,10 @@ namespace yams::daemon {
 extern void registerModelProvider(const std::string& name, ModelProviderFactory factory);
 
 // macOS provides dlopen_preflight in <dlfcn.h>; no forward decl needed
+
+static bool isBundledRuntimeDependency(std::string_view filename) {
+    return filename == "libzpdf.so" || filename == "libzpdf.dylib" || filename == "zpdf.dll";
+}
 
 static std::vector<std::string> parseInterfacesFromManifest(const std::string& manifestJson) {
     std::vector<std::string> out;
@@ -221,7 +226,7 @@ AbiPluginLoader::scanDirectory(const std::filesystem::path& dir) const {
         } catch (...) {
         }
         if (!looks_like_yams) {
-            if (namePolicy == NamePolicy::Spec) {
+            if (namePolicy == NamePolicy::Spec && !isBundledRuntimeDependency(fname)) {
                 appendSkip(SkipInfo{p, "name policy: require libyams_* or yams_*"});
             }
             return;
@@ -561,14 +566,7 @@ bool AbiPluginLoader::isTrusted(const std::filesystem::path& p) const {
         // 2. If YAMS_PLUGIN_DIR is set and the candidate path is under that directory
         // 3. If a configured plugin directory was provided via
         // PluginLoader::setConfiguredPluginDirectories
-        auto truthy = [](const char* v) {
-            if (!v)
-                return false;
-            std::string s(v);
-            std::ranges::transform(s, s.begin(), ::tolower);
-            return s == "1" || s == "true" || s == "on" || s == "yes";
-        };
-        if (truthy(std::getenv("YAMS_PLUGIN_TRUST_ALL"))) {
+        if (yams::config::read_env_bool("YAMS_PLUGIN_TRUST_ALL").valueOr(false)) {
             return true;
         }
         // Configured plugin directories (global static in PluginLoader)
@@ -580,14 +578,14 @@ bool AbiPluginLoader::isTrusted(const std::filesystem::path& p) const {
             std::vector<std::filesystem::path> defaults;
 #ifdef _WIN32
             // Windows: use LOCALAPPDATA for user plugins
-            if (const char* localAppData = std::getenv("LOCALAPPDATA"))
-                defaults.push_back(std::filesystem::path(localAppData) / "yams" / "plugins");
-            else if (const char* userProfile = std::getenv("USERPROFILE"))
-                defaults.push_back(std::filesystem::path(userProfile) / "AppData" / "Local" /
+            if (auto localAppData = yams::config::getenv_nonempty("LOCALAPPDATA"))
+                defaults.push_back(std::filesystem::path(*localAppData) / "yams" / "plugins");
+            else if (auto userProfile = yams::config::getenv_nonempty("USERPROFILE"))
+                defaults.push_back(std::filesystem::path(*userProfile) / "AppData" / "Local" /
                                    "yams" / "plugins");
 #else
-            if (const char* home = std::getenv("HOME"))
-                defaults.push_back(std::filesystem::path(home) / ".local" / "lib" / "yams" /
+            if (auto home = yams::config::getenv_nonempty("HOME"))
+                defaults.push_back(std::filesystem::path(*home) / ".local" / "lib" / "yams" /
                                    "plugins");
 #ifdef __APPLE__
             // macOS: Homebrew default install location
@@ -612,12 +610,15 @@ bool AbiPluginLoader::isTrusted(const std::filesystem::path& p) const {
                     }
                 }
             }
+        } catch (const std::exception& error) {
+            spdlog::debug("Failed to inspect default plugin trust roots: {}", error.what());
         } catch (...) {
+            spdlog::debug("Failed to inspect default plugin trust roots: unknown error");
         }
         try {
-            if (const char* dir = std::getenv("YAMS_PLUGIN_DIR")) {
+            if (auto dir = yams::config::getenv_nonempty("YAMS_PLUGIN_DIR")) {
                 std::error_code ec;
-                auto base = std::filesystem::weakly_canonical(std::filesystem::path(dir), ec);
+                auto base = std::filesystem::weakly_canonical(std::filesystem::path(*dir), ec);
                 auto target = std::filesystem::weakly_canonical(p, ec);
                 if (!ec) {
                     if (plugin_trust::isPathWithin(base, target)) {
@@ -625,7 +626,10 @@ bool AbiPluginLoader::isTrusted(const std::filesystem::path& p) const {
                     }
                 }
             }
+        } catch (const std::exception& error) {
+            spdlog::debug("Failed to inspect YAMS_PLUGIN_DIR trust root: {}", error.what());
         } catch (...) {
+            spdlog::debug("Failed to inspect YAMS_PLUGIN_DIR trust root: unknown error");
         }
         return false; // default deny otherwise
     }

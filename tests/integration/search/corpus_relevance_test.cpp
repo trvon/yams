@@ -223,12 +223,26 @@ TEST_CASE_METHOD(CorpusRelevanceFixture, "Collection: --collection scopes to one
     addContent("coll_a_doc.txt", "corpus alpha body zcollscoped distinguishing-token-a", "corpusA");
     addContent("coll_b_doc.txt", "corpus beta body zcollscoped distinguishing-token-b", "corpusB");
 
-    // Unscoped: both collections' docs are visible.
-    auto all = keywordHits("zcollscoped", /*collection=*/"");
-    bool sawA = false, sawB = false;
-    for (const auto& p : all) {
-        sawA = sawA || p.find("coll_a_doc") != std::string::npos;
-        sawB = sawB || p.find("coll_b_doc") != std::string::npos;
+    // Unscoped: one response eventually contains both collections' docs. Chunk-level results may
+    // duplicate the first visible path, so wait for both identities rather than a result count.
+    const auto deadline = std::chrono::steady_clock::now() + 8s;
+    std::vector<std::string> all;
+    bool sawA = false;
+    bool sawB = false;
+    while (std::chrono::steady_clock::now() < deadline && !(sawA && sawB)) {
+        all.clear();
+        sawA = false;
+        sawB = false;
+        auto result = search("zcollscoped", "keyword", 25);
+        if (result) {
+            for (const auto& item : result.value().results) {
+                all.push_back(item.path);
+                sawA = sawA || item.path.find("coll_a_doc") != std::string::npos;
+                sawB = sawB || item.path.find("coll_b_doc") != std::string::npos;
+            }
+        }
+        if (!(sawA && sawB))
+            std::this_thread::sleep_for(150ms);
     }
     CAPTURE(all);
     REQUIRE(sawA);

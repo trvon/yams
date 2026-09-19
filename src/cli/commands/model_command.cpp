@@ -1131,8 +1131,8 @@ private:
             }
             std::cout << "  Check embedding status:\n";
             std::cout << "    yams config embeddings status\n";
-            std::cout << "  Enable automatic embedding generation (optional):\n";
-            std::cout << "    yams config embeddings enable\n";
+            std::cout << "  Choose the model used for automatic embedding during ingest:\n";
+            std::cout << "    yams config embeddings model <name>\n";
         }
 
         if (applyConfig_) {
@@ -1222,8 +1222,6 @@ private:
             std::cout << "  2. Configure YAMS:\n";
             std::cout << "     yams config search reranker backend onnx\n";
             std::cout << "     yams config search reranker set " << model.name << "\n";
-            std::cout
-                << "     (Optional) yams config set search.reranker_model_path <path>/model.onnx\n";
             std::cout << "     (If ONNX is unavailable, reranking falls back to Simeon.)\n";
         }
 

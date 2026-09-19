@@ -71,7 +71,7 @@ struct RepairServiceContext {
     std::function<std::shared_ptr<IModelProvider>()> getModelProvider;
     std::function<std::size_t()> getEmbeddingQueuedJobs;
     std::function<std::size_t()> getEmbeddingInFlightJobs;
-    std::function<const std::vector<std::shared_ptr<extraction::IContentExtractor>>&()>
+    std::function<std::vector<std::shared_ptr<extraction::IContentExtractor>>()>
         getContentExtractors;
     std::function<const std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>>&()>
         getSymbolExtractors;

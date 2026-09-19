@@ -253,4 +253,96 @@ TEST_CASE("RepairUtilScan returns empty list for empty metadata", "[repair][embe
     std::filesystem::remove_all(tmp, ec);
 }
 
+namespace {
+
+class CandidateMetadata final : public InMemoryMetadata {
+public:
+    Result<std::vector<metadata::DocumentInfo>>
+    queryDocuments(const metadata::DocumentQueryOptions& options) override {
+        queryHadEmbeddingFilter_ = options.hasEmbedding.has_value();
+        queriedEmbeddingValue_ = options.hasEmbedding.value_or(false);
+        return InMemoryMetadata::queryDocuments(options);
+    }
+
+    Result<std::vector<metadata::GrepCandidateProjection>>
+    queryDocumentsForGrepCandidates(const metadata::DocumentQueryOptions& options) override {
+        queryHadEmbeddingFilter_ = options.hasEmbedding.has_value();
+        queriedEmbeddingValue_ = options.hasEmbedding.value_or(false);
+        return metadata::IMetadataRepository::queryDocumentsForGrepCandidates(options);
+    }
+
+    bool queryHadEmbeddingFilter() const { return queryHadEmbeddingFilter_; }
+    bool queriedEmbeddingValue() const { return queriedEmbeddingValue_; }
+
+private:
+    bool queryHadEmbeddingFilter_{false};
+    bool queriedEmbeddingValue_{false};
+};
+
+metadata::DocumentInfo makeCandidate(std::string hash, std::string path, std::string mime,
+                                     bool contentExtracted = false) {
+    metadata::DocumentInfo doc{};
+    doc.sha256Hash = std::move(hash);
+    doc.filePath = std::move(path);
+    doc.mimeType = std::move(mime);
+    doc.contentExtracted = contentExtracted;
+    return doc;
+}
+
+} // namespace
+
+TEST_CASE("Embedding repair candidate policy preserves MIME and extracted-content eligibility",
+          "[repair][embedding][catch2]") {
+    auto repo = std::make_shared<CandidateMetadata>();
+    repo->add(makeCandidate("text", "/docs/readme.txt", "text/plain"));
+    repo->add(makeCandidate("json", "/docs/data.json", "application/json", true));
+    repo->add(makeCandidate("xml", "/docs/data.xml", "application/xml"));
+    repo->add(makeCandidate("x-yaml", "/docs/data.yaml", "application/x-yaml"));
+    repo->add(makeCandidate("yaml", "/docs/config.yaml", "application/yaml"));
+    repo->add(makeCandidate("custom-exact", "/docs/report.pdf", "application/pdf"));
+    repo->add(makeCandidate("custom-prefix", "/docs/photo.png", "image/png"));
+    repo->add(makeCandidate("extracted", "/docs/archive.bin", "application/octet-stream", true));
+    repo->add(makeCandidate("javascript", "/docs/app.js", "application/javascript"));
+    repo->add(makeCandidate("excluded", "/docs/video.mp4", "video/mp4"));
+
+    const auto scan = selectEmbeddingRepairCandidates(
+        *repo, {"application/pdf", "image/", "", "not/a-match"}, false);
+
+    REQUIRE(scan);
+    CHECK(repo->queryHadEmbeddingFilter());
+    CHECK_FALSE(repo->queriedEmbeddingValue());
+    CHECK(scan.value().documentsScanned == 10u);
+    CHECK(scan.value().eligibleByMime == 7u);
+    CHECK(scan.value().eligibleByExtractedText == 1u);
+    CHECK((scan.value().documentHashes == std::vector<std::string>{"text", "json", "xml", "x-yaml",
+                                                                   "yaml", "custom-exact",
+                                                                   "custom-prefix", "extracted"}));
+    CHECK((scan.value().excludedSamples ==
+           std::vector<std::string>{"/docs/app.js mime=application/javascript extracted=0",
+                                    "/docs/video.mp4 mime=video/mp4 extracted=0"}));
+}
+
+TEST_CASE("Embedding repair candidate policy force scans all documents and caps exclusions",
+          "[repair][embedding][catch2]") {
+    auto repo = std::make_shared<CandidateMetadata>();
+    for (int i = 0; i < 10; ++i) {
+        repo->add(makeCandidate("excluded-" + std::to_string(i),
+                                "/docs/excluded-" + std::to_string(i), "video/mp4"));
+    }
+
+    const auto scan = selectEmbeddingRepairCandidates(*repo, {}, true);
+
+    REQUIRE(scan);
+    CHECK_FALSE(repo->queryHadEmbeddingFilter());
+    CHECK(scan.value().documentsScanned == 10u);
+    CHECK(scan.value().documentHashes.empty());
+    CHECK(scan.value().eligibleByMime == 0u);
+    CHECK(scan.value().eligibleByExtractedText == 0u);
+    REQUIRE(scan.value().excludedSamples.size() == 8u);
+    CHECK(scan.value().excludedSamples.front() ==
+          std::string("/docs/excluded-0 mime=video/mp4 extracted=0"));
+    CHECK(scan.value().excludedSamples.back() ==
+          std::string("/docs/excluded-7 mime=video/mp4 extracted=0"));
+}
+
 } // namespace yams::repair::test

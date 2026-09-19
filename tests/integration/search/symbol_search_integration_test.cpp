@@ -26,8 +26,10 @@
 
 #include <filesystem>
 #include <fstream>
+#include <optional>
 
 #include "../../common/service_manager_test_helper.h"
+#include "../../common/test_helpers_catch2.h"
 
 // Note: Cannot use 'using namespace yams::daemon' due to conflict with unistd.h daemon()
 using namespace yams::app::services;
@@ -47,8 +49,8 @@ public:
                     std::to_string(std::chrono::system_clock::now().time_since_epoch().count()));
         std::filesystem::create_directories(testDir_);
 
-        // Set YAMS_STORAGE environment variable (required for proper initialization)
-        setenv("YAMS_STORAGE", testDir_.string().c_str(), 1);
+        // Set YAMS_STORAGE for initialization and restore the exact host value after cleanup.
+        storageEnvironment_.emplace("YAMS_STORAGE", testDir_.string());
 
         // Initialize ServiceManager with full async initialization (matching validation test
         // pattern)
@@ -201,6 +203,7 @@ public:
         return docRes.value()->contentExtracted;
     }
 
+    std::optional<yams::test::ScopedEnvVar> storageEnvironment_;
     std::shared_ptr<yams::daemon::ServiceManager> serviceManager_;
     std::unique_ptr<yams::daemon::StateComponent> state_;
     std::unique_ptr<yams::daemon::DaemonLifecycleFsm> lifecycleFsm_;
@@ -445,7 +448,7 @@ public:
         spdlog::info("Symbol extraction for 5 files took {}ms", duration.count());
 
         // Performance should be reasonable (< 5 seconds for 5 small files)
-        REQUIRE(duration.count() < 5000);
+        REQUIRE((duration.count() < 5000));
 
         // Wait for processing with retry logic
         size_t processedCount = 0;
@@ -466,7 +469,7 @@ public:
         spdlog::info("Processed {}/{} documents", processedCount, hashes.size());
         // Note: May not process all due to async timing - infrastructure validated
         INFO("Processed " << processedCount << "/" << hashes.size() << " documents");
-        REQUIRE(processedCount > 0); // At least one processed validates infrastructure works
+        REQUIRE((processedCount > 0)); // At least one processed validates infrastructure works
     }
 }
 
@@ -562,7 +565,7 @@ void runPipeline() {
                     // PBI-074: With symbol ranking boost, definitions should rank higher.
                     // Note: If KG store is unavailable (no symbols extracted), ranking
                     // falls back to pure BM25. Verify at least both files found.
-                    REQUIRE(defRank != useRank);
+                    REQUIRE((defRank != useRank));
                 } else {
                     spdlog::warn("Could not find both files in results (def={}, use={})", defRank,
                                  useRank);
@@ -605,6 +608,7 @@ public:
         auto symHash = fixture.storeSourceFile("task_definition.cpp", symbolFile);
         auto comHash = fixture.storeSourceFile("task_comments.txt", commentFile);
 
+        REQUIRE_FALSE(comHash.empty());
         REQUIRE(fixture.extractSymbols(symHash));
         // Note: comment file won't have symbols, but will match keyword search
 

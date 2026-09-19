@@ -16,6 +16,10 @@ else
     'daemon_shutdown_test.cpp',
   )
 
+  daemon_harness_srcs = files(
+    'daemon_harness_catch2_test.cpp',
+  )
+
   post_ingest_queue_validation_srcs = files(
     'post_ingest_queue_validation_test.cpp',
   )
@@ -73,6 +77,10 @@ else
 
   lifecycle_single_instance_srcs = files(
     'lifecycle_single_instance_test.cpp',
+  )
+
+  memory_sync_service_integration_srcs = files(
+    'memory_sync_service_integration_test.cpp',
   )
 
   dbg = (get_option('buildtype') == 'debug')
@@ -248,6 +256,62 @@ else
       dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
       cpp_args: ['-DYAMS_TESTING=1'],
       install: false,
+    )
+
+    daemon_harness_exe = executable('yams_daemon_harness_tests_catch2',
+      daemon_harness_srcs,
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
+      cpp_args: ['-DYAMS_TESTING=1'],
+      install: false,
+    )
+
+    test('daemon_harness_startup_rollback',
+      daemon_harness_exe,
+      suite: ['integration', 'daemon', 'catch2', 'harness'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: [
+        'DaemonHarness rolls back owned endpoints when startup callback fails',
+        '--allow-running-no-tests',
+      ],
+    )
+
+    test('daemon_harness_endpoint_ownership',
+      daemon_harness_exe,
+      suite: ['integration', 'daemon', 'catch2', 'harness'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: [
+        'DaemonHarness preserves endpoints claimed after fixture construction',
+        '--allow-running-no-tests',
+      ],
+    )
+
+    test('daemon_harness_config_exception',
+      daemon_harness_exe,
+      suite: ['integration', 'daemon', 'catch2', 'harness'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: [
+        'DaemonHarness restores process state when configuration throws',
+        '--allow-running-no-tests',
+      ],
+    )
+
+    test('daemon_harness_config_lifecycle',
+      daemon_harness_exe,
+      suite: ['integration', 'daemon', 'catch2', 'harness'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: get_option('integration-daemon-timeout'),
+      args: [
+        'DaemonHarness isolates config and observes lifecycle cleanup',
+        '--allow-running-no-tests',
+      ],
     )
 
     # Split shutdown tests into individual processes
@@ -524,13 +588,127 @@ else
       args: ['Data-dir lock released on shutdown', '--allow-running-no-tests'],
     )
 
+    memory_sync_service_integration_exe = executable('yams_memory_sync_service_integration',
+      memory_sync_service_integration_srcs,
+      include_directories: incs,
+      dependencies: [catch2_dep, catch2_main_dep, test_deps, catch2_trailing_link_deps],
+      cpp_args: ['-DYAMS_TESTING=1', _test_timeout_cpp_arg],
+      install: false,
+    )
+
+    test('daemon_memory_sync_auth_startup_failure',
+      memory_sync_service_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 30,
+      args: ['Daemon refuses enabled memory sync when writer authentication cannot initialize', '--allow-running-no-tests'],
+    )
+    test('daemon_memory_sync_periodic_convergence',
+      memory_sync_service_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 60,
+      args: ['Daemon memory sync periodically converges and stops cleanly', '--allow-running-no-tests'],
+    )
+    test('daemon_memory_sync_delete_integrity',
+      memory_sync_service_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 60,
+      args: ['Production document deletion also replicates content-byte deletion', '--allow-running-no-tests'],
+    )
+    test('daemon_memory_sync_apply_stop',
+      memory_sync_service_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 60,
+      args: ['Daemon memory sync stop during production apply prevents later adapters', '--allow-running-no-tests'],
+    )
+    test('daemon_memory_sync_apply_serialization',
+      memory_sync_service_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 60,
+      args: ['Daemon serializes concurrent memory sync apply callbacks', '--allow-running-no-tests'],
+    )
+    test('daemon_memory_sync_prerequisites',
+      memory_sync_service_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 60,
+      args: ['Daemon memory sync prerequisite failures stop dependent adapters and retry', '--allow-running-no-tests'],
+    )
+    test('daemon_memory_sync_content_prerequisite',
+      memory_sync_service_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 60,
+      args: ['Daemon memory sync requires content before metadata visibility', '--allow-running-no-tests'],
+    )
+    test('daemon_memory_sync_backfill_stop',
+      memory_sync_service_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 60,
+      args: ['Daemon memory sync stop during production backfill bounds published documents', '--allow-running-no-tests'],
+    )
+    test('daemon_memory_sync_backfill_budget',
+      memory_sync_service_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 60,
+      args: ['Daemon memory sync backfill budget resumes document cursor', '--allow-running-no-tests'],
+    )
+    test('daemon_memory_sync_poisoned_blob',
+      memory_sync_service_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 60,
+      args: ['Daemon memory sync backfill skips a poisoned blob and continues', '--allow-running-no-tests'],
+    )
+    test('daemon_memory_sync_direct_delta_hydration',
+      memory_sync_service_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 60,
+      args: ['Daemon direct deltas immediately hydrate content and metadata', '--allow-running-no-tests'],
+    )
+    test('daemon_memory_sync_temporary',
+      memory_sync_service_integration_exe,
+      suite: ['integration', 'daemon', 'catch2', 'memory-sync'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 60,
+      args: ['Daemon temporary memory sync converges inside one session and cleans only its namespace', '--allow-running-no-tests'],
+    )
+
     test('lifecycle_repair_hysteresis',
       lifecycle_single_instance_exe,
       suite: ['integration', 'daemon', 'catch2', 'lifecycle', 'repair'],
       env: _daemon_test_env,
       is_parallel: false,
       timeout: 120,
-      args: ['Repair lifecycle hysteresis does not leak across daemon instances', '--allow-running-no-tests'],
+      args: ['~[slow]', '--allow-running-no-tests'],
+    )
+
+    test('lifecycle_repair_hysteresis_slow',
+      lifecycle_single_instance_exe,
+      suite: ['integration', 'daemon', 'catch2', 'lifecycle', 'repair', 'slow'],
+      env: _daemon_test_env,
+      is_parallel: false,
+      timeout: 300,
+      args: ['[slow]', '--allow-running-no-tests'],
     )
 
     # ONNX Concurrency / TuneAdvisor integration tests

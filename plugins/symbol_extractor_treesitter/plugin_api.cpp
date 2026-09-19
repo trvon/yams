@@ -46,6 +46,8 @@ void debugLog(const char* fmt, ...) {
     va_end(args);
 }
 
+// C-ABI ownership: strings handed to the host via the result struct are freed by
+// the host free path.
 static char* dup_cstr(const std::string& s) {
     if (s.empty())
         return nullptr;

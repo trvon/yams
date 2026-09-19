@@ -4,6 +4,7 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -13,6 +14,13 @@
 #include <yams/core/types.h>
 
 namespace yams::storage {
+
+/// One bounded object-listing page. `nextCursor` is opaque to callers and absent
+/// only after the backend has exhausted the requested prefix.
+struct ObjectListPage {
+    std::vector<std::string> keys;
+    std::optional<std::string> nextCursor;
+};
 
 /**
  * Storage backend configuration
@@ -28,8 +36,8 @@ struct BackendConfig {
     std::unordered_map<std::string, std::string> credentials;
 
     // Client-side cache for remote reads
-    size_t cacheSize = 256 * 1024 * 1024; // 256MB
-    size_t cacheTTL = 3600;               // 1 hour (seconds)
+    size_t cacheSize = size_t{256} * 1024 * 1024; // 256MB
+    size_t cacheTTL = 3600;                       // 1 hour (seconds)
 
     // Performance tuning
     size_t maxConcurrentOps = 10; // Max in-flight operations
@@ -90,6 +98,15 @@ public:
     virtual Result<std::vector<std::string>> list(std::string_view prefix = "") const = 0;
 
     /**
+     * List at most `limit` keys after an opaque cursor. Backends with native
+     * continuation tokens override this; the compatibility implementation keeps
+     * existing third-party backends source-compatible.
+     */
+    virtual Result<ObjectListPage> listPage(std::string_view prefix,
+                                            std::optional<std::string_view> cursor,
+                                            std::size_t limit) const;
+
+    /**
      * Get storage statistics
      */
     virtual Result<::yams::StorageStats> getStats() const = 0;
@@ -120,6 +137,15 @@ public:
      * Flush any pending operations or caches
      */
     virtual Result<void> flush() = 0;
+
+    /// Remove every object owned by this backend namespace. The default implementation
+    /// composes list/remove so third-party object backends remain source-compatible.
+    virtual Result<void> clear();
+
+    /// Best-effort interruption hook for in-flight blocking operations during shutdown.
+    /// Backends without an interruptible transport may keep the default no-op.
+    virtual void requestCancel() noexcept {}
+    virtual void resetCancel() noexcept {}
 };
 
 /**
@@ -135,6 +161,8 @@ public:
     Result<bool> exists(std::string_view key) const override;
     Result<void> remove(std::string_view key) override;
     Result<std::vector<std::string>> list(std::string_view prefix) const override;
+    Result<ObjectListPage> listPage(std::string_view prefix, std::optional<std::string_view> cursor,
+                                    std::size_t limit) const override;
     Result<::yams::StorageStats> getStats() const override;
 
     std::future<Result<void>> storeAsync(std::string_view key,
@@ -144,10 +172,11 @@ public:
     std::string getType() const override { return "filesystem"; }
     bool isRemote() const override { return false; }
     Result<void> flush() override { return {}; }
+    Result<void> clear() override;
 
 private:
     std::filesystem::path basePath_;
-    std::filesystem::path getObjectPath(std::string_view key) const;
+    Result<std::filesystem::path> getObjectPath(std::string_view key) const;
     Result<void> ensureDirectoryExists(const std::filesystem::path& path) const;
 };
 
