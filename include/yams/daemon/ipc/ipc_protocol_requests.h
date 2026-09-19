@@ -3343,6 +3343,14 @@ enum class MemorySyncOperation : std::uint32_t {
     Forget = 9
 };
 
+// Highest valid wire value for MemorySyncOperation. Validate against this constant rather than a
+// hand-picked member: appending an enum member without widening the bound silently rejects the new
+// value during deserialization. (The shipping path is protobuf, where proto_serializer.cpp asserts
+// parity with MemorySyncOperation at compile time; this template path is currently uninstantiated,
+// so the trap was latent rather than live.)
+inline constexpr std::uint32_t kMaxMemorySyncOperationWireValue =
+    static_cast<std::uint32_t>(MemorySyncOperation::Forget);
+
 struct MemorySyncRequest {
     MemorySyncOperation operation{MemorySyncOperation::Status};
     std::string key;
@@ -3362,7 +3370,7 @@ struct MemorySyncRequest {
         if (!operation) {
             return operation.error();
         }
-        if (operation.value() > static_cast<std::uint32_t>(MemorySyncOperation::Enroll)) {
+        if (operation.value() > kMaxMemorySyncOperationWireValue) {
             return Error{ErrorCode::InvalidArgument, "invalid memory sync operation"};
         }
         request.operation = static_cast<MemorySyncOperation>(operation.value());
