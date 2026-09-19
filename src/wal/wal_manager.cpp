@@ -942,6 +942,10 @@ WALManager::Stats WALManager::getStats() const {
         std::shared_lock lock(pImpl->stateMutex);
         pImpl->recordSharedLockWait(std::chrono::steady_clock::now() - lockStart);
         stats.pendingEntriesCount = pImpl->pendingEntries.size();
+        // lastSync and lastRotation are written under this mutex by the sync and rotation paths;
+        // read them inside the same critical section rather than after the lock is released.
+        stats.lastSync = pImpl->lastSync;
+        stats.lastRotation = pImpl->lastRotation;
     }
 
     // Count log files
@@ -955,8 +959,6 @@ WALManager::Stats WALManager::getStats() const {
     }
     stats.logFileCount = logCount;
 
-    stats.lastSync = pImpl->lastSync;
-    stats.lastRotation = pImpl->lastRotation;
     stats.maxExclusiveLockWait =
         std::chrono::nanoseconds(pImpl->maxExclusiveLockWaitNs.load(std::memory_order_relaxed));
     stats.maxSharedLockWait =

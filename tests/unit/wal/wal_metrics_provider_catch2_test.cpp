@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 
 #include <yams/daemon/components/WalMetricsProvider.h>
 #include <yams/wal/wal_manager.h>
@@ -40,6 +41,37 @@ TEST_CASE("WalMetricsProvider reports zeros without a manager", "[unit][daemon][
     CHECK(stats.pendingEntries == 0);
     CHECK(stats.totalEntries == 0);
     CHECK(stats.totalBytes == 0);
+    CHECK(stats.logFileCount == 0);
+}
+
+TEST_CASE("WalMetricsProvider stays noexcept when WAL stats throw",
+          "[unit][daemon][metrics][wal]") {
+    // WALManager::getStats() performs filesystem queries over walDirectory. Pointing the config at
+    // a regular file makes std::filesystem::directory_iterator throw, which is the cheapest
+    // deterministic way to reach that path. The provider is noexcept, so an escaping exception
+    // would terminate the daemon instead of degrading to zeroed metrics.
+    TempDir temp;
+    const auto notADirectory = temp.path / "wal-is-a-file";
+    {
+        std::ofstream file(notADirectory);
+        REQUIRE(file.good());
+        file << "not a directory";
+    }
+
+    WALManager::Config cfg;
+    cfg.walDirectory = notADirectory;
+    cfg.compressOldLogs = false;
+    cfg.enableGroupCommit = false;
+
+    auto manager = std::make_shared<WALManager>(cfg);
+
+    WalMetricsProvider provider;
+    provider.setManager(manager);
+
+    // Must not throw and must not terminate: the optional filesystem statistics are missing, so
+    // the best-effort contract is zeros.
+    CHECK_NOTHROW((void)provider.getStats());
+    const auto stats = provider.getStats();
     CHECK(stats.logFileCount == 0);
 }
 
