@@ -581,30 +581,72 @@ std::unique_ptr<StatementCache> createReferenceStatementCache(Database& db) {
     return stmtCache;
 }
 
+// Classify lock contention from the message shapes this layer produces. The storage
+// Database::execute path returns void and throws "SQL execution failed: max retries exceeded"
+// once its own bounded retries are exhausted, so matching only "database is locked" missed it.
+bool isTransientInitLock(const std::string& message) {
+    return message.find("database is locked") != std::string::npos ||
+           message.find("database table is locked") != std::string::npos ||
+           message.find("SQLITE_BUSY") != std::string::npos ||
+           message.find("max retries exceeded") != std::string::npos;
+}
+
 } // namespace
 
 // Initialize database
 Result<void> ReferenceCounter::initializeDatabase() {
-    try {
-        yams::common::ensureDirectories(pImpl->config.databasePath.parent_path());
+    // A concurrent writer (e.g. a prior add command's async batch commit on a slow
+    // host) can hold the reference database long enough to exhaust ReferenceDB's
+    // short retry budget, failing CLI/daemon startup with "database is locked".
+    // Retry the whole init (schema + migrations) with a bounded, growing backoff so
+    // transient contention does not fail startup.
+    constexpr int kMaxInitLockRetries = 6;
+    constexpr int kBaseRetryDelayMs = 250;
+    for (int attempt = 0;; ++attempt) {
+        try {
+            yams::common::ensureDirectories(pImpl->config.databasePath.parent_path());
 
-        pImpl->db = std::make_unique<Database>(pImpl->config.databasePath);
-        configureReferenceDatabase(*pImpl->db, pImpl->config);
-        applyReferenceSchema(*pImpl->db);
+            pImpl->db = std::make_unique<Database>(pImpl->config.databasePath);
+            configureReferenceDatabase(*pImpl->db, pImpl->config);
+            applyReferenceSchema(*pImpl->db);
 
-        auto migration = executeSchemaMigrations();
-        if (!migration) {
-            return migration;
+            auto migration = executeSchemaMigrations();
+            if (!migration) {
+                // Route a Result-based failure through the same classification and backoff path as
+                // the throwing ones. Returning it directly is why contention during schema
+                // migrations was never retried, even when the error was a locked database.
+                if (!isTransientInitLock(migration.error().message)) {
+                    return migration;
+                }
+                throw std::runtime_error(migration.error().message);
+            }
+
+            pImpl->stmtCache = createReferenceStatementCache(*pImpl->db);
+
+            spdlog::debug("Reference counter database initialized at {}",
+                          pImpl->config.databasePath.string());
+            return {};
+        } catch (const std::exception& e) {
+            // Classify from the message shapes this layer actually produces.
+            // executeSchemaMigrations preserves the original text now, and the storage
+            // Database::execute path throws "max retries exceeded" once its own bounded retries are
+            // exhausted; matching only "database is locked"/"SQLITE_BUSY" missed that case.
+            const std::string what = e.what();
+            const bool transientLock = isTransientInitLock(what);
+            if (transientLock && attempt < kMaxInitLockRetries) {
+                const int delayMs = kBaseRetryDelayMs * (1 << std::min(attempt, 4));
+                spdlog::warn("Reference counter init hit a transient lock (attempt {}/{}); "
+                             "retrying in {}ms",
+                             attempt + 1, kMaxInitLockRetries, delayMs);
+                // Drop the handle and cached statements so the next attempt reopens cleanly.
+                pImpl->db.reset();
+                pImpl->stmtCache.reset();
+                std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+                continue;
+            }
+            spdlog::error("Failed to initialize reference counter database: {}", e.what());
+            return Result<void>(ErrorCode::DatabaseError);
         }
-
-        pImpl->stmtCache = createReferenceStatementCache(*pImpl->db);
-
-        spdlog::debug("Reference counter database initialized at {}",
-                      pImpl->config.databasePath.string());
-        return {};
-    } catch (const std::exception& e) {
-        spdlog::error("Failed to initialize reference counter database: {}", e.what());
-        return Result<void>(ErrorCode::DatabaseError);
     }
 }
 
@@ -615,15 +657,22 @@ Result<void> ReferenceCounter::executeSchemaMigrations() {
         try {
             pImpl->db->execute("ALTER TABLE block_references ADD COLUMN uncompressed_size INTEGER");
             spdlog::info("Added uncompressed_size column to block_references table");
-        } catch (...) { // NOLINT(bugprone-empty-catch)
-            // Column already exists, ignore.
+        } catch (const std::exception& e) {
+            // Only a pre-existing column is expected here. Everything else -- notably lock
+            // exhaustion -- must propagate: swallowing it made a locked database look migrated.
+            const std::string what = e.what();
+            if (what.find("duplicate column") == std::string::npos) {
+                throw;
+            }
         }
 
         pImpl->db->execute(kReferenceSchemaTriggersAndBackfillSql);
         return {};
     } catch (const std::exception& e) {
         spdlog::error("Failed to execute reference counter schema migrations: {}", e.what());
-        return Result<void>(ErrorCode::DatabaseError);
+        // Preserve the original text so the caller can classify contention. Collapsing this to a
+        // bare DatabaseError is what made a lock during migrations unretryable.
+        return Error{ErrorCode::DatabaseError, e.what()};
     }
 }
 

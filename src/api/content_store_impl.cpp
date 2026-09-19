@@ -1,3 +1,4 @@
+// pi-lens-ignore: fatal error
 #include <yams/api/content_store.h>
 #include <yams/api/content_store_error.h>
 #include <yams/api/progress_reporter.h>
@@ -6,6 +7,7 @@
 #include <yams/crypto/hasher.h>
 #include <yams/manifest/manifest_manager.h>
 #include <yams/profiling.h>
+#include <yams/storage/disk_pressure.h>
 #include <yams/storage/reference_counter.h>
 #include <yams/storage/reference_counter_writer.h>
 #include <yams/storage/storage_engine.h>
@@ -146,10 +148,12 @@ public:
                  std::shared_ptr<chunking::IChunker> chunker,
                  std::shared_ptr<crypto::IHasher> hasher,
                  std::shared_ptr<manifest::IManifestManager> manifestManager,
-                 std::shared_ptr<storage::IReferenceCounter> refCounter, ContentStoreConfig config)
+                 std::shared_ptr<storage::IReferenceCounter> refCounter, ContentStoreConfig config,
+                 storage::DiskPressurePolicy diskPressure, storage::DiskSpaceProbe diskSpaceProbe)
         : storage_(std::move(storage)), chunker_(std::move(chunker)), hasher_(std::move(hasher)),
           manifestManager_(std::move(manifestManager)), refCounter_(std::move(refCounter)),
-          config_(std::move(config)) {
+          config_(std::move(config)), diskPressure_(diskPressure),
+          diskSpaceProbe_(std::move(diskSpaceProbe)) {
         if (auto concreteRefCounter =
                 std::dynamic_pointer_cast<storage::ReferenceCounter>(refCounter_)) {
             refWriter_ = std::make_unique<storage::RefCounterWriter>(std::move(concreteRefCounter));
@@ -381,11 +385,65 @@ public:
             return Result<RetrieveResult>(ErrorCode::InvalidArgument);
         }
 
-        // Retrieve manifest
+        // Retrieve manifest. Small payloads accepted through storeBytes() are stored directly
+        // under their content hash and intentionally have no manifest.
         auto manifestHash = hash + ".manifest";
         auto manifestResult = storage_->retrieve(manifestHash);
         if (!manifestResult) {
-            return Result<RetrieveResult>(manifestResult.error());
+            const auto code = manifestResult.error().code;
+            const bool manifestMissing = code == ErrorCode::FileNotFound ||
+                                         code == ErrorCode::ChunkNotFound ||
+                                         code == ErrorCode::NotFound;
+            if (!manifestMissing) {
+                return Result<RetrieveResult>(manifestResult.error());
+            }
+
+            auto directResult = storage_->retrieve(hash);
+            if (!directResult) {
+                return Result<RetrieveResult>(directResult.error());
+            }
+            const auto& bytes = directResult.value();
+            if (crypto::SHA256Hasher::hash(std::span<const std::byte>(bytes)) != hash) {
+                return Error{ErrorCode::HashMismatch,
+                             "direct content bytes do not match the requested hash"};
+            }
+
+            std::ofstream output(outputPath, std::ios::binary | std::ios::trunc);
+            if (!output) {
+                return Error{ErrorCode::WriteError,
+                             "failed to open output path for direct content"};
+            }
+            output.write(reinterpret_cast<const char*>(bytes.data()),
+                         static_cast<std::streamsize>(bytes.size()));
+            if (!output) {
+                return Error{ErrorCode::WriteError, "failed to write direct content"};
+            }
+            output.close();
+            if (!output) {
+                return Error{ErrorCode::WriteError, "failed to finalize direct content output"};
+            }
+
+            ContentMetadata metadata;
+            {
+                std::shared_lock lock(metadataMutex_);
+                auto it = metadataStore_.find(hash);
+                if (it != metadataStore_.end()) {
+                    metadata = it->second;
+                    metadata.accessedAt = std::chrono::system_clock::now();
+                }
+            }
+            if (progress) {
+                ProgressReporter reporter(bytes.size());
+                reporter.setCallback(progress);
+                reporter.reportProgress(bytes.size());
+            }
+            updateStats(0, 0, bytes.size(), 0, 0, 1, 0);
+            auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - startTime);
+            return RetrieveResult{.found = true,
+                                  .size = bytes.size(),
+                                  .metadata = std::move(metadata),
+                                  .duration = duration};
         }
 
         // Deserialize manifest
@@ -787,7 +845,44 @@ public:
         auto manifestHash = hash + ".manifest";
         auto manifestResult = storage_->retrieve(manifestHash);
         if (!manifestResult) {
-            return Result<bool>(false); // Not found
+            const auto errorCode = manifestResult.error().code;
+            const bool manifestMissing = errorCode == ErrorCode::FileNotFound ||
+                                         errorCode == ErrorCode::ChunkNotFound ||
+                                         errorCode == ErrorCode::NotFound;
+            if (!manifestMissing) {
+                if (errorCode == ErrorCode::InvalidArgument) {
+                    return Result<bool>(false);
+                }
+                return manifestResult.error();
+            }
+
+            // Small storeBytes() payloads are stored directly under their content hash.
+            // Require live metadata before taking this fallback: a chunked object's final
+            // manifest removal leaves zero-reference chunks for GC, and those chunks must
+            // not be mistaken for independently stored direct objects on a repeated remove.
+            {
+                std::shared_lock lock(metadataMutex_);
+                if (!metadataStore_.contains(hash)) {
+                    return Result<bool>(false);
+                }
+            }
+
+            auto directExists = storage_->exists(hash);
+            if (!directExists) {
+                return directExists.error();
+            }
+            if (!directExists.value()) {
+                return Result<bool>(false);
+            }
+            if (auto removed = storage_->remove(hash); !removed) {
+                return removed.error();
+            }
+            {
+                std::unique_lock lock(metadataMutex_);
+                metadataStore_.erase(hash);
+            }
+            updateStats(0, 0, 0, 0, 0, 0, 1);
+            return Result<bool>(true);
         }
 
         // Deserialize manifest
@@ -1142,17 +1237,22 @@ public:
         // Check storage engine
         [[maybe_unused]] auto storageStats = storage_->getStats();
 
-        // Check available space
-        auto spaceInfo = std::filesystem::space(config_.storagePath);
-        uint64_t availableBytes = spaceInfo.available;
-        uint64_t totalBytes = spaceInfo.capacity;
-
-        constexpr uint64_t kCriticalFreeBytes = 100ULL * 1024ULL * 1024ULL;
-        if (availableBytes < kCriticalFreeBytes) { // Less than 100MB
-            status.errors.push_back("Critical: Less than 100MB storage available");
+        // Probe daemon-local capacity through the configured seam. This keeps tests deterministic
+        // and avoids confusing remote object-store capacity with the daemon's local filesystem.
+        auto diskPressure =
+            storage::inspectDiskPressure(config_.storagePath, diskPressure_, diskSpaceProbe_);
+        if (!diskPressure) {
+            status.errors.push_back("Unable to determine storage disk pressure: " +
+                                    diskPressure.error().message);
             status.isHealthy = false;
-        } else if (availableBytes < totalBytes * 0.1) { // Less than 10%
-            status.warnings.push_back("Warning: Less than 10% storage available");
+        } else if (diskPressure.value().level == storage::DiskPressureLevel::Emergency) {
+            status.errors.push_back("Critical: storage emergency reserve reached");
+            status.isHealthy = false;
+        } else if (diskPressure.value().level == storage::DiskPressureLevel::Warning) {
+            status.warnings.push_back("Warning: storage free space below configured threshold");
+        } else if (diskPressure.value().level == storage::DiskPressureLevel::Unknown) {
+            status.errors.push_back("Unable to classify storage disk pressure");
+            status.isHealthy = false;
         }
 
         // Check if storage path is accessible
@@ -1415,6 +1515,8 @@ private:
     std::shared_ptr<storage::IReferenceCounter> refCounter_;
     std::unique_ptr<storage::RefCounterWriter> refWriter_;
     ContentStoreConfig config_;
+    storage::DiskPressurePolicy diskPressure_{};
+    storage::DiskSpaceProbe diskSpaceProbe_;
 
     // Metadata storage (in-memory for now)
     mutable std::shared_mutex metadataMutex_;
@@ -1597,10 +1699,11 @@ std::unique_ptr<IContentStore> createContentStore(
     std::shared_ptr<storage::IStorageEngine> storage, std::shared_ptr<chunking::IChunker> chunker,
     std::shared_ptr<crypto::IHasher> hasher,
     std::shared_ptr<manifest::IManifestManager> manifestManager,
-    std::shared_ptr<storage::IReferenceCounter> refCounter, const ContentStoreConfig& config) {
+    std::shared_ptr<storage::IReferenceCounter> refCounter, const ContentStoreConfig& config,
+    const storage::DiskPressurePolicy& diskPressure, storage::DiskSpaceProbe diskSpaceProbe) {
     return std::make_unique<ContentStore>(std::move(storage), std::move(chunker), std::move(hasher),
-                                          std::move(manifestManager), std::move(refCounter),
-                                          config);
+                                          std::move(manifestManager), std::move(refCounter), config,
+                                          diskPressure, std::move(diskSpaceProbe));
 }
 
 } // namespace yams::api

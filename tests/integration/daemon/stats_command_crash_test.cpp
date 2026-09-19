@@ -24,17 +24,10 @@ using namespace std::chrono_literals;
 
 namespace {
 
-void startHarnessWithRetry(DaemonHarness& harness, int maxRetries = 3,
-                           std::chrono::milliseconds retryDelay = 250ms) {
-    for (int attempt = 0; attempt < maxRetries; ++attempt) {
-        if (harness.start(30s)) {
-            return;
-        }
-        harness.stop();
-        std::this_thread::sleep_for(retryDelay);
+void startHarnessWithRetry(DaemonHarness& harness, std::size_t maxRetries = 3) {
+    if (!harness.startWithRetry(30s, maxRetries)) {
+        SKIP("Skipping stats integration section due to daemon startup instability");
     }
-
-    SKIP("Skipping stats integration section due to daemon startup instability");
 }
 
 bool connectWithRetry(DaemonClient& client, int maxRetries = 3,
@@ -168,9 +161,9 @@ TEST_CASE("Stats command - response validation", "[stats][command][crash][unit]"
             return 0; // Safe default instead of throwing
         };
 
-        REQUIRE(safeAt("storage_documents") == 0);
-        REQUIRE(safeAt("storage_logical_bytes") == 0);
-        REQUIRE(safeAt("nonexistent_key") == 0);
+        REQUIRE((safeAt("storage_documents") == 0));
+        REQUIRE((safeAt("storage_logical_bytes") == 0));
+        REQUIRE((safeAt("nonexistent_key") == 0));
     }
 
     SECTION("formatSize with various byte values") {
@@ -198,11 +191,11 @@ TEST_CASE("Stats command - response validation", "[stats][command][crash][unit]"
             return oss.str();
         };
 
-        REQUIRE(formatBytes(0) == "0 B");
-        REQUIRE(formatBytes(512) == "512 B");
-        REQUIRE(formatBytes(1024) == "1.0 KB");
-        REQUIRE(formatBytes(1536) == "1.5 KB");
-        REQUIRE(formatBytes(1048576) == "1.0 MB");
+        REQUIRE((formatBytes(0) == "0 B"));
+        REQUIRE((formatBytes(512) == "512 B"));
+        REQUIRE((formatBytes(1024) == "1.0 KB"));
+        REQUIRE((formatBytes(1536) == "1.5 KB"));
+        REQUIRE((formatBytes(1048576) == "1.0 MB"));
     }
 }
 
@@ -268,5 +261,5 @@ TEST_CASE("Stats command - concurrent requests", "[stats][command][crash][stress
     INFO("Failed requests: " << failCount.load());
 
     // Test passes if daemon didn't crash and we got some successful responses
-    REQUIRE(successCount.load() > 0);
+    REQUIRE((successCount.load() > 0));
 }

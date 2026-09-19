@@ -1,12 +1,15 @@
 // Copyright 2025 The YAMS Authors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+// pi-lens-ignore: fatal error
 #include <yams/common/fs_utils.h>
 #include <yams/config/config_helpers.h>
 #include <yams/config/detail/config_parse_utils.h>
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/daemon.h>
+#include <yams/memory_sync/memory_sync_config.h>
+#include <yams/vector/dim_resolver.h>
 #include <yams/vector/sqlite_vec_backend.h>
 
 #include <nlohmann/json.hpp>
@@ -74,13 +77,6 @@ std::optional<bool> parseBoolValue(std::string raw) {
     return std::nullopt;
 }
 
-std::string getenvValue(const char* name) {
-    if (const char* value = std::getenv(name)) {
-        return value;
-    }
-    return {};
-}
-
 std::string embeddingDispatchEnvSignature() {
     static constexpr const char* kEnvNames[] = {
         "YAMS_EMBED_SELECTION_STRATEGY",
@@ -103,7 +99,7 @@ std::string embeddingDispatchEnvSignature() {
     for (const auto* name : kEnvNames) {
         signature += name;
         signature += '=';
-        signature += getenvValue(name);
+        signature += yams::config::getenv_copy(name);
         signature += '\n';
     }
     return signature;
@@ -218,33 +214,7 @@ void ConfigResolver::writeVectorSentinel(const std::filesystem::path& dataDir, s
 }
 
 bool ConfigResolver::detectEmbeddingPreloadFlag(const DaemonConfig& config) {
-    bool flag = false;
-
-    // Config file precedence
-    std::filesystem::path cfgPath = config.configFilePath;
-    if (cfgPath.empty())
-        cfgPath = resolveDefaultConfigPath();
-    if (!cfgPath.empty()) {
-        try {
-            auto kv = parseSimpleTomlFlat(cfgPath);
-            auto it = kv.find("embeddings.preload_on_startup");
-            if (it != kv.end()) {
-                std::string lower = it->second;
-                std::transform(lower.begin(), lower.end(), lower.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                flag = (lower == "1" || lower == "true" || lower == "yes" || lower == "on");
-            }
-        } catch (const std::exception& e) {
-            spdlog::debug("[Warmup] failed to read config for preload flag: {}", e.what());
-        }
-    }
-
-    // Environment override wins
-    if (const char* env = std::getenv("YAMS_EMBED_PRELOAD_ON_STARTUP")) {
-        flag = envTruthy(env);
-    }
-
-    return flag;
+    return resolveEmbeddingConfig(config, {}).preloadOnStartup;
 }
 
 ConfigResolver::EmbeddingSelectionPolicy ConfigResolver::resolveEmbeddingSelectionPolicy() {
@@ -275,25 +245,17 @@ ConfigResolver::EmbeddingSelectionPolicy ConfigResolver::resolveEmbeddingSelecti
     };
 
     auto parseSize = [](const std::string& raw, std::size_t fallback) {
-        try {
-            return static_cast<std::size_t>(std::stoull(raw));
-        } catch (...) {
-            return fallback;
-        }
+        return parseUnsignedIntegral<std::size_t>(raw).value_or(fallback);
     };
 
     auto parseDouble = [](const std::string& raw, double fallback) {
-        try {
-            return std::stod(raw);
-        } catch (...) {
-            return fallback;
-        }
+        return yams::config::detail::parseDouble(raw).value_or(fallback);
     };
 
     try {
         auto cfgPath = resolveDefaultConfigPath();
         if (!cfgPath.empty()) {
-            auto kv = parseSimpleTomlFlat(cfgPath);
+            auto kv = yams::config::parse_simple_toml(cfgPath);
             if (auto it = kv.find("embeddings.selection.strategy"); it != kv.end()) {
                 policy.strategy = parseStrategy(it->second);
             }
@@ -319,29 +281,27 @@ ConfigResolver::EmbeddingSelectionPolicy ConfigResolver::resolveEmbeddingSelecti
                 }
             }
         }
+    } catch (const std::exception& error) {
+        spdlog::debug("Error reading embedding selection policy: {}", error.what());
     } catch (...) {
-        // Intentional best-effort path; keep the primary operation unaffected.
+        spdlog::debug("Error reading embedding selection policy: unknown error");
     }
 
-    // Env overrides (config component owns this precedence)
-    if (const char* v = std::getenv("YAMS_EMBED_SELECTION_STRATEGY")) {
-        policy.strategy = parseStrategy(v);
+    // Env overrides (config component owns this precedence).
+    if (auto value = yams::config::getenv_nonempty("YAMS_EMBED_SELECTION_STRATEGY")) {
+        policy.strategy = parseStrategy(*value);
     }
-    if (const char* v = std::getenv("YAMS_EMBED_SELECTION_MODE")) {
-        policy.mode = parseMode(v);
+    if (auto value = yams::config::getenv_nonempty("YAMS_EMBED_SELECTION_MODE")) {
+        policy.mode = parseMode(*value);
     }
-    if (const char* v = std::getenv("YAMS_EMBED_MAX_CHUNKS_PER_DOC")) {
-        policy.maxChunksPerDoc = parseSize(v, policy.maxChunksPerDoc);
-    }
-    if (const char* v = std::getenv("YAMS_EMBED_MAX_CHARS_PER_DOC")) {
-        policy.maxCharsPerDoc = parseSize(v, policy.maxCharsPerDoc);
-    }
-    if (const char* v = std::getenv("YAMS_EMBED_SELECTION_HEADING_BOOST")) {
-        policy.headingBoost = parseDouble(v, policy.headingBoost);
-    }
-    if (const char* v = std::getenv("YAMS_EMBED_SELECTION_INTRO_BOOST")) {
-        policy.introBoost = parseDouble(v, policy.introBoost);
-    }
+    policy.maxChunksPerDoc = yams::config::read_env_size("YAMS_EMBED_MAX_CHUNKS_PER_DOC")
+                                 .valueOr(policy.maxChunksPerDoc);
+    policy.maxCharsPerDoc =
+        yams::config::read_env_size("YAMS_EMBED_MAX_CHARS_PER_DOC").valueOr(policy.maxCharsPerDoc);
+    policy.headingBoost = yams::config::read_env_double("YAMS_EMBED_SELECTION_HEADING_BOOST")
+                              .valueOr(policy.headingBoost);
+    policy.introBoost = yams::config::read_env_double("YAMS_EMBED_SELECTION_INTRO_BOOST")
+                            .valueOr(policy.introBoost);
 
     return policy;
 }
@@ -424,74 +384,59 @@ ConfigResolver::EmbeddingChunkingPolicy ConfigResolver::resolveEmbeddingChunking
     try {
         auto cfgPath = resolveDefaultConfigPath();
         if (!cfgPath.empty()) {
-            applyFromKv(parseSimpleTomlFlat(cfgPath));
+            applyFromKv(yams::config::parse_simple_toml(cfgPath));
         }
+    } catch (const std::exception& error) {
+        spdlog::debug("Error reading embedding chunking policy: {}", error.what());
     } catch (...) {
-        // Intentional best-effort path; keep the primary operation unaffected.
+        spdlog::debug("Error reading embedding chunking policy: unknown error");
     }
 
     // Env overrides (backwards compatible with existing embedding pipeline vars).
-    if (const char* v = std::getenv("YAMS_EMBED_CHUNK_STRATEGY")) {
-        if (auto s = parseChunkingStrategy(v); s) {
-            policy.strategy = *s;
-            policy.config.strategy = *s;
+    if (auto value = yams::config::getenv_nonempty("YAMS_EMBED_CHUNK_STRATEGY")) {
+        if (auto strategy = parseChunkingStrategy(*value)) {
+            policy.strategy = *strategy;
+            policy.config.strategy = *strategy;
             policy.overridden = true;
         }
     }
-    if (const char* v = std::getenv("YAMS_EMBED_CHUNK_PRESERVE_SENTENCES")) {
-        if (auto b = parseBool01(v); b) {
-            policy.config.preserve_sentences = *b;
-            policy.overridden = true;
-        }
+    if (auto value = yams::config::read_env_bool("YAMS_EMBED_CHUNK_PRESERVE_SENTENCES").value) {
+        policy.config.preserve_sentences = *value;
+        policy.overridden = true;
     }
-    if (const char* v = std::getenv("YAMS_EMBED_CHUNK_USE_TOKENS")) {
-        if (auto b = parseBool01(v); b) {
-            policy.config.use_token_count = *b;
-            policy.overridden = true;
-        }
+    if (auto value = yams::config::read_env_bool("YAMS_EMBED_CHUNK_USE_TOKENS").value) {
+        policy.config.use_token_count = *value;
+        policy.overridden = true;
     }
-    if (const char* v = std::getenv("YAMS_EMBED_CHUNK_TARGET")) {
-        if (auto s = parseSize(v); s && *s > 0) {
-            policy.config.target_chunk_size = *s;
-            policy.overridden = true;
-        }
+    if (auto value = yams::config::read_env_size("YAMS_EMBED_CHUNK_TARGET").value;
+        value && *value > 0) {
+        policy.config.target_chunk_size = *value;
+        policy.overridden = true;
     }
-    if (const char* v = std::getenv("YAMS_EMBED_CHUNK_MAX")) {
-        if (auto s = parseSize(v); s && *s > 0) {
-            policy.config.max_chunk_size = *s;
-            policy.overridden = true;
-        }
+    if (auto value = yams::config::read_env_size("YAMS_EMBED_CHUNK_MAX").value;
+        value && *value > 0) {
+        policy.config.max_chunk_size = *value;
+        policy.overridden = true;
     }
-    if (const char* v = std::getenv("YAMS_EMBED_CHUNK_MIN")) {
-        if (auto s = parseSize(v); s && *s > 0) {
-            policy.config.min_chunk_size = *s;
-            policy.overridden = true;
-        }
+    if (auto value = yams::config::read_env_size("YAMS_EMBED_CHUNK_MIN").value;
+        value && *value > 0) {
+        policy.config.min_chunk_size = *value;
+        policy.overridden = true;
     }
-    if (const char* v = std::getenv("YAMS_EMBED_CHUNK_OVERLAP")) {
-        if (auto s = parseSize(v); s) {
-            policy.config.overlap_size = *s;
-            if (*s == 0) {
-                policy.config.overlap_percentage = 0.0;
-            }
-            policy.overridden = true;
+    if (auto value = yams::config::read_env_size("YAMS_EMBED_CHUNK_OVERLAP").value) {
+        policy.config.overlap_size = *value;
+        if (*value == 0) {
+            policy.config.overlap_percentage = 0.0;
         }
+        policy.overridden = true;
     }
-    if (const char* v = std::getenv("YAMS_EMBED_CHUNK_OVERLAP_PCT")) {
-        if (auto d = parseDouble(v); d) {
-            double pct = *d;
-            if (pct < 0.0) {
-                pct = 0.0;
-            }
-            if (pct > 1.0) {
-                pct = 1.0;
-            }
-            policy.config.overlap_percentage = pct;
-            if (pct == 0.0) {
-                policy.config.overlap_size = 0;
-            }
-            policy.overridden = true;
+    if (auto value = yams::config::read_env_float("YAMS_EMBED_CHUNK_OVERLAP_PCT").value) {
+        const double percentage = std::clamp(static_cast<double>(*value), 0.0, 1.0);
+        policy.config.overlap_percentage = percentage;
+        if (percentage == 0.0) {
+            policy.config.overlap_size = 0;
         }
+        policy.overridden = true;
     }
 
     // Sanity: ensure min <= target <= max.
@@ -544,215 +489,347 @@ ConfigResolver::EmbeddingDispatchPolicy ConfigResolver::resolveEmbeddingDispatch
 
 std::string ConfigResolver::resolvePreferredModel(const DaemonConfig& config,
                                                   const std::filesystem::path& resolvedDataDir) {
-    std::string preferred;
-
-    // Returns true if the model name is acceptable as the preferred model for
-    // the currently-resolved embedding backend.  simeon sentinels are only
-    // valid when the backend is actually simeon (in-process, model-free).
-    auto acceptAsPreferred = [&](const std::string& model) -> bool {
-        if (model != "simeon-default" && model != "simeon")
-            return true;
-        if (resolveEmbeddingBackend("auto") == "simeon")
-            return true;
-        spdlog::debug("Model '{}' is a simeon sentinel but backend is not simeon; "
-                      "skipping",
-                      model);
-        return false;
-    };
-
-    if (const char* envp = std::getenv("YAMS_PREFERRED_MODEL")) {
-        preferred = envp;
-        if (!preferred.empty()) {
-            spdlog::debug("Preferred model from environment: {}", preferred);
-            if (acceptAsPreferred(preferred))
-                return preferred;
-            preferred.clear();
-        }
-    }
-
-    try {
-        namespace fs = std::filesystem;
-        fs::path cfgPath =
-            !config.configFilePath.empty() ? config.configFilePath : resolveDefaultConfigPath();
-        if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            // Flat parse for explicit keys
-            auto kv = parseSimpleTomlFlat(cfgPath);
-            auto it = kv.find("embeddings.preferred_model");
-            if (it != kv.end() && !it->second.empty()) {
-                preferred = it->second;
-                spdlog::debug("Preferred model from config: {}", preferred);
-                if (acceptAsPreferred(preferred))
-                    return preferred;
-                preferred.clear();
-            }
-
-            // daemon.models.preload_models -> take the first known value
-            auto preload = kv.find("daemon.models.preload_models");
-            if (preload != kv.end()) {
-                const auto& v = preload->second;
-                if (v.find("simeon-default") != std::string::npos) {
-                    preferred = "simeon-default";
-                } else if (v.find("embeddinggemma-300m") != std::string::npos) {
-                    preferred = "embeddinggemma-300m";
-                } else if (v.find("all-MiniLM-L6-v2") != std::string::npos) {
-                    preferred = "all-MiniLM-L6-v2";
-                } else if (v.find("all-mpnet-base-v2") != std::string::npos) {
-                    preferred = "all-mpnet-base-v2";
-                }
-                if (!preferred.empty()) {
-                    spdlog::debug("Preferred model from config preload list: {}", preferred);
-                    if (acceptAsPreferred(preferred))
-                        return preferred;
-                    preferred.clear();
-                }
-            }
-
-            // Fallback: scan lines to catch cases the flat parser misses
-            std::ifstream in(cfgPath);
-            std::string line;
-            auto trim = [](std::string& t) {
-                if (t.empty())
-                    return;
-                t.erase(0, t.find_first_not_of(" \t"));
-                auto p = t.find_last_not_of(" \t");
-                if (p != std::string::npos)
-                    t.erase(p + 1);
-            };
-
-            while (std::getline(in, line)) {
-                std::string l = line;
-                trim(l);
-                if (l.empty() || l[0] == '#')
-                    continue;
-
-                if (l.find("embeddings.preferred_model") != std::string::npos) {
-                    auto eq = l.find('=');
-                    if (eq != std::string::npos) {
-                        std::string v = l.substr(eq + 1);
-                        trim(v);
-                        if (!v.empty() && v.front() == '"' && v.back() == '"')
-                            v = v.substr(1, v.size() - 2);
-                        preferred = v;
-                    }
-                    if (!preferred.empty()) {
-                        spdlog::debug("Preferred model from config: {}", preferred);
-                        if (acceptAsPreferred(preferred))
-                            return preferred;
-                        preferred.clear();
-                    }
-                }
-                // daemon.models.preload_models -> take the first
-                if (l.find("daemon.models.preload_models") != std::string::npos) {
-                    auto eq = l.find('=');
-                    if (eq != std::string::npos) {
-                        std::string v = l.substr(eq + 1);
-                        trim(v);
-                        if (v.find("simeon-default") != std::string::npos) {
-                            preferred = "simeon-default";
-                        } else if (v.find("embeddinggemma-300m") != std::string::npos) {
-                            preferred = "embeddinggemma-300m";
-                        } else if (v.find("all-MiniLM-L6-v2") != std::string::npos) {
-                            preferred = "all-MiniLM-L6-v2";
-                        } else if (v.find("all-mpnet-base-v2") != std::string::npos) {
-                            preferred = "all-mpnet-base-v2";
-                        }
-                    }
-                    if (!preferred.empty()) {
-                        spdlog::debug("Preferred model from config preload list: {}", preferred);
-                        if (acceptAsPreferred(preferred))
-                            return preferred;
-                        preferred.clear();
-                    }
-                }
-            }
-        }
-    } catch (const std::exception& e) {
-        spdlog::debug("Error reading config for preferred model: {}", e.what());
-    }
-
-    // If simeon is the selected backend and nothing else named a preferred
-    // model above, return the simeon-default sentinel instead of scanning
-    // the ONNX models directory (which would pick an incompatible model).
-    if (resolveEmbeddingBackend("auto") == "simeon") {
-        spdlog::debug("Preferred model defaulted to simeon-default (backend=simeon)");
-        return "simeon-default";
-    }
-
-    try {
-        if (!resolvedDataDir.empty()) {
-            namespace fs = std::filesystem;
-            fs::path models = resolvedDataDir / "models";
-            std::error_code ec;
-            if (fs::exists(models, ec) && fs::is_directory(models, ec)) {
-                // Use the first available model with model.onnx
-                for (const auto& e : fs::directory_iterator(models, ec)) {
-                    if (e.is_directory() && fs::exists(e.path() / "model.onnx", ec)) {
-                        preferred = e.path().filename().string();
-                        spdlog::debug("Using first available model: {}", preferred);
-                        return preferred;
-                    }
-                }
-            }
-        }
-    } catch (const std::exception& e) {
-        spdlog::debug("Error auto-detecting models: {}", e.what());
-    }
-
-    return preferred;
+    return resolveEmbeddingConfig(config, resolvedDataDir).preferredModel;
 }
 
 ResolvedEmbeddingConfig
 ConfigResolver::resolveEmbeddingConfig(const DaemonConfig& config,
                                        const std::filesystem::path& resolvedDataDir) {
+    namespace fs = std::filesystem;
+
     ResolvedEmbeddingConfig result;
-    result.backend = resolveEmbeddingBackend("auto");
-    result.isTrainingFree = (result.backend == "simeon");
-    result.preferredModel = resolvePreferredModel(config, resolvedDataDir);
+    result.effectiveConfigPath =
+        !config.configFilePath.empty() ? config.configFilePath : resolveDefaultConfigPath();
 
-    auto isSimeonSentinel = [](const std::string& s) {
-        return s == "simeon-default" || s == "simeon";
-    };
-
-    if (result.isTrainingFree && !result.preferredModel.empty() &&
-        !isSimeonSentinel(result.preferredModel)) {
-        spdlog::warn("[ConfigResolver] backend '{}' is model-free but preferred_model '{}' "
-                     "is an ONNX model name; using 'simeon-default' instead",
-                     result.backend, result.preferredModel);
-        result.warnings.push_back(fmt::format(
-            "backend '{}' is model-free but preferred_model '{}' is an ONNX model name; "
-            "using 'simeon-default' instead",
-            result.backend, result.preferredModel));
-        result.preferredModel = "simeon-default";
+    std::map<std::string, std::string> values;
+    if (!result.effectiveConfigPath.empty()) {
+        try {
+            values = yams::config::parse_simple_toml(result.effectiveConfigPath);
+        } catch (const std::exception& error) {
+            result.warnings.push_back(fmt::format("unable to read embedding config '{}': {}",
+                                                  result.effectiveConfigPath.string(),
+                                                  error.what()));
+        }
     }
 
-    if (!result.isTrainingFree && isSimeonSentinel(result.preferredModel) &&
-        result.backend != "simeon") {
-        spdlog::warn("[ConfigResolver] preferred_model '{}' is a simeon sentinel but "
-                     "backend is '{}'; model may not be loadable",
-                     result.preferredModel, result.backend);
-        result.warnings.push_back(
-            fmt::format("preferred_model '{}' is a simeon sentinel but backend is '{}'; "
-                        "model may not be loadable",
-                        result.preferredModel, result.backend));
+    const auto configured = [&](std::string_view key) -> std::optional<std::string> {
+        const auto it = values.find(std::string(key));
+        if (it == values.end() || it->second.empty()) {
+            return std::nullopt;
+        }
+        return it->second;
+    };
+    const auto normalizeBackend = [](std::string backend) {
+        std::transform(backend.begin(), backend.end(), backend.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (backend == "onnx" || backend == "onnxruntime" || backend == "onnx-runtime" ||
+            backend == "ort" || backend == "local_onnx") {
+            return std::string{"onnxruntime"};
+        }
+        if (backend == "hybrid" || backend == "local") {
+            return std::string{"daemon"};
+        }
+        return backend;
+    };
+    const auto noteConflict = [&](std::string_view field, std::string_view authoritativeKey,
+                                  std::string_view authoritativeValue,
+                                  std::string_view compatibilityKey,
+                                  std::string_view compatibilityValue) {
+        if (authoritativeValue == compatibilityValue) {
+            return;
+        }
+        result.warnings.push_back(fmt::format(
+            "embedding {} conflict: {}='{}' overrides compatibility key {}='{}'", field,
+            authoritativeKey, authoritativeValue, compatibilityKey, compatibilityValue));
+    };
+
+    const auto canonicalBackend = configured("embeddings.backend");
+    const auto runtimeBackend = configured("embeddings.runtime.backend");
+    if (canonicalBackend && runtimeBackend) {
+        noteConflict("backend", "embeddings.backend", normalizeBackend(*canonicalBackend),
+                     "embeddings.runtime.backend", normalizeBackend(*runtimeBackend));
+    }
+    if (canonicalBackend) {
+        result.backend = normalizeBackend(*canonicalBackend);
+        result.provenance["backend"] = "config:embeddings.backend";
+    } else if (runtimeBackend) {
+        result.backend = normalizeBackend(*runtimeBackend);
+        result.provenance["backend"] = "config:embeddings.runtime.backend";
+    } else {
+        result.backend = "auto";
+        result.provenance["backend"] = "default:auto";
+    }
+    if (auto environmentBackend = yams::config::getenv_nonempty("YAMS_EMBED_BACKEND")) {
+        const auto normalized = normalizeBackend(*environmentBackend);
+        if ((canonicalBackend || runtimeBackend) && normalized != result.backend) {
+            noteConflict("backend", "YAMS_EMBED_BACKEND", normalized, result.provenance["backend"],
+                         result.backend);
+        }
+        result.backend = normalized;
+        result.provenance["backend"] = "environment:YAMS_EMBED_BACKEND";
+    }
+    result.isTrainingFree = result.backend == "simeon";
+
+    const auto canonicalModel = configured("embeddings.preferred_model");
+    const auto runtimeModel = configured("embeddings.runtime.preferred_model");
+    if (canonicalModel && runtimeModel) {
+        noteConflict("preferred model", "embeddings.preferred_model", *canonicalModel,
+                     "embeddings.runtime.preferred_model", *runtimeModel);
+    }
+    if (canonicalModel) {
+        result.preferredModel = *canonicalModel;
+        result.provenance["preferred_model"] = "config:embeddings.preferred_model";
+    } else if (runtimeModel) {
+        result.preferredModel = *runtimeModel;
+        result.provenance["preferred_model"] = "config:embeddings.runtime.preferred_model";
+    } else if (const auto preloadModels = configured("daemon.models.preload_models")) {
+        static constexpr std::string_view kKnownModels[] = {"simeon-default",
+                                                            "embeddinggemma-300m",
+                                                            "all-MiniLM-L6-v2",
+                                                            "all-mpnet-base-v2",
+                                                            "jina-embeddings-v2-small-en",
+                                                            "nomic-embed-text-v1",
+                                                            "bge-small-en-v1.5",
+                                                            "bge-base-en-v1.5"};
+        for (const auto model : kKnownModels) {
+            if (preloadModels->find(model) != std::string::npos) {
+                result.preferredModel = model;
+                result.provenance["preferred_model"] = "config:daemon.models.preload_models";
+                break;
+            }
+        }
+    }
+    if (auto environmentModel = yams::config::getenv_nonempty("YAMS_PREFERRED_MODEL")) {
+        if (!result.preferredModel.empty() && *environmentModel != result.preferredModel) {
+            noteConflict("preferred model", "YAMS_PREFERRED_MODEL", *environmentModel,
+                         result.provenance["preferred_model"], result.preferredModel);
+        }
+        result.preferredModel = *environmentModel;
+        result.provenance["preferred_model"] = "environment:YAMS_PREFERRED_MODEL";
+    }
+
+    if (result.preferredModel.empty() && result.isTrainingFree) {
+        result.preferredModel = "simeon-default";
+        result.provenance["preferred_model"] = "default:simeon-default";
+    }
+    const auto isSimeonSentinel = [](const std::string& model) {
+        return model == "simeon-default" || model == "simeon";
+    };
+    if (result.isTrainingFree && !result.preferredModel.empty() &&
+        !isSimeonSentinel(result.preferredModel)) {
+        const auto configuredModel = result.preferredModel;
+        const auto configuredProvenance = result.provenance["preferred_model"];
+        const auto warning = fmt::format(
+            "backend '{}' is model-free but preferred_model '{}' is an ONNX model name; "
+            "using 'simeon-default' instead",
+            result.backend, configuredModel);
+        spdlog::warn("[ConfigResolver] {}", warning);
+        result.warnings.push_back(warning);
+        result.preferredModel = "simeon-default";
+        result.provenance["preferred_model"] =
+            "normalization:simeon-backend(" + configuredProvenance + ")";
+    } else if (!result.isTrainingFree && isSimeonSentinel(result.preferredModel)) {
+        const auto rejectedModel = result.preferredModel;
+        const auto warning = fmt::format(
+            "preferred_model '{}' is a simeon sentinel but backend is '{}'; searching installed "
+            "models instead",
+            rejectedModel, result.backend);
+        spdlog::warn("[ConfigResolver] {}", warning);
+        result.warnings.push_back(warning);
+        result.preferredModel.clear();
+        result.provenance["preferred_model"] =
+            "rejected:simeon-sentinel(" + result.provenance["preferred_model"] + ")";
+    }
+
+    if (result.preferredModel.empty() && !resolvedDataDir.empty()) {
+        std::vector<std::string> availableModels;
+        std::error_code error;
+        const auto modelsDir = resolvedDataDir / "models";
+        if (fs::is_directory(modelsDir, error)) {
+            for (const auto& entry : fs::directory_iterator(modelsDir, error)) {
+                if (entry.is_directory(error) && fs::exists(entry.path() / "model.onnx", error)) {
+                    availableModels.push_back(entry.path().filename().string());
+                }
+            }
+        }
+        if (!availableModels.empty()) {
+            std::sort(availableModels.begin(), availableModels.end());
+            result.preferredModel = availableModels.front();
+            result.provenance["preferred_model"] = "data_directory:models";
+        }
+    }
+
+    if (const auto preload = configured("embeddings.preload_on_startup")) {
+        if (const auto parsed = parseBoolValue(*preload)) {
+            result.preloadOnStartup = *parsed;
+            result.provenance["preload"] = "config:embeddings.preload_on_startup";
+        } else {
+            result.warnings.push_back(fmt::format(
+                "invalid embeddings.preload_on_startup value '{}'; using false", *preload));
+        }
+    } else {
+        result.provenance["preload"] = "default:false";
+    }
+    if (const auto environmentPreload =
+            yams::config::read_env_bool("YAMS_EMBED_PRELOAD_ON_STARTUP").value) {
+        result.preloadOnStartup = *environmentPreload;
+        result.provenance["preload"] = "environment:YAMS_EMBED_PRELOAD_ON_STARTUP";
+    }
+
+    const auto applyRuntimeSize = [&](std::string_view key, std::optional<std::size_t>& target,
+                                      std::string_view provenanceKey) {
+        if (const auto raw = configured(key)) {
+            if (const auto parsed = parseSize(*raw)) {
+                target = parsed;
+                result.provenance[std::string(provenanceKey)] = "config:" + std::string(key);
+            } else {
+                result.warnings.push_back(
+                    fmt::format("invalid {} value '{}'; ignoring", key, *raw));
+            }
+        }
+    };
+    applyRuntimeSize("embeddings.runtime.batch_size", result.runtime.batchSize, "batch_size");
+    if (!result.runtime.batchSize) {
+        // Older configs spell this key under [embeddings]; honour it silently.
+        applyRuntimeSize("embeddings.batch_size", result.runtime.batchSize, "batch_size");
+    }
+    applyRuntimeSize("embeddings.runtime.batch_target", result.runtime.batchTarget, "batch_target");
+    if (const auto raw = configured("embeddings.runtime.repair_lock_timeout_ms")) {
+        if (const auto parsed = parseUnsignedIntegral<std::uint64_t>(*raw)) {
+            result.runtime.repairLockTimeoutMs = parsed;
+            result.provenance["repair_lock_timeout_ms"] =
+                "config:embeddings.runtime.repair_lock_timeout_ms";
+        } else {
+            result.warnings.push_back(fmt::format(
+                "invalid embeddings.runtime.repair_lock_timeout_ms value '{}'; ignoring", *raw));
+        }
+    }
+    if (const auto value = yams::config::read_env_size("YAMS_EMBED_BATCH").value) {
+        result.runtime.batchSize = value;
+        result.provenance["batch_size"] = "environment:YAMS_EMBED_BATCH";
+    }
+    if (const auto value = yams::config::read_env_size("YAMS_EMBED_BATCH_TARGET").value) {
+        result.runtime.batchTarget = value;
+        result.provenance["batch_target"] = "environment:YAMS_EMBED_BATCH_TARGET";
+    }
+    if (const auto value = yams::config::read_env_size("YAMS_REPAIR_LOCK_TIMEOUT_MS").value) {
+        result.runtime.repairLockTimeoutMs = static_cast<std::uint64_t>(*value);
+        result.provenance["repair_lock_timeout_ms"] = "environment:YAMS_REPAIR_LOCK_TIMEOUT_MS";
+    }
+
+    if (!resolvedDataDir.empty()) {
+        if (const auto databaseDimension = readDbEmbeddingDim(resolvedDataDir / "vectors.db")) {
+            result.dimension = databaseDimension;
+            result.dimensionSource = EmbeddingDimensionSource::ExistingDatabase;
+            result.provenance["dimension"] = "database:vectors.db";
+        } else if (const auto sentinelDimension = readVectorSentinelDim(resolvedDataDir)) {
+            result.dimension = sentinelDimension;
+            result.dimensionSource = EmbeddingDimensionSource::Sentinel;
+            result.provenance["dimension"] = "sentinel:vectors_sentinel.json";
+        }
+    }
+    if (!result.dimension) {
+        static constexpr std::string_view kDimensionKeys[] = {
+            "embeddings.embedding_dim", "vector_database.embedding_dim", "vector_index.dimension"};
+        std::optional<std::size_t> selectedDimension;
+        std::string selectedKey;
+        for (const auto key : kDimensionKeys) {
+            const auto raw = configured(key);
+            if (!raw) {
+                continue;
+            }
+            const auto parsed = parseSize(*raw);
+            if (!parsed || *parsed == 0) {
+                result.warnings.push_back(
+                    fmt::format("invalid {} value '{}'; ignoring", key, *raw));
+                continue;
+            }
+            if (!selectedDimension) {
+                selectedDimension = parsed;
+                selectedKey = key;
+            } else if (*selectedDimension != *parsed) {
+                noteConflict("dimension", selectedKey, std::to_string(*selectedDimension), key,
+                             std::to_string(*parsed));
+            }
+        }
+        if (!selectedDimension && result.isTrainingFree) {
+            if (const auto raw = configured("embeddings.simeon.output_dim")) {
+                if (const auto parsed = parseSize(*raw); parsed && *parsed > 0) {
+                    selectedDimension = parsed;
+                    selectedKey = "embeddings.simeon.output_dim";
+                }
+            }
+        }
+        if (selectedDimension) {
+            result.dimension = selectedDimension;
+            result.dimensionSource = EmbeddingDimensionSource::Config;
+            result.provenance["dimension"] = "config:" + selectedKey;
+        }
+    }
+    if (!result.dimension) {
+        if (const auto environmentDimension = yams::config::read_env_size("YAMS_EMBED_DIM").value;
+            environmentDimension && *environmentDimension > 0) {
+            result.dimension = environmentDimension;
+            result.dimensionSource = EmbeddingDimensionSource::Environment;
+            result.provenance["dimension"] = "environment:YAMS_EMBED_DIM";
+        }
+    }
+    if (!result.dimension && !resolvedDataDir.empty() && !result.preferredModel.empty()) {
+        const auto modelDirectory = resolvedDataDir / "models" / result.preferredModel;
+        if (const auto modelConfigDimension =
+                yams::vector::dimres::dim_from_model_config(modelDirectory)) {
+            result.dimension = modelConfigDimension;
+            result.dimensionSource = EmbeddingDimensionSource::ModelConfig;
+            result.provenance["dimension"] = "model_config:" + result.preferredModel;
+        } else if (const auto modelNameDimension =
+                       yams::vector::dimres::dim_from_model_name(result.preferredModel)) {
+            result.dimension = modelNameDimension;
+            result.dimensionSource = EmbeddingDimensionSource::ModelName;
+            result.provenance["dimension"] = "model_name:" + result.preferredModel;
+        }
+    }
+    if (!result.dimension) {
+        result.provenance["dimension"] = "unresolved";
     }
 
     if (result.backend == "onnxruntime" && !result.preferredModel.empty() &&
         !isSimeonSentinel(result.preferredModel) && !resolvedDataDir.empty()) {
-        namespace fs = std::filesystem;
-        fs::path modelPath = resolvedDataDir / "models" / result.preferredModel / "model.onnx";
-        std::error_code ec;
-        if (!fs::exists(modelPath, ec)) {
-            spdlog::warn("[ConfigResolver] backend 'onnxruntime' selected but model file "
-                         "not found: {} (download with: yams model --download {})",
-                         modelPath.string(), result.preferredModel);
-            result.warnings.push_back(
-                fmt::format("backend 'onnxruntime' selected but model file not found: {} "
-                            "(download with: yams model --download {})",
-                            modelPath.string(), result.preferredModel));
+        const auto modelPath = resolvedDataDir / "models" / result.preferredModel / "model.onnx";
+        std::error_code error;
+        if (!fs::exists(modelPath, error)) {
+            const auto warning = fmt::format(
+                "backend 'onnxruntime' selected but model file not found: {} (download with: yams "
+                "model --download {})",
+                modelPath.string(), result.preferredModel);
+            spdlog::warn("[ConfigResolver] {}", warning);
+            result.warnings.push_back(warning);
         }
     }
 
+    result.runtime.backend = result.backend;
+    if (!result.preferredModel.empty()) {
+        result.runtime.preferredModel = result.preferredModel;
+    }
+    result.policyIdentity =
+        fmt::format("{}:{}:{}", result.backend,
+                    result.preferredModel.empty() ? "unresolved" : result.preferredModel,
+                    result.dimension ? std::to_string(*result.dimension) : "unresolved");
     return result;
+}
+
+ConfigResolver::EmbeddingRuntimePolicy ConfigResolver::resolveEmbeddingRuntimePolicy() {
+    // One resolver, one parse policy: project the typed resolution onto the compatibility
+    // shape that library callers without a DaemonConfig still consume.
+    DaemonConfig config;
+    const auto resolved = resolveEmbeddingConfig(config, {});
+    EmbeddingRuntimePolicy policy = resolved.runtime;
+    if (!resolved.backend.empty()) {
+        policy.backend = resolved.backend;
+    }
+    if (!resolved.preferredModel.empty()) {
+        policy.preferredModel = resolved.preferredModel;
+    }
+    return policy;
 }
 
 ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPolicy() {
@@ -762,7 +839,7 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
         namespace fs = std::filesystem;
         fs::path cfgPath = resolveDefaultConfigPath();
         if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            auto kv = parseSimpleTomlFlat(cfgPath);
+            auto kv = yams::config::parse_simple_toml(cfgPath);
             auto parseFloat = [](const std::string& s) -> std::optional<float> {
                 try {
                     return std::stof(s);
@@ -824,6 +901,14 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
             if (auto it = kv.find("search.topology.route_calibration_fingerprint");
                 it != kv.end()) {
                 policy.routeCalibrationFingerprint = std::string(trimView(it->second));
+            }
+            if (auto it = kv.find("search.topology.route_calibration_policy_fingerprint");
+                it != kv.end()) {
+                policy.routeCalibrationPolicyFingerprint = std::string(trimView(it->second));
+            }
+            if (auto it = kv.find("search.topology.route_calibration_dataset_identity");
+                it != kv.end()) {
+                policy.routeCalibrationDatasetIdentity = std::string(trimView(it->second));
             }
             if (auto it = kv.find("search.topology.route_calibration_queries"); it != kv.end()) {
                 policy.routeCalibrationQueries = parseSize(it->second);
@@ -890,70 +975,44 @@ ConfigResolver::TopologyRoutingPolicy ConfigResolver::resolveTopologyRoutingPoli
         spdlog::debug("Error reading config for topology routing policy: {}", e.what());
     }
 
-    auto readEnv = [](const char* name) -> const char* { return std::getenv(name); };
-    if (const char* env = readEnv("YAMS_SEARCH_ENABLE_TOPOLOGY_WEAK_ROUTING")) {
-        if (auto parsed = parseBoolValue(env); parsed.has_value()) {
-            policy.enableWeakQueryRouting = *parsed;
-        }
+    if (auto value =
+            yams::config::read_env_bool("YAMS_SEARCH_ENABLE_TOPOLOGY_WEAK_ROUTING").value) {
+        policy.enableWeakQueryRouting = value;
     }
-    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS")) {
-        if (auto parsed = parseSize(env); parsed.has_value()) {
-            policy.maxClusters = *parsed;
-        }
+    if (auto value = yams::config::read_env_size("YAMS_SEARCH_TOPOLOGY_MAX_CLUSTERS").value) {
+        policy.maxClusters = value;
     }
-    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_MAX_DOCS")) {
-        if (auto parsed = parseSize(env); parsed.has_value()) {
-            policy.maxDocs = *parsed;
-        }
+    if (auto value = yams::config::read_env_size("YAMS_SEARCH_TOPOLOGY_MAX_DOCS").value) {
+        policy.maxDocs = value;
     }
-    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_MEDOID_BOOST")) {
-        try {
-            policy.medoidBoost = std::stof(env);
-        } catch (const std::exception&) {
-            spdlog::debug("config: failed to parse YAMS_SEARCH_TOPOLOGY_MEDOID_BOOST float");
-        }
+    if (auto value = yams::config::read_env_float("YAMS_SEARCH_TOPOLOGY_MEDOID_BOOST").value) {
+        policy.medoidBoost = value;
     }
-    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_ROUTE_SCORING")) {
-        if (*env) {
-            policy.routeScoring = std::string(trimView(env));
-        }
+    if (auto value = yams::config::getenv_nonempty("YAMS_SEARCH_TOPOLOGY_ROUTE_SCORING")) {
+        policy.routeScoring = std::string(trimView(*value));
     }
-    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_SPARSE_DENSE_ALPHA")) {
-        try {
-            policy.sparseDenseAlpha = std::stof(env);
-        } catch (const std::exception&) {
-            spdlog::debug("config: failed to parse YAMS_SEARCH_TOPOLOGY_SPARSE_DENSE_ALPHA float");
-        }
+    if (auto value =
+            yams::config::read_env_float("YAMS_SEARCH_TOPOLOGY_SPARSE_DENSE_ALPHA").value) {
+        policy.sparseDenseAlpha = value;
     }
-    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_MIN_ROUTE_SCORE")) {
-        try {
-            policy.minRouteScore = std::stof(env);
-        } catch (const std::exception&) {
-            spdlog::debug("config: failed to parse YAMS_SEARCH_TOPOLOGY_MIN_ROUTE_SCORE float");
-        }
+    if (auto value = yams::config::read_env_float("YAMS_SEARCH_TOPOLOGY_MIN_ROUTE_SCORE").value) {
+        policy.minRouteScore = value;
     }
-    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE")) {
-        if (*env) {
-            policy.expansionSource = std::string(trimView(env));
-        }
+    if (auto value = yams::config::getenv_nonempty("YAMS_SEARCH_TOPOLOGY_EXPANSION_SOURCE")) {
+        policy.expansionSource = std::string(trimView(*value));
     }
-    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE")) {
-        try {
-            policy.graphNeighborMinScore = std::stof(env);
-        } catch (const std::exception&) {
-            spdlog::debug(
-                "config: failed to parse YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE float");
-        }
+    if (auto value =
+            yams::config::read_env_float("YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_MIN_SCORE").value) {
+        policy.graphNeighborMinScore = value;
     }
-    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_RECIPROCAL_ONLY")) {
-        if (auto parsed = parseBoolValue(env); parsed.has_value()) {
-            policy.graphNeighborReciprocalOnly = *parsed;
-        }
+    if (auto value =
+            yams::config::read_env_bool("YAMS_SEARCH_TOPOLOGY_GRAPH_NEIGHBOR_RECIPROCAL_ONLY")
+                .value) {
+        policy.graphNeighborReciprocalOnly = value;
     }
-    if (const char* env = readEnv("YAMS_SEARCH_TOPOLOGY_GRAPH_VECTOR_SEED_PROBE")) {
-        if (auto parsed = parseSize(env); parsed.has_value()) {
-            policy.graphVectorSeedProbe = *parsed;
-        }
+    if (auto value =
+            yams::config::read_env_size("YAMS_SEARCH_TOPOLOGY_GRAPH_VECTOR_SEED_PROBE").value) {
+        policy.graphVectorSeedProbe = value;
     }
 
     return policy;
@@ -967,7 +1026,7 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
         fs::path cfgPath = resolveDefaultConfigPath();
         std::map<std::string, std::string> kv;
         if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            kv = parseSimpleTomlFlat(cfgPath);
+            kv = yams::config::parse_simple_toml(cfgPath);
         }
 
         if (auto it = kv.find("topology.engine"); it != kv.end()) {
@@ -1028,17 +1087,17 @@ ConfigResolver::TopologyEnginePolicy ConfigResolver::resolveTopologyEnginePolicy
     }
 
     const auto applyBoolEnv = [](const char* name, std::optional<bool>& target) {
-        if (const auto value = parseBoolValue(getenvValue(name)); value.has_value()) {
+        if (const auto value = parseBoolValue(yams::config::getenv_copy(name)); value.has_value()) {
             target = value;
         }
     };
     const auto applySizeEnv = [](const char* name, std::optional<std::size_t>& target) {
-        if (const auto value = parseSize(getenvValue(name)); value.has_value()) {
+        if (const auto value = parseSize(yams::config::getenv_copy(name)); value.has_value()) {
             target = value;
         }
     };
     const auto applyFloatEnv = [](const char* name, std::optional<float>& target) {
-        if (const auto value = parseDouble(getenvValue(name)); value.has_value()) {
+        if (const auto value = parseDouble(yams::config::getenv_copy(name)); value.has_value()) {
             target = static_cast<float>(*value);
         }
     };
@@ -1065,7 +1124,7 @@ ConfigResolver::TopologyTunerPolicy ConfigResolver::resolveTopologyTunerPolicy()
             return policy;
         }
 
-        auto kv = parseSimpleTomlFlat(cfgPath);
+        auto kv = yams::config::parse_simple_toml(cfgPath);
 
         if (auto it = kv.find("topology.tuner.enabled"); it != kv.end()) {
             policy.enabled = ConfigResolver::envTruthy(it->second.c_str());
@@ -1115,7 +1174,7 @@ ConfigResolver::resolveRerankerBackendPolicy(const DaemonConfig& config) {
         fs::path cfgPath =
             !config.configFilePath.empty() ? config.configFilePath : resolveDefaultConfigPath();
         if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            auto kv = parseSimpleTomlFlat(cfgPath);
+            auto kv = yams::config::parse_simple_toml(cfgPath);
             if (auto it = kv.find("search.reranker_backend");
                 it != kv.end() && !it->second.empty()) {
                 policy.backend = normalize(it->second);
@@ -1168,7 +1227,7 @@ ConfigResolver::resolveInstrumentationPolicy(const DaemonConfig& config) {
         fs::path cfgPath =
             !config.configFilePath.empty() ? config.configFilePath : resolveDefaultConfigPath();
         if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            auto kv = parseSimpleTomlFlat(cfgPath);
+            auto kv = yams::config::parse_simple_toml(cfgPath);
             if (auto it = kv.find("daemon.instrumentation.profile");
                 it != kv.end() && !it->second.empty()) {
                 policy.profile = normalize(it->second);
@@ -1189,8 +1248,9 @@ ConfigResolver::resolveInstrumentationPolicy(const DaemonConfig& config) {
         spdlog::debug("Error reading config for instrumentation policy: {}", e.what());
     }
 
-    const bool mslActive = envTruthy(std::getenv("MallocStackLogging")) ||
-                           envTruthy(std::getenv("MallocStackLoggingNoCompact"));
+    const bool mslActive =
+        yams::config::read_env_bool("MallocStackLogging").valueOr(false) ||
+        yams::config::read_env_bool("MallocStackLoggingNoCompact").valueOr(false);
     if (policy.profile.empty()) {
         policy.profile = "auto";
     }
@@ -1213,9 +1273,22 @@ ConfigResolver::resolveInstrumentationPolicy(const DaemonConfig& config) {
 
 TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
                                                 TuningConfig tuningConfig) {
+    [[maybe_unused]] TuneAdvisor::ConfiguredOverrideUpdate configuredOverrideUpdate;
+
+    // A fresh unresolved typed snapshot clears only the overrides owned by this resolver so a
+    // prior configured generation cannot leak into a new lifecycle or replacement reload.
+    if (!tuningConfig.tuneAdvisorOverridesResolved) {
+        TuneAdvisor::resetConfiguredOverrides();
+        tuningConfig.tuneAdvisorOverridesResolved = true;
+    }
+
     const auto findSection = [&](std::string_view name) -> const ConfigSection* {
         auto it = sections.find(std::string(name));
         return it == sections.end() ? nullptr : &it->second;
+    };
+    const auto noteSource = [&](std::string_view sectionName, std::string_view key) {
+        const std::string qualified = std::string(sectionName) + "." + std::string(key);
+        tuningConfig.provenance.insert_or_assign(qualified, "config:" + qualified);
     };
     const auto findValue = [](const ConfigSection* section,
                               std::string_view key) -> const std::string* {
@@ -1299,9 +1372,85 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
     };
 
     const auto* tuning = findSection("tuning");
+    // Match the supported accessor/setter ranges, not merely the uint32 storage type.
+    // Zero is auto for post-ingest threads and an explicit value for ONNX reservations.
+    struct Uint32Range {
+        std::string_view key;
+        uint32_t minimum;
+        uint32_t maximum;
+    };
+    static constexpr Uint32Range kUint32Ranges[] = {
+        {"backpressure_read_pause_ms", 1, 1000},
+        {"worker_poll_ms", 50, 2000},
+        {"idle_shrink_hold_ms", 500, 60000},
+        {"pool_cooldown_ms", 1, 60000},
+        {"pool_ipc_min", 1, 1024},
+        {"pool_ipc_max", 1, 4096},
+        {"pool_io_min", 1, 1024},
+        {"pool_io_max", 1, 4096},
+        {"io_conn_per_thread", 1, 1024},
+        {"post_ingest_threads", 0, 64},
+        {"post_ingest_queue_max", 10, 1000000},
+        {"post_ingest_pending_kg_max", 1, UINT32_MAX},
+        {"list_inflight_limit", 1, 1024},
+        {"list_admission_wait_ms", 1, 120000},
+        {"grep_inflight_limit", 1, 1024},
+        {"grep_admission_wait_ms", 1, 120000},
+        {"conn_slots_min", 1, 1024},
+        {"conn_slots_max", 64, 16384},
+        {"conn_slots_step", 1, 128},
+        {"onnx_max_concurrent", 1, 64},
+        {"onnx_gliner_reserved", 0, 8},
+        {"onnx_embed_reserved", 0, 8},
+        {"onnx_reranker_reserved", 0, 8},
+        {"onnx_sessions_per_model", 1, 32},
+        {"indexing_workers_max", 1, UINT32_MAX},
+        {"store_document_channel_capacity", 64, 1000000},
+        {"work_coordinator_threads", 1, 512},
+        {"embed_channel_capacity", 256, 65536},
+    };
+    const auto boundedUint32 = [&](std::string_view key) -> std::optional<uint32_t> {
+        auto value = parseUint32(tuning, "tuning", key);
+        if (!value)
+            return std::nullopt;
+        const auto range = std::find_if(std::begin(kUint32Ranges), std::end(kUint32Ranges),
+                                        [key](const auto& item) { return item.key == key; });
+        if (range == std::end(kUint32Ranges)) {
+            spdlog::error("Config: tuning.{} has no supported range; ignoring", key);
+            return std::nullopt;
+        }
+        if (*value < range->minimum || *value > range->maximum) {
+            spdlog::warn("Config: tuning.{} must be within [{}, {}]; ignoring {}", key,
+                         range->minimum, range->maximum, *value);
+            return std::nullopt;
+        }
+        return value;
+    };
     const auto applyUint32 = [&](std::string_view key, auto setter) {
-        if (auto value = parseUint32(tuning, "tuning", key)) {
+        if (auto value = boundedUint32(key)) {
             setter(*value);
+            noteSource("tuning", key);
+        }
+    };
+    // Validate the proposed pair before changing either override or its provenance.
+    // Missing endpoints retain the resolved baseline, including compatibility overlays.
+    const auto applyPair = [&](std::string_view minKey, std::string_view maxKey, auto getMin,
+                               auto getMax, auto setMin, auto setMax) {
+        const auto minimum = boundedUint32(minKey);
+        const auto maximum = boundedUint32(maxKey);
+        if (!minimum && !maximum)
+            return;
+        if (minimum.value_or(getMin()) > maximum.value_or(getMax())) {
+            spdlog::warn("Config: tuning.{} exceeds tuning.{}; ignoring pair", minKey, maxKey);
+            return;
+        }
+        if (minimum) {
+            setMin(*minimum);
+            noteSource("tuning", minKey);
+        }
+        if (maximum) {
+            setMax(*maximum);
+            noteSource("tuning", maxKey);
         }
     };
     applyUint32("backpressure_read_pause_ms", &TuneAdvisor::setBackpressureReadPauseMs);
@@ -1317,17 +1466,85 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
     if (auto value = parseSigned(tuning, "tuning", "pool_scale_step")) {
         TuneAdvisor::setPoolScaleStep(*value);
     }
-    applyUint32("pool_ipc_min", &TuneAdvisor::setPoolMinSizeIpc);
-    applyUint32("pool_ipc_max", &TuneAdvisor::setPoolMaxSizeIpc);
-    applyUint32("pool_io_min", &TuneAdvisor::setPoolMinSizeIpcIo);
-    applyUint32("pool_io_max", &TuneAdvisor::setPoolMaxSizeIpcIo);
+    applyPair("pool_ipc_min", "pool_ipc_max", &TuneAdvisor::poolMinSizeIpc,
+              &TuneAdvisor::poolMaxSizeIpc, &TuneAdvisor::setPoolMinSizeIpc,
+              &TuneAdvisor::setPoolMaxSizeIpc);
+    applyPair("pool_io_min", "pool_io_max", &TuneAdvisor::poolMinSizeIpcIo,
+              &TuneAdvisor::poolMaxSizeIpcIo, &TuneAdvisor::setPoolMinSizeIpcIo,
+              &TuneAdvisor::setPoolMaxSizeIpcIo);
     applyUint32("io_conn_per_thread", &TuneAdvisor::setIoConnPerThread);
     applyUint32("post_ingest_threads", &TuneAdvisor::setPostIngestThreads);
     applyUint32("post_ingest_queue_max", &TuneAdvisor::setPostIngestQueueMax);
+    applyUint32("post_ingest_pending_kg_max", &TuneAdvisor::setPostIngestPendingKgMax);
     applyUint32("list_inflight_limit", &TuneAdvisor::setListInflightLimit);
     applyUint32("list_admission_wait_ms", &TuneAdvisor::setListAdmissionWaitMs);
     applyUint32("grep_inflight_limit", &TuneAdvisor::setGrepInflightLimit);
     applyUint32("grep_admission_wait_ms", &TuneAdvisor::setGrepAdmissionWaitMs);
+    // Typed keys for setters that were previously reachable only through YAMS_* overlays.
+    applyPair("conn_slots_min", "conn_slots_max", &TuneAdvisor::connectionSlotsMin,
+              &TuneAdvisor::connectionSlotsMax, &TuneAdvisor::setConnectionSlotsMin,
+              &TuneAdvisor::setConnectionSlotsMax);
+    applyUint32("conn_slots_step", &TuneAdvisor::setConnectionSlotsScaleStep);
+    // The setters below silently keep the default outside their ranges; check here so a
+    // rejected value is reported and never recorded as config provenance.
+    if (auto value = parseFloating(tuning, "tuning", "cpu_high_pct")) {
+        if (*value < 10.0 || *value > 100.0) {
+            spdlog::warn("Config: tuning.cpu_high_pct must be within [10, 100]; ignoring {}",
+                         *value);
+        } else {
+            TuneAdvisor::setCpuHighThresholdPercent(*value);
+            noteSource("tuning", "cpu_high_pct");
+        }
+    }
+    applyUint32("onnx_max_concurrent", &TuneAdvisor::setOnnxMaxConcurrent);
+    applyUint32("onnx_gliner_reserved", &TuneAdvisor::setOnnxGlinerReserved);
+    applyUint32("onnx_embed_reserved", &TuneAdvisor::setOnnxEmbedReserved);
+    applyUint32("onnx_reranker_reserved", &TuneAdvisor::setOnnxRerankerReserved);
+    applyUint32("onnx_sessions_per_model", &TuneAdvisor::setOnnxSessionsPerModel);
+    if (auto value = parseFloating(tuning, "tuning", "model_evict_warning_threshold")) {
+        if (*value <= 0.0 || *value >= 1.0) {
+            spdlog::warn(
+                "Config: tuning.model_evict_warning_threshold must be within (0, 1); ignoring {}",
+                *value);
+        } else {
+            TuneAdvisor::setModelEvictWarningThreshold(*value);
+            noteSource("tuning", "model_evict_warning_threshold");
+        }
+    }
+    if (auto value = parseFloating(tuning, "tuning", "model_evict_critical_threshold")) {
+        if (*value <= 0.0 || *value >= 1.0) {
+            spdlog::warn(
+                "Config: tuning.model_evict_critical_threshold must be within (0, 1); ignoring {}",
+                *value);
+        } else {
+            TuneAdvisor::setModelEvictCriticalThreshold(*value);
+            noteSource("tuning", "model_evict_critical_threshold");
+        }
+    }
+    if (auto value = parseFloating(tuning, "tuning", "model_evict_emergency_threshold")) {
+        if (*value <= 0.0 || *value >= 1.0) {
+            spdlog::warn(
+                "Config: tuning.model_evict_emergency_threshold must be within (0, 1); ignoring {}",
+                *value);
+        } else {
+            TuneAdvisor::setModelEvictEmergencyThreshold(*value);
+            noteSource("tuning", "model_evict_emergency_threshold");
+        }
+    }
+    applyUint32("indexing_workers_max", &TuneAdvisor::setMaxIngestWorkers);
+    applyUint32("store_document_channel_capacity", &TuneAdvisor::setStoreDocumentChannelCapacity);
+    applyUint32("work_coordinator_threads", &TuneAdvisor::setWorkCoordinatorThreads);
+    applyUint32("embed_channel_capacity", &TuneAdvisor::setEmbedChannelCapacity);
+    // 0 disables connection recycling and is a valid value here, unlike the uint32 knobs.
+    if (auto value = parseUint32(tuning, "tuning", "connection_lifetime_s")) {
+        if (*value > 86400) {
+            spdlog::warn("Config: tuning.connection_lifetime_s must be at most 86400; ignoring {}",
+                         *value);
+        } else {
+            TuneAdvisor::setConnectionLifetimeSeconds(*value);
+            noteSource("tuning", "connection_lifetime_s");
+        }
+    }
 
     if (auto value = parseBoolean(tuning, "tuning", "use_internal_bus_for_repair")) {
         TuneAdvisor::setUseInternalBusForRepair(*value);
@@ -1353,11 +1570,13 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
     const auto updateSize = [&](std::string_view key, std::size_t& field) {
         if (auto value = parseSize(tuning, "tuning", key)) {
             field = *value;
+            noteSource("tuning", key);
         }
     };
     const auto updateUint32 = [&](std::string_view key, std::uint32_t& field) {
         if (auto value = parseUint32(tuning, "tuning", key)) {
             field = *value;
+            noteSource("tuning", key);
         }
     };
     updateUint32("target_cpu_percent", tuningConfig.targetCpuPercent);
@@ -1368,6 +1587,80 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
     updateSize("admit_stop_threshold", tuningConfig.admitStopThreshold);
     updateUint32("control_interval_ms", tuningConfig.controlIntervalMs);
     updateUint32("hold_ms", tuningConfig.holdMs);
+
+    const auto* ipc = findSection("tuning.ipc");
+    if (auto value = parseUint32(ipc, "tuning.ipc", "timeout_ms")) {
+        if (*value >= 500 && *value <= 600000) {
+            TuneAdvisor::setIpcTimeoutMs(*value);
+            noteSource("tuning.ipc", "timeout_ms");
+        } else {
+            spdlog::warn("Config: tuning.ipc.timeout_ms outside range 500..600000");
+        }
+    }
+    if (auto value = parseUint32(ipc, "tuning.ipc", "stream_chunk_timeout_ms")) {
+        if (*value >= 1000 && *value <= 600000) {
+            TuneAdvisor::setStreamChunkTimeoutMs(*value);
+            noteSource("tuning.ipc", "stream_chunk_timeout_ms");
+        } else {
+            spdlog::warn("Config: tuning.ipc.stream_chunk_timeout_ms outside range 1000..600000");
+        }
+    }
+
+    const auto* resource = findSection("tuning.resource");
+    if (auto value = parseBoolean(resource, "tuning.resource", "enabled")) {
+        TuneAdvisor::setEnableResourceGovernor(*value);
+        noteSource("tuning.resource", "enabled");
+    }
+    if (auto value = parseBoolean(resource, "tuning.resource", "admission_control")) {
+        TuneAdvisor::setEnableAdmissionControl(*value);
+        noteSource("tuning.resource", "admission_control");
+    }
+    if (auto value = parseUint32(resource, "tuning.resource", "warning_scale_percent")) {
+        if (*value >= 10 && *value <= 100) {
+            TuneAdvisor::setGovernorWarningScalePercent(*value);
+            noteSource("tuning.resource", "warning_scale_percent");
+        } else {
+            spdlog::warn("Config: tuning.resource.warning_scale_percent outside range 10..100");
+        }
+    }
+    if (auto value = parseUnsigned(resource, "tuning.resource", "memory_budget_bytes")) {
+        constexpr std::uint64_t kMinimumMemoryBudget = 64ULL * 1024ULL * 1024ULL;
+        if (*value >= kMinimumMemoryBudget) {
+            TuneAdvisor::setMemoryBudgetBytes(*value);
+            noteSource("tuning.resource", "memory_budget_bytes");
+        } else {
+            spdlog::warn("Config: tuning.resource.memory_budget_bytes below 64 MiB");
+        }
+    }
+    const auto applyResourceThreshold = [&](std::string_view key, auto setter) {
+        if (auto value = parseFloating(resource, "tuning.resource", key)) {
+            if (*value >= 0.5 && *value <= 0.99) {
+                setter(*value);
+                noteSource("tuning.resource", key);
+            } else {
+                spdlog::warn("Config: tuning.resource.{} outside range 0.5..0.99", key);
+            }
+        }
+    };
+    applyResourceThreshold("memory_warning_threshold", &TuneAdvisor::setMemoryWarningThreshold);
+    applyResourceThreshold("memory_critical_threshold", &TuneAdvisor::setMemoryCriticalThreshold);
+    applyResourceThreshold("memory_emergency_threshold", &TuneAdvisor::setMemoryEmergencyThreshold);
+    if (auto value = parseUint32(resource, "tuning.resource", "memory_hysteresis_ms")) {
+        if (*value >= 10 && *value <= 10000) {
+            TuneAdvisor::setMemoryHysteresisMs(*value);
+            noteSource("tuning.resource", "memory_hysteresis_ms");
+        } else {
+            spdlog::warn("Config: tuning.resource.memory_hysteresis_ms outside range 10..10000");
+        }
+    }
+    if (auto value = parseUint32(resource, "tuning.resource", "cpu_hysteresis_ms")) {
+        if (*value >= 10 && *value <= 10000) {
+            TuneAdvisor::setCpuLevelHysteresisMs(*value);
+            noteSource("tuning.resource", "cpu_hysteresis_ms");
+        } else {
+            spdlog::warn("Config: tuning.resource.cpu_hysteresis_ms outside range 10..10000");
+        }
+    }
 
     const auto* ingest = findSection("tuning.ingest");
     if (auto value = parseUnsigned(ingest, "tuning.ingest", "store_batch_size")) {
@@ -1385,15 +1678,32 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
         constexpr std::uint64_t kMaxCoalesceMs = 20;
         if (*value <= kMaxCoalesceMs) {
             tuningConfig.postIngestCoalesceMs = static_cast<std::uint32_t>(*value);
+            noteSource("tuning.post_ingest", "coalesce_ms");
         } else {
             spdlog::warn("Config: tuning.post_ingest.coalesce_ms outside range 0..{}",
                          kMaxCoalesceMs);
         }
     }
-    const auto applyPostIngestCap = [&](std::string_view key, const char* envName,
-                                        std::uint32_t minimum, std::uint32_t maximum, auto setter) {
+    if (auto value = parseUint32(postIngest, "tuning.post_ingest", "rpc_queue_max")) {
+        if (*value >= 10 && *value <= 1'000'000) {
+            TuneAdvisor::setPostIngestRpcQueueMax(*value);
+            noteSource("tuning.post_ingest", "rpc_queue_max");
+        } else {
+            spdlog::warn("Config: tuning.post_ingest.rpc_queue_max outside range 10..1000000");
+        }
+    }
+    if (auto value = parseUint32(postIngest, "tuning.post_ingest", "rpc_max_per_batch")) {
+        if (*value >= 1 && *value <= 1024) {
+            TuneAdvisor::setPostIngestRpcMaxPerBatch(*value);
+            noteSource("tuning.post_ingest", "rpc_max_per_batch");
+        } else {
+            spdlog::warn("Config: tuning.post_ingest.rpc_max_per_batch outside range 1..1024");
+        }
+    }
+    const auto applyPostIngestCap = [&](std::string_view key, std::uint32_t minimum,
+                                        std::uint32_t maximum, auto setter) {
         auto value = parseUnsigned(postIngest, "tuning.post_ingest", key);
-        if (!value || std::getenv(envName) != nullptr) {
+        if (!value) {
             return;
         }
         if (*value < minimum || *value > maximum) {
@@ -1402,23 +1712,16 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
             return;
         }
         setter(static_cast<std::uint32_t>(*value));
+        noteSource("tuning.post_ingest", key);
     };
-    applyPostIngestCap("total_concurrent", "YAMS_POST_INGEST_TOTAL_CONCURRENT", 1, 256,
-                       &TuneAdvisor::setPostIngestTotalConcurrent);
-    applyPostIngestCap("embed_concurrent", "YAMS_POST_EMBED_CONCURRENT", 1, 32,
-                       &TuneAdvisor::setPostEmbedConcurrent);
-    applyPostIngestCap("extraction_concurrent", "YAMS_POST_EXTRACTION_CONCURRENT", 1, 64,
-                       &TuneAdvisor::setPostExtractionConcurrent);
-    applyPostIngestCap("kg_concurrent", "YAMS_POST_KG_CONCURRENT", 1, 64,
-                       &TuneAdvisor::setPostKgConcurrent);
-    applyPostIngestCap("symbol_concurrent", "YAMS_POST_SYMBOL_CONCURRENT", 1, 32,
-                       &TuneAdvisor::setPostSymbolConcurrent);
-    applyPostIngestCap("entity_concurrent", "YAMS_POST_ENTITY_CONCURRENT", 1, 16,
-                       &TuneAdvisor::setPostEntityConcurrent);
-    applyPostIngestCap("title_concurrent", "YAMS_POST_TITLE_CONCURRENT", 1, 16,
-                       &TuneAdvisor::setPostTitleConcurrent);
-    applyPostIngestCap("batch_size", "YAMS_POST_INGEST_BATCH_SIZE", 1, 256,
-                       &TuneAdvisor::setPostIngestBatchSize);
+    applyPostIngestCap("total_concurrent", 1, 256, &TuneAdvisor::setPostIngestTotalConcurrent);
+    applyPostIngestCap("embed_concurrent", 1, 32, &TuneAdvisor::setPostEmbedConcurrent);
+    applyPostIngestCap("extraction_concurrent", 1, 64, &TuneAdvisor::setPostExtractionConcurrent);
+    applyPostIngestCap("kg_concurrent", 1, 64, &TuneAdvisor::setPostKgConcurrent);
+    applyPostIngestCap("symbol_concurrent", 1, 32, &TuneAdvisor::setPostSymbolConcurrent);
+    applyPostIngestCap("entity_concurrent", 1, 16, &TuneAdvisor::setPostEntityConcurrent);
+    applyPostIngestCap("title_concurrent", 1, 16, &TuneAdvisor::setPostTitleConcurrent);
+    applyPostIngestCap("batch_size", 1, 256, &TuneAdvisor::setPostIngestBatchSize);
 
     const auto* gradient = findSection("gradient_limiter");
     if (auto value = parseBoolean(gradient, "gradient_limiter", "enable")) {
@@ -1449,56 +1752,356 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
     return tuningConfig;
 }
 
+void ConfigResolver::applySearchMaintenance(const ConfigSections& sections, DaemonConfig& config) {
+    const auto section = sections.find("search");
+    if (section == sections.end()) {
+        return;
+    }
+    const auto value = section->second.find("automatic_rebuilds");
+    if (value == section->second.end()) {
+        return;
+    }
+    const auto parsed = parseBoolValue(value->second);
+    if (!parsed.has_value()) {
+        spdlog::warn("Config: failed to parse search.automatic_rebuilds as boolean");
+        return;
+    }
+    config.searchMaintenance.automaticRebuildsEnabled = parsed;
+    config.searchMaintenance.automaticRebuildsSource = "config:search.automatic_rebuilds";
+}
+
+bool ConfigResolver::applyStorageDiskPressure(const ConfigSections& sections,
+                                              DaemonConfig& config) {
+    const auto section = sections.find("storage.disk_pressure");
+    if (section == sections.end()) {
+        return true;
+    }
+    for (const auto& [key, value] : section->second) {
+        (void)value;
+        if (key != "warning_free_percent" && key != "minimum_write_admission_bytes" &&
+            key != "emergency_reserve_bytes") {
+            spdlog::warn("Config: unknown storage.disk_pressure key '{}'", key);
+            return false;
+        }
+    }
+
+    auto policy = config.diskPressure;
+    if (const auto it = section->second.find("warning_free_percent"); it != section->second.end()) {
+        const auto parsed = parseDouble(it->second);
+        if (!parsed) {
+            spdlog::warn("Config: storage.disk_pressure.warning_free_percent must be numeric");
+            return false;
+        }
+        policy.warningFreePercent = *parsed;
+    }
+    if (const auto it = section->second.find("minimum_write_admission_bytes");
+        it != section->second.end()) {
+        const auto parsed = parseUnsignedIntegral<std::uint64_t>(it->second);
+        if (!parsed) {
+            spdlog::warn(
+                "Config: storage.disk_pressure.minimum_write_admission_bytes must be unsigned");
+            return false;
+        }
+        policy.minimumWriteAdmissionBytes = *parsed;
+    }
+    if (const auto it = section->second.find("emergency_reserve_bytes");
+        it != section->second.end()) {
+        const auto parsed = parseUnsignedIntegral<std::uint64_t>(it->second);
+        if (!parsed) {
+            spdlog::warn("Config: storage.disk_pressure.emergency_reserve_bytes must be unsigned");
+            return false;
+        }
+        policy.emergencyReserveBytes = *parsed;
+    }
+
+    if (const auto valid = policy.validate(); !valid) {
+        spdlog::warn("Config: invalid storage.disk_pressure policy: {}", valid.error().message);
+        return false;
+    }
+    config.diskPressure = policy;
+    return true;
+}
+
+bool ConfigResolver::applyMemorySync(const ConfigSections& sections, DaemonConfig& config) {
+    const auto section = sections.find("memory_sync");
+    if (section == sections.end()) {
+        return true;
+    }
+
+    auto policy = config.memorySync;
+    if (const auto it = section->second.find("corpus_scope"); it != section->second.end()) {
+        policy.corpusScope = yams::memory_sync::parseCorpusScope(it->second);
+        if (policy.corpusScope == yams::memory_sync::CorpusScope::Invalid) {
+            spdlog::warn("Config: memory_sync.corpus_scope must be personal or shared");
+            config.memorySync.enabled = false;
+            return false;
+        }
+    }
+    const bool transportSpecified = section->second.contains("transport");
+    if (const auto it = section->second.find("enabled"); it != section->second.end()) {
+        const auto enabled = parseBoolValue(it->second);
+        if (!enabled) {
+            spdlog::warn("Config: invalid memory_sync; enabled must be a boolean");
+            config.memorySync.enabled = false;
+            return false;
+        }
+        policy.enabled = *enabled;
+    }
+    if (const auto it = section->second.find("node_id"); it != section->second.end()) {
+        policy.nodeId = it->second;
+    }
+    if (const auto it = section->second.find("corpus_id"); it != section->second.end()) {
+        policy.corpusId = it->second;
+    }
+    if (const auto it = section->second.find("corpus_epoch"); it != section->second.end()) {
+        const auto epoch = parseUnsignedIntegral<std::uint64_t>(it->second);
+        if (!epoch || *epoch == 0) {
+            spdlog::warn("Config: invalid memory_sync; corpus_epoch must be positive");
+            config.memorySync.enabled = false;
+            return false;
+        }
+        policy.corpusEpoch = *epoch;
+    }
+    if (const auto it = section->second.find("transport"); it != section->second.end()) {
+        policy.transport = it->second;
+    }
+    if (const auto it = section->second.find("listen"); it != section->second.end()) {
+        policy.listen = it->second;
+    }
+    if (const auto it = section->second.find("identity_key"); it != section->second.end()) {
+        policy.identityKeyPath = it->second;
+    }
+    if (const auto it = section->second.find("allow_first_contact"); it != section->second.end()) {
+        const auto allow = parseBoolValue(it->second);
+        if (!allow) {
+            spdlog::warn("Config: invalid memory_sync; allow_first_contact must be a boolean");
+            config.memorySync.enabled = false;
+            return false;
+        }
+        policy.allowFirstContact = *allow;
+    }
+    if (const auto it = section->second.find("max_peers"); it != section->second.end()) {
+        const auto maxPeers = parseUnsignedIntegral<std::size_t>(it->second);
+        if (!maxPeers || *maxPeers == 0) {
+            spdlog::warn("Config: invalid memory_sync; max_peers must be greater than zero");
+            config.memorySync.enabled = false;
+            return false;
+        }
+        policy.maxPeers = *maxPeers;
+    }
+    if (const auto it = section->second.find("backend"); it != section->second.end()) {
+        policy.backend = it->second;
+    }
+    if (const auto it = section->second.find("path"); it != section->second.end()) {
+        policy.path = it->second;
+    }
+    if (!transportSpecified &&
+        (section->second.contains("backend") || section->second.contains("path"))) {
+        policy.transport = "shared-store";
+    }
+    if (const auto it = section->second.find("mode"); it != section->second.end()) {
+        policy.mode = it->second;
+    }
+    if (const auto it = section->second.find("session_id"); it != section->second.end()) {
+        policy.sessionId = it->second;
+    }
+    if (const auto it = section->second.find("writer_auth_required"); it != section->second.end()) {
+        const auto required = parseBoolValue(it->second);
+        if (!required) {
+            spdlog::warn("Config: invalid memory_sync; writer_auth_required must be a boolean");
+            config.memorySync.enabled = false;
+            return false;
+        }
+        // pi-lens-ignore: clang:no_member -- daemon policy field is defined in daemon.h.
+        policy.writerAuthRequired = *required;
+    }
+    if (const auto it = section->second.find("writer_auth_manifest"); it != section->second.end()) {
+        // pi-lens-ignore: clang:no_member -- daemon policy field is defined in daemon.h.
+        policy.writerAuthManifestPath = it->second;
+    }
+    if (const auto it = section->second.find("temporary_session_ttl_ms");
+        it != section->second.end()) {
+        const auto ttl = parseUnsignedIntegral<std::uint32_t>(it->second);
+        if (!ttl) {
+            spdlog::warn("Config: invalid memory_sync; temporary_session_ttl_ms must be unsigned");
+            config.memorySync.enabled = false;
+            return false;
+        }
+        // pi-lens-ignore: clang:no_member
+        policy.temporarySessionTtlMs = *ttl;
+    }
+    if (const auto it = section->second.find("allow_legacy_unbound"); it != section->second.end()) {
+        const auto allowLegacy = parseBoolValue(it->second);
+        if (!allowLegacy) {
+            spdlog::warn("Config: invalid memory_sync; allow_legacy_unbound must be a boolean");
+            config.memorySync.enabled = false;
+            return false;
+        }
+        if (*allowLegacy) {
+            if (policy.mode != "persistent") {
+                spdlog::warn(
+                    "Config: invalid memory_sync; allow_legacy_unbound requires persistent mode");
+                config.memorySync.enabled = false;
+                return false;
+            }
+            policy.mode = "persistent-migration";
+        }
+    }
+    if (const auto it = section->second.find("sync_interval_ms"); it != section->second.end()) {
+        const auto interval = parseUnsignedIntegral<std::uint32_t>(it->second);
+        if (!interval || *interval == 0) {
+            spdlog::warn("Config: invalid memory_sync; sync_interval_ms must be greater than zero");
+            config.memorySync.enabled = false;
+            return false;
+        }
+        // Direct transport reuses sync_interval_ms as the reconnect interval, which
+        // P2pManager::create bounds to p2p::kP2pMaxReconnectInterval (5 minutes). Reject here so a
+        // large value fails config resolution instead of aborting daemon startup later.
+        if (policy.transport == "direct" && *interval > 5 * 60 * 1000) {
+            spdlog::warn("Config: invalid memory_sync; sync_interval_ms exceeds the 5-minute "
+                         "direct reconnect ceiling");
+            config.memorySync.enabled = false;
+            return false;
+        }
+        policy.syncIntervalMs = *interval;
+    }
+    const auto applyLimit = [&](std::string_view key, std::size_t& target) {
+        const auto it = section->second.find(std::string(key));
+        if (it == section->second.end()) {
+            return true;
+        }
+        const auto parsed = parseUnsignedIntegral<std::size_t>(it->second);
+        if (!parsed || *parsed == 0) {
+            spdlog::warn("Config: disabling memory_sync; {} must be greater than zero", key);
+            return false;
+        }
+        target = *parsed;
+        return true;
+    };
+    if (!applyLimit("max_index_objects_per_sync", policy.limits.maxIndexObjectsPerSync) ||
+        !applyLimit("max_envelope_bytes", policy.limits.maxEnvelopeBytes) ||
+        !applyLimit("max_value_bytes", policy.limits.maxValueBytes) ||
+        !applyLimit("max_merged_keys", policy.limits.maxMergedKeys) ||
+        !applyLimit("max_cache_bytes", policy.limits.maxCacheBytes) ||
+        !applyLimit("max_tracked_identities", policy.limits.maxTrackedIdentities)) {
+        config.memorySync.enabled = false;
+        return false;
+    }
+
+    if (!policy.enabled) {
+        config.memorySync = std::move(policy);
+        return true;
+    }
+    if (policy.corpusScope != yams::memory_sync::CorpusScope::Shared) {
+        spdlog::warn("Config: replication requires memory_sync.corpus_scope=shared; keep "
+                     "personal memory in a separate data directory");
+        policy.enabled = false;
+        config.memorySync = std::move(policy);
+        return false;
+    }
+    if (policy.transport != "direct" && policy.transport != "shared-store") {
+        spdlog::warn("Config: disabling invalid memory_sync.transport '{}'", policy.transport);
+        policy.enabled = false;
+    } else if (!yams::memory_sync::isCanonicalWriterUuid(policy.nodeId)) {
+        spdlog::warn("Config: disabling memory_sync; node_id must be a canonical UUID");
+        policy.enabled = false;
+    } else if (!yams::memory_sync::isCanonicalCorpusId(policy.corpusId) ||
+               policy.corpusEpoch == 0) {
+        spdlog::warn("Config: disabling memory_sync; corpus_id and corpus_epoch are required");
+        policy.enabled = false;
+    } else if (policy.transport == "direct") {
+        if (policy.mode != "persistent") {
+            spdlog::warn("Config: disabling direct memory_sync; mode must be persistent");
+            policy.enabled = false;
+        } else if (policy.listen.empty()) {
+            spdlog::warn("Config: disabling direct memory_sync with empty listen address");
+            policy.enabled = false;
+        } else if (!policy.writerAuthRequired || policy.writerAuthManifestPath.empty()) {
+            spdlog::warn("Config: disabling direct memory_sync; writer_auth_required=true and "
+                         "writer_auth_manifest are required for authenticated cold bootstrap");
+            policy.enabled = false;
+        }
+    } else if (policy.writerAuthRequired && policy.mode == "persistent-migration") {
+        spdlog::warn("Config: disabling memory_sync; legacy migration cannot run with writer "
+                     "authentication");
+        policy.enabled = false;
+    } else if (policy.mode != "persistent" && policy.mode != "persistent-migration" &&
+               policy.mode != "temporary") {
+        spdlog::warn(
+            "Config: disabling memory_sync; mode must be persistent, persistent-migration, or "
+            "temporary");
+        policy.enabled = false;
+    } else if (policy.mode == "temporary" &&
+               !yams::memory_sync::isCanonicalSessionId(policy.sessionId)) {
+        spdlog::warn("Config: disabling temporary memory_sync; session_id is required");
+        policy.enabled = false;
+    } else if (policy.mode == "temporary" && policy.temporarySessionTtlMs != 0 &&
+               policy.temporarySessionTtlMs < policy.syncIntervalMs * 3ULL) {
+        spdlog::warn("Config: disabling temporary memory_sync; temporary_session_ttl_ms must be "
+                     "at least three sync intervals");
+        policy.enabled = false;
+    } else if (policy.backend != "filesystem" && policy.backend != "s3") {
+        spdlog::warn("Config: disabling invalid memory_sync.backend '{}'", policy.backend);
+        policy.enabled = false;
+    } else if (policy.path.empty()) {
+        spdlog::warn("Config: disabling shared-store memory_sync with empty path");
+        policy.enabled = false;
+    }
+    const bool valid = policy.enabled;
+    config.memorySync = std::move(policy);
+    return valid;
+}
+
 ConfigResolver::PostIngestCaps ConfigResolver::resolvePostIngestCaps() {
     PostIngestCaps caps;
 
     try {
-        namespace fs = std::filesystem;
-        fs::path cfgPath = resolveDefaultConfigPath();
-        if (cfgPath.empty() || !fs::exists(cfgPath)) {
+        const auto configPath = resolveDefaultConfigPath();
+        if (configPath.empty()) {
             return caps;
         }
-
-        auto kv = parseSimpleTomlFlat(cfgPath);
-
-        auto parseBounded = [](const std::string& s, std::uint32_t lo,
-                               std::uint32_t hi) -> std::optional<std::uint32_t> {
-            try {
-                auto raw = static_cast<std::uint32_t>(std::stoul(s));
-                if (raw < lo || raw > hi)
-                    return std::nullopt;
-                return raw;
-            } catch (const std::exception&) {
+        const auto values = yams::config::parse_simple_toml(configPath);
+        const auto parseBounded = [](std::string_view raw, std::uint32_t minimum,
+                                     std::uint32_t maximum) -> std::optional<std::uint32_t> {
+            const auto parsed = parseUnsignedIntegral<std::uint32_t>(raw);
+            if (!parsed || *parsed < minimum || *parsed > maximum) {
                 return std::nullopt;
             }
+            return parsed;
         };
 
-        if (auto it = kv.find("tuning.post_ingest.total_concurrent"); it != kv.end()) {
+        if (const auto it = values.find("tuning.post_ingest.total_concurrent");
+            it != values.end()) {
             caps.totalConcurrent = parseBounded(it->second, 1, 256);
         }
-        if (auto it = kv.find("tuning.post_ingest.embed_concurrent"); it != kv.end()) {
+        if (const auto it = values.find("tuning.post_ingest.embed_concurrent");
+            it != values.end()) {
             caps.embedConcurrent = parseBounded(it->second, 1, 32);
         }
-        if (auto it = kv.find("tuning.post_ingest.extraction_concurrent"); it != kv.end()) {
+        if (const auto it = values.find("tuning.post_ingest.extraction_concurrent");
+            it != values.end()) {
             caps.extractionConcurrent = parseBounded(it->second, 1, 64);
         }
-        if (auto it = kv.find("tuning.post_ingest.kg_concurrent"); it != kv.end()) {
+        if (const auto it = values.find("tuning.post_ingest.kg_concurrent"); it != values.end()) {
             caps.kgConcurrent = parseBounded(it->second, 1, 64);
         }
-        if (auto it = kv.find("tuning.post_ingest.symbol_concurrent"); it != kv.end()) {
+        if (const auto it = values.find("tuning.post_ingest.symbol_concurrent");
+            it != values.end()) {
             caps.symbolConcurrent = parseBounded(it->second, 1, 32);
         }
-        if (auto it = kv.find("tuning.post_ingest.entity_concurrent"); it != kv.end()) {
+        if (const auto it = values.find("tuning.post_ingest.entity_concurrent");
+            it != values.end()) {
             caps.entityConcurrent = parseBounded(it->second, 1, 16);
         }
-        if (auto it = kv.find("tuning.post_ingest.title_concurrent"); it != kv.end()) {
+        if (const auto it = values.find("tuning.post_ingest.title_concurrent");
+            it != values.end()) {
             caps.titleConcurrent = parseBounded(it->second, 1, 16);
         }
-        if (auto it = kv.find("tuning.post_ingest.batch_size"); it != kv.end()) {
+        if (const auto it = values.find("tuning.post_ingest.batch_size"); it != values.end()) {
             caps.batchSize = parseBounded(it->second, 1, 256);
         }
-    } catch (const std::exception& e) {
-        spdlog::debug("Error reading config for post-ingest caps: {}", e.what());
+    } catch (const std::exception& error) {
+        spdlog::debug("Error reading config for post-ingest caps: {}", error.what());
     }
 
     return caps;
@@ -1514,7 +2117,7 @@ ConfigResolver::WriteCoordinatorTuning ConfigResolver::resolveWriteCoordinatorTu
             return tuning;
         }
 
-        auto kv = parseSimpleTomlFlat(cfgPath);
+        auto kv = yams::config::parse_simple_toml(cfgPath);
 
         if (auto it = kv.find("tuning.write_coordinator.kg_dedup_enabled"); it != kv.end()) {
             tuning.kgDedupEnabled = parseBoolValue(it->second);
@@ -1525,8 +2128,9 @@ ConfigResolver::WriteCoordinatorTuning ConfigResolver::resolveWriteCoordinatorTu
                 if (raw >= 1000 && raw <= 1000000) {
                     tuning.kgDedupMaxEdges = raw;
                 }
-            } catch (const std::exception&) {
-                // Invalid user input leaves the typed default unchanged.
+            } catch (const std::exception& error) {
+                spdlog::debug("Invalid tuning.write_coordinator.kg_dedup_max_edges: {}",
+                              error.what());
             }
         }
     } catch (const std::exception& e) {
@@ -1537,67 +2141,43 @@ ConfigResolver::WriteCoordinatorTuning ConfigResolver::resolveWriteCoordinatorTu
 }
 
 std::string ConfigResolver::resolveRerankerModel(const DaemonConfig& config) {
-    std::string preferred;
-
-    if (const char* envp = std::getenv("YAMS_RERANKER_MODEL")) {
-        preferred = envp;
-        if (!preferred.empty()) {
-            spdlog::debug("Reranker model from environment: {}", preferred);
-            return preferred;
-        }
+    if (const auto configured = yams::config::getenv_nonempty("YAMS_RERANKER_MODEL")) {
+        return *configured;
     }
 
     try {
-        namespace fs = std::filesystem;
-        fs::path cfgPath =
+        const auto configPath =
             !config.configFilePath.empty() ? config.configFilePath : resolveDefaultConfigPath();
-        if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            auto kv = parseSimpleTomlFlat(cfgPath);
-            auto it = kv.find("search.reranker_model");
-            if (it != kv.end() && !it->second.empty()) {
-                preferred = it->second;
-                spdlog::debug("Reranker model from config: {}", preferred);
-                return preferred;
-            }
+        const auto values = yams::config::parse_simple_toml(configPath);
+        if (const auto it = values.find("search.reranker_model");
+            it != values.end() && !it->second.empty()) {
+            return it->second;
         }
-    } catch (const std::exception& e) {
-        spdlog::debug("Error reading config for reranker model: {}", e.what());
+    } catch (const std::exception& error) {
+        spdlog::debug("Error reading config for reranker model: {}", error.what());
     }
-
-    return preferred;
+    return {};
 }
 
 bool ConfigResolver::isSymbolExtractionEnabled(const DaemonConfig& config) {
-    bool enableSymbols = true;
-
     try {
-        namespace fs = std::filesystem;
-        fs::path cfgPath =
+        const auto configPath =
             !config.configFilePath.empty() ? config.configFilePath : resolveDefaultConfigPath();
-        if (!cfgPath.empty() && fs::exists(cfgPath)) {
-            auto flat = parseSimpleTomlFlat(cfgPath);
-            auto it = flat.find("plugins.symbol_extraction.enable");
-            if (it != flat.end()) {
-                std::string v = it->second;
-                std::transform(v.begin(), v.end(), v.begin(),
-                               [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-                enableSymbols = !(v == "0" || v == "false" || v == "off" || v == "no");
-            }
+        const auto values = yams::config::parse_simple_toml(configPath);
+        if (const auto it = values.find("plugins.symbol_extraction.enable"); it != values.end()) {
+            return parseTomlBool(it->second).value_or(true);
         }
-    } catch (const std::exception& e) {
-        spdlog::debug("[ConfigResolver] Failed to read symbol extraction flag: {}", e.what());
+    } catch (const std::exception& error) {
+        spdlog::debug("[ConfigResolver] Failed to read symbol extraction flag: {}", error.what());
     } catch (...) {
         spdlog::debug("[ConfigResolver] Failed to read symbol extraction flag: unknown error");
     }
-
-    return enableSymbols;
+    return true;
 }
 
 int ConfigResolver::readTimeoutMs(const char* envName, int defaultMs, int minMs) {
-    if (const char* v = std::getenv(envName)) {
-        if (auto val = parseSignedIntegral<int>(v)) {
-            return std::max(minMs, *val);
-        }
+    if (auto value = yams::config::read_env_int(envName).value) {
+        return std::max(minMs, *value);
     }
     return defaultMs;
 }
@@ -1608,26 +2188,21 @@ size_t ConfigResolver::readVectorMaxElements() {
     constexpr size_t kMaxMaxElements = 10000000; // 10M reasonable upper bound
 
     // 1. Environment variable takes precedence
-    if (const char* env = std::getenv("YAMS_VECTOR_MAX_ELEMENTS")) {
-        try {
-            size_t val = std::stoull(env);
-            if (val >= kMinMaxElements && val <= kMaxMaxElements) {
-                spdlog::info("[ConfigResolver] Using YAMS_VECTOR_MAX_ELEMENTS={}", val);
-                return val;
-            }
-            spdlog::warn(
-                "[ConfigResolver] YAMS_VECTOR_MAX_ELEMENTS={} out of range [{}, {}], using default",
-                val, kMinMaxElements, kMaxMaxElements);
-        } catch (...) {
-            spdlog::warn("[ConfigResolver] Invalid YAMS_VECTOR_MAX_ELEMENTS value, using default");
+    if (auto value = yams::config::read_env_size("YAMS_VECTOR_MAX_ELEMENTS").value) {
+        if (*value >= kMinMaxElements && *value <= kMaxMaxElements) {
+            spdlog::info("[ConfigResolver] Using YAMS_VECTOR_MAX_ELEMENTS={}", *value);
+            return *value;
         }
+        spdlog::warn(
+            "[ConfigResolver] YAMS_VECTOR_MAX_ELEMENTS={} out of range [{}, {}], using default",
+            *value, kMinMaxElements, kMaxMaxElements);
     }
 
     // 2. Config file
     auto cfgPath = resolveDefaultConfigPath();
     if (!cfgPath.empty()) {
         try {
-            auto kv = parseSimpleTomlFlat(cfgPath);
+            auto kv = yams::config::parse_simple_toml(cfgPath);
             auto it = kv.find("vector_database.max_elements");
             if (it != kv.end() && !it->second.empty()) {
                 size_t val = std::stoull(it->second);
@@ -1640,8 +2215,10 @@ size_t ConfigResolver::readVectorMaxElements() {
                     "[ConfigResolver] vector_database.max_elements={} out of range, using default",
                     val);
             }
+        } catch (const std::exception& error) {
+            spdlog::debug("Invalid vector_database.max_elements config: {}", error.what());
         } catch (...) {
-            // Ignore parse errors
+            spdlog::debug("Invalid vector_database.max_elements config: unknown error");
         }
     }
 

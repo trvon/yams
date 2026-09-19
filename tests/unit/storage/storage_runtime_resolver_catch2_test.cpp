@@ -4,8 +4,11 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 
 #include <yams/storage/storage_runtime_resolver.h>
+
+#include "../../common/test_helpers_catch2.h"
 
 namespace {
 
@@ -150,6 +153,31 @@ TEST_CASE("Storage runtime resolver supports flattened storage.s3 keys",
     CHECK(decision.value().activeDataDir == fallbackDir);
 }
 
+TEST_CASE("Storage runtime resolver preserves explicit HTTP endpoint scheme",
+          "[storage][runtime][resolver][s3]") {
+    TempDir td;
+    const auto configPath = td.path() / "config.toml";
+    {
+        std::ofstream out(configPath);
+        out << "[storage]\n";
+        out << "engine = \"s3\"\n";
+        out << "[storage.s3]\n";
+        out << "url = \"s3://test-bucket/prefix\"\n";
+        out << "endpoint = \"http://minio:9000\"\n";
+        out << "access_key = \"test-access\"\n";
+        out << "secret_key = \"test-secret\"\n";
+        out << "use_path_style = true\n";
+        out << "fallback_policy = \"fallback_local_if_configured\"\n";
+        out << "fallback_local_data_dir = \"" << (td.path() / "fallback").string() << "\"\n";
+    }
+
+    const auto decision =
+        yams::storage::resolveStorageBootstrapDecision(configPath, td.path() / "primary-data");
+    REQUIRE(decision.has_value());
+    REQUIRE(decision.value().backendConfig.has_value());
+    CHECK(decision.value().backendConfig->credentials.at("endpoint") == "http://minio:9000");
+}
+
 TEST_CASE("Storage runtime resolver detects Cloudflare token-shaped access key in direct mode",
           "[storage][runtime][resolver][r2][catch2]") {
     TempDir td;
@@ -175,13 +203,8 @@ TEST_CASE("Storage runtime resolver validates temp credential mode requires R2 e
     TempDir td;
     const auto configPath = td.path() / "config.toml";
 
-#if defined(_WIN32)
-    _putenv_s("YAMS_R2_API_TOKEN", "");
-    _putenv_s("CLOUDFLARE_API_TOKEN", "");
-#else
-    setenv("YAMS_R2_API_TOKEN", "", 1);
-    setenv("CLOUDFLARE_API_TOKEN", "", 1);
-#endif
+    yams::test::ScopedEnvVar yamsToken{"YAMS_R2_API_TOKEN", std::string{}};
+    yams::test::ScopedEnvVar cloudflareToken{"CLOUDFLARE_API_TOKEN", std::string{}};
 
     {
         std::ofstream out(configPath);
@@ -243,6 +266,17 @@ TEST_CASE("Storage runtime resolver rejects mismatched explicit account id and e
         yams::storage::resolveStorageBootstrapDecision(configPath, td.path() / "primary-data");
     REQUIRE_FALSE(decision.has_value());
     CHECK(decision.error().message.find("does not match") != std::string::npos);
+}
+
+// The callback must abort without touching the destination when byte-count math overflows.
+TEST_CASE("Storage runtime response writer rejects size overflow",
+          "[storage][runtime][resolver][curl][catch2]") {
+    std::string response;
+    char byte = 'x';
+
+    CHECK(yams::storage::testingWriteResponse(&byte, std::numeric_limits<std::size_t>::max(), 2,
+                                              &response) == 0);
+    CHECK(response.empty());
 }
 
 TEST_CASE("Storage runtime resolver helper identifies Cloudflare endpoint and token pattern",

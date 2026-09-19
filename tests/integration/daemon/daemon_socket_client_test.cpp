@@ -2,6 +2,7 @@
 // Covers connection lifecycle, reconnection, timeouts, multiplexing, and error handling
 
 #define CATCH_CONFIG_MAIN
+// pi-lens-ignore: fatal error
 #include <catch2/catch_session.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
@@ -38,39 +39,7 @@ using namespace yams::test;
 using namespace std::chrono_literals;
 
 namespace {
-class EnvGuard {
-public:
-    EnvGuard(const std::string& envName, const std::string& newValue) : name_(envName) {
-        if (const char* orig = std::getenv(name_.c_str())) {
-            originalValue_ = orig;
-        }
-#ifdef _WIN32
-        _putenv_s(name_.c_str(), newValue.c_str());
-#else
-        setenv(name_.c_str(), newValue.c_str(), 1);
-#endif
-    }
-
-    ~EnvGuard() {
-        if (originalValue_) {
-#ifdef _WIN32
-            _putenv_s(name_.c_str(), originalValue_->c_str());
-#else
-            setenv(name_.c_str(), originalValue_->c_str(), 1);
-#endif
-        } else {
-#ifdef _WIN32
-            _putenv_s(name_.c_str(), "");
-#else
-            unsetenv(name_.c_str());
-#endif
-        }
-    }
-
-private:
-    std::string name_;
-    std::optional<std::string> originalValue_;
-};
+using EnvGuard = yams::test::ScopedEnvVar;
 
 class StubModelProvider : public yams::daemon::IModelProvider {
 public:
@@ -808,6 +777,8 @@ TEST_CASE("Daemon client request execution", "[daemon][socket][requests]") {
 
         auto downloadResult = yams::cli::run_sync(client.call<DownloadRequest>(downloadReq), 10s);
 
+        INFO("download request error: " << (downloadResult ? std::string{"<none>"}
+                                                           : downloadResult.error().message));
         REQUIRE(downloadResult.has_value());
         CHECK(downloadResult.value().url == downloadReq.url);
         CHECK_FALSE(downloadResult.value().success);
@@ -1206,16 +1177,21 @@ TEST_CASE("Daemon client plugin request execution", "[daemon][socket][requests][
         yams::cli::run_sync(client.executeRequest(Request{unloadLoadedReq}), 5s);
 
     REQUIRE(unloadLoadedResult.has_value());
-    REQUIRE(std::holds_alternative<SuccessResponse>(unloadLoadedResult.value()));
-    CHECK(std::get<SuccessResponse>(unloadLoadedResult.value()).message == "unloaded");
+    REQUIRE(std::holds_alternative<ErrorResponse>(unloadLoadedResult.value()));
+    CHECK(std::get<ErrorResponse>(unloadLoadedResult.value()).code ==
+          yams::ErrorCode::InvalidState);
+    CHECK(std::get<ErrorResponse>(unloadLoadedResult.value()).message ==
+          "Plugin not found or unload failed");
 
     PluginUnloadRequest unloadReq;
     unloadReq.name = "definitely_missing_plugin_for_dispatcher_coverage";
     auto unloadResult = yams::cli::run_sync(client.executeRequest(Request{unloadReq}), 5s);
 
     REQUIRE(unloadResult.has_value());
-    REQUIRE(std::holds_alternative<SuccessResponse>(unloadResult.value()));
-    CHECK(std::get<SuccessResponse>(unloadResult.value()).message == "unloaded");
+    REQUIRE(std::holds_alternative<ErrorResponse>(unloadResult.value()));
+    CHECK(std::get<ErrorResponse>(unloadResult.value()).code == yams::ErrorCode::NotFound);
+    CHECK(std::get<ErrorResponse>(unloadResult.value()).message ==
+          "Plugin not found or unload failed");
 
     PluginScanRequest missingScanReq;
     missingScanReq.target = (pluginRoot / "missing_plugin_dir").string();
@@ -1289,7 +1265,9 @@ TEST_CASE("Daemon client prune request execution", "[daemon][socket][requests][p
 
     AddDocumentRequest signatureReq;
     signatureReq.name = "dispatcher_coverage_binary";
-    signatureReq.content = std::string("\x7F" "ELF", 4);
+    signatureReq.content = std::string("\x7F"
+                                       "ELF",
+                                       4);
     auto signatureResult = yams::cli::run_sync(client.streamingAddDocument(signatureReq), 10s);
 
     REQUIRE(signatureResult.has_value());
@@ -1406,7 +1384,10 @@ TEST_CASE("Daemon client graph maintenance request execution",
           "[daemon][socket][requests][graph]") {
     SKIP_DAEMON_TEST_ON_WINDOWS();
 
-    DaemonHarness harness;
+    DaemonHarness::Options options;
+    options.isolateConfig = true;
+    options.isolateState = true;
+    DaemonHarness harness{std::move(options)};
     startHarnessWithRetry(harness);
     std::this_thread::sleep_for(200ms);
 
@@ -1444,7 +1425,9 @@ TEST_CASE("Daemon client graph maintenance request execution",
     addReq.name = "graph_dispatcher_coverage.txt";
     addReq.content = "graph maintenance coverage content\n";
     addReq.tags = {"graph-coverage", "dispatcher"};
-    auto addResult = yams::cli::run_sync(client.streamingAddDocument(addReq), 10s);
+    addReq.waitForProcessing = true;
+    addReq.waitTimeoutSeconds = 10;
+    auto addResult = yams::cli::run_sync(client.streamingAddDocument(addReq), 15s);
 
     REQUIRE(addResult.has_value());
     REQUIRE_FALSE(addResult.value().hash.empty());

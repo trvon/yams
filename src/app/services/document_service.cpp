@@ -1,5 +1,6 @@
 #include <yams/app/services/services.hpp>
 #include <yams/common/fs_utils.h>
+#include <yams/common/hash_predicates.h>
 #include <yams/common/time_utils.h>
 #include <yams/core/assert.hpp>
 #include <yams/core/checked_arithmetic.h>
@@ -192,18 +193,6 @@ inline void addMetadataToMap(const std::unordered_map<std::string, std::string>&
     }
 }
 
-// Returns true if s consists only of hex digits
-inline bool isHex(const std::string& s) {
-    return std::all_of(s.begin(), s.end(), [](unsigned char c) { return std::isxdigit(c) != 0; });
-}
-
-// Heuristic: treat as hash when it looks like a hex string of reasonable length (6-64)
-inline bool looksLikePartialHash(const std::string& s) {
-    if (s.size() < 6 || s.size() >= 64)
-        return false;
-    return isHex(s);
-}
-
 bool canForceCleanupAfterStorageError(const Error& error) {
     return error.code == ErrorCode::CorruptedData || error.code == ErrorCode::ManifestInvalid ||
            error.code == ErrorCode::DataCorruption;
@@ -267,7 +256,8 @@ public:
         }
 
         // Strategy 5: Hash prefix (only if explicitly requested)
-        if (opts.tryHashPrefix && looksLikePartialHash(query)) {
+        if (opts.tryHashPrefix && query.size() != 64 &&
+            yams::common::looksLikePartialHashArgument(query)) {
             auto hashMatches = tryHashPrefix(query);
             if (!hashMatches.empty()) {
                 if (hashMatches.size() == 1) {
@@ -314,7 +304,8 @@ public:
         addUnique(tryPathPatterns(query));
 
         // Try hash prefix if requested
-        if (opts.tryHashPrefix && looksLikePartialHash(query)) {
+        if (opts.tryHashPrefix && query.size() != 64 &&
+            yams::common::looksLikePartialHashArgument(query)) {
             addUnique(tryHashPrefix(query));
         }
 
@@ -884,7 +875,7 @@ private:
                 auto docRes = ctx_.metadataRepo->getDocumentByHash(req.hash);
                 if (docRes && docRes.value().has_value()) {
                     addUniqueDeleteTargets(targets, seenHashes, {docRes.value().value()});
-                } else if (docRes && isHex(req.hash)) {
+                } else if (docRes && yams::common::isHexDigits(req.hash)) {
                     rawFullHashWithoutMetadata = true;
                 }
             } else {
@@ -984,6 +975,16 @@ private:
             r.deleted = false;
             resp.deleted.push_back(r);
             return;
+        }
+        if (req.beforeDelete) {
+            auto staged = req.beforeDelete(target.hash);
+            if (!staged) {
+                r.deleted = false;
+                r.errorCode = staged.error().code;
+                r.error = "Failed to stage replicated deletion: " + staged.error().message;
+                resp.errors.push_back(r);
+                return;
+            }
         }
 
         if (target.doc.has_value()) {
@@ -1981,13 +1982,10 @@ public:
         RetrieveDocumentResponse resp;
         resp.graphEnabled = false;
 
-        // Validate hash format if provided (must be hex string, at least 8 chars for partial)
+        // Explicit hash arguments accept six-character prefixes; bare query tokens do not.
         if (!req.hash.empty()) {
             std::string normalized = normalizeHashInput(req.hash);
-            // Check if it's a valid hex string (allows partial hashes >= 8 chars)
-            if (normalized.size() < 8 ||
-                !std::all_of(normalized.begin(), normalized.end(),
-                             [](char c) { return std::isxdigit(static_cast<unsigned char>(c)); })) {
+            if (!yams::common::looksLikePartialHashArgument(normalized)) {
                 return Error{ErrorCode::NotFound,
                              "Document not found for hash: '" + req.hash + "'"};
             }
@@ -2006,7 +2004,7 @@ public:
 
         // Resolve hash (handle partial hashes)
         if (!resolvedHash.empty() && resolvedHash.size() != 64 &&
-            looksLikePartialHash(resolvedHash)) {
+            yams::common::looksLikePartialHashArgument(resolvedHash)) {
             if (!ctx_.metadataRepo) {
                 return Error{ErrorCode::NotInitialized,
                              "Metadata repository not available for partial hash resolution"};
@@ -2038,7 +2036,10 @@ public:
         std::optional<metadata::DocumentInfo> foundDoc;
         if (ctx_.metadataRepo) {
             auto docResult = ctx_.metadataRepo->getDocumentByHash(resolvedHash);
-            if (docResult && docResult.value()) {
+            if (!docResult) {
+                return docResult.error();
+            }
+            if (docResult.value()) {
                 foundDoc = docResult.value();
             }
             if (!foundDoc) {

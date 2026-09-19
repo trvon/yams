@@ -5,6 +5,7 @@
 #include <iostream>
 #include <ostream>
 #include <yams/core/types.h>
+#include <yams/daemon/client/client_config.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 #include <yams/daemon/ipc/message_framing.h>
 #include <yams/daemon/ipc/response_of.hpp>
@@ -21,37 +22,6 @@
 namespace yams::daemon {
 
 class IClientTransport;
-
-enum class ClientTransportMode {
-    Auto,
-    Socket,
-    InProcess,
-};
-
-struct ClientConfig {
-    std::filesystem::path socketPath;
-    std::filesystem::path proxySocketPath;
-    std::filesystem::path pidFile;
-    std::filesystem::path dataDir;
-    std::chrono::milliseconds connectTimeout{1000};
-    std::chrono::milliseconds headerTimeout{30000};
-    std::chrono::milliseconds bodyTimeout{60000};
-    std::chrono::milliseconds requestTimeout{5000};
-    size_t maxRetries = 3;
-    std::chrono::milliseconds retryBaseDelay{75};
-    bool autoStart = true;
-    bool enableCircuitBreaker = true;
-    bool enableChunkedResponses = true;
-    size_t maxChunkSize = static_cast<size_t>(512) * static_cast<size_t>(1024);
-    size_t maxInflight = 128;
-    bool progressiveOutput = true;
-    bool singleUseConnections = false;
-    bool disableStreamingForLargeQueries = false;
-    bool acceptCompressed = false;
-    ClientTransportMode transportMode = ClientTransportMode::Auto;
-    std::optional<boost::asio::any_io_executor> executor;
-    std::shared_ptr<IClientTransport> transport;
-};
 
 class DaemonClient {
 public:
@@ -401,10 +371,6 @@ public:
     // Start daemon if not running
     static Result<void> startDaemon(const ClientConfig& config = {});
 
-    // Helper method to set environment variables for timeouts
-    static void setTimeoutEnvVars(std::chrono::milliseconds headerTimeout,
-                                  std::chrono::milliseconds bodyTimeout);
-
     // Path resolution helper (matches daemon's path resolution)
     static std::filesystem::path resolveSocketPath();
     // Config-first path resolution: prefer env/config, then fall back to defaults
@@ -474,6 +440,8 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
             std::is_same<Req, CatRequest>,
             // Generic metadata value counts query (MCP client mode)
             std::is_same<Req, MetadataValueCountsRequest>,
+            // Lifecycle-owned memory sync control
+            std::is_same<Req, MemorySyncRequest>,
             // Document repair
             std::is_same<Req, RepairRequest>>,
         "Req must be a valid daemon Request alternative");
@@ -498,7 +466,13 @@ boost::asio::awaitable<Result<ResponseOfT<Req>>> DaemonClient::call(const Req& r
         co_return *ok;
     if (auto* er = std::get_if<ErrorResponse>(&payload))
         co_return Error{er->code, er->message};
-    co_return Error{ErrorCode::InvalidData, "Unexpected response type"};
+
+    const auto requestName = getRequestName(Request{req});
+    const auto expectedName = getResponseName(Response{ResponseOfT<Req>{}});
+    co_return Error{ErrorCode::InvalidData,
+                    "Unexpected response type for " + requestName + ": expected " + expectedName +
+                        ", received " + getResponseName(payload) +
+                        ". Possible CLI/daemon protocol mismatch; run 'yams daemon restart'"};
 }
 
 // ============================================================================

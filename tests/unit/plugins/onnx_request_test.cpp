@@ -6,6 +6,8 @@
 #include <catch2/catch_test_macros.hpp>
 #include <yams/compat/dlfcn.h>
 
+#include "../../common/test_helpers_catch2.h"
+
 extern "C" {
 #include <yams/plugins/abi.h>
 #include <yams/plugins/onnx_request_v1.h>
@@ -77,8 +79,8 @@ TEST_CASE("ONNX Request plugin interface", "[plugins][onnx][request]") {
     SECTION("embedding request without inputs returns error") {
         char* out = nullptr;
         int rc = req->process_json(req->self, "{}", &out);
-        REQUIRE(rc == 0);
-        REQUIRE(out != nullptr);
+        REQUIRE((rc == 0));
+        REQUIRE((out != nullptr));
 
         auto j = nlohmann::json::parse(out);
         req->free_string(req->self, out);
@@ -86,17 +88,13 @@ TEST_CASE("ONNX Request plugin interface", "[plugins][onnx][request]") {
     }
 
     SECTION("embedding request with batch returns correct shape") {
-        // Use mock mode to avoid heavy model load
-#ifdef _WIN32
-        _putenv_s("YAMS_SKIP_MODEL_LOADING", "1");
-#else
-        setenv("YAMS_SKIP_MODEL_LOADING", "1", 1);
-#endif
+        // Use mock mode to avoid heavy model load.
+        yams::test::ScopedEnvVar skipLoading{"YAMS_SKIP_MODEL_LOADING", std::string{"1"}};
         std::string body = R"({"task":"embedding","model_id":"e5-small","inputs":["a","b"]})";
         char* out = nullptr;
         int rc = req->process_json(req->self, body.c_str(), &out);
-        REQUIRE(rc == 0);
-        REQUIRE(out != nullptr);
+        REQUIRE((rc == 0));
+        REQUIRE((out != nullptr));
 
         auto j = nlohmann::json::parse(out, nullptr, false);
         req->free_string(req->self, out);
@@ -106,7 +104,7 @@ TEST_CASE("ONNX Request plugin interface", "[plugins][onnx][request]") {
             SKIP("Model not available: " + j.dump());
         }
 
-        CHECK(j.value("task", "") == "embedding");
-        CHECK(j.value("batch", 0) == 2);
+        CHECK((j.value("task", "") == "embedding"));
+        CHECK((j.value("batch", 0) == 2));
     }
 }

@@ -13,6 +13,7 @@
 #include <yams/compression/compression_header.h>
 #include <yams/compression/compression_monitor.h>
 #include <yams/compression/compression_stats.h>
+#include <yams/compression/compression_utils.h>
 #include <yams/compression/compressor_interface.h>
 #include <yams/storage/compressed_storage_engine.h>
 
@@ -44,18 +45,6 @@ parseStoredCompressionHeader(std::span<const std::byte> data) {
 
 bool isCompressedData(std::span<const std::byte> data) {
     return parseStoredCompressionHeader(data).has_value();
-}
-
-uint32_t calculateCRC32(std::span<const std::byte> data) {
-    // Simple CRC32 implementation - in production use a proper CRC32 library
-    uint32_t crc = 0xFFFFFFFF;
-    for (size_t i = 0; i < data.size(); ++i) {
-        crc ^= static_cast<uint8_t>(data[i]);
-        for (int j = 0; j < 8; ++j) {
-            crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320 : 0);
-        }
-    }
-    return ~crc;
 }
 
 } // anonymous namespace
@@ -521,8 +510,9 @@ private:
         header.level = decision.level;
         header.uncompressedSize = data.size();
         header.compressedSize = compressionResult.compressedSize;
-        header.uncompressedCRC32 = calculateCRC32(data);
-        header.compressedCRC32 = calculateCRC32(std::span<const std::byte>(compressionResult.data));
+        header.uncompressedCRC32 = compression::calculateCRC32(data);
+        header.compressedCRC32 =
+            compression::calculateCRC32(std::span<const std::byte>(compressionResult.data));
         const auto now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                 std::chrono::system_clock::now().time_since_epoch())
                                 .count();
@@ -591,7 +581,7 @@ private:
                                                       compression::CompressionHeader::SIZE,
                                                   static_cast<size_t>(header.compressedSize)};
 
-        const auto compressedCRC = calculateCRC32(compressedData);
+        const auto compressedCRC = compression::calculateCRC32(compressedData);
         if (compressedCRC != header.compressedCRC32) {
             updateStats([](compression::CompressionStats& stats) {
                 stats.cacheEvictions++; // Using as error counter
@@ -621,7 +611,8 @@ private:
             return result.error();
         }
 
-        const auto uncompressedCRC = calculateCRC32(std::span<const std::byte>(result.value()));
+        const auto uncompressedCRC =
+            compression::calculateCRC32(std::span<const std::byte>(result.value()));
         if (uncompressedCRC != header.uncompressedCRC32) {
             return Error(ErrorCode::HashMismatch, "Decompressed data CRC mismatch");
         }

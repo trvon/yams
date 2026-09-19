@@ -1,4 +1,5 @@
 // Templated, trait-driven serializer to minimize if/else and ease extension
+// Use the in-tree protocol header even when a standalone analyzer omits Meson's include root.
 #include <yams/daemon/ipc/proto_serializer.h>
 
 #include <yams/common/utf8_utils.h>
@@ -25,6 +26,10 @@ namespace daemon {
 
 using Envelope = yams::daemon::ipc::Envelope;
 namespace pb = yams::daemon::ipc;
+
+static_assert(static_cast<int>(pb::MemorySyncRequest_Operation_Operation_MAX) >=
+                  static_cast<int>(MemorySyncOperation::Forget),
+              "protobuf MemorySyncRequest.Operation must preserve all C++ wire values");
 
 // (bindings inserted later, after ProtoBinding primary template)
 
@@ -160,6 +165,63 @@ template <> struct ProtoBinding<ErrorResponse> {
                                                 env.error().retry().reason()};
         }
         return er;
+    }
+};
+
+template <> struct ProtoBinding<MemorySyncRequest> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kMemorySyncRequest;
+    static void set(Envelope& env, const MemorySyncRequest& request) {
+        auto* out = env.mutable_memory_sync_request();
+        out->set_operation(static_cast<pb::MemorySyncRequest_Operation>(request.operation));
+        out->set_key(yams::common::sanitizeUtf8(request.key));
+        out->set_value(request.value);
+    }
+    static MemorySyncRequest get(const Envelope& env) {
+        const auto& in = env.memory_sync_request();
+        return MemorySyncRequest{static_cast<MemorySyncOperation>(in.operation()), in.key(),
+                                 in.value()};
+    }
+};
+
+template <> struct ProtoBinding<MemorySyncResponse> {
+    static constexpr Envelope::PayloadCase case_v = Envelope::kMemorySyncResponse;
+    static void set(Envelope& env, const MemorySyncResponse& response) {
+        auto* out = env.mutable_memory_sync_response();
+        out->set_published(response.published);
+        out->set_started(response.started);
+        out->set_value(response.value);
+        out->set_records(response.records);
+        out->set_quarantined_records(response.quarantinedRecords);
+        out->set_auth_failures(response.authFailures);
+        out->set_successful_cycles(response.successfulCycles);
+        out->set_failed_cycles(response.failedCycles);
+        out->set_last_success_age_ms(response.lastSuccessAgeMs);
+        out->set_backend(yams::common::sanitizeUtf8(response.backend));
+        out->set_node_id(yams::common::sanitizeUtf8(response.nodeId));
+        out->set_corpus_id(yams::common::sanitizeUtf8(response.corpusId));
+        out->set_corpus_epoch(response.corpusEpoch);
+        out->set_mode(yams::common::sanitizeUtf8(response.mode));
+        out->set_trust_mode(yams::common::sanitizeUtf8(response.trustMode));
+        out->set_peer_count(response.peerCount);
+    }
+    static MemorySyncResponse get(const Envelope& env) {
+        const auto& in = env.memory_sync_response();
+        return MemorySyncResponse{in.published(),
+                                  in.started(),
+                                  in.value(),
+                                  in.records(),
+                                  in.quarantined_records(),
+                                  in.auth_failures(),
+                                  in.successful_cycles(),
+                                  in.failed_cycles(),
+                                  in.last_success_age_ms(),
+                                  in.backend(),
+                                  in.node_id(),
+                                  in.corpus_id(),
+                                  in.corpus_epoch(),
+                                  in.mode(),
+                                  in.trust_mode(),
+                                  in.peer_count()};
     }
 };
 
@@ -1325,6 +1387,11 @@ template <> struct ProtoBinding<StatusResponse> {
             kv->set_key("data_dir");
             kv->set_value(r.dataDir);
         }
+        if (!r.logFile.empty()) {
+            auto* kv = o->add_request_counts();
+            kv->set_key("log_file");
+            kv->set_value(r.logFile);
+        }
         if (!r.metadataDbPath.empty()) {
             auto* kv = o->add_request_counts();
             kv->set_key("metadata_db_path");
@@ -1412,6 +1479,21 @@ template <> struct ProtoBinding<StatusResponse> {
             auto* kv = o->add_request_counts();
             kv->set_key("search_tuning_param:" + key);
             kv->set_value(std::to_string(value));
+        }
+        {
+            auto* kv = o->add_request_counts();
+            kv->set_key("search_automatic_rebuilds_enabled");
+            kv->set_value(r.searchAutomaticRebuildsEnabled ? "1" : "0");
+        }
+        if (!r.searchAutomaticRebuildsSource.empty()) {
+            auto* kv = o->add_request_counts();
+            kv->set_key("search_automatic_rebuilds_source");
+            kv->set_value(r.searchAutomaticRebuildsSource);
+        }
+        for (const auto& [key, value] : r.runtimeTuning) {
+            auto* kv = o->add_request_counts();
+            kv->set_key("runtime_tuning:" + key);
+            kv->set_value(value);
         }
 
         // Proxy socket observability (serialized via request_counts until proto gains fields)
@@ -1527,6 +1609,10 @@ template <> struct ProtoBinding<StatusResponse> {
             }
             if (kv.key() == "data_dir") {
                 r.dataDir = kv.value();
+                continue;
+            }
+            if (kv.key() == "log_file") {
+                r.logFile = kv.value();
                 continue;
             }
             if (kv.key() == "metadata_db_path") {
@@ -1652,6 +1738,19 @@ template <> struct ProtoBinding<StatusResponse> {
                     r.vectorDbDim = static_cast<uint32_t>(std::stoul(kv.value()));
                 } catch (...) {
                 }
+                continue;
+            }
+            if (kv.key() == "search_automatic_rebuilds_enabled") {
+                r.searchAutomaticRebuildsEnabled =
+                    kv.value() == "1" || kv.value() == "true" || kv.value() == "yes";
+                continue;
+            }
+            if (kv.key() == "search_automatic_rebuilds_source") {
+                r.searchAutomaticRebuildsSource = kv.value();
+                continue;
+            }
+            if (kv.key().rfind("runtime_tuning:", 0) == 0) {
+                r.runtimeTuning[kv.key().substr(std::strlen("runtime_tuning:"))] = kv.value();
                 continue;
             }
             if (kv.key() == "search_tuning_state") {
@@ -1954,6 +2053,7 @@ template <> struct ProtoBinding<GrepResponse> {
             }
             m->set_match_type(match.matchType);
             m->set_confidence(match.confidence);
+            m->set_hash(match.hash);
         }
         o->set_total_matches(r.totalMatches);
         o->set_files_searched(r.filesSearched);
@@ -1984,6 +2084,7 @@ template <> struct ProtoBinding<GrepResponse> {
             }
             match.matchType = m.match_type();
             match.confidence = m.confidence();
+            match.hash = m.hash();
             r.matches.push_back(std::move(match));
         }
         r.totalMatches = i.total_matches();
@@ -4339,6 +4440,11 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
             m.payload = Request{std::move(v)};
             break;
         }
+        case Envelope::kMemorySyncRequest: {
+            auto v = ProtoBinding<MemorySyncRequest>::get(env);
+            m.payload = Request{std::move(v)};
+            break;
+        }
         case Envelope::kBatchRequest: {
             auto v = ProtoBinding<BatchRequest>::get(env);
             m.payload = Request{std::move(v)};
@@ -4559,6 +4665,11 @@ Result<Message> ProtoSerializer::decode_payload(std::span<const uint8_t> bytes) 
         case Envelope::kMetadataValueCountsResponse: {
             auto v = ProtoBinding<MetadataValueCountsResponse>::get(env);
             m.payload = Response{std::in_place_type<MetadataValueCountsResponse>, std::move(v)};
+            break;
+        }
+        case Envelope::kMemorySyncResponse: {
+            auto v = ProtoBinding<MemorySyncResponse>::get(env);
+            m.payload = Response{std::in_place_type<MemorySyncResponse>, std::move(v)};
             break;
         }
         case Envelope::kBatchResponse: {

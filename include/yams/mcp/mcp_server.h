@@ -295,8 +295,10 @@ private:
     // Record that a feature was used prior to client 'initialized'
     void recordEarlyFeatureUse();
 
+#if !defined(YAMS_WASI)
     Result<void> ensureDaemonClient();
     Result<yams::daemon::DaemonClient*> requireDaemonClient();
+#endif
 
     // YAMS extensions toggle.
     bool areYamsExtensionsEnabled() const { return enableYamsExtensions_; }
@@ -432,6 +434,7 @@ private:
     // (No additional declarations needed here.)
 #endif
 
+#if !defined(YAMS_WASI)
     enum class DaemonStatusFetchMode {
         Required,
         BestEffort,
@@ -439,6 +442,7 @@ private:
 
     boost::asio::awaitable<Result<std::optional<yams::daemon::StatusResponse>>>
     fetchDaemonStatus(DaemonStatusFetchMode mode);
+#endif
 
     // Modern C++20 tool handlers (type-safe, clean)
     boost::asio::awaitable<Result<MCPSearchResponse>>
@@ -524,6 +528,7 @@ private:
     Result<std::vector<std::pair<std::string, std::string>>>
     resolvePatternToHashes(const std::string& pattern);
 
+#if !defined(YAMS_WASI)
     // Collection and snapshot helpers
     json performRestore(const std::vector<metadata::DocumentInfo>& documents,
                         const std::string& outputDir, const std::string& layoutTemplate,
@@ -531,6 +536,7 @@ private:
     std::string
     expandLayoutTemplate(const std::string& layoutTemplate, const metadata::DocumentInfo& doc,
                          const std::unordered_map<std::string, metadata::MetadataValue>& metadata);
+#endif
 
     // Helper methods for hash search
     bool isValidHash(const std::string& str);

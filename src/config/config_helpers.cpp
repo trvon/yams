@@ -1,8 +1,23 @@
+#include <algorithm>
+#include <array>
+#include <charconv>
 #include <fstream>
+#include <functional>
+#include <limits>
 #include <map>
-#include <sstream>
+#include <mutex>
+#include <stdexcept>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+
+// pi-lens-ignore: fatal error
+#include <spdlog/spdlog.h>
+
 #include <yams/common/fs_utils.h>
+#include <yams/common/string_utils.h>
 #include <yams/config/config_helpers.h>
+#include <yams/config/detail/config_parse_utils.h>
 
 #ifdef _WIN32
 #if defined(__has_include)
@@ -16,27 +31,554 @@
 #include <windows.h>
 #else
 #include <unistd.h> // For geteuid(), getpid(), getuid()
+#if defined(__APPLE__)
+#include <crt_externs.h>
+#else
+extern char** environ;
+#endif
 #endif
 
 namespace yams::config {
 namespace {
 
-std::string getenv_copy(const char* key) {
-    const char* raw = std::getenv(key); // NOLINT(concurrency-mt-unsafe)
-    if (raw && *raw) {
-        return raw;
+std::mutex& processEnvironmentMutex() {
+    // Environment reads occur from process-lifetime singleton teardown paths. Keep this boundary
+    // alive until process exit rather than depending on cross-translation-unit destruction order.
+    static auto* mutex = new std::mutex();
+    return *mutex;
+}
+
+struct EnvironmentLeaseRecord {
+    std::string installedValue;
+    std::optional<std::string> previousValue;
+    std::optional<std::uint64_t> parent;
+};
+
+struct EnvironmentOwnershipState {
+    std::optional<std::uint64_t> currentLease;
+    std::unordered_map<std::uint64_t, EnvironmentLeaseRecord> leases;
+};
+
+unsigned char foldEnvironmentKeyByte(unsigned char byte) noexcept {
+#ifdef _WIN32
+    if (byte >= static_cast<unsigned char>('a') && byte <= static_cast<unsigned char>('z')) {
+        return static_cast<unsigned char>(byte - static_cast<unsigned char>('a') +
+                                          static_cast<unsigned char>('A'));
     }
-    return {};
+#endif
+    return byte;
+}
+
+struct EnvironmentKeyHash {
+    using is_transparent = void;
+
+    std::size_t operator()(std::string_view key) const noexcept {
+#ifdef _WIN32
+        constexpr std::size_t kOffsetBasis = sizeof(std::size_t) == 8
+                                                 ? std::size_t{1469598103934665603ULL}
+                                                 : std::size_t{2166136261U};
+        constexpr std::size_t kPrime =
+            sizeof(std::size_t) == 8 ? std::size_t{1099511628211ULL} : std::size_t{16777619U};
+        std::size_t hash = kOffsetBasis;
+        for (const unsigned char byte : key) {
+            hash ^= foldEnvironmentKeyByte(byte);
+            hash *= kPrime;
+        }
+        return hash;
+#else
+        return std::hash<std::string_view>{}(key);
+#endif
+    }
+};
+
+struct EnvironmentKeyEqual {
+    using is_transparent = void;
+
+    bool operator()(std::string_view left, std::string_view right) const noexcept {
+        if (left.size() != right.size()) {
+            return false;
+        }
+        return std::equal(left.begin(), left.end(), right.begin(), [](char lhs, char rhs) {
+            return foldEnvironmentKeyByte(static_cast<unsigned char>(lhs)) ==
+                   foldEnvironmentKeyByte(static_cast<unsigned char>(rhs));
+        });
+    }
+};
+
+using EnvironmentOwnershipMap = std::unordered_map<std::string, EnvironmentOwnershipState,
+                                                   EnvironmentKeyHash, EnvironmentKeyEqual>;
+
+EnvironmentOwnershipMap& processEnvironmentOwnership() {
+    static auto* ownership = new EnvironmentOwnershipMap();
+    return *ownership;
+}
+
+#ifdef _WIN32
+using ExplicitEmptyEnvironmentSet =
+    std::unordered_set<std::string, EnvironmentKeyHash, EnvironmentKeyEqual>;
+
+ExplicitEmptyEnvironmentSet& explicitEmptyEnvironmentKeys() {
+    static auto* keys = new ExplicitEmptyEnvironmentSet();
+    return *keys;
+}
+#endif
+
+std::uint64_t& processEnvironmentLeaseGeneration() {
+    static auto* generation = new std::uint64_t{0};
+    return *generation;
+}
+
+std::optional<std::size_t>& ownedLeaseFailureCountdown() {
+    static auto* countdown = new std::optional<std::size_t>();
+    return *countdown;
+}
+
+bool& ownedLeaseRestoreFailurePending() {
+    static auto* pending = new bool{false};
+    return *pending;
+}
+
+std::optional<std::string> environmentValueLocked(const char* key) {
+#ifdef _WIN32
+    // The CRT environment cannot hold an explicitly empty value: _putenv_s("KEY", "") removes
+    // the variable, so std::getenv cannot distinguish empty from unset. Read through the Win32
+    // environment instead. Win32 also collapses an explicit empty assignment to deletion, so
+    // values written through this boundary use a process-local overlay to preserve that
+    // distinction.
+    DWORD required = GetEnvironmentVariableA(key, nullptr, 0);
+    if (required == 0) {
+        return explicitEmptyEnvironmentKeys().contains(key)
+                   ? std::optional<std::string>{std::string{}}
+                   : std::nullopt;
+    }
+    explicitEmptyEnvironmentKeys().erase(key);
+    std::string buffer;
+    for (;;) {
+        buffer.resize(required);
+        SetLastError(ERROR_SUCCESS);
+        const DWORD copied = GetEnvironmentVariableA(key, buffer.data(), required);
+        if (copied == 0) {
+            if (GetLastError() == ERROR_ENVVAR_NOT_FOUND) {
+                return std::nullopt;
+            }
+            buffer.clear();
+            return buffer; // explicitly empty value
+        }
+        if (copied < required) {
+            buffer.resize(copied);
+            return buffer;
+        }
+        required = copied; // value grew between probe and copy — retry with the reported size
+    }
+#else
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): caller holds processEnvironmentMutex().
+    const char* raw = std::getenv(key);
+    if (raw == nullptr) {
+        return std::nullopt;
+    }
+    return std::string{raw};
+#endif
+}
+
+bool mutateEnvironmentLocked(const char* key, const char* value) noexcept {
+#ifdef _WIN32
+    // Authoritative Win32 write: SetEnvironmentVariableA distinguishes NULL (remove) from ""
+    // (set empty), which the CRT environment cannot represent.
+    if (!SetEnvironmentVariableA(key, value)) {
+        return false;
+    }
+    if (value != nullptr && *value == '\0') {
+        explicitEmptyEnvironmentKeys().insert(key);
+    } else {
+        explicitEmptyEnvironmentKeys().erase(key);
+    }
+    // Best-effort CRT sync so legacy std::getenv readers (e.g. sandbox_detection,
+    // file_type_detector) stay coherent for representable values. _putenv_s removes on "" and
+    // returns EINVAL on NULL, so empty and unset both collapse to removal in the CRT table —
+    // matching those readers' treat-empty-as-unset semantics.
+    (void)_putenv_s(key, value != nullptr ? value : "");
+    return true;
+#else
+    if (value != nullptr) {
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): caller holds processEnvironmentMutex().
+        return ::setenv(key, value, 1) == 0;
+    }
+    // NOLINTNEXTLINE(concurrency-mt-unsafe): caller holds processEnvironmentMutex().
+    return ::unsetenv(key) == 0;
+#endif
+}
+
+void warnEnvironmentOnce(const std::string& message) {
+    static auto* warningMutex = new std::mutex();
+    static auto* warnings = new std::unordered_set<std::string>();
+    bool firstOccurrence = false;
+    {
+        std::lock_guard lock(*warningMutex);
+        firstOccurrence = warnings->insert(message).second;
+    }
+    if (firstOccurrence) {
+        spdlog::warn("{}", message);
+    }
+}
+
+std::size_t findFlatTomlComment(std::string_view value) {
+    char activeQuote = '\0';
+    bool escaped = false;
+    for (std::size_t i = 0; i < value.size(); ++i) {
+        const char current = value[i];
+        if (activeQuote == '"' && escaped) {
+            escaped = false;
+            continue;
+        }
+        if (activeQuote == '"' && current == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (activeQuote != '\0') {
+            if (current == activeQuote) {
+                activeQuote = '\0';
+            }
+            continue;
+        }
+        if (current == '"' || current == '\'') {
+            activeQuote = current;
+        } else if (current == '#') {
+            return i;
+        }
+    }
+    return std::string_view::npos;
+}
+
+template <typename T, typename Parser>
+ParsedEnvironmentValue<T> readTypedEnvironment(std::string_view key, std::string_view expected,
+                                               Parser&& parser) {
+    ParsedEnvironmentValue<T> result;
+    const auto raw = getenv_optional(key);
+    if (!raw || detail::trimView(*raw).empty()) {
+        return result;
+    }
+
+    result.present = true;
+    result.raw = *raw;
+    result.value = parser(*raw);
+    if (!result.value) {
+        warnEnvironmentOnce("Ignoring invalid environment " + std::string(key) + "='" +
+                            yams::common::sanitizeForTerminal(*raw) + "'; expected " +
+                            std::string(expected));
+    }
+    return result;
 }
 
 } // namespace
+
+std::optional<std::string> getenv_optional(std::string_view key) {
+    const std::string name(key);
+    std::lock_guard lock(processEnvironmentMutex());
+    return environmentValueLocked(name.c_str());
+}
+
+std::optional<std::string> getenv_nonempty(std::string_view key) {
+    const auto value = getenv_optional(key);
+    return value && !value->empty() ? value : std::nullopt;
+}
+
+std::map<std::string, std::string> snapshot_environment_prefix(std::string_view prefix) {
+    std::map<std::string, std::string> snapshot;
+    std::lock_guard lock(processEnvironmentMutex());
+    const auto append = [&](std::string_view entry) {
+        const auto separator = entry.find('=');
+        if (separator == std::string_view::npos) {
+            return;
+        }
+        const auto name = entry.substr(0, separator);
+        if (name.starts_with(prefix)) {
+            snapshot.emplace(name, entry.substr(separator + 1));
+        }
+    };
+
+#ifdef _WIN32
+    char* environment = GetEnvironmentStringsA();
+    if (environment == nullptr) {
+        return snapshot;
+    }
+    for (const char* entry = environment; *entry != '\0'; entry += std::strlen(entry) + 1) {
+        append(entry);
+    }
+    FreeEnvironmentStringsA(environment);
+    for (const auto& name : explicitEmptyEnvironmentKeys()) {
+        if (name.starts_with(prefix)) {
+            snapshot.emplace(name, std::string{});
+        }
+    }
+#else
+#ifdef __APPLE__
+    char** environment = *_NSGetEnviron();
+#else
+    char** environment = ::environ;
+#endif
+    if (environment != nullptr) {
+        for (char** entry = environment; *entry != nullptr; ++entry) {
+            append(*entry);
+        }
+    }
+#endif
+    return snapshot;
+}
+
+bool set_environment(const char* key, const char* value) noexcept {
+    if (key == nullptr || *key == '\0') {
+        return false;
+    }
+    try {
+        std::lock_guard lock(processEnvironmentMutex());
+        auto& ownership = processEnvironmentOwnership()[key];
+        if (!mutateEnvironmentLocked(key, value)) {
+            return false;
+        }
+        ownership.currentLease.reset();
+        ownership.leases.clear();
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+std::optional<std::uint64_t> set_environment_owned(const char* key, const char* value) noexcept {
+    if (key == nullptr || *key == '\0' || value == nullptr) {
+        return std::nullopt;
+    }
+    try {
+        std::lock_guard lock(processEnvironmentMutex());
+        auto& failureCountdown = ownedLeaseFailureCountdown();
+        if (failureCountdown) {
+            if (*failureCountdown == 0) {
+                failureCountdown.reset();
+                return std::nullopt;
+            }
+            --*failureCountdown;
+        }
+        auto& ownership = processEnvironmentOwnership()[key];
+        auto& generation = processEnvironmentLeaseGeneration();
+        if (generation == std::numeric_limits<std::uint64_t>::max()) {
+            return std::nullopt;
+        }
+
+        const auto previousValue = environmentValueLocked(key);
+        auto parent = ownership.currentLease;
+        if (parent) {
+            const auto active = ownership.leases.find(*parent);
+            if (active == ownership.leases.end() || !previousValue ||
+                *previousValue != active->second.installedValue) {
+                // A writer bypassed the shared boundary. Do not let an older lease later
+                // overwrite that value after this new lease restores it.
+                ownership.currentLease.reset();
+                ownership.leases.clear();
+                parent.reset();
+            }
+        }
+
+        const auto token = generation + 1;
+        const auto [lease, inserted] = ownership.leases.emplace(
+            token, EnvironmentLeaseRecord{
+                       .installedValue = value, .previousValue = previousValue, .parent = parent});
+        if (!inserted) {
+            return std::nullopt;
+        }
+        if (!mutateEnvironmentLocked(key, value)) {
+            ownership.leases.erase(lease);
+            return std::nullopt;
+        }
+        generation = token;
+        ownership.currentLease = token;
+        return token;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+EnvironmentRestoreResult restore_environment_if_owned(const char* key,
+                                                      std::uint64_t installedGeneration) noexcept {
+    if (key == nullptr || *key == '\0') {
+        return EnvironmentRestoreResult::Error;
+    }
+    try {
+        std::lock_guard lock(processEnvironmentMutex());
+        const auto state = processEnvironmentOwnership().find(std::string_view{key});
+        if (state == processEnvironmentOwnership().end()) {
+            return EnvironmentRestoreResult::OwnershipLost;
+        }
+        auto& ownership = state->second;
+        const auto lease = ownership.leases.find(installedGeneration);
+        if (lease == ownership.leases.end()) {
+            return EnvironmentRestoreResult::OwnershipLost;
+        }
+        if (ownedLeaseRestoreFailurePending()) {
+            ownedLeaseRestoreFailurePending() = false;
+            ownership.currentLease.reset();
+            ownership.leases.clear();
+            return EnvironmentRestoreResult::Error;
+        }
+        if (ownership.currentLease != installedGeneration) {
+            const auto child =
+                std::find_if(ownership.leases.begin(), ownership.leases.end(),
+                             [installedGeneration](const auto& candidate) {
+                                 return candidate.second.parent == installedGeneration;
+                             });
+            if (child == ownership.leases.end()) {
+                ownership.leases.erase(lease);
+                return EnvironmentRestoreResult::OwnershipLost;
+            }
+            child->second.previousValue.swap(lease->second.previousValue);
+            child->second.parent = lease->second.parent;
+            ownership.leases.erase(lease);
+            return EnvironmentRestoreResult::Released;
+        }
+
+        const auto currentValue = environmentValueLocked(key);
+        if (!currentValue || *currentValue != lease->second.installedValue) {
+            ownership.currentLease.reset();
+            ownership.leases.clear();
+            return EnvironmentRestoreResult::OwnershipLost;
+        }
+        if (!mutateEnvironmentLocked(key, lease->second.previousValue
+                                              ? lease->second.previousValue->c_str()
+                                              : nullptr)) {
+            ownership.currentLease.reset();
+            ownership.leases.clear();
+            return EnvironmentRestoreResult::Error;
+        }
+        ownership.currentLease = lease->second.parent;
+        ownership.leases.erase(lease);
+        return EnvironmentRestoreResult::Restored;
+    } catch (...) {
+        return EnvironmentRestoreResult::Error;
+    }
+}
+
+void testing_fail_owned_environment_lease_after(std::size_t successfulLeases) noexcept {
+    try {
+        std::lock_guard lock(processEnvironmentMutex());
+        ownedLeaseFailureCountdown() = successfulLeases;
+    } catch (...) {
+        return;
+    }
+}
+
+void testing_fail_owned_environment_restore_once() noexcept {
+    try {
+        std::lock_guard lock(processEnvironmentMutex());
+        ownedLeaseRestoreFailurePending() = true;
+    } catch (...) {
+        return;
+    }
+}
+
+std::string getenv_copy(const char* key) {
+    const auto value = getenv_nonempty(key);
+    return value.value_or(std::string{});
+}
+
+ParsedEnvironmentValue<bool> read_env_bool(std::string_view key) {
+    return readTypedEnvironment<bool>(
+        key, "one of 1/0, true/false, yes/no, on/off",
+        [](std::string_view raw) { return detail::parseTomlBool(detail::trimView(raw)); });
+}
+
+ParsedEnvironmentValue<std::size_t> read_env_size(std::string_view key) {
+    return readTypedEnvironment<std::size_t>(
+        key, "a non-negative integer",
+        [](std::string_view raw) { return detail::parseUnsignedIntegral<std::size_t>(raw); });
+}
+
+ParsedEnvironmentValue<int> read_env_int(std::string_view key) {
+    return readTypedEnvironment<int>(key, "an integer", [](std::string_view raw) {
+        raw = detail::trimView(raw);
+        int value{};
+        const char* begin = raw.data();
+        const char* end = begin + raw.size();
+        const auto [parsedEnd, error] = std::from_chars(begin, end, value);
+        return error == std::errc{} && parsedEnd == end ? std::optional<int>{value}
+                                                        : std::optional<int>{};
+    });
+}
+
+ParsedEnvironmentValue<std::uint32_t> read_env_u32(std::string_view key) {
+    return readTypedEnvironment<std::uint32_t>(key, "a uint32 integer", [](std::string_view raw) {
+        return detail::parseUnsignedIntegral<std::uint32_t>(raw);
+    });
+}
+
+ParsedEnvironmentValue<float> read_env_float(std::string_view key) {
+    return readTypedEnvironment<float>(key, "a finite number", [](std::string_view raw) {
+        const auto parsed = detail::parseDouble(raw);
+        if (!parsed || *parsed > std::numeric_limits<float>::max() ||
+            *parsed < std::numeric_limits<float>::lowest()) {
+            return std::optional<float>{};
+        }
+        return std::optional<float>{static_cast<float>(*parsed)};
+    });
+}
+
+ParsedEnvironmentValue<double> read_env_double(std::string_view key) {
+    return readTypedEnvironment<double>(key, "a finite number", detail::parseDouble);
+}
+
+ParsedEnvironmentValue<std::chrono::milliseconds> read_env_milliseconds(std::string_view key) {
+    return readTypedEnvironment<std::chrono::milliseconds>(
+        key, "a non-negative integer number of milliseconds", [](std::string_view raw) {
+            const auto parsed = detail::parseUnsignedIntegral<std::chrono::milliseconds::rep>(raw);
+            return parsed ? std::optional{std::chrono::milliseconds{*parsed}}
+                          : std::optional<std::chrono::milliseconds>{};
+        });
+}
+
+VectorEnvironmentPolicy resolve_vector_environment(bool configuredEnabled) {
+    constexpr std::array<std::string_view, 3> kDisableAliases{
+        "YAMS_DISABLE_VECTORS", "YAMS_DISABLE_VECTOR", "YAMS_DISABLE_VECTOR_DB"};
+
+    VectorEnvironmentPolicy policy;
+    policy.enabled = configuredEnabled;
+    bool sawFalse = false;
+    for (const auto alias : kDisableAliases) {
+        const auto parsed = read_env_bool(alias);
+        if (parsed.invalid()) {
+            policy.diagnostics.push_back("Ignoring invalid vector-disable alias " +
+                                         std::string(alias) + "='" +
+                                         yams::common::sanitizeForTerminal(parsed.raw) + "'");
+            continue;
+        }
+        if (!parsed.value) {
+            continue;
+        }
+        if (*parsed.value) {
+            policy.disableSources.emplace_back(alias);
+        } else {
+            sawFalse = true;
+        }
+    }
+
+    if (!policy.disableSources.empty()) {
+        policy.enabled = false;
+        if (sawFalse) {
+            const std::string diagnostic =
+                "Conflicting vector-disable aliases; a valid disable=true value wins";
+            policy.diagnostics.push_back(diagnostic);
+            warnEnvironmentOnce(diagnostic);
+        }
+    }
+    return policy;
+}
+
+std::string sanitize_for_terminal(std::string_view in) {
+    return yams::common::sanitizeForTerminal(in);
+}
 
 std::filesystem::path expand_tilde(const std::string& path) {
     if (!path.empty() && path[0] == '~') {
         if (const auto home = getenv_copy("HOME"); !home.empty()) {
             // path may be "~" (bare home) or "~/..." (relative to home).
             // path.substr(2) would throw std::out_of_range for a bare "~".
-            if (path.size() >= 2 && path[1] == '/') {
+            if (path.size() >= 2 && (path[1] == '/' || path[1] == '\\')) {
                 return std::filesystem::path(home) / path.substr(2);
             }
             if (path.size() == 1) {
@@ -72,26 +614,15 @@ std::filesystem::path get_config_dir() {
     return std::filesystem::current_path() / ".yams";
 }
 
-std::filesystem::path get_data_dir() {
-    // Check YAMS_DATA_DIR environment variable first (used by test fixtures)
-    if (const auto dataDir = getenv_copy("YAMS_DATA_DIR"); !dataDir.empty()) {
-        return std::filesystem::path(dataDir);
-    }
-    // Also check legacy YAMS_STORAGE env var for backwards compatibility
-    if (const auto storage = getenv_copy("YAMS_STORAGE"); !storage.empty()) {
-        return std::filesystem::path(storage);
-    }
+static std::filesystem::path get_platform_data_dir() {
 #ifdef _WIN32
-    // Windows: Use LOCALAPPDATA for local data (databases, indices)
     if (const auto localAppData = getenv_copy("LOCALAPPDATA"); !localAppData.empty()) {
         return std::filesystem::path(localAppData) / "yams";
     }
-    // Fallback to USERPROFILE
     if (const auto userProfile = getenv_copy("USERPROFILE"); !userProfile.empty()) {
         return std::filesystem::path(userProfile) / "AppData" / "Local" / "yams";
     }
 #else
-    // Unix: Follow XDG Base Directory Specification
     if (const auto xdgData = getenv_copy("XDG_DATA_HOME"); !xdgData.empty()) {
         return std::filesystem::path(xdgData) / "yams";
     }
@@ -99,8 +630,15 @@ std::filesystem::path get_data_dir() {
         return std::filesystem::path(home) / ".local" / "share" / "yams";
     }
 #endif
-    // Last resort: current directory
     return std::filesystem::current_path() / "yams_data";
+}
+
+std::filesystem::path get_data_dir() {
+    auto resolved = resolve_runtime_paths();
+    if (resolved) {
+        return resolved.value().dataDir.value;
+    }
+    throw std::invalid_argument(resolved.error().message);
 }
 
 std::filesystem::path get_cache_dir() {
@@ -192,6 +730,62 @@ bool can_write_to_directory(const std::filesystem::path& dir) {
     return true;
 }
 
+std::filesystem::path
+resolve_default_socket_path(const std::optional<std::filesystem::path>& runtimeOverride) {
+    namespace fs = std::filesystem;
+    if (runtimeOverride && !runtimeOverride->empty()) {
+        return *runtimeOverride / "yams-daemon.sock";
+    }
+#ifdef _WIN32
+    if (const auto localAppData = getenv_copy("LOCALAPPDATA"); !localAppData.empty()) {
+        const auto runtimeDir = fs::path(localAppData) / "yams";
+        std::error_code error;
+        yams::common::ensureDirectories(runtimeDir, error);
+        if (!error && can_write_to_directory(runtimeDir)) {
+            return runtimeDir / "yams-daemon.sock";
+        }
+    }
+    return fs::temp_directory_path() / "yams-daemon.sock";
+#else
+    if (geteuid() == 0) {
+        return fs::path("/var/run/yams-daemon.sock");
+    }
+    if (const auto xdgRuntime = getenv_copy("XDG_RUNTIME_DIR"); !xdgRuntime.empty()) {
+        const fs::path runtimeDir(xdgRuntime);
+        if (can_write_to_directory(runtimeDir)) {
+            return runtimeDir / "yams-daemon.sock";
+        }
+    }
+    return fs::path("/tmp") /
+           ("yams-daemon-" + std::to_string(static_cast<unsigned long long>(getuid())) + ".sock");
+#endif
+}
+
+std::filesystem::path
+resolve_default_pid_path(const std::optional<std::filesystem::path>& runtimeOverride) {
+    namespace fs = std::filesystem;
+    if (runtimeOverride && !runtimeOverride->empty()) {
+        return *runtimeOverride / "yams-daemon.pid";
+    }
+#ifdef _WIN32
+    if (auto runtimeDir = get_daemon_runtime_dir();
+        !runtimeDir.empty() && can_write_to_directory(runtimeDir)) {
+        return runtimeDir / "yams-daemon.pid";
+    }
+    return fs::temp_directory_path() / "yams-daemon.pid";
+#else
+    if (geteuid() == 0) {
+        return fs::path("/var/run/yams-daemon.pid");
+    }
+    if (auto runtimeDir = get_daemon_runtime_dir();
+        !runtimeDir.empty() && can_write_to_directory(runtimeDir)) {
+        return runtimeDir / "yams-daemon.pid";
+    }
+    return fs::path("/tmp") /
+           ("yams-daemon-" + std::to_string(static_cast<unsigned long long>(getuid())) + ".pid");
+#endif
+}
+
 std::filesystem::path get_state_home_for_daemon_log() {
     auto stateDir = get_state_dir();
     if (stateDir.empty()) {
@@ -220,26 +814,11 @@ std::filesystem::path get_daemon_status_file() {
 }
 
 std::filesystem::path resolve_daemon_pid_file_path() {
-    if (auto configured = resolve_pid_file_from_config(); !configured.empty()) {
-        return configured;
+    auto resolved = resolve_runtime_paths();
+    if (resolved) {
+        return resolved.value().pidFile.value;
     }
-#ifdef _WIN32
-    if (auto runtimeDir = get_daemon_runtime_dir();
-        !runtimeDir.empty() && can_write_to_directory(runtimeDir)) {
-        return runtimeDir / "yams-daemon.pid";
-    }
-    return std::filesystem::temp_directory_path() / "yams-daemon.pid";
-#else
-    if (geteuid() == 0) {
-        return std::filesystem::path("/var/run/yams-daemon.pid");
-    }
-    if (auto runtimeDir = get_daemon_runtime_dir();
-        !runtimeDir.empty() && can_write_to_directory(runtimeDir)) {
-        return runtimeDir / "yams-daemon.pid";
-    }
-    return std::filesystem::path("/tmp") /
-           ("yams-daemon-" + std::to_string(static_cast<unsigned long long>(getuid())) + ".pid");
-#endif
+    throw std::invalid_argument(resolved.error().message);
 }
 
 std::filesystem::path resolve_daemon_log_file_path() {
@@ -286,184 +865,238 @@ std::filesystem::path get_legacy_plugin_trust_file() {
 
 std::string parse_config_value(const std::filesystem::path& config_path, const std::string& section,
                                const std::string& key) {
-    std::ifstream file(config_path);
-    if (!file) {
-        return "";
+    const auto values = parse_simple_toml(config_path);
+    const auto qualifiedKey = section.empty() ? key : section + "." + key;
+    if (const auto it = values.find(qualifiedKey); it != values.end()) {
+        return it->second;
     }
-
-    std::string line;
-    std::string currentSection;
-    bool in_target_section = section.empty();
-
-    while (std::getline(file, line)) {
-        trim(line);
-
-        // Skip comments and empty lines
-        if (line.empty() || line[0] == '#') {
-            continue;
-        }
-
-        // Check for section headers [section]
-        if (line[0] == '[') {
-            size_t end = line.find(']');
-            if (end != std::string::npos) {
-                currentSection = line.substr(1, end - 1);
-                trim(currentSection);
-                in_target_section = (section.empty() || currentSection == section);
-            }
-            continue;
-        }
-
-        // Parse key-value pairs
-        if (in_target_section) {
-            size_t eq = line.find('=');
-            if (eq != std::string::npos) {
-                std::string k = line.substr(0, eq);
-                std::string v = line.substr(eq + 1);
-
-                trim(k);
-                trim(v);
-
-                // Remove inline comments
-                size_t comment = v.find('#');
-                if (comment != std::string::npos) {
-                    v = v.substr(0, comment);
-                    trim(v);
-                }
-
-                if (k == key) {
-                    return unquote(v);
-                }
-            }
-        }
-    }
-
-    return "";
+    return {};
 }
 
 std::filesystem::path get_config_path(const std::string& override_path) {
     if (!override_path.empty()) {
         return std::filesystem::path(override_path);
     }
-    // Check YAMS_CONFIG environment variable first (used by test fixtures)
-    if (const auto configEnv = getenv_copy("YAMS_CONFIG"); !configEnv.empty()) {
-        return std::filesystem::path(configEnv);
+    // Compatibility override retained for ConfigResolver callers and older harnesses. A stale
+    // compatibility path falls through to the canonical path instead of masking it.
+    if (const auto compatibilityEnv = getenv_copy("YAMS_CONFIG_PATH"); !compatibilityEnv.empty()) {
+        const auto compatibilityPath = expand_tilde(compatibilityEnv);
+        std::error_code error;
+        if (std::filesystem::exists(compatibilityPath, error) && !error) {
+            return compatibilityPath;
+        }
     }
-    // Use the platform-specific config directory helper
+    if (const auto configEnv = getenv_copy("YAMS_CONFIG"); !configEnv.empty()) {
+        return expand_tilde(configEnv);
+    }
     return get_config_dir() / "config.toml";
 }
 
-// Helper to parse path-specific config values with tilde expansion
-static std::filesystem::path parse_config_path_value(const std::filesystem::path& config_path,
-                                                     const std::string& target_section,
-                                                     const std::string& target_key) {
-    if (!std::filesystem::exists(config_path))
-        return {};
+// Helper to parse path-specific config values with tilde expansion.
+static std::filesystem::path parse_config_path_value(const std::filesystem::path& configPath,
+                                                     const std::string& targetSection,
+                                                     const std::string& targetKey) {
+    const auto value = parse_config_value(configPath, targetSection, targetKey);
+    return value.empty() ? std::filesystem::path{} : expand_tilde(value);
+}
 
-    std::ifstream f(config_path);
-    std::string line, current_section;
+namespace {
 
-    while (std::getline(f, line)) {
-        trim(line);
-        if (line.empty() || line[0] == '#')
-            continue;
+bool paths_equal(const std::filesystem::path& lhs, const std::filesystem::path& rhs) {
+    return lhs.lexically_normal() == rhs.lexically_normal();
+}
 
-        if (line.front() == '[') {
-            trim(line);
-            if (line.size() >= 2 && line.back() == ']') {
-                current_section = line.substr(1, line.size() - 2);
-                trim(current_section);
-            }
-            continue;
+ResolvedRuntimePath make_resolved_path(std::filesystem::path value, RuntimePathSource source,
+                                       std::string sourceName) {
+    return ResolvedRuntimePath{std::move(value), source, std::move(sourceName)};
+}
+
+std::string alias_conflict_message(std::string_view firstName,
+                                   const std::filesystem::path& firstValue,
+                                   std::string_view secondName,
+                                   const std::filesystem::path& secondValue) {
+    return "Conflicting runtime path aliases " + std::string(firstName) + "='" +
+           firstValue.string() + "' and " + std::string(secondName) + "='" + secondValue.string() +
+           "'";
+}
+
+} // namespace
+
+Result<ResolvedRuntimePaths> resolve_runtime_paths(const RuntimePathOverrides& overrides) {
+    ResolvedRuntimePaths resolved;
+
+    if (overrides.configFile && !overrides.configFile->empty()) {
+        resolved.configFile = make_resolved_path(expand_tilde(overrides.configFile->string()),
+                                                 RuntimePathSource::Explicit, "explicit config");
+    } else {
+        const auto compatibilityConfig = getenv_copy("YAMS_CONFIG_PATH");
+        const auto canonicalConfig = getenv_copy("YAMS_CONFIG");
+        std::error_code compatibilityError;
+        const bool compatibilityActive =
+            !compatibilityConfig.empty() &&
+            std::filesystem::exists(expand_tilde(compatibilityConfig), compatibilityError) &&
+            !compatibilityError;
+        const auto configSource = compatibilityActive || !canonicalConfig.empty()
+                                      ? RuntimePathSource::Environment
+                                      : RuntimePathSource::PlatformDefault;
+        const auto configSourceName =
+            compatibilityActive
+                ? "YAMS_CONFIG_PATH"
+                : (!canonicalConfig.empty() ? "YAMS_CONFIG" : "platform config default");
+        const auto configPath = compatibilityActive
+                                    ? expand_tilde(compatibilityConfig)
+                                    : (!canonicalConfig.empty() ? expand_tilde(canonicalConfig)
+                                                                : get_config_dir() / "config.toml");
+        resolved.configFile = make_resolved_path(configPath, configSource, configSourceName);
+    }
+
+    std::vector<std::pair<std::string, std::filesystem::path>> configuredDataPaths;
+    const auto addConfiguredDataPath = [&](std::string section, std::string key) {
+        if (auto value = parse_config_path_value(resolved.configFile.value, section, key);
+            !value.empty()) {
+            configuredDataPaths.emplace_back(section + "." + key, std::move(value));
         }
+    };
+    addConfiguredDataPath("core", "data_dir");
+    addConfiguredDataPath("daemon", "data_dir");
+    addConfiguredDataPath("daemon", "storage");
+    addConfiguredDataPath("daemon", "storage_path");
 
-        auto pos = line.find('=');
-        if (pos == std::string::npos)
-            continue;
-
-        std::string key = line.substr(0, pos);
-        std::string val = line.substr(pos + 1);
-        trim(key);
-        val = unquote(val);
-
-        // Support both "daemon.socket_path" and "[daemon] socket_path"
-        if (key == target_section + "." + target_key ||
-            (current_section == target_section && key == target_key)) {
-            return expand_tilde(val);
+    const auto explicitData = overrides.dataDir && !overrides.dataDir->empty();
+    if (configuredDataPaths.size() > 1) {
+        const auto& [firstName, firstValue] = configuredDataPaths.front();
+        for (auto it = std::next(configuredDataPaths.begin()); it != configuredDataPaths.end();
+             ++it) {
+            if (!paths_equal(firstValue, it->second)) {
+                const auto message =
+                    alias_conflict_message(firstName, firstValue, it->first, it->second);
+                if (!explicitData) {
+                    return Error{ErrorCode::InvalidData, message};
+                }
+                resolved.diagnostics.push_back(message + " (ignored by explicit data path)");
+            }
         }
     }
-    return {};
+
+    const auto legacyStorage = getenv_copy("YAMS_STORAGE");
+    const auto canonicalData = getenv_copy("YAMS_DATA_DIR");
+    const bool dataEnvConflict = !legacyStorage.empty() && !canonicalData.empty() &&
+                                 !paths_equal(legacyStorage, canonicalData);
+    const bool configuredData = !configuredDataPaths.empty();
+    if (dataEnvConflict) {
+        const auto message =
+            alias_conflict_message("YAMS_STORAGE", legacyStorage, "YAMS_DATA_DIR", canonicalData);
+        if (!explicitData && !configuredData) {
+            return Error{ErrorCode::InvalidData, message};
+        }
+        resolved.diagnostics.push_back(message + " (ignored by higher-precedence data path)");
+    }
+
+    if (explicitData) {
+        resolved.dataDir = make_resolved_path(expand_tilde(overrides.dataDir->string()),
+                                              RuntimePathSource::Explicit, "explicit data path");
+    } else if (configuredData) {
+        resolved.dataDir =
+            make_resolved_path(configuredDataPaths.front().second, RuntimePathSource::ConfigFile,
+                               configuredDataPaths.front().first);
+    } else if (!canonicalData.empty()) {
+        resolved.dataDir = make_resolved_path(expand_tilde(canonicalData),
+                                              RuntimePathSource::Environment, "YAMS_DATA_DIR");
+    } else if (!legacyStorage.empty()) {
+        resolved.dataDir = make_resolved_path(expand_tilde(legacyStorage),
+                                              RuntimePathSource::Environment, "YAMS_STORAGE");
+    } else {
+        resolved.dataDir = make_resolved_path(
+            get_platform_data_dir(), RuntimePathSource::PlatformDefault, "platform data default");
+    }
+
+    const auto explicitRuntime = overrides.runtimeDir && !overrides.runtimeDir->empty();
+    if (explicitRuntime) {
+        resolved.runtimeDir =
+            make_resolved_path(expand_tilde(overrides.runtimeDir->string()),
+                               RuntimePathSource::Explicit, "explicit runtime path");
+    } else {
+        resolved.runtimeDir = make_resolved_path(
+            get_runtime_dir(), RuntimePathSource::PlatformDefault, "platform runtime default");
+    }
+
+    const auto canonicalSocket = getenv_copy("YAMS_DAEMON_SOCKET");
+    const auto compatibilitySocket = getenv_copy("YAMS_DAEMON_SOCKET_PATH");
+    const bool explicitSocket = overrides.socketPath && !overrides.socketPath->empty();
+    if (!canonicalSocket.empty() && !compatibilitySocket.empty() &&
+        !paths_equal(canonicalSocket, compatibilitySocket)) {
+        const auto message = alias_conflict_message("YAMS_DAEMON_SOCKET", canonicalSocket,
+                                                    "YAMS_DAEMON_SOCKET_PATH", compatibilitySocket);
+        if (!explicitSocket) {
+            return Error{ErrorCode::InvalidData, message};
+        }
+        resolved.diagnostics.push_back(message + " (ignored by explicit socket path)");
+    }
+
+    if (explicitSocket) {
+        resolved.socketPath =
+            make_resolved_path(expand_tilde(overrides.socketPath->string()),
+                               RuntimePathSource::Explicit, "explicit socket path");
+    } else if (!canonicalSocket.empty()) {
+        resolved.socketPath = make_resolved_path(
+            expand_tilde(canonicalSocket), RuntimePathSource::Environment, "YAMS_DAEMON_SOCKET");
+    } else if (!compatibilitySocket.empty()) {
+        resolved.socketPath =
+            make_resolved_path(expand_tilde(compatibilitySocket), RuntimePathSource::Environment,
+                               "YAMS_DAEMON_SOCKET_PATH");
+    } else if (auto configured =
+                   parse_config_path_value(resolved.configFile.value, "daemon", "socket_path");
+               !configured.empty()) {
+        resolved.socketPath = make_resolved_path(
+            std::move(configured), RuntimePathSource::ConfigFile, "daemon.socket_path");
+    } else {
+        resolved.socketPath = make_resolved_path(
+            resolve_default_socket_path(explicitRuntime ? std::optional{resolved.runtimeDir.value}
+                                                        : std::nullopt),
+            RuntimePathSource::PlatformDefault, "platform socket default");
+    }
+
+    const bool explicitPid = overrides.pidFile && !overrides.pidFile->empty();
+    if (explicitPid) {
+        resolved.pidFile = make_resolved_path(expand_tilde(overrides.pidFile->string()),
+                                              RuntimePathSource::Explicit, "explicit PID path");
+    } else if (auto configured =
+                   parse_config_path_value(resolved.configFile.value, "daemon", "pid_file");
+               !configured.empty()) {
+        resolved.pidFile = make_resolved_path(std::move(configured), RuntimePathSource::ConfigFile,
+                                              "daemon.pid_file");
+    } else {
+        resolved.pidFile = make_resolved_path(
+            resolve_default_pid_path(explicitRuntime ? std::optional{resolved.runtimeDir.value}
+                                                     : std::nullopt),
+            RuntimePathSource::PlatformDefault, "platform PID default");
+    }
+
+    return resolved;
 }
 
 std::filesystem::path resolve_socket_path_from_config() {
-    // 1) YAMS_DAEMON_SOCKET env
-    if (const auto env = getenv_copy("YAMS_DAEMON_SOCKET"); !env.empty()) {
-        return std::filesystem::path(env);
+    auto resolved = resolve_runtime_paths();
+    if (resolved) {
+        return resolved.value().socketPath.value;
     }
-
-    // 2) config.toml daemon.socket_path
-    std::filesystem::path config_path;
-    if (const auto cfg_env = getenv_copy("YAMS_CONFIG"); !cfg_env.empty()) {
-        config_path = std::filesystem::path(cfg_env);
-    } else {
-        config_path = get_config_path();
-    }
-
-    if (!config_path.empty()) {
-        if (auto result = parse_config_path_value(config_path, "daemon", "socket_path");
-            !result.empty()) {
-            return result;
-        }
-    }
-
-    // 3) Default
-    return {};
+    throw std::invalid_argument(resolved.error().message);
 }
 
 std::filesystem::path resolve_pid_file_from_config() {
-    std::filesystem::path config_path;
-    if (const auto cfg_env = getenv_copy("YAMS_CONFIG"); !cfg_env.empty()) {
-        config_path = std::filesystem::path(cfg_env);
-    } else {
-        config_path = get_config_path();
+    auto resolved = resolve_runtime_paths();
+    if (resolved) {
+        return resolved.value().pidFile.value;
     }
-
-    if (!config_path.empty()) {
-        if (auto result = parse_config_path_value(config_path, "daemon", "pid_file");
-            !result.empty()) {
-            return result;
-        }
-    }
-
-    return {};
+    throw std::invalid_argument(resolved.error().message);
 }
 
 std::filesystem::path resolve_data_dir_from_config() {
-    // 1) config.toml core.data_dir
-    std::filesystem::path config_path;
-    if (const auto cfg_env = getenv_copy("YAMS_CONFIG"); !cfg_env.empty()) {
-        config_path = std::filesystem::path(cfg_env);
-    } else {
-        config_path = get_config_path();
+    auto resolved = resolve_runtime_paths();
+    if (resolved) {
+        return resolved.value().dataDir.value;
     }
-
-    if (!config_path.empty()) {
-        if (auto result = parse_config_path_value(config_path, "core", "data_dir");
-            !result.empty()) {
-            return result;
-        }
-    }
-
-    // 2) Environment overrides when config does not set a data dir.
-    if (const auto env = getenv_copy("YAMS_STORAGE"); !env.empty()) {
-        return std::filesystem::path(env);
-    }
-    if (const auto env = getenv_copy("YAMS_DATA_DIR"); !env.empty()) {
-        return std::filesystem::path(env);
-    }
-
-    // 3) Platform-specific default
-    return get_data_dir();
+    throw std::invalid_argument(resolved.error().message);
 }
 
 std::string resolve_daemon_mode_from_config() {
@@ -475,12 +1108,7 @@ std::string resolve_daemon_mode_from_config() {
         }
     }
 
-    std::filesystem::path config_path;
-    if (const auto cfg_env = getenv_copy("YAMS_CONFIG"); !cfg_env.empty()) {
-        config_path = std::filesystem::path(cfg_env);
-    } else {
-        config_path = get_config_path();
-    }
+    const std::filesystem::path config_path = get_config_path();
 
     if (!config_path.empty()) {
         auto value = parse_config_value(config_path, "daemon", "mode");
@@ -506,15 +1134,45 @@ std::vector<std::filesystem::path> parse_path_list(const std::string& raw) {
         s = s.substr(1, s.size() - 2);
     }
 
-    std::stringstream ss(s);
+    char activeQuote = '\0';
+    bool escaped = false;
     std::string item;
-    while (std::getline(ss, item, ',')) {
+    const auto appendItem = [&] {
         trim(item);
         item = unquote(item);
-        if (item.empty())
+        if (!item.empty()) {
+            out.emplace_back(expand_tilde(item));
+        }
+        item.clear();
+    };
+    for (const char current : s) {
+        if (activeQuote == '"' && escaped) {
+            item.push_back(current);
+            escaped = false;
             continue;
-        out.emplace_back(expand_tilde(item));
+        }
+        if (activeQuote == '"' && current == '\\') {
+            item.push_back(current);
+            escaped = true;
+            continue;
+        }
+        if (activeQuote != '\0') {
+            item.push_back(current);
+            if (current == activeQuote) {
+                activeQuote = '\0';
+            }
+            continue;
+        }
+        if (current == '"' || current == '\'') {
+            activeQuote = current;
+            item.push_back(current);
+        } else if (current == ',') {
+            appendItem();
+        } else {
+            item.push_back(current);
+        }
     }
+    appendItem();
 
     return out;
 }
@@ -563,16 +1221,12 @@ std::map<std::string, std::string> parse_simple_toml(const std::filesystem::path
             trim(key);
             trim(value);
 
-            // Remove inline comments (but be careful with quoted strings)
-            bool inQuote = false;
-            for (size_t i = 0; i < value.size(); ++i) {
-                if (value[i] == '"' || value[i] == '\'') {
-                    inQuote = !inQuote;
-                } else if (value[i] == '#' && !inQuote) {
-                    value = value.substr(0, i);
-                    trim(value);
-                    break;
-                }
+            // Remove inline comments while respecting the active quote type and escaped double
+            // quotes. The flat reader deliberately preserves escape sequences in returned values.
+            if (const auto comment = findFlatTomlComment(value);
+                comment != std::string_view::npos) {
+                value.resize(comment);
+                trim(value);
             }
 
             value = unquote(value);

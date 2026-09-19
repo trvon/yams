@@ -3,30 +3,19 @@
 #include <atomic>
 #include <cctype>
 #include <cstdio>
-#include <cstdlib>
 #include <limits>
 #include <source_location>
 #include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <yams/config/config_helpers.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/profiling.h>
 
 namespace yams::metadata {
 
 namespace {
-
-std::string getenvCopy(std::string_view name) {
-    static std::mutex envMutex;
-    std::lock_guard<std::mutex> lock(envMutex);
-    const std::string key(name);
-    const char* env = std::getenv(key.c_str()); // NOLINT(concurrency-mt-unsafe)
-    if (!env || !*env) {
-        return {};
-    }
-    return std::string(env);
-}
 
 bool metadata_pool_trace_enabled() {
     static std::atomic<int> cached{-1};
@@ -35,8 +24,7 @@ bool metadata_pool_trace_enabled() {
         return cachedValue == 1;
     }
 
-    const std::string env = getenvCopy("YAMS_METADATA_TRACE");
-    bool enabled = !env.empty() && std::string_view(env) != "0";
+    const bool enabled = yams::config::read_env_bool("YAMS_METADATA_TRACE").valueOr(false);
     cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
     return enabled;
 }
@@ -58,8 +46,7 @@ bool db_lifetime_trace_enabled() {
         return cachedValue == 1;
     }
 
-    const std::string env = getenvCopy("YAMS_TRACE_DB_LIFETIME");
-    bool enabled = !env.empty() && std::string_view(env) != "0";
+    const bool enabled = yams::config::read_env_bool("YAMS_TRACE_DB_LIFETIME").valueOr(false);
     cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
     return enabled;
 }
@@ -85,8 +72,7 @@ bool sqlite_profile_trace_enabled() {
         return cachedValue == 1;
     }
 
-    const std::string env = getenvCopy("YAMS_SQL_TRACE");
-    bool enabled = !env.empty() && std::string_view(env) != "0";
+    const bool enabled = yams::config::read_env_bool("YAMS_SQL_TRACE").valueOr(false);
     cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
     return enabled;
 }
@@ -99,15 +85,10 @@ int sqlite_profile_min_ms() {
     }
 
     int value = 200;
-    if (const std::string env = getenvCopy("YAMS_SQL_TRACE_MIN_MS"); !env.empty()) {
-        try {
-            int parsed = std::stoi(env);
-            if (parsed > 0) {
-                value = parsed;
-            }
-        } catch (const std::exception&) {
-            spdlog::debug("Ignoring invalid YAMS_SQL_TRACE_MIN_MS value");
-        }
+    if (auto configured = yams::config::read_env_milliseconds("YAMS_SQL_TRACE_MIN_MS").value;
+        configured && configured->count() > 0 &&
+        configured->count() <= std::numeric_limits<int>::max()) {
+        value = static_cast<int>(configured->count());
     }
     cached.store(value, std::memory_order_relaxed);
     return value;
@@ -355,18 +336,49 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout, ConnectionPriority pr
     // Wait for available connection
     auto deadline = std::chrono::steady_clock::now() + timeout;
 
-    while (available_.empty()) {
-        // Can we create a new connection?
-        if (totalConnections_ < effectiveMaxConnections) {
-            lock.unlock();
-            auto connResult = createConnection();
-            lock.lock();
+    for (;;) {
+        while (available_.empty()) {
+            // A stale-creation retry may have released mutex_ while closing its Database.
+            if (shutdown_) {
+                failedAcquisitions_++;
+                return Error{ErrorCode::InvalidState, "Pool is shut down"};
+            }
+            if (acquireInterrupted_.load(std::memory_order_acquire)) {
+                failedAcquisitions_++;
+                return Error{ErrorCode::OperationCancelled,
+                             "Connection acquire interrupted for shutdown"};
+            }
+            // Can we reserve capacity for a new connection?
+            if (totalConnections_ + pendingCreations_ < effectiveMaxConnections) {
+                const uint64_t creationGeneration = currentGeneration_.load();
+                auto connResult = createConnectionOutsideLock(lock);
 
-            if (connResult) {
+                if (shutdown_) {
+                    lock.unlock(); // Destroy any successfully created Database outside mutex_.
+                    failedAcquisitions_++;
+                    return Error{ErrorCode::InvalidState, "Pool is shut down"};
+                }
+                if (acquireInterrupted_.load(std::memory_order_acquire)) {
+                    lock.unlock(); // Destroy any successfully created Database outside mutex_.
+                    failedAcquisitions_++;
+                    return Error{ErrorCode::OperationCancelled,
+                                 "Connection acquire interrupted for shutdown"};
+                }
+                if (!connResult) {
+                    failedAcquisitions_++;
+                    return connResult.error();
+                }
+                if (creationGeneration != currentGeneration_.load()) {
+                    auto staleDb = std::move(connResult).value();
+                    lock.unlock();
+                    staleDb.reset();
+                    lock.lock();
+                    continue;
+                }
+
                 auto pooledConn = std::make_unique<PooledConnection>(
                     std::move(connResult).value(),
-                    [this](PooledConnection* conn) { returnConnection(conn); },
-                    currentGeneration_.load());
+                    [this](PooledConnection* conn) { returnConnection(conn); }, creationGeneration);
 
                 pooledConn->markAcquired(effectiveTag);
                 totalConnections_++;
@@ -389,151 +401,138 @@ ConnectionPool::acquire(std::chrono::milliseconds timeout, ConnectionPriority pr
                 }
 
                 return pooledConn;
-            } else {
+            }
+
+            waitingGuard.activate();
+            if (!cv_.wait_until(lock, deadline, [this, effectiveMaxConnections] {
+                    return !available_.empty() ||
+                           totalConnections_ + pendingCreations_ < effectiveMaxConnections ||
+                           shutdown_ || acquireInterrupted_.load(std::memory_order_acquire);
+                })) {
+                waitingGuard.markTimeout();
+                waitingGuard.finish();
                 failedAcquisitions_++;
-                return connResult.error();
+                std::ostringstream holders;
+                std::size_t shown = 0;
+                const auto now = std::chrono::steady_clock::now();
+                for (const auto* leased : leased_) {
+                    if (!leased) {
+                        continue;
+                    }
+                    if (shown++ > 0) {
+                        holders << "; ";
+                    }
+                    const auto heldMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            now - leased->acquiredAt())
+                                            .count();
+                    const auto& tag = leased->holderTag();
+                    holders << (tag.empty() ? "<untagged>" : tag) << " held_ms=" << heldMs;
+                    if (shown >= 8 && leased_.size() > shown) {
+                        holders << "; +" << (leased_.size() - shown) << " more";
+                        break;
+                    }
+                }
+                const std::string holderSummary = holders.str();
+                spdlog::error(
+                    "[ConnectionPool] timeout acquiring connection tag='{}' priority={} active={} "
+                    "available={} total={} waiting={} holders=[{}]",
+                    effectiveTag.empty() ? "<untagged>" : effectiveTag,
+                    priority == ConnectionPriority::High ? "high" : "normal",
+                    activeConnections_.load(std::memory_order_relaxed), available_.size(),
+                    totalConnections_.load(std::memory_order_relaxed),
+                    waitingRequests_.load(std::memory_order_relaxed), holderSummary);
+                return Error{
+                    ErrorCode::Timeout,
+                    "Timeout acquiring connection; active=" +
+                        std::to_string(activeConnections_.load(std::memory_order_relaxed)) +
+                        " available=" + std::to_string(available_.size()) + " total=" +
+                        std::to_string(totalConnections_.load(std::memory_order_relaxed)) +
+                        " holders=[" + holderSummary + "]"};
             }
-        }
-
-        waitingGuard.activate();
-        if (!cv_.wait_until(lock, deadline, [this] {
-                return !available_.empty() || shutdown_ ||
-                       acquireInterrupted_.load(std::memory_order_acquire);
-            })) {
-            waitingGuard.markTimeout();
             waitingGuard.finish();
-            failedAcquisitions_++;
-            std::ostringstream holders;
-            std::size_t shown = 0;
-            const auto now = std::chrono::steady_clock::now();
-            for (const auto* leased : leased_) {
-                if (!leased) {
-                    continue;
-                }
-                if (shown++ > 0) {
-                    holders << "; ";
-                }
-                const auto heldMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                        now - leased->acquiredAt())
-                                        .count();
-                const auto& tag = leased->holderTag();
-                holders << (tag.empty() ? "<untagged>" : tag) << " held_ms=" << heldMs;
-                if (shown >= 8 && leased_.size() > shown) {
-                    holders << "; +" << (leased_.size() - shown) << " more";
-                    break;
-                }
+
+            if (shutdown_) {
+                failedAcquisitions_++;
+                return Error{ErrorCode::InvalidState, "Pool is shut down"};
             }
-            const std::string holderSummary = holders.str();
-            spdlog::error(
-                "[ConnectionPool] timeout acquiring connection tag='{}' priority={} active={} "
-                "available={} total={} waiting={} holders=[{}]",
-                effectiveTag.empty() ? "<untagged>" : effectiveTag,
-                priority == ConnectionPriority::High ? "high" : "normal",
-                activeConnections_.load(std::memory_order_relaxed), available_.size(),
-                totalConnections_.load(std::memory_order_relaxed),
-                waitingRequests_.load(std::memory_order_relaxed), holderSummary);
-            return Error{ErrorCode::Timeout,
-                         "Timeout acquiring connection; active=" +
-                             std::to_string(activeConnections_.load(std::memory_order_relaxed)) +
-                             " available=" + std::to_string(available_.size()) + " total=" +
-                             std::to_string(totalConnections_.load(std::memory_order_relaxed)) +
-                             " holders=[" + holderSummary + "]"};
+            if (acquireInterrupted_.load(std::memory_order_acquire)) {
+                failedAcquisitions_++;
+                return Error{ErrorCode::OperationCancelled,
+                             "Connection acquire interrupted for shutdown"};
+            }
         }
-        waitingGuard.finish();
 
-        if (shutdown_) {
-            failedAcquisitions_++;
-            return Error{ErrorCode::InvalidState, "Pool is shut down"};
+        std::unique_ptr<PooledConnection> conn;
+        const uint64_t currentGen = currentGeneration_.load();
+
+        // Try up to 3 connections from the pool before creating a new one
+        // Note: Validation is performed outside the lock to avoid blocking other threads
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            // Pop connection under lock
+            if (available_.empty()) {
+                break;
+            }
+            conn = std::move(available_.front());
+            available_.pop();
+            conn->returned_ = false;
+
+            // PBI-079: Check if connection is from an old generation (stale) - cheap check under
+            // lock
+            if (conn->generation_ < currentGen) {
+                conn->returned_ = true; // Prevent destructor deadlock
+                totalConnections_--;
+                spdlog::debug("[PBI-079] Discarded stale connection (gen {}, current {})",
+                              conn->generation_, currentGen);
+                conn.reset();
+                continue;
+            }
+
+            // Release lock before validation (SQL queries should not block pool)
+            lock.unlock();
+            bool valid = isConnectionValid(**conn);
+            lock.lock();
+
+            if (valid) {
+                break;
+            } else {
+                // Connection is stale, discard it
+                conn->returned_ = true; // Prevent destructor deadlock
+                totalConnections_--;
+                spdlog::warn("Discarded stale connection on acquire (attempt {})", attempt + 1);
+                conn.reset();
+            }
         }
-        if (acquireInterrupted_.load(std::memory_order_acquire)) {
-            failedAcquisitions_++;
-            return Error{ErrorCode::OperationCancelled,
-                         "Connection acquire interrupted for shutdown"};
-        }
-    }
 
-    std::unique_ptr<PooledConnection> conn;
-    bool createdConnection = false;
-    const uint64_t currentGen = currentGeneration_.load();
-
-    // Try up to 3 connections from the pool before creating a new one
-    // Note: Validation is performed outside the lock to avoid blocking other threads
-    for (int attempt = 0; attempt < 3; ++attempt) {
-        // Pop connection under lock
-        if (available_.empty()) {
-            break;
-        }
-        conn = std::move(available_.front());
-        available_.pop();
-        conn->returned_ = false;
-
-        // PBI-079: Check if connection is from an old generation (stale) - cheap check under lock
-        if (conn->generation_ < currentGen) {
-            conn->returned_ = true; // Prevent destructor deadlock
-            totalConnections_--;
-            spdlog::debug("[PBI-079] Discarded stale connection (gen {}, current {})",
-                          conn->generation_, currentGen);
-            conn.reset();
+        // Route exhausted/invalid validation batches back through capacity admission. This also
+        // handles an available queue drained by another validator while mutex_ was unlocked.
+        if (!conn) {
             continue;
         }
 
-        // Release lock before validation (SQL queries should not block pool)
-        lock.unlock();
-        bool valid = isConnectionValid(**conn);
-        lock.lock();
+        conn->touch();
+        conn->markAcquired(effectiveTag);
+        activeConnections_++;
+        totalAcquired_++;
+        leased_.insert(conn.get());
 
-        if (valid) {
-            break;
-        } else {
-            // Connection is stale, discard it
-            conn->returned_ = true; // Prevent destructor deadlock
-            totalConnections_--;
-            spdlog::warn("Discarded stale connection on acquire (attempt {})", attempt + 1);
-            conn.reset();
-        }
-    }
+        waitingGuard.finish();
 
-    // If no valid connection found, create a new one
-    if (!conn) {
-        lock.unlock();
-        auto connResult = createConnection();
-        lock.lock();
-
-        if (!connResult) {
-            failedAcquisitions_++;
-            return connResult.error();
+        if (metadata_pool_trace_enabled()) {
+            const auto waitUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                                    std::chrono::steady_clock::now() - acquireRequestStart)
+                                    .count();
+            spdlog::info(
+                "ConnectionPool::timeline event='acquire' pool='{}' tag='{}' priority='{}' "
+                "wait_us={} active={} available={} total={} waiting={} created={}",
+                pool_role(config_), effectiveTag,
+                priority == ConnectionPriority::High ? "high" : "normal", waitUs,
+                activeConnections_.load(std::memory_order_relaxed), available_.size(),
+                totalConnections_.load(std::memory_order_relaxed),
+                waitingRequests_.load(std::memory_order_relaxed), "false");
         }
 
-        conn = std::make_unique<PooledConnection>(
-            std::move(connResult).value(), [this](PooledConnection* c) { returnConnection(c); },
-            currentGeneration_.load());
-        createdConnection = true;
-        totalConnections_++;
+        return conn;
     }
-
-    conn->touch();
-    conn->markAcquired(effectiveTag);
-    activeConnections_++;
-    totalAcquired_++;
-    leased_.insert(conn.get());
-
-    waitingGuard.finish();
-
-    if (metadata_pool_trace_enabled()) {
-        const auto waitUs = std::chrono::duration_cast<std::chrono::microseconds>(
-                                std::chrono::steady_clock::now() - acquireRequestStart)
-                                .count();
-        spdlog::info("ConnectionPool::timeline event='acquire' pool='{}' tag='{}' priority='{}' "
-                     "wait_us={} active={} available={} total={} waiting={} created={}",
-                     pool_role(config_), effectiveTag,
-                     priority == ConnectionPriority::High ? "high" : "normal", waitUs,
-                     activeConnections_.load(std::memory_order_relaxed), available_.size(),
-                     totalConnections_.load(std::memory_order_relaxed),
-                     waitingRequests_.load(std::memory_order_relaxed),
-                     createdConnection ? "true" : "false");
-    }
-
-    return conn;
 }
 
 ConnectionPool::Stats ConnectionPool::getStats() const {
@@ -563,45 +562,54 @@ void ConnectionPool::interruptPendingAcquires() {
 }
 
 Result<void> ConnectionPool::healthCheck() {
-    size_t needed = 0;
-    uint64_t gen = 0;
+    std::unique_lock<std::mutex> lock(mutex_);
 
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        size_t current = available_.size() + activeConnections_;
-        if (current < config_.minConnections && totalConnections_ < config_.maxConnections) {
-            needed = std::min(config_.minConnections - current,
-                              config_.maxConnections - totalConnections_);
+    for (;;) {
+        if (shutdown_) {
+            return Error{ErrorCode::InvalidState, "Pool is shut down"};
         }
-        gen = currentGeneration_.load();
-    }
+        if (acquireInterrupted_.load(std::memory_order_acquire)) {
+            return Error{ErrorCode::OperationCancelled,
+                         "Connection creation interrupted for shutdown"};
+        }
 
-    if (needed == 0) {
-        return {};
-    }
+        const size_t physicalConnections = totalConnections_ + pendingCreations_;
+        if (physicalConnections >= config_.minConnections ||
+            physicalConnections >= config_.maxConnections) {
+            return {};
+        }
 
-    std::vector<std::unique_ptr<Database>> newConns;
-    newConns.reserve(needed);
-    for (size_t i = 0; i < needed; ++i) {
-        auto connResult = createConnection();
+        const uint64_t creationGeneration = currentGeneration_.load();
+        auto connResult = createConnectionOutsideLock(lock);
+
+        if (shutdown_) {
+            lock.unlock(); // Destroy any successfully created Database outside mutex_.
+            return Error{ErrorCode::InvalidState, "Pool is shut down"};
+        }
+        if (acquireInterrupted_.load(std::memory_order_acquire)) {
+            lock.unlock(); // Destroy any successfully created Database outside mutex_.
+            return Error{ErrorCode::OperationCancelled,
+                         "Connection creation interrupted for shutdown"};
+        }
         if (!connResult) {
-            break;
+            return connResult.error();
         }
-        newConns.push_back(std::move(connResult).value());
-    }
-
-    if (!newConns.empty()) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        for (auto& db : newConns) {
-            auto pooledConn = std::make_unique<PooledConnection>(
-                std::move(db), [this](PooledConnection* conn) { returnConnection(conn); }, gen);
-            pooledConn->returned_ = true;
-            available_.push(std::move(pooledConn));
-            totalConnections_++;
+        if (creationGeneration != currentGeneration_.load()) {
+            auto staleDb = std::move(connResult).value();
+            lock.unlock();
+            staleDb.reset();
+            lock.lock();
+            continue;
         }
-    }
 
-    return {};
+        auto pooledConn = std::make_unique<PooledConnection>(
+            std::move(connResult).value(),
+            [this](PooledConnection* conn) { returnConnection(conn); }, creationGeneration);
+        pooledConn->returned_ = true;
+        available_.push(std::move(pooledConn));
+        totalConnections_++;
+        cv_.notify_all();
+    }
 }
 
 void ConnectionPool::pruneIdleConnections() {
@@ -660,8 +668,32 @@ void ConnectionPool::pruneIdleConnections() {
     }
 }
 
+Result<std::unique_ptr<Database>>
+ConnectionPool::createConnectionOutsideLock(std::unique_lock<std::mutex>& lock) {
+    ++pendingCreations_;
+    lock.unlock();
+
+    auto result = [&]() -> Result<std::unique_ptr<Database>> {
+        try {
+            return createConnection();
+        } catch (...) {
+            lock.lock();
+            --pendingCreations_;
+            cv_.notify_all();
+            throw;
+        }
+    }();
+    lock.lock();
+    --pendingCreations_;
+    cv_.notify_all();
+    return result;
+}
+
 Result<std::unique_ptr<Database>> ConnectionPool::createConnection() {
     YAMS_ZONE_SCOPED_N("MetadataPool::createConnection");
+    if (beforeCreateForTesting_) {
+        beforeCreateForTesting_();
+    }
     auto db = std::make_unique<Database>();
 
     const auto mode = config_.readOnly ? ConnectionMode::ReadOnly : ConnectionMode::Create;
@@ -681,14 +713,9 @@ Result<std::unique_ptr<Database>> ConnectionPool::createConnection() {
 Result<void> ConnectionPool::configureConnection(Database& db) {
     // Allow env-var override for busy_timeout (default from config, typically 15000ms)
     auto effectiveBusyTimeout = config_.busyTimeout;
-    if (const std::string envBusy = getenvCopy("YAMS_DB_BUSY_TIMEOUT_MS"); !envBusy.empty()) {
-        try {
-            auto v = std::stoul(envBusy);
-            if (v > 0)
-                effectiveBusyTimeout = std::chrono::milliseconds(v);
-        } catch (const std::exception&) {
-            spdlog::debug("Ignoring invalid YAMS_DB_BUSY_TIMEOUT_MS value");
-        }
+    if (auto configured = yams::config::read_env_milliseconds("YAMS_DB_BUSY_TIMEOUT_MS").value;
+        configured && configured->count() > 0) {
+        effectiveBusyTimeout = *configured;
     }
 
     // Set busy timeout
@@ -717,7 +744,7 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
     }
 
     // Additional pragmas for performance (more relaxed when running tests)
-    if (!getenvCopy("YAMS_TEST_TMPDIR").empty()) {
+    if (!yams::config::getenv_copy("YAMS_TEST_TMPDIR").empty()) {
         db.execute("PRAGMA synchronous = OFF");
     } else {
         db.execute("PRAGMA synchronous = NORMAL");
@@ -760,29 +787,15 @@ Result<void> ConnectionPool::configureConnection(Database& db) {
     // Both are overridable: YAMS_DB_CACHE_SIZE_MB (write pool), YAMS_DB_READ_CACHE_SIZE_MB.
     int defaultCacheMB = config_.readOnly ? 32 : 256;
     const char* envName = config_.readOnly ? "YAMS_DB_READ_CACHE_SIZE_MB" : "YAMS_DB_CACHE_SIZE_MB";
-    if (const std::string envCache = getenvCopy(envName); !envCache.empty()) {
-        try {
-            int mb = std::stoi(envCache);
-            if (mb > 0)
-                defaultCacheMB = mb;
-        } catch (const std::exception&) {
-            spdlog::debug("Ignoring invalid {} value", envName);
-        }
+    if (auto value = yams::config::read_env_int(envName).value; value && *value > 0) {
+        defaultCacheMB = *value;
     }
     // Also check the generic env var as fallback for read pool
     if (config_.readOnly) {
-        if (const std::string envGeneric = getenvCopy("YAMS_DB_CACHE_SIZE_MB");
-            !envGeneric.empty()) {
-            // Only use generic if specific read var wasn't set
-            if (getenvCopy("YAMS_DB_READ_CACHE_SIZE_MB").empty()) {
-                try {
-                    int mb = std::stoi(envGeneric);
-                    if (mb > 0)
-                        defaultCacheMB = mb;
-                } catch (const std::exception&) {
-                    spdlog::debug("Ignoring invalid YAMS_DB_CACHE_SIZE_MB value");
-                }
-            }
+        const auto generic = yams::config::read_env_int("YAMS_DB_CACHE_SIZE_MB");
+        if (generic.value && *generic.value > 0 &&
+            !yams::config::getenv_optional("YAMS_DB_READ_CACHE_SIZE_MB").has_value()) {
+            defaultCacheMB = *generic.value;
         }
     }
     constexpr int kMaxCacheSizeMB = std::numeric_limits<int>::max() / 1024;
@@ -938,12 +951,14 @@ bool ConnectionPool::isConnectionValid(const Database& db) const {
     }
 
     try {
-        auto stmtResult = const_cast<Database&>(db).prepare("SELECT 1");
+        // Runs on every acquire and release: keep the probe in the connection's statement
+        // cache instead of compiling it twice per pooled call.
+        auto stmtResult = const_cast<Database&>(db).prepareCached("SELECT 1");
         if (!stmtResult)
             return false;
 
-        Statement stmt = std::move(stmtResult).value();
-        auto result = stmt.step();
+        auto stmt = std::move(stmtResult).value();
+        auto result = stmt->step();
         if (!result.has_value())
             return false;
 

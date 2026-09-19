@@ -1,5 +1,6 @@
 #pragma once
 
+// pi-lens-ignore: fatal error
 #include <yams/daemon/ipc/ipc_protocol_common.h>
 
 namespace yams::daemon {
@@ -936,6 +937,7 @@ struct StatusResponse {
 
     // Content store diagnostics
     std::string dataDir;           // absolute daemon-resolved active data dir
+    std::string logFile;           // absolute live daemon log file path (empty when unknown)
     std::string metadataDbPath;    // absolute live metadata DB file path
     std::string vectorDbPath;      // absolute live vector DB file path
     std::string contentStoreRoot;  // absolute path to storage root (daemon-resolved)
@@ -1111,6 +1113,9 @@ struct StatusResponse {
     std::string searchTuningState;  // e.g., "SMALL_CODE", "SCIENTIFIC", "MIXED"
     std::string searchTuningReason; // Human-readable explanation of state selection
     std::map<std::string, double> searchTuningParams; // e.g., {"textWeight": 0.55, ...}
+    bool searchAutomaticRebuildsEnabled{true};
+    std::string searchAutomaticRebuildsSource;
+    std::map<std::string, std::string> runtimeTuning;
 
     // ResourceGovernor metrics (memory pressure management)
     uint64_t governorRssBytes{0};     // Current process RSS
@@ -1181,7 +1186,8 @@ struct StatusResponse {
             s.serialize(ser);
 
         // Serialize content store and database diagnostics (as strings)
-        ser << dataDir << metadataDbPath << vectorDbPath << contentStoreRoot << contentStoreError;
+        ser << dataDir << logFile << metadataDbPath << vectorDbPath << contentStoreRoot
+            << contentStoreError;
 
         // Serialize embedding runtime details
         ser << embeddingAvailable << embeddingBackend << embeddingModel << embeddingModelPath
@@ -1221,6 +1227,10 @@ struct StatusResponse {
 
         // Maintenance phase (appended; older clients tolerate missing tail fields)
         ser << maintenancePhase << static_cast<uint64_t>(maintenancePhaseElapsedMs);
+
+        // Effective search-maintenance and runtime tuning policy (appended; older clients tolerate
+        // missing tail fields).
+        ser << searchAutomaticRebuildsEnabled << searchAutomaticRebuildsSource << runtimeTuning;
     }
 
     template <typename Deserializer>
@@ -1460,6 +1470,10 @@ struct StatusResponse {
         if (!rdd)
             return rdd.error();
         res.dataDir = std::move(rdd.value());
+        auto lfp = deser.readString();
+        if (!lfp)
+            return lfp.error();
+        res.logFile = std::move(lfp.value());
         auto mdp = deser.readString();
         if (!mdp)
             return mdp.error();
@@ -1628,6 +1642,16 @@ struct StatusResponse {
         auto maintenanceElapsedRes = deser.template read<uint64_t>();
         if (maintenanceElapsedRes)
             res.maintenancePhaseElapsedMs = maintenanceElapsedRes.value();
+
+        auto automaticRebuildsRes = deser.template read<bool>();
+        if (automaticRebuildsRes)
+            res.searchAutomaticRebuildsEnabled = automaticRebuildsRes.value();
+        auto automaticRebuildsSourceRes = deser.template read<std::string>();
+        if (automaticRebuildsSourceRes)
+            res.searchAutomaticRebuildsSource = std::move(automaticRebuildsSourceRes.value());
+        auto runtimeTuningRes = deser.readStringMap();
+        if (runtimeTuningRes)
+            res.runtimeTuning = std::move(runtimeTuningRes.value());
 
         return res;
     }
@@ -2399,6 +2423,10 @@ struct GrepMatch {
     double confidence = 1.0;         // Match confidence (1.0 for regex, variable for semantic)
     std::string diff;
 
+    // Encoded as an additive protobuf field and a GrepResponse legacy trailer,
+    // preserving the layout of individual matches in the legacy wire format.
+    std::string hash;
+
     template <typename Serializer>
     requires IsSerializer<Serializer>
     void serialize(Serializer& ser) const {
@@ -2466,6 +2494,11 @@ struct GrepResponse {
             it.serialize(ser);
         ser << totalMatches << filesSearched << regexMatches << semanticMatches << executionTimeMs
             << queryInfo << searchStats << filesWith << filesWithout << pathsOnly;
+        std::vector<std::string> hashes;
+        hashes.reserve(matches.size());
+        for (const auto& match : matches)
+            hashes.push_back(match.hash);
+        ser << hashes;
     }
 
     template <typename Deserializer>
@@ -2525,6 +2558,13 @@ struct GrepResponse {
         auto pathsOnly_ = deser.readStringVector();
         if (pathsOnly_)
             r.pathsOnly = pathsOnly_.value();
+
+        // Older peers omit this trailer; their results retain unknown identity.
+        auto hashes = deser.readStringVector();
+        if (hashes && hashes.value().size() == r.matches.size()) {
+            for (size_t i = 0; i < r.matches.size(); ++i)
+                r.matches[i].hash = std::move(hashes.value()[i]);
+        }
 
         return r;
     }
@@ -4913,6 +4953,46 @@ struct RepairResponse {
     }
 };
 
+struct MemorySyncResponse {
+    bool published{false};
+    bool started{false};
+    std::string value;
+    std::uint64_t records{0};
+    std::uint64_t quarantinedRecords{0};
+    std::uint64_t authFailures{0};
+    std::uint64_t successfulCycles{0};
+    std::uint64_t failedCycles{0};
+    std::uint64_t lastSuccessAgeMs{0};
+    std::string backend;
+    std::string nodeId;
+    std::string corpusId;
+    std::uint64_t corpusEpoch{0};
+    std::string mode;
+    std::string trustMode;
+    std::uint64_t peerCount{0};
+
+    template <typename Serializer>
+    requires IsSerializer<Serializer>
+    void serialize(Serializer& ser) const {
+        // Keep the legacy binary field order stable. Protobuf carries the additive
+        // quarantine/auth counters; legacy binary peers observe their default values.
+        ser << published << started << value << records << backend << nodeId;
+    }
+
+    template <typename Deserializer>
+    requires IsDeserializer<Deserializer>
+    static Result<MemorySyncResponse> deserialize(Deserializer& deser) {
+        MemorySyncResponse response;
+        YAMS_TRY(ipc_detail::readField(deser, response.published));
+        YAMS_TRY(ipc_detail::readField(deser, response.started));
+        YAMS_TRY(ipc_detail::readField(deser, response.value));
+        YAMS_TRY(ipc_detail::readField(deser, response.records));
+        YAMS_TRY(ipc_detail::readField(deser, response.backend));
+        YAMS_TRY(ipc_detail::readField(deser, response.nodeId));
+        return response;
+    }
+};
+
 // Forward declaration for batch response type
 struct BatchResponse;
 
@@ -4928,7 +5008,7 @@ using Response = std::variant<
     RestoreCollectionResponse, RestoreSnapshotResponse, GraphQueryResponse, GraphExploreResponse,
     GraphSymbolLookupResponse, GraphTraceResponse, GraphImpactResponse, GraphAffectedTestsResponse,
     GraphPathHistoryResponse, GraphRepairResponse, GraphValidateResponse, KgIngestResponse,
-    MetadataValueCountsResponse,
+    MetadataValueCountsResponse, MemorySyncResponse,
     // Batch response (Track B)
     BatchResponse,
     // Streaming events (progress/heartbeats)

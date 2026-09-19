@@ -1,6 +1,6 @@
+#include <yams/config/config_helpers.h>
 #include <yams/core/assert.hpp>
 #include <yams/vector/sqlite_vec_backend.h>
-#include <yams/vector/vector_database.h>
 #include <yams/vector/vector_schema_migration.h>
 #include <yams/vector/vector_utils.h>
 
@@ -22,7 +22,6 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -147,15 +146,6 @@ std::uint64_t stableStringKey(std::string_view value) noexcept {
     return hash;
 }
 
-std::optional<std::string> getenvCopy(const char* name) {
-    static std::mutex envMutex;
-    std::lock_guard<std::mutex> lock(envMutex);
-    if (const char* value = std::getenv(name)) { // NOLINT(concurrency-mt-unsafe)
-        return std::string(value);
-    }
-    return std::nullopt;
-}
-
 bool db_lifetime_trace_enabled() {
     static std::atomic<int> cached{-1};
     int cachedValue = cached.load(std::memory_order_relaxed);
@@ -163,8 +153,7 @@ bool db_lifetime_trace_enabled() {
         return cachedValue == 1;
     }
 
-    auto env = getenvCopy("YAMS_TRACE_DB_LIFETIME");
-    bool enabled = env.has_value() && !env->empty() && *env != "0";
+    const bool enabled = yams::config::read_env_bool("YAMS_TRACE_DB_LIFETIME").valueOr(false);
     cached.store(enabled ? 1 : 0, std::memory_order_relaxed);
     return enabled;
 }
@@ -1146,7 +1135,7 @@ public:
                 if (old_record) {
                     old_dims[idx] = !old_record->embedding.empty() ? old_record->embedding.size()
                                                                    : old_record->embedding_dim;
-                    old_rowids[idx] = *existing_rowid;
+                    old_rowids[idx] = existing_rowid;
                     if (old_dims[idx]) {
                         vec0_affected_dims.insert(*old_dims[idx]);
                     }
@@ -1776,6 +1765,54 @@ public:
         return results;
     }
 
+    Result<std::vector<VectorRecord>> getVectorsPage(std::string_view afterDocumentHash,
+                                                     std::string_view afterChunkId,
+                                                     std::size_t limit) {
+        if (limit == 0) {
+            return Error{ErrorCode::InvalidArgument, "vector page limit must be positive"};
+        }
+
+        std::shared_lock lock(mutex_);
+        if (!db_) {
+            return Error{ErrorCode::NotInitialized, "Database not initialized"};
+        }
+
+        static constexpr const char* kSelectPage = R"sql(
+SELECT rowid, chunk_id, document_hash, embedding, embedding_dim, content,
+       start_offset, end_offset, metadata,
+       model_id, model_version, embedding_version, content_hash,
+       created_at, embedded_at, is_stale, level,
+       source_chunk_ids, parent_document_hash, child_document_hashes
+FROM vectors
+WHERE document_hash > ?1 OR (document_hash = ?1 AND chunk_id > ?2)
+ORDER BY document_hash ASC, chunk_id ASC
+LIMIT ?3
+)sql";
+
+        sqlite3_stmt* stmt = nullptr;
+        if (sqlite3_prepare_v2(db_, kSelectPage, -1, &stmt, nullptr) != SQLITE_OK) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string{"prepare getVectorsPage: "} + sqlite3_errmsg(db_)};
+        }
+        sqlite3_bind_text(stmt, 1, afterDocumentHash.data(),
+                          static_cast<int>(afterDocumentHash.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, afterChunkId.data(), static_cast<int>(afterChunkId.size()),
+                          SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 3, static_cast<sqlite3_int64>(limit));
+
+        std::vector<VectorRecord> results;
+        int rc = SQLITE_ROW;
+        while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+            results.push_back(recordFromStatement(stmt));
+        }
+        sqlite3_finalize(stmt);
+        if (rc != SQLITE_DONE) {
+            return Error{ErrorCode::DatabaseError,
+                         std::string{"getVectorsPage iteration failed: "} + sqlite3_errmsg(db_)};
+        }
+        return results;
+    }
+
     Result<std::unordered_map<std::string, VectorRecord>> getDocumentLevelVectorsAll() {
         std::shared_lock lock(mutex_);
 
@@ -2183,15 +2220,29 @@ LIMIT ?2
                 if (simeon_pq_indices_.contains(dim) && !hasCurrentSimeonPqStateUnlocked(dim)) {
                     markSimeonPqDimDirtyUnlocked(dim);
                 }
-                // Dirty means the live vectors have changed since the in-memory or persisted
-                // snapshot was built. Rebuild from current rows before considering disk state;
-                // loading an older snapshot here would silently omit committed mutations.
-                if (simeon_pq_dirty_dims_.contains(dim)) {
+                const auto rebuildAndPersist = [&]() -> Result<void> {
                     auto rebuild = rebuildSimeonPqDimUnlocked(dim);
                     if (!rebuild) {
                         return Error{ErrorCode::InvalidState,
                                      std::string("Simeon PQ index for dim ") + std::to_string(dim) +
                                          " build failed: " + rebuild.error().message};
+                    }
+                    auto persisted = saveSimeonPqDimUnlocked(dim);
+                    if (!persisted) {
+                        return Error{
+                            persisted.error().code,
+                            std::string("Simeon PQ index for dim ") + std::to_string(dim) +
+                                " rebuilt but persistence failed: " + persisted.error().message};
+                    }
+                    return Result<void>{};
+                };
+                // Dirty means the live vectors have changed since the in-memory or persisted
+                // snapshot was built. Rebuild from current rows before considering disk state;
+                // loading an older snapshot here would silently omit committed mutations.
+                if (simeon_pq_dirty_dims_.contains(dim)) {
+                    auto rebuilt = rebuildAndPersist();
+                    if (!rebuilt) {
+                        return rebuilt;
                     }
                     continue;
                 }
@@ -2199,12 +2250,11 @@ LIMIT ?2
                     continue;
                 }
                 // Missing, corrupt, or recipe-incompatible persisted state is not reusable.
-                // Rebuild from the authoritative vectors table.
-                auto rebuild = rebuildSimeonPqDimUnlocked(dim);
-                if (!rebuild) {
-                    return Error{ErrorCode::InvalidState,
-                                 std::string("Simeon PQ index for dim ") + std::to_string(dim) +
-                                     " build failed: " + rebuild.error().message};
+                // Rebuild from the authoritative vectors table and save the validated generation
+                // so the next clean restart can load it instead of repeating the build.
+                auto rebuilt = rebuildAndPersist();
+                if (!rebuilt) {
+                    return rebuilt;
                 }
             }
             return Result<void>{};
@@ -2857,7 +2907,7 @@ public:
             // Compute cosine similarity
             if (record.embedding.size() == query_embedding.size()) {
                 float similarity = static_cast<float>(
-                    VectorDatabase::computeCosineSimilarity(query_embedding, record.embedding));
+                    vector_utils::computeCosineSimilarity(query_embedding, record.embedding));
 
                 if (similarity >= params.similarity_threshold) {
                     record.relevance_score = similarity;
@@ -4022,8 +4072,8 @@ private:
             float similarity = approxScore;
             if (!record_opt->embedding.empty()) {
                 const auto rerankStart = std::chrono::steady_clock::now();
-                similarity = static_cast<float>(VectorDatabase::computeCosineSimilarity(
-                    query_embedding, record_opt->embedding));
+                similarity = static_cast<float>(
+                    vector_utils::computeCosineSimilarity(query_embedding, record_opt->embedding));
                 if (diagnostics != nullptr) {
                     ++diagnostics->exactDistanceEvaluations;
                     diagnostics->exactRerankNanoseconds += static_cast<std::uint64_t>(
@@ -4085,9 +4135,7 @@ private:
                 (blob && blob_size > 0) ? static_cast<size_t>(blob_size) / sizeof(float) : 0;
 
             size_t dim = static_cast<size_t>(sqlite3_column_int64(stmt, 1));
-            if (dim == 0) {
-                dim = num_floats;
-            } else if (num_floats > 0 && dim != num_floats) {
+            if (num_floats > 0 && dim != num_floats) {
                 dim = num_floats;
             }
 
@@ -4371,7 +4419,7 @@ WHERE embedding_dim = ?1
             }
 
             float similarity = static_cast<float>(
-                VectorDatabase::computeCosineSimilarity(query_embedding, record.embedding));
+                vector_utils::computeCosineSimilarity(query_embedding, record.embedding));
             if (similarity < similarity_threshold) {
                 continue;
             }
@@ -4504,7 +4552,7 @@ ORDER BY rowid
             }
 
             float similarity = static_cast<float>(
-                VectorDatabase::computeCosineSimilarity(query_embedding, record_opt->embedding));
+                vector_utils::computeCosineSimilarity(query_embedding, record_opt->embedding));
             if (similarity < similarity_threshold) {
                 continue;
             }
@@ -4722,6 +4770,12 @@ SqliteVecBackend::forEachDocumentLevelVector(const std::function<bool(VectorReco
 
 Result<bool> SqliteVecBackend::hasEmbedding(const std::string& document_hash) {
     return impl_->hasEmbedding(document_hash);
+}
+
+Result<std::vector<VectorRecord>>
+SqliteVecBackend::getVectorsPage(std::string_view afterDocumentHash, std::string_view afterChunkId,
+                                 std::size_t limit) {
+    return impl_->getVectorsPage(afterDocumentHash, afterChunkId, limit);
 }
 
 Result<std::unordered_set<std::string>> SqliteVecBackend::getEmbeddedDocumentHashes() {

@@ -271,6 +271,9 @@ public:
     /// Get current scaling caps (thread-safe copy)
     [[nodiscard]] ScalingCaps getScalingCaps() const;
 
+    /// Recompute caps for the current pressure level after a typed tuning reload.
+    void refreshScalingCaps();
+
 #ifdef YAMS_TESTING
     /// Test-only: expose updateScalingCaps for unit tests.
     void testing_updateScalingCaps(ResourcePressureLevel level) { updateScalingCaps(level); }
@@ -332,8 +335,11 @@ private:
     /// Update CPU-based admission control with hysteresis
     void updateCpuAdmissionControl(const ResourceSnapshot& snap);
 
-    /// Update scaling caps based on pressure level
+    /// Update scaling caps based on pressure level.
     void updateScalingCaps(ResourcePressureLevel level);
+
+    /// Update scaling caps while mutex_ is held exclusively.
+    void updateScalingCapsLocked(ResourcePressureLevel level);
 
     /// Check if eviction cooldown has elapsed
     bool canEvict() const;

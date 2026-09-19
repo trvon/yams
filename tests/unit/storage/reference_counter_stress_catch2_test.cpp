@@ -52,7 +52,7 @@ struct ReferenceCounterStressFixture {
 } // namespace
 
 TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter concurrent getStats",
-                 "[storage][refcount][stress][catch2]") {
+                 "[storage][refcount][stress][slow][catch2]") {
     constexpr int numThreads = 20;
     constexpr int numIterations = 100;
     constexpr int numBlocks = 50;
@@ -101,7 +101,7 @@ TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter concurrent get
 }
 
 TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter concurrent mixed operations",
-                 "[storage][refcount][stress][catch2]") {
+                 "[storage][refcount][stress][slow][catch2]") {
     constexpr int numThreads = 16;
     constexpr int opsPerThread = 500;
     constexpr int numHashes = 100;
@@ -159,7 +159,7 @@ TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter concurrent mix
 }
 
 TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter concurrent transactions",
-                 "[storage][refcount][stress][transaction][catch2]") {
+                 "[storage][refcount][stress][slow][transaction][catch2]") {
     constexpr int numThreads = 12;
     constexpr int txnsPerThread = 50;
     constexpr int opsPerTxn = 10;
@@ -221,7 +221,7 @@ TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter concurrent tra
 }
 
 TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter concurrent getUnreferencedBlocks",
-                 "[storage][refcount][stress][catch2]") {
+                 "[storage][refcount][stress][slow][catch2]") {
     constexpr int numReaderThreads = 4;
     constexpr int numWriterThreads = 8;
     constexpr int iterations = 100;
@@ -283,7 +283,7 @@ TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter concurrent get
 }
 
 TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter high load batch operations",
-                 "[storage][refcount][stress][batch][catch2]") {
+                 "[storage][refcount][stress][slow][batch][catch2]") {
     constexpr int numThreads = 8;
     constexpr int batchesPerThread = 100;
     constexpr int batchSize = 100;
@@ -322,7 +322,7 @@ TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter high load batc
 
 TEST_CASE_METHOD(ReferenceCounterStressFixture,
                  "ReferenceCounter transaction isActive concurrent observer",
-                 "[storage][refcount][stress][transaction][tsan][catch2]") {
+                 "[storage][refcount][stress][slow][transaction][tsan][catch2]") {
     constexpr int iterations = 200;
 
     std::atomic<int> activeTrue{0};
@@ -375,7 +375,7 @@ TEST_CASE_METHOD(ReferenceCounterStressFixture,
 }
 
 TEST_CASE_METHOD(ReferenceCounterStressFixture, "ReferenceCounter reproduce getStats crash",
-                 "[storage][refcount][stress][regression][catch2]") {
+                 "[storage][refcount][stress][slow][regression][catch2]") {
     // This keeps the original daemon-metrics regression in the fast lane,
     // but uses bounded concurrent work instead of a multi-second soak.
     constexpr int numThreads = 10;

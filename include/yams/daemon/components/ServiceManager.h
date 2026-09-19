@@ -2,19 +2,15 @@
 
 #include <atomic>
 #include <chrono>
-#include <condition_variable>
-#include <exception>
 #include <functional>
 #include <future>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
-#include <stop_token>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 #include "IComponent.h"
 #include <boost/asio/any_io_executor.hpp>
@@ -60,12 +56,13 @@
 #include <yams/daemon/components/WriteCoordinator.h>
 #include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/retrieval_session.h>
+#include <yams/daemon/p2p/p2p_manager.h>
 #include <yams/daemon/resource/abi_entity_extractor_adapter.h>
-#include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/plugin_host.h>
 #include <yams/extraction/content_extractor.h>
+#include <yams/memory_sync/memory_sync_service.h>
 #include <yams/profiling.h>
 #include <yams/search/search_engine.h>
 #include <yams/search/search_execution_context.h>
@@ -85,6 +82,9 @@ class MetadataRepository;
 namespace yams::integrity {
 class RepairManager;
 } // namespace yams::integrity
+namespace yams::memory_sync {
+class MemorySyncService;
+} // namespace yams::memory_sync
 namespace yams::search {
 class SearchEngine;
 class SearchEngineBuilder;
@@ -95,7 +95,6 @@ class VectorDatabase;
 } // namespace yams::vector
 namespace yams::daemon {
 
-class AbiPluginLoader;
 class ExternalPluginHost;
 class IModelProvider;
 class RetrievalSessionManager;
@@ -131,6 +130,10 @@ public:
 
     void startAsyncInit(std::promise<void>* barrierPromise = nullptr,
                         std::atomic<bool>* barrierSet = nullptr);
+
+    bool waitForAsyncInitCompletion(std::chrono::milliseconds timeout) {
+        return asyncInit_.waitForCompletion(timeout);
+    }
 
     void shutdown() override;
 
@@ -180,6 +183,38 @@ public:
     std::shared_ptr<PostIngestQueue> getPostIngestQueue() const {
         return std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
     }
+
+    struct MemorySyncStatus {
+        bool started{false};
+        std::uint64_t records{0};
+        std::uint64_t quarantinedRecords{0};
+        std::uint64_t authFailures{0};
+        std::uint64_t successfulCycles{0};
+        std::uint64_t failedCycles{0};
+        std::uint64_t lastSuccessAgeMs{0};
+        std::string backend;
+        std::string nodeId;
+        std::string corpusId;
+        std::uint64_t corpusEpoch{0};
+        std::string mode;
+        std::string trustMode;
+        std::uint64_t peerCount{0};
+    };
+    Result<void> publishMemorySync(const std::string& key, const std::string& value);
+    Result<void> deleteMemorySync(const std::string& key);
+    Result<std::string> readMemorySyncCached(const std::string& key) const;
+    Result<MemorySyncStatus> getMemorySyncStatus() const;
+    Result<p2p::P2pSyncResult> connectP2p(std::string_view connectionString);
+    Result<void> disconnectP2p(std::string_view nodeId);
+    Result<void> enrollP2pPeer(std::string_view nodeId, std::string_view spkiPin);
+    Result<void> forgetP2pPeer(std::string_view nodeId);
+    Result<p2p::P2pLocalIdentity> getP2pIdentity() const;
+    Result<std::vector<p2p::PeerRegistryRecord>> listP2pPeers() const;
+    Result<void> stageMemorySyncDocumentDelete(std::string_view contentHash,
+                                               bool retainContent = false);
+    Result<void> publishMemorySyncDocumentDelete(std::string_view contentHash,
+                                                 bool retainContent = false);
+
     struct SearchLoadMetrics {
         std::uint32_t active{0};
         std::uint32_t queued{0};
@@ -327,23 +362,47 @@ public:
     std::size_t getWorkerQueueDepth() const;
 
     // Tuning configuration (no envs): getter/setter with live application where applicable.
-    const TuningConfig& getTuningConfig() const { return tuningConfig_; }
+    // Return a copy so reload cannot invalidate or race a caller-held reference.
+    TuningConfig getTuningConfig() const {
+        [[maybe_unused]] auto publication = TuneAdvisor::beginConfiguredOverridePublication();
+        std::lock_guard lock(tuningConfigMutex_);
+        return tuningConfig_;
+    }
+    std::map<std::string, std::string> getRuntimeTuningStatus() const {
+        [[maybe_unused]] auto publication = TuneAdvisor::beginConfiguredOverridePublication();
+        std::lock_guard lock(runtimeTuningStatusMutex_);
+        return runtimeTuningStatus_;
+    }
     uint32_t getIngestStoreBatchSize() const {
         return ingestStoreBatchSize_.load(std::memory_order_relaxed);
     }
+    void releaseTuningLifecycle() noexcept { tuningLifecycleLease_.release(); }
     void setTuningConfig(const TuningConfig& cfg) {
-        ingestStoreBatchSize_.store(cfg.ingestStoreBatchSize, std::memory_order_relaxed);
-        tuningConfig_ = cfg;
+        [[maybe_unused]] auto publication = TuneAdvisor::beginConfiguredOverridePublication();
+        auto applied = cfg;
+        const auto previous = getTuningConfig();
         auto piq = std::atomic_load_explicit(&postIngest_, std::memory_order_acquire);
         if (piq) {
-            if (cfg.postIngestCapacity > 0) {
-                piq->setCapacity(cfg.postIngestCapacity);
+            // Channel capacity is construction-time state. Preserve the effective value during a
+            // live update so configuration/status cannot claim a resize that did not occur.
+            const auto requestedCapacity = applied.postIngestCapacity;
+            applied.postIngestCapacity = previous.postIngestCapacity;
+            if (requestedCapacity != applied.postIngestCapacity) {
+                applied.provenance.insert_or_assign(
+                    "tuning.post_ingest_capacity", "runtime:construction-time-post-ingest-channel");
             }
-            piq->setBatchCoalesceWindow(std::chrono::milliseconds(cfg.postIngestCoalesceMs));
+            piq->setBatchCoalesceWindow(std::chrono::milliseconds(applied.postIngestCoalesceMs));
         }
+        ingestStoreBatchSize_.store(applied.ingestStoreBatchSize, std::memory_order_relaxed);
+        snapshotRuntimeTuningSources(applied, &previous);
+        {
+            std::lock_guard lock(tuningConfigMutex_);
+            tuningConfig_ = applied;
+        }
+        refreshRuntimeTuningStatus();
     }
-    const std::vector<std::shared_ptr<yams::extraction::IContentExtractor>>&
-    getContentExtractors() const {
+    std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> getContentExtractors() const {
+        std::lock_guard lock(contentExtractorsMutex_);
         return contentExtractors_;
     }
     // Symbol extractors (ABI adapters) - delegate to PluginManager
@@ -381,6 +440,41 @@ public:
     void __test_setWriteCoordinator(std::unique_ptr<WriteCoordinator> coordinator) {
         writeCoordinator_ = std::move(coordinator);
     }
+    yams::memory_sync::MemorySyncService* testingMemorySyncService() const noexcept {
+        return memorySync_.get();
+    }
+    void
+    testingSetMemorySyncService(std::unique_ptr<yams::memory_sync::MemorySyncService> service) {
+        memorySync_ = std::move(service);
+    }
+    void testingSetMemorySyncStageObserver(std::function<void(std::string_view)> observer) {
+        std::lock_guard<std::mutex> lock(memorySyncStageObserverMutex_);
+        memorySyncStageObserver_ = std::move(observer);
+    }
+    void testingSetMemorySyncDeleteOutboxObserver(std::function<void(std::string_view)> observer) {
+        std::lock_guard<std::mutex> lock(memorySyncDeleteOutboxObserverMutex_);
+        memorySyncDeleteOutboxObserver_ = std::move(observer);
+    }
+    void testingApplyMemorySyncWinners() { applyMemorySyncWinners(); }
+    void testingPublishMemorySyncBackfill() { publishMemorySyncBackfill(); }
+    void testingSetMemorySyncBackfillItemBudget(std::size_t budget) {
+        std::lock_guard<std::mutex> lock(memorySyncBackfillMutex_);
+        memorySyncBackfillState_.itemBudgetPerCycle = std::max<std::size_t>(budget, 1);
+    }
+    bool testingMemorySyncApplyLockHeld() {
+        std::unique_lock<std::mutex> lock(memorySyncApplyMutex_, std::try_to_lock);
+        return !lock.owns_lock();
+    }
+    std::uint64_t testingMemorySyncApplyAttempts() const noexcept {
+        return memorySyncApplyAttempts_.load(std::memory_order_acquire);
+    }
+    bool testingMemorySyncBackfillLockHeld() {
+        std::unique_lock<std::mutex> lock(memorySyncBackfillMutex_, std::try_to_lock);
+        return !lock.owns_lock();
+    }
+    std::uint64_t testingMemorySyncBackfillAttempts() const noexcept {
+        return memorySyncBackfillAttempts_.load(std::memory_order_acquire);
+    }
     static bool __test_shouldStartSessionWatcher(std::string_view disableValue) {
         return shouldStartSessionWatcher(disableValue);
     }
@@ -402,6 +496,11 @@ public:
     static bool __test_shouldAutoVacuum(std::uint64_t databaseBytes, std::uint64_t pageCount,
                                         std::uint64_t freePageCount, std::uint64_t pageSize) {
         return shouldAutoVacuum(databaseBytes, pageCount, freePageCount, pageSize);
+    }
+    bool
+    testingEnsureDatabaseIntegrityOrRecover(const std::filesystem::path& path,
+                                            const std::shared_ptr<metadata::Database>& database) {
+        return ensureDatabaseIntegrityOrRecover(path, database);
     }
 #endif
 
@@ -477,7 +576,6 @@ public:
     // Stop source for cancelling async initialization coroutine during shutdown
     AsyncInitOrchestrator asyncInit_;
 
-    AbiPluginLoader* getAbiPluginLoader() const { return abiPluginLoader_.get(); }
     AbiPluginHost* getAbiPluginHost() const { return abiHost_.get(); }
     ExternalPluginHost* getExternalPluginHost() const {
         return pluginManager_ ? pluginManager_->getExternalPluginHost() : nullptr;
@@ -520,20 +618,15 @@ public:
     uint64_t getEmbeddingSemanticUpdateErrors() const {
         return embeddingLifecycle_.semanticUpdateErrors();
     }
-    std::unordered_map<std::string, EmbeddingService::PhaseTiming>
-    getEmbeddingPhaseTimingsSnapshot() const {
-        return embeddingService_ ? embeddingService_->phaseTimingsSnapshot()
-                                 : std::unordered_map<std::string, EmbeddingService::PhaseTiming>{};
-    }
-    void resetEmbeddingPhaseTimings() {
+    void setEmbeddingPhaseTimingSink(std::shared_ptr<EmbeddingPhaseTimingSink> sink) {
         if (embeddingService_) {
-            embeddingService_->resetPhaseTimings();
+            embeddingService_->setPhaseTimingSink(std::move(sink));
         }
     }
 
     RetrievalSessionManager* getRetrievalSessionManager() const { return retrievalSessions_.get(); }
 
-    CheckpointManager* getCheckpointManager() const { return checkpointManager_.get(); }
+    CheckpointManager* getCheckpointManager() const noexcept;
 
     // Get AppContext for app services
     app::services::AppContext getAppContext() const;
@@ -562,10 +655,16 @@ public:
 
     // Expose resolved daemon configuration for components that need paths
     const DaemonConfig& getConfig() const { return config_; }
+    std::shared_ptr<const ResolvedEmbeddingConfig> getResolvedEmbeddingConfig() const {
+        return std::atomic_load_explicit(&embeddingConfig_, std::memory_order_acquire);
+    }
     const StateComponent& getState() const { return state_; }
     const std::filesystem::path& getResolvedDataDir() const { return resolvedDataDir_; }
+
+    /// Resolved live daemon log file path (empty when the daemon was not configured with one).
+    const std::filesystem::path& getResolvedLogFilePath() const { return config_.logFile; }
     std::string getMetadataDatabasePath() const {
-        auto db = database_;
+        auto db = std::atomic_load_explicit(&database_, std::memory_order_acquire);
         return db ? db->path() : std::string{};
     }
     std::string getVectorDatabasePath() const {
@@ -636,12 +735,12 @@ public:
     void __test_setAbiHost(std::unique_ptr<AbiPluginHost> host) {
         abiHost_ = std::move(host);
         if (pluginManager_) {
-            pluginManager_->__test_setSharedPluginHost(abiHost_.get());
+            pluginManager_->testingSetSharedPluginHost(abiHost_.get());
         }
     }
     void __test_setExternalPluginHost(std::unique_ptr<ExternalPluginHost> host) {
         if (pluginManager_) {
-            pluginManager_->__test_setExternalPluginHost(std::move(host));
+            pluginManager_->testingSetExternalPluginHost(std::move(host));
         }
     }
     void __test_setCachedSearchEngine(const std::shared_ptr<yams::search::SearchEngine>& engine,
@@ -649,10 +748,17 @@ public:
         searchEngineManager_.setEngine(engine, vectorEnabled);
     }
     AbiPluginHost* __test_getAbiHost() const { return abiHost_.get(); }
-    AbiPluginLoader* __test_getAbiPluginLoader() const { return abiPluginLoader_.get(); }
+    Result<void> __test_initializeWithPoolConfiguration(std::function<void()> beforeConfigure) {
+        return initializeImpl(std::move(beforeConfigure));
+    }
 #endif
 
 #if YAMS_DAEMON_TEST_HOOKS_ENABLED
+    YAMS_DAEMON_TEST_HOOK static Result<std::string>
+    __test_loadOrCreateP2pPrivateKey(const std::filesystem::path& keyPath);
+    YAMS_DAEMON_TEST_HOOK static Result<void>
+    __test_writeProtectedP2pPrivateKey(const std::filesystem::path& keyPath,
+                                       std::string_view contents);
     YAMS_DAEMON_TEST_HOOK void __test_setModelProviderDegraded(bool degraded,
                                                                const std::string& error = {});
 #endif
@@ -716,10 +822,25 @@ private:
     std::chrono::milliseconds runSessionWatcherIteration();
     boost::asio::awaitable<void> co_runSessionWatcher(const yams::compat::stop_token& token);
 
+    Result<void> initializeImpl(const std::function<void()>& beforePoolConfigure);
+    Result<void> configureResourcePools(const std::function<void()>& beforeConfigure);
     Result<std::filesystem::path> initializeDataDirAndContentStore();
+    Result<void> initializeMemorySync(const std::filesystem::path& dataDir);
+    Result<void> initializeDirectP2p(const std::filesystem::path& dataDir);
+    Result<void> configureMemorySyncApply();
+    void applyMemorySyncWinners() noexcept;
+    bool drainMemorySyncDocumentDeleteOutbox() noexcept;
+    Result<bool> memorySyncDeleteLocallyAbsent(std::string_view contentHash,
+                                               memory_sync::EraseReadinessProbe probe) const;
+    void publishMemorySyncBackfill() noexcept;
+    void notifyMemorySyncStage(std::string_view stage) noexcept;
+    void notifyMemorySyncDeleteOutboxStage(std::string_view stage) noexcept;
+    Result<std::size_t> applyMemorySyncContentBlobs();
     boost::asio::awaitable<bool> initializeMetadataDatabaseAt(const std::filesystem::path& dbPath,
                                                               yams::compat::stop_token token);
-    void finalizeDatabaseStartup(const std::filesystem::path& dbPath);
+    bool finalizeDatabaseStartup(const std::filesystem::path& dbPath,
+                                 const std::shared_ptr<metadata::Database>& database,
+                                 yams::compat::stop_token token);
     void runStartupSalvageIfNeeded(const std::filesystem::path& dbPath);
     void schedulePostStartupMaintenance(const std::filesystem::path& dbPath);
     void scheduleRecoveryArtifactCleanup(const std::filesystem::path& dbPath);
@@ -730,12 +851,15 @@ private:
     void setDatabasePhase(std::string_view phase);
     void setMaintenancePhase(std::string_view phase);
     void recoverStaleWalIfPresent(const std::filesystem::path& dbPath);
-    bool openDatabaseOnce(const std::filesystem::path& dbPath);
-    bool ensureDatabaseIntegrityOrRecover(const std::filesystem::path& dbPath);
+    bool openDatabaseOnce(const std::filesystem::path& dbPath,
+                          const std::shared_ptr<metadata::Database>& database);
+    bool ensureDatabaseIntegrityOrRecover(const std::filesystem::path& dbPath,
+                                          const std::shared_ptr<metadata::Database>& database);
     static bool shouldAutoVacuum(std::uint64_t databaseBytes, std::uint64_t pageCount,
                                  std::uint64_t freePageCount, std::uint64_t pageSize);
     void maybeAutoVacuumDatabase(const std::filesystem::path& dbPath);
-    bool openDatabaseBlocking(const std::filesystem::path& dbPath);
+    bool openDatabaseBlocking(const std::filesystem::path& dbPath,
+                              const std::shared_ptr<metadata::Database>& database);
 
     void stopBackgroundTaskManagerForShutdown();
     void stopSessionWatcherForShutdown();
@@ -743,6 +867,9 @@ private:
     quiesceServicesBeforeWorkerShutdown(std::unique_ptr<CheckpointManager>& checkpointManagerHold);
     void stopWorkCoordinatorForShutdown(std::unique_ptr<CheckpointManager>& checkpointManagerHold);
     void clearCachedServiceState();
+    void configureTopologyRuntime();
+    void snapshotRuntimeTuningSources(TuningConfig& tuning, const TuningConfig* previous) const;
+    void refreshRuntimeTuningStatus();
     void seedBuiltinContentExtractors();
     void shutdownModelProviderForShutdown();
     void resetRetrievalSessionsForShutdown();
@@ -754,11 +881,17 @@ private:
     void shutdownExtractedManagers();
     void releasePluginInfrastructure();
 
-    boost::asio::awaitable<bool> co_openDatabase(const std::filesystem::path& dbPath,
-                                                 int timeout_ms, yams::compat::stop_token token);
-    boost::asio::awaitable<bool> co_migrateDatabase(int timeout_ms, yams::compat::stop_token token);
+    boost::asio::awaitable<bool>
+    co_openDatabase(const std::filesystem::path& dbPath, int timeout_ms,
+                    yams::compat::stop_token token,
+                    const std::shared_ptr<metadata::Database>& database);
+    boost::asio::awaitable<bool>
+    co_migrateDatabase(int timeout_ms, yams::compat::stop_token token,
+                       const std::shared_ptr<metadata::Database>& database);
     bool detectEmbeddingPreloadFlag() const { return embeddingLifecycle_.detectPreloadFlag(); }
 
+    // Declared first so the process-wide compatibility lease outlives all managed services.
+    TuneAdvisor::ConfiguredOverrideLifecycleLease tuningLifecycleLease_;
     DaemonConfig config_;
     StateComponent& state_;
 
@@ -769,7 +902,8 @@ private:
     std::shared_ptr<IModelProvider> modelProvider_;
     std::shared_ptr<IModelProvider> simeonRerankerProvider_;
 
-    std::unique_ptr<AbiPluginLoader> abiPluginLoader_;
+    // ServiceManager owns the shared ABI host storage. PluginManager owns its
+    // configuration, loading, interface adoption, and one-time shutdown lifecycle.
     std::unique_ptr<AbiPluginHost> abiHost_;
     // NOTE: ExternalPluginHost moved to PluginManager (PBI-093)
     std::unique_ptr<RetrievalSessionManager> retrievalSessions_;
@@ -779,6 +913,7 @@ private:
     SearchAdmissionController searchAdmission_;
     IngestMetricsPublisher metricsPublisher_;
 
+    std::shared_ptr<const ResolvedEmbeddingConfig> embeddingConfig_;
     EmbeddingLifecycleManager embeddingLifecycle_;
 
     boost::asio::cancellation_signal shutdownSignal_;
@@ -794,7 +929,6 @@ private:
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> pluginStrand_;
     std::optional<boost::asio::strand<boost::asio::any_io_executor>> modelStrand_;
     std::filesystem::path resolvedDataDir_;
-    ResolvedEmbeddingConfig embeddingConfig_;
     std::shared_ptr<yams::integrity::RepairManager> repairManager_;
     std::shared_ptr<PostIngestQueue> postIngest_;
     std::shared_ptr<EmbeddingService> embeddingService_;
@@ -802,13 +936,18 @@ private:
     std::shared_ptr<metadata::MetadataInsertWriter> metadataInsertWriter_;
     RepairServiceHost repairServiceHost_;
     TopologyManager topologyManager_;
+    mutable std::mutex contentExtractorsMutex_;
     std::vector<std::shared_ptr<yams::extraction::IContentExtractor>> contentExtractors_;
     std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>> symbolExtractors_;
+    mutable std::mutex tuningConfigMutex_;
     TuningConfig tuningConfig_{};
+    mutable std::mutex runtimeTuningStatusMutex_;
+    std::map<std::string, std::string> runtimeTuningStatus_;
     // Independent advisory scalar; it does not publish or synchronize other tuning fields.
     std::atomic<uint32_t> ingestStoreBatchSize_{64};
 
     std::atomic<bool> shutdownInvoked_{false};
+    std::atomic<bool> databaseIntegrityStampEligible_{false};
     std::mutex maintenanceMutex_;
     std::atomic<bool> semanticTopologyMaintenanceScheduled_{false};
     std::atomic<bool> topologyRebuildPending_{false};
@@ -824,7 +963,46 @@ private:
     std::unique_ptr<PluginManager> pluginManager_;
     std::unique_ptr<VectorSystemManager> vectorSystemManager_;
     std::shared_ptr<VectorIndexCoordinator> vectorIndexCoordinator_;
+    // Serializes late async database finalization against shutdown/reset after a bounded
+    // async-init wait expires.
+    mutable std::mutex databaseManagerLifecycleMutex_;
     std::unique_ptr<DatabaseManager> databaseManager_;
+
+    // P2P memory-sync service (version-vector + LWW over a shared store).
+    // Started after storage/content-store init, stopped during shutdown.
+    std::unique_ptr<yams::memory_sync::MemorySyncService> memorySync_;
+    std::unique_ptr<yams::daemon::p2p::P2pManager> p2pManager_;
+    mutable std::mutex memorySyncDeleteOutboxMutex_;
+    mutable std::mutex memorySyncDeleteOutboxObserverMutex_;
+    std::function<void(std::string_view)> memorySyncDeleteOutboxObserver_;
+    mutable std::mutex memorySyncStageObserverMutex_;
+    std::function<void(std::string_view)> memorySyncStageObserver_;
+    // Direct sessions may finish concurrently. Serialize the daemon adapter pipeline and its
+    // vector rebuild state; backfill has a separate lock so focused maintenance calls are safe.
+    mutable std::mutex memorySyncApplyMutex_;
+    mutable std::mutex memorySyncBackfillMutex_;
+    std::atomic<std::uint64_t> memorySyncApplyAttempts_{0};
+    std::atomic<std::uint64_t> memorySyncBackfillAttempts_{0};
+    bool memorySyncVectorRebuildDirty_{false};
+    struct MemorySyncBackfillState {
+        enum class Domain { Documents, Vectors, Topology };
+
+        std::int64_t documentIdCursor{0};
+        std::string vectorDocumentHashCursor;
+        std::string vectorChunkIdCursor;
+        bool topologySnapshotInitialized{false};
+        std::vector<std::string> topologyNodeTypes;
+        std::size_t topologyTypeIndex{0};
+        std::unordered_map<std::string, std::size_t> topologyNodeOffsets;
+        std::size_t topologyEdgeOffset{0};
+        std::int64_t topologyNodeId{0};
+        std::string topologyNodeKey;
+        bool topologyNodeActive{false};
+        Domain nextDomain{Domain::Documents};
+        std::size_t itemBudgetPerCycle{256};
+        std::chrono::milliseconds timeBudgetPerCycle{100};
+    } memorySyncBackfillState_;
+    std::chrono::steady_clock::time_point nextMemorySyncBackfill_{};
 
     // Cached GLiNER query concept extraction function.
     mutable search::EntityExtractionFunc cachedQueryConceptExtractor_;

@@ -2,53 +2,18 @@
 #include <array>
 #include <cstring>
 #include <openssl/evp.h>
+#include <yams/common/crc32.h>
 #include <yams/compression/compression_utils.h>
 
 namespace yams::compression {
 
-namespace {
-// CRC32 polynomial used by zlib/gzip
-constexpr uint32_t CRC32_POLY = 0xEDB88320U;
-
-// Precomputed CRC32 table
-struct CRC32Table {
-    std::array<uint32_t, 256> table;
-
-    constexpr CRC32Table() : table{} {
-        for (uint32_t i = 0; i < 256; ++i) {
-            uint32_t crc = i;
-            for (int j = 0; j < 8; ++j) {
-                crc = (crc >> 1) ^ ((crc & 1) ? CRC32_POLY : 0);
-            }
-            table[i] = crc;
-        }
-    }
-};
-
-constexpr CRC32Table crc32Table;
-} // namespace
-
 uint32_t calculateCRC32(std::span<const std::byte> data) {
-    uint32_t crc = 0xFFFFFFFFU;
-
-    for (const auto& byte : data) {
-        const uint8_t index = static_cast<uint8_t>(crc ^ static_cast<uint8_t>(byte));
-        crc = (crc >> 8) ^ crc32Table.table[index];
-    }
-
-    return crc ^ 0xFFFFFFFFU;
+    return yams::common::crc32(data);
 }
 
 uint32_t updateCRC32(uint32_t crc, std::span<const std::byte> data) {
-    // Undo final XOR from previous calculation
-    crc ^= 0xFFFFFFFFU;
-
-    for (const auto& byte : data) {
-        const uint8_t index = static_cast<uint8_t>(crc ^ static_cast<uint8_t>(byte));
-        crc = (crc >> 8) ^ crc32Table.table[index];
-    }
-
-    return crc ^ 0xFFFFFFFFU;
+    // Undo the final XOR of the previous computation, continue, re-apply.
+    return yams::common::crc32Update(crc ^ 0xFFFFFFFFU, data) ^ 0xFFFFFFFFU;
 }
 
 bool isLikelyCompressed(std::span<const std::byte> data) {

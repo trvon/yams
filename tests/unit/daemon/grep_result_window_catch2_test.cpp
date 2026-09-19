@@ -1,4 +1,5 @@
 #include <catch2/catch_test_macros.hpp>
+#include <any>
 
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/daemon/components/grep_result_window.h>
@@ -11,6 +12,32 @@ GlobalIOContextInitializer::~GlobalIOContextInitializer() = default;
 } // namespace yams::daemon
 
 namespace {
+
+// Exercise the legacy field contract without depending on the protobuf codec.
+struct RecordedFields {
+    std::vector<std::any> values;
+    std::size_t offset{0};
+    template <typename T> RecordedFields& operator<<(const T& value) {
+        values.emplace_back(value);
+        return *this;
+    }
+    template <typename T> yams::Result<T> read() {
+        if (offset >= values.size())
+            return yams::ErrorCode::InvalidData;
+        const auto* value = std::any_cast<T>(&values[offset]);
+        if (!value)
+            return yams::ErrorCode::InvalidData;
+        ++offset;
+        return *value;
+    }
+    yams::Result<std::string> readString() { return read<std::string>(); }
+    yams::Result<std::vector<std::string>> readStringVector() {
+        return read<std::vector<std::string>>();
+    }
+    yams::Result<std::map<std::string, std::string>> readStringMap() {
+        return read<std::map<std::string, std::string>>();
+    }
+};
 
 yams::app::services::GrepMatch makeMatch(std::size_t lineNumber, std::string line) {
     yams::app::services::GrepMatch match;
@@ -30,6 +57,42 @@ makeFileResult(std::string file, std::vector<yams::app::services::GrepMatch> mat
 }
 
 } // namespace
+
+TEST_CASE("Legacy grep response appends identity without changing match layout",
+          "[daemon][grep][identity][serialization]") {
+    yams::daemon::GrepResponse response;
+    yams::daemon::GrepMatch match;
+    match.file = "evidence.txt";
+    match.hash = std::string(64, 'a');
+    response.matches = {match, match};
+    RecordedFields fields;
+    response.serialize(fields);
+    bool legacy = false;
+    SECTION("New response roundtrips hashes") {}
+    SECTION("Older response remains readable without hashes") {
+        fields.values.pop_back(); // Old response ends at pathsOnly.
+        legacy = true;
+    }
+    const auto result = yams::daemon::GrepResponse::deserialize(fields);
+    REQUIRE(result);
+    REQUIRE(result.value().matches.size() == 2);
+    for (const auto& decoded : result.value().matches) {
+        CHECK(decoded.file == match.file);
+        CHECK(decoded.hash == (legacy ? std::string{} : match.hash));
+    }
+}
+
+TEST_CASE("Grep result window preserves immutable revisions at the same path",
+          "[daemon][grep][result-window][identity]") {
+    auto first = makeFileResult("evidence.txt", {makeMatch(1, "same content")});
+    first.hash = std::string(64, 'a');
+    auto second = first;
+    second.hash = std::string(64, 'b');
+    const auto selected = yams::daemon::grep_result_window::select({first, second, first}, 0);
+    REQUIRE(selected.matches.size() == 2);
+    CHECK(selected.matches[0].hash == first.hash);
+    CHECK(selected.matches[1].hash == second.hash);
+}
 
 TEST_CASE("Grep result window deduplicates identities before applying its total cap",
           "[daemon][grep][result-window]") {

@@ -25,14 +25,31 @@
 #include <stdexcept>
 
 namespace yams::daemon {
+namespace {
+
+uint64_t steadyNowNs() noexcept {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count());
+}
+
+} // namespace
 
 struct WorkCoordinator::DetachedCancellationState {
     mutable std::mutex mutex;
     std::vector<DetachedCancellationRequest> requests;
 };
 
+struct WorkCoordinator::ProgressProbeState {
+    std::atomic<uint64_t> posted{0};
+    std::atomic<uint64_t> completed{0};
+    std::atomic<uint64_t> lastProgressAtNs{0};
+    std::atomic<bool> inFlight{false};
+};
+
 WorkCoordinator::WorkCoordinator()
     : ioContext_(std::make_shared<boost::asio::io_context>()), started_(false),
+      progressProbeState_(std::make_shared<ProgressProbeState>()),
       highPriorityStrand_(ioContext_->get_executor()),
       normalPriorityStrand_(ioContext_->get_executor()),
       backgroundPriorityStrand_(ioContext_->get_executor()),
@@ -162,6 +179,7 @@ void WorkCoordinator::start(std::optional<std::size_t> numThreads) {
             });
         }
         started_ = true;
+        requestProgressProbe();
         spdlog::info("[WorkCoordinator] Started with {} worker threads", workerCount);
     } catch (const std::exception& e) {
         // Cleanup on thread creation failure
@@ -486,6 +504,41 @@ void WorkCoordinator::abandonWorkersForShutdown() {
     }
     workers_.clear();
     started_ = false;
+}
+
+void WorkCoordinator::requestProgressProbe() noexcept {
+    const auto state = progressProbeState_;
+    bool expected = false;
+    if (!state->inFlight.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+        return;
+    }
+
+    const uint64_t sequence = state->posted.fetch_add(1, std::memory_order_relaxed) + 1;
+    try {
+        boost::asio::post(getExecutor(), [state, sequence] {
+            state->lastProgressAtNs.store(steadyNowNs(), std::memory_order_relaxed);
+            state->completed.store(sequence, std::memory_order_release);
+            state->inFlight.store(false, std::memory_order_release);
+        });
+    } catch (...) {
+        state->inFlight.store(false, std::memory_order_release);
+    }
+}
+
+WorkCoordinator::Stats WorkCoordinator::getStats() const noexcept {
+    const auto state = progressProbeState_;
+    Stats stats{.workerCount = getWorkerCount(),
+                .activeWorkers = getActiveWorkerCount(),
+                .isRunning = isRunning(),
+                .progressProbesPosted = state->posted.load(std::memory_order_relaxed),
+                .progressProbesCompleted = state->completed.load(std::memory_order_acquire),
+                .progressProbeInFlight = state->inFlight.load(std::memory_order_acquire)};
+    const uint64_t lastProgressAtNs = state->lastProgressAtNs.load(std::memory_order_relaxed);
+    const uint64_t nowNs = steadyNowNs();
+    if (lastProgressAtNs != 0 && nowNs >= lastProgressAtNs) {
+        stats.lastProgressAgeMs = (nowNs - lastProgressAtNs) / 1'000'000;
+    }
+    return stats;
 }
 
 std::shared_ptr<boost::asio::io_context> WorkCoordinator::getIOContext() const noexcept {

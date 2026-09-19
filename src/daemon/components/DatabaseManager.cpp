@@ -1,7 +1,9 @@
 // Copyright 2025 The YAMS Authors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
-#include <yams/daemon/components/DatabaseManager.h>
+#include "../../../include/yams/daemon/components/DatabaseManager.h"
+#include "../../../include/yams/daemon/components/db_integrity_stamp.h"
+#include <yams/config/config_helpers.h>
 #include <yams/daemon/components/init_utils.hpp>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuneAdvisor.h>
@@ -25,10 +27,7 @@
 #include <spdlog/spdlog.h>
 
 #include <algorithm>
-#include <cctype>
-#include <charconv>
 #include <chrono>
-#include <cstdlib>
 #include <string>
 #include <thread>
 #include <vector>
@@ -37,37 +36,8 @@ namespace yams::daemon {
 
 namespace {
 
-std::string getenvCopy(std::string_view name) {
-    static std::mutex envMutex;
-    std::lock_guard<std::mutex> lock(envMutex);
-    const std::string key(name);
-    const char* env = std::getenv(key.c_str()); // NOLINT(concurrency-mt-unsafe)
-    if (!env || !*env) {
-        return {};
-    }
-    return std::string(env);
-}
-
-std::optional<size_t> parseSizeEnv(const char* raw) {
-    if (!raw || !*raw || *raw == '-') {
-        return std::nullopt;
-    }
-    size_t value{};
-    const char* end = raw + std::char_traits<char>::length(raw);
-    auto [ptr, ec] = std::from_chars(raw, end, value);
-    if (ec != std::errc{} || ptr != end) {
-        return std::nullopt;
-    }
-    return value;
-}
-
 size_t readPoolPrewarmTarget(size_t defaultTarget) {
-    if (const std::string env = getenvCopy("YAMS_DB_READ_POOL_PREWARM"); !env.empty()) {
-        if (auto parsed = parseSizeEnv(env.c_str())) {
-            return *parsed;
-        }
-    }
-    return defaultTarget;
+    return yams::config::read_env_size("YAMS_DB_READ_POOL_PREWARM").valueOr(defaultTarget);
 }
 
 void prewarmReadPool(const std::shared_ptr<metadata::ConnectionPool>& readPool,
@@ -130,12 +100,18 @@ Result<void> DatabaseManager::initialize() {
 void DatabaseManager::shutdown() {
     spdlog::debug("[DatabaseManager] Shutting down");
 
+    if (deps_.state) {
+        deps_.state->readiness.metadataRepoReady.store(false, std::memory_order_release);
+    }
     shutdownWal();
 
-    kgStore_.reset();
-    if (metadataRepo_) {
+    std::atomic_store_explicit(&kgStore_, std::shared_ptr<metadata::KnowledgeGraphStore>{},
+                               std::memory_order_release);
+    auto metadataRepo = std::atomic_exchange_explicit(
+        &metadataRepo_, std::shared_ptr<metadata::MetadataRepository>{}, std::memory_order_acq_rel);
+    if (metadataRepo) {
         try {
-            metadataRepo_->shutdown();
+            metadataRepo->shutdown();
         } catch (const std::exception& e) {
             spdlog::debug("[DatabaseManager] MetadataRepository shutdown failed: {}", e.what());
         } catch (...) {
@@ -143,7 +119,6 @@ void DatabaseManager::shutdown() {
                 "[DatabaseManager] MetadataRepository shutdown failed: unknown exception");
         }
     }
-    metadataRepo_.reset();
     std::shared_ptr<metadata::ConnectionPool> readPool;
     std::shared_ptr<metadata::ConnectionPool> writePool;
     {
@@ -151,31 +126,53 @@ void DatabaseManager::shutdown() {
         readPool = std::move(readConnectionPool_);
         writePool = std::move(connectionPool_);
     }
+    bool poolsQuiesced = true;
     if (readPool) {
         try {
+            const auto stats = readPool->getStats();
+            if (stats.activeConnections != 0) {
+                poolsQuiesced = false;
+                spdlog::warn("[DatabaseManager] ReadConnectionPool shutdown found {} active "
+                             "lease(s); clean-shutdown stamp disabled",
+                             stats.activeConnections);
+            }
             readPool->shutdown();
         } catch (const std::exception& e) {
+            poolsQuiesced = false;
             spdlog::debug("[DatabaseManager] ReadConnectionPool shutdown failed: {}", e.what());
         } catch (...) {
+            poolsQuiesced = false;
             spdlog::debug(
                 "[DatabaseManager] ReadConnectionPool shutdown failed: unknown exception");
         }
     }
     if (writePool) {
         try {
+            const auto stats = writePool->getStats();
+            if (stats.activeConnections != 0) {
+                poolsQuiesced = false;
+                spdlog::warn("[DatabaseManager] ConnectionPool shutdown found {} active lease(s); "
+                             "clean-shutdown stamp disabled",
+                             stats.activeConnections);
+            }
             writePool->shutdown();
         } catch (const std::exception& e) {
+            poolsQuiesced = false;
             spdlog::debug("[DatabaseManager] ConnectionPool shutdown failed: {}", e.what());
         } catch (...) {
+            poolsQuiesced = false;
             spdlog::debug("[DatabaseManager] ConnectionPool shutdown failed: unknown exception");
         }
     }
 
     std::string dbPath;
+    bool checkpointCompleted = false;
     bool cleanupMalformedSidecars = false;
-    if (database_ && database_->isOpen()) {
-        dbPath = database_->path();
-        auto checkpointResult = database_->execute("PRAGMA wal_checkpoint(TRUNCATE)");
+    auto database = std::atomic_exchange_explicit(&database_, std::shared_ptr<metadata::Database>{},
+                                                  std::memory_order_acq_rel);
+    if (database && database->isOpen()) {
+        dbPath = database->path();
+        auto checkpointResult = database->execute("PRAGMA wal_checkpoint(TRUNCATE)");
         if (!checkpointResult) {
             const auto message = checkpointResult.error().message;
             cleanupMalformedSidecars = message.find("malformed") != std::string::npos ||
@@ -183,19 +180,30 @@ void DatabaseManager::shutdown() {
             spdlog::warn("[DatabaseManager] Shutdown WAL checkpoint (TRUNCATE) failed: {}",
                          message);
         } else {
+            checkpointCompleted = true;
             spdlog::info("[DatabaseManager] Shutdown WAL checkpoint (TRUNCATE) completed");
         }
     }
 
-    if (database_) {
+    if (database) {
         try {
-            database_->close();
+            database->close();
         } catch (const std::exception& e) {
+            checkpointCompleted = false;
             spdlog::debug("[DatabaseManager] database close failed: {}", e.what());
         } catch (...) {
+            checkpointCompleted = false;
             spdlog::debug("[DatabaseManager] database close failed: unknown exception");
         }
-        database_.reset();
+    }
+
+    if (!dbPath.empty() && checkpointCompleted && poolsQuiesced) {
+        auto sidecarsCleared = clearDbCleanShutdownSidecars(dbPath);
+        if (!sidecarsCleared) {
+            checkpointCompleted = false;
+            spdlog::warn("[DatabaseManager] Clean-checkpoint sidecar cleanup failed: {}",
+                         sidecarsCleared.error().message);
+        }
     }
 
     if (cleanupMalformedSidecars && !dbPath.empty()) {
@@ -213,6 +221,23 @@ void DatabaseManager::shutdown() {
             }
         }
     }
+
+    const bool stampEligible = integrityStampEligible_.exchange(false, std::memory_order_acq_rel);
+    if (!dbPath.empty() && checkpointCompleted && poolsQuiesced && stampEligible) {
+        auto stampResult = publishDbCleanShutdownStamp(dbPath);
+        if (stampResult) {
+            spdlog::info("[DatabaseManager] Published clean-shutdown integrity stamp");
+        } else {
+            spdlog::warn("[DatabaseManager] Clean-shutdown stamp unavailable: {}",
+                         stampResult.error().message);
+        }
+    } else if (!dbPath.empty()) {
+        auto invalidateResult = invalidateDbCleanShutdownStamp(dbPath);
+        if (!invalidateResult) {
+            spdlog::debug("[DatabaseManager] Could not invalidate integrity stamp: {}",
+                          invalidateResult.error().message);
+        }
+    }
 }
 
 // NOTE: async open()/migrate() helpers were removed (orphaned).
@@ -224,19 +249,20 @@ void DatabaseManager::initializeWal(const std::filesystem::path& dataDir) {
     try {
         yams::wal::WALManager::Config walConfig;
         walConfig.walDirectory = dataDir / "wal";
-        walManager_ = std::make_shared<yams::wal::WALManager>(walConfig);
-        if (auto result = walManager_->initialize(); !result) {
+        auto walManager = std::make_shared<yams::wal::WALManager>(walConfig);
+        if (auto result = walManager->initialize(); !result) {
             spdlog::warn("[DatabaseManager] WALManager initialization failed: {}",
                          result.error().message);
-            walManager_.reset();
             return;
         }
+        std::atomic_store_explicit(&walManager_, walManager, std::memory_order_release);
         spdlog::info("[DatabaseManager] WALManager initialized");
-        attachWalManager(walManager_);
+        attachWalManager(std::move(walManager));
         spdlog::debug("[DatabaseManager] WALManager attached to metrics provider");
     } catch (const std::exception& e) {
         spdlog::warn("[DatabaseManager] WALManager initialization threw: {}", e.what());
-        walManager_.reset();
+        std::atomic_store_explicit(&walManager_, std::shared_ptr<yams::wal::WALManager>{},
+                                   std::memory_order_release);
     }
 }
 
@@ -257,11 +283,17 @@ void DatabaseManager::interruptPendingConnectionAcquiresForShutdown() {
 }
 
 void DatabaseManager::shutdownWal() {
-    if (!walManager_) {
+    auto walManager = std::atomic_exchange_explicit(
+        &walManager_, std::shared_ptr<yams::wal::WALManager>{}, std::memory_order_acq_rel);
+    if (auto provider =
+            std::atomic_load_explicit(&walMetricsProvider_, std::memory_order_acquire)) {
+        provider->setManager(nullptr);
+    }
+    if (!walManager) {
         return;
     }
     try {
-        auto result = walManager_->shutdown();
+        auto result = walManager->shutdown();
         if (!result) {
             spdlog::warn("[DatabaseManager] WALManager shutdown failed: {}",
                          result.error().message);
@@ -273,18 +305,25 @@ void DatabaseManager::shutdownWal() {
     } catch (...) {
         spdlog::warn("[DatabaseManager] WALManager shutdown threw unknown exception");
     }
-    walManager_.reset();
 }
 
 void DatabaseManager::attachWalManager(std::shared_ptr<yams::wal::WALManager> wal) {
-    if (!walMetricsProvider_) {
-        walMetricsProvider_ = std::make_shared<WalMetricsProvider>();
+    auto provider = std::atomic_load_explicit(&walMetricsProvider_, std::memory_order_acquire);
+    if (!provider) {
+        auto candidate = std::make_shared<WalMetricsProvider>();
+        candidate->setManager(wal);
+        if (std::atomic_compare_exchange_strong_explicit(&walMetricsProvider_, &provider, candidate,
+                                                         std::memory_order_release,
+                                                         std::memory_order_acquire)) {
+            return;
+        }
     }
-    walMetricsProvider_->setManager(std::move(wal));
+    provider->setManager(std::move(wal));
 }
 
 bool DatabaseManager::initializePools(const std::filesystem::path& dbPath) {
-    if (!database_) {
+    auto database = std::atomic_load_explicit(&database_, std::memory_order_acquire);
+    if (!database) {
         spdlog::warn("[DatabaseManager] Cannot init pools: database not open");
         return false;
     }
@@ -302,15 +341,12 @@ bool DatabaseManager::initializePools(const std::filesystem::path& dbPath) {
     }();
     size_t readPoolMin = std::min<size_t>(std::max<size_t>(2, readRecommended), 8);
     size_t readPoolMax = 64;
-    if (const std::string envMax = getenvCopy("YAMS_DB_POOL_MAX"); !envMax.empty()) {
-        if (auto v = parseSizeEnv(envMax.c_str()); v && *v >= readPoolMin) {
-            readPoolMax = *v;
-        }
+    if (auto value = yams::config::read_env_size("YAMS_DB_POOL_MAX").value;
+        value && *value >= readPoolMin) {
+        readPoolMax = *value;
     }
-    if (const std::string envMin = getenvCopy("YAMS_DB_POOL_MIN"); !envMin.empty()) {
-        if (auto v = parseSizeEnv(envMin.c_str()); v && *v > 0) {
-            readPoolMin = *v;
-        }
+    if (auto value = yams::config::read_env_size("YAMS_DB_POOL_MIN").value; value && *value > 0) {
+        readPoolMin = *value;
     }
 
     metadata::ConnectionPoolConfig dbPoolCfg;
@@ -341,12 +377,7 @@ bool DatabaseManager::initializePools(const std::filesystem::path& dbPath) {
         return false;
     }
 
-    bool dualPoolEnabled = true;
-    if (std::string value = getenvCopy("YAMS_DB_DUAL_POOL"); !value.empty()) {
-        std::transform(value.begin(), value.end(), value.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        dualPoolEnabled = (value != "0" && value != "false" && value != "off" && value != "no");
-    }
+    const bool dualPoolEnabled = yams::config::read_env_bool("YAMS_DB_DUAL_POOL").valueOr(true);
 
     if (dualPoolEnabled) {
         metadata::ConnectionPoolConfig readCfg;
@@ -362,17 +393,13 @@ bool DatabaseManager::initializePools(const std::filesystem::path& dbPath) {
                              kMaxReadConnections);
             }
         }
-        if (const std::string envReadMax = getenvCopy("YAMS_DB_READ_POOL_MAX");
-            !envReadMax.empty()) {
-            if (auto v = parseSizeEnv(envReadMax.c_str()); v && *v >= readCfg.minConnections) {
-                readCfg.maxConnections = *v;
-            }
+        if (auto value = yams::config::read_env_size("YAMS_DB_READ_POOL_MAX").value;
+            value && *value >= readCfg.minConnections) {
+            readCfg.maxConnections = *value;
         }
-        if (const std::string envReadMin = getenvCopy("YAMS_DB_READ_POOL_MIN");
-            !envReadMin.empty()) {
-            if (auto v = parseSizeEnv(envReadMin.c_str()); v && *v > 0) {
-                readCfg.minConnections = *v;
-            }
+        if (auto value = yams::config::read_env_size("YAMS_DB_READ_POOL_MIN").value;
+            value && *value > 0) {
+            readCfg.minConnections = *value;
         }
 
         std::shared_ptr<metadata::ConnectionPool> readPool;
@@ -408,12 +435,14 @@ bool DatabaseManager::initializePools(const std::filesystem::path& dbPath) {
     auto repoRes = init::record_duration(
         std::string(readiness::kMetadataRepo),
         [&]() -> yams::Result<void> {
-            metadataRepo_ =
+            auto metadataRepo =
                 std::make_shared<metadata::MetadataRepository>(*writePool, readPoolSnap.get());
+            metadataRepo->initializeCounters();
+            std::atomic_store_explicit(&metadataRepo_, std::move(metadataRepo),
+                                       std::memory_order_release);
             if (deps_.state) {
                 deps_.state->readiness.metadataRepoReady = true;
             }
-            metadataRepo_->initializeCounters();
             spdlog::info("[DatabaseManager] Metadata repository initialized successfully");
             return yams::Result<void>();
         },

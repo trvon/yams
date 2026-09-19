@@ -8,12 +8,13 @@
 #include <mutex>
 #include <optional>
 #include <string>
-#include <tuple>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 #include <boost/asio/awaitable.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/strand.hpp>
+#include <yams/daemon/components/embedding_service_config.h>
 #include <yams/daemon/components/IComponent.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/metadata/document_metadata.h>
@@ -38,6 +39,18 @@ class IModelProvider;
 class WorkCoordinator;
 struct ModelLoadEvent;
 
+// Supported diagnostic observation seam. The service emits canonical microsecond durations but
+// never retains samples or owns percentile aggregation; callers must opt in explicitly. This is
+// not a product tuning surface and has zero sample-storage cost when unset.
+class EmbeddingPhaseTimingSink {
+public:
+    virtual ~EmbeddingPhaseTimingSink() = default;
+
+    // May be called concurrently from embedding worker threads. Implementations
+    // own aggregation and must provide any required synchronization.
+    virtual void record(std::string_view phase, std::uint64_t elapsedUs) = 0;
+};
+
 /**
  * @brief Embedding service that processes embed jobs from InternalEventBus
  *
@@ -46,15 +59,9 @@ struct ModelLoadEvent;
  */
 class EmbeddingService : public IComponent {
 public:
-    struct PhaseTiming {
-        uint64_t calls{0};
-        uint64_t totalMs{0};
-        uint64_t maxMs{0};
-    };
-
     EmbeddingService(std::shared_ptr<api::IContentStore> store,
                      std::shared_ptr<metadata::MetadataRepository> meta,
-                     WorkCoordinator* coordinator);
+                     WorkCoordinator* coordinator, EmbeddingServiceConfig config = {});
     ~EmbeddingService() override;
 
     const char* getName() const override { return "EmbeddingService"; }
@@ -93,10 +100,14 @@ public:
     uint64_t semanticUpdateErrors() const {
         return semanticUpdateErrors_.load(std::memory_order_relaxed);
     }
-    std::unordered_map<std::string, PhaseTiming> phaseTimingsSnapshot() const;
-    void resetPhaseTimings();
+    void setPhaseTimingSink(std::shared_ptr<EmbeddingPhaseTimingSink> sink) {
+        std::atomic_store_explicit(&phaseTimingSink_, std::move(sink), std::memory_order_release);
+    }
 
     void setTopologyRebuildRequester(std::function<void(const std::vector<std::string>&)> cb);
+
+    // Exposes the immutable effective safeguard and its provenance for status/tests.
+    EffectiveEmbeddingServiceConfig effectiveConcurrencyPolicy() const;
 
     // Wipes semantic_neighbor edges and rebuilds against every vdb doc in one
     // pass. Per-job rebuilds make each doc's top-K depend on job-completion
@@ -113,6 +124,11 @@ public:
     void start();
 
 private:
+    friend class EmbeddingServiceTimingTestAccess;
+
+    static EffectiveEmbeddingServiceConfig
+    resolveConcurrencyPolicy(const EmbeddingServiceConfig& config);
+
     // Parallel poller that dispatches jobs to work executor
     boost::asio::awaitable<void> channelPoller();
 
@@ -128,13 +144,15 @@ private:
         const std::shared_ptr<yams::vector::VectorDatabase>& vdb, const std::string& modelName,
         const std::vector<std::pair<std::string, std::string>>& sourceDocuments,
         bool sourceAllCorpus);
-    void recordPhaseTiming(const std::string& phase, std::chrono::steady_clock::time_point start);
+    void recordPhaseTiming(std::string_view phase, std::chrono::steady_clock::time_point start);
     void enqueueRepairStatusUpdate(std::vector<std::string> hashes, metadata::RepairStatus status,
-                                   std::string source);
-    void enqueueEmbeddingStatusUpdate(std::vector<std::string> hashes, bool embedded,
-                                      std::string modelName, std::string source);
-    void enqueueEmbeddingCompletion(std::vector<std::string> hashes, std::string modelName);
+                                   std::string source,
+                                   std::vector<metadata::EmbeddingDerivationToken> tokens);
+    void enqueueEmbeddingCompletion(std::vector<metadata::EmbeddingDerivationToken> tokens,
+                                    std::string modelName);
 
+    const EmbeddingServiceConfig config_;
+    const EffectiveEmbeddingServiceConfig effectiveConfig_;
     std::shared_ptr<api::IContentStore> store_;
     std::shared_ptr<metadata::MetadataRepository> meta_;
     WorkCoordinator* coordinator_;
@@ -151,6 +169,9 @@ private:
     std::function<void(const std::vector<std::string>&)> topologyRebuildRequester_;
 
     std::atomic<bool> stop_{false};
+    std::mutex stageActivityMutex_;
+    bool stageActivityPublished_{false};
+    std::uint64_t stageActivityToken_{0};
     std::atomic<std::size_t> processed_{0};
     std::atomic<std::size_t> failed_{0};
     std::atomic<std::size_t> inFlight_{0}; // PBI-05b: parallel job tracking
@@ -179,8 +200,7 @@ private:
     static constexpr std::size_t kSemanticBackfillIdleTickThreshold{4};
     static constexpr std::size_t kSemanticBackfillBatchLimit{64};
     std::atomic<uint64_t> inferTokenCounter_{0};
-    mutable std::mutex phaseTimingsMutex_;
-    std::unordered_map<std::string, PhaseTiming> phaseTimings_;
+    std::shared_ptr<EmbeddingPhaseTimingSink> phaseTimingSink_;
     mutable std::mutex inferTrackerMutex_;
     std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> activeInferSubBatches_;
     struct SemanticCorpusEntry {

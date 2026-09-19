@@ -12,9 +12,10 @@
 #include <iostream>
 #include <thread>
 
-#include "../../common/env_compat.h"
 #include <spdlog/sinks/stdout_color_sinks.h>
 #include <spdlog/spdlog.h>
+#include "../../common/env_compat.h"
+#include "../../common/test_helpers_catch2.h"
 #include <yams/compat/unistd.h>
 #include <yams/daemon/client/daemon_client.h>
 
@@ -47,8 +48,8 @@ int main() {
     fs::create_directories(testDir);
     std::cout << "Test directory: " << testDir << std::endl;
 
-    // Set environment
-    setenv("YAMS_STORAGE", testDir.string().c_str(), 1);
+    // Keep the diagnostic isolated without leaking its storage override to its host process.
+    yams::test::ScopedEnvVar storageEnvironment{"YAMS_STORAGE", testDir.string()};
 
     // Create daemon components
     DaemonConfig config;

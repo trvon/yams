@@ -3,7 +3,6 @@
 
 #include <spdlog/spdlog.h>
 #include <algorithm>
-#include <cstdlib>
 #include <boost/asio/co_spawn.hpp>
 #include <boost/asio/detached.hpp>
 #include <yams/daemon/components/SearchComponent.h>
@@ -93,7 +92,8 @@ bool SearchComponent::shouldTriggerHeavyRebuild() const {
                     vectorUsable = true;
                 }
             } catch (...) {
-                // Intentional best-effort path; keep the primary operation unaffected.
+                spdlog::debug(
+                    "[SearchComponent] Vector readiness probe failed with unknown exception");
             }
         }
         if (lexicalOverlayCoversGrowth && vectorUsable) {
@@ -175,17 +175,8 @@ bool SearchComponent::checkAndTriggerRebuildIfNeeded() {
         return false;
     }
 
-    // Allow disabling rebuilds (bench + ops control).
-    if (const char* env = std::getenv("YAMS_DISABLE_SEARCH_REBUILDS")) {
-        try {
-            std::string v(env);
-            std::transform(v.begin(), v.end(), v.begin(), ::tolower);
-            if (v == "1" || v == "true" || v == "yes" || v == "on") {
-                return false;
-            }
-        } catch (...) {
-            // Intentional best-effort path; keep the primary operation unaffected.
-        }
+    if (!config_.automaticRebuildsEnabled) {
+        return false;
     }
 
     // Avoid rebuilds while ingestion is active (even if post-ingest is briefly drained).
@@ -196,7 +187,7 @@ bool SearchComponent::checkAndTriggerRebuildIfNeeded() {
             return false;
         }
     } catch (...) {
-        // Intentional best-effort path; keep the primary operation unaffected.
+        spdlog::debug("[SearchComponent] Ingest load probe failed with unknown exception");
     }
 
     // Rebuild only when ingest/post-ingest/embedding pipelines are drained.
@@ -219,7 +210,7 @@ bool SearchComponent::checkAndTriggerRebuildIfNeeded() {
             return false;
         }
     } catch (...) {
-        // Intentional best-effort path; keep the primary operation unaffected.
+        spdlog::debug("[SearchComponent] Search load probe failed with unknown exception");
     }
 
     // Check for concurrent rebuild

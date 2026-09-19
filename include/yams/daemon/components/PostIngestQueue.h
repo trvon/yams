@@ -6,6 +6,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
+#include <deque>
 #include <functional>
 #include <list>
 #include <memory>
@@ -20,6 +22,7 @@
 #include <boost/asio/steady_timer.hpp>
 #include <yams/daemon/components/GradientLimiter.h>
 #include <yams/daemon/components/InternalEventBus.h>
+#include <yams/daemon/components/knowledge_graph_completion.h>
 #include <yams/metadata/document_metadata.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/search/query_concept_extractor.h>
@@ -190,6 +193,7 @@ public:
     struct PreparedMetadataEntry {
         int64_t documentId = 0;
         std::string hash;
+        std::string knowledgeGraphToken;
         std::string fileName;
         std::string filePath; // Full path for KG node creation
         std::string title;
@@ -209,6 +213,7 @@ public:
         std::string symbolLanguage;
         bool shouldDispatchEntity = false;
         bool shouldDispatchTitle = false;
+        bool preserveTitle = false;
         bool shouldDispatchEmbed = true;
         std::string titleTextSnippet; // First N chars for async GLiNER title extraction
         std::vector<std::string> fallbackEntities; // ScientificAdapter entities for bulk write
@@ -341,11 +346,6 @@ public:
     GradientLimiter* titleLimiter() const;
     GradientLimiter* embedLimiter() const;
 
-    void setCapacity(std::size_t cap) {
-        if (cap > 0) {
-            capacity_.store(cap, std::memory_order_relaxed);
-        }
-    }
     void setBatchCoalesceWindow(std::chrono::milliseconds window) {
         constexpr auto kMaxWindow = std::chrono::milliseconds{20};
         const auto bounded = std::clamp(window, std::chrono::milliseconds{0}, kMaxWindow);
@@ -383,6 +383,11 @@ public:
     /// @return true if the stage is paused
     [[nodiscard]] bool isStagePaused(Stage stage) const;
 
+    /// Explicitly enable or disable KG dispatch. Unlike pauseStage(), disabling dispatch marks
+    /// KG as outside the active pipeline contract; temporary pauses continue buffering work.
+    void setKnowledgeGraphEnabled(bool enabled);
+    [[nodiscard]] bool isKnowledgeGraphEnabled() const;
+
     /// Pause all processing stages (emergency shutdown)
     void pauseAll();
 
@@ -416,6 +421,47 @@ public:
     [[nodiscard]] search::EntityExtractionFunc getTitleExtractor() const;
     [[nodiscard]] bool hasTitleExtractor() const;
 
+#ifdef YAMS_TESTING
+    void testing_deferKgJob(InternalEventBus::KgJob job) {
+        std::lock_guard<std::mutex> lock(pendingKgMutex_);
+        pendingKgJobs_.push_back(std::move(job));
+    }
+    void testing_schedulePendingKgDrain() { schedulePendingKgDrain(); }
+    void testing_enqueueKgJob(InternalEventBus::KgJob job) { enqueueKgJob(std::move(job)); }
+    bool testing_commitAndDispatchKg(std::vector<PreparedMetadataEntry>& entries) {
+        std::vector<ExtractionFailure> failures;
+        commitBatchResults(entries, failures);
+        for (const auto& entry : entries) {
+            DispatchTimingSet timings;
+            dispatchNonEmbeddingStages(entry, buildDispatchPlan(entry, false, false),
+                                       entry.contentBytes, timings);
+        }
+        return failures.empty();
+    }
+    // Route every KG job to the pending FIFO, as a full channel does in production.
+    void testing_detachKgChannel() {
+        std::lock_guard<std::mutex> lock(pendingKgMutex_);
+        kgChannel_.reset();
+    }
+    void testing_processEntityExtractionBatch(
+        std::vector<InternalEventBus::EntityExtractionJob>&& jobs) {
+        processEntityExtractionBatch(std::move(jobs));
+    }
+    void
+    testing_processTitleExtractionBatch(std::vector<InternalEventBus::TitleExtractionJob>&& jobs) {
+        processTitleExtractionBatch(std::move(jobs));
+    }
+    void testing_dispatchNonEmbeddingStages(const PreparedMetadataEntry& entry) {
+        DispatchTimingSet timings;
+        dispatchNonEmbeddingStages(entry, buildDispatchPlan(entry, false, false),
+                                   entry.contentBytes, timings);
+    }
+    [[nodiscard]] std::size_t testing_pendingKgJobs() const {
+        std::lock_guard<std::mutex> lock(pendingKgMutex_);
+        return pendingKgJobs_.size();
+    }
+#endif
+
 private:
     template <typename Job>
     PressureLimitedPollerConfig<Job> makePollerConfig(
@@ -439,32 +485,40 @@ private:
         const std::vector<std::shared_ptr<ExternalEntityProviderAdapter>>& entityProviders);
 
     void processKnowledgeGraphBatch(std::vector<InternalEventBus::KgJob>&& jobs);
-    void processSymbolExtractionStage(const std::string& hash, int64_t docId,
-                                      const std::string& filePath, const std::string& language,
-                                      std::vector<std::byte>* contentBytes);
     void processSymbolExtractionBatch(std::vector<InternalEventBus::SymbolExtractionJob>&& jobs);
     void processEntityExtractionBatch(std::vector<InternalEventBus::EntityExtractionJob>&& jobs);
     void processTitleExtractionBatch(std::vector<InternalEventBus::TitleExtractionJob>&& jobs);
     void dispatchToKgChannel(const std::string& hash, int64_t docId, const std::string& filePath,
                              std::vector<std::string> tags,
-                             std::shared_ptr<std::vector<std::byte>> contentBytes);
+                             std::shared_ptr<std::vector<std::byte>> contentBytes,
+                             const std::string& knowledgeGraphToken,
+                             std::shared_ptr<KnowledgeGraphCompletion> knowledgeGraphCompletion);
+    void enqueueKgJob(InternalEventBus::KgJob job);
+    void schedulePendingKgDrain();
+    boost::asio::awaitable<void> drainPendingKgJobs();
+    std::size_t cancelPendingKgJobs(bool countAsDrop, const char* reason) noexcept;
     void dispatchToSymbolChannel(const std::string& hash, int64_t docId,
                                  const std::string& filePath, const std::string& language,
                                  std::shared_ptr<std::vector<std::byte>> contentBytes);
     void dispatchToEntityChannel(const std::string& hash, int64_t docId,
                                  const std::string& filePath, const std::string& extension,
                                  std::shared_ptr<std::vector<std::byte>> contentBytes);
+    // contentBytes may alias a buffer shared with the KG and symbol channels; the stage
+    // reads it in place and must never move out of it.
     void processEntityExtractionStage(const std::string& hash, int64_t docId,
                                       const std::string& filePath, const std::string& extension,
-                                      std::vector<std::byte>* contentBytes);
+                                      const std::vector<std::byte>* contentBytes);
     void dispatchToTitleChannel(const std::string& hash, int64_t docId,
                                 const std::string& textSnippet, const std::string& fallbackTitle,
                                 const std::string& filePath, const std::string& language,
-                                const std::string& mimeType);
-    void processTitleExtractionStage(const std::string& hash, int64_t docId,
-                                     const std::string& textSnippet,
-                                     const std::string& fallbackTitle, const std::string& filePath,
-                                     const std::string& language, const std::string& mimeType);
+                                const std::string& mimeType, bool preserveTitle,
+                                const std::string& knowledgeGraphToken,
+                                std::shared_ptr<KnowledgeGraphCompletion> knowledgeGraphCompletion);
+    void processTitleExtractionStage(
+        const std::string& hash, int64_t docId, const std::string& textSnippet,
+        const std::string& fallbackTitle, const std::string& filePath, const std::string& language,
+        const std::string& mimeType, bool preserveTitle, const std::string& knowledgeGraphToken,
+        const std::shared_ptr<KnowledgeGraphCompletion>& knowledgeGraphCompletion);
     std::size_t resolveChannelCapacity() const;
     std::size_t boundedStageChannelCapacity(std::size_t defaultCap) const;
 
@@ -485,6 +539,7 @@ private:
     void checkDrainAndSignal(); // Check if drained and signal corpus stats stale
     std::string deriveTitle(const std::string& text, const std::string& fileName,
                             const std::string& mimeType, const std::string& extension) const;
+    void publishStageActivity(std::size_t index, bool active);
     void refreshStageAvailability();
     void logStageAvailabilitySnapshot() const;
     void requeueMissedEntityExtractions();
@@ -504,7 +559,11 @@ private:
     // Per-stage arrays indexed by Stage enum (0..4)
     std::array<std::atomic<bool>, kStageCount> stageStarted_{};
     std::array<std::atomic<bool>, kStageCount> stagePaused_{};
+    std::mutex stageActivityMutex_;
+    std::array<bool, kStageCount> stageActivityPublished_{};
+    std::array<std::uint64_t, kStageCount> stageActivityTokens_{};
     std::array<std::atomic<std::size_t>, kStageCount> stageInFlight_{};
+    std::atomic<bool> knowledgeGraphEnabled_{true};
     std::atomic<std::size_t> callbacksInFlight_{0};
 
     [[nodiscard]] bool anyStageStarted() const {
@@ -535,8 +594,12 @@ private:
     }
 
     [[nodiscard]] bool shutdownQuiesced() const {
-        return allStagesStopped() && totalInFlight() == 0 &&
-               callbacksInFlight_.load(std::memory_order_acquire) == 0;
+        if (!allStagesStopped() || totalInFlight() != 0 ||
+            callbacksInFlight_.load(std::memory_order_acquire) != 0) {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(pendingKgMutex_);
+        return pendingKgJobs_.empty() && !pendingKgDrainScheduled_.load(std::memory_order_acquire);
     }
 
     mutable std::mutex lifecycleMutex_;
@@ -592,6 +655,10 @@ private:
     std::shared_ptr<SpscQueue<InternalEventBus::PostIngestTask>> postIngestChannel_;
     std::shared_ptr<SpscQueue<InternalEventBus::PostIngestTask>> postIngestRpcChannel_;
     std::shared_ptr<SpscQueue<InternalEventBus::KgJob>> kgChannel_;
+    mutable std::mutex pendingKgMutex_;
+    std::deque<InternalEventBus::KgJob> pendingKgJobs_;
+    std::atomic<std::uint64_t> pendingKgDropped_{0};
+    std::atomic<bool> pendingKgDrainScheduled_{false};
     std::shared_ptr<SpscQueue<InternalEventBus::SymbolExtractionJob>> symbolChannel_;
     std::shared_ptr<SpscQueue<InternalEventBus::EntityExtractionJob>> entityChannel_;
     std::shared_ptr<SpscQueue<InternalEventBus::TitleExtractionJob>> titleChannel_;

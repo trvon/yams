@@ -2,6 +2,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -11,6 +12,8 @@
 #include <nlohmann/json.hpp>
 #include <yams/core/uuid.h>
 #include <yams/mcp/mcp_server.h>
+
+#include "../../common/test_helpers_catch2.h"
 
 using namespace yams::mcp;
 using json = nlohmann::json;
@@ -57,15 +60,15 @@ TEST_CASE("MCP prompts/list includes codex repo session prompt", "[mcp][prompts]
     json req = {
         {"jsonrpc", "2.0"}, {"id", 1}, {"method", "prompts/list"}, {"params", json::object()}};
     auto mr = server->handleRequestPublic(req);
-    REQUIRE(mr.has_value());
+    REQUIRE((mr.has_value()));
     json out = mr.value();
-    REQUIRE(out.is_object());
-    REQUIRE(out.contains("result"));
+    REQUIRE((out.is_object()));
+    REQUIRE((out.contains("result")));
     auto result = out["result"];
 
-    REQUIRE(result.is_object());
-    REQUIRE(result.contains("prompts"));
-    REQUIRE(result["prompts"].is_array());
+    REQUIRE((result.is_object()));
+    REQUIRE((result.contains("prompts")));
+    REQUIRE((result["prompts"].is_array()));
 
     std::unordered_set<std::string> names;
     for (const auto& p : result["prompts"]) {
@@ -74,8 +77,8 @@ TEST_CASE("MCP prompts/list includes codex repo session prompt", "[mcp][prompts]
         }
     }
 
-    CHECK(names.count("search_codebase") == 1);
-    CHECK(names.count("session/codex_repo") == 1);
+    CHECK((names.count("search_codebase") == 1));
+    CHECK((names.count("session/codex_repo") == 1));
 }
 
 TEST_CASE("MCP prompts/get builtins return MCP message schema",
@@ -90,28 +93,28 @@ TEST_CASE("MCP prompts/get builtins return MCP message schema",
                   {"arguments", {{"pattern", "listPrompts"}, {"file_type", "cpp"}}}}}};
 
     auto mr = server->handleRequestPublic(req);
-    REQUIRE(mr.has_value());
+    REQUIRE((mr.has_value()));
     json out = mr.value();
-    REQUIRE(out.is_object());
-    REQUIRE(out.contains("result"));
+    REQUIRE((out.is_object()));
+    REQUIRE((out.contains("result")));
     auto result = out["result"];
-    REQUIRE(result.is_object());
-    REQUIRE(result.contains("messages"));
-    REQUIRE(result["messages"].is_array());
-    REQUIRE(result["messages"].size() >= 2);
+    REQUIRE((result.is_object()));
+    REQUIRE((result.contains("messages")));
+    REQUIRE((result["messages"].is_array()));
+    REQUIRE((result["messages"].size() >= 2));
 
     const auto& first = result["messages"][0];
     const auto& second = result["messages"][1];
-    REQUIRE(first["role"].is_string());
-    REQUIRE(second["role"].is_string());
-    CHECK(first["role"] == "assistant");
-    CHECK(second["role"] == "user");
-    REQUIRE(first.contains("content"));
-    REQUIRE(first["content"].is_object());
-    CHECK(first["content"]["type"] == "text");
-    REQUIRE(second.contains("content"));
-    REQUIRE(second["content"].is_object());
-    CHECK(second["content"]["type"] == "text");
+    REQUIRE((first["role"].is_string()));
+    REQUIRE((second["role"].is_string()));
+    CHECK((first["role"] == "assistant"));
+    CHECK((second["role"] == "user"));
+    REQUIRE((first.contains("content")));
+    REQUIRE((first["content"].is_object()));
+    CHECK((first["content"]["type"] == "text"));
+    REQUIRE((second.contains("content")));
+    REQUIRE((second["content"].is_object()));
+    CHECK((second["content"]["type"] == "text"));
 }
 
 TEST_CASE("MCP prompts/get session/codex_repo references eng_codex and AGENTS",
@@ -124,19 +127,52 @@ TEST_CASE("MCP prompts/get session/codex_repo references eng_codex and AGENTS",
                 {"params", {{"name", "session/codex_repo"}, {"arguments", json::object()}}}};
 
     auto mr = server->handleRequestPublic(req);
-    REQUIRE(mr.has_value());
+    REQUIRE((mr.has_value()));
     json out = mr.value();
-    REQUIRE(out.is_object());
-    REQUIRE(out.contains("result"));
+    REQUIRE((out.is_object()));
+    REQUIRE((out.contains("result")));
     auto result = out["result"];
-    REQUIRE(result["messages"].is_array());
-    REQUIRE(result["messages"].size() >= 2);
+    REQUIRE((result["messages"].is_array()));
+    REQUIRE((result["messages"].size() >= 2));
 
     const auto& userMessage = result["messages"][1]["content"]["text"];
-    REQUIRE(userMessage.is_string());
+    REQUIRE((userMessage.is_string()));
     const std::string text = userMessage.get<std::string>();
-    CHECK(text.find("eng_codex") != std::string::npos);
-    CHECK(text.find("AGENTS.md") != std::string::npos);
+    CHECK((text.find("eng_codex") != std::string::npos));
+    CHECK((text.find("AGENTS.md") != std::string::npos));
+}
+
+TEST_CASE("MCP prompt directory uses the canonical shared config reader",
+          "[mcp][prompts][config][catch2]") {
+    TempDirGuard tmp;
+    const auto promptsDir = tmp.path() / "configured-prompts";
+    std::filesystem::create_directories(promptsDir);
+    std::ofstream(promptsDir / "PROMPT-config-path.md")
+        << "# Config Path Prompt\n\nLoaded through shared config.\n";
+    const auto configPath = tmp.path() / "config.toml";
+    std::ofstream(configPath) << "[mcp_server]\n"
+                                 "prompts_dir = \""
+                              << promptsDir.string() << "\" # inline comment\n";
+
+    const auto dataDir = tmp.path() / "data";
+    yams::test::ScopedEnvVar explicitPrompts{"YAMS_MCP_PROMPTS_DIR", std::nullopt};
+    yams::test::ScopedEnvVar compatibilityConfig{"YAMS_CONFIG_PATH", std::nullopt};
+    yams::test::ScopedEnvVar canonicalConfig{"YAMS_CONFIG", configPath.string()};
+    yams::test::ScopedEnvVar storage{"YAMS_STORAGE", dataDir.string()};
+    yams::test::ScopedEnvVar canonicalData{"YAMS_DATA_DIR", dataDir.string()};
+
+    auto server = std::make_shared<MCPServer>(std::make_unique<NullTransport>());
+    json request = {
+        {"jsonrpc", "2.0"}, {"id", 4}, {"method", "prompts/list"}, {"params", json::object()}};
+    auto response = server->handleRequestPublic(request);
+    REQUIRE((response.has_value()));
+    const auto& prompts = response.value().at("result").at("prompts");
+    REQUIRE((prompts.is_array()));
+
+    const auto found = std::ranges::any_of(prompts, [](const auto& prompt) {
+        return prompt.is_object() && prompt.value("name", "") == "config_path";
+    });
+    CHECK((found));
 }
 
 TEST_CASE("MCP prompts/get supports file-backed prompt fallback",
@@ -146,7 +182,7 @@ TEST_CASE("MCP prompts/get supports file-backed prompt fallback",
 
     {
         std::ofstream out(promptPath);
-        REQUIRE(out.good());
+        REQUIRE((out.good()));
         out << "# Test Prompt\n\nUse this file-backed prompt.\n";
     }
 
@@ -156,37 +192,37 @@ TEST_CASE("MCP prompts/get supports file-backed prompt fallback",
     json listReq = {
         {"jsonrpc", "2.0"}, {"id", 4}, {"method", "prompts/list"}, {"params", json::object()}};
     auto listMr = server->handleRequestPublic(listReq);
-    REQUIRE(listMr.has_value());
+    REQUIRE((listMr.has_value()));
     json listOut = listMr.value();
-    REQUIRE(listOut.is_object());
-    REQUIRE(listOut.contains("result"));
+    REQUIRE((listOut.is_object()));
+    REQUIRE((listOut.contains("result")));
     auto listResult = listOut["result"];
-    REQUIRE(listResult["prompts"].is_array());
+    REQUIRE((listResult["prompts"].is_array()));
 
     bool foundFilePrompt = false;
     for (const auto& p : listResult["prompts"]) {
         if (p.is_object() && p.value("name", "") == "foo_bar") {
             foundFilePrompt = true;
-            CHECK(p.value("description", "") == "Test Prompt");
+            CHECK((p.value("description", "") == "Test Prompt"));
             break;
         }
     }
-    CHECK(foundFilePrompt);
+    CHECK((foundFilePrompt));
 
     json getReq = {{"jsonrpc", "2.0"},
                    {"id", 5},
                    {"method", "prompts/get"},
                    {"params", {{"name", "foo_bar"}, {"arguments", json::object()}}}};
     auto getMr = server->handleRequestPublic(getReq);
-    REQUIRE(getMr.has_value());
+    REQUIRE((getMr.has_value()));
     json getOut = getMr.value();
-    REQUIRE(getOut.is_object());
-    REQUIRE(getOut.contains("result"));
+    REQUIRE((getOut.is_object()));
+    REQUIRE((getOut.contains("result")));
     auto getResult = getOut["result"];
-    REQUIRE(getResult["messages"].is_array());
-    REQUIRE(getResult["messages"].size() == 1);
-    CHECK(getResult["messages"][0]["role"] == "assistant");
-    CHECK(getResult["messages"][0]["content"]["type"] == "text");
+    REQUIRE((getResult["messages"].is_array()));
+    REQUIRE((getResult["messages"].size() == 1));
+    CHECK((getResult["messages"][0]["role"] == "assistant"));
+    CHECK((getResult["messages"][0]["content"]["type"] == "text"));
     const std::string text = getResult["messages"][0]["content"]["text"].get<std::string>();
-    CHECK(text.find("Use this file-backed prompt.") != std::string::npos);
+    CHECK((text.find("Use this file-backed prompt.") != std::string::npos));
 }

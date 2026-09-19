@@ -332,7 +332,29 @@ void collectGraphNeighborStageTrace(
     trace.eligibleCandidateCount = eligibleCandidates.size();
 
     std::unordered_map<std::string, std::optional<std::string>> documentIds;
-    documentIds.reserve(request.seedDocumentHashes.size() + relationCandidates.size());
+    documentIds.reserve(request.seedDocumentHashes.size() + relationCandidates.size() +
+                        fetchedCandidates.size() + eligibleCandidates.size());
+    {
+        std::vector<std::string> allHashes;
+        allHashes.reserve(documentIds.bucket_count());
+        for (const auto* stage : {&request.seedDocumentHashes, &relationCandidates,
+                                  &fetchedCandidates, &eligibleCandidates}) {
+            for (const auto& hash : *stage) {
+                if (documentIds.try_emplace(hash).second) {
+                    allHashes.push_back(hash);
+                }
+            }
+        }
+        if (auto hydrated = metadataRepo->batchGetDocumentsByHash(allHashes)) {
+            for (auto& [hash, document] : hydrated.value()) {
+                documentIds[hash] = documentIdForTrace(document.filePath, hash);
+            }
+        } else {
+            // A failed batch is not a cache of confirmed misses. Retain the existing
+            // per-document diagnostic fallback without changing routing decisions.
+            documentIds.clear();
+        }
+    }
     auto resolveDocumentId = [&](const std::string& hash) -> const std::optional<std::string>& {
         auto [it, inserted] = documentIds.try_emplace(hash);
         if (!inserted) {
@@ -407,6 +429,8 @@ bool loadRoutingSnapshot(const TopologyRoutingSessionRequest& request,
                             snapshot->artifacts->topologyEpoch == request.expectedTopologyEpoch;
     result.topologyEpoch = snapshot->artifacts->topologyEpoch;
     result.certificate.constructionFingerprint = snapshot->constructionFingerprint;
+    result.certificate.routingPolicyFingerprint =
+        topologyRoutingPolicyFingerprint(snapshot->representationFingerprint, request.options);
     result.certificate.coordinateSpaceIdentity = snapshot->artifacts->embeddingSpaceIdentity;
     if (!request.queryEmbedding.has_value()) {
         result.certificate.admission.coordinateSpaceAlignment =
@@ -503,6 +527,22 @@ tryMedoidGraphExpansion(const TopologyRoutingSessionRequest& request,
     return out;
 }
 
+void rejectMetadataHydration(TopologyRoutingSessionResult& result, const Error& error) {
+    result.skipReason = "metadata_lookup_failed:" + error.message;
+    result.applied = false;
+    result.artifactAdmitted = false;
+    result.acceptedRoutes = 0;
+    result.addedCandidates = 0;
+    result.duplicateCandidates = 0;
+    result.certificate = {};
+    result.routeEvidence.clear();
+    result.addedCandidateHashes.clear();
+    result.routedCandidateHashes.clear();
+    result.routedCandidateDocIds.clear();
+    result.medoidHashes.clear();
+    result.candidateStructureEvidence.clear();
+}
+
 void admitRankedCandidates(TopologyRoutingSessionResult& result,
                            const TopologyRoutingSessionRequest& request,
                            const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,
@@ -515,11 +555,22 @@ void admitRankedCandidates(TopologyRoutingSessionResult& result,
     }
     candidateHashes.reserve(candidateHashes.size() + ranked.size());
 
+    // One bounded batch call; only a successful lookup can establish that a hash is stale.
+    const auto docLookupStart = std::chrono::steady_clock::now();
+    auto hydrated = metadataRepo->batchGetDocumentsByHash(ranked);
+    result.timings.docLookupMicros += microsSince(docLookupStart);
+    if (!hydrated) {
+        rejectMetadataHydration(result, hydrated.error());
+        return;
+    }
     for (const auto& hash : ranked) {
-        const auto docLookupStart = std::chrono::steady_clock::now();
-        auto docLookup = metadataRepo->getDocumentByHash(hash);
-        result.timings.docLookupMicros += microsSince(docLookupStart);
-        if (!docLookup || !docLookup.value().has_value()) {
+        const yams::metadata::DocumentInfo* document = nullptr;
+        if (hydrated) {
+            if (const auto it = hydrated.value().find(hash); it != hydrated.value().end()) {
+                document = &it->second;
+            }
+        }
+        if (!document) {
             ++result.staleCandidates;
             continue;
         }
@@ -527,8 +578,7 @@ void admitRankedCandidates(TopologyRoutingSessionResult& result,
             result.certificate.allowedDocumentHashes.insert(hash);
         }
         result.routedCandidateHashes.insert(hash);
-        result.routedCandidateDocIds.push_back(
-            documentIdForTrace(docLookup.value()->filePath, hash));
+        result.routedCandidateDocIds.push_back(documentIdForTrace(document->filePath, hash));
         const auto insertStart = std::chrono::steady_clock::now();
         const auto [_, inserted] = candidateHashes.insert(hash);
         result.timings.candidateInsertMicros += microsSince(insertStart);
@@ -606,7 +656,7 @@ bool tryRunGraphNeighborExpansion(
     }
 
     admitRankedCandidates(result, request, metadataRepo, ranked);
-    if (!result.applied) {
+    if (!result.applied && result.skipReason.empty()) {
         result.skipReason = "graph_all_duplicates";
     } else if (result.skipReason.empty()) {
         result.skipReason = "graph_seed_neighbors";
@@ -869,7 +919,10 @@ void produceTopologyRouteAdmission(const std::vector<yams::topology::ClusterRout
     const bool calibrationObserved =
         !calibration.constructionFingerprint.empty() &&
         calibration.constructionFingerprint == result.certificate.constructionFingerprint &&
-        calibration.calibrationQueries > 0 && calibration.protectedCandidates > 0;
+        !calibration.routingPolicyFingerprint.empty() &&
+        calibration.routingPolicyFingerprint == result.certificate.routingPolicyFingerprint &&
+        !calibration.datasetIdentity.empty() && calibration.calibrationQueries > 0 &&
+        calibration.protectedCandidates > 0;
     if (!calibrationObserved) {
         result.certificate.admission.protectedFibersRepresented = Status::Unavailable;
         result.certificate.admission.routeRisk = Status::Unavailable;
@@ -1067,16 +1120,35 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
         if (request.options.collectRouteMembership) {
             continue;
         }
-        const auto expansionHashes = selectClusterExpansionHashes(route);
-        for (const auto& hash : expansionHashes) {
-            if (request.options.maxDocs > 0 && result.routedDocs >= request.options.maxDocs) {
-                break;
+        auto expansionHashes = selectClusterExpansionHashes(route);
+        if (request.options.maxDocs > 0) {
+            // Same cut the per-document loop applied, taken before hydration.
+            const std::size_t remaining = result.routedDocs >= request.options.maxDocs
+                                              ? 0
+                                              : request.options.maxDocs - result.routedDocs;
+            if (expansionHashes.size() > remaining) {
+                expansionHashes.resize(remaining);
             }
+        }
+        const auto docLookupStart = std::chrono::steady_clock::now();
+        auto hydrated = expansionHashes.empty()
+                            ? decltype(metadataRepo->batchGetDocumentsByHash(expansionHashes)){}
+                            : metadataRepo->batchGetDocumentsByHash(expansionHashes);
+        result.timings.docLookupMicros += microsSince(docLookupStart);
+        if (!expansionHashes.empty() && !hydrated) {
+            rejectMetadataHydration(result, hydrated.error());
+            result.timings.totalMicros = microsSince(totalStart);
+            return result;
+        }
+        for (const auto& hash : expansionHashes) {
             ++result.routedDocs;
-            const auto docLookupStart = std::chrono::steady_clock::now();
-            auto docLookup = metadataRepo->getDocumentByHash(hash);
-            result.timings.docLookupMicros += microsSince(docLookupStart);
-            if (!docLookup || !docLookup.value().has_value()) {
+            const yams::metadata::DocumentInfo* document = nullptr;
+            if (hydrated) {
+                if (const auto it = hydrated.value().find(hash); it != hydrated.value().end()) {
+                    document = &it->second;
+                }
+            }
+            if (!document) {
                 ++result.staleCandidates;
                 continue;
             }
@@ -1084,8 +1156,7 @@ runClusterArtifactExpansion(const TopologyRoutingSessionRequest& request,
                 continue;
             }
             result.routedCandidateHashes.insert(hash);
-            result.routedCandidateDocIds.push_back(
-                documentIdForTrace(docLookup.value()->filePath, hash));
+            result.routedCandidateDocIds.push_back(documentIdForTrace(document->filePath, hash));
             const auto insertStart = std::chrono::steady_clock::now();
             const auto [_, inserted] = candidateHashes.insert(hash);
             result.timings.candidateInsertMicros += microsSince(insertStart);
@@ -1215,6 +1286,7 @@ makeTopologyRoutingOptions(const SearchEngineConfig& config,
         .weakTier1Query = weakTier1Query,
         .minClusters = config.topologyMinClusters,
         .maxClusters = config.topologyMaxClusters,
+        .maxSeedDocuments = config.topologyMaxSeedDocuments,
         .representativeLimit = config.topologyRoutingRepresentativeLimit,
         .denseAnnCandidateLimit = config.topologyRoutingAnnCandidateLimit,
         .adaptiveProbeScoreGap = config.topologyAdaptiveProbeScoreGap,
@@ -1457,6 +1529,57 @@ topologyRoutingConstructionFingerprint(const yams::topology::TopologyArtifactBat
     return fingerprintHex(hash);
 }
 
+std::string
+topologyRoutingRepresentationFingerprint(const yams::topology::TopologyArtifactBatch& batch) {
+    std::uint64_t hash = 14695981039346656037ULL;
+    fingerprintString(hash, "routing-representations-v1");
+    fingerprintString(hash, topologyRoutingConstructionFingerprint(batch));
+    std::vector<const yams::topology::ClusterArtifact*> clusters;
+    for (const auto& cluster : batch.clusters) {
+        clusters.push_back(&cluster);
+    }
+    std::ranges::sort(clusters, {}, [](const auto* cluster) { return cluster->clusterId; });
+    for (const auto* cluster : clusters) {
+        fingerprintString(hash, cluster->clusterId);
+        fingerprintIntegral(hash, cluster->routingRepresentatives.size());
+        // Order matters when a representative limit selects a prefix.
+        for (const auto& representative : cluster->routingRepresentatives) {
+            fingerprintString(hash, representative.documentHash);
+            fingerprintIntegral(hash, representative.embedding.size());
+            for (float value : representative.embedding) {
+                fingerprintFloat(hash, value);
+            }
+        }
+    }
+    return fingerprintHex(hash);
+}
+
+std::string topologyRoutingPolicyFingerprint(std::string_view representationFingerprint,
+                                             const TopologyRoutingOptions& options) {
+    std::uint64_t hash = 14695981039346656037ULL;
+    fingerprintString(hash, "routing-policy-v1");
+    fingerprintString(hash, representationFingerprint);
+    fingerprintIntegral(hash, static_cast<unsigned>(options.routingMode));
+    fingerprintIntegral(hash, static_cast<unsigned>(options.routeScoringMode));
+    fingerprintIntegral(hash, static_cast<unsigned>(options.expansionSource));
+    fingerprintIntegral(hash, static_cast<unsigned>(options.weakTier1Query));
+    fingerprintIntegral(hash, options.minClusters);
+    fingerprintIntegral(hash, options.maxClusters);
+    fingerprintIntegral(hash, options.maxSeedDocuments);
+    fingerprintIntegral(hash, options.representativeLimit);
+    fingerprintIntegral(hash, options.denseAnnCandidateLimit);
+    fingerprintIntegral(hash, options.maxDocs);
+    fingerprintFloat(hash, options.adaptiveProbeScoreGap);
+    fingerprintFloat(hash, options.narrowMinBoundaryMargin);
+    fingerprintFloat(hash, options.sparseDenseAlpha);
+    fingerprintFloat(hash, options.minRouteScore);
+    fingerprintIntegral(hash, static_cast<unsigned>(options.collectRouteMembership));
+    fingerprintFloat(hash, options.graphNeighborMinScore);
+    fingerprintIntegral(hash, static_cast<unsigned>(options.graphNeighborReciprocalOnly));
+    fingerprintIntegral(hash, static_cast<unsigned>(options.graphWeightedSeedRanking));
+    return fingerprintHex(hash);
+}
+
 TopologyRoutingSnapshotCache::TopologyRoutingSnapshotCache(TopologyRoutingSnapshotLoader loader)
     : loader_(std::move(loader)) {}
 
@@ -1500,6 +1623,8 @@ Result<TopologyRoutingSnapshotLookup> TopologyRoutingSnapshotCache::get(std::uin
     snapshot->artifacts = std::move(artifacts);
     snapshot->constructionFingerprint =
         topologyRoutingConstructionFingerprint(*snapshot->artifacts);
+    snapshot->representationFingerprint =
+        topologyRoutingRepresentationFingerprint(*snapshot->artifacts);
     snapshot->sparseRouteIndex = yams::topology::SparseGuidedClusterRouter::buildRouteIndex(
         *snapshot->artifacts, requireDenseAnnIndex);
     snapshot->denseAnnBuildAttempted = requireDenseAnnIndex;

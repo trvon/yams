@@ -12,6 +12,7 @@
 #include <type_traits>
 #include <unordered_map>
 #include <vector>
+#include <yams/daemon/components/knowledge_graph_completion.h>
 #include <yams/daemon/ipc/ipc_protocol_requests.h>
 #include <yams/integrity/repair_manager.h>
 
@@ -254,6 +255,8 @@ public:
         std::string filePath;
         std::string mimeType;
         std::vector<EmbedPreparedChunk> chunks;
+        std::string sourceTextHash;
+        std::string preparationRecipe;
     };
 
     struct EmbedJobMonitor {
@@ -309,6 +312,8 @@ public:
         std::vector<std::string> tags;
         std::shared_ptr<std::vector<std::byte>> contentBytes;
         std::chrono::steady_clock::time_point enqueuedAt{};
+        std::string knowledgeGraphToken;
+        std::shared_ptr<KnowledgeGraphCompletion> knowledgeGraphCompletion;
     };
     struct SymbolExtractionJob {
         std::string hash;
@@ -331,9 +336,12 @@ public:
         std::string textSnippet;   // First N chars for GLiNER inference
         std::string fallbackTitle; // Filename to use if GLiNER fails
         // Additional context for NL entity KG population
-        std::string filePath; // For KG node creation
-        std::string language; // Language hint for extraction
-        std::string mimeType; // MIME type for content routing
+        std::string filePath;      // For KG node creation
+        std::string language;      // Language hint for extraction
+        std::string mimeType;      // MIME type for content routing
+        bool preserveTitle{false}; // Supplied metadata title must not be replaced by inference.
+        std::string knowledgeGraphToken;
+        std::shared_ptr<KnowledgeGraphCompletion> knowledgeGraphCompletion;
     };
     struct StoreDocumentTask {
         AddDocumentRequest request;
@@ -373,6 +381,9 @@ public:
         std::string contentUtf8;
         std::string language;
         std::string mimeType;
+        int64_t documentDbId = 0;
+        std::string knowledgeGraphToken;
+        std::shared_ptr<KnowledgeGraphCompletion> knowledgeGraphCompletion;
     };
 
 private:

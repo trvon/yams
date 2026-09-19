@@ -5,6 +5,7 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <yams/daemon/components/EntityGraphService.h>
 #include <yams/daemon/components/GraphComponent.h>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/kg_topology_analysis.h>
@@ -565,6 +566,30 @@ TEST_CASE("GraphComponent: Versioned extraction state dedupe", "[daemon][graph][
 
         // Should skip when no expected extractor specified
         CHECK(GraphComponent::shouldSkipEntityExtraction(fixture.kgStore, "hash-versioned"));
+    }
+
+    SECTION("Legacy completion cannot acknowledge a tracked admission") {
+        SymbolExtractionState state;
+        state.extractorId = "extractor_v1";
+        state.status = "complete";
+        state.entityCount = 5;
+        REQUIRE(fixture.kgStore->upsertSymbolExtractionState("hash-versioned", state));
+        REQUIRE(fixture.metadataRepo->setMetadata(docIdRes.value(), "yams:kg_enrichment",
+                                                  MetadataValue("pending:current")));
+        GraphComponent graph(fixture.metadataRepo, fixture.kgStore);
+        REQUIRE(graph.initialize());
+        // No worker or daemon: submission fails, but the legacy skip path would succeed.
+        graph.testing_setEntityService(std::make_shared<EntityGraphService>(nullptr, 1));
+        GraphComponent::EntityExtractionJob job;
+        job.documentHash = "hash-versioned";
+        job.documentDbId = docIdRes.value();
+        REQUIRE(graph.submitEntityExtraction(job));
+        job.knowledgeGraphToken = "current";
+        REQUIRE_FALSE(graph.submitEntityExtraction(job));
+        auto marker = fixture.metadataRepo->getMetadata(docIdRes.value(), "yams:kg_enrichment");
+        REQUIRE(marker);
+        REQUIRE(marker.value());
+        CHECK(marker.value()->value == "pending:current");
     }
 
     SECTION("Skip extraction when extractor version matches") {

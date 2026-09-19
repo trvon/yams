@@ -3,13 +3,17 @@
 The tables below are the latest recorded snapshot of the **default system**
 (no experiment matrices). They were produced with an xplan harness that is now
 kept as optional, gitignored local tooling. Per-run detail:
-`build/benchmarks/<plan>/<stamp>/` (`REPORT.md`, `ablation.md`, `metrics.csv`).
+`build/benchmarks/<plan>/<timestamp>-<config-hash>/` (`run_manifest.json`, `REPORT.md`,
+`ablation.md`, `metrics.csv`). Tracked API/core/search/tree-diff benchmarks use the same default
+`build/benchmarks/<suite>/<timestamp>-<config-hash>/` layout and record effective CLI values,
+field-level sources, and execution provenance in `run_manifest.json`; `--out-dir` remains exact.
 
 | | |
 |--|--|
 | Local harness | `tests/benchmarks/xplan/` (optional; not distributed) |
-| Artifacts | `build/benchmarks/<plan>/<stamp>/` (gitignored) |
+| Artifacts | `build/benchmarks/<plan>/<timestamp>-<config-hash>/` (gitignored) |
 | Micro baselines (code) | `tests/benchmarks/baseline/*.json` |
+| Full Simeon ingestion oracle | [`ingestion_oracle.md`](ingestion_oracle.md) |
 
 **Corpora:** quality plans use **BEIR scifact** (`dataset=scifact`, 2000 docs × 50
 queries) by default. Cache: `~/.cache/yams/benchmarks/<name>` (auto-download).
@@ -27,6 +31,10 @@ queries) by default. Cache: `~/.cache/yams/benchmarks/<name>` (auto-download).
 **Builds:** `build/release` (ingest, repair, quality); `build/prepush-macos` (load, ops — Catch2)
 
 ### Ingest — `ingest_pipeline` (80 docs × 1 KB, synthetic throughput)
+
+This historical snapshot predates the full Simeon identity, persistence, and lifecycle contract in
+[`ingestion_oracle.md`](ingestion_oracle.md); do not use it as the comprehensive optimization
+baseline.
 
 | Arm | docs/s | wall_ms | complete |
 |-----|------:|--------:|----------|
@@ -52,6 +60,11 @@ Artifacts: `build/benchmarks/retrieval_load/kpi-20260709T003228Z-load/`
 
 2000 docs · 50 queries · topk=10 · topology routing **off** (historical control; the current
 product default is `hybrid_assist` + `shadow`)
+
+This table is historical quality evidence, not a current latency baseline. Keep
+current product default, topology-disabled, and traced-shadow runs distinct.
+Stage tracing can perform an additional exact document-complete retrieval;
+use untraced runs for product latency and paired traced runs for attribution.
 
 | Metric | Value |
 |--------|------:|

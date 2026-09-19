@@ -160,6 +160,29 @@ TEST_CASE("Hash edge cases: 8-char prefix paths-only mixed case",
     CHECK_FALSE(r.value().paths.empty());
 }
 
+TEST_CASE("Hash edge cases: explicit six and seven character prefixes resolve",
+          "[unit][services][search][hash]") {
+    SearchHashFixture f;
+    REQUIRE_FALSE(f.hashes.empty());
+    auto documents = makeDocumentService(f.ctx);
+    for (const std::size_t length : {std::size_t{6}, std::size_t{7}}) {
+        const auto prefix = f.hashes.front().substr(0, length);
+        SearchRequest searchRequest;
+        searchRequest.hash = prefix;
+        auto searched = runAwait(f.search->search(searchRequest));
+        REQUIRE(searched.has_value());
+        REQUIRE(searched.value().results.size() == 1);
+        CHECK(searched.value().results.front().hash == f.hashes.front());
+
+        RetrieveDocumentRequest retrieveRequest;
+        retrieveRequest.hash = prefix;
+        auto retrieved = documents->retrieve(retrieveRequest);
+        REQUIRE(retrieved.has_value());
+        REQUIRE(retrieved.value().document.has_value());
+        CHECK(retrieved.value().document->hash == f.hashes.front());
+    }
+}
+
 TEST_CASE("Hash edge cases: pathPatterns filter is honored", "[unit][services][search][hash]") {
     SearchHashFixture f;
     REQUIRE_FALSE(f.hashes.empty());

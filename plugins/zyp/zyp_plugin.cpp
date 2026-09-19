@@ -22,6 +22,8 @@ void free_result(yams_extraction_result_t* result);
 /**
  * Duplicate a C++ string to a malloc'd C string.
  */
+// C-ABI ownership: strings attached to the result struct are released by the
+// host-side free_result; do not free here.
 char* dupString(const std::string& s) {
     if (s.empty()) {
         return nullptr;
@@ -118,6 +120,8 @@ int extract(const uint8_t* content, size_t content_len, yams_extraction_result_t
             *result = nullptr;
             return YAMS_PLUGIN_ERR_INVALID;
         }
+        // pairs and their key/value strings are owned by *result and released by
+        // free_result when the host drains the result.
         (*result)->metadata.count = metaMap.size();
         size_t i = 0;
         for (const auto& [key, value] : metaMap) {

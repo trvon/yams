@@ -4,13 +4,6 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
-#ifdef _WIN32
-#include <process.h>
-static int setenv(const char* name, const char* value, int overwrite) {
-    return _putenv_s(name, value);
-}
-#endif
-
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -25,6 +18,8 @@ static int setenv(const char* name, const char* value, int overwrite) {
 
 #include <yams/daemon/client/global_io_context.h>
 #include <yams/mcp/mcp_server.h>
+
+#include "../../common/test_helpers_catch2.h"
 
 using namespace std::chrono_literals;
 using Catch::Matchers::ContainsSubstring;
@@ -68,13 +63,13 @@ auto run_awaitable_with_timeout(Awaitable aw, std::chrono::milliseconds timeout)
 
 class MCPAsyncExecFixture {
 public:
+    yams::test::ScopedEnvVar discovery{"YAMS_ENABLE_LOCAL_MCP_DISCOVERY", std::string{"0"}};
+    yams::test::ScopedEnvVar autoStart{"YAMS_CLI_DISABLE_DAEMON_AUTOSTART", std::string{"1"}};
+    std::optional<yams::test::ScopedEnvVar> socketEnvironment;
     std::shared_ptr<yams::mcp::MCPServer> server;
     std::filesystem::path socketPath;
 
     MCPAsyncExecFixture() {
-        setenv("YAMS_ENABLE_LOCAL_MCP_DISCOVERY", "0", 1);
-        setenv("YAMS_CLI_DISABLE_DAEMON_AUTOSTART", "1", 1);
-
         auto transport = std::make_unique<NullTransport>();
         server = std::make_shared<yams::mcp::MCPServer>(std::move(transport));
 
@@ -82,7 +77,7 @@ public:
             std::string("yams-mcp-test-") +
             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".sock";
         socketPath = std::filesystem::temp_directory_path() / uniqueName;
-        setenv("YAMS_DAEMON_SOCKET_PATH", socketPath.string().c_str(), 1);
+        socketEnvironment.emplace("YAMS_DAEMON_SOCKET_PATH", socketPath.string());
 
         yams::daemon::ClientConfig cfg;
         cfg.autoStart = false;

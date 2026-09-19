@@ -281,8 +281,7 @@ private:
             doc["title"] = item.title;
         if (!item.path.empty())
             doc["path"] = item.path;
-        if (showHash_ && !item.hash.empty())
-            doc["hash"] = item.hash;
+        addContentReference(doc, item.hash);
         doc["score"] = item.score;
         if (auto snippet = buildSnippet(item, 200))
             doc["snippet"] = *snippet;
@@ -1079,6 +1078,7 @@ public:
 
         try {
             invocationCwd_ = std::filesystem::current_path();
+            jsonOutput_ = jsonOutput_ || (cli_ && cli_->getJsonOutput());
             // Resolve base query from flags/stdin/file
             if (query_.empty()) {
                 if (!queryFile_.empty() && queryFile_ != "-") {
@@ -1208,15 +1208,8 @@ public:
                     clientConfig.dataDir = dp;
                 }
             }
-            // Seed env aliases for any subprocess-based startup paths
-            if (clientConfig.dataDir != std::filesystem::path{}) {
-#ifndef _WIN32
-                // NOLINTNEXTLINE(concurrency-mt-unsafe)
-                ::setenv("YAMS_STORAGE", clientConfig.dataDir.string().c_str(), 1);
-                // NOLINTNEXTLINE(concurrency-mt-unsafe)
-                ::setenv("YAMS_DATA_DIR", clientConfig.dataDir.string().c_str(), 1);
-#endif
-            }
+            // Daemon startup receives dataDir through typed ClientConfig; no process-global
+            // aliases.
             auto daemonLeaseRes = yams::cli::acquire_cli_daemon_client_shared_with_fallback(
                 clientConfig, yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback, 1, 12,
                 std::chrono::milliseconds{-1});
@@ -1376,6 +1369,7 @@ public:
     }
 
     boost::asio::awaitable<Result<void>> executeAsync() override {
+        jsonOutput_ = jsonOutput_ || (cli_ && cli_->getJsonOutput());
         const bool cliOneShot = yams::cli::cli_one_shot_enabled();
 
         // Build normalized arguments (copy of execute() preamble)
@@ -1463,8 +1457,6 @@ public:
         };
 
         // Daemon client config
-        yams::daemon::DaemonClient::setTimeoutEnvVars(std::chrono::milliseconds(headerTimeoutMs_),
-                                                      std::chrono::milliseconds(bodyTimeoutMs_));
         yams::cli::CliDaemonRequestOptions daemonOpts;
         daemonOpts.accessPolicy = yams::cli::CliDaemonAccessPolicy::AllowInProcessFallback;
         daemonOpts.requestTimeout = std::chrono::milliseconds(30000);

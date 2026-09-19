@@ -16,6 +16,8 @@
 #include <yams/metadata/query_helpers.h>
 #include <yams/metadata/versioning_util.h>
 
+#include "../../common/test_helpers_catch2.h"
+
 using namespace yams;
 using namespace yams::metadata;
 
@@ -119,11 +121,7 @@ struct VersioningFixture {
 
 TEST_CASE_METHOD(VersioningFixture, "Versioning: first document gets version 1 and is_latest",
                  "[versioning][metadata][catch2]") {
-#ifdef _WIN32
-    _putenv_s("YAMS_ENABLE_VERSIONING", "1");
-#else
-    setenv("YAMS_ENABLE_VERSIONING", "1", 1);
-#endif
+    yams::test::ScopedEnvVar versioning{"YAMS_ENABLE_VERSIONING", std::string{"1"}};
 
     auto repo = makeRepo();
     auto docInfo = makeDocInfo("/path/doc.txt", "hash_v1", "doc.txt");
@@ -152,11 +150,7 @@ TEST_CASE_METHOD(VersioningFixture, "Versioning: first document gets version 1 a
 
 TEST_CASE_METHOD(VersioningFixture, "Versioning: re-index with different hash creates version edge",
                  "[versioning][metadata][catch2]") {
-#ifdef _WIN32
-    _putenv_s("YAMS_ENABLE_VERSIONING", "1");
-#else
-    setenv("YAMS_ENABLE_VERSIONING", "1", 1);
-#endif
+    yams::test::ScopedEnvVar versioning{"YAMS_ENABLE_VERSIONING", std::string{"1"}};
 
     auto repo = makeRepo();
     const std::string path = "/path/evolving.txt";
@@ -213,11 +207,7 @@ TEST_CASE_METHOD(VersioningFixture, "Versioning: re-index with different hash cr
 
 TEST_CASE_METHOD(VersioningFixture, "Versioning: same hash re-index does not create version edge",
                  "[versioning][metadata][catch2]") {
-#ifdef _WIN32
-    _putenv_s("YAMS_ENABLE_VERSIONING", "1");
-#else
-    setenv("YAMS_ENABLE_VERSIONING", "1", 1);
-#endif
+    yams::test::ScopedEnvVar versioning{"YAMS_ENABLE_VERSIONING", std::string{"1"}};
 
     auto repo = makeRepo();
     const std::string path = "/path/identical.txt";
@@ -240,11 +230,7 @@ TEST_CASE_METHOD(VersioningFixture, "Versioning: same hash re-index does not cre
 TEST_CASE_METHOD(VersioningFixture,
                  "Versioning: metadata batch failure falls back to best-effort individual writes",
                  "[versioning][metadata][catch2]") {
-#ifdef _WIN32
-    _putenv_s("YAMS_ENABLE_VERSIONING", "1");
-#else
-    setenv("YAMS_ENABLE_VERSIONING", "1", 1);
-#endif
+    yams::test::ScopedEnvVar versioning{"YAMS_ENABLE_VERSIONING", std::string{"1"}};
 
     auto repo = makeBatchFailingRepo();
     const std::string path = "/path/fallback.txt";
@@ -306,11 +292,7 @@ TEST_CASE_METHOD(VersioningFixture,
 
 TEST_CASE_METHOD(VersioningFixture, "Versioning respects YAMS_ENABLE_VERSIONING=0",
                  "[versioning][metadata][catch2]") {
-#ifdef _WIN32
-    _putenv_s("YAMS_ENABLE_VERSIONING", "0");
-#else
-    setenv("YAMS_ENABLE_VERSIONING", "0", 1);
-#endif
+    yams::test::ScopedEnvVar versioning{"YAMS_ENABLE_VERSIONING", std::string{"0"}};
 
     auto repo = makeRepo();
     auto docInfo = makeDocInfo("/path/disabled.txt", "hash_disabled", "disabled.txt");

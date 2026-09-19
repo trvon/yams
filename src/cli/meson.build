@@ -36,6 +36,7 @@ yams_cli_sources = [
   'commands/repair_command.cpp',
   'commands/model_command.cpp',
   'commands/daemon_command.cpp',
+  'commands/daemon_status_render.cpp',
   'commands/pipeline_stage_render.cpp',
   'commands/download_command.cpp',
   'commands/watch_command.cpp',
@@ -66,6 +67,7 @@ yams_cli_sources = [
   'commands/graph_command.cpp',
   'commands/diff_command.cpp',
   'commands/tune_command.cpp',
+  'commands/p2p_command.cpp',
 ]
 
 if get_option('build-mcp-server')
@@ -92,9 +94,12 @@ cli_deps = [
   dependency('yams_config'),
   dependency('yams_daemon_client'),
   dependency('yams_daemon_client_embedded'),
+  dependency('yams_tune_advisor'),
   dependency('yams_plugin_runtime'),
   dependency('yams_downloader'),
   dependency('yams_plugins_mgmt'),
+  dependency('yams_storage_engine'),
+  dependency('yams_crypto'),
   dependency('nlohmann_json'),
   dependency('spdlog'),
   dependency('OpenSSL'),

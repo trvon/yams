@@ -55,6 +55,54 @@ struct ReferenceCounterFixture {
     std::unique_ptr<ReferenceCounter> refCounter;
 };
 
+// Regression: a lock held by another connection during initialization must be retried. The retry
+// loop classifies transient locks from the error text, and the schema-migration path used to
+// collapse every failure into a bare DatabaseError, so a locked database aborted startup instead
+// of retrying. The tiny busyTimeout forces the first attempt to fail fast rather than block, which
+// makes the failure deterministic instead of timing-dependent.
+TEST_CASE("ReferenceCounter initialize retries while another connection holds the write lock",
+          "[storage][reference][contention]") {
+    const auto dbPath = std::filesystem::temp_directory_path() /
+                        std::format("yams_refcount_contention_{}.db",
+                                    std::chrono::system_clock::now().time_since_epoch().count());
+
+    sqlite3* holder = nullptr;
+    REQUIRE(sqlite3_open(dbPath.string().c_str(), &holder) == SQLITE_OK);
+    REQUIRE(sqlite3_exec(holder, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) == SQLITE_OK);
+
+    std::thread releaser([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        sqlite3_exec(holder, "COMMIT", nullptr, nullptr, nullptr);
+    });
+
+    ReferenceCounter::Config config{.databasePath = dbPath,
+                                    .enableWAL = true,
+                                    .enableStatistics = false,
+                                    .cacheSize = 1000,
+                                    .busyTimeout = 1,
+                                    .enableAuditLog = false};
+
+    // The constructor initializes the database and throws if initialization fails, which is the
+    // behaviour under test: it must retry until the other connection releases the lock.
+    std::optional<std::string> initError;
+    try {
+        ReferenceCounter counter(std::move(config));
+    } catch (const std::exception& e) {
+        initError = e.what();
+    }
+
+    releaser.join();
+    sqlite3_close(holder);
+    std::filesystem::remove(dbPath);
+    std::filesystem::remove(dbPath.string() + "-wal");
+    std::filesystem::remove(dbPath.string() + "-shm");
+
+    REQUIRE_FALSE(initError.has_value());
+    if (initError) {
+        INFO("constructor failed: " << *initError);
+    }
+}
+
 struct GarbageCollectorFixture {
     GarbageCollectorFixture() {
         auto tempDir = std::filesystem::temp_directory_path();
@@ -1811,4 +1859,41 @@ TEST_CASE("ReferenceCounter survives WAL-only checkpoint after forced close",
     }
 
     cleanup();
+}
+
+TEST_CASE("ReferenceCounter init retries when the database is transiently locked",
+          "[storage][reference][lock]") {
+    const auto dbPath = std::filesystem::temp_directory_path() /
+                        std::format("yams_refcount_lock_catch2_{}.db",
+                                    std::chrono::system_clock::now().time_since_epoch().count());
+    struct Cleanup {
+        std::filesystem::path p;
+        ~Cleanup() {
+            std::filesystem::remove(p);
+            std::filesystem::remove(p.string() + "-wal");
+            std::filesystem::remove(p.string() + "-shm");
+        }
+    } cleanup{dbPath};
+
+    // Hold a write lock on the database so the first init attempt must wait.
+    sqlite3* blocker = nullptr;
+    REQUIRE(sqlite3_open(dbPath.string().c_str(), &blocker) == SQLITE_OK);
+    execSql(blocker, "BEGIN IMMEDIATE");
+
+    // Release the lock shortly after init starts so the retry path is exercised.
+    std::thread releaser([blocker] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+        char* err = nullptr;
+        sqlite3_exec(blocker, "ROLLBACK", nullptr, nullptr, &err);
+        sqlite3_free(err);
+        sqlite3_close(blocker);
+    });
+
+    // Small busy timeout keeps the inner retries fast; the outer init retry
+    // must succeed once the lock is released.
+    ReferenceCounter::Config config{.databasePath = dbPath, .enableWAL = true, .busyTimeout = 10};
+    std::unique_ptr<ReferenceCounter> refCounter;
+    REQUIRE_NOTHROW(refCounter = std::make_unique<ReferenceCounter>(std::move(config)));
+
+    releaser.join();
 }

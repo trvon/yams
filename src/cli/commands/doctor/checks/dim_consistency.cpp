@@ -4,9 +4,10 @@
 #include <yams/cli/vector_db_util.h>
 #include <yams/cli/yams_cli.h>
 #include <yams/config/config_helpers.h>
+#include <yams/daemon/components/ConfigResolver.h>
+#include <yams/daemon/daemon.h>
 #include <yams/daemon/ipc/ipc_protocol.h>
 
-#include <cstdlib>
 #include <filesystem>
 
 namespace yams::cli::doctor {
@@ -30,58 +31,35 @@ DimConsistencyCheck::execute(const DoctorContext& ctx, const daemon::StatusRespo
         targetSrc = "daemon_provider";
     }
 
-    // Priority 2: Config file
-    if (targetDim == 0) {
-        auto cfgPath = ctx.configPath();
-        if (!cfgPath.empty() && std::filesystem::exists(cfgPath)) {
-            auto dimConfig = ctx.readConfigDims();
-            if (dimConfig.embeddings) {
-                targetDim = *dimConfig.embeddings;
-                targetSrc = "config(embeddings.embedding_dim)";
-            } else if (dimConfig.vectorDb) {
-                targetDim = *dimConfig.vectorDb;
-                targetSrc = "config(vector_database.embedding_dim)";
-            } else if (dimConfig.index) {
-                targetDim = *dimConfig.index;
-                targetSrc = "config(vector_index.dimension)";
-            }
-        }
-    }
-
-    // Priority 3: Environment variable
-    if (targetDim == 0) {
-        if (const char* envDim = std::getenv("YAMS_EMBED_DIM")) {
-            try {
-                targetDim = static_cast<size_t>(std::stoul(envDim));
+    // Priority 2: one command-local effective policy snapshot. Resolve without a data directory
+    // so an existing DB cannot become the target and mask a mismatch.
+    yams::daemon::DaemonConfig embeddingConfig;
+    embeddingConfig.configFilePath = ctx.configPath();
+    const auto policy = yams::daemon::ConfigResolver::resolveEmbeddingConfig(embeddingConfig, {});
+    if (targetDim == 0 && policy.dimension) {
+        targetDim = *policy.dimension;
+        switch (policy.dimensionSource) {
+            case yams::daemon::EmbeddingDimensionSource::Config:
+                targetSrc = "config(" + policy.provenance.at("dimension") + ")";
+                break;
+            case yams::daemon::EmbeddingDimensionSource::Environment:
                 targetSrc = "env(YAMS_EMBED_DIM)";
-            } catch (...) {
-            }
+                break;
+            default:
+                targetSrc = policy.provenance.at("dimension");
+                break;
         }
     }
 
-    // Priority 4: Model metadata/heuristic
-    if (targetDim == 0) {
-        std::string modelName;
-        if (const char* pref = std::getenv("YAMS_PREFERRED_MODEL"))
-            modelName = pref;
-        if (modelName.empty()) {
-            auto cfgPath = ctx.configPath();
-            if (!cfgPath.empty() && std::filesystem::exists(cfgPath)) {
-                auto kv = ctx.parseToml();
-                auto it = kv.find("embeddings.preferred_model");
-                if (it != kv.end() && !it->second.empty())
-                    modelName = it->second;
-            }
-        }
-        if (!modelName.empty()) {
-            auto dataPath = ctx.dataDir();
-            if (auto cfgDim = vecutil::getModelDimensionFromMetadata(dataPath, modelName)) {
-                targetDim = *cfgDim;
-                targetSrc = "model_metadata(" + modelName + ")";
-            } else if (auto heurDim = vecutil::getModelDimensionHeuristic(modelName)) {
-                targetDim = *heurDim;
-                targetSrc = "model_heuristic(" + modelName + ")";
-            }
+    // Priority 3: model metadata/heuristic selected by the same effective policy.
+    if (targetDim == 0 && !policy.preferredModel.empty()) {
+        const auto dataPath = ctx.dataDir();
+        if (auto cfgDim = vecutil::getModelDimensionFromMetadata(dataPath, policy.preferredModel)) {
+            targetDim = *cfgDim;
+            targetSrc = "model_metadata(" + policy.preferredModel + ")";
+        } else if (auto heurDim = vecutil::getModelDimensionHeuristic(policy.preferredModel)) {
+            targetDim = *heurDim;
+            targetSrc = "model_heuristic(" + policy.preferredModel + ")";
         }
     }
 

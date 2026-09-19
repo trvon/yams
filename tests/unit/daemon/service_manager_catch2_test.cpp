@@ -2,7 +2,13 @@
 // Migration: yams-3s4 (daemon unit tests)
 // Unit tests for ServiceManager component - construction, initialization, and service access
 
+// pi-lens-ignore: fatal error
 #include <catch2/catch_test_macros.hpp>
+
+#include <nlohmann/json.hpp>
+#include <boost/asio/co_spawn.hpp>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/use_future.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -11,18 +17,31 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <system_error>
 #include <thread>
 
+#ifdef _WIN32
+#include <aclapi.h>
+#include <windows.h>
+#endif
+
 #include "../../common/test_helpers_catch2.h"
 
+#include "../../../include/yams/daemon/components/db_integrity_stamp.h"
+#include "../../../src/daemon/components/service_manager/bootstrap_status.h"
 #include <yams/daemon/components/ConfigResolver.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
 #include <yams/daemon/components/InternalEventBus.h>
 #include <yams/daemon/components/repair/repair_health_probe.h>
 #include <yams/daemon/components/RepairService.h>
 #include <yams/daemon/components/ServiceManager.h>
+#include <yams/daemon/components/StateComponent.h>
+#include <yams/daemon/components/TuneAdvisor.h>
 #include <yams/daemon/daemon.h>
+#include <yams/memory_sync/writer_auth.h>
+#include <yams/memory_sync/memory_sync_service.h>
+#include <yams/crypto/hasher.h>
 #include <yams/metadata/database.h>
 
 namespace fs = std::filesystem;
@@ -31,6 +50,114 @@ using namespace yams::daemon;
 
 namespace yams::daemon::test {
 namespace {
+
+TEST_CASE("Bootstrap status snapshot preserves readiness schema and ETA values",
+          "[daemon][service_manager][status][eta]") {
+    using service_manager::BootstrapStatusData;
+
+    const auto start = std::chrono::steady_clock::time_point{std::chrono::seconds{100}};
+    const auto now = start + std::chrono::seconds{2};
+    BootstrapStatusData data;
+    data.dataDir = "/tmp/yams-data";
+    data.startTime = start;
+    data.readiness.ipcServerReady = true;
+    data.readiness.contentStoreReady = true;
+    data.readiness.vectorDbInitAttempted = true;
+    data.readiness.vectorDbReady = true;
+    data.readiness.vectorDbDim = 768;
+    data.readiness.searchProgress = 100;
+    data.readiness.vectorIndexProgress = 50;
+    data.readiness.modelLoadProgress = 25;
+    data.freshness = service_manager::BootstrapFreshnessSnapshot{
+        .simeonLexicalConfigured = true,
+        .simeonLexicalReady = false,
+        .simeonLexicalBuilding = true,
+        .simeonFragmentGeometryReady = false,
+    };
+    data.databaseRecoveredAt = "2026-01-02T03:04:05Z";
+    data.databaseRecoveredFrom = "/tmp/yams.db.corrupt";
+    data.databasePhase = "migrating";
+    data.databasePhaseSince = now - std::chrono::milliseconds{750};
+    data.maintenancePhase = "recovery_cleanup";
+    data.maintenancePhaseSince = now - std::chrono::milliseconds{250};
+    data.storageWarning = "slow storage";
+    data.initDurationsMs = {{"vector_index", 7000}, {"database", 1500}, {"plugins", 500}};
+
+    const auto status = service_manager::buildBootstrapStatusSnapshot(data, now);
+
+    CHECK_FALSE(status.at("ready").get<bool>());
+    CHECK(status.at("overall") == "initializing");
+    const auto& readiness = status.at("readiness");
+    CHECK(readiness.at("ipc_server") == true);
+    CHECK(readiness.at("content_store") == true);
+    CHECK(readiness.at("database") == false);
+    CHECK(readiness.at("metadata_repo") == false);
+    CHECK(readiness.at("search_engine") == false);
+    CHECK(readiness.at("model_provider") == false);
+    CHECK(readiness.at("vector_index") == false);
+    CHECK(readiness.at("plugins") == false);
+    CHECK(readiness.at("vector_db_init_attempted") == true);
+    CHECK(readiness.at("vector_db_ready") == true);
+    CHECK(readiness.at("vector_db_dim") == 768);
+    CHECK(readiness.at("search_engine_lexical_enhancement_configured") == true);
+    CHECK(readiness.at("search_engine_lexical_enhancement_ready") == false);
+    CHECK(readiness.at("search_engine_lexical_enhancement_building") == true);
+    CHECK(readiness.at("search_engine_fragment_geometry_ready") == false);
+    CHECK(status.at("search_engine_lexical_enhancement_state") == "building");
+    CHECK(status.at("database_recovered_at") == "2026-01-02T03:04:05Z");
+    CHECK(status.at("database_recovered_from") == "/tmp/yams.db.corrupt");
+    CHECK(status.at("database_phase") == "migrating");
+    CHECK(status.at("database_phase_elapsed_ms") == 750);
+    CHECK(status.at("maintenance_phase") == "recovery_cleanup");
+    CHECK(status.at("maintenance_phase_elapsed_ms") == 250);
+    CHECK(status.at("storage_warning") == "slow storage");
+    CHECK(status.at("progress").at("search_engine") == 100);
+    CHECK(status.at("progress").at("vector_index") == 50);
+    CHECK(status.at("progress").at("model_provider") == 25);
+    CHECK(status.at("eta_seconds").at("vector_index") == 5);
+    CHECK(status.at("eta_seconds").at("model_provider") == 18);
+    CHECK_FALSE(status.at("eta_seconds").contains("content_store"));
+    CHECK(status.at("durations_ms").at("database") == 1500);
+    CHECK(status.at("top_slowest").at(0).at("name") == "vector_index");
+    CHECK(status.at("top_slowest").at(0).at("elapsed_ms") == 7000);
+    CHECK(status.at("uptime_seconds") == 2);
+    CHECK(status.at("data_dir") == "/tmp/yams-data");
+}
+
+TEST_CASE("Bootstrap status throttles only pre-ready publication",
+          "[daemon][service_manager][status][throttle]") {
+    const auto previous = std::chrono::steady_clock::time_point{std::chrono::milliseconds{1000}};
+
+    CHECK_FALSE(service_manager::shouldPublishBootstrapStatus(
+        false, previous, previous + std::chrono::milliseconds{249}));
+    CHECK(service_manager::shouldPublishBootstrapStatus(false, previous,
+                                                        previous + std::chrono::milliseconds{250}));
+    CHECK(service_manager::shouldPublishBootstrapStatus(true, previous,
+                                                        previous + std::chrono::milliseconds{1}));
+    CHECK(service_manager::shouldPublishBootstrapStatus(
+        false, std::chrono::steady_clock::time_point{}, previous));
+}
+
+TEST_CASE("Bootstrap status snapshot publishes completed readiness immediately",
+          "[daemon][service_manager][status][ready]") {
+    service_manager::BootstrapStatusData data;
+    data.readiness.ipcServerReady = true;
+    data.readiness.contentStoreReady = true;
+    data.readiness.databaseReady = true;
+    data.readiness.metadataRepoReady = true;
+    data.readiness.searchEngineReady = true;
+    data.readiness.modelProviderReady = true;
+    data.readiness.vectorIndexReady = true;
+    data.readiness.pluginsReady = true;
+    data.freshness = service_manager::BootstrapFreshnessSnapshot{};
+
+    const auto status = service_manager::buildBootstrapStatusSnapshot(data, data.startTime);
+
+    CHECK(status.at("ready") == true);
+    CHECK(status.at("overall") == "ready");
+    CHECK(status.at("eta_seconds").empty());
+    CHECK(status.at("search_engine_lexical_enhancement_state") == "disabled");
+}
 
 fs::path metadataDbPath(const DaemonConfig& config) {
     return config.dataDir / "yams.db";
@@ -43,7 +170,9 @@ void seedMetadataDb(const fs::path& dbPath, const std::string& value = "seed") {
         db.execute("CREATE TABLE IF NOT EXISTS startup_probe(id INTEGER PRIMARY KEY, value TEXT)"));
     REQUIRE(db.execute("DELETE FROM startup_probe"));
     REQUIRE(db.execute("INSERT INTO startup_probe(value) VALUES('" + value + "')"));
+    REQUIRE(db.execute("PRAGMA wal_checkpoint(TRUNCATE)"));
     db.close();
+    REQUIRE(clearDbCleanShutdownSidecars(dbPath));
 }
 
 void writeCorruptDb(const fs::path& dbPath) {
@@ -67,8 +196,8 @@ std::optional<fs::path> findQuarantinedFile(const fs::path& dataDir) {
             ec.clear();
             continue;
         }
-        if (it->path().filename().string().rfind(prefix, 0) == 0 &&
-            it->path().extension() != ".sentinel") {
+        const auto name = it->path().filename().string();
+        if (name.starts_with(prefix) && !name.ends_with("-wal") && !name.ends_with("-shm")) {
             return it->path();
         }
     }
@@ -188,6 +317,89 @@ void requireReadyDatabaseState(const StateComponent& state) {
     CHECK((state.readiness.databasePhase == "ready"));
 }
 
+struct PluginHostLifecycleCounters {
+    std::atomic<std::size_t> listCalls{0};
+    std::atomic<std::size_t> unloadCalls{0};
+};
+
+class CountingAbiPluginHost final : public AbiPluginHost {
+public:
+    explicit CountingAbiPluginHost(std::shared_ptr<PluginHostLifecycleCounters> counters)
+        : counters_(counters) {}
+
+    std::vector<PluginDescriptor> listLoaded() const override {
+        counters_->listCalls.fetch_add(1, std::memory_order_relaxed);
+        if (counters_->unloadCalls.load(std::memory_order_relaxed) == 0) {
+            return {{.name = "counted_plugin"}};
+        }
+        return {};
+    }
+
+    Result<void> unload(const std::string&) override {
+        counters_->unloadCalls.fetch_add(1, std::memory_order_relaxed);
+        return {};
+    }
+
+private:
+    std::shared_ptr<PluginHostLifecycleCounters> counters_;
+};
+
+fs::path writeProtectedWriterManifest(const fs::path& directory, std::string_view nodeId,
+                                      std::string_view corpusId, std::uint64_t corpusEpoch) {
+    auto keys = memory_sync::generateWriterKeyPair();
+    REQUIRE(keys.has_value());
+    const auto privateKey = directory / "writer-private.pem";
+    const auto publicKey = directory / "writer-public.pem";
+    REQUIRE(
+        ServiceManager::__test_writeProtectedP2pPrivateKey(privateKey, keys.value().privateKeyPem)
+            .has_value());
+    REQUIRE(ServiceManager::__test_writeProtectedP2pPrivateKey(publicKey, keys.value().publicKeyPem)
+                .has_value());
+    const auto manifest = directory / "writers.json";
+    const nlohmann::json content{
+        {"schema_version", 1},
+        {"corpus_id", corpusId},
+        {"corpus_epoch", corpusEpoch},
+        {"local_key",
+         {{"writer_id", nodeId},
+          {"key_id", "local-v1"},
+          {"private_key_path", privateKey.string()}}},
+        {"trusted_writers", nlohmann::json::array({{{"writer_id", nodeId},
+                                                    {"key_id", "local-v1"},
+                                                    {"public_key_path", publicKey.string()}}})}};
+    REQUIRE(
+        ServiceManager::__test_writeProtectedP2pPrivateKey(manifest, content.dump()).has_value());
+    return manifest;
+}
+
+void grantUntrustedKeyAccess(const fs::path& keyPath, bool writable) {
+#ifdef _WIN32
+    BYTE worldSid[SECURITY_MAX_SID_SIZE];
+    DWORD worldSidBytes = sizeof(worldSid);
+    REQUIRE(CreateWellKnownSid(WinWorldSid, nullptr, worldSid, &worldSidBytes));
+    PACL currentAcl = nullptr;
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    REQUIRE(GetNamedSecurityInfoW(const_cast<wchar_t*>(keyPath.c_str()), SE_FILE_OBJECT,
+                                  DACL_SECURITY_INFORMATION, nullptr, nullptr, &currentAcl, nullptr,
+                                  &descriptor) == ERROR_SUCCESS);
+    EXPLICIT_ACCESSW access{};
+    access.grfAccessPermissions = writable ? GENERIC_WRITE : GENERIC_READ;
+    access.grfAccessMode = GRANT_ACCESS;
+    access.grfInheritance = NO_INHERITANCE;
+    BuildTrusteeWithSidW(&access.Trustee, worldSid);
+    PACL broadenedAcl = nullptr;
+    REQUIRE(SetEntriesInAclW(1, &access, currentAcl, &broadenedAcl) == ERROR_SUCCESS);
+    REQUIRE(SetNamedSecurityInfoW(const_cast<wchar_t*>(keyPath.c_str()), SE_FILE_OBJECT,
+                                  DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                  nullptr, nullptr, broadenedAcl, nullptr) == ERROR_SUCCESS);
+    LocalFree(broadenedAcl);
+    LocalFree(descriptor);
+#else
+    fs::permissions(keyPath, writable ? fs::perms::group_write : fs::perms::group_read,
+                    fs::perm_options::add);
+#endif
+}
+
 } // namespace
 
 // Test fixture for ServiceManager tests
@@ -242,6 +454,28 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager construction succeeds",
     REQUIRE_NOTHROW(ServiceManager(config_, state_, lifecycleFsm_));
 }
 
+TEST_CASE("Async initialization completion wait survives caller timeout",
+          "[daemon][service_manager][async-completion]") {
+    AsyncInitOrchestrator init;
+    REQUIRE(init.tryStart());
+    const auto token = init.getStopToken();
+
+    // A caller may time out before co_spawn installs its future.
+    CHECK_FALSE(init.waitForCompletion(std::chrono::milliseconds(0)));
+    CHECK_FALSE(token.stop_requested());
+
+    std::promise<void> completion;
+    init.setFuture(completion.get_future());
+    CHECK_FALSE(init.waitForCompletion(std::chrono::milliseconds(0)));
+    CHECK_FALSE(token.stop_requested());
+
+    // The future remains owned by the orchestrator, not the timed-out caller.
+    completion.set_value();
+    CHECK(init.waitForCompletion(std::chrono::milliseconds(0)));
+    CHECK_FALSE(token.stop_requested());
+    CHECK(init.requestStopAndWait(std::chrono::milliseconds(0)));
+}
+
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager getName returns correct component name",
                  "[daemon][service_manager]") {
     ServiceManager sm(config_, state_, lifecycleFsm_);
@@ -269,16 +503,389 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager multiple construction is
     SUCCEED();
 }
 
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "Concurrent embedded ServiceManager preserves active tuning lifecycle",
+                 "[daemon][service_manager][config][tuning][lifecycle]") {
+    yams::test::ScopedEnvVar timeout{"YAMS_IPC_TIMEOUT_MS", std::nullopt};
+    TuneAdvisor::setIpcTimeoutMs(4321);
+    config_.tuning.tuneAdvisorOverridesResolved = true;
+    ServiceManager owner(config_, state_, lifecycleFsm_);
+    REQUIRE((owner.getRuntimeTuningStatus().at("ipc.timeout_ms") == "4321"));
+
+    auto directConfig = config_;
+    directConfig.tuning.tuneAdvisorOverridesResolved = false;
+    ServiceManager embedded(directConfig, state_, lifecycleFsm_);
+
+    CHECK((TuneAdvisor::ipcTimeoutMs() == 4321u));
+    CHECK((owner.getRuntimeTuningStatus().at("ipc.timeout_ms") == "4321"));
+    CHECK((embedded.getRuntimeTuningStatus().at("ipc.timeout_ms") == "4321"));
+}
+
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager construction with missing data directory",
                  "[daemon][service_manager]") {
     fs::remove_all(config_.dataDir);
     REQUIRE_NOTHROW(ServiceManager(config_, state_, lifecycleFsm_));
 }
 
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager initialize reports data directory creation failures",
+                 "[daemon][service_manager][startup][error]") {
+    fs::remove_all(config_.dataDir);
+    {
+        std::ofstream blocker(config_.dataDir);
+        REQUIRE(blocker.good());
+        blocker << "not a directory";
+    }
+
+    ServiceManager sm(config_, state_, lifecycleFsm_);
+    const auto result = sm.initialize();
+
+    REQUIRE_FALSE(result);
+    CHECK((result.error().code == ErrorCode::IOError));
+    CHECK((result.error().message.find("Failed to create data directory") != std::string::npos));
+    CHECK((result.error().message.find(config_.dataDir.string()) != std::string::npos));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "Task record publication and reads validate immutable revision identity",
+                 "[daemon][service_manager][task-record]") {
+    storage::BackendConfig backendConfig;
+    backendConfig.localPath = config_.dataDir / "task-record-store";
+    auto backend = std::make_unique<storage::FilesystemBackend>();
+    REQUIRE(backend->initialize(backendConfig).has_value());
+    ServiceManager manager(config_, state_, lifecycleFsm_);
+    manager.testingSetMemorySyncService(std::make_unique<memory_sync::MemorySyncService>(
+        std::move(backend), memory_sync::MemorySyncConfig{"A", 50}));
+    auto* sync = manager.testingMemorySyncService();
+    const std::string taskId = "123e4567-e89b-42d3-a456-426614174000";
+    nlohmann::json record = {
+        {"schema", "yams.task-record/v1"},
+        {"task_id", taskId},
+        {"kind", "claim"},
+        {"owner", "agent-a"},
+        {"source_uri", "repo:src/search"},
+        {"source_revision", "git:9883a438"},
+        {"recorded_at_ms", 2000},
+        {"source_timestamp_ms", 1000},
+        {"supersedes", nlohmann::json::array()},
+        {"ownership_semantics", "record_only"},
+        {"body", "Investigating retrieval"},
+    };
+    const auto value = record.dump();
+    const auto hash = crypto::SHA256Hasher::hash(std::as_bytes(std::span(value)));
+    const auto key = "task-record/" + taskId + "/" + hash;
+    const auto published = manager.publishMemorySync(key, value);
+    CAPTURE(backendConfig.localPath.string(), key.size());
+    INFO((published ? "task record published" : published.error().message));
+    REQUIRE(published.has_value());
+    REQUIRE(sync->syncOnce().has_value());
+    const auto hydrated = manager.readMemorySyncCached(key);
+    REQUIRE(hydrated.has_value());
+    CHECK(hydrated.value() == value);
+
+    record["body"] = "changed revision";
+    CHECK_FALSE(manager.publishMemorySync(key, record.dump()).has_value());
+    record["ownership_semantics"] = "acquired";
+    const auto acquired = record.dump();
+    const auto acquiredHash = crypto::SHA256Hasher::hash(std::as_bytes(std::span(acquired)));
+    CHECK_FALSE(manager.publishMemorySync("task-record/" + taskId + "/" + acquiredHash, acquired)
+                    .has_value());
+
+    // A remote/lower-level writer cannot bypass the typed read contract.
+    const auto namespaced = memory_sync::userLogicalKey(key);
+    REQUIRE(namespaced.has_value());
+    REQUIRE(sync->publish(namespaced.value(), std::as_bytes(std::span(acquired))).has_value());
+    REQUIRE(sync->syncOnce().has_value());
+    CHECK_FALSE(manager.readMemorySyncCached(key).has_value());
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager rejects replication of a personal corpus",
+                 "[daemon][service_manager][sharing][security][config]") {
+    config_.memorySync.enabled = true;
+    config_.memorySync.nodeId = "123e4567-e89b-42d3-a456-42661417400a";
+    config_.memorySync.corpusId = "personal-corpus";
+    config_.memorySync.corpusEpoch = 1;
+    config_.memorySync.path = (config_.dataDir / "forbidden-sync-store").string();
+    SECTION("direct") {
+        config_.memorySync.transport = "direct";
+    }
+    SECTION("shared store") {
+        config_.memorySync.transport = "shared-store";
+    }
+    ServiceManager manager(config_, state_, lifecycleFsm_);
+    REQUIRE(manager.initialize().has_value());
+    boost::asio::io_context io;
+    compat::stop_source stopSource;
+    auto future = boost::asio::co_spawn(
+        io, manager.initializeAsyncAwaitable(stopSource.get_token()), boost::asio::use_future);
+    io.run();
+    const auto initialized = future.get();
+    REQUIRE_FALSE(initialized.has_value());
+    CHECK(initialized.error().message.find("corpus_scope=shared") != std::string::npos);
+    CHECK_FALSE(fs::exists(config_.memorySync.path));
+    CHECK_FALSE(fs::exists(config_.dataDir / "p2p" / "op-store"));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager rejects direct P2P without usable writer authentication",
+                 "[daemon][service_manager][p2p][security][config]") {
+    config_.memorySync.enabled = true;
+    config_.memorySync.corpusScope = yams::memory_sync::CorpusScope::Shared;
+    config_.memorySync.transport = "direct";
+    config_.memorySync.nodeId = "123e4567-e89b-42d3-a456-42661417400a";
+    config_.memorySync.corpusId = "missing-writer-auth";
+    config_.memorySync.corpusEpoch = 1;
+
+    ServiceManager manager(config_, state_, lifecycleFsm_);
+    REQUIRE(manager.initialize().has_value());
+    boost::asio::io_context io;
+    compat::stop_source stopSource;
+    auto future = boost::asio::co_spawn(
+        io, manager.initializeAsyncAwaitable(stopSource.get_token()), boost::asio::use_future);
+    io.run();
+    const auto initialized = future.get();
+    REQUIRE_FALSE(initialized.has_value());
+    CHECK(initialized.error().code == ErrorCode::InvalidArgument);
+    CHECK(initialized.error().message.find("writer_auth_required=true") != std::string::npos);
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager rejects provenance-unknown direct operation stores",
+                 "[daemon][service_manager][p2p][security][migration]") {
+    const std::string nodeId = "123e4567-e89b-42d3-a456-42661417400a";
+    const std::string corpusId = "legacy-direct-store";
+    const auto manifest = writeProtectedWriterManifest(testDir_, nodeId, corpusId, 2);
+    const auto legacyObject = config_.dataDir / "p2p" / "op-store" / "legacy" / "record.json";
+    fs::create_directories(legacyObject.parent_path());
+    std::ofstream(legacyObject) << "unsigned-history";
+
+    config_.memorySync.enabled = true;
+    config_.memorySync.corpusScope = yams::memory_sync::CorpusScope::Shared;
+    config_.memorySync.transport = "direct";
+    config_.memorySync.nodeId = nodeId;
+    config_.memorySync.corpusId = corpusId;
+    config_.memorySync.corpusEpoch = 2;
+    config_.memorySync.writerAuthRequired = true;
+    config_.memorySync.writerAuthManifestPath = manifest.string();
+
+    ServiceManager manager(config_, state_, lifecycleFsm_);
+    REQUIRE(manager.initialize().has_value());
+    boost::asio::io_context io;
+    compat::stop_source stopSource;
+    auto future = boost::asio::co_spawn(
+        io, manager.initializeAsyncAwaitable(stopSource.get_token()), boost::asio::use_future);
+    io.run();
+    const auto initialized = future.get();
+    REQUIRE_FALSE(initialized.has_value());
+    CHECK(initialized.error().code == ErrorCode::InvalidState);
+    CHECK(initialized.error().message.find("provenance-unknown") != std::string::npos);
+    CHECK(fs::exists(legacyObject));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager rejects symbolic-link P2P identity keys",
+                 "[daemon][service_manager][p2p][security]") {
+#ifdef _WIN32
+    SKIP("symbolic-link permission semantics differ on Windows");
+#else
+    auto generated = memory_sync::generateWriterKeyPair();
+    REQUIRE(generated.has_value());
+    const auto victim = testDir_ / "victim.pem";
+    {
+        std::ofstream output(victim, std::ios::binary | std::ios::trunc);
+        REQUIRE(output.good());
+        output << generated.value().privateKeyPem;
+    }
+    fs::permissions(victim, fs::perms::owner_read | fs::perms::owner_write,
+                    fs::perm_options::replace);
+    const auto publicKey = testDir_ / "identity.pub.pem";
+    {
+        std::ofstream output(publicKey, std::ios::binary | std::ios::trunc);
+        REQUIRE(output.good());
+        output << generated.value().publicKeyPem;
+    }
+    const auto manifest = testDir_ / "writers.json";
+    {
+        nlohmann::json content{
+            {"schema_version", 1},
+            {"corpus_id", "identity-security-test"},
+            {"corpus_epoch", 1},
+            {"local_key",
+             {{"writer_id", "123e4567-e89b-42d3-a456-42661417400a"},
+              {"key_id", "local-v1"},
+              {"private_key_path", victim.string()}}},
+            {"trusted_writers",
+             nlohmann::json::array({{{"writer_id", "123e4567-e89b-42d3-a456-42661417400a"},
+                                     {"key_id", "local-v1"},
+                                     {"public_key_path", publicKey.string()}}})}};
+        std::ofstream output(manifest, std::ios::binary | std::ios::trunc);
+        REQUIRE(output.good());
+        output << content.dump();
+    }
+    const auto identity = testDir_ / "identity.pem";
+    fs::create_symlink(victim, identity);
+
+    config_.memorySync.enabled = true;
+    config_.memorySync.corpusScope = yams::memory_sync::CorpusScope::Shared;
+    config_.memorySync.transport = "direct";
+    config_.memorySync.nodeId = "123e4567-e89b-42d3-a456-42661417400a";
+    config_.memorySync.corpusId = "identity-security-test";
+    config_.memorySync.corpusEpoch = 1;
+    config_.memorySync.identityKeyPath = identity.string();
+    config_.memorySync.writerAuthRequired = true;
+    config_.memorySync.writerAuthManifestPath = manifest.string();
+
+    ServiceManager manager(config_, state_, lifecycleFsm_);
+    REQUIRE(manager.initialize().has_value());
+    boost::asio::io_context io;
+    compat::stop_source stopSource;
+    auto future = boost::asio::co_spawn(
+        io, manager.initializeAsyncAwaitable(stopSource.get_token()), boost::asio::use_future);
+    io.run();
+    const auto initialized = future.get();
+    REQUIRE_FALSE(initialized.has_value());
+    CHECK(initialized.error().code == ErrorCode::Unauthorized);
+    CHECK(initialized.error().message.find("symbolic link") != std::string::npos);
+    CHECK(fs::is_symlink(fs::symlink_status(identity)));
+#endif
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager rejects broadly accessible direct writer private keys",
+                 "[daemon][service_manager][p2p][security][platform]") {
+    const std::string nodeId = "123e4567-e89b-42d3-a456-42661417400a";
+    const std::string corpusId = "writer-key-security";
+    const auto manifest = writeProtectedWriterManifest(testDir_, nodeId, corpusId, 1);
+    const auto identity = testDir_ / "separate-identity.pem";
+    REQUIRE(ServiceManager::__test_loadOrCreateP2pPrivateKey(identity).has_value());
+    grantUntrustedKeyAccess(testDir_ / "writer-private.pem", false);
+
+    config_.memorySync.enabled = true;
+    config_.memorySync.corpusScope = yams::memory_sync::CorpusScope::Shared;
+    config_.memorySync.transport = "direct";
+    config_.memorySync.nodeId = nodeId;
+    config_.memorySync.corpusId = corpusId;
+    config_.memorySync.corpusEpoch = 1;
+    config_.memorySync.identityKeyPath = identity.string();
+    config_.memorySync.writerAuthRequired = true;
+    config_.memorySync.writerAuthManifestPath = manifest.string();
+
+    ServiceManager manager(config_, state_, lifecycleFsm_);
+    REQUIRE(manager.initialize().has_value());
+    boost::asio::io_context io;
+    compat::stop_source stopSource;
+    auto future = boost::asio::co_spawn(
+        io, manager.initializeAsyncAwaitable(stopSource.get_token()), boost::asio::use_future);
+    io.run();
+    const auto initialized = future.get();
+    REQUIRE_FALSE(initialized.has_value());
+    CHECK(initialized.error().code == ErrorCode::Unauthorized);
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager rejects writable direct writer trust files",
+                 "[daemon][service_manager][p2p][security][platform]") {
+    const std::string nodeId = "123e4567-e89b-42d3-a456-42661417400a";
+    const std::string corpusId = "writer-trust-security";
+    const auto manifest = writeProtectedWriterManifest(testDir_, nodeId, corpusId, 1);
+    const auto identity = testDir_ / "trust-test-identity.pem";
+    REQUIRE(ServiceManager::__test_loadOrCreateP2pPrivateKey(identity).has_value());
+
+    SECTION("writable manifest") {
+        grantUntrustedKeyAccess(manifest, true);
+    }
+    SECTION("writable public key") {
+        grantUntrustedKeyAccess(testDir_ / "writer-public.pem", true);
+    }
+
+    config_.memorySync.enabled = true;
+    config_.memorySync.corpusScope = yams::memory_sync::CorpusScope::Shared;
+    config_.memorySync.transport = "direct";
+    config_.memorySync.nodeId = nodeId;
+    config_.memorySync.corpusId = corpusId;
+    config_.memorySync.corpusEpoch = 1;
+    config_.memorySync.identityKeyPath = identity.string();
+    config_.memorySync.writerAuthRequired = true;
+    config_.memorySync.writerAuthManifestPath = manifest.string();
+
+    ServiceManager manager(config_, state_, lifecycleFsm_);
+    REQUIRE(manager.initialize().has_value());
+    boost::asio::io_context io;
+    compat::stop_source stopSource;
+    auto future = boost::asio::co_spawn(
+        io, manager.initializeAsyncAwaitable(stopSource.get_token()), boost::asio::use_future);
+    io.run();
+    const auto initialized = future.get();
+    REQUIRE_FALSE(initialized.has_value());
+    CHECK(initialized.error().code == ErrorCode::Unauthorized);
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager creates owner-only P2P identity keys and rejects broad access",
+                 "[daemon][service_manager][p2p][security][platform]") {
+    const auto identity = testDir_ / "generated-identity.pem";
+    auto created = ServiceManager::__test_loadOrCreateP2pPrivateKey(identity);
+    REQUIRE(created.has_value());
+    REQUIRE_FALSE(created.value().empty());
+    REQUIRE(ServiceManager::__test_loadOrCreateP2pPrivateKey(identity).has_value());
+
+    grantUntrustedKeyAccess(identity, false);
+
+    auto rejected = ServiceManager::__test_loadOrCreateP2pPrivateKey(identity);
+    REQUIRE_FALSE(rejected.has_value());
+    CHECK(rejected.error().code == ErrorCode::Unauthorized);
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager rejects inherited Windows P2P identity ACLs",
+                 "[daemon][service_manager][p2p][security][platform]") {
+#ifndef _WIN32
+    SKIP("Windows ACL-specific coverage");
+#else
+    const auto identity = testDir_ / "inherited-identity.pem";
+    REQUIRE(ServiceManager::__test_loadOrCreateP2pPrivateKey(identity).has_value());
+    PACL currentAcl = nullptr;
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    REQUIRE(GetNamedSecurityInfoW(const_cast<wchar_t*>(identity.c_str()), SE_FILE_OBJECT,
+                                  DACL_SECURITY_INFORMATION, nullptr, nullptr, &currentAcl, nullptr,
+                                  &descriptor) == ERROR_SUCCESS);
+    REQUIRE(SetNamedSecurityInfoW(const_cast<wchar_t*>(identity.c_str()), SE_FILE_OBJECT,
+                                  DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                                  nullptr, nullptr, currentAcl, nullptr) == ERROR_SUCCESS);
+    LocalFree(descriptor);
+    auto rejected = ServiceManager::__test_loadOrCreateP2pPrivateKey(identity);
+    REQUIRE_FALSE(rejected.has_value());
+    CHECK(rejected.error().code == ErrorCode::Unauthorized);
+#endif
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager pool configuration failures propagate through Result",
+                 "[daemon][service_manager][startup][error]") {
+    ServiceManager sm(config_, state_, lifecycleFsm_);
+
+    const auto result = sm.__test_initializeWithPoolConfiguration(
+        [] { throw std::runtime_error("forced pool configuration failure"); });
+
+    REQUIRE_FALSE(result);
+    CHECK((result.error().code == ErrorCode::InternalError));
+    CHECK((result.error().message.find("forced pool configuration failure") != std::string::npos));
+}
+
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager destructor handles cleanup",
                  "[daemon][service_manager]") {
     auto sm = std::make_unique<ServiceManager>(config_, state_, lifecycleFsm_);
     REQUIRE_NOTHROW(sm.reset());
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager delegates shared plugin host shutdown once",
+                 "[daemon][service_manager][plugin][ownership][shutdown]") {
+    ServiceManager sm(config_, state_, lifecycleFsm_);
+    auto counters = std::make_shared<PluginHostLifecycleCounters>();
+    sm.__test_setAbiHost(std::make_unique<CountingAbiPluginHost>(counters));
+
+    sm.shutdown();
+
+    CHECK((counters->listCalls.load(std::memory_order_relaxed) == 1));
+    CHECK((counters->unloadCalls.load(std::memory_order_relaxed) == 1));
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager getConfig returns configuration",
@@ -288,6 +895,140 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager getConfig returns config
     const auto& cfg = sm.getConfig();
     REQUIRE((cfg.dataDir == config_.dataDir));
     REQUIRE((cfg.socketPath == config_.socketPath));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager snapshots search rebuild compatibility policy once",
+                 "[daemon][service_manager][config][search]") {
+    yams::test::ScopedEnvVar disableRebuilds{"YAMS_DISABLE_SEARCH_REBUILDS", std::string{"1"}};
+
+    ServiceManager sm(config_, state_, lifecycleFsm_);
+    const auto& policy = sm.getConfig().searchMaintenance;
+    REQUIRE(policy.automaticRebuildsEnabled.has_value());
+    CHECK_FALSE(*policy.automaticRebuildsEnabled);
+    CHECK((policy.automaticRebuildsSource ==
+           "compatibility-environment:YAMS_DISABLE_SEARCH_REBUILDS"));
+    REQUIRE((sm.getSearchComponent() != nullptr));
+    CHECK_FALSE(sm.getSearchComponent()->getConfig().automaticRebuildsEnabled);
+
+    disableRebuilds.set("0");
+    CHECK_FALSE(*sm.getConfig().searchMaintenance.automaticRebuildsEnabled);
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "Typed search rebuild policy outranks compatibility environment",
+                 "[daemon][service_manager][config][search]") {
+    yams::test::ScopedEnvVar disableRebuilds{"YAMS_DISABLE_SEARCH_REBUILDS", std::string{"1"}};
+    config_.searchMaintenance.automaticRebuildsEnabled = true;
+    config_.searchMaintenance.automaticRebuildsSource = "typed:test";
+
+    ServiceManager sm(config_, state_, lifecycleFsm_);
+    const auto& policy = sm.getConfig().searchMaintenance;
+    REQUIRE(policy.automaticRebuildsEnabled.has_value());
+    CHECK(*policy.automaticRebuildsEnabled);
+    CHECK((policy.automaticRebuildsSource == "typed:test"));
+    REQUIRE((sm.getSearchComponent() != nullptr));
+    CHECK(sm.getSearchComponent()->getConfig().automaticRebuildsEnabled);
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager snapshots runtime tuning provenance across live refresh",
+                 "[daemon][service_manager][config][tuning][snapshot]") {
+    yams::test::ScopedEnvVar timeout{"YAMS_IPC_TIMEOUT_MS", std::string{"4321"}};
+
+    ServiceManager sm(config_, state_, lifecycleFsm_);
+    const auto snapshot = sm.getTuningConfig();
+    REQUIRE((sm.getRuntimeTuningStatus().at("ipc.timeout_ms.source") ==
+             "compatibility-environment:YAMS_IPC_TIMEOUT_MS"));
+
+    timeout.unset();
+    sm.setTuningConfig(snapshot);
+
+    CHECK((sm.getRuntimeTuningStatus().at("ipc.timeout_ms.source") ==
+           "compatibility-environment:YAMS_IPC_TIMEOUT_MS"));
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "Live tuning refresh reports preserved construction-time capacity",
+                 "[daemon][service_manager][config][tuning][physical-state]") {
+    config_.enableModelProvider = false;
+    config_.useMockModelProvider = false;
+    config_.autoLoadPlugins = false;
+    config_.tuning.postIngestCapacity = 111;
+    config_.tuning.provenance["tuning.post_ingest_capacity"] = "config:tuning.post_ingest_capacity";
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    auto beforeInitialization = sm->getTuningConfig();
+    beforeInitialization.postIngestCapacity = 222;
+    beforeInitialization.provenance["tuning.post_ingest_capacity"] =
+        "config:tuning.post_ingest_capacity";
+    sm->setTuningConfig(beforeInitialization);
+
+    REQUIRE(sm->initialize());
+    sm->startAsyncInit();
+    const auto ready = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE((ready.state == ServiceManagerState::Ready));
+    REQUIRE(sm->getPostIngestQueue() != nullptr);
+    CHECK((sm->getPostIngestQueue()->capacity() == 222u));
+
+    TuningConfig refreshed;
+    refreshed.tuneAdvisorOverridesResolved = true;
+    sm->setTuningConfig(refreshed);
+
+    const auto effective = sm->getTuningConfig();
+    CHECK((effective.postIngestCapacity == 222u));
+    CHECK((effective.provenance.at("tuning.post_ingest_capacity") ==
+           "runtime:construction-time-post-ingest-channel"));
+    const auto status = sm->getRuntimeTuningStatus();
+    CHECK((status.at("post_ingest.capacity") == "222"));
+    CHECK((status.at("post_ingest.capacity.source") ==
+           "runtime:construction-time-post-ingest-channel"));
+    sm->shutdown();
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "Runtime tuning status publishes values from one configured generation",
+                 "[daemon][service_manager][config][tuning][snapshot]") {
+    config_.tuning.tuneAdvisorOverridesResolved = true;
+    TuneAdvisor::setIpcTimeoutMs(1001);
+    TuneAdvisor::setMemoryWarningThreshold(0.61);
+    ServiceManager sm(config_, state_, lifecycleFsm_);
+
+    std::atomic<bool> stop{false};
+    std::thread writer([&] {
+        bool alternate = false;
+        while (!stop.load(std::memory_order_acquire)) {
+            [[maybe_unused]] auto update = TuneAdvisor::beginConfiguredOverrideUpdate();
+            TuneAdvisor::setIpcTimeoutMs(alternate ? 1001 : 2002);
+            TuneAdvisor::setMemoryWarningThreshold(alternate ? 0.61 : 0.82);
+            alternate = !alternate;
+        }
+    });
+
+    for (int i = 0; i < 500; ++i) {
+        sm.setTuningConfig(sm.getTuningConfig());
+        const auto status = sm.getRuntimeTuningStatus();
+        const auto timeout = status.at("ipc.timeout_ms");
+        const auto warning = status.at("resource.memory_warning_threshold");
+        CHECK(((timeout == "1001" && warning == "0.610000") ||
+               (timeout == "2002" && warning == "0.820000")));
+    }
+
+    stop.store(true, std::memory_order_release);
+    writer.join();
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "Direct embedded ServiceManager starts a fresh tuning lifecycle",
+                 "[daemon][service_manager][config][tuning][lifecycle]") {
+    yams::test::ScopedEnvVar timeout{"YAMS_IPC_TIMEOUT_MS", std::nullopt};
+    TuneAdvisor::setIpcTimeoutMs(4321);
+    REQUIRE_FALSE(config_.tuning.tuneAdvisorOverridesResolved);
+
+    ServiceManager sm(config_, state_, lifecycleFsm_);
+
+    CHECK(sm.getTuningConfig().tuneAdvisorOverridesResolved);
+    CHECK((sm.getRuntimeTuningStatus().at("ipc.timeout_ms") == "15000"));
 }
 
 TEST_CASE("ServiceManager session watcher honors only the test disable gate",
@@ -301,9 +1042,9 @@ TEST_CASE("ServiceManager session watcher uses configured intervals without busy
           "[daemon][service_manager][session_watch]") {
     using namespace std::chrono_literals;
 
-    CHECK(ServiceManager::__test_sessionWatcherDelay(false, 0) == 2s);
-    CHECK(ServiceManager::__test_sessionWatcherDelay(true, 250) == 250ms);
-    CHECK(ServiceManager::__test_sessionWatcherDelay(true, 20) == 100ms);
+    CHECK((ServiceManager::__test_sessionWatcherDelay(false, 0) == 2s));
+    CHECK((ServiceManager::__test_sessionWatcherDelay(true, 250) == 250ms));
+    CHECK((ServiceManager::__test_sessionWatcherDelay(true, 20) == 100ms));
 }
 
 TEST_CASE("ServiceManager session watcher refreshes every retrieval index",
@@ -311,10 +1052,10 @@ TEST_CASE("ServiceManager session watcher refreshes every retrieval index",
     auto request = ServiceManager::__test_makeSessionWatchRequest("coding", "/workspace/yams",
                                                                   {"src/search/search_engine.cpp"});
 
-    CHECK(request.directoryPath == "/workspace/yams");
-    CHECK(request.includePatterns == std::vector<std::string>{"src/search/search_engine.cpp"});
+    CHECK((request.directoryPath == "/workspace/yams"));
+    CHECK((request.includePatterns == std::vector<std::string>{"src/search/search_engine.cpp"}));
     CHECK(request.recursive);
-    CHECK(request.sessionId == "coding");
+    CHECK((request.sessionId == "coding"));
     CHECK_FALSE(request.noEmbeddings);
 }
 
@@ -336,32 +1077,32 @@ TEST_CASE_METHOD(ServiceManagerFixture,
     indexingService.failuresRemaining = 1;
     CHECK_FALSE(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
                                                                 "coding", watchedDirectory));
-    REQUIRE(indexingService.requests.size() == 1);
-    CHECK(indexingService.requests.front().includePatterns ==
-          std::vector<std::string>{"changed.cpp"});
+    REQUIRE((indexingService.requests.size() == 1));
+    CHECK((indexingService.requests.front().includePatterns ==
+           std::vector<std::string>{"changed.cpp"}));
 
     CHECK(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
                                                           "coding", watchedDirectory));
-    CHECK(indexingService.requests.size() == 2);
+    CHECK((indexingService.requests.size() == 2));
 
     CHECK(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
                                                           "coding", watchedDirectory));
-    CHECK(indexingService.requests.size() == 2);
+    CHECK((indexingService.requests.size() == 2));
 
     REQUIRE(fs::remove(watchedFile));
     documentService.failuresRemaining = 1;
     CHECK_FALSE(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
                                                                 "coding", watchedDirectory));
-    REQUIRE(documentService.deleteRequests.size() == 1);
-    CHECK(documentService.deleteRequests.front().name == watchedFile.string());
+    REQUIRE((documentService.deleteRequests.size() == 1));
+    CHECK((documentService.deleteRequests.front().name == watchedFile.string()));
 
     CHECK(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
                                                           "coding", watchedDirectory));
-    CHECK(documentService.deleteRequests.size() == 2);
+    CHECK((documentService.deleteRequests.size() == 2));
 
     CHECK(serviceManager.__test_scanSessionWatchDirectory(indexingService, &documentService,
                                                           "coding", watchedDirectory));
-    CHECK(documentService.deleteRequests.size() == 2);
+    CHECK((documentService.deleteRequests.size() == 2));
 }
 
 TEST_CASE("ServiceManager topology readiness follows artifact freshness",
@@ -414,8 +1155,8 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager tuning config getter doe
     config_.tuning.ingestStoreBatchSize = 19;
     ServiceManager sm(config_, state_, lifecycleFsm_);
     const auto& tuning = sm.getTuningConfig();
-    CHECK(tuning.ingestStoreBatchSize == 19);
-    CHECK(sm.getIngestStoreBatchSize() == 19);
+    CHECK((tuning.ingestStoreBatchSize == 19));
+    CHECK((sm.getIngestStoreBatchSize() == 19));
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager set tuning config doesn't crash",
@@ -429,7 +1170,7 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager set tuning config doesn'
     tc.ingestStoreBatchSize = 23;
 
     REQUIRE_NOTHROW(sm.setTuningConfig(tc));
-    CHECK(sm.getIngestStoreBatchSize() == 23);
+    CHECK((sm.getIngestStoreBatchSize() == 23));
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager getWorkerQueueDepth doesn't crash",
@@ -546,6 +1287,57 @@ TEST_CASE_METHOD(ServiceManagerFixture,
 }
 
 TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager consumes clean shutdown proof and republishes it on shutdown",
+                 "[daemon][service_manager][startup][integrity_stamp]") {
+    config_.enableModelProvider = false;
+    config_.useMockModelProvider = false;
+    config_.autoLoadPlugins = false;
+
+    const auto dbPath = metadataDbPath(config_);
+    seedMetadataDb(dbPath, "clean_restart");
+    const auto initialStamp = publishDbCleanShutdownStamp(dbPath);
+    const std::string initialStampInfo =
+        initialStamp ? "clean stamp published" : initialStamp.error().message;
+    INFO(initialStampInfo);
+    REQUIRE(initialStamp);
+
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+    REQUIRE(sm->initialize());
+    sm->startAsyncInit();
+    const auto ready = sm->waitForServiceManagerTerminalState(30);
+    REQUIRE((ready.state == ServiceManagerState::Ready));
+    CHECK(state_.readiness.databaseIntegrityFastPath.load(std::memory_order_acquire));
+
+    sm->shutdown();
+    const auto nextStartup = consumeDbCleanShutdownStamp(dbPath);
+    CHECK(nextStartup.trustedCleanShutdown);
+    CHECK(nextStartup.invalidationPersisted);
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
+                 "ServiceManager preserves metadata when integrity validation cannot finish",
+                 "[daemon][service_manager][startup][integrity][cancellation]") {
+    const auto dbPath = metadataDbPath(config_);
+    seedMetadataDb(dbPath, "must-survive");
+    auto database = std::make_shared<metadata::Database>();
+    auto sm = std::make_shared<ServiceManager>(config_, state_, lifecycleFsm_);
+
+    SECTION("shutdown cancels validation without recovery") {
+        REQUIRE(database->open(dbPath.string(), metadata::ConnectionMode::ReadWrite));
+        sm->shutdown();
+    }
+    SECTION("an unavailable connection is not evidence of corruption") {
+        // The on-disk database is valid; the supplied connection is closed.
+    }
+
+    CHECK_FALSE(sm->testingEnsureDatabaseIntegrityOrRecover(dbPath, database));
+    database->close();
+    CHECK_FALSE(findQuarantinedFile(config_.dataDir).has_value());
+    CHECK(state_.readiness.databaseRecoveredFrom.empty());
+    CHECK(startupProbeRowCount(dbPath) == 1);
+}
+
+TEST_CASE_METHOD(ServiceManagerFixture,
                  "ServiceManager records recovery provenance for corrupt metadata DB startup",
                  "[daemon][service_manager][startup][recovery]") {
     config_.enableModelProvider = false;
@@ -587,6 +1379,7 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager clears stale metadata WA
 
     const auto dbPath = metadataDbPath(config_);
     seedMetadataDb(dbPath, "stale_wal_seed");
+    REQUIRE(publishDbCleanShutdownStamp(dbPath));
     const std::string staleWalPayload = "stale-wal";
     seedDummyWalSidecar(dbPath, staleWalPayload);
 
@@ -598,6 +1391,7 @@ TEST_CASE_METHOD(ServiceManagerFixture, "ServiceManager clears stale metadata WA
     REQUIRE((smSnap.state == ServiceManagerState::Ready));
 
     requireReadyDatabaseState(state_);
+    CHECK_FALSE(state_.readiness.databaseIntegrityFastPath.load(std::memory_order_acquire));
     {
         std::lock_guard<std::mutex> lk(state_.readiness.recoveryMutex);
         CHECK(state_.readiness.databaseRecoveredFrom.empty());

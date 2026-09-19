@@ -2,9 +2,9 @@
 
 #include <memory>
 #include <optional>
-#include <shared_mutex>
 #include <string>
 #include <vector>
+
 #include <yams/core/types.h>
 #include <yams/vector/vector_backend.h>
 
@@ -137,6 +137,9 @@ public:
     getVectorsBatch(const std::vector<std::string>& chunk_ids) override;
     Result<std::vector<VectorRecord>>
     getVectorsByDocument(const std::string& document_hash) override;
+    Result<std::vector<VectorRecord>> getVectorsPage(std::string_view afterDocumentHash,
+                                                     std::string_view afterChunkId,
+                                                     std::size_t limit) override;
     Result<std::unordered_map<std::string, VectorRecord>> getDocumentLevelVectorsAll() override;
     Result<size_t>
     forEachDocumentLevelVector(const std::function<bool(VectorRecord&&)>& visitor) override;

@@ -3,8 +3,6 @@
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
-#include <catch2/matchers/catch_matchers_floating_point.hpp>
-#include <catch2/matchers/catch_matchers_string.hpp>
 
 #include <yams/api/async_content_store.h>
 #include <yams/api/content_metadata.h>
@@ -691,6 +689,41 @@ TEST_CASE("ContentStore: Memory operations", "[api][content-store][memory]") {
         CHECK(retrieved == content);
     }
 
+    SECTION("Retrieve directly stored bytes to a file") {
+        const std::string content = "direct memory payload";
+        const auto data = std::span<const std::byte>(
+            reinterpret_cast<const std::byte*>(content.data()), content.size());
+
+        auto stored = fixture.store_->storeBytes(data);
+        REQUIRE(stored.has_value());
+
+        const auto outputPath = fixture.testDir_ / "retrieved-memory.bin";
+        auto retrieved = fixture.store_->retrieve(stored.value().contentHash, outputPath);
+        REQUIRE(retrieved.has_value());
+        REQUIRE(fs::exists(outputPath));
+
+        std::ifstream input(outputPath, std::ios::binary);
+        const std::string output{std::istreambuf_iterator<char>{input},
+                                 std::istreambuf_iterator<char>{}};
+        CHECK(output == content);
+    }
+
+    SECTION("Direct retrieval reports close-time output failures") {
+#ifndef __linux__
+        SKIP("/dev/full close-time failure fixture is Linux-only");
+#else
+        const std::string content = "direct close failure";
+        const auto data = std::span<const std::byte>(
+            reinterpret_cast<const std::byte*>(content.data()), content.size());
+        auto stored = fixture.store_->storeBytes(data);
+        REQUIRE(stored.has_value());
+
+        auto retrieved = fixture.store_->retrieve(stored.value().contentHash, "/dev/full");
+        REQUIRE_FALSE(retrieved.has_value());
+        CHECK(retrieved.error().code == ErrorCode::WriteError);
+#endif
+    }
+
     SECTION("Store binary bytes with null characters") {
         std::vector<std::byte> data = {std::byte{0x00}, std::byte{0x01}, std::byte{0x00},
                                        std::byte{0xFF}, std::byte{0x00}, std::byte{0xFE}};
@@ -846,6 +879,22 @@ TEST_CASE("ContentStore: Batch store commits references once before publishing m
 
     std::error_code ec;
     fs::remove_all(tempDir, ec);
+}
+
+TEST_CASE("ContentStore: Remove deletes directly stored small content",
+          "[api][content-store][remove][direct]") {
+    ContentStoreFixture fixture;
+    const std::string payload = "small direct payload";
+    const auto data = std::span<const std::byte>(reinterpret_cast<const std::byte*>(payload.data()),
+                                                 payload.size());
+    const auto stored = fixture.store_->storeBytes(data);
+    REQUIRE(stored.has_value());
+    REQUIRE(fixture.store_->exists(stored.value().contentHash).value());
+
+    const auto removed = fixture.store_->remove(stored.value().contentHash);
+    REQUIRE(removed.has_value());
+    CHECK(removed.value());
+    CHECK_FALSE(fixture.store_->exists(stored.value().contentHash).value());
 }
 
 TEST_CASE("ContentStore: Remove commits reference decrements through its transaction",
@@ -1026,7 +1075,7 @@ TEST_CASE("ContentStore: Progress reporting", "[api][content-store][progress]") 
     ContentStoreFixture fixture;
 
     SECTION("Progress callback invoked") {
-        std::string content(1024 * 1024, 'X'); // 1MB
+        std::string content(std::size_t{1024} * 1024, 'X'); // 1MB
         auto file = fixture.createTestFile("large.bin", content);
 
         std::atomic<int> progressCalls{0};
@@ -1413,6 +1462,77 @@ TEST_CASE("ContentStore: Health check", "[api][content-store][health]") {
     }
 }
 
+TEST_CASE("ContentStore classifies disk pressure through an injected probe",
+          "[api][content-store][health][disk-pressure]") {
+    const auto gib = 1024ULL * 1024ULL * 1024ULL;
+    const auto mib = 1024ULL * 1024ULL;
+    const auto makeProbe = [&](std::uint64_t availableBytes) -> storage::DiskSpaceProbe {
+        return [=](const fs::path&) {
+            return Result<storage::DiskSpaceSnapshot>(
+                storage::DiskSpaceSnapshot{10ULL * gib, availableBytes});
+        };
+    };
+    const auto makeStore = [&](std::uint64_t availableBytes) {
+        ContentStoreConfig config;
+        config.storagePath = fs::temp_directory_path() /
+                             ("yams_disk_pressure_" + std::to_string(std::random_device{}()));
+        ContentStoreBuilder builder;
+        builder.withConfig(config).withDiskPressurePolicy({}, makeProbe(availableBytes));
+        return builder.build();
+    };
+
+    const auto normalObservation = storage::inspectDiskPressure({}, {}, makeProbe(5ULL * gib));
+    REQUIRE(normalObservation.has_value());
+    CHECK(normalObservation.value().space.capacityBytes == 10ULL * gib);
+    CHECK(normalObservation.value().space.availableBytes == 5ULL * gib);
+    CHECK(normalObservation.value().level == storage::DiskPressureLevel::Normal);
+    auto normalStore = makeStore(5ULL * gib);
+    REQUIRE(normalStore.has_value());
+    CHECK(normalStore.value()->checkHealth().isHealthy);
+
+    const auto warningObservation = storage::inspectDiskPressure({}, {}, makeProbe(500ULL * mib));
+    REQUIRE(warningObservation.has_value());
+    CHECK(warningObservation.value().level == storage::DiskPressureLevel::Warning);
+    auto warningStore = makeStore(500ULL * mib);
+    REQUIRE(warningStore.has_value());
+    const auto warning = warningStore.value()->checkHealth();
+    CHECK(warning.isHealthy);
+    CHECK_FALSE(warning.warnings.empty());
+
+    const auto reserveBoundaryObservation =
+        storage::inspectDiskPressure({}, {}, makeProbe(100ULL * mib));
+    REQUIRE(reserveBoundaryObservation.has_value());
+    CHECK(reserveBoundaryObservation.value().level == storage::DiskPressureLevel::Emergency);
+
+    const auto emergencyObservation = storage::inspectDiskPressure({}, {}, makeProbe(50ULL * mib));
+    REQUIRE(emergencyObservation.has_value());
+    CHECK(emergencyObservation.value().level == storage::DiskPressureLevel::Emergency);
+    auto emergencyStore = makeStore(50ULL * mib);
+    REQUIRE(emergencyStore.has_value());
+    const auto emergency = emergencyStore.value()->checkHealth();
+    CHECK_FALSE(emergency.isHealthy);
+    CHECK_FALSE(emergency.errors.empty());
+}
+
+TEST_CASE("ContentStore reports an unknown disk state when probing fails",
+          "[api][content-store][health][disk-pressure]") {
+    ContentStoreConfig config;
+    config.storagePath = fs::temp_directory_path() /
+                         ("yams_disk_pressure_error_" + std::to_string(std::random_device{}()));
+    storage::DiskSpaceProbe probe = [](const fs::path&) -> Result<storage::DiskSpaceSnapshot> {
+        return Error{ErrorCode::IOError, "scripted disk probe failure"};
+    };
+    CHECK_FALSE(storage::inspectDiskPressure(config.storagePath, {}, probe).has_value());
+
+    ContentStoreBuilder builder;
+    builder.withConfig(config).withDiskPressurePolicy({}, probe);
+    auto store = builder.build();
+    REQUIRE(store.has_value());
+    const auto health = store.value()->checkHealth();
+    CHECK_FALSE(health.isHealthy);
+    REQUIRE_FALSE(health.errors.empty());
+}
+
 TEST_CASE("ContentStore: Verify detects storage integrity issues",
           "[api][content-store][verify][integrity]") {
     ContentStoreFixture fixture;
@@ -1668,7 +1788,7 @@ TEST_CASE("ContentStoreBuilder: Construction", "[api][builder]") {
         ContentStoreConfig config;
         config.storagePath =
             fs::temp_directory_path() / ("custom_test_" + std::to_string(std::random_device{}()));
-        config.chunkSize = 128 * 1024;
+        config.chunkSize = std::size_t{128} * 1024;
         config.enableCompression = true;
         config.compressionType = "zstd";
         config.compressionLevel = 5;
@@ -1756,7 +1876,8 @@ TEST_CASE("ContentStore: Edge cases", "[api][content-store][edge]") {
         std::mutex resultMutex;
         std::vector<std::string> hashes;
         std::vector<std::string> errors;
-        hashes.reserve(kThreadCount * kStoresPerThread);
+        hashes.reserve(static_cast<std::size_t>(kThreadCount) *
+                       static_cast<std::size_t>(kStoresPerThread));
 
         for (int i = 0; i < kThreadCount; ++i) {
             threads.emplace_back([&, i]() {

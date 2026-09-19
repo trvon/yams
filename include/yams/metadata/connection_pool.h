@@ -20,6 +20,7 @@
 #include <source_location>
 #include <type_traits>
 #include <unordered_set>
+#include <utility>
 #include <yams/metadata/database.h>
 
 namespace yams::metadata {
@@ -196,6 +197,19 @@ public:
 
     [[nodiscard]] const std::string& dbPath() const { return dbPath_; }
 
+#if defined(YAMS_TESTING)
+    /**
+     * Install a callback invoked immediately before each connection creation.
+     *
+     * Test synchronization seam only. The callback MUST be installed before initialize() and
+     * MUST NOT be changed while initialize(), acquire(), healthCheck(), or maintenance can run.
+     * The callback runs on creation callers, may run concurrently, and MUST NOT throw.
+     */
+    void testing_setBeforeCreateHook(std::function<void()> hook) {
+        beforeCreateForTesting_ = std::move(hook);
+    }
+#endif
+
     void setSlowHolderThreshold(std::chrono::milliseconds threshold) {
         slowHolderThresholdMicros_.store(static_cast<std::uint64_t>(threshold.count()) * 1000ULL,
                                          std::memory_order_relaxed);
@@ -237,11 +251,14 @@ public:
 private:
     std::string dbPath_;
     ConnectionPoolConfig config_;
+    // Always present so YAMS_TESTING does not change ConnectionPool's object layout.
+    std::function<void()> beforeCreateForTesting_;
 
     mutable std::mutex mutex_;
     std::condition_variable cv_;
     std::queue<std::unique_ptr<PooledConnection>> available_;
     std::unordered_set<PooledConnection*> leased_;
+    std::size_t pendingCreations_{0}; // Protected by mutex_; not yet published connections.
     std::atomic<size_t> totalConnections_{0};
     std::atomic<size_t> activeConnections_{0};
     std::atomic<size_t> waitingRequests_{0};
@@ -268,6 +285,14 @@ private:
      * @brief Create a new connection
      */
     Result<std::unique_ptr<Database>> createConnection();
+
+    /**
+     * @brief Reserve capacity, create outside mutex_, then settle the reservation.
+     * @pre lock owns mutex_ and the caller has verified capacity is available.
+     * @post lock owns mutex_ and pendingCreations_ has been restored, including on exceptions.
+     */
+    Result<std::unique_ptr<Database>>
+    createConnectionOutsideLock(std::unique_lock<std::mutex>& lock);
 
     /**
      * @brief Configure a new connection

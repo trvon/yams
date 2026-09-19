@@ -30,6 +30,15 @@ TEST_CASE("navigationZoomLevelToString covers all zoom levels", "[search][config
     CHECK(std::string(SearchEngineConfig::navigationZoomLevelToString(Z::Street)) == "STREET");
 }
 
+TEST_CASE("default mixed weights favor lexical and graph-vector evidence",
+          "[search][config][catch2]") {
+    const SearchEngineConfig cfg;
+
+    CHECK(cfg.textWeight == Approx(1.0F));
+    CHECK(cfg.vectorWeight == Approx(0.0F));
+    CHECK(cfg.graphVectorWeight == Approx(0.08F));
+}
+
 // ────────────────────────────────────────────────────────────────────────────────
 // forProfile
 // ────────────────────────────────────────────────────────────────────────────────

@@ -1,10 +1,15 @@
 #pragma once
 
+// pi-lens-ignore: fatal error
 #include <yams/core/types.h>
 #include <yams/daemon/components/DaemonLifecycleFsm.h>
+#include <yams/daemon/components/embedding_service_config.h>
 #include <yams/daemon/components/StateComponent.h>
 #include <yams/daemon/components/TuningConfig.h>
 #include <yams/daemon/resource/onnx_model_pool.h> // For DaemonConfig
+#include <yams/memory_sync/memory_sync.h>
+#include <yams/memory_sync/corpus_scope.h>
+#include <yams/storage/disk_pressure.h>
 
 #include <atomic>
 #include <chrono>
@@ -17,7 +22,9 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
+#include <vector>
 #include <yams/compat/thread_stop_compat.h>
 //
 
@@ -62,6 +69,20 @@ struct DaemonConfig {
     // writes, but opportunistic reconcile/rebuild work is suppressed.
     bool embeddedOneShot = false;
 
+    // Immutable startup safeguards consumed by EmbeddingService.
+    EmbeddingServiceConfig embeddingService;
+
+    // Search maintenance is resolved once at ServiceManager construction. A missing typed value
+    // preserves the installed YAMS_DISABLE_SEARCH_REBUILDS compatibility overlay; explicit typed
+    // values outrank ambient process state.
+    struct SearchMaintenancePolicy {
+        std::optional<bool> automaticRebuildsEnabled;
+        std::string automaticRebuildsSource;
+    } searchMaintenance;
+
+    // Daemon-local disk pressure policy. Resolved from [storage.disk_pressure]; no env overlays.
+    storage::DiskPressurePolicy diskPressure{};
+
     // Typed runtime instrumentation profile. The "memory" profile suppresses
     // opportunistic startup maintenance that creates large transient allocator
     // churn, which is especially expensive under macOS MallocStackLogging.
@@ -102,6 +123,31 @@ struct DaemonConfig {
     } documentRetention;
 
     // Forward decls for GTEST-only accessors are below guarded by YAMS_TESTING
+    /// Opt-in P2P memory sync. Runs the version-vector + LWW sync loop against
+    /// a shared store (filesystem dir or s3/R2) so multiple daemons converge.
+    /// No YAMS_* env knobs.
+    struct MemorySyncPolicy {
+        bool enabled{false};
+        memory_sync::CorpusScope corpusScope{memory_sync::CorpusScope::Personal};
+        std::string nodeId;              // explicit stable daemon writer UUID
+        std::string corpusId;            // stable replication-domain identifier
+        std::uint64_t corpusEpoch{0};    // incompatible reset/migration generation
+        std::string transport{"direct"}; // "direct" | legacy "shared-store"
+        std::string listen{"127.0.0.1:9721"};
+        std::string identityKeyPath; // empty -> <dataDir>/p2p/identity.pem
+        bool allowFirstContact{false};
+        std::size_t maxPeers{1024};
+        std::string backend{"filesystem"}; // shared-store only: "filesystem" | "s3"
+        std::string path;                  // shared-store path; direct uses a daemon-local op store
+        std::uint32_t syncIntervalMs{5000};
+        memory_sync::MemorySyncLimits limits{};
+        std::string mode{"persistent"};
+        std::string sessionId;
+        std::uint32_t temporarySessionTtlMs{0};
+        bool writerAuthRequired{false};
+        std::string writerAuthManifestPath;
+    } memorySync;
+
     struct DownloadPolicy {
         bool enable{false};                               // feature gate
         std::vector<std::string> allowedHosts{};          // exact or wildcard patterns
@@ -168,6 +214,8 @@ public:
     mutable std::mutex metricsMutex_;
     // Protects mutable config fields updated after startup (currently tuning reload state).
     mutable std::mutex configMutex_;
+    // Serializes parse, aggregate TuneAdvisor publication, config replacement, and status refresh.
+    std::mutex tuningReloadMutex_;
     std::shared_ptr<DaemonMetrics> metrics_;
     // Integrated socket server (replaces external yams-socket-server)
     std::unique_ptr<SocketServer> socketServer_;
@@ -199,8 +247,13 @@ public:
     std::thread shutdownThread_;
     std::atomic<bool> shutdownThreadActive_{false};
 
+    struct RuntimeEnvironmentLease {
+        std::uint64_t token{0};
+    };
+
     int tuningProfileOverrideBeforeStart_{0};
     bool tuningProfileOverrideSnapshotActive_{false};
+    std::map<std::string, RuntimeEnvironmentLease> runtimeEnvironmentLeases_;
 
     bool modelPreloadSkipped_{false};
     std::chrono::steady_clock::time_point repairBusySince_{};
@@ -223,6 +276,8 @@ public:
 
     void snapshotTuningProfileForRuntime();
     void restoreTuningProfileOverrideSnapshot() noexcept;
+    void leaseRuntimeEnvironment(const char* name, const std::string& value);
+    void restoreRuntimeEnvironment() noexcept;
 
     // Set a hook that will be called each iteration of runLoop() to check for signals
     // Returns true if shutdown was requested

@@ -1,8 +1,10 @@
 // Integration harness preflight: ensure daemon operations are test-safe.
 #pragma once
-#include <cstdlib>
 #include <filesystem>
 #include <string>
+
+#include "test_helpers_catch2.h"
+
 #include <yams/compat/unistd.h>
 
 namespace yams::test::harnesses {
@@ -13,9 +15,13 @@ struct DaemonPreflightConfig {
 };
 
 struct DaemonPreflight {
-    static void ensure_environment(const DaemonPreflightConfig& cfg) {
+    [[nodiscard]] static std::vector<ScopedEnvVar>
+    ensure_environment(const DaemonPreflightConfig& cfg) {
+        std::vector<ScopedEnvVar> environment;
+        environment.reserve(4);
         // 1) Prevent tests from stopping user/system daemons.
-        ::setenv("YAMS_DAEMON_KILL_OTHERS", cfg.kill_others ? "1" : "0", 1);
+        environment.emplace_back("YAMS_DAEMON_KILL_OTHERS",
+                                 cfg.kill_others ? std::string{"1"} : std::string{"0"});
 
         // 2) Ensure a unique runtime dir per test process. Keep AF_UNIX path short.
         std::error_code ec;
@@ -58,9 +64,10 @@ struct DaemonPreflight {
             pid_path = p.second;
         }
 #endif
-        ::setenv("YAMS_RUNTIME_DIR", unique_dir.string().c_str(), 1);
-        ::setenv("YAMS_SOCKET_PATH", socket_path.c_str(), 1);
-        ::setenv("YAMS_PID_FILE", pid_path.c_str(), 1);
+        environment.emplace_back("YAMS_RUNTIME_DIR", unique_dir.string());
+        environment.emplace_back("YAMS_SOCKET_PATH", socket_path);
+        environment.emplace_back("YAMS_PID_FILE", pid_path);
+        return environment;
     }
 
     static void post_test_cleanup(const std::filesystem::path& runtime_root) {

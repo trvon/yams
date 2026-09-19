@@ -11,6 +11,7 @@ import Yams.Topology.SearchEngine
 import Yams.Topology.TopologyInfluence
 import Yams.Topology.SelectiveRouting
 import Yams.Topology.RetrievalCoordinates
+import Yams.Topology.AllowedSetRetrieval
 import Yams.Topology.CandidateExpansion
 import Yams.Topology.ClusterObjective
 import Yams.Topology.Bridge

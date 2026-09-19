@@ -84,7 +84,7 @@ BENCHMARK_F(IngestionBenchmark, SmallDocument) {
 }
 
 BENCHMARK_F(IngestionBenchmark, MediumDocument) {
-    auto content = generator_->generateTextDocument(100 * 1024);
+    auto content = generator_->generateTextDocument(std::size_t{100} * 1024);
     std::vector<std::byte> contentBytes;
     contentBytes.reserve(content.size());
     std::transform(content.begin(), content.end(), std::back_inserter(contentBytes),
@@ -94,7 +94,7 @@ BENCHMARK_F(IngestionBenchmark, MediumDocument) {
     auto result = contentStore_->storeBytes(contentBytes, metadata);
     if (result.has_value()) {
         lastDedupRatio_ = result.value().dedupRatio();
-        totalBytesProcessed_ = 100 * 1024;
+        totalBytesProcessed_ = std::size_t{100} * 1024;
         return 1;
     }
     return 0;
@@ -242,7 +242,14 @@ BENCHMARK_F(MetadataBenchmark, BulkUpdate) {
 // --- Main Runner ---
 
 int main(int argc, char** argv) {
-    const auto cli = parseBenchmarkArgs(argc, argv);
+    auto cli = parseBenchConfig(argc, argv, "api_benchmarks");
+    if (!cli.outputFile) {
+        cli.outputFile = cli.outDir / "api_benchmarks.jsonl";
+    }
+    if (!prepareBenchmarkRun(cli)) {
+        std::cerr << "ERROR: unable to prepare benchmark run directory: " << cli.outDir << '\n';
+        return 2;
+    }
 
     BenchmarkBase::Config config;
     config.verbose = cli.verbose;
@@ -257,7 +264,7 @@ int main(int argc, char** argv) {
     std::error_code ec_mkdir;
     std::filesystem::create_directories(outDir, ec_mkdir);
     if (ec_mkdir) {
-        std::cerr << "WARNING: unable to create bench_results directory: " << ec_mkdir.message()
+        std::cerr << "WARNING: unable to create benchmark output directory: " << ec_mkdir.message()
                   << std::endl;
     }
     const std::filesystem::path suiteHistoryJson = outDir / "api_benchmarks.json";
@@ -276,7 +283,7 @@ int main(int argc, char** argv) {
     benchmarks.push_back(std::make_unique<BulkUpdateBenchmark>(config));
 
     for (auto& benchmark : benchmarks) {
-        if (!matchesAnyFilter(benchmark->name(), cli.filters)) {
+        if (!matchesAnyFilter(benchmark->name(), cli.filters, cli.exactFilters)) {
             continue;
         }
         auto result = benchmark->run();

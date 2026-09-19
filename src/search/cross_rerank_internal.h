@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <string_view>
 #include <yams/core/types.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/search_engine_config.h>
@@ -45,8 +46,7 @@ using CrossRerankScorerFn =
     std::function<Result<std::vector<float>>(const std::string&, const std::vector<std::string>&)>;
 
 // Rerank input text for one candidate: fileName + filePath + snippet + (bounded) content.
-std::string buildCrossRerankText(const SearchResult& result,
-                                 const std::shared_ptr<metadata::MetadataRepository>& metadataRepo,
+std::string buildCrossRerankText(const SearchResult& result, std::string_view contentPreview,
                                  std::size_t textLimit);
 
 // Reranks the top-`window` results in place (min-max normalize → replace/blend → stable-sort) and

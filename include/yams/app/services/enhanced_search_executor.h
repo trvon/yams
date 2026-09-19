@@ -36,7 +36,7 @@ public:
     void apply(const AppContext& ctx, const EnhancedConfig& cfg, const std::string& query,
                std::vector<SearchItem>& items) const;
 
-    // Best-effort loader for config from ~/.config/yams/config.toml (no dependency on migrator).
+    // Best-effort loader through the shared ordinary config path/flat-TOML reader.
     static EnhancedConfig loadConfigFromToml();
 
 private:

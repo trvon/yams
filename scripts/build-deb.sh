@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Debian local runner for SourceHut .build.yml (trixie)
-# - Mirrors the CI tasks using Meson + Conan toolchain
+# Debian package builder for YAMS (trixie)
+# - Mirrors the release CI tasks using Meson + Conan toolchain
 # - Produces tarball, .deb, and .rpm artifacts for tagged builds
 # - Intended to run inside a Debian trixie container with your repo mounted at /workspace/yams
 #
@@ -354,7 +354,7 @@ Section: utils
 Priority: optional
 Architecture: __ARCH__
 Maintainer: YAMS Contributors <git@trevon.dev>
-Homepage: https://git.sr.ht/~trevon/yams
+Homepage: https://git.trevon.dev/trevon/yams
 Depends: @DEPENDENCIES@
 Description: Yet Another Memory System - persistent memory for LLMs
  YAMS provides content-addressed storage, deduplication, and search for long-term LLM memory.
@@ -570,7 +570,7 @@ Version: __VERSION__
 Release: __RELEASE__%{?dist}
 Summary: Yet Another Memory System
 License: Apache-2.0
-URL: https://git.sr.ht/~trevon/yams
+URL: https://git.trevon.dev/trevon/yams
 Source0: %{name}-%{version}.tar.gz
 BuildArch: __RPM_ARCH__
 Requires(post): systemd

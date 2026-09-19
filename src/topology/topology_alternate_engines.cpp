@@ -66,7 +66,8 @@ PairWeightMap buildPairWeights(std::span<const TopologyDocumentInput> documents,
             if (config.reciprocalOnly && !neighbor.reciprocal) {
                 continue;
             }
-            if (neighbor.score < static_cast<float>(config.minEdgeScore)) {
+            if (!std::isfinite(neighbor.score) ||
+                neighbor.score < static_cast<float>(config.minEdgeScore)) {
                 continue;
             }
             const detail::PairKey key{std::min(i, j), std::max(i, j)};

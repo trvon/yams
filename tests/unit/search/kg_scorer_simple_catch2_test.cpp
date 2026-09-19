@@ -8,6 +8,9 @@
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <vector>
+#include <yams/metadata/connection_pool.h>
+#include <yams/metadata/database.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/search/kg_scorer.h>
@@ -139,4 +142,75 @@ TEST_CASE("SimpleKGScorer - ScoresEntityAndStructuralOverlap", "[search][kg_scor
     // Explanations best-effort: should be available for the hit
     auto expl = scorer->getLastExplanations();
     CHECK_FALSE(expl.empty());
+}
+
+TEST_CASE("SimpleKGScorer - neighbor union is one batched fetch", "[search][kg_scorer][catch2]") {
+    auto dbPath = tempDbPath("kg_scorer_batch_");
+    {
+        auto bootstrap =
+            makeSqliteKnowledgeGraphStore(dbPath.string(), KnowledgeGraphStoreConfig{});
+        REQUIRE(bootstrap.has_value());
+    }
+    ConnectionPoolConfig pcfg;
+    pcfg.minConnections = 1;
+    pcfg.maxConnections = 1;
+    auto pool = std::make_shared<ConnectionPool>(dbPath.string(), pcfg);
+    REQUIRE(pool->initialize().has_value());
+    auto sres = makeSqliteKnowledgeGraphStore(*pool, KnowledgeGraphStoreConfig{});
+    REQUIRE(sres.has_value());
+    std::shared_ptr<KnowledgeGraphStore> store(sres.value().release());
+
+    // Eight query nodes, each aliased by one query token, each with one outgoing edge.
+    std::vector<KGNode> nodes;
+    for (int i = 0; i < 9; ++i) {
+        nodes.push_back(KGNode{.nodeKey = "ent:q" + std::to_string(i),
+                               .label = std::string("Q" + std::to_string(i)),
+                               .type = std::string("entity")});
+    }
+    auto ids = store->upsertNodes(nodes);
+    REQUIRE(ids.has_value());
+    std::string query;
+    for (int i = 0; i < 8; ++i) {
+        REQUIRE(store
+                    ->addAlias(KGAlias{.nodeId = ids.value()[i],
+                                       .alias = std::string("term" + std::to_string(i)),
+                                       .source = std::string("test"),
+                                       .confidence = 1.0f})
+                    .has_value());
+        REQUIRE(store
+                    ->addEdge(KGEdge{.srcNodeId = ids.value()[i],
+                                     .dstNodeId = ids.value()[8],
+                                     .relation = std::string("REL")})
+                    .has_value());
+        query += "term" + std::to_string(i) + " ";
+    }
+
+    auto scorer = makeSimpleKGScorer(store);
+    REQUIRE(scorer != nullptr);
+    KGScoringConfig scfg;
+    scfg.max_neighbors = 16;
+    scfg.max_hops = 1;
+    scfg.budget = std::chrono::milliseconds(1000);
+    scorer->setConfig(scfg);
+
+    const auto uncached = [&]() {
+        std::size_t count = 0;
+        auto r = pool->withConnection([&](Database& db) -> Result<void> {
+            count = db.getStatementCacheStats().uncachedPrepares;
+            return Result<void>();
+        });
+        REQUIRE(r.has_value());
+        return count;
+    };
+    std::vector<std::string> cands = {"1", "2"};
+    REQUIRE(scorer->score(query, cands).has_value()); // warm-up
+    const auto before = uncached();
+    REQUIRE(scorer->score(query, cands).has_value());
+    // Per-node neighbors() re-prepared once per query node (8); a batch is one IN query.
+    CHECK(uncached() - before < 8);
+    scorer.reset();
+    store.reset();
+    pool->shutdown();
+    std::error_code ec;
+    std::filesystem::remove(dbPath, ec);
 }

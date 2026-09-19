@@ -112,4 +112,7 @@ TEST_CASE("YamsCLI - command registration preserves help entrypoints", "[cli][re
     SECTION("full graph help still works") {
         runHelp("graph");
     }
+    SECTION("full p2p help still works") {
+        runHelp("p2p");
+    }
 }

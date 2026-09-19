@@ -10,6 +10,7 @@
 
 namespace yams::mcp {
 
+#if !defined(YAMS_WASI)
 namespace {
 
 json makeTextResourceResult(const std::string& uri, const std::string& mimeType, std::string text) {
@@ -46,6 +47,7 @@ json daemonStatusToJson(const yams::daemon::StatusResponse& s) {
 }
 
 } // namespace
+#endif
 
 json MCPServer::listResources() {
 #if defined(YAMS_WASI)

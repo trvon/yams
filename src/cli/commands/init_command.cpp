@@ -54,6 +54,19 @@ using init_assets::GlinerModel;
 using init_assets::GrammarInfo;
 using init_assets::RerankerModel;
 
+// Post-setup guidance formatters (pure string builders, testable without stdout).
+std::string formatLaterCommand(const std::string& command) {
+    return "\nLater: " + command + "\n";
+}
+
+std::string formatInitSummary(const fs::path& configPath, const fs::path& dataPath) {
+    std::string out = "\n" + ui::status_ok("YAMS is ready") + "\n";
+    out += ui::key_value("Config", configPath.string()) + "\n";
+    out += ui::key_value("Data", dataPath.string()) + "\n";
+    out += ui::key_value("Next", "yams list | yams doctor") + "\n";
+    return out;
+}
+
 class InitCommand : public ICommand {
 public:
     std::string getName() const override { return "init"; }
@@ -89,6 +102,44 @@ public:
         });
     }
 
+private:
+    // Handles the already-initialized path: update the tuning profile and offer the
+    // optional setup steps (GLiNER, reranker, grammars, skill, session) without re-running
+    // storage/key/vector initialization.
+    Result<void> handleAlreadyInitialized(const fs::path& dataPath, const fs::path& configPath) {
+        spdlog::info("YAMS is already initialized at {} (use --force to overwrite).",
+                     dataPath.string());
+
+        if (!nonInteractive_) {
+            tuningProfile_ = promptForTuningProfile();
+            auto writeOk = config::write_config_value(configPath, "tuning.profile", tuningProfile_);
+            if (!writeOk) {
+                spdlog::warn("Failed to update tuning.profile in config");
+            }
+        }
+
+        const auto preferredModel =
+            config::parse_config_value(configPath, "embeddings", "preferred_model");
+        const bool colbertPreferred = isColbertModelName(preferredModel);
+
+        maybeSetupGlinerModel(dataPath, configPath);
+        if (colbertPreferred) {
+            auto selected = maybeSetupRerankerModel(dataPath, configPath);
+            if (selected.empty()) {
+                updateColbertRerankingConfig(configPath);
+                spdlog::info("ColBERT preferred model detected; enabling MaxSim reranking via "
+                             "ONNX plugin");
+            }
+        } else {
+            (void)maybeSetupRerankerModel(dataPath, configPath);
+        }
+        maybeSetupGrammars(dataPath);
+        maybeSetupAgentSkill();
+        maybeBootstrapProjectSession();
+        return Result<void>();
+    }
+
+public:
     Result<void> execute() override {
         try {
             // Handle --auto flag: sets sensible defaults for containerized environments
@@ -137,40 +188,7 @@ public:
                 fs::exists(dbFile) && fs::exists(storageDir) && fs::exists(configPath);
 
             if (alreadyInitialized && !force_) {
-                spdlog::info("YAMS is already initialized at {} (use --force to overwrite).",
-                             dataPath.string());
-
-                if (!nonInteractive_) {
-                    tuningProfile_ = promptForTuningProfile();
-                    auto writeOk =
-                        config::write_config_value(configPath, "tuning.profile", tuningProfile_);
-                    if (!writeOk) {
-                        spdlog::warn("Failed to update tuning.profile in config");
-                    }
-                }
-
-                const auto preferredModel =
-                    config::parse_config_value(configPath, "embeddings", "preferred_model");
-                const bool colbertPreferred = isColbertModelName(preferredModel);
-
-                // Still offer GLiNER model, reranker model, grammar download, and skill install
-                // even if already initialized
-                maybeSetupGlinerModel(dataPath, configPath);
-                if (colbertPreferred) {
-                    auto selected = maybeSetupRerankerModel(dataPath, configPath);
-                    if (selected.empty()) {
-                        updateColbertRerankingConfig(configPath);
-                        spdlog::info(
-                            "ColBERT preferred model detected; enabling MaxSim reranking via "
-                            "ONNX plugin");
-                    }
-                } else {
-                    (void)maybeSetupRerankerModel(dataPath, configPath);
-                }
-                maybeSetupGrammars(dataPath);
-                maybeSetupAgentSkill();
-                maybeBootstrapProjectSession();
-                return Result<void>();
+                return handleAlreadyInitialized(dataPath, configPath);
             }
 
             // 4) Initialize storage (database + content store)
@@ -413,14 +431,11 @@ private:
     }
 
     static void printLaterCommand(const std::string& command) {
-        std::cout << "\nLater: " << command << "\n";
+        std::cout << formatLaterCommand(command);
     }
 
     static void printInitSummary(const fs::path& configPath, const fs::path& dataPath) {
-        std::cout << "\n" << ui::status_ok("YAMS is ready") << "\n";
-        std::cout << ui::key_value("Config", configPath.string()) << "\n";
-        std::cout << ui::key_value("Data", dataPath.string()) << "\n";
-        std::cout << ui::key_value("Next", "yams list | yams doctor") << "\n";
+        std::cout << formatInitSummary(configPath, dataPath);
     }
 
     static std::string normalizeS3EndpointInput(std::string endpoint) {
@@ -1755,9 +1770,8 @@ private:
                 content.append("\n[search]\n");
             }
 
-            // Set reranker_backend, reranker_model and reranker_model_path in [search]
-            fs::path rerankerModelPath =
-                dataPath / "models" / "reranker" / selectedRerankerModel / "model.onnx";
+            // Set reranker_backend and reranker_model in [search]. The daemon resolves the
+            // model by name (ConfigResolver::resolveRerankerModel); no path key is read.
             auto secPos = content.find("[search]");
             if (secPos != std::string::npos) {
                 auto nextSec = content.find("\n[", secPos + 1);
@@ -1787,23 +1801,10 @@ private:
                     content.replace(namePos, lineEnd - namePos, modelNameLine);
                 }
 
-                // Add reranker_model_path
-                auto keyPos = content.find("reranker_model_path", secPos);
-                std::string modelPathLine = "reranker_model_path = \"" +
-                                            escapeTomlString(rerankerModelPath.string()) + "\"";
-                if (keyPos == std::string::npos || keyPos > rangeEnd) {
-                    content.insert(rangeEnd, modelPathLine + "\n");
-                } else {
-                    auto lineEnd = content.find('\n', keyPos);
-                    if (lineEnd == std::string::npos)
-                        lineEnd = content.size();
-                    content.replace(keyPos, lineEnd - keyPos, modelPathLine);
-                }
-
                 // Also enable reranking by default
                 auto enablePos = content.find("enable_reranking", secPos);
                 if (enablePos == std::string::npos || enablePos > rangeEnd) {
-                    // Find position after reranker_model_path (re-find since string changed)
+                    // Re-find the section since the string changed
                     secPos = content.find("[search]");
                     nextSec = content.find("\n[", secPos + 1);
                     rangeEnd = (nextSec == std::string::npos) ? content.size() : nextSec;
@@ -1814,7 +1815,7 @@ private:
             std::ofstream outCfg(configPath, std::ios::trunc);
             outCfg << content;
             outCfg.close();
-            spdlog::info("Configured [search].reranker_model_path");
+            spdlog::info("Configured [search].reranker_model");
         } catch (const std::exception& e) {
             spdlog::debug("Skipping reranker config write: {}", e.what());
         }

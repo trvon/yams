@@ -1,6 +1,6 @@
 #pragma once
 
-#include <yams/daemon/client/daemon_client.h>
+#include <yams/daemon/client/client_config.h>
 
 namespace yams::daemon {
 

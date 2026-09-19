@@ -3,11 +3,20 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <string>
 #include <thread>
 
+#include <nlohmann/json.hpp>
+
+#include "src/daemon/components/post_ingest_nl_graph_builder.h"
+#include <yams/daemon/components/GraphComponent.h>
 #include <yams/daemon/components/PostIngestQueue.h>
+#include <yams/daemon/components/TuneAdvisor.h>
+#include <yams/daemon/components/WorkCoordinator.h>
+#include <yams/daemon/resource/external_entity_provider_adapter.h>
+#include <yams/metadata/path_utils.h>
 
 using namespace yams::daemon;
 using namespace std::chrono_literals;
@@ -123,6 +132,125 @@ TEST_CASE("LruCache access refreshes position", "[daemon][post-ingest][cache][ca
 // PostIngestQueue Stage Constants
 // ============================================================================
 
+TEST_CASE("PostIngestQueue rejects and accounts KG admission after stop",
+          "[daemon][post-ingest][lifecycle][catch2]") {
+    PostIngestQueue queue{nullptr, nullptr, {}, nullptr, nullptr, nullptr, nullptr, 8};
+    queue.stop();
+
+    auto& bus = InternalEventBus::instance();
+    const auto queuedBefore = bus.kgQueued();
+    const auto droppedBefore = bus.kgDropped();
+    InternalEventBus::KgJob job;
+    job.hash = "after-stop";
+    queue.testing_enqueueKgJob(std::move(job));
+
+    CHECK(bus.kgQueued() == queuedBefore);
+    CHECK(bus.kgDropped() == droppedBefore + 1);
+    CHECK(queue.testing_pendingKgJobs() == 0);
+}
+
+TEST_CASE("PostIngestQueue shares KG completion across graph and title dispatch",
+          "[daemon][post-ingest][kg-completion][catch2]") {
+    auto& bus = InternalEventBus::instance();
+    auto kgChannel = bus.get_or_create_channel<InternalEventBus::KgJob>("kg_jobs", 4096);
+    auto titleChannel =
+        bus.get_or_create_channel<InternalEventBus::TitleExtractionJob>("title_extraction", 4096);
+    InternalEventBus::KgJob staleKg;
+    while (kgChannel->try_pop(staleKg)) {
+    }
+    InternalEventBus::TitleExtractionJob staleTitle;
+    while (titleChannel->try_pop(staleTitle)) {
+    }
+
+    auto graph = std::make_shared<GraphComponent>(nullptr, nullptr);
+    PostIngestQueue queue{nullptr, nullptr, {}, nullptr, graph, nullptr, nullptr, 8};
+    PostIngestQueue::PreparedMetadataEntry entry;
+    entry.documentId = 42;
+    entry.hash = "shared-dispatch";
+    entry.knowledgeGraphToken = "shared-dispatch-token";
+    entry.filePath = "/tmp/shared-dispatch.txt";
+    entry.shouldDispatchKg = true;
+    entry.shouldDispatchTitle = true;
+    entry.titleTextSnippet = "shared dispatch";
+
+    queue.testing_dispatchNonEmbeddingStages(entry);
+
+    InternalEventBus::KgJob kgJob;
+    REQUIRE(kgChannel->try_pop(kgJob));
+    InternalEventBus::TitleExtractionJob titleJob;
+    REQUIRE(titleChannel->try_pop(titleJob));
+    REQUIRE(kgJob.knowledgeGraphCompletion != nullptr);
+    CHECK(titleJob.knowledgeGraphCompletion == kgJob.knowledgeGraphCompletion);
+    CHECK(kgJob.knowledgeGraphToken == entry.knowledgeGraphToken);
+    CHECK(titleJob.knowledgeGraphToken == entry.knowledgeGraphToken);
+    queue.stop();
+}
+
+TEST_CASE("PostIngestQueue entity stage leaves the shared content buffer intact",
+          "[daemon][post-ingest][entity][catch2]") {
+    // dispatchNonEmbeddingStages hands one shared_ptr<vector<byte>> to the KG, symbol,
+    // and entity channels. Any consumer that moves out of it starves the others.
+    PostIngestQueue queue{nullptr, nullptr, {}, nullptr, nullptr, nullptr, nullptr, 8};
+    queue.stop();
+    auto provider = std::make_shared<ExternalEntityProviderAdapter>(
+        nullptr, "fake-entity-plugin", "fake.getEntities", std::vector<std::string>{".bin"});
+    queue.setEntityProviders({provider});
+
+    const std::string payload = "shared content bytes";
+    auto shared = std::make_shared<std::vector<std::byte>>(payload.size());
+    std::transform(payload.begin(), payload.end(), shared->begin(),
+                   [](char c) { return static_cast<std::byte>(c); });
+    const auto expectedSize = shared->size();
+
+    InternalEventBus::EntityExtractionJob first;
+    first.hash = "shared-buffer-hash";
+    first.documentId = 1;
+    first.filePath = "a.bin";
+    first.extension = ".bin";
+    first.contentBytes = shared;
+    InternalEventBus::EntityExtractionJob second = first;
+
+    std::vector<InternalEventBus::EntityExtractionJob> jobs;
+    jobs.push_back(std::move(first));
+    jobs.push_back(std::move(second));
+    queue.testing_processEntityExtractionBatch(std::move(jobs));
+
+    CHECK(shared->size() == expectedSize);
+}
+
+TEST_CASE("PostIngestQueue bounds the pending KG overflow and accounts drops",
+          "[daemon][post-ingest][kg][backpressure][catch2]") {
+    // With the channel detached every job lands in the overflow FIFO; a running coordinator
+    // keeps the drain coroutine alive so pending jobs are neither cancelled nor consumed.
+    WorkCoordinator coordinator;
+    coordinator.start(1);
+    PostIngestQueue queue{nullptr, nullptr, {}, nullptr, nullptr, &coordinator, nullptr, 8};
+    queue.testing_detachKgChannel();
+    struct ResetPendingCap {
+        ~ResetPendingCap() { TuneAdvisor::setPostIngestPendingKgMax(0); }
+    } resetPendingCap;
+    TuneAdvisor::setPostIngestPendingKgMax(2);
+
+    auto& bus = InternalEventBus::instance();
+    const auto droppedBefore = bus.kgDropped();
+    for (int i = 0; i < 3; ++i) {
+        InternalEventBus::KgJob job;
+        job.hash = "pending-" + std::to_string(i);
+        auto content = std::make_shared<std::vector<std::byte>>(1024 * 1024);
+        std::weak_ptr<std::vector<std::byte>> retained = content;
+        job.contentBytes = std::move(content);
+        queue.testing_enqueueKgJob(std::move(job));
+        // Durable content is reloaded by hash; queued descriptors must not pin raw buffers.
+        CHECK(retained.expired());
+    }
+    CHECK(queue.testing_pendingKgJobs() == 2);
+    CHECK(bus.kgDropped() == droppedBefore + 1);
+
+    TuneAdvisor::setPostIngestPendingKgMax(0);
+    queue.stop();
+    coordinator.stop();
+}
+
 TEST_CASE("PostIngestQueue stage constants", "[daemon][post-ingest][catch2]") {
     CHECK(PostIngestQueue::kStageCount == 5);
     CHECK(PostIngestQueue::kLimiterCount == 6);
@@ -174,4 +302,166 @@ TEST_CASE("LruCache works with integer keys", "[daemon][post-ingest][cache][catc
     REQUIRE(result.has_value());
     CHECK(result.value().size() == 3);
     CHECK(result.value()[0] == "tag1");
+}
+
+namespace {
+yams::search::QueryConcept makeConcept(const std::string& text, const std::string& type,
+                                       float confidence, const std::string& source) {
+    const auto start = source.find(text);
+    REQUIRE(start != std::string::npos);
+    return {text, type, confidence, static_cast<std::uint32_t>(start),
+            static_cast<std::uint32_t>(start + text.size())};
+}
+
+const yams::metadata::KGNode& findNode(const DeferredKGBatch& batch, const std::string& key) {
+    const auto it = std::find_if(batch.nodes.begin(), batch.nodes.end(),
+                                 [&](const auto& node) { return node.nodeKey == key; });
+    REQUIRE(it != batch.nodes.end());
+    return *it;
+}
+
+const DeferredEdge& findEdge(const DeferredKGBatch& batch, const std::string& source,
+                             const std::string& target, const std::string& relation) {
+    const auto it =
+        std::find_if(batch.deferredEdges.begin(), batch.deferredEdges.end(), [&](const auto& edge) {
+            return edge.srcNodeKey == source && edge.dstNodeKey == target &&
+                   edge.relation == relation;
+        });
+    REQUIRE(it != batch.deferredEdges.end());
+    return *it;
+}
+
+} // namespace
+
+TEST_CASE("Post-ingest NL graph builder preserves graph schema and metric deltas",
+          "[daemon][post-ingest][graph-builder][catch2]") {
+    const std::string text =
+        "TP53 response in lung cancer\nTP53 regulates apoptosis in epithelial cells. "
+        "Aspirin treatment reduced lung cancer progression.";
+    PostIngestNlGraphContext context{
+        .hash = "abc123",
+        .documentId = 42,
+        .textSnippet = text,
+        .fallbackTitle = "TP53 response in lung cancer",
+        .filePath = "papers/study.txt",
+        .language = std::string("e") + static_cast<char>(0xFF),
+        .titleConfidence = 0.9f,
+        .lastSeen = 123456,
+    };
+    std::vector<yams::search::QueryConcept> concepts{
+        makeConcept("lung cancer", "disease", 0.82f, text),
+        makeConcept("Aspirin", "drug", 0.88f, text),
+        makeConcept("TP53", "gene", 0.95f, text),
+    };
+
+    auto built = buildPostIngestNlGraph(context, concepts);
+    REQUIRE(built.batch);
+    const auto& batch = *built.batch;
+    const auto expectedPath =
+        yams::metadata::computePathDerivedValues(context.filePath).normalizedPath;
+
+    CHECK(batch.sourceFile == expectedPath);
+    CHECK(batch.documentIdToDelete == 42);
+    const auto& docNode = findNode(batch, "doc:abc123");
+    CHECK(docNode.label == "papers/study.txt");
+    const auto docProperties = nlohmann::json::parse(*docNode.properties);
+    CHECK(docProperties["hash"] == "abc123");
+    CHECK(docProperties["path"] == expectedPath);
+    CHECK(docProperties["language"] == "e?");
+    findNode(batch, "path:file:" + expectedPath);
+    findNode(batch, "segment:title:abc123");
+    findNode(batch, "segment:summary:abc123");
+    findNode(batch, "segment:body:abc123:1");
+    const auto& containsTitle =
+        findEdge(batch, "doc:abc123", "segment:title:abc123", "contains_segment");
+    CHECK(containsTitle.weight == 0.9f);
+    const auto containsProperties = nlohmann::json::parse(*containsTitle.properties);
+    CHECK(containsProperties["source"] == "gliner");
+    CHECK(containsProperties["region"] == "title");
+    CHECK(containsProperties["confidence"] == 0.9f);
+
+    const auto& gene = findNode(batch, "nl_entity:gene:tp53");
+    const auto geneProps = nlohmann::json::parse(*gene.properties);
+    CHECK(geneProps["entity_text"] == "TP53");
+    CHECK(geneProps["entity_type"] == "gene");
+    CHECK(geneProps["last_seen"] == 123456);
+
+    CHECK(std::any_of(batch.aliases.begin(), batch.aliases.end(), [](const auto& alias) {
+        return alias.alias == "tp53" && alias.source == "gliner.surface|nl_entity:gene:tp53" &&
+               alias.confidence == 0.95f;
+    }));
+    CHECK(std::any_of(
+        batch.deferredDocEntities.begin(), batch.deferredDocEntities.end(), [](const auto& entity) {
+            return entity.documentId == 42 && entity.entityText == "TP53" &&
+                   entity.nodeKey == "nl_entity:gene:tp53" && entity.extractor == "gliner_title_nl";
+        }));
+    CHECK(std::any_of(batch.deferredEdges.begin(), batch.deferredEdges.end(), [](const auto& edge) {
+        return edge.srcNodeKey == "nl_entity:gene:tp53" && edge.dstNodeKey == "doc:abc123" &&
+               edge.relation == "title_mentions" && edge.weight == 1.0f;
+    }));
+    CHECK(std::any_of(batch.deferredEdges.begin(), batch.deferredEdges.end(), [](const auto& edge) {
+        return edge.srcNodeKey == "nl_entity:drug:aspirin" &&
+               edge.relation == "mentioned_in_segment" &&
+               nlohmann::json::parse(*edge.properties)["region"] == "body_claim";
+    }));
+    const auto& primary = findEdge(batch, "nl_entity:gene:tp53", "doc:abc123", "primary_topic_of");
+    CHECK(primary.weight == 1.0f);
+    const auto primaryProperties = nlohmann::json::parse(*primary.properties);
+    CHECK(primaryProperties["title_overlap"] == true);
+    CHECK(primaryProperties["entity_type"] == "gene");
+    const auto& coMention = findEdge(batch, "nl_entity:gene:tp53", "nl_entity:disease:lung cancer",
+                                     "co_occurs_biomedical");
+    CHECK(coMention.weight > 0.69f);
+    CHECK(coMention.weight < 0.70f);
+    const auto coMentionProperties = nlohmann::json::parse(*coMention.properties);
+    CHECK(coMentionProperties["lhs_type"] == "gene");
+    CHECK(coMentionProperties["rhs_type"] == "disease");
+    CHECK(coMentionProperties["scope"] == "title");
+    CHECK(coMentionProperties["provenance"]["source"] == "gliner");
+
+    CHECK(built.metrics.segmentNodesCreated == 3);
+    CHECK(built.metrics.bodySegmentNodesCreated == 1);
+    CHECK(built.metrics.segmentEdgesCreated == 6);
+    CHECK(built.metrics.entitySegmentEdgesCreated == 3);
+    CHECK(built.metrics.bodyEntitySegmentEdgesCreated == 1);
+    CHECK(built.metrics.deferredDocEntitiesQueued == 3);
+    CHECK(built.metrics.entities == 3);
+    CHECK(built.metrics.highValueEntities == 3);
+    CHECK(built.metrics.primaryTopicEdges == 3);
+    CHECK(built.metrics.coMentionEdges == 3);
+}
+
+TEST_CASE("Post-ingest NL graph builder bounds edges without prescribing equal-confidence order",
+          "[daemon][post-ingest][graph-builder][catch2]") {
+    const std::string text =
+        "Topic overview\nGene0 Gene1 Gene2 Gene3 Gene4 Gene5 Gene6 Gene7 Gene8 Gene9 are linked "
+        "in this sufficiently long body claim.";
+    PostIngestNlGraphContext context{
+        .hash = "stable",
+        .documentId = 7,
+        .textSnippet = text,
+        .fallbackTitle = "Topic overview",
+        .filePath = "/tmp/stable.txt",
+        .language = "en",
+        .titleConfidence = std::nullopt,
+        .lastSeen = 99,
+    };
+    std::vector<yams::search::QueryConcept> concepts;
+    for (int i = 9; i >= 0; --i) {
+        concepts.push_back(makeConcept("Gene" + std::to_string(i), "gene", 0.9f, text));
+    }
+    auto reversed = concepts;
+    std::reverse(reversed.begin(), reversed.end());
+
+    auto first = buildPostIngestNlGraph(context, concepts);
+    auto second = buildPostIngestNlGraph(context, reversed);
+
+    for (const auto* built : {&first, &second}) {
+        CHECK(built->metrics.primaryTopicEdges == 3);
+        CHECK(built->metrics.coMentionEdges == 16);
+        REQUIRE(built->batch);
+        CHECK(std::count_if(
+                  built->batch->nodes.begin(), built->batch->nodes.end(),
+                  [](const auto& node) { return node.nodeKey.starts_with("nl_entity:"); }) == 10);
+    }
 }

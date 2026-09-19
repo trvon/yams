@@ -485,6 +485,17 @@ public:
     /// is deferred to the next getCorpusStats() call.
     virtual void signalCorpusStatsStale() = 0;
 
+    // Repositories without attempt fencing fail closed rather than publishing legacy readiness.
+    virtual Result<EmbeddingDerivationToken> beginDocumentEmbeddingDerivation(const std::string&,
+                                                                              const std::string&) {
+        return Error{ErrorCode::NotImplemented, "Embedding derivation fencing unavailable"};
+    }
+    virtual Result<std::size_t>
+    batchCompleteDocumentEmbeddingDerivations(const std::vector<EmbeddingDerivationToken>&,
+                                              const std::string&) {
+        return Error{ErrorCode::NotImplemented, "Embedding derivation fencing unavailable"};
+    }
+
     // Embedding status operations
     virtual Result<void> updateDocumentEmbeddingStatus(int64_t documentId, bool hasEmbedding,
                                                        const std::string& modelId = "") = 0;
@@ -611,6 +622,12 @@ public:
     Result<std::optional<DocumentInfo>> getDocument(int64_t id) override;
     Result<std::optional<DocumentInfo>> getDocumentByHash(const std::string& hash) override;
     Result<void> updateDocument(const DocumentInfo& info) override;
+    /// Replace one sync-selected document winner and its complete metadata map atomically.
+    /// The document row and metadata keys either commit together or remain unchanged.
+    /// Receiver-local extraction and repair status are preserved, not replicated.
+    Result<void>
+    replaceDocumentAndMetadata(const DocumentInfo& info,
+                               const std::vector<std::pair<std::string, MetadataValue>>& metadata);
     Result<void> deleteDocument(int64_t id) override;
     Result<size_t> deleteDocumentsBatch(const std::vector<int64_t>& ids) override;
     Result<size_t> updateDocumentsMimeBatch(
@@ -622,6 +639,10 @@ public:
     Result<void> updateContent(const DocumentContent& content) override;
     Result<void> deleteContent(int64_t documentId) override;
     Result<void> batchInsertContentAndIndex(const std::vector<BatchContentEntry>& entries) override;
+
+    /// Acknowledge actual KG completion only for the matching pending admission token.
+    /// False means stale, missing, untracked, or already acknowledged; errors leave it pending.
+    Result<bool> completeKnowledgeGraphEnrichment(int64_t documentId, const std::string& token);
 
     // Metadata operations
     Result<void> setMetadata(int64_t documentId, const std::string& key,
@@ -842,7 +863,7 @@ public:
     batchGetContent(const std::vector<int64_t>& documentIds) override;
 
     // Batch fetch content previews for list/snippet hydration without reading full blobs.
-    Result<std::unordered_map<int64_t, std::string>>
+    virtual Result<std::unordered_map<int64_t, std::string>>
     batchGetContentPreview(const std::vector<int64_t>& documentIds, int maxChars, int maxDocs = 0);
 
     /// Batch fetch documents with content previews in a single JOIN query.
@@ -852,6 +873,33 @@ public:
                                         int maxPreviewChars);
 
     // Embedding status operations
+    /// Starts a new local attempt and invalidates previous readiness/tokens.
+    /// Call before reading the input snapshot. Recipe must identify the full derivation policy.
+    Result<EmbeddingDerivationToken>
+    beginDocumentEmbeddingDerivation(const std::string& hash, const std::string& recipe) override;
+    /// Returns false for stale, deleted, or already-completed attempts, without changing readiness.
+    Result<bool> completeDocumentEmbeddingDerivation(const EmbeddingDerivationToken& token,
+                                                     const std::string& modelId);
+    Result<std::unordered_map<std::string, EmbeddingDerivationState>>
+    batchGetDocumentEmbeddingDerivations(const std::vector<std::string>& hashes);
+    /// Batch form of beginDocumentEmbeddingDerivation: one transaction, one token per known
+    /// document (unknown or duplicate hashes are skipped), previous readiness invalidated.
+    Result<std::vector<EmbeddingDerivationToken>>
+    batchBeginDocumentEmbeddingDerivations(const std::vector<std::string>& hashes,
+                                           const std::string& recipe);
+    /// Classify ready matching recipes or mint new tokens atomically under the writer transaction.
+    Result<EmbeddingDerivationAdmission> batchClassifyOrBeginEmbeddingDerivations(
+        const std::vector<std::string>& hashes, const std::string& recipe, bool skipExisting,
+        EmbeddingAdmissionPolicy policy = EmbeddingAdmissionPolicy::MatchRecipe);
+    /// Update only still-pending matching attempts; success uses derivation completion instead.
+    Result<std::size_t>
+    batchUpdateEmbeddingDerivationRepairStatus(const std::vector<EmbeddingDerivationToken>& tokens,
+                                               RepairStatus status);
+    /// Batch form of completeDocumentEmbeddingDerivation: one transaction; returns how many
+    /// tokens were still current and are now published. Stale tokens are skipped silently.
+    Result<std::size_t>
+    batchCompleteDocumentEmbeddingDerivations(const std::vector<EmbeddingDerivationToken>& tokens,
+                                              const std::string& modelId) override;
     Result<void> updateDocumentEmbeddingStatus(int64_t documentId, bool hasEmbedding,
                                                const std::string& modelId = "") override;
     Result<void> updateDocumentEmbeddingStatusByHash(const std::string& hash, bool hasEmbedding,
@@ -953,6 +1001,8 @@ public:
     }
 
 private:
+    class ContentBatchOps;
+
     ConnectionPool& pool_;
     ConnectionPool* readPool_{nullptr};
     bool hasPathIndexing_{false};

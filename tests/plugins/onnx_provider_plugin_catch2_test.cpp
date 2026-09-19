@@ -3,6 +3,7 @@
 #include <fstream>
 #include <string>
 #include "../common/env_compat.h"
+#include "../common/test_helpers_catch2.h"
 #include <catch2/catch_test_macros.hpp>
 #include <yams/compat/dlfcn.h>
 #include <yams/compat/unistd.h>
@@ -53,26 +54,27 @@ static int get_health_json(void* handle, std::string& out_json) {
 }
 
 TEST_CASE("OnnxProviderPluginTest.RuntimeInfoIncludesHints", "[plugin][onnxproviderplugintest]") {
-    setenv("YAMS_SKIP_MODEL_LOADING", "1", 1);
+    yams::test::ScopedEnvVar skipLoading{"YAMS_SKIP_MODEL_LOADING", std::string{"1"}};
     void* h = nullptr;
     auto* prov = load_provider(&h);
     if (!prov)
         SKIP("onnx plugin not available");
     char* js = nullptr;
-    REQUIRE(0 == prov->get_runtime_info_json(prov->self, "e5-small", &js));
-    REQUIRE(js != nullptr);
+    REQUIRE((0 == prov->get_runtime_info_json(prov->self, "e5-small", &js)));
+    REQUIRE((js != nullptr));
     auto j = nlohmann::json::parse(js, nullptr, false);
     prov->free_string(prov->self, js);
     REQUIRE_FALSE(j.is_discarded());
-    CHECK(j.value("model", "") == "e5-small");
+    CHECK((j.value("model", "") == "e5-small"));
     CHECK(j.contains("graph_optimization"));
     CHECK(j.contains("execution_provider"));
 }
 
 TEST_CASE("OnnxProviderPluginTest.MissingRuntimeReportedViaHealth",
           "[plugin][onnxproviderplugintest]") {
-    setenv("YAMS_ONNX_RUNTIME_LIB", "/nonexistent/libonnxruntime.dylib", 1);
-    setenv("YAMS_SKIP_MODEL_LOADING", "1", 1);
+    yams::test::ScopedEnvVar runtimeLibrary{"YAMS_ONNX_RUNTIME_LIB",
+                                            std::string{"/nonexistent/libonnxruntime.dylib"}};
+    yams::test::ScopedEnvVar skipLoading{"YAMS_SKIP_MODEL_LOADING", std::string{"1"}};
 
     void* h = nullptr;
     auto* prov = load_provider(&h);
@@ -80,10 +82,10 @@ TEST_CASE("OnnxProviderPluginTest.MissingRuntimeReportedViaHealth",
         SKIP("onnx plugin not available");
 
     std::string health;
-    REQUIRE(0 == get_health_json(h, health));
+    REQUIRE((0 == get_health_json(h, health)));
     auto j = nlohmann::json::parse(health, nullptr, false);
     REQUIRE_FALSE(j.is_discarded());
-    CHECK(j.value("status", "unknown") == "unavailable");
+    CHECK((j.value("status", "unknown") == "unavailable"));
     CHECK((j.value("reason", "") == "runtime_load_failed" ||
            j.value("reason", "") == "runtime_not_found"));
     CHECK_FALSE(j.value("runtime_status", "").empty());
@@ -99,25 +101,25 @@ TEST_CASE("OnnxProviderPluginTest.ConfigPreloadParsingAndReady",
     std::ofstream(tmp / "yams" / "config.toml")
         << "[plugins.onnx]\npreload=\"a,b\"\n\n[plugins.onnx.models.sentiment]\n"
         << "task=\"sentiment\"\n";
-    setenv("XDG_CONFIG_HOME", tmp.string().c_str(), 1);
-    setenv("YAMS_SKIP_MODEL_LOADING", "1", 1);
+    yams::test::ScopedEnvVar configHome{"XDG_CONFIG_HOME", tmp.string()};
+    yams::test::ScopedEnvVar skipLoading{"YAMS_SKIP_MODEL_LOADING", std::string{"1"}};
 
     void* h = nullptr;
     auto* prov = load_provider(&h);
     if (!prov)
         SKIP("onnx plugin not available");
     std::string health;
-    REQUIRE(0 == get_health_json(h, health));
+    REQUIRE((0 == get_health_json(h, health)));
     auto j = nlohmann::json::parse(health, nullptr, false);
     REQUIRE_FALSE(j.is_discarded());
-    CHECK(j.value("status", "unknown") != "unavailable");
+    CHECK((j.value("status", "unknown") != "unavailable"));
     // Prefer ok status
-    CHECK(j.value("status", "ok") == "ok");
+    CHECK((j.value("status", "ok") == "ok"));
 }
 
 TEST_CASE("OnnxProviderPluginTest.GenerateEmbeddingBatchErrors",
           "[plugin][onnxproviderplugintest]") {
-    setenv("YAMS_SKIP_MODEL_LOADING", "1", 1);
+    yams::test::ScopedEnvVar skipLoading{"YAMS_SKIP_MODEL_LOADING", std::string{"1"}};
     void* h = nullptr;
     auto* prov = load_provider(&h);
     if (!prov)
@@ -126,12 +128,12 @@ TEST_CASE("OnnxProviderPluginTest.GenerateEmbeddingBatchErrors",
     // Invalid args: null inputs
     float* out = nullptr;
     size_t b = 0, d = 0;
-    CHECK(0 != prov->generate_embedding_batch(prov->self, "bad-model", nullptr, nullptr, 0, &out,
-                                              &b, &d));
+    CHECK((0 != prov->generate_embedding_batch(prov->self, "bad-model", nullptr, nullptr, 0, &out,
+                                               &b, &d)));
 
     // Bad model id with empty batch arrays
     const uint8_t* inputs_dummy = nullptr;
     size_t lens_dummy = 0; // not dereferenced for batch_size=0
-    CHECK(0 != prov->generate_embedding_batch(prov->self, "bad-model", &inputs_dummy, &lens_dummy,
-                                              0, &out, &b, &d));
+    CHECK((0 != prov->generate_embedding_batch(prov->self, "bad-model", &inputs_dummy, &lens_dummy,
+                                               0, &out, &b, &d)));
 }

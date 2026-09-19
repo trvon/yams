@@ -2,6 +2,7 @@
 // Consolidates status/metrics tests: embedding status, plugin degradation, WAL metrics, FSM states
 // Covers: DaemonMetrics, StatusResponse serialization, plugin degradation, WAL metrics
 
+// pi-lens-ignore: fatal error
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 
@@ -46,9 +47,11 @@
 #include <yams/daemon/resource/external_plugin_host.h>
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/plugin_host.h>
+#include <yams/memory_sync/memory_sync_service.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
 #include <yams/metadata/path_utils.h>
+#include <yams/storage/storage_backend.h>
 #include <yams/vector/vector_database.h>
 #include <yams/version.hpp>
 
@@ -620,7 +623,7 @@ public:
                                                api::ProgressCallback) override {
         return ErrorCode::NotImplemented;
     }
-    Result<bool> exists(const std::string&) const override { return ErrorCode::NotImplemented; }
+    Result<bool> exists(const std::string& hash) const override { return blobs_.contains(hash); }
     Result<bool> remove(const std::string& hash) override {
         if (auto it = removeResults_.find(hash); it != removeResults_.end()) {
             return it->second;
@@ -849,7 +852,8 @@ std::filesystem::path writeTempFile(const std::string& prefix, const std::string
 }
 
 std::filesystem::path createMockExternalPlugin(const std::filesystem::path& baseDir,
-                                               const std::string& name) {
+                                               const std::string& name,
+                                               bool requireTrustedConfig = false) {
     auto pluginDir = baseDir / name;
     std::filesystem::create_directories(pluginDir);
 
@@ -858,6 +862,9 @@ std::filesystem::path createMockExternalPlugin(const std::filesystem::path& base
         pluginFile << R"PY(#!/usr/bin/env python3
 import json
 import sys
+
+EXPECTED_MODE = )PY"
+                   << (requireTrustedConfig ? R"PY("trusted")PY" : "None") << R"PY(
 
 
 def handle_request(req):
@@ -869,6 +876,8 @@ def handle_request(req):
             "interfaces": ["content_extractor_v1"]
         }
     if method == "plugin.init":
+        if EXPECTED_MODE and req.get("params", {}).get("mode") != EXPECTED_MODE:
+            raise ValueError("missing configured mode")
         return {"status": "initialized"}
     if method == "plugin.health":
         return {"status": "ok"}
@@ -1024,6 +1033,43 @@ TEST_CASE("DaemonMetrics: Embedding provider status", "[daemon][metrics][embeddi
     }
 }
 
+TEST_CASE("DaemonMetrics reports effective embedding policy before provider adoption",
+          "[daemon][metrics][embedding][config][snapshot]") {
+    const auto dataDir = makeTempDir("yams_metrics_embed_policy_");
+    const auto configPath = yams::test::write_file(dataDir / "config.toml", R"toml(
+[embeddings]
+backend = "simeon"
+preferred_model = "simeon-default"
+embedding_dim = 1024
+preload_on_startup = false
+)toml");
+    yams::test::ScopedEnvVar configPathEnvironment{"YAMS_CONFIG_PATH", std::nullopt};
+    yams::test::ScopedEnvVar configEnvironment{"YAMS_CONFIG", std::nullopt};
+    yams::test::ScopedEnvVar backendEnvironment{"YAMS_EMBED_BACKEND", std::nullopt};
+    yams::test::ScopedEnvVar modelEnvironment{"YAMS_PREFERRED_MODEL", std::nullopt};
+    yams::test::ScopedEnvVar dimensionEnvironment{"YAMS_EMBED_DIM", std::nullopt};
+
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = dataDir;
+    cfg.configFilePath = configPath;
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    REQUIRE(svc.initialize().has_value());
+
+    DaemonMetrics metrics(nullptr, &state, &svc, svc.getWorkCoordinator());
+    const auto snapshot = metrics.getSnapshot();
+
+    REQUIRE((snapshot != nullptr));
+    CHECK((snapshot->embeddingBackend == "simeon"));
+    CHECK((snapshot->embeddingModel == "simeon-default"));
+    CHECK((snapshot->embeddingDim == 1024U));
+    const auto policy = svc.getResolvedEmbeddingConfig();
+    REQUIRE((policy != nullptr));
+    CHECK((policy->policyIdentity == "simeon:simeon-default:1024"));
+    CHECK((policy->effectiveConfigPath == configPath));
+}
+
 // =============================================================================
 // WAL Metrics Tests
 // =============================================================================
@@ -1167,6 +1213,49 @@ TEST_CASE("RequestDispatcher: compact and detailed status agree on FSM readiness
         REQUIRE(detailed.readinessStates.count(k) > 0);
         REQUIRE(compact.readinessStates.at(k) == detailed.readinessStates.at(k));
     }
+}
+
+TEST_CASE("RequestDispatcher: detailed status includes disk pressure policy",
+          "[daemon][status][disk-pressure]") {
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_status_disk_pressure_");
+    cfg.diskPressure.warningFreePercent = 12.5;
+    cfg.diskPressure.minimumWriteAdmissionBytes = 512ULL * 1024ULL * 1024ULL;
+    cfg.diskPressure.emergencyReserveBytes = 64ULL * 1024ULL * 1024ULL;
+
+    YamsDaemon daemon(cfg);
+    DaemonLifecycleAdapter lifecycleAdapter(&daemon);
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    RequestDispatcher dispatcher(&lifecycleAdapter, &svc, &state);
+
+    auto fetch = [&](bool detailed) {
+        StatusRequest req;
+        req.detailed = detailed;
+        Request request = req;
+        boost::asio::io_context io;
+        auto future =
+            boost::asio::co_spawn(io, dispatcher.dispatch(request), boost::asio::use_future);
+        io.run();
+        const auto response = future.get();
+        REQUIRE(std::holds_alternative<StatusResponse>(response));
+        return std::get<StatusResponse>(response);
+    };
+
+    const auto compact = fetch(false);
+    CHECK_FALSE(compact.requestCounts.contains(std::string(metrics::kStoragePressureLevel)));
+
+    const auto detailed = fetch(true);
+    CHECK(detailed.requestCounts.at(std::string(metrics::kStoragePressureLevel)) ==
+          static_cast<std::size_t>(storage::DiskPressureLevel::Unknown));
+    CHECK(detailed.requestCounts.at(std::string(metrics::kStorageWarningFreePercentBp)) == 1250);
+    CHECK(detailed.requestCounts.at(std::string(metrics::kStorageWriteAdmissionBytesLow)) ==
+          512ULL * 1024ULL * 1024ULL);
+    CHECK(detailed.requestCounts.at(std::string(metrics::kStorageWriteAdmissionBytesHigh)) == 0);
+    CHECK(detailed.requestCounts.at(std::string(metrics::kStorageEmergencyReserveBytesLow)) ==
+          64ULL * 1024ULL * 1024ULL);
+    CHECK(detailed.requestCounts.at(std::string(metrics::kStorageEmergencyReserveBytesHigh)) == 0);
 }
 
 TEST_CASE("RequestDispatcher: status includes repair metrics and flags",
@@ -2320,6 +2409,44 @@ TEST_CASE("RequestDispatcher: document handlers cover direct helper and error br
         REQUIRE(deleteResp.results.size() == 2);
         CHECK(lifecycle.removedHashes().size() == 1);
         CHECK(lifecycle.removedHashes().front() == successDoc.sha256Hash);
+    }
+
+    SECTION("delete publishes durable document and content tombstones") {
+        auto repo = std::make_shared<StubPruneMetadataRepository>();
+        auto store = std::make_shared<StubContentStore>();
+        const std::string hash(64, 'a');
+        auto doc = makeDoc(23, "/tmp/delete/replicated.txt", hash);
+        repo->addDocument(doc);
+        store->setBlob(hash, "replicated");
+        svc.__test_setMetadataRepo(repo);
+        svc.__test_setContentStore(store);
+
+        storage::BackendConfig backendConfig;
+        backendConfig.type = "filesystem";
+        backendConfig.localPath = cfg.dataDir / "memory-sync";
+        auto backend = std::make_unique<storage::FilesystemBackend>();
+        REQUIRE(backend->initialize(backendConfig).has_value());
+        auto sync = std::make_unique<memory_sync::MemorySyncService>(
+            std::move(backend),
+            memory_sync::MemorySyncConfig{"delete-node", 60'000, "delete-corpus", 1});
+        REQUIRE(sync->syncFully().has_value());
+        svc.testingSetMemorySyncService(std::move(sync));
+
+        DeleteRequest req;
+        req.hash = hash;
+        req.force = true;
+        auto resp = dispatchRequest(dispatcher, Request{req});
+
+        REQUIRE(std::holds_alternative<DeleteResponse>(resp));
+        CHECK(std::get<DeleteResponse>(resp).successCount == 1);
+        memory_sync::VersionVector empty;
+        auto deltas = svc.testingMemorySyncService()->exportLocalDeltasAfter(empty, 4);
+        REQUIRE(deltas.has_value());
+        REQUIRE(deltas.value().deltas.size() == 2);
+        CHECK(deltas.value().deltas[0].logicalKey == "content-blob/" + hash);
+        CHECK(deltas.value().deltas[0].record.isTombstone());
+        CHECK(deltas.value().deltas[1].logicalKey == "document/" + hash);
+        CHECK(deltas.value().deltas[1].record.isTombstone());
     }
 
     SECTION("delete reports missing content store") {
@@ -5545,9 +5672,20 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
 
 TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches",
           "[daemon][plugin][dispatcher]") {
-    auto makeReadyService = []() {
+    struct ReadyServiceFixture {
+        // ServiceManager keeps non-owning references to both dependencies. Member teardown is
+        // reverse declaration order, so the service shuts down before either dependency.
+        std::unique_ptr<StateComponent> state;
+        std::unique_ptr<DaemonLifecycleFsm> lifecycleFsm;
+        std::unique_ptr<ServiceManager> service;
+    };
+
+    auto makeReadyService = [](bool configureExternalPlugin = false) {
         DaemonConfig cfg;
         cfg.dataDir = makeTempDir("yams_plugin_dispatcher_");
+        if (configureExternalPlugin) {
+            cfg.pluginConfigs["dispatcher_external_plugin"] = R"({"mode":"trusted"})";
+        }
 
         auto state = std::make_unique<StateComponent>();
         state->readiness.contentStoreReady.store(true, std::memory_order_relaxed);
@@ -5558,7 +5696,7 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
         svc->__test_pluginScanComplete(0);
         REQUIRE(svc->getPluginHostFsmSnapshot().state == PluginHostState::Ready);
 
-        return std::tuple{std::move(state), std::move(lifecycleFsm), std::move(svc)};
+        return ReadyServiceFixture{std::move(state), std::move(lifecycleFsm), std::move(svc)};
     };
 
     SECTION("plugin handlers reject non-ready host state") {
@@ -5686,6 +5824,33 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
         CHECK(err.message == "Plugin not found");
     }
 
+    SECTION("plugin dry run does not execute an untrusted standalone script") {
+        auto [state, lifecycleFsm, svc] = makeReadyService();
+        StubLifecycle lifecycle;
+        RequestDispatcher dispatcher(&lifecycle, svc.get(), state.get());
+        auto shimPath = makePythonShimPath();
+        ScopedEnvVar pythonGuard("PATH", shimPath.c_str());
+
+        const auto scanDir = makeTempDir("yams_untrusted_plugin_scan_");
+        const auto marker = scanDir / "scan-executed";
+        const auto script = scanDir / "untrusted.py";
+        {
+            std::ofstream out(script);
+            CHECK(out.good());
+            out << "from pathlib import Path\nPath(" << nlohmann::json(marker.string()).dump()
+                << ").write_text('executed')\n";
+        }
+
+        PluginLoadRequest request;
+        request.pathOrName = script.string();
+        request.dryRun = true;
+        auto response = dispatchRequest(dispatcher, Request{request});
+
+        CHECK(std::holds_alternative<ErrorResponse>(response));
+        CHECK_FALSE(std::filesystem::exists(marker));
+        std::filesystem::remove_all(scanDir);
+    }
+
     SECTION("plugin scan and load search default directories") {
         auto homeDir = makeTempDir("yams_plugin_home_");
         auto homeText = homeDir.string();
@@ -5782,7 +5947,9 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
 
         auto externalUnloadResp =
             dispatchRequest(dispatcher, Request{PluginUnloadRequest{"dispatcher_external_plugin"}});
-        REQUIRE(std::holds_alternative<SuccessResponse>(externalUnloadResp));
+        REQUIRE(std::holds_alternative<ErrorResponse>(externalUnloadResp));
+        CHECK((std::get<ErrorResponse>(externalUnloadResp).code == ErrorCode::InvalidState));
+        CHECK((external->listLoaded().size() == 1));
     }
 
     SECTION("plugin handlers route external plugins when ABI host is absent") {
@@ -5832,9 +5999,9 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
         auto unloadResp =
             dispatchRequest(dispatcher, Request{PluginUnloadRequest{"dispatcher_external_plugin"}});
 
-        REQUIRE(std::holds_alternative<SuccessResponse>(unloadResp));
-        CHECK(std::get<SuccessResponse>(unloadResp).message == "unloaded");
-        CHECK(external->listLoaded().empty());
+        REQUIRE(std::holds_alternative<ErrorResponse>(unloadResp));
+        CHECK((std::get<ErrorResponse>(unloadResp).code == ErrorCode::InvalidState));
+        CHECK((external->listLoaded().size() == 1));
     }
 
     SECTION("plugin load routes direct external files before ABI fallback") {
@@ -5865,7 +6032,9 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
 
         auto unloadResp =
             dispatchRequest(dispatcher, Request{PluginUnloadRequest{"dispatcher_external_plugin"}});
-        REQUIRE(std::holds_alternative<SuccessResponse>(unloadResp));
+        REQUIRE(std::holds_alternative<ErrorResponse>(unloadResp));
+        CHECK((std::get<ErrorResponse>(unloadResp).code == ErrorCode::InvalidState));
+        CHECK((external->listLoaded().size() == 1));
     }
 
     SECTION("plugin load recognizes manifest-adjacent executable files") {
@@ -5904,7 +6073,9 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
 
         auto unloadResp =
             dispatchRequest(dispatcher, Request{PluginUnloadRequest{"dispatcher_external_plugin"}});
-        REQUIRE(std::holds_alternative<SuccessResponse>(unloadResp));
+        REQUIRE(std::holds_alternative<ErrorResponse>(unloadResp));
+        CHECK((std::get<ErrorResponse>(unloadResp).code == ErrorCode::InvalidState));
+        CHECK((external->listLoaded().size() == 1));
 #endif
     }
 
@@ -5928,15 +6099,15 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
         CHECK(err.message == "Plugin load failed for: " + pluginFile.string());
     }
 
-    SECTION("plugin trust add loads regular files and reuses loaded path metadata") {
-        auto [state, lifecycleFsm, svc] = makeReadyService();
+    SECTION("plugin trust add loads regular files with configured plugin settings") {
+        auto [state, lifecycleFsm, svc] = makeReadyService(true);
         StubLifecycle lifecycle;
         RequestDispatcher dispatcher(&lifecycle, svc.get(), state.get());
         auto shimPath = makePythonShimPath();
         ScopedEnvVar pythonGuard("PATH", shimPath.c_str());
 
-        auto pluginDir =
-            createMockExternalPlugin(svc->getResolvedDataDir(), "dispatcher_external_trust_file");
+        auto pluginDir = createMockExternalPlugin(svc->getResolvedDataDir(),
+                                                  "dispatcher_external_trust_file", true);
         auto pluginFile = pluginDir / "plugin.py";
 
         auto trustAddResp =
@@ -5955,7 +6126,9 @@ TEST_CASE("RequestDispatcher: plugin handlers cover readiness and error branches
 
         auto unloadResp =
             dispatchRequest(dispatcher, Request{PluginUnloadRequest{"dispatcher_external_plugin"}});
-        REQUIRE(std::holds_alternative<SuccessResponse>(unloadResp));
+        REQUIRE(std::holds_alternative<ErrorResponse>(unloadResp));
+        CHECK((std::get<ErrorResponse>(unloadResp).code == ErrorCode::InvalidState));
+        CHECK((external->listLoaded().size() == 1));
     }
 }
 
@@ -6543,6 +6716,22 @@ TEST_CASE("DaemonMetrics: snapshot includes canonical readiness flags",
     }
 }
 
+TEST_CASE("DaemonMetrics: snapshot exposes metadata integrity fast-path use",
+          "[daemon][metrics][readiness]") {
+    StateComponent state;
+    state.readiness.databaseIntegrityFastPath.store(true, std::memory_order_release);
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig cfg;
+    cfg.dataDir = makeTempDir("yams_metrics_integrity_fast_path_");
+    ServiceManager svc(cfg, state, lifecycleFsm);
+    DaemonMetrics metrics(nullptr, &state, &svc, svc.getWorkCoordinator());
+
+    auto snap = metrics.getSnapshot();
+    REQUIRE(snap != nullptr);
+    REQUIRE((snap->diagnosticCounters.count("database_integrity_fast_path") == 1));
+    CHECK((snap->diagnosticCounters.at("database_integrity_fast_path") == 1));
+}
+
 TEST_CASE("DaemonMetrics: snapshot reports generated build version", "[daemon][metrics][version]") {
     StateComponent state;
     DaemonLifecycleFsm lifecycleFsm;
@@ -6588,6 +6777,29 @@ TEST_CASE("RequestDispatcher: status refreshes cold snapshot without retry hint"
     const auto& status = std::get<StatusResponse>(resp);
     CHECK(status.running);
     CHECK(status.retryAfterMs == 0);
+}
+
+TEST_CASE("RequestDispatcher: status reports effective search maintenance provenance",
+          "[daemon][status][search][config]") {
+    StateComponent state;
+    DaemonLifecycleFsm lifecycleFsm;
+    DaemonConfig config;
+    config.dataDir = makeTempDir("yams_status_search_maintenance_");
+    config.searchMaintenance.automaticRebuildsEnabled = false;
+    config.searchMaintenance.automaticRebuildsSource = "typed:test";
+    ServiceManager services(config, state, lifecycleFsm);
+    DaemonMetrics metrics(nullptr, &state, &services, services.getWorkCoordinator());
+    RequestDispatcher dispatcher(nullptr, &services, &state, &metrics);
+
+    const auto response = dispatchRequest(dispatcher, Request{StatusRequest{}});
+    REQUIRE(std::holds_alternative<StatusResponse>(response));
+    const auto& status = std::get<StatusResponse>(response);
+    CHECK_FALSE(status.searchAutomaticRebuildsEnabled);
+    CHECK((status.searchAutomaticRebuildsSource == "typed:test"));
+    CHECK(status.runtimeTuning.contains("ipc.timeout_ms"));
+    CHECK(status.runtimeTuning.contains("ipc.timeout_ms.source"));
+    CHECK(status.runtimeTuning.contains("post_ingest.total_concurrent"));
+    CHECK(status.runtimeTuning.contains("resource.memory_budget_bytes"));
 }
 
 TEST_CASE("RequestDispatcher: cold status still reports active repair work",
@@ -6706,6 +6918,31 @@ TEST_CASE("StatusResponse: maintenance phase fields round-trip",
     CHECK(decoded.maintenancePhaseElapsedMs == 222);
 }
 
+TEST_CASE("StatusResponse: search maintenance provenance round-trips",
+          "[daemon][status][protocol][search][config]") {
+    StatusResponse status{};
+    status.searchAutomaticRebuildsEnabled = false;
+    status.searchAutomaticRebuildsSource = "compatibility-environment:YAMS_DISABLE_SEARCH_REBUILDS";
+    status.runtimeTuning = {{"ipc.timeout_ms", "4321"},
+                            {"ipc.timeout_ms.source", "config:tuning.ipc.timeout_ms"}};
+
+    Message message{};
+    message.payload = Response{std::in_place_type<StatusResponse>, status};
+
+    const auto encoded = ProtoSerializer::encode_payload(message);
+    REQUIRE(encoded.has_value());
+    const auto decodedMessage = ProtoSerializer::decode_payload(encoded.value());
+    REQUIRE(decodedMessage.has_value());
+    const auto& response = std::get<Response>(decodedMessage.value().payload);
+    REQUIRE(std::holds_alternative<StatusResponse>(response));
+    const auto& decoded = std::get<StatusResponse>(response);
+    CHECK_FALSE(decoded.searchAutomaticRebuildsEnabled);
+    CHECK((decoded.searchAutomaticRebuildsSource ==
+           "compatibility-environment:YAMS_DISABLE_SEARCH_REBUILDS"));
+    CHECK((decoded.runtimeTuning.at("ipc.timeout_ms") == "4321"));
+    CHECK((decoded.runtimeTuning.at("ipc.timeout_ms.source") == "config:tuning.ipc.timeout_ms"));
+}
+
 TEST_CASE("StatusResponse: freshness requestCounts keys round-trip",
           "[daemon][status][protocol][freshness]") {
     StatusResponse s{};
@@ -6795,7 +7032,7 @@ TEST_CASE("AbiPluginHost: failed plugin loads are retained in last scan skips",
         SKIP("Installed yams_glint plugin not present");
     }
 
-    AbiPluginHost host(nullptr);
+    AbiPluginHost host;
     const auto trustFile = makeTempDir("yams_glint_skip_status_") / "plugins.trust";
     host.setTrustFile(trustFile);
     REQUIRE(host.trustAdd(pluginPath.parent_path()));
@@ -7058,6 +7295,10 @@ TEST_CASE("DaemonMetrics: WorkCoordinator metrics export", "[daemon][metrics][wo
         // ServiceManager creates WorkCoordinator with hardware_concurrency() workers
         REQUIRE(snap->workerThreads > 0);              // Should have workers (worker_threads)
         REQUIRE(snap->workCoordinatorRunning == true); // Should be running
+        REQUIRE(snap->workCoordinatorProgressProbesPosted > 0);
+        CHECK(snap->workCoordinatorProgressProbesCompleted <=
+              snap->workCoordinatorProgressProbesPosted);
+        CHECK(snap->vectorCheckpointPhase == 0); // VectorCheckpointPhase::Idle
     }
 }
 

@@ -20,6 +20,7 @@
 #include <boost/asio/awaitable.hpp>
 
 #include <yams/core/types.h>
+#include <yams/daemon/components/knowledge_graph_completion.h>
 #include <yams/metadata/knowledge_graph_store.h>
 
 // Forward declarations for C ABI types
@@ -47,6 +48,9 @@ public:
         std::string contentUtf8;  ///< UTF-8 document content
         std::string language;     ///< Language hint (e.g., "cpp", "python")
         std::string mimeType;     ///< MIME type for content routing (e.g., "text/plain")
+        int64_t documentDbId = 0;
+        std::string knowledgeGraphToken;
+        std::shared_ptr<KnowledgeGraphCompletion> knowledgeGraphCompletion;
     };
 
     /**
@@ -82,6 +86,10 @@ public:
         std::uint64_t failed{0};
     };
     Stats getStats() const;
+
+#ifdef YAMS_TESTING
+    bool testing_process(Job& job) { return process(job); }
+#endif
 
 private:
     bool process(Job& job);

@@ -672,7 +672,8 @@ std::string CompletionCommand::generateZshCompletion() const {
         oss << "        '" << entry.path << "')\n";
         oss << "            commands=(\n";
         for (const auto& child : entry.children) {
-            oss << "                '" << child.name << ":" << child.description << "'\n";
+            oss << "                '" << child.name << ":"
+                << escapeSingleQuotedShell(child.description) << "'\n";
         }
         oss << "            )\n";
         oss << "            ;;\n";

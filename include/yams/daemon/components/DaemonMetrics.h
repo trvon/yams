@@ -228,17 +228,27 @@ struct MetricsSnapshot {
     std::uint64_t casDedupSavedBytes{0};    // bytes avoided via dedup (duplicate chunks)
     std::uint64_t casCompressSavedBytes{0}; // bytes saved via compression (global monitor)
     std::uint64_t metadataPhysicalBytes{0}; // yams.db + WAL/SHM + refs.db
-    std::uint64_t indexPhysicalBytes{0};    // text/search index files (if externalized)
-    std::uint64_t vectorPhysicalBytes{0};   // vector DB + index files
-    std::uint64_t logsTmpPhysicalBytes{0};  // logs + temp files under data dir
-    std::uint64_t physicalTotalBytes{0};    // sum of above components
-    std::uint64_t volumeUsedBytes{0};       // statvfs/GetDiskFreeSpaceExW used bytes for the
-                                            // mount holding the data dir; instant fast-path
-                                            // populated every status tick (independent of the
-                                            // adaptive deep-walk TTL)
+    // WAL data-system optics (detailed snapshot; best-effort from WalMetricsProvider)
+    std::uint64_t walActiveTransactions{0};
+    std::uint64_t walPendingEntries{0};
+    std::uint64_t walTotalEntries{0};
+    std::uint64_t walTotalBytes{0};
+    std::uint64_t walLogFileCount{0};
+    std::uint64_t indexPhysicalBytes{0};   // text/search index files (if externalized)
+    std::uint64_t vectorPhysicalBytes{0};  // vector DB + index files
+    std::uint64_t logsTmpPhysicalBytes{0}; // logs + temp files under data dir
+    std::uint64_t physicalTotalBytes{0};   // sum of above components
+    std::uint64_t volumeUsedBytes{0};      // statvfs/GetDiskFreeSpaceExW used bytes for the mount
+    std::uint64_t storageCapacityBytes{0};
+    std::uint64_t storageAvailableBytes{0};
+    std::uint64_t storageWriteAdmissionBytes{0};
+    std::uint64_t storageEmergencyReserveBytes{0};
+    std::uint32_t storageWarningFreePercentBp{0};
+    std::uint8_t storagePressureLevel{0}; // DiskPressureLevel code; unknown when zero.
 
     // Resolved data directory
     std::string dataDir;
+    std::string logFile; // live daemon log file path (empty when unknown)
     std::string metadataDbPath;
     std::string vectorDbPath;
 
@@ -311,6 +321,21 @@ struct MetricsSnapshot {
     // WorkCoordinator metrics
     std::size_t workCoordinatorActiveWorkers{0};
     bool workCoordinatorRunning{false};
+    uint64_t workCoordinatorProgressProbesPosted{0};
+    uint64_t workCoordinatorProgressProbesCompleted{0};
+    bool workCoordinatorProgressProbeInFlight{false};
+    uint64_t workCoordinatorLastProgressAgeMs{0};
+
+    // Vector checkpoint metrics
+    uint8_t vectorCheckpointPhase{0};
+    uint64_t vectorCheckpointRequests{0};
+    uint64_t vectorCheckpointCoalesced{0};
+    uint64_t vectorCheckpointStarted{0};
+    uint64_t vectorCheckpointCompleted{0};
+    uint64_t vectorCheckpointTimedOut{0};
+    uint64_t vectorCheckpointPostFailures{0};
+    uint64_t vectorCheckpointQueuedAgeMs{0};
+    uint64_t vectorCheckpointRunningAgeMs{0};
 
     // Stream metrics (from StreamMetricsRegistry)
     uint64_t streamTotal{0};
@@ -452,7 +477,9 @@ private:
     struct CachedSnapshotState {
         std::shared_ptr<const MetricsSnapshot> fast;
         std::shared_ptr<const MetricsSnapshot> detailed;
+        // NOLINT(no-bit-fields): false positive — time_point members are not bit-fields.
         std::chrono::steady_clock::time_point fastAt{};
+        // NOLINT(no-bit-fields): false positive — time_point members are not bit-fields.
         std::chrono::steady_clock::time_point detailedAt{};
     };
 

@@ -70,10 +70,13 @@ static Ort::Env& get_global_ort_env() {
             (void)Ort::GetApi().SetGlobalInterOpNumThreads(threading_options, inter_threads);
             (void)Ort::GetApi().SetGlobalSpinControl(threading_options, 0);
 
+            // Process-lifetime singleton: Ort::Env intentionally never freed — ORT
+            // requires the env for the process lifetime.
             g_onnx_env = new Ort::Env(threading_options, ORT_LOGGING_LEVEL_WARNING, "YamsDaemon");
             Ort::GetApi().ReleaseThreadingOptions(threading_options);
             spdlog::info("[ONNX] Global Ort::Env initialized with custom threading options");
         } else {
+            // Process-lifetime singleton: see comment above.
             g_onnx_env = new Ort::Env(ORT_LOGGING_LEVEL_WARNING, "YamsDaemon");
             spdlog::info("[ONNX] Global Ort::Env initialized (default threading)");
         }
