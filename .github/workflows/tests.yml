@@ -208,6 +208,26 @@ jobs:
           docker-images: true # Cached docker images
           swap-storage: false # Keep swap for large links
 
+      - name: Free disk space (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          df -h /
+          # Observed on this lane: "zstd: error 70 ... No space left on device" followed by a
+          # linker failure. Drop multi-GB toolchains this build never uses before building.
+          # Deliberately keep Xcode/clang, Homebrew, cmake, ccache, zig, boost and the Rust
+          # toolchain (libSQL). Removing /Applications/Xcode_*.app would reclaim the most space
+          # but risks the selected toolchain, so it is left alone.
+          sudo rm -rf /Users/runner/Library/Android/sdk || true
+          sudo rm -rf /usr/local/share/dotnet /Users/runner/.dotnet || true
+          # Do NOT remove ~/.cargo or ~/.rustup: meson.build builds the libSQL subproject only when
+          # `cargo` is found, and silently falls back to plain sqlite3 otherwise (meson.build:555-572).
+          # Deleting them would switch this lane's database backend without failing anything.
+          sudo rm -rf /usr/local/share/powershell || true
+          sudo rm -rf /Library/Frameworks/Mono.framework /usr/local/lib/mono || true
+          df -h /
+
       - name: Initialize required submodules
         shell: bash
         run: |
