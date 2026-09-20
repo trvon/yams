@@ -1255,10 +1255,15 @@ void SocketServer::execute_on_io_context(std::function<void()> fn) {
             error = std::current_exception();
         }
         {
+            // Notify while still holding the lock. `mutex` and `cv` are stack locals of the
+            // calling frame: if the lock is released before notify_one(), the waiter can observe
+            // `done`, return, and destroy them -- leaving this thread signalling a destroyed
+            // condition variable in reused stack memory (observed as an ASan BUS with a corrupted
+            // return address during shutdown).
             std::lock_guard<std::mutex> lock(mutex);
             done = true;
+            cv.notify_one();
         }
-        cv.notify_one();
     };
     if (acceptorStrand_) {
         boost::asio::post(*acceptorStrand_, std::move(handler));
