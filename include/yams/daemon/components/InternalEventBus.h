@@ -242,15 +242,22 @@ public:
         std::size_t requested;
     };
 
+#ifdef YAMS_TESTING
     /// Capacity disagreements observed so far, in first-seen order, at most once per distinct
     /// (name, actual, requested). Empty means every reuse of an existing channel agreed on its
     /// size.
+    ///
+    /// Test-facing: no production caller exists. The production-facing part of this diagnostic is
+    /// the warn emitted in get_or_create_channel, which stays enabled in all builds. If the daemon
+    /// later wants to surface these in status/doctor, add an ungated accessor then rather than
+    /// leaving one on the public API unused.
     ///
     /// Not const, matching get_channel(): mu_ is a plain std::mutex.
     std::vector<CapacityMismatch> capacity_mismatches() {
         std::lock_guard<std::mutex> lk(mu_);
         return capacityMismatches_;
     }
+#endif
 
     template <typename T>
     std::shared_ptr<SpscQueue<T>> get_or_create_channel(const std::string& name,
@@ -287,9 +294,17 @@ public:
         return result;
     }
 
+#ifdef YAMS_TESTING
     /// Drop a channel from the registry. Existing holders keep their shared_ptr; the next
     /// get_or_create_channel() for this name creates a fresh queue at the capacity it requests.
-    /// Test-facing: get_or_create_channel ignores the requested capacity on a name hit, so a
+    ///
+    /// Test-only, deliberately. This is not safe as a runtime API: existing holders keep their
+    /// shared_ptr, so calling it while producers or consumers are live creates two queues for one
+    /// name and silently splits or drops events between the old holders and the next
+    /// get_or_create_channel(). Gating it behind YAMS_TESTING keeps that footgun off the production
+    /// surface (Copilot review finding on #170).
+    ///
+    /// Its test purpose: get_or_create_channel ignores the requested capacity on a name hit, so a
     /// channel created with a small capacity earlier otherwise pins that capacity for the whole
     /// process.
     ///
@@ -302,6 +317,7 @@ public:
                       [&name](const CapacityMismatch& m) { return m.name == name; });
         return chans_.erase(name) > 0;
     }
+#endif
 
     // Non-creating accessor: returns nullptr if channel doesn't exist.
     // Use for observability paths (status/metrics) to avoid side effects.
