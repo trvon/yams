@@ -230,6 +230,16 @@ public:
         return q;
     }
 
+    /// Drop a channel from the registry. Existing holders keep their shared_ptr; the next
+    /// get_or_create_channel() for this name creates a fresh queue at the capacity it requests.
+    /// Test-facing: get_or_create_channel ignores the requested capacity on a name hit, so a
+    /// channel created with a small capacity earlier otherwise pins that capacity for the whole
+    /// process.
+    bool remove_channel(const std::string& name) {
+        std::lock_guard<std::mutex> lk(mu_);
+        return chans_.erase(name) > 0;
+    }
+
     // Non-creating accessor: returns nullptr if channel doesn't exist.
     // Use for observability paths (status/metrics) to avoid side effects.
     template <typename T> std::shared_ptr<SpscQueue<T>> get_channel(const std::string& name) {
