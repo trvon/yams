@@ -70,12 +70,18 @@ void stopAndResetQueue(std::unique_ptr<PostIngestQueue>& queue) {
 /// cross-test interference (tasks enqueued by a previous test that the previous
 /// queue didn't consume before stopping).
 void drainPostIngestChannel() {
-    auto channel =
-        InternalEventBus::instance().get_or_create_channel<InternalEventBus::PostIngestTask>(
-            "post_ingest", 32);
-    InternalEventBus::PostIngestTask drain;
-    while (channel->try_pop(drain)) {
+    auto& bus = InternalEventBus::instance();
+    // Drain, then drop the channel. get_or_create_channel() returns an existing channel and
+    // ignores the requested capacity, so creating it here at 32 pinned that capacity for every
+    // later case: a queue built with capacity 64 still got a 31-slot ring, the producer blocked
+    // until the poller drained, and batch boundaries became a function of runner load (flaky
+    // exact-count assertions). Removing it lets each case's own declared capacity take effect.
+    if (auto existing = bus.get_channel<InternalEventBus::PostIngestTask>("post_ingest")) {
+        InternalEventBus::PostIngestTask drain;
+        while (existing->try_pop(drain)) {
+        }
     }
+    bus.remove_channel("post_ingest");
 }
 
 void drainEmbedJobsChannel() {
