@@ -378,7 +378,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             createDocumentGraphCleanupIndexes(),
             createEmbeddingDerivations(),
             invalidateEmbeddingReadinessOnContentChanges(),
-            dropSymbolExtractionSubsystem()};
+            dropSymbolExtractionSubsystem(),
+            bypassTopologyMetadataValueCountsTriggers()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -3128,6 +3129,123 @@ Migration YamsMetadataMigrations::dropSymbolExtractionSubsystem() {
             );
             INSERT INTO symbol_metadata_fts(rowid, file_path, symbol_name, qualified_name)
             VALUES (new.symbol_id, new.file_path, new.symbol_name, new.qualified_name);
+        END;
+    )";
+    return m;
+}
+
+Migration YamsMetadataMigrations::bypassTopologyMetadataValueCountsTriggers() {
+    Migration m;
+    m.version = 41;
+    m.name = "Optimize metadata value counts triggers to bypass topology keys and prune legacy "
+             "topology metadata";
+    m.created = std::chrono::system_clock::now();
+    m.upSQL = R"(
+        -- 1. Recreate metadata_value_counts triggers to ignore topology keys
+        DROP TRIGGER IF EXISTS trg_metadata_value_counts_insert;
+        DROP TRIGGER IF EXISTS trg_metadata_value_counts_delete;
+        DROP TRIGGER IF EXISTS trg_metadata_value_counts_update_old;
+        DROP TRIGGER IF EXISTS trg_metadata_value_counts_update_new;
+
+        CREATE TRIGGER IF NOT EXISTS trg_metadata_value_counts_insert
+        AFTER INSERT ON metadata
+        WHEN NEW.value IS NOT NULL AND NEW.value != '' AND NEW.key NOT LIKE 'topology.%'
+        BEGIN
+            INSERT INTO metadata_value_counts (key, value, count)
+            VALUES (NEW.key, NEW.value, 1)
+            ON CONFLICT(key, value) DO UPDATE SET count = count + 1;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_metadata_value_counts_delete
+        AFTER DELETE ON metadata
+        WHEN OLD.value IS NOT NULL AND OLD.value != '' AND OLD.key NOT LIKE 'topology.%'
+        BEGIN
+            UPDATE metadata_value_counts
+            SET count = count - 1
+            WHERE key = OLD.key AND value = OLD.value;
+            DELETE FROM metadata_value_counts
+            WHERE key = OLD.key AND value = OLD.value AND count <= 0;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_metadata_value_counts_update_old
+        AFTER UPDATE ON metadata
+        WHEN OLD.value IS NOT NULL AND OLD.value != '' AND OLD.key NOT LIKE 'topology.%' AND (OLD.key != NEW.key OR OLD.value != NEW.value)
+        BEGIN
+            UPDATE metadata_value_counts
+            SET count = count - 1
+            WHERE key = OLD.key AND value = OLD.value;
+            DELETE FROM metadata_value_counts
+            WHERE key = OLD.key AND value = OLD.value AND count <= 0;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_metadata_value_counts_update_new
+        AFTER UPDATE ON metadata
+        WHEN NEW.value IS NOT NULL AND NEW.value != '' AND NEW.key NOT LIKE 'topology.%' AND (OLD.key != NEW.key OR OLD.value != NEW.value)
+        BEGIN
+            INSERT INTO metadata_value_counts (key, value, count)
+            VALUES (NEW.key, NEW.value, 1)
+            ON CONFLICT(key, value) DO UPDATE SET count = count + 1;
+        END;
+
+        -- 2. Delete any existing topology keys from metadata_value_counts
+        DELETE FROM metadata_value_counts WHERE key LIKE 'topology.%';
+
+        -- 3. Prune redundant continuous/structural float metadata rows from metadata table
+        DELETE FROM metadata WHERE key IN (
+            'topology.parent_cluster_id',
+            'topology.cluster_level',
+            'topology.persistence_score',
+            'topology.cohesion_score',
+            'topology.bridge_score',
+            'topology.role',
+            'topology.overlap_cluster_ids_json'
+        );
+    )";
+
+    m.downSQL = R"(
+        DROP TRIGGER IF EXISTS trg_metadata_value_counts_insert;
+        DROP TRIGGER IF EXISTS trg_metadata_value_counts_delete;
+        DROP TRIGGER IF EXISTS trg_metadata_value_counts_update_old;
+        DROP TRIGGER IF EXISTS trg_metadata_value_counts_update_new;
+
+        CREATE TRIGGER IF NOT EXISTS trg_metadata_value_counts_insert
+        AFTER INSERT ON metadata
+        WHEN NEW.value IS NOT NULL AND NEW.value != ''
+        BEGIN
+            INSERT INTO metadata_value_counts (key, value, count)
+            VALUES (NEW.key, NEW.value, 1)
+            ON CONFLICT(key, value) DO UPDATE SET count = count + 1;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_metadata_value_counts_delete
+        AFTER DELETE ON metadata
+        WHEN OLD.value IS NOT NULL AND OLD.value != ''
+        BEGIN
+            UPDATE metadata_value_counts
+            SET count = count - 1
+            WHERE key = OLD.key AND value = OLD.value;
+            DELETE FROM metadata_value_counts
+            WHERE key = OLD.key AND value = OLD.value AND count <= 0;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_metadata_value_counts_update_old
+        AFTER UPDATE ON metadata
+        WHEN OLD.value IS NOT NULL AND OLD.value != '' AND (OLD.key != NEW.key OR OLD.value != NEW.value)
+        BEGIN
+            UPDATE metadata_value_counts
+            SET count = count - 1
+            WHERE key = OLD.key AND value = OLD.value;
+            DELETE FROM metadata_value_counts
+            WHERE key = OLD.key AND value = OLD.value AND count <= 0;
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS trg_metadata_value_counts_update_new
+        AFTER UPDATE ON metadata
+        WHEN NEW.value IS NOT NULL AND NEW.value != '' AND (OLD.key != NEW.key OR OLD.value != NEW.value)
+        BEGIN
+            INSERT INTO metadata_value_counts (key, value, count)
+            VALUES (NEW.key, NEW.value, 1)
+            ON CONFLICT(key, value) DO UPDATE SET count = count + 1;
         END;
     )";
     return m;

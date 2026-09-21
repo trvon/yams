@@ -926,19 +926,20 @@ Result<std::string> serializeTopologyBatchCompressed(const TopologyArtifactBatch
     if (!compRes) {
         return compRes.error();
     }
-    const auto& compData = compRes.value().data;
-
-    std::string b64 = encodeBase64(compData);
+    const auto& compResult = compRes.value();
+    const bool isZstd = (compResult.algorithm == compression::CompressionAlgorithm::Zstandard);
+    std::string b64 = encodeBase64(compResult.data);
 
     json envelope;
     envelope["format"] = "zstd_binary_v1";
+    envelope["compression"] = isZstd ? "zstd" : "none";
     envelope["snapshot_id"] = batch.snapshotId;
     envelope["algorithm"] = batch.algorithm;
     envelope["topology_epoch"] = batch.topologyEpoch;
     envelope["cluster_count"] = batch.clusters.size();
     envelope["membership_count"] = batch.memberships.size();
     envelope["uncompressed_bytes"] = binaryBytes.size();
-    envelope["compressed_bytes"] = compData.size();
+    envelope["compressed_bytes"] = compResult.data.size();
     envelope["generated_at_unix_seconds"] = batch.generatedAtUnixSeconds;
     envelope["data_b64"] = std::move(b64);
 
@@ -964,6 +965,20 @@ Result<TopologyArtifactBatch> deserializeTopologyBatchCompressed(std::string_vie
         auto decodedBytes = decodeBase64(b64);
         if (!decodedBytes) {
             return decodedBytes.error();
+        }
+
+        // If data was stored uncompressed (e.g. tiny batch where compressor opted out of zstd
+        // frame), or starts with topology binary magic, deserialize directly without invoking zstd.
+        std::string compAlgo = parsed.value("compression", "zstd");
+        if (compAlgo == "none") {
+            return deserializeTopologyBatchBinary(decodedBytes.value());
+        }
+        if (decodedBytes.value().size() >= 4) {
+            uint32_t magic = 0;
+            std::memcpy(&magic, decodedBytes.value().data(), sizeof(magic));
+            if (magic == kTopologyBinaryMagic) {
+                return deserializeTopologyBatchBinary(decodedBytes.value());
+            }
         }
 
         auto compressor = compression::CompressionRegistry::instance().createCompressor(

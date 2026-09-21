@@ -93,39 +93,33 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
         previousBatch = std::move(latestResult.value());
     }
 
-    std::vector<std::tuple<int64_t, std::string, metadata::MetadataValue>> metadataEntries;
-    metadataEntries.reserve(batch.memberships.size() * 9);
+    std::vector<std::string> requestedHashes;
+    requestedHashes.reserve(batch.memberships.size());
     for (const auto& membership : batch.memberships) {
-        auto documentResult = metadataRepo_->getDocumentByHash(membership.documentHash);
-        if (!documentResult) {
-            return documentResult.error();
-        }
-        if (!documentResult.value().has_value()) {
+        requestedHashes.push_back(membership.documentHash);
+    }
+
+    auto docsResult = metadataRepo_->batchGetDocumentsByHash(requestedHashes);
+    if (!docsResult) {
+        return docsResult.error();
+    }
+    const auto& docMap = docsResult.value();
+    for (const auto& membership : batch.memberships) {
+        if (!docMap.contains(membership.documentHash)) {
             return Error{ErrorCode::NotFound, "topology membership document not found for hash=" +
                                                   membership.documentHash};
         }
-        const auto documentId = documentResult.value()->id;
+    }
+
+    std::vector<std::tuple<int64_t, std::string, metadata::MetadataValue>> metadataEntries;
+    metadataEntries.reserve(batch.memberships.size() * 2);
+    for (const auto& membership : batch.memberships) {
+        const auto it = docMap.find(membership.documentHash);
+        const auto documentId = it->second.id;
         metadataEntries.emplace_back(documentId, std::string(kSnapshotIdKey),
                                      metadata::MetadataValue(batch.snapshotId));
         metadataEntries.emplace_back(documentId, std::string(kClusterIdKey),
                                      metadata::MetadataValue(membership.clusterId));
-        metadataEntries.emplace_back(
-            documentId, std::string(kParentClusterIdKey),
-            metadata::MetadataValue(membership.parentClusterId.value_or("")));
-        metadataEntries.emplace_back(
-            documentId, std::string(kClusterLevelKey),
-            metadata::MetadataValue(static_cast<int64_t>(membership.clusterLevel)));
-        metadataEntries.emplace_back(documentId, std::string(kPersistenceKey),
-                                     metadata::MetadataValue(membership.persistenceScore));
-        metadataEntries.emplace_back(documentId, std::string(kCohesionKey),
-                                     metadata::MetadataValue(membership.cohesionScore));
-        metadataEntries.emplace_back(documentId, std::string(kBridgeKey),
-                                     metadata::MetadataValue(membership.bridgeScore));
-        metadataEntries.emplace_back(documentId, std::string(kRoleKey),
-                                     metadata::MetadataValue(roleToString(membership.role)));
-        metadataEntries.emplace_back(
-            documentId, std::string(kOverlapKey),
-            metadata::MetadataValue(json(membership.overlapClusterIds).dump()));
     }
 
     if (!metadataEntries.empty()) {
@@ -136,25 +130,26 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
     }
 
     if (previousBatch.has_value()) {
-        std::unordered_set<std::string> currentDocumentHashes;
-        currentDocumentHashes.reserve(batch.memberships.size());
-        for (const auto& membership : batch.memberships) {
-            currentDocumentHashes.insert(membership.documentHash);
+        std::unordered_set<std::string> currentDocumentHashes(requestedHashes.begin(),
+                                                              requestedHashes.end());
+        std::vector<std::string> removedHashes;
+        for (const auto& previousMembership : previousBatch->memberships) {
+            if (!currentDocumentHashes.contains(previousMembership.documentHash)) {
+                removedHashes.push_back(previousMembership.documentHash);
+            }
         }
 
-        for (const auto& previousMembership : previousBatch->memberships) {
-            if (currentDocumentHashes.contains(previousMembership.documentHash)) {
-                continue;
-            }
-            auto documentResult = metadataRepo_->getDocumentByHash(previousMembership.documentHash);
-            if (!documentResult || !documentResult.value().has_value()) {
-                continue;
-            }
-            for (const auto key : topologyMetadataKeys()) {
-                auto removeResult =
-                    metadataRepo_->removeMetadata(documentResult.value()->id, std::string(key));
-                if (!removeResult) {
-                    return removeResult.error();
+        if (!removedHashes.empty()) {
+            auto removedDocsResult = metadataRepo_->batchGetDocumentsByHash(removedHashes);
+            if (removedDocsResult) {
+                for (const auto& [hash, docInfo] : removedDocsResult.value()) {
+                    for (const auto key : topologyMetadataKeys()) {
+                        auto removeResult =
+                            metadataRepo_->removeMetadata(docInfo.id, std::string(key));
+                        if (!removeResult) {
+                            return removeResult.error();
+                        }
+                    }
                 }
             }
         }
@@ -250,6 +245,30 @@ MetadataKgTopologyArtifactStore::loadLatest(std::string_view snapshotId) const {
 
 Result<std::vector<DocumentClusterMembership>> MetadataKgTopologyArtifactStore::loadMemberships(
     std::span<const std::string> documentHashes) const {
+    if (!cachedLatest_.has_value()) {
+        auto latestResult = loadLatest();
+        if (!latestResult) {
+            return latestResult.error();
+        }
+    }
+
+    if (cachedLatest_.has_value() && !cachedLatest_->memberships.empty()) {
+        std::unordered_map<std::string_view, const DocumentClusterMembership*> membershipIndex;
+        membershipIndex.reserve(cachedLatest_->memberships.size());
+        for (const auto& m : cachedLatest_->memberships) {
+            membershipIndex.emplace(m.documentHash, &m);
+        }
+
+        std::vector<DocumentClusterMembership> memberships;
+        memberships.reserve(documentHashes.size());
+        for (const auto& hash : documentHashes) {
+            if (auto it = membershipIndex.find(hash); it != membershipIndex.end()) {
+                memberships.push_back(*it->second);
+            }
+        }
+        return memberships;
+    }
+
     if (!metadataRepo_) {
         return Error{ErrorCode::InvalidState,
                      "topology metadata store requires metadata repository"};
