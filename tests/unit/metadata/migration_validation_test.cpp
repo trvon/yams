@@ -331,7 +331,7 @@ TEST_CASE("Core tables exist after migration", "[catch2][unit][metadata][migrati
         REQUIRE(table_exists);
     }
 
-    SECTION("Symbol_metadata table exists (v16)") {
+    SECTION("Symbol_metadata table is dropped (v40)") {
         bool table_exists = false;
 
         auto result = pool->withConnection([&](Database& db) -> Result<void> {
@@ -350,15 +350,15 @@ TEST_CASE("Core tables exist after migration", "[catch2][unit][metadata][migrati
         });
 
         REQUIRE(result);
-        REQUIRE(table_exists);
+        REQUIRE_FALSE(table_exists);
     }
 
-    SECTION("Symbol_metadata unique index exists (v25)") {
-        bool index_exists = false;
+    SECTION("Document_symbol_extraction_state table is dropped (v40)") {
+        bool table_exists = false;
 
         auto result = pool->withConnection([&](Database& db) -> Result<void> {
-            auto stmt_result = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND "
-                                          "name='ux_symbol_document_qualified'");
+            auto stmt_result = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND "
+                                          "name='document_symbol_extraction_state'");
             if (!stmt_result)
                 return stmt_result.error();
 
@@ -367,12 +367,12 @@ TEST_CASE("Core tables exist after migration", "[catch2][unit][metadata][migrati
             if (!step_result)
                 return step_result.error();
 
-            index_exists = step_result.value();
+            table_exists = step_result.value();
             return Result<void>();
         });
 
         REQUIRE(result);
-        REQUIRE(index_exists);
+        REQUIRE_FALSE(table_exists);
     }
 
     SECTION("Metadata table exists") {
@@ -396,4 +396,179 @@ TEST_CASE("Core tables exist after migration", "[catch2][unit][metadata][migrati
         REQUIRE(result);
         REQUIRE(table_exists);
     }
+}
+
+TEST_CASE("Migration v40 drops symbol extraction subsystem and prunes graph",
+          "[catch2][unit][metadata][migration][v40]") {
+    MigrationTestFixture fixture;
+    auto pool = fixture.getPool();
+
+    REQUIRE(
+        pool->withConnection([](Database& db) -> Result<void> {
+                MigrationManager mm(db);
+                auto initRes = mm.initialize();
+                if (!initRes)
+                    return initRes.error();
+                mm.registerMigrations(YamsMetadataMigrations::getAllMigrations());
+
+                // Step 1: Migrate up to v39
+                auto mig39 = mm.migrateTo(39);
+                if (!mig39)
+                    return mig39.error();
+
+                // Step 2: Seed v39 schema with document, symbol tables, KG nodes, edges, aliases
+                auto seedRes = db.execute(R"(
+            INSERT INTO documents (id, file_path, file_name, file_size, sha256_hash)
+            VALUES (1, '/src/main.cpp', 'main.cpp', 100, 'hash123');
+
+            INSERT INTO symbol_metadata (
+                document_hash, file_path, symbol_name, qualified_name, kind, start_line, end_line
+            ) VALUES ('hash123', '/src/main.cpp', 'process', 'demo::process', 'function', 10, 20);
+
+            INSERT INTO document_symbol_extraction_state (
+                document_id, extractor_id, extracted_at, status, entity_count
+            ) VALUES (1, 'symbol_extractor_v1', 12345, 'completed', 1);
+
+            INSERT INTO kg_nodes (id, node_key, label, type, properties) VALUES
+                (10, 'dir:/src', 'src', 'directory', '{}'),
+                (11, 'path:file:/src/main.cpp', 'main.cpp', 'file', '{}'),
+                (12, 'doc:hash123', 'doc-hash123', 'document', '{}'),
+                (13, 'function:process@/src/main.cpp', 'process', 'function', '{}'),
+                (14, 'function:process@/src/main.cpp@snap:hash123', 'process', 'function_version', '{}'),
+                (15, 'symbol_ref:callee', 'callee', 'symbol_reference', '{}'),
+                (16, 'topology:snapshot:latest', 'latest', 'topology_snapshot_pointer', '{"snapshot_id":"snap-curr"}'),
+                (17, 'topology:snapshot:snap-curr', 'snap-curr', 'topology_snapshot', '{"cluster_count":5}'),
+                (18, 'topology:snapshot:snap-old', 'snap-old', 'topology_snapshot', '{"cluster_count":3}'),
+                (19, 'nl_entity:method:pytorch', 'pytorch', 'method', '{}');
+
+            INSERT INTO kg_edges (src_node_id, dst_node_id, relation, weight) VALUES
+                (10, 11, 'contains', 1.0),
+                (11, 14, 'contains', 1.0),
+                (14, 12, 'defined_in', 1.0),
+                (14, 15, 'calls', 1.0);
+
+            INSERT INTO kg_aliases (node_id, alias, source, confidence) VALUES
+                (12, 'main_doc', 'doc_title', 1.0),
+                (13, 'process_func', 'symbol_name', 1.0);
+        )");
+                if (!seedRes)
+                    return seedRes.error();
+
+                // Step 3: Apply migration v40
+                auto mig40 = mm.migrateTo(40);
+                if (!mig40)
+                    return mig40.error();
+
+                // Verify symbol tables are dropped
+                auto tableExists = [&](const char* tableName) -> Result<bool> {
+                    auto stmtR = db.prepare(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?");
+                    if (!stmtR)
+                        return stmtR.error();
+                    auto stmt = std::move(stmtR).value();
+                    if (auto b = stmt.bind(1, tableName); !b)
+                        return b.error();
+                    if (auto s = stmt.step(); !s)
+                        return s.error();
+                    return stmt.getInt(0) > 0;
+                };
+
+                auto symMeta = tableExists("symbol_metadata");
+                if (!symMeta || symMeta.value())
+                    return Error{ErrorCode::InvalidData, "symbol_metadata still exists"};
+
+                auto symState = tableExists("document_symbol_extraction_state");
+                if (!symState || symState.value())
+                    return Error{ErrorCode::InvalidData,
+                                 "document_symbol_extraction_state still exists"};
+
+                auto symFts = tableExists("symbol_metadata_fts");
+                if (!symFts || symFts.value())
+                    return Error{ErrorCode::InvalidData, "symbol_metadata_fts still exists"};
+
+                // Verify symbol nodes are deleted
+                auto countQuery = [&](const std::string& sql) -> Result<int> {
+                    auto stmtR = db.prepare(sql);
+                    if (!stmtR)
+                        return stmtR.error();
+                    auto stmt = std::move(stmtR).value();
+                    if (auto s = stmt.step(); !s)
+                        return s.error();
+                    return stmt.getInt(0);
+                };
+
+                auto symNodeCount =
+                    countQuery("SELECT COUNT(*) FROM kg_nodes WHERE type IN ('function', "
+                               "'function_version', 'symbol_reference')");
+                if (!symNodeCount || symNodeCount.value() != 0) {
+                    return Error{ErrorCode::InvalidData, "Symbol nodes not cleaned"};
+                }
+
+                // Verify structural nodes remain (dir, file, doc)
+                auto structNodeCount = countQuery("SELECT COUNT(*) FROM kg_nodes WHERE type IN "
+                                                  "('directory', 'file', 'document')");
+                if (!structNodeCount || structNodeCount.value() != 3) {
+                    return Error{ErrorCode::InvalidData, "Structural nodes lost"};
+                }
+
+                // Verify nl_entity nodes are preserved even if type matches a symbol type
+                auto nlNodeCount = countQuery(
+                    "SELECT COUNT(*) FROM kg_nodes WHERE node_key = 'nl_entity:method:pytorch'");
+                if (!nlNodeCount || nlNodeCount.value() != 1) {
+                    return Error{ErrorCode::InvalidData,
+                                 "nl_entity node did not survive migration 40"};
+                }
+
+                // Verify AST edges are cleaned, but directory->file 'contains' remains
+                auto edgesRemaining = countQuery("SELECT COUNT(*) FROM kg_edges");
+                if (!edgesRemaining || edgesRemaining.value() != 1) {
+                    return Error{ErrorCode::InvalidData, "Expected 1 remaining edge (dir->file)"};
+                }
+
+                auto dirFileEdge = countQuery("SELECT COUNT(*) FROM kg_edges WHERE src_node_id = "
+                                              "10 AND dst_node_id = 11 AND relation = 'contains'");
+                if (!dirFileEdge || dirFileEdge.value() != 1) {
+                    return Error{ErrorCode::InvalidData, "dir->file contains edge missing"};
+                }
+
+                // Verify symbol aliases cleaned, doc alias preserved
+                auto aliasCount = countQuery("SELECT COUNT(*) FROM kg_aliases");
+                if (!aliasCount || aliasCount.value() != 1) {
+                    return Error{ErrorCode::InvalidData, "Expected 1 remaining alias"};
+                }
+
+                // Verify historical topology snapshot pruned, current preserved
+                auto oldSnap = countQuery(
+                    "SELECT COUNT(*) FROM kg_nodes WHERE node_key = 'topology:snapshot:snap-old'");
+                if (!oldSnap || oldSnap.value() != 0) {
+                    return Error{ErrorCode::InvalidData, "Historical topology snapshot not pruned"};
+                }
+
+                auto currSnap = countQuery(
+                    "SELECT COUNT(*) FROM kg_nodes WHERE node_key = 'topology:snapshot:snap-curr'");
+                if (!currSnap || currSnap.value() != 1) {
+                    return Error{ErrorCode::InvalidData, "Current topology snapshot missing"};
+                }
+
+                auto latestPtr = countQuery(
+                    "SELECT COUNT(*) FROM kg_nodes WHERE node_key = 'topology:snapshot:latest'");
+                if (!latestPtr || latestPtr.value() != 1) {
+                    return Error{ErrorCode::InvalidData,
+                                 "Latest topology snapshot pointer missing"};
+                }
+
+                // Step 4: Test rollback to v39
+                auto rollRes = mm.rollbackTo(39);
+                if (!rollRes)
+                    return rollRes.error();
+
+                auto rolledSymMeta = tableExists("symbol_metadata");
+                if (!rolledSymMeta || !rolledSymMeta.value()) {
+                    return Error{ErrorCode::InvalidData,
+                                 "Rollback failed to recreate symbol_metadata"};
+                }
+
+                return Result<void>();
+            })
+            .has_value());
 }

@@ -35,7 +35,7 @@ bool SymbolEnricher::enrichResult(SearchResultItem& result, const std::string& q
             return false;
         }
 
-        auto entitiesRes = kg_store_->getDocEntitiesForDocument(docId.value(), 50, 0);
+        auto entitiesRes = kg_store_->getDocEntitiesForDocument(docId.value(), 250, 0);
         if (!entitiesRes.has_value() || entitiesRes.value().empty()) {
             return false;
         }
@@ -90,8 +90,9 @@ bool SymbolEnricher::enrichResult(SearchResultItem& result, const std::string& q
                 std::string lowerName = symInfo.name;
                 std::transform(lowerName.begin(), lowerName.end(), lowerName.begin(), ::tolower);
 
-                matches = (lowerName.find(lowerQuery) != std::string::npos) ||
-                          (symInfo.qualifiedName.find(query_text) != std::string::npos);
+                matches = (!lowerName.empty() && lowerName.find(lowerQuery) != std::string::npos) ||
+                          (!symInfo.qualifiedName.empty() &&
+                           symInfo.qualifiedName.find(query_text) != std::string::npos);
             }
 
             if (matches) {
@@ -165,13 +166,30 @@ std::optional<SymbolInfo> SymbolEnricher::extractSymbolInfo(std::int64_t node_id
 
 std::optional<SymbolInfo>
 SymbolEnricher::extractSymbolInfoFromNode(const yams::metadata::KGNode& node) {
-    if (!node.type || (node.type != "function" && node.type != "class" && node.type != "method" &&
-                       node.type != "variable" && node.type != "typedef" && node.type != "macro")) {
+    if (!node.type) {
+        return std::nullopt;
+    }
+
+    std::string_view type = node.type.value();
+    if (type.ends_with("_version")) {
+        type.remove_suffix(8);
+    }
+
+    static const std::unordered_set<std::string_view> kValidTypes = {
+        "function", "class", "method", "variable", "typedef",  "macro",     "struct", "interface",
+        "enum",     "type",  "field",  "constant", "property", "namespace", "module"};
+
+    if (kValidTypes.find(type) == kValidTypes.end()) {
+        return std::nullopt;
+    }
+
+    // Exclude natural language entities from being treated as code symbols
+    if (node.nodeKey.starts_with("nl_entity:")) {
         return std::nullopt;
     }
 
     SymbolInfo info;
-    info.kind = node.type.value();
+    info.kind = std::string(type);
     info.name = node.label.value_or("");
     info.qualifiedName = info.name;
 

@@ -441,45 +441,6 @@ TEST_CASE("ConfigCommand - path-tree enable and mode update config",
     CHECK(output.find("Mode       : fallback") != std::string::npos);
 }
 
-TEST_CASE("ConfigCommand - grammar auto download flags update config",
-          "[cli][config][grammar][catch2]") {
-    ConfigCommandFixture fixture;
-    auto normalizedPathString = [](const fs::path& path) {
-        auto normalized = path.lexically_normal().generic_string();
-        std::transform(normalized.begin(), normalized.end(), normalized.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        return normalized;
-    };
-
-    const int enableRc = fixture.runCommand({"yams", "config", "grammar", "auto-enable"});
-    REQUIRE(enableRc == 0);
-
-    auto cfg = yams::config::parse_simple_toml(fixture.testConfigHome / "config.toml");
-    REQUIRE(cfg.count("plugins.symbol_extraction.auto_download_grammars") == 1);
-    CHECK(cfg.at("plugins.symbol_extraction.auto_download_grammars") == "true");
-
-    CaptureStdout pathCapture;
-    const int pathRc = fixture.runCommand({"yams", "config", "grammar", "path"});
-    REQUIRE(pathRc == 0);
-    auto outputPath = pathCapture.str();
-    outputPath.erase(std::remove(outputPath.begin(), outputPath.end(), '\r'), outputPath.end());
-    outputPath.erase(std::remove(outputPath.begin(), outputPath.end(), '\n'), outputPath.end());
-    const bool containsExpectedPath =
-        normalizedPathString(fs::path(outputPath))
-            .find(normalizedPathString(fixture.testDataHome / "grammars")) != std::string::npos;
-    const bool matchesNormalizedPath = normalizedPathString(fs::path(outputPath)) ==
-                                       normalizedPathString(fixture.testDataHome / "grammars");
-    const bool pathMatched = containsExpectedPath || matchesNormalizedPath;
-    CHECK(pathMatched);
-
-    const int disableRc = fixture.runCommand({"yams", "config", "grammar", "auto-disable"});
-    REQUIRE(disableRc == 0);
-
-    cfg = yams::config::parse_simple_toml(fixture.testConfigHome / "config.toml");
-    REQUIRE(cfg.count("plugins.symbol_extraction.auto_download_grammars") == 1);
-    CHECK(cfg.at("plugins.symbol_extraction.auto_download_grammars") == "false");
-}
-
 TEST_CASE("ConfigCommand - plugins status reports trust and defaults",
           "[cli][config][plugins][catch2]") {
     ConfigCommandFixture fixture;

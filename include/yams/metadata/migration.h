@@ -276,6 +276,10 @@ private:
 
     // Version 39: Keep legacy readiness consistent with content/token invalidation.
     static Migration invalidateEmbeddingReadinessOnContentChanges();
+
+    // Version 40: Drop symbol extraction subsystem tables, dead AST edges, and orphaned symbol
+    // nodes.
+    static Migration dropSymbolExtractionSubsystem();
 };
 
 /**

@@ -2005,7 +2005,7 @@ private:
             if (req.symbolRank && symbolEnricher_ && symbolWeight_ > 0.0f &&
                 !resp.results.empty()) {
                 YAMS_ZONE_SCOPED_N("search_service::symbol_enrichment_topk");
-                constexpr size_t kSymbolEnrichLimit = 25;
+                constexpr size_t kSymbolEnrichLimit = 50;
                 const size_t enrichCount = std::min(resp.results.size(), kSymbolEnrichLimit);
                 const std::string& queryText = req.query;
                 std::string queryLower = queryText;
@@ -2038,10 +2038,13 @@ private:
                                                        return static_cast<char>(std::tolower(c));
                                                    });
 
-                                    if ((!nameLower.empty() &&
-                                         queryLower.find(nameLower) != std::string::npos) ||
+                                    bool nameMatch =
+                                        (!nameLower.empty() &&
+                                         nameLower.find(queryLower) != std::string::npos);
+                                    bool qualMatch =
                                         (!qualifiedLower.empty() &&
-                                         queryLower.find(qualifiedLower) != std::string::npos)) {
+                                         qualifiedLower.find(queryLower) != std::string::npos);
+                                    if (nameMatch || qualMatch) {
                                         queryMatchesSymbol = true;
                                         break;
                                     }

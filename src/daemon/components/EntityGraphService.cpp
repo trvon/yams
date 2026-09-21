@@ -69,7 +69,10 @@ std::string normalizeGraphPath(const std::string& path) {
         if (!derived.normalizedPath.empty()) {
             return derived.normalizedPath;
         }
+    } catch (const std::exception& e) {
+        spdlog::debug("normalizeFilePath: normalization failed for {}: {}", path, e.what());
     } catch (...) {
+        spdlog::debug("normalizeFilePath: unknown exception for {}", path);
     }
     return path;
 }
@@ -393,7 +396,10 @@ bool EntityGraphService::process(Job& job) {
     try {
         if (table->free_result)
             table->free_result(table->self, result);
+    } catch (const std::exception& e) {
+        spdlog::debug("EntityGraphService: exception freeing result: {}", e.what());
     } catch (...) {
+        spdlog::debug("EntityGraphService: unknown exception freeing result");
     }
     return success;
 }
@@ -432,12 +438,21 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
 
     // Get document database ID for doc entities (read operation, safe)
     std::optional<std::int64_t> documentDbId;
-    if (hasSnapshot) {
+    if (job.documentDbId > 0) {
+        documentDbId = job.documentDbId;
+    } else if (hasSnapshot) {
         auto docDbIdResult = kg->getDocumentIdByHash(job.documentHash);
         if (docDbIdResult.has_value()) {
             documentDbId = docDbIdResult.value();
-            batch->documentIdToDelete = documentDbId; // Delete old doc entities
+        } else if (services_ && services_->getMetadataRepo()) {
+            auto docRes = services_->getMetadataRepo()->getDocumentByHash(job.documentHash);
+            if (docRes && docRes.value().has_value()) {
+                documentDbId = docRes.value().value().id;
+            }
         }
+    }
+    if (hasSnapshot && documentDbId.has_value()) {
+        batch->documentIdToDelete = documentDbId; // Delete old doc entities
     }
 
     // Optionally cleanup stale edges for this file
@@ -684,7 +699,6 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
 
     // === Build context edges ===
     // Symbol -> document, symbol -> file, symbol -> directory
-    std::string targetNodeKey = !docNodeKey.empty() ? docNodeKey : fileNodeKey;
     for (size_t i = 0; i < result->symbol_count; ++i) {
         const std::string& symNodeKey = versionNodeKeys[i];
 
@@ -858,7 +872,10 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
                                     }
                                 }
                             }
+                        } catch (const std::exception& e) {
+                            spdlog::debug("filterMatchedNodes: json parse error: {}", e.what());
                         } catch (...) {
+                            spdlog::debug("filterMatchedNodes: unknown exception");
                         }
                     }
 
@@ -1046,7 +1063,9 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
             docEnt.documentId = documentDbId.value();
             docEnt.entityText = sym.qualified_name ? std::string(sym.qualified_name)
                                                    : (sym.name ? std::string(sym.name) : "");
-            docEnt.nodeKey = versionNodeKeys[i];
+            docEnt.nodeKey = (hasSnapshot && i < versionNodeKeys.size())
+                                 ? versionNodeKeys[i]
+                                 : (i < canonicalNodeKeys.size() ? canonicalNodeKeys[i] : "");
             docEnt.startOffset = sym.start_offset;
             docEnt.endOffset = sym.end_offset;
             docEnt.confidence = 1.0f;
@@ -1059,7 +1078,8 @@ bool EntityGraphService::populateKnowledgeGraphDeferred(
     try {
         auto wb = makeWriteBatchFromDeferredKGBatch(std::move(batch),
                                                     "EntityGraphService::symbols/" + job.filePath);
-        wb->knowledgeGraphDocumentId = job.documentDbId;
+        wb->knowledgeGraphDocumentId =
+            documentDbId.has_value() ? documentDbId.value() : job.documentDbId;
         wb->knowledgeGraphToken = job.knowledgeGraphToken;
         wb->knowledgeGraphCompletionStage = KnowledgeGraphCompletionStage::Graph;
         wb->knowledgeGraphCompletion = job.knowledgeGraphCompletion;

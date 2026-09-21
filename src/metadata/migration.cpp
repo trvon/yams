@@ -377,7 +377,8 @@ std::vector<Migration> YamsMetadataMigrations::getAllMigrations() {
             createSymbolMetadataTrigramFts(),
             createDocumentGraphCleanupIndexes(),
             createEmbeddingDerivations(),
-            invalidateEmbeddingReadinessOnContentChanges()};
+            invalidateEmbeddingReadinessOnContentChanges(),
+            dropSymbolExtractionSubsystem()};
 }
 
 Migration YamsMetadataMigrations::createInitialSchema() {
@@ -2985,6 +2986,149 @@ Migration YamsMetadataMigrations::invalidateEmbeddingReadinessOnContentChanges()
         DROP TRIGGER IF EXISTS embedding_readiness_content_delete;
         DROP TRIGGER IF EXISTS embedding_readiness_content_update;
         DROP TRIGGER IF EXISTS embedding_readiness_content_insert;
+    )";
+    return m;
+}
+
+Migration YamsMetadataMigrations::dropSymbolExtractionSubsystem() {
+    Migration m;
+    m.version = 40;
+    m.name = "Drop symbol extraction subsystem tables and graph nodes";
+    m.created = std::chrono::system_clock::now();
+    m.upSQL = R"(
+        -- 1. Drop symbol tables and triggers
+        DROP TRIGGER IF EXISTS symbol_metadata_au;
+        DROP TRIGGER IF EXISTS symbol_metadata_ad;
+        DROP TRIGGER IF EXISTS symbol_metadata_ai;
+        DROP TABLE IF EXISTS symbol_metadata_fts;
+        DROP TABLE IF EXISTS symbol_metadata;
+        DROP TABLE IF EXISTS document_symbol_extraction_state;
+
+        -- 2. Delete AST symbol edges by relation
+        DELETE FROM kg_edges WHERE relation IN (
+            'calls', 'defined_in', 'located_in',
+            'scoped_by', 'resolves_to', 'inherits', 'implements', 'includes'
+        );
+
+        -- 3. Delete any remaining edges connected to symbol nodes (e.g. contains edges to symbols)
+        DELETE FROM kg_edges WHERE src_node_id IN (
+            SELECT id FROM kg_nodes WHERE node_key NOT LIKE 'nl_entity:%' AND type IN (
+                'function', 'function_version', 'field', 'field_version',
+                'struct', 'struct_version', 'class', 'class_version',
+                'enum', 'enum_version', 'interface', 'interface_version',
+                'trait', 'trait_version', 'method', 'method_version',
+                'variable', 'variable_version', 'symbol_reference'
+            )
+        ) OR dst_node_id IN (
+            SELECT id FROM kg_nodes WHERE node_key NOT LIKE 'nl_entity:%' AND type IN (
+                'function', 'function_version', 'field', 'field_version',
+                'struct', 'struct_version', 'class', 'class_version',
+                'enum', 'enum_version', 'interface', 'interface_version',
+                'trait', 'trait_version', 'method', 'method_version',
+                'variable', 'variable_version', 'symbol_reference'
+            )
+        );
+
+        -- 4. Delete symbol aliases and orphaned aliases
+        DELETE FROM kg_aliases WHERE node_id IN (
+            SELECT id FROM kg_nodes WHERE node_key NOT LIKE 'nl_entity:%' AND type IN (
+                'function', 'function_version', 'field', 'field_version',
+                'struct', 'struct_version', 'class', 'class_version',
+                'enum', 'enum_version', 'interface', 'interface_version',
+                'trait', 'trait_version', 'method', 'method_version',
+                'variable', 'variable_version', 'symbol_reference'
+            )
+        ) OR node_id NOT IN (SELECT id FROM kg_nodes);
+
+        -- 5. Delete document entities from symbol extractor
+        DELETE FROM kg_doc_entities WHERE extractor IN ('symbol_extractor_v1', 'treesitter');
+
+        -- 6. Delete symbol nodes (preserving any NL entity nodes whose canonical type is method)
+        DELETE FROM kg_nodes WHERE node_key NOT LIKE 'nl_entity:%' AND type IN (
+            'function', 'function_version', 'field', 'field_version',
+            'struct', 'struct_version', 'class', 'class_version',
+            'enum', 'enum_version', 'interface', 'interface_version',
+            'trait', 'trait_version', 'method', 'method_version',
+            'variable', 'variable_version', 'symbol_reference'
+        );
+
+        -- 7. Prune historical topology snapshot nodes (keeping latest active snapshot)
+        DELETE FROM kg_nodes WHERE type = 'topology_snapshot'
+          AND node_key != 'topology:snapshot:latest'
+          AND node_key != COALESCE(
+              (SELECT 'topology:snapshot:' || json_extract(properties, '$.snapshot_id')
+               FROM kg_nodes WHERE node_key = 'topology:snapshot:latest'), '');
+    )";
+
+    m.downSQL = R"(
+        CREATE TABLE IF NOT EXISTS symbol_metadata (
+            symbol_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            document_hash TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            symbol_name TEXT NOT NULL,
+            qualified_name TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            start_line INTEGER,
+            end_line INTEGER,
+            start_offset INTEGER,
+            end_offset INTEGER,
+            return_type TEXT,
+            parameters TEXT,
+            documentation TEXT,
+            FOREIGN KEY (document_hash) REFERENCES documents(sha256_hash) ON DELETE CASCADE,
+            UNIQUE(document_hash, qualified_name)
+        );
+        CREATE TABLE IF NOT EXISTS document_symbol_extraction_state (
+            document_id INTEGER PRIMARY KEY,
+            extractor_id TEXT NOT NULL,
+            extractor_config_hash TEXT,
+            extracted_at INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            entity_count INTEGER NOT NULL DEFAULT 0,
+            error_message TEXT,
+            FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_symbol_name ON symbol_metadata(symbol_name);
+        CREATE INDEX IF NOT EXISTS idx_symbol_document ON symbol_metadata(document_hash);
+        CREATE INDEX IF NOT EXISTS idx_symbol_file_path ON symbol_metadata(file_path);
+        CREATE INDEX IF NOT EXISTS idx_symbol_kind ON symbol_metadata(kind);
+        CREATE INDEX IF NOT EXISTS idx_symbol_qualified ON symbol_metadata(qualified_name);
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_symbol_document_qualified ON symbol_metadata(document_hash, qualified_name);
+        CREATE INDEX IF NOT EXISTS idx_symbol_extraction_state_extractor ON document_symbol_extraction_state(extractor_id);
+        CREATE INDEX IF NOT EXISTS idx_symbol_extraction_state_status ON document_symbol_extraction_state(status);
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS symbol_metadata_fts USING fts5(
+            file_path,
+            symbol_name,
+            qualified_name,
+            content='symbol_metadata',
+            content_rowid='symbol_id',
+            tokenize='trigram'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS symbol_metadata_ai AFTER INSERT ON symbol_metadata BEGIN
+            INSERT INTO symbol_metadata_fts(rowid, file_path, symbol_name, qualified_name)
+            VALUES (new.symbol_id, new.file_path, new.symbol_name, new.qualified_name);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS symbol_metadata_ad AFTER DELETE ON symbol_metadata BEGIN
+            INSERT INTO symbol_metadata_fts(
+                symbol_metadata_fts, rowid, file_path, symbol_name, qualified_name
+            ) VALUES (
+                'delete', old.symbol_id, old.file_path, old.symbol_name, old.qualified_name
+            );
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS symbol_metadata_au AFTER UPDATE ON symbol_metadata BEGIN
+            INSERT INTO symbol_metadata_fts(
+                symbol_metadata_fts, rowid, file_path, symbol_name, qualified_name
+            ) VALUES (
+                'delete', old.symbol_id, old.file_path, old.symbol_name, old.qualified_name
+            );
+            INSERT INTO symbol_metadata_fts(rowid, file_path, symbol_name, qualified_name)
+            VALUES (new.symbol_id, new.file_path, new.symbol_name, new.qualified_name);
+        END;
     )";
     return m;
 }

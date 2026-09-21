@@ -55,7 +55,11 @@ def run_git(
         ["git", *arguments],
         cwd=root,
         # The explicit root owns this read, not a caller's Git-hook environment.
-        env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+        env={
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith("GIT_")
+        },
         capture_output=True,
         text=True,
         check=False,
@@ -166,10 +170,14 @@ def validate_candidate(root: Path, base: str, candidate: str) -> CandidateReport
         root, "merge-base", "--is-ancestor", base_sha, candidate_sha, check=False
     )
     if ancestry.returncode not in (0, 1):
-        raise CandidateError("could not determine candidate ancestry; inspect repository integrity")
+        raise CandidateError(
+            "could not determine candidate ancestry; inspect repository integrity"
+        )
     if ancestry.returncode == 1:
         missing = int(
-            run_git(root, "rev-list", "--count", f"{candidate_sha}..{base_sha}").stdout.strip()
+            run_git(
+                root, "rev-list", "--count", f"{candidate_sha}..{base_sha}"
+            ).stdout.strip()
         )
         raise CandidateError(
             "candidate must contain the complete base history: "

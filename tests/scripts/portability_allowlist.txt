@@ -92,11 +92,11 @@ src/benchmarks/internal_event_bus_benchmark.cpp:13:portability/env-read # review
 src/cli/commands/add_command.cpp:266:portability/env-read # reviewed raw environment read
 src/cli/commands/doctor/checks/model_check.cpp:16:portability/env-read # reviewed raw environment read
 src/cli/commands/doctor/plugin_trust.cpp:29:portability/env-read # reviewed raw environment read
-src/cli/commands/init_command.cpp:491:portability/env-read # reviewed raw environment read
-src/cli/commands/init_command.cpp:925:portability/env-read # reviewed raw environment read
-src/cli/commands/init_command.cpp:2444:portability/env-read # reviewed raw environment read
-src/cli/commands/init_command.cpp:2447:portability/env-read # reviewed raw environment read
-src/cli/commands/init_command.cpp:2457:portability/env-read # reviewed raw environment read
+src/cli/commands/init_command.cpp:481:portability/env-read # reviewed raw environment read
+src/cli/commands/init_command.cpp:915:portability/env-read # reviewed raw environment read
+src/cli/commands/init_command.cpp:1922:portability/env-read # reviewed raw environment read
+src/cli/commands/init_command.cpp:1925:portability/env-read # reviewed raw environment read
+src/cli/commands/init_command.cpp:1935:portability/env-read # reviewed raw environment read
 src/cli/commands/model_command.cpp:100:portability/env-read # reviewed raw environment read
 src/cli/commands/model_command.cpp:569:portability/env-read # reviewed raw environment read
 src/cli/commands/model_command.cpp:578:portability/env-read # reviewed raw environment read
@@ -155,7 +155,7 @@ src/metadata/connection_pool.cpp:974:portability/jthread # feature-test guarded 
 src/metadata/database.cpp:29:portability/env-read # reviewed raw environment read
 src/metadata/database.cpp:476:portability/path-cstr # std::string filename, not filesystem::path
 src/metadata/metadata_repository.cpp:1546:portability/env-read # reviewed raw environment read
-src/metadata/migration.cpp:1560:portability/env-read # reviewed raw environment read
+src/metadata/migration.cpp:1561:portability/env-read # reviewed raw environment read
 src/metadata/repository/search_ops.cpp:89:portability/env-read # reviewed raw environment read
 src/metadata/repository/search_ops.cpp:103:portability/env-read # reviewed raw environment read
 src/metadata/repository/search_ops.cpp:120:portability/env-read # reviewed raw environment read

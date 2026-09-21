@@ -48,7 +48,7 @@ public:
                                      init_result.error().message);
         }
 
-        // Apply migrations
+        // Apply migrations up to v39 (v40 intentionally drops symbol_metadata)
         auto migrateResult = pool_->withConnection([](Database& db) -> Result<void> {
             MigrationManager mm(db);
             auto initResult = mm.initialize();
@@ -56,7 +56,7 @@ public:
                 return initResult.error();
 
             mm.registerMigrations(YamsMetadataMigrations::getAllMigrations());
-            return mm.migrate();
+            return mm.migrateTo(39);
         });
 
         if (!migrateResult) {
@@ -69,11 +69,8 @@ public:
 
     ~SymbolSchemaValidator() {
         pool_.reset();
-        try {
-            std::filesystem::remove_all(temp_db_path_);
-        } catch (const std::filesystem::filesystem_error& e) {
-            // Ignore cleanup errors
-        }
+        std::error_code ec;
+        std::filesystem::remove_all(temp_db_path_, ec);
     }
 
     const std::vector<std::string>& getSymbolColumns() const { return symbol_columns_; }

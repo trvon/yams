@@ -787,8 +787,8 @@ inline PruneCategory getPruneCategory(std::string_view filename, std::string_vie
          has_dir("minsizerel"))) {
         return PruneCategory::BuildObject;
     }
-    if (has_dir_prefix("build-") || has_dir_prefix("builddir-") ||
-        has_dir_prefix("cmake-build-") || has_dir_prefix("bazel-")) {
+    if (has_dir_prefix("build-") || has_dir_prefix("builddir-") || has_dir_prefix("cmake-build-") ||
+        has_dir_prefix("bazel-")) {
         return PruneCategory::BuildObject;
     }
     if (has_dir(".next") || has_dir(".nuxt") || has_dir(".svelte-kit") ||
