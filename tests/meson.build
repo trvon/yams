@@ -2303,6 +2303,15 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_topology_codec_exe = executable('catch2_topology_codec',
+    files('unit/topology/topology_codec_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
 #Fuzzy Index Prioritization Tests(Catch2) - fuzzy index scoring
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
@@ -2985,6 +2994,12 @@ if catch2_dep.found()
   )
 
   test('topology_kmeans', catch2_topology_kmeans_exe,
+    suite: ['catch2', 'unit', 'topology'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
+  )
+
+  test('topology_codec', catch2_topology_codec_exe,
     suite: ['catch2', 'unit', 'topology'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 30

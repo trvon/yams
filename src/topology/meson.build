@@ -3,12 +3,14 @@ spdlog_dep = dependency('spdlog', required: true)
 yams_core = dependency('yams_core', required: true)
 yams_metadata = dependency('yams_metadata', required: true)
 yams_vector = dependency('yams_vector', required: true)
+yams_compression = dependency('yams_compression', required: true)
 
 yams_topology = static_library('yams_topology',
   [
     'topology_alternate_engines.cpp',
     'topology_baseline.cpp',
-  'protected_relation_cover.cpp',
+    'topology_codec.cpp',
+    'protected_relation_cover.cpp',
     'topology_factory.cpp',
     'topology_input_extractor.cpp',
     'topology_metadata_store.cpp',
@@ -17,7 +19,7 @@ yams_topology = static_library('yams_topology',
     'topology_sgc.cpp',
   ],
   include_directories: include_directories('../../include'),
-  dependencies: [nlohmann_json_dep, spdlog_dep, yams_core, yams_metadata, yams_vector, simeon_retrieval_dep],
+  dependencies: [nlohmann_json_dep, spdlog_dep, yams_core, yams_metadata, yams_vector, yams_compression, simeon_retrieval_dep],
   install: true,
 )
 
@@ -31,7 +33,7 @@ pkg.generate(yams_topology,
 yams_topology_dep = declare_dependency(
   link_with: yams_topology,
   include_directories: include_directories('../../include'),
-  dependencies: [nlohmann_json_dep, spdlog_dep, yams_core, yams_metadata, yams_vector, simeon_retrieval_dep],
+  dependencies: [nlohmann_json_dep, spdlog_dep, yams_core, yams_metadata, yams_vector, yams_compression, simeon_retrieval_dep],
 )
 
 meson.override_dependency('yams_topology', yams_topology_dep)
