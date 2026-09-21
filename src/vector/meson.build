@@ -117,6 +117,7 @@ srcs = [
   'document_chunker.cpp',
   'vector_utils.cpp',
   'static_cosine_ann_index.cpp',
+  'binary_quantization.cpp',
   'vector_schema_migration.cpp',
   'mock_embedding_provider.cpp',
   'embedding_provider_registry.cpp',

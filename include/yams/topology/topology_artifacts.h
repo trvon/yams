@@ -221,6 +221,9 @@ struct TopologyRouteRequest {
     /// Maximum centroid candidates exact-scored after cached ANN routing. Zero preserves the
     /// exhaustive centroid scan. Sparse-vote clusters are always unioned into the shortlist.
     std::size_t denseAnnCandidateLimit{0};
+    /// Maximum centroid candidates shortlisted using 1-bit binary quantization (BQ) pre-filtering
+    /// before exact scoring. Zero disables BQ pre-filtering unless fallback routing applies.
+    std::size_t bqCandidateLimit{0};
 };
 
 struct ClusterRoute {

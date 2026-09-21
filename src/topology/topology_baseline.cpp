@@ -1,6 +1,7 @@
 #include <yams/topology/protected_relation_cover.h>
 #include <yams/topology/topology_baseline.h>
 #include <yams/topology/topology_representatives.h>
+#include <yams/vector/binary_quantization.h>
 #include <yams/vector/static_cosine_ann_index.h>
 
 #include "protected_relation_identity_internal.h"
@@ -728,12 +729,15 @@ float vectorNorm(const std::vector<float>& a) {
 Result<std::vector<ClusterRoute>>
 SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
                                  const TopologyArtifactBatch& artifacts) const {
-    const auto index = buildRouteIndex(artifacts, request.denseAnnCandidateLimit > 0);
+    const auto index =
+        buildRouteIndex(artifacts, request.denseAnnCandidateLimit > 0,
+                        request.bqCandidateLimit > 0 || request.denseAnnCandidateLimit > 0);
     return route(request, artifacts, index);
 }
 
 SparseRouteIndex SparseGuidedClusterRouter::buildRouteIndex(const TopologyArtifactBatch& artifacts,
-                                                            bool buildDenseAnnIndex) {
+                                                            bool buildDenseAnnIndex,
+                                                            bool buildBqIndex) {
     SparseRouteIndex index;
     index.centroidNorms.reserve(artifacts.clusters.size());
     index.routingRepresentativeNorms.reserve(artifacts.clusters.size());
@@ -768,6 +772,12 @@ SparseRouteIndex SparseGuidedClusterRouter::buildRouteIndex(const TopologyArtifa
         auto annIndex = yams::vector::StaticCosineAnnIndex::build(centroidIds, centroids);
         if (annIndex) {
             index.centroidAnnIndex = std::move(annIndex).value();
+        }
+    }
+    if (buildBqIndex && !centroids.empty()) {
+        auto bqIndex = yams::vector::BinaryQuantizedIndex::build(centroidIds, centroids);
+        if (bqIndex) {
+            index.centroidBqIndex = std::move(bqIndex).value();
         }
     }
 
@@ -877,10 +887,41 @@ SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
     }
 
     std::vector<bool> routeCandidates(artifacts.clusters.size(), true);
-    const bool denseAnnEligible = alpha < 1.0F && queryNorm > 0.0F && request.limit > 0 &&
-                                  request.denseAnnCandidateLimit > 0 && index.centroidAnnIndex &&
+    const bool bqRequested = alpha < 1.0F && queryNorm > 0.0F && request.limit > 0 &&
+                             request.bqCandidateLimit > 0 && index.centroidBqIndex &&
+                             artifacts.clusters.size() > request.bqCandidateLimit;
+    const bool denseAnnEligible = !bqRequested && alpha < 1.0F && queryNorm > 0.0F &&
+                                  request.limit > 0 && request.denseAnnCandidateLimit > 0 &&
+                                  index.centroidAnnIndex &&
                                   artifacts.clusters.size() > request.denseAnnCandidateLimit;
-    if (denseAnnEligible) {
+    const bool bqFallbackEligible =
+        !denseAnnEligible && !bqRequested && alpha < 1.0F && queryNorm > 0.0F &&
+        request.limit > 0 && request.denseAnnCandidateLimit > 0 && !index.centroidAnnIndex &&
+        index.centroidBqIndex && artifacts.clusters.size() > request.denseAnnCandidateLimit;
+
+    if (bqRequested || bqFallbackEligible) {
+        const auto candidateLimit = std::min(
+            artifacts.clusters.size(),
+            std::max(bqRequested ? request.bqCandidateLimit : request.denseAnnCandidateLimit,
+                     request.limit));
+        auto bqHits = index.centroidBqIndex->search(request.queryEmbedding, candidateLimit);
+        std::fill(routeCandidates.begin(), routeCandidates.end(), false);
+        for (const auto& hit : bqHits) {
+            if (hit.id < routeCandidates.size()) {
+                routeCandidates[hit.id] = true;
+            }
+        }
+        for (std::size_t clusterIndex = 0; clusterIndex < signals.size(); ++clusterIndex) {
+            if (signals[clusterIndex].sparseMass > 0.0) {
+                routeCandidates[clusterIndex] = true;
+            }
+        }
+        if (work != nullptr) {
+            work->bqUsed = true;
+            work->bqCandidates = bqHits.size();
+            work->bqDistanceEvaluations = index.centroidBqIndex->size();
+        }
+    } else if (denseAnnEligible) {
         const auto candidateLimit = std::min(
             artifacts.clusters.size(), std::max(request.denseAnnCandidateLimit, request.limit));
         auto annResult = index.centroidAnnIndex->search(request.queryEmbedding, candidateLimit);

@@ -689,6 +689,83 @@ TEST_CASE("Sparse-guided exact routing can omit the centroid ANN index",
     CHECK(work.exactRepresentativeDistanceEvaluations == batch.clusters.size());
 }
 
+TEST_CASE("Sparse-guided topology routing shortlists centroids with 1-bit binary quantization (BQ)",
+          "[unit][topology][routing][bq]") {
+    TopologyArtifactBatch batch;
+    constexpr std::size_t clusterCount = 128;
+    batch.clusters.reserve(clusterCount);
+    for (std::size_t index = 0; index < clusterCount; ++index) {
+        const auto angle = static_cast<float>(index) * 2.0F * std::numbers::pi_v<float> /
+                           static_cast<float>(clusterCount);
+        batch.clusters.push_back(ClusterArtifact{
+            .clusterId = "cluster-" + std::to_string(index),
+            .memberCount = 1,
+            .memberDocumentHashes = {"doc-" + std::to_string(index)},
+            .centroidEmbedding = {std::cos(angle), std::sin(angle)},
+        });
+    }
+
+    const auto routeIndex = SparseGuidedClusterRouter::buildRouteIndex(batch);
+    REQUIRE(routeIndex.centroidBqIndex != nullptr);
+
+    SparseGuidedClusterRouter router;
+    TopologyRouteRequest request;
+    request.limit = 1;
+    request.queryEmbedding = {1.0F, 0.0F};
+    request.sparseDenseAlpha = 0.0F;
+    request.bqCandidateLimit = 8;
+    SparseRouteWork work;
+
+    auto routed = router.route(request, batch, routeIndex, &work);
+
+    REQUIRE(routed.has_value());
+    REQUIRE(routed.value().size() == 1U);
+    CHECK(routed.value().front().clusterId == "cluster-0");
+    CHECK(work.bqUsed);
+    CHECK(work.bqCandidates <= 8U);
+    CHECK(work.bqDistanceEvaluations == clusterCount);
+    CHECK(work.exactRepresentativeDistanceEvaluations <= 8U);
+}
+
+TEST_CASE("Sparse-guided topology routing falls back to BQ when ANN index is omitted",
+          "[unit][topology][routing][bq][fallback]") {
+    TopologyArtifactBatch batch;
+    constexpr std::size_t clusterCount = 64;
+    batch.clusters.reserve(clusterCount);
+    for (std::size_t index = 0; index < clusterCount; ++index) {
+        const auto angle = static_cast<float>(index) * 2.0F * std::numbers::pi_v<float> /
+                           static_cast<float>(clusterCount);
+        batch.clusters.push_back(ClusterArtifact{
+            .clusterId = "cluster-" + std::to_string(index),
+            .memberCount = 1,
+            .memberDocumentHashes = {"doc-" + std::to_string(index)},
+            .centroidEmbedding = {std::cos(angle), std::sin(angle)},
+        });
+    }
+
+    const auto routeIndex = SparseGuidedClusterRouter::buildRouteIndex(batch, false, true);
+    REQUIRE(routeIndex.centroidAnnIndex == nullptr);
+    REQUIRE(routeIndex.centroidBqIndex != nullptr);
+
+    SparseGuidedClusterRouter router;
+    TopologyRouteRequest request;
+    request.limit = 1;
+    request.queryEmbedding = {1.0F, 0.0F};
+    request.sparseDenseAlpha = 0.0F;
+    request.denseAnnCandidateLimit = 8;
+    SparseRouteWork work;
+
+    auto routed = router.route(request, batch, routeIndex, &work);
+
+    REQUIRE(routed.has_value());
+    REQUIRE(routed.value().size() == 1U);
+    CHECK(routed.value().front().clusterId == "cluster-0");
+    CHECK_FALSE(work.denseAnnUsed);
+    CHECK(work.bqUsed);
+    CHECK(work.bqCandidates <= 8U);
+    CHECK(work.exactRepresentativeDistanceEvaluations <= 8U);
+}
+
 TEST_CASE("Topology construction emits a deterministic bounded diverse routing cover",
           "[unit][topology][routing][representatives]") {
     ConnectedComponentTopologyEngine engine;
