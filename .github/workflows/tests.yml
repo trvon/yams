@@ -222,8 +222,8 @@ jobs:
           sudo rm -rf /Users/runner/Library/Android/sdk || true
           sudo rm -rf /usr/local/share/dotnet /Users/runner/.dotnet || true
           # Do NOT remove ~/.cargo or ~/.rustup: meson.build builds the libSQL subproject only when
-          # `cargo` is found, and silently falls back to plain sqlite3 otherwise (meson.build:555-572).
-          # Deleting them would switch this lane's database backend without failing anything.
+          # `cargo` is found, and emits warnings before falling back to plain sqlite3 without failing
+          # (meson.build:555-572). Deleting them would switch this lane's database backend without failing.
           sudo rm -rf /usr/local/share/powershell || true
           sudo rm -rf /Library/Frameworks/Mono.framework /usr/local/lib/mono || true
           df -h /
