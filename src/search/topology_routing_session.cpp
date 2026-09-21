@@ -1620,6 +1620,7 @@ Result<TopologyRoutingSnapshotLookup> TopologyRoutingSnapshotCache::get(std::uin
     }
 
     auto snapshot = std::make_shared<TopologyRoutingSnapshot>();
+    snapshot->interner = std::make_shared<StringInterner>();
     snapshot->artifacts = std::move(artifacts);
     snapshot->constructionFingerprint =
         topologyRoutingConstructionFingerprint(*snapshot->artifacts);
