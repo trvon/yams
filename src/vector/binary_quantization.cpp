@@ -122,6 +122,8 @@ std::vector<BinaryQuantizedHit> BinaryQuantizedIndex::search(const BinaryVector&
         for (std::size_t w = 0; w < wordsPerVector_; ++w) {
             dist += static_cast<std::size_t>(std::popcount(queryWords[w] ^ vecWords[w]));
         }
+        // cos(pi * h / d) is the SimHash estimate, exact in expectation only for random
+        // hyperplane projections; for raw sign bits it is an ordering proxy, not a cosine.
         const float normDist = static_cast<float>(dist) * invDim;
         candidates.push_back(BinaryQuantizedHit{
             .id = ids_[i],

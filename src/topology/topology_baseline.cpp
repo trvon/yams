@@ -925,21 +925,25 @@ SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
             std::max(bqRequested ? request.bqCandidateLimit : request.denseAnnCandidateLimit,
                      request.limit));
         auto bqHits = index.centroidBqIndex->search(request.queryEmbedding, candidateLimit);
-        std::fill(routeCandidates.begin(), routeCandidates.end(), false);
-        for (const auto& hit : bqHits) {
-            if (hit.id < routeCandidates.size()) {
-                routeCandidates[hit.id] = true;
+        // An empty shortlist means BQ could not score the query (e.g. a dimension mismatch);
+        // keep the exhaustive candidate set, as the dense ANN branch does when it fails.
+        if (!bqHits.empty()) {
+            std::fill(routeCandidates.begin(), routeCandidates.end(), false);
+            for (const auto& hit : bqHits) {
+                if (hit.id < routeCandidates.size()) {
+                    routeCandidates[hit.id] = true;
+                }
             }
-        }
-        for (std::size_t clusterIndex = 0; clusterIndex < signals.size(); ++clusterIndex) {
-            if (signals[clusterIndex].sparseMass > 0.0) {
-                routeCandidates[clusterIndex] = true;
+            for (std::size_t clusterIndex = 0; clusterIndex < signals.size(); ++clusterIndex) {
+                if (signals[clusterIndex].sparseMass > 0.0) {
+                    routeCandidates[clusterIndex] = true;
+                }
             }
-        }
-        if (work != nullptr) {
-            work->bqUsed = true;
-            work->bqCandidates = bqHits.size();
-            work->bqDistanceEvaluations = index.centroidBqIndex->size();
+            if (work != nullptr) {
+                work->bqUsed = true;
+                work->bqCandidates = bqHits.size();
+                work->bqDistanceEvaluations = index.centroidBqIndex->size();
+            }
         }
     } else if (denseAnnEligible) {
         const auto candidateLimit = std::min(
