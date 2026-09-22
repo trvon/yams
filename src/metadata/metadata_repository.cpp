@@ -2725,6 +2725,27 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
                                                   static_cast<double>(stats.docCount);
                         }
                     }
+                    // Relational structure only; see CorpusStats::kgRelationalEdgeCount.
+                    auto relationalResult = db.prepare(R"(
+                        SELECT COUNT(*) FROM kg_edges WHERE relation NOT IN (
+                            'semantic_neighbor',
+                            'has_version', 'path_version', 'has_blob', 'blob_at_path',
+                            'renamed_to', 'moved_to', 'contains', 'has_tag',
+                            'contains_segment', 'segment_of',
+                            'mentioned_in', 'title_mentions', 'mentioned_in_segment',
+                            'primary_topic_of', 'observed_as'
+                        )
+                    )");
+                    if (relationalResult) {
+                        auto& stmt = relationalResult.value();
+                        auto stepResult = stmt.step();
+                        if (stepResult && stepResult.value()) {
+                            stats.kgRelationalEdgeCount = stmt.getInt64(0);
+                            stats.kgRelationalEdgeDensity =
+                                static_cast<double>(stats.kgRelationalEdgeCount) /
+                                static_cast<double>(stats.docCount);
+                        }
+                    }
                 }
             }
 
