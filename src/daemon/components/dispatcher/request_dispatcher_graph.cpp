@@ -599,8 +599,10 @@ RequestDispatcher::handleGraphQueryIsolatedMode(const GraphQueryRequest& req,
             "calls edges) was removed in v0.20");
     }
     const std::string& nodeType = req.nodeType;
+    // Default to semantic_neighbor: "isolated" then means a node with no embedding neighbours,
+    // the orphan signal that still exists now that code-symbol calls edges are gone.
     std::string relation = req.isolatedRelation.empty()
-                               ? "calls"
+                               ? "semantic_neighbor"
                                : metadata::normalizeRelationName(req.isolatedRelation);
 
     spdlog::debug("GraphQuery isolatedMode: type='{}', relation='{}', limit={}", nodeType, relation,

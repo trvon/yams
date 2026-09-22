@@ -203,7 +203,6 @@ static yams::daemon::SearchRequest makeSearchRequest(const SearchOptions& req_op
     req.useSession = req_opts.useSession;
     req.sessionName = req_opts.sessionName;
     req.globalSearch = req_opts.globalSearch;
-    req.symbolRank = req_opts.symbolRank;
     return req;
 }
 

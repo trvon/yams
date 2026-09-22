@@ -4589,7 +4589,6 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
         opts.limit = static_cast<std::size_t>(k);
         const auto queryTimeout = configuredBenchQueryTimeout(searchType);
         opts.timeout = queryTimeout;
-        opts.symbolRank = true;
         opts.allowFuzzyRetry = false;
         opts.allowLiteralTextRetry = false;
         const bool benchDiagEnabled = []() -> bool {

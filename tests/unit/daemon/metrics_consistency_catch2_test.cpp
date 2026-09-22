@@ -40,11 +40,10 @@ TEST_CASE("Metrics consistency: unique keys", "[unit][daemon][metrics]") {
 
         // Stages
         kExtractionInflight, kPostExtractionLimit, kKgQueued, kKgDropped, kKgConsumed, kKgInflight,
-        kKgQueueDepth, kPostKgLimit, kKgJobsCapacity, kKgJobsFillPct, kSymbolQueued, kSymbolDropped,
-        kSymbolConsumed, kSymbolInflight, kSymbolQueueDepth, kPostSymbolLimit, kEntityQueued,
-        kEntityDropped, kEntityConsumed, kEntityInflight, kEntityQueueDepth, kPostEntityLimit,
-        kTitleQueued, kTitleDropped, kTitleConsumed, kTitleInflight, kTitleQueueDepth,
-        kPostTitleLimit, kEmbedQueued, kEmbedInflight, kPostEmbedLimit,
+        kKgQueueDepth, kPostKgLimit, kKgJobsCapacity, kKgJobsFillPct, kEntityQueued, kEntityDropped,
+        kEntityConsumed, kEntityInflight, kEntityQueueDepth, kPostEntityLimit, kTitleQueued,
+        kTitleDropped, kTitleConsumed, kTitleInflight, kTitleQueueDepth, kPostTitleLimit,
+        kEmbedQueued, kEmbedInflight, kPostEmbedLimit,
 
         // FTS5
         kFts5Queued, kFts5Dropped, kFts5Consumed,

@@ -449,8 +449,6 @@ public:
                                     stages["backpressure_rejects"] =
                                         getCount("post_ingest_backpressure_rejects");
                                 }
-                                stages["symbol_inflight"] = getCount("symbol_inflight");
-                                stages["symbol_limit"] = getCount("post_symbol_limit");
                                 // Entity extraction metrics (external plugins like Ghidra)
                                 stages["entity_inflight"] = getCount("entity_inflight");
                                 stages["entity_limit"] = getCount("post_entity_limit");
@@ -948,8 +946,6 @@ public:
                                     uint64_t kgc = getU64("kg_consumed");
                                     uint64_t kgi = getU64("kg_inflight");
                                     uint64_t kgLim = getU64("post_kg_limit");
-                                    uint64_t sym = getU64("symbol_inflight");
-                                    uint64_t symLim = getU64("post_symbol_limit");
                                     // Entity extraction metrics (external plugins like Ghidra)
                                     uint64_t entq = getU64("entity_queued");
                                     uint64_t entc = getU64("entity_consumed");
@@ -970,8 +966,7 @@ public:
                                         entPending = 0;
                                     std::cout << "      stages: extract=" << ext << "/" << extLim
                                               << ", kg(q=" << kgPending << "/i=" << kgi << "/"
-                                              << kgLim << ")"
-                                              << ", symbol=" << sym << "/" << symLim;
+                                              << kgLim << ")";
                                     // Only show entity stage if there's any activity
                                     if (entq > 0 || enti > 0) {
                                         std::cout << ", entity(q=" << entPending << "/i=" << enti

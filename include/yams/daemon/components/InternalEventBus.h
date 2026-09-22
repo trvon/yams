@@ -525,9 +525,6 @@ private:
     std::atomic<std::uint64_t> kgQueued_{0};
     std::atomic<std::uint64_t> kgDropped_{0};
     std::atomic<std::uint64_t> kgConsumed_{0};
-    std::atomic<std::uint64_t> symbolQueued_{0};
-    std::atomic<std::uint64_t> symbolDropped_{0};
-    std::atomic<std::uint64_t> symbolConsumed_{0};
     std::atomic<std::uint64_t> entityQueued_{0};
     std::atomic<std::uint64_t> entityDropped_{0};
     std::atomic<std::uint64_t> entityConsumed_{0};
@@ -595,9 +592,6 @@ public:
     void incKgQueued() { kgQueued_.fetch_add(1, std::memory_order_relaxed); }
     void incKgDropped() { kgDropped_.fetch_add(1, std::memory_order_relaxed); }
     void incKgConsumed() { kgConsumed_.fetch_add(1, std::memory_order_relaxed); }
-    void incSymbolQueued() { symbolQueued_.fetch_add(1, std::memory_order_relaxed); }
-    void incSymbolDropped() { symbolDropped_.fetch_add(1, std::memory_order_relaxed); }
-    void incSymbolConsumed() { symbolConsumed_.fetch_add(1, std::memory_order_relaxed); }
     void incEntityQueued() { entityQueued_.fetch_add(1, std::memory_order_relaxed); }
     void incEntityDropped() { entityDropped_.fetch_add(1, std::memory_order_relaxed); }
     void incEntityConsumed() { entityConsumed_.fetch_add(1, std::memory_order_relaxed); }
@@ -641,9 +635,6 @@ public:
     std::uint64_t kgQueued() const { return kgQueued_.load(std::memory_order_relaxed); }
     std::uint64_t kgDropped() const { return kgDropped_.load(std::memory_order_relaxed); }
     std::uint64_t kgConsumed() const { return kgConsumed_.load(std::memory_order_relaxed); }
-    std::uint64_t symbolQueued() const { return symbolQueued_.load(std::memory_order_relaxed); }
-    std::uint64_t symbolDropped() const { return symbolDropped_.load(std::memory_order_relaxed); }
-    std::uint64_t symbolConsumed() const { return symbolConsumed_.load(std::memory_order_relaxed); }
     std::uint64_t entityQueued() const { return entityQueued_.load(std::memory_order_relaxed); }
     std::uint64_t entityDropped() const { return entityDropped_.load(std::memory_order_relaxed); }
     std::uint64_t entityConsumed() const { return entityConsumed_.load(std::memory_order_relaxed); }

@@ -1008,15 +1008,12 @@ void renderDaemonStatusDetailed(const yams::daemon::StatusResponse& status,
         uint64_t kgAuditQueued = findPostIngestCount("kg_queued");
         uint64_t kgAuditConsumed = findPostIngestCount("kg_consumed");
         uint64_t kgAuditDropped = findPostIngestCount("kg_dropped");
-        uint64_t enrichAuditQueued = findPostIngestCount("symbol_queued") +
-                                     findPostIngestCount("entity_queued") +
-                                     findPostIngestCount("title_queued");
-        uint64_t enrichAuditConsumed = findPostIngestCount("symbol_consumed") +
-                                       findPostIngestCount("entity_consumed") +
-                                       findPostIngestCount("title_consumed");
-        uint64_t enrichAuditDropped = findPostIngestCount("symbol_dropped") +
-                                      findPostIngestCount("entity_dropped") +
-                                      findPostIngestCount("title_dropped");
+        uint64_t enrichAuditQueued =
+            findPostIngestCount("entity_queued") + findPostIngestCount("title_queued");
+        uint64_t enrichAuditConsumed =
+            findPostIngestCount("entity_consumed") + findPostIngestCount("title_consumed");
+        uint64_t enrichAuditDropped =
+            findPostIngestCount("entity_dropped") + findPostIngestCount("title_dropped");
 
         // Unified Pipeline Stages block
         using yams::cli::detail::StageInfo;

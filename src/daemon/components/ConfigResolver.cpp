@@ -1734,7 +1734,6 @@ TuningConfig ConfigResolver::applyRuntimeTuning(const ConfigSections& sections,
     applyPostIngestCap("embed_concurrent", 1, 32, &TuneAdvisor::setPostEmbedConcurrent);
     applyPostIngestCap("extraction_concurrent", 1, 64, &TuneAdvisor::setPostExtractionConcurrent);
     applyPostIngestCap("kg_concurrent", 1, 64, &TuneAdvisor::setPostKgConcurrent);
-    applyPostIngestCap("symbol_concurrent", 1, 32, &TuneAdvisor::setPostSymbolConcurrent);
     applyPostIngestCap("entity_concurrent", 1, 16, &TuneAdvisor::setPostEntityConcurrent);
     applyPostIngestCap("title_concurrent", 1, 16, &TuneAdvisor::setPostTitleConcurrent);
     applyPostIngestCap("batch_size", 1, 256, &TuneAdvisor::setPostIngestBatchSize);
@@ -2100,10 +2099,6 @@ ConfigResolver::PostIngestCaps ConfigResolver::resolvePostIngestCaps() {
         }
         if (const auto it = values.find("tuning.post_ingest.kg_concurrent"); it != values.end()) {
             caps.kgConcurrent = parseBounded(it->second, 1, 64);
-        }
-        if (const auto it = values.find("tuning.post_ingest.symbol_concurrent");
-            it != values.end()) {
-            caps.symbolConcurrent = parseBounded(it->second, 1, 32);
         }
         if (const auto it = values.find("tuning.post_ingest.entity_concurrent");
             it != values.end()) {
