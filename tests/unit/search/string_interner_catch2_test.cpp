@@ -4,6 +4,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <yams/search/string_interner.h>
+#include <yams/vector/binary_quantization.h>
 #include <yams/search/topology_routing_session.h>
 #include <yams/topology/topology_artifacts.h>
 
