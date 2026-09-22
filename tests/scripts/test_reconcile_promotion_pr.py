@@ -118,6 +118,8 @@ class PromotionTests(unittest.TestCase):
         self.assertEqual((payload["head"], payload["base"]), ("experimental", "main"))
         self.assertIn("GITHUB_TOKEN", payload["body"])
         self.assertIn("close and reopen", payload["body"])
+        self.assertIn("Promotion Merge Policy", payload["body"])
+        self.assertIn("NEVER Squash and Merge", payload["body"])
         self.assertIn(MAIN + "..." + HEAD, api.assert_compare)
         self.assertIn("page=2", api.assert_compare)
 
@@ -321,9 +323,22 @@ class PromotionTests(unittest.TestCase):
         self.assertNotIn("fixture-token", str(raised.exception))
         self.assertEqual(raised.exception.status, 403)
 
+    def test_workflow_dispatch_creates_draft_with_merge_policy(self):
+        api = FakeAPI()
+        env = context()
+        env["GITHUB_EVENT_NAME"] = "workflow_dispatch"
+        result = promotion.reconcile(api, env, event(), apply=True)
+        self.assertEqual(result["action"], "created")
+        _, _, payload = api.writes()[0]
+        self.assertIn("Promotion Merge Policy", payload["body"])
+        self.assertIn("NEVER Squash and Merge", payload["body"])
+        self.assertIn("Create a merge commit", payload["body"])
+
     def test_workflow_authority_and_main_owned_checkout(self):
         text = (ROOT / ".github/workflows/draft-promotion.yml").read_text()
-        self.assertIn("types: [requested]", text)
+        self.assertIn("workflow_dispatch:", text)
+        self.assertNotIn("workflow_run:", text)
+        self.assertNotIn("types: [requested]", text)
         self.assertIn("ref: ${{ github.workflow_sha }}", text)
         self.assertIn("persist-credentials: false", text)
         self.assertIn("pull-requests: write", text)

@@ -167,6 +167,11 @@ This snapshot is informational, not a validation of the current PR head.
 Promotion, merge, version selection and publication remain maintainer decisions.
 Release Please owns version changes; this automation never marks a PR ready or merges it.
 
+### Promotion Merge Policy (MANDATORY)
+- **Merge Strategy**: You MUST select **"Create a merge commit"** (`git merge --no-ff`) or fast-forward.
+- **NEVER Squash and Merge**: Squash-merging into `main` collapses all individual `feat:`, `fix:`, and `perf:` commits into a single generic commit, destroying Release Please semver calculation and changelog generation. It also severs Git ancestry between `main` and `experimental`, causing future merge conflicts and candidate validation failures.
+- **Back-Merge Requirement**: Any hotfixes or release commits landing on `main` must be back-merged immediately into `experimental` (`git checkout experimental && git merge main`).
+
 **Check-trigger warning:** PRs created with `GITHUB_TOKEN` do not trigger the normal
 PR-opened workflows. A maintainer must verify all required checks for the current head;
 if absent, manually **close and reopen** this PR using their own authenticated account.

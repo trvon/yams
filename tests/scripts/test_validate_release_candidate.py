@@ -87,6 +87,10 @@ class ReleaseCandidateTests(unittest.TestCase):
         self.assertEqual(report.commit_count, 1)
         self.assertEqual(report.base_sha, self.base)
         self.assertEqual(report.candidate_sha, self.candidate)
+        markdown = report.markdown()
+        self.assertIn("Promotion Merge Policy", markdown)
+        self.assertIn("Create a merge commit", markdown)
+        self.assertIn("NEVER Squash and Merge", markdown)
 
     def test_rejects_divergent_candidate(self) -> None:
         self.git("checkout", "-q", "--detach", self.base + "^")
@@ -114,6 +118,7 @@ class ReleaseCandidateTests(unittest.TestCase):
         self.assertIn(current_main, message)
         self.assertIn("resolve conflicts", message)
         self.assertIn("rerun", message)
+        self.assertIn("Never squash-merge", message)
         self.assertEqual(self.git("rev-parse", "HEAD"), current_main)
         self.assertEqual(self.git("status", "--porcelain"), before_status)
         self.assertFalse((self.repo / ".git" / "MERGE_HEAD").exists())
