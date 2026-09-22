@@ -104,14 +104,15 @@ Result<WireHello> parseHello(const Json& json, std::string_view expectedType) {
         if (!json.is_object() || json.value("type", std::string{}) != expectedType) {
             return Error{ErrorCode::ValidationError, "unexpected p2p handshake message type"};
         }
-        return WireHello{.protocol = json.at("protocol").get<std::uint32_t>(),
-                         .schemaVersion = json.at("schema_version").get<std::uint32_t>(),
-                         .nodeId = json.at("node_id").get<std::string>(),
-                         .corpusId = json.at("corpus_id").get<std::string>(),
-                         .corpusEpoch = json.at("corpus_epoch").get<std::uint64_t>(),
-                         .maxWriterAdvance = json.at("max_writer_advance").get<std::size_t>(),
-                         .maxWriterWindowBytes =
-                             json.at("max_writer_window_bytes").get<std::size_t>()};
+        return WireHello{
+            .protocol = detail::unsignedField<std::uint32_t>(json, "protocol"),
+            .schemaVersion = detail::unsignedField<std::uint32_t>(json, "schema_version"),
+            .nodeId = json.at("node_id").get<std::string>(),
+            .corpusId = json.at("corpus_id").get<std::string>(),
+            .corpusEpoch = detail::unsignedField<std::uint64_t>(json, "corpus_epoch"),
+            .maxWriterAdvance = detail::unsignedField<std::size_t>(json, "max_writer_advance"),
+            .maxWriterWindowBytes =
+                detail::unsignedField<std::size_t>(json, "max_writer_window_bytes")};
     } catch (const std::exception& error) {
         return Error{ErrorCode::ValidationError, std::string("invalid p2p hello: ") + error.what()};
     }
@@ -200,7 +201,7 @@ Result<WireState> parseState(const Json& json) {
         for (const auto& entry : commitments) {
             const auto writer = entry.at("writer_id").get<std::string>();
             memory_sync::WriterHistoryCommitment commitment{
-                .counter = entry.at("counter").get<std::uint64_t>(),
+                .counter = detail::unsignedField<std::uint64_t>(entry, "counter"),
                 .digest = entry.at("digest").get<std::string>()};
             if (writer.empty() || writer.size() > kMaxP2pIdentityBytes || commitment.counter == 0 ||
                 commitment.counter != state.version.get(writer) ||
@@ -235,7 +236,8 @@ Result<WireWindowFrontier> parseWindowFrontier(const Json& json) {
             return Error{ErrorCode::ValidationError, "unexpected p2p writer-window message type"};
         }
         WireWindowFrontier frontier{.writerId = json.at("writer_id").get<std::string>(),
-                                    .counter = json.at("counter").get<std::uint64_t>(),
+                                    .counter =
+                                        detail::unsignedField<std::uint64_t>(json, "counter"),
                                     .digest = json.at("digest").get<std::string>()};
         if (frontier.writerId.empty() || frontier.writerId.size() > kMaxP2pIdentityBytes ||
             (frontier.counter == 0 ? !frontier.digest.empty()
@@ -476,7 +478,7 @@ Result<WireHistoryProof> parseHistoryProof(const Json& json) {
             return Error{ErrorCode::ValidationError, "unexpected p2p history proof message type"};
         }
         WireHistoryProof proof{.writerId = json.at("writer_id").get<std::string>(),
-                               .counter = json.at("counter").get<std::uint64_t>(),
+                               .counter = detail::unsignedField<std::uint64_t>(json, "counter"),
                                .digest = json.at("digest").get<std::string>()};
         if (proof.writerId.empty() || proof.writerId.size() > kMaxP2pIdentityBytes ||
             (proof.counter == 0 ? !proof.digest.empty()

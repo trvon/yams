@@ -133,7 +133,7 @@ Result<BatchHeader> parseBatchHeader(const Json& control, const DeltaExchangeOpt
         if (!control.is_object() || control.value("type", std::string{}) != "delta_batch") {
             return Error{ErrorCode::ValidationError, "unexpected p2p delta batch message"};
         }
-        BatchHeader header{.count = control.at("count").get<std::size_t>(),
+        BatchHeader header{.count = detail::unsignedField<std::size_t>(control, "count"),
                            .hasMore = control.at("has_more").get<bool>()};
         if (header.count > options.maxDeltasPerBatch || (header.hasMore && header.count == 0)) {
             return Error{ErrorCode::ValidationError, "p2p delta batch violates configured limits"};
@@ -158,7 +158,7 @@ Result<DeltaRecordControl> parseDeltaRecordControl(const Json& control) {
         DeltaRecordControl parsed;
         parsed.delta.logicalKey = control.at("logical_key").get<std::string>();
         parsed.delta.record = control.at("record").get<memory_sync::MemoryIndexRecord>();
-        parsed.payloadSize = control.at("payload_size").get<std::size_t>();
+        parsed.payloadSize = detail::unsignedField<std::size_t>(control, "payload_size");
         if (parsed.delta.logicalKey.empty() ||
             parsed.delta.logicalKey.size() > memory_sync::kMaxLogicalKeyBytes ||
             parsed.payloadSize > kP2pMaxValuePayloadBytes ||
@@ -318,7 +318,7 @@ parseCommitments(const Json& entries) {
         for (const auto& entry : entries) {
             auto writer = entry.at("writer_id").get<std::string>();
             memory_sync::WriterHistoryCommitment commitment{
-                .counter = entry.at("counter").get<std::uint64_t>(),
+                .counter = detail::unsignedField<std::uint64_t>(entry, "counter"),
                 .digest = entry.at("digest").get<std::string>()};
             if (writer.empty() || writer.size() > kMaxP2pIdentityBytes || commitment.counter == 0 ||
                 !memory_sync::isSha256Digest(commitment.digest) ||
@@ -373,8 +373,8 @@ Result<SnapshotBeginControl> parseSnapshotBegin(const Json& json,
             return commitments.error();
         }
         control.commitments = std::move(commitments.value());
-        control.recordCount = json.at("record_count").get<std::size_t>();
-        control.payloadBytes = json.at("payload_bytes").get<std::size_t>();
+        control.recordCount = detail::unsignedField<std::size_t>(json, "record_count");
+        control.payloadBytes = detail::unsignedField<std::size_t>(json, "payload_bytes");
         control.rootDigest = json.at("root_digest").get<std::string>();
         control.witnessSignature = memory_sync::DetachedWriterSignature{
             .writerId = control.witness,
