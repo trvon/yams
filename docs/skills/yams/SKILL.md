@@ -35,7 +35,7 @@ yams cat --hash <hash>          # Inspect saved content on stdout
 yams get --hash <hash> -o <path> # Export only when a file copy is needed
 
 # Graph
-yams graph --explore <query>   # Agent context: symbols, relationships, snippets
+yams graph --explore <query>   # Agent context: related files, relationships, snippets
 yams graph --name <file>       # Raw file relationships
 yams graph --list-types        # List node types with counts
 yams graph --relations         # List relation types with counts
@@ -283,10 +283,10 @@ Use graph after search/grep finds a likely entry point. Graph answers "what is c
 ### Agent Graph Context
 
 ```bash
-# Preferred follow-up after search/grep hints: ranked symbols + line-numbered snippets
+# Preferred follow-up after search/grep hints: related files + line-numbered snippets
 yams graph --explore "authenticateUser" --max-files 3
 
-# Explore a file path when the result path is more useful than a symbol name
+# Explore a file path when the result path is more useful than a query term
 yams graph --explore src/auth/login.ts --max-files 8
 
 # JSON for tool consumers
@@ -296,7 +296,7 @@ yams graph --explore "RequestHandler" --json
 Notes:
 
 - `yams search` and `yams grep` results may emit `graph_explore_hint`; run that exact command before broad local search.
-- `--explore` is budgeted for agents: entry symbols, related files, relationship summaries, and line-numbered snippets.
+- `--explore` is budgeted for agents: entry documents, related files, relationship summaries, and line-numbered snippets.
 - If `--explore` fails or looks stale, fall back to raw traversal plus local reads.
 
 ### Raw Graph Structure
@@ -312,25 +312,24 @@ yams graph --search "auth*"
 yams graph --search "handle?Request"
 
 # List scoped node types
-yams graph --list-type function --scope-cwd --limit 50
+yams graph --list-type document --scope-cwd --limit 50
 ```
 
-### File / Symbol Relationships
+### File Relationships
+
+Code-symbol nodes (functions, classes) and their `calls`/`defined_in`/`includes` edges were
+removed in v0.20. For callers or blast radius, use `yams grep "<symbol>" --cwd .`.
 
 ```bash
-# Show file dependencies and symbols
+# Show a file's document-level relationships
 yams graph --name src/auth/login.ts --depth 2 --limit 50
-
-# Filter by relation type when doing blast-radius review
-yams graph --name src/main.ts --relation includes --depth 1
-yams graph --node-key "func:authenticate" --relation calls --depth 2
 
 # Output as JSON or DOT
 yams graph --name src/auth/login.ts --format json
 yams graph --name src/auth/login.ts --format dot > graph.dot
 ```
 
-Common relations: `calls`, `includes`, `contains`, `defined_in`, `located_in`, `has_version`, `semantic_neighbor`.
+Common relations: `contains`, `has_version`, `semantic_neighbor`, plus extracted entity relations.
 
 ### Topology Navigation
 

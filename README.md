@@ -10,7 +10,7 @@ graph, and grep surfaces.
 
 - SHA-256 content-addressed storage with chunk-level deduplication and compression
 - SQLite FTS5, Simeon embeddings, hybrid search, and knowledge-graph retrieval
-- Tree-sitter symbol extraction and source-aware graph traversal
+- Document graph traversal over paths, versions, entities, and semantic neighbors
 - Snapshots, Merkle tree diffs, corruption detection, and repair tooling
 - A CLI, an MCP server over stdio, and a C ABI for plugins and mobile hosts
 - Local-first operation with no account or hosted service requirement
