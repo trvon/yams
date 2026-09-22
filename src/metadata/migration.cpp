@@ -3053,12 +3053,27 @@ Migration YamsMetadataMigrations::dropSymbolExtractionSubsystem() {
             'variable', 'variable_version', 'symbol_reference'
         );
 
-        -- 7. Prune historical topology snapshot nodes (keeping latest active snapshot)
+        -- 7. Prune historical topology snapshot nodes, keeping the one the latest pointer names.
+        -- Only prune when the pointer is valid JSON and names a snapshot node that exists;
+        -- otherwise leave every snapshot in place rather than orphaning the topology.
         DELETE FROM kg_nodes WHERE type = 'topology_snapshot'
           AND node_key != 'topology:snapshot:latest'
-          AND node_key != COALESCE(
-              (SELECT 'topology:snapshot:' || json_extract(properties, '$.snapshot_id')
-               FROM kg_nodes WHERE node_key = 'topology:snapshot:latest'), '');
+          AND EXISTS (
+              SELECT 1 FROM kg_nodes AS keep
+              WHERE keep.type = 'topology_snapshot'
+                AND keep.node_key = (
+                    SELECT 'topology:snapshot:' || json_extract(ptr.properties, '$.snapshot_id')
+                    FROM kg_nodes AS ptr
+                    WHERE ptr.node_key = 'topology:snapshot:latest'
+                      AND json_valid(ptr.properties)
+                      AND json_type(ptr.properties, '$.snapshot_id') = 'text')
+          )
+          AND node_key != (
+              SELECT 'topology:snapshot:' || json_extract(ptr.properties, '$.snapshot_id')
+              FROM kg_nodes AS ptr
+              WHERE ptr.node_key = 'topology:snapshot:latest'
+                AND json_valid(ptr.properties)
+                AND json_type(ptr.properties, '$.snapshot_id') = 'text');
     )";
 
     m.downSQL = R"(
@@ -3149,7 +3164,7 @@ Migration YamsMetadataMigrations::bypassTopologyMetadataValueCountsTriggers() {
 
         CREATE TRIGGER IF NOT EXISTS trg_metadata_value_counts_insert
         AFTER INSERT ON metadata
-        WHEN NEW.value IS NOT NULL AND NEW.value != '' AND NEW.key NOT LIKE 'topology.%'
+        WHEN NEW.value IS NOT NULL AND NEW.value != '' AND NEW.key NOT GLOB 'topology.*'
         BEGIN
             INSERT INTO metadata_value_counts (key, value, count)
             VALUES (NEW.key, NEW.value, 1)
@@ -3158,7 +3173,7 @@ Migration YamsMetadataMigrations::bypassTopologyMetadataValueCountsTriggers() {
 
         CREATE TRIGGER IF NOT EXISTS trg_metadata_value_counts_delete
         AFTER DELETE ON metadata
-        WHEN OLD.value IS NOT NULL AND OLD.value != '' AND OLD.key NOT LIKE 'topology.%'
+        WHEN OLD.value IS NOT NULL AND OLD.value != '' AND OLD.key NOT GLOB 'topology.*'
         BEGIN
             UPDATE metadata_value_counts
             SET count = count - 1
@@ -3169,7 +3184,7 @@ Migration YamsMetadataMigrations::bypassTopologyMetadataValueCountsTriggers() {
 
         CREATE TRIGGER IF NOT EXISTS trg_metadata_value_counts_update_old
         AFTER UPDATE ON metadata
-        WHEN OLD.value IS NOT NULL AND OLD.value != '' AND OLD.key NOT LIKE 'topology.%' AND (OLD.key != NEW.key OR OLD.value != NEW.value)
+        WHEN OLD.value IS NOT NULL AND OLD.value != '' AND OLD.key NOT GLOB 'topology.*' AND (OLD.key != NEW.key OR OLD.value != NEW.value)
         BEGIN
             UPDATE metadata_value_counts
             SET count = count - 1
@@ -3180,7 +3195,7 @@ Migration YamsMetadataMigrations::bypassTopologyMetadataValueCountsTriggers() {
 
         CREATE TRIGGER IF NOT EXISTS trg_metadata_value_counts_update_new
         AFTER UPDATE ON metadata
-        WHEN NEW.value IS NOT NULL AND NEW.value != '' AND NEW.key NOT LIKE 'topology.%' AND (OLD.key != NEW.key OR OLD.value != NEW.value)
+        WHEN NEW.value IS NOT NULL AND NEW.value != '' AND NEW.key NOT GLOB 'topology.*' AND (OLD.key != NEW.key OR OLD.value != NEW.value)
         BEGIN
             INSERT INTO metadata_value_counts (key, value, count)
             VALUES (NEW.key, NEW.value, 1)
@@ -3188,7 +3203,7 @@ Migration YamsMetadataMigrations::bypassTopologyMetadataValueCountsTriggers() {
         END;
 
         -- 2. Delete any existing topology keys from metadata_value_counts
-        DELETE FROM metadata_value_counts WHERE key LIKE 'topology.%';
+        DELETE FROM metadata_value_counts WHERE key GLOB 'topology.*';
 
         -- 3. Prune redundant continuous/structural float metadata rows from metadata table
         DELETE FROM metadata WHERE key IN (
@@ -3247,6 +3262,13 @@ Migration YamsMetadataMigrations::bypassTopologyMetadataValueCountsTriggers() {
             VALUES (NEW.key, NEW.value, 1)
             ON CONFLICT(key, value) DO UPDATE SET count = count + 1;
         END;
+
+        -- Restore the topology counts the up migration deleted, from the rows that remain.
+        INSERT INTO metadata_value_counts (key, value, count)
+        SELECT key, value, COUNT(*) FROM metadata
+        WHERE key GLOB 'topology.*' AND value IS NOT NULL AND value != ''
+        GROUP BY key, value
+        ON CONFLICT(key, value) DO UPDATE SET count = excluded.count;
     )";
     return m;
 }
