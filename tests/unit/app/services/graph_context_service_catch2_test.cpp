@@ -27,8 +27,7 @@ namespace {
 
 struct GraphContextServiceFixture {
     GraphContextServiceFixture() {
-        dbPath =
-            yams::test::migrated_metadata_db_template().clone("yams_graph_context_service_db_");
+        dbPath = yams::test::v39_metadata_db_template().clone("yams_graph_context_service_db_");
         testDir = dbPath.parent_path() / dbPath.stem();
         std::filesystem::create_directories(testDir);
 

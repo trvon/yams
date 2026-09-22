@@ -114,5 +114,4 @@ RUN conan profile detect --force && \
 
 # Set environment variables to disable optional features that have missing dependencies
 # These can be overridden when running the container
-ENV YAMS_DISABLE_ONNX="true" \
-    YAMS_DISABLE_SYMBOL_EXTRACTION="true"
+ENV YAMS_DISABLE_ONNX="true"

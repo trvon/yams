@@ -474,7 +474,7 @@ tests/unit/metadata/fts5_performance_stress_catch2_test.cpp:31:portability/env-r
 tests/unit/metadata/fts5_performance_stress_catch2_test.cpp:36:portability/env-read # reviewed raw environment read
 tests/unit/metadata/kg_relation_summary_catch2_test.cpp:19:portability/env-read # reviewed raw environment read
 tests/unit/metadata/kg_store_alias_and_entities_catch2_test.cpp:20:portability/env-read # reviewed raw environment read
-tests/unit/metadata/kg_store_catch2_test.cpp:26:portability/env-read # reviewed raw environment read
+tests/unit/metadata/kg_store_catch2_test.cpp:27:portability/env-read # reviewed raw environment read
 tests/unit/metadata/metadata_repository_cache_catch2_test.cpp:25:portability/env-read # reviewed raw environment read
 tests/unit/metadata/metadata_schema_catch2_test.cpp:79:portability/env-read # reviewed raw environment read
 tests/unit/metadata/path_tree_delete_catch2_test.cpp:24:portability/env-read # reviewed raw environment read

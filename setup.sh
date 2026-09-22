@@ -701,11 +701,6 @@ else
 	fi
 fi
 
-if [[ "${YAMS_DISABLE_SYMBOL_EXTRACTION:-}" == "true" ]]; then
-	echo "Symbol extraction disabled (YAMS_DISABLE_SYMBOL_EXTRACTION=true)"
-	CONAN_ARGS+=(-o "yams/*:enable_symbol_extraction=False")
-fi
-
 if [[ "${YAMS_DISABLE_RE2:-}" == "true" ]]; then
 	echo "RE2 disabled (YAMS_DISABLE_RE2=true)"
 	CONAN_ARGS+=(-o "yams/*:enable_re2=False")

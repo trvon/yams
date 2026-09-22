@@ -58,7 +58,6 @@ class YamsConan(ConanFile):
         "build_benchmarks": [True, False],
         "enable_profiling": [True, False],
         "enable_onnx": [True, False],
-        "enable_symbol_extraction": [True, False],
         "enable_re2": [True, False],
     }
     default_options = {
@@ -66,7 +65,6 @@ class YamsConan(ConanFile):
         "build_benchmarks": False,
         "enable_profiling": False,
         "enable_onnx": True,
-        "enable_symbol_extraction": True,
         "enable_re2": True,
     }
 
@@ -104,12 +102,6 @@ class YamsConan(ConanFile):
             # Catch2 must be a regular requirement so Meson dependency()
             # can resolve catch2/catch2-with-main via generated deps.
             self.requires("catch2/3.5.2")
-
-        if self.options.enable_symbol_extraction:  # type: ignore
-            try:
-                self.requires("tree-sitter/0.25.9")
-            except Exception:
-                pass
 
         # ONNX Runtime for vector/embedding support (optional)
         if self.options.enable_onnx:  # type: ignore
