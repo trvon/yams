@@ -2163,22 +2163,6 @@ std::string ConfigResolver::resolveRerankerModel(const DaemonConfig& config) {
     return {};
 }
 
-bool ConfigResolver::isSymbolExtractionEnabled(const DaemonConfig& config) {
-    try {
-        const auto configPath =
-            !config.configFilePath.empty() ? config.configFilePath : resolveDefaultConfigPath();
-        const auto values = yams::config::parse_simple_toml(configPath);
-        if (const auto it = values.find("plugins.symbol_extraction.enable"); it != values.end()) {
-            return parseTomlBool(it->second).value_or(true);
-        }
-    } catch (const std::exception& error) {
-        spdlog::debug("[ConfigResolver] Failed to read symbol extraction flag: {}", error.what());
-    } catch (...) {
-        spdlog::debug("[ConfigResolver] Failed to read symbol extraction flag: unknown error");
-    }
-    return true;
-}
-
 int ConfigResolver::readTimeoutMs(const char* envName, int defaultMs, int minMs) {
     if (auto value = yams::config::read_env_int(envName).value) {
         return std::max(minMs, *value);

@@ -1236,7 +1236,6 @@ void ServiceManager::clearCachedServiceState() {
         std::lock_guard lock(contentExtractorsMutex_);
         contentExtractors_.clear();
     }
-    symbolExtractors_.clear();
     cachedQueryConceptExtractor_ = {};
     searchEngineManager_.clearEngine();
     searchComponent_.reset();
@@ -2443,17 +2442,6 @@ ServiceManager::initializeAsyncAwaitable(yams::compat::stop_token token) {
                 if (piq) {
                     if (!refreshedExtractors.empty()) {
                         piq->setExtractors(refreshedExtractors);
-                    }
-                    std::unordered_map<std::string, std::string> extMap;
-                    for (const auto& extractor : pluginManager_->getSymbolExtractors()) {
-                        if (!extractor)
-                            continue;
-                        for (const auto& [ext, lang] : extractor->getSupportedExtensions()) {
-                            extMap[ext] = lang;
-                        }
-                    }
-                    if (!extMap.empty()) {
-                        piq->setSymbolExtensionMap(std::move(extMap));
                     }
                     if (auto titleExtractor =
                             createGlinerExtractionFunc(pluginManager_->getEntityExtractors())) {

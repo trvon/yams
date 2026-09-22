@@ -1514,7 +1514,6 @@ struct BenchmarkResult {
                 {"edges_coalesced", stats.edgesCoalesced},
                 {"aliases_added", stats.aliasesAdded},
                 {"doc_entities_added", stats.docEntitiesAdded},
-                {"symbols_upserted", stats.symbolsUpserted},
                 {"node_key_lookups_batched", stats.nodeKeyLookupsBatched},
                 {"max_queue_depth", stats.maxQueueDepth},
                 {"capacity_rejections", stats.capacityRejections},
@@ -1590,9 +1589,6 @@ QueueSnapshot captureQueueSnapshot() {
     }
     if (auto q = bus.get_channel<InternalEventBus::KgJob>("kg_jobs")) {
         snap.kg_jobs = q->size_approx();
-    }
-    if (auto q = bus.get_channel<InternalEventBus::SymbolExtractionJob>("symbol_extraction")) {
-        snap.symbol_jobs = q->size_approx();
     }
     if (auto q = bus.get_channel<InternalEventBus::EntityExtractionJob>("entity_extraction")) {
         snap.entity_jobs = q->size_approx();

@@ -402,7 +402,6 @@ public:
     static std::string resolveRerankerModel(const DaemonConfig& config);
 
     /// Compatibility lookup retained for installed consumers; typed plugin policy is preferred.
-    static bool isSymbolExtractionEnabled(const DaemonConfig& config);
 
     /**
      * @brief Detect if embedding preload on startup is configured.

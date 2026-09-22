@@ -1,12 +1,22 @@
 #pragma once
 
+#include <algorithm>
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <yams/core/types.h>
 
 namespace yams::daemon {
+
+// Plugin interface removed in v0.20 together with the code-symbol graph. Hosts refuse plugins
+// that still declare it instead of adopting them.
+inline constexpr std::string_view kRemovedSymbolExtractorInterface = "symbol_extractor_v1";
+
+inline bool declaresRemovedSymbolExtractor(const std::vector<std::string>& interfaces) {
+    return std::ranges::find(interfaces, kRemovedSymbolExtractorInterface) != interfaces.end();
+}
 
 struct PluginDescriptor {
     std::string name;

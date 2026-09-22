@@ -421,9 +421,7 @@ else
   message('GTest not found; skipping daemon_socket_accept_bench.')
 endif
 
-# PBI-073: Symbol extraction benchmark (Catch2-based)
-# Validates symbol extraction quality (Recall/Precision/F1) and performance
-# Only build if Catch2 is available (requires build_tests=true in conan)
+# Catch2-based benchmarks. Only built when Catch2 is available (build_tests=true in conan).
 catch2_with_main_dep = dependency('catch2-with-main', required: false)
 if catch2_with_main_dep.found()
   write_coordinator_bench = executable('write_coordinator_bench',
@@ -509,7 +507,6 @@ if catch2_with_main_dep.found()
 
   # HNSW Entity Search benchmark (Catch2-based)
   # Benchmarks HNSW search performance with various corpus sizes, dimensions, and k values
-  # Also tests symbol extractor integration for entity vector search
   hnsw_entity_search_bench = executable('hnsw_entity_search_bench',
     files('hnsw_entity_search_bench.cpp'),
     include_directories: incs,
@@ -619,5 +616,5 @@ if catch2_with_main_dep.found()
 
   alias_target('bench_topology_ablation', topology_ablation_bench)
 else
-  message('Catch2 not found, skipping symbol_extraction_bench, hnsw_entity_search_bench, and multi_client_ingestion_bench')
+  message('Catch2 not found, skipping hnsw_entity_search_bench and multi_client_ingestion_bench')
 endif

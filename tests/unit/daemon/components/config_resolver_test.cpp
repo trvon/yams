@@ -701,7 +701,6 @@ batch_size = 32
     DaemonConfig daemonConfig;
     daemonConfig.configFilePath = configPath;
     CHECK((ConfigResolver::resolveRerankerModel(daemonConfig) == "compat-reranker"));
-    CHECK_FALSE(ConfigResolver::isSymbolExtractionEnabled(daemonConfig));
 
     const auto caps = ConfigResolver::resolvePostIngestCaps();
     REQUIRE(caps.totalConcurrent.has_value());

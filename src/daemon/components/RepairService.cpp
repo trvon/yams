@@ -305,10 +305,6 @@ RepairServiceContext makeRepairServiceContext(ServiceManager* services) {
     ctx.getEmbeddingQueuedJobs = [services] { return services->getEmbeddingQueuedJobs(); };
     ctx.getEmbeddingInFlightJobs = [services] { return services->getEmbeddingInFlightJobs(); };
     ctx.getContentExtractors = [services] { return services->getContentExtractors(); };
-    ctx.getSymbolExtractors =
-        [services]() -> const std::vector<std::shared_ptr<AbiSymbolExtractorAdapter>>& {
-        return services->getSymbolExtractors();
-    };
     ctx.resolvePreferredModel = [services] { return services->resolvePreferredModel(); };
     ctx.getEmbeddingModelName = [services] { return services->getEmbeddingModelName(); };
     ctx.rebuildTopologyArtifacts = [services](const std::string& reason, bool dryRun,
