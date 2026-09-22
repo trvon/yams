@@ -998,7 +998,7 @@ TEST_CASE("KG Store: orphan cleanup removes invalid rows and preserves valid row
 
 TEST_CASE("KG Store: document hash and extraction state helpers handle missing and updated rows",
           "[unit][metadata][kg]") {
-    KGStoreRepoFixture fix;
+    KGStoreRepoFixture fix(true);
 
     const auto docId = fix.insertDocument("hash-state-doc", "/tmp/state-doc.cpp");
 

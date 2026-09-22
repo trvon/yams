@@ -15,7 +15,7 @@
     { "type": "chore", "section": "Maintenance", "hidden": true },
     { "type": "ci", "section": "CI/CD", "hidden": true },
     { "type": "test", "section": "Testing", "hidden": true },
-    { "type": "refactor", "section": "Changed", "hidden": true },
+    { "type": "refactor", "section": "Changed" },
     { "type": "build", "section": "Build", "hidden": true }
   ],
   "packages": {

@@ -44,6 +44,12 @@ class CandidateReport:
                     "agree, and no release version has been pre-bumped."
                 ),
                 "",
+                "### Promotion Merge Policy",
+                "",
+                "- **Merge Strategy**: Use **'Create a merge commit'** (`git merge --no-ff`) or fast-forward (`git merge --ff-only`).",
+                "- **NEVER Squash and Merge**: Squash-merging experimental into main destroys individual commit metadata, breaking Release Please changelog generation and breaking Git ancestry for future promotions.",
+                "- **Back-Merge Requirement**: Any commits landing directly on main must be back-merged immediately into experimental.",
+                "",
             )
         )
 
@@ -184,7 +190,8 @@ def validate_candidate(root: Path, base: str, candidate: str) -> CandidateReport
             f"{missing} base commit(s) from main {base_sha} are missing from {candidate_sha}. "
             "Merge current main into the candidate branch, resolve conflicts while preserving "
             "both branches' changes, then rerun validation on the resulting immutable SHA. "
-            "This preflight does not merge or modify either branch."
+            "This preflight does not merge or modify either branch. "
+            "Note: Never squash-merge promotions into main, as squashing severs commit ancestry."
         )
 
     commit_count = int(

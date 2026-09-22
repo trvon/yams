@@ -2,10 +2,6 @@
 name: Draft Promotion
 
 "on":
-  workflow_run:
-    workflows: [Tests]
-    types: [requested]
-    branches: [experimental]
   workflow_dispatch: {}
 
 permissions: {}
@@ -16,12 +12,7 @@ concurrency:
 
 jobs:
   reconcile:
-    if: >-
-      github.repository == 'trvon/yams' && github.ref == 'refs/heads/main' &&
-      (github.event_name == 'workflow_dispatch' ||
-       (github.event.workflow_run.event == 'push' &&
-        github.event.workflow_run.head_branch == 'experimental' &&
-        github.event.workflow_run.head_repository.full_name == github.repository))
+    if: github.repository == 'trvon/yams' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -51,4 +42,8 @@ jobs:
             echo 'GITHUB_TOKEN PR creation does not trigger normal PR-opened checks.'
             echo 'A maintainer must verify current-head checks and close/reopen the PR with their own account if needed.'
             echo 'If PR creation is denied, a maintainer must approve repository Actions PR-creation settings; this job never changes them.'
+            echo ''
+            echo '### Promotion Merge Policy Reminder'
+            echo 'Promotions from experimental to main must use "Create a merge commit" (git merge --no-ff) or fast-forward.'
+            echo 'NEVER use "Squash and merge" into main.'
           } >> "$GITHUB_STEP_SUMMARY"
