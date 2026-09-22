@@ -290,8 +290,6 @@ public:
                                 nlohmann::json caps = nlohmann::json::object();
                                 caps["content_extractors_loaded"] =
                                     getCount("content_extractors_loaded");
-                                caps["symbol_extractors_loaded"] =
-                                    getCount("symbol_extractors_loaded");
                                 caps["entity_extractors_loaded"] =
                                     getCount("entity_extractors_loaded");
                                 caps["title_extractor_enabled"] =
@@ -300,10 +298,6 @@ public:
                                 caps["content_extractors_ready"] =
                                     s.readinessStates.contains("content_extractors_ready")
                                         ? s.readinessStates.at("content_extractors_ready")
-                                        : false;
-                                caps["symbol_extractors_ready"] =
-                                    s.readinessStates.contains("symbol_extractors_ready")
-                                        ? s.readinessStates.at("symbol_extractors_ready")
                                         : false;
                                 caps["entity_extractors_ready"] =
                                     s.readinessStates.contains("entity_extractors_ready")
@@ -801,15 +795,13 @@ public:
                                                     !s.embeddingModel.empty() || s.embeddingDim > 0;
                             const auto contentExtractorCount =
                                 getCount("content_extractors_loaded");
-                            const auto symbolExtractorCount = getCount("symbol_extractors_loaded");
                             const auto entityExtractorCount = getCount("entity_extractors_loaded");
                             const bool titleExtractorEnabled =
                                 getCount("title_extractor_enabled") != 0;
                             const auto skippedPluginCount = getCount("plugin_skipped_count");
                             const bool hasCapabilities =
-                                contentExtractorCount > 0 || symbolExtractorCount > 0 ||
-                                entityExtractorCount > 0 || titleExtractorEnabled ||
-                                skippedPluginCount > 0;
+                                contentExtractorCount > 0 || entityExtractorCount > 0 ||
+                                titleExtractorEnabled || skippedPluginCount > 0;
                             if (hasPlugins || hasEmbeddingInfo || hasCapabilities) {
                                 std::cout << "\n" << section_header("Plugins") << "\n\n";
                                 std::vector<Row> plugRows;
@@ -861,12 +853,6 @@ public:
                                                                    : Severity::Warn,
                                          contentExtractorCount > 0 ? "Ready" : "Unavailable", true),
                                      std::to_string(contentExtractorCount) + " loaded"});
-                                plugRows.push_back(
-                                    {"Symbol Extractors",
-                                     severity_text(
-                                         symbolExtractorCount > 0 ? Severity::Good : Severity::Warn,
-                                         symbolExtractorCount > 0 ? "Ready" : "Unavailable", true),
-                                     std::to_string(symbolExtractorCount) + " loaded"});
                                 plugRows.push_back(
                                     {"Entity Extractors",
                                      severity_text(

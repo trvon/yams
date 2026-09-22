@@ -405,13 +405,6 @@ public:
         std::string knowledgeGraphToken;
         std::shared_ptr<KnowledgeGraphCompletion> knowledgeGraphCompletion;
     };
-    struct SymbolExtractionJob {
-        std::string hash;
-        int64_t documentId{-1};
-        std::string filePath;
-        std::string language;
-        std::shared_ptr<std::vector<std::byte>> contentBytes;
-    };
     struct EntityExtractionJob {
         std::string hash;
         int64_t documentId{-1};

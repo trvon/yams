@@ -142,9 +142,4 @@ inline const MetadataDbTemplate& migrated_metadata_db_template() {
     return templateDb;
 }
 
-inline const MetadataDbTemplate& v39_metadata_db_template() {
-    static const MetadataDbTemplate templateDb{"yams_metadata_v39_template_", 39};
-    return templateDb;
-}
-
 } // namespace yams::test

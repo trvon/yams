@@ -234,7 +234,6 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
             }
             try {
                 const auto contentExtractorCount = serviceManager->getContentExtractors().size();
-                const auto symbolExtractorCount = serviceManager->getSymbolExtractors().size();
                 const auto entityExtractorCount = serviceManager->getEntityExtractors().size();
                 const bool titleExtractorReady = serviceManager->hasTitleExtractor();
 
@@ -244,13 +243,11 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
                 }
 
                 setVal(metrics::kContentExtractorsLoaded, contentExtractorCount);
-                setVal(metrics::kSymbolExtractorsLoaded, symbolExtractorCount);
                 setVal(metrics::kEntityExtractorsLoaded, entityExtractorCount);
                 setVal(metrics::kTitleExtractorEnabled, titleExtractorReady ? 1 : 0);
                 setVal(metrics::kPluginSkippedCount, skippedPlugins);
 
                 setReady(readiness::kContentExtractorsReady, contentExtractorCount > 0);
-                setReady(readiness::kSymbolExtractorsReady, symbolExtractorCount > 0);
                 setReady(readiness::kEntityExtractorsReady, entityExtractorCount > 0);
                 setReady(readiness::kTitleExtractorReady, titleExtractorReady);
             } catch (...) { // NOLINT(bugprone-empty-catch)
@@ -787,7 +784,6 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
                 if (serviceManager_) {
                     const auto contentExtractorCount =
                         serviceManager_->getContentExtractors().size();
-                    const auto symbolExtractorCount = serviceManager_->getSymbolExtractors().size();
                     const auto entityExtractorCount = serviceManager_->getEntityExtractors().size();
                     const bool titleExtractorReady = serviceManager_->hasTitleExtractor();
                     std::size_t skippedPlugins = 0;
@@ -797,8 +793,6 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
 
                     res.requestCounts[std::string(metrics::kContentExtractorsLoaded)] =
                         contentExtractorCount;
-                    res.requestCounts[std::string(metrics::kSymbolExtractorsLoaded)] =
-                        symbolExtractorCount;
                     res.requestCounts[std::string(metrics::kEntityExtractorsLoaded)] =
                         entityExtractorCount;
                     res.requestCounts[std::string(metrics::kTitleExtractorEnabled)] =
@@ -807,8 +801,6 @@ boost::asio::awaitable<Response> RequestDispatcher::handleStatusRequest(const St
 
                     res.readinessStates[std::string(readiness::kContentExtractorsReady)] =
                         contentExtractorCount > 0;
-                    res.readinessStates[std::string(readiness::kSymbolExtractorsReady)] =
-                        symbolExtractorCount > 0;
                     res.readinessStates[std::string(readiness::kEntityExtractorsReady)] =
                         entityExtractorCount > 0;
                     res.readinessStates[std::string(readiness::kTitleExtractorReady)] =
@@ -1277,8 +1269,6 @@ RequestDispatcher::handleGetStatsRequest(const GetStatsRequest& req) {
                         std::to_string(stats.extractionStatusesUpdated);
                     response.additionalStats["write_embedding_statuses_updated"] =
                         std::to_string(stats.embeddingStatusesUpdated);
-                    response.additionalStats["write_symbol_extraction_states_updated"] =
-                        std::to_string(stats.symbolExtractionStatesUpdated);
                     response.additionalStats["kg_write_edges_deleted"] =
                         std::to_string(stats.edgesDeleted);
                     response.additionalStats["kg_write_nodes_deleted"] =

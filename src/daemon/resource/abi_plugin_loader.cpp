@@ -42,6 +42,7 @@ static const char* dlerror() {
 #include <yams/config/config_helpers.h>
 #include <yams/daemon/resource/abi_plugin_loader.h>
 #include <yams/daemon/resource/model_provider.h>
+#include <yams/daemon/resource/plugin_host.h>
 #include <yams/daemon/resource/plugin_host_services.h>
 #include <yams/daemon/resource/plugin_trust.h>
 #include <yams/plugins/abi.h>
@@ -397,6 +398,15 @@ Result<AbiPluginLoader::ScanResult> AbiPluginLoader::load(const std::filesystem:
             }
         }
     } catch (...) {
+    }
+    if (declaresRemovedSymbolExtractor(hi->info.interfaces)) {
+        spdlog::warn("Skipping plugin '{}' ({}): the {} interface was removed in v0.20",
+                     hi->info.name, canon.string(), kRemovedSymbolExtractorInterface);
+        recordSkip("symbol_extractor_v1 interface removed in v0.20");
+        // hi owns the handle and host context; releasing it shuts the plugin down.
+        return Error{ErrorCode::NotSupported,
+                     "Plugin declares the removed symbol_extractor_v1 interface: " +
+                         canon.string()};
     }
     // Normalize provider name to avoid duplicate variants on UNIX (e.g., libyams_foo_plugin vs
     // yams_foo_plugin). Prefer non-'lib' prefix for user-facing identity.

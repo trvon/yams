@@ -15,6 +15,7 @@
 #include <regex>
 #include <set>
 #include <unordered_map>
+#include <unordered_set>
 
 #include <yams/config/config_helpers.h>
 #include <yams/daemon/resource/plugin_trust.h>
@@ -56,6 +57,7 @@ struct ExternalPluginHost::Impl {
     // This avoids spawning duplicate processes during scan + load sequences
     mutable std::mutex manifest_cache_mutex;
     std::unordered_map<std::string, PluginDescriptor> manifest_cache;
+    std::unordered_set<std::string> removed_interface_refusals;
 
     Impl(ServiceManager* sm, const std::filesystem::path& trustFile, ExternalPluginHostConfig cfg)
         : service_manager(sm), trust_file(trustFile), config(std::move(cfg)) {
@@ -112,15 +114,27 @@ struct ExternalPluginHost::Impl {
             if (caps.contains("content_extraction")) {
                 desc.interfaces.push_back("content_extractor_v1");
             }
-            if (caps.contains("symbol_extraction")) {
-                desc.interfaces.push_back("symbol_extractor_v1");
-            }
             if (caps.contains("graph_store")) {
                 desc.interfaces.push_back("graph_store_v1");
             }
         }
 
         return desc;
+    }
+
+    // True when the manifest declares the symbol extractor interface removed in v0.20, either
+    // explicitly or through the legacy `symbol_extraction` capability.
+    static bool declaresRemovedSymbolExtraction(const PluginDescriptor& desc) {
+        if (declaresRemovedSymbolExtractor(desc.interfaces)) {
+            return true;
+        }
+        try {
+            auto manifest = json::parse(desc.manifestJson);
+            return manifest.contains("capabilities") && manifest["capabilities"].is_object() &&
+                   manifest["capabilities"].contains("symbol_extraction");
+        } catch (const json::exception&) {
+            return false;
+        }
     }
 
     //--------------------------------------------------------------------------
@@ -191,6 +205,22 @@ struct ExternalPluginHost::Impl {
 
             // Shutdown the temporary process
             (void)rpc_client->call("plugin.shutdown", nullptr, config.defaultRpcTimeout);
+        }
+
+        if (declaresRemovedSymbolExtraction(*desc)) {
+            bool firstRefusal = false;
+            {
+                std::lock_guard<std::mutex> cache_lock(manifest_cache_mutex);
+                firstRefusal = removed_interface_refusals.insert(canonical_path).second;
+            }
+            if (firstRefusal) {
+                spdlog::warn("ExternalPluginHost: skipping plugin '{}' ({}): the {} interface "
+                             "was removed in v0.20",
+                             desc->name, file.string(), kRemovedSymbolExtractorInterface);
+            }
+            return Error{ErrorCode::NotSupported,
+                         "Plugin declares the removed symbol_extractor_v1 interface: " +
+                             file.string()};
         }
 
         // Cache the result
