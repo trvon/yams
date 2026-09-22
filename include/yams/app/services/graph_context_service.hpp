@@ -7,6 +7,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace yams::metadata {
@@ -20,9 +21,16 @@ namespace yams::app::services {
  * Agent-oriented graph context service.
  *
  * GraphQueryService exposes low-level KG traversal. GraphContextService composes
- * symbol lookup, graph traversal, source hydration, ranking, and output budgets
- * into read-equivalent context blocks for CLI/MCP/agent surfaces.
+ * node lookup (labels and aliases), graph traversal, source hydration, ranking, and output
+ * budgets into read-equivalent context blocks for CLI/MCP/agent surfaces.
  */
+
+// Reported by impact/affected-tests analysis, which walked the code-symbol edges (calls,
+// references, inherits, implements) that v0.20 stopped producing and migration 40 deleted.
+inline constexpr std::string_view kImpactNeedsSymbolGraphWarning =
+    "code-symbol graph was removed in v0.20; impact analysis needs symbol edges";
+inline constexpr std::string_view kAffectedTestsNeedSymbolGraphWarning =
+    "code-symbol graph was removed in v0.20; affected-test analysis needs symbol edges";
 
 enum class GraphContextSnippetMode {
     Full,    // Include the selected source span in full, subject to budgets.
