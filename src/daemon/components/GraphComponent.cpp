@@ -186,16 +186,9 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
         return Result<void>();
     }
 
-    // Need ServiceManager to access the content store and NL entity extractors
+    // Need ServiceManager to access the NL entity extractors
     if (!serviceManager_) {
         spdlog::debug("[GraphComponent] No service manager, skipping extraction");
-        return Result<void>();
-    }
-
-    // Get content store to load document content
-    auto contentStore = serviceManager_->getContentStore();
-    if (!contentStore) {
-        spdlog::debug("[GraphComponent] No content store available");
         return Result<void>();
     }
 
@@ -236,28 +229,11 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
                                          ctx.knowledgeGraphCompletion);
     }
 
-    std::vector<std::byte> bytes;
-    if (ctx.contentBytes) {
-        bytes = *ctx.contentBytes;
-    } else {
-        // Load document content
-        auto contentResult = contentStore->retrieveBytes(ctx.documentHash);
-        if (!contentResult) {
-            spdlog::warn("[GraphComponent] Failed to load content for {}: {}",
-                         ctx.documentHash.substr(0, 12), contentResult.error().message);
-            return contentResult.error();
-        }
-        bytes = std::move(contentResult.value());
-    }
-
-    // Convert bytes to UTF-8 string
-    std::string contentUtf8(reinterpret_cast<const char*>(bytes.data()), bytes.size());
-
-    // Submit for entity extraction
+    // The graph stage only records completion (NL entities are written by the PostIngestQueue
+    // title+NL stage since v0.20), so the job carries no document content.
     EntityExtractionJob job;
     job.documentHash = ctx.documentHash;
     job.filePath = ctx.filePath;
-    job.contentUtf8 = std::move(contentUtf8);
     job.documentDbId = ctx.documentDbId;
     job.knowledgeGraphToken = ctx.knowledgeGraphToken;
     job.knowledgeGraphCompletion = ctx.knowledgeGraphCompletion;
@@ -267,8 +243,8 @@ Result<void> GraphComponent::onDocumentIngested(const DocumentGraphContext& ctx)
         spdlog::warn("[GraphComponent] Failed to submit extraction for {}: {}",
                      ctx.documentHash.substr(0, 12), submitResult.error().message);
     } else {
-        spdlog::info("[GraphComponent] Queued entity extraction for {} ({})", ctx.filePath,
-                     ctx.documentHash.substr(0, 12));
+        spdlog::debug("[GraphComponent] Queued graph completion for {} ({})", ctx.filePath,
+                      ctx.documentHash.substr(0, 12));
     }
 
     return submitResult;
@@ -298,11 +274,6 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
         return Error{ErrorCode::NotInitialized,
                      "GraphComponent batch ingest requires entity service + service manager"};
     }
-    auto contentStore = serviceManager_->getContentStore();
-    if (!contentStore) {
-        return Error{ErrorCode::NotInitialized, "ContentStore unavailable"};
-    }
-
     const auto& nlExtractors = serviceManager_->getEntityExtractors();
     auto nlSupports = [&](std::string_view contentType) {
         for (const auto& ex : nlExtractors) {
@@ -354,34 +325,10 @@ Result<void> GraphComponent::onDocumentsIngestedBatch(std::vector<DocumentGraphC
             continue;
         }
 
-        const std::byte* dataPtr = nullptr;
-        std::size_t dataLen = 0;
-        std::vector<std::byte> ownedFallback;
-        if (ctx.contentBytes) {
-            dataPtr = ctx.contentBytes->data();
-            dataLen = ctx.contentBytes->size();
-        } else {
-            auto contentResult = contentStore->retrieveBytes(ctx.documentHash);
-            if (!contentResult) {
-                spdlog::warn("[GraphComponent] Failed to load content for {}: {}",
-                             ctx.documentHash.substr(0, 12), contentResult.error().message);
-                if (!firstError)
-                    firstError = contentResult.error();
-                skipped++;
-                continue;
-            }
-            ownedFallback = std::move(contentResult.value());
-            dataPtr = ownedFallback.data();
-            dataLen = ownedFallback.size();
-        }
-
-        std::string contentUtf8(reinterpret_cast<const char*>(dataPtr), dataLen);
-
-        // Build extraction job
+        // Completion-only job: the graph stage no longer reads document content.
         EntityExtractionJob job;
         job.documentHash = std::move(ctx.documentHash);
         job.filePath = std::move(ctx.filePath);
-        job.contentUtf8 = std::move(contentUtf8);
         job.documentDbId = ctx.documentDbId;
         job.knowledgeGraphToken = std::move(ctx.knowledgeGraphToken);
         job.knowledgeGraphCompletion = std::move(ctx.knowledgeGraphCompletion);
