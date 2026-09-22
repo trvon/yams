@@ -189,20 +189,6 @@ bool queryMentionsTests(const std::string& query) {
     return lowered.find("test") != std::string::npos || lowered.find("spec") != std::string::npos;
 }
 
-bool looksLikePathQuery(const std::string& query) {
-    if (query.empty()) {
-        return false;
-    }
-    if (query.find('/') != std::string::npos || query.find('\\') != std::string::npos) {
-        return true;
-    }
-    if (query.find_first_of(" \t\n\r") != std::string::npos) {
-        return false;
-    }
-    const auto ext = std::filesystem::path(query).extension().string();
-    return !ext.empty() && ext.size() <= 10;
-}
-
 std::string languageFromPath(const std::string& path) {
     const auto ext = lowerAscii(std::filesystem::path(path).extension().string());
     if (ext == ".cpp" || ext == ".cc" || ext == ".cxx" || ext == ".hpp" || ext == ".h")
@@ -280,22 +266,6 @@ std::optional<std::int32_t> tryExtractIntProperty(const metadata::KGNode& node,
     } catch (...) {
         return std::nullopt;
     }
-}
-
-bool nodeWithinScope(const metadata::KGNode& node, std::string_view scopePathPrefix) {
-    if (scopePathPrefix.empty()) {
-        return true;
-    }
-    if (const auto filePath = tryExtractStringProperty(node, "file_path")) {
-        return pathWithinScope(*filePath, scopePathPrefix);
-    }
-    if (const auto sourceFile = tryExtractStringProperty(node, "source_file")) {
-        return pathWithinScope(*sourceFile, scopePathPrefix);
-    }
-    if (const auto sourcePath = metadata::sourcePathFromNodeKey(node.nodeKey)) {
-        return pathWithinScope(*sourcePath, scopePathPrefix);
-    }
-    return false;
 }
 
 std::optional<std::string> filePathFromNodeKey(std::string_view nodeKey) {
