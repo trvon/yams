@@ -57,17 +57,21 @@ struct TopologyRoutingSnapshotLookup {
 
 using TopologyRoutingSnapshotLoader =
     std::function<Result<std::optional<yams::topology::TopologyArtifactBatch>>()>;
+/// Loader that hands out the store's resident snapshot instead of a copy (null when none).
+using TopologyRoutingSharedSnapshotLoader =
+    std::function<Result<std::shared_ptr<const yams::topology::TopologyArtifactBatch>>()>;
 
 /// Thread-safe, epoch-aware cache for an immutable, prevalidated routing snapshot.
 class TopologyRoutingSnapshotCache {
 public:
     explicit TopologyRoutingSnapshotCache(TopologyRoutingSnapshotLoader loader);
+    explicit TopologyRoutingSnapshotCache(TopologyRoutingSharedSnapshotLoader loader);
 
     [[nodiscard]] Result<TopologyRoutingSnapshotLookup> get(std::uint64_t expectedEpoch = 0,
                                                             bool requireDenseAnnIndex = true);
 
 private:
-    TopologyRoutingSnapshotLoader loader_;
+    TopologyRoutingSharedSnapshotLoader loader_;
     std::mutex mutex_;
     std::shared_ptr<const TopologyRoutingSnapshot> cached_;
 };

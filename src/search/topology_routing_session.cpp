@@ -395,7 +395,7 @@ makeSnapshotCache(const std::shared_ptr<yams::metadata::MetadataRepository>& met
     auto store =
         std::make_shared<yams::topology::MetadataKgTopologyArtifactStore>(metadataRepo, kgStore);
     return std::make_shared<TopologyRoutingSnapshotCache>(
-        [store]() { return store->loadLatest(); });
+        TopologyRoutingSharedSnapshotLoader{[store]() { return store->loadLatestShared(); }});
 }
 
 bool loadRoutingSnapshot(const TopologyRoutingSessionRequest& request,
@@ -1580,7 +1580,25 @@ std::string topologyRoutingPolicyFingerprint(std::string_view representationFing
     return fingerprintHex(hash);
 }
 
-TopologyRoutingSnapshotCache::TopologyRoutingSnapshotCache(TopologyRoutingSnapshotLoader loader)
+TopologyRoutingSnapshotCache::TopologyRoutingSnapshotCache(TopologyRoutingSnapshotLoader loader) {
+    if (loader) {
+        loader_ = [copyLoader = std::move(loader)]()
+            -> Result<std::shared_ptr<const yams::topology::TopologyArtifactBatch>> {
+            auto loaded = copyLoader();
+            if (!loaded) {
+                return loaded.error();
+            }
+            if (!loaded.value().has_value()) {
+                return std::shared_ptr<const yams::topology::TopologyArtifactBatch>{};
+            }
+            return std::make_shared<const yams::topology::TopologyArtifactBatch>(
+                std::move(*loaded.value()));
+        };
+    }
+}
+
+TopologyRoutingSnapshotCache::TopologyRoutingSnapshotCache(
+    TopologyRoutingSharedSnapshotLoader loader)
     : loader_(std::move(loader)) {}
 
 Result<TopologyRoutingSnapshotLookup> TopologyRoutingSnapshotCache::get(std::uint64_t expectedEpoch,
@@ -1604,12 +1622,12 @@ Result<TopologyRoutingSnapshotLookup> TopologyRoutingSnapshotCache::get(std::uin
     if (!loaded) {
         return loaded.error();
     }
-    if (!loaded.value().has_value()) {
+    if (!loaded.value()) {
         return TopologyRoutingSnapshotLookup{};
     }
 
-    auto artifacts =
-        std::make_shared<yams::topology::TopologyArtifactBatch>(std::move(loaded.value().value()));
+    std::shared_ptr<const yams::topology::TopologyArtifactBatch> artifacts =
+        std::move(loaded.value());
     if (auto invalid = validateTopologyArtifactBatchForRouting(*artifacts); invalid.has_value()) {
         return Error{ErrorCode::InvalidData, std::string{"invalid_artifact:"} + *invalid};
     }

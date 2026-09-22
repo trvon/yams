@@ -11,10 +11,12 @@
 #include <yams/topology/topology_artifacts.h>
 #include <yams/topology/topology_metadata_store.h>
 
+#include <atomic>
 #include <chrono>
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace yams;
@@ -246,4 +248,101 @@ TEST_CASE("MetadataKgTopologyArtifactStore storeBatch and loadMemberships fast p
     CHECK(loaded[1].clusterId == "cluster-2");
     CHECK(loaded[1].role == DocumentTopologyRole::Outlier);
     CHECK(loaded[1].overlapClusterIds == std::vector<std::string>{"cluster-1"});
+}
+
+namespace {
+
+TopologyArtifactBatch makeTwoDocBatch(const std::string& snapshotId, uint64_t epoch) {
+    TopologyArtifactBatch batch;
+    batch.snapshotId = snapshotId;
+    batch.algorithm = "connected_components_v1";
+    batch.topologyEpoch = epoch;
+    ClusterArtifact cluster;
+    cluster.clusterId = "cluster-" + snapshotId;
+    cluster.memberCount = 2;
+    cluster.memberDocumentHashes = {"hash_a", "hash_b"};
+    batch.clusters.push_back(cluster);
+    for (const auto* hash : {"hash_a", "hash_b"}) {
+        DocumentClusterMembership membership;
+        membership.documentHash = hash;
+        membership.clusterId = cluster.clusterId;
+        batch.memberships.push_back(membership);
+    }
+    return batch;
+}
+
+} // namespace
+
+TEST_CASE("MetadataKgTopologyArtifactStore shares one resident snapshot",
+          "[unit][topology][store]") {
+    TestFixture fixture;
+    fixture.addDocument("hash_a", "/repo/a.md");
+    fixture.addDocument("hash_b", "/repo/b.md");
+
+    MetadataKgTopologyArtifactStore store(fixture.repository, fixture.kgStore);
+    REQUIRE(store.storeBatch(makeTwoDocBatch("snap-1", 1)).has_value());
+
+    auto first = store.loadLatestShared();
+    auto second = store.loadLatestShared();
+    REQUIRE(first.has_value());
+    REQUIRE(second.has_value());
+    REQUIRE(first.value());
+    CHECK(first.value().get() == second.value().get());
+    CHECK(first.value()->snapshotId == "snap-1");
+
+    REQUIRE(store.storeBatch(makeTwoDocBatch("snap-2", 2)).has_value());
+    auto third = store.loadLatestShared();
+    REQUIRE(third.has_value());
+    REQUIRE(third.value());
+    CHECK(third.value()->snapshotId == "snap-2");
+    // A reader holding the previous snapshot keeps a valid, unchanged view.
+    CHECK(first.value()->snapshotId == "snap-1");
+
+    SECTION("A fresh store reloads the persisted snapshot") {
+        MetadataKgTopologyArtifactStore reopened(fixture.repository, fixture.kgStore);
+        auto loaded = reopened.loadLatestShared();
+        REQUIRE(loaded.has_value());
+        REQUIRE(loaded.value());
+        CHECK(loaded.value()->snapshotId == "snap-2");
+    }
+}
+
+TEST_CASE("MetadataKgTopologyArtifactStore tolerates concurrent readers and a writer",
+          "[unit][topology][store][concurrency]") {
+    TestFixture fixture;
+    fixture.addDocument("hash_a", "/repo/a.md");
+    fixture.addDocument("hash_b", "/repo/b.md");
+
+    MetadataKgTopologyArtifactStore store(fixture.repository, fixture.kgStore);
+    REQUIRE(store.storeBatch(makeTwoDocBatch("snap-0", 1)).has_value());
+
+    constexpr int kWrites = 8;
+    constexpr int kReadsPerThread = 64;
+    std::atomic<bool> readFailure{false};
+    std::vector<std::thread> readers;
+    for (int t = 0; t < 3; ++t) {
+        readers.emplace_back([&] {
+            const std::vector<std::string> hashes = {"hash_a", "hash_b"};
+            for (int i = 0; i < kReadsPerThread; ++i) {
+                auto latest = store.loadLatest();
+                auto memberships = store.loadMemberships(hashes);
+                if (!latest || !latest.value().has_value() || !memberships ||
+                    memberships.value().size() != 2) {
+                    readFailure = true;
+                }
+            }
+        });
+    }
+    for (int i = 1; i <= kWrites; ++i) {
+        REQUIRE(store.storeBatch(makeTwoDocBatch("snap-" + std::to_string(i), i + 1)).has_value());
+    }
+    for (auto& reader : readers) {
+        reader.join();
+    }
+    CHECK_FALSE(readFailure.load());
+
+    auto latest = store.loadLatestShared();
+    REQUIRE(latest.has_value());
+    REQUIRE(latest.value());
+    CHECK(latest.value()->snapshotId == "snap-" + std::to_string(kWrites));
 }
