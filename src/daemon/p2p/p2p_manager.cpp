@@ -18,6 +18,7 @@
 
 #include <spdlog/spdlog.h>
 
+#include <algorithm>
 #include <atomic>
 #include <charconv>
 #include <condition_variable>
@@ -168,6 +169,44 @@ std::string P2pConnectionSpec::endpoint() const {
     return (bracket ? "[" + host + "]" : host) + ":" + std::to_string(port);
 }
 
+namespace {
+
+bool isAsciiAlnum(char c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+// Hostnames and IPv4 literals: ASCII letters, digits, '.', '-', '_'.
+bool isValidPlainHost(std::string_view host) {
+    return !host.empty() && std::ranges::all_of(host, [](char c) {
+        return isAsciiAlnum(c) || c == '.' || c == '-' || c == '_';
+    });
+}
+
+// Bracketed IPv6 literals: hex digits, ':', '.', and an optional %zone of ASCII letters/digits.
+bool isValidBracketedHost(std::string_view host) {
+    if (host.empty() || host.find(':') == std::string_view::npos) {
+        return false;
+    }
+    const auto zoneAt = host.find('%');
+    const auto address = host.substr(0, zoneAt);
+    const bool addressOk = std::ranges::all_of(address, [](char c) {
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F') ||
+               c == ':' || c == '.';
+    });
+    if (!addressOk) {
+        return false;
+    }
+    if (zoneAt == std::string_view::npos) {
+        return true;
+    }
+    const auto zone = host.substr(zoneAt + 1);
+    return !zone.empty() && std::ranges::all_of(zone, [](char c) {
+        return isAsciiAlnum(c) || c == '.' || c == '-' || c == '_';
+    });
+}
+
+} // namespace
+
 Result<P2pConnectionSpec> parseP2pConnectionString(std::string_view connectionString) {
     constexpr std::string_view scheme = "yams://";
     if (connectionString.starts_with(scheme)) {
@@ -193,6 +232,9 @@ Result<P2pConnectionSpec> parseP2pConnectionString(std::string_view connectionSt
             return Error{ErrorCode::InvalidArgument, "invalid bracketed P2P address"};
         }
         spec.host = authority.substr(1, close - 1);
+        if (!isValidBracketedHost(spec.host)) {
+            return Error{ErrorCode::InvalidArgument, "invalid bracketed P2P address"};
+        }
         portText = authority.substr(close + 2);
     } else {
         const auto colon = authority.rfind(':');
@@ -202,6 +244,9 @@ Result<P2pConnectionSpec> parseP2pConnectionString(std::string_view connectionSt
                          "P2P address must be host:port; bracket IPv6 addresses"};
         }
         spec.host = authority.substr(0, colon);
+        if (!isValidPlainHost(spec.host)) {
+            return Error{ErrorCode::InvalidArgument, "invalid P2P host name"};
+        }
         portText = authority.substr(colon + 1);
     }
     auto port = parseUnsigned<std::uint32_t>(portText, "port");
