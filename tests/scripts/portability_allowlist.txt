@@ -33,7 +33,7 @@ include/yams/daemon/resource/gpu_info.h:385:portability/env-read # reviewed raw 
 include/yams/daemon/resource/gpu_info.h:439:portability/env-read # reviewed raw environment read
 include/yams/mcp/tool_registry.h:31:portability/env-read # reviewed raw environment read
 include/yams/metadata/connection_pool.h:281:portability/jthread # feature-test guarded std::jthread
-include/yams/metadata/metadata_repository.h:67:portability/env-read # reviewed raw environment read
+include/yams/metadata/metadata_repository.h:68:portability/env-read # reviewed raw environment read
 plugins/glint/gliner_session.cpp:35:portability/env-read # reviewed raw environment read
 plugins/onnx/model_provider.cpp:88:portability/env-read # reviewed raw environment read
 plugins/onnx/model_provider.cpp:99:portability/env-read # reviewed raw environment read

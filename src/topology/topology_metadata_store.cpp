@@ -21,48 +21,13 @@ using json = nlohmann::json;
 constexpr std::string_view kLatestSnapshotNodeKey = "topology:snapshot:latest";
 constexpr std::string_view kSnapshotNodePrefix = "topology:snapshot:";
 constexpr std::string_view kClusterIdKey = "topology.cluster_id";
-constexpr std::string_view kParentClusterIdKey = "topology.parent_cluster_id";
-constexpr std::string_view kClusterLevelKey = "topology.cluster_level";
-constexpr std::string_view kPersistenceKey = "topology.persistence_score";
-constexpr std::string_view kCohesionKey = "topology.cohesion_score";
-constexpr std::string_view kBridgeKey = "topology.bridge_score";
-constexpr std::string_view kRoleKey = "topology.role";
-constexpr std::string_view kOverlapKey = "topology.overlap_cluster_ids_json";
 constexpr std::string_view kSnapshotIdKey = "topology.snapshot_id";
 
-const std::array<std::string_view, 9>& topologyMetadataKeys() {
-    static const std::array<std::string_view, 9> keys = {
-        kSnapshotIdKey,   kClusterIdKey,   kParentClusterIdKey,
-        kClusterLevelKey, kPersistenceKey, kCohesionKey,
-        kBridgeKey,       kRoleKey,        kOverlapKey};
+// Only these per-document keys are written; migration 41 pruned the structural keys, which now
+// live solely in the snapshot node.
+const std::array<std::string_view, 2>& topologyMetadataKeys() {
+    static const std::array<std::string_view, 2> keys = {kSnapshotIdKey, kClusterIdKey};
     return keys;
-}
-
-const char* roleToString(DocumentTopologyRole role) {
-    switch (role) {
-        case DocumentTopologyRole::Core:
-            return "core";
-        case DocumentTopologyRole::Bridge:
-            return "bridge";
-        case DocumentTopologyRole::Medoid:
-            return "medoid";
-        case DocumentTopologyRole::Outlier:
-            return "outlier";
-    }
-    return "core";
-}
-
-DocumentTopologyRole roleFromString(std::string_view value) {
-    if (value == "bridge") {
-        return DocumentTopologyRole::Bridge;
-    }
-    if (value == "medoid") {
-        return DocumentTopologyRole::Medoid;
-    }
-    if (value == "outlier") {
-        return DocumentTopologyRole::Outlier;
-    }
-    return DocumentTopologyRole::Core;
 }
 
 std::string snapshotNodeKey(std::string_view snapshotId) {
@@ -111,6 +76,30 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
         }
     }
 
+    // Write order makes the latest pointer the commit point: the snapshot node is written first
+    // (an orphan is harmless if a later step fails), then per-document keys, then the pointer.
+    // A failure before the pointer leaves the previous snapshot authoritative.
+    const auto nowSecs = std::chrono::duration_cast<std::chrono::seconds>(
+                             std::chrono::system_clock::now().time_since_epoch())
+                             .count();
+    if (kgStore_) {
+        metadata::KGNode snapshotNode;
+        snapshotNode.nodeKey = snapshotNodeKey(batch.snapshotId);
+        snapshotNode.label = batch.snapshotId;
+        snapshotNode.type = std::string{"topology_snapshot"};
+        snapshotNode.createdTime = nowSecs;
+        snapshotNode.updatedTime = nowSecs;
+        auto compRes = serializeTopologyBatchCompressed(batch);
+        if (!compRes) {
+            return compRes.error();
+        }
+        snapshotNode.properties = std::move(compRes.value());
+        auto snapshotResult = kgStore_->upsertNode(snapshotNode);
+        if (!snapshotResult) {
+            return snapshotResult.error();
+        }
+    }
+
     std::vector<std::tuple<int64_t, std::string, metadata::MetadataValue>> metadataEntries;
     metadataEntries.reserve(batch.memberships.size() * 2);
     for (const auto& membership : batch.memberships) {
@@ -142,39 +131,22 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
         if (!removedHashes.empty()) {
             auto removedDocsResult = metadataRepo_->batchGetDocumentsByHash(removedHashes);
             if (removedDocsResult) {
+                std::vector<std::pair<int64_t, std::string>> removals;
+                removals.reserve(removedDocsResult.value().size() * topologyMetadataKeys().size());
                 for (const auto& [hash, docInfo] : removedDocsResult.value()) {
                     for (const auto key : topologyMetadataKeys()) {
-                        auto removeResult =
-                            metadataRepo_->removeMetadata(docInfo.id, std::string(key));
-                        if (!removeResult) {
-                            return removeResult.error();
-                        }
+                        removals.emplace_back(docInfo.id, std::string(key));
                     }
+                }
+                auto removeResult = metadataRepo_->removeMetadataBatch(removals);
+                if (!removeResult) {
+                    return removeResult.error();
                 }
             }
         }
     }
 
     if (kgStore_) {
-        const auto nowSecs = std::chrono::duration_cast<std::chrono::seconds>(
-                                 std::chrono::system_clock::now().time_since_epoch())
-                                 .count();
-        metadata::KGNode snapshotNode;
-        snapshotNode.nodeKey = snapshotNodeKey(batch.snapshotId);
-        snapshotNode.label = batch.snapshotId;
-        snapshotNode.type = std::string{"topology_snapshot"};
-        snapshotNode.createdTime = nowSecs;
-        snapshotNode.updatedTime = nowSecs;
-        auto compRes = serializeTopologyBatchCompressed(batch);
-        if (!compRes) {
-            return compRes.error();
-        }
-        snapshotNode.properties = std::move(compRes.value());
-        auto snapshotResult = kgStore_->upsertNode(snapshotNode);
-        if (!snapshotResult) {
-            return snapshotResult.error();
-        }
-
         metadata::KGNode latestNode;
         latestNode.nodeKey = std::string{kLatestSnapshotNodeKey};
         latestNode.label = std::string{"latest_topology_snapshot"};
@@ -379,39 +351,12 @@ Result<std::vector<DocumentClusterMembership>> MetadataKgTopologyArtifactStore::
             continue;
         }
 
+        // Without a resident snapshot only the per-document cluster id survives (migration 41
+        // moved the structural fields into the snapshot node), so the remaining fields keep
+        // their defaults rather than reading keys that are no longer written.
         DocumentClusterMembership membership;
         membership.documentHash = hash;
         membership.clusterId = clusterIt->second.asString();
-        if (auto parentIt = allMetadata.find(std::string(kParentClusterIdKey));
-            parentIt != allMetadata.end() && !parentIt->second.asString().empty()) {
-            membership.parentClusterId = parentIt->second.asString();
-        }
-        if (auto levelIt = allMetadata.find(std::string(kClusterLevelKey));
-            levelIt != allMetadata.end()) {
-            membership.clusterLevel = static_cast<std::size_t>(levelIt->second.asInteger());
-        }
-        if (auto persistenceIt = allMetadata.find(std::string(kPersistenceKey));
-            persistenceIt != allMetadata.end()) {
-            membership.persistenceScore = persistenceIt->second.asReal();
-        }
-        if (auto cohesionIt = allMetadata.find(std::string(kCohesionKey));
-            cohesionIt != allMetadata.end()) {
-            membership.cohesionScore = cohesionIt->second.asReal();
-        }
-        if (auto bridgeIt = allMetadata.find(std::string(kBridgeKey));
-            bridgeIt != allMetadata.end()) {
-            membership.bridgeScore = bridgeIt->second.asReal();
-        }
-        if (auto roleIt = allMetadata.find(std::string(kRoleKey)); roleIt != allMetadata.end()) {
-            membership.role = roleFromString(roleIt->second.asString());
-        }
-        if (auto overlapIt = allMetadata.find(std::string(kOverlapKey));
-            overlapIt != allMetadata.end() && !overlapIt->second.asString().empty()) {
-            auto parsed = json::parse(overlapIt->second.asString(), nullptr, false);
-            if (!parsed.is_discarded() && parsed.is_array()) {
-                membership.overlapClusterIds = parsed.get<std::vector<std::string>>();
-            }
-        }
         memberships.push_back(std::move(membership));
     }
 

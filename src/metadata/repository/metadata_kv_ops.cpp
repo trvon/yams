@@ -324,4 +324,54 @@ Result<void> MetadataRepository::removeMetadata(int64_t documentId, const std::s
     metadataChangeCounter_.fetch_add(1, std::memory_order_release);
     return {};
 }
+
+Result<void> MetadataRepository::removeMetadataBatch(
+    const std::vector<std::pair<int64_t, std::string>>& entries) {
+    YAMS_ZONE_SCOPED_N("MetadataRepo::removeMetadataBatch");
+    if (entries.empty()) {
+        return {};
+    }
+    std::size_t removedRows = 0;
+    auto result = executeQuery<MetadataTagDelta>([&](Database& db) -> Result<MetadataTagDelta> {
+        removedRows = 0;
+        YAMS_TRY(beginTransactionWithRetry(db));
+        bool committed = false;
+        auto rollback = scope_exit([&] {
+            if (!committed) {
+                rollbackIgnoringErrors(db);
+            }
+        });
+
+        MetadataTagDelta total;
+        repository::CrudOps<repository::MetadataEntry> ops;
+        for (const auto& [documentId, key] : entries) {
+            // Each delta is computed before its own delete so later entries see earlier removals.
+            YAMS_TRY_UNWRAP(delta,
+                            repository::calculateMetadataTagDeltaForDelete(db, documentId, key));
+            YAMS_TRY_UNWRAP(deleted,
+                            ops.deleteWhere(db, "document_id = ? AND key = ?", documentId, key));
+            if (deleted > 0) {
+                total.tagCountDelta += delta.tagCountDelta;
+                total.docsWithTagsDelta += delta.docsWithTagsDelta;
+                removedRows += static_cast<std::size_t>(deleted);
+            }
+        }
+
+        YAMS_TRY(commitOrRollback(db));
+        committed = true;
+        return total;
+    });
+
+    if (!result) {
+        return result.error();
+    }
+    if (removedRows == 0) {
+        return {};
+    }
+    signalCorpusStatsStale();
+    applyMetadataTagDelta(cachedTagCount_, cachedDocsWithTags_, cachedDocumentCount_,
+                          result.value());
+    metadataChangeCounter_.fetch_add(removedRows, std::memory_order_release);
+    return {};
+}
 } // namespace yams::metadata

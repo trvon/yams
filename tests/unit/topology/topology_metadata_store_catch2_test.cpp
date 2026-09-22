@@ -346,3 +346,61 @@ TEST_CASE("MetadataKgTopologyArtifactStore tolerates concurrent readers and a wr
     REQUIRE(latest.value());
     CHECK(latest.value()->snapshotId == "snap-" + std::to_string(kWrites));
 }
+
+TEST_CASE("MetadataKgTopologyArtifactStore failed store leaves the prior snapshot authoritative",
+          "[unit][topology][store]") {
+    TestFixture fixture;
+    const auto idA = fixture.addDocument("hash_a", "/repo/a.md");
+    fixture.addDocument("hash_b", "/repo/b.md");
+
+    {
+        MetadataKgTopologyArtifactStore store(fixture.repository, fixture.kgStore);
+        REQUIRE(store.storeBatch(makeTwoDocBatch("snap-good", 1)).has_value());
+    }
+
+    // Inject a failure when the next snapshot node is written.
+    auto injected = fixture.pool->withConnection([](Database& db) -> Result<void> {
+        return db.execute("CREATE TRIGGER inject_snapshot_failure BEFORE INSERT ON kg_nodes "
+                          "WHEN NEW.node_key = 'topology:snapshot:snap-bad' "
+                          "BEGIN SELECT RAISE(ABORT, 'injected snapshot failure'); END;");
+    });
+    REQUIRE(injected.has_value());
+
+    {
+        MetadataKgTopologyArtifactStore store(fixture.repository, fixture.kgStore);
+        CHECK_FALSE(store.storeBatch(makeTwoDocBatch("snap-bad", 2)).has_value());
+    }
+
+    MetadataKgTopologyArtifactStore reopened(fixture.repository, fixture.kgStore);
+    auto latest = reopened.loadLatestShared();
+    REQUIRE(latest.has_value());
+    REQUIRE(latest.value());
+    CHECK(latest.value()->snapshotId == "snap-good");
+
+    // Per-document metadata must not point at a snapshot that was never persisted.
+    auto snapshotId = fixture.repository->getMetadata(idA, "topology.snapshot_id");
+    REQUIRE(snapshotId.has_value());
+    REQUIRE(snapshotId.value().has_value());
+    CHECK(snapshotId.value()->asString() == "snap-good");
+}
+
+TEST_CASE("MetadataKgTopologyArtifactStore clears topology keys for dropped documents",
+          "[unit][topology][store]") {
+    TestFixture fixture;
+    fixture.addDocument("hash_a", "/repo/a.md");
+    const auto idB = fixture.addDocument("hash_b", "/repo/b.md");
+
+    MetadataKgTopologyArtifactStore store(fixture.repository, fixture.kgStore);
+    REQUIRE(store.storeBatch(makeTwoDocBatch("snap-1", 1)).has_value());
+
+    auto next = makeTwoDocBatch("snap-2", 2);
+    next.memberships.pop_back(); // hash_b leaves the topology
+    next.clusters[0].memberDocumentHashes = {"hash_a"};
+    next.clusters[0].memberCount = 1;
+    REQUIRE(store.storeBatch(next).has_value());
+
+    auto metaB = fixture.repository->getAllMetadata(idB);
+    REQUIRE(metaB.has_value());
+    CHECK_FALSE(metaB.value().contains("topology.snapshot_id"));
+    CHECK_FALSE(metaB.value().contains("topology.cluster_id"));
+}

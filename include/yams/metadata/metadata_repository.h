@@ -15,6 +15,7 @@
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 #include <yams/metadata/connection_pool.h>
 #include <yams/metadata/database.h>
@@ -318,6 +319,17 @@ public:
     virtual Result<std::unordered_map<std::string, MetadataValue>>
     getAllMetadata(int64_t documentId) = 0;
     virtual Result<void> removeMetadata(int64_t documentId, const std::string& key) = 0;
+    /// Remove several (document, key) rows. Repositories backed by one database override this
+    /// to apply all removals in a single transaction; the default removes them one at a time.
+    virtual Result<void>
+    removeMetadataBatch(const std::vector<std::pair<int64_t, std::string>>& entries) {
+        for (const auto& [documentId, key] : entries) {
+            if (auto removed = removeMetadata(documentId, key); !removed) {
+                return removed.error();
+            }
+        }
+        return {};
+    }
 
     // Relationship operations
     virtual Result<int64_t> insertRelationship(const DocumentRelationship& relationship) = 0;
@@ -654,6 +666,8 @@ public:
     Result<std::unordered_map<std::string, MetadataValue>>
     getAllMetadata(int64_t documentId) override;
     Result<void> removeMetadata(int64_t documentId, const std::string& key) override;
+    Result<void>
+    removeMetadataBatch(const std::vector<std::pair<int64_t, std::string>>& entries) override;
 
     // Relationship operations
     Result<int64_t> insertRelationship(const DocumentRelationship& relationship) override;
