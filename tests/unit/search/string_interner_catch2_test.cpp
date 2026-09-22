@@ -90,7 +90,6 @@ TEST_CASE("TopologyRoutingSnapshotCache zero-copy flyweight index maps",
     REQUIRE(lookup.has_value());
     auto snapshot = lookup.value().snapshot;
     REQUIRE(snapshot);
-    REQUIRE(snapshot->interner);
 
     // 1. Verify clustersById size and zero-copy string_view pointing into artifacts
     REQUIRE(snapshot->clustersById.size() == snapshot->artifacts->clusters.size());
@@ -135,11 +134,16 @@ TEST_CASE("TopologyRoutingSnapshotCache zero-copy flyweight index maps",
         CHECK(it->first.data() == dHash.data());
     }
 
-    // 4. Verify interner on snapshot is functional
-    std::string testStr = "dynamic-interned-string";
-    auto interned1 = snapshot->interner->intern(testStr);
-    auto interned2 = snapshot->interner->intern(testStr);
-    CHECK(interned1 == testStr);
-    CHECK(interned1.data() == interned2.data());
-    CHECK(snapshot->interner->size() == 1);
+    // 4. A different BQ prefix rebuilds only the route index over the shared artifacts.
+    REQUIRE(upgraded->sparseRouteIndex.centroidBqIndex);
+    CHECK(upgraded->sparseRouteIndex.centroidBqIndex->dimension() == 2U);
+    auto prefixLookup = cache.get(42, true, 1);
+    REQUIRE(prefixLookup.has_value());
+    auto prefixed = prefixLookup.value().snapshot;
+    REQUIRE(prefixed);
+    CHECK(prefixed->bqPrefixDimension == 1U);
+    CHECK(prefixed->denseAnnBuildAttempted);
+    REQUIRE(prefixed->sparseRouteIndex.centroidBqIndex);
+    CHECK(prefixed->sparseRouteIndex.centroidBqIndex->dimension() == 1U);
+    CHECK(prefixed->artifacts.get() == upgraded->artifacts.get());
 }

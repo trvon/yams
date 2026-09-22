@@ -211,6 +211,12 @@ struct SearchEngineConfig {
     /// Exact-score this many cached centroid-ANN candidates when the topology exceeds the limit.
     /// Sparse-vote clusters are always retained. Zero forces exhaustive centroid scoring.
     size_t topologyRoutingAnnCandidateLimit = 64;
+    /// Shortlist this many centroids with 1-bit binary quantization before exact scoring.
+    /// Zero disables explicit BQ routing (BQ still backs up a missing dense ANN index).
+    size_t topologyRoutingBqCandidateLimit = 0;
+    /// Leading coordinate prefix for the centroid BQ index. Only meaningful for
+    /// Matryoshka-trained embeddings; zero uses the full dimension.
+    size_t topologyRoutingBqPrefixDimension = 0;
     /// Include another cluster while its score remains this close to the best route.
     float topologyAdaptiveProbeScoreGap = 0.0f;
     /// Abstain from hard narrowing when the selected/excluded boundary is closer
@@ -531,6 +537,8 @@ struct SearchEngineConfig {
         topologyMaxSeedDocuments = source.topologyMaxSeedDocuments;
         topologyRoutingRepresentativeLimit = source.topologyRoutingRepresentativeLimit;
         topologyRoutingAnnCandidateLimit = source.topologyRoutingAnnCandidateLimit;
+        topologyRoutingBqCandidateLimit = source.topologyRoutingBqCandidateLimit;
+        topologyRoutingBqPrefixDimension = source.topologyRoutingBqPrefixDimension;
         topologyAdaptiveProbeScoreGap = source.topologyAdaptiveProbeScoreGap;
         topologyNarrowMinBoundaryMargin = source.topologyNarrowMinBoundaryMargin;
         topologyMaxDocs = source.topologyMaxDocs;
