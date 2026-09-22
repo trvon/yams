@@ -10,7 +10,6 @@ inline void mapSearchServiceOptions(const SearchRequest& source,
     destination.vectorStageTimeoutMs = source.vectorStageTimeoutMs;
     destination.keywordStageTimeoutMs = source.keywordStageTimeoutMs;
     destination.snippetHydrationTimeoutMs = source.snippetHydrationTimeoutMs;
-    destination.symbolRank = source.symbolRank;
 }
 
 } // namespace yams::daemon::dispatch

@@ -1575,7 +1575,6 @@ if catch2_dep.found()
       'unit/search/cross_rerank_catch2_test.cpp',
       'unit/search/search_vector_pipeline_catch2_test.cpp',
       'unit/search/search_facets_catch2_test.cpp',
-      'unit/search/symbol_enrichment_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
