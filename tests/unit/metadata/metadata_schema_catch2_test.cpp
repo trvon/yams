@@ -75,13 +75,58 @@ struct MetadataSchemaFixture {
     }
 };
 
+struct LegacySymbolSchemaFixture {
+    std::filesystem::path dbPath_;
+    std::unique_ptr<ConnectionPool> pool_;
+    std::unique_ptr<MetadataRepository> repo_;
+
+    LegacySymbolSchemaFixture() {
+        static const bool kSuppressInfoLogs = [] {
+            spdlog::set_level(spdlog::level::warn);
+            return true;
+        }();
+        (void)kSuppressInfoLogs;
+
+        dbPath_ = yams::test::v39_metadata_db_template().clone("kronos_metadata_v39_test_");
+
+        ConnectionPoolConfig config;
+        config.minConnections = 2;
+        config.maxConnections = 4;
+        pool_ = std::make_unique<ConnectionPool>(dbPath_.string(), config);
+        auto initResult = pool_->initialize();
+        REQUIRE(initResult.has_value());
+
+        repo_ = std::make_unique<MetadataRepository>(
+            *pool_, nullptr, MetadataRepository::SchemaBootstrapMode::AssumeReady);
+    }
+
+    ~LegacySymbolSchemaFixture() {
+        repo_.reset();
+        pool_->shutdown();
+        pool_.reset();
+        yams::test::remove_sqlite_artifacts(dbPath_);
+    }
+
+    DocumentInfo createTestDocument(const std::string& name) {
+        DocumentInfo doc;
+        doc.filePath = "/test/path/" + name;
+        doc.fileName = name;
+        doc.fileExtension = ".txt";
+        doc.fileSize = 1024;
+        doc.sha256Hash = "hash_" + name;
+        doc.mimeType = "text/plain";
+        doc.createdTime =
+            std::chrono::floor<std::chrono::seconds>(std::chrono::system_clock::now());
+        doc.modifiedTime = doc.createdTime;
+        doc.indexedTime = doc.createdTime;
+        doc.contentExtracted = false;
+        doc.extractionStatus = ExtractionStatus::Pending;
+        return doc;
+    }
+};
+
 std::filesystem::path makeStandaloneMigrationDbPath(std::string_view prefix) {
-    const char* t = std::getenv("YAMS_TEST_TMPDIR");
-    auto base = (t && *t) ? std::filesystem::path(t) : std::filesystem::temp_directory_path();
-    std::error_code ec;
-    std::filesystem::create_directories(base, ec);
-    auto ts = std::chrono::steady_clock::now().time_since_epoch().count();
-    return base / (std::string(prefix) + "_" + std::to_string(ts) + ".db");
+    return yams::test::make_temp_sqlite_path(prefix);
 }
 
 struct StandaloneMigrationDb {
@@ -1004,7 +1049,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Migration version 16 hash",
     REQUIRE(result.has_value());
 }
 
-TEST_CASE_METHOD(MetadataSchemaFixture, "Symbol metadata schema",
+TEST_CASE_METHOD(LegacySymbolSchemaFixture, "Symbol metadata schema",
                  "[unit][metadata][schema][symbol]") {
     auto result = pool_->withConnection([](Database& db) -> Result<void> {
         // Check table exists
@@ -1057,7 +1102,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Symbol metadata schema",
     REQUIRE(result.has_value());
 }
 
-TEST_CASE_METHOD(MetadataSchemaFixture, "Symbol metadata insert and query",
+TEST_CASE_METHOD(LegacySymbolSchemaFixture, "Symbol metadata insert and query",
                  "[unit][metadata][schema][symbol]") {
     // Create a test document first to satisfy FK constraint
     auto doc = createTestDocument("test_symbol.cpp");
@@ -1180,7 +1225,7 @@ TEST_CASE_METHOD(MetadataSchemaFixture, "Symbol metadata insert and query",
     }
 }
 
-TEST_CASE_METHOD(MetadataSchemaFixture, "Symbol metadata foreign key constraint",
+TEST_CASE_METHOD(LegacySymbolSchemaFixture, "Symbol metadata foreign key constraint",
                  "[unit][metadata][schema][symbol][fk]") {
     // Try to insert symbol with non-existent document hash (should fail)
     auto result = pool_->withConnection([](Database& db) -> Result<void> {

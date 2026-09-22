@@ -35,7 +35,7 @@ SOURCEHUT_ALLOWLIST = {
     "docs/newsletter.md",
     "tests/scripts/check_repository_metadata.py",
 }
-SKIP_PARTS = {".git", "build", "builddir", "node_modules", "subprojects", "third_party"}
+SKIP_PARTS = {".git", "build", "builddir", "node_modules", "site", "subprojects", "third_party"}
 RETIRED_PATHS = (".build.yml", "scripts/srht-collect-artifacts.sh")
 
 
