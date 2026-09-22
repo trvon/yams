@@ -424,7 +424,8 @@ if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
 	CONAN_SUBDIR="build-profiling"
 	# Conan often writes profiling/debug toolchains under a nested build-debug directory
 	CONAN_ALT_SUBDIR="build-debug"
-	BUILD_TYPE_MESON_LOWER="debug"
+	# Profile optimized code: -O0 zone timings do not predict release hot spots.
+	BUILD_TYPE_MESON_LOWER="debugoptimized"
 elif [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
 	BUILD_DIR="build/fuzzing"
 	CONAN_SUBDIR="build-fuzzing"
@@ -1028,7 +1029,10 @@ fi
 
 # ThreadSanitizer: default enabled for Debug builds, can be overridden with --tsan/--no-tsan
 if [[ -z "${ENABLE_TSAN}" ]]; then
-	if [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_PROFILING:-false}" == "true" ]] || [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
+	# Profiling stays uninstrumented so Tracy timings are not TSAN-distorted (opt in with --tsan).
+	if [[ "${ENABLE_PROFILING:-false}" == "true" ]]; then
+		ENABLE_TSAN=false
+	elif [[ "${BUILD_TYPE}" == "Debug" ]] || [[ "${ENABLE_FUZZING:-false}" == "true" ]]; then
 		ENABLE_TSAN=true
 	else
 		ENABLE_TSAN=false
