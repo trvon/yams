@@ -1685,6 +1685,46 @@ TopologyRoutingSnapshotCache::get(std::uint64_t expectedEpoch, bool requireDense
     return TopologyRoutingSnapshotLookup{.snapshot = cached_, .cacheHit = false};
 }
 
+std::vector<float> topologyCommunitySupport(const TopologyRoutingSnapshot& snapshot,
+                                            const std::vector<std::string>& candidateHashes,
+                                            float referenceSize, TopologyCommunityStats* stats) {
+    std::vector<float> support(candidateHashes.size(), 0.0F);
+    TopologyCommunityStats local;
+    if (snapshot.artifacts == nullptr || candidateHashes.size() < 2) {
+        if (stats != nullptr) {
+            *stats = local;
+        }
+        return support;
+    }
+    std::unordered_map<std::string_view, std::vector<std::size_t>> byCluster;
+    for (std::size_t i = 0; i < candidateHashes.size(); ++i) {
+        const auto it = snapshot.membershipsByDocumentHash.find(candidateHashes[i]);
+        if (it == snapshot.membershipsByDocumentHash.end()) {
+            continue;
+        }
+        byCluster[snapshot.artifacts->memberships[it->second].clusterId].push_back(i);
+    }
+    const float denom = referenceSize > 1.0F ? referenceSize - 1.0F
+                                             : static_cast<float>(candidateHashes.size() - 1);
+    for (const auto& [_, members] : byCluster) {
+        if (members.size() < 2) {
+            continue;
+        }
+        ++local.communities;
+        local.supportedDocs += members.size();
+        local.largestCommunity = std::max(local.largestCommunity, members.size());
+        const float normalized =
+            std::clamp(static_cast<float>(members.size() - 1) / denom, 0.0F, 1.0F);
+        for (const auto member : members) {
+            support[member] = normalized;
+        }
+    }
+    if (stats != nullptr) {
+        *stats = local;
+    }
+    return support;
+}
+
 TopologyRoutingSessionResult
 runTopologyRoutingSession(const TopologyRoutingSessionRequest& request,
                           const std::shared_ptr<yams::metadata::MetadataRepository>& metadataRepo,

@@ -3620,13 +3620,33 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
                 std::size_t graphLargestCommunity = 0;
                 double graphCommunitySignalMass = 0.0;
                 std::size_t graphCommunityBoostedDocs = 0;
-                const auto communitySupport = computeReciprocalCommunitySupport(
-                    kgStore_, candidateIds,
-                    std::max<std::size_t>(8, workingConfig.graphMaxNeighbors),
-                    workingConfig.graphCommunityReferenceSize, &graphCommunitySupportedDocs,
-                    &graphCommunityEdges, &graphLargestCommunity,
-                    workingConfig.graphCommunityDecayHalfLifeDays,
-                    workingConfig.graphCommunityMinEdgeWeight);
+                std::vector<float> communitySupport;
+                const char* graphCommunitySourceUsed = "reciprocal_edges";
+                if (workingConfig.graphCommunitySource ==
+                        SearchEngineConfig::GraphCommunitySource::TopologySnapshot &&
+                    topologySnapshotCache_) {
+                    // Co-membership from the resident snapshot: no per-candidate edge reads.
+                    auto lookup = topologySnapshotCache_->get(0, false);
+                    if (lookup && lookup.value().snapshot) {
+                        TopologyCommunityStats communityStats;
+                        communitySupport = topologyCommunitySupport(
+                            *lookup.value().snapshot, candidateIds,
+                            workingConfig.graphCommunityReferenceSize, &communityStats);
+                        graphCommunitySupportedDocs = communityStats.supportedDocs;
+                        graphLargestCommunity = communityStats.largestCommunity;
+                        graphCommunitySourceUsed = "topology_snapshot";
+                    }
+                }
+                if (communitySupport.empty()) {
+                    communitySupport = computeReciprocalCommunitySupport(
+                        kgStore_, candidateIds,
+                        std::max<std::size_t>(8, workingConfig.graphMaxNeighbors),
+                        workingConfig.graphCommunityReferenceSize, &graphCommunitySupportedDocs,
+                        &graphCommunityEdges, &graphLargestCommunity,
+                        workingConfig.graphCommunityDecayHalfLifeDays,
+                        workingConfig.graphCommunityMinEdgeWeight);
+                }
+                response.debugStats["graph_community_source"] = graphCommunitySourceUsed;
 
                 std::vector<float> rawSignals(rerankWindow, 0.0f);
                 std::vector<float> lexicalAnchors(rerankWindow, 0.0f);

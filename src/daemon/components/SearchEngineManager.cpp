@@ -484,6 +484,20 @@ SearchEngineManager::buildEngine(std::shared_ptr<yams::metadata::MetadataReposit
         if (tp.bqPrefixDimension) {
             opts.config.topologyRoutingBqPrefixDimension = *tp.bqPrefixDimension;
         }
+        if (tp.graphCommunitySource) {
+            if (*tp.graphCommunitySource == "topology_snapshot" ||
+                *tp.graphCommunitySource == "topology") {
+                opts.config.graphCommunitySource =
+                    search::SearchEngineConfig::GraphCommunitySource::TopologySnapshot;
+            } else if (*tp.graphCommunitySource == "reciprocal_edges" ||
+                       *tp.graphCommunitySource == "edges") {
+                opts.config.graphCommunitySource =
+                    search::SearchEngineConfig::GraphCommunitySource::ReciprocalEdges;
+            } else {
+                spdlog::warn("Unknown search.topology.graph_community_source '{}'; keeping '{}'",
+                             *tp.graphCommunitySource, "reciprocal_edges");
+            }
+        }
         if (tp.adaptiveProbeScoreGap) {
             opts.config.topologyAdaptiveProbeScoreGap = std::max(0.0F, *tp.adaptiveProbeScoreGap);
         }

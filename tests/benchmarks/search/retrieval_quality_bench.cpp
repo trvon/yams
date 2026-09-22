@@ -6245,6 +6245,8 @@ struct BenchFixture {
                 yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_SGC_HOPS");
             const auto simeonOuterMaxSimEnv =
                 yams::config::getenv_optional("YAMS_BENCH_SIMEON_OUTER_MAXSIM");
+            const auto graphCommunitySourceEnv =
+                yams::config::getenv_optional("YAMS_BENCH_GRAPH_COMMUNITY_SOURCE");
             const char* topologyExpansionOutputLimitEnv =
                 std::getenv("YAMS_BENCH_TOPOLOGY_EXPANSION_OUTPUT_LIMIT");
             const char* topologyGraphWeightedSeedRankingEnv =
@@ -6282,6 +6284,7 @@ struct BenchFixture {
                 (topologyRepresentativeLimitEnv && *topologyRepresentativeLimitEnv) ||
                 (topologyAnnCandidateLimitEnv && *topologyAnnCandidateLimitEnv) ||
                 envSet(topologyBqCandidateLimitEnv) || envSet(topologyBqPrefixDimEnv) ||
+                envSet(graphCommunitySourceEnv) ||
                 (topologyExpansionOutputLimitEnv && *topologyExpansionOutputLimitEnv) ||
                 (topologyGraphWeightedSeedRankingEnv && *topologyGraphWeightedSeedRankingEnv) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_ADAPTIVE_PROBE_SCORE_GAP") != nullptr) ||
@@ -6629,6 +6632,10 @@ struct BenchFixture {
                                       << parseSizeEnvOrDefault(
                                              "YAMS_BENCH_TOPOLOGY_ROUTE_BQ_CANDIDATE_LIMIT", 0)
                                       << "\n";
+                        }
+                        if (envSet(graphCommunitySourceEnv)) {
+                            configOut << "graph_community_source = \"" << *graphCommunitySourceEnv
+                                      << "\"\n";
                         }
                         if (envSet(topologyBqPrefixDimEnv)) {
                             configOut << "bq_prefix_dim = "

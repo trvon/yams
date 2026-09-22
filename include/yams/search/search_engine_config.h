@@ -264,6 +264,15 @@ struct SearchEngineConfig {
         GraphNeighbors,
     } topologyExpansionSource = TopologyExpansionSource::Clusters;
 
+    /// Where the graph-rerank community signal comes from. ReciprocalEdges walks mutual
+    /// semantic_neighbor edges among the rerank candidates on every query; TopologySnapshot reads
+    /// co-membership from the resident topology snapshot (no per-query edge reads) and falls back
+    /// to edges when no snapshot is loaded.
+    enum class GraphCommunitySource {
+        ReciprocalEdges,
+        TopologySnapshot,
+    } graphCommunitySource = GraphCommunitySource::ReciprocalEdges;
+
     [[nodiscard]] static constexpr const char*
     topologyExpansionSourceToString(TopologyExpansionSource source) noexcept {
         switch (source) {
@@ -550,6 +559,7 @@ struct SearchEngineConfig {
         topologyRouteRiskCalibration = source.topologyRouteRiskCalibration;
         topologyRouteWorkBudget = source.topologyRouteWorkBudget;
         topologyExpansionSource = source.topologyExpansionSource;
+        graphCommunitySource = source.graphCommunitySource;
         topologyGraphNeighborMinScore = source.topologyGraphNeighborMinScore;
         topologyGraphNeighborReciprocalOnly = source.topologyGraphNeighborReciprocalOnly;
         topologyGraphWeightedSeedRanking = source.topologyGraphWeightedSeedRanking;

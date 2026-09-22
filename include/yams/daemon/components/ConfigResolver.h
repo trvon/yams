@@ -113,6 +113,8 @@ public:
         std::optional<std::size_t> annCandidateLimit;
         std::optional<std::size_t> bqCandidateLimit;
         std::optional<std::size_t> bqPrefixDimension;
+        // reciprocal_edges | topology_snapshot: source of the graph-rerank community signal.
+        std::optional<std::string> graphCommunitySource;
         std::optional<float> adaptiveProbeScoreGap;
         std::optional<float> narrowMinBoundaryMargin;
         std::optional<std::size_t> maxDocs;
