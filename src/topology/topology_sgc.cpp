@@ -1,3 +1,4 @@
+#include <yams/profiling.h>
 #include <yams/topology/topology_sgc.h>
 
 #include <yams/core/assert.hpp>
@@ -24,6 +25,7 @@ struct Edge {
 
 void applySGCSmoothing(std::vector<TopologyDocumentInput>& documents,
                        const TopologyBuildConfig& config, std::size_t hops) {
+    YAMS_ZONE_SCOPED_N("topology::sgc::smooth");
     if (hops == 0 || documents.size() < 2) {
         return;
     }

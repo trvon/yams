@@ -1,6 +1,7 @@
 // Copyright (c) 2025 YAMS Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <yams/profiling.h>
 #include <yams/vector/binary_quantization.h>
 
 #include <algorithm>
@@ -107,6 +108,7 @@ std::vector<BinaryQuantizedHit> BinaryQuantizedIndex::search(std::span<const flo
 
 std::vector<BinaryQuantizedHit> BinaryQuantizedIndex::search(const BinaryVector& queryBq,
                                                              std::size_t topK) const {
+    YAMS_ZONE_SCOPED_N("vector::bq::search");
     if (topK == 0 || size() == 0 || queryBq.dimension != dimension_) {
         return {};
     }

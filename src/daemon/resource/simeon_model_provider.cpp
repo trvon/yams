@@ -2,6 +2,7 @@
 
 #include "simeon_fragments.h"
 
+#include <yams/profiling.h>
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/simeon_embedding_backend.h>
 
@@ -140,6 +141,7 @@ public:
 
     Result<std::vector<float>>
     scoreDocumentsOuterMaxSim(const std::string& query, const std::vector<std::string>& documents) {
+        YAMS_ZONE_SCOPED_N("simeon::rerank::outerMaxSim");
         auto queryFragments = detail::selectMaxSimFragments(query, kMaxQueryFragments);
         if (queryFragments.empty()) {
             queryFragments.push_back(query);

@@ -1,3 +1,4 @@
+#include <yams/profiling.h>
 #include <yams/search/topology_routing_session.h>
 
 #include <yams/metadata/knowledge_graph_store.h>
@@ -1613,6 +1614,7 @@ TopologyRoutingSnapshotCache::TopologyRoutingSnapshotCache(
 Result<TopologyRoutingSnapshotLookup>
 TopologyRoutingSnapshotCache::get(std::uint64_t expectedEpoch, bool requireDenseAnnIndex,
                                   std::size_t bqPrefixDimension) {
+    YAMS_ZONE_SCOPED_N("search::topology::snapshotCacheGet");
     // The lock is held through a build on purpose: concurrent misses wait for one build instead
     // of each constructing the route index.
     std::lock_guard lock(mutex_);
