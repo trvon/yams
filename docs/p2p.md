@@ -238,8 +238,9 @@ tools/fuzzing/fuzz.sh local p2p_handshake -max_total_time=120
 tools/fuzzing/fuzz.sh build && AFL_FUZZ_SECONDS=60 tools/fuzzing/fuzz.sh fuzz p2p_protocol
 ```
 
-`.github/workflows/fuzz-smoke.yml` runs every target for 60 seconds on pull requests that touch
-these areas and nightly, and uploads reproducers on failure.
+`.forgejo/workflows/fuzz-smoke.yml` runs every target for 60 seconds on our self-hosted Forgejo
+runner for pull requests and `experimental` pushes that touch these areas, nightly, and on demand,
+and uploads reproducers on failure. Fuzzing does not run on GitHub-hosted runners.
 
 Remaining gaps: the lane does not fuzz TLS itself, the initiator side of the handshake and delta
 exchange, or sequences that need an authenticated writer key (records are rejected before merge).
