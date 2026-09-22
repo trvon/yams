@@ -209,23 +209,46 @@ The smoke performs PUT, GET, HEAD, LIST, and DELETE. Do not put credentials or g
 
 ## Fuzz direct protocol controls
 
-The direct-P2P fuzz targets exercise the production protocol-v4 handshake/state/history control
-parsers and bounded delta/bootstrap control parsers. Their deterministic seed corpus retains a protocol-v3 hello specifically
-to verify fail-closed exact-version rejection after the v4 upgrade:
+Direct-P2P fuzz targets run the production code through a private `FrameSource` seam
+(`src/daemon/p2p/p2p_frame_source.h`): a replayed buffer of length-prefixed frames stands in for the
+TLS socket, and the TLS-derived identity is passed explicitly. Every other line is the production
+path, and each harness traps on an oracle violation.
+
+| Target | Surface | Oracle |
+|---|---|---|
+| `p2p_json` | control-frame JSON parsing | accepted frames respect the nesting bound and round-trip |
+| `p2p_connstr` | connection strings, SPKI pins, pin trust decisions | endpoints re-parse; normalization is idempotent; a changed key is never re-pinned |
+| `p2p_protocol` | single handshake control frames | (parser coverage) |
+| `p2p_handshake` | hello/window/history validators and the full acceptor | accepted handshakes bind the TLS peer and need first-contact trust |
+| `p2p_delta` | single delta/bootstrap control frames under fuzzed exchange limits | (parser coverage) |
+| `p2p_delta_stream` | batch, session and cold-bootstrap receive paths | counts and wire bytes stay inside every budget |
+| `p2p_inbound` | the manager inbound session through registry update | a completed session pinned the TLS peer |
+| `topology_codec` | persisted topology snapshots | decoded binary batches re-encode losslessly |
+
+The seed corpus keeps a protocol-v3 hello to exercise exact-version rejection, and
+`tools/fuzzing/dicts/p2p.dict` supplies the frame vocabulary. Run locally with a clang that ships
+the libFuzzer runtime (Homebrew or apt LLVM), or with AFL++ in Docker:
 
 ```bash
+CC=clang CXX=clang++ meson setup build/fuzz -Dbuild-fuzzers=true -Dbuild-tests=false
+meson compile -C build/fuzz
 tools/fuzzing/generate_corpus.sh
-tools/fuzzing/fuzz.sh build
-AFL_FUZZ_SECONDS=60 tools/fuzzing/fuzz.sh fuzz p2p_protocol
-AFL_FUZZ_SECONDS=60 tools/fuzzing/fuzz.sh fuzz p2p_delta
+tools/fuzzing/fuzz.sh local p2p_handshake -max_total_time=120
+# AFL++:
+tools/fuzzing/fuzz.sh build && AFL_FUZZ_SECONDS=60 tools/fuzzing/fuzz.sh fuzz p2p_protocol
 ```
 
-These parser harnesses do not replace deterministic TLS/session, payload-accounting, authenticated
-application, or restart tests. Bounded local fuzz runs are regression evidence, not
-release-readiness evidence. Promotion still requires exact protocol-v4 binaries on every endpoint; at least three isolated cold, warm,
-reconnect, and restart repeats; exact pre/post corpus equality; and captured latency, CPU, RSS,
-logical/wire-byte, and disk-I/O measurements. Existing protocol-v3 or host-contended profiles must
-not be reused for that gate.
+`.github/workflows/fuzz-smoke.yml` runs every target for 60 seconds on pull requests that touch
+these areas and nightly, and uploads reproducers on failure.
+
+Remaining gaps: the lane does not fuzz TLS itself, the initiator side of the handshake and delta
+exchange, or sequences that need an authenticated writer key (records are rejected before merge).
+`p2p_inbound` reopens a SQLite registry per input and runs at a few hundred executions per second.
+Bounded fuzz runs are regression evidence, not release-readiness evidence. Promotion still requires
+exact protocol-v4 binaries on every endpoint; at least three isolated cold, warm, reconnect, and
+restart repeats; exact pre/post corpus equality; and captured latency, CPU, RSS, logical/wire-byte,
+and disk-I/O measurements. Existing protocol-v3 or host-contended profiles must not be reused for
+that gate.
 
 ## Troubleshooting
 
