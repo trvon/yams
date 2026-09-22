@@ -116,7 +116,6 @@ srcs = [
   'batch_metrics.cpp',
   'document_chunker.cpp',
   'vector_utils.cpp',
-  'static_cosine_ann_index.cpp',
   'binary_quantization.cpp',
   'vector_schema_migration.cpp',
   'mock_embedding_provider.cpp',
@@ -259,11 +258,12 @@ if host_machine.system() == 'windows'
 endif
 
 sqlite_vec_backend_lib = static_library('yams_sqlite_vec_backend',
-  ['sqlite_vec_backend.cpp'],
+  ['sqlite_vec_backend.cpp', 'static_cosine_ann_index.cpp'],
   include_directories: [include_directories('../../include'), include_directories('.'), sqlite_vec_cpp_inc, simeon_inc],
   dependencies: deps_vec + vector_platform_deps,
-  # This TU instantiates sqlite-vec's header-only HNSW distance templates, so it needs the same
-  # feature defines and codegen flags as the sqlite-vec implementation library.
+  # Every TU that includes sqlite-vec's header-only HNSW/distance templates must live here: the
+  # inline kernels change body with SQLITE_VEC_ENABLE_*, so compiling one elsewhere without these
+  # defines is an ODR violation and can silently link the scalar kernel.
   cpp_args: vector_cppargs + sqlite_vec_feature_cppargs + vec_simd_cppargs + simeon_simd_defines,
   install: false,
 )
