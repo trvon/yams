@@ -15,6 +15,8 @@ namespace yams::daemon::p2p {
 
 namespace {
 
+using detail::ChannelIdentity;
+using detail::FrameSource;
 using detail::Json;
 using detail::readJson;
 using detail::writeJson;
@@ -116,7 +118,7 @@ Result<WireHello> parseHello(const Json& json, std::string_view expectedType) {
 }
 
 Result<void> validatePeerHello(const WireHello& peer, const PeerHandshakeConfig& local,
-                               const P2pConnection& connection) {
+                               std::string_view peerCertCn) {
     if (peer.protocol != kP2pProtocolVersion) {
         return Error{ErrorCode::NotSupported, "p2p protocol version mismatch"};
     }
@@ -124,7 +126,7 @@ Result<void> validatePeerHello(const WireHello& peer, const PeerHandshakeConfig&
         return Error{ErrorCode::NotSupported, "p2p envelope schema version mismatch"};
     }
     if (peer.nodeId.empty() || peer.nodeId.size() > kMaxP2pIdentityBytes ||
-        peer.corpusId.size() > kMaxP2pIdentityBytes || peer.nodeId != connection.peerCertCn() ||
+        peer.corpusId.size() > kMaxP2pIdentityBytes || peer.nodeId != peerCertCn ||
         peer.maxWriterAdvance == 0 || peer.maxWriterAdvance > kMaxP2pWriterAdvance ||
         peer.maxWriterWindowBytes == 0 || peer.maxWriterWindowBytes > kMaxP2pWriterWindowBytes) {
         return Error{ErrorCode::Unauthorized, "p2p claimed node id does not match TLS certificate"};
@@ -399,14 +401,13 @@ Result<PeerTrustDecision> preflightTrust(IPeerTrustStore& trustStore, std::strin
 }
 
 Result<PeerTrustDecision> validatePeerAndPreflightTrust(IPeerTrustStore& trustStore,
-                                                        const P2pConnection& connection,
+                                                        const ChannelIdentity& identity,
                                                         const PeerHandshakeConfig& local,
                                                         const WireHello& peer) {
-    if (auto valid = validatePeerHello(peer, local, connection); !valid) {
+    if (auto valid = validatePeerHello(peer, local, identity.peerCertCn); !valid) {
         return valid.error();
     }
-    return preflightTrust(trustStore, peer.nodeId, connection.peerSpkiPin(),
-                          local.allowFirstContact);
+    return preflightTrust(trustStore, peer.nodeId, identity.peerSpkiPin, local.allowFirstContact);
 }
 
 Result<PeerTrustDecision> commitTrust(IPeerTrustStore& trustStore, std::string_view nodeId,
@@ -418,12 +419,12 @@ Result<PeerTrustDecision> commitTrust(IPeerTrustStore& trustStore, std::string_v
     return trustStore.verifyOrPin(nodeId, spkiPin, true);
 }
 
-Result<PeerHandshakeResult> makeHandshakeResult(const P2pConnection& connection,
+Result<PeerHandshakeResult> makeHandshakeResult(const ChannelIdentity& identity,
                                                 WireState localState, WireState peerState,
                                                 const ValidatedHistoryProof& proof,
                                                 PeerTrustDecision trust) {
-    return PeerHandshakeResult{.peerNodeId = connection.peerCertCn(),
-                               .peerSpkiPin = connection.peerSpkiPin(),
+    return PeerHandshakeResult{.peerNodeId = identity.peerCertCn,
+                               .peerSpkiPin = identity.peerSpkiPin,
                                .localVersion = std::move(localState.version),
                                .peerVersion = std::move(peerState.version),
                                .peerSeen = std::move(peerState.seen),
@@ -436,19 +437,19 @@ Result<PeerHandshakeResult> makeHandshakeResult(const P2pConnection& connection,
                                .pinnedByOperator = trust.pinnedByOperator};
 }
 
-Result<void> validateLocalHandshake(const P2pConnection& connection,
+Result<void> validateLocalHandshake(const ChannelIdentity& identity,
                                     const PeerHandshakeConfig& config) {
     if (auto valid = validateConfig(config); !valid) {
         return valid.error();
     }
-    if (config.nodeId != connection.localNodeId()) {
+    if (config.nodeId != identity.localNodeId) {
         return Error{ErrorCode::InvalidState, "p2p local node id does not match TLS identity"};
     }
     return {};
 }
 
-Result<WireState> readStateFrame(P2pConnection& connection, std::chrono::milliseconds timeout) {
-    auto stateJsonValue = readJson(connection, timeout);
+Result<WireState> readStateFrame(FrameSource& frames, std::chrono::milliseconds timeout) {
+    auto stateJsonValue = readJson(frames, timeout);
     if (!stateJsonValue) {
         return stateJsonValue.error();
     }
@@ -456,10 +457,10 @@ Result<WireState> readStateFrame(P2pConnection& connection, std::chrono::millise
 }
 
 Result<PeerTrustDecision> finalizeTrust(IPeerTrustStore& trustStore,
-                                        const P2pConnection& connection,
+                                        const ChannelIdentity& identity,
                                         std::string_view peerNodeId,
                                         PeerTrustDecision preflightDecision) {
-    return commitTrust(trustStore, peerNodeId, connection.peerSpkiPin(), preflightDecision);
+    return commitTrust(trustStore, peerNodeId, identity.peerSpkiPin, preflightDecision);
 }
 
 Json historyProofJson(const WireHistoryProof& proof) {
@@ -527,14 +528,10 @@ Result<WireHistoryProof> makeLocalHistoryProof(const PeerHandshakeConfig& config
                             .digest = std::move(commitment.digest)};
 }
 
-Result<ValidatedHistoryProof> readAndValidatePeerHistoryProof(P2pConnection& connection,
-                                                              const PeerHandshakeConfig& config,
-                                                              std::string_view peerNodeId) {
-    auto json = readJson(connection, config.timeout);
-    if (!json) {
-        return json.error();
-    }
-    auto proof = parseHistoryProof(json.value());
+Result<ValidatedHistoryProof> validatePeerHistoryProof(const Json& json,
+                                                       const PeerHandshakeConfig& config,
+                                                       std::string_view peerNodeId) {
+    auto proof = parseHistoryProof(json);
     if (!proof) {
         return proof.error();
     }
@@ -553,6 +550,16 @@ Result<ValidatedHistoryProof> readAndValidatePeerHistoryProof(P2pConnection& con
     }
     const bool matches = expected->second.digest == proof.value().digest;
     return ValidatedHistoryProof{.proof = std::move(proof.value()), .matchesLocalPrefix = matches};
+}
+
+Result<ValidatedHistoryProof> readAndValidatePeerHistoryProof(FrameSource& frames,
+                                                              const PeerHandshakeConfig& config,
+                                                              std::string_view peerNodeId) {
+    auto json = readJson(frames, config.timeout);
+    if (!json) {
+        return json.error();
+    }
+    return validatePeerHistoryProof(json.value(), config, peerNodeId);
 }
 
 } // namespace
@@ -609,6 +616,70 @@ Result<void> detail::validateHandshakeControlFrame(std::span<const std::byte> fr
         return Error{ErrorCode::ValidationError,
                      std::string("invalid p2p handshake control message: ") + error.what()};
     }
+}
+
+Result<void> detail::validatePeerHelloFrame(std::span<const std::byte> frame,
+                                            std::string_view expectedType,
+                                            const PeerHandshakeConfig& local,
+                                            std::string_view peerCertCn) {
+    auto parsed = parseJsonFrame(frame);
+    if (!parsed) {
+        return parsed.error();
+    }
+    auto hello = parseHello(parsed.value(), expectedType);
+    if (!hello) {
+        return hello.error();
+    }
+    return validatePeerHello(hello.value(), local, peerCertCn);
+}
+
+Result<detail::BoundedPeerWindow> detail::validatePeerWindowFrames(
+    std::span<const std::byte> helloFrame, std::span<const std::byte> stateFrame,
+    std::span<const std::byte> windowFrame, const PeerHandshakeConfig& local) {
+    auto helloJsonValue = parseJsonFrame(helloFrame);
+    if (!helloJsonValue) {
+        return helloJsonValue.error();
+    }
+    auto hello = parseHello(helloJsonValue.value(), "hello");
+    if (!hello) {
+        return hello.error();
+    }
+    auto stateJsonValue = parseJsonFrame(stateFrame);
+    if (!stateJsonValue) {
+        return stateJsonValue.error();
+    }
+    auto state = parseState(stateJsonValue.value());
+    if (!state) {
+        return state.error();
+    }
+    auto windowJson = parseJsonFrame(windowFrame);
+    if (!windowJson) {
+        return windowJson.error();
+    }
+    auto window = parseWindowFrontier(windowJson.value());
+    if (!window) {
+        return window.error();
+    }
+    auto bounded = validatePeerWindowFrontier(local, state.value(), hello.value(), window.value());
+    if (!bounded) {
+        return bounded.error();
+    }
+    return BoundedPeerWindow{.version = std::move(bounded.value().version),
+                             .commitments = std::move(bounded.value().commitments)};
+}
+
+Result<bool> detail::validatePeerHistoryProofFrame(std::span<const std::byte> frame,
+                                                   const PeerHandshakeConfig& local,
+                                                   std::string_view peerNodeId) {
+    auto parsed = parseJsonFrame(frame);
+    if (!parsed) {
+        return parsed.error();
+    }
+    auto proof = validatePeerHistoryProof(parsed.value(), local, peerNodeId);
+    if (!proof) {
+        return proof.error();
+    }
+    return proof.value().matchesLocalPrefix;
 }
 
 Result<std::string> normalizePeerSpkiPin(std::string_view spkiPin) {
@@ -735,20 +806,21 @@ Result<bool> requiresPeerWriterQuarantine(const memory_sync::ReplicationState& l
     return localCommitment->second.digest != peerCommitment->second.digest;
 }
 
-Result<PeerHandshakeResult> initiatePeerHandshake(P2pConnection& connection,
-                                                  const PeerHandshakeConfig& config,
-                                                  IPeerTrustStore& trustStore) {
+Result<PeerHandshakeResult> detail::initiatePeerHandshake(FrameSource& frames,
+                                                          const ChannelIdentity& identity,
+                                                          const PeerHandshakeConfig& config,
+                                                          IPeerTrustStore& trustStore) {
     const auto fail = [&](Error error) -> Result<PeerHandshakeResult> {
-        connection.close();
+        frames.close();
         return error;
     };
-    if (auto valid = validateLocalHandshake(connection, config); !valid) {
+    if (auto valid = validateLocalHandshake(identity, config); !valid) {
         return fail(valid.error());
     }
-    if (auto written = writeJson(connection, helloJson(config), config.timeout); !written) {
+    if (auto written = writeJson(frames, helloJson(config), config.timeout); !written) {
         return fail(written.error());
     }
-    auto acknowledgement = readJson(connection, config.timeout);
+    auto acknowledgement = readJson(frames, config.timeout);
     if (!acknowledgement) {
         return fail(acknowledgement.error());
     }
@@ -765,14 +837,14 @@ Result<PeerHandshakeResult> initiatePeerHandshake(P2pConnection& connection,
         return fail(peerHello.error());
     }
     auto pendingTrust =
-        validatePeerAndPreflightTrust(trustStore, connection, config, peerHello.value());
+        validatePeerAndPreflightTrust(trustStore, identity, config, peerHello.value());
     if (!pendingTrust) {
         return fail(pendingTrust.error());
     }
-    if (auto written = writeJson(connection, stateJson(config), config.timeout); !written) {
+    if (auto written = writeJson(frames, stateJson(config), config.timeout); !written) {
         return fail(written.error());
     }
-    auto peerState = readStateFrame(connection, config.timeout);
+    auto peerState = readStateFrame(frames, config.timeout);
     if (!peerState) {
         return fail(peerState.error());
     }
@@ -780,12 +852,11 @@ Result<PeerHandshakeResult> initiatePeerHandshake(P2pConnection& connection,
     if (!localWindow) {
         return fail(localWindow.error());
     }
-    if (auto written =
-            writeJson(connection, windowFrontierJson(localWindow.value()), config.timeout);
+    if (auto written = writeJson(frames, windowFrontierJson(localWindow.value()), config.timeout);
         !written) {
         return fail(written.error());
     }
-    auto peerWindowJson = readJson(connection, config.timeout);
+    auto peerWindowJson = readJson(frames, config.timeout);
     if (!peerWindowJson) {
         return fail(peerWindowJson.error());
     }
@@ -807,11 +878,11 @@ Result<PeerHandshakeResult> initiatePeerHandshake(P2pConnection& connection,
     if (!localProof) {
         return fail(localProof.error());
     }
-    if (auto written = writeJson(connection, historyProofJson(localProof.value()), config.timeout);
+    if (auto written = writeJson(frames, historyProofJson(localProof.value()), config.timeout);
         !written) {
         return fail(written.error());
     }
-    auto peerProof = readAndValidatePeerHistoryProof(connection, config, peerHello.value().nodeId);
+    auto peerProof = readAndValidatePeerHistoryProof(frames, config, peerHello.value().nodeId);
     if (!peerProof) {
         return fail(peerProof.error());
     }
@@ -820,30 +891,30 @@ Result<PeerHandshakeResult> initiatePeerHandshake(P2pConnection& connection,
             Error{ErrorCode::Unauthorized, "first-contact peer failed writer prefix verification"});
     }
     auto trust =
-        finalizeTrust(trustStore, connection, peerHello.value().nodeId, pendingTrust.value());
+        finalizeTrust(trustStore, identity, peerHello.value().nodeId, pendingTrust.value());
     if (!trust) {
         return fail(trust.error());
     }
-    return makeHandshakeResult(connection, std::move(boundedLocal), std::move(boundedPeer.value()),
+    return makeHandshakeResult(identity, std::move(boundedLocal), std::move(boundedPeer.value()),
                                peerProof.value(), trust.value());
 }
 
-Result<PeerHandshakeResult> acceptPeerHandshake(P2pConnection& connection,
-                                                const PeerHandshakeConfig& config,
-                                                IPeerTrustStore& trustStore) {
+Result<PeerHandshakeResult> detail::acceptPeerHandshake(FrameSource& frames,
+                                                        const ChannelIdentity& identity,
+                                                        const PeerHandshakeConfig& config,
+                                                        IPeerTrustStore& trustStore) {
     const auto fail = [&](Error error) -> Result<PeerHandshakeResult> {
-        connection.close();
+        frames.close();
         return error;
     };
     const auto reject = [&](Error error) -> Result<PeerHandshakeResult> {
-        (void)writeJson(connection, acknowledgementJson(config, false, error.message),
-                        config.timeout);
+        (void)writeJson(frames, acknowledgementJson(config, false, error.message), config.timeout);
         return fail(std::move(error));
     };
-    if (auto valid = validateLocalHandshake(connection, config); !valid) {
+    if (auto valid = validateLocalHandshake(identity, config); !valid) {
         return fail(valid.error());
     }
-    auto helloJsonValue = readJson(connection, config.timeout);
+    auto helloJsonValue = readJson(frames, config.timeout);
     if (!helloJsonValue) {
         return fail(helloJsonValue.error());
     }
@@ -851,23 +922,22 @@ Result<PeerHandshakeResult> acceptPeerHandshake(P2pConnection& connection,
     if (!hello) {
         return reject(hello.error());
     }
-    auto pendingTrust =
-        validatePeerAndPreflightTrust(trustStore, connection, config, hello.value());
+    auto pendingTrust = validatePeerAndPreflightTrust(trustStore, identity, config, hello.value());
     if (!pendingTrust) {
         return reject(pendingTrust.error());
     }
-    if (auto written = writeJson(connection, acknowledgementJson(config, true), config.timeout);
+    if (auto written = writeJson(frames, acknowledgementJson(config, true), config.timeout);
         !written) {
         return fail(written.error());
     }
-    auto peerState = readStateFrame(connection, config.timeout);
+    auto peerState = readStateFrame(frames, config.timeout);
     if (!peerState) {
         return fail(peerState.error());
     }
-    if (auto written = writeJson(connection, stateJson(config), config.timeout); !written) {
+    if (auto written = writeJson(frames, stateJson(config), config.timeout); !written) {
         return fail(written.error());
     }
-    auto peerWindowJson = readJson(connection, config.timeout);
+    auto peerWindowJson = readJson(frames, config.timeout);
     if (!peerWindowJson) {
         return fail(peerWindowJson.error());
     }
@@ -884,8 +954,7 @@ Result<PeerHandshakeResult> acceptPeerHandshake(P2pConnection& connection,
     if (!localWindow) {
         return fail(localWindow.error());
     }
-    if (auto written =
-            writeJson(connection, windowFrontierJson(localWindow.value()), config.timeout);
+    if (auto written = writeJson(frames, windowFrontierJson(localWindow.value()), config.timeout);
         !written) {
         return fail(written.error());
     }
@@ -894,7 +963,7 @@ Result<PeerHandshakeResult> acceptPeerHandshake(P2pConnection& connection,
                          .commitments = config.localCommitments,
                          .quarantinedWriters = config.localQuarantinedWriters};
     auto boundedLocal = replaceWriterFrontier(std::move(localState), localWindow.value());
-    auto peerProof = readAndValidatePeerHistoryProof(connection, config, hello.value().nodeId);
+    auto peerProof = readAndValidatePeerHistoryProof(frames, config, hello.value().nodeId);
     if (!peerProof) {
         return fail(peerProof.error());
     }
@@ -906,16 +975,32 @@ Result<PeerHandshakeResult> acceptPeerHandshake(P2pConnection& connection,
     if (!localProof) {
         return fail(localProof.error());
     }
-    if (auto written = writeJson(connection, historyProofJson(localProof.value()), config.timeout);
+    if (auto written = writeJson(frames, historyProofJson(localProof.value()), config.timeout);
         !written) {
         return fail(written.error());
     }
-    auto trust = finalizeTrust(trustStore, connection, hello.value().nodeId, pendingTrust.value());
+    auto trust = finalizeTrust(trustStore, identity, hello.value().nodeId, pendingTrust.value());
     if (!trust) {
         return fail(trust.error());
     }
-    return makeHandshakeResult(connection, std::move(boundedLocal), std::move(boundedPeer.value()),
+    return makeHandshakeResult(identity, std::move(boundedLocal), std::move(boundedPeer.value()),
                                peerProof.value(), trust.value());
+}
+
+Result<PeerHandshakeResult> initiatePeerHandshake(P2pConnection& connection,
+                                                  const PeerHandshakeConfig& config,
+                                                  IPeerTrustStore& trustStore) {
+    detail::ConnectionFrameSource frames(connection);
+    return detail::initiatePeerHandshake(frames, detail::channelIdentity(connection), config,
+                                         trustStore);
+}
+
+Result<PeerHandshakeResult> acceptPeerHandshake(P2pConnection& connection,
+                                                const PeerHandshakeConfig& config,
+                                                IPeerTrustStore& trustStore) {
+    detail::ConnectionFrameSource frames(connection);
+    return detail::acceptPeerHandshake(frames, detail::channelIdentity(connection), config,
+                                       trustStore);
 }
 
 } // namespace yams::daemon::p2p

@@ -14,6 +14,8 @@
 // pi-lens-ignore: fatal error
 #include <yams/memory_sync/memory_sync_service.h>
 
+#include "p2p_fuzz.h"
+
 #include <spdlog/spdlog.h>
 
 #include <atomic>
@@ -71,7 +73,95 @@ void invokeReconnectLoopHook() {
 }
 #endif
 
+PeerHandshakeConfig makeHandshakeConfig(memory_sync::MemorySyncService& service,
+                                        const std::string& nodeId, const std::string& corpusId,
+                                        std::uint64_t corpusEpoch, bool allowFirstContact,
+                                        std::chrono::milliseconds timeout) {
+    const auto state = service.replicationState();
+    return PeerHandshakeConfig{
+        .nodeId = nodeId,
+        .corpusId = corpusId,
+        .corpusEpoch = corpusEpoch,
+        .localVersion = state.version,
+        .localCommitments = state.commitments,
+        .localQuarantinedWriters = state.quarantinedWriters,
+        .resolveLocalCommitment =
+            [&service](std::uint64_t counter) { return service.localHistoryCommitmentAt(counter); },
+        .resolveLocalWindow =
+            [&service](std::uint64_t peerCounter, std::size_t maxRecords,
+                       std::size_t maxWireBytes) {
+                return service.localHistoryWindowAfter(peerCounter, maxRecords, maxWireBytes);
+            },
+        .allowFirstContact = allowFirstContact,
+        .timeout = timeout};
+}
+
+Result<void> enforcePeerHistory(memory_sync::MemorySyncService& service, const std::string& nodeId,
+                                const PeerHandshakeResult& peer) {
+    const auto localState = service.replicationState();
+    if (localState.quarantinedWriters.contains(peer.peerNodeId)) {
+        return Error{ErrorCode::InvalidData, "peer writer is durably quarantined"};
+    }
+    auto mismatch = requiresPeerWriterQuarantine(localState, peer);
+    if (!mismatch) {
+        return mismatch.error();
+    }
+    if (!mismatch.value()) {
+        return {};
+    }
+    auto quarantined = service.quarantineWriter(peer.peerNodeId, nodeId);
+    if (!quarantined) {
+        return quarantined.error();
+    }
+    return Error{ErrorCode::InvalidData, "authenticated peer writer history commitment mismatch"};
+}
+
 } // namespace
+
+detail::InboundSessionOutcome detail::runInboundSession(FrameSource& frames,
+                                                        const ChannelIdentity& identity,
+                                                        memory_sync::MemorySyncService& service,
+                                                        PeerRegistry& registry,
+                                                        const InboundSessionOptions& options) {
+    using Stage = InboundSessionStage;
+    auto handshake = detail::acceptPeerHandshake(
+        frames, identity,
+        makeHandshakeConfig(service, options.nodeId, options.corpusId, options.corpusEpoch,
+                            options.allowFirstContact, options.timeout),
+        registry);
+    if (!handshake) {
+        return {.stage = Stage::Handshake, .result = handshake.error()};
+    }
+    if (auto history = enforcePeerHistory(service, options.nodeId, handshake.value()); !history) {
+        return {.stage = Stage::PeerHistory, .result = history.error()};
+    }
+    auto exchanged = detail::acceptDeltaExchange(
+        frames, identity.localNodeId, service, handshake.value(),
+        DeltaExchangeOptions{
+            .maxDeltasPerBatch = 128, .maxBatches = 4096, .timeout = options.timeout});
+    if (!exchanged) {
+        return {.stage = Stage::DeltaExchange, .result = exchanged.error()};
+    }
+    if (auto history = enforcePeerHistory(service, options.nodeId, handshake.value()); !history) {
+        return {.stage = Stage::PostExchangeHistory, .result = history.error()};
+    }
+    std::string endpoint;
+    bool remembered = false;
+    auto records = registry.listPeers();
+    if (records) {
+        for (const auto& peer : records.value()) {
+            if (peer.nodeId == handshake.value().peerNodeId) {
+                endpoint = peer.endpoint;
+                remembered = peer.remembered;
+                break;
+            }
+        }
+    }
+    return {.stage = Stage::RegistryUpdate,
+            .result = registry.updatePeerState(handshake.value().peerNodeId, options.corpusId,
+                                               options.corpusEpoch, service.currentVersion(),
+                                               unixTimeMs(), endpoint, remembered)};
+}
 
 std::string P2pConnectionSpec::endpoint() const {
     const bool bracket = host.find(':') != std::string::npos;
@@ -324,45 +414,13 @@ public:
 
 private:
     PeerHandshakeConfig handshakeConfig() const {
-        const auto state = service_.replicationState();
-        return PeerHandshakeConfig{.nodeId = options_.nodeId,
-                                   .corpusId = options_.corpusId,
-                                   .corpusEpoch = options_.corpusEpoch,
-                                   .localVersion = state.version,
-                                   .localCommitments = state.commitments,
-                                   .localQuarantinedWriters = state.quarantinedWriters,
-                                   .resolveLocalCommitment =
-                                       [this](std::uint64_t counter) {
-                                           return service_.localHistoryCommitmentAt(counter);
-                                       },
-                                   .resolveLocalWindow =
-                                       [this](std::uint64_t peerCounter, std::size_t maxRecords,
-                                              std::size_t maxWireBytes) {
-                                           return service_.localHistoryWindowAfter(
-                                               peerCounter, maxRecords, maxWireBytes);
-                                       },
-                                   .allowFirstContact = options_.allowFirstContact,
-                                   .timeout = options_.timeout};
+        return makeHandshakeConfig(service_, options_.nodeId, options_.corpusId,
+                                   options_.corpusEpoch, options_.allowFirstContact,
+                                   options_.timeout);
     }
 
     Result<void> enforcePeerHistory(const PeerHandshakeResult& peer) {
-        const auto localState = service_.replicationState();
-        if (localState.quarantinedWriters.contains(peer.peerNodeId)) {
-            return Error{ErrorCode::InvalidData, "peer writer is durably quarantined"};
-        }
-        auto mismatch = requiresPeerWriterQuarantine(localState, peer);
-        if (!mismatch) {
-            return mismatch.error();
-        }
-        if (!mismatch.value()) {
-            return {};
-        }
-        auto quarantined = service_.quarantineWriter(peer.peerNodeId, options_.nodeId);
-        if (!quarantined) {
-            return quarantined.error();
-        }
-        return Error{ErrorCode::InvalidData,
-                     "authenticated peer writer history commitment mismatch"};
+        return p2p::enforcePeerHistory(service_, options_.nodeId, peer);
     }
 
     Result<P2pSyncResult> connectSpec(const P2pConnectionSpec& spec,
@@ -428,38 +486,14 @@ private:
     }
 
     void handleInbound(P2pConnection connection) {
-        auto handshake = acceptPeerHandshake(connection, handshakeConfig(), *registry_);
-        if (!handshake) {
-            return;
-        }
-        if (auto history = enforcePeerHistory(handshake.value()); !history) {
-            return;
-        }
-        auto exchanged = acceptDeltaExchange(connection, service_, handshake.value(),
-                                             DeltaExchangeOptions{.maxDeltasPerBatch = 128,
-                                                                  .maxBatches = 4096,
-                                                                  .timeout = options_.timeout});
-        if (!exchanged) {
-            return;
-        }
-        if (auto history = enforcePeerHistory(handshake.value()); !history) {
-            return;
-        }
-        std::string endpoint;
-        bool remembered = false;
-        auto records = registry_->listPeers();
-        if (records) {
-            for (const auto& peer : records.value()) {
-                if (peer.nodeId == handshake.value().peerNodeId) {
-                    endpoint = peer.endpoint;
-                    remembered = peer.remembered;
-                    break;
-                }
-            }
-        }
-        (void)registry_->updatePeerState(handshake.value().peerNodeId, options_.corpusId,
-                                         options_.corpusEpoch, service_.currentVersion(),
-                                         unixTimeMs(), endpoint, remembered);
+        detail::ConnectionFrameSource frames(connection);
+        (void)detail::runInboundSession(
+            frames, detail::channelIdentity(connection), service_, *registry_,
+            detail::InboundSessionOptions{.nodeId = options_.nodeId,
+                                          .corpusId = options_.corpusId,
+                                          .corpusEpoch = options_.corpusEpoch,
+                                          .allowFirstContact = options_.allowFirstContact,
+                                          .timeout = options_.timeout});
     }
 
     void reconnectLoop() {

@@ -8,6 +8,8 @@
 // pi-lens-ignore: fatal error
 #include <yams/daemon/p2p/p2p_transport.h>
 
+#include "p2p_frame_source.h"
+
 #include <cstring>
 #include <string_view>
 
@@ -15,14 +17,13 @@ namespace yams::daemon::p2p::detail {
 
 using Json = nlohmann::json;
 
-inline Result<void> writeJson(P2pConnection& connection, const Json& json,
+inline Result<void> writeJson(FrameSource& frames, const Json& json,
                               std::chrono::milliseconds timeout) {
     try {
         const std::string text = json.dump();
-        return connection.writeFrame(
-            std::span<const std::byte>(reinterpret_cast<const std::byte*>(text.data()),
-                                       text.size()),
-            timeout);
+        return frames.writeFrame(std::span<const std::byte>(
+                                     reinterpret_cast<const std::byte*>(text.data()), text.size()),
+                                 timeout, kP2pMaxControlFrameBytes);
     } catch (const std::exception& error) {
         return Error{ErrorCode::SerializationError, error.what()};
     }
@@ -82,9 +83,8 @@ struct JsonFrame {
 
 /// Read and parse one control frame, retaining the exact wire payload size so callers can
 /// account for bytes actually received rather than a compact re-serialization.
-inline Result<JsonFrame> readJsonFrame(P2pConnection& connection,
-                                       std::chrono::milliseconds timeout) {
-    auto frame = connection.readFrame(timeout);
+inline Result<JsonFrame> readJsonFrame(FrameSource& frames, std::chrono::milliseconds timeout) {
+    auto frame = frames.readFrame(timeout, kP2pMaxControlFrameBytes);
     if (!frame) {
         return frame.error();
     }
@@ -95,8 +95,8 @@ inline Result<JsonFrame> readJsonFrame(P2pConnection& connection,
     return JsonFrame{std::move(parsed.value()), frame.value().size()};
 }
 
-inline Result<Json> readJson(P2pConnection& connection, std::chrono::milliseconds timeout) {
-    auto frame = connection.readFrame(timeout);
+inline Result<Json> readJson(FrameSource& frames, std::chrono::milliseconds timeout) {
+    auto frame = frames.readFrame(timeout, kP2pMaxControlFrameBytes);
     if (!frame) {
         return frame.error();
     }
