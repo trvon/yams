@@ -140,3 +140,4 @@ infer-out/
 .zenith-skills/
 .pi
 traces/
+/data/fuzz/
