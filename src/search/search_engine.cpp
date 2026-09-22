@@ -1192,8 +1192,10 @@ public:
 
     void setSearchTuner(std::shared_ptr<SearchTuner> tuner) { tuner_ = std::move(tuner); }
 
-    void setCrossReranker(SearchEngine::CrossRerankScorer scorer) {
+    void setCrossReranker(SearchEngine::CrossRerankScorer scorer, std::string scoringMode) {
         crossReranker_ = std::move(scorer);
+        crossRerankScoringMode_ = crossReranker_ && !scoringMode.empty() ? std::move(scoringMode)
+                                                                         : std::string("unknown");
     }
 
     void setSimeonLexicalBackend(std::unique_ptr<SimeonLexicalBackend> backend) {
@@ -1265,6 +1267,7 @@ private:
     EntityExtractionFunc conceptExtractor_; // GLiNER concept extractor (optional)
     std::shared_ptr<SearchTuner> tuner_;    // Adaptive runtime tuner (optional)
     SearchEngine::CrossRerankScorer crossReranker_;
+    std::string crossRerankScoringMode_ = "unknown";
     std::unique_ptr<SimeonLexicalBackend> simeonLexical_;
     // Per-profile simeon bandit arms. Each corpus profile learns independently
     // which simeon recipe works best via UCB1 from proxy rewards. Training-free.
@@ -3920,8 +3923,9 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         response.debugStats["cross_rerank_window"] = std::to_string(rerankWindow);
         response.debugStats["cross_rerank_snippet_max_chars"] =
             std::to_string(workingConfig.rerankSnippetMaxChars);
+        response.debugStats["cross_rerank_scoring_mode"] = crossRerankScoringMode_;
         response.debugStats["cross_rerank_simeon_outer_maxsim"] =
-            workingConfig.simeonRerankOuterMaxSim ? "1" : "0";
+            crossRerankScoringMode_ == "simeon_outer_maxsim" ? "1" : "0";
 
         const auto crossStart = std::chrono::steady_clock::now();
         auto outcome = detail::applyCrossRerank(response.results, query, workingConfig,
@@ -5530,8 +5534,8 @@ void SearchEngine::setSimeonLexicalBackend(std::unique_ptr<SimeonLexicalBackend>
     pImpl_->setSimeonLexicalBackend(std::move(backend));
 }
 
-void SearchEngine::setCrossReranker(CrossRerankScorer scorer) {
-    pImpl_->setCrossReranker(std::move(scorer));
+void SearchEngine::setCrossReranker(CrossRerankScorer scorer, std::string scoringMode) {
+    pImpl_->setCrossReranker(std::move(scorer), std::move(scoringMode));
 }
 
 void SearchEngine::setSearchTuner(std::shared_ptr<SearchTuner> tuner) {
