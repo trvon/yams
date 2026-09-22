@@ -20,7 +20,6 @@
 
 #include <yams/compat/dlfcn.h>
 #include <yams/plugins/abi.h>
-#include <yams/plugins/symbol_extractor_v1.h>
 #include <yams/vector/vector_database.h>
 
 namespace fs = std::filesystem;
@@ -44,16 +43,6 @@ struct HNSWBenchmarkResult {
     double p99_latency_us = 0.0;
     double qps = 0.0;
     double recall = 0.0;
-};
-
-struct EntitySearchResult {
-    std::string name;
-    size_t total_entities = 0;
-    size_t total_files = 0;
-    double extraction_time_ms = 0.0;
-    double indexing_time_ms = 0.0;
-    double search_latency_us = 0.0;
-    double qps = 0.0;
 };
 
 // ============================================================================
@@ -139,130 +128,6 @@ double calculateRecall(const std::vector<std::string>& retrieved,
     return gt_set.empty() ? 0.0 : static_cast<double>(hits) / gt_set.size();
 }
 
-// ============================================================================
-// Symbol Extraction Plugin
-// ============================================================================
-
-struct PluginHandle {
-    void* handle = nullptr;
-    yams_symbol_extractor_v1* api = nullptr;
-
-    ~PluginHandle() {
-        // Don't close handle in benchmark
-    }
-};
-
-std::optional<PluginHandle> loadSymbolExtractorPlugin() {
-    PluginHandle p;
-
-#ifdef __APPLE__
-    const char* libname = "yams_symbol_extractor.dylib";
-#else
-    const char* libname = "yams_symbol_extractor.so";
-#endif
-
-    std::vector<std::string> paths;
-    const char* buildroot = std::getenv("MESON_BUILD_ROOT");
-    if (buildroot && *buildroot) {
-        paths.push_back(std::string(buildroot) + "/plugins/symbol_extractor_treesitter/" + libname);
-    }
-    paths.push_back("plugins/symbol_extractor_treesitter/" + std::string(libname));
-    paths.push_back("./plugins/symbol_extractor_treesitter/" + std::string(libname));
-    paths.push_back("../plugins/symbol_extractor_treesitter/" + std::string(libname));
-    paths.push_back("../../plugins/symbol_extractor_treesitter/" + std::string(libname));
-
-    for (const auto& path : paths) {
-        p.handle = dlopen(path.c_str(), RTLD_LAZY | RTLD_LOCAL);
-        if (!p.handle) {
-            continue;
-        }
-
-        auto get_iface = reinterpret_cast<int (*)(const char*, uint32_t, void**)>(
-            dlsym(p.handle, "yams_plugin_get_interface"));
-        if (!get_iface) {
-            continue;
-        }
-
-        void* iface_ptr = nullptr;
-        int rc = get_iface(YAMS_IFACE_SYMBOL_EXTRACTOR_V1, YAMS_IFACE_SYMBOL_EXTRACTOR_V1_VERSION,
-                           &iface_ptr);
-        if (rc != YAMS_PLUGIN_OK || !iface_ptr) {
-            continue;
-        }
-
-        p.api = static_cast<yams_symbol_extractor_v1*>(iface_ptr);
-
-        auto init_fn = reinterpret_cast<int (*)(const char*, const void*)>(
-            dlsym(p.handle, "yams_plugin_init"));
-        if (init_fn) {
-            init_fn(nullptr, nullptr);
-        }
-
-        return p;
-    }
-
-    return std::nullopt;
-}
-
-// Extract symbols from a C++ file
-std::vector<std::pair<std::string, std::string>> extractSymbols(PluginHandle& plugin,
-                                                                const fs::path& file_path) {
-    std::vector<std::pair<std::string, std::string>> symbols; // {name, qualified_name}
-
-    if (!fs::exists(file_path) || !fs::is_regular_file(file_path)) {
-        return symbols;
-    }
-
-    std::ifstream file(file_path, std::ios::binary);
-    std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-    if (content.empty()) {
-        return symbols;
-    }
-
-    yams_symbol_extraction_result_v1* result = nullptr;
-    int rc = plugin.api->extract_symbols(plugin.api->self, content.c_str(), content.size(),
-                                         file_path.string().c_str(), "cpp", &result);
-
-    if (rc != YAMS_PLUGIN_OK || !result) {
-        return symbols;
-    }
-
-    for (size_t i = 0; i < result->symbol_count; ++i) {
-        std::string name = result->symbols[i].name ? result->symbols[i].name : "";
-        std::string qname =
-            result->symbols[i].qualified_name ? result->symbols[i].qualified_name : name;
-        if (!name.empty()) {
-            symbols.emplace_back(name, qname);
-        }
-    }
-
-    plugin.api->free_result(plugin.api->self, result);
-    return symbols;
-}
-
-// Collect C++ source files
-std::vector<fs::path> collectSourceFiles(const fs::path& dir, size_t max_files = 100) {
-    std::vector<fs::path> files;
-    if (!fs::exists(dir)) {
-        return files;
-    }
-
-    for (const auto& entry :
-         fs::recursive_directory_iterator(dir, fs::directory_options::skip_permission_denied)) {
-        if (!entry.is_regular_file()) {
-            continue;
-        }
-        auto ext = entry.path().extension().string();
-        if (ext == ".cpp" || ext == ".hpp" || ext == ".h" || ext == ".cc") {
-            files.push_back(entry.path());
-            if (files.size() >= max_files) {
-                break;
-            }
-        }
-    }
-    return files;
-}
-
 // Write benchmark results to JSON
 void writeBenchmarkJSON(const fs::path& output, const std::vector<HNSWBenchmarkResult>& results) {
     json arr = json::array();
@@ -282,21 +147,6 @@ void writeBenchmarkJSON(const fs::path& output, const std::vector<HNSWBenchmarkR
     fs::create_directories(output.parent_path());
     std::ofstream out(output);
     out << arr.dump(2);
-}
-
-void writeEntitySearchJSON(const fs::path& output, const EntitySearchResult& result) {
-    json j = {{"name", result.name},
-              {"total_entities", result.total_entities},
-              {"total_files", result.total_files},
-              {"extraction_time_ms", result.extraction_time_ms},
-              {"indexing_time_ms", result.indexing_time_ms},
-              {"search_latency_us", result.search_latency_us},
-              {"qps", result.qps},
-              {"timestamp", std::chrono::system_clock::now().time_since_epoch().count()}};
-
-    fs::create_directories(output.parent_path());
-    std::ofstream out(output);
-    out << j.dump(2);
 }
 
 // ============================================================================
@@ -580,135 +430,6 @@ TEST_CASE_METHOD(HNSWSearchFixture, "HNSW Search Speed Benchmark",
         }
 
         writeBenchmarkJSON("bench_results/hnsw_search_dim_scaling.json", dim_results);
-    }
-}
-
-// ============================================================================
-// Entity Vector Search Benchmark (Symbol Extractor Integration)
-// ============================================================================
-
-TEST_CASE_METHOD(HNSWSearchFixture, "Entity Vector Search with Symbol Extractor",
-                 "[benchmark][hnsw][entity][symbol_extractor][!benchmark]") {
-    auto plugin = loadSymbolExtractorPlugin();
-    if (!plugin.has_value()) {
-        WARN("Symbol extractor plugin not found, skipping entity search benchmark");
-        return;
-    }
-
-    std::mt19937 rng(42);
-    size_t dim = 384; // Common embedding dimension
-
-    SECTION("Extract Symbols and Search") {
-        // Collect source files (reduced for faster testing)
-        auto files = collectSourceFiles("src", 20);
-        if (files.empty()) {
-            files = collectSourceFiles(".", 20);
-        }
-        REQUIRE(!files.empty());
-
-        INFO("Found " << files.size() << " source files");
-
-        // Extract symbols from files
-        auto extract_start = std::chrono::high_resolution_clock::now();
-
-        std::vector<std::pair<std::string, std::string>> all_symbols;
-        for (const auto& file : files) {
-            auto symbols = extractSymbols(*plugin, file);
-            all_symbols.insert(all_symbols.end(), symbols.begin(), symbols.end());
-        }
-
-        auto extract_end = std::chrono::high_resolution_clock::now();
-        double extraction_time_ms = static_cast<double>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(extract_end - extract_start)
-                .count());
-
-        INFO("Extracted " << all_symbols.size() << " symbols in " << extraction_time_ms << " ms");
-        REQUIRE(!all_symbols.empty());
-
-        // Create vector database and index symbols with random embeddings
-        // (In production, these would be generated by an embedding model)
-        auto config = createConfig(dim);
-        VectorDatabase db(config);
-        REQUIRE(db.initialize());
-
-        auto index_start = std::chrono::high_resolution_clock::now();
-
-        std::vector<std::string> entity_ids;
-        std::vector<std::vector<float>> entity_vectors;
-
-        for (size_t i = 0; i < all_symbols.size(); ++i) {
-            const auto& [name, qname] = all_symbols[i];
-            std::string entity_id = "entity_" + std::to_string(i) + "_" + name;
-            entity_ids.push_back(entity_id);
-
-            auto vec = generateRandomVector(dim, rng);
-            entity_vectors.push_back(vec);
-
-            VectorRecord rec;
-            rec.chunk_id = entity_id;
-            rec.document_hash = "entity_doc";
-            rec.embedding = vec;
-            rec.content = qname;
-            rec.start_offset = 0;
-            rec.end_offset = qname.size();
-            db.insertVector(rec);
-        }
-
-        auto index_end = std::chrono::high_resolution_clock::now();
-        double indexing_time_ms = static_cast<double>(
-            std::chrono::duration_cast<std::chrono::milliseconds>(index_end - index_start).count());
-
-        INFO("Indexed " << all_symbols.size() << " entity vectors in " << indexing_time_ms
-                        << " ms");
-
-        // Benchmark search
-        auto query = generateRandomVector(dim, rng);
-        std::vector<double> latencies_us;
-        size_t num_iterations = 50; // Reduced for faster testing
-        size_t k = 10;
-
-        for (size_t iter = 0; iter < num_iterations; ++iter) {
-            auto start = std::chrono::high_resolution_clock::now();
-
-            VectorSearchParams params;
-            params.k = k;
-            params.similarity_threshold = -2.0f; // Include all results
-            auto results = db.search(query, params);
-
-            auto end = std::chrono::high_resolution_clock::now();
-            auto duration_us =
-                std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-            latencies_us.push_back(static_cast<double>(duration_us));
-        }
-
-        std::sort(latencies_us.begin(), latencies_us.end());
-        double mean_latency = latencies_us.empty()
-                                  ? 0.0
-                                  : std::accumulate(latencies_us.begin(), latencies_us.end(), 0.0) /
-                                        latencies_us.size();
-
-        EntitySearchResult result;
-        result.name = "Entity_Vector_Search";
-        result.total_entities = all_symbols.size();
-        result.total_files = files.size();
-        result.extraction_time_ms = extraction_time_ms;
-        result.indexing_time_ms = indexing_time_ms;
-        result.search_latency_us = mean_latency;
-        result.qps = mean_latency > 0.0 ? 1000000.0 / mean_latency : 0.0;
-
-        INFO("Entity Search Results:");
-        INFO("  Total entities: " << result.total_entities);
-        INFO("  Total files: " << result.total_files);
-        INFO("  Extraction time: " << result.extraction_time_ms << " ms");
-        INFO("  Indexing time: " << result.indexing_time_ms << " ms");
-        INFO("  Search latency: " << result.search_latency_us << " μs");
-        INFO("  QPS: " << result.qps);
-
-        writeEntitySearchJSON("bench_results/entity_vector_search.json", result);
-
-        // Performance requirements (relaxed for TSan builds)
-        CHECK(result.search_latency_us < 50000); // <50ms search latency (TSan overhead)
-        CHECK(result.qps > 20);                  // >20 QPS (TSan overhead)
     }
 }
 

@@ -2519,8 +2519,6 @@ if catch2_dep.found()
       'unit/plugins/plugin_installer_test.cpp',
       'unit/plugins/plugin_repo_client_test.cpp',
       'unit/plugins/onnx_request_test.cpp',
-      'unit/plugins/symbol_extractor_query_test.cpp',
-      'unit/plugins/symbol_extractor_validation_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,

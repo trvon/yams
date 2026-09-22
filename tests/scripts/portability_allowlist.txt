@@ -74,13 +74,6 @@ plugins/onnx/onnx_plugin.cpp:82:portability/env-read # reviewed raw environment 
 plugins/onnx/ort_runtime_loader.cpp:173:portability/env-read # reviewed raw environment read
 plugins/onnx/ort_runtime_loader.cpp:174:portability/env-read # reviewed raw environment read
 plugins/onnx/ort_runtime_loader.cpp:197:portability/env-read # reviewed raw environment read
-plugins/symbol_extractor_treesitter/grammar_loader.cpp:31:portability/env-read # reviewed raw environment read
-plugins/symbol_extractor_treesitter/grammar_loader.cpp:124:portability/env-read # reviewed raw environment read
-plugins/symbol_extractor_treesitter/grammar_loader.cpp:138:portability/env-read # reviewed raw environment read
-plugins/symbol_extractor_treesitter/grammar_loader.cpp:399:portability/env-read # reviewed raw environment read
-plugins/symbol_extractor_treesitter/grammar_loader.cpp:402:portability/env-read # reviewed raw environment read
-plugins/symbol_extractor_treesitter/grammar_loader.cpp:411:portability/env-read # reviewed raw environment read
-plugins/symbol_extractor_treesitter/grammar_loader.cpp:413:portability/env-read # reviewed raw environment read
 src/app/services/document_service.cpp:1198:portability/env-read # reviewed raw environment read
 src/app/services/search_service.cpp:510:portability/env-read # reviewed raw environment read
 src/app/services/search_service.cpp:591:portability/env-read # reviewed raw environment read
@@ -188,7 +181,6 @@ tests/benchmarks/bench_utils.h:56:portability/env-read # reviewed raw environmen
 tests/benchmarks/daemon_warm_latency_main.cpp:34:portability/env-read # reviewed raw environment read
 tests/benchmarks/daemon_warm_latency_main.cpp:87:portability/env-read # reviewed raw environment read
 tests/benchmarks/daemon_warm_latency_main.cpp:102:portability/env-read # reviewed raw environment read
-tests/benchmarks/hnsw_entity_search_bench.cpp:165:portability/env-read # reviewed raw environment read
 tests/benchmarks/ingestion_throughput_bench.cpp:578:portability/env-read # reviewed raw environment read
 tests/benchmarks/ingestion_throughput_bench.cpp:728:portability/env-read # reviewed raw environment read
 tests/benchmarks/ingestion_throughput_bench.cpp:777:portability/env-read # reviewed raw environment read
@@ -392,7 +384,6 @@ tests/benchmarks/simeon_lexical_score_bench.cpp:216:portability/env-read # revie
 tests/benchmarks/single_client_pipeline_bench.cpp:65:portability/env-read # reviewed raw environment read
 tests/benchmarks/single_client_pipeline_bench.cpp:205:portability/env-read # reviewed raw environment read
 tests/benchmarks/single_client_pipeline_bench.cpp:272:portability/env-read # reviewed raw environment read
-tests/benchmarks/symbol_extraction_bench.cpp:82:portability/env-read # reviewed raw environment read
 tests/benchmarks/topology_ablation_bench.cpp:63:portability/env-read # reviewed raw environment read
 tests/benchmarks/topology_ablation_bench.cpp:70:portability/env-read # reviewed raw environment read
 tests/benchmarks/topology_ablation_bench.cpp:82:portability/env-read # reviewed raw environment read
@@ -439,8 +430,6 @@ tests/plugins/s3/s3_plugin_smoke_test.cpp:21:portability/env-read # reviewed raw
 tests/plugins/s3/s3_plugin_smoke_test.cpp:22:portability/env-read # reviewed raw environment read
 tests/plugins/s3/s3_plugin_smoke_test.cpp:23:portability/env-read # reviewed raw environment read
 tests/plugins/s3/s3_plugin_smoke_test.cpp:24:portability/env-read # reviewed raw environment read
-tests/plugins/symbol_extractor_all_langs_catch2_test.cpp:95:portability/env-read # reviewed raw environment read
-tests/plugins/symbol_extractor_solidity_catch2_test.cpp:83:portability/env-read # reviewed raw environment read
 tests/unit/api/metadata_api_catch2_test.cpp:28:portability/env-read # reviewed raw environment read
 tests/unit/cli/add_command_stdin_catch2_test.cpp:32:portability/env-read # reviewed raw environment read
 tests/unit/cli/add_command_stdin_catch2_test.cpp:37:portability/env-read # reviewed raw environment read
@@ -558,5 +547,3 @@ plugins/onnx/onnx_model_pool.cpp:3199:portability/env-read # reviewed raw enviro
 plugins/onnx/onnx_model_pool.cpp:3223:portability/env-read # reviewed raw environment read
 plugins/onnx/onnx_model_pool.cpp:3225:portability/env-read # reviewed raw environment read
 plugins/onnx/onnx_model_pool.cpp:3308:portability/env-read # reviewed raw environment read
-plugins/symbol_extractor_treesitter/plugin_api.cpp:28:portability/env-read # reviewed raw environment read
-plugins/symbol_extractor_treesitter/plugin_api.cpp:104:portability/env-read # reviewed raw environment read

@@ -958,10 +958,6 @@ else
 	MESON_OPTIONS+=("-Db_ndebug=false")
 fi
 
-if [[ "${YAMS_DISABLE_SYMBOL_EXTRACTION:-}" == "true" ]]; then
-	MESON_OPTIONS+=("-Dplugin-symbols=false")
-fi
-
 # libSQL backend: default to libsql but fall back to sqlite on Linux when unavailable
 LIBSQL_BACKEND_INPUT=${YAMS_DATABASE_BACKEND:-libsql}
 LIBSQL_BACKEND_LOWER=$(echo "${LIBSQL_BACKEND_INPUT}" | tr '[:upper:]' '[:lower:]')
