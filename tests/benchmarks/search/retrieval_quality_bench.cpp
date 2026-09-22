@@ -4721,8 +4721,6 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
 
         if (benchDiagEnabled) {
             debugEntry.diagnostics.push_back("searchType=" + opts.searchType);
-            debugEntry.diagnostics.push_back(std::string("symbolRank=") +
-                                             (opts.symbolRank ? "true" : "false"));
             debugEntry.diagnostics.push_back("limit=" + std::to_string(opts.limit));
             debugEntry.diagnostics.push_back(
                 "timeout_ms=" +
@@ -4820,7 +4818,6 @@ RetrievalMetrics evaluateQueries(yams::daemon::DaemonClient& client, const fs::p
                 shadow.searchType = opts.searchType;
                 shadow.limit = opts.limit;
                 shadow.timeout = opts.timeout;
-                shadow.symbolRank = opts.symbolRank;
                 shadow.allowFuzzyRetry = false;
                 shadow.allowLiteralTextRetry = false;
 
@@ -5307,6 +5304,8 @@ struct BenchFixture {
             return trimCopy(std::string(fallbackName));
         };
 
+        std::unordered_set<std::string> topologyInputHashes;
+        std::size_t duplicateContentDocuments = 0;
         for (const auto& docPath : documentPaths) {
             auto docResult = metadataRepo->findDocumentByExactPath(docPath);
             if (!docResult) {
@@ -5314,21 +5313,28 @@ struct BenchFixture {
                                          docResult.error().message);
             }
             auto resolvedDoc = std::move(docResult.value());
-            if (!resolvedDoc.has_value() && warmDataDir) {
+            // Content-addressed ingest stores identical files once (warm caches rebase paths,
+            // and corpora such as nfcorpus contain duplicate texts), so fall back to the
+            // content hash to find the surviving document.
+            if (!resolvedDoc.has_value()) {
                 const auto contentHash = contentHasher.hashFile(docPath);
                 auto hashResult = metadataRepo->getDocumentByHash(contentHash);
                 if (!hashResult) {
-                    throw std::runtime_error("Failed to resolve warm-cache benchmark document " +
-                                             docPath +
+                    throw std::runtime_error("Failed to resolve benchmark document " + docPath +
                                              " by content hash: " + hashResult.error().message);
                 }
                 resolvedDoc = std::move(hashResult.value());
-                if (resolvedDoc.has_value()) {
+                if (resolvedDoc.has_value() && warmDataDir) {
                     ++warmPathRebases;
                 }
             }
             if (!resolvedDoc.has_value()) {
                 throw std::runtime_error("Benchmark document missing from metadata: " + docPath);
+            }
+            // A duplicate-content file resolves to a document already added as a topology input.
+            if (!topologyInputHashes.insert(resolvedDoc->sha256Hash).second) {
+                ++duplicateContentDocuments;
+                continue;
             }
 
             const auto& doc = *resolvedDoc;
@@ -5403,6 +5409,10 @@ struct BenchFixture {
             }
             docs.push_back({doc.sha256Hash, fs::path(docPath).stem().string(), text, headerText,
                             themeText, embedding, doc.id, nodeIdResult.value()});
+        }
+        if (duplicateContentDocuments > 0) {
+            spdlog::info("Topology benchmark skipped {} duplicate-content documents",
+                         duplicateContentDocuments);
         }
         if (warmPathRebases > 0) {
             spdlog::info("Resolved {} cloned warm-cache documents by stable content hash",
@@ -8715,15 +8725,14 @@ struct BenchFixture {
                 spdlog::warn("GetStats failed: {}", statsRes.error().message);
             }
 
-            auto doSanitySearch = [&](std::string label, std::string query, std::string searchType,
-                                      bool symbolRank) {
+            auto doSanitySearch = [&](std::string label, std::string query,
+                                      std::string searchType) {
                 yams::cli::search_runner::DaemonSearchOptions opts;
                 opts.query = std::move(query);
                 opts.searchType = std::move(searchType);
                 opts.limit = 25;
                 const auto queryTimeout = configuredBenchQueryTimeout(opts.searchType);
                 opts.timeout = queryTimeout;
-                opts.symbolRank = symbolRank;
                 opts.allowFuzzyRetry = false;
                 opts.allowLiteralTextRetry = false;
 
@@ -8761,15 +8770,15 @@ struct BenchFixture {
             };
 
             // Keyword search should return something if FTS is populated.
-            doSanitySearch("__sanity_keyword_the__", "the", "keyword", false);
+            doSanitySearch("__sanity_keyword_the__", "the", "keyword");
 
             // Hybrid search without symbol rank to avoid symbol-only decisions.
-            doSanitySearch("__sanity_hybrid_the__", "the", "hybrid", false);
+            doSanitySearch("__sanity_hybrid_the__", "the", "hybrid");
 
             // If BEIR corpus is used, easily-searchable token is doc id.
             if (useBEIR && beirCorpus && !beirCorpus->dataset.documents.empty()) {
                 const auto& firstDocId = beirCorpus->dataset.documents.begin()->first;
-                doSanitySearch("__sanity_keyword_docid__", firstDocId, "keyword", false);
+                doSanitySearch("__sanity_keyword_docid__", firstDocId, "keyword");
             }
         }
 
