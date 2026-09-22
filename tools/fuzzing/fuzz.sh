@@ -103,7 +103,7 @@ cmd_fuzz() {
         -e AFL_AUTORESUME=1 \
         "${IMAGE_NAME}" \
         afl-fuzz -S "${fuzzer_id}" -i "${corpus_dir}" -o "${findings_dir}" -m none \
-        "${dict_args[@]}" "${duration_args[@]}" "${fuzzer_bin}"
+        ${dict_args[@]+"${dict_args[@]}"} "${duration_args[@]}" "${fuzzer_bin}"
 }
 
 cmd_local() {
@@ -132,7 +132,7 @@ cmd_local() {
     fi
 
     echo "Running libFuzzer target ${target} (seeds: ${seeds})"
-    "$fuzzer_bin" "${dict_args[@]}" "-artifact_prefix=${run_dir}/artifacts/" "$@" \
+    "$fuzzer_bin" ${dict_args[@]+"${dict_args[@]}"} "-artifact_prefix=${run_dir}/artifacts/" "$@" \
         "${run_dir}/corpus" "${seeds}"
 }
 

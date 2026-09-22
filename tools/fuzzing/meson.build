@@ -109,6 +109,33 @@ fuzz_p2p_delta = executable('fuzz_p2p_delta',
   build_by_default: true,
 )
 
+# Direct P2P lane over the FrameSource seam: frame JSON, connection strings and pins, the
+# handshake validators and acceptor, the delta receive paths with fuzzed session bounds, and the
+# full manager inbound session. Each harness traps on an oracle violation.
+foreach p2p_target : ['p2p_json', 'p2p_connstr', 'p2p_handshake', 'p2p_delta_stream',
+                      'p2p_inbound']
+  executable('fuzz_' + p2p_target,
+    'fuzz_' + p2p_target + '.cpp',
+    include_directories: include_directories('../../include'),
+    link_with: yams_daemon_lib,
+    dependencies: fuzz_deps,
+    cpp_args: fuzzer_args,
+    link_args: fuzzer_args,
+    build_by_default: true,
+  )
+endforeach
+
+# Topology snapshot decoder (untrusted persisted payloads).
+fuzz_topology_codec = executable('fuzz_topology_codec',
+  'fuzz_topology_codec.cpp',
+  include_directories: include_directories('../../include'),
+  link_with: yams_daemon_lib,
+  dependencies: fuzz_deps + [dependency('yams_topology')],
+  cpp_args: fuzzer_args,
+  link_args: fuzzer_args,
+  build_by_default: true,
+)
+
 # AddDocumentRequest Fuzzer
 fuzz_add_document = executable('fuzz_add_document',
   'fuzz_add_document.cpp',
