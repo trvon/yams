@@ -160,6 +160,15 @@ jobs:
           fi
 
           if [ "$channel" = "stable" ]; then
+            # A stable release must come from a version tag; dispatching from a branch would
+            # otherwise publish a release (and tag) named after the branch, e.g. "main".
+            case "${GITHUB_REF}" in
+              refs/tags/v[0-9]*|refs/tags/yams-v[0-9]*) ;;
+              *)
+                echo "Stable releases must run from a refs/tags/v* or refs/tags/yams-v* ref, got: ${GITHUB_REF}" >&2
+                exit 1
+                ;;
+            esac
             TAG="${GITHUB_REF_NAME}"
             VERSION="${TAG#yams-v}"
             if [ "$VERSION" = "$TAG" ]; then
