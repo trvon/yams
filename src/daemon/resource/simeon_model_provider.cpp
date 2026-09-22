@@ -1,5 +1,7 @@
 #include <yams/daemon/resource/simeon_model_provider.h>
 
+#include "simeon_fragments.h"
+
 #include <yams/vector/embedding_generator.h>
 #include <yams/vector/simeon_embedding_backend.h>
 
@@ -23,67 +25,10 @@ namespace yams::daemon {
 
 namespace {
 
-std::vector<std::string> extractDocumentFragments(std::string_view text,
-                                                  std::size_t maxFragments = 8) {
-    std::vector<std::string> fragments;
-    if (text.empty()) {
-        return fragments;
-    }
-
-    std::size_t start = 0;
-    while (start < text.size() && fragments.size() < maxFragments) {
-        while (start < text.size() && (std::isspace(static_cast<unsigned char>(text[start])) ||
-                                       text[start] == '\r' || text[start] == '\n')) {
-            ++start;
-        }
-        if (start >= text.size()) {
-            break;
-        }
-
-        std::size_t end = start;
-        while (end < text.size()) {
-            char c = text[end];
-            if (c == '\n' || c == '\r') {
-                break;
-            }
-            if ((c == '.' || c == '?' || c == '!' || c == ';') &&
-                (end + 1 == text.size() ||
-                 std::isspace(static_cast<unsigned char>(text[end + 1])))) {
-                ++end;
-                break;
-            }
-            ++end;
-        }
-
-        std::string_view seg = text.substr(start, end - start);
-        while (!seg.empty() && std::isspace(static_cast<unsigned char>(seg.back()))) {
-            seg.remove_suffix(1);
-        }
-
-        if (seg.size() >= 5) {
-            fragments.emplace_back(seg);
-        }
-        start = end + 1;
-    }
-
-    if (fragments.empty()) {
-        fragments.emplace_back(text);
-    } else if (fragments.size() > 1 && fragments.size() < maxFragments) {
-        std::string fullDoc(text.substr(0, std::min<std::size_t>(text.size(), 512)));
-        bool found = false;
-        for (const auto& f : fragments) {
-            if (f == fullDoc) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            fragments.push_back(std::move(fullDoc));
-        }
-    }
-
-    return fragments;
-}
+// Fragment budgets for outer MaxSim: per document, per query, and across one rerank call.
+constexpr std::size_t kMaxDocumentFragments = 8;
+constexpr std::size_t kMaxQueryFragments = 4;
+constexpr std::size_t kMaxFragmentsPerCall = 256;
 
 inline float computeCosineSimilarity(std::span<const float> a, std::span<const float> b) {
     if (a.size() != b.size() || a.empty()) {
@@ -195,7 +140,7 @@ public:
 
     Result<std::vector<float>>
     scoreDocumentsOuterMaxSim(const std::string& query, const std::vector<std::string>& documents) {
-        auto queryFragments = extractDocumentFragments(query, 4);
+        auto queryFragments = detail::selectMaxSimFragments(query, kMaxQueryFragments);
         if (queryFragments.empty()) {
             queryFragments.push_back(query);
         }
@@ -214,8 +159,10 @@ public:
         std::vector<std::pair<std::size_t, std::size_t>> docSpans;
         docSpans.reserve(documents.size());
 
+        const auto perDocument = detail::fragmentsPerDocument(
+            documents.size(), kMaxDocumentFragments, kMaxFragmentsPerCall);
         for (const auto& doc : documents) {
-            auto frags = extractDocumentFragments(doc, 8);
+            auto frags = detail::selectMaxSimFragments(doc, perDocument);
             if (frags.empty()) {
                 frags.push_back(doc);
             }
