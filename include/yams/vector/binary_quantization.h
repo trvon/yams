@@ -32,7 +32,10 @@ struct BinaryVector {
 class BinaryQuantizer {
 public:
     /// Quantize a single float vector into a 1-bit BinaryVector.
-    [[nodiscard]] static BinaryVector quantize(std::span<const float> vector);
+    /// If maxDimensions > 0, quantize only the leading min(vector.size(), maxDimensions)
+    /// coordinates.
+    [[nodiscard]] static BinaryVector quantize(std::span<const float> vector,
+                                               std::size_t maxDimensions = 0);
 
     /// Compute Hamming distance (number of differing bits) between two binary vectors.
     [[nodiscard]] static std::size_t hammingDistance(const BinaryVector& a, const BinaryVector& b);
@@ -56,8 +59,12 @@ struct BinaryQuantizedHit {
 /// Compact, immutable index of 1-bit binary quantized vectors for fast coarse filtering.
 class BinaryQuantizedIndex final {
 public:
+    /// Build index over vectors.
+    /// If maxPrefixDimension > 0, store only the leading coordinates up to maxPrefixDimension
+    /// (e.g. 64 dimensions for Matryoshka prefix shortlisting).
     static Result<std::shared_ptr<const BinaryQuantizedIndex>>
-    build(std::span<const std::size_t> ids, std::span<const std::vector<float>> vectors);
+    build(std::span<const std::size_t> ids, std::span<const std::vector<float>> vectors,
+          std::size_t maxPrefixDimension = 0);
 
     [[nodiscard]] std::vector<BinaryQuantizedHit> search(std::span<const float> query,
                                                          std::size_t topK) const;

@@ -133,4 +133,30 @@ TEST_CASE("BinaryQuantizedIndex: build and search", "[vector][bq][index][catch2]
         CHECK(hits[2].id == 30);
         CHECK(hits[2].hammingDistance == 2);
     }
+
+    SECTION("Matryoshka prefix dimension slicing") {
+        // 128-dimensional vectors, indexed with maxPrefixDimension = 64
+        std::vector<std::size_t> ids = {1, 2};
+        std::vector<float> v1(128, 1.0F);
+        std::vector<float> v2(128, -1.0F);
+        for (std::size_t i = 64; i < 128; ++i) {
+            v1[i] = -1.0F;
+        }
+
+        std::vector<std::vector<float>> vecs = {v1, v2};
+        auto fullIndex = BinaryQuantizedIndex::build(ids, vecs, 0).value();
+        CHECK(fullIndex->dimension() == 128);
+
+        auto prefixIndex = BinaryQuantizedIndex::build(ids, vecs, 64).value();
+        CHECK(prefixIndex->dimension() == 64);
+
+        // Full 128-D query queries 64-D prefix index seamlessly
+        std::vector<float> query(128, 1.0F);
+        auto hits = prefixIndex->search(query, 2);
+        REQUIRE(hits.size() == 2);
+        CHECK(hits[0].id == 1);
+        CHECK(hits[0].hammingDistance == 0);
+        CHECK(hits[1].id == 2);
+        CHECK(hits[1].hammingDistance == 64);
+    }
 }

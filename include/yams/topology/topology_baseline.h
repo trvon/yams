@@ -69,7 +69,8 @@ public:
     /// Build immutable exact-routing structures and optionally the centroid ANN/BQ shortlist.
     [[nodiscard]] static SparseRouteIndex buildRouteIndex(const TopologyArtifactBatch& artifacts,
                                                           bool buildDenseAnnIndex = true,
-                                                          bool buildBqIndex = true);
+                                                          bool buildBqIndex = true,
+                                                          std::size_t bqPrefixDimension = 0);
 
     Result<std::vector<ClusterRoute>> route(const TopologyRouteRequest& request,
                                             const TopologyArtifactBatch& artifacts) const;

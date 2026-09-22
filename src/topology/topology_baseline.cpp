@@ -1,6 +1,7 @@
 #include <yams/topology/protected_relation_cover.h>
 #include <yams/topology/topology_baseline.h>
 #include <yams/topology/topology_representatives.h>
+#include <yams/topology/topology_sgc.h>
 #include <yams/vector/binary_quantization.h>
 #include <yams/vector/static_cosine_ann_index.h>
 
@@ -275,17 +276,32 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
         return batch;
     }
 
+    std::vector<TopologyDocumentInput> smoothedDocuments;
+    std::span<const TopologyDocumentInput> effectiveDocuments = documents;
+    if (config.sgcHops > 0 && documents.size() >= 2) {
+        smoothedDocuments.assign(documents.begin(), documents.end());
+        applySGCSmoothing(smoothedDocuments, config, config.sgcHops);
+        if (config.sgcNormalize) {
+            for (auto& doc : smoothedDocuments) {
+                if (!doc.embedding.empty()) {
+                    detail::normalizeVector(doc.embedding);
+                }
+            }
+        }
+        effectiveDocuments = smoothedDocuments;
+    }
+
     std::unordered_map<std::string, std::size_t> indexByHash;
-    indexByHash.reserve(documents.size());
-    for (std::size_t i = 0; i < documents.size(); ++i) {
-        if (!documents[i].documentHash.empty()) {
-            indexByHash[documents[i].documentHash] = i;
+    indexByHash.reserve(effectiveDocuments.size());
+    for (std::size_t i = 0; i < effectiveDocuments.size(); ++i) {
+        if (!effectiveDocuments[i].documentHash.empty()) {
+            indexByHash[effectiveDocuments[i].documentHash] = i;
         }
     }
 
     std::unordered_map<detail::PairKey, float, detail::PairKeyHash> pairWeights;
-    for (std::size_t i = 0; i < documents.size(); ++i) {
-        for (const auto& neighbor : documents[i].neighbors) {
+    for (std::size_t i = 0; i < effectiveDocuments.size(); ++i) {
+        for (const auto& neighbor : effectiveDocuments[i].neighbors) {
             if (neighbor.documentHash.empty()) {
                 continue;
             }
@@ -314,14 +330,14 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
         }
     }
 
-    Adjacency adjacency(documents.size());
+    Adjacency adjacency(effectiveDocuments.size());
     std::vector<detail::ProtectedRelationObservation> relationObservations;
     relationObservations.reserve(pairWeights.size());
     for (const auto& [key, weight] : pairWeights) {
         adjacency[key.first].push_back({key.second, weight});
         adjacency[key.second].push_back({key.first, weight});
-        const std::string_view firstHash = documents[key.first].documentHash;
-        const std::string_view secondHash = documents[key.second].documentHash;
+        const std::string_view firstHash = effectiveDocuments[key.first].documentHash;
+        const std::string_view secondHash = effectiveDocuments[key.second].documentHash;
         const auto endpoints = std::minmax(firstHash, secondHash);
         relationObservations.push_back(detail::ProtectedRelationObservation{
             .lhs = endpoints.first,
@@ -333,11 +349,11 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
         detail::protectedRelationIdentityFromObservations(std::move(relationObservations));
 
     // BFS connected components over the filtered undirected graph.
-    std::vector<bool> visited(documents.size(), false);
+    std::vector<bool> visited(effectiveDocuments.size(), false);
     std::vector<std::vector<std::size_t>> components;
     SplitScratch splitScratch;
-    components.reserve(documents.size());
-    for (std::size_t root = 0; root < documents.size(); ++root) {
+    components.reserve(effectiveDocuments.size());
+    for (std::size_t root = 0; root < effectiveDocuments.size(); ++root) {
         if (visited[root]) {
             continue;
         }
@@ -356,22 +372,23 @@ ConnectedComponentTopologyEngine::buildArtifacts(std::span<const TopologyDocumen
                 }
             }
         }
-        sortComponentByHash(component, documents);
+        sortComponentByHash(component, effectiveDocuments);
         for (auto& piece : splitOversizedComponent(component, config.maxComponentDocs, adjacency,
-                                                   documents, splitScratch)) {
+                                                   effectiveDocuments, splitScratch)) {
             components.emplace_back();
             components.back().swap(piece);
         }
     }
 
-    batch.memberships.reserve(documents.size());
+    batch.memberships.reserve(effectiveDocuments.size());
     for (const auto& component : components) {
-        emitComponent(batch, component, adjacency, documents, config.routingRepresentativeCount);
+        emitComponent(batch, component, adjacency, effectiveDocuments,
+                      config.routingRepresentativeCount);
     }
 
     std::ranges::sort(batch.clusters, {}, &ClusterArtifact::clusterId);
     std::ranges::sort(batch.memberships, {}, &DocumentClusterMembership::documentHash);
-    (void)applyOrthogonalBoundarySpill(documents, config, batch);
+    (void)applyOrthogonalBoundarySpill(effectiveDocuments, config, batch);
 
     return batch;
 }
@@ -731,13 +748,15 @@ SparseGuidedClusterRouter::route(const TopologyRouteRequest& request,
                                  const TopologyArtifactBatch& artifacts) const {
     const auto index =
         buildRouteIndex(artifacts, request.denseAnnCandidateLimit > 0,
-                        request.bqCandidateLimit > 0 || request.denseAnnCandidateLimit > 0);
+                        request.bqCandidateLimit > 0 || request.denseAnnCandidateLimit > 0,
+                        request.bqPrefixDimension);
     return route(request, artifacts, index);
 }
 
 SparseRouteIndex SparseGuidedClusterRouter::buildRouteIndex(const TopologyArtifactBatch& artifacts,
                                                             bool buildDenseAnnIndex,
-                                                            bool buildBqIndex) {
+                                                            bool buildBqIndex,
+                                                            std::size_t bqPrefixDimension) {
     SparseRouteIndex index;
     index.centroidNorms.reserve(artifacts.clusters.size());
     index.routingRepresentativeNorms.reserve(artifacts.clusters.size());
@@ -775,7 +794,8 @@ SparseRouteIndex SparseGuidedClusterRouter::buildRouteIndex(const TopologyArtifa
         }
     }
     if (buildBqIndex && !centroids.empty()) {
-        auto bqIndex = yams::vector::BinaryQuantizedIndex::build(centroidIds, centroids);
+        auto bqIndex =
+            yams::vector::BinaryQuantizedIndex::build(centroidIds, centroids, bqPrefixDimension);
         if (bqIndex) {
             index.centroidBqIndex = std::move(bqIndex).value();
         }

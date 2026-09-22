@@ -10,15 +10,17 @@
 
 namespace yams::vector {
 
-BinaryVector BinaryQuantizer::quantize(std::span<const float> vector) {
+BinaryVector BinaryQuantizer::quantize(std::span<const float> vector, std::size_t maxDimensions) {
     BinaryVector result;
-    result.dimension = vector.size();
-    if (vector.empty()) {
+    const auto dim =
+        (maxDimensions > 0 && maxDimensions < vector.size()) ? maxDimensions : vector.size();
+    result.dimension = dim;
+    if (dim == 0) {
         return result;
     }
-    const std::size_t numWords = (vector.size() + 63) / 64;
+    const std::size_t numWords = (dim + 63) / 64;
     result.words.assign(numWords, 0ULL);
-    for (std::size_t i = 0; i < vector.size(); ++i) {
+    for (std::size_t i = 0; i < dim; ++i) {
         if (vector[i] >= 0.0F) {
             result.words[i / 64] |= (1ULL << (i % 64));
         }
@@ -51,20 +53,24 @@ float BinaryQuantizer::estimatedCosineSimilarity(const BinaryVector& a, const Bi
 
 Result<std::shared_ptr<const BinaryQuantizedIndex>>
 BinaryQuantizedIndex::build(std::span<const std::size_t> ids,
-                            std::span<const std::vector<float>> vectors) {
+                            std::span<const std::vector<float>> vectors,
+                            std::size_t maxPrefixDimension) {
     if (ids.empty() || ids.size() != vectors.size()) {
         return Error{ErrorCode::InvalidArgument,
                      "BQ IDs and vectors must be non-empty and have equal sizes"};
     }
-    const auto dimension = vectors.front().size();
-    if (dimension == 0) {
+    const auto fullDimension = vectors.front().size();
+    if (fullDimension == 0) {
         return Error{ErrorCode::InvalidArgument, "BQ vector dimension must be non-zero"};
     }
+    const auto dimension = (maxPrefixDimension > 0 && maxPrefixDimension < fullDimension)
+                               ? maxPrefixDimension
+                               : fullDimension;
 
     std::unordered_set<std::size_t> uniqueIds;
     uniqueIds.reserve(ids.size());
     for (std::size_t i = 0; i < vectors.size(); ++i) {
-        if (vectors[i].size() != dimension) {
+        if (vectors[i].size() != fullDimension) {
             return Error{ErrorCode::InvalidArgument, "BQ vector dimensions must match"};
         }
         if (!uniqueIds.insert(ids[i]).second) {
@@ -92,10 +98,10 @@ BinaryQuantizedIndex::build(std::span<const std::size_t> ids,
 
 std::vector<BinaryQuantizedHit> BinaryQuantizedIndex::search(std::span<const float> query,
                                                              std::size_t topK) const {
-    if (query.size() != dimension_) {
+    if (query.size() < dimension_) {
         return {};
     }
-    const auto queryBq = BinaryQuantizer::quantize(query);
+    const auto queryBq = BinaryQuantizer::quantize(query.subspan(0, dimension_));
     return search(queryBq, topK);
 }
 

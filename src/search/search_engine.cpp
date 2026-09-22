@@ -3899,6 +3899,8 @@ Result<SearchResponse> SearchEngine::Impl::searchInternal(const std::string& que
         response.debugStats["cross_rerank_window"] = std::to_string(rerankWindow);
         response.debugStats["cross_rerank_snippet_max_chars"] =
             std::to_string(workingConfig.rerankSnippetMaxChars);
+        response.debugStats["cross_rerank_simeon_outer_maxsim"] =
+            workingConfig.simeonRerankOuterMaxSim ? "1" : "0";
 
         const auto crossStart = std::chrono::steady_clock::now();
         auto outcome = detail::applyCrossRerank(response.results, query, workingConfig,

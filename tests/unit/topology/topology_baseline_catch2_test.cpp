@@ -1525,3 +1525,59 @@ TEST_CASE("Topology baseline minEdgeScore filters weak links",
     CHECK((byDoc.at("a") == byDoc.at("b")));
     CHECK((byDoc.at("a") != byDoc.at("c")));
 }
+
+TEST_CASE("Topology baseline applies SGC feature smoothing (Lean SGC.lean)",
+          "[unit][topology][baseline][sgc]") {
+    ConnectedComponentTopologyEngine engine;
+    TopologyBuildConfig config;
+    config.reciprocalOnly = true;
+    config.minEdgeScore = 0.5;
+    config.maxComponentDocs = 0;
+    config.sgcHops = 1;
+    config.sgcNormalize = true;
+
+    // Triangle of connected docs with orthogonal embeddings
+    std::vector<TopologyDocumentInput> docs{
+        TopologyDocumentInput{
+            .documentHash = "doc-1",
+            .filePath = "/1",
+            .embedding = {1.0F, 0.0F, 0.0F, 0.0F},
+            .neighbors = {{.documentHash = "doc-2", .score = 0.8F, .reciprocal = true},
+                          {.documentHash = "doc-3", .score = 0.8F, .reciprocal = true}}},
+        TopologyDocumentInput{
+            .documentHash = "doc-2",
+            .filePath = "/2",
+            .embedding = {0.0F, 1.0F, 0.0F, 0.0F},
+            .neighbors = {{.documentHash = "doc-1", .score = 0.8F, .reciprocal = true},
+                          {.documentHash = "doc-3", .score = 0.8F, .reciprocal = true}}},
+        TopologyDocumentInput{
+            .documentHash = "doc-3",
+            .filePath = "/3",
+            .embedding = {0.0F, 0.0F, 1.0F, 0.0F},
+            .neighbors = {{.documentHash = "doc-1", .score = 0.8F, .reciprocal = true},
+                          {.documentHash = "doc-2", .score = 0.8F, .reciprocal = true}}},
+    };
+
+    auto smoothed = engine.buildArtifacts(docs, config);
+    REQUIRE(smoothed.has_value());
+    requireWellFormedBatch(smoothed.value());
+    CHECK(smoothed.value().memberships.size() == 3);
+    CHECK(smoothed.value().clusters.size() == 1);
+
+    const auto& cluster = smoothed.value().clusters.front();
+    CHECK(cluster.memberCount == 3);
+    REQUIRE(cluster.centroidEmbedding.size() == 4);
+
+    // With SGC 1-hop smoothing, neighbor embeddings blend into each other,
+    // so centroid components are balanced and non-zero.
+    CHECK(cluster.centroidEmbedding[0] > 0.1F);
+    CHECK(cluster.centroidEmbedding[1] > 0.1F);
+    CHECK(cluster.centroidEmbedding[2] > 0.1F);
+
+    // Verify sgcHops = 0 baseline leaves centroid as standard mean
+    config.sgcHops = 0;
+    auto unsmoothed = engine.buildArtifacts(docs, config);
+    REQUIRE(unsmoothed.has_value());
+    requireWellFormedBatch(unsmoothed.value());
+    CHECK(unsmoothed.value().clusters.size() == 1);
+}

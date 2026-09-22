@@ -60,4 +60,17 @@ inline std::vector<float> meanEmbedding(std::span<const TopologyDocumentInput> d
     return centroid;
 }
 
+inline void normalizeVector(std::vector<float>& vec) {
+    double normSq = 0.0;
+    for (float v : vec) {
+        normSq += static_cast<double>(v) * static_cast<double>(v);
+    }
+    if (normSq > 0.0) {
+        const auto invNorm = static_cast<float>(1.0 / std::sqrt(normSq));
+        for (float& v : vec) {
+            v *= invNorm;
+        }
+    }
+}
+
 } // namespace yams::topology::detail
