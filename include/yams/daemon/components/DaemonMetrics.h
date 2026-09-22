@@ -116,15 +116,13 @@ struct MetricsSnapshot {
     std::uint64_t directoriesProcessed{0};
     double postIngestLatencyMsEma{0.0};
     double postIngestRateSecEma{0.0};
-    // Pipeline stage metrics (extraction → KG → symbol → entity → embedding)
+    // Pipeline stage metrics (extraction → KG → entity → embedding)
     std::size_t extractionInFlight{0};
     std::size_t kgQueued{0};
     std::size_t kgDropped{0};
     std::size_t kgConsumed{0};
     std::size_t kgInFlight{0};
     std::size_t kgQueueDepth{0}; // Current channel queue depth
-    std::size_t symbolInFlight{0};
-    std::size_t symbolQueueDepth{0}; // Current channel queue depth
     // Entity extraction metrics (external plugins like Ghidra)
     std::size_t entityQueued{0};
     std::size_t entityDropped{0};
@@ -147,10 +145,9 @@ struct MetricsSnapshot {
     // Dynamic concurrency limits (PBI-05a)
     std::size_t postExtractionLimit{4};
     std::size_t postKgLimit{8};
-    std::size_t postSymbolLimit{4};
     std::size_t postEntityLimit{2};
     std::size_t postEmbedLimit{0};
-    // Combined enrich limit (symbol+entity+title)
+    // Combined enrich limit (entity+title)
     std::size_t postEnrichLimit{0};
     std::size_t enrichInflight{0};
     std::size_t enrichQueueDepth{0};
@@ -354,9 +351,6 @@ struct MetricsSnapshot {
     uint64_t fts5Consumed{0};
 
     // Symbol extraction metrics (from InternalEventBus)
-    uint64_t symbolQueued{0};
-    uint64_t symbolDropped{0};
-    uint64_t symbolConsumed{0};
 
     // GC pipeline metrics (from InternalEventBus)
     uint64_t gcQueued{0};
@@ -379,7 +373,6 @@ struct MetricsSnapshot {
     };
     GradientLimiterMetrics glExtraction;
     GradientLimiterMetrics glKg;
-    GradientLimiterMetrics glSymbol;
     GradientLimiterMetrics glEntity;
     GradientLimiterMetrics glTitle;
     GradientLimiterMetrics glEmbed;

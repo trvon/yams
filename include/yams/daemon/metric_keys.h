@@ -46,14 +46,8 @@ constexpr std::string_view kKgJobsCapacity = "kg_jobs_capacity";
 constexpr std::string_view kKgJobsFillPct = "kg_jobs_fill_pct";
 
 // Symbol Stage metrics
-constexpr std::string_view kSymbolQueued = "symbol_queued";
-constexpr std::string_view kSymbolDropped = "symbol_dropped";
-constexpr std::string_view kSymbolConsumed = "symbol_consumed";
-constexpr std::string_view kSymbolInflight = "symbol_inflight";
-constexpr std::string_view kSymbolQueueDepth = "symbol_queue_depth";
-constexpr std::string_view kPostSymbolLimit = "post_symbol_limit";
 
-// Enrich (combined symbol+entity+title) metrics
+// Enrich (combined entity+title) metrics
 constexpr std::string_view kPostEnrichLimit = "post_enrich_limit";
 constexpr std::string_view kEnrichInflight = "enrich_inflight";
 constexpr std::string_view kEnrichQueueDepth = "enrich_queue_depth";

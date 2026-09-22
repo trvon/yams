@@ -84,7 +84,6 @@ TEST_CASE("MetricsSnapshot nested structures are default-initialized", "[metrics
     REQUIRE(snap.glExtraction.rejectCount == 0);
 
     REQUIRE(snap.glKg.limit == 0.0);
-    REQUIRE(snap.glSymbol.limit == 0.0);
     REQUIRE(snap.glEntity.limit == 0.0);
     REQUIRE(snap.glEmbed.limit == 0.0);
     REQUIRE(snap.gradientLimitersEnabled == false);
@@ -98,7 +97,6 @@ TEST_CASE("MetricsSnapshot pipeline counters start at zero", "[metrics][snapshot
     REQUIRE(snap.kgDropped == 0);
     REQUIRE(snap.kgConsumed == 0);
     REQUIRE(snap.kgInFlight == 0);
-    REQUIRE(snap.symbolInFlight == 0);
     REQUIRE(snap.entityQueued == 0);
     REQUIRE(snap.entityDropped == 0);
     REQUIRE(snap.embedQueued == 0);

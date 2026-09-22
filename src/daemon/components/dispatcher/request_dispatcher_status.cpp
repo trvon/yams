@@ -335,8 +335,6 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
         setVal(metrics::kKgConsumed, snap.kgConsumed);
         setVal(metrics::kKgInflight, snap.kgInFlight);
         setVal(metrics::kKgQueueDepth, snap.kgQueueDepth);
-        setVal(metrics::kSymbolInflight, snap.symbolInFlight);
-        setVal(metrics::kSymbolQueueDepth, snap.symbolQueueDepth);
         setVal(metrics::kEntityQueued, snap.entityQueued);
         setVal(metrics::kEntityDropped, snap.entityDropped);
         setVal(metrics::kEntityConsumed, snap.entityConsumed);
@@ -351,9 +349,6 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
         setVal(metrics::kFts5Queued, snap.fts5Queued);
         setVal(metrics::kFts5Dropped, snap.fts5Dropped);
         setVal(metrics::kFts5Consumed, snap.fts5Consumed);
-        setVal(metrics::kSymbolQueued, snap.symbolQueued);
-        setVal(metrics::kSymbolDropped, snap.symbolDropped);
-        setVal(metrics::kSymbolConsumed, snap.symbolConsumed);
         setVal(metrics::kStreamTotal, snap.streamTotal);
         setVal(metrics::kStreamBatches, snap.streamBatches);
         setVal(metrics::kStreamKeepalives, snap.streamKeepalives);
@@ -399,7 +394,6 @@ void populateStatusCountsFromSnapshot(StatusResponse& res, const MetricsSnapshot
         setVal(metrics::kDirectoriesProcessed, static_cast<size_t>(snap.directoriesProcessed));
         setVal(metrics::kPostExtractionLimit, snap.postExtractionLimit);
         setVal(metrics::kPostKgLimit, snap.postKgLimit);
-        setVal(metrics::kPostSymbolLimit, snap.postSymbolLimit);
         setVal(metrics::kPostEntityLimit, snap.postEntityLimit);
         setVal(metrics::kPostEnrichLimit, snap.postEnrichLimit);
         setVal(metrics::kEnrichInflight, snap.enrichInflight);

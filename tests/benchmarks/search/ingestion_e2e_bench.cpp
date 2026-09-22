@@ -1615,9 +1615,6 @@ QueueSnapshot captureQueueSnapshot() {
     snap.kg_queued = bus.kgQueued();
     snap.kg_consumed = bus.kgConsumed();
     snap.kg_dropped = bus.kgDropped();
-    snap.symbol_queued = bus.symbolQueued();
-    snap.symbol_consumed = bus.symbolConsumed();
-    snap.symbol_dropped = bus.symbolDropped();
     snap.entity_queued = bus.entityQueued();
     snap.entity_consumed = bus.entityConsumed();
     snap.entity_dropped = bus.entityDropped();
