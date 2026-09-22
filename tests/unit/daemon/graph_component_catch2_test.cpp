@@ -300,7 +300,7 @@ TEST_CASE("GraphComponent: validateGraph flags one-way semantic neighborhoods",
           report.value().issues.end());
 }
 
-TEST_CASE("GraphComponent: maintainSemanticTopology prunes one-way semantic edges",
+TEST_CASE("GraphComponent: maintainSemanticTopology keeps one-way kNN edges and drops self-loops",
           "[daemon][graph][repair]") {
     GraphComponentTestFixture fixture;
     GraphComponent component(fixture.metadataRepo, fixture.kgStore);
@@ -327,18 +327,24 @@ TEST_CASE("GraphComponent: maintainSemanticTopology prunes one-way semantic edge
                                   KGEdge{.srcNodeId = ids.value()[2],
                                          .dstNodeId = ids.value()[3],
                                          .relation = "semantic_neighbor",
-                                         .weight = 0.93f}})
+                                         .weight = 0.93f},
+                                  // A self-loop is invalid and is removed.
+                                  KGEdge{.srcNodeId = ids.value()[3],
+                                         .dstNodeId = ids.value()[3],
+                                         .relation = "semantic_neighbor",
+                                         .weight = 1.0f}})
                 .has_value());
 
     auto maintenance = component.maintainSemanticTopology(false);
     REQUIRE(maintenance.has_value());
-    CHECK(maintenance.value().semanticEdgesPruned == 3);
+    // One-way edges are ordinary (non-mutual) kNN edges and are kept.
+    CHECK(maintenance.value().semanticEdgesPruned == 1);
     CHECK(maintenance.value().reciprocalCommunities == 0);
     CHECK(maintenance.value().largestReciprocalCommunity == 0);
 
     auto topology = analyzeDocumentTopology(fixture.kgStore.get());
     REQUIRE(topology.has_value());
-    CHECK(topology->semanticEdgeCount == 0);
+    CHECK(topology->semanticEdgeCount == 3);
     CHECK(topology->reciprocalCommunityCount == 0);
 }
 
@@ -379,7 +385,7 @@ TEST_CASE("GraphComponent: maintainSemanticTopology keeps reciprocal communities
     CHECK(topology->reciprocalCommunityCount == 1);
 }
 
-TEST_CASE("GraphComponent: scoped semantic maintenance prunes only dirty incident one-way edges",
+TEST_CASE("GraphComponent: scoped semantic maintenance keeps one-way kNN edges",
           "[daemon][graph][repair]") {
     GraphComponentTestFixture fixture;
     GraphComponent component(fixture.metadataRepo, fixture.kgStore);
@@ -396,12 +402,12 @@ TEST_CASE("GraphComponent: scoped semantic maintenance prunes only dirty inciden
 
     REQUIRE(fixture.kgStore
                 ->addEdgesUnique({
-                    // Dirty incident one-way edge: should be pruned.
+                    // Dirty incident one-way edge: an ordinary kNN edge, kept.
                     KGEdge{.srcNodeId = ids.value()[0],
                            .dstNodeId = ids.value()[1],
                            .relation = "semantic_neighbor",
                            .weight = 0.95f},
-                    // Non-dirty one-way edge: should be left for a future scoped/global pass.
+                    // Non-dirty one-way edge: outside the scoped region, kept.
                     KGEdge{.srcNodeId = ids.value()[2],
                            .dstNodeId = ids.value()[3],
                            .relation = "semantic_neighbor",
@@ -411,11 +417,12 @@ TEST_CASE("GraphComponent: scoped semantic maintenance prunes only dirty inciden
 
     auto maintenance = component.maintainSemanticTopologyForDocuments({"a"}, false);
     REQUIRE(maintenance.has_value());
-    CHECK(maintenance.value().semanticEdgesPruned == 1);
+    CHECK(maintenance.value().semanticEdgesPruned == 0);
 
     auto aEdges = fixture.kgStore->getEdgesFrom(ids.value()[0], "semantic_neighbor");
     REQUIRE(aEdges.has_value());
-    CHECK(aEdges.value().empty());
+    REQUIRE(aEdges.value().size() == 1);
+    CHECK(aEdges.value().front().dstNodeId == ids.value()[1]);
 
     auto cEdges = fixture.kgStore->getEdgesFrom(ids.value()[2], "semantic_neighbor");
     REQUIRE(cEdges.has_value());

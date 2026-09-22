@@ -774,8 +774,11 @@ void EmbeddingService::updateSemanticNeighborGraphUnlocked(
         std::size_t missingDstNodeCount = 0;
         float minEffectiveThreshold = 1.0f;
         float maxEffectiveThreshold = 0.0f;
+        // Edges point from a document to each of its k nearest neighbours and are not
+        // mirrored: a reverse edge exists only when the pair is mutual, which is what
+        // topology's reciprocalOnly filtering and graph reciprocity measure.
         std::vector<metadata::KGEdge> semanticEdges;
-        semanticEdges.reserve(sources.size() * semanticTopK * 2);
+        semanticEdges.reserve(sources.size() * semanticTopK);
         const auto nowSecs = std::chrono::duration_cast<std::chrono::seconds>(
                                  std::chrono::system_clock::now().time_since_epoch())
                                  .count();
@@ -828,22 +831,6 @@ void EmbeddingService::updateSemanticNeighborGraphUnlocked(
                 edge.properties = props.dump();
                 semanticEdges.push_back(std::move(edge));
 
-                metadata::KGEdge reverseEdge;
-                reverseEdge.srcNodeId = *dstNodeId;
-                reverseEdge.dstNodeId = *srcNodeId;
-                reverseEdge.relation = "semantic_neighbor";
-                reverseEdge.weight = std::clamp(neighbor.similarity, effectiveThreshold, 1.0f);
-                reverseEdge.createdTime = nowSecs;
-                nlohmann::json reverseProps;
-                reverseProps["source"] = "embedding_service";
-                reverseProps["document_hash"] = neighbor.hash;
-                reverseProps["neighbor_hash"] = source.hash;
-                reverseProps["model"] = modelName;
-                reverseProps["similarity"] = neighbor.similarity;
-                reverseProps["rank"] = kept + 1;
-                reverseProps["layer"] = "semantic";
-                reverseEdge.properties = reverseProps.dump();
-                semanticEdges.push_back(std::move(reverseEdge));
                 ++kept;
             }
         }
@@ -1000,7 +987,7 @@ void EmbeddingService::updateSemanticNeighborGraphUnlocked(
     float maxEffectiveThreshold = 0.0f;
 
     std::vector<metadata::KGEdge> semanticEdges;
-    semanticEdges.reserve(sources.size() * semanticTopK * 2);
+    semanticEdges.reserve(sources.size() * semanticTopK);
     const auto nowSecs = std::chrono::duration_cast<std::chrono::seconds>(
                              std::chrono::system_clock::now().time_since_epoch())
                              .count();
@@ -1090,23 +1077,6 @@ void EmbeddingService::updateSemanticNeighborGraphUnlocked(
             edge.properties = props.dump();
             semanticEdges.push_back(std::move(edge));
 
-            metadata::KGEdge reverseEdge;
-            reverseEdge.srcNodeId = *dstNodeId;
-            reverseEdge.dstNodeId = *srcNodeId;
-            reverseEdge.relation = "semantic_neighbor";
-            reverseEdge.weight = std::clamp(similarity, effectiveThreshold, 1.0f);
-            reverseEdge.createdTime = nowSecs;
-
-            nlohmann::json reverseProps;
-            reverseProps["source"] = "embedding_service";
-            reverseProps["document_hash"] = neighbor->hash;
-            reverseProps["neighbor_hash"] = *source.hash;
-            reverseProps["model"] = modelName;
-            reverseProps["similarity"] = similarity;
-            reverseProps["rank"] = kept + 1;
-            reverseProps["layer"] = "semantic";
-            reverseEdge.properties = reverseProps.dump();
-            semanticEdges.push_back(std::move(reverseEdge));
             ++kept;
         }
     }

@@ -4335,8 +4335,9 @@ void ServiceManager::requestSemanticTopologyMaintenance(const std::string& reaso
                 spdlog::warn("[ServiceManager] Semantic topology maintenance failed: {}",
                              maintenance.error().message);
             } else if (maintenance.value().semanticEdgesPruned > 0) {
-                spdlog::info("[ServiceManager] Pruned {} one-way semantic_neighbor edges after {}",
-                             maintenance.value().semanticEdgesPruned, reason);
+                spdlog::info(
+                    "[ServiceManager] Pruned {} self-loop semantic_neighbor edges after {}",
+                    maintenance.value().semanticEdgesPruned, reason);
             }
         }
     });

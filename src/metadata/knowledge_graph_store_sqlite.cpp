@@ -1245,7 +1245,7 @@ public:
             if (relation.has_value()) {
                 sql += " AND relation = ?";
             }
-            sql += " LIMIT ? OFFSET ?";
+            sql += " ORDER BY weight DESC, created_time DESC, id DESC LIMIT ? OFFSET ?";
 
             auto stmtR = db.prepareCached(sql);
             if (!stmtR)
@@ -1315,7 +1315,8 @@ public:
             if (relation.has_value()) {
                 sql += " AND relation = ?";
             }
-            sql += " ORDER BY id LIMIT ?";
+            // Strongest edges first, so a LIMIT truncates the weakest rather than the newest.
+            sql += " ORDER BY weight DESC, created_time DESC, id DESC LIMIT ?";
 
             auto stmtR = db.prepare(sql);
             if (!stmtR)

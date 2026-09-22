@@ -96,16 +96,6 @@ collectDirectedSemanticNeighborEdges(metadata::KnowledgeGraphStore* kgStore,
     return edgeIdsByPair;
 }
 
-bool shouldPruneSemanticTopology(const metadata::KGTopologySummary& summary) {
-    if (summary.unreciprocatedSemanticEdgeCount == 0) {
-        return false;
-    }
-    if (summary.semanticEdgeCount >= 3 && summary.reciprocalSemanticEdgeCount == 0) {
-        return true;
-    }
-    return summary.semanticEdgeCount >= 4 && summary.semanticReciprocity < 0.5;
-}
-
 } // namespace
 
 GraphComponent::GraphComponent(std::shared_ptr<metadata::MetadataRepository> metadataRepo,
@@ -969,40 +959,30 @@ GraphComponent::maintainSemanticTopology(bool dryRun) {
     stats.largestReciprocalCommunity =
         static_cast<uint64_t>(topology->largestReciprocalCommunitySize);
 
-    if (!shouldPruneSemanticTopology(*topology)) {
-        stats.skipped = true;
-        stats.issues.push_back("semantic topology maintenance skipped: reciprocity healthy enough");
-        return stats;
-    }
-
     auto edgesByPairResult = collectDirectedSemanticNeighborEdges(kgStore_.get(), 256);
     if (!edgesByPairResult) {
         return Error{ErrorCode::InternalError, "failed to collect semantic_neighbor edges: " +
                                                    edgesByPairResult.error().message};
     }
 
+    // semantic_neighbor edges point from a document to its own nearest neighbours, so a one-way
+    // edge is an ordinary non-mutual kNN edge, not damage. Only self-loops are invalid.
     std::vector<std::int64_t> edgesToRemove;
-    edgesToRemove.reserve(topology->unreciprocatedSemanticEdgeCount);
     for (const auto& [pair, edgeId] : edgesByPairResult.value()) {
         if (pair.first == pair.second) {
-            edgesToRemove.push_back(edgeId);
-            continue;
-        }
-        if (!edgesByPairResult.value().contains(DirectedNodePair{pair.second, pair.first})) {
             edgesToRemove.push_back(edgeId);
         }
     }
 
     if (edgesToRemove.empty()) {
         stats.skipped = true;
-        stats.issues.push_back(
-            "semantic topology maintenance skipped: no removable one-way edges found");
+        stats.issues.push_back("semantic topology maintenance skipped: no self-loop edges found");
         return stats;
     }
 
     if (dryRun) {
         stats.issues.push_back("dry-run: would prune " + std::to_string(edgesToRemove.size()) +
-                               " one-way semantic_neighbor edges");
+                               " self-loop semantic_neighbor edges");
         return stats;
     }
 
@@ -1018,7 +998,7 @@ GraphComponent::maintainSemanticTopology(bool dryRun) {
 
     if (stats.semanticEdgesPruned > 0) {
         stats.issues.push_back("pruned " + std::to_string(stats.semanticEdgesPruned) +
-                               " one-way semantic_neighbor edges");
+                               " self-loop semantic_neighbor edges");
     }
 
     auto updatedTopology = metadata::analyzeDocumentTopology(kgStore_.get(), 256);
@@ -1140,8 +1120,8 @@ GraphComponent::maintainSemanticTopologyForDocuments(const std::vector<std::stri
         return stats;
     }
 
+    // One-way edges are ordinary non-mutual kNN edges; only self-loops are removed.
     std::vector<std::int64_t> edgesToRemove;
-    edgesToRemove.reserve(edgeIdsByPair.size());
     std::size_t reciprocalPairs = 0;
     for (const auto& [pair, edgeId] : edgeIdsByPair) {
         if (pair.first == pair.second) {
@@ -1150,24 +1130,23 @@ GraphComponent::maintainSemanticTopologyForDocuments(const std::vector<std::stri
         }
         if (edgeIdsByPair.contains(DirectedNodePair{pair.second, pair.first})) {
             ++reciprocalPairs;
-            continue;
         }
-        edgesToRemove.push_back(edgeId);
     }
 
+    // Mutual pairs seen in the scoped region; community sizes are not measured here.
     stats.reciprocalCommunities = reciprocalPairs / 2;
-    stats.largestReciprocalCommunity = stats.reciprocalCommunities > 0 ? 2 : 0;
+    stats.largestReciprocalCommunity = 0;
 
     if (edgesToRemove.empty()) {
         stats.skipped = true;
-        stats.issues.push_back("semantic topology scoped maintenance skipped: incident region "
-                               "reciprocity healthy enough");
+        stats.issues.push_back(
+            "semantic topology scoped maintenance skipped: no self-loop edges in incident region");
         return stats;
     }
 
     if (dryRun) {
         stats.issues.push_back("dry-run: would prune " + std::to_string(edgesToRemove.size()) +
-                               " one-way semantic_neighbor edges from scoped region");
+                               " self-loop semantic_neighbor edges from scoped region");
         return stats;
     }
 
@@ -1186,7 +1165,7 @@ GraphComponent::maintainSemanticTopologyForDocuments(const std::vector<std::stri
                            std::to_string(incidentEdges) + " incident edges");
     if (stats.semanticEdgesPruned > 0) {
         stats.issues.push_back("pruned " + std::to_string(stats.semanticEdgesPruned) +
-                               " one-way semantic_neighbor edges from scoped region");
+                               " self-loop semantic_neighbor edges from scoped region");
     }
 
     return stats;
