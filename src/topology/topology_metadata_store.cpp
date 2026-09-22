@@ -3,6 +3,9 @@
 #include <yams/topology/topology_metadata_store.h>
 
 #include <nlohmann/json.hpp>
+#include <spdlog/spdlog.h>
+
+#include <algorithm>
 
 #include <chrono>
 #include <cstdint>
@@ -33,6 +36,182 @@ const std::array<std::string_view, 2>& topologyMetadataKeys() {
 
 std::string snapshotNodeKey(std::string_view snapshotId) {
     return std::string(kSnapshotNodePrefix) + std::string(snapshotId);
+}
+
+constexpr std::string_view kClusterNodePrefix = "topology:cluster:";
+constexpr std::string_view kClusterNodeType = "topology_cluster";
+constexpr std::string_view kSnapshotNodeType = "topology_snapshot";
+constexpr std::size_t kNodeScanPage = 512;
+
+std::string clusterNodeKey(std::string_view clusterId) {
+    return std::string(kClusterNodePrefix) + std::string(clusterId);
+}
+
+float unitWeight(double value) {
+    return static_cast<float>(std::clamp(value, 0.0, 1.0));
+}
+
+/// Replace the cluster graph with the batch's clusters in one KG write batch: cluster nodes,
+/// document member_of / medoid_of / overlaps edges, and cluster subcluster_of hierarchy edges.
+/// Deleting the previous cluster nodes removes their edges through the foreign-key cascade.
+Result<void> materializeClusterGraph(metadata::KnowledgeGraphStore& kgStore,
+                                     const TopologyArtifactBatch& batch, std::int64_t nowSecs) {
+    YAMS_ZONE_SCOPED_N("topology::store::materializeClusterGraph");
+    std::vector<std::int64_t> staleClusterNodes;
+    for (std::size_t offset = 0;; offset += kNodeScanPage) {
+        auto page = kgStore.findNodesByType(kClusterNodeType, kNodeScanPage, offset);
+        if (!page) {
+            return page.error();
+        }
+        for (const auto& node : page.value()) {
+            staleClusterNodes.push_back(node.id);
+        }
+        if (page.value().size() < kNodeScanPage) {
+            break;
+        }
+    }
+
+    std::vector<std::string> docKeys;
+    docKeys.reserve(batch.memberships.size());
+    for (const auto& membership : batch.memberships) {
+        docKeys.push_back("doc:" + membership.documentHash);
+    }
+    std::unordered_map<std::string, std::int64_t> docNodeIds;
+    if (!docKeys.empty()) {
+        auto docNodes = kgStore.getNodesByKeys(docKeys);
+        if (!docNodes) {
+            return docNodes.error();
+        }
+        for (const auto& node : docNodes.value()) {
+            docNodeIds.emplace(node.nodeKey.substr(4), node.id); // strip "doc:"
+        }
+    }
+
+    auto writeBatch = kgStore.beginWriteBatch();
+    if (!writeBatch) {
+        return writeBatch.error();
+    }
+    auto& wb = *writeBatch.value();
+    for (const auto nodeId : staleClusterNodes) {
+        if (auto removed = wb.deleteNodeById(nodeId); !removed) {
+            return removed.error();
+        }
+    }
+
+    std::vector<metadata::KGNode> clusterNodes;
+    clusterNodes.reserve(batch.clusters.size());
+    for (const auto& cluster : batch.clusters) {
+        metadata::KGNode node;
+        node.nodeKey = clusterNodeKey(cluster.clusterId);
+        node.label = cluster.clusterId;
+        node.type = std::string(kClusterNodeType);
+        node.createdTime = nowSecs;
+        node.updatedTime = nowSecs;
+        node.properties =
+            json{{"snapshot_id", batch.snapshotId},     {"level", cluster.level},
+                 {"member_count", cluster.memberCount}, {"persistence", cluster.persistenceScore},
+                 {"cohesion", cluster.cohesionScore},   {"density", cluster.densityScore}}
+                .dump();
+        clusterNodes.push_back(std::move(node));
+    }
+    auto clusterIds = wb.upsertNodes(clusterNodes);
+    if (!clusterIds) {
+        return clusterIds.error();
+    }
+    std::unordered_map<std::string_view, std::int64_t> clusterNodeIds;
+    for (std::size_t i = 0; i < batch.clusters.size() && i < clusterIds.value().size(); ++i) {
+        clusterNodeIds.emplace(batch.clusters[i].clusterId, clusterIds.value()[i]);
+    }
+
+    std::vector<metadata::KGEdge> edges;
+    edges.reserve(batch.memberships.size() + batch.clusters.size() * 2);
+    const auto addEdge = [&](std::int64_t src, std::int64_t dst, std::string_view relation,
+                             float weight) {
+        edges.push_back(metadata::KGEdge{.srcNodeId = src,
+                                         .dstNodeId = dst,
+                                         .relation = std::string(relation),
+                                         .weight = weight,
+                                         .createdTime = nowSecs});
+    };
+    for (const auto& membership : batch.memberships) {
+        const auto doc = docNodeIds.find(membership.documentHash);
+        if (doc == docNodeIds.end()) {
+            continue;
+        }
+        if (const auto cluster = clusterNodeIds.find(membership.clusterId);
+            cluster != clusterNodeIds.end()) {
+            addEdge(doc->second, cluster->second, "member_of",
+                    unitWeight(membership.persistenceScore));
+        }
+        for (const auto& overlapId : membership.overlapClusterIds) {
+            if (const auto overlap = clusterNodeIds.find(overlapId);
+                overlap != clusterNodeIds.end()) {
+                addEdge(doc->second, overlap->second, "overlaps",
+                        unitWeight(membership.bridgeScore));
+            }
+        }
+    }
+    for (const auto& cluster : batch.clusters) {
+        const auto self = clusterNodeIds.find(cluster.clusterId);
+        if (self == clusterNodeIds.end()) {
+            continue;
+        }
+        if (cluster.medoid) {
+            if (const auto doc = docNodeIds.find(cluster.medoid->documentHash);
+                doc != docNodeIds.end()) {
+                addEdge(doc->second, self->second, "medoid_of",
+                        unitWeight(cluster.medoid->representativeScore));
+            }
+        }
+        if (cluster.parentClusterId) {
+            if (const auto parent = clusterNodeIds.find(*cluster.parentClusterId);
+                parent != clusterNodeIds.end()) {
+                addEdge(self->second, parent->second, "subcluster_of", 1.0F);
+            }
+        }
+    }
+    if (!edges.empty()) {
+        if (auto added = wb.addEdgesUnique(edges); !added) {
+            return added.error();
+        }
+    }
+    return wb.commit();
+}
+
+/// Keep the newest kRetainedSnapshots snapshot nodes (by insertion order) plus the one the
+/// latest pointer names; older compressed snapshots are removed.
+Result<void> pruneSnapshotNodes(metadata::KnowledgeGraphStore& kgStore, std::size_t retain,
+                                std::string_view latestSnapshotId) {
+    YAMS_ZONE_SCOPED_N("topology::store::pruneSnapshotNodes");
+    std::vector<std::pair<std::int64_t, std::string>> snapshots;
+    for (std::size_t offset = 0;; offset += kNodeScanPage) {
+        auto page = kgStore.findNodesByType(kSnapshotNodeType, kNodeScanPage, offset);
+        if (!page) {
+            return page.error();
+        }
+        for (const auto& node : page.value()) {
+            snapshots.emplace_back(node.id, node.nodeKey);
+        }
+        if (page.value().size() < kNodeScanPage) {
+            break;
+        }
+    }
+    if (snapshots.size() <= retain) {
+        return {};
+    }
+    std::ranges::sort(snapshots, [](const auto& lhs, const auto& rhs) {
+        return lhs.first > rhs.first; // newest first
+    });
+    const auto latestKey = snapshotNodeKey(latestSnapshotId);
+    for (std::size_t i = retain; i < snapshots.size(); ++i) {
+        if (snapshots[i].second == latestKey) {
+            continue;
+        }
+        if (auto removed = kgStore.deleteNodeById(snapshots[i].first); !removed) {
+            return removed.error();
+        }
+    }
+    return {};
 }
 
 } // namespace
@@ -151,6 +330,13 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
     }
 
     if (kgStore_) {
+        // Written before the pointer flips, so a failure leaves the previous snapshot current.
+        if (auto graph = materializeClusterGraph(*kgStore_, batch, nowSecs); !graph) {
+            return graph.error();
+        }
+    }
+
+    if (kgStore_) {
         metadata::KGNode latestNode;
         latestNode.nodeKey = std::string{kLatestSnapshotNodeKey};
         latestNode.label = std::string{"latest_topology_snapshot"};
@@ -163,6 +349,12 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
         auto latestResult = kgStore_->upsertNode(latestNode);
         if (!latestResult) {
             return latestResult.error();
+        }
+        // Retention is best effort: an old snapshot left behind is only wasted space.
+        if (auto pruned = pruneSnapshotNodes(*kgStore_, kRetainedSnapshots, batch.snapshotId);
+            !pruned) {
+            spdlog::warn("[topology] failed to prune old snapshot nodes: {}",
+                         pruned.error().message);
         }
     }
 

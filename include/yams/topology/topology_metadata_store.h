@@ -14,6 +14,9 @@ namespace yams::topology {
 
 class MetadataKgTopologyArtifactStore final : public ITopologyArtifactStore {
 public:
+    /// Snapshot nodes kept in the knowledge graph; older compressed snapshots are removed.
+    static constexpr std::size_t kRetainedSnapshots = 3;
+
     MetadataKgTopologyArtifactStore(
         std::shared_ptr<metadata::IMetadataRepository> metadataRepo,
         std::shared_ptr<metadata::KnowledgeGraphStore> kgStore = nullptr);
