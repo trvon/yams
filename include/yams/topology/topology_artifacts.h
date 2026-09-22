@@ -95,6 +95,11 @@ struct TopologyBuildConfig {
     // Total dense route representatives per cluster, including the centroid. Values above one
     // add deterministic diverse member embeddings. The default preserves centroid-only routing.
     std::size_t routingRepresentativeCount{1};
+    // SGC smoothing hops applied to input embeddings before clustering (Lean SGC.lean).
+    // 0 = disabled (legacy default), 1-2 = linear feature smoothing over reciprocal graph edges.
+    std::size_t sgcHops{0};
+    // Re-normalize smoothed feature vectors to unit L2 length to preserve cosine distance.
+    bool sgcNormalize{true};
 };
 
 struct TopologyDirtyRegion {
@@ -221,6 +226,13 @@ struct TopologyRouteRequest {
     /// Maximum centroid candidates exact-scored after cached ANN routing. Zero preserves the
     /// exhaustive centroid scan. Sparse-vote clusters are always unioned into the shortlist.
     std::size_t denseAnnCandidateLimit{0};
+    /// Maximum centroid candidates shortlisted using 1-bit binary quantization (BQ) pre-filtering
+    /// before exact scoring. Zero disables BQ pre-filtering unless fallback routing applies.
+    std::size_t bqCandidateLimit{0};
+    /// Leading coordinate prefix dimension for BQ pre-filtering (Matryoshka Representation
+    /// Learning). Zero uses the full vector dimension; values like 64 fit within a single 64-bit
+    /// word.
+    std::size_t bqPrefixDimension{0};
 };
 
 struct ClusterRoute {

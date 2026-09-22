@@ -808,10 +808,9 @@ ca_path = ""
 url = ""
 
 [plugins.symbol_extraction]
-# Enable Tree-sitter based symbol extraction plugins (runtime toggle)
-enable = true
-# Auto-download missing Tree-sitter grammar shared objects on first use
-auto_download_grammars = true
+# Tree-sitter symbol extraction is disabled by default in favor of semantic topology and embedding geometry
+enable = false
+auto_download_grammars = false
 # Optional: restrict languages processed by the symbol extractor plugin
 # languages = ["cpp", "python", "c", "go", "rust", "js", "ts"]
 # Optional: override grammar .so paths per language

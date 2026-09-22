@@ -393,6 +393,7 @@ struct SearchEngineConfig {
     float rerankScoreGapThreshold = 0.0f;
     size_t rerankSnippetMaxChars = 256;
     size_t fusionCandidateLimit = 0;
+    bool simeonRerankOuterMaxSim = false;
 
     bool enableGraphRerank = false;
     size_t graphRerankTopN = 25;

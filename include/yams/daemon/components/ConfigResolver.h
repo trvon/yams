@@ -235,6 +235,7 @@ public:
 
     struct RerankerBackendPolicy {
         std::optional<std::string> backend;
+        std::optional<bool> simeonOuterMaxSim;
     };
 
     struct InstrumentationPolicy {

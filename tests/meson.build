@@ -1575,6 +1575,7 @@ if catch2_dep.found()
       'unit/search/cross_rerank_catch2_test.cpp',
       'unit/search/search_vector_pipeline_catch2_test.cpp',
       'unit/search/search_facets_catch2_test.cpp',
+      'unit/search/symbol_enrichment_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
@@ -2302,6 +2303,42 @@ if catch2_dep.found()
     install: false,
   )
 
+  catch2_topology_codec_exe = executable('catch2_topology_codec',
+    files('unit/topology/topology_codec_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_topology_metadata_store_exe = executable('catch2_topology_metadata_store',
+    files('unit/topology/topology_metadata_store_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_string_interner_exe = executable('catch2_string_interner',
+    files('unit/search/string_interner_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
+  catch2_binary_quantization_exe = executable('catch2_binary_quantization',
+    files('unit/vector/binary_quantization_catch2_test.cpp'),
+    include_directories: incs,
+    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
+    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
+    build_rpath: ':'.join(_test_rpaths),
+    install: false,
+  )
+
 #Fuzzy Index Prioritization Tests(Catch2) - fuzzy index scoring
 #Migrated from GTest as part of yams - 3s4 / yams - aqc
 #-- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
@@ -2518,8 +2555,6 @@ if catch2_dep.found()
       'unit/plugins/plugin_installer_test.cpp',
       'unit/plugins/plugin_repo_client_test.cpp',
       'unit/plugins/onnx_request_test.cpp',
-      'unit/plugins/symbol_extractor_query_test.cpp',
-      'unit/plugins/symbol_extractor_validation_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
@@ -2987,6 +3022,30 @@ if catch2_dep.found()
 
   test('topology_kmeans', catch2_topology_kmeans_exe,
     suite: ['catch2', 'unit', 'topology'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
+  )
+
+  test('topology_codec', catch2_topology_codec_exe,
+    suite: ['catch2', 'unit', 'topology'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
+  )
+
+  test('topology_metadata_store', catch2_topology_metadata_store_exe,
+    suite: ['catch2', 'unit', 'topology'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
+  )
+
+  test('string_interner', catch2_string_interner_exe,
+    suite: ['catch2', 'unit', 'search'],
+    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
+    timeout: 30
+  )
+
+  test('binary_quantization', catch2_binary_quantization_exe,
+    suite: ['catch2', 'unit', 'vector'],
     env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
     timeout: 30
   )

@@ -1688,6 +1688,13 @@ public:
     getSymbolExtractionState(std::string_view documentHash) override {
         return readPool()->withConnection(
             [&](Database& db) -> Result<std::optional<SymbolExtractionState>> {
+                auto exists = db.tableExists("document_symbol_extraction_state");
+                if (!exists)
+                    return exists.error();
+                if (!exists.value()) {
+                    return std::optional<SymbolExtractionState>{};
+                }
+
                 auto stmtR = db.prepare(R"(
                 SELECT ses.document_id, ses.extractor_id, ses.extractor_config_hash,
                        ses.extracted_at, ses.status, ses.entity_count, ses.error_message
@@ -1724,6 +1731,13 @@ public:
     Result<void> upsertSymbolExtractionState(std::string_view documentHash,
                                              const SymbolExtractionState& state) override {
         return pool_->withConnection([&](Database& db) -> Result<void> {
+            auto exists = db.tableExists("document_symbol_extraction_state");
+            if (!exists)
+                return exists.error();
+            if (!exists.value()) {
+                return Result<void>();
+            }
+
             // Resolve document_id from hash
             auto docIdR = db.prepare("SELECT id FROM documents WHERE sha256_hash = ?");
             if (!docIdR)
@@ -2720,6 +2734,13 @@ public:
         }
 
         return pool_->withConnection([&](Database& db) -> Result<void> {
+            auto exists = db.tableExists("symbol_metadata");
+            if (!exists)
+                return exists.error();
+            if (!exists.value()) {
+                return Result<void>();
+            }
+
             auto stmtR = db.prepare(R"(
                 INSERT INTO symbol_metadata (
                     document_hash, file_path, symbol_name, qualified_name, kind,
@@ -2767,6 +2788,13 @@ public:
 
     Result<std::int64_t> deleteSymbolMetadataForDocument(std::string_view documentHash) override {
         return pool_->withConnection([&](Database& db) -> Result<std::int64_t> {
+            auto exists = db.tableExists("symbol_metadata");
+            if (!exists)
+                return exists.error();
+            if (!exists.value()) {
+                return std::int64_t{0};
+            }
+
             auto stmtR = db.prepare("DELETE FROM symbol_metadata WHERE document_hash = ?");
             if (!stmtR)
                 return stmtR.error();
@@ -2790,6 +2818,13 @@ public:
                         std::optional<std::string_view> namePattern, std::size_t limit,
                         std::size_t offset) override {
         return readPool()->withConnection([&](Database& db) -> Result<std::vector<SymbolMetadata>> {
+            auto exists = db.tableExists("symbol_metadata");
+            if (!exists)
+                return exists.error();
+            if (!exists.value()) {
+                return std::vector<SymbolMetadata>{};
+            }
+
             struct SymbolQuery {
                 std::string sql;
                 std::vector<std::string> binds;
@@ -3708,6 +3743,12 @@ public:
             return Error{ErrorCode::InvalidState, "Transaction not started"};
         }
         Database& db = **conn_;
+        auto exists = db.tableExists("symbol_metadata");
+        if (!exists)
+            return exists.error();
+        if (!exists.value()) {
+            return Result<void>();
+        }
 
         auto stmtR = db.prepareCached(R"(
             INSERT INTO symbol_metadata (

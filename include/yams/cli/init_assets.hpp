@@ -32,19 +32,11 @@ struct RerankerModel {
     int max_tokens;
 };
 
-struct GrammarInfo {
-    std::string_view language;
-    std::string_view repo;
-    std::string_view description;
-    bool recommended;
-};
-
 const std::vector<EmbeddingModel>& embeddingModels();
 const std::vector<GlinerModel>& glinerModels();
 const std::vector<std::string>& glinerTokenizerFiles();
 const std::vector<RerankerModel>& rerankerModels();
 const std::vector<std::string>& rerankerTokenizerFiles();
-const std::vector<GrammarInfo>& supportedGrammars();
 std::string_view yamsSkillContent();
 
 } // namespace yams::cli::init_assets

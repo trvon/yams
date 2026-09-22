@@ -52,7 +52,11 @@ class ReleaseCandidateTests(unittest.TestCase):
             ["git", *args],
             cwd=self.repo,
             # Hooks export GIT_DIR even across cwd changes; never mutate the caller.
-            env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+            env={
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith("GIT_")
+            },
             check=True,
             capture_output=True,
             text=True,
@@ -124,7 +128,9 @@ class ReleaseCandidateTests(unittest.TestCase):
         self.git("merge", "--no-ff", "-m", "Merge current main", current_main)
         reconciled = self.git("rev-parse", "HEAD")
 
-        report = candidate_module.validate_candidate(self.repo, current_main, reconciled)
+        report = candidate_module.validate_candidate(
+            self.repo, current_main, reconciled
+        )
 
         self.assertEqual(report.base_sha, current_main)
         self.assertEqual(report.candidate_sha, reconciled)

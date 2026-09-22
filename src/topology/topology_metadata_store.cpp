@@ -1,4 +1,5 @@
 #include <yams/topology/topology_metadata_store.h>
+#include <yams/topology/topology_codec.h>
 
 #include <nlohmann/json.hpp>
 
@@ -61,208 +62,6 @@ DocumentTopologyRole roleFromString(std::string_view value) {
     return DocumentTopologyRole::Core;
 }
 
-const char* inputKindToString(TopologyInputKind kind) {
-    switch (kind) {
-        case TopologyInputKind::SemanticNeighborGraph:
-            return "semantic_neighbor_graph";
-        case TopologyInputKind::EmbeddingNeighborhood:
-            return "embedding_neighborhood";
-        case TopologyInputKind::Hybrid:
-            return "hybrid";
-    }
-    return "hybrid";
-}
-
-TopologyInputKind inputKindFromString(std::string_view value) {
-    if (value == "semantic_neighbor_graph") {
-        return TopologyInputKind::SemanticNeighborGraph;
-    }
-    if (value == "embedding_neighborhood") {
-        return TopologyInputKind::EmbeddingNeighborhood;
-    }
-    return TopologyInputKind::Hybrid;
-}
-
-json membershipToJson(const DocumentClusterMembership& membership) {
-    json j = json::object();
-    j["document_hash"] = membership.documentHash;
-    j["cluster_id"] = membership.clusterId;
-    if (membership.parentClusterId.has_value()) {
-        j["parent_cluster_id"] = *membership.parentClusterId;
-    } else {
-        j["parent_cluster_id"] = nullptr;
-    }
-    j["cluster_level"] = membership.clusterLevel;
-    j["persistence_score"] = membership.persistenceScore;
-    j["cohesion_score"] = membership.cohesionScore;
-    j["bridge_score"] = membership.bridgeScore;
-    j["role"] = roleToString(membership.role);
-    j["overlap_cluster_ids"] = membership.overlapClusterIds;
-    return j;
-}
-
-DocumentClusterMembership membershipFromJson(const json& j) {
-    DocumentClusterMembership membership;
-    membership.documentHash = j.value("document_hash", "");
-    membership.clusterId = j.value("cluster_id", "");
-    if (j.contains("parent_cluster_id") && !j["parent_cluster_id"].is_null()) {
-        membership.parentClusterId = j["parent_cluster_id"].get<std::string>();
-    }
-    membership.clusterLevel = j.value("cluster_level", std::size_t{0});
-    membership.persistenceScore = j.value("persistence_score", 0.0);
-    membership.cohesionScore = j.value("cohesion_score", 0.0);
-    membership.bridgeScore = j.value("bridge_score", 0.0);
-    membership.role = roleFromString(j.value("role", std::string{"core"}));
-    if (j.contains("overlap_cluster_ids") && j["overlap_cluster_ids"].is_array()) {
-        membership.overlapClusterIds = j["overlap_cluster_ids"].get<std::vector<std::string>>();
-    }
-    return membership;
-}
-
-json representativeToJson(const ClusterRepresentative& representative) {
-    return json{{"cluster_id", representative.clusterId},
-                {"document_hash", representative.documentHash},
-                {"file_path", representative.filePath},
-                {"representative_score", representative.representativeScore}};
-}
-
-ClusterRepresentative representativeFromJson(const json& j) {
-    ClusterRepresentative representative;
-    representative.clusterId = j.value("cluster_id", "");
-    representative.documentHash = j.value("document_hash", "");
-    representative.filePath = j.value("file_path", "");
-    representative.representativeScore = j.value("representative_score", 0.0);
-    return representative;
-}
-
-json routingRepresentativeToJson(const ClusterRoutingRepresentative& representative) {
-    return json{{"document_hash", representative.documentHash},
-                {"embedding", representative.embedding}};
-}
-
-ClusterRoutingRepresentative routingRepresentativeFromJson(const json& j) {
-    ClusterRoutingRepresentative representative;
-    representative.documentHash = j.value("document_hash", "");
-    if (j.contains("embedding") && j["embedding"].is_array()) {
-        representative.embedding = j["embedding"].get<std::vector<float>>();
-    }
-    return representative;
-}
-
-json clusterToJson(const ClusterArtifact& cluster) {
-    json j = json::object();
-    j["cluster_id"] = cluster.clusterId;
-    if (cluster.parentClusterId.has_value()) {
-        j["parent_cluster_id"] = *cluster.parentClusterId;
-    } else {
-        j["parent_cluster_id"] = nullptr;
-    }
-    j["level"] = cluster.level;
-    j["member_count"] = cluster.memberCount;
-    j["persistence_score"] = cluster.persistenceScore;
-    j["cohesion_score"] = cluster.cohesionScore;
-    j["density_score"] = cluster.densityScore;
-    j["bridge_mass"] = cluster.bridgeMass;
-    j["protected_pair_count"] = cluster.protectedPairCount;
-    j["preserved_protected_pair_count"] = cluster.preservedProtectedPairCount;
-    j["member_document_hashes"] = cluster.memberDocumentHashes;
-    j["overlap_cluster_ids"] = cluster.overlapClusterIds;
-    if (cluster.medoid.has_value()) {
-        j["medoid"] = representativeToJson(*cluster.medoid);
-    }
-    if (!cluster.centroidEmbedding.empty()) {
-        j["centroid_embedding"] = cluster.centroidEmbedding;
-    }
-    if (!cluster.routingRepresentatives.empty()) {
-        j["routing_representatives"] = json::array();
-        for (const auto& representative : cluster.routingRepresentatives) {
-            j["routing_representatives"].push_back(routingRepresentativeToJson(representative));
-        }
-    }
-    return j;
-}
-
-ClusterArtifact clusterFromJson(const json& j) {
-    ClusterArtifact cluster;
-    cluster.clusterId = j.value("cluster_id", "");
-    if (j.contains("parent_cluster_id") && !j["parent_cluster_id"].is_null()) {
-        cluster.parentClusterId = j["parent_cluster_id"].get<std::string>();
-    }
-    cluster.level = j.value("level", std::size_t{0});
-    cluster.memberCount = j.value("member_count", std::size_t{0});
-    cluster.persistenceScore = j.value("persistence_score", 0.0);
-    cluster.cohesionScore = j.value("cohesion_score", 0.0);
-    cluster.densityScore = j.value("density_score", 0.0);
-    cluster.bridgeMass = j.value("bridge_mass", 0.0);
-    cluster.protectedPairCount = j.value("protected_pair_count", std::size_t{0});
-    cluster.preservedProtectedPairCount = j.value("preserved_protected_pair_count", std::size_t{0});
-    if (j.contains("medoid") && j["medoid"].is_object()) {
-        cluster.medoid = representativeFromJson(j["medoid"]);
-    }
-    if (j.contains("member_document_hashes") && j["member_document_hashes"].is_array()) {
-        cluster.memberDocumentHashes = j["member_document_hashes"].get<std::vector<std::string>>();
-    }
-    if (j.contains("overlap_cluster_ids") && j["overlap_cluster_ids"].is_array()) {
-        cluster.overlapClusterIds = j["overlap_cluster_ids"].get<std::vector<std::string>>();
-    }
-    if (j.contains("centroid_embedding") && j["centroid_embedding"].is_array()) {
-        cluster.centroidEmbedding = j["centroid_embedding"].get<std::vector<float>>();
-    }
-    if (j.contains("routing_representatives") && j["routing_representatives"].is_array()) {
-        for (const auto& representative : j["routing_representatives"]) {
-            if (representative.is_object()) {
-                cluster.routingRepresentatives.push_back(
-                    routingRepresentativeFromJson(representative));
-            }
-        }
-    }
-    return cluster;
-}
-
-json batchToJson(const TopologyArtifactBatch& batch) {
-    json j{{"snapshot_id", batch.snapshotId},
-           {"algorithm", batch.algorithm},
-           {"input_kind", inputKindToString(batch.inputKind)},
-           {"embedding_space_identity", batch.embeddingSpaceIdentity},
-           {"protected_relation_identity", batch.protectedRelationIdentity},
-           {"generated_at_unix_seconds", batch.generatedAtUnixSeconds},
-           {"topology_epoch", batch.topologyEpoch}};
-    j["clusters"] = json::array();
-    for (const auto& cluster : batch.clusters) {
-        j["clusters"].push_back(clusterToJson(cluster));
-    }
-    j["memberships"] = json::array();
-    for (const auto& membership : batch.memberships) {
-        j["memberships"].push_back(membershipToJson(membership));
-    }
-    return j;
-}
-
-Result<TopologyArtifactBatch> batchFromJson(const json& j) {
-    if (!j.is_object()) {
-        return Error{ErrorCode::InvalidData, "topology batch JSON must be an object"};
-    }
-    TopologyArtifactBatch batch;
-    batch.snapshotId = j.value("snapshot_id", "");
-    batch.algorithm = j.value("algorithm", "");
-    batch.inputKind = inputKindFromString(j.value("input_kind", std::string{"hybrid"}));
-    batch.embeddingSpaceIdentity = j.value("embedding_space_identity", "");
-    batch.protectedRelationIdentity = j.value("protected_relation_identity", "");
-    batch.generatedAtUnixSeconds = j.value("generated_at_unix_seconds", uint64_t{0});
-    batch.topologyEpoch = j.value("topology_epoch", uint64_t{0});
-    if (j.contains("clusters") && j["clusters"].is_array()) {
-        for (const auto& clusterJson : j["clusters"]) {
-            batch.clusters.push_back(clusterFromJson(clusterJson));
-        }
-    }
-    if (j.contains("memberships") && j["memberships"].is_array()) {
-        for (const auto& membershipJson : j["memberships"]) {
-            batch.memberships.push_back(membershipFromJson(membershipJson));
-        }
-    }
-    return batch;
-}
-
 std::string snapshotNodeKey(std::string_view snapshotId) {
     return std::string(kSnapshotNodePrefix) + std::string(snapshotId);
 }
@@ -294,39 +93,33 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
         previousBatch = std::move(latestResult.value());
     }
 
-    std::vector<std::tuple<int64_t, std::string, metadata::MetadataValue>> metadataEntries;
-    metadataEntries.reserve(batch.memberships.size() * 9);
+    std::vector<std::string> requestedHashes;
+    requestedHashes.reserve(batch.memberships.size());
     for (const auto& membership : batch.memberships) {
-        auto documentResult = metadataRepo_->getDocumentByHash(membership.documentHash);
-        if (!documentResult) {
-            return documentResult.error();
-        }
-        if (!documentResult.value().has_value()) {
+        requestedHashes.push_back(membership.documentHash);
+    }
+
+    auto docsResult = metadataRepo_->batchGetDocumentsByHash(requestedHashes);
+    if (!docsResult) {
+        return docsResult.error();
+    }
+    const auto& docMap = docsResult.value();
+    for (const auto& membership : batch.memberships) {
+        if (!docMap.contains(membership.documentHash)) {
             return Error{ErrorCode::NotFound, "topology membership document not found for hash=" +
                                                   membership.documentHash};
         }
-        const auto documentId = documentResult.value()->id;
+    }
+
+    std::vector<std::tuple<int64_t, std::string, metadata::MetadataValue>> metadataEntries;
+    metadataEntries.reserve(batch.memberships.size() * 2);
+    for (const auto& membership : batch.memberships) {
+        const auto it = docMap.find(membership.documentHash);
+        const auto documentId = it->second.id;
         metadataEntries.emplace_back(documentId, std::string(kSnapshotIdKey),
                                      metadata::MetadataValue(batch.snapshotId));
         metadataEntries.emplace_back(documentId, std::string(kClusterIdKey),
                                      metadata::MetadataValue(membership.clusterId));
-        metadataEntries.emplace_back(
-            documentId, std::string(kParentClusterIdKey),
-            metadata::MetadataValue(membership.parentClusterId.value_or("")));
-        metadataEntries.emplace_back(
-            documentId, std::string(kClusterLevelKey),
-            metadata::MetadataValue(static_cast<int64_t>(membership.clusterLevel)));
-        metadataEntries.emplace_back(documentId, std::string(kPersistenceKey),
-                                     metadata::MetadataValue(membership.persistenceScore));
-        metadataEntries.emplace_back(documentId, std::string(kCohesionKey),
-                                     metadata::MetadataValue(membership.cohesionScore));
-        metadataEntries.emplace_back(documentId, std::string(kBridgeKey),
-                                     metadata::MetadataValue(membership.bridgeScore));
-        metadataEntries.emplace_back(documentId, std::string(kRoleKey),
-                                     metadata::MetadataValue(roleToString(membership.role)));
-        metadataEntries.emplace_back(
-            documentId, std::string(kOverlapKey),
-            metadata::MetadataValue(json(membership.overlapClusterIds).dump()));
     }
 
     if (!metadataEntries.empty()) {
@@ -337,25 +130,26 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
     }
 
     if (previousBatch.has_value()) {
-        std::unordered_set<std::string> currentDocumentHashes;
-        currentDocumentHashes.reserve(batch.memberships.size());
-        for (const auto& membership : batch.memberships) {
-            currentDocumentHashes.insert(membership.documentHash);
+        std::unordered_set<std::string> currentDocumentHashes(requestedHashes.begin(),
+                                                              requestedHashes.end());
+        std::vector<std::string> removedHashes;
+        for (const auto& previousMembership : previousBatch->memberships) {
+            if (!currentDocumentHashes.contains(previousMembership.documentHash)) {
+                removedHashes.push_back(previousMembership.documentHash);
+            }
         }
 
-        for (const auto& previousMembership : previousBatch->memberships) {
-            if (currentDocumentHashes.contains(previousMembership.documentHash)) {
-                continue;
-            }
-            auto documentResult = metadataRepo_->getDocumentByHash(previousMembership.documentHash);
-            if (!documentResult || !documentResult.value().has_value()) {
-                continue;
-            }
-            for (const auto key : topologyMetadataKeys()) {
-                auto removeResult =
-                    metadataRepo_->removeMetadata(documentResult.value()->id, std::string(key));
-                if (!removeResult) {
-                    return removeResult.error();
+        if (!removedHashes.empty()) {
+            auto removedDocsResult = metadataRepo_->batchGetDocumentsByHash(removedHashes);
+            if (removedDocsResult) {
+                for (const auto& [hash, docInfo] : removedDocsResult.value()) {
+                    for (const auto key : topologyMetadataKeys()) {
+                        auto removeResult =
+                            metadataRepo_->removeMetadata(docInfo.id, std::string(key));
+                        if (!removeResult) {
+                            return removeResult.error();
+                        }
+                    }
                 }
             }
         }
@@ -371,7 +165,11 @@ Result<void> MetadataKgTopologyArtifactStore::storeBatch(const TopologyArtifactB
         snapshotNode.type = std::string{"topology_snapshot"};
         snapshotNode.createdTime = nowSecs;
         snapshotNode.updatedTime = nowSecs;
-        snapshotNode.properties = batchToJson(batch).dump();
+        auto compRes = serializeTopologyBatchCompressed(batch);
+        if (!compRes) {
+            return compRes.error();
+        }
+        snapshotNode.properties = std::move(compRes.value());
         auto snapshotResult = kgStore_->upsertNode(snapshotNode);
         if (!snapshotResult) {
             return snapshotResult.error();
@@ -437,11 +235,7 @@ MetadataKgTopologyArtifactStore::loadLatest(std::string_view snapshotId) const {
         return std::optional<TopologyArtifactBatch>{};
     }
 
-    auto parsed = json::parse(*snapshotNodeResult.value()->properties, nullptr, false);
-    if (parsed.is_discarded()) {
-        return Error{ErrorCode::SerializationError, "failed to parse topology snapshot JSON"};
-    }
-    auto batchResult = batchFromJson(parsed);
+    auto batchResult = deserializeTopologyBatchCompressed(*snapshotNodeResult.value()->properties);
     if (!batchResult) {
         return batchResult.error();
     }
@@ -451,6 +245,30 @@ MetadataKgTopologyArtifactStore::loadLatest(std::string_view snapshotId) const {
 
 Result<std::vector<DocumentClusterMembership>> MetadataKgTopologyArtifactStore::loadMemberships(
     std::span<const std::string> documentHashes) const {
+    if (!cachedLatest_.has_value()) {
+        auto latestResult = loadLatest();
+        if (!latestResult) {
+            return latestResult.error();
+        }
+    }
+
+    if (cachedLatest_.has_value() && !cachedLatest_->memberships.empty()) {
+        std::unordered_map<std::string_view, const DocumentClusterMembership*> membershipIndex;
+        membershipIndex.reserve(cachedLatest_->memberships.size());
+        for (const auto& m : cachedLatest_->memberships) {
+            membershipIndex.emplace(m.documentHash, &m);
+        }
+
+        std::vector<DocumentClusterMembership> memberships;
+        memberships.reserve(documentHashes.size());
+        for (const auto& hash : documentHashes) {
+            if (auto it = membershipIndex.find(hash); it != membershipIndex.end()) {
+                memberships.push_back(*it->second);
+            }
+        }
+        return memberships;
+    }
+
     if (!metadataRepo_) {
         return Error{ErrorCode::InvalidState,
                      "topology metadata store requires metadata repository"};

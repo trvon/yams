@@ -29,8 +29,10 @@ namespace {
 
 // Test fixture helper for GraphComponent tests
 struct GraphComponentTestFixture {
-    GraphComponentTestFixture() {
-        dbPath = yams::test::migrated_metadata_db_template().clone("yams_graph_component_db_");
+    explicit GraphComponentTestFixture(bool useV39 = false) {
+        dbPath = (useV39 ? yams::test::v39_metadata_db_template()
+                         : yams::test::migrated_metadata_db_template())
+                     .clone("yams_graph_component_db_");
         testDir = dbPath.parent_path() / dbPath.stem();
         std::filesystem::create_directories(testDir);
 
@@ -538,7 +540,7 @@ TEST_CASE("GraphComponent: Dedupe predicate detects existing doc entities",
 }
 
 TEST_CASE("GraphComponent: Versioned extraction state dedupe", "[daemon][graph][dedupe]") {
-    GraphComponentTestFixture fixture;
+    GraphComponentTestFixture fixture(true);
 
     // Create a document in the database
     DocumentInfo doc;
@@ -646,7 +648,7 @@ TEST_CASE("GraphComponent: Versioned extraction state dedupe", "[daemon][graph][
 
 TEST_CASE("GraphComponent: Extraction state get/upsert roundtrip",
           "[daemon][graph][extraction-state]") {
-    GraphComponentTestFixture fixture;
+    GraphComponentTestFixture fixture(true);
 
     // Create a document in the database
     DocumentInfo doc;
@@ -1219,7 +1221,7 @@ TEST_CASE("KnowledgeGraphStore: getNodeTypeCounts empty", "[daemon][graph][query
 
 TEST_CASE("GraphComponent reconcileSymbolReferences links placeholders to definitions",
           "[daemon][graph]") {
-    GraphComponentTestFixture fixture;
+    GraphComponentTestFixture fixture(true);
     GraphComponent component(fixture.metadataRepo, fixture.kgStore);
     REQUIRE(component.initialize().has_value());
 
@@ -1302,7 +1304,7 @@ TEST_CASE("GraphComponent reconcileSymbolReferences links placeholders to defini
 
 TEST_CASE("GraphComponent reconcileSymbolReferences is idempotent (no double-count on re-run)",
           "[daemon][graph][reconcile][idempotency]") {
-    GraphComponentTestFixture fixture;
+    GraphComponentTestFixture fixture(true);
     GraphComponent component(fixture.metadataRepo, fixture.kgStore);
     REQUIRE(component.initialize().has_value());
 
@@ -1424,7 +1426,7 @@ TEST_CASE("GraphComponent: repairGraph removes orphaned KG nodes after document 
 
 TEST_CASE("GraphComponent: repairGraph removes dangling resolves_to after canonical deletion",
           "[daemon][graph][reconcile][dangling]") {
-    GraphComponentTestFixture fixture;
+    GraphComponentTestFixture fixture(true);
     GraphComponent component(fixture.metadataRepo, fixture.kgStore);
     REQUIRE(component.initialize().has_value());
 

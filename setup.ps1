@@ -663,11 +663,6 @@ if ($env:YAMS_DISABLE_ONNX -eq 'true') {
     }
 }
 
-if ($env:YAMS_DISABLE_SYMBOL_EXTRACTION -eq 'true') {
-    Write-Host 'Symbol extraction disabled (YAMS_DISABLE_SYMBOL_EXTRACTION=true)'
-    $conanArgs += @('-o', 'yams/*:enable_symbol_extraction=False')
-}
-
 if ($env:YAMS_DISABLE_PDF -eq 'true') {
     Write-Host 'PDF support disabled (YAMS_DISABLE_PDF=true)'
     $conanArgs += @('-o', 'yams/*:enable_pdf=False')

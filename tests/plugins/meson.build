@@ -28,38 +28,7 @@ test('zyp_pdf_metadata', zyp_pdf_metadata_test_exe,
   timeout: 30,
 )
 
-# Dedicated symbol plugin shard to avoid ABI symbol conflicts.
-if get_option('plugin-symbols')
-  symbol_plugin_tests = files(
-    'symbol_extractor_all_langs_catch2_test.cpp',
-    'symbol_extractor_edge_cases_catch2_test.cpp',
-    'symbol_extractor_solidity_catch2_test.cpp',
-  )
-
-  plugin_path = join_paths(plugin_build_dir, 'plugins/symbol_extractor_treesitter/yams_symbol_extractor' + plugin_ext)
-
-  plugin_runtime_deps = get_variable('symbol_extractor_plugin_target', [])
-
-  symbol_plugin_exe = executable('yams_symbol_plugin_tests', symbol_plugin_tests,
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: ['-DPLUGIN_PATH="' + plugin_path + '"'],
-    install: false,
-  )
-
-  test('symbol_plugins', symbol_plugin_exe,
-    suite: ['plugins', 'symbols', 'catch2'],
-    env: {
-      'YAMS_AUTO_DOWNLOAD_GRAMMARS': '1',
-      'YAMS_SKIP_MODEL_LOADING': '1',
-      'LD_LIBRARY_PATH': plugin_test_ld_library_path,
-    },
-    depends: plugin_runtime_deps,
-  )
-endif
-
-# ONNX plugin ABI tests are registered separately from symbol plugin tests so
-# plugin-symbols=false does not hide ONNX coverage when ONNX is available.
+# ONNX plugin ABI tests
 onnx_plugin_runtime_deps = get_variable('yams_onnx_plugin_target', [])
 if get_option('plugin-onnx') and onnx_plugin_runtime_deps.length() > 0
   if host_machine.system() == 'windows'

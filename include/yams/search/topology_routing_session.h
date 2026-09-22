@@ -1,6 +1,7 @@
 #pragma once
 
 #include <yams/search/search_engine_config.h>
+#include <yams/search/string_interner.h>
 #include <yams/topology/protected_relation_cover.h>
 #include <yams/topology/topology_artifacts.h>
 #include <yams/topology/topology_baseline.h>
@@ -41,11 +42,12 @@ struct TopologyRoutingSnapshot {
     std::shared_ptr<const yams::topology::TopologyArtifactBatch> artifacts;
     std::string constructionFingerprint;
     std::string representationFingerprint;
-    std::unordered_map<std::string, std::size_t> clustersById;
-    std::unordered_map<std::string, std::size_t> membershipsByDocumentHash;
+    std::unordered_map<std::string_view, std::size_t> clustersById;
+    std::unordered_map<std::string_view, std::size_t> membershipsByDocumentHash;
     yams::topology::ProtectedRelationCoverIndex protectedRelationCover;
     yams::topology::SparseRouteIndex sparseRouteIndex;
     bool denseAnnBuildAttempted = false;
+    std::shared_ptr<StringInterner> interner;
 };
 
 struct TopologyRoutingSnapshotLookup {

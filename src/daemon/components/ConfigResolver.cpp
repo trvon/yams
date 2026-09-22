@@ -1178,8 +1178,12 @@ ConfigResolver::resolveRerankerBackendPolicy(const DaemonConfig& config) {
             if (auto it = kv.find("search.reranker_backend");
                 it != kv.end() && !it->second.empty()) {
                 policy.backend = normalize(it->second);
-                return policy;
             }
+            if (auto it = kv.find("search.simeon_rerank_outer_maxsim");
+                it != kv.end() && !it->second.empty()) {
+                policy.simeonOuterMaxSim = parseTomlBool(it->second);
+            }
+            return policy;
         }
     } catch (const std::exception& e) {
         spdlog::debug("Error reading config for reranker backend: {}", e.what());

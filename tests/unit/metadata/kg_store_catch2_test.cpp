@@ -15,6 +15,7 @@
 #include <yams/metadata/kg_topology_analysis.h>
 #include <yams/metadata/knowledge_graph_store.h>
 #include <yams/metadata/metadata_repository.h>
+#include <yams/metadata/migration.h>
 
 using namespace yams;
 using namespace yams::metadata;
@@ -118,7 +119,7 @@ Result<void> seedWithoutForeignKeys(const std::filesystem::path& dbPath, Seeder&
 }
 
 struct KGStoreRepoFixture {
-    KGStoreRepoFixture() {
+    explicit KGStoreRepoFixture(bool rollbackToV39 = false) {
         dbPath_ = tempDbPath("kg_store_repo_catch2_test_");
         KnowledgeGraphStoreConfig cfg{};
         auto storeRes = makeSqliteKnowledgeGraphStore(dbPath_.string(), cfg);
@@ -130,7 +131,22 @@ struct KGStoreRepoFixture {
         pool_ = std::make_unique<ConnectionPool>(dbPath_.string(), poolCfg);
         auto initResult = pool_->initialize();
         REQUIRE((initResult.has_value()));
-        repo_ = std::make_unique<MetadataRepository>(*pool_);
+        if (rollbackToV39) {
+            auto rb = pool_->withConnection([](Database& db) -> Result<void> {
+                MigrationManager mm(db);
+                auto initRes = mm.initialize();
+                if (!initRes) {
+                    return initRes.error();
+                }
+                mm.registerMigrations(YamsMetadataMigrations::getAllMigrations());
+                return mm.rollbackTo(39);
+            });
+            REQUIRE(rb.has_value());
+        }
+        repo_ = std::make_unique<MetadataRepository>(
+            *pool_, nullptr,
+            rollbackToV39 ? MetadataRepository::SchemaBootstrapMode::AssumeReady
+                          : MetadataRepository::SchemaBootstrapMode::EnsureSchema);
     }
 
     ~KGStoreRepoFixture() {
@@ -1055,7 +1071,7 @@ TEST_CASE("KG Store: document hash and extraction state helpers handle missing a
 
 TEST_CASE("KG Store: symbol metadata queries support update, filter, pagination, and delete",
           "[unit][metadata][kg]") {
-    KGStoreRepoFixture fix;
+    KGStoreRepoFixture fix(true);
 
     fix.insertDocument("hash-symbol-a", "/tmp/symbol-a.cpp");
     fix.insertDocument("hash-symbol-b", "/tmp/symbol-b.cpp");
@@ -1159,7 +1175,7 @@ TEST_CASE("KG Store: symbol metadata queries support update, filter, pagination,
 
 TEST_CASE("KG Store: symbol lookup falls back while the optional FTS capability is unavailable",
           "[unit][metadata][kg][symbols]") {
-    KGStoreRepoFixture fix;
+    KGStoreRepoFixture fix(true);
     fix.insertDocument("hash-symbol-fallback", "/tmp/write-coordinator.cpp");
 
     SymbolMetadata symbol;
