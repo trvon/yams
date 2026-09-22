@@ -311,6 +311,8 @@ struct TopologyRoutingSessionResult {
     bool routeAnnUsed = false;
     std::size_t routeAnnCandidates = 0;
     std::size_t routeAnnDistanceEvaluations = 0;
+    bool routeBqUsed = false;
+    std::size_t routeBqCandidates = 0;
     std::size_t routeExactRepresentativeDistanceEvaluations = 0;
     TopologyRouteCertificate certificate;
     std::vector<TopologyRouteEvidence> routeEvidence;

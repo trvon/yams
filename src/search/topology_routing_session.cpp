@@ -191,6 +191,8 @@ void accumulateRouteWork(TopologyRoutingSessionResult& result,
     result.routeAnnUsed = result.routeAnnUsed || work.denseAnnUsed;
     result.routeAnnCandidates += work.denseAnnCandidates;
     result.routeAnnDistanceEvaluations += work.denseAnnDistanceEvaluations;
+    result.routeBqUsed = result.routeBqUsed || work.bqUsed;
+    result.routeBqCandidates += work.bqCandidates;
     result.routeExactRepresentativeDistanceEvaluations +=
         work.exactRepresentativeDistanceEvaluations;
 }
