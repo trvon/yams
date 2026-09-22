@@ -15,7 +15,6 @@
 #include <yams/daemon/components/TuningSnapshot.h>
 #include <yams/daemon/components/VectorIndexCoordinator.h>
 #include <yams/daemon/metric_keys.h>
-#include <yams/daemon/resource/abi_symbol_extractor_adapter.h>
 #include <yams/detection/file_type_detector.h>
 #include <yams/extraction/content_extractor.h>
 #include <yams/extraction/extraction_util.h>
