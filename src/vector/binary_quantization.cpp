@@ -1,6 +1,7 @@
 // Copyright (c) 2025 YAMS Contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <yams/profiling.h>
 #include <yams/vector/binary_quantization.h>
 
 #include <algorithm>
@@ -107,6 +108,7 @@ std::vector<BinaryQuantizedHit> BinaryQuantizedIndex::search(std::span<const flo
 
 std::vector<BinaryQuantizedHit> BinaryQuantizedIndex::search(const BinaryVector& queryBq,
                                                              std::size_t topK) const {
+    YAMS_ZONE_SCOPED_N("vector::bq::search");
     if (topK == 0 || size() == 0 || queryBq.dimension != dimension_) {
         return {};
     }
@@ -122,6 +124,8 @@ std::vector<BinaryQuantizedHit> BinaryQuantizedIndex::search(const BinaryVector&
         for (std::size_t w = 0; w < wordsPerVector_; ++w) {
             dist += static_cast<std::size_t>(std::popcount(queryWords[w] ^ vecWords[w]));
         }
+        // cos(pi * h / d) is the SimHash estimate, exact in expectation only for random
+        // hyperplane projections; for raw sign bits it is an ordering proxy, not a cosine.
         const float normDist = static_cast<float>(dist) * invDim;
         candidates.push_back(BinaryQuantizedHit{
             .id = ids_[i],

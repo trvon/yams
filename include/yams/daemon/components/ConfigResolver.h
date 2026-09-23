@@ -111,6 +111,8 @@ public:
         std::optional<std::size_t> maxSeedDocuments;
         std::optional<std::size_t> representativeLimit;
         std::optional<std::size_t> annCandidateLimit;
+        std::optional<std::size_t> bqCandidateLimit;
+        std::optional<std::size_t> bqPrefixDimension;
         std::optional<float> adaptiveProbeScoreGap;
         std::optional<float> narrowMinBoundaryMargin;
         std::optional<std::size_t> maxDocs;
@@ -148,6 +150,9 @@ public:
     struct TopologyEnginePolicy {
         std::optional<std::string> engine;
         std::optional<std::size_t> routingRepresentativeCount;
+        /// SGC feature-smoothing hops before clustering (0 disables).
+        std::optional<std::size_t> sgcHops;
+        std::optional<bool> sgcNormalize;
         std::optional<bool> boundarySpillEnabled;
         std::optional<std::size_t> boundarySpillLimit;
         std::optional<double> boundarySpillDistanceRatio;

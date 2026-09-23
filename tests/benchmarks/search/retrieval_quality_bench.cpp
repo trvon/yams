@@ -6234,6 +6234,17 @@ struct BenchFixture {
                 std::getenv("YAMS_BENCH_TOPOLOGY_ROUTE_REPRESENTATIVE_LIMIT");
             const char* topologyAnnCandidateLimitEnv =
                 std::getenv("YAMS_BENCH_TOPOLOGY_ROUTE_ANN_CANDIDATE_LIMIT");
+            const auto envSet = [](const std::optional<std::string>& value) {
+                return value.has_value() && !value->empty();
+            };
+            const auto topologyBqCandidateLimitEnv =
+                yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROUTE_BQ_CANDIDATE_LIMIT");
+            const auto topologyBqPrefixDimEnv =
+                yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_ROUTE_BQ_PREFIX_DIM");
+            const auto topologySgcHopsEnv =
+                yams::config::getenv_optional("YAMS_BENCH_TOPOLOGY_SGC_HOPS");
+            const auto simeonOuterMaxSimEnv =
+                yams::config::getenv_optional("YAMS_BENCH_SIMEON_OUTER_MAXSIM");
             const char* topologyExpansionOutputLimitEnv =
                 std::getenv("YAMS_BENCH_TOPOLOGY_EXPANSION_OUTPUT_LIMIT");
             const char* topologyGraphWeightedSeedRankingEnv =
@@ -6259,7 +6270,8 @@ struct BenchFixture {
             const bool writeTopologyEngineConfig =
                 (topologyEngineEnv && *topologyEngineEnv) ||
                 (topologyRepresentativesEnv && *topologyRepresentativesEnv) ||
-                (topologyBoundarySpillEnv && *topologyBoundarySpillEnv);
+                (topologyBoundarySpillEnv && *topologyBoundarySpillEnv) ||
+                envSet(topologySgcHopsEnv);
             const bool writeTopologyRouteConfig =
                 (std::getenv("YAMS_BENCH_TOPOLOGY_ROUTE_SCORING") != nullptr) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_SPARSE_DENSE_ALPHA") != nullptr) ||
@@ -6269,6 +6281,7 @@ struct BenchFixture {
                 (std::getenv("YAMS_BENCH_TOPOLOGY_MAX_SEED_DOCUMENTS") != nullptr) ||
                 (topologyRepresentativeLimitEnv && *topologyRepresentativeLimitEnv) ||
                 (topologyAnnCandidateLimitEnv && *topologyAnnCandidateLimitEnv) ||
+                envSet(topologyBqCandidateLimitEnv) || envSet(topologyBqPrefixDimEnv) ||
                 (topologyExpansionOutputLimitEnv && *topologyExpansionOutputLimitEnv) ||
                 (topologyGraphWeightedSeedRankingEnv && *topologyGraphWeightedSeedRankingEnv) ||
                 (std::getenv("YAMS_BENCH_TOPOLOGY_ADAPTIVE_PROBE_SCORE_GAP") != nullptr) ||
@@ -6549,6 +6562,12 @@ struct BenchFixture {
                     }
                     yams::bench::writeTopologyDisabledEmbeddingSelection(configOut,
                                                                          topologyDisabled);
+                    if (envSet(simeonOuterMaxSimEnv)) {
+                        configOut << "\n[search]\n";
+                        configOut << "simeon_rerank_outer_maxsim = "
+                                  << (envTruthy(simeonOuterMaxSimEnv->c_str()) ? "true" : "false")
+                                  << "\n";
+                    }
                     configOut << "\n[vector_database]\n";
                     configOut << "search_engine = \"" << g_benchmark_search_engine << "\"\n";
                     if (std::getenv("YAMS_BENCH_SIMEON_PQ_RERANK_FACTOR") != nullptr) {
@@ -6603,6 +6622,18 @@ struct BenchFixture {
                             configOut << "ann_candidate_limit = "
                                       << parseSizeEnvOrDefault(
                                              "YAMS_BENCH_TOPOLOGY_ROUTE_ANN_CANDIDATE_LIMIT", 64)
+                                      << "\n";
+                        }
+                        if (envSet(topologyBqCandidateLimitEnv)) {
+                            configOut << "bq_candidate_limit = "
+                                      << parseSizeEnvOrDefault(
+                                             "YAMS_BENCH_TOPOLOGY_ROUTE_BQ_CANDIDATE_LIMIT", 0)
+                                      << "\n";
+                        }
+                        if (envSet(topologyBqPrefixDimEnv)) {
+                            configOut << "bq_prefix_dim = "
+                                      << parseSizeEnvOrDefault(
+                                             "YAMS_BENCH_TOPOLOGY_ROUTE_BQ_PREFIX_DIM", 0)
                                       << "\n";
                         }
                         configOut << "adaptive_probe_score_gap = "
@@ -6717,6 +6748,11 @@ struct BenchFixture {
                             configOut << "routing_representatives = "
                                       << parseSizeEnvOrDefault(
                                              "YAMS_BENCH_TOPOLOGY_ROUTING_REPRESENTATIVES", 1)
+                                      << "\n";
+                        }
+                        if (envSet(topologySgcHopsEnv)) {
+                            configOut << "sgc_hops = "
+                                      << parseSizeEnvOrDefault("YAMS_BENCH_TOPOLOGY_SGC_HOPS", 0)
                                       << "\n";
                         }
                         if (topologyBoundarySpillEnv && *topologyBoundarySpillEnv) {

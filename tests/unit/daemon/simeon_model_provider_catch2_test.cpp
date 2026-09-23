@@ -7,6 +7,8 @@
 #include <yams/daemon/resource/model_provider.h>
 #include <yams/daemon/resource/simeon_model_provider.h>
 
+#include "src/daemon/resource/simeon_fragments.h"
+
 #include <algorithm>
 #include <memory>
 #include <string>
@@ -155,4 +157,80 @@ TEST_CASE("SimeonModelProvider::scoreDocuments with FragmentOuterMaxSim mode",
         // the diluted whole-doc cosine score.
         CHECK(rMaxSim.value()[0] >= rCos.value()[0] - 0.05f);
     }
+}
+
+namespace {
+
+std::string numberedSentences(std::size_t count, std::size_t insertAt, const std::string& insert) {
+    std::string text;
+    for (std::size_t i = 0; i < count; ++i) {
+        if (i == insertAt) {
+            text += insert + " ";
+        }
+        text += "Filler sentence number " + std::to_string(i) + " about unrelated weather. ";
+    }
+    return text;
+}
+
+} // namespace
+
+TEST_CASE("selectMaxSimFragments samples across the whole document",
+          "[daemon][model_provider][simeon][maxsim]") {
+    using yams::daemon::detail::selectMaxSimFragments;
+
+    SECTION("Short single sentence yields one fragment") {
+        auto fragments = selectMaxSimFragments("Just one sentence here.", 8);
+        REQUIRE(fragments.size() == 1U);
+        CHECK(fragments.front() == "Just one sentence here.");
+    }
+
+    SECTION("Long document keeps first, last, and a head view within budget") {
+        const auto text = numberedSentences(40, 40, "");
+        auto fragments = selectMaxSimFragments(text, 8);
+        REQUIRE(fragments.size() == 8U);
+        CHECK(fragments.front().find("number 0 ") != std::string::npos);
+        // The last sampled sentence is the document's final sentence, not the eighth.
+        CHECK(fragments[6].find("number 39 ") != std::string::npos);
+        // Head view (first 512 chars) is the reserved final slot.
+        CHECK(fragments.back().size() == 512U);
+    }
+
+    SECTION("Budget of one keeps a single fragment") {
+        auto fragments = selectMaxSimFragments(numberedSentences(10, 10, ""), 1);
+        CHECK(fragments.size() == 1U);
+    }
+
+    SECTION("Empty text and zero budget yield nothing") {
+        CHECK(selectMaxSimFragments("", 8).empty());
+        CHECK(selectMaxSimFragments("Some text here.", 0).empty());
+    }
+}
+
+TEST_CASE("fragmentsPerDocument bounds the per-call fragment total",
+          "[daemon][model_provider][simeon][maxsim]") {
+    using yams::daemon::detail::fragmentsPerDocument;
+    CHECK(fragmentsPerDocument(10, 8, 256) == 8U);
+    CHECK(fragmentsPerDocument(64, 8, 256) == 4U);
+    CHECK(fragmentsPerDocument(1000, 8, 256) == 1U);
+    CHECK(fragmentsPerDocument(0, 8, 256) == 8U);
+}
+
+TEST_CASE("SimeonModelProvider outer MaxSim reaches a late relevant sentence",
+          "[daemon][model_provider][simeon][maxsim]") {
+    auto provider = yams::daemon::makeSimeonModelProvider(
+        384, yams::daemon::SimeonScoringMode::FragmentOuterMaxSim);
+    REQUIRE(provider != nullptr);
+    REQUIRE(provider->isAvailable());
+
+    const std::string relevant =
+        "Quantum annealing hardware schedules qubit couplers for combinatorial optimization.";
+    const std::vector<std::string> documents = {
+        numberedSentences(30, 25, relevant), // relevant sentence far past the first eight
+        numberedSentences(30, 30, ""),       // same filler, no relevant sentence
+    };
+    auto scores = provider->scoreDocuments(
+        "quantum annealing qubit couplers combinatorial optimization", documents);
+    REQUIRE(scores.has_value());
+    REQUIRE(scores.value().size() == 2U);
+    CHECK(scores.value()[0] > scores.value()[1]);
 }
