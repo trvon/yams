@@ -233,6 +233,21 @@ mode/expansion). Harness-only: `YAMS_BENCH_*`. Do not grow product `YAMS_*` for 
 - Prefer sanitizer builds for intermittent bench crashes:
   `build/asan-api|tsan-api|ubsan-api` + `YAMS_BENCH_SKIP_BUILD=1`.
 
+## Branches, PRs & Promotion
+
+- Feature PRs target `experimental`; `main` only moves through the automated
+  "promote experimental to main" draft PR, which lists everything on
+  `experimental` not yet on `main` (not just the latest change).
+- Stacked PRs (a PR whose base is another PR's branch): merge bottom-up. Merge the
+  child into the parent branch *before* merging the parent, or retarget the child
+  to `experimental` first. A child merged into a parent branch that was already
+  merged lands only on that branch and silently misses `experimental`.
+- After merging a stack, verify nothing was stranded:
+  `git cherry origin/experimental origin/<branch>` must print no `+` lines.
+- Submodule (`third_party/*`) PRs merge with a merge commit or rebase, never
+  squash, and land before the YAMS PR that bumps the pointer, so the pinned SHA
+  stays reachable from the submodule's default branch.
+
 ## Patterns To Reuse (High Signal)
 
 - `TuneAdvisor`: static inline atomics, relaxed reads for advisory knobs.
