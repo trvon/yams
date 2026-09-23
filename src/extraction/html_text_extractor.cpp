@@ -165,21 +165,32 @@ size_t find_caseless(const std::string& haystack, const std::string& needle, siz
 std::string HtmlTextExtractor::removeScriptAndStyle(const std::string& html) {
     std::string result;
     result.reserve(html.size());
+
+    // Each search remembers its next hit and is only repeated once the cursor passes it, and a
+    // closing token that is missing once is missing for the rest of the document. Without this,
+    // unclosed "<script" or many "<!---->" blocks rescanned the tail per occurrence (quadratic).
+    constexpr size_t kUnknown = std::string::npos - 1;
+    size_t nextScript = kUnknown;
+    size_t nextStyle = kUnknown;
+    size_t nextComment = kUnknown;
+    bool noScriptEnd = false;
+    bool noStyleEnd = false;
+    bool noCommentEnd = false;
+    auto refresh = [&](size_t& cached, size_t from, auto&& finder) {
+        if (cached == kUnknown || (cached != std::string::npos && cached < from)) {
+            cached = finder(from);
+        }
+    };
+
     size_t last_pos = 0;
-
     while (last_pos < html.size()) {
-        size_t script_start = find_caseless(html, "<script", last_pos);
-        size_t style_start = find_caseless(html, "<style", last_pos);
-        size_t comment_start = html.find("<!--", last_pos);
+        refresh(nextScript, last_pos,
+                [&](size_t from) { return find_caseless(html, "<script", from); });
+        refresh(nextStyle, last_pos,
+                [&](size_t from) { return find_caseless(html, "<style", from); });
+        refresh(nextComment, last_pos, [&](size_t from) { return html.find("<!--", from); });
 
-        size_t next_block = std::string::npos;
-        if (script_start != std::string::npos)
-            next_block = script_start;
-        if (style_start != std::string::npos)
-            next_block = std::min(next_block, style_start);
-        if (comment_start != std::string::npos)
-            next_block = std::min(next_block, comment_start);
-
+        const size_t next_block = std::min({nextScript, nextStyle, nextComment});
         if (next_block == std::string::npos) {
             result.append(html, last_pos, std::string::npos);
             break;
@@ -187,27 +198,24 @@ std::string HtmlTextExtractor::removeScriptAndStyle(const std::string& html) {
 
         result.append(html, last_pos, next_block - last_pos);
 
-        if (next_block == script_start) {
-            size_t end_tag = find_caseless(html, "</script>", next_block);
+        auto skipBlock = [&](bool& missing, auto&& findEnd, size_t endLen) {
+            const size_t end_tag = missing ? std::string::npos : findEnd(next_block);
             if (end_tag == std::string::npos) {
+                missing = true;
                 last_pos = next_block + 1; // Malformed, skip '<'
             } else {
-                last_pos = end_tag + 9;
+                last_pos = end_tag + endLen;
             }
-        } else if (next_block == style_start) {
-            size_t end_tag = find_caseless(html, "</style>", next_block);
-            if (end_tag == std::string::npos) {
-                last_pos = next_block + 1;
-            } else {
-                last_pos = end_tag + 8;
-            }
+        };
+        if (next_block == nextScript) {
+            skipBlock(
+                noScriptEnd, [&](size_t from) { return find_caseless(html, "</script>", from); },
+                9);
+        } else if (next_block == nextStyle) {
+            skipBlock(
+                noStyleEnd, [&](size_t from) { return find_caseless(html, "</style>", from); }, 8);
         } else { // comment
-            size_t end_tag = html.find("-->", next_block);
-            if (end_tag == std::string::npos) {
-                last_pos = next_block + 1;
-            } else {
-                last_pos = end_tag + 3;
-            }
+            skipBlock(noCommentEnd, [&](size_t from) { return html.find("-->", from); }, 3);
         }
     }
     return result;
@@ -225,6 +233,9 @@ std::string HtmlTextExtractor::convertBlockTagsToNewlines(const std::string& htm
         "section", "article", "header",     "footer", "nav", "aside", "main", "br"};
 
     size_t pos = 0;
+    // Position of the next '>' at or after pos; recomputed only once the cursor passes it, so a
+    // run of '<' without a closing '>' stays linear instead of rescanning per '<'.
+    size_t next_gt = html.find('>');
     while (pos < html.size()) {
         if (html[pos] != '<') {
             result += html[pos];
@@ -233,7 +244,10 @@ std::string HtmlTextExtractor::convertBlockTagsToNewlines(const std::string& htm
         }
 
         // Found a tag, check if it's a block tag
-        size_t tag_end = html.find('>', pos);
+        if (next_gt != std::string::npos && next_gt < pos) {
+            next_gt = html.find('>', pos);
+        }
+        size_t tag_end = next_gt;
         if (tag_end == std::string::npos) {
             result += html[pos];
             pos++;
