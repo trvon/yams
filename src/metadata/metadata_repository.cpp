@@ -2733,7 +2733,8 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
                             'renamed_to', 'moved_to', 'contains', 'has_tag',
                             'contains_segment', 'segment_of',
                             'mentioned_in', 'title_mentions', 'mentioned_in_segment',
-                            'primary_topic_of', 'observed_as'
+                            'primary_topic_of', 'observed_as',
+                            'member_of', 'overlaps', 'medoid_of', 'subcluster_of'
                         )
                     )");
                     if (relationalResult) {

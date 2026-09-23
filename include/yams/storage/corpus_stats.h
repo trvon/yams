@@ -76,8 +76,9 @@ struct CorpusStats {
     int64_t kgEdgeCount{0};
     double kgEdgeDensity{0.0};
     // Relational edges only: excludes embedding kNN (semantic_neighbor), file lineage and
-    // layout, text segments, and entity-to-document attachments, which exist on any indexed
-    // corpus and say nothing about knowledge-graph structure.
+    // layout, text segments, entity-to-document attachments, and materialized topology
+    // clusters, which exist on any indexed corpus and say nothing about knowledge-graph
+    // structure.
     int64_t kgRelationalEdgeCount{0};
     double kgRelationalEdgeDensity{0.0};
     int64_t kgAliasCount{0};
