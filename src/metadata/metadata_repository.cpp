@@ -2608,7 +2608,7 @@ Result<storage::CorpusStats> MetadataRepository::getCorpusStats() {
                         }
                     }
 
-                    // Native code symbols (treesitter).
+                    // Legacy native code symbols (extractor removed in v0.20; zero on new corpora).
                     auto nativeResult = db.prepare("SELECT COUNT(*) FROM kg_doc_entities"
                                                    " WHERE extractor = 'symbol_extractor_v1'");
                     if (nativeResult) {

@@ -45,7 +45,7 @@ struct CorpusStats {
     double symbolDensity{0.0}; // symbolCount / docCount (entities per document)
 
     // Entity counts split by extractor source.
-    // nativeSymbolCount: treesitter code symbols (extractor = 'symbol_extractor_v1')
+    // nativeSymbolCount: legacy code symbols (extractor = 'symbol_extractor_v1', removed v0.20)
     // nerEntityCount: GLiNER NER annotations (extractor LIKE 'gliner%')
     // Keeping symbolCount as the unfiltered total so hasKnowledgeGraph() still works.
     int64_t nativeSymbolCount{0};
@@ -139,9 +139,10 @@ struct CorpusStats {
     // negatives from deep absolute filesystem paths — a corpus at /Users/x/papers/ with
     // all files in one folder has pathDepthAvg≈10 but pathRelativeDepthAvg≈0.
     //
-    // Uses nativeSymbolDensity (treesitter code symbols only) to avoid false negatives
-    // from GLiNER NER annotations, which are expected to be high in scientific prose
-    // corpora and must not be conflated with code structure signals.
+    // Uses nativeSymbolDensity (native code-symbol entities only) rather than all KG entities
+    // so GLiNER NER annotations, which are expected to be high in scientific prose corpora,
+    // are not conflated with code structure signals. No in-tree extractor has produced native
+    // code symbols since v0.20, so this term is zero unless a corpus predates that release.
     [[nodiscard]] bool isScientific() const noexcept {
         const bool flatPaths = pathRelativeDepthAvg < 1.5;
         const bool lowCodeStructure = tagCoverage < 0.1 && nativeSymbolDensity < 0.1;

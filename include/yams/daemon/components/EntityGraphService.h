@@ -1,10 +1,9 @@
 /**
  * EntityGraphService
  *
- * A single daemon-owned service that executes plugin-based entity/symbol extraction
- * and updates the canonical Knowledge Graph (KG) plus a materialized symbol index
- * for fast grep/search. Provides a small facade API used by post-ingest pipeline
- * and repair flows.
+ * A daemon-owned service that completes the graph stage of knowledge-graph enrichment for
+ * post-ingest and repair flows. Code-symbol extraction was removed in v0.20; NL entities are
+ * written by the PostIngestQueue title+NL stage.
  *
  * Jobs are routed through InternalEventBus ("entity_graph_jobs" channel) for
  * centralized backpressure and observability, then consumed by a channel poller
@@ -21,23 +20,14 @@
 
 #include <yams/core/types.h>
 #include <yams/daemon/components/knowledge_graph_completion.h>
-#include <yams/metadata/knowledge_graph_store.h>
-
-// Forward declarations for C ABI types
-struct yams_symbol_extraction_result_v1;
-struct yams_entity_extraction_result_v2;
 
 namespace yams {
 namespace daemon {
 class ServiceManager;
-class AbiSymbolExtractorAdapter;
-class AbiEntityExtractorAdapter;
-class WriteCoordinator;
 
 /**
  * EntityGraphService facade.
  * - Thread-safe submit; background worker consumes jobs.
- * - Uses symbol extractor plugins when available; otherwise no-ops safely.
  */
 class EntityGraphService {
 public:
@@ -94,24 +84,6 @@ public:
 private:
     bool process(Job& job);
     boost::asio::awaitable<void> channelPoller();
-    // KG population helper: builds rich multi-layered symbol graph
-    bool populateKnowledgeGraph(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
-                                const Job& job, const yams_symbol_extraction_result_v1* result);
-
-    /**
-     * Deferred symbol KG population through WriteCoordinator.
-     * Eliminates lock contention by queuing writes instead of immediate commits.
-     */
-    bool
-    populateKnowledgeGraphDeferred(const std::shared_ptr<yams::metadata::KnowledgeGraphStore>& kg,
-                                   const Job& job, const yams_symbol_extraction_result_v1* result,
-                                   WriteCoordinator* writeCoordinator);
-
-    /**
-     * Check if content type should use NL entity extraction instead of code symbol extraction.
-     * Returns true for text/plain, text/markdown, application/json, and similar NL content.
-     */
-    static bool isNaturalLanguageContent(const Job& job);
 
     ServiceManager* services_{};
     std::atomic<bool> stop_{false};

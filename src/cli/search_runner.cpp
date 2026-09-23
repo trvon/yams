@@ -27,7 +27,6 @@ detail::daemon_search_with_callers(DaemonSearchOptions opts, bool enableStreamin
     req.pathsOnly = false;
     req.searchType = opts.searchType;
     req.showLineNumbers = opts.showLineNumbers;
-    req.symbolRank = opts.symbolRank;
     req.timeout = opts.timeout;
     req.verbose = true;
 

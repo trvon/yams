@@ -590,9 +590,19 @@ RequestDispatcher::handleGraphQueryListByType(const GraphQueryRequest& req,
 boost::asio::awaitable<Response>
 RequestDispatcher::handleGraphQueryIsolatedMode(const GraphQueryRequest& req,
                                                 KnowledgeGraphStore* kgStore) {
-    std::string nodeType = req.nodeType.empty() ? "function" : req.nodeType;
+    // The old default (function nodes without incoming calls edges) queried the code-symbol
+    // graph, which v0.20 removed; an implicit default would now always come back empty.
+    if (req.nodeType.empty()) {
+        co_return dispatch::makeErrorResponse(
+            ErrorCode::InvalidArgument,
+            "isolated mode needs a node type: the default code-symbol graph (function nodes, "
+            "calls edges) was removed in v0.20");
+    }
+    const std::string& nodeType = req.nodeType;
+    // Default to semantic_neighbor: "isolated" then means a node with no embedding neighbours,
+    // the orphan signal that still exists now that code-symbol calls edges are gone.
     std::string relation = req.isolatedRelation.empty()
-                               ? "calls"
+                               ? "semantic_neighbor"
                                : metadata::normalizeRelationName(req.isolatedRelation);
 
     spdlog::debug("GraphQuery isolatedMode: type='{}', relation='{}', limit={}", nodeType, relation,

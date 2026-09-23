@@ -192,7 +192,6 @@ public:
         std::optional<std::uint32_t> embedConcurrent;
         std::optional<std::uint32_t> extractionConcurrent;
         std::optional<std::uint32_t> kgConcurrent;
-        std::optional<std::uint32_t> symbolConcurrent;
         std::optional<std::uint32_t> entityConcurrent;
         std::optional<std::uint32_t> titleConcurrent;
         std::optional<std::uint32_t> batchSize;
@@ -407,7 +406,6 @@ public:
     static std::string resolveRerankerModel(const DaemonConfig& config);
 
     /// Compatibility lookup retained for installed consumers; typed plugin policy is preferred.
-    static bool isSymbolExtractionEnabled(const DaemonConfig& config);
 
     /**
      * @brief Detect if embedding preload on startup is configured.

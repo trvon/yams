@@ -36,9 +36,9 @@ can answer is a defect. Pick by question type:
 |---|---|
 | Exact symbol / string / pattern | `yams grep "<pat>" --cwd .` |
 | Definition and bounded source context for a known symbol/file | `yams graph --explore "<symbol-or-file>" --max-files 8` |
-| Callers / blast radius for a known symbol | `yams graph --impact "<symbol>" --depth 1` |
+| Callers / blast radius for a known symbol | `yams grep "<symbol>" --cwd .` (symbol graph removed in v0.20) |
 | Related tests for changed files | `yams graph --affected-tests <file> --depth 1` |
-| Precise callees/includes/edges | `yams graph --name <file> --depth 1 --limit 50`, `--node-key <key> -r <relation>` |
+| Precise document edges | `yams graph --name <file> --depth 1 --limit 50`, `--node-key <key> -r <relation>` |
 | Concept / prior decision / task history | `yams search "<query>" --cwd --limit 10` |
 | Inspect a selected saved-memory artifact | run the emitted `yams cat --hash <hash>` hint |
 | Export a selected artifact | `yams get --hash <hash> -o <path>` |

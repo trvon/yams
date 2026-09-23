@@ -1575,7 +1575,6 @@ if catch2_dep.found()
       'unit/search/cross_rerank_catch2_test.cpp',
       'unit/search/search_vector_pipeline_catch2_test.cpp',
       'unit/search/search_facets_catch2_test.cpp',
-      'unit/search/symbol_enrichment_catch2_test.cpp',
     ),
     include_directories: incs,
     dependencies: [catch2_dep, catch2_main_dep] + test_deps,
@@ -2049,15 +2048,6 @@ if catch2_dep.found()
   )
 
 #Removed : catch2_metadata_search(search_metadata_interface_test.cpp) - HybridSearchEngine specific
-
-  catch2_metadata_symbol_exe = executable('catch2_metadata_symbol',
-    files('unit/metadata/symbol_metadata_schema_test.cpp'),
-    include_directories: incs,
-    dependencies: [catch2_dep, catch2_main_dep] + test_deps,
-    cpp_args: test_cpp_noerror_args + ['-DYAMS_TESTING=1'],
-    build_rpath: ':'.join(_test_rpaths),
-    install: false,
-  )
 
   catch2_metadata_migration_exe = executable('catch2_metadata_migration',
     files('unit/metadata/migration_validation_test.cpp'),
@@ -2894,11 +2884,6 @@ if catch2_dep.found()
 
 #Removed : metadata_search test - HybridSearchEngine specific
 
-  test('metadata_symbol_schema', catch2_metadata_symbol_exe,
-    suite: ['catch2', 'unit', 'metadata', 'symbol'],
-    env: { 'LD_LIBRARY_PATH': _test_env_ld_library_path },
-    timeout: 120
-  )
 
   test('metadata_migration_validation', catch2_metadata_migration_exe,
     suite: ['catch2', 'unit', 'metadata', 'migration'],

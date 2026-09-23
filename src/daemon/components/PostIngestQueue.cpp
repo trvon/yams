@@ -230,9 +230,6 @@ PostIngestQueue::~PostIngestQueue() {
         if (kgWakeTimer_) {
             (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(kgWakeTimer_));
         }
-        if (symbolWakeTimer_) {
-            (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(symbolWakeTimer_));
-        }
         if (entityWakeTimer_) {
             (void)new std::shared_ptr<boost::asio::steady_timer>(std::move(entityWakeTimer_));
         }
@@ -253,8 +250,7 @@ void PostIngestQueue::setWakeTimer(Stage stage, std::shared_ptr<boost::asio::ste
         case Stage::KnowledgeGraph:
             kgWakeTimer_ = std::move(timer);
             break;
-        case Stage::Symbol:
-            symbolWakeTimer_ = std::move(timer);
+        case Stage::Symbol: // Retired in v0.20: no poller, no wake timer.
             break;
         case Stage::Entity:
             entityWakeTimer_ = std::move(timer);
@@ -276,8 +272,7 @@ void PostIngestQueue::signalWakeTimer(Stage stage) {
             case Stage::KnowledgeGraph:
                 timer = kgWakeTimer_;
                 break;
-            case Stage::Symbol:
-                timer = symbolWakeTimer_;
+            case Stage::Symbol: // Retired in v0.20: no poller, no wake timer.
                 break;
             case Stage::Entity:
                 timer = entityWakeTimer_;
@@ -318,7 +313,6 @@ static void leakWakeTimer(std::shared_ptr<boost::asio::steady_timer>& t) noexcep
 void PostIngestQueue::signalAllWakeTimers() {
     signalWakeTimer(Stage::Extraction);
     signalWakeTimer(Stage::KnowledgeGraph);
-    signalWakeTimer(Stage::Symbol);
     signalWakeTimer(Stage::Entity);
     signalWakeTimer(Stage::Title);
 }
@@ -328,13 +322,11 @@ void PostIngestQueue::clearWakeTimers() {
 #ifdef _WIN32
     leakWakeTimer(extractionWakeTimer_);
     leakWakeTimer(kgWakeTimer_);
-    leakWakeTimer(symbolWakeTimer_);
     leakWakeTimer(entityWakeTimer_);
     leakWakeTimer(titleWakeTimer_);
 #else
     extractionWakeTimer_.reset();
     kgWakeTimer_.reset();
-    symbolWakeTimer_.reset();
     entityWakeTimer_.reset();
     titleWakeTimer_.reset();
 #endif
@@ -362,11 +354,6 @@ void PostIngestQueue::start() {
     initializeGradientLimiters();
 
     bool startKg = graphComponent_ != nullptr;
-    bool startSymbol = false;
-    {
-        std::lock_guard<std::mutex> lock(extMapMutex_);
-        startSymbol = !symbolExtensionMap_.empty();
-    }
     bool startEntity = false;
     {
         std::lock_guard<std::mutex> lock(entityMutex_);
@@ -379,10 +366,6 @@ void PostIngestQueue::start() {
     if (startKg) {
         spdlog::info("[PostIngestQueue] Spawning kgPoller coroutine...");
         coordinator_->spawnDetached(coordinator_->makeStrand(), kgPoller());
-    }
-    if (startSymbol) {
-        spdlog::info("[PostIngestQueue] Spawning symbolPoller coroutine...");
-        coordinator_->spawnDetached(coordinator_->makeStrand(), symbolPoller());
     }
     if (startEntity) {
         spdlog::info("[PostIngestQueue] Spawning entityPoller coroutine...");
@@ -400,10 +383,9 @@ void PostIngestQueue::start() {
     {
         std::unique_lock<std::mutex> lock(lifecycleMutex_);
         allStarted = lifecycleCv_.wait_until(
-            lock, startupDeadline, [this, startKg, startSymbol, startEntity, startTitle]() {
+            lock, startupDeadline, [this, startKg, startEntity, startTitle]() {
                 return stageStarted_[0].load(std::memory_order_acquire) &&
                        (!startKg || stageStarted_[1].load(std::memory_order_acquire)) &&
-                       (!startSymbol || stageStarted_[2].load(std::memory_order_acquire)) &&
                        (!startEntity || stageStarted_[3].load(std::memory_order_acquire)) &&
                        (!startTitle || stageStarted_[4].load(std::memory_order_acquire));
             });
@@ -583,14 +565,6 @@ void PostIngestQueue::resumeAll() {
     spdlog::info("[PostIngestQueue] All stages resumed (normal operation)");
 }
 
-void PostIngestQueue::setSymbolExtensionMap(std::unordered_map<std::string, std::string> extMap) {
-    {
-        std::lock_guard<std::mutex> lock(extMapMutex_);
-        symbolExtensionMap_ = std::move(extMap);
-    }
-    refreshStageAvailability();
-}
-
 void PostIngestQueue::setEntityProviders(
     std::vector<std::shared_ptr<ExternalEntityProviderAdapter>> providers) {
     bool hadProviders = false;
@@ -635,13 +609,8 @@ void PostIngestQueue::refreshStageAvailability() {
                           !stagePaused_[1].load(std::memory_order_acquire);
     publishStageActivity(1, kgActive);
 
-    bool symbolCapable = false;
-    {
-        std::lock_guard<std::mutex> lock(extMapMutex_);
-        symbolCapable = !symbolExtensionMap_.empty();
-    }
-    const bool symbolActive = symbolCapable && !stagePaused_[2].load(std::memory_order_acquire);
-    publishStageActivity(2, symbolActive);
+    // The symbol stage was retired in v0.20; its slot stays so stage indices remain stable.
+    publishStageActivity(2, false);
 
     bool entityCapable = false;
     {
@@ -657,11 +626,6 @@ void PostIngestQueue::refreshStageAvailability() {
 }
 
 void PostIngestQueue::logStageAvailabilitySnapshot() const {
-    bool symbolCapable = false;
-    {
-        std::lock_guard<std::mutex> lock(extMapMutex_);
-        symbolCapable = !symbolExtensionMap_.empty();
-    }
     bool entityCapable = false;
     {
         std::lock_guard<std::mutex> lock(entityMutex_);
@@ -669,21 +633,19 @@ void PostIngestQueue::logStageAvailabilitySnapshot() const {
     }
 
     spdlog::info(
-        "[PostIngestQueue] Stage snapshot: active={{extraction={}, kg={}, symbol={}, entity={}, "
-        "title={}}} paused={{extraction={}, kg={}, symbol={}, entity={}, title={}}} limits={{"
-        "extraction={}, kg={}, symbol={}, entity={}, title={}}}",
+        "[PostIngestQueue] Stage snapshot: active={{extraction={}, kg={}, entity={}, title={}}} "
+        "paused={{extraction={}, kg={}, entity={}, title={}}} limits={{extraction={}, kg={}, "
+        "entity={}, title={}}}",
         !stagePaused_[0].load(std::memory_order_acquire),
         graphComponent_ != nullptr && knowledgeGraphEnabled_.load(std::memory_order_acquire) &&
             !stagePaused_[1].load(std::memory_order_acquire),
-        symbolCapable && !stagePaused_[2].load(std::memory_order_acquire),
         entityCapable && !stagePaused_[3].load(std::memory_order_acquire),
         hasTitleExtractor() && !stagePaused_[4].load(std::memory_order_acquire),
         stagePaused_[0].load(std::memory_order_acquire),
         stagePaused_[1].load(std::memory_order_acquire),
-        stagePaused_[2].load(std::memory_order_acquire),
         stagePaused_[3].load(std::memory_order_acquire),
         stagePaused_[4].load(std::memory_order_acquire), maxExtractionConcurrent(),
-        maxKgConcurrent(), maxSymbolConcurrent(), maxEntityConcurrent(), maxTitleConcurrent());
+        maxKgConcurrent(), maxEntityConcurrent(), maxTitleConcurrent());
 }
 
 void PostIngestQueue::requeueMissedEntityExtractions() {
@@ -812,8 +774,8 @@ PostIngestQueue::BackpressureStatus PostIngestQueue::getBackpressureStatus() con
 
 void PostIngestQueue::checkDrainAndSignal() {
     // Check if queue is now drained (all stages idle)
-    const bool channelsEmpty = size() == 0 && kgQueueDepth() == 0 && symbolQueueDepth() == 0 &&
-                               entityQueueDepth() == 0 && titleQueueDepth() == 0;
+    const bool channelsEmpty =
+        size() == 0 && kgQueueDepth() == 0 && entityQueueDepth() == 0 && titleQueueDepth() == 0;
     if (channelsEmpty && totalInFlight() == 0) {
         // Only signal if we were previously active (had work)
         bool expected = true;
@@ -1203,7 +1165,6 @@ void PostIngestQueue::recordDispatchTimingSet(const DispatchTimingSet& timings) 
     flush("dispatch_embed_enqueue", timings.embedEnqueue);
     flush("dispatch_content_load", timings.contentLoad);
     flush("dispatch_kg_enqueue", timings.kgDispatch);
-    flush("dispatch_symbol_enqueue", timings.symbolDispatch);
     flush("dispatch_entity_enqueue", timings.entityDispatch);
     flush("dispatch_title_enqueue", timings.titleDispatch);
 }
@@ -1243,12 +1204,6 @@ void PostIngestQueue::dispatchNonEmbeddingStages(
                             prepared.knowledgeGraphToken, knowledgeGraphCompletion);
         timings.kgDispatch.add(std::chrono::steady_clock::now() - dispatchStart);
     }
-    if (plan.dispatchSymbol) {
-        const auto dispatchStart = std::chrono::steady_clock::now();
-        dispatchToSymbolChannel(prepared.hash, prepared.documentId, prepared.filePath,
-                                plan.symbolLanguage, contentBytes);
-        timings.symbolDispatch.add(std::chrono::steady_clock::now() - dispatchStart);
-    }
     if (plan.dispatchEntity) {
         const auto dispatchStart = std::chrono::steady_clock::now();
         dispatchToEntityChannel(prepared.hash, prepared.documentId, prepared.filePath,
@@ -1272,7 +1227,7 @@ std::size_t PostIngestQueue::kgQueueDepth() const {
 }
 
 std::size_t PostIngestQueue::symbolQueueDepth() const {
-    return symbolChannel_ ? symbolChannel_->size_approx() : 0;
+    return 0; // Symbol stage retired in v0.20; kept for status/tuning metric stability.
 }
 
 std::size_t PostIngestQueue::entityQueueDepth() const {
@@ -1327,7 +1282,6 @@ std::variant<PostIngestQueue::PreparedMetadataEntry, PostIngestQueue::Extraction
 PostIngestQueue::prepareMetadataEntry(
     const std::string& hash, const std::string& mime, const metadata::DocumentInfo& info,
     const std::vector<std::string>& tags,
-    const std::unordered_map<std::string, std::string>& symbolExtensionMap,
     const std::vector<std::shared_ptr<ExternalEntityProviderAdapter>>& entityProviders) {
     PreparedMetadataEntry prepared;
     prepared.documentId = info.id;
@@ -1379,16 +1333,6 @@ PostIngestQueue::prepareMetadataEntry(
     // Determine dispatch flags that depend only on document metadata (not extracted text).
     prepared.shouldDispatchKg = (info.id >= 0);
 
-    std::string extKey = prepared.extension;
-    if (!extKey.empty() && extKey[0] == '.') {
-        extKey = extKey.substr(1);
-    }
-    auto symIt = symbolExtensionMap.find(extKey);
-    if (symIt != symbolExtensionMap.end()) {
-        prepared.shouldDispatchSymbol = true;
-        prepared.symbolLanguage = symIt->second;
-    }
-
     // Entity extraction via binary provider (Ghidra, Zyp). For text-based
     // documents, the title extraction stage already runs GLiNER which
     // produces NL entities and stores them in the KG — no need to dispatch
@@ -1399,7 +1343,7 @@ PostIngestQueue::prepareMetadataEntry(
     // Extract document text (and metadata when available from plugin extractors).
     // Always use extractDocumentContent so we can grab plugin-provided metadata
     // (e.g. PDF title from zyp) and skip expensive ML-based title inference.
-    const bool wantContentBytes = prepared.shouldDispatchSymbol || prepared.shouldDispatchEntity;
+    const bool wantContentBytes = prepared.shouldDispatchEntity;
     auto extracted = yams::extraction::util::extractDocumentContent(
         store_, hash, prepared.mimeType, prepared.extension, extractors_);
     if (extracted && !extracted->text.empty()) {
@@ -1834,124 +1778,6 @@ boost::asio::awaitable<void> PostIngestQueue::kgPoller() {
     };
 
     co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
-}
-
-boost::asio::awaitable<void> PostIngestQueue::symbolPoller() {
-    auto channel = symbolChannel_;
-    auto symbolWakeTimer =
-        std::make_shared<boost::asio::steady_timer>(co_await boost::asio::this_coro::executor);
-    setWakeTimer(Stage::Symbol, symbolWakeTimer);
-
-    auto cfg = makePollerConfig<InternalEventBus::SymbolExtractionJob>(
-        Stage::Symbol, "symbol", [this]() { return symbolLimiter(); }, &maxSymbolConcurrent,
-        coordinator_->getExecutor(),
-        [](const InternalEventBus::SymbolExtractionJob& job) { return job.hash; }, symbolWakeTimer);
-
-    cfg.batchMode = true;
-    cfg.batchSizeFn = [this]() -> std::size_t {
-        const std::size_t tuned = std::max<std::size_t>(1u, TuneAdvisor::postIngestBatchSize());
-        return adaptiveStageBatchSize(symbolQueueDepth(), tuned, 16u);
-    };
-    cfg.batchProcessFn = [this](std::vector<InternalEventBus::SymbolExtractionJob>&& jobs) {
-        processSymbolExtractionBatch(std::move(jobs));
-    };
-
-    co_await pressureLimitedPoll(std::move(channel), std::move(cfg));
-}
-
-void PostIngestQueue::processSymbolExtractionBatch(
-    std::vector<InternalEventBus::SymbolExtractionJob>&& jobs) {
-    // Metrics are per consumed job even if we dedupe processing.
-    for (const auto& j : jobs) {
-        (void)j;
-        InternalEventBus::instance().incSymbolConsumed();
-    }
-
-    if (!graphComponent_) {
-        // Preserve prior behavior: treat as a no-op rather than retrying.
-        if (!jobs.empty()) {
-            spdlog::warn("[PostIngestQueue] Symbol extraction batch skipped ({} jobs) - no "
-                         "graphComponent",
-                         jobs.size());
-        }
-        return;
-    }
-
-    // Dedupe by hash so we load content at most once per doc per batch.
-    std::unordered_set<std::string> seen;
-    seen.reserve(jobs.size());
-
-    for (auto& j : jobs) {
-        const std::string& hash = j.hash;
-        if (hash.empty()) {
-            continue;
-        }
-        if (!seen.insert(hash).second) {
-            continue;
-        }
-        try {
-            const std::byte* dataPtr = nullptr;
-            std::size_t dataLen = 0;
-            std::vector<std::byte> ownedFallback;
-            if (j.contentBytes) {
-                dataPtr = j.contentBytes->data();
-                dataLen = j.contentBytes->size();
-            } else if (store_) {
-                auto contentResult = store_->retrieveBytes(hash);
-                if (contentResult) {
-                    ownedFallback = std::move(contentResult.value());
-                    dataPtr = ownedFallback.data();
-                    dataLen = ownedFallback.size();
-                } else {
-                    spdlog::warn(
-                        "[PostIngestQueue] Failed to load content for symbol extraction: {}",
-                        hash.substr(0, 12));
-                    continue;
-                }
-            } else {
-                spdlog::warn("[PostIngestQueue] No content store for symbol extraction");
-                continue;
-            }
-
-            GraphComponent::EntityExtractionJob extractJob;
-            extractJob.documentHash = hash;
-            extractJob.filePath = j.filePath;
-            extractJob.language = std::move(j.language);
-            extractJob.contentUtf8 = std::string(reinterpret_cast<const char*>(dataPtr), dataLen);
-
-            auto result = graphComponent_->submitEntityExtraction(std::move(extractJob));
-            if (!result) {
-                spdlog::warn("[PostIngestQueue] Symbol extraction failed for {}: {}", hash,
-                             result.error().message);
-            }
-        } catch (const std::exception& e) {
-            spdlog::error("[PostIngestQueue] Symbol extraction failed for {}: {}", hash, e.what());
-        }
-    }
-}
-
-void PostIngestQueue::dispatchToSymbolChannel(
-    const std::string& hash, int64_t docId, const std::string& filePath,
-    const std::string& language, std::shared_ptr<std::vector<std::byte>> contentBytes) {
-    auto channel = symbolChannel_;
-
-    InternalEventBus::SymbolExtractionJob job;
-    job.hash = hash;
-    job.documentId = docId;
-    job.filePath = filePath;
-    job.language = language;
-    job.contentBytes = std::move(contentBytes);
-
-    if (!channel->try_push(std::move(job))) {
-        spdlog::warn("[PostIngestQueue] Symbol channel full, dropping job for {}", hash);
-        InternalEventBus::instance().incSymbolDropped();
-    } else {
-        spdlog::info("[PostIngestQueue] Dispatched symbol extraction job for {} ({}) lang={}",
-                     filePath, hash.substr(0, 12), language);
-        InternalEventBus::instance().incSymbolQueued();
-        TuningManager::notifyWakeup();
-        signalWakeTimer(Stage::Symbol);
-    }
 }
 
 void PostIngestQueue::dispatchToEntityChannel(
@@ -2639,8 +2465,6 @@ void PostIngestQueue::initializeChannels() {
     }
     kgChannel_ = bus.get_or_create_channel<InternalEventBus::KgJob>(
         "kg_jobs", boundedStageChannelCapacity(16384));
-    symbolChannel_ = bus.get_or_create_channel<InternalEventBus::SymbolExtractionJob>(
-        "symbol_extraction", boundedStageChannelCapacity(16384));
     entityChannel_ = bus.get_or_create_channel<InternalEventBus::EntityExtractionJob>(
         "entity_extraction", boundedStageChannelCapacity(4096));
     titleChannel_ = bus.get_or_create_channel<InternalEventBus::TitleExtractionJob>(
@@ -2836,10 +2660,6 @@ std::optional<std::vector<std::string>> PostIngestQueue::getCachedDocumentTags(i
 PostIngestQueue::StageConfigSnapshot PostIngestQueue::snapshotStageConfig() {
     StageConfigSnapshot snap;
     {
-        std::lock_guard<std::mutex> lock(extMapMutex_);
-        snap.symbolExtensionMap = symbolExtensionMap_;
-    }
-    {
         std::lock_guard<std::mutex> lock(entityMutex_);
         snap.entityProviders = entityProviders_;
     }
@@ -2974,13 +2794,10 @@ PostIngestQueue::buildDispatchPlan(const PreparedMetadataEntry& prepared, bool e
     return PreparedDispatchPlan{
         .dispatchKg =
             prepared.shouldDispatchKg && knowledgeGraphEnabled_.load(std::memory_order_acquire),
-        .dispatchSymbol = prepared.shouldDispatchSymbol,
         .dispatchEntity = prepared.shouldDispatchEntity,
         .dispatchTitle = prepared.shouldDispatchTitle,
         .dispatchEmbed = hasEmbedQueue && embedStageActive && prepared.shouldDispatchEmbed,
-        .loadContentForNonEmbedding = !prepared.contentBytes && (prepared.shouldDispatchSymbol ||
-                                                                 prepared.shouldDispatchEntity),
-        .symbolLanguage = prepared.symbolLanguage,
+        .loadContentForNonEmbedding = !prepared.contentBytes && prepared.shouldDispatchEntity,
     };
 }
 
@@ -3191,8 +3008,8 @@ void PostIngestQueue::processBatch(std::vector<InternalEventBus::PostIngestTask>
         const std::vector<std::string> emptyTags;
         const auto& tags = tagsOpt ? *tagsOpt : emptyTags;
 
-        auto result = prepareMetadataEntry(task.hash, task.mime, *infoOpt, tags,
-                                           stageCfg.symbolExtensionMap, stageCfg.entityProviders);
+        auto result =
+            prepareMetadataEntry(task.hash, task.mime, *infoOpt, tags, stageCfg.entityProviders);
         if (task.noEmbeddings && std::holds_alternative<PreparedMetadataEntry>(result)) {
             auto& prepared = std::get<PreparedMetadataEntry>(result);
             prepared.shouldDispatchEmbed = false;

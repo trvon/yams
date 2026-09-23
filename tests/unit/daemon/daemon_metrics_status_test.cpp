@@ -1146,7 +1146,6 @@ TEST_CASE("RequestDispatcher: status includes canonical readiness flags",
         readiness::kPluginsReady,
         readiness::kPluginsDegraded,
         readiness::kContentExtractorsReady,
-        readiness::kSymbolExtractorsReady,
         readiness::kEntityExtractorsReady,
         readiness::kTitleExtractorReady,
         readiness::kRepairService,
@@ -1165,10 +1164,14 @@ TEST_CASE("RequestDispatcher: status includes canonical readiness flags",
         INFO("missing readiness key: " << key);
         REQUIRE(status.readinessStates.count(std::string(key)) > 0);
     }
+    // Symbol extraction was removed in v0.20; status must not advertise it as unavailable.
+    CHECK(status.readinessStates.count("symbol_extractors_ready") == 0);
+    CHECK(status.requestCounts.count("symbol_extractors_loaded") == 0);
 
-    const std::array<std::string_view, 5> requiredCapabilityMetricKeys = {
-        metrics::kContentExtractorsLoaded, metrics::kSymbolExtractorsLoaded,
-        metrics::kEntityExtractorsLoaded,  metrics::kTitleExtractorEnabled,
+    const std::array<std::string_view, 4> requiredCapabilityMetricKeys = {
+        metrics::kContentExtractorsLoaded,
+        metrics::kEntityExtractorsLoaded,
+        metrics::kTitleExtractorEnabled,
         metrics::kPluginSkippedCount,
     };
 
@@ -5288,12 +5291,8 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         }
     }
 
-    SECTION("graph query isolated mode uses default node type and relation") {
+    SECTION("graph query isolated mode without a node type explains the removed symbol graph") {
         fixture.initMetadata();
-        auto calledId = fixture.upsertNode("fn:isolated:default:called", "called", "function");
-        fixture.upsertNode("fn:isolated:default:free", "free", "function");
-        auto callerId = fixture.upsertNode("fn:isolated:default:caller", "caller", "function");
-        fixture.addEdge(callerId, calledId, "calls");
 
         GraphQueryRequest req;
         req.isolatedMode = true;
@@ -5301,10 +5300,10 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
 
         auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
 
-        REQUIRE(std::holds_alternative<GraphQueryResponse>(resp));
-        const auto& graphResp = std::get<GraphQueryResponse>(resp);
-        CHECK(graphResp.originNode.label == "isolated:function:calls");
-        REQUIRE(graphResp.connectedNodes.size() == 2);
+        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
+        const auto& err = std::get<ErrorResponse>(resp);
+        CHECK(err.code == ErrorCode::InvalidArgument);
+        CHECK(err.message.find("removed in v0.20") != std::string::npos);
     }
 
     SECTION("graph query isolated mode reports store errors") {
@@ -5313,6 +5312,7 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
 
         GraphQueryRequest req;
         req.isolatedMode = true;
+        req.nodeType = "function";
         req.limit = 10;
 
         auto resp = dispatchRequest(*fixture.dispatcher, Request{req});

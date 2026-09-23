@@ -1008,15 +1008,12 @@ void renderDaemonStatusDetailed(const yams::daemon::StatusResponse& status,
         uint64_t kgAuditQueued = findPostIngestCount("kg_queued");
         uint64_t kgAuditConsumed = findPostIngestCount("kg_consumed");
         uint64_t kgAuditDropped = findPostIngestCount("kg_dropped");
-        uint64_t enrichAuditQueued = findPostIngestCount("symbol_queued") +
-                                     findPostIngestCount("entity_queued") +
-                                     findPostIngestCount("title_queued");
-        uint64_t enrichAuditConsumed = findPostIngestCount("symbol_consumed") +
-                                       findPostIngestCount("entity_consumed") +
-                                       findPostIngestCount("title_consumed");
-        uint64_t enrichAuditDropped = findPostIngestCount("symbol_dropped") +
-                                      findPostIngestCount("entity_dropped") +
-                                      findPostIngestCount("title_dropped");
+        uint64_t enrichAuditQueued =
+            findPostIngestCount("entity_queued") + findPostIngestCount("title_queued");
+        uint64_t enrichAuditConsumed =
+            findPostIngestCount("entity_consumed") + findPostIngestCount("title_consumed");
+        uint64_t enrichAuditDropped =
+            findPostIngestCount("entity_dropped") + findPostIngestCount("title_dropped");
 
         // Unified Pipeline Stages block
         using yams::cli::detail::StageInfo;
@@ -1571,12 +1568,11 @@ void renderDaemonStatusDetailed(const yams::daemon::StatusResponse& status,
             return it == status.requestCounts.end() ? 0ULL : it->second;
         };
         const auto contentExtractorCount = getCount("content_extractors_loaded");
-        const auto symbolExtractorCount = getCount("symbol_extractors_loaded");
         const auto entityExtractorCount = getCount("entity_extractors_loaded");
         const bool titleExtractorEnabled = getCount("title_extractor_enabled") != 0;
         const auto skippedPluginCount = getCount("plugin_skipped_count");
-        if (contentExtractorCount > 0 || symbolExtractorCount > 0 || entityExtractorCount > 0 ||
-            titleExtractorEnabled || skippedPluginCount > 0) {
+        if (contentExtractorCount > 0 || entityExtractorCount > 0 || titleExtractorEnabled ||
+            skippedPluginCount > 0) {
             os << "\n" << section_header("Plugin Capabilities") << "\n\n";
             std::vector<Row> capabilityRows;
             capabilityRows.push_back(
@@ -1584,11 +1580,6 @@ void renderDaemonStatusDetailed(const yams::daemon::StatusResponse& status,
                  paintStatus(contentExtractorCount > 0 ? Severity::Good : Severity::Warn,
                              contentExtractorCount > 0 ? "Ready" : "Unavailable"),
                  std::to_string(contentExtractorCount) + " loaded"});
-            capabilityRows.push_back(
-                {"Symbol Extractors",
-                 paintStatus(symbolExtractorCount > 0 ? Severity::Good : Severity::Warn,
-                             symbolExtractorCount > 0 ? "Ready" : "Unavailable"),
-                 std::to_string(symbolExtractorCount) + " loaded"});
             capabilityRows.push_back(
                 {"Entity Extractors",
                  paintStatus(entityExtractorCount > 0 ? Severity::Good : Severity::Warn,

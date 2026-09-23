@@ -313,19 +313,6 @@ def main() -> int:
             ],
             timeout_sec=args.timeout,
         ),
-        BenchRun(
-            "symbol_extraction_bench",
-            "extraction/plugins",
-            [
-                "meson",
-                "test",
-                "-C",
-                str(build_dir),
-                "symbol_extraction_bench",
-                "--print-errorlogs",
-            ],
-            timeout_sec=args.timeout,
-        ),
     ]
 
     for run in runs:

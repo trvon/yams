@@ -140,14 +140,36 @@ struct StoredTopologyFixture {
     std::string firstClusterId;
 };
 
-std::string symbolNodeKey(const yams::metadata::SymbolMetadata& sym) {
+// Source-location fields a graph node carries in its properties for explore hydration.
+struct TestSymbol {
+    std::string documentHash;
+    std::string filePath;
+    std::string symbolName;
+    std::string qualifiedName;
+    std::string kind;
+    std::optional<std::int32_t> startLine;
+    std::optional<std::int32_t> endLine;
+};
+
+std::string symbolNodeProperties(const TestSymbol& sym) {
+    nlohmann::json props{{"file_path", sym.filePath}, {"qualified_name", sym.qualifiedName}};
+    if (sym.startLine) {
+        props["start_line"] = *sym.startLine;
+    }
+    if (sym.endLine) {
+        props["end_line"] = *sym.endLine;
+    }
+    return props.dump();
+}
+
+std::string symbolNodeKey(const TestSymbol& sym) {
     return sym.kind + ":" + sym.qualifiedName + "@" + sym.filePath;
 }
 
-yams::metadata::SymbolMetadata makeSymbol(const fs::path& path, const std::string& hash,
-                                          const std::string& name, const std::string& qualifiedName,
-                                          std::int32_t startLine, std::int32_t endLine) {
-    yams::metadata::SymbolMetadata sym;
+TestSymbol makeSymbol(const fs::path& path, const std::string& hash, const std::string& name,
+                      const std::string& qualifiedName, std::int32_t startLine,
+                      std::int32_t endLine) {
+    TestSymbol sym;
     sym.documentHash = hash;
     sym.filePath = path.string();
     sym.symbolName = name;
@@ -268,13 +290,12 @@ void createGraphExploreFixture(const fs::path& root) {
                                     "foreign::exploreTarget", 1, 3);
     auto foreignEntry = makeSymbol(foreignSourcePath, "foreign-explore-hash", "exploreEntry",
                                    "foreign::exploreEntry", 4, 6);
-    REQUIRE(
-        kgStore->upsertSymbolMetadata({entry, target, foreignEntry, foreignTarget}).has_value());
 
     KGNode entryNode;
     entryNode.nodeKey = symbolNodeKey(entry);
     entryNode.label = entry.symbolName;
     entryNode.type = entry.kind;
+    entryNode.properties = symbolNodeProperties(entry);
     const auto entryId = kgStore->upsertNode(entryNode);
     REQUIRE(entryId.has_value());
 
@@ -282,6 +303,7 @@ void createGraphExploreFixture(const fs::path& root) {
     targetNode.nodeKey = symbolNodeKey(target);
     targetNode.label = target.symbolName;
     targetNode.type = target.kind;
+    targetNode.properties = symbolNodeProperties(target);
     const auto targetId = kgStore->upsertNode(targetNode);
     REQUIRE(targetId.has_value());
 
@@ -296,6 +318,7 @@ void createGraphExploreFixture(const fs::path& root) {
     foreignEntryNode.nodeKey = symbolNodeKey(foreignEntry);
     foreignEntryNode.label = foreignEntry.symbolName;
     foreignEntryNode.type = foreignEntry.kind;
+    foreignEntryNode.properties = symbolNodeProperties(foreignEntry);
     const auto foreignEntryId = kgStore->upsertNode(foreignEntryNode);
     REQUIRE(foreignEntryId.has_value());
 
@@ -303,6 +326,7 @@ void createGraphExploreFixture(const fs::path& root) {
     foreignTargetNode.nodeKey = symbolNodeKey(foreignTarget);
     foreignTargetNode.label = foreignTarget.symbolName;
     foreignTargetNode.type = foreignTarget.kind;
+    foreignTargetNode.properties = symbolNodeProperties(foreignTarget);
     const auto foreignTargetId = kgStore->upsertNode(foreignTargetNode);
     REQUIRE(foreignTargetId.has_value());
 
@@ -433,17 +457,16 @@ TEST_CASE("IntegrationSmoke.GraphExploreRendersAgentContext", "[smoke][integrati
     INFO(impactOut);
     REQUIRE((impactRc == 0));
     const auto impact = nlohmann::json::parse(impactOut);
-    REQUIRE((impact["affectedSymbols"].size() == 1));
-    CHECK((impact["affectedSymbols"][0]["filePath"] ==
-           (root / "repo" / "src" / "explore.cpp").string()));
-
-    std::string globalImpactOut;
-    const int globalImpactRc = run_cli(
-        {"yams", "graph", "--impact", "exploreTarget", "--global", "--json"}, &globalImpactOut);
-    INFO(globalImpactOut);
-    REQUIRE((globalImpactRc == 0));
-    const auto globalImpact = nlohmann::json::parse(globalImpactOut);
-    CHECK((globalImpact["affectedSymbols"].size() == 2));
+    // Impact analysis walked code-symbol edges, which v0.20 no longer produces.
+    CHECK(impact["affectedSymbols"].empty());
+    REQUIRE(impact["warnings"].is_array());
+    bool reportsRemoval = false;
+    for (const auto& warning : impact["warnings"]) {
+        if (warning.get<std::string>().find("removed in v0.20") != std::string::npos) {
+            reportsRemoval = true;
+        }
+    }
+    CHECK(reportsRemoval);
 }
 
 TEST_CASE("IntegrationSmoke.GraphTopologyModesReadStoredSnapshot", "[smoke][integrationsmoke]") {
