@@ -5291,8 +5291,12 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
         }
     }
 
-    SECTION("graph query isolated mode without a node type explains the removed symbol graph") {
+    SECTION("graph query isolated mode defaults to documents without semantic neighbours") {
         fixture.initMetadata();
+        auto docA = fixture.upsertNode("doc:isolated-a", "a", "document");
+        auto docB = fixture.upsertNode("doc:isolated-b", "b", "document");
+        fixture.upsertNode("doc:isolated-c", "c", "document");
+        fixture.addEdge(docA, docB, "semantic_neighbor");
 
         GraphQueryRequest req;
         req.isolatedMode = true;
@@ -5300,10 +5304,13 @@ TEST_CASE("RequestDispatcher: graph query and ingest handlers cover dispatcher b
 
         auto resp = dispatchRequest(*fixture.dispatcher, Request{req});
 
-        REQUIRE(std::holds_alternative<ErrorResponse>(resp));
-        const auto& err = std::get<ErrorResponse>(resp);
-        CHECK(err.code == ErrorCode::InvalidArgument);
-        CHECK(err.message.find("removed in v0.20") != std::string::npos);
+        REQUIRE(std::holds_alternative<GraphQueryResponse>(resp));
+        const auto& graphResp = std::get<GraphQueryResponse>(resp);
+        CHECK(graphResp.originNode.label == "isolated:document:semantic_neighbor");
+        CHECK(graphResp.totalNodesFound == 2);
+        for (const auto& node : graphResp.connectedNodes) {
+            CHECK(node.nodeKey != "doc:isolated-b");
+        }
     }
 
     SECTION("graph query isolated mode reports store errors") {

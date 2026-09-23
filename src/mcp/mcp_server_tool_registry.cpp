@@ -845,11 +845,15 @@ void MCPServer::initializeToolRegistry() {
                     {"description", "List nodes of specific type (e.g., binary.function)"}}},
                   {"isolated",
                    {{"type", "boolean"},
-                    {"description", "Find isolated nodes (no incoming edges)"},
+                    {"description",
+                     "Find isolated nodes (no incoming edges of `relation`). Node type comes "
+                     "from list_type (default document); relation defaults to "
+                     "semantic_neighbor"},
                     {"default", false}}},
                   {"relation",
                    {{"type", "string"},
-                    {"description", "Filter by relation type (e.g., calls, imports)"}}},
+                    {"description",
+                     "Filter by relation type (e.g., semantic_neighbor, co_mentioned_with)"}}},
                   {"depth",
                    {{"type", "integer"},
                     {"description", "BFS traversal depth (1-5)"},
