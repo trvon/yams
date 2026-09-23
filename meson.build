@@ -232,6 +232,39 @@ add_project_arguments(hardening_cpp_args, language: 'cpp')
 add_project_arguments(hardening_c_args, language: 'c')
 add_project_link_arguments(hardening_link_args, language: ['cpp', 'c'])
 
+# --- Fuzzing engine selection ---
+# AFL++ wrappers (afl-clang-fast++) instrument every object themselves, so an AFL build keeps
+# its historical flags. A plain clang build with -Dbuild-fuzzers=true selects libFuzzer: every
+# project object gets SanitizerCoverage (-fsanitize=fuzzer-no-link) so library code, not only the
+# harness entry points, guides the fuzzer, and ASan+UBSan are applied project-wide unless the
+# caller already chose sanitizers through b_sanitize.
+yams_fuzz_engine = 'none'
+if get_option('build-fuzzers') and not wasi_enabled
+  _afl_compiler = cpp.compiles('''
+    #ifndef __AFL_COMPILER
+    #error "Not AFL++"
+    #endif
+    int main() { return 0; }
+  ''', name: 'AFL++ compiler check')
+  if _afl_compiler
+    yams_fuzz_engine = 'afl'
+  elif cpp.get_id() == 'clang' and cpp.has_argument('-fsanitize=fuzzer-no-link') and cpp.links('''
+      #include <cstddef>
+      #include <cstdint>
+      extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t*, std::size_t) { return 0; }
+    ''', args: ['-fsanitize=fuzzer'], name: 'libFuzzer runtime check')
+    yams_fuzz_engine = 'libfuzzer'
+    _fuzz_instrument_args = ['-fsanitize=fuzzer-no-link', '-fno-omit-frame-pointer']
+    if '@0@'.format(get_option('b_sanitize')) in ['none', '[]']
+      _fuzz_sanitizers = '-fsanitize=address,undefined'
+      _fuzz_instrument_args += [_fuzz_sanitizers, '-fno-sanitize-recover=undefined']
+      add_project_link_arguments(_fuzz_sanitizers, language: ['cpp', 'c'])
+    endif
+    add_project_arguments(_fuzz_instrument_args, language: ['cpp', 'c'])
+  endif
+  message('Fuzzing engine: ' + yams_fuzz_engine)
+endif
+
 if host_machine.system() == 'darwin' and cpp.get_id() == 'clang'
   # Apple clang + external fmt/spdlog can fail when fmt enables
   # consteval format-string checking inside spdlog headers.

@@ -18,6 +18,7 @@ namespace yams::daemon::p2p {
 
 namespace {
 
+using detail::FrameSource;
 using detail::Json;
 using detail::readJson;
 using detail::readJsonFrame;
@@ -94,9 +95,9 @@ Result<void> admitBatch(const memory_sync::MemoryDeltaBatch& batch,
     return {};
 }
 
-Result<void> sendBatch(P2pConnection& connection, const memory_sync::MemoryDeltaBatch& batch,
+Result<void> sendBatch(FrameSource& frames, const memory_sync::MemoryDeltaBatch& batch,
                        std::chrono::milliseconds timeout) {
-    if (auto written = writeJson(connection, batchJson(batch), timeout); !written) {
+    if (auto written = writeJson(frames, batchJson(batch), timeout); !written) {
         return written.error();
     }
     for (const auto& delta : batch.deltas) {
@@ -109,12 +110,11 @@ Result<void> sendBatch(P2pConnection& connection, const memory_sync::MemoryDelta
         } catch (const std::exception& error) {
             return Error{ErrorCode::SerializationError, error.what()};
         }
-        if (auto written = writeJson(connection, recordJson, timeout); !written) {
+        if (auto written = writeJson(frames, recordJson, timeout); !written) {
             return written.error();
         }
         if (!delta.payload.empty()) {
-            if (auto written =
-                    connection.writeFrame(delta.payload, timeout, kP2pMaxValuePayloadBytes);
+            if (auto written = frames.writeFrame(delta.payload, timeout, kP2pMaxValuePayloadBytes);
                 !written) {
                 return written.error();
             }
@@ -133,7 +133,7 @@ Result<BatchHeader> parseBatchHeader(const Json& control, const DeltaExchangeOpt
         if (!control.is_object() || control.value("type", std::string{}) != "delta_batch") {
             return Error{ErrorCode::ValidationError, "unexpected p2p delta batch message"};
         }
-        BatchHeader header{.count = control.at("count").get<std::size_t>(),
+        BatchHeader header{.count = detail::unsignedField<std::size_t>(control, "count"),
                            .hasMore = control.at("has_more").get<bool>()};
         if (header.count > options.maxDeltasPerBatch || (header.hasMore && header.count == 0)) {
             return Error{ErrorCode::ValidationError, "p2p delta batch violates configured limits"};
@@ -158,7 +158,7 @@ Result<DeltaRecordControl> parseDeltaRecordControl(const Json& control) {
         DeltaRecordControl parsed;
         parsed.delta.logicalKey = control.at("logical_key").get<std::string>();
         parsed.delta.record = control.at("record").get<memory_sync::MemoryIndexRecord>();
-        parsed.payloadSize = control.at("payload_size").get<std::size_t>();
+        parsed.payloadSize = detail::unsignedField<std::size_t>(control, "payload_size");
         if (parsed.delta.logicalKey.empty() ||
             parsed.delta.logicalKey.size() > memory_sync::kMaxLogicalKeyBytes ||
             parsed.payloadSize > kP2pMaxValuePayloadBytes ||
@@ -178,11 +178,10 @@ struct ReceivedDelta {
     std::size_t wireBytes{0};
 };
 
-Result<ReceivedDelta> receiveDeltaRecord(P2pConnection& connection,
-                                         const DeltaExchangeOptions& options,
+Result<ReceivedDelta> receiveDeltaRecord(FrameSource& frames, const DeltaExchangeOptions& options,
                                          std::size_t remainingBytes) {
     constexpr std::size_t kFramePrefixBytes = 4;
-    auto control = readJsonFrame(connection, options.timeout);
+    auto control = readJsonFrame(frames, options.timeout);
     if (!control) {
         return control.error();
     }
@@ -199,7 +198,7 @@ Result<ReceivedDelta> receiveDeltaRecord(P2pConnection& connection,
                      "p2p delta exchange exceeded aggregate byte limit"};
     }
     if (payloadSize != 0) {
-        auto payload = connection.readFrame(options.timeout, kP2pMaxValuePayloadBytes);
+        auto payload = frames.readFrame(options.timeout, kP2pMaxValuePayloadBytes);
         if (!payload) {
             return payload.error();
         }
@@ -212,15 +211,12 @@ Result<ReceivedDelta> receiveDeltaRecord(P2pConnection& connection,
     return ReceivedDelta{.delta = std::move(delta), .wireBytes = controlBytes + payloadBytes};
 }
 
-struct ReceivedBatch {
-    memory_sync::MemoryDeltaBatch batch;
-    std::size_t wireBytes{0};
-};
+using ReceivedBatch = detail::ReceivedDeltaBatch;
 
-Result<ReceivedBatch> receiveBatch(P2pConnection& connection, const DeltaExchangeOptions& options,
+Result<ReceivedBatch> receiveBatch(FrameSource& frames, const DeltaExchangeOptions& options,
                                    std::size_t remainingDeltas, std::size_t remainingBytes) {
     constexpr std::size_t kFramePrefixBytes = 4;
-    auto control = readJsonFrame(connection, options.timeout);
+    auto control = readJsonFrame(frames, options.timeout);
     if (!control) {
         return control.error();
     }
@@ -242,7 +238,7 @@ Result<ReceivedBatch> receiveBatch(P2pConnection& connection, const DeltaExchang
     received.batch.deltas.reserve(header.value().count);
     received.wireBytes = headerBytes;
     for (std::size_t index = 0; index < header.value().count; ++index) {
-        auto delta = receiveDeltaRecord(connection, options, remainingBytes - received.wireBytes);
+        auto delta = receiveDeltaRecord(frames, options, remainingBytes - received.wireBytes);
         if (!delta) {
             return delta.error();
         }
@@ -289,19 +285,16 @@ Result<DeltaAcknowledgement> parseAcknowledgement(const Json& json) {
     }
 }
 
-Result<DeltaAcknowledgement> receiveAcknowledgement(P2pConnection& connection,
+Result<DeltaAcknowledgement> receiveAcknowledgement(FrameSource& frames,
                                                     std::chrono::milliseconds timeout) {
-    auto json = readJson(connection, timeout);
+    auto json = readJson(frames, timeout);
     if (!json) {
         return json.error();
     }
     return parseAcknowledgement(json.value());
 }
 
-struct BootstrapPhaseResult {
-    DeltaExchangeStats stats;
-    memory_sync::VersionVector peerVersion;
-};
+using BootstrapPhaseResult = detail::BootstrapPhaseResult;
 
 Json commitmentArray(
     const std::map<memory_sync::NodeId, memory_sync::WriterHistoryCommitment>& commitments) {
@@ -325,7 +318,7 @@ parseCommitments(const Json& entries) {
         for (const auto& entry : entries) {
             auto writer = entry.at("writer_id").get<std::string>();
             memory_sync::WriterHistoryCommitment commitment{
-                .counter = entry.at("counter").get<std::uint64_t>(),
+                .counter = detail::unsignedField<std::uint64_t>(entry, "counter"),
                 .digest = entry.at("digest").get<std::string>()};
             if (writer.empty() || writer.size() > kMaxP2pIdentityBytes || commitment.counter == 0 ||
                 !memory_sync::isSha256Digest(commitment.digest) ||
@@ -380,8 +373,8 @@ Result<SnapshotBeginControl> parseSnapshotBegin(const Json& json,
             return commitments.error();
         }
         control.commitments = std::move(commitments.value());
-        control.recordCount = json.at("record_count").get<std::size_t>();
-        control.payloadBytes = json.at("payload_bytes").get<std::size_t>();
+        control.recordCount = detail::unsignedField<std::size_t>(json, "record_count");
+        control.payloadBytes = detail::unsignedField<std::size_t>(json, "payload_bytes");
         control.rootDigest = json.at("root_digest").get<std::string>();
         control.witnessSignature = memory_sync::DetachedWriterSignature{
             .writerId = control.witness,
@@ -448,18 +441,18 @@ Result<SnapshotAcknowledgement> parseSnapshotAcknowledgement(const Json& json) {
     }
 }
 
-Result<BootstrapPhaseResult> sendBootstrapPhase(P2pConnection& connection,
+Result<BootstrapPhaseResult> sendBootstrapPhase(FrameSource& frames, const std::string& localNodeId,
                                                 memory_sync::MemorySyncService& service,
                                                 const PeerHandshakeResult& handshake,
                                                 const DeltaExchangeOptions& options) {
     BootstrapPhaseResult result{.peerVersion = handshake.peerVersion};
     const bool hasForeignWriter =
         std::ranges::any_of(handshake.localVersion.counters(), [&](const auto& entry) {
-            return entry.first != connection.localNodeId() && entry.second != 0;
+            return entry.first != localNodeId && entry.second != 0;
         });
     const bool offer = handshake.peerVersion.empty() && hasForeignWriter;
     if (auto written = writeJson(
-            connection, Json{{"type", "replication_mode"}, {"mode", offer ? "snapshot" : "delta"}},
+            frames, Json{{"type", "replication_mode"}, {"mode", offer ? "snapshot" : "delta"}},
             options.timeout);
         !written) {
         return written.error();
@@ -488,7 +481,7 @@ Result<BootstrapPhaseResult> sendBootstrapPhase(P2pConnection& connection,
         payloadBytes += winner.payload.size();
     }
     const Json beginJson{{"type", "snapshot_begin"},
-                         {"witness", connection.localNodeId()},
+                         {"witness", localNodeId},
                          {"frontier", snapshot.value().frontier},
                          {"commitments", commitmentArray(snapshot.value().commitments)},
                          {"record_count", snapshot.value().winners.size()},
@@ -509,16 +502,16 @@ Result<BootstrapPhaseResult> sendBootstrapPhase(P2pConnection& connection,
         }
         wireBytes += estimated.value();
     }
-    if (auto written = writeJson(connection, beginJson, options.timeout); !written) {
+    if (auto written = writeJson(frames, beginJson, options.timeout); !written) {
         return written.error();
     }
     for (const auto& delta : snapshot.value().winners) {
         memory_sync::MemoryDeltaBatch one{.deltas = {delta}};
-        if (auto sent = sendBatch(connection, one, options.timeout); !sent) {
+        if (auto sent = sendBatch(frames, one, options.timeout); !sent) {
             return sent.error();
         }
     }
-    auto ack = readJson(connection, options.timeout);
+    auto ack = readJson(frames, options.timeout);
     if (!ack) {
         return ack.error();
     }
@@ -538,12 +531,12 @@ Result<BootstrapPhaseResult> sendBootstrapPhase(P2pConnection& connection,
     return result;
 }
 
-Result<BootstrapPhaseResult> receiveBootstrapPhase(P2pConnection& connection,
+Result<BootstrapPhaseResult> receiveBootstrapPhase(FrameSource& frames,
                                                    memory_sync::MemorySyncService& service,
                                                    const PeerHandshakeResult& handshake,
                                                    const DeltaExchangeOptions& options) {
     BootstrapPhaseResult result{.peerVersion = handshake.localVersion};
-    auto mode = readJson(connection, options.timeout);
+    auto mode = readJson(frames, options.timeout);
     if (!mode) {
         return mode.error();
     }
@@ -560,7 +553,7 @@ Result<BootstrapPhaseResult> receiveBootstrapPhase(P2pConnection& connection,
                      "cold bootstrap requires a durable zero state and explicit operator "
                      "enrollment"};
     }
-    auto begin = readJsonFrame(connection, options.timeout);
+    auto begin = readJsonFrame(frames, options.timeout);
     if (!begin) {
         return begin.error();
     }
@@ -595,7 +588,7 @@ Result<BootstrapPhaseResult> receiveBootstrapPhase(P2pConnection& connection,
         std::size_t payloadBytes = 0;
         for (std::size_t index = 0; index < count; ++index) {
             auto received =
-                receiveBatch(connection, options, 1, options.maxSnapshotWireBytes - wireBytes);
+                receiveBatch(frames, options, 1, options.maxSnapshotWireBytes - wireBytes);
             if (!received || received.value().batch.deltas.size() != 1 ||
                 received.value().batch.hasMore) {
                 return Error{ErrorCode::ValidationError,
@@ -619,7 +612,7 @@ Result<BootstrapPhaseResult> receiveBootstrapPhase(P2pConnection& connection,
         if (!applied) {
             return applied.error();
         }
-        if (auto written = writeJson(connection,
+        if (auto written = writeJson(frames,
                                      Json{{"type", "snapshot_ack"},
                                           {"root_digest", root},
                                           {"vv", applied.value().version}},
@@ -637,7 +630,7 @@ Result<BootstrapPhaseResult> receiveBootstrapPhase(P2pConnection& connection,
     }
 }
 
-Result<DeltaExchangeStats> sendAll(P2pConnection& connection,
+Result<DeltaExchangeStats> sendAll(FrameSource& frames, const std::string& localNodeId,
                                    memory_sync::MemorySyncService& service,
                                    memory_sync::VersionVector peerVersion,
                                    std::uint64_t maxWriterCounter,
@@ -656,19 +649,19 @@ Result<DeltaExchangeStats> sendAll(P2pConnection& connection,
             !admitted) {
             return admitted.error();
         }
-        if (auto sent = sendBatch(connection, batch.value(), options.timeout); !sent) {
+        if (auto sent = sendBatch(frames, batch.value(), options.timeout); !sent) {
             return sent.error();
         }
         ++stats.batchesSent;
         stats.deltasSent += batch.value().deltas.size();
         sessionBytes += batchBytes;
-        auto acknowledgement = receiveAcknowledgement(connection, options.timeout);
+        auto acknowledgement = receiveAcknowledgement(frames, options.timeout);
         if (!acknowledgement) {
             return acknowledgement.error();
         }
         stats.peerQuarantined += acknowledgement.value().quarantined;
-        const auto before = peerVersion.get(connection.localNodeId());
-        const auto after = acknowledgement.value().version.get(connection.localNodeId());
+        const auto before = peerVersion.get(localNodeId);
+        const auto after = acknowledgement.value().version.get(localNodeId);
         if (!batch.value().deltas.empty() && after <= before) {
             return Error{ErrorCode::ValidationError,
                          "p2p peer made no causal progress applying direct deltas"};
@@ -681,7 +674,7 @@ Result<DeltaExchangeStats> sendAll(P2pConnection& connection,
     return Error{ErrorCode::ResourceExhausted, "p2p delta exchange exceeded batch limit"};
 }
 
-Result<DeltaExchangeStats> receiveAll(P2pConnection& connection,
+Result<DeltaExchangeStats> receiveAll(FrameSource& frames, const std::string& localNodeId,
                                       memory_sync::MemorySyncService& service,
                                       const PeerHandshakeResult& handshake,
                                       const DeltaExchangeOptions& options) {
@@ -692,7 +685,7 @@ Result<DeltaExchangeStats> receiveAll(P2pConnection& connection,
     auto projectedVersion = service.currentVersion();
     for (std::size_t batchIndex = 0; batchIndex < options.maxBatches; ++batchIndex) {
         auto batch =
-            receiveBatch(connection, options, options.maxDeltasPerSession - stats.deltasReceived,
+            receiveBatch(frames, options, options.maxDeltasPerSession - stats.deltasReceived,
                          options.maxWireBytesPerSession - sessionBytes);
         if (!batch) {
             return batch.error();
@@ -717,7 +710,7 @@ Result<DeltaExchangeStats> receiveAll(P2pConnection& connection,
             stagedAck.received = stats.deltasReceived;
             stagedAck.version = projectedVersion;
             if (auto acknowledged =
-                    writeJson(connection, acknowledgementJson(stagedAck), options.timeout);
+                    writeJson(frames, acknowledgementJson(stagedAck), options.timeout);
                 !acknowledged) {
                 return acknowledged.error();
             }
@@ -737,8 +730,7 @@ Result<DeltaExchangeStats> receiveAll(P2pConnection& connection,
                                             localCommitment != local.commitments.end() &&
                                             localCommitment->second == expected->second);
             if (!matches) {
-                auto quarantined =
-                    service.quarantineWriter(handshake.peerNodeId, connection.localNodeId());
+                auto quarantined = service.quarantineWriter(handshake.peerNodeId, localNodeId);
                 if (!quarantined) {
                     return quarantined.error();
                 }
@@ -748,7 +740,7 @@ Result<DeltaExchangeStats> receiveAll(P2pConnection& connection,
             memory_sync::DeltaApplyResult emptyAck;
             emptyAck.version = projectedVersion;
             if (auto acknowledged =
-                    writeJson(connection, acknowledgementJson(emptyAck), options.timeout);
+                    writeJson(frames, acknowledgementJson(emptyAck), options.timeout);
                 !acknowledged) {
                 return acknowledged.error();
             }
@@ -761,8 +753,7 @@ Result<DeltaExchangeStats> receiveAll(P2pConnection& connection,
         }
         auto validated = service.validateHistoryExtension(staged, expected->second);
         if (!validated) {
-            auto quarantined =
-                service.quarantineWriter(handshake.peerNodeId, connection.localNodeId());
+            auto quarantined = service.quarantineWriter(handshake.peerNodeId, localNodeId);
             if (!quarantined) {
                 return quarantined.error();
             }
@@ -773,7 +764,7 @@ Result<DeltaExchangeStats> receiveAll(P2pConnection& connection,
             return applied.error();
         }
         if (auto acknowledged =
-                writeJson(connection, acknowledgementJson(applied.value()), options.timeout);
+                writeJson(frames, acknowledgementJson(applied.value()), options.timeout);
             !acknowledged) {
             return acknowledged.error();
         }
@@ -801,13 +792,13 @@ DeltaExchangeStats combine(DeltaExchangeStats first, const DeltaExchangeStats& s
 
 enum class ExchangeRole : std::uint8_t { Initiator, Acceptor };
 
-Result<DeltaExchangeStats> runDeltaExchange(P2pConnection& connection,
+Result<DeltaExchangeStats> runDeltaExchange(FrameSource& frames, const std::string& localNodeId,
                                             memory_sync::MemorySyncService& service,
                                             const PeerHandshakeResult& handshake,
                                             const DeltaExchangeOptions& options,
                                             ExchangeRole role) {
     const auto fail = [&](Error error) -> Result<DeltaExchangeStats> {
-        connection.close();
+        frames.close();
         return error;
     };
     if (auto valid = validateOptions(options); !valid) {
@@ -827,49 +818,49 @@ Result<DeltaExchangeStats> runDeltaExchange(P2pConnection& connection,
         return fail(
             Error{ErrorCode::InvalidData, "p2p delta exchange rejected forked peer history"});
     }
-    const auto localWriterCounter = handshake.localVersion.get(connection.localNodeId());
+    const auto localWriterCounter = handshake.localVersion.get(localNodeId);
     DeltaExchangeStats total;
     if (role == ExchangeRole::Initiator) {
-        auto bootstrapSent = sendBootstrapPhase(connection, service, handshake, options);
+        auto bootstrapSent = sendBootstrapPhase(frames, localNodeId, service, handshake, options);
         if (!bootstrapSent) {
             return fail(bootstrapSent.error());
         }
         total = combine(total, bootstrapSent.value().stats);
-        auto sent = sendAll(connection, service, bootstrapSent.value().peerVersion,
+        auto sent = sendAll(frames, localNodeId, service, bootstrapSent.value().peerVersion,
                             localWriterCounter, options);
         if (!sent) {
             return fail(sent.error());
         }
         total = combine(total, sent.value());
-        auto bootstrapReceived = receiveBootstrapPhase(connection, service, handshake, options);
+        auto bootstrapReceived = receiveBootstrapPhase(frames, service, handshake, options);
         if (!bootstrapReceived) {
             return fail(bootstrapReceived.error());
         }
         total = combine(total, bootstrapReceived.value().stats);
-        auto received = receiveAll(connection, service, handshake, options);
+        auto received = receiveAll(frames, localNodeId, service, handshake, options);
         if (!received) {
             return fail(received.error());
         }
         return combine(total, received.value());
     }
 
-    auto bootstrapReceived = receiveBootstrapPhase(connection, service, handshake, options);
+    auto bootstrapReceived = receiveBootstrapPhase(frames, service, handshake, options);
     if (!bootstrapReceived) {
         return fail(bootstrapReceived.error());
     }
     total = combine(total, bootstrapReceived.value().stats);
-    auto received = receiveAll(connection, service, handshake, options);
+    auto received = receiveAll(frames, localNodeId, service, handshake, options);
     if (!received) {
         return fail(received.error());
     }
     total = combine(total, received.value());
-    auto bootstrapSent = sendBootstrapPhase(connection, service, handshake, options);
+    auto bootstrapSent = sendBootstrapPhase(frames, localNodeId, service, handshake, options);
     if (!bootstrapSent) {
         return fail(bootstrapSent.error());
     }
     total = combine(total, bootstrapSent.value().stats);
-    auto sent = sendAll(connection, service, bootstrapSent.value().peerVersion, localWriterCounter,
-                        options);
+    auto sent = sendAll(frames, localNodeId, service, bootstrapSent.value().peerVersion,
+                        localWriterCounter, options);
     if (!sent) {
         return fail(sent.error());
     }
@@ -920,18 +911,62 @@ Result<void> detail::validateDeltaControlFrame(std::span<const std::byte> frame,
     }
 }
 
+Result<detail::ReceivedDeltaBatch> detail::receiveDeltaBatch(FrameSource& frames,
+                                                             const DeltaExchangeOptions& options,
+                                                             std::size_t remainingDeltas,
+                                                             std::size_t remainingBytes) {
+    return receiveBatch(frames, options, remainingDeltas, remainingBytes);
+}
+
+Result<detail::BootstrapPhaseResult>
+detail::receiveColdBootstrapPhase(FrameSource& frames, memory_sync::MemorySyncService& service,
+                                  const PeerHandshakeResult& handshake,
+                                  const DeltaExchangeOptions& options) {
+    return receiveBootstrapPhase(frames, service, handshake, options);
+}
+
+Result<DeltaExchangeStats> detail::receiveAllDeltas(FrameSource& frames,
+                                                    const std::string& localNodeId,
+                                                    memory_sync::MemorySyncService& service,
+                                                    const PeerHandshakeResult& handshake,
+                                                    const DeltaExchangeOptions& options) {
+    return receiveAll(frames, localNodeId, service, handshake, options);
+}
+
+Result<DeltaExchangeStats> detail::initiateDeltaExchange(FrameSource& frames,
+                                                         const std::string& localNodeId,
+                                                         memory_sync::MemorySyncService& service,
+                                                         const PeerHandshakeResult& handshake,
+                                                         const DeltaExchangeOptions& options) {
+    return runDeltaExchange(frames, localNodeId, service, handshake, options,
+                            ExchangeRole::Initiator);
+}
+
+Result<DeltaExchangeStats> detail::acceptDeltaExchange(FrameSource& frames,
+                                                       const std::string& localNodeId,
+                                                       memory_sync::MemorySyncService& service,
+                                                       const PeerHandshakeResult& handshake,
+                                                       const DeltaExchangeOptions& options) {
+    return runDeltaExchange(frames, localNodeId, service, handshake, options,
+                            ExchangeRole::Acceptor);
+}
+
 Result<DeltaExchangeStats> initiateDeltaExchange(P2pConnection& connection,
                                                  memory_sync::MemorySyncService& service,
                                                  const PeerHandshakeResult& handshake,
                                                  const DeltaExchangeOptions& options) {
-    return runDeltaExchange(connection, service, handshake, options, ExchangeRole::Initiator);
+    detail::ConnectionFrameSource frames(connection);
+    return runDeltaExchange(frames, connection.localNodeId(), service, handshake, options,
+                            ExchangeRole::Initiator);
 }
 
 Result<DeltaExchangeStats> acceptDeltaExchange(P2pConnection& connection,
                                                memory_sync::MemorySyncService& service,
                                                const PeerHandshakeResult& handshake,
                                                const DeltaExchangeOptions& options) {
-    return runDeltaExchange(connection, service, handshake, options, ExchangeRole::Acceptor);
+    detail::ConnectionFrameSource frames(connection);
+    return runDeltaExchange(frames, connection.localNodeId(), service, handshake, options,
+                            ExchangeRole::Acceptor);
 }
 
 } // namespace yams::daemon::p2p
